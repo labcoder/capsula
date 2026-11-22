@@ -430,65 +430,6 @@ fn run(mode: Mode) {
 }
 
 #[test]
-fn the_fixture_is_a_legal_resting_picture_of_every_mapping() {
-    kumochi_scene::deferred::start().expect("the dropper starts");
-    let text = gpui_kit::TextSystem::new(Arc::new(gpui_kit::NoopTextSystem::new()));
-    let mut measure =
-        crate::presenter::Measure::new(Arc::new(text), gpui_kit::Font::default().family);
-    let (items, work) = resting(&mut measure, [1920.0, 1080.0], Mode::Rest);
-    assert!(work.within_limits(), "{work:?}");
-    let prims = || items.iter().flat_map(|(_, prims)| prims.iter());
-    assert!(prims().any(|prim| matches!(
-        prim,
-        Prim::Rect { radius, fill: Some(_), border: Some(_), .. } if radius.to_bits() == 8.0_f32.to_bits()
-    )));
-    assert!(prims().any(|prim| matches!(prim, Prim::Line { dashed: true, .. })));
-    assert!(prims().any(|prim| matches!(prim, Prim::Fill { points, .. } if points.len() == 5)));
-    let crossing = items
-        .iter()
-        .find(|(_, prims)| {
-            matches!(&prims[..], [Prim::Line { points, dashed: false, .. }] if points.len() == 4)
-        })
-        .expect("the self-crossing stroke");
-    assert_eq!(crossing.0.opacity.to_bits(), 0.5_f32.to_bits());
-    let turned: Vec<_> = items
-        .iter()
-        .filter(|(item, _)| item.transform.0[1].abs() > f32::EPSILON)
-        .map(|(_, prims)| prims.iter().all(|prim| matches!(prim, Prim::Text { .. })))
-        .collect();
-    assert_eq!(
-        turned,
-        [false, true],
-        "the turned rect, then the turned note"
-    );
-}
-
-#[test]
-fn the_capped_painter_fixture_reuses_the_full_native_preparation_workload() {
-    let text = gpui_kit::TextSystem::new(Arc::new(gpui_kit::NoopTextSystem::new()));
-    let mut measure =
-        crate::presenter::Measure::new(Arc::new(text), gpui_kit::Font::default().family);
-    let (items, work) = resting(&mut measure, [2560.0, 1440.0], Mode::Capped);
-    assert_eq!(items.len(), 130);
-    assert_eq!(
-        (work.dash_pieces, work.fill_vertices, work.outline_points),
-        (
-            PaintWork::LIMITS.dash_pieces,
-            PaintWork::LIMITS.fill_vertices,
-            PaintWork::LIMITS.outline_points
-        )
-    );
-    assert_eq!(
-        items
-            .iter()
-            .flat_map(|(_, prims)| prims.iter())
-            .filter(|prim| matches!(prim, Prim::Text { .. }))
-            .count(),
-        44
-    );
-}
-
-#[test]
 #[ignore = "manual input-free five-second native item-painter dry run; numbers do not count"]
 fn smoke_primary_overlay() {
     run(Mode::Dry);

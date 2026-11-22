@@ -1,24 +1,20 @@
-//! The paint cache: a staged fill paints what the per-paint build painted, its charge is what
+//! The paint cache: a staged fill paints at its requested placement, its charge is what
 //! staging leaves allocated, and it paints only for the view it was staged from.
 
-use std::{
-    any::Any,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::sync::{Arc, atomic::AtomicBool};
 
-use gpui_kit::{Bounds, Path, PathVertex, Pixels, Point};
+use gpui_kit::{Bounds, Path, Pixels, Point, point, px};
 use kumochi_scene::{
-    Admission, GlobalBudget, Handle, Record, SceneState, SceneView,
+    Admission, GlobalBudget, Handle, Record, SceneState, SceneView, WireId,
     display::{MeasureError, Paint, Prim, TextMeasure, TextStyle},
     geom::{Affine, Vec2},
     layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare},
-    limits::MAX_COMPOSED_SCALE,
     parse_record,
     record::Rgb,
     theme::Theme,
 };
 
-use super::super::paint_paths::{BuildError, paths};
+use super::super::paint_paths::BuildError;
 use super::{FillEntry, PaintScene, Pending, Stager, bound};
 use crate::presenter::{SceneCache, Stage};
 
@@ -87,27 +83,6 @@ fn view(put: &str) -> SceneView {
     SceneView::new(&rest, state.activated())
 }
 
-/// Every fill of the view, with its object and primitive index.
-fn fills(view: &SceneView) -> Vec<(Handle, usize, Prim)> {
-    let mut fills = Vec::new();
-    for (handle, prims) in view.paint_sources() {
-        for (index, prim) in prims.iter().enumerate() {
-            if matches!(prim, Prim::Fill { .. }) {
-                fills.push((handle, index, prim.clone()));
-            }
-        }
-    }
-    fills
-}
-
-type Geometry = (Vec<(Point<Pixels>, Point<f32>)>, Bounds<Pixels>);
-
-/// What the renderer reads of a path: each vertex's position and texture point, and the bounds.
-fn shape(path: &Path<Pixels>) -> Geometry {
-    let read = |vertex: &PathVertex<Pixels>| (vertex.xy_position, vertex.st_position);
-    (path.vertices.iter().map(read).collect(), path.bounds)
-}
-
 fn ink() -> Paint {
     Paint::from(Rgb::try_from(0x33_66_99).expect("a packed RGB value"))
 }
@@ -129,46 +104,86 @@ fn live<T>(make: impl FnOnce() -> T) -> (T, usize) {
     (value, allocated - released)
 }
 
-/// Each staged fill's key and corner count, or its refusal.
-fn entries(scene: &PaintScene) -> Vec<(Handle, usize, Result<usize, BuildError>)> {
-    let entry = |fill: &FillEntry| {
-        let corners = fill.triangles.as_deref().map(<[Vec2]>::len);
-        (fill.handle, fill.prim, corners.map_err(|error| *error))
-    };
-    scene.fills.iter().map(entry).collect()
+fn covers(path: &Path<Pixels>, x: f32, y: f32) -> bool {
+    path.vertices.as_chunks::<3>().0.iter().any(|triangle| {
+        let sides = std::array::from_fn::<_, 3, _>(|edge| {
+            let start = triangle[edge].xy_position;
+            let end = triangle[(edge + 1) % 3].xy_position;
+            let dx = f32::from(end.x - start.x);
+            let dy = f32::from(end.y - start.y);
+            dx * (y - f32::from(start.y)) - dy * (x - f32::from(start.x))
+        });
+        sides.iter().any(|side| *side != 0.0)
+            && (sides.iter().all(|side| *side >= 0.0) || sides.iter().all(|side| *side <= 0.0))
+    })
 }
 
 #[test]
-fn a_staged_fill_paints_the_vertices_and_bounds_of_the_per_paint_build() {
-    let view = view(DRAWING);
-    let scene = PaintScene::staged(&view);
-    let fills = fills(&view);
-    assert_eq!(fills.len(), 2, "the star and the triangle");
-    let transforms = [
-        Affine::default(),
-        Affine([1.5, 0.0, 0.0, 1.5, 20.0, -7.25]),
-        Affine([-1.0, 0.0, 0.0, 1.0, 300.0, 0.0]),
-        Affine::pose(0.75, 0.4, Vec2::new(13.0, 5.5)),
-    ];
-    for (handle, index, prim) in &fills {
-        for transform in transforms {
-            let built =
-                paths(prim, transform, 1.0, 0.0, MAX_COMPOSED_SCALE).expect("today's build");
-            assert_eq!(built.len(), 1, "one path per covering fill");
-            let staged = scene
-                .fill(*handle, *index, transform)
-                .expect("the staged fill");
-            assert_eq!(
-                staged.as_ref().map(shape),
-                Some(shape(&built[0].0)),
-                "fill {index} under {transform:?}"
+fn a_staged_fill_places_its_corners_and_bounds() {
+    let drawing = view(
+        r#"[{"shape":{"id":"tri","kind":"polygon","points":[[0,0],[10,0],[0,10]],"fill":"blue"}}]"#,
+    );
+    let handle = drawing.paint_sources().next().expect("the triangle").0;
+    let scene = PaintScene::staged(&drawing);
+    for (transform, corners, (left, top, right, bottom), inside, outside) in [
+        (
+            Affine::default(),
+            [(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)],
+            (0.0, 0.0, 10.0, 10.0),
+            (2.0, 2.0),
+            (8.0, 8.0),
+        ),
+        (
+            Affine([1.5, 0.0, 0.0, 1.5, 20.0, -7.25]),
+            [(20.0, -7.25), (35.0, -7.25), (20.0, 7.75)],
+            (20.0, -7.25, 35.0, 7.75),
+            (23.0, -4.25),
+            (32.0, 4.75),
+        ),
+        (
+            Affine([-1.0, 0.0, 0.0, 1.0, 300.0, 0.0]),
+            [(300.0, 0.0), (290.0, 0.0), (300.0, 10.0)],
+            (290.0, 0.0, 300.0, 10.0),
+            (298.0, 2.0),
+            (292.0, 8.0),
+        ),
+        (
+            Affine([0.75, 0.5, -0.5, 0.75, 13.0, 5.5]),
+            [(13.0, 5.5), (20.5, 10.5), (8.0, 13.0)],
+            (8.0, 5.5, 20.5, 13.0),
+            (13.5, 8.0),
+            (18.0, 12.5),
+        ),
+    ] {
+        let path = scene
+            .fill(handle, 0, transform)
+            .expect("the staged triangle")
+            .expect("the triangle covers a region");
+        for (x, y) in corners {
+            assert!(
+                path.vertices
+                    .iter()
+                    .any(|v| v.xy_position == point(px(x), px(y))),
+                "{transform:?} is missing triangle corner ({x}, {y})"
             );
         }
+        assert_eq!(
+            path.bounds,
+            Bounds::from_corners(point(px(left), px(top)), point(px(right), px(bottom)))
+        );
+        assert!(
+            covers(&path, inside.0, inside.1),
+            "{transform:?} must fill {inside:?}"
+        );
+        assert!(
+            !covers(&path, outside.0, outside.1),
+            "{transform:?} must not fill {outside:?}"
+        );
     }
 }
 
 #[test]
-fn a_fill_that_covers_nothing_or_is_refused_stages_as_its_per_paint_result() {
+fn a_staged_fill_skips_collinear_points_and_refuses_an_over_limit_polygon() {
     let handle = Handle::new(1, 0).expect("a handle");
     let flat = Prim::Fill {
         points: Arc::from([
@@ -178,19 +193,10 @@ fn a_fill_that_covers_nothing_or_is_refused_stages_as_its_per_paint_result() {
         ]),
         color: ink(),
     };
-    let built = paths(&flat, Affine::default(), 1.0, 0.0, MAX_COMPOSED_SCALE);
-    assert_eq!(built.map(|built| built.len()), Ok(0), "today's build");
     let scene = PaintScene::of(handle, &[flat, over()]);
-    assert_eq!(
-        entries(&scene),
-        [(handle, 0, Ok(0)), (handle, 1, Err(BuildError::OverCharge))]
-    );
-    assert_eq!(
-        scene
-            .fill(handle, 0, Affine::default())
-            .map(|path| path.is_none()),
-        Ok(true),
-        "no path, so no handoff"
+    assert!(
+        matches!(scene.fill(handle, 0, Affine::default()), Ok(None)),
+        "collinear points emit no path"
     );
     assert_eq!(
         scene.fill(handle, 1, Affine::default()).err(),
@@ -199,37 +205,78 @@ fn a_fill_that_covers_nothing_or_is_refused_stages_as_its_per_paint_result() {
 }
 
 #[test]
-fn a_cache_paints_only_for_the_view_generation_it_was_staged_from() {
-    let first = view(DRAWING);
-    let second = view(DRAWING);
-    let mut cache = Stager(size_of::<Stager>()).stage(&first);
-    let any: &dyn Any = &*cache;
-    let staged = std::ptr::from_ref(any.downcast_ref::<PaintScene>().expect("a paint scene"));
-    let scene = bound(&mut *cache, first.generation()).expect("its own view");
-    assert_eq!(std::ptr::from_ref(&*scene), staged);
-    let (handle, ..) = fills(&first)[0];
-    assert_eq!(
-        scene.fill(handle, 99, Affine::default()).err(),
-        Some(BuildError::Stale),
-        "a primitive the view never had"
-    );
-    assert_eq!(
-        bound(&mut *cache, second.generation()).err(),
-        Some(BuildError::Stale),
-        "an identical drawing in another view"
-    );
-    assert_eq!(
-        bound(&mut Foreign, first.generation()).err(),
-        Some(BuildError::Stale),
-        "another stage's cache"
-    );
-}
-
-#[test]
 fn a_view_with_three_dimensional_records_stages_only_its_objects_fills() {
-    let flat = PaintScene::staged(&view(DRAWING));
     let mixed = view(&format!("[{},{SOLID}]", &DRAWING[1..DRAWING.len() - 1]));
-    assert_eq!(entries(&PaintScene::staged(&mixed)), entries(&flat));
+    let scene = PaintScene::staged(&mixed);
+    let layout = mixed.layout();
+    for (name, transform, (left, top, right, bottom), inside, outside) in [
+        (
+            "star",
+            Affine::default(),
+            (700.0, 700.0, 900.0, 880.0),
+            (800.0, 800.0),
+            (710.0, 710.0),
+        ),
+        (
+            "star",
+            Affine([1.5, 0.0, 0.0, 1.5, 20.0, -7.25]),
+            (1070.0, 1042.75, 1370.0, 1312.75),
+            (1220.0, 1192.75),
+            (1085.0, 1057.75),
+        ),
+        (
+            "star",
+            Affine([-1.0, 0.0, 0.0, 1.0, 300.0, 0.0]),
+            (-600.0, 700.0, -400.0, 880.0),
+            (-500.0, 800.0),
+            (-410.0, 710.0),
+        ),
+        (
+            "star",
+            Affine([0.75, 0.5, -0.5, 0.75, 13.0, 5.5]),
+            (128.0, 930.5, 303.0, 1095.5),
+            (213.0, 1005.5),
+            (190.5, 893.0),
+        ),
+        (
+            "tri",
+            Affine::default(),
+            (20.0, 20.0, 50.0, 50.0),
+            (25.0, 25.0),
+            (45.0, 45.0),
+        ),
+    ] {
+        let id = WireId::try_from(name.to_owned()).expect("a model id");
+        let handle = layout.handle(&id).expect("the flat shape");
+        let path = scene
+            .fill(handle, 0, transform)
+            .expect("a staged fill")
+            .expect("the flat shape still fills in a mixed view");
+        assert_eq!(
+            path.bounds,
+            Bounds::from_corners(point(px(left), px(top)), point(px(right), px(bottom))),
+            "the {name} still fills in a mixed view at {transform:?}"
+        );
+        assert!(covers(&path, inside.0, inside.1), "inside the {name}");
+        assert!(!covers(&path, outside.0, outside.1), "outside the {name}");
+    }
+    let view_id = WireId::try_from("v".to_owned()).expect("a model id");
+    let volume = &layout.views()[&view_id];
+    let box_id = WireId::try_from("box".to_owned()).expect("a model id");
+    let rect = layout.handle(&box_id).expect("the rect");
+    let triangle_id = WireId::try_from("tri".to_owned()).expect("a model id");
+    let triangle = layout.handle(&triangle_id).expect("the triangle");
+    for (handle, index) in [
+        (volume.handle, 0),
+        (volume.solids[0].handle, 0),
+        (rect, 0),
+        (triangle, 1),
+    ] {
+        assert_eq!(
+            scene.fill(handle, index, Affine::default()).err(),
+            Some(BuildError::Stale)
+        );
+    }
 }
 
 #[test]
@@ -525,19 +572,43 @@ fn retained_layout_keys_and_recreated_hosts_preserve_warm_storage(
 
 #[test]
 fn retained_labels_reject_foreign_objects_primitives_and_view_generations() {
-    let first = view(LABEL);
-    let second = view(LABEL);
+    let put = r#"[{"text":{"id":"t","text":"T","at":[0,0]}},{"shape":{"id":"tri","kind":"polygon","points":[[0,0],[10,0],[0,10]],"fill":"blue"}}]"#;
+    let first = view(put);
+    let second = view(put);
     let mut cache = Stager(size_of::<Stager>()).stage(&first);
     let scene = bound(&mut *cache, first.generation()).expect("its view");
-    let (handle, _) = first.paint_sources().next().expect("one label object");
+    let id = WireId::try_from("t".to_owned()).expect("a model id");
+    let handle = first.layout().handle(&id).expect("the label");
     assert_eq!(scene.label_index(handle, 0), Ok(0));
     assert_eq!(scene.label_index(handle, 1), Err(BuildError::Stale));
     assert_eq!(
         scene.label_index(Handle::new(2, 0).expect("foreign handle"), 0),
         Err(BuildError::Stale)
     );
+    let id = WireId::try_from("tri".to_owned()).expect("a model id");
+    let triangle = first.layout().handle(&id).expect("the triangle");
+    assert_eq!(
+        scene
+            .fill(triangle, 0, Affine::default())
+            .expect("its own view's fill")
+            .map(|path| path.bounds),
+        Some(Bounds::from_corners(
+            point(px(0.0), px(0.0)),
+            point(px(10.0), px(10.0))
+        ))
+    );
+    assert_eq!(
+        scene.fill(triangle, 99, Affine::default()).err(),
+        Some(BuildError::Stale),
+        "a primitive the view never had"
+    );
     assert_eq!(
         bound(&mut *cache, second.generation()).err(),
         Some(BuildError::Stale)
+    );
+    assert_eq!(
+        bound(&mut Foreign, first.generation()).err(),
+        Some(BuildError::Stale),
+        "another stage's cache"
     );
 }

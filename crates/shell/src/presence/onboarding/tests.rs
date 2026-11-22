@@ -422,26 +422,6 @@ fn finish_later_drops_a_name_that_cant_be_saved(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn an_onboarded_view_closes_the_window_quietly(cx: &mut TestAppContext) {
-    let (owner, _, _) = showing(cx);
-    owner.update(cx, |owner, cx| {
-        owner
-            .link_events(
-                Batch::Plain(vec![LinkEvent::Settings {
-                    generation: 7,
-                    view: view("Kumo", true),
-                    answer: false,
-                }]),
-                cx,
-            )
-            .expect("an unsolicited view");
-        assert!(owner.onboarding.is_none());
-        assert_eq!(owner.onboarding_run, ThisRun::Owed);
-        assert_eq!(owner.panel_visibility, PanelVisibility::Hidden);
-    });
-}
-
-#[gpui::test]
 fn an_onboarded_view_drops_an_unsaved_edit_as_it_closes(cx: &mut TestAppContext) {
     let (owner, _, controls) = showing(cx);
     rename(&owner, "Mochi", cx);
@@ -457,6 +437,8 @@ fn an_onboarded_view_drops_an_unsaved_edit_as_it_closes(cx: &mut TestAppContext)
             )
             .expect("an unsolicited view");
         assert!(owner.onboarding.is_none());
+        assert_eq!(owner.onboarding_run, ThisRun::Owed);
+        assert_eq!(owner.panel_visibility, PanelVisibility::Hidden);
         assert_eq!(owner.settings.read(cx).value(Field::Assistant), "Kumo");
     });
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
@@ -527,12 +509,13 @@ fn the_finish_lands_on_the_peek_only_when_the_brain_says_so(cx: &mut TestAppCont
                     cx,
                 )
                 .expect("a step's answer");
+            assert!(owner.onboarding.is_some());
+            assert_ne!(owner.panel_visibility, PanelVisibility::Visible);
         }
-        assert!(owner.onboarding.is_some());
-        assert!(
-            owner.settings.read(cx).finishing_for_tests(),
-            "still the finish's"
-        );
+    });
+    press_continue(&owner, cx);
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    owner.update(cx, |owner, cx| {
         owner
             .link_events(
                 Batch::Plain(vec![LinkEvent::Settings {

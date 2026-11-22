@@ -647,7 +647,16 @@ mod tests {
             (first.glow_pos.x - later.glow_pos.x).abs() > 1e-3,
             "the light orbits"
         );
-        assert!(blinks_over(&mut a, 20.0) >= 2, "a long turn still blinks");
+        let mut speaking = Animator::new(Mood::Idle, 7);
+        speaking.set_mood(Mood::Speaking);
+        let mut closed = false;
+        let mut closures = 0;
+        for _ in 0..720 {
+            let next = speaking.tick(FRAME, 0.0).eyes[0].half_h < 0.09;
+            closures += u32::from(next && !closed);
+            closed = next;
+        }
+        assert!(closures >= 2, "a long speaking turn still blinks");
     }
 
     #[test]
@@ -707,8 +716,15 @@ mod tests {
         let mut a = Animator::new(Mood::Idle, 7);
         a.engage();
         let f = a.tick(4.0 * FRAME, 0.0);
+        assert!(f.eyes[0].half_h < 0.06);
         a.set_mood(Mood::Thinking);
-        let (last, _) = drive(&mut a, f, 144);
+        assert_eq!(
+            a.tick(0.0, 0.0).eyes[0].half_h.to_bits(),
+            f.eyes[0].half_h.to_bits()
+        );
+        let next = a.tick(FRAME, 0.0);
+        assert!(next.eyes[0].half_h < 0.06);
+        let (last, _) = drive(&mut a, next, 144);
         assert!(
             (last.eyes[0].half_h - 0.09).abs() < 1e-5,
             "eyes open, at thinking's height"

@@ -143,6 +143,9 @@ fn followup_settings_error_keys_mark_only_the_fifo_head() {
                 field: Field::User
             })
         );
+        assert_eq!(settings.value(Field::User), "Oscar");
+        assert!(!settings.field(Field::User).saving);
+        assert!(settings.field(Field::Assistant).saving);
         assert_eq!(
             settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
             Some(Completion {
@@ -150,6 +153,15 @@ fn followup_settings_error_keys_mark_only_the_fifo_head() {
                 field: Field::Assistant
             })
         );
+        assert_eq!(settings.value(Field::Assistant), "Cloud");
+        assert_eq!(
+            settings.field(Field::User).error,
+            Some(Error::Brain(key.into()))
+        );
         assert_eq!(settings.notice(), Some(&key.into()));
+        assert_eq!(
+            settings.set_view(view("Cloud", Some("Oscar")), Update::Answer),
+            None
+        );
     }
 }

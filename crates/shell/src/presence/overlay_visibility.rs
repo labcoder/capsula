@@ -193,6 +193,18 @@ mod tests {
             let ok = state.sync(self, &frames, sample).is_ok();
             (ok, std::mem::take(&mut self.calls))
         }
+
+        fn assert_order(&mut self, expected: &[Call]) {
+            let calls = std::mem::take(&mut self.calls);
+            let mut after = 0;
+            for event in expected {
+                let Some(index) = calls.iter().position(|call| call == event) else {
+                    panic!("{event:?} is missing from {calls:?}");
+                };
+                assert!(index >= after, "{event:?} out of order in {calls:?}");
+                after = index + 1;
+            }
+        }
     }
 
     impl Surface for Fake {
@@ -252,29 +264,72 @@ mod tests {
 
     #[test]
     fn a_hidden_drawing_shows_the_next_in_a_fresh_window() {
-        let presenter = presenter();
+        use crate::{presence::paint_cache::Stager, presenter::tests::painter_fixture};
+        let (presenter, scene) = painter_fixture(Box::new(Stager(size_of::<Stager>())));
+        let frames = presenter.frames();
         let mut fake = Fake::new(&presenter);
         let mut state = Visibility::Closed;
-        assert_eq!(fake.sync(&mut state, HIDE), (true, vec![]), "nothing opens");
-        assert_eq!(state, Visibility::Closed);
-        let (mut fake, mut state) = shown(&presenter);
-        assert!(holds_esc(&presenter));
-        assert_eq!(fake.sync(&mut state, SAME), (true, vec![]));
-        assert_eq!(fake.sync(&mut state, SHOW), (true, vec![Repaint(1, true)]));
-        assert_eq!(
-            fake.sync(&mut state, HIDE),
-            (true, vec![Repaint(1, false), Hide(1), Close(1)]),
-            "the hide opens nothing"
+        state.sync(&mut fake, &frames, HIDE).expect("idle hide");
+        assert!(
+            fake.calls.is_empty(),
+            "idle hide does not touch native windows"
         );
-        assert_eq!(state, Visibility::Closed);
-        assert!(!holds_esc(&presenter));
-        assert_eq!(fake.sync(&mut state, HIDE), (true, vec![]), "nothing opens");
-        assert_eq!(
-            fake.sync(&mut state, SHOW),
-            (true, vec![Open(2), Show(2), Repaint(2, true)])
+        assert_eq!(state.window(), None);
+        let assert_activity = |shown| {
+            let activity = Presence::activity(&Runs::default(), Panel::Closed, &presenter);
+            assert_eq!(activity.drawing, shown);
+            assert_eq!(activity.holds_global_escape(), shown);
+        };
+        assert_activity(false);
+
+        state.sync(&mut fake, &frames, SHOW).expect("first show");
+        let first = *state.window().expect("the first host");
+        fake.assert_order(&[Open(first), Show(first), Repaint(first, true)]);
+        assert_activity(true);
+        state
+            .sync(&mut fake, &frames, SAME)
+            .expect("unchanged sample");
+        assert!(fake.calls.is_empty(), "an unchanged sample is quiet");
+        state
+            .sync(&mut fake, &frames, SHOW)
+            .expect("changed sample");
+        assert_eq!(state.window(), Some(&first));
+        assert!(
+            !fake.calls.is_empty(),
+            "a changed sample schedules a repaint"
         );
-        assert_eq!(state, Visibility::Shown(2));
-        assert!(holds_esc(&presenter));
+        assert!(fake.calls.iter().all(|call| *call == Repaint(first, true)));
+        fake.calls.clear();
+        assert!(!frames.borrow().paint(|_, _| Ok::<_, OpenError>(())));
+        assert_eq!(
+            frames
+                .borrow()
+                .observations()
+                .into_iter()
+                .flatten()
+                .map(|(id, _, bound)| (id, bound))
+                .collect::<Vec<_>>(),
+            [(scene, 1)]
+        );
+
+        state.sync(&mut fake, &frames, HIDE).expect("hide");
+        fake.assert_order(&[Repaint(first, false), Hide(first), Close(first)]);
+        assert_eq!(state.window(), None);
+        assert_activity(false);
+        assert!(frames.borrow().observations().iter().all(Option::is_none));
+        state
+            .sync(&mut fake, &frames, HIDE)
+            .expect("already hidden");
+        assert!(fake.calls.is_empty(), "there is no native host to touch");
+        state.sync(&mut fake, &frames, SHOW).expect("next show");
+        let next = *state.window().expect("a newly shown host");
+        assert_ne!(next, first);
+        fake.assert_order(&[Open(next), Show(next), Repaint(next, true)]);
+        assert_activity(true);
+        assert!(
+            frames.borrow().observations().iter().all(Option::is_none),
+            "no stale paint before the new host draws"
+        );
     }
 
     #[test]
@@ -320,51 +375,91 @@ mod tests {
     #[test]
     fn a_refused_show_is_never_trusted_hidden_or_shown() {
         let presenter = presenter();
+        let frames = presenter.frames();
         let mut fake = Fake::new(&presenter);
         let mut state = Visibility::Closed;
         fake.refuse = Some(Show(1));
-        assert_eq!(fake.sync(&mut state, SHOW), (false, vec![Open(1), Show(1)]));
-        assert_eq!(state, Visibility::Showing(1));
+        assert!(matches!(
+            state.sync(&mut fake, &frames, SHOW),
+            Err(OpenError::Gpui(_))
+        ));
+        assert!(!presenter.drawn());
         assert!(!holds_esc(&presenter));
-        assert_eq!(
-            fake.sync(&mut state, HIDE),
-            (true, vec![Repaint(1, false), Hide(1), Close(1)])
-        );
-        fake.refuse = Some(Show(2));
-        assert_eq!(fake.sync(&mut state, SHOW), (false, vec![Open(2), Show(2)]));
-        assert_eq!(
-            fake.sync(&mut state, SHOW),
-            (true, vec![Close(2), Open(3), Show(3), Repaint(3, true)])
-        );
-        assert_eq!(state, Visibility::Shown(3));
+        state
+            .sync(&mut fake, &frames, HIDE)
+            .expect("retire possibly visible host");
+        fake.assert_order(&[Open(1), Show(1), Repaint(1, false), Hide(1), Close(1)]);
+        assert_eq!(state.window(), None);
+        let refused = fake.opened + 1;
+        fake.refuse = Some(Show(refused));
+        assert!(matches!(
+            state.sync(&mut fake, &frames, SHOW),
+            Err(OpenError::Gpui(_))
+        ));
+        assert!(!presenter.drawn());
+        assert!(!holds_esc(&presenter));
+        state
+            .sync(&mut fake, &frames, SHOW)
+            .expect("show a fresh host");
+        let next = *state.window().expect("the shown host");
+        assert_ne!(next, refused);
+        fake.assert_order(&[
+            Open(refused),
+            Show(refused),
+            Close(refused),
+            Open(next),
+            Show(next),
+            Repaint(next, true),
+        ]);
+        assert!(presenter.drawn());
     }
 
     #[test]
     fn a_hidden_window_that_cannot_be_replaced_leaves_none() {
         let presenter = presenter();
-        let (mut fake, mut state) = shown(&presenter);
-        assert_eq!(
-            fake.sync(&mut state, HIDE),
-            (true, vec![Repaint(1, false), Hide(1), Close(1)])
+        let frames = presenter.frames();
+        let mut fake = Fake::new(&presenter);
+        let mut state = Visibility::Closed;
+        state.sync(&mut fake, &frames, SHOW).expect("first show");
+        let initial = *state.window().expect("first host");
+        fake.assert_order(&[Open(initial), Show(initial), Repaint(initial, true)]);
+        state.sync(&mut fake, &frames, HIDE).expect("hide");
+        fake.assert_order(&[Repaint(initial, false), Hide(initial), Close(initial)]);
+        fake.refuse = Some(Open(fake.opened + 1));
+        assert!(matches!(
+            state.sync(&mut fake, &frames, SHOW),
+            Err(OpenError::Gpui(_))
+        ));
+        assert!(
+            !fake
+                .calls
+                .iter()
+                .any(|call| matches!(call, Show(_) | Repaint(_, _)))
         );
-        fake.refuse = Some(Open(2));
-        assert_eq!(fake.sync(&mut state, SHOW), (false, vec![Open(2)]));
-        assert_eq!(state, Visibility::Closed);
+        assert_eq!(state.window(), None);
         assert!(!holds_esc(&presenter));
-        assert_eq!(
-            fake.sync(&mut state, SHOW),
-            (true, vec![Open(3), Show(3), Repaint(3, true)])
-        );
-        fake.refuse = Some(Close(3));
-        assert_eq!(
-            fake.sync(&mut state, HIDE),
-            (false, vec![Repaint(3, false), Hide(3), Close(3)])
-        );
-        assert_eq!(state, Visibility::Closed);
+        fake.calls.clear();
+        state
+            .sync(&mut fake, &frames, SHOW)
+            .expect("show after open refusal");
+        let earlier = *state.window().expect("the shown host");
+        assert_ne!(earlier, initial);
+        fake.assert_order(&[Open(earlier), Show(earlier), Repaint(earlier, true)]);
+        assert!(presenter.drawn());
+        fake.refuse = Some(Close(earlier));
+        assert!(matches!(
+            state.sync(&mut fake, &frames, HIDE),
+            Err(OpenError::Gpui(_))
+        ));
+        fake.assert_order(&[Repaint(earlier, false), Hide(earlier), Close(earlier)]);
+        assert_eq!(state.window(), None);
         assert!(!holds_esc(&presenter));
-        assert_eq!(
-            fake.sync(&mut state, SHOW),
-            (true, vec![Open(4), Show(4), Repaint(4, true)])
-        );
+        state
+            .sync(&mut fake, &frames, SHOW)
+            .expect("show after close refusal");
+        let next = *state.window().expect("a fresh host");
+        assert_ne!(next, earlier);
+        fake.assert_order(&[Open(next), Show(next), Repaint(next, true)]);
+        assert!(presenter.drawn());
     }
 }

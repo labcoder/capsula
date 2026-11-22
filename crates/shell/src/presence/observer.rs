@@ -909,33 +909,19 @@ mod tests {
     #[test]
     fn geometry_holds_the_exact_drawn_and_owned_rows() {
         let geometry = of(&frame([10, 20, 70, 4], [10, 10, 70, 24]));
-        assert_eq!(
-            (geometry.origin_y, geometry.rows, geometry.trimmed),
-            (10, 24, true)
-        );
-        assert_eq!(
-            geometry.spans[0],
-            [0, 0, 0, 0, 10, 80, 0, 0, 0, 0, 0, 0],
-            "band, not drawn"
-        );
-        assert_eq!(geometry.spans[9], [0, 0, 0, 0, 10, 80, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(
-            geometry.spans[10],
-            [10, 80, 0, 0, 10, 80, 0, 0, 0, 0, 0, 0],
-            "the line's first row"
-        );
-        assert_eq!(
-            geometry.spans[13],
-            [10, 80, 0, 0, 10, 80, 0, 0, 0, 0, 0, 0],
-            "its last row"
-        );
-        assert_eq!(geometry.spans[14], [0, 0, 0, 0, 10, 80, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(
-            geometry.spans[23],
-            [0, 0, 0, 0, 10, 80, 0, 0, 0, 0, 0, 0],
-            "the band's last row"
-        );
-        assert_eq!(geometry.spans[24], [0; 12], "past the band");
+        let written = text(&Record::Geometry { id: 1, geometry });
+        let rows = written
+            .strip_prefix("geometry id=1 origin_y=10 rows=24 trimmed=true spans=")
+            .and_then(|record| record.strip_suffix('\n'))
+            .expect("the recorded geometry");
+        let owned = "-,-,10:80,-,-,-";
+        let drawn_and_owned = "10:80,-,10:80,-,-,-";
+        let expected = [owned; 10]
+            .into_iter()
+            .chain([drawn_and_owned; 4])
+            .chain([owned; 10])
+            .collect::<Vec<_>>();
+        assert_eq!(rows.split(';').collect::<Vec<_>>(), expected);
     }
 
     #[test]

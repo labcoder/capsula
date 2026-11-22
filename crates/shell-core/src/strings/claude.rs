@@ -80,6 +80,20 @@ mod tests {
     use super::*;
     use kumochi_protocol::message::ClaudeVersion;
 
+    const AUDIT_LABELS: [(AuditFailed, &str); 11] = [
+        (AuditFailed::Version, "version mismatch"),
+        (AuditFailed::Commands, "unexpected slash commands"),
+        (AuditFailed::Agents, "unexpected agents"),
+        (AuditFailed::McpServer, "unexpected MCP server"),
+        (AuditFailed::Tools, "unexpected tools"),
+        (AuditFailed::Plugins, "unexpected plugins"),
+        (AuditFailed::Skills, "unexpected skills"),
+        (AuditFailed::KeySource, "unexpected API key source"),
+        (AuditFailed::TokenSource, "unexpected sign-in source"),
+        (AuditFailed::Deadline, "audit timed out"),
+        (AuditFailed::Malformed, "unreadable launch facts"),
+    ];
+
     #[test]
     fn every_closed_state_and_reason_has_localized_copy() {
         let strings = Strings::english();
@@ -88,87 +102,96 @@ mod tests {
             minor: 1,
             patch: 306,
         };
-        assert_eq!(
-            strings.claude_status(Some(ClaudeCodeView::Finding)),
-            "Looking for Claude Code…"
-        );
-        assert_eq!(
-            strings.claude_status(Some(ClaudeCodeView::SignedOut { version })),
-            "Claude Code 2.1.306 is signed out."
-        );
-        assert_eq!(
-            strings.claude_status(Some(ClaudeCodeView::Ready {
-                version,
-                analytics_on: false
-            })),
-            "Claude Code 2.1.306 is ready."
-        );
-        for (reason, label) in [
-            (AuditFailed::Version, "version mismatch"),
-            (AuditFailed::Commands, "unexpected slash commands"),
-            (AuditFailed::Agents, "unexpected agents"),
-            (AuditFailed::McpServer, "unexpected MCP server"),
-            (AuditFailed::Tools, "unexpected tools"),
-            (AuditFailed::Plugins, "unexpected plugins"),
-            (AuditFailed::Skills, "unexpected skills"),
-            (AuditFailed::KeySource, "unexpected API key source"),
-            (AuditFailed::TokenSource, "unexpected sign-in source"),
-            (AuditFailed::Deadline, "audit timed out"),
-            (AuditFailed::Malformed, "unreadable launch facts"),
+        let mut copies = std::collections::HashSet::new();
+        let mut version_args = FluentArgs::new();
+        version_args.set("version", "2.1.306");
+        for (state, id) in [
+            (ClaudeCodeView::SignedOut { version }, "claude-status-out"),
+            (
+                ClaudeCodeView::Ready {
+                    version,
+                    analytics_on: false,
+                },
+                "claude-status-ready",
+            ),
         ] {
-            assert_eq!(
-                strings.claude_status(Some(ClaudeCodeView::AuditFailed(reason))),
-                format!("Claude Code’s launch audit failed: {label}.")
-            );
+            let copy = strings.claude_status(Some(state));
+            assert_eq!(copy, strings.format(id, Some(&version_args)), "{state:?}");
+            assert!(copy.contains("2.1.306"), "{state:?}");
+            assert!(copies.insert(copy), "{state:?}");
         }
-        for (view, text) in [
-            (None, "Waiting for Claude Code status…"),
+        version_args.set("reason", "version");
+        let unreviewed = strings.claude_status(Some(ClaudeCodeView::Unsupported(
+            Unsupported::Unreviewed(version),
+        )));
+        assert_eq!(
+            unreviewed,
+            strings.format("claude-status-unsupported", Some(&version_args))
+        );
+        assert!(unreviewed.contains("2.1.306"));
+        assert!(copies.insert(unreviewed));
+        for (reason, label) in AUDIT_LABELS {
+            let copy = strings.claude_status(Some(ClaudeCodeView::AuditFailed(reason)));
+            assert!(copy.contains(label), "{reason:?}");
+            assert!(copies.insert(copy), "{reason:?}");
+        }
+        let cleanup = strings.claude_status(Some(ClaudeCodeView::CleanupPending));
+        assert!(
+            cleanup.contains("Look again")
+                && cleanup.contains("removing Kumochi’s Claude Code folder")
+        );
+        assert!(copies.insert(cleanup));
+        let policy = strings.claude_status(Some(ClaudeCodeView::PolicyFailed(
+            PolicyFailed::ManagedPolicy,
+        )));
+        assert!(policy.contains("managed policy") && policy.contains("Claude Code cannot be used"));
+        assert!(copies.insert(policy));
+        for (view, id, reason) in [
+            (None, "claude-status-waiting", None),
+            (Some(ClaudeCodeView::Finding), "claude-status-finding", None),
+            (Some(ClaudeCodeView::TurnedOff), "claude-status-off", None),
             (
-                Some(ClaudeCodeView::TurnedOff),
-                "Claude Code is turned off in config.",
-            ),
-            (Some(ClaudeCodeView::NotFound), "Claude Code was not found."),
-            (Some(ClaudeCodeView::SigningIn), "Signing in…"),
-            (
-                Some(ClaudeCodeView::CleanupPending),
-                "Cleanup is pending. Choose Look again to retry removing Kumochi’s Claude Code folder.",
+                Some(ClaudeCodeView::NotFound),
+                "claude-status-not-found",
+                None,
             ),
             (
-                Some(ClaudeCodeView::InUse),
-                "Another Kumochi session is using Claude Code. Close that session, then look again.",
+                Some(ClaudeCodeView::SigningIn),
+                "claude-status-signing",
+                None,
             ),
+            (Some(ClaudeCodeView::InUse), "claude-status-in-use", None),
             (
                 Some(ClaudeCodeView::Unavailable),
-                "Claude Code is unavailable. Restart Kumochi before trying again.",
+                "claude-status-unavailable",
+                None,
             ),
-            (
-                Some(ClaudeCodeView::Busy),
-                "Claude Code is still finishing an earlier question. Try again in a moment.",
-            ),
+            (Some(ClaudeCodeView::Busy), "error-claude-code-busy", None),
             (
                 Some(ClaudeCodeView::Unsupported(Unsupported::Shim)),
-                "This Claude Code installation is a wrapper or shim, not the native executable.",
+                "claude-status-unsupported",
+                Some("shim"),
             ),
             (
                 Some(ClaudeCodeView::Unsupported(Unsupported::SignInStore)),
-                "This build cannot use Claude Code’s sign-in store.",
-            ),
-            (
-                Some(ClaudeCodeView::Unsupported(Unsupported::Unreviewed(
-                    version,
-                ))),
-                "Claude Code 2.1.306 has not been reviewed for this build.",
-            ),
-            (
-                Some(ClaudeCodeView::PolicyFailed(PolicyFailed::ManagedPolicy)),
-                "A managed policy is present or could not be ruled out. Claude Code cannot be used.",
+                "claude-status-unsupported",
+                Some("store"),
             ),
             (
                 Some(ClaudeCodeView::PolicyFailed(PolicyFailed::TurnCap)),
-                "This Claude Code version’s turn limit is not verified.",
+                "claude-status-policy",
+                Some("turns"),
             ),
         ] {
-            assert_eq!(strings.claude_status(view), text, "{view:?}");
+            let args = reason.map(|reason| {
+                let mut args = FluentArgs::new();
+                args.set("reason", reason);
+                args
+            });
+            let copy = strings.claude_status(view);
+            assert_eq!(copy, strings.format(id, args.as_ref()), "{view:?}");
+            assert!(!copy.is_empty() && copy != id, "{view:?}");
+            assert!(copies.insert(copy), "{view:?}");
         }
     }
 }

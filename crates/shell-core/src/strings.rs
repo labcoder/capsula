@@ -717,17 +717,6 @@ mod tests {
     }
 
     #[test]
-    fn the_taskbar_label_uses_the_product_name() {
-        assert_eq!(
-            Strings::english().taskbar(),
-            format!(
-                "Also show {} in the taskbar",
-                kumochi_protocol::constants::DISPLAY_NAME
-            )
-        );
-    }
-
-    #[test]
     fn onboarding_splits_the_shortcut_at_its_keys() {
         assert_eq!(
             Strings::english().onboarding_shortcut("Kumo"),

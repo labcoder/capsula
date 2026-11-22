@@ -1,4 +1,4 @@
-use std::f32::consts::{FRAC_PI_4, TAU};
+use std::f32::consts::TAU;
 
 use gpui_kit::{Path, PathBuilder, Pixels, Point, point, px};
 use kumochi_scene::{
@@ -12,8 +12,13 @@ use kumochi_scene::{
     record::{Align, Rgb},
 };
 
-use super::super::paint_cache::PaintScene;
-use super::{BuildError, Strokes, corners, paths, rounded, scale};
+use super::super::{
+    paint_cache::PaintScene,
+    paint_geometry::{self, PrimPaths},
+    paint_phase::{self, Phase},
+    paint_stroke::Scratch,
+};
+use super::{BuildError, corners, fill_triangles, paths, scale};
 
 fn ink() -> Paint {
     Paint::from(Rgb::try_from(0x33_66_99).expect("a packed RGB value"))
@@ -34,9 +39,13 @@ fn solid_line(points: &[(f32, f32)], contour: Contour) -> Prim {
 }
 
 fn dashed_line(points: &[(f32, f32)]) -> Prim {
+    dash_contour(points, Contour::Open)
+}
+
+fn dash_contour(points: &[(f32, f32)], contour: Contour) -> Prim {
     Prim::Line {
         points: points.iter().map(|&(x, y)| Vec2::new(x, y)).collect(),
-        closed: false,
+        closed: matches!(contour, Contour::Closed),
         color: ink(),
         width: 2.0,
         dashed: true,
@@ -50,11 +59,23 @@ fn zigzag(count: u16, y: f32) -> Vec<(f32, f32)> {
         .collect()
 }
 
-fn built(prim: &Prim, draw: f32, flow: f32) -> Path<Pixels> {
-    let mut built = paths(prim, Affine::default(), draw, flow, MAX_COMPOSED_SCALE)
-        .expect("bounded geometry builds");
-    assert_eq!(built.len(), 1, "a line builds one merged path");
-    built.remove(0).0
+fn geometry_paths(
+    scratch: &mut Scratch,
+    prim: &Prim,
+    transform: Affine,
+    draw: f32,
+    flow: f32,
+) -> Result<PrimPaths, BuildError> {
+    paint_geometry::paths(scratch, prim, transform, draw, flow, MAX_COMPOSED_SCALE)
+}
+
+fn built(scratch: &mut Scratch, prim: &Prim, draw: f32, flow: f32) -> Path<Pixels> {
+    let [Some((path, _)), None] = geometry_paths(scratch, prim, Affine::default(), draw, flow)
+        .expect("bounded geometry builds")
+    else {
+        panic!("one path in the first slot");
+    };
+    path
 }
 
 /// Hand-written runs stroked in one lyon build, each run its own subpath.
@@ -71,67 +92,121 @@ fn reference(runs: &[Vec<Point<Pixels>>], contour: Contour) -> Path<Pixels> {
         .expect("a reference stroke under the u16 ceiling builds")
 }
 
-fn xy(path: &Path<Pixels>) -> Vec<Point<Pixels>> {
-    path.vertices
-        .iter()
-        .map(|vertex| vertex.xy_position)
-        .collect()
-}
-
-fn assert_same(actual: &Path<Pixels>, expected: &Path<Pixels>) {
-    assert_eq!(xy(actual), xy(expected), "the same triangles in order");
+fn assert_same_coverage(actual: &Path<Pixels>, expected: &Path<Pixels>) {
     assert_eq!(actual.bounds, expected.bounds, "the same bounds");
+    let origin = world(expected.bounds.origin);
+    let width = f32::from(expected.bounds.size.width);
+    let height = f32::from(expected.bounds.size.height);
+    for (i, j) in (0..64_u8).flat_map(|i| (0..64_u8).map(move |j| (i, j))) {
+        let at = origin
+            + Vec2::new(
+                (f32::from(i) + 0.125) * width / 64.0,
+                (f32::from(j) + 0.375) * height / 64.0,
+            );
+        assert_eq!(
+            covers(actual, at),
+            covers(expected, at),
+            "coverage at {at:?}"
+        );
+    }
 }
 
-fn runs(intervals: &[(f32, f32)]) -> Vec<Vec<Point<Pixels>>> {
-    intervals
-        .iter()
-        .map(|&(from, to)| pts(&[(from, 0.0), (to, 0.0)]))
-        .collect()
+fn assert_straight_runs(path: &Path<Pixels>, intervals: &[(f32, f32)]) {
+    let left = intervals.first().expect("a dash").0;
+    let right = intervals.last().expect("a dash").1;
+    assert_eq!(
+        (
+            path.bounds.origin,
+            path.bounds.size.width,
+            path.bounds.size.height
+        ),
+        (point(px(left), px(-1.0)), px(right - left), px(2.0)),
+        "path bounds tightly cover the first and last dashes",
+    );
+    let (triangles, tail) = path.vertices.as_chunks::<3>();
+    assert!(
+        tail.is_empty(),
+        "the handoff contains only complete triangles"
+    );
+    let mut areas = vec![0.0; intervals.len()];
+    for triangle in triangles {
+        let [a, b, c] = triangle.each_ref().map(|vertex| world(vertex.xy_position));
+        let left = a.x.min(b.x).min(c.x);
+        let right = a.x.max(b.x).max(c.x);
+        let index = intervals.partition_point(|&(_, end)| end < left);
+        let &(start, end) = intervals.get(index).expect("a triangle lies in a dash");
+        assert!(
+            start <= left && right <= end,
+            "a dash cannot bleed into a gap"
+        );
+        for at in [a, b, c] {
+            assert!(
+                (-1.0..=1.0).contains(&at.y),
+                "the stroke is two pixels wide"
+            );
+        }
+        areas[index] += side(a, b, c).abs() * 0.5;
+    }
+    for (area, &(start, end)) in areas.iter().zip(intervals) {
+        assert!(
+            (*area - (end - start) * 2.0).abs() <= 1e-5,
+            "the dash at {start}..{end} covers its full strip",
+        );
+    }
 }
 
 #[test]
 fn dashes_follow_the_prim_pattern_and_its_flow() {
+    let mut scratch = Scratch::new();
     let dashed = dashed_line(&[(0.0, 0.0), (128.0, 0.0)]);
     let at_rest: Vec<_> = (0..13_u8)
         .map(|k| (10.0 * f32::from(k), 10.0 * f32::from(k) + 6.0))
         .collect();
-    assert_same(
-        &built(&dashed, 1.0, 0.0),
-        &reference(&runs(&at_rest), Contour::Open),
-    );
+    assert_straight_runs(&built(&mut scratch, &dashed, 1.0, 0.0), &at_rest);
 
     let mut moved = vec![(0.0, 1.0)];
     moved.extend((1..13_u8).map(|k| (10.0 * f32::from(k) - 5.0, 10.0 * f32::from(k) + 1.0)));
     moved.push((125.0, 128.0));
-    assert_same(
-        &built(&dashed, 1.0, 0.5),
-        &reference(&runs(&moved), Contour::Open),
-    );
+    for flow in [0.5, -1.5] {
+        assert_straight_runs(&built(&mut scratch, &dashed, 1.0, flow), &moved);
+    }
     assert_eq!(
         PaintWork::of(std::slice::from_ref(&dashed), MAX_COMPOSED_SCALE).dash_pieces,
         14,
-        "half a period of flow paints exactly the charged pieces"
+        "the scene charges enough pieces for the half-period shift"
     );
 
     let mut revealed: Vec<_> = at_rest[..6].to_vec();
     revealed.push((60.0, 64.0));
-    assert_same(
-        &built(&dashed, 0.5, 0.0),
-        &reference(&runs(&revealed), Contour::Open),
+    assert_straight_runs(&built(&mut scratch, &dashed, 0.5, 0.0), &revealed);
+
+    let closed = dash_contour(
+        &[(0.0, 0.0), (0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)],
+        Contour::Closed,
+    );
+    assert_same_coverage(
+        &built(&mut scratch, &closed, 1.0, 0.0),
+        &reference(
+            &[
+                pts(&[(0.0, 0.0), (4.0, 0.0), (4.0, 2.0)]),
+                pts(&[(2.0, 4.0), (0.0, 4.0), (0.0, 0.0)]),
+            ],
+            Contour::Open,
+        ),
     );
 }
 
 /// The second line's first dash ends on a vertex, and its gap is exactly the next segment.
 #[test]
 fn a_dash_crosses_a_vertex_but_never_a_gap() {
+    let mut scratch = Scratch::new();
     let corner = dashed_line(&[(0.0, 0.0), (4.0, 0.0), (4.0, 8.0)]);
     let expected = [
         pts(&[(0.0, 0.0), (4.0, 0.0), (4.0, 2.0)]),
         pts(&[(4.0, 6.0), (4.0, 8.0)]),
     ];
-    assert_same(
-        &built(&corner, 1.0, 0.0),
+    assert_same_coverage(
+        &built(&mut scratch, &corner, 1.0, 0.0),
         &reference(&expected, Contour::Open),
     );
 
@@ -140,90 +215,97 @@ fn a_dash_crosses_a_vertex_but_never_a_gap() {
         pts(&[(0.0, 0.0), (6.0, 0.0)]),
         pts(&[(6.0, 4.0), (6.0, 10.0)]),
     ];
-    assert_same(&built(&gap, 1.0, 0.0), &reference(&expected, Contour::Open));
+    let path = built(&mut scratch, &gap, 1.0, 0.0);
+    assert_same_coverage(&path, &reference(&expected, Contour::Open));
+    assert!(
+        !covers(&path, Vec2::new(6.0, 2.0)),
+        "the vertex gap stays clear"
+    );
+
+    let straight = dashed_line(&[(0.0, 0.0), (12.0, 0.0)]);
+    let [Some((mirrored, _)), None] = geometry_paths(
+        &mut scratch,
+        &straight,
+        Affine([-1.0, 0.0, 0.0, 1.0, 300.0, 0.0]),
+        1.0,
+        0.0,
+    )
+    .expect("the reflected stroke builds") else {
+        panic!("one reflected stroke");
+    };
+    assert_straight_runs(&mirrored, &[(288.0, 290.0), (294.0, 300.0)]);
+    assert_eq!(
+        (
+            mirrored.bounds.origin,
+            mirrored.bounds.size.width,
+            mirrored.bounds.size.height
+        ),
+        (point(px(288.0), px(-1.0)), px(12.0), px(2.0)),
+    );
 }
 
 #[test]
 fn solid_closed_strokes_close_only_when_whole() {
+    let mut scratch = Scratch::new();
     let square = [(0.0, 0.0), (8.0, 0.0), (8.0, 8.0), (0.0, 8.0)];
     let closed = solid_line(&square, Contour::Closed);
-    assert_same(
-        &built(&closed, 1.0, 0.0),
+    assert_same_coverage(
+        &built(&mut scratch, &closed, 1.0, 0.0),
         &reference(&[pts(&square)], Contour::Closed),
     );
-    assert_same(
-        &built(&closed, 0.5, 0.0),
+    assert_same_coverage(
+        &built(&mut scratch, &closed, 0.5, 0.0),
         &reference(&[pts(&square[..3])], Contour::Open),
     );
-    let drawn = paths(&closed, Affine::default(), 0.0, 0.0, MAX_COMPOSED_SCALE)
+    let drawn = geometry_paths(&mut scratch, &closed, Affine::default(), 0.0, 0.0)
         .expect("an unrevealed stroke builds");
-    assert_eq!(drawn.len(), 0, "nothing of a stroke is revealed at draw 0");
-}
-
-/// 5,457 points cost 4 · 5,457 + 4 = 21,832, and each two-point run costs 12.
-#[test]
-fn chunks_split_one_over_the_build_limit_and_merge_in_order() {
-    assert_eq!(BUILD_VERTEX_LIMIT, 21_845, "u16::MAX / 3");
-    let long = pts(&zigzag(5_457, 0.0));
-    let short = pts(&[(0.0, 10.0), (4.0, 10.0)]);
-    let last = pts(&[(0.0, 20.0), (4.0, 20.0)]);
-    let mut strokes = Strokes::new(px(2.0));
-    strokes.add(&long, Contour::Open).expect("fits");
-    strokes.add(&short, Contour::Open).expect("fits");
-    assert_eq!(strokes.bound, 21_844, "the largest bound under the limit");
-    assert!(
-        strokes.merged.is_none(),
-        "21_844 vertices stay in one build"
-    );
-
-    strokes.add(&last, Contour::Open).expect("fits");
-    assert_eq!(strokes.bound, 12, "one run over starts a new chunk");
-    let first = reference(&[long, short], Contour::Open);
-    let second = reference(&[last], Contour::Open);
-    assert_eq!(
-        strokes.merged.as_ref().map(xy),
-        Some(xy(&first)),
-        "the full chunk built before the run that overflowed it"
-    );
-
-    let merged = strokes.finish().expect("both chunks build").expect("ink");
-    let mut expected = xy(&first);
-    expected.extend(xy(&second));
-    assert_eq!(xy(&merged), expected, "chunks concatenate in order");
-    assert_eq!(
-        merged.bounds,
-        first.bounds.union(&second.bounds),
-        "bounds union"
-    );
+    assert!(matches!(drawn, [None, None]), "draw 0 reveals no stroke");
 }
 
 /// 3,277 two-point runs cost 39,324, so they take two chunks.
 #[test]
 fn a_long_dashed_line_merges_its_chunks_into_one_build() {
+    assert_eq!(BUILD_VERTEX_LIMIT, 21_845, "the documented build limit");
+    let mut scratch = Scratch::new();
     let dashed = dashed_line(&[(0.0, 0.0), (32_768.0, 0.0)]);
     let intervals: Vec<_> = (0..3_277_u16)
         .map(|k| (10.0 * f32::from(k), 10.0 * f32::from(k) + 6.0))
         .collect();
-    assert_same(
-        &built(&dashed, 1.0, 0.0),
-        &reference(&runs(&intervals), Contour::Open),
-    );
+    let near_boundary: Vec<_> = (0..5_456_u16)
+        .map(|index| (f32::from(index) / 1024.0, 0.0))
+        .chain([(6.0, 0.0), (26.0, 0.0)])
+        .collect();
+    let mixed = dashed_line(&near_boundary);
+    for (prim, strips) in [
+        (&dashed, intervals.as_slice()),
+        (&mixed, &[(0.0, 6.0), (10.0, 16.0), (20.0, 26.0)][..]),
+    ] {
+        let ((), events) = crate::allocation::requests(16, || {
+            let _app = paint_phase::enter(Phase::App);
+            let path = built(&mut scratch, prim, 1.0, 0.0);
+            drop(path);
+        });
+        assert_eq!(paint_phase::tests::assert_paths(&events, 1), 1);
+        assert_straight_runs(&built(&mut scratch, prim, 1.0, 0.0), strips);
+    }
 }
 
 #[test]
 fn one_run_past_the_build_limit_is_refused() {
-    let at_limit = solid_line(&zigzag(5_460, 0.0), Contour::Open);
-    assert_eq!(
-        paths(&at_limit, Affine::default(), 1.0, 0.0, MAX_COMPOSED_SCALE).map(|built| built.len()),
-        Ok(1),
-        "4 * 5_460 + 4 = 21_844 builds"
-    );
-    let over = solid_line(&zigzag(5_461, 0.0), Contour::Open);
-    assert_eq!(
-        paths(&over, Affine::default(), 1.0, 0.0, MAX_COMPOSED_SCALE).map(|built| built.len()),
-        Err(BuildError::OverCharge),
-        "4 * 5_461 + 4 = 21_848 is past the limit"
-    );
+    let mut scratch = Scratch::new();
+    for (count, expected) in [(5_460, Ok(1)), (5_461, Err(BuildError::OverCharge))] {
+        let prim = solid_line(&zigzag(count, 0.0), Contour::Open);
+        let (actual, events) = crate::allocation::requests(16, || {
+            let _app = paint_phase::enter(Phase::App);
+            geometry_paths(&mut scratch, &prim, Affine::default(), 1.0, 0.0)
+                .map(|paths| paths.into_iter().flatten().count())
+        });
+        assert_eq!(actual, expected, "stroke with {count} points");
+        assert_eq!(
+            paint_phase::tests::assert_paths(&events, 1),
+            expected.unwrap_or(0)
+        );
+    }
 }
 
 fn circle(count: u16, radius: f32) -> Vec<Vec2> {
@@ -237,37 +319,23 @@ fn circle(count: u16, radius: f32) -> Vec<Vec2> {
 
 #[test]
 fn fills_are_refused_past_their_point_limit() {
-    let fill = |count| Prim::Fill {
-        points: circle(count, 10_000.0).into(),
-        color: ink(),
-    };
-    assert_eq!(
-        FILL_VERTEX_LIMIT, 21_845,
-        "the fill limit is the build limit"
+    assert_eq!(FILL_VERTEX_LIMIT, 21_845, "the documented fill limit");
+    let triangles = fill_triangles(&circle(21_845, 10_000.0)).expect("the fill limit builds");
+    assert!(
+        triangles
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .any(|triangle| { triangle_covers(*triangle, Vec2::default()) }),
+        "a fill at the limit emits triangles that cover the centre"
     );
+    let over = circle(21_846, 10_000.0);
+    let (result, counts, bytes) = crate::allocation::usage(|| fill_triangles(&over));
+    assert_eq!(result.err(), Some(BuildError::OverCharge));
     assert_eq!(
-        paths(
-            &fill(21_845),
-            Affine::default(),
-            1.0,
-            0.0,
-            MAX_COMPOSED_SCALE
-        )
-        .map(|built| built.len()),
-        Ok(1),
-        "a fill at the limit builds"
-    );
-    assert_eq!(
-        paths(
-            &fill(21_846),
-            Affine::default(),
-            1.0,
-            0.0,
-            MAX_COMPOSED_SCALE
-        )
-        .map(|built| built.len()),
-        Err(BuildError::OverCharge),
-        "one point over is refused"
+        (counts, bytes),
+        ([0, 0], [0, 0]),
+        "refused before tessellation"
     );
 }
 
@@ -387,67 +455,68 @@ fn lyon_strokes_stay_within_four_per_point_at_the_u16_ceiling() {
 }
 
 /// The largest sagitta between consecutive points of one corner around `center`.
-fn sagitta(outline: &[Vec2], segments: usize, center: Vec2, radius: f64) -> f64 {
-    let angle = |v: Vec2| {
-        let [x, y] = [v.x - center.x, v.y - center.y].map(f64::from);
-        y.atan2(x)
-    };
-    let step = outline
-        .chunks(segments + 1)
-        .flat_map(|corner| corner.windows(2))
-        .map(|pair| (angle(pair[1]) - angle(pair[0])).rem_euclid(f64::from(TAU)))
-        .fold(0.0, f64::max);
-    radius * (1.0 - (step / 2.0).cos())
+fn outer_sagitta(path: &Path<Pixels>, radius: f64) -> f64 {
+    let mut edges = std::collections::BTreeMap::new();
+    for triangle in path.vertices.as_chunks::<3>().0 {
+        for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+            let mut edge = [a, b].map(|index| {
+                let at = world(triangle[index].xy_position);
+                [at.x.to_bits(), at.y.to_bits()]
+            });
+            edge.sort_unstable();
+            *edges.entry(edge).or_insert(0) += 1;
+        }
+    }
+    edges
+        .into_iter()
+        .filter(|(_, uses)| *uses == 1)
+        .map(|([from, to], _)| {
+            let [ax, ay] = from.map(|bits| f64::from(f32::from_bits(bits)));
+            let [bx, by] = to.map(|bits| f64::from(f32::from_bits(bits)));
+            radius - f64::midpoint(ax, bx).hypot(f64::midpoint(ay, by))
+        })
+        .reduce(f64::max)
+        .expect("the fill has boundary edges")
 }
 
 #[test]
 fn corners_flatten_from_the_world_radius_without_coarsening() {
-    let largest = Rect {
-        origin: Vec2::new(-20_000.0, -20_000.0),
-        size: Vec2::new(40_000.0, 40_000.0),
-    };
-    assert_eq!(corner_segments(20_000.0), 158, "the shared corner count");
-    let outline = rounded(largest, 20_000.0, 158);
-    assert_eq!(outline.len(), 636, "four corners of 159 points");
-    let center = Vec2::new(0.0, 0.0);
-    assert!(
-        sagitta(&outline, 158, center, 20_000.0) <= 0.25,
-        "158 chords hold 0.25"
-    );
-    let coarse = rounded(largest, 20_000.0, 157);
-    assert!(
-        sagitta(&coarse, 157, center, 20_000.0) > 0.25,
-        "157 chords break 0.25"
-    );
-
-    let rect = Prim::Rect {
-        rect: largest,
-        radius: 20_000.0,
+    assert_eq!(corner_segments(20_000.0), 158, "the shared corner charge");
+    assert_eq!(corner_segments(0.0), 0, "a sharp corner charges no chords");
+    let filled = |size: f32, radius, border| Prim::Rect {
+        rect: Rect {
+            origin: Vec2::new(-size / 2.0, -size / 2.0),
+            size: Vec2::new(size, size),
+        },
+        radius,
         fill: Some(ink()),
-        border: Some((ink(), 2.0)),
+        border,
     };
-    assert_eq!(
-        paths(&rect, Affine::default(), 0.5, 0.0, MAX_COMPOSED_SCALE).map(|built| built.len()),
-        Ok(2),
-        "the largest rect's fill and partly drawn border build"
-    );
+    let mut scratch = Scratch::new();
+    let [Some((circle, _)), Some((_, _))] = geometry_paths(
+        &mut scratch,
+        &filled(20_000.0, 10_000.0, Some((ink(), 2.0))),
+        Affine::pose(2.0, 0.0, Vec2::default()),
+        0.5,
+        0.0,
+    )
+    .expect("a filled round rect builds") else {
+        panic!("the large rect paints its fill and partial border");
+    };
+    let sagitta = outer_sagitta(&circle, 20_000.0);
+    assert!(sagitta <= 0.25, "the outer edges lose {sagitta} pixels");
+    let coarse = 20_000.0 * (1.0 - (std::f64::consts::FRAC_PI_4 / 157.0).cos());
+    assert!(coarse > 0.25, "157 uniform chords miss the tolerance");
 
-    let square = Rect {
-        origin: Vec2::new(0.0, 0.0),
-        size: Vec2::new(1_000.0, 1_000.0),
-    };
-    assert_eq!(corner_segments(0.0), 0, "radius 0 needs no chords");
-    let sharp = rounded(square, 0.0, 0);
-    let corners = [
-        (1_000.0, 0.0),
-        (1_000.0, 1_000.0),
-        (0.0, 1_000.0),
-        (0.0, 0.0),
-    ];
-    assert_eq!(
-        sharp,
-        corners.map(|(x, y)| Vec2::new(x, y)),
-        "radius 0 is four corners"
+    let sharp = built(&mut scratch, &filled(1_000.0, 0.0, None), 1.0, 0.0);
+    assert_same_coverage(
+        &sharp,
+        &polygon(&[
+            (-500.0, -500.0),
+            (500.0, -500.0),
+            (500.0, 500.0),
+            (-500.0, 500.0),
+        ]),
     );
 }
 
@@ -463,14 +532,9 @@ fn a_pose_past_the_charged_scale_fails_instead_of_coarsening() {
         fill: Some(ink()),
         border: Some((ink(), 4.0)),
     };
-    assert_eq!(
-        [2.0, 2.07, 2.08].map(|zoom: f32| corner_segments(400.0 * f64::from(zoom))),
-        [32, 32, 33],
-        "2.07 stays within the pieces charged at 2 and 2.08 crosses a subdivision"
-    );
+    let mut scratch = Scratch::new();
     let charge = fallback_corner_segments(400.0, 2.0);
-    let mut scratch = super::super::paint_stroke::Scratch::new();
-    for (zoom, pieces, built) in [
+    for (zoom, expected_pieces, built) in [
         (2.0, Ok(32), Ok(2)),
         (2.07, Ok(32), Ok(2)),
         (
@@ -479,14 +543,20 @@ fn a_pose_past_the_charged_scale_fails_instead_of_coarsening() {
             Err(BuildError::OverCharge),
         ),
     ] {
+        assert_eq!(
+            corner_segments(400.0 * f64::from(zoom)),
+            if zoom < 2.08 { 32 } else { 33 },
+            "the shared budget crosses the next subdivision at 2.08"
+        );
         // Turned and half drawn, so the painter takes the path fallback, not a native quad.
         let turned = Affine::pose(zoom, 0.5, Vec2::new(0.0, 0.0));
         assert_eq!(
             corners(rect, 400.0, scale(turned), charge).map(|(_, segments)| segments),
-            pieces
+            expected_pieces,
+            "world-scale admission uses the shared charge"
         );
         assert_eq!(
-            super::super::paint_geometry::paths(&mut scratch, &prim, turned, 0.5, 0.0, 2.0)
+            paint_geometry::paths(&mut scratch, &prim, turned, 0.5, 0.0, 2.0)
                 .map(|paths| paths.into_iter().flatten().count()),
             built,
             "a pose needing more pieces than charged isn't coarsened to fit"
@@ -496,6 +566,7 @@ fn a_pose_past_the_charged_scale_fails_instead_of_coarsening() {
 
 #[test]
 fn text_is_refused_and_an_unusable_phase_paints_nothing() {
+    let mut scratch = Scratch::new();
     let text = Prim::Text {
         origin: Vec2::new(0.0, 0.0),
         text: Text::try_from("label".to_owned()).expect("short text"),
@@ -508,21 +579,16 @@ fn text_is_refused_and_an_unusable_phase_paints_nothing() {
         align: Align::Left,
     };
     assert_eq!(
-        paths(&text, Affine::default(), 1.0, 0.0, MAX_COMPOSED_SCALE).map(|built| built.len()),
-        Err(BuildError::Text),
+        geometry_paths(&mut scratch, &text, Affine::default(), 1.0, 0.0,).err(),
+        Some(BuildError::Text),
         "text is painted outside"
     );
     let dashed = dashed_line(&[(0.0, 0.0), (128.0, 0.0)]);
-    assert_eq!(
-        paths(
-            &dashed,
-            Affine::default(),
-            1.0,
-            f32::NAN,
-            MAX_COMPOSED_SCALE
-        )
-        .map(|built| built.len()),
-        Ok(0),
+    assert!(
+        matches!(
+            geometry_paths(&mut scratch, &dashed, Affine::default(), 1.0, f32::NAN,),
+            Ok([None, None])
+        ),
         "a NaN phase ends the walk"
     );
     let empty = Prim::Rect {
@@ -535,15 +601,15 @@ fn text_is_refused_and_an_unusable_phase_paints_nothing() {
         border: None,
     };
     let (result, counts, bytes) = crate::allocation::usage(|| {
-        paths(
+        geometry_paths(
+            &mut scratch,
             &empty,
             Affine::pose(65.0, 0.0, Vec2::default()),
             1.0,
             0.0,
-            MAX_COMPOSED_SCALE,
         )
     });
-    assert_eq!(result.map(|built| built.len()), Ok(0));
+    assert!(matches!(result, Ok([None, None])));
     assert_eq!(
         (counts, bytes),
         ([0, 0], [0, 0]),
@@ -551,14 +617,23 @@ fn text_is_refused_and_an_unusable_phase_paints_nothing() {
     );
 }
 
+fn side(p: Vec2, q: Vec2, r: Vec2) -> f32 {
+    (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+}
+
+fn triangle_covers([a, b, c]: [Vec2; 3], at: Vec2) -> bool {
+    let sides = [side(a, b, at), side(b, c, at), side(c, a, at)];
+    side(a, b, c).abs() > 1e-6
+        && (sides.iter().all(|s| *s >= -1e-3) || sides.iter().all(|s| *s <= 1e-3))
+}
+
 /// Whether a non-degenerate triangle of the path covers `at`, edges included.
 fn covers(path: &Path<Pixels>, at: Vec2) -> bool {
-    let side = |p: Vec2, q: Vec2, r: Vec2| (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
-    path.vertices.chunks(3).any(|triangle| {
-        let [a, b, c] = [0, 1, 2].map(|i| world(triangle[i].xy_position));
-        let sides = [side(a, b, at), side(b, c, at), side(c, a, at)];
-        side(a, b, c).abs() > 1e-6
-            && (sides.iter().all(|s| *s >= -1e-3) || sides.iter().all(|s| *s <= 1e-3))
+    path.vertices.as_chunks::<3>().0.iter().any(|triangle| {
+        triangle_covers(
+            triangle.each_ref().map(|vertex| world(vertex.xy_position)),
+            at,
+        )
     })
 }
 
@@ -583,10 +658,12 @@ fn bordered(size: Vec2, radius: f32, width: f32) -> Prim {
 }
 
 fn border_path(prim: &Prim, transform: Affine) -> Path<Pixels> {
-    let mut built =
-        paths(prim, transform, 1.0, 0.0, MAX_COMPOSED_SCALE).expect("a bordered rect builds");
-    assert_eq!(built.len(), 1, "the primitive builds one path");
-    built.remove(0).0
+    let [None, Some((path, _))] = geometry_paths(&mut Scratch::new(), prim, transform, 1.0, 0.0)
+        .expect("a bordered rect builds")
+    else {
+        panic!("one border, no background");
+    };
+    path
 }
 
 /// A quad's border wider than half its short side fills the whole rect and nothing outside it,
@@ -634,25 +711,14 @@ fn a_border_wider_than_its_rect_covers_exactly_the_rect() {
             "every point of the circle is border"
         );
     }
-}
-
-/// A border narrower than half the rect covers the band inside the rect, not the interior.
-#[test]
-fn a_border_covers_its_inner_band() {
-    let path = border_path(&border(40.0, 0.0, 4.0), Affine::default());
-    for vertex in &path.vertices {
-        let at = world(vertex.xy_position);
-        assert!(
-            (0.0..=40.0).contains(&at.x) && (0.0..=40.0).contains(&at.y),
-            "every vertex stays inside the rect"
-        );
-    }
-    for (x, y) in [(2.0, 20.0), (20.0, 2.0), (38.0, 20.0), (1.0, 1.0)] {
-        assert!(covers(&path, Vec2::new(x, y)), "the band is border");
-    }
-    for (x, y) in [(20.0, 20.0), (5.0, 20.0), (20.0, 35.0), (5.0, 5.0)] {
-        assert!(!covers(&path, Vec2::new(x, y)), "the interior isn't");
-    }
+    assert!(
+        covers(&square, transform.point(center)),
+        "the square center is painted"
+    );
+    assert!(
+        covers(&round, transform.point(center)),
+        "the circle center is painted"
+    );
 }
 
 /// How far `at` lies outside a rounded rect, negative inside: the distance a quad tests,
@@ -702,28 +768,11 @@ fn assert_quad_border(size: Vec2, radius: f32, width: f32) {
     );
 }
 
-/// A radius under half the border keeps the outer corner round, as the quad's does. The inset
-/// stroke this replaced mitred it sharp and covered (0.1, 0.1) at radius 1 and width 4.
-#[test]
-fn a_narrow_radius_border_keeps_its_outer_corners_round() {
-    let path = border_path(&border(40.0, 1.0, 4.0), Affine::default());
-    for (x, y) in [(0.1, 0.1), (39.9, 0.1), (39.9, 39.9), (0.1, 39.9)] {
-        assert!(
-            !covers(&path, Vec2::new(x, y)),
-            "outside the rounded corner"
-        );
-    }
-    for (x, y) in [(0.5, 1.0), (1.0, 0.5), (3.0, 3.0)] {
-        assert!(covers(&path, Vec2::new(x, y)), "the band at the corner");
-    }
-    assert_quad_border(Vec2::new(40.0, 40.0), 1.0, 4.0);
-    assert_quad_border(Vec2::new(40.0, 24.0), 0.5, 3.0);
-}
-
 #[test]
 fn a_border_covers_what_its_quad_would() {
     for (radius, width) in [
         (0.0, 4.0),
+        (0.5, 3.0),
         (3.0, 4.0),
         (4.0, 4.0),
         (10.0, 4.0),
@@ -731,13 +780,67 @@ fn a_border_covers_what_its_quad_would() {
     ] {
         assert_quad_border(Vec2::new(40.0, 24.0), radius, width);
     }
+    assert_quad_border(Vec2::new(40.0, 40.0), 1.0, 4.0);
+    let narrow = border_path(&border(40.0, 1.0, 4.0), Affine::default());
+    for (x, y) in [(0.1, 0.1), (39.9, 0.1), (39.9, 39.9), (0.1, 39.9)] {
+        assert!(
+            !covers(&narrow, Vec2::new(x, y)),
+            "outside the rounded corner"
+        );
+    }
+    for (x, y) in [(0.5, 1.0), (1.0, 0.5), (3.0, 3.0)] {
+        assert!(covers(&narrow, Vec2::new(x, y)), "the band at the corner");
+    }
+
+    let sharp = border_path(&border(40.0, 0.0, 4.0), Affine::default());
+    for vertex in &sharp.vertices {
+        let at = world(vertex.xy_position);
+        assert!((0.0..=40.0).contains(&at.x) && (0.0..=40.0).contains(&at.y));
+    }
+    for (x, y) in [(2.0, 20.0), (20.0, 2.0), (38.0, 20.0), (1.0, 1.0)] {
+        assert!(covers(&sharp, Vec2::new(x, y)), "the band is border");
+    }
+    for (x, y) in [(20.0, 20.0), (5.0, 20.0), (20.0, 35.0), (5.0, 5.0)] {
+        assert!(!covers(&sharp, Vec2::new(x, y)), "the interior isn't");
+    }
+
+    let mut scratch = Scratch::new();
+    for (size, width) in [(0.0, 4.0), (40.0, 0.0), (40.0, -1.0)] {
+        let rect = Prim::Rect {
+            rect: Rect {
+                origin: Vec2::default(),
+                size: Vec2::new(size, size),
+            },
+            radius: 0.0,
+            fill: Some(ink()),
+            border: Some((ink(), width)),
+        };
+        let [fill, None] = geometry_paths(&mut scratch, &rect, Affine::default(), 1.0, 0.0)
+            .expect("degenerate contour is not a tessellation error")
+        else {
+            panic!("a degenerate contour paints no border");
+        };
+        if size > 0.0 {
+            let (path, _) = fill.expect("a visible background");
+            assert!(covers(&path, Vec2::new(20.0, 20.0)));
+            assert_eq!(path.bounds.origin, point(px(0.0), px(0.0)));
+            assert_eq!(
+                (path.bounds.size.width, path.bounds.size.height),
+                (px(40.0), px(40.0))
+            );
+        } else {
+            assert!(fill.is_none(), "a zero-size rect paints no fill");
+        }
+    }
 }
 
 fn drawn(prim: &Prim, draw: f32) -> Option<Path<Pixels>> {
-    let mut built = paths(prim, Affine::default(), draw, 0.0, MAX_COMPOSED_SCALE)
-        .expect("a bordered rect builds");
-    assert!(built.len() <= 1, "a border builds at most one path");
-    built.pop().map(|(path, _)| path)
+    let [None, border] = geometry_paths(&mut Scratch::new(), prim, Affine::default(), draw, 0.0)
+        .expect("a bordered rect builds")
+    else {
+        panic!("a border does not paint a background");
+    };
+    border.map(|(path, _)| path)
 }
 
 fn polygon(points: &[(f32, f32)]) -> Path<Pixels> {
@@ -755,28 +858,21 @@ fn polygon(points: &[(f32, f32)]) -> Path<Pixels> {
 #[test]
 fn a_partial_border_fills_one_sector_of_the_band() {
     let square = border(40.0, 0.0, 4.0);
-    let sector = |draw| xy(&drawn(&square, draw).expect("a revealed sector"));
-    assert_eq!(
-        sector(0.25),
-        xy(&polygon(&[
-            (40.0, 0.0),
-            (40.0, 40.0),
-            (36.0, 36.0),
-            (36.0, 4.0)
-        ])),
-        "the right side, mitred at both ends"
+    let sector = |draw| drawn(&square, draw).expect("a revealed sector");
+    assert_same_coverage(
+        &sector(0.25),
+        &polygon(&[(40.0, 0.0), (40.0, 40.0), (36.0, 36.0), (36.0, 4.0)]),
     );
-    assert_eq!(
-        sector(0.3125),
-        xy(&polygon(&[
+    assert_same_coverage(
+        &sector(0.3125),
+        &polygon(&[
             (40.0, 0.0),
             (40.0, 40.0),
             (30.0, 40.0),
             (28.0, 36.0),
             (36.0, 36.0),
             (36.0, 4.0),
-        ])),
-        "a quarter of the bottom edge, paired with a quarter of the inner one"
+        ]),
     );
     for draw in [0.0, -1.0] {
         assert!(drawn(&square, draw).is_none(), "nothing is revealed");
@@ -789,9 +885,7 @@ fn a_partial_border_fills_one_sector_of_the_band() {
 #[test]
 fn a_partial_border_cuts_straight_across_the_band() {
     let path = drawn(&border(40.0, 10.0, 4.0), 0.2).expect("a revealed sector");
-    let n = f32::from(u16::try_from(corner_segments(10.0)).expect("a few chords"));
-    let arc = n * 20.0 * (FRAC_PI_4 / n).sin();
-    let cut = 10.0 + 0.2 * (80.0 + 4.0 * arc) - arc;
+    let cut = 22.87;
     for x in [36.5, 37.5, 39.5] {
         assert!(
             covers(&path, Vec2::new(x, cut - 0.25)),
@@ -838,8 +932,10 @@ fn a_partial_border_folds_onto_a_collapsed_inner_outline() {
 }
 
 fn distinct(path: &Path<Pixels>) -> usize {
-    let mut positions: Vec<_> = xy(path)
-        .into_iter()
+    let mut positions: Vec<_> = path
+        .vertices
+        .iter()
+        .map(|vertex| vertex.xy_position)
         .map(|at| (f32::from(at.x).to_bits(), f32::from(at.y).to_bits()))
         .collect();
     positions.sort_unstable();
@@ -856,6 +952,7 @@ fn ring_borders_build_within_the_fill_limit_at_the_largest_charge() {
     let n = corner_segments(20_000.0 * 64.0);
     assert_eq!(n, 1_257, "the largest charged corner");
     assert_eq!(2 * ((n + 1) * 4 + 1), 10_066, "2p contour points at most");
+    let mut scratch = Scratch::new();
     let largest = |height, width| Prim::Rect {
         rect: Rect {
             origin: Vec2::new(-20_000.0, -20_000.0),
@@ -867,37 +964,34 @@ fn ring_borders_build_within_the_fill_limit_at_the_largest_charge() {
     };
     let charged = Affine::pose(64.0, 0.3, Vec2::new(0.0, 0.0));
     let cases = [
-        (40_000.0, 2.0),
-        (40_000.0, 20_000.0),
-        (20_000.0, 10_000.0),
-        (40_000.0, 3e-3),
-        (40_000.0, 1e-3),
+        (40_000.0, 2.0, true),
+        (40_000.0, 20_000.0, true),
+        (20_000.0, 10_000.0, true),
+        (40_000.0, 3e-3, false),
+        (40_000.0, 1e-3, false),
     ];
-    for (index, (height, width)) in cases.into_iter().enumerate() {
+    for (height, width, visible) in cases {
         for draw in [1.0, 0.999, 0.5] {
-            let built = paths(
-                &largest(height, width),
-                charged,
-                draw,
-                0.0,
-                MAX_COMPOSED_SCALE,
-            )
-            .expect("the largest border builds");
-            if index < 3 {
-                assert_eq!(built.len(), 1, "a control border builds one path");
-            }
-            for (path, _) in &built {
+            let [None, border] =
+                geometry_paths(&mut scratch, &largest(height, width), charged, draw, 0.0)
+                    .expect("the largest border builds")
+            else {
+                panic!("at most one border; no background");
+            };
+            if let Some((path, _)) = border {
                 assert!(
-                    distinct(path) <= FILL_VERTEX_LIMIT,
+                    distinct(&path) <= 21_845,
                     "lyon's vertices stay within one fill's limit"
                 );
+            } else {
+                assert!(!visible, "a visible control border paints");
             }
         }
     }
     let past = Affine::pose(65.0, 0.3, Vec2::new(0.0, 0.0));
     assert_eq!(
-        paths(&largest(40_000.0, 2.0), past, 1.0, 0.0, MAX_COMPOSED_SCALE).map(|built| built.len()),
-        Err(BuildError::OverCharge),
+        geometry_paths(&mut scratch, &largest(40_000.0, 2.0), past, 1.0, 0.0,).err(),
+        Some(BuildError::OverCharge),
         "a scale past the charge isn't coarsened"
     );
 }
@@ -906,50 +1000,62 @@ fn ring_borders_build_within_the_fill_limit_at_the_largest_charge() {
 /// collapse into each other, places the same triangles rather than retriangulating them.
 #[test]
 fn crossing_geometry_is_placed_not_retriangulated() {
-    let star = Prim::Fill {
-        points: (0..5_u8)
-            .map(|i| {
-                let angle = TAU * f32::from(i * 2 % 5) / 5.0;
-                Vec2::new(angle.cos(), angle.sin()) * 10.0
-            })
-            .collect(),
-        color: ink(),
+    const EDGE: f32 = 20_000.0;
+    const ZOOM: f32 = 0.00025;
+
+    let handle = Handle::new(1, 0).expect("a handle");
+    let scene = PaintScene::of(handle, &[pentagram()]);
+    let fill = |transform| {
+        scene
+            .fill(handle, 0, transform)
+            .expect("the staged fill")
+            .expect("the star paints")
     };
-    let baseline = border_path(&star, Affine::default());
+    let baseline = fill(Affine::default());
     assert!(
         baseline.vertices.len() >= 15,
         "a star's five points tessellate"
     );
-    let transform = Affine::pose(1e-4, 0.3, Vec2::new(20_000.0, 20_000.0));
-    let placed = border_path(&star, transform);
-    let expected: Vec<_> = xy(&baseline)
-        .into_iter()
-        .map(|at| transform.point(world(at)))
-        .collect();
-    assert_eq!(
-        xy(&placed).into_iter().map(world).collect::<Vec<_>>(),
-        expected,
-        "the baseline triangles, each vertex transformed"
-    );
-    let (min, max) = expected
-        .iter()
-        .fold((expected[0], expected[0]), |(min, max), at| {
+    for (transform, min, width, height) in [
+        (
+            Affine::pose(1e-4, 0.3, Vec2::new(EDGE, EDGE)),
+            px(EDGE),
+            px(0.0),
+            px(0.001_953_125),
+        ),
+        (
+            Affine([ZOOM, 0.0, 0.0, ZOOM, EDGE, EDGE]),
+            px(EDGE.next_down()),
+            px(0.003_906_25),
+            px(0.003_906_25),
+        ),
+    ] {
+        let placed = fill(transform);
+        assert_eq!(
             (
-                Vec2::new(min.x.min(at.x), min.y.min(at.y)),
-                Vec2::new(max.x.max(at.x), max.y.max(at.y)),
-            )
-        });
-    let size = placed.bounds.size;
-    assert_eq!(
-        (world(placed.bounds.origin), size.width, size.height),
-        (min, px(max.x - min.x), px(max.y - min.y)),
-        "the exact bounds of the transformed vertices"
-    );
+                placed.bounds.origin,
+                placed.bounds.size.width,
+                placed.bounds.size.height
+            ),
+            (point(min, min), width, height),
+            "the exact bounds at the far canvas edge"
+        );
+        assert!(
+            placed
+                .vertices
+                .iter()
+                .map(|vertex| world(vertex.xy_position))
+                .eq(baseline
+                    .vertices
+                    .iter()
+                    .map(|vertex| transform.point(world(vertex.xy_position)))),
+            "every cached triangle is placed in order, even when its corners collapse",
+        );
+    }
 }
 
-#[test]
-fn a_pentagram_fills_its_centre_nonzero() {
-    let star = Prim::Fill {
+fn pentagram() -> Prim {
+    Prim::Fill {
         points: (0..5_u8)
             .map(|i| {
                 let angle = TAU * f32::from(i * 2 % 5) / 5.0;
@@ -957,8 +1063,16 @@ fn a_pentagram_fills_its_centre_nonzero() {
             })
             .collect(),
         color: ink(),
-    };
-    let path = border_path(&star, Affine::default());
+    }
+}
+
+#[test]
+fn a_pentagram_fills_its_centre_nonzero() {
+    let handle = Handle::new(1, 0).expect("a handle");
+    let path = PaintScene::of(handle, &[pentagram()])
+        .fill(handle, 0, Affine::default())
+        .expect("the staged fill")
+        .expect("the star paints");
     assert!(
         covers(&path, Vec2::new(0.0, 0.0)),
         "the centre pentagon winds twice, so nonzero fills it"

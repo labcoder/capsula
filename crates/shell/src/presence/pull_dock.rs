@@ -422,9 +422,13 @@ mod tests {
         assert_eq!(dock.rest(Holding::Nothing), Rest::Wait, "asked once");
     }
 
-    #[test]
-    fn letting_go_of_a_drip_stub_and_body_retires_all_three_without_growing() {
-        let image = || {
+    #[gpui::test]
+    fn letting_go_of_a_drip_stub_and_body_retires_all_three_without_growing(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{AppContext as _, VisualTestContext, WindowOptions};
+
+        let images = std::array::from_fn(|_| {
             let pixels = image::RgbaImage::new(1, 1);
             Some((
                 Quad {
@@ -435,24 +439,40 @@ mod tests {
                 },
                 Arc::new(RenderImage::new([image::Frame::new(pixels)])),
             ))
-        };
-        let mut dock = Dock::new();
-        let reserved = dock.retired.capacity();
-        let picture = PullPicture {
-            area: AREA,
-            images: [image(), image(), image()],
-        };
-        dock.show_pull(Some(picture), Drawn::default());
-        dock.let_go();
-        assert_eq!(dock.retired.len(), 3, "the drip, the stub and the body");
-        assert_eq!(
-            dock.retired.capacity(),
-            reserved,
-            "made at the dock's start"
-        );
-        assert!(
-            dock.pull.is_none() && dock.undrawn,
-            "a frame without them is due"
-        );
+        });
+        let handles = images
+            .each_ref()
+            .map(|image| Arc::downgrade(&image.as_ref().unwrap().1));
+        let (dock, window) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            let dock = cx.new(|_| Dock::new());
+            let shown = dock.clone();
+            let window = cx
+                .open_window(WindowOptions::default(), |_, _| shown)
+                .expect("test dock window");
+            (dock, window)
+        });
+        let mut frame = VisualTestContext::from_window(window.into(), cx);
+        dock.update(&mut frame, |dock, _| {
+            dock.show_pull(Some(PullPicture { area: AREA, images }), Drawn::default());
+        });
+        frame.update(|window, cx| window.draw(cx).clear(cx));
+        dock.update(&mut frame, |dock, _| {
+            let reserved = dock.retired.capacity();
+            dock.let_go();
+            assert!(
+                dock.pull.is_none() && dock.undrawn,
+                "a frame without the pull is due"
+            );
+            assert_eq!(
+                dock.retired.capacity(),
+                reserved,
+                "made at the dock's start"
+            );
+        });
+        frame.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(handles.iter().all(|image| image.upgrade().is_some()));
+        frame.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(handles.iter().all(|image| image.upgrade().is_none()));
     }
 }

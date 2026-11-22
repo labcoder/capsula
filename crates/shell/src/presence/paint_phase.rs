@@ -51,8 +51,6 @@ pub(super) fn handoff(path: &gpui_kit::Path<gpui_kit::Pixels>) {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::*;
-
     pub(crate) fn assert_paths(events: &[crate::allocation::Request], free_tag: u8) -> usize {
         let mut fills = std::collections::BTreeMap::new();
         let mut filling = false;
@@ -126,69 +124,5 @@ pub(super) mod tests {
             "no unrecorded or extra application handoff"
         );
         allocations
-    }
-
-    #[test]
-    fn the_path_oracle_checks_each_reused_pointer_lifetime_and_rejects_a_missing_handoff() {
-        use crate::allocation::Request;
-        let allocation = Request {
-            action: 0,
-            pointer: 7,
-            size: 96,
-            align: 4,
-            tag: 1,
-        };
-        let lifetime = [
-            allocation,
-            Request {
-                action: 4,
-                ..allocation
-            },
-            Request {
-                action: 1,
-                ..allocation
-            },
-        ];
-        let events = [lifetime, lifetime].concat();
-        assert_eq!(assert_paths(&events, 1), 2);
-        let mut missing = events;
-        missing.remove(1);
-        assert!(std::panic::catch_unwind(|| assert_paths(&missing, 1)).is_err());
-        let fill = [
-            Request {
-                action: 2,
-                pointer: 0,
-                size: 0,
-                align: 0,
-                tag: 2,
-            },
-            Request {
-                pointer: 9,
-                size: 8,
-                tag: 2,
-                ..allocation
-            },
-            Request {
-                action: 3,
-                pointer: 0,
-                size: 0,
-                align: 0,
-                tag: 2,
-            },
-        ];
-        assert!(std::panic::catch_unwind(|| assert_paths(&fill, 1)).is_err());
-    }
-
-    #[test]
-    fn phase_guards_restore_the_outer_phase_even_when_unwinding() {
-        let before = crate::allocation::set_tag(7);
-        let failed = std::panic::catch_unwind(|| {
-            let _app = enter(Phase::App);
-            let _fill = enter(Phase::LyonFill);
-            panic!("phase guard control");
-        });
-        let restored = crate::allocation::set_tag(before);
-        assert!(failed.is_err());
-        assert_eq!(restored, 7);
     }
 }

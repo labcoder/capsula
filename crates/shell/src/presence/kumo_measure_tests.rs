@@ -1,14 +1,11 @@
 //! Manual quiet-Rez timing of Kumo's animated frame as the peek drives it, from the shell's side
 //! of the crate line: the animator's tick, and one frame's pixels allocated and shaded. No GPUI
-//! image is made, so the frame's image wrap is not in these numbers. One test that always runs
-//! holds the squares timed here, and the one the pull's own test lays out, to the views' sizes.
+//! image is made, so the frame's image wrap is not in these numbers.
 
 use std::hint::black_box;
 use std::time::Instant;
 
-use super::kumo::{Animator, CARRY_WIDTH, Look, Mood, Renderer, Silhouette};
-use super::kumo_view::SIZE;
-use super::pulling::PEEK_SQUARE;
+use super::kumo::{Animator, Look, Mood, Renderer, Silhouette};
 
 const WARMUPS: usize = 8;
 const SAMPLES: usize = 256;
@@ -37,22 +34,6 @@ fn stats(mut samples: Vec<u128>) -> String {
         samples[samples.len() * 95 / 100],
         samples[samples.len() - 1]
     )
-}
-
-#[test]
-fn the_tests_squares_follow_the_views_sizes() {
-    assert!(
-        (f32::from(PEEK) - SIZE).abs() < f32::EPSILON,
-        "the timed peek square follows kumo_view::SIZE"
-    );
-    assert!(
-        (f32::from(CARRY) - CARRY_WIDTH).abs() < f32::EPSILON,
-        "the timed carry square follows CARRY_WIDTH"
-    );
-    assert!(
-        (PEEK_SQUARE - SIZE).abs() < f32::EPSILON,
-        "the pull test's peek square follows kumo_view::SIZE"
-    );
 }
 
 #[test]

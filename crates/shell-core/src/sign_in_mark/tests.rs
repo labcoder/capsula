@@ -10,44 +10,27 @@ fn open(generation: u64) -> SignInMark {
 fn only_a_queued_op_opens_the_mark() {
     let mut mark = SignInMark::default();
     assert_eq!(mark.view(1, Shows::Waiting), Seen::Nothing);
-    assert_eq!(mark, SignInMark::Settled);
     assert!(!mark.take(), "nothing was asked for here");
     mark.sent(1);
-    assert_eq!(
-        mark,
-        SignInMark::Open {
-            generation: 1,
-            shown: false
-        }
-    );
+    assert!(mark.take());
+    assert_eq!(mark.view(1, Shows::Waiting), Seen::SendCancel);
+    assert!(!mark.take());
 }
 
 /// Before the brain shows the wait, no answer on the asking connection ends the mark, complete or
 /// refused (it may predate the op, or the brain may start the sign-in late), so a dismissal still
 /// cancels it.
 #[test]
-fn a_dismissal_before_the_wait_shows_owes_the_cancel_once() {
-    let mut mark = open(1);
-    assert_eq!(mark.view(1, Shows::Other), Seen::Nothing);
-    assert!(mark.take());
-    assert_eq!(mark, SignInMark::CancelOwed { generation: 1 });
-    assert!(!mark.take(), "a second close sends nothing");
-    mark.cancel_sent();
-    assert_eq!(mark, SignInMark::Settled);
-}
-
-#[test]
-fn the_wait_shown_is_not_an_end() {
-    let mut mark = open(1);
-    assert_eq!(mark.view(1, Shows::Waiting), Seen::Nothing);
-    assert_eq!(
-        mark,
-        SignInMark::Open {
-            generation: 1,
-            shown: true
-        }
-    );
-    assert!(mark.take(), "a shown wait is still owed its cancel");
+fn a_dismissal_owes_the_cancel_once_with_or_without_a_visible_wait() {
+    for shown in [Shows::Other, Shows::Waiting] {
+        let mut mark = open(1);
+        assert_eq!(mark.view(1, shown), Seen::Nothing);
+        assert!(mark.take());
+        assert!(!mark.take(), "a second close sends nothing");
+        assert_eq!(mark.view(1, Shows::Waiting), Seen::SendCancel);
+        mark.cancel_sent();
+        assert_eq!(mark.view(1, Shows::Waiting), Seen::Nothing);
+    }
 }
 
 #[test]
@@ -73,13 +56,9 @@ fn each_terminal_event_ends_the_mark() {
 fn a_wait_on_the_next_connection_moves_the_mark_there() {
     let mut mark = open(1);
     assert_eq!(mark.view(2, Shows::Waiting), Seen::Nothing);
-    assert_eq!(
-        mark,
-        SignInMark::Open {
-            generation: 2,
-            shown: true
-        }
-    );
+    assert!(mark.take());
+    assert_eq!(mark.view(2, Shows::Other), Seen::Nothing);
+    assert_eq!(mark.view(2, Shows::Waiting), Seen::SendCancel);
 }
 
 #[test]

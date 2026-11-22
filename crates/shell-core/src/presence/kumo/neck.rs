@@ -671,8 +671,8 @@ fn tapered(p: Vec2, a: Vec2, b: Vec2, ra: f32, rb: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BREAK_AT, Curve, GooMismatch, GooShader, MAX_SCALE, Neck, Piece, Rect, SNAP_LEN, State,
-        pixels, tapered,
+        Curve, GooMismatch, GooShader, MAX_SCALE, Neck, Piece, Rect, SNAP_LEN, State, pixels,
+        tapered,
     };
     use crate::presence::kumo::expression::Motion;
     use crate::presence::kumo::frame::FrameState;
@@ -760,7 +760,13 @@ mod tests {
 
     #[test]
     fn the_neck_breaks_one_unit_past_the_snap_length() {
+        assert_eq!(pulled(0.0).body_scale(), v2(1.0, 1.0), "slack, it is round");
         let mut neck = pulled(SNAP_LEN);
+        let stretched = neck.body_scale();
+        assert!(
+            close(stretched, v2(0.93, 1.14)),
+            "the body reaches full stretch: {stretched:?}"
+        );
         assert!(!neck.broken(), "attached at exactly {SNAP_LEN}");
         assert!(neck.bounds(Piece::Neck).is_some());
         assert_eq!(neck.bounds(Piece::Drip), None);
@@ -768,8 +774,7 @@ mod tests {
         assert!(neck.broken(), "broken one unit past");
         assert_eq!(neck.bounds(Piece::Neck), None, "the neck itself is gone");
         assert!(neck.bounds(Piece::Drip).is_some() && neck.bounds(Piece::Stub).is_some());
-        let s = neck.body_scale();
-        assert!(close(s, v2(0.93, 1.14)), "it broke at full stretch: {s:?}");
+        assert_eq!(neck.body_scale(), stretched, "it broke at full stretch");
     }
 
     #[test]
@@ -789,11 +794,10 @@ mod tests {
             (true, true),
             "0.1 s: the stub is still melting"
         );
-        // exp(-0.9) cos(2.6) = -0.3484: the body overshoots round.
+        let overshoot = neck.body_scale();
         assert!(
-            close(neck.body_scale(), v2(1.024_39, 0.951_22)),
-            "{:?}",
-            neck.body_scale()
+            close(overshoot, v2(1.024_39, 0.951_22)),
+            "visible recoil overshoot: {overshoot:?}"
         );
         neck.update(0.1, body);
         assert_eq!(
@@ -807,38 +811,49 @@ mod tests {
             (false, false),
             "0.3 s: the drip is back in the line"
         );
-        assert!(matches!(neck.state, State::Recoiling { .. }));
+        assert_ne!(
+            neck.body_scale(),
+            v2(1.0, 1.0),
+            "the body is still recoiling"
+        );
         neck.update(0.1, body);
-        assert_eq!(neck.state, State::Gone, "past the 0.32 s recoil");
+        for piece in [Piece::Neck, Piece::Drip, Piece::Stub] {
+            assert_eq!(neck.bounds(piece), None, "{piece:?} must disappear");
+        }
         assert_eq!(neck.body_scale(), v2(1.0, 1.0), "the body is round again");
         assert!(neck.broken());
-    }
-
-    #[test]
-    fn a_stretched_neck_draws_the_body_out() {
-        let neck = pulled(SNAP_LEN);
-        assert!(
-            close(neck.body_scale(), v2(0.93, 1.14)),
-            "{:?}",
-            neck.body_scale()
-        );
-        assert_eq!(pulled(0.0).body_scale(), v2(1.0, 1.0), "slack, it's round");
     }
 
     #[test]
     fn an_invalid_step_counts_as_none_and_a_long_one_as_a_tenth_of_a_second() {
         let start = pulled(100.0);
         let body = v2(DOCK.x + 60.0, DOCK.y + 100.0);
+        let region = Rect {
+            origin: v2(300.0, -50.0),
+            size: v2(240.0, 240.0),
+        };
         let after = |dt: f32| {
             let mut neck = start.clone();
             neck.update(dt, body);
-            neck
+            shade_in(&neck, Piece::Neck, region, 0.5, &mut GooShader::neck(BODY)).2
         };
+        let zero = after(0.0);
+        let clamped = after(0.1);
         for dt in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0] {
-            assert_eq!(after(dt), after(0.0), "{dt}");
+            assert_eq!(after(dt), zero, "{dt}");
         }
-        assert_eq!(after(1.0e9), after(0.1));
-        assert_ne!(after(0.1), after(0.0), "the spring did move");
+        assert_eq!(after(1.0e9), clamped);
+        let mask = |pixels: &[u8]| {
+            pixels
+                .iter()
+                .skip(3)
+                .step_by(4)
+                .map(|&alpha| alpha != 0)
+                .collect::<Vec<_>>()
+        };
+        let (zero, clamped) = (mask(&zero), mask(&clamped));
+        assert!(zero.contains(&true) && clamped.contains(&true));
+        assert_ne!(zero, clamped, "the spring visibly moved");
     }
 
     #[test]
@@ -851,31 +866,6 @@ mod tests {
             let r = neck.bounds(Piece::Neck).expect("still attached");
             assert!(inside_cap(r, Piece::Neck, DOCK), "frame {k}: {r:?}");
         }
-    }
-
-    #[test]
-    fn a_short_sideways_pull_keeps_the_whole_root_in_the_region() {
-        let mut neck = Neck::new(DOCK, BODY);
-        neck.update(0.0, v2(420.0, 20.08));
-        let scale = 0.5;
-        let r = neck.bounds(Piece::Neck).expect("attached");
-        // Shade a wider image on the same pixel grid; nothing may land outside the region.
-        let grow = 40.0;
-        let wide = Rect {
-            origin: r.origin - v2(grow, grow),
-            size: r.size + v2(2.0 * grow, 2.0 * grow),
-        };
-        let mut shader = GooShader::neck(BODY);
-        let (w, h) = GooShader::size(r, scale);
-        let (ww, wh, out) = shade_in(&neck, Piece::Neck, wide, scale, &mut shader);
-        let skip = pixels(grow, scale);
-        let clipped: Vec<(usize, usize, u8)> = (0..wh)
-            .flat_map(|j| (0..ww).map(move |i| (i, j)))
-            .filter(|&(i, j)| !((skip..skip + w).contains(&i) && (skip..skip + h).contains(&j)))
-            .map(|(i, j)| (i, j, out[(j * ww + i) * 4 + 3]))
-            .filter(|&(.., a)| a > 0)
-            .collect();
-        assert!(clipped.is_empty(), "{r:?} clips {clipped:?}");
     }
 
     /// Every pixel with alpha that a 40 px wider image of `piece` on the same grid holds outside
@@ -908,10 +898,15 @@ mod tests {
     #[test]
     fn no_piece_draws_outside_its_region() {
         let mut states = Vec::new();
-        // CAPS-139's two: a stub on its first recoil frame, and a pull's first step.
-        for body in [v2(400.0, 170.08), v2(400.0, 20.08)] {
+        for body in [v2(400.0, 170.08), v2(400.0, 20.08), v2(420.0, 20.08)] {
             let mut neck = Neck::new(DOCK, BODY);
             neck.update(0.0, body);
+            let piece = if neck.broken() {
+                Piece::Stub
+            } else {
+                Piece::Neck
+            };
+            assert!(neck.bounds(piece).is_some(), "{body:?} draws a first frame");
             states.push(neck);
         }
         for len in [0.0, 0.08, 2.0, 6.0, 15.0, 30.0, 55.0, 80.0, 110.0, 143.9] {
@@ -965,27 +960,56 @@ mod tests {
 
     #[test]
     fn extremal_controls_keep_both_pieces_inside_their_caps() {
-        // The control at 144 on one axis and the end at 144 on the other, then both on one axis.
-        for (ctrl, end, at_break) in [
-            (v2(144.0, 0.0), v2(0.0, 144.0), v2(38.7072, 3.6864)),
-            (v2(0.0, 144.0), v2(0.0, 144.0), v2(0.0, 42.3936)),
+        for (ctrl, end) in [
+            (v2(144.0, 0.0), v2(0.0, 144.0)),
+            (v2(0.0, 144.0), v2(0.0, 144.0)),
         ] {
             let mut neck = Neck::new(v2(0.0, 0.0), BODY);
             neck.body = end + v2(0.0, BODY * 0.12);
             let curve = Curve { ctrl, end };
             neck.state = State::Recoiling { since: 0.0, curve };
-            assert!(close(neck.along(curve, BREAK_AT), at_break), "{curve:?}");
-            let drip = neck.bounds(Piece::Drip).expect("a drip");
-            assert!(
-                inside_cap(drip, Piece::Drip, v2(0.0, 0.0)),
-                "{curve:?}: {drip:?}"
-            );
-            let stub = neck.bounds(Piece::Stub).expect("a stub");
-            assert!(
-                inside_cap(stub, Piece::Stub, neck.attach()),
-                "{curve:?}: {stub:?}"
-            );
+            for (piece, cap, center) in [(Piece::Drip, 352, v2(0.0, 0.0)), (Piece::Stub, 613, end)]
+            {
+                let region = neck.bounds(piece).expect("the split piece is drawable");
+                assert!(inside_cap(region, piece, center), "{piece:?} at {region:?}");
+                let (width, height, out) =
+                    shade_in(&neck, piece, region, MAX_SCALE, &mut shader_for(piece));
+                assert!(
+                    (1..=cap).contains(&width) && (1..=cap).contains(&height),
+                    "{curve:?} {piece:?}"
+                );
+                assert!(out.iter().skip(3).step_by(4).any(|&alpha| alpha > 0));
+            }
         }
+        let mut neck = Neck::new(v2(0.0, 0.0), BODY);
+        neck.body = v2(0.0, 144.0 + BODY * 0.12);
+        neck.state = State::Recoiling {
+            since: 0.0,
+            curve: Curve {
+                ctrl: v2(0.0, 144.0),
+                end: v2(0.0, 144.0),
+            },
+        };
+        let sample = |y: f32| {
+            let region = Rect {
+                origin: v2(-0.5, y - 0.5),
+                size: v2(1.0, 1.0),
+            };
+            shade_in(
+                &neck,
+                Piece::Drip,
+                region,
+                MAX_SCALE,
+                &mut GooShader::neck(BODY),
+            )
+            .2[3]
+        };
+        assert_eq!(sample(42.0), 255, "the drip reaches the break");
+        assert_eq!(
+            sample(55.0),
+            0,
+            "the drip ends near the dock, not in the stub"
+        );
     }
 
     #[test]
@@ -1033,41 +1057,32 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::as_conversions,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "a point inside a small test image"
-    )]
-    fn the_goo_covers_its_middle_and_clears_its_corners() {
-        let neck = pulled(100.0);
-        let mut shader = GooShader::neck(BODY);
-        let (w, h, out) = shade(&neck, Piece::Neck, &mut shader);
-        let middle = neck.along(neck.curve(), 0.5);
-        let r = neck.bounds(Piece::Neck).expect("goo");
-        let i = ((middle.x - r.origin.x) * MAX_SCALE) as usize;
-        let j = ((middle.y - r.origin.y) * MAX_SCALE) as usize;
-        assert_eq!(out[(j * w + i) * 4 + 3], 255, "the neck's middle is solid");
-        for (ci, cj) in [(0, 0), (w - 1, 0)] {
-            assert_eq!(out[(cj * w + ci) * 4 + 3], 0, "corner {ci},{cj} is clear");
-        }
-        assert!(h > 100, "the region spans the neck");
-    }
-
-    #[test]
     fn no_goo_pixel_is_black_clear_or_covered() {
         for (neck, piece) in [
             (pulled(100.0), Piece::Neck),
             (snapped(150.0), Piece::Drip),
             (snapped(150.0), Piece::Stub),
         ] {
-            let (_, _, out) = shade(&neck, piece, &mut shader_for(piece));
+            let (width, height, out) = shade(&neck, piece, &mut shader_for(piece));
             let px = out.as_chunks::<4>().0;
             assert!(
                 px.iter().any(|p| p[3] == 255),
                 "{piece:?}: some goo is solid"
             );
             assert!(px.iter().any(|p| p[3] == 0), "{piece:?}: some goo is clear");
+            if piece == Piece::Neck {
+                assert!(height > 100, "the region spans the full straight neck");
+                assert_eq!(
+                    px[(height / 2) * width + width / 2][3],
+                    255,
+                    "solid straight midline"
+                );
+                assert_eq!(
+                    (px[0][3], px[width - 1][3]),
+                    (0, 0),
+                    "transparent top corners"
+                );
+            }
             let black = px.iter().filter(|p| p[..3] == [0, 0, 0]).count();
             assert_eq!(black, 0, "{piece:?}: a scaled edge blends toward these");
         }
@@ -1076,17 +1091,33 @@ mod tests {
     #[test]
     fn shading_twice_gives_the_same_bytes_and_keeps_the_scratch() {
         let neck = pulled(100.0);
+        let drip = snapped(150.0);
         let mut shader = GooShader::neck(BODY);
-        let tiles = shader.tiles.as_ptr();
-        let rows = (shader.above.as_ptr(), shader.row.as_ptr());
-        let first = shade(&neck, Piece::Neck, &mut shader).2;
-        assert_eq!(shade(&neck, Piece::Neck, &mut shader).2, first);
-        assert_eq!(shader.tiles.as_ptr(), tiles, "the tile table is reused");
-        assert_eq!(
-            (shader.above.as_ptr(), shader.row.as_ptr()),
-            rows,
-            "the rows are reused"
-        );
+        let (shape, look) = (Silhouette::emoji(), Look::default());
+        let region = neck.bounds(Piece::Neck).expect("a neck");
+        let (width, height) = GooShader::size(region, MAX_SCALE);
+        let mut out = vec![0; width * height * 4];
+        let mut render = |model: &Neck, piece, out: &mut [u8]| {
+            shader.render(
+                model,
+                piece,
+                region,
+                MAX_SCALE,
+                &shape,
+                &look,
+                &FrameState::IDLE,
+                out,
+            )
+        };
+        assert_eq!(render(&neck, Piece::Neck, &mut out), Ok(()));
+        let first = out.clone();
+        assert_eq!(render(&drip, Piece::Drip, &mut out), Ok(()));
+        assert_ne!(out, first, "the intervening frame must change the image");
+        let (result, [allocations, _], _) =
+            crate::allocation::usage(|| render(&neck, Piece::Neck, &mut out));
+        assert_eq!(result, Ok(()));
+        assert_eq!(allocations, 0);
+        assert_eq!(out, first);
     }
 
     #[test]

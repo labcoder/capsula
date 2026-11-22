@@ -321,7 +321,7 @@ mod tests {
     use std::cell::Cell;
     use std::time::{Duration, Instant};
 
-    use super::{Candidates, EXTENTS, READ_INTERVAL, Sample, decide, deliver, label};
+    use super::{Candidates, READ_INTERVAL, Sample, decide, deliver, label};
     use crate::platform::PresenceEvent;
     use crate::platform::host::{HostChange, Label, PhysicalRect, WatchGen};
     use crate::presence::perch::target_fixtures::{
@@ -393,8 +393,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_host_publishes_its_placement_after_both_drains() {
-        assert_eq!(EXTENTS.body, 56);
-        assert_eq!(drop(|_| [vec![], vec![]]), (Some(PERCH), 2));
+        assert_eq!(drop(|_| [vec![], vec![]]).0, Some(PERCH));
     }
 
     #[test]
@@ -574,14 +573,11 @@ mod tests {
         );
         assert_eq!(reads.get(), 0, "held back");
         candidates.stale();
-        assert!(matches!(
-            candidates.sample(drag(1), released, soon, read),
-            Sample::Arm(OTHER, ..)
-        ));
         assert_eq!(
-            (reads.get(), candidates.due),
-            (1, None),
-            "the release reads now"
+            candidates.sample(drag(1), released, soon, read),
+            Sample::Arm(OTHER, watch(2), titled(OTHER, "Beneath").label)
         );
+        assert_eq!(reads.get(), 1, "one host read during the release");
+        assert_eq!(candidates.due, None, "no stale-read wake remains scheduled");
     }
 }

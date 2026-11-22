@@ -159,7 +159,7 @@ impl Pull {
 
 #[cfg(test)]
 mod tests {
-    use super::{CARRY_WIDTH, MAX_STEP, PEEK_WIDTH, Pull, SETTLED};
+    use super::{CARRY_WIDTH, Pull, SETTLED};
     use crate::presence::kumo::expression::Motion;
     use crate::presence::kumo::math::{Vec2, v2};
     use crate::presence::kumo::neck::{Piece, Rect, SNAP_LEN};
@@ -187,16 +187,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::float_cmp, reason = "the width's ends are exact")]
-    fn a_grab_starts_at_home_at_the_peek_width() {
-        let pull = grab(Motion::Full);
-        assert_eq!(pull.body(), HOME);
-        assert_eq!(pull.width(), PEEK_WIDTH);
-        assert!(!pull.settled(), "a held pull isn't settled");
-        assert!(!pull.neck().broken());
-    }
-
-    #[test]
     fn the_body_follows_the_pointer_from_where_it_was_pressed() {
         let mut pull = Pull::grab(DOCK, HOME, HOME, HOME + v2(10.0, 4.0), BOUNDS, Motion::Full);
         pull.aim(v2(450.0, 104.0));
@@ -211,16 +201,29 @@ mod tests {
 
     #[test]
     fn a_release_before_the_snap_springs_home_and_shrinks_back() {
+        let mut pull = grab(Motion::Reduced);
+        pull.aim(HOME + v2(0.0, 72.0));
+        pull.update(FRAME);
+        assert!((pull.width() - 74.0).abs() < 1e-3);
+        pull.release();
+        pull.aim(v2(0.0, 0.0));
+        pull.update(FRAME);
+        assert_eq!(pull.body(), HOME);
+        assert!((pull.width() - 64.0).abs() < 1e-3);
+        assert!(!pull.neck().broken());
+        assert!(pull.settled());
+
         let mut pull = grab(Motion::Full);
         pull.aim(HOME + v2(0.0, 100.0));
         run(&mut pull, 36);
-        assert!(pull.width() > PEEK_WIDTH + 5.0, "{}", pull.width());
+        assert!(pull.width() > 69.0, "the full-motion body visibly expands");
         pull.release();
         pull.aim(v2(0.0, 0.0));
         run(&mut pull, 72);
-        assert!(pull.settled(), "{:?}", pull.body());
+        assert!(pull.settled());
         assert!(!pull.neck().broken());
-        assert!((pull.width() - PEEK_WIDTH).abs() < 1e-3, "{}", pull.width());
+        assert_eq!(pull.body(), HOME);
+        assert!((pull.width() - 64.0).abs() < 1e-3);
     }
 
     #[test]
@@ -306,15 +309,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::float_cmp, reason = "halfway to SNAP_LEN is exactly halfway")]
-    fn halfway_to_the_snap_the_body_is_halfway_to_the_carry_width() {
-        let mut pull = grab(Motion::Reduced);
-        pull.aim(HOME + v2(0.0, 72.0));
-        pull.update(FRAME);
-        assert_eq!(pull.width(), 74.0);
-    }
-
-    #[test]
     fn an_overlay_narrower_than_the_body_holds_it_at_its_corner() {
         let tight = Rect {
             origin: v2(380.0, 0.0),
@@ -355,7 +349,9 @@ mod tests {
         for dt in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, 0.0] {
             assert_eq!(stepped(dt), HOME, "{dt}");
         }
-        assert_eq!(stepped(1e9), stepped(MAX_STEP));
+        let clamped = stepped(0.1);
+        assert!(clamped.y > HOME.y && clamped.y < HOME.y + 80.0);
+        assert_eq!(stepped(1e9), clamped);
     }
 
     #[test]
@@ -386,11 +382,14 @@ mod tests {
     fn a_released_body_rests_at_the_threshold_and_not_one_step_over() {
         let over = SETTLED.next_up();
         let still = v2(0.0, 0.0);
+        let diagonal = v2(0.04, 0.04);
         for (offset, velocity, rests) in [
             (v2(SETTLED, 0.0), still, true),
             (v2(over, 0.0), still, false),
             (still, v2(0.0, SETTLED), true),
             (still, v2(0.0, over), false),
+            (diagonal, still, false),
+            (still, diagonal, false),
             (v2(0.0, SETTLED), v2(SETTLED, 0.0), true),
         ] {
             let pull = released_at(offset, velocity);
@@ -399,14 +398,6 @@ mod tests {
                 assert_eq!(pull.body(), HOME);
             }
         }
-    }
-
-    #[test]
-    fn a_vector_whose_parts_are_under_but_length_is_over_does_not_rest() {
-        let near = v2(0.04, 0.04);
-        assert!(near.len() > SETTLED);
-        assert!(!released_at(near, v2(0.0, 0.0)).settled());
-        assert!(!released_at(v2(0.0, 0.0), near).settled());
     }
 
     #[test]
@@ -420,6 +411,10 @@ mod tests {
     #[test]
     fn a_held_pull_never_rests_even_still_at_home() {
         let mut pull = grab(Motion::Full);
+        assert_eq!(pull.body(), HOME);
+        assert!((pull.width() - 64.0).abs() < 1e-3);
+        assert!(!pull.settled());
+        assert!(!pull.neck().broken());
         run(&mut pull, 144);
         assert_eq!(pull.body(), HOME);
         assert!(!pull.settled());

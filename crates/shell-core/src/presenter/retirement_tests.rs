@@ -17,45 +17,54 @@ const PAD: usize = 37;
 
 #[test]
 fn preparation_attribution_tracks_its_source_and_tip_not_the_whole_scene() {
-    let (mut presenter, now) = live();
-    begin(&mut presenter, LIVE, now);
-    let first = only_job(commit(&mut presenter, LIVE, 0, rects(""), now).expect("large step"));
-    let source = rect("c");
-    let (copy, _, [allocated, released]) = crate::allocation::usage(|| Arc::new(source.clone()));
-    let original_bytes =
-        2 * size_of::<usize>() + size_of::<Step>() + size_of::<kumochi_scene::Op>() + 2;
+    let charges = [
+        ("x", "y", false),
+        ("x0123456789abcdef", "y", false),
+        ("x", "y0123456789abcdef", false),
+        ("x", "y", true),
+    ]
+        .map(|(old_say, next_say, many)| {
+        let (mut presenter, now) = live();
+        begin(&mut presenter, LIVE, now);
+        let predecessor = if many {
+            rects("")
+        } else {
+            step(&format!(
+            r#"{{"step":{{"id":"first","say":"{old_say}","put":[{{"shape":{{"id":"r","kind":"rect","box":[0,0,10,10]}}}}]}}}}"#
+            ))
+        };
+        let first = only_job(commit(&mut presenter, LIVE, 0, predecessor, now).expect("predecessor"));
+        let successor = step(&format!(r#"{{"step":{{"id":"c","say":"{next_say}","put":[{{"shape":{{"id":"c","kind":"rect","box":[0,0,10,10]}}}}]}}}}"#));
+        let (source, _, [allocated, released]) = crate::allocation::usage(|| Arc::new(successor.clone()));
+        drop(source);
+        let queued = commit(&mut presenter, LIVE, 1, successor, now).expect("queued step");
+        assert_eq!(credit(&queued), FRAME);
+        assert!(jobs(queued).is_empty());
+        let ticket = &presenter.scenes[&LIVE].queue.front().expect("one ticket").preparation;
+        let ticket_charge = ticket.attribution();
+        assert_eq!(ticket_charge, ticket.attributed_bytes());
+        assert!(ticket_charge >= allocated - released, "the ticket covers its source allocation");
+        let done = first.run(&mut Shaper);
+        let Completion::Prepared { result, .. } = &done else {
+            panic!("prepared answer");
+        };
+        let layout_charge = result.as_ref().expect("geometry prepared").after.resident_bytes();
+        let next = only_job(presenter.completed(done, now).expect("successor dispatched"));
+        assert_eq!(next.attribution().checked_sub(layout_charge), Some(ticket_charge));
+        ticket_charge
+    });
     assert_eq!(
-        allocated - released,
-        original_bytes,
-        "one source Arc, record, op and two one-byte ids"
-    );
-    drop(copy);
-    let ticket_bytes = original_bytes
-        + 4 * size_of::<usize>()
-        + size_of::<std::collections::BTreeMap<usize, usize>>();
-    let queued = commit(&mut presenter, LIVE, 1, source, now).expect("queued step");
-    assert_eq!(credit(&queued), FRAME);
-    assert!(controls(&queued).is_empty());
-    assert!(jobs(queued).is_empty());
-    let scene = &presenter.scenes[&LIVE];
-    assert!(scene.state.view().attributed_bytes() > ticket_bytes);
-    let ticket = &scene.queue.front().expect("one ticket").preparation;
-    assert_eq!(ticket.attributed_bytes(), ticket_bytes);
-    assert_eq!(ticket.attribution(), ticket_bytes);
-    let done = first.run(&mut Shaper);
-    let Completion::Prepared { full_after, .. } = &done else {
-        panic!("prepared answer")
-    };
-    let expected = ticket_bytes + full_after;
-    let next = only_job(
-        presenter
-            .completed(done, now)
-            .expect("next step dispatched"),
+        charges[0], charges[1],
+        "unused predecessor narration is not the next ticket's charge"
     );
     assert_eq!(
-        next.attribution(),
-        expected,
-        "only this ticket and its preceding layout"
+        charges[2].checked_sub(charges[0]),
+        Some(16),
+        "the ticket charges its own source once"
+    );
+    assert_eq!(
+        charges[3], charges[0],
+        "the queue does not charge predecessor geometry"
     );
 }
 
@@ -89,7 +98,7 @@ fn retirement_meter_counts_queue_owners_and_semantic_state_only_once() {
             .sum::<usize>();
     settled();
     let release = hold_dropper();
-    presenter.scenes.get_mut(&LIVE).expect("scene").halt();
+    presenter.stop(RUN, now).expect("stop with queued work");
     assert_eq!(
         kumochi_scene::deferred::pending().bytes,
         expected,
@@ -100,39 +109,49 @@ fn retirement_meter_counts_queue_owners_and_semantic_state_only_once() {
     settled();
 
     for disconnect in [false, true] {
-        let (mut presenter, now, job) = recovering(vec![(LIVE, rect("a"))]);
-        presenter
-            .completed(job.run(&mut Shaper), now)
-            .expect("recovered");
-        let scene = &presenter.scenes[&LIVE];
-        let semantic = 2 * size_of::<usize>()
-            + size_of::<SceneState>()
-            + scene.state.view().attributed_bytes();
-        let expected = semantic
-            + scene.retained
-            + scene.view_bytes
-            + scene.frame_bytes
-            + super::super::Activation::BYTES;
-        settled();
-        let release = hold_dropper();
-        if disconnect {
-            presenter.disconnected();
+        let totals = [0, 4096].map(|cache| {
+            let (mut presenter, now, job) = recovering(vec![(LIVE, rect("a"))]);
+            presenter.stage = Box::new(Charged(cache));
+            presenter
+                .completed(job.run(&mut Shaper), now)
+                .expect("recovered");
+            let scene = &presenter.scenes[&LIVE];
+            let expected_bytes = 2 * size_of::<usize>()
+                + size_of::<SceneState>()
+                + scene.state.view().attributed_bytes()
+                + scene.held();
+            settled();
+            let release = hold_dropper();
+            presenter.stop(RUN, now).expect("stop at rest");
+            let stopped = kumochi_scene::deferred::pending().bytes;
+            if disconnect {
+                presenter.disconnected();
+            } else {
+                presenter.clear(now).expect("clear");
+            }
+            let discarded = kumochi_scene::deferred::pending().bytes;
+            let wire = if disconnect {
+                usize::try_from(FRAME).expect("snapshot frame")
+            } else {
+                0
+            };
             assert_eq!(
-                kumochi_scene::deferred::pending().bytes,
-                expected + usize::try_from(FRAME).expect("snapshot frame"),
-                "one semantic owner plus the assembler's retained wire charge"
+                discarded - stopped,
+                expected_bytes + wire,
+                "scene and wire charges each retire once"
             );
-        } else {
-            presenter.clear(now).expect("clear");
-            assert_eq!(
-                kumochi_scene::deferred::pending().bytes,
-                expected,
-                "semantic state has one owner"
-            );
-        }
-        drop(release);
-        drop(presenter);
-        settled();
+            drop(release);
+            drop(presenter);
+            settled();
+            (stopped, discarded)
+        });
+        let [(free_stop, free_discard), (charged_stop, charged_discard)] = totals;
+        assert_eq!(charged_stop, free_stop, "stop keeps the paint cache");
+        assert_eq!(
+            charged_discard,
+            free_discard + 4096,
+            "discard accounts for the cache once"
+        );
     }
 }
 
@@ -258,7 +277,8 @@ fn a_source_for_another_layout_version_drops_on_the_dropper() {
 #[test]
 fn a_recovered_scene_removed_before_its_answer_drops_on_the_dropper() {
     let scene = SceneId(10);
-    let (mut presenter, now, job) = recovering(vec![(scene, rect("r"))]);
+    let survivor = SceneId(11);
+    let (mut presenter, now, job) = recovering(vec![(scene, rect("r")), (survivor, rect("k"))]);
     let done = job.run(&mut Shaper);
     let Completion::Recovered { scenes, .. } = &done else {
         panic!("a recovery result");
@@ -274,7 +294,8 @@ fn a_recovered_scene_removed_before_its_answer_drops_on_the_dropper() {
     let removal = DataToShell::ScenesRemoved {
         scenes: vec![scene],
     };
-    data(&mut presenter, removal, now).expect("a removal during recovery");
+    let effects = data(&mut presenter, removal, now).expect("a removal during recovery");
+    assert_eq!(credit(&effects), FRAME);
     let effects = presenter
         .completed(done, ms(now, 20))
         .expect("the current batch");
@@ -293,6 +314,8 @@ fn a_recovered_scene_removed_before_its_answer_drops_on_the_dropper() {
     );
     drop(release);
     assert!(drained(&probe, 1), "the dropper destroys it");
+    let effects = presenter.stop(RUN, ms(now, 30)).expect("stop the survivor");
+    assert_eq!(controls(&effects), [&stop_scenes(vec![kept(survivor)])]);
 }
 
 #[test]

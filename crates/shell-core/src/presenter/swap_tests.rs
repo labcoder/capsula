@@ -97,14 +97,23 @@ fn prepare(presenter: &mut Presenter, index: u32, drawing: Step, now: Instant) {
 
 #[test]
 fn replacement_keeps_the_exact_old_sample_until_one_atomic_successor_selection() {
+    use kumochi_scene::geom::{Rect, Vec2};
+
     let (mut presenter, now) = fixture(&[LIVE]);
     let old = picture(&presenter);
-    let bytes = presenter.residency() - super::super::Activation::BYTES;
+    let old_picture_charge = presenter.residency() - super::super::Activation::BYTES;
     replace(&mut presenter, &[LIVE], NEXT, now);
-    assert_eq!(presenter.global.usage().objects, 0);
-    assert_eq!(presenter.global.usage().scenes, 0);
-    assert_eq!(presenter.residency(), bytes);
     assert_eq!(presenter.deadline(), Some(ms(now, 250)));
+    assert_eq!(
+        presenter.global.usage().scenes,
+        0,
+        "outgoing semantic scene is gone"
+    );
+    assert_eq!(
+        presenter.residency(),
+        old_picture_charge,
+        "only its drawable picture is held"
+    );
     assert!(
         presenter
             .sample_at(ms(now, 10))
@@ -113,7 +122,7 @@ fn replacement_keeps_the_exact_old_sample_until_one_atomic_successor_selection()
             .visible
     );
     assert_eq!(picture(&presenter), old);
-    assert_eq!(presenter.frames.borrow().observations(), [None; 4]);
+    assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
     assert!(bound_everywhere(&presenter));
     begin(&mut presenter, NEXT, now);
     prepare(
@@ -127,10 +136,19 @@ fn replacement_keeps_the_exact_old_sample_until_one_atomic_successor_selection()
     presenter.advance(GENERATION, now).expect("activation");
     assert_eq!(picture(&presenter), old);
     assert!(presenter.sample_at(now).expect("a sample").0.visible);
-    assert_ne!(picture(&presenter), old);
-    assert_eq!(picture(&presenter).len(), 1);
-    assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
+    assert_eq!(
+        super::painted_rects(&presenter),
+        [Rect {
+            origin: Vec2::new(40.0, 0.0),
+            size: Vec2::new(30.0, 20.0)
+        }]
+    );
     assert!(bound_everywhere(&presenter));
+    assert_eq!(
+        presenter.frames.borrow().retirement_bytes(),
+        0,
+        "handoff releases the outgoing picture"
+    );
     assert!(presenter.drawn());
 }
 
@@ -495,7 +513,58 @@ fn a_refused_successor_header_reports_failure_without_guessing_a_run() {
 
 #[test]
 fn combined_paint_work_at_the_limit_keeps_the_hold_and_one_over_relinquishes_it() {
+    use super::super::activation::Shown;
+    use super::paint_work::anchored;
     use kumochi_scene::display::PaintWork;
+
+    for (pieces, bridge_visible) in [(496, true), (497, false)] {
+        let (mut presenter, now, job) = recovering(vec![(LIVE, anchored(16))]);
+        presenter
+            .completed(job.run(&mut Shaper), now)
+            .expect("old dashed drawing");
+        presenter.sample_at(now).expect("old sample");
+        presenter.frames.borrow_mut().shown = true;
+        let old = picture(&presenter);
+        assert_eq!(old.iter().map(Vec::len).collect::<Vec<_>>(), [2]);
+        replace(&mut presenter, &[LIVE], NEXT, now);
+        begin(&mut presenter, NEXT, now);
+        prepare(&mut presenter, 0, anchored(pieces), now);
+        presenter.sample_at(now).expect("bridge sample");
+        assert_eq!(
+            picture(&presenter).as_slice(),
+            if bridge_visible { old.as_slice() } else { &[] }
+        );
+        assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
+
+        presenter
+            .advance(GENERATION, now)
+            .expect("successor activation");
+        presenter.sample_at(now).expect("first successor sample");
+        paint_shown(&mut presenter, now);
+        presenter
+            .sample_at(ms(now, 1000))
+            .expect("completed wire entrance");
+        let successor = picture(&presenter);
+        assert_eq!(successor.iter().map(Vec::len).collect::<Vec<_>>(), [2]);
+        assert_ne!(
+            successor, old,
+            "the successor's longer dashed wire replaces the bridge"
+        );
+        assert_eq!(
+            presenter
+                .take_shown(GENERATION)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+            [Shown {
+                generation: GENERATION,
+                run: RUN,
+                scene: NEXT,
+                index: 0
+            }]
+        );
+    }
+
     for extra in [0, 1] {
         let (mut presenter, now) = fixture(&[LIVE]);
         replace(&mut presenter, &[LIVE], NEXT, now);
@@ -506,8 +575,8 @@ fn combined_paint_work_at_the_limit_keeps_the_hold_and_one_over_relinquishes_it(
                 ..PaintWork::default()
             },
         );
-        assert_eq!(presenter.frames.borrow().retirement.is_some(), extra == 0);
-        assert_eq!(presenter.global.usage().objects, 0);
+        presenter.sample_at(now).expect("fill-cap bridge sample");
+        assert_eq!(!picture(&presenter).is_empty(), extra == 0);
     }
 }
 

@@ -51,18 +51,27 @@ fn four_live_scenes_release_a_middle_slot_and_adopt_a_fifth() {
             now,
         )
         .expect("middle removal");
+        let duplicate = DataToShell::ScenesRemoved {
+            scenes: vec![SceneId(removed)],
+        };
+        assert!(
+            controls(&super::data(&mut presenter, duplicate, now).expect("repeated removal"))
+                .is_empty()
+        );
         assert_eq!(presenter.residency(), 3 * each);
         assert!(controls(&begin(&mut presenter, SceneId(added), now)).is_empty());
         assert_eq!(presenter.scenes.len(), 4);
         assert_eq!(presenter.residency(), 4 * each);
         assert_eq!(presenter.frames.borrow().ids(), expected);
     }
-    presenter.disconnected();
-    assert_eq!(presenter.residency(), 0);
-    assert_eq!(presenter.frames.borrow().ids(), [None; 4]);
+    for _ in 0..2 {
+        presenter.disconnected();
+        assert_eq!(presenter.residency(), 0);
+        assert_eq!(presenter.frames.borrow().ids(), [None; 4]);
+    }
 }
 
-fn anchored(count: usize) -> Step {
+pub(super) fn anchored(count: usize) -> Step {
     let mut operations =
         vec![r#"{"shape":{"id":"anchor","kind":"rect","box":[-0.5,-0.5,1,1]}}"#.to_owned()];
     let mut left = count;
@@ -235,29 +244,6 @@ fn kept_cut_replaces_the_cached_paint_work() {
 }
 
 #[test]
-fn consuming_a_removal_releases_the_previous_rest_work() {
-    let (mut presenter, now, job) = recovering(vec![(LIVE, anchored(16))]);
-    presenter
-        .completed(job.run(&mut Shaper), now)
-        .expect("recovered line");
-    let removal = step(r#"{"step":{"id":"remove","remove":["wire0"]}}"#);
-    let job = only_job(commit(&mut presenter, LIVE, 1, removal, now).expect("remove line"));
-    presenter
-        .completed(job.run(&mut Shaper), now)
-        .expect("prepared removal");
-    assert_eq!(
-        presenter.paint_work().dash_pieces,
-        16,
-        "the old rest can still paint"
-    );
-    let consumed = presenter
-        .consume_ready(LIVE, 1, now, 0, 0)
-        .expect("consume removal");
-    consumed.effects.expect("remaining work resumes");
-    assert_eq!(presenter.paint_work().dash_pieces, 0);
-}
-
-#[test]
 fn ready_states_reserve_componentwise_maxima_until_the_old_rest_is_replaced() {
     use kumochi_scene::display::PaintWork;
 
@@ -309,4 +295,24 @@ fn ready_states_reserve_componentwise_maxima_until_the_old_rest_is_replaced() {
             ..both
         }
     );
+
+    let (mut presenter, now, job) = recovering(vec![(LIVE, anchored(16))]);
+    presenter
+        .completed(job.run(&mut Shaper), now)
+        .expect("recovered line");
+    let removal = step(r#"{"step":{"id":"remove","remove":["wire0"]}}"#);
+    let job = only_job(commit(&mut presenter, LIVE, 1, removal, now).expect("remove line"));
+    presenter
+        .completed(job.run(&mut Shaper), now)
+        .expect("prepared removal");
+    assert_eq!(
+        presenter.paint_work().dash_pieces,
+        16,
+        "the old rest can still paint"
+    );
+    let consumed = presenter
+        .consume_ready(LIVE, 1, now, 0, 0)
+        .expect("consume removal");
+    consumed.effects.expect("remaining work resumes");
+    assert_eq!(presenter.paint_work().dash_pieces, 0);
 }

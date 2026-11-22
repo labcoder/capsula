@@ -173,7 +173,10 @@ mod tests {
             Some(Duration::from_secs(75))
         );
         for invalid in ["0", "120001", "-1", "later"] {
-            assert!(launch([format!("--quit-after-ms={invalid}")].into_iter()).is_err());
+            assert!(matches!(
+                launch([format!("--quit-after-ms={invalid}")].into_iter()),
+                Err(LaunchError::QuitDelay)
+            ));
         }
     }
 

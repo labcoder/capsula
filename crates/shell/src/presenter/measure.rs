@@ -137,12 +137,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_app_text_system_can_cross_to_a_worker_without_a_window() {
-        fn send_sync<T: Send + Sync>() {}
-        send_sync::<TextSystem>();
-    }
-
     /// The brain's wide measure bounds the shipped font: on this corpus its lines, width and height
     /// are never below the shell's, nor its width on a run of any one printable ASCII character,
     /// and the shell's lines are at most 1.5 em.
@@ -260,33 +254,14 @@ mod tests {
 
     #[test]
     fn multiline_measurement_uses_the_widest_line_and_combined_height() {
-        let measured = measure()
-            .measure(
-                "ab\nc",
-                TextStyle {
-                    size: 10.0,
-                    bold: false,
-                },
-                None,
-            )
-            .expect("GPUI test shaping");
-        assert_eq!(
-            measured.map(f32::to_bits),
-            [12.0_f32, 26.0].map(f32::to_bits)
-        );
-    }
-
-    #[test]
-    fn worker_local_noop_shaping_wraps_regular_and_bold_dimensions() {
-        let text = Arc::new(TextSystem::new(Arc::new(gpui_kit::NoopTextSystem::new())));
-        let results = std::thread::spawn(move || {
-            let mut measure = Measure::new(text, Font::default().family);
-            [false, true]
-                .map(|bold| measure.measure("abcd", TextStyle { size: 10.0, bold }, Some(12.0)))
-        })
-        .join()
-        .expect("worker completed");
-        assert_eq!(results, [Ok([12.0, 26.0]), Ok([12.0, 26.0])]);
+        for (text, width, bold) in [
+            ("ab\nc", None, false),
+            ("abcd", Some(12.0), false),
+            ("abcd", Some(12.0), true),
+        ] {
+            let style = TextStyle { size: 10.0, bold };
+            assert_eq!(measure().measure(text, style, width), Ok([12.0, 26.0]));
+        }
     }
 
     #[test]

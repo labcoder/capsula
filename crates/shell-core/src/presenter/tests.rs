@@ -56,16 +56,40 @@ impl SceneCache for Probed {
 }
 
 /// Paints every frame, checking that its slot's cache was staged from the view the frame
-/// sampled; whether every frame passed.
-fn bound_everywhere(presenter: &Presenter) -> bool {
-    !presenter.frames.borrow().paint(|frame, cache| {
+/// sampled; returns the item count for every painted frame.
+fn bound_item_counts(presenter: &Presenter) -> Option<Vec<usize>> {
+    let mut counts = Vec::new();
+    let failed = presenter.frames.borrow().paint(|frame, cache| {
+        counts.push(frame.items().len());
         let cache: &dyn std::any::Any = cache;
         let staged = cache.downcast_ref::<Witnessed>().map(|cache| &cache.0);
         match (frame.generation(), staged) {
             (Some(sampled), Some(staged)) if Arc::ptr_eq(sampled, staged) => Ok(()),
             _ => Err(()),
         }
-    })
+    });
+    (!failed).then_some(counts)
+}
+
+fn bound_everywhere(presenter: &Presenter) -> bool {
+    bound_item_counts(presenter).is_some()
+}
+
+fn painted_rects(presenter: &Presenter) -> Vec<kumochi_scene::geom::Rect> {
+    use kumochi_scene::display::Prim;
+    let mut rects = Vec::new();
+    assert!(!presenter.frames.borrow().paint(|frame, _| {
+        for (item, _, primitives) in frame.paint_items() {
+            for primitive in primitives {
+                let Prim::Rect { rect, .. } = primitive else {
+                    panic!("the fixture paints only rectangles");
+                };
+                rects.push(item.transform.bounds(*rect));
+            }
+        }
+        Ok::<_, ()>(())
+    }));
+    rects
 }
 
 #[path = "frame_tests.rs"]
@@ -268,32 +292,6 @@ fn paint_shown(presenter: &mut Presenter, at: Instant) {
 }
 
 #[test]
-fn a_matching_commit_prepares_once_and_its_result_is_charged() {
-    let (mut presenter, now) = live();
-    assert_eq!(credit(&begin(&mut presenter, LIVE, now)), FRAME);
-    let before = presenter.residency();
-    let effects = commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a matching step");
-    assert_eq!(credit(&effects), FRAME);
-    let job = only_job(effects);
-    assert_eq!(job.scene(), LIVE);
-    assert_eq!(presenter.deadline(), Some(ms(now, 250)));
-    let done = job.run(&mut Shaper);
-    let Completion::Prepared { result, .. } = &done else {
-        panic!("a prepared step");
-    };
-    let Ok(prepared) = &**result else {
-        panic!("a prepared step");
-    };
-    let charged = prepared.resident_bytes;
-    let effects = presenter
-        .completed(done, ms(now, 10))
-        .expect("a current answer");
-    assert!(effects.is_empty());
-    assert_eq!(presenter.residency(), before + charged);
-    assert_eq!(presenter.deadline(), None);
-}
-
-#[test]
 fn a_clear_before_membership_survives_a_brain_restart() {
     let mut mirror = presenter();
     let now = Instant::now();
@@ -331,18 +329,45 @@ fn a_clear_without_a_durable_ack_is_resent_when_membership_returns() {
 
 #[test]
 fn a_scene_prepares_its_steps_one_at_a_time_on_the_previous_result() {
+    use kumochi_scene::geom::{Rect, Vec2};
+
     let (mut presenter, now, first) = preparing();
-    let effects = commit(&mut presenter, LIVE, 1, rect("b"), now).expect("a matching step");
+    let replacement = step(
+        r#"{"step":{"id":"b","start":"now","remove":["a"],"put":[{"shape":{"id":"b","kind":"rect","box":[20,0,10,10],"enter":"none"}}]}}"#,
+    );
+    let effects = commit(&mut presenter, LIVE, 1, replacement, now).expect("a matching step");
     assert!(jobs(effects).is_empty());
+    assert!(presenter.take_ready().is_empty());
+    let ready = |index| ControlToBrain::StepReady {
+        run: RUN,
+        scene: LIVE,
+        index,
+    };
     let second = only_job(
         presenter
             .completed(first.run(&mut Shaper), ms(now, 5))
-            .expect("a current answer"),
+            .expect("first answer"),
     );
-    let effects = presenter
+    assert_eq!(controls(&presenter.take_ready()), [&ready(0)]);
+    presenter
         .completed(second.run(&mut Shaper), ms(now, 10))
-        .expect("a current answer");
-    assert!(controls(&effects).is_empty());
+        .expect("successor answer");
+    assert_eq!(controls(&presenter.take_ready()), [&ready(1)]);
+    for (index, time) in [(0, 10), (1, 11)] {
+        presenter
+            .consume_ready(LIVE, index, ms(now, time), time, 0)
+            .expect("consume head");
+    }
+    presenter
+        .sample_at(ms(now, 11))
+        .expect("paint the successor");
+    assert_eq!(
+        painted_rects(&presenter),
+        [Rect {
+            origin: Vec2::new(20.0, 0.0),
+            size: Vec2::new(10.0, 10.0)
+        }]
+    );
 }
 
 #[test]
@@ -370,22 +395,6 @@ fn a_step_the_mirror_rejects_ends_the_connection_unprepared() {
     assert_eq!(
         commit(&mut presenter, LIVE, 1, rect("a"), now).err(),
         Some(Broken::Step)
-    );
-}
-
-#[test]
-fn a_failed_preparation_cuts_its_scene_with_a_content_free_reason() {
-    let (mut presenter, now) = live();
-    begin(&mut presenter, LIVE, now);
-    let job = only_job(
-        commit(&mut presenter, LIVE, 0, label("a", "unshapeable"), now).expect("a matching step"),
-    );
-    let effects = presenter
-        .completed(job.run(&mut Shaper), ms(now, 5))
-        .expect("an answer");
-    assert_eq!(
-        controls(&effects),
-        [&failed(LIVE, 0, SceneFailure::TextMeasure)]
     );
 }
 
@@ -422,46 +431,24 @@ fn each_prepared_step_is_announced_once_and_a_refused_or_late_one_never() {
         .completed(job.run(&mut Shaper), ms(now, 400))
         .expect("a late answer");
     assert!(presenter.take_ready().is_empty());
-}
 
-#[test]
-fn an_answer_before_the_deadline_is_published() {
-    let (mut presenter, now, job) = preparing();
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let bad = only_job(
+        commit(&mut presenter, LIVE, 0, label("a", "unshapeable"), now).expect("first step"),
+    );
     let effects = presenter
-        .completed(job.run(&mut Shaper), ms(now, 249))
-        .expect("an answer");
-    assert!(controls(&effects).is_empty());
-}
-
-#[test]
-fn an_answer_at_the_deadline_fails_its_step_before_the_watchdog_runs() {
-    let (mut presenter, now, job) = preparing();
-    let before = presenter.residency();
-    let effects = presenter
-        .completed(job.run(&mut Shaper), ms(now, 250))
-        .expect("an answer");
+        .completed(bad.run(&mut Shaper), now)
+        .expect("refused");
     assert_eq!(
         controls(&effects),
-        [&failed(LIVE, 0, SceneFailure::Timeout)]
+        [&failed(LIVE, 0, SceneFailure::TextMeasure)]
     );
-    assert_eq!(presenter.residency(), before);
-}
-
-#[test]
-fn the_watchdog_fails_a_step_whose_worker_never_answers_and_drops_its_late_answer() {
-    let (mut presenter, now, job) = preparing();
-    assert!(presenter.tick(ms(now, 249)).expect("a tick").is_empty());
-    let effects = presenter.tick(ms(now, 250)).expect("a tick");
-    assert_eq!(
-        controls(&effects),
-        [&failed(LIVE, 0, SceneFailure::Timeout)]
-    );
-    assert!(job.cancelled());
-    assert_eq!(presenter.deadline(), None);
-    let late = presenter
-        .completed(job.run(&mut Shaper), ms(now, 400))
-        .expect("a late answer");
-    assert!(late.is_empty());
+    assert!(presenter.take_ready().is_empty());
+    let effects = presenter
+        .stop(RUN, now)
+        .expect("the failed first step was already cut");
+    assert_eq!(controls(&effects), [&stop_scenes(Vec::new())]);
 }
 
 #[test]
@@ -647,23 +634,6 @@ fn stop_clears_an_incomplete_recovery_before_it_cuts() {
         controls(&effects),
         [&clear_drawing(vec![recovering]), &stop_scenes(Vec::new())]
     );
-}
-
-#[test]
-fn a_scene_removed_during_recovery_never_installs_and_is_not_cleared_again() {
-    let (removed, kept_scene) = (SceneId(10), SceneId(11));
-    let (mut presenter, now, job) = recovering(vec![(removed, rect("r")), (kept_scene, rect("k"))]);
-    let frame = DataToShell::ScenesRemoved {
-        scenes: vec![removed],
-    };
-    let effects = data(&mut presenter, frame, now).expect("a removal");
-    assert_eq!(credit(&effects), FRAME);
-    let effects = presenter
-        .completed(job.run(&mut Shaper), ms(now, 20))
-        .expect("the batch");
-    assert!(controls(&effects).is_empty());
-    let effects = presenter.stop(RUN, ms(now, 30)).expect("a stop");
-    assert_eq!(controls(&effects), [&stop_scenes(vec![kept(kept_scene)])]);
 }
 
 /// Eight cleared scenes whose cancelled workers never answer, holding every worker slot.

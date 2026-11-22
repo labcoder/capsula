@@ -1,6 +1,6 @@
 use kumochi_protocol::message::{ErrorKey, ThreadId, UserError};
 
-use super::{AssistantName, Error, Field, Settings, SettingsView, Update, UserName};
+use super::{AssistantName, Completion, Error, Field, Settings, SettingsView, Update, UserName};
 
 fn view(assistant: &str, user: &str) -> SettingsView {
     SettingsView {
@@ -213,17 +213,21 @@ fn receive_fences_stale_and_missing_generations_before_any_state_mutation() {
         Some(Error::Brain(error.clone()))
     );
     assert_eq!(settings.notice(), Some(&error));
-    assert!(
-        settings.receive(Some(7), 7, view("Cloud", "Oscar"), Update::Answer),
-        "the next current answer settles the inline rename"
-    );
-    assert_eq!(settings.view(), Some(&view("Cloud", "Oscar")));
+    assert!(settings.receive(Some(7), 7, view("Remote", "Alex"), Update::Unsolicited));
+    assert_eq!(settings.value(Field::User), "Alex");
     assert_eq!(settings.value(Field::Assistant), "Later");
-    assert_eq!(settings.value(Field::User), "Oscar");
-    assert!(
-        !settings.field(Field::Assistant).saving,
-        "the second save settled"
+    assert!(settings.field(Field::Assistant).saving);
+    assert_eq!(
+        settings.set_view(view("Cloud", "Alex"), Update::Answer),
+        Some(Completion {
+            failed: false,
+            field: Field::Assistant
+        })
     );
+    assert_eq!(settings.view(), Some(&view("Cloud", "Alex")));
+    assert_eq!(settings.value(Field::Assistant), "Later");
+    assert_eq!(settings.value(Field::User), "Alex");
+    assert!(!settings.field(Field::Assistant).saving);
     assert_eq!(settings.field(Field::Assistant).error, None);
     assert_eq!(settings.notice(), Some(&error));
 }

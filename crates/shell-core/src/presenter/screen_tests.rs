@@ -7,7 +7,7 @@ use kumochi_protocol::message::{
     ControlToBrain, DataToShell, RunId, SceneHeader, SceneId, SceneSnapshotChunk,
 };
 use kumochi_scene::{
-    Frame, Record, SceneEvent, Step, parse_screen_draw_record, record::ScreenDisplay, screen,
+    Record, SceneEvent, Step, parse_screen_draw_record, record::ScreenDisplay, screen,
     text::Bounded,
 };
 
@@ -202,6 +202,31 @@ fn a_change_before_the_first_mark_skips_the_scene_and_names_its_run() {
     let effects = marked(&mut presenter, OTHER, SceneId(32), now);
     assert!(controls(&effects).is_empty());
     assert_eq!(scene_ids(&presenter), [SceneId(32)]);
+
+    let (mut presenter, now, log) = watched();
+    release(&mut presenter, AFTER, now);
+    set(&log);
+    assert!(
+        presenter
+            .source_woke(now)
+            .expect("change before name")
+            .is_empty()
+    );
+    assert_eq!(counts(&log), (1, 1), "unnamed change retires the source");
+    assert_eq!(presenter.marks_skipped(), None);
+    let effects = marked(&mut presenter, RUN, MARKS, now);
+    assert_eq!(controls(&effects), [&skipped(MARKS)]);
+    assert_eq!(presenter.marks_skipped(), Some(RUN));
+    presenter.screen_run(RUN, now);
+    let effects = marked(&mut presenter, RUN, SECOND, now);
+    assert_eq!(controls(&effects), [&skipped(SECOND)]);
+    assert_eq!(scene_ids(&presenter), []);
+
+    release(&mut presenter, RUN, now);
+    presenter.screen_run(OTHER, now);
+    assert_eq!(presenter.marks_skipped(), None);
+    assert!(controls(&marked(&mut presenter, OTHER, SceneId(32), now)).is_empty());
+    assert_eq!(scene_ids(&presenter), [SceneId(32)]);
 }
 
 #[test]
@@ -270,8 +295,12 @@ fn a_change_clears_a_shown_scene_whose_frames_are_still_held() {
 #[test]
 fn a_set_bit_clears_the_shown_scene_at_the_next_tick_or_frame() {
     let (mut presenter, now, log, _) = shown();
-    set(&log);
+    let bit = log.borrow().bit.clone().expect("started source");
+    assert!(bit.set());
+    assert!(!bit.set(), "repeated events coalesce before the wake");
     let effects = presenter.tick(now).expect("a tick");
+    assert!(!bit.take(), "the tick consumed the pending wake");
+    assert!(bit.set(), "a future event can signal again");
     assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
     assert_eq!(scene_ids(&presenter), []);
     assert_eq!(counts(&log), (1, 1));
@@ -352,10 +381,17 @@ fn a_hold_that_ends_without_a_screen_scene_stops_the_watch() {
 #[test]
 fn no_mark_is_shown_without_a_release_or_without_running_sources() {
     let (mut presenter, now, log) = watched();
+    assert!(
+        presenter
+            .screen_changed(now)
+            .expect("idle change")
+            .is_empty()
+    );
     let effects = marked(&mut presenter, RUN, MARKS, now);
     assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(presenter.marks_skipped(), None);
     assert_eq!(counts(&log), (0, 0));
+    assert_eq!(presenter.deadline(), None);
 
     // No sources installed: what the product does until the shell supplies them.
     let (mut presenter, now) = live();
@@ -527,38 +563,6 @@ fn a_replaced_screen_scene_leaves_no_picture_for_the_bridge() {
     assert_eq!(counts(&log), (1, 0));
 }
 
-#[test]
-fn an_unnamed_release_stops_listening_thirty_seconds_later() {
-    let (mut presenter, now, log) = watched();
-    release(&mut presenter, AFTER, now);
-    assert_eq!(presenter.deadline(), Some(ms(now, 30_000)));
-    assert!(presenter.tick(ms(now, 29_999)).expect("a tick").is_empty());
-    assert_eq!(counts(&log), (1, 0));
-    assert!(presenter.tick(ms(now, 30_000)).expect("a tick").is_empty());
-    assert_eq!(counts(&log), (1, 1));
-    assert_eq!(presenter.deadline(), None);
-    // The watch stays ended: a name and a scene that come later change nothing.
-    presenter.screen_run(RUN, now);
-    let effects = marked(&mut presenter, RUN, MARKS, ms(now, 30_001));
-    assert_eq!(controls(&effects), [&skipped(MARKS)]);
-    assert_eq!(presenter.marks_skipped(), None);
-    assert_eq!(counts(&log), (1, 1));
-}
-
-#[test]
-fn a_named_run_keeps_the_watch_past_thirty_seconds() {
-    let (mut presenter, now, log) = watched();
-    release(&mut presenter, AFTER, now);
-    presenter.screen_run(RUN, now);
-    assert_eq!(presenter.deadline(), None);
-    assert!(presenter.tick(ms(now, 30_000)).expect("a tick").is_empty());
-    assert_eq!(counts(&log), (1, 0));
-    let effects = marked(&mut presenter, RUN, MARKS, ms(now, 45_000));
-    assert!(controls(&effects).is_empty());
-    assert_eq!(scene_ids(&presenter), [MARKS]);
-    assert_eq!(counts(&log), (1, 0));
-}
-
 /// The keys of the next screen hold come up.
 fn release(presenter: &mut Presenter, after: RunId, now: Instant) -> Vec<Effect> {
     presenter
@@ -681,6 +685,12 @@ fn a_clear_drops_the_marks_admission_that_still_waits_for_a_worker_slot() {
 #[test]
 fn the_brain_s_replacement_passes_the_watch_to_the_run_s_next_screen_scene() {
     let (mut presenter, now, log, _) = shown();
+    let unrelated = DataToShell::ScenesReplaced {
+        scenes: vec![LIVE],
+        successor: SceneId(32),
+    };
+    data(&mut presenter, unrelated, now).expect("unrelated marker");
+    assert_eq!(scene_ids(&presenter), [MARKS]);
     let effects = data(&mut presenter, replaced_by(SECOND), now).expect("the marker");
     assert!(controls(&effects).is_empty());
     assert_eq!(scene_ids(&presenter), []);
@@ -772,6 +782,26 @@ fn a_handoff_that_fails_or_never_comes_ends_the_watch() {
     assert_eq!(counts(&log), (1, 1));
     let effects = marked(&mut presenter, RUN, SECOND, now);
     assert_eq!(controls(&effects), [&skipped(SECOND)]);
+
+    let (mut presenter, now, log) = passing();
+    set(&log);
+    presenter.source_woke(now).expect("screen changed");
+    let effects = marked(&mut presenter, RUN, SECOND, now);
+    assert_eq!(controls(&effects), [&skipped(SECOND)]);
+
+    let (mut presenter, now, log) = passing();
+    let effects = data(
+        &mut presenter,
+        DataToShell::ScenesRemoved {
+            scenes: vec![SECOND],
+        },
+        now,
+    )
+    .expect("the designated successor is removed");
+    assert!(controls(&effects).is_empty());
+    assert_eq!(counts(&log), (1, 1));
+    let effects = marked(&mut presenter, RUN, SceneId(32), now);
+    assert_eq!(controls(&effects), [&skipped(SceneId(32))]);
 }
 
 #[test]
@@ -806,7 +836,21 @@ fn a_first_mark_or_a_name_at_the_unnamed_limit_is_late_before_the_watchdog_runs(
     release(&mut presenter, AFTER, now);
     presenter.screen_run(RUN, ms(now, 29_999));
     assert_eq!(presenter.deadline(), None);
-    let effects = marked(&mut presenter, RUN, MARKS, ms(now, 45_000));
+    assert!(
+        presenter
+            .tick(ms(now, 30_000))
+            .expect("named watch")
+            .is_empty()
+    );
+    assert_eq!(counts(&log), (1, 0));
+    let far_after_release = ms(now, 3_600_000);
+    assert!(
+        presenter
+            .tick(far_after_release)
+            .expect("named watch stays armed")
+            .is_empty()
+    );
+    let effects = marked(&mut presenter, RUN, MARKS, far_after_release);
     assert!(controls(&effects).is_empty());
     assert_eq!(counts(&log), (1, 0));
 }
@@ -817,6 +861,11 @@ fn a_first_mark_before_the_run_is_named_is_skipped_and_the_named_run_s_still_sho
     // release: its run is newer than the release and is not the hold's.
     let (mut presenter, now, log) = watched();
     release(&mut presenter, AFTER, now);
+    for (old, scene) in [(AFTER, SceneId(32)), (RunId(3), SceneId(33))] {
+        let effects = marked(&mut presenter, old, scene, now);
+        assert_eq!(controls(&effects), [&skipped(scene)]);
+        assert_eq!(presenter.marks_skipped(), None);
+    }
     let effects = marked(&mut presenter, RUN, MARKS, now);
     assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(scene_ids(&presenter), []);
@@ -852,6 +901,7 @@ fn a_frame_at_the_time_limit_clears_the_marks_before_the_watchdog_runs() {
 fn a_run_s_end_before_any_name_leaves_the_unnamed_watch_to_its_own_limit() {
     let (mut presenter, now, log) = watched();
     release(&mut presenter, AFTER, now);
+    assert_eq!(presenter.deadline(), Some(ms(now, 30_000)));
     for run in [AFTER, RUN] {
         presenter.run_ended(run, ms(now, 10_000));
         assert_eq!(counts(&log), (1, 0));
@@ -869,6 +919,7 @@ fn a_run_s_end_before_any_name_leaves_the_unnamed_watch_to_its_own_limit() {
     let effects = marked(&mut presenter, RUN, MARKS, ms(now, 30_000));
     assert_eq!(controls(&effects), [&skipped(MARKS)]);
     assert_eq!(counts(&log), (1, 1));
+    assert_eq!(presenter.marks_skipped(), None);
 }
 
 #[test]
@@ -888,6 +939,7 @@ fn a_wake_queued_before_a_release_changes_nothing_after_it() {
     set(&log);
     let effects = presenter.tick(now).expect("a tick");
     assert_eq!(controls(&effects), [&cleared(&[SECOND])]);
+    let old = log.borrow().bit.clone().expect("old source");
     release(&mut presenter, OTHER, now);
     presenter.screen_run(RunId(7), now);
     assert!(presenter.source_woke(now).expect("the old wake").is_empty());
@@ -895,8 +947,16 @@ fn a_wake_queued_before_a_release_changes_nothing_after_it() {
     assert!(controls(&effects).is_empty());
     assert_eq!(scene_ids(&presenter), [SceneId(32)]);
 
-    // The shell's own event is the one that sets the bit.
-    let effects = presenter.screen_changed(now).expect("the next hold");
+    assert!(old.set(), "the retired listener can still fire");
+    assert!(
+        presenter
+            .source_woke(now)
+            .expect("retired source wake")
+            .is_empty()
+    );
+    assert_eq!(scene_ids(&presenter), [SceneId(32)]);
+    set(&log);
+    let effects = presenter.source_woke(now).expect("current source wake");
     assert_eq!(controls(&effects), [&cleared(&[SceneId(32)])]);
 }
 
@@ -981,41 +1041,6 @@ fn every_road_that_takes_shown_marks_down_logs_one_fixed_word() {
     release(&mut presenter, AFTER, now);
     data(&mut presenter, begin_frame(MARKS), now).expect("a screen scene");
     presenter.disconnected();
-}
-
-#[test]
-fn set_says_whether_it_changed_the_bit() {
-    let bit = Changed::default();
-    assert!(bit.set());
-    assert!(
-        !bit.set(),
-        "a second event of the same change wakes nothing"
-    );
-    assert!(bit.take());
-    assert!(!bit.take());
-    assert!(bit.set());
-}
-
-#[test]
-fn every_release_starts_the_sources_again_on_a_bit_of_its_own() {
-    let (mut presenter, now, log) = watched();
-    release(&mut presenter, AFTER, now);
-    let old = log.borrow().bit.clone().expect("started sources");
-    release(&mut presenter, AFTER, now);
-    presenter.screen_run(RUN, now);
-    assert_eq!(counts(&log), (2, 1));
-    // A handler of the watch before is still running: the bit it sets is nobody's.
-    assert!(old.set());
-    assert!(presenter.source_woke(now).expect("its wake").is_empty());
-    let effects = marked(&mut presenter, RUN, MARKS, now);
-    assert!(controls(&effects).is_empty());
-    assert_eq!(scene_ids(&presenter), [MARKS]);
-    assert_eq!(presenter.marks_skipped(), None);
-    // This watch's own bit still counts.
-    set(&log);
-    let effects = presenter.source_woke(now).expect("a wake");
-    assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
-    assert_eq!(counts(&log), (2, 2));
 }
 
 #[test]
@@ -1393,56 +1418,45 @@ fn a_shown_scene_whose_display_changes_is_cleared_under_the_word_display() {
 
 #[test]
 fn a_display_known_after_the_begin_places_the_scene_before_its_first_mark() {
-    let (mut presenter, now, log) = watched();
-    presenter.set_display(None, now).expect("no display");
-    release(&mut presenter, AFTER, now);
-    presenter.screen_run(RUN, now);
-    data(&mut presenter, begin_frame(MARKS), now).expect("a screen scene");
-    assert!(
+    for discover_late in [false, true] {
+        let (mut presenter, now, _) = watched();
+        if discover_late {
+            presenter.set_display(None, now).expect("no display");
+        }
+        release(&mut presenter, AFTER, now);
+        presenter.screen_run(RUN, now);
+        data(&mut presenter, begin_frame(MARKS), now).expect("a screen scene");
+        if discover_late {
+            presenter
+                .set_display(Some(DISPLAY), now)
+                .expect("a display");
+        }
+        let effects = commit_as(&mut presenter, RUN, MARKS, 0, mark(), now).expect("a first mark");
+        assert!(controls(&effects).is_empty());
         presenter
-            .set_display(Some(DISPLAY), now)
-            .expect("a display")
-            .is_empty()
-    );
-    let effects = commit_as(&mut presenter, RUN, MARKS, 0, mark(), now).expect("a first mark");
-    assert!(controls(&effects).is_empty());
-    presenter
-        .completed(only_job(effects).run(&mut Shaper), now)
-        .expect("prepared");
-    presenter.advance(GENERATION, now).expect("activation");
-    assert!(presenter.sample_at(now).expect("a sample").0.visible);
-    let placed = scales(&presenter, MARKS);
-    assert!(!placed.is_empty());
-    assert_eq!(placed, vec![TWICE; placed.len()]);
-    assert_eq!(counts(&log), (1, 0));
-}
-
-/// The scale each painted mark of `scene` is placed at, as bits.
-fn scales(presenter: &Presenter, scene: SceneId) -> Vec<[u32; 2]> {
-    let mut frame = Frame::new();
-    presenter.scenes[&scene]
-        .view
-        .frame(60_000, &mut frame)
-        .expect("frame");
-    frame
-        .items()
-        .iter()
-        .map(|item| [item.transform.0[0].to_bits(), item.transform.0[3].to_bits()])
-        .collect()
+            .completed(only_job(effects).run(&mut Shaper), now)
+            .expect("prepared");
+        presenter.advance(GENERATION, now).expect("activation");
+        assert!(presenter.sample_at(now).expect("a sample").0.visible);
+        let mut marks = Vec::new();
+        let mut painted = 0;
+        assert!(!presenter.frames().borrow().paint(|frame, _| {
+            painted += 1;
+            marks.extend(
+                frame
+                    .items()
+                    .iter()
+                    .map(|item| [item.transform.0[0].to_bits(), item.transform.0[3].to_bits()]),
+            );
+            Ok::<_, ()>(())
+        }));
+        assert_eq!(painted, 1);
+        assert_eq!(marks, [TWICE], "late display discovery: {discover_late}");
+    }
 }
 
 /// 1,280 picture pixels across a 2,560-pixel display at 100%: two logical pixels each.
 const TWICE: [u32; 2] = [2.0_f32.to_bits(); 2];
-
-#[test]
-fn shown_marks_are_placed_on_the_overlay_s_display() {
-    let (mut presenter, now, _) = prepared();
-    presenter.advance(GENERATION, now).expect("activation");
-    assert!(presenter.sample_at(now).expect("a sample").0.visible);
-    let placed = scales(&presenter, MARKS);
-    assert!(!placed.is_empty());
-    assert_eq!(placed, vec![TWICE; placed.len()]);
-}
 
 #[test]
 fn the_frame_checks_allocate_nothing_while_nothing_changed() {

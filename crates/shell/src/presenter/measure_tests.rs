@@ -508,30 +508,25 @@ fn native_maximal_content_is_refused_as_paint_work() {
                     running.extend(super::jobs(effects));
                     drop(done.step);
                 }
+                assert_eq!(super::held(&presenter, id), (0, 0));
                 assert!(super::idle(&presenter, id));
-                assert_eq!(super::activated(&presenter, id), consumed);
+                assert_eq!(super::activated(&presenter, id), 14);
                 sender.send((refusals, consumed)).expect("the receiver");
             })
             .detach();
         let (refusals, consumed) = receiver
             .recv_timeout(Duration::from_secs(180))
             .expect("native refusal worker");
-        assert_eq!(
-            consumed,
-            21 + 1 - u32::try_from(super::WINDOW).expect("small")
-        );
-        assert!(
-            matches!(
-                refusals.as_slice(),
-                [ControlToBrain::StepFailed {
-                    scene: SceneId(200),
-                    index: 21,
-                    reason: SceneFailure::PaintWork,
-                    ..
-                }]
-            ),
-            "{} refusals",
-            refusals.len()
-        );
+        assert_eq!(consumed, 14);
+        assert!(matches!(
+            refusals.as_slice(),
+            [ControlToBrain::StepFailed {
+                run: super::RUN,
+                scene: SceneId(200),
+                index: 21,
+                reason: SceneFailure::PaintWork,
+                cut: kumochi_scene::StopCut { activated: 14, .. },
+            }]
+        ));
     }
 }

@@ -105,18 +105,23 @@ fn maximum_rate_full_final_packet_does_not_grow_the_prepared_buffers() {
     submit
         .packet(&[16_384; PACKET_SAMPLES], PacketKind::More)
         .unwrap();
-    submit
-        .packet(&[16_384; PACKET_SAMPLES], PacketKind::End)
-        .unwrap();
-    let first = render.ready.pop().unwrap();
-    let final_block = render.ready.pop().unwrap();
-    assert_eq!(
-        first.pcm.samples.len() + final_block.pcm.samples.len(),
-        15_360
+    let (final_submission, requests) = crate::allocation::requests(64, || {
+        submit.packet(&[16_384; PACKET_SAMPLES], PacketKind::End)
+    });
+    assert_eq!(final_submission, Ok(()));
+    assert!(
+        requests.iter().all(|request| request.action != 0),
+        "a prepared submission must not grow its buffers"
     );
-    assert_eq!(first.pcm.samples.capacity(), MAX_FRAMES * 2);
-    assert_eq!(final_block.pcm.samples.capacity(), MAX_FRAMES * 2);
-    assert_eq!(submit.mono.capacity(), MAX_FRAMES);
+
+    let mut rendered = vec![99.0; 7_680 * 2 + 2];
+    render.fill(&mut rendered);
+    let (audio, silence) = rendered.split_at(7_680 * 2);
+    for frame in audio.as_chunks::<2>().0 {
+        assert!(frame[0].is_finite() && frame[0] > 0.0);
+        assert_eq!(frame[0].to_bits(), frame[1].to_bits());
+    }
+    assert_eq!(silence, [0.0; 2]);
 }
 
 #[test]
@@ -198,12 +203,9 @@ fn dropping_partial_playback_leaves_pcm_for_worker_teardown() {
 
 #[test]
 fn a_callback_retained_past_wrapper_drop_cannot_play() {
-    retained_wrapper(DropPath::Normal);
-}
-
-#[test]
-fn a_callback_retained_past_wrapper_unwind_cannot_play() {
-    retained_wrapper(DropPath::Unwind);
+    for path in [DropPath::Normal, DropPath::Unwind] {
+        retained_wrapper(path);
+    }
 }
 
 #[derive(Clone, Copy)]
