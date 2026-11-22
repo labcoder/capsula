@@ -508,7 +508,7 @@ impl Presence {
     }
 
     /// Steps every gate once; the only place a gate retires.
-    pub(super) fn dispatch(&mut self, cx: &mut Context<'_, Self>) {
+    pub(in crate::presence) fn dispatch(&mut self, cx: &mut Context<'_, Self>) {
         let executor = cx.background_executor().clone();
         let current = (self.link.link_generation(), self.link.choice_revision());
         let gates = self.voice.gates.clone();

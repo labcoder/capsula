@@ -764,17 +764,32 @@ impl Presence {
         run: kumochi_protocol::message::RunId,
         cx: &mut Context<'_, Self>,
     ) {
-        self.pending_stops.push_back((session, run, STOP_TRIES));
+        self.pending_stops
+            .push_back((session, run, STOP_TRIES, false));
+        if self.stop_retry.is_none() {
+            self.drain_stops(cx);
+        }
+    }
+
+    /// The same for audio the brain has already ended: giving it up never ends the session.
+    pub(super) fn stop_speech_locally(
+        &mut self,
+        session: Session,
+        run: kumochi_protocol::message::RunId,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.pending_stops
+            .push_back((session, run, STOP_TRIES, true));
         if self.stop_retry.is_none() {
             self.drain_stops(cx);
         }
     }
 
     /// Offers the pending speaker stops to the owner in order. A busy owner is offered the front
-    /// one again after [`STOP_RETRY`], with later ones behind it. Once its tries run out, its
-    /// session ends ([`Presence::end_session`]), and the queue waits for that end.
+    /// one again after [`STOP_RETRY`], with later ones behind it. Once a brain-told one's tries run
+    /// out, its session ends ([`Presence::end_session`]), and the queue waits for that end.
     pub(super) fn drain_stops(&mut self, cx: &mut Context<'_, Self>) {
-        while let Some((session, run, tries)) = self.pending_stops.front_mut() {
+        while let Some((session, run, tries, local)) = self.pending_stops.front_mut() {
             let task = match self.link.output().stop(session.generation(), *run) {
                 Err(Denied::Busy) if *tries > 1 => {
                     *tries -= 1;
@@ -782,6 +797,11 @@ impl Presence {
                         cx.background_executor().timer(STOP_RETRY).await;
                         Self::after_stop(&this, cx);
                     })
+                }
+                // The brain already ended this audio, so giving the stop up leaves the pair alone.
+                Err(Denied::Busy) if *local => {
+                    self.pending_stops.pop_front();
+                    continue;
                 }
                 Err(reason)
                     if reason == Denied::Busy
@@ -830,7 +850,7 @@ impl Presence {
             if this
                 .pending_stops
                 .front()
-                .is_some_and(|(.., tries)| *tries == 0)
+                .is_some_and(|(_, _, tries, _)| *tries == 0)
             {
                 this.pending_stops.pop_front();
             }
