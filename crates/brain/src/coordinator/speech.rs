@@ -15,6 +15,7 @@ use kumochi_protocol::message::{ControlToShell, DataToShell, OutputGeneration, R
 
 use super::{Coordinator, Effect, Input, Notify, Run, Stale};
 use crate::store::{Interruption, RunEnd};
+use crate::voice::pump::OutputMode;
 use crate::voice::reply::{Failure, Reply, ReportMode, Revoker, Speech};
 
 /// How long a draining run may go without progress before its speech is revoked [guess].
@@ -134,11 +135,13 @@ impl Coordinator {
         &mut self,
         rate: u32,
         generation: OutputGeneration,
+        mode: OutputMode,
     ) -> Result<Vec<Effect>, Stale> {
         let mut effects = Vec::new();
         if !self.announce((rate, generation, ReportMode::Queued), &mut effects) {
             return Err(Stale);
         }
+        self.plain_say = mode != OutputMode::Conducted;
         Ok(effects)
     }
 

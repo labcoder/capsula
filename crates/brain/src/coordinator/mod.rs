@@ -827,6 +827,8 @@ pub struct Coordinator {
     withdrawn: Option<OutputGeneration>,
     /// Spoken replies are loaded.
     spoken: bool,
+    /// A Plain queued pair with no conductor: a step's `say` is spoken as a plain segment.
+    plain_say: bool,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -889,6 +891,7 @@ impl Coordinator {
             output: None,
             withdrawn: None,
             spoken: false,
+            plain_say: false,
         }
     }
 
@@ -1071,6 +1074,7 @@ impl Coordinator {
                 }
                 self.output = None;
                 self.withdrawn = None;
+                self.plain_say = false;
                 let runs: Vec<_> = self.ending.iter().map(|run| run.id).collect();
                 for run in runs {
                     self.release(run, &mut effects);
