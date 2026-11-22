@@ -203,20 +203,23 @@ fn live_solids_sharing_a_slot_across_revisions_resolve_by_their_own_handles() {
 
 #[test]
 fn a_parts_debug_prints_lengths_never_its_text() {
-    let (mut state, mut global) = (
-        SceneState::begin(header()).expect("scene"),
-        GlobalBudget::default(),
+    let debug = |fields| {
+        let (mut state, mut global) = (
+            SceneState::begin(header()).expect("scene"),
+            GlobalBudget::default(),
+        );
+        let put = first(&mut state, &mut global, fields);
+        format!("{:?}", state.part(handle(&put, "a")).expect("labelled"))
+    };
+    let shown = debug(r#","label":"SENTINELLABEL","info":"SENTINELINFO""#);
+    assert!(
+        shown == debug(r#","label":"ALTERNATEWORD","info":"ANOTHERWORDS""#),
+        "part text affected Debug"
     );
-    let put = first(
-        &mut state,
-        &mut global,
-        r#","label":"SENTINELLABEL","info":"SENTINELINFO""#,
-    );
-    let shown = format!("{:?}", state.part(handle(&put, "a")).expect("labelled"));
     for sentinel in ["SENTINELLABEL", "SENTINELINFO"] {
-        assert!(!shown.contains(sentinel), "{shown}");
+        assert!(!shown.contains(sentinel), "part Debug contains text");
         let bytes = format!("{:?}", sentinel.as_bytes());
         let bytes = bytes.trim_matches(['[', ']']);
-        assert!(!shown.contains(bytes), "{shown}");
+        assert!(!shown.contains(bytes), "part Debug contains text bytes");
     }
 }

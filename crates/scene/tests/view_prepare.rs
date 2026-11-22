@@ -597,20 +597,34 @@ fn removing_the_last_view_retains_no_map_allocation() {
 
 #[test]
 fn prepared_carriers_keep_solid_text_out_of_debug() {
-    let (mut scene, mut budget) = scene();
-    let prepared = opening(
-        &mut scene,
-        &mut budget,
-        json!({"id":"a","put":[view(), cube("sentinel", &json!({"label":"SENTINEL","info":"SENTINEL"}))]}),
+    let debug = |id, label, info| {
+        let (mut scene, mut budget) = scene();
+        let prepared = opening(
+            &mut scene,
+            &mut budget,
+            json!({"id":"a","put":[view(), cube(id, &json!({"label":label,"info":info}))]}),
+        );
+        [
+            format!("{:?}", prepared.views[0]),
+            format!("{:?}", geometry(&prepared.after).solids[0].mesh),
+        ]
+    };
+    let observed = debug("sentinel", "SENTINEL", "SENTINEL");
+    assert!(
+        observed == debug("altmodel", "NEWLABEL", "NEWTITLE"),
+        "solid text affected prepared Debug"
     );
-    for debug in [
-        format!("{:?}", prepared.views[0]),
-        format!("{:?}", geometry(&prepared.after).solids[0].mesh),
-    ] {
+    for debug in observed {
         for marker in ["sentinel", "SENTINEL"] {
             let bytes = format!("{:?}", marker.as_bytes());
-            assert!(!debug.contains(marker), "{debug}");
-            assert!(!debug.contains(bytes.trim_matches(['[', ']'])), "{debug}");
+            assert!(
+                !debug.contains(marker),
+                "prepared Debug contains solid text"
+            );
+            assert!(
+                !debug.contains(bytes.trim_matches(['[', ']'])),
+                "prepared Debug contains text bytes"
+            );
         }
     }
 }

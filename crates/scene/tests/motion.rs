@@ -468,21 +468,32 @@ fn a_three_level_entrance_chain_keeps_its_start_when_a_child_is_added_later() {
 #[test]
 fn frame_debug_summarizes_counts_instead_of_drawing_properties() {
     let marker = "drawing marker";
-    let (mut scene, mut budget, mut view) = fresh();
-    activate(
-        &mut scene,
-        &mut budget,
-        &mut view,
-        json!({"id":"text","put":[
-            {"text":{"id":"label","at":[123.125,456.875],"text":marker}}
-        ]}),
-        0,
+    let debug = |text, x, y| {
+        let (mut scene, mut budget, mut view) = fresh();
+        activate(
+            &mut scene,
+            &mut budget,
+            &mut view,
+            json!({"id":"text","put":[
+                {"text":{"id":"label","at":[x,y],"text":text}}
+            ]}),
+            0,
+        );
+        let frame = sample(&view, 0);
+        [format!("{frame:?}"), format!("{:?}", frame.items()[0])]
+    };
+    let observed = debug(marker, 123.125, 456.875);
+    assert!(
+        observed == debug("another phrase", 734.625, 289.375),
+        "drawing content affected frame Debug"
     );
-    let frame = sample(&view, 0);
     let bytes = format!("{:?}", marker.as_bytes());
-    for debug in [format!("{frame:?}"), format!("{:?}", frame.items()[0])] {
+    for debug in observed {
         for private in [marker, bytes.trim_matches(['[', ']']), "123.125", "456.875"] {
-            assert!(!debug.contains(private), "{debug}");
+            assert!(
+                !debug.contains(private),
+                "frame Debug contains a drawing argument"
+            );
         }
     }
 }

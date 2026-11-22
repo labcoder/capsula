@@ -306,14 +306,22 @@ fn binary_payloads_cannot_bypass_validation() {
 }
 #[test]
 fn errors_and_debug_do_not_echo_drawing_content() {
-    let sentinel = "private-label-sentinel".repeat(25);
-    let json = serde_json::json!({"step":{"id":"private-id-sentinel","put":[{"node":{"id":"n","label":sentinel}}]}});
-    let bytes = serde_json::to_vec(&json).expect("fixture encodes");
-    let mut failure = parse_record(&bytes).expect_err("long label fails");
-    assert_eq!(failure.code, ErrorCode::TooLong);
-    assert_eq!(failure.path.as_str(), "put[0].node.label");
-    failure.step = Some(WireId::try_from("private-id-sentinel".to_owned()).expect("valid id"));
+    let long_label_error = |id: &str, label: &str| {
+        let json = serde_json::json!({"step":{"id":id,"put":[{"node":{"id":"n","label":label.repeat(25)}}]}});
+        let bytes = serde_json::to_vec(&json).expect("fixture encodes");
+        let mut failure = parse_record(&bytes).expect_err("long label fails");
+        assert_eq!(failure.code, ErrorCode::TooLong);
+        assert_eq!(failure.path.as_str(), "put[0].node.label");
+        failure.step = Some(WireId::try_from(id.to_owned()).expect("valid id"));
+        failure
+    };
+    let failure = long_label_error("private-id-sentinel", "private-label-sentinel");
     let safe = format!("{failure} {failure:?}");
+    let other = long_label_error("another-wired-label", "another-title-fragment");
+    assert!(
+        safe == format!("{other} {other:?}"),
+        "drawing content affected the error"
+    );
     assert!(!safe.contains("private"), "diagnostics redact ids and text");
     assert!(
         failure.tool_text().contains("private-id-sentinel"),
@@ -325,10 +333,14 @@ fn errors_and_debug_do_not_echo_drawing_content() {
     );
     let text = Text::try_from("private-text-sentinel".to_owned()).expect("valid text");
     let id = WireId::try_from("private-id-sentinel".to_owned()).expect("valid id");
+    let other_text = Text::try_from("another-user-fragment".to_owned()).expect("valid text");
+    let other_id = WireId::try_from("another-wired-label".to_owned()).expect("valid id");
+    let debug = format!("{text:?} {id:?}");
     assert!(
-        !format!("{text:?} {id:?}").contains("private"),
-        "debug is length only"
+        debug == format!("{other_text:?} {other_id:?}"),
+        "text or id affected Debug"
     );
+    assert!(!debug.contains("private"), "debug is length only");
     for (json, code, path) in [
         (
             r#"{"step":{"id":"s","private-key-sentinel":"private-value-sentinel"}}"#,
@@ -365,6 +377,16 @@ fn errors_and_debug_do_not_echo_drawing_content() {
         assert_eq!(failure.code, code);
         assert_eq!(failure.path.as_str(), path);
         let safe = format!("{failure} {failure:?} {}", failure.tool_text());
+        let other = error(
+            &json
+                .replace("private-key-sentinel", "another-user-key")
+                .replace("private-op-sentinel", "another-operation")
+                .replace("private-value-sentinel", "another-input-value"),
+        );
+        assert!(
+            safe == format!("{other} {other:?} {}", other.tool_text()),
+            "malformed content affected the parser diagnostics"
+        );
         assert!(
             !safe.contains("private"),
             "parser messages and unknown keys are discarded"

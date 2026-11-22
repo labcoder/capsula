@@ -330,23 +330,32 @@ fn steady_state_uses_the_one_record_buffer() {
 
 #[test]
 fn debug_and_errors_do_not_expose_buffered_content() {
-    let mut tokenizer = Tokenizer::new();
-    let mut input: &[u8] = br#"{"records":[{"label":"private-content-sentinel"}"#;
-    let record = tokenizer
-        .next(&mut input)
-        .expect("closed record")
-        .expect("emission");
+    let diagnostics = |label| {
+        let mut tokenizer = Tokenizer::new();
+        let json = format!(r#"{{"records":[{{"label":"{label}"}}"#);
+        let mut input = json.as_bytes();
+        let record = tokenizer
+            .next(&mut input)
+            .expect("closed record")
+            .expect("emission");
+        let closed = format!("{record:?}");
+        let open = format!("{tokenizer:?}");
+        let error = tokenizer.finish().expect_err("missing envelope tail");
+        [closed, open, format!("{error} {error:?}")]
+    };
+    let observed = diagnostics("private-content-sentinel");
     assert!(
-        !format!("{record:?}").contains("private"),
+        observed == diagnostics("another-message-fragment"),
+        "buffered content affected tokenizer diagnostics"
+    );
+    let [closed, open, error] = observed;
+    assert!(
+        !closed.contains("private"),
         "closed-record Debug is redacted"
     );
+    assert!(!open.contains("private"), "tokenizer Debug is redacted");
     assert!(
-        !format!("{tokenizer:?}").contains("private"),
-        "tokenizer Debug is redacted"
-    );
-    let error = tokenizer.finish().expect_err("missing envelope tail");
-    assert!(
-        !format!("{error} {error:?}").contains("private"),
+        !error.contains("private"),
         "errors contain no buffered content"
     );
 }
