@@ -394,7 +394,7 @@ flowchart LR
 | Page message | Direction | Fields |
 |---|---|---|
 | `PageRequest` | Shell to brain, data | `request`, `PageOf::Threads { search, after }`, `PageOf::Events { thread, before }` or `PageOf::EventsAfter { thread, after }` |
-| `ThreadList` | Brain to shell, data | `request`, thread rows (`id`, `title`, `updated_ms`, `kind`, optional `choice`), `next` |
+| `ThreadList` | Brain to shell, data | `request`, thread rows (`id`, `title`, `updated_ms`, `kind`, optional `choice`, optional `task`), `next` |
 | `Page` | Brain to shell, data | `request`, `thread`, events (`id`, `created_ms`, optional `run`, `kind`, `text`, `cut`), `next` |
 | `PageFailed` | Brain to shell, data | `request`; the read failed and the brain logged its kind |
 
@@ -402,6 +402,15 @@ An event request walks from its exclusive id in the requested direction. The rep
 always newest first; `next` is the farthest id actually sent in that direction.
 `created_ms` is the stored Unix time for display; ids still order every page. These
 frames use the existing exact-build handshake, not mixed-build decoding.
+
+The plain list and search attach the same read-only task fact from the page's store snapshot.
+Kumo's chat has no task fact. A task carries its latest saved run ID and outcome, last real
+activity and a state derived at read time. None of those fields changes the page's order or
+cursor. A stored active run does not establish live Working status; a run failure or
+interruption reads as Needs you.
+After strictly more than five quiet days, the state is Sleeping without discarding the saved
+outcome. A crash recovery timestamp does not count as activity. Done has no acknowledgement
+write, and these facts add no GPUI presentation.
 
 - **Credit.** The brain may send 512 KiB of data frames, headers included, before the shell
   grants more with `Credit`. That holds the largest frame the pipe allows, so no frame is too

@@ -460,6 +460,7 @@ fn read_row(ready: &Ready, choice: Option<ModelChoice>, cx: &mut TestAppContext)
                     updated_ms: 0,
                     kind: ThreadKind::Main,
                     choice: choice.clone(),
+                    task: None,
                 }],
                 next: None,
             },

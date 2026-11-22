@@ -1483,6 +1483,7 @@ fn row(id: u64) -> ThreadRow {
         updated_ms: i64::try_from(id).expect("small"),
         kind: ThreadKind::Thread,
         choice: None,
+        task: None,
     }
 }
 

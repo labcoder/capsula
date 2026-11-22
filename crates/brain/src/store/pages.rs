@@ -1,13 +1,16 @@
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     DataToShell, EventId, MAX_PAGE_BYTES, MAX_PAGE_ROWS, PageEvent, PageEventKind, PageOf, RunId,
-    SceneId, ThreadCursor, ThreadId, ThreadKind, ThreadRow,
+    SceneId, TaskFact, TaskRun, TaskRunOutcome, TaskState, ThreadCursor, ThreadId, ThreadKind,
+    ThreadRow,
 };
 use rusqlite::{Connection, Row, params};
 
 use super::drawing::MAX_BODY_BYTES;
 use super::threads::{choice_of, kind_of};
-use super::{StoreError, row_id};
+use super::{StoreError, now_ms, row_id};
+
+const TASK_QUIET_MS: i64 = 5 * 24 * 60 * 60 * 1_000;
 
 fn issue_draft(body: Option<&[u8]>) -> Result<kumochi_protocol::message::DraftId, rusqlite::Error> {
     #[derive(serde::Deserialize)]
@@ -113,11 +116,20 @@ impl Pages<'_> {
     /// # Errors
     /// Fails with a content-free error when reading or encoding fails.
     pub(crate) fn read_page(&self, request: u32, page: PageOf) -> Result<DataToShell, StoreError> {
+        self.read_page_with_clock(request, page, now_ms)
+    }
+
+    fn read_page_with_clock(
+        &self,
+        request: u32,
+        page: PageOf,
+        clock: impl FnOnce() -> i64,
+    ) -> Result<DataToShell, StoreError> {
         let newer = matches!(page, PageOf::EventsAfter { .. });
         let mut cursors = Vec::new();
         let mut reply = match page {
             PageOf::Threads { search, after } => {
-                let (threads, next);
+                let (mut threads, next);
                 (threads, cursors, next) = match search {
                     Some(words) => paged(
                         self.search_rows(&words, after, MAX_PAGE_ROWS)?,
@@ -125,6 +137,7 @@ impl Pages<'_> {
                     ),
                     None => self.thread_rows(after, MAX_PAGE_ROWS)?,
                 };
+                self.attach_task_facts(&mut threads, clock())?;
                 DataToShell::ThreadList {
                     request,
                     threads,
@@ -160,6 +173,56 @@ impl Pages<'_> {
             events.reverse();
         }
         Ok(reply)
+    }
+
+    fn attach_task_facts(&self, threads: &mut [ThreadRow], now: i64) -> Result<(), StoreError> {
+        let mut query = self
+            .0
+            .prepare(
+                "SELECT r.id, r.state, r.started_ms,
+                        CASE WHEN r.reason IS NOT 'crash' THEN r.ended_ms END
+                 FROM threads AS t
+                 LEFT JOIN runs AS r ON r.id = (SELECT max(id) FROM runs WHERE thread = t.id)
+                 WHERE t.id = ?1",
+            )
+            .map_err(|_| StoreError::Read)?;
+        for thread in threads
+            .iter_mut()
+            .filter(|row| row.kind == ThreadKind::Thread)
+        {
+            let fact = query
+                .query_row([bounded_id(thread.id.0)], |row| {
+                    let latest_run = if let Some(id) = row.get::<_, Option<i64>>(0)? {
+                        let outcome = match row.get_ref(1)?.as_str()? {
+                            "active" => TaskRunOutcome::Active,
+                            "done" => TaskRunOutcome::Done,
+                            "interrupted" => TaskRunOutcome::Interrupted,
+                            "failed" => TaskRunOutcome::Failed,
+                            _ => return Err(rusqlite::Error::InvalidQuery),
+                        };
+                        Some(TaskRun {
+                            id: RunId(row_id(id)),
+                            outcome,
+                        })
+                    } else {
+                        None
+                    };
+                    let started_ms: Option<i64> = row.get(2)?;
+                    let ended_ms: Option<i64> = row.get(3)?;
+                    let last_activity_ms = started_ms
+                        .into_iter()
+                        .chain(ended_ms)
+                        .fold(thread.updated_ms, i64::max);
+                    Ok(TaskFact {
+                        latest_run,
+                        last_activity_ms,
+                        state: task_state(now, last_activity_ms, latest_run.map(|run| run.outcome)),
+                    })
+                })
+                .map_err(|_| StoreError::Read)?;
+            thread.task = Some(fact);
+        }
+        Ok(())
     }
 
     fn event_reply(
@@ -489,6 +552,17 @@ fn bounded_id(id: u64) -> i64 {
     i64::try_from(id).unwrap_or(i64::MAX)
 }
 
+fn task_state(now: i64, activity: i64, outcome: Option<TaskRunOutcome>) -> TaskState {
+    if now.saturating_sub(activity) > TASK_QUIET_MS {
+        return TaskState::Sleeping;
+    }
+    match outcome {
+        Some(TaskRunOutcome::Failed | TaskRunOutcome::Interrupted) => TaskState::NeedsYou,
+        Some(TaskRunOutcome::Done) => TaskState::Done,
+        Some(TaskRunOutcome::Active) | None => TaskState::Earlier,
+    }
+}
+
 /// A row of `id, title, updated_ms, kind, model, effort`.
 fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
     Ok(ThreadRow {
@@ -501,6 +575,7 @@ fn thread_row(row: &Row<'_>) -> rusqlite::Result<ThreadRow> {
             row.get_ref(5)?.as_str_or_null()?,
             row.get_ref(6)?.as_str_or_null()?,
         )?,
+        task: None,
     })
 }
 
