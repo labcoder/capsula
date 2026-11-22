@@ -40,6 +40,11 @@ impl Step {
         }
     }
 
+    /// Whether leaving this step hands the window's sign-ins over for the window's whole life.
+    pub fn hands_over_sign_ins(self) -> bool {
+        self == Self::Accounts
+    }
+
     /// Where a launch resumes: the first step not yet completed.
     fn resume(from: OnboardingStep) -> Self {
         match from {
@@ -96,6 +101,34 @@ pub enum Next {
     Close(Landing),
 }
 
+/// How the window goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// Finish later, Esc at the top level or the native close: not again this run.
+    Dismiss,
+    /// The brain says onboarding is finished: close, landing here.
+    Close(Landing),
+}
+
+/// One thing the shell does as the window goes, in the order [`Onboarding::leave`] gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leave {
+    /// Save the name still being edited, as closing Settings saves one.
+    Save(Field),
+    /// Drop the step's draft, so no draft or notice outlives the window.
+    CancelEdit,
+    /// Cancel a sign-in this window asked for that hasn't ended, or the cancel stays owed.
+    CancelSignIns,
+    /// Hand this window's sign-ins over, so closing doesn't cancel them.
+    HandOverSignIns,
+    /// Not again until the next launch.
+    PutOff,
+    /// Remove the window.
+    Close,
+    /// Open what the finish asked for.
+    Land(Landing),
+}
+
 #[derive(Debug)]
 pub struct Onboarding {
     step: Step,
@@ -103,6 +136,8 @@ pub struct Onboarding {
     awaiting: Option<Field>,
     /// `FinishOnboarding` is queued and unanswered, and where to land when it's answered.
     finishing: Option<Landing>,
+    /// The last finish couldn't be sent.
+    unsent: bool,
 }
 
 impl Onboarding {
@@ -113,6 +148,7 @@ impl Onboarding {
             step: Step::resume(view.onboarding_from),
             awaiting: None,
             finishing: None,
+            unsent: false,
         })
     }
 
@@ -124,13 +160,22 @@ impl Onboarding {
         self.finishing.is_some()
     }
 
+    /// The last finish couldn't be sent; the next Continue clears it.
+    pub fn unsent(&self) -> bool {
+        self.unsent
+    }
+
     /// Continue, Not now or Enter, after `Settings::save` ran for the step's field. What `save`
     /// returned isn't read: false means unchanged, already saving or not sent. The field decides:
     /// saving waits for the answer, a validation or offline error stays, and anything else goes
     /// on, including the brain's error left from a refusal once the draft is back at the saved
     /// name. A step with no field goes on. With no settings view, nothing happens.
     pub fn submit(&mut self, settings: &Settings) -> Next {
-        if settings.view().is_none() || self.finishing.is_some() {
+        if settings.view().is_none() {
+            return Next::Stay;
+        }
+        self.unsent = false;
+        if self.finishing.is_some() {
             return Next::Stay;
         }
         let Some(field) = self.step.field() else {
@@ -189,6 +234,34 @@ impl Onboarding {
     /// `FinishOnboarding` was queued; the window closes only when the brain says so.
     pub fn finish_queued(&mut self, landing: Landing) {
         self.finishing = Some(landing);
+        self.unsent = false;
+    }
+
+    /// `FinishOnboarding` couldn't be sent: the window says so until the next Continue.
+    pub fn finish_unsent(&mut self) {
+        self.unsent = true;
+    }
+
+    /// What the shell does as the window goes, in this order: a name still being edited is saved
+    /// before this window's sign-ins are cancelled, and they're handed over before anything opens.
+    pub fn leave(&self, exit: Exit, settings: &Settings) -> Vec<Leave> {
+        let field = self.step.field();
+        match exit {
+            Exit::Dismiss => {
+                let editing = field.filter(|field| settings.editing(*field));
+                editing
+                    .map(Leave::Save)
+                    .into_iter()
+                    .chain(editing.map(|_| Leave::CancelEdit))
+                    .chain([Leave::CancelSignIns, Leave::PutOff, Leave::Close])
+                    .collect()
+            }
+            Exit::Close(landing) => field
+                .map(|_| Leave::CancelEdit)
+                .into_iter()
+                .chain([Leave::HandOverSignIns, Leave::Close, Leave::Land(landing)])
+                .collect(),
+        }
     }
 
     /// The link dropped: no save or finish is awaited any more, and the step stays.
@@ -216,5 +289,7 @@ impl Onboarding {
     }
 }
 
+#[cfg(test)]
+mod flow_tests;
 #[cfg(test)]
 mod tests;
