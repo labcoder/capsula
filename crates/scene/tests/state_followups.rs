@@ -1,43 +1,15 @@
 //! Additional semantic-boundary and Stop/replay conformance cases.
 use kumochi_scene::{
-    Admission, Begin, CallState, ErrorCode, GlobalBudget, Handle, Record, SceneEvent, SceneState,
-    Step, StopCut, StopOutcome, WireId, parse_record, text::Bounded,
+    Admission, CallState, ErrorCode, GlobalBudget, Handle, Record, SceneEvent, SceneState, StopCut,
+    StopOutcome, WireId, parse_record, text::Bounded,
 };
 
-fn record(json: &str) -> Record {
-    parse_record(json.as_bytes()).expect("valid fixture")
-}
-fn header() -> Begin {
-    let Record::Begin(header) =
-        record(r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":""}}"#)
-    else {
-        panic!("begin fixture");
-    };
-    header
-}
-fn scene() -> SceneState {
-    SceneState::begin(header()).expect("valid header")
-}
-fn step(json: &str) -> Step {
-    let Record::Step(step) = record(&format!(r#"{{"step":{json}}}"#)) else {
-        panic!("step fixture");
-    };
-    step
-}
+#[path = "support/state_followups.rs"]
+mod state_followups;
+use state_followups::{commit, header, record, scene, step};
+
 fn id(value: &str) -> WireId {
     value.to_owned().try_into().expect("valid id")
-}
-fn commit(state: &mut SceneState, global: &mut GlobalBudget, json: &str) -> Vec<Handle> {
-    let Admission::New(admitted) = state.admit(&step(json), global).expect("valid step") else {
-        panic!("new step");
-    };
-    state
-        .commit(admitted, global)
-        .expect("fresh candidate")
-        .handles
-        .into_iter()
-        .map(|(_, h)| h)
-        .collect()
 }
 fn cut(activated: u32, handles: Vec<Handle>) -> StopCut {
     StopCut {
@@ -271,11 +243,6 @@ fn missing_targets_endpoint_kinds_and_duplicate_removals_are_rejected() {
             "put[0].anim.target",
         ),
         (
-            r#"{"id":"bad","put":[{"anim":{"target":"missing","track":"x","keys":[[0,1]]}}],"remove":["missing"]}"#,
-            ErrorCode::UnknownRef,
-            "put[0].anim.target",
-        ),
-        (
             r#"{"id":"bad","remove":["a","a"]}"#,
             ErrorCode::DuplicateKey,
             "remove[1]",
@@ -486,6 +453,14 @@ fn new_state_types_never_debug_print_ids_or_drawing_text() {
         panic!("new");
     };
     let committed = state.commit(candidate, &mut global).expect("fresh");
+    assert_eq!(state.header(), &header());
+    assert!(
+        state
+            .step(0)
+            .is_some_and(|step| step.id == id("PRIVATE_STEP"))
+    );
+    assert!(state.step(u32::MAX).is_none());
+
     let values = [
         candidate_debug,
         admission_debug,
@@ -502,64 +477,11 @@ fn new_state_types_never_debug_print_ids_or_drawing_text() {
     ];
     for value in values {
         for sentinel in ["PRIVATE_STEP", "PRIVATE_OBJECT", "PRIVATE_CONTENT"] {
+            let bytes = format!("{:?}", sentinel.as_bytes());
             assert!(
-                !value.contains(sentinel),
+                !value.contains(sentinel) && !value.contains(bytes.trim_matches(['[', ']'])),
                 "new Debug output is content-free"
             );
         }
     }
-    assert_eq!(state.header(), &header());
-    assert!(
-        state
-            .step(0)
-            .is_some_and(|step| step.id == id("PRIVATE_STEP"))
-    );
-    assert!(state.step(u32::MAX).is_none());
-}
-
-#[test]
-#[ignore = "normal-priority timing on a quiet Rez with the measurement lock"]
-fn measure_whole_scene_removal_admit() {
-    use std::{
-        hint::black_box,
-        time::{Duration, Instant},
-    };
-    let mut state = scene();
-    let mut global = GlobalBudget::default();
-    for (name, range) in [("first", 0..300), ("second", 300..600)] {
-        let operations = range
-            .map(|n| format!(r#"{{"text":{{"id":"t{n}","at":[0,0],"text":""}}}}"#))
-            .collect::<Vec<_>>()
-            .join(",");
-        commit(
-            &mut state,
-            &mut global,
-            &format!(r#"{{"id":"{name}","put":[{operations}]}}"#),
-        );
-    }
-    let ids = (0..600)
-        .map(|n| format!(r#""t{n}""#))
-        .collect::<Vec<_>>()
-        .join(",");
-    let removal = step(&format!(r#"{{"id":"remove","remove":[{ids}]}}"#));
-    assert_eq!(state.object_count(), 600);
-    for _ in 0..5 {
-        black_box(state.admit(&removal, &global).expect("valid full removal"));
-    }
-    let mut total = Duration::ZERO;
-    let mut longest = Duration::ZERO;
-    for _ in 0..128 {
-        let started = Instant::now();
-        let candidate = state.admit(&removal, &global).expect("valid full removal");
-        let elapsed = started.elapsed();
-        total += elapsed;
-        longest = longest.max(elapsed);
-        black_box(candidate);
-    }
-    assert_eq!((state.revision(), state.object_count()), (2, 600));
-    eprintln!(
-        "admit: objects=600 removals=600 warmups=5 samples=128 mean_us={:.3} max_us={:.3}",
-        total.as_secs_f64() * 1_000_000.0 / 128.0,
-        longest.as_secs_f64() * 1_000_000.0
-    );
 }

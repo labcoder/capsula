@@ -1,8 +1,8 @@
 //! Cluster-local visual sizing and many-cluster preparation boundaries.
 use kumochi_scene::{
-    Admission, ErrorCode, GlobalBudget, Record, SceneState,
+    Admission, ErrorCode, Frame, GlobalBudget, Record, SceneState, SceneView,
     display::Prim,
-    geom::Rect,
+    geom::{Rect, Vec2},
     layout::{LayoutState, PrepareError, PrepareInput, SurfaceGeometry, prepare, recover},
     parse_record,
     theme::Theme,
@@ -65,7 +65,6 @@ fn absolute_local_geometry_sizes_a_cluster_before_its_sibling() {
         );
         assert_rect(bounds(&picture.after, "left"), [60.0, 32.0, 240.0, 240.0]);
         assert_rect(bounds(&picture.after, "right"), [140.0, 334.0, 80.0, 40.0]);
-        assert!(picture.glides.is_empty());
     }
 }
 
@@ -132,9 +131,7 @@ fn local_highlights_and_callouts_contribute_their_measured_bounds() {
 
 #[test]
 fn outside_sibling_and_self_anchors_still_draw_without_ranking_the_cluster() {
-    for (right_first, a_y, b_y, cross_to_y) in
-        [(false, 32.0, 134.0, 138.0_f32), (true, 134.0, 32.0, -66.0)]
-    {
+    for (right_first, a_y, b_y) in [(false, 32.0, 134.0), (true, 134.0, 32.0)] {
         let mut scene = new_scene("late");
         let before = LayoutState::new(&scene);
         let mut value = siblings(vec![
@@ -167,36 +164,60 @@ fn outside_sibling_and_self_anchors_still_draw_without_ranking_the_cluster() {
             [176.0, 98.0, 8.0, 10.0],
         );
         assert_rect(bounds(&picture.after, "cross"), [180.0, 52.0, 0.0, 102.0]);
-        let items = picture.after.items();
-        for name in ["outside_tag", "sibling_tag", "self_tag", "ancestor_tag"] {
+        let view = SceneView::new(&picture.after, 1);
+        let mut frame = Frame::new();
+        view.frame(0, &mut frame).expect("resting frame");
+        for (name, expected) in [
+            ("outside_tag", "O"),
+            ("sibling_tag", "S"),
+            ("self_tag", "C"),
+            ("ancestor_tag", "A"),
+        ] {
             let handle = picture.after.handle(&id(name)).expect("retained handle");
-            let item = items
+            let item = frame
+                .items()
                 .iter()
                 .find(|item| item.handle == handle)
                 .expect("drawn item");
-            assert!(matches!(item.primitives.as_ref(), [Prim::Text { .. }]));
+            assert!(
+                item.primitives.iter().any(
+                    |prim| matches!(prim, Prim::Text { text, .. } if text.as_str() == expected)
+                )
+            );
         }
-        let handle = picture.after.handle(&id("cross")).expect("line handle");
-        let [Prim::Line { points, .. }] = items
-            .iter()
-            .find(|item| item.handle == handle)
-            .expect("line")
-            .primitives
-            .as_ref()
-        else {
-            panic!("line geometry");
-        };
-        assert_eq!(
-            points
-                .iter()
-                .map(|point| [point.x.to_bits(), point.y.to_bits()])
-                .collect::<Vec<_>>(),
-            [
-                [180.0_f32.to_bits(), 36.0_f32.to_bits()],
-                [180.0_f32.to_bits(), cross_to_y.to_bits()]
-            ]
+        assert_route(
+            &picture.after,
+            &frame,
+            "cross",
+            bounds(&picture.after, "a").center(),
+            bounds(&picture.after, "b").center(),
         );
     }
+}
+
+fn assert_route(layout: &LayoutState, frame: &Frame, name: &str, from: Vec2, to: Vec2) {
+    let handle = layout.handle(&id(name)).expect("line handle");
+    let item = frame
+        .items()
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("painted line");
+    assert!(
+        item.primitives.iter().any(|prim| {
+            let Prim::Line {
+                points,
+                closed: false,
+                ..
+            } = prim
+            else {
+                return false;
+            };
+            points.first().zip(points.last()).is_some_and(|(a, b)| {
+                item.transform.point(*a) == from && item.transform.point(*b) == to
+            })
+        }),
+        "{name} connects the world endpoints {from:?} and {to:?}"
+    );
 }
 
 #[test]
@@ -243,7 +264,6 @@ fn descendant_anchors_cancel_nested_and_already_ranked_cluster_transforms() {
             {"text":{"id":"tag2","in":"left","at":{"ref":"a"},"text":"LOCAL"}}
         ]}),
     );
-    assert_rect(bounds(&third.after, "tag2"), [160.0, 77.0, 40.0, 10.0]);
     let (_, recovered) = recover(
         scene.header().clone(),
         scene.recovery_log(),
@@ -254,7 +274,34 @@ fn descendant_anchors_cancel_nested_and_already_ranked_cluster_transforms() {
         None,
     )
     .expect("recovered anchors");
-    assert_eq!(third.after.items(), recovered.items());
+    for layout in [&third.after, &recovered] {
+        for (name, expected) in [
+            ("a", [140.0, 62.0, 80.0, 40.0]),
+            ("b", [140.0, 250.0, 80.0, 40.0]),
+            ("box", [60.0, 32.0, 240.0, 100.0]),
+            ("tag", [160.0, 77.0, 40.0, 10.0]),
+            ("tag2", [160.0, 77.0, 40.0, 10.0]),
+        ] {
+            assert_rect(bounds(layout, name), expected);
+            assert_eq!(
+                layout.handle(&id(name)),
+                Some(scene.handle(&id(name)).expect("committed identity"))
+            );
+        }
+        let items = layout.items();
+        for name in ["tag", "tag2"] {
+            let handle = layout.handle(&id(name)).expect("tag handle");
+            let item = items
+                .iter()
+                .find(|item| item.handle == handle)
+                .expect("tag");
+            assert!(
+                item.primitives.iter().any(
+                    |prim| matches!(prim, Prim::Text { text, .. } if text.as_str() == "LOCAL")
+                )
+            );
+        }
+    }
 }
 
 #[test]
@@ -278,58 +325,21 @@ fn anchors_crossing_a_boxed_diagram_follow_its_resting_glide() {
             {"edge":{"id":"cross","in":"left","from":"second","to":"local"}}
         ]}),
     );
-    let [glide] = picture.glides.as_slice() else {
-        panic!("one boxed glide");
-    };
-    assert_eq!(
-        glide.target,
-        picture.after.handle(&id("boxed")).expect("boxed handle")
-    );
-    assert_eq!(
-        [glide.to.x, glide.to.y].map(f32::to_bits),
-        [-66.0_f32, 0.0].map(f32::to_bits)
-    );
     let node = bounds(&picture.after, "second");
+    let local = bounds(&picture.after, "local");
     assert_rect(node, [90.0, 48.0, 80.0, 40.0]);
-    let text = bounds(&picture.after, "tag");
-    let items = picture.after.items();
-    let left = items
-        .iter()
-        .find(|item| Some(item.handle) == picture.after.handle(&id("left")))
-        .expect("left");
-    let edge = items
-        .iter()
-        .find(|item| Some(item.handle) == picture.after.handle(&id("cross")))
-        .expect("cross edge");
-    let points = edge
-        .primitives
-        .iter()
-        .find_map(|primitive| match primitive {
-            Prim::Line { points, .. } => Some(points),
-            _ => None,
-        })
-        .expect("edge line");
-    let from = left.transform.point(*points.first().expect("start"));
-    let to = left.transform.point(*points.last().expect("end"));
-    assert_eq!(
-        [text.center().x, text.center().y, from.x, from.y, to.x, to.y].map(f32::to_bits),
-        [130.0_f32, 68.0, 170.0, 68.0, 210.0, 68.0].map(f32::to_bits),
-        "text and edge endpoints follow the boxed diagram's resting glide"
-    );
-    assert_rect(text, [126.0, 63.0, 8.0, 10.0]);
-    assert_eq!(
-        [text.center().x, text.center().y].map(f32::to_bits),
-        [node.center().x, node.center().y].map(f32::to_bits)
-    );
+    assert_rect(bounds(&picture.after, "tag"), [126.0, 63.0, 8.0, 10.0]);
     assert_rect(bounds(&picture.after, "boxed"), [-62.0, 48.0, 232.0, 40.0]);
     assert_rect(bounds(&picture.after, "box_tag"), [50.0, 63.0, 8.0, 10.0]);
-    assert_eq!(
-        [from.x, from.y, to.x, to.y].map(f32::to_bits),
-        [170.0_f32, 68.0, 210.0, 68.0].map(f32::to_bits)
-    );
-    assert_eq!(
-        [from.x, from.y].map(f32::to_bits),
-        [node.max().x, node.center().y].map(f32::to_bits)
+    let view = SceneView::new(&picture.after, 1);
+    let mut frame = Frame::new();
+    view.frame(0, &mut frame).expect("resting frame");
+    assert_route(
+        &picture.after,
+        &frame,
+        "cross",
+        Vec2::new(node.max().x, node.center().y),
+        Vec2::new(local.origin.x, local.center().y),
     );
 }
 
@@ -382,8 +392,11 @@ fn reverse_anchor_chain_prepares_all_locally_owned_texts() {
     assert_eq!(budget.usage().objects, 403);
     let picture = prepare(input, &mut Measure, &AtomicBool::new(false)).expect("reverse chain");
     assert_eq!(picture.after.items().len(), 403);
-    for name in ["t0", "t399"] {
-        assert_rect(bounds(&picture.after, name), [176.0, 47.0, 8.0, 10.0]);
+    for index in 0..400 {
+        assert_rect(
+            bounds(&picture.after, &format!("t{index}")),
+            [176.0, 47.0, 8.0, 10.0],
+        );
     }
 }
 

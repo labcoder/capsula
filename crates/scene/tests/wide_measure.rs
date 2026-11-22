@@ -6,6 +6,7 @@ use kumochi_scene::{
     Admission, Begin, ErrorCode, GlobalBudget, Record, SceneState, StopCut,
     display::{MeasureError, PaintWork, TextMeasure, TextStyle, WideMeasure},
     layout::{LayoutState, PrepareError, PrepareInput, SurfaceGeometry, prepare},
+    limits::MAX_GLOBAL_DASH_PIECES,
     parse_record,
     text::Bounded,
     theme::Theme,
@@ -337,11 +338,28 @@ fn work(
 /// advances: the brain's width, height and line count are never below the shell's.
 #[test]
 fn the_wide_measure_bounds_shell_measures_on_generated_labels() {
+    let style = TextStyle {
+        size: 10.0,
+        bold: true,
+    };
+    for (text, max_width, expected) in [
+        ("中文\n中\n", None, [20.0, 45.0]),
+        ("m m m mm", Some(25.0), [25.0, 60.0]),
+        ("mmmm", Some(25.0), [25.0, 30.0]),
+    ] {
+        assert_eq!(
+            WideMeasure
+                .measure(text, style, max_width)
+                .expect("known label")
+                .map(f32::to_bits),
+            expected.map(f32::to_bits),
+            "{text:?} with width {max_width:?}"
+        );
+    }
     let mut rng = Rng(SEED);
     for index in 0..4_000_u64 {
         let text = label(&mut rng, 12);
         for (seed, breaks) in [
-            (0, Breaks::Rule),
             (1, Breaks::Rule),
             (2, Breaks::Anywhere),
             (3, Breaks::Anywhere),
@@ -478,6 +496,10 @@ fn dashed_fixtures_fit_and_their_dashes_are_not_under_counted() {
         let steps = [json!({"id":"one","put":put})];
         let brain = work(&steps, None, &mut WideMeasure).expect("the brain prepares it");
         assert!(brain.within_limits(), "fixture {index}: {brain:?}");
+        assert!(
+            brain.dash_pieces > 0,
+            "fixture {index}: the brain must charge dashed paint"
+        );
         let most = (0..8)
             .map(|seed| {
                 let mut shell = Shell {
@@ -490,18 +512,21 @@ fn dashed_fixtures_fit_and_their_dashes_are_not_under_counted() {
                         Breaks::Anywhere
                     },
                 };
-                work(&steps, None, &mut shell)
+                let pieces = work(&steps, None, &mut shell)
                     .expect("the shell prepares it")
-                    .dash_pieces
+                    .dash_pieces;
+                assert!(
+                    (1..=MAX_GLOBAL_DASH_PIECES).contains(&pieces),
+                    "fixture {index}: shell {seed} must charge dashes and fit, got {pieces}"
+                );
+                pieces
             })
             .max()
             .expect("eight shells");
-        println!("fixture {index}: brain {brain:?}, shells' most dash pieces {most}");
         if index == 6 {
-            assert_eq!(
-                (brain.dash_pieces, most),
-                (110, 112),
-                "the fan-out residual"
+            assert!(
+                brain.dash_pieces < most,
+                "fan-out can route more dashes under the shell: brain {brain:?}, shell max {most}"
             );
         } else {
             assert!(

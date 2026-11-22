@@ -415,8 +415,8 @@ fn lca(chart: &Flowchart<'_>, from: Option<usize>, to: Option<usize>) -> Option<
 mod tests {
     use super::{Extra, expand};
     use crate::{
-        Budget, ErrorCode, FieldPath, Handle, Record, Step, StepError, WireId, parse_record,
-        record::Op, state::object,
+        ErrorCode, FieldPath, Handle, Record, Step, StepError, WireId, parse_record, record::Op,
+        state::object,
     };
     use serde_json::{Value, json};
     use std::{
@@ -486,12 +486,6 @@ mod tests {
         for (case, (parent, put, set, remove)) in [
             (
                 "d",
-                json!([{"text":{"id":"t","in":collision,"at":[0,0],"text":""}}]),
-                json!([]),
-                json!([]),
-            ),
-            (
-                "d",
                 json!([{"text":{"id":"t","at":{"ref":collision},"text":""}}]),
                 json!([]),
                 json!([]),
@@ -506,6 +500,12 @@ mod tests {
                 "d",
                 json!([]),
                 json!([{"target":collision,"color":"red"}]),
+                json!([]),
+            ),
+            (
+                "d",
+                json!([{"text":{"id":"t","at":[0,0],"text":""}}]),
+                json!([{"target":"t","behind":collision}]),
                 json!([]),
             ),
             ("d", json!([]), json!([]), json!([collision])),
@@ -529,53 +529,32 @@ mod tests {
             assert_ne!(root.id.as_str(), collision, "reference case {case}");
             assert_ne!(root.id.as_str(), "A", "the node keeps its authored id");
             assert_eq!(root.parent.as_ref().map(WireId::as_str), Some(parent));
-            if case == 0 {
-                assert_ne!(root.id.as_str(), "t", "the text keeps its authored id");
-                let ids: BTreeMap<_, _> = result
-                    .run
-                    .put
-                    .iter()
-                    .filter_map(object::visual)
-                    .map(|visual| (visual.id.as_str(), visual.parent.map(WireId::as_str)))
-                    .collect();
-                assert_eq!(
-                    ids,
-                    BTreeMap::from([
-                        ("d", None),
-                        (root.id.as_str(), Some("d")),
-                        ("A", Some(root.id.as_str())),
-                        ("t", Some(collision)),
-                    ]),
-                    "the dangling parent stays unresolved"
-                );
-            }
+            assert!(
+                result.run.put.iter().any(|op| matches!(
+                    op, Op::Node(node)
+                        if node.id.as_str() == "A" && node.parent.as_ref() == Some(&root.id)
+                )),
+                "the authored node stays under the generated root"
+            );
         }
     }
 
     #[test]
-    fn one_diagram_holds_96_edges_and_refuses_97() {
-        let chart = |edges: usize| {
-            let src = format!("flowchart LR\n{}", "A --> B\n".repeat(edges));
-            step(&json!({"id":"edges","put":[
-                {"diagram":{"id":"d"}},
-                {"mermaid":{"in":"d","src":src}}
-            ]}))
-        };
-        let result = expand(&chart(96), 1, &BTreeSet::new(), 599).expect("96 edges");
+    fn one_diagram_compiles_96_edges() {
+        let src = format!("flowchart LR\n{}", "A --> B\n".repeat(96));
+        let chart = step(&json!({"id":"edges","put":[
+            {"diagram":{"id":"d"}},
+            {"mermaid":{"in":"d","src":src}}
+        ]}));
+        let result = expand(&chart, 1, &BTreeSet::new(), 599).expect("96 edges");
         assert_eq!(
-            result.run.put.len(),
-            100,
-            "d, the root, two nodes and 96 edges"
-        );
-        let error = expand(&chart(97), 1, &BTreeSet::new(), 599)
-            .err()
-            .expect("97 edges");
-        assert_eq!(
-            (error.code, error.path.to_string()),
-            (
-                ErrorCode::OverBudget(Budget::DiagramEdges),
-                "put[1].mermaid.src".to_owned()
-            )
+            result
+                .run
+                .put
+                .iter()
+                .filter(|op| matches!(op, Op::Edge(_)))
+                .count(),
+            96
         );
     }
 

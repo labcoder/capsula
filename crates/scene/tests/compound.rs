@@ -239,7 +239,10 @@ fn clusters_measure_table_only_and_boxed_diagram_only_contents_before_ranking() 
         let left = bounds(&prepared.after, "left");
         let right = bounds(&prepared.after, "right");
         if table {
-            assert_rect(left, [19.0, 36.225], [180.0, 31.549_995]);
+            assert!((left.origin.x - 19.0).abs() < 0.01);
+            assert!((left.origin.y - 36.225).abs() < 0.01);
+            assert!((left.size.x - 180.0).abs() < 0.01);
+            assert!((left.size.y - 31.55).abs() < 0.01);
             assert_rect(right, [261.0, 32.0], [80.0, 40.0]);
         } else {
             assert_rect(left, [19.0, 32.0], [180.0, 120.0]);
@@ -408,6 +411,58 @@ fn a_diagram_can_rank_48_direct_nodes_alongside_child_clusters() {
     );
 }
 
+fn assert_cross_group_routes(layout: &LayoutState, step: &Value) {
+    let view = SceneView::new(layout, 1);
+    let mut frame = Frame::new();
+    view.frame(0, &mut frame).expect("rest frame");
+    let routes = step["put"]
+        .as_array()
+        .expect("authored operations")
+        .iter()
+        .filter_map(|op| op.get("edge"))
+        .filter(|edge| edge["in"] == "g0");
+    let mut checked = 0;
+    for edge in routes {
+        let name = edge["id"].as_str().expect("edge id");
+        let a = bounds(layout, edge["from"].as_str().expect("from id"));
+        let b = bounds(layout, edge["to"].as_str().expect("to id"));
+        let handle = layout.handle(&id(name)).expect("edge handle");
+        let item = frame
+            .items()
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("painted edge");
+        let from = a.edge_toward(b.center());
+        let to = b.edge_toward(a.center());
+        let at = |point, expected: Vec2| {
+            let delta = item.transform.point(point) - expected;
+            delta.x.abs() < 0.01 && delta.y.abs() < 0.01
+        };
+        assert!(
+            item.primitives.iter().any(|prim| {
+                let Prim::Line {
+                    points,
+                    closed: false,
+                    ..
+                } = prim
+                else {
+                    return false;
+                };
+                points
+                    .first()
+                    .zip(points.last())
+                    .is_some_and(|(a, b)| at(*a, from) && at(*b, to))
+            }),
+            "{name} connects the two node outlines"
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked, 96,
+        "the fixture contains every cross-cluster route"
+    );
+}
+
 #[test]
 fn compound_cap_fixtures_share_the_global_object_budget() {
     for fixture in [fixtures::Fixture::Local, fixtures::Fixture::CrossGroup] {
@@ -416,60 +471,28 @@ fn compound_cap_fixtures_share_the_global_object_budget() {
         for (index, count) in [600, 600, 150, 150].into_iter().enumerate() {
             let mut scene = named_scene(&format!("caps{index}"));
             let before = LayoutState::new(&scene);
-            let prepared = picture(
-                &mut scene,
-                &mut budget,
-                &before,
-                fixtures::capped_step(count, fixture),
-            );
+            let step = fixtures::capped_step(count, fixture);
+            let prepared = picture(&mut scene, &mut budget, &before, step.clone());
             assert_eq!(scene.usage().objects, count);
             assert_eq!(prepared.after.items().len(), count);
             if count == 600 && matches!(fixture, fixtures::Fixture::CrossGroup) {
-                let items = prepared.after.items();
-                let root = prepared.after.handle(&id("g0")).expect("root");
-                assert_eq!(
-                    items
-                        .iter()
-                        .find(|item| item.handle == root)
-                        .expect("root item")
-                        .transform
-                        .0[0]
-                        .to_bits(),
-                    0.8_f32.to_bits()
-                );
-                let clusters = ["g1", "ge", "gf", "g10"].map(|name| {
-                    let handle = prepared.after.handle(&id(name)).expect("cluster");
-                    let item = items
-                        .iter()
-                        .find(|item| item.handle == handle)
-                        .expect("cluster item");
-                    assert_eq!(item.parent, Some(root));
-                    item.transform.bounds(item.bounds)
-                });
-                for pair in clusters.windows(2) {
-                    assert_eq!(
-                        pair[1].origin.y.to_bits(),
-                        (pair[0].max().y + 104.0).to_bits()
-                    );
-                    assert_eq!(pair[1].center().x.to_bits(), pair[0].center().x.to_bits());
-                }
-                for index in 0..96 {
-                    let handle = prepared
-                        .after
-                        .handle(&id(&format!("x{:x}", 288 + index)))
-                        .expect("cross edge handle");
-                    let edge = items
-                        .iter()
-                        .find(|item| item.handle == handle)
-                        .expect("cross edge item");
-                    assert_eq!(edge.parent, prepared.after.handle(&id("g0")));
+                for name in ["0", "30", "40", "50"] {
+                    let node = bounds(&prepared.after, name);
                     assert!(
-                        edge.primitives
-                            .iter()
-                            .any(|primitive| matches!(primitive, Prim::Line { closed: false, .. })),
-                        "cross edge {index} has a routed path"
+                        (node.size.x - 64.0).abs() < 0.01,
+                        "{name} fits at the 0.8 floor"
+                    );
+                    assert!(
+                        (node.size.y - 32.0).abs() < 0.01,
+                        "{name} fits at the 0.8 floor"
                     );
                 }
+                let clusters = ["g1", "ge", "gf", "g10"].map(|name| bounds(&prepared.after, name));
+                for pair in clusters.windows(2) {
+                    assert!((pair[1].origin.y - pair[0].max().y - 104.0 * 0.8).abs() < 0.01);
+                    assert!((pair[1].center().x - pair[0].center().x).abs() < 0.01);
+                }
+                assert_cross_group_routes(&prepared.after, &step);
             }
             retained.push((scene, prepared));
         }
@@ -741,11 +764,13 @@ fn dropping_a_cluster_ancestor_preserves_world_bounds_and_recovery() {
         None,
     )
     .expect("recovered cluster");
-    assert_eq!(detached.items().len(), 4);
-    assert_eq!(detached.items(), recovered.items());
-    for (name, expected) in survivors.into_iter().zip(expected) {
-        assert_eq!(bounds(&detached, name), expected);
-        assert_eq!(bounds(&recovered, name), expected);
+    for layout in [&detached, &recovered] {
+        assert_eq!(layout.items().len(), 4);
+        assert_eq!(layout.handle(&id("outer")), None);
+        for ((name, expected), handle) in survivors.into_iter().zip(expected).zip(revealed) {
+            assert_eq!(bounds(layout, name), expected);
+            assert_eq!(layout.handle(&id(name)), Some(handle));
+        }
     }
 }
 

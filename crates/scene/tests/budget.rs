@@ -1,9 +1,17 @@
 //! Expanded-work admission, retirement and final-result replay budgets.
 use kumochi_scene::{
     Admission, Begin, Budget, ErrorCode, GlobalBudget, Handle, Record, ReplacementDisposition,
-    SceneEvent, SceneState, Step, StepError, StopCut, WireId, parse_record, text::Bounded,
+    SceneEvent, SceneState, Step, StepError, StopCut, WireId,
+    budget::Usage,
+    display::{Prim, WideMeasure},
+    geom::Vec2,
+    layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare},
+    parse_record,
+    text::Bounded,
+    theme::Theme,
 };
 use serde_json::{Value, json};
+use std::sync::{Arc, atomic::AtomicBool};
 
 fn header(name: &str) -> Begin {
     let Record::Begin(header) = parse_record(
@@ -91,8 +99,54 @@ fn cut(revision: u32, handles: Vec<Handle>) -> StopCut {
 fn a_preview_is_the_ticket_its_commit_returns_and_refuses_a_stale_candidate() {
     let mut global = GlobalBudget::default();
     let mut old = scene("old");
-    put(&mut old, &mut global, texts(0, 1));
-    let ops = json!([{"shape":{"id":"p","kind":"polygon","points":[[0,0],[40,0],[20,30]]}}]);
+    let prepare_ticket = |ticket, layout| {
+        let input = PrepareInput::new(
+            ticket,
+            layout,
+            SurfaceGeometry::default(),
+            Arc::new(Theme::default()),
+        )
+        .map_err(|(error, _)| error)
+        .expect("ticket matches layout");
+        prepare(input, &mut WideMeasure, &AtomicBool::new(false))
+            .expect("ticket prepares")
+            .after
+    };
+    let layout = LayoutState::new(&old);
+    let Admission::New(first) =
+        candidate(&old, &global, json!({"id":"one","put":texts(0,1)})).expect("first step")
+    else {
+        panic!("new first step");
+    };
+    let first = old.commit(first, &mut global).expect("first commit");
+    let before = prepare_ticket(first.preparation, layout);
+    let prepares_polygon = |ticket, layout, revision| {
+        let picture = prepare_ticket(ticket, layout);
+        let expected = Handle::new(revision, 0).expect("polygon handle");
+        assert_eq!(picture.revision(), revision);
+        assert_eq!(picture.handle(&id("p")), Some(expected));
+        let bounds = picture
+            .bounds(&id("p"))
+            .expect("valid bounds")
+            .expect("polygon");
+        assert_eq!(bounds.size, Vec2::new(40.0, 30.0));
+        let item = picture
+            .items()
+            .into_iter()
+            .find(|item| item.handle == expected)
+            .expect("painted polygon");
+        for vertex in [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(40.0, 0.0),
+            Vec2::new(20.0, 30.0),
+        ] {
+            assert!(item.primitives.iter().any(|prim| {
+                matches!(prim, Prim::Fill { points, .. } if points.iter().any(|p| item.transform.point(*p) == vertex))
+            }), "the polygon paints its authored vertex {vertex:?}");
+        }
+    };
+    let ops =
+        json!([{"shape":{"id":"p","kind":"polygon","fill":"red","points":[[0,0],[40,0],[20,30]]}}]);
     let Admission::New(admitted) =
         candidate(&old, &global, json!({"id":"two","put":ops})).expect("legal step")
     else {
@@ -106,18 +160,27 @@ fn a_preview_is_the_ticket_its_commit_returns_and_refuses_a_stale_candidate() {
     let preview = old.preview(&admitted).expect("a current candidate");
     let committed = old.commit(admitted, &mut global).expect("fresh candidate");
     assert_eq!(committed.revision, 2);
-    assert_eq!(preview, committed.preparation);
+    prepares_polygon(preview, before.clone(), 2);
+    prepares_polygon(committed.preparation, before, 2);
     assert_eq!(
         old.preview(&rival).expect_err("the scene moved past it"),
         kumochi_scene::StaleAdmission
     );
 
     let first = step(json!({"id":"first","put":ops}));
+    let victim = (old.handle(&id("t0")), old.handle(&id("p")), old.revision());
+    let usage = global.usage();
     let admission =
         kumochi_scene::ReplacementAdmission::checked(scene("next"), &first, &[&old], &global)
             .expect("valid admission");
     let (ticket, layout) = admission.preview();
+    prepares_polygon(ticket, layout.clone(), 1);
     assert_eq!(old.object_count(), 2, "a preview settles no victim");
+    assert_eq!(
+        (old.handle(&id("t0")), old.handle(&id("p")), old.revision()),
+        victim
+    );
+    assert_eq!(global.usage(), usage);
     let (_, committed) = admission
         .settle(
             &mut [&mut old],
@@ -126,15 +189,7 @@ fn a_preview_is_the_ticket_its_commit_returns_and_refuses_a_stale_candidate() {
         )
         .expect("sealed transition")
         .expect("installed");
-    assert_eq!(ticket, committed.preparation);
-    kumochi_scene::layout::PrepareInput::new(
-        ticket,
-        layout,
-        kumochi_scene::layout::SurfaceGeometry::default(),
-        std::sync::Arc::new(kumochi_scene::theme::Theme::default()),
-    )
-    .map_err(|(error, _)| error)
-    .expect("the ticket prepares against the preview's layout");
+    prepares_polygon(committed.preparation, layout, 1);
 }
 
 #[test]
@@ -153,6 +208,11 @@ fn replacement_at_the_cap_is_owned_atomic_and_does_not_release_twice() {
         ErrorCode::OverBudget(Budget::VisibleScenes)
     );
     let generation = global.generation();
+    let Admission::New(peer) =
+        candidate(&scenes[1], &global, json!({"id":"peer"})).expect("valid peer step")
+    else {
+        panic!("new peer step");
+    };
     let admission = kumochi_scene::ReplacementAdmission::checked(
         next,
         &first,
@@ -179,13 +239,19 @@ fn replacement_at_the_cap_is_owned_atomic_and_does_not_release_twice() {
         .expect("installed");
     assert_eq!(committed.index, 0);
     assert!(scenes[0].is_cleared());
+    assert_eq!((global.usage().scenes, global.usage().objects), (4, 4));
+    let settled = global.generation();
+    assert_eq!(
+        scenes[1].commit(peer, &mut global),
+        Err(kumochi_scene::StaleAdmission)
+    );
     assert_eq!(
         (
             global.usage().scenes,
             global.usage().objects,
             global.generation()
         ),
-        (4, 4, generation + 1)
+        (4, 4, settled)
     );
     scenes[0].clear(&mut global).expect("already cleared");
     assert_eq!(
@@ -194,14 +260,14 @@ fn replacement_at_the_cap_is_owned_atomic_and_does_not_release_twice() {
             global.usage().objects,
             global.generation()
         ),
-        (4, 4, generation + 1)
+        (4, 4, settled)
     );
     next.clear(&mut global).expect("new scene leaves");
     assert_eq!((global.usage().scenes, global.usage().objects), (3, 3));
 }
 
 #[test]
-fn replacement_refusal_and_stale_settlement_preserve_the_victims() {
+fn replacement_refusal_and_an_intervening_budget_change_preserve_the_victim() {
     let mut global = GlobalBudget::default();
     let mut old = scene("old");
     put(&mut old, &mut global, texts(0, 1));
@@ -209,6 +275,8 @@ fn replacement_refusal_and_stale_settlement_preserve_the_victims() {
     let rejected = step(json!({"id":"bad","remove":["missing"]}));
     let usage = global.usage();
     let generation = global.generation();
+    let first_handle = old.handle(&id("t0")).expect("original object");
+    let original_log = old.recovery_log().to_vec();
     assert_eq!(
         kumochi_scene::ReplacementAdmission::checked(scene("bad"), &rejected, &[&old], &global)
             .expect_err("missing removal target")
@@ -219,11 +287,23 @@ fn replacement_refusal_and_stale_settlement_preserve_the_victims() {
         (old.object_count(), global.usage(), global.generation()),
         (1, usage, generation)
     );
+    assert_eq!(old.handle(&id("t0")), Some(first_handle));
+    assert_eq!(old.recovery_log(), original_log);
     let admission =
         kumochi_scene::ReplacementAdmission::checked(scene("next"), &first, &[&old], &global)
             .expect("valid admission");
     put(&mut old, &mut global, texts(1, 1));
     let changed = (global.usage(), global.generation());
+    assert_eq!(
+        changed.0,
+        Usage {
+            scenes: 1,
+            objects: 2,
+            ..Usage::default()
+        }
+    );
+    let second_handle = old.handle(&id("t1")).expect("intervening object");
+    let changed_log = old.recovery_log().to_vec();
     assert_eq!(
         admission
             .settle(
@@ -231,9 +311,12 @@ fn replacement_refusal_and_stale_settlement_preserve_the_victims() {
                 &mut global,
                 ReplacementDisposition::Install
             )
-            .expect_err("stale original stamp"),
+            .expect_err("the intervening commit changed the budget"),
         kumochi_scene::StaleAdmission
     );
+    assert_eq!(old.handle(&id("t0")), Some(first_handle));
+    assert_eq!(old.handle(&id("t1")), Some(second_handle));
+    assert_eq!(old.recovery_log(), changed_log);
     assert_eq!(
         (
             old.object_count(),
@@ -266,10 +349,14 @@ fn suppressed_replacement_settles_only_the_frozen_victims() {
             .is_none()
     );
     assert!(old.is_cleared());
-    assert_eq!(global.usage(), kumochi_scene::budget::Usage::default());
-    assert_eq!(global.generation(), generation + 1);
+    assert_eq!(global.usage(), Usage::default());
+    let settled = global.generation();
+    assert_ne!(settled, generation);
     old.clear(&mut global).expect("later sweep");
-    assert_eq!(global.generation(), generation + 1);
+    assert_eq!(
+        (global.usage(), global.generation()),
+        (Usage::default(), settled)
+    );
 }
 
 #[test]
@@ -425,7 +512,9 @@ fn pending_removals_count_until_shown_and_replay_does_not_invent_activation() {
         (replay.revision(), replay.usage()),
         (state.revision(), state.usage())
     );
-    assert_eq!(replay.handle(&id("t1200")), state.handle(&id("t1200")));
+    let newest = Some(Handle::new(8, 0).expect("last batch's first object"));
+    assert_eq!(state.handle(&id("t1200")), newest);
+    assert_eq!(replay.handle(&id("t1200")), newest);
 
     let mut stopped = scene("stopped");
     let mut budget = GlobalBudget::default();
@@ -450,7 +539,7 @@ fn pending_removals_count_until_shown_and_replay_does_not_invent_activation() {
 }
 
 #[test]
-fn removal_and_replacement_charges_are_asymmetric_and_idempotent() {
+fn removal_charges_converge_when_step_shown_arrives_and_do_not_release_twice() {
     let mut brain = scene("s");
     let mut shell = scene("s");
     let mut a = GlobalBudget::default();
@@ -465,7 +554,6 @@ fn removal_and_replacement_charges_are_asymmetric_and_idempotent() {
     }
     shell.retire(1, &mut b).expect("activation");
     assert_eq!((a.usage().objects, b.usage().objects), (300, 0));
-    assert!(b.usage().objects <= a.usage().objects);
     brain.retire(1, &mut a).expect("StepShown");
     assert_eq!(a.usage(), b.usage());
     let generation = a.generation();
@@ -535,31 +623,39 @@ fn four_scenes_fit_and_foreign_budget_mutations_are_rejected_without_corruption(
         ErrorCode::OverBudget(Budget::VisibleScenes),
     );
     let mut foreign = GlobalBudget::default();
-    let original = budget.usage();
+    let original = (budget.usage(), budget.generation());
+    let foreign_before = (foreign.usage(), foreign.generation());
+    let state = &mut scenes[0];
+    let object = state.handle(&id("t0")).expect("live object");
+    let before = (
+        state.revision(),
+        state.activated(),
+        state.recovery_log().to_vec(),
+    );
     assert_eq!(
-        scenes[0]
+        state
             .stop(&cut(0, vec![]), &mut foreign)
             .expect_err("foreign context")
             .code,
         ErrorCode::BudgetContext
     );
     assert_eq!(
-        scenes[0]
+        state
             .retire(0, &mut foreign)
             .expect_err("foreign context")
             .code,
         ErrorCode::BudgetContext
     );
     assert_eq!(
-        scenes[0]
-            .clear(&mut foreign)
-            .expect_err("foreign context")
-            .code,
+        state.clear(&mut foreign).expect_err("foreign context").code,
         ErrorCode::BudgetContext
     );
+    assert_eq!((budget.usage(), budget.generation()), original);
+    assert_eq!((foreign.usage(), foreign.generation()), foreign_before);
+    assert_eq!(state.handle(&id("t0")), Some(object));
     assert_eq!(
-        (budget.usage(), foreign.usage()),
-        (original, kumochi_scene::budget::Usage::default())
+        (state.revision(), state.activated(), state.recovery_log()),
+        (before.0, before.1, before.2.as_slice())
     );
     let Admission::New(pending) = candidate(
         &scenes[0],
@@ -629,11 +725,16 @@ fn table_rows_are_charged_after_padding_and_global_cells_reach_the_exact_cap() {
         put(&mut state, &mut global, table_ops(&format!("a{n}"), 40));
     }
     put(&mut state, &mut global, table_ops("last", 20));
-    assert_eq!((global.usage().cells, state.usage().objects), (4000, 513));
+    put(
+        &mut state,
+        &mut global,
+        vec![json!({"table":{"id":"narrow","cols":[""]}})],
+    );
+    assert_eq!((global.usage().cells, state.usage().objects), (4000, 514));
     rejected(
         &state,
         &global,
-        json!({"id":"extra_cell","put":[{"row":{"id":"extra","in":"lasttable","cells":[]}}]}),
+        json!({"id":"extra_cell","put":[{"row":{"id":"extra","in":"narrow","cells":[]}}]}),
         ErrorCode::OverBudget(Budget::TableCells),
     );
 }
@@ -836,13 +937,27 @@ fn area_stroke_and_fill_are_reserved_before_preparation() {
 fn titled_charts_reserve_the_label_origin_inset_at_the_canvas_edge() {
     let state = scene("title");
     let global = GlobalBudget::default();
-    for bounds in [[19995, 0, 4, 300], [0, 19995, 300, 4]] {
-        rejected(
+    for (axis, bounds) in [[19995, 0, 4, 300], [0, 19995, 300, 4]]
+        .into_iter()
+        .enumerate()
+    {
+        let mut chart = json!({"id":"c","kind":"line","box":bounds});
+        assert!(matches!(
+            candidate(
+                &state,
+                &global,
+                json!({"id":"edge","put":[{"chart":chart}]})
+            ),
+            Ok(Admission::New(_))
+        ));
+        chart["title"] = json!("T");
+        let error = rejected(
             &state,
             &global,
-            json!({"id":"edge","put":[{"chart":{"id":"c","kind":"line","title":"T","box":bounds}}]}),
+            json!({"id":"edge","put":[{"chart":chart}]}),
             ErrorCode::OutOfRange,
         );
+        assert_eq!(error.path.as_str(), format!("put[0].chart.box[{axis}]"));
     }
 }
 
@@ -884,16 +999,26 @@ fn chart_domains_and_stacked_sums_remain_safe_after_sets_and_detachment() {
     state
         .stop(&cut(1, vec![handle]), &mut budget)
         .expect("frozen detached series");
-    rejected(
-        &state,
-        &budget,
-        json!({"id":"negative","set":[{"target":"a","data":[-1]}]}),
-        ErrorCode::OutOfRange,
-    );
     let encoded = serde_json::to_vec(state.recovery_log()).expect("log encodes");
     let log: Vec<SceneEvent> = serde_json::from_slice(&encoded).expect("log decodes");
     let replay = SceneState::replay(header("log"), &log).expect("retained numeric domain replays");
-    assert_eq!(replay.handle(&id("a")), Some(handle));
+    for (scene, budget) in [(&state, &budget), (&replay, &GlobalBudget::default())] {
+        assert!(matches!(
+            candidate(
+                scene,
+                budget,
+                json!({"id":"positive","set":[{"target":"a","data":[3]}]})
+            ),
+            Ok(Admission::New(_))
+        ));
+        rejected(
+            scene,
+            budget,
+            json!({"id":"negative","set":[{"target":"a","data":[-1]}]}),
+            ErrorCode::OutOfRange,
+        );
+        assert_eq!(scene.handle(&id("a")), Some(handle));
+    }
 }
 
 #[test]
@@ -986,6 +1111,7 @@ fn a_detached_replay_has_its_own_mutation_fence_before_budget_installation() {
         SceneState::replay(header("source"), source.recovery_log()).expect("inspection replay");
     let mut first = GlobalBudget::default();
     let mut second = GlobalBudget::default();
+    let initial = first.generation();
     let Admission::New(pending) =
         candidate(&detached, &first, json!({"id":"new","put":texts(1,1)})).expect("candidate")
     else {
@@ -994,13 +1120,16 @@ fn a_detached_replay_has_its_own_mutation_fence_before_budget_installation() {
     detached
         .stop(&cut(1, vec![]), &mut second)
         .expect("cut binds a different budget");
-    assert_eq!(first.generation(), 0);
+    assert_eq!(first.generation(), initial);
     assert_eq!(detached.revision(), 1);
     assert_eq!(
         detached.commit(pending, &mut first),
         Err(kumochi_scene::StaleAdmission)
     );
-    assert_eq!(first.usage(), kumochi_scene::budget::Usage::default());
+    assert_eq!(
+        (first.usage(), first.generation()),
+        (Usage::default(), initial)
+    );
     assert_eq!((second.usage().objects, second.usage().scenes), (0, 1));
 }
 
@@ -1030,12 +1159,13 @@ fn spring_scale_envelopes_and_repeat_counts_remain_positive_and_finite() {
         &mut budget,
         vec![json!({"anim":{"target":"t0","track":"scale","repeat":59999,"keys":[[0,1],[1,1]]}})],
     );
-    rejected(
+    let error = rejected(
         &state,
         &budget,
-        json!({"id":"repeat_overflow","put":[{"anim":{"target":"t0","track":"scale","repeat":60000,"keys":[[0,1]]}}]}),
+        json!({"id":"repeat_overflow","put":[{"anim":{"target":"t0","track":"scale","repeat":60000,"keys":[[0,1],[1,1]]}}]}),
         ErrorCode::OutOfRange,
     );
+    assert_eq!(error.path.as_str(), "put[0].anim.repeat");
     let mut rotated = scene("rotated");
     let mut global = GlobalBudget::default();
     put(
@@ -1292,12 +1422,6 @@ fn delay_generated_motion_foreign_admission_and_replay_batch_limits_are_checked(
     put(
         &mut state,
         &mut budget,
-        vec![json!({"text":{"id":"t","at":[0,0],"text":"","enter":"fade"}})],
-    );
-    assert_eq!((budget.usage().tracks, budget.usage().keys), (0, 0));
-    put(
-        &mut state,
-        &mut budget,
         vec![
             json!({"diagram":{"id":"d"}}),
             json!({"node":{"id":"a","in":"d","label":""}}),
@@ -1314,7 +1438,7 @@ fn delay_generated_motion_foreign_admission_and_replay_batch_limits_are_checked(
     let error = rejected(
         &state,
         &budget,
-        json!({"id":"long","put":[{"anim":{"target":"t","track":"opacity","delay":1,"repeat":1,"keys":[[0,0],[30000,1]]}}]}),
+        json!({"id":"long","put":[{"anim":{"target":"a","track":"opacity","delay":1,"repeat":1,"keys":[[0,0],[30000,1]]}}]}),
         ErrorCode::OutOfRange,
     );
     assert_eq!(error.path.as_str(), "put[0].anim.repeat");
@@ -1340,7 +1464,7 @@ fn delay_generated_motion_foreign_admission_and_replay_batch_limits_are_checked(
 }
 
 #[test]
-fn four_scenes_jointly_fill_every_global_work_cap() {
+fn four_scenes_jointly_fill_the_scene_object_cell_mark_and_segment_caps() {
     let mut budget = GlobalBudget::default();
     let mut scenes: Vec<_> = (0..4).map(|n| scene(&format!("global{n}"))).collect();
     for state in &mut scenes {

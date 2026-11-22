@@ -1,4 +1,5 @@
-use super::{activate, new_scene, prepared};
+use super::{new_scene, prepared};
+use kumochi_scene::motion::synthetic_duration_ms;
 use kumochi_scene::{Frame, GlobalBudget, SceneState, SceneView, layout::LayoutState};
 use serde_json::{Value, json};
 
@@ -194,4 +195,24 @@ pub(super) fn four_views(fixture: Fixture) -> Vec<SceneView> {
         "all four views share the legal global caps"
     );
     views
+}
+
+/// Commits, prepares on the view's layout and activates one step at `now`.
+pub(super) fn activate(
+    scene: &mut SceneState,
+    budget: &mut GlobalBudget,
+    view: &mut SceneView,
+    value: Value,
+    now: u64,
+) {
+    let step = prepared(scene, budget, view.layout(), value);
+    let segment = synthetic_duration_ms(step.step().say.as_ref());
+    view.activate(step, now, segment, &mut Frame::new())
+        .expect("fresh activation");
+}
+
+pub(super) fn sample(view: &SceneView, now: u64) -> Frame {
+    let mut frame = Frame::new();
+    view.frame(now, &mut frame).expect("fresh frame");
+    frame
 }

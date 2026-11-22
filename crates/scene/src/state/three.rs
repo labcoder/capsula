@@ -251,5 +251,16 @@ mod tests {
         )
         .expect("small chain");
         assert_eq!((child.origin, child.scale), (120.0, 6.0));
+        let parent = Placement {
+            origin: 100.0,
+            scale: 2.0,
+        };
+        let offset = 9947.0_f64;
+        let at = check(parent, offset, 3.0, 1.0).expect("scaled reach fits exactly");
+        assert_eq!((at.origin, at.scale), (19_994.0, 6.0));
+        assert_eq!(
+            check(parent, offset.next_up(), 3.0, 1.0).map(|_| ()),
+            Err(ErrorCode::OutOfRange)
+        );
     }
 }

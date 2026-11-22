@@ -2,9 +2,10 @@
 #[path = "support/allocation.rs"]
 mod allocation;
 use kumochi_scene::{
-    Admission, Begin, Frame, GlobalBudget, Record, SceneState, SceneView, StopCut,
+    Admission, Begin, Frame, GlobalBudget, Handle, Record, SceneState, SceneView, StopCut, WireId,
     display::{
-        MeasureError, PaintWork, TextMeasure, TextStyle, WideMeasure, fallback_corner_segments,
+        MeasureError, PaintWork, Prim, TextMeasure, TextStyle, WideMeasure,
+        fallback_corner_segments,
     },
     geom::{Affine, Rect, Vec2},
     layout::{LayoutState, PrepareInput, PreparedStep, SurfaceGeometry, place, prepare, recover},
@@ -89,16 +90,40 @@ fn prepared(
     prepare(input, measure, &AtomicBool::new(false)).expect("prepare")
 }
 
-fn assert_graph_placement(frame: &Frame, expected: Affine) {
-    assert_eq!(
-        frame.items().len(),
-        7,
-        "the recorded graph keeps every item"
-    );
+fn id(name: &str) -> WireId {
+    name.to_owned().try_into().expect("fixture ID")
+}
+
+fn at_rest(layout: &LayoutState) -> Frame {
+    let mut frame = Frame::new();
+    SceneView::new(layout, 0)
+        .frame(0, &mut frame)
+        .expect("resting frame");
+    frame
+}
+
+fn assert_graph_placement(
+    frame: &Frame,
+    handles: &[Handle],
+    expected: Affine,
+) -> Vec<(Handle, Arc<[Prim]>)> {
+    let mut actual: Vec<_> = frame
+        .paint_items()
+        .map(|(item, _, _)| {
+            assert_eq!(
+                item.transform, expected,
+                "fitted transform for {:?}",
+                item.handle
+            );
+            (item.handle, Arc::clone(&item.primitives))
+        })
+        .collect();
+    actual.sort_unstable_by_key(|(handle, _)| *handle);
     assert!(
-        frame.items().iter().all(|item| item.transform == expected),
-        "every recorded graph item uses the fitted transform"
+        actual.iter().map(|(handle, _)| handle).eq(handles),
+        "all seven authored graph objects paint"
     );
+    actual
 }
 
 #[test]
@@ -125,13 +150,24 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     };
     let step = prepared(&mut scene, &mut budget, before, &step, &mut Measure);
     assert_eq!(step.after.fit_extent(), rect(16.0, -14.0, 473.0, 448.0));
+    let mut handles = [
+        "x_axis",
+        "y_axis",
+        "parabola",
+        "graph_label",
+        "x_label",
+        "y_label",
+        "origin_label",
+    ]
+    .map(|name| scene.handle(&id(name)).expect("authored object"));
+    handles.sort_unstable();
     let mut frame = Frame::new();
     view.activate(step, 0, 800, &mut frame).expect("activate");
     // Default entrances pace the recorded objects, so sample once the last has entered.
     let entered = view.entrance_end().expect("the step puts objects");
     view.frame(entered, &mut frame).expect("sample");
     let expected = Affine::pose(2.0, 0.0, Vec2::new(775.0, 354.0));
-    assert_graph_placement(&frame, expected);
+    assert_graph_placement(&frame, &handles, expected);
     let ((), activity) = allocation::activity(|| {
         for now in [0, 100, 400, 800, 1000, 60_000] {
             view.frame(now, &mut frame).expect("placed frame");
@@ -152,7 +188,7 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     stopped.set_stage(stage);
     let mut rest_frame = Frame::new();
     stopped.frame(0, &mut rest_frame).expect("stopped frame");
-    assert_graph_placement(&rest_frame, expected);
+    assert_graph_placement(&rest_frame, &handles, expected);
     let (replayed, recovered) = recover(
         begin,
         scene.recovery_log(),
@@ -171,12 +207,7 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     recovered_view
         .frame(0, &mut recovered_frame)
         .expect("recovered frame");
-    assert_graph_placement(&recovered_frame, expected);
-    let sources: Vec<_> = recovered
-        .items()
-        .iter()
-        .map(|item| Arc::clone(&item.primitives))
-        .collect();
+    let original_paint = assert_graph_placement(&recovered_frame, &handles, expected);
     let (changed, allocations) =
         allocation::count(|| recovered_view.set_stage(rect(10.0, 20.0, 473.0, 448.0)));
     assert!(changed);
@@ -184,18 +215,14 @@ fn recorded_graph_stays_centered_through_activation_stop_recovery_and_stage_chan
     recovered_view
         .frame(0, &mut recovered_frame)
         .expect("new stage");
-    assert_graph_placement(
-        &recovered_frame,
-        Affine::pose(1.0, 0.0, Vec2::new(-6.0, 34.0)),
-    );
-    assert_eq!(recovered_view.layout().items().len(), sources.len());
-    assert!(
-        recovered_view
-            .layout()
-            .items()
-            .iter()
-            .zip(&sources)
-            .all(|(item, source)| Arc::ptr_eq(&item.primitives, source))
+    assert_eq!(
+        assert_graph_placement(
+            &recovered_frame,
+            &handles,
+            Affine::pose(1.0, 0.0, Vec2::new(-6.0, 34.0))
+        ),
+        original_paint,
+        "changing the stage only changes where the graph paints"
     );
 }
 
@@ -368,17 +395,116 @@ fn curve_subdivision_reserves_the_presentation_scale() {
         header(None),
         &json!([{"path":{"id":"p","d":"M0 0 Q4 8 8 0"}}]),
     );
-    let items = layout.items();
-    let kumochi_scene::display::Prim::Line { points, .. } = &items[0].primitives[0] else {
-        panic!("curve")
-    };
-    assert_eq!(points.len(), 9);
+    let frame = at_rest(&layout);
+    let points = frame
+        .paint_items()
+        .flat_map(|(_, _, primitives)| primitives)
+        .find_map(|prim| {
+            if let Prim::Line { points, .. } = prim {
+                Some(points)
+            } else {
+                None
+            }
+        })
+        .expect("painted curve");
+    assert_eq!(points.first(), Some(&Vec2::new(0.0, 0.0)));
+    assert_eq!(points.last(), Some(&Vec2::new(8.0, 0.0)));
+    for i in 0..=128_u16 {
+        let t = f32::from(i) / 128.0;
+        let point = Vec2::new(8.0 * t, 16.0 * t * (1.0 - t));
+        assert!(
+            points.windows(2).any(|p| {
+                let side = p[1] - p[0];
+                let from_start = point - p[0];
+                let offset = (from_start.x * side.x + from_start.y * side.y)
+                    / (side.x * side.x + side.y * side.y);
+                let error = from_start - side * offset.clamp(0.0, 1.0);
+                2.0 * error.x.hypot(error.y) <= 0.25
+            }),
+            "quadratic at t={t} must be within a quarter pixel at 2×"
+        );
+    }
+}
+
+fn assert_graph_paint(
+    layout: &LayoutState,
+    nodes: &[(&str, &str, Option<&str>)],
+    edges: &[(&str, &str)],
+) -> Vec<(Rect, f32)> {
+    assert!(
+        layout.paint_work().within_limits(),
+        "the graph fits the paint cap"
+    );
+    let frame = at_rest(layout);
+    let contours = nodes
+        .iter()
+        .map(|(name, main, aux)| {
+            let handle = layout.handle(&id(name)).expect("authored node");
+            let item = frame
+                .items()
+                .iter()
+                .find(|item| item.handle == handle)
+                .expect("painted node");
+            let outline = item
+                .primitives
+                .iter()
+                .find_map(|prim| match prim {
+                    Prim::Rect {
+                        rect,
+                        radius,
+                        fill: Some(_),
+                        border: Some(_),
+                        ..
+                    } => Some((*rect, *radius)),
+                    _ => None,
+                })
+                .expect("filled, bordered node");
+            for label in std::iter::once(main).chain(aux) {
+                assert!(
+                    item.primitives
+                        .iter()
+                        .any(|p| matches!(p, Prim::Text { text, .. } if text.as_str() == *label)),
+                    "{name} paints its label {label}"
+                );
+            }
+            outline
+        })
+        .collect();
+    for (name, label) in edges {
+        let handle = layout.handle(&id(name)).expect("authored edge");
+        let item = frame
+            .items()
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("painted edge");
+        let end = item
+            .primitives
+            .iter()
+            .find_map(|prim| match prim {
+                Prim::Line { points, .. } if points.first() != points.last() => points.last(),
+                _ => None,
+            })
+            .expect("painted edge stroke");
+        assert!(
+            item.primitives
+                .iter()
+                .any(|p| matches!(p, Prim::Fill { points, .. } if points.contains(end))),
+            "{name} paints an arrowhead at the end of its stroke"
+        );
+        assert!(
+            item.primitives
+                .iter()
+                .any(|p| matches!(p, Prim::Text { text, .. } if text.as_str() == *label)),
+            "{name} paints its edge label"
+        );
+    }
+    contours
 }
 
 #[test]
 fn a_small_overlay_diagram_of_rounded_nodes_fits_the_paint_budgets() {
     // The shape of a recorded call the shell refused for the paint work of its rounded rects.
-    let work = picture(
+    let layout = picture(
         header(Some([520.0, 320.0])),
         &json!([
             {"node":{"id":"a","label":"Alpha \u{2600}\u{fe0f}","shape":"circle","color":"amber"}},
@@ -390,26 +516,42 @@ fn a_small_overlay_diagram_of_rounded_nodes_fits_the_paint_budgets() {
             {"edge":{"id":"cd","from":"c","to":"d","label":"three"}},
             {"edge":{"id":"db","from":"d","to":"b","label":"four"}}
         ]),
-    )
-    .paint_work();
-    // At the overlay's charge of 2 the radius-40 circle needs 10 pieces per corner (4 · 11 + 1
-    // points), the radius-12 rounds 6 (29) and the radius-32 pill 9 (41), filled and bordered.
-    // Each edge adds a 3-point arrowhead and a radius-4 label chip of 21 fill points.
-    assert_eq!(
-        work,
-        PaintWork {
-            dash_pieces: 0,
-            fill_vertices: 45 + 2 * 29 + 41 + 4 * (3 + 21),
-            largest_fill: 45,
-            outline_points: 45 + 2 * 29 + 41,
-            largest_outline: 45,
-        }
     );
+    let shapes = assert_graph_paint(
+        &layout,
+        &[
+            ("a", "Alpha \u{2600}\u{fe0f}", None),
+            ("b", "Bravo", Some("second")),
+            ("c", "Charlie", Some("third")),
+            ("d", "Delta", Some("fourth")),
+        ],
+        &[
+            ("ab", "one"),
+            ("bc", "two"),
+            ("cd", "three"),
+            ("db", "four"),
+        ],
+    );
+    let [
+        (circle, circle_radius),
+        (_, bravo),
+        (_, charlie),
+        (pill, pill_radius),
+    ] = shapes.as_slice()
+    else {
+        panic!("four node contours")
+    };
+    assert_eq!(circle.size.x.to_bits(), circle.size.y.to_bits());
+    assert_eq!(circle_radius.to_bits(), (circle.size.y * 0.5).to_bits());
+    assert_eq!(pill_radius.to_bits(), (pill.size.y * 0.5).to_bits());
+    assert!(pill.size.x > pill.size.y);
+    assert!(circle_radius > pill_radius && pill_radius > bravo && *bravo > 0.0);
+    assert_eq!(bravo.to_bits(), charlie.to_bits());
 }
 
 #[test]
 fn four_plain_nodes_and_three_labelled_edges_fit_the_paint_budgets() {
-    let work = picture(
+    let layout = picture(
         header(Some([520.0, 320.0])),
         &json!([
             {"node":{"id":"a","label":"Alpha"}},
@@ -420,27 +562,25 @@ fn four_plain_nodes_and_three_labelled_edges_fit_the_paint_budgets() {
             {"edge":{"id":"bc","from":"b","to":"c","label":"two"}},
             {"edge":{"id":"cd","from":"c","to":"d","label":"three"}}
         ]),
-    )
-    .paint_work();
-    // Four radius-4 boxes at the overlay's charge of 2: 4 pieces per corner, so 4 · 5 + 1 points,
-    // filled and bordered. Each edge adds a 3-point arrowhead and a label chip of 21.
-    assert_eq!(
-        work,
-        PaintWork {
-            dash_pieces: 0,
-            fill_vertices: 4 * 21 + 3 * (3 + 21),
-            largest_fill: 21,
-            outline_points: 4 * 21,
-            largest_outline: 21,
-        }
     );
+    let nodes = assert_graph_paint(
+        &layout,
+        &[
+            ("a", "Alpha", None),
+            ("b", "Bravo", None),
+            ("c", "Charlie", None),
+            ("d", "Delta", None),
+        ],
+        &[("ab", "one"), ("bc", "two"), ("cd", "three")],
+    );
+    assert!(nodes.iter().all(|(rect, radius)| {
+        rect.size.x > rect.size.y && *radius >= 0.0 && *radius < rect.size.y * 0.5
+    }));
 }
 
 #[test]
 fn the_drift_allowance_comes_before_the_64_clamp() {
-    // g = 32 on the overlay reaches the 64 clamp. Radius 1.2671660184860229 sits just under the
-    // ten-piece threshold there, so each filled, bordered rect costs 4 · 11 + 1 points; applying
-    // the allowance after the clamp would cross it, to 49 each and 539 in all.
+    // The overlay projects g=32 at 2×, right at the clamp before the allowance.
     let mut put = vec![
         json!({"diagram":{"id":"d"}}),
         json!({"anim":{"target":"d","track":"scale","keys":[[0,32]]}}),
@@ -448,17 +588,19 @@ fn the_drift_allowance_comes_before_the_64_clamp() {
     put.extend((0..11).map(|index| {
         json!({"shape":{"id":format!("r{index}"),"in":"d","kind":"rect","box":[index * 4,0,3,3],"radius":1.267_166_f32,"fill":"blue"}})
     }));
-    let work = picture(header(Some([520.0, 320.0])), &json!(put)).paint_work();
-    assert_eq!(
-        work,
-        PaintWork {
-            dash_pieces: 0,
-            fill_vertices: 11 * 45,
-            largest_fill: 45,
-            outline_points: 11 * 45,
-            largest_outline: 45,
-        }
-    );
+    let layout = picture(header(Some([520.0, 320.0])), &json!(put));
+    let frame = at_rest(&layout);
+    for index in 0..11 {
+        let handle = layout
+            .handle(&id(&format!("r{index}")))
+            .expect("rounded rect");
+        let item = frame
+            .items()
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("painted rect");
+        assert_eq!(item.paint_scale.to_bits(), 64.0_f32.to_bits());
+    }
 }
 
 #[test]
@@ -492,9 +634,14 @@ fn a_rotated_chain_at_the_depth_limit_stays_within_its_charge() {
     let posed = (a * d - b * c).abs().sqrt();
     assert!((posed - 32.0).abs() < 1e-3, "posed at {posed}");
     assert!(b.abs() > 1.0, "turned, so the painter takes the fallback");
-    assert_eq!(fallback_corner_segments(radius, 32.0), 10);
-    assert_eq!(fallback_corner_segments(radius, item.paint_scale), 11);
-    assert!(fallback_corner_segments(radius, posed) <= 11);
+    assert_eq!(
+        item.paint_scale.to_bits(),
+        (32.0_f32 * (1.0 + 1.0 / 65_536.0)).to_bits()
+    );
+    assert!(
+        fallback_corner_segments(radius, posed)
+            <= fallback_corner_segments(radius, item.paint_scale)
+    );
 }
 
 #[test]
@@ -555,8 +702,7 @@ fn ordinary_illustrations_fit_the_paint_caps() {
         let x = f32::from(index) * 30.0;
         round(format!("part{index}"), [x, 200.0, 24.0, 18.0])
     }));
-    // A 30-step flowchart with labelled arrows fits the default and a tall authored canvas
-    // without changing its paint charge.
+    // A 30-step flowchart with labelled arrows fits the default and a tall authored canvas.
     let mut flow = vec![json!({"diagram":{"id":"d","dir":"down"}})];
     flow.extend(
         (0..30).map(|index| json!({"node":{"id":format!("n{index}"),"in":"d","label":"Step"}})),
@@ -565,21 +711,71 @@ fn ordinary_illustrations_fit_the_paint_caps() {
         json!({"edge":{"id":format!("e{index}"),"from":format!("n{}", index - 1),"to":format!("n{index}"),"label":"then"}})
     }));
     let flow = serde_json::Value::Array(flow);
-    let charge = |size, put: &serde_json::Value| {
-        let work = picture(header(size), put).paint_work();
-        assert_ne!(work, PaintWork::default(), "the scene has paint work");
+    let check = |size, put: &serde_json::Value| {
+        let layout = picture(header(size), put);
+        let frame = at_rest(&layout);
+        for op in put.as_array().expect("illustration operations") {
+            let (kind, fields) = op
+                .as_object()
+                .expect("tagged op")
+                .iter()
+                .next()
+                .expect("op");
+            let name = fields["id"].as_str().expect("authored ID");
+            let handle = layout.handle(&id(name)).expect("authored object");
+            if kind == "diagram" {
+                continue;
+            }
+            let paint = || {
+                frame
+                    .paint_items()
+                    .filter(|(item, _, _)| item.handle == handle)
+                    .flat_map(|(_, _, prims)| prims)
+            };
+            match kind.as_str() {
+                "edge" | "node" => {
+                    assert!(
+                        paint().any(|prim| matches!(prim, Prim::Text { text, .. }
+                        if Some(text.as_str()) == fields["label"].as_str())),
+                        "{name} paints its label"
+                    );
+                    assert!(
+                        paint().any(|prim| match kind.as_str() {
+                            "edge" => matches!(prim, Prim::Line { .. }),
+                            _ => matches!(
+                                prim,
+                                Prim::Rect {
+                                    border: Some(_),
+                                    ..
+                                }
+                            ),
+                        }),
+                        "{name} paints its geometry"
+                    );
+                }
+                "shape" => assert!(
+                    paint().any(|prim| matches!(
+                        prim,
+                        Prim::Rect { fill: Some(_), .. } | Prim::Fill { .. }
+                    )),
+                    "{name}"
+                ),
+                _ => panic!("fixture operation"),
+            }
+        }
+        let work = layout.paint_work();
+        assert!(work.within_limits());
         let wide = measured(header(size), put, &mut WideMeasure).paint_work();
         assert_eq!(wide.max(work), wide, "the brain's measure is conservative");
-        work
     };
-    charge(None, &serde_json::Value::Array(sky));
-    charge(None, &serde_json::Value::Array(mouse));
-    assert_eq!(charge(None, &flow), charge(Some([960.0, 4000.0]), &flow));
+    check(None, &serde_json::Value::Array(sky));
+    check(None, &serde_json::Value::Array(mouse));
+    check(None, &flow);
+    check(Some([960.0, 4000.0]), &flow);
 }
 
 /// A node a Stop keeps without its shrunk diagram takes the diagram's fit into its own transform,
-/// and stays charged unshrunk in every later step and after recovery: 21 fill and 21 outline
-/// points, where charging it at the 0.8 fit would give 17.
+/// and stays charged unshrunk in every later step and after recovery.
 #[test]
 fn a_node_cut_out_of_its_shrunk_diagram_stays_charged_unshrunk() {
     let mut put = vec![json!({"diagram":{"id":"d","dir":"down"}})];
@@ -605,9 +801,23 @@ fn a_node_cut_out_of_its_shrunk_diagram_stays_charged_unshrunk() {
         &step(json!({"id":"one","put":put})),
         &mut Measure,
     );
-    let node = scene
-        .handle(&"n0".to_owned().try_into().expect("id"))
-        .expect("node");
+    let node = scene.handle(&id("n0")).expect("node");
+    let control = picture(header(None), &json!([{"node":{"id":"n0","label":"Step"}}]));
+    let charge = |work: PaintWork| (work.fill_vertices, work.outline_points);
+    let unshrunk = charge(control.paint_work());
+    let frame = at_rest(&first.after);
+    let item = frame
+        .items()
+        .iter()
+        .find(|item| item.handle == node)
+        .expect("shrunk node");
+    let [a, b, ..] = item.transform.0;
+    let fit = a.hypot(b);
+    assert!(fit < 1.0);
+    assert_ne!(
+        charge(PaintWork::of(&item.primitives, item.paint_scale * fit)),
+        unshrunk
+    );
     scene
         .stop(
             &StopCut {
@@ -618,8 +828,7 @@ fn a_node_cut_out_of_its_shrunk_diagram_stays_charged_unshrunk() {
         )
         .expect("stop");
     let cut = first.after.cut(&scene).expect("a re-rooted node");
-    let charge = |work: PaintWork| (work.fill_vertices, work.outline_points);
-    assert_eq!(charge(cut.paint_work()), (21, 21));
+    assert_eq!(charge(cut.paint_work()), unshrunk);
     let next = prepared(
         &mut scene,
         &mut budget,
@@ -627,7 +836,7 @@ fn a_node_cut_out_of_its_shrunk_diagram_stays_charged_unshrunk() {
         &step(json!({"id":"two","set":[{"target":"n0","color":"#abcdef"}]})),
         &mut Measure,
     );
-    assert_eq!(charge(next.after.paint_work()), (21, 21));
+    assert_eq!(charge(next.after.paint_work()), unshrunk);
     let (_, recovered) = recover(
         scene.header().clone(),
         scene.recovery_log(),
@@ -640,5 +849,5 @@ fn a_node_cut_out_of_its_shrunk_diagram_stays_charged_unshrunk() {
         Some(PaintWork::LIMITS),
     )
     .expect("recovered");
-    assert_eq!(charge(recovered.paint_work()), (21, 21));
+    assert_eq!(charge(recovered.paint_work()), unshrunk);
 }

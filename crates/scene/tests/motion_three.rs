@@ -13,9 +13,10 @@ mod allocation;
 mod scene_support;
 
 use kumochi_scene::{
-    Frame, GlobalBudget, SceneState, SceneView,
+    Frame, GlobalBudget, SceneState, SceneView, StopCut,
     layout::LayoutState,
     limits::MAX_SOLIDS,
+    text::Bounded,
     three::{
         frame::{Solid, frame},
         raster::FrameScratch,
@@ -69,6 +70,16 @@ fn at(view: &SceneView, now: u64, name: &str, point: [f64; 3]) -> [f64; 3] {
 fn x(view: &SceneView, now: u64, name: &str) -> f64 {
     at(view, now, name, [0.0; 3])[0]
 }
+fn assert_direction(view: &SceneView, now: u64, name: &str, expected: [f64; 3]) {
+    let actual = at(view, now, name, [1.0, 0.0, 0.0]);
+    assert!(
+        actual
+            .iter()
+            .zip(expected)
+            .all(|(a, b)| (a - b).abs() < 1e-12),
+        "direction at {now}: expected {expected:?}, got {actual:?}"
+    );
+}
 fn yaw(view: &SceneView, now: u64) -> f64 {
     let mut frame = Frame::new();
     view.frame(now, &mut frame).expect("fresh frame");
@@ -80,7 +91,7 @@ fn yaw(view: &SceneView, now: u64) -> f64 {
 
 #[test]
 fn a_delayed_pos3_holds_its_first_key_then_runs_to_its_last_beside_any_other_track() {
-    let delayed = pos3("a", 1000, &json!([[0, [0, 0, 0]], [1000, [10, 0, 0]]]));
+    let delayed = pos3("a", 1000, &json!([[0, [2, 0, 0]], [1000, [10, 0, 0]]]));
     let other = pos3("b", 0, &json!([[0, [0, 0, 0]], [2000, [4, 0, 0]]]));
     for put in [
         vec![
@@ -108,9 +119,10 @@ fn a_delayed_pos3_holds_its_first_key_then_runs_to_its_last_beside_any_other_tra
             0,
         );
         for (now, expected) in [
-            (0, 0.0),
-            (1000, 0.0),
-            (1500, 5.0),
+            (0, 2.0),
+            (999, 2.0),
+            (1000, 2.0),
+            (1500, 6.0),
             (2000, 10.0),
             (3000, 10.0),
         ] {
@@ -140,17 +152,12 @@ fn a_delayed_rot3_holds_its_first_key() {
         &mut frame,
         json!({"id":"s","put":[{"view3d":{"id":"v"}}, box_at("a", [0.0; 3]),
             {"anim":{"target":"a","track":"rot3","ease":"linear","delay":1000,
-                "keys":[[0,[0,0,0]],[1000,[0,90,0]]]}}]}),
+                "keys":[[0,[0,30,0]],[1000,[0,90,0]]]}}]}),
         0,
     );
-    assert_eq!(at(&view, 500, "a", [1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
-    let [px, py, pz] = at(&view, 1500, "a", [1.0, 0.0, 0.0]);
-    let half = std::f64::consts::FRAC_1_SQRT_2;
-    assert!(
-        (px - half).abs() < 1e-12 && py == 0.0 && (pz + half).abs() < 1e-12,
-        "45 degrees about y: {:?}",
-        [px, py, pz]
-    );
+    let sin_60 = 3.0_f64.sqrt() / 2.0;
+    assert_direction(&view, 500, "a", [sin_60, 0.0, -0.5]);
+    assert_direction(&view, 1500, "a", [0.5, 0.0, -sin_60]);
 }
 
 #[test]
@@ -188,13 +195,32 @@ fn a_finished_pos3_settles_into_rest_through_a_cut_view_and_without_a_rebuild() 
         matches!(&solid.mesh, Mesh::Built(after) if Arc::ptr_eq(after, &mesh)),
         "a track-only step shares the mesh"
     );
-    assert_eq!(solid.pos3, [10.0, 0.0, 0.0]);
     assert_eq!(
         x(&view, 50, "s"),
         6.0,
         "the owner overrides the settled end"
     );
-    let rested = SceneView::new(view.layout(), scene.activated());
+    for now in [100, 200] {
+        assert_eq!(x(&view, now, "s"), 11.0, "the live track settles");
+    }
+    let _pending = prepared(
+        &mut scene,
+        &mut budget,
+        view.layout(),
+        json!({"id":"pending","put":[box_at("pending", [0.0; 3])]}),
+    );
+    scene
+        .stop(
+            &StopCut {
+                activated: view.activated(),
+                revealed: Bounded::new(view.stop(200)).expect("bounded cut"),
+            },
+            &mut budget,
+        )
+        .expect("valid cut");
+    assert_eq!(scene.handle(&id("pending")), None);
+    let kept = view.layout().cut(&scene).expect("kept view and solid");
+    let rested = SceneView::new(&kept, scene.activated());
     assert_eq!(
         x(&rested, 0, "s"),
         11.0,
@@ -242,7 +268,12 @@ fn removing_a_preceding_solid_leaves_a_running_track_on_its_own_solid() {
         json!({"id":"b","remove":["first"]}),
         100,
     );
-    assert_eq!([index(&view, "tracked"), index(&view, "last")], [0, 1]);
+    assert!(
+        geometry(&view)
+            .solids
+            .iter()
+            .all(|solid| solid.id != id("first"))
+    );
     assert_eq!(x(&view, 5000, "tracked"), 5.0);
     assert_eq!(
         x(&view, 5000, "last"),
@@ -273,18 +304,12 @@ fn a_replacement_rot3_takes_over_only_at_its_activation() {
         view.layout(),
         json!({"id":"b","put":[turn(180)]}),
     );
-    let up = |view: &SceneView, now| at(view, now, "s", [1.0, 0.0, 0.0])[1];
-    assert!(
-        (up(&view, 1000) - 1.0).abs() < 1e-12,
-        "the first track still owns rot3"
-    );
+    assert_direction(&view, 1000, "s", [0.0, 1.0, 0.0]);
     view.activate(staged, 1000, 0, &mut frame)
         .expect("fresh activation");
-    assert!(
-        (up(&view, 1500) - 1.0).abs() < 1e-12,
-        "90 of 180 degrees about z"
-    );
-    assert!(up(&view, 2000).abs() < 1e-12, "the replacement's end");
+    assert_direction(&view, 1000, "s", [1.0, 0.0, 0.0]);
+    assert_direction(&view, 1500, "s", [0.0, 1.0, 0.0]);
+    assert_direction(&view, 2000, "s", [-1.0, 0.0, 0.0]);
 }
 
 #[test]
@@ -426,9 +451,15 @@ fn sampling_at_cap_allocates_nothing_across_revisions_removal_and_re_add() {
     let mut frame = Frame::new();
     let mut out = FrameScratch::with_capacity(2_000);
     let mut counted = |view: &SceneView, frame: &mut Frame, now: u64, label: &str| {
+        out.clear();
         let (posed, [allocations, frees]) =
             allocation::activity(|| sample(view, now, frame, &mut out));
         assert_eq!([allocations, frees], [0, 0], "{label}");
+        if posed == 0 {
+            assert!(frame.views().is_empty(), "{label}");
+        } else {
+            assert!(!out.is_empty(), "the frame stage emits polygons: {label}");
+        }
         posed
     };
     activate(

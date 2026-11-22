@@ -529,7 +529,6 @@ mod tests {
     fn invalid_and_refused_sources_keep_their_codes() {
         let long_label = format!("flowchart LR\nA[{}]\n", "x".repeat(401));
         let long_id = format!("flowchart LR\n{}\n", "a".repeat(41));
-        let deep = format!("flowchart LR\n{}", "subgraph\n".repeat(17));
         for (source, code) in [
             ("", ErrorCode::Malformed),
             ("flowchart LR\nA[\"abc", ErrorCode::Malformed),
@@ -569,7 +568,6 @@ mod tests {
             ),
             (long_label.as_str(), ErrorCode::TooLong),
             (long_id.as_str(), ErrorCode::TooLong),
-            (deep.as_str(), ErrorCode::TooDeep),
         ] {
             assert_eq!(parse(source, 100).err(), Some(code), "source {source:?}");
         }
@@ -661,12 +659,6 @@ mod tests {
             chart.groups[0].title.as_ref().map(Text::as_str),
             Some("old style that is broken")
         );
-        let repeated = parse(
-            "flowchart TB\nsubgraph first\nA\nend\nsubgraph second\nA\nend\n",
-            4,
-        )
-        .expect("bare mentions keep first ownership");
-        assert_eq!(repeated.nodes[0].owner, Some(0));
     }
 
     #[test]

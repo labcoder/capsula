@@ -426,31 +426,35 @@ mod tests {
             old.push(chip.clone());
             let new = repaint_curve(&old, &points, heads(&points, Head::Both))
                 .expect("repaint wrong heads");
-            assert_eq!(new.len(), 4);
-            assert_eq!(new[0], line);
-            assert_eq!(
-                new[1],
-                Prim::Fill {
-                    points: Arc::from([
-                        Vec2::new(16.0, 0.0),
-                        Vec2::new(7.0, 4.0),
-                        Vec2::new(7.0, -4.0)
-                    ]),
-                    color
-                }
-            );
-            assert_eq!(
-                new[2],
-                Prim::Fill {
-                    points: Arc::from([
-                        Vec2::new(0.0, 0.0),
-                        Vec2::new(9.0, -4.0),
-                        Vec2::new(9.0, 4.0)
-                    ]),
-                    color
-                }
-            );
-            assert_eq!(new[3], chip);
+            let mut tips = Vec::new();
+            let mut unchanged = Vec::new();
+            for prim in new.iter() {
+                let Prim::Fill {
+                    points,
+                    color: paint,
+                } = prim
+                else {
+                    unchanged.push(prim);
+                    continue;
+                };
+                assert_eq!(*paint, color);
+                let tip = points.iter().find(|p| p.y.abs() < 1e-5).expect("arrow tip");
+                let at_start = tip.x.abs() < 1e-5;
+                assert!(at_start || (tip.x - 16.0).abs() < 1e-5);
+                assert!(points.iter().any(|p| p.y < 0.0));
+                assert!(points.iter().any(|p| p.y > 0.0));
+                assert!(
+                    points
+                        .iter()
+                        .filter(|p| p.y.abs() >= 1e-5)
+                        .all(|p| { if at_start { p.x > tip.x } else { p.x < tip.x } })
+                );
+                tips.push(at_start);
+            }
+            tips.sort_unstable();
+            assert_eq!(tips, [false, true]);
+            assert_eq!(unchanged.len(), 2);
+            assert!(unchanged.contains(&&line) && unchanged.contains(&&chip));
             assert_eq!(
                 repaint_curve(&new, &points, heads(&points, Head::Both)),
                 None

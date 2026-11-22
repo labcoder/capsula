@@ -78,6 +78,7 @@ fn later_kept_sets_apply_in_order_and_a_partial_set_keeps_the_other_field() {
         &mut global,
         r##"{"id":"s3","set":[{"target":"a","color":"#ff0000"}]}"##,
     );
+    assert_eq!(text(state.part(a)), Some(pair("Hub", Some("Front left"))));
     commit(
         &mut state,
         &mut global,
@@ -105,6 +106,7 @@ fn a_set_a_cut_dropped_never_counts_even_after_replay() {
         &mut global,
         r#"{"id":"s2","set":[{"target":"a","label":"Hub","info":"Late"}]}"#,
     );
+    assert_eq!(text(state.part(a)), Some(pair("Hub", Some("Late"))));
     let revealed =
         Bounded::new(put.handles.iter().map(|&(_, handle)| handle).collect()).expect("two");
     state

@@ -1,6 +1,9 @@
 //! Strict scene v1 records shared by the brain and shell.
 //! JSON tool arguments and binary messages validate through the same types.
 
+#[cfg(test)]
+#[path = "../tests/support/allocation.rs"]
+mod allocation;
 pub mod budget;
 pub mod deferred;
 pub mod display;

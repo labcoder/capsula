@@ -737,6 +737,21 @@ mod tests {
                 [0.0, f64::from(height), 0.0],
             ];
             assert_eq!(emit.triangle(face, Face::Surface), expected);
+            if expected.is_ok() {
+                assert_eq!(
+                    out,
+                    [Triangle {
+                        v: [
+                            Vec3::default(),
+                            Vec3::new(1.0, 0.0, 0.0),
+                            Vec3::new(0.0, height, 0.0),
+                        ],
+                        part: 1,
+                    }]
+                );
+            } else {
+                assert!(out.is_empty());
+            }
         }
         let cancel = AtomicBool::new(false);
         let mut out = Vec::with_capacity(2);

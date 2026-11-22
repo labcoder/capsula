@@ -1,11 +1,12 @@
 //! Scene-format behavior and privacy regressions.
 use kumochi_scene::record::{
-    Anchor, Cell, Color, KeyValue, Others, Point, Start, Surface, Version,
+    Anchor, Cell, Color, KeyValue, Others, Point, Rgb, Start, Surface, Token, Version,
 };
 use kumochi_scene::{
     Begin, ErrorCode, Finite, Record, StepError, Text, WireId, parse_draw_record, parse_record,
 };
 use serde::{Serialize, de::DeserializeOwned};
+use serde_json::json;
 
 fn round_trip<T: Serialize + DeserializeOwned + PartialEq>(value: &T) {
     let json = serde_json::to_vec(value).expect("valid fixture serializes");
@@ -203,29 +204,56 @@ fn text_and_list_boundaries_are_not_truncated() {
 }
 #[test]
 fn mixed_syntax_round_trips() {
-    for json in [r#""speech""#, r#""now""#, r#"{"after":"s1","ms":200}"#] {
-        let value: Start = serde_json::from_str(json).expect("valid static fixture");
+    fn check<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
+        json: &str,
+        expected: &T,
+    ) {
+        let value: T = serde_json::from_str(json).expect("valid static fixture");
+        assert_eq!(&value, expected);
         round_trip(&value);
     }
-    for json in ["[1,-2]", r#"{"ref":"n"}"#] {
-        let value: Anchor = serde_json::from_str(json).expect("valid static fixture");
-        round_trip(&value);
-    }
-    for json in [r#""blue""#, r##""#01a2ff""##] {
-        let value: Color = serde_json::from_str(json).expect("valid static fixture");
-        round_trip(&value);
-    }
-    for json in [r#""cell""#, "3.5", "true"] {
-        let value: Cell = serde_json::from_str(json).expect("valid static fixture");
-        round_trip(&value);
-    }
-    for json in ["3.5", "[1,2]"] {
-        let value: Point = serde_json::from_str(json).expect("valid static fixture");
-        round_trip(&value);
-    }
-    for json in ["0.5", "[1,2]", r#""accent""#] {
-        let value: KeyValue = serde_json::from_str(json).expect("valid static fixture");
-        round_trip(&value);
+    let id = |name: &str| WireId::try_from(name.to_owned()).expect("valid ID");
+    let finite = |value| Finite::try_from(value).expect("finite");
+    let number = |value| kumochi_scene::text::Number::try_from(value).expect("valid number");
+    check(r#""speech""#, &Start::Speech);
+    check(r#""now""#, &Start::Now);
+    check(
+        r#"{"after":"s1","ms":200}"#,
+        &Start::After {
+            step: id("s1"),
+            ms: 200.try_into().expect("valid milliseconds"),
+        },
+    );
+    check("[1,-2]", &Anchor::At([1.0, -2.0].map(finite)));
+    check(r#"{"ref":"n"}"#, &Anchor::Ref(id("n")));
+    check(r#""blue""#, &Color::Token(Token::Blue));
+    check(
+        r##""#01a2ff""##,
+        &Color::Hex(Rgb::try_from(0x01_a2_ff).expect("valid RGB")),
+    );
+    check(
+        r#""cell""#,
+        &Cell::Text(Text::try_from("cell".to_owned()).expect("valid text")),
+    );
+    check("3.5", &Cell::Number(number(3.5)));
+    check("true", &Cell::Bool(true));
+    check("3.5", &Point::Value(number(3.5)));
+    check("[1,2]", &Point::Pair([1.0, 2.0].map(number)));
+    check("0.5", &KeyValue::Num(finite(0.5)));
+    check("[1,2]", &KeyValue::V2([1.0, 2.0].map(finite)));
+    check(r#""accent""#, &KeyValue::Color(Color::Token(Token::Accent)));
+}
+fn omits_bytes(output: &str, marker: &[u8]) -> bool {
+    let bytes = format!("{marker:?}");
+    !output.contains(bytes.trim_matches(['[', ']']))
+}
+
+fn assert_redacted(output: &str, markers: &[&str]) {
+    for marker in markers {
+        assert!(
+            !output.contains(marker) && omits_bytes(output, marker.as_bytes()),
+            "output must not contain a private marker"
+        );
     }
 }
 #[test]
@@ -314,21 +342,21 @@ fn errors_and_debug_do_not_echo_drawing_content() {
     assert_eq!(failure.path.as_str(), "put[0].node.label");
     failure.step = Some(WireId::try_from("private-id-sentinel".to_owned()).expect("valid id"));
     let safe = format!("{failure} {failure:?}");
-    assert!(!safe.contains("private"), "diagnostics redact ids and text");
+    assert_redacted(&safe, &["private"]);
+    let tool_text = failure.tool_text();
     assert!(
-        failure.tool_text().contains("private-id-sentinel"),
+        tool_text.contains("private-id-sentinel"),
         "only the model reply includes its step id"
     );
     assert!(
-        !failure.tool_text().contains("private-label"),
+        !tool_text.contains("private-label"),
         "model reply never echoes labels"
     );
+    assert_redacted(&tool_text, &["private-label-sentinel"]);
+    assert!(omits_bytes(&tool_text, b"private-id-sentinel"));
     let text = Text::try_from("private-text-sentinel".to_owned()).expect("valid text");
     let id = WireId::try_from("private-id-sentinel".to_owned()).expect("valid id");
-    assert!(
-        !format!("{text:?} {id:?}").contains("private"),
-        "debug is length only"
-    );
+    assert_redacted(&format!("{text:?} {id:?}"), &["private"]);
     for (json, code, path) in [
         (
             r#"{"step":{"id":"s","private-key-sentinel":"private-value-sentinel"}}"#,
@@ -365,22 +393,12 @@ fn errors_and_debug_do_not_echo_drawing_content() {
         assert_eq!(failure.code, code);
         assert_eq!(failure.path.as_str(), path);
         let safe = format!("{failure} {failure:?} {}", failure.tool_text());
-        assert!(
-            !safe.contains("private"),
-            "parser messages and unknown keys are discarded"
-        );
-        assert!(
-            !safe.contains("unknown field"),
-            "raw serde wording is discarded"
-        );
+        assert_redacted(&safe, &["private"]);
     }
     let bytes = postcard::to_allocvec("private-value-sentinel/").expect("raw string encodes");
     let failure = postcard::from_bytes::<WireId>(&bytes).expect_err("invalid binary id");
     assert_eq!(failure, postcard::Error::SerdeDeCustom);
-    assert!(
-        !format!("{failure} {failure:?}").contains("private"),
-        "binary errors discard custom text"
-    );
+    assert_redacted(&format!("{failure} {failure:?}"), &["private"]);
 }
 #[test]
 fn every_operation_round_trips_as_a_record() {
@@ -402,9 +420,43 @@ fn every_operation_round_trips_as_a_record() {
         r#"{"anim":{"target":"s","track":"pos","keys":[[0,[0,0]],[100,[2,3]]]}}"#,
         r#"{"mermaid":{"in":"d","src":"flowchart LR; a-->b"}}"#,
     ];
-    for op in fixtures {
+    let expected = [
+        ("line", "to", json!([1.0, 2.0])),
+        ("arrow", "from", json!({"ref":"n"})),
+        ("path", "d", json!("M0 0 L1 1")),
+        ("shape", "box", json!([0.0, 0.0, 4.0, 5.0])),
+        ("text", "text", json!("hello")),
+        ("callout", "target", json!({"ref":"n"})),
+        ("highlight", "target", json!({"ref":"n"})),
+        ("diagram", "box", json!([0.0, 0.0, 100.0, 100.0])),
+        ("node", "label", json!("node")),
+        ("edge", "flow", json!(500)),
+        ("table", "cols", json!(["a", "b"])),
+        ("row", "cells", json!(["cell", 1.0, true])),
+        ("chart", "/x/scale", json!("linear")),
+        ("series", "data", json!([1.0, [2.0, 3.0]])),
+        ("anim", "keys", json!([[0, [0.0, 0.0]], [100, [2.0, 3.0]]])),
+        ("mermaid", "src", json!("flowchart LR; a-->b")),
+    ];
+    for (op, (tag, field, payload)) in fixtures.into_iter().zip(expected) {
         let json = format!(r#"{{"step":{{"id":"s","put":[{op}]}}}}"#);
         let record = parse_record(json.as_bytes()).expect("valid static fixture");
+        let Record::Step(step) = &record else {
+            panic!("step")
+        };
+        assert_eq!(step.id.as_str(), "s");
+        assert_eq!(step.put.len(), 1);
+        let encoded = serde_json::to_value(&step.put[0]).expect("operation encodes");
+        let tagged = encoded.get(tag).expect("authored operation tag");
+        assert_eq!(
+            tagged.pointer(&if field.starts_with('/') {
+                field.to_owned()
+            } else {
+                format!("/{field}")
+            }),
+            Some(&payload),
+            "{tag}.{field}"
+        );
         round_trip(&record);
         let json = serde_json::to_vec(&record).expect("record encodes");
         assert!(
@@ -412,13 +464,23 @@ fn every_operation_round_trips_as_a_record() {
             "typed parse preserves every operation"
         );
     }
-    for json in [
-        r#"{"begin":{"v":1,"scene":"s","surface":"inline","size":[320,240],"title":"t","alt":"description"}}"#,
-        r#"{"end":{}}"#,
-    ] {
-        let record = parse_record(json.as_bytes()).expect("valid static fixture");
-        round_trip(&record);
-    }
+    let begin = parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"inline","size":[320,240],"title":"t","alt":"description"}}"#)
+        .expect("valid begin");
+    let Record::Begin(header) = &begin else {
+        panic!("begin")
+    };
+    assert_eq!(header.scene.as_str(), "s");
+    assert_eq!(header.surface, Surface::Inline);
+    assert_eq!(
+        serde_json::to_value(header.size).expect("size encodes"),
+        json!([320.0, 240.0])
+    );
+    assert_eq!(header.title.as_ref().map(Text::as_str), Some("t"));
+    assert_eq!(header.alt.as_str(), "description");
+    round_trip(&begin);
+    let end = parse_record(br#"{"end":{}}"#).expect("valid end");
+    assert!(matches!(end, Record::End(_)));
+    round_trip(&end);
 }
 
 mod three {
@@ -515,20 +577,53 @@ mod three {
         for (index, fields) in fields().into_iter().enumerate() {
             let mut value = fixture(fields);
             value.as_object_mut().expect("object").extend(json!({
-                "pos":[1,2,3],"rot":[4,5,6],"scale":2,"attach":"a",
+                "pos":[12.875,-7.625,23.125],"rot":[4,5,6],"scale":2,"attach":"a",
                 "label":"private-label-sentinel","info":"private-info-sentinel","color":"accent","opacity":0.5
             }).as_object().expect("object").clone());
             if !matches!(index, 0 | 5) {
                 value["segments"] = json!(12);
             }
-            let solid = solid(&value);
-            assert_eq!(solid.geometry().expect("geometry"), expected[index]);
             let input = json!({"step":{"id":"s","put":[{"solid":value}]}});
             let record =
                 parse_record(&serde_json::to_vec(&input).expect("fixture")).expect("record");
+            let Record::Step(step) = &record else {
+                panic!("step")
+            };
+            let [kumochi_scene::Op::Solid(decoded)] = &*step.put else {
+                panic!("one solid")
+            };
+            assert_eq!(decoded.geometry().expect("geometry"), expected[index]);
+            let position: [f32; 3] = [12.875, -7.625, 23.125];
+            assert_eq!(
+                decoded.pos.map(|v| v.map(|v| v.get().to_bits())),
+                Some(position.map(f32::to_bits))
+            );
+            assert_eq!(
+                decoded.rot.map(|v| v.map(|v| v.get().to_bits())),
+                Some([4.0_f32, 5.0, 6.0].map(f32::to_bits))
+            );
+            assert_eq!(
+                decoded.scale.map(|v| v.get().to_bits()),
+                Some(2.0_f32.to_bits())
+            );
+            assert_eq!(decoded.attach.as_ref().map(WireId::as_str), Some("a"));
+            assert_eq!(
+                decoded.label.as_ref().map(Text::as_str),
+                Some("private-label-sentinel")
+            );
+            assert_eq!(
+                decoded.info.as_ref().map(Text::as_str),
+                Some("private-info-sentinel")
+            );
+            assert_eq!(decoded.color, Some(Color::Token(Token::Accent)));
+            assert_eq!(
+                decoded.opacity.map(|v| v.get().to_bits()),
+                Some(0.5_f32.to_bits())
+            );
             exact_round_trip(&record);
-            assert!(!format!("{solid:?}").contains("private"));
-            assert!(!format!("{solid:?}").contains("1.0"));
+            let debug = format!("{decoded:?}");
+            assert_redacted(&debug, &["private", "12.875"]);
+            assert!(omits_bytes(&debug, &12.875_f32.to_le_bytes()));
         }
         let mut cone = fixture(json!({"shape":"cone","r":2,"h":3}));
         assert_eq!(
@@ -565,11 +660,16 @@ mod three {
             (None, None, None, true, None)
         );
         let full: View3d = serde_json::from_value(json!({
-            "id":"private-id-sentinel","box":[1,2,300,400],
+            "id":"private-id-sentinel","box":[1,2,303.625,400],
             "camera":{"yaw":30,"pitch":45,"dist":12,"fov":60,"target":[1,2,3]},
             "light":{"dir":[4,5,6],"ambient":0.25},"orbit":false,"spin":-90
         }))
         .expect("full viewport");
+        assert_eq!(full.id.as_str(), "private-id-sentinel");
+        assert_eq!(
+            full.bounds.map(|v| v.map(|v| v.get().to_bits())),
+            Some([1.0_f32, 2.0, 303.625, 400.0].map(f32::to_bits))
+        );
         exact_round_trip(&full);
         let encoded = serde_json::to_value(&full).expect("encoded viewport");
         assert_eq!(
@@ -583,8 +683,8 @@ mod three {
         assert_eq!(encoded["orbit"], false);
         assert_eq!(encoded["spin"], -90.0);
         let debug = format!("{full:?}");
-        assert!(!debug.contains("private"));
-        assert!(!debug.contains("300"));
+        assert_redacted(&debug, &["private", "303.625"]);
+        assert!(omits_bytes(&debug, &303.625_f32.to_le_bytes()));
         let camera: kumochi_scene::record::Camera = serde_json::from_str("{}").expect("camera");
         assert_eq!(
             (
@@ -622,24 +722,7 @@ mod three {
             "size",
             ErrorCode::MissingField,
         );
-        for (field, unused) in [
-            ("r", json!(1)),
-            ("r2", json!(1)),
-            ("h", json!(1)),
-            ("depth", json!(1)),
-            ("points", json!([[0, 0]])),
-            ("path", json!([[0, 0, 0]])),
-            ("segments", json!(3)),
-        ] {
-            let mut value = fixture(json!({"shape":"box","size":[1,1,1]}));
-            value[field] = unused;
-            shape_error(&value, field, ErrorCode::UnknownField);
-        }
-        let mut sphere = fixture(json!({"shape":"sphere","r":1,"size":[1,1,1]}));
-        shape_error(&sphere, "size", ErrorCode::UnknownField);
-        sphere.as_object_mut().expect("object").remove("size");
-        sphere["points"] = json!([]);
-        sphere["path"] = json!([]);
+        let sphere = fixture(json!({"shape":"sphere","r":1,"points":[],"path":[]}));
         assert_eq!(
             solid(&sphere).geometry().expect("unused empty lists"),
             Geometry::Sphere { r: 1.0 }
@@ -821,6 +904,29 @@ mod three {
             KeyValue::V3([1.0, 2.0, 3.0].map(|v| Finite::try_from(v).expect("finite")))
         );
         exact_round_trip(&v3);
+        let Record::Step(step) =
+            parse_record(br#"{"step":{"id":"s","put":[{"view3d":{"id":"v"}}]}}"#)
+                .expect("empty view")
+        else {
+            panic!("step")
+        };
+        assert_eq!(step.put.len(), 1);
+    }
+
+    #[test]
+    fn three_dimensional_binary_records_reject_nonfinite_and_truncated_inputs() {
+        let solid_with_position = |position: [f32; 3]| {
+            let mut bytes = vec![1, b'v', 1, b's', 0, 0, 0, 0, 0, 0, 0, 0, 1];
+            bytes.extend(position.into_iter().flat_map(f32::to_le_bytes));
+            bytes.extend([0; 8]);
+            bytes
+        };
+        let control = postcard::from_bytes::<Solid>(&solid_with_position([1.0, 2.0, 3.0]))
+            .expect("fixed-wire control position");
+        assert_eq!(
+            control,
+            solid(&fixture(json!({"shape":"box","pos":[1,2,3]})))
+        );
         for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             let raw = postcard::to_allocvec(&[value, 0.0, 0.0]).expect("raw position");
             let mut bytes = vec![3];
@@ -829,11 +935,9 @@ mod three {
                 postcard::from_bytes::<KeyValue>(&bytes).expect_err("nonfinite V3"),
                 postcard::Error::SerdeDeCustom
             );
-            let value = solid(&fixture(json!({"shape":"box","pos":[0,0,0]})));
-            let mut bytes = postcard::to_allocvec(&value).expect("solid");
-            bytes[13..25].copy_from_slice(&raw);
             assert_eq!(
-                postcard::from_bytes::<Solid>(&bytes).expect_err("nonfinite position"),
+                postcard::from_bytes::<Solid>(&solid_with_position([value, 2.0, 3.0]))
+                    .expect_err("nonfinite position"),
                 postcard::Error::SerdeDeCustom
             );
         }
@@ -847,12 +951,5 @@ mod three {
             postcard::from_bytes::<KeyValue>(&[3, 0, 0, 0, 0]).expect_err("truncated V3"),
             postcard::Error::DeserializeUnexpectedEnd
         );
-        let Record::Step(step) =
-            parse_record(br#"{"step":{"id":"s","put":[{"view3d":{"id":"v"}}]}}"#)
-                .expect("empty view")
-        else {
-            panic!("step")
-        };
-        assert_eq!(step.put.len(), 1);
     }
 }

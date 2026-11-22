@@ -449,6 +449,7 @@ pub(super) fn header(
 mod tests {
     use super::super::tests::Measure;
     use super::*;
+    use crate::display::TextMeasure;
     use crate::{display::Prim, theme::Theme};
     use std::{collections::BTreeMap, sync::atomic::AtomicBool};
     #[test]
@@ -456,12 +457,12 @@ mod tests {
         for log in [false, true] {
             assert_eq!(
                 Domain {
-                    min: 0.0,
-                    max: 12.0,
+                    min: 1.0,
+                    max: 14.0,
                     log
                 }
                 .ticks(),
-                [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
+                [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
             );
         }
     }
@@ -482,8 +483,16 @@ mod tests {
             screen: None,
         };
         let (plot, out) = header(&chart, &[&series], &mut build).expect("header");
-        assert_eq!(plot.y.min.to_bits(), 2.0_f64.log10().to_bits());
-        assert_eq!(plot.y.max.to_bits(), 8.0_f64.log10().to_bits());
+        assert!((plot.y.value(plot.y.min) - 2.0).abs() < 1e-12);
+        assert!((plot.y.value(plot.y.max) - 8.0).abs() < 1e-12);
+        let frame = plot.frame;
+        for (value, y) in [
+            (2.0, frame.max().y),
+            (4.0, frame.center().y),
+            (8.0, frame.origin.y),
+        ] {
+            assert!((plot.at(0.0, value).y - y).abs() < 1e-4);
+        }
         assert_eq!(
             out.output
                 .iter()
@@ -497,7 +506,6 @@ mod tests {
                 .count(),
             0
         );
-        assert_eq!(plot.frame.origin.x.to_bits(), 22.0_f32.to_bits());
     }
 
     #[test]
@@ -517,26 +525,32 @@ mod tests {
             screen: None,
         };
         let (plot, out) = header(&chart, &[&series], &mut build).expect("header");
-        let labels: Vec<_> = out
-            .output
-            .iter()
-            .filter_map(|p| match p {
+        for (label, right) in [("1.0e-6", false), ("1M", true)] {
+            let mut labels = out.output.iter().filter_map(|p| match p {
                 Prim::Text {
                     origin,
                     text,
+                    style,
+                    max_width,
                     align: Align::Center,
                     ..
-                } => Some((origin.x, text.as_str())),
+                } if text.as_str() == label => Some((
+                    origin.x,
+                    Measure
+                        .measure(text.as_str(), *style, *max_width)
+                        .expect("label measurement")[0],
+                )),
                 _ => None,
-            })
-            .collect();
-        assert_eq!(
-            labels.iter().map(|(_, text)| *text).collect::<Vec<_>>(),
-            ["1.0e-6", "1.0e-4", "0.01", "1", "100", "10k", "1M"]
-        );
-        assert_eq!(labels[0].0.to_bits(), plot.frame.origin.x.to_bits());
-        // The "1M" label measures two glyphs at 7 px each.
-        assert_eq!((labels[6].0 + 14.0).to_bits(), plot.frame.max().x.to_bits());
+            });
+            let (x, width) = labels.next().expect("edge decade label");
+            assert_eq!(labels.next(), None, "each edge decade is only painted once");
+            let (edge, expected) = if right {
+                (x + width, plot.frame.max().x)
+            } else {
+                (x, plot.frame.origin.x)
+            };
+            assert!((edge - expected).abs() < 1e-4, "{label} at the plot edge");
+        }
     }
 
     #[test]
@@ -587,6 +601,9 @@ mod tests {
                 range.min.is_finite() && range.max.is_finite() && range.max > range.min,
                 "finite expanded domain"
             );
+            assert!((range.min..=range.max).contains(&value));
+            let ticks = range.ticks();
+            assert!(!ticks.is_empty() && ticks.iter().all(|&tick| range.value(tick).is_finite()));
         }
         let axis: Axis =
             serde_json::from_str(r#"{"min":1,"max":100,"scale":"log"}"#).expect("axis");
@@ -604,9 +621,15 @@ mod tests {
                 range.min.is_finite() && range.max.is_finite() && range.max > range.min,
                 "finite log extremes"
             );
+            assert!((range.min..=range.max).contains(&value.log10()));
+            let ticks = range.ticks();
+            assert!(!ticks.is_empty());
             assert!(
-                range.ticks().iter().all(|v| range.value(*v).is_finite()),
-                "finite log ticks"
+                ticks.iter().all(|&tick| {
+                    let value = range.value(tick);
+                    value.is_finite() && value > 0.0
+                }),
+                "finite positive log ticks"
             );
         }
         let axis = Axis {
@@ -624,8 +647,10 @@ mod tests {
             ..Axis::default()
         };
         let range = domain(2.0, 5.0, &axis, None, None);
-        assert_eq!(range.min.to_bits(), 0.0_f64.to_bits());
-        assert_eq!(range.max.to_bits(), 1.0_f64.to_bits());
+        assert!((range.value(range.min) - 1.0).abs() < 1e-12);
+        assert!((range.value(range.max) - 10.0).abs() < 1e-12);
+        assert_eq!(range.fraction(1.0).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(range.fraction(10.0).to_bits(), 1.0_f32.to_bits());
         let chart: Chart = serde_json::from_str(
             r#"{"id":"c","box":[0,0,400,300],"kind":"line","y":{"min":1,"max":100,"scale":"log"}}"#,
         )
@@ -642,30 +667,37 @@ mod tests {
             screen: None,
         };
         let (plot, out) = header(&chart, &[&series], &mut build).expect("header");
-        let mut texts = Vec::new();
-        let mut centres = Vec::new();
-        for p in &out.output {
-            if let Prim::Text {
-                origin,
-                text,
-                style,
-                max_width,
-                align: Align::Right,
-                ..
-            } = p
-            {
-                texts.push(text.as_str());
-                centres.push(origin.y + style.size * 0.65);
-                assert_eq!(max_width.map(f32::to_bits), Some(29.0_f32.to_bits()));
-            }
-        }
-        assert_eq!(texts, ["1", "10", "100"]);
+        let labels: Vec<_> = out
+            .output
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Text {
+                    origin,
+                    text,
+                    style,
+                    max_width,
+                    align: Align::Right,
+                    ..
+                } => {
+                    let height = Measure
+                        .measure(text.as_str(), *style, *max_width)
+                        .expect("label measurement")[1];
+                    Some((text.as_str(), origin.y + height * 0.5))
+                }
+                _ => None,
+            })
+            .collect();
         let frame = plot.frame;
-        for (centre, expected) in centres.into_iter().zip([
-            frame.max().y,
-            frame.origin.y + frame.size.y * 0.5,
-            frame.origin.y,
-        ]) {
+        assert_eq!(labels.len(), 3);
+        for (label, expected) in [
+            ("1", frame.max().y),
+            ("10", frame.center().y),
+            ("100", frame.origin.y),
+        ] {
+            let &(_, centre) = labels
+                .iter()
+                .find(|&&(text, _)| text == label)
+                .expect("decade label");
             assert!(
                 (centre - expected).abs() < 1e-4,
                 "decade label centred on its tick"

@@ -306,7 +306,7 @@ mod three {
     }
 
     #[test]
-    fn solid_text_and_list_decode_caps_apply_in_both_formats() {
+    fn solid_text_decode_caps_apply_in_both_formats() {
         for count in [400, 401] {
             let info = "é".repeat(count);
             let input = json!({"step":{"id":"s","put":[{"solid":{"id":"s","in":"v","shape":"box","info":info}}]}});
@@ -336,31 +336,62 @@ mod three {
                 );
             }
         }
+    }
+
+    #[test]
+    fn solid_list_decode_caps_apply_in_both_formats() {
         for field in ["points", "path"] {
-            for count in [512, 513] {
-                let list = if field == "points" {
-                    json!(vec![[0.0_f32; 2]; count])
-                } else {
-                    json!(vec![[0.0_f32; 3]; count])
-                };
+            for count in [512_u16, 513] {
+                let points: Vec<_> = (0..count)
+                    .map(|i| [f32::from(i), -f32::from(i) - 1.0])
+                    .collect();
+                let path: Vec<_> = points.iter().map(|&[x, y]| [x, y, x + 2.0]).collect();
                 let mut solid = json!({"id":"s","in":"v","shape":"box"});
-                solid[field] = list;
+                solid[field] = if field == "points" {
+                    json!(points)
+                } else {
+                    json!(path)
+                };
                 let input = json!({"step":{"id":"s","put":[{"solid":solid}]}});
                 if count == 512 {
                     let record = parse(&input).expect("exact list cap");
                     let bytes = postcard::to_allocvec(&record).expect("binary list");
-                    assert_eq!(
-                        postcard::from_bytes::<Record>(&bytes).expect("exact binary list"),
-                        record
-                    );
+                    let binary = postcard::from_bytes::<Record>(&bytes).expect("exact binary list");
+                    assert_eq!(binary, record);
+                    for decoded in [record, binary] {
+                        let Record::Step(step) = decoded else {
+                            panic!("step")
+                        };
+                        let Op::Solid(solid) = &step.put[0] else {
+                            panic!("solid")
+                        };
+                        if field == "points" {
+                            assert_eq!(solid.points.len(), 512);
+                            assert!(
+                                solid
+                                    .points
+                                    .iter()
+                                    .map(|p| p.map(Finite::get))
+                                    .eq(points.iter().copied())
+                            );
+                        } else {
+                            assert_eq!(solid.path.len(), 512);
+                            assert!(
+                                solid
+                                    .path
+                                    .iter()
+                                    .map(|p| p.map(Finite::get))
+                                    .eq(path.iter().copied())
+                            );
+                        }
+                    }
                 } else {
                     let error = parse(&input).expect_err("excess list");
                     assert_eq!(error.code, ErrorCode::TooLong);
                     assert_eq!(error.path.as_str(), format!("put[0].solid.{field}[512]"));
                 }
                 if field == "points" {
-                    let bytes =
-                        postcard::to_allocvec(&vec![[0.0_f32; 2]; count]).expect("raw outline");
+                    let bytes = postcard::to_allocvec(&points).expect("raw outline");
                     let decoded = postcard::from_bytes::<Bounded<[Finite; 2], 512>>(&bytes);
                     if count == 512 {
                         assert_eq!(decoded.expect("binary cap").len(), 512);
@@ -371,8 +402,7 @@ mod three {
                         );
                     }
                 } else {
-                    let bytes =
-                        postcard::to_allocvec(&vec![[0.0_f32; 3]; count]).expect("raw path");
+                    let bytes = postcard::to_allocvec(&path).expect("raw path");
                     let decoded = postcard::from_bytes::<Bounded<[Finite; 3], 512>>(&bytes);
                     if count == 512 {
                         assert_eq!(decoded.expect("binary cap").len(), 512);

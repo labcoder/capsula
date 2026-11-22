@@ -981,33 +981,35 @@ mod tests {
             panic!("begin");
         };
         let mut before = LayoutState::new(&SceneState::begin(header).expect("scene"));
-        let points: Arc<[Vec2]> =
-            Arc::from([Vec2::default(), Vec2::new(1.0, 1.0), Vec2::new(2.0, 0.0)]);
         let color =
             crate::display::Paint::from(crate::record::Rgb::try_from(0x00ff_ffff).expect("RGB"));
-        let item = Item {
-            handle: Handle::new(1, 0).expect("handle"),
-            parent: None,
-            bounds: Rect::default(),
-            transform: Affine::default(),
-            opacity: 1.0,
-            primitives: Arc::from([
-                Prim::Line {
-                    points: Arc::clone(&points),
-                    closed: false,
-                    color,
-                    width: 1.0,
-                    dashed: false,
-                },
-                Prim::Fill { points, color },
-            ]),
-        };
+        let (item, _, [allocated, released]) = crate::allocation::usage(|| {
+            let points: Arc<[Vec2]> =
+                Arc::from([Vec2::default(), Vec2::new(1.0, 1.0), Vec2::new(2.0, 0.0)]);
+            Item {
+                handle: Handle::new(1, 0).expect("handle"),
+                parent: None,
+                bounds: Rect::default(),
+                transform: Affine::default(),
+                opacity: 1.0,
+                primitives: Arc::from([
+                    Prim::Line {
+                        points: Arc::clone(&points),
+                        closed: false,
+                        color,
+                        width: 1.0,
+                        dashed: false,
+                    },
+                    Prim::Fill { points, color },
+                ]),
+            }
+        });
         assert_eq!(
             residency(
                 before.objects.values().map(|o| &o.item),
                 std::slice::from_ref(&item)
             ),
-            2 * heap::ARC_HEADER + 2 * size_of::<Prim>() + 3 * size_of::<Vec2>(),
+            allocated - released,
             "one primitive array and one vertex array shared by the stroke and the fill"
         );
         let crate::Record::Step(step) = crate::parse_record(
@@ -1027,13 +1029,24 @@ mod tests {
             ),
             0
         );
-        let recolored = Item {
-            primitives: item.primitives.to_vec().into(),
-            ..item
-        };
+        let (recolored, _, [allocated, released]) = crate::allocation::usage(|| {
+            let mut prims = item.primitives.to_vec();
+            for prim in &mut prims {
+                match prim {
+                    Prim::Line { color, .. } | Prim::Fill { color, .. } => {
+                        *color = color.faded(0.5);
+                    }
+                    _ => panic!("stroke and fill fixture"),
+                }
+            }
+            Item {
+                primitives: prims.into(),
+                ..item
+            }
+        });
         assert_eq!(
             residency(before.objects.values().map(|o| &o.item), &[recolored]),
-            heap::ARC_HEADER + 2 * size_of::<Prim>()
+            allocated - released
         );
     }
 }

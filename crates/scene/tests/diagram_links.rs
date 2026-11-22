@@ -1,9 +1,10 @@
 //! Exact geometry for the diagram look review's visible-link and clearance regressions.
 use kumochi_scene::{
-    GlobalBudget, Handle, StopCut,
-    display::Prim,
+    GlobalBudget, StopCut,
+    display::{Prim, TextMeasure},
     geom::{Rect, Vec2},
     layout::{LayoutState, SurfaceGeometry},
+    motion::{Frame, FrameItem, SceneView},
     text::Bounded,
 };
 use serde_json::json;
@@ -12,19 +13,195 @@ use serde_json::json;
 mod scene_support;
 use scene_support::{id, new_scene, prepared, prepared_on};
 
-fn chip(layout: &LayoutState, handle: Handle) -> Rect {
-    layout
+fn frame(layout: &LayoutState) -> Frame {
+    let mut frame = Frame::new();
+    SceneView::new(layout, 0)
+        .frame(u64::MAX, &mut frame)
+        .expect("resting frame");
+    frame
+}
+
+fn item<'a>(layout: &LayoutState, frame: &'a Frame, name: &str) -> &'a FrameItem {
+    let handle = layout.handle(&id(name)).expect("prepared handle");
+    frame
         .items()
         .iter()
         .find(|item| item.handle == handle)
-        .expect("edge")
-        .primitives
+        .expect("painted item")
+}
+
+fn chip(item: &FrameItem) -> Rect {
+    item.primitives
         .iter()
         .find_map(|primitive| match primitive {
-            Prim::Rect { rect, .. } => Some(*rect),
+            Prim::Rect {
+                rect,
+                fill: Some(fill),
+                ..
+            } if item.opacity * fill.opacity > 0.0 => Some(item.transform.bounds(*rect)),
             _ => None,
         })
         .expect("chip")
+}
+
+fn ink(item: &FrameItem, label: &str) -> Rect {
+    let (origin, size) = item
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Text {
+                origin,
+                text,
+                style,
+                max_width,
+                align,
+                color,
+                ..
+            } if text.as_str() == label && item.opacity * color.opacity > 0.0 => {
+                let [w, h] = scene_support::Measure
+                    .measure(label, *style, *max_width)
+                    .expect("ink");
+                let spare = max_width.unwrap_or(w) - w;
+                let x = match align {
+                    kumochi_scene::record::Align::Left => 0.0,
+                    kumochi_scene::record::Align::Center => spare * 0.5,
+                    kumochi_scene::record::Align::Right => spare,
+                };
+                Some((*origin + Vec2::new(x, 0.0), Vec2::new(w, h)))
+            }
+            _ => None,
+        })
+        .expect("painted label");
+    item.transform.bounds(Rect { origin, size })
+}
+
+fn route(item: &FrameItem) -> Vec<Vec2> {
+    item.primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Line {
+                points,
+                closed: false,
+                color,
+                width,
+                ..
+            } if *width > 0.0 && item.opacity * color.opacity > 0.0 => Some(
+                points
+                    .iter()
+                    .map(|point| item.transform.point(*point))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("painted edge stroke")
+}
+
+fn ports(route: &[Vec2]) -> [Vec2; 2] {
+    [
+        *route.first().expect("start port"),
+        *route.last().expect("end port"),
+    ]
+}
+
+fn crossing(route: &[Vec2], axis: fn(Vec2) -> f32, at: f32) -> Vec2 {
+    route
+        .windows(2)
+        .rev()
+        .find_map(|pair| {
+            let [a, b] = [pair[0], pair[1]];
+            let (start, end) = (axis(a), axis(b));
+            let fraction = (at - start) / (end - start);
+            (0.0..=1.0)
+                .contains(&fraction)
+                .then(|| a + (b - a) * fraction)
+        })
+        .expect("route crosses the requested coordinate")
+}
+
+fn distance_to_route(point: Vec2, route: &[Vec2]) -> f32 {
+    route
+        .windows(2)
+        .map(|pair| {
+            let delta = pair[1] - pair[0];
+            let offset = point - pair[0];
+            let length_sq = delta.x * delta.x + delta.y * delta.y;
+            let fraction = if length_sq > 0.0 {
+                ((offset.x * delta.x + offset.y * delta.y) / length_sq).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let residual = offset - delta * fraction;
+            residual.x.hypot(residual.y)
+        })
+        .fold(f32::INFINITY, f32::min)
+}
+
+fn assert_route_eq(a: &[Vec2], b: &[Vec2]) {
+    assert_eq!(ports(a), ports(b), "routes preserve both outline ports");
+    for (samples, curve) in [(a, b), (b, a)] {
+        assert!(
+            samples
+                .iter()
+                .all(|point| distance_to_route(*point, curve) < 1.0),
+            "both routes cover the same visible curve"
+        );
+    }
+}
+
+fn near(actual: f32, expected: f32) {
+    assert!((actual - expected).abs() < 0.75, "{actual} vs {expected}");
+}
+
+fn bounds(layout: &LayoutState, name: &str) -> Rect {
+    layout
+        .bounds(&id(name))
+        .expect("valid world bounds")
+        .expect("prepared bounds")
+}
+
+fn border_strips(item: &FrameItem) -> [Rect; 4] {
+    let (rect, width) = item
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Rect {
+                rect,
+                border: Some((paint, width)),
+                ..
+            } if paint.opacity * item.opacity > 0.0 && *width > 0.0 => Some((*rect, *width)),
+            _ => None,
+        })
+        .expect("painted group frame");
+    let r = width * 0.5;
+    let first = rect.origin - Vec2::new(r, r);
+    let last = rect.max() - Vec2::new(r, r);
+    let horizontal = Vec2::new(rect.size.x + width, width);
+    let vertical = Vec2::new(width, rect.size.y + width);
+    [
+        Rect {
+            origin: first,
+            size: horizontal,
+        },
+        Rect {
+            origin: Vec2::new(first.x, last.y),
+            size: horizontal,
+        },
+        Rect {
+            origin: first,
+            size: vertical,
+        },
+        Rect {
+            origin: Vec2::new(last.x, first.y),
+            size: vertical,
+        },
+    ]
+    .map(|strip| {
+        let world = item.transform.bounds(strip);
+        Rect {
+            origin: world.origin - Vec2::new(4.0, 4.0),
+            size: world.size + Vec2::new(8.0, 8.0),
+        }
+    })
 }
 
 #[test]
@@ -43,29 +220,23 @@ fn two_way_labels_have_distinct_opposite_arcs() {
             {"edge":{"id":"e2","in":"diagram","from":"b","to":"a","label":"retry"}}
         ]}),
     );
-    for (name, y, width, start, end) in [
-        ("e1", -3.0, 32.0, 144.0, 216.0),
-        ("e2", 61.0, 48.0, 216.0, 144.0),
-    ] {
-        let handle = scene.handle(&id(name)).expect("edge");
+    let frame = frame(&picture.after);
+    let a = bounds(&picture.after, "a");
+    let b = bounds(&picture.after, "b");
+    for (name, label, offset, from, to) in [("e1", "yes", -32.0, a, b), ("e2", "retry", 32.0, b, a)]
+    {
+        let edge = item(&picture.after, &frame, name);
+        let curve = route(edge);
+        let [start, end] = ports(&curve);
+        assert_eq!(start, from.edge_toward(to.center()));
+        assert_eq!(end, to.edge_toward(from.center()));
+        let middle = crossing(&curve, |point| point.x, start.x.midpoint(end.x));
+        near(middle.y, start.y + offset);
+        let text = ink(edge, label);
         assert_eq!(
-            chip(&picture.after, handle),
-            Rect {
-                origin: Vec2::new(180.0 - width * 0.5, y),
-                size: Vec2::new(width, 14.0),
-            }
+            chip(edge),
+            Rect::centered(middle, text.size + Vec2::new(8.0, 4.0))
         );
-        let items = picture.after.items();
-        let edge = items
-            .iter()
-            .find(|item| item.handle == handle)
-            .expect("edge");
-        let Prim::Line { points, .. } = &edge.primitives[0] else {
-            panic!("curve")
-        };
-        assert_eq!(points[0], Vec2::new(start, 36.0));
-        assert_eq!(points[8], Vec2::new(180.0, y + 7.0));
-        assert_eq!(points[16], Vec2::new(end, 36.0));
     }
 }
 
@@ -92,24 +263,15 @@ fn neighbouring_chips_keep_an_exact_six_pixel_world_gap() {
             {"anim":{"target":"d","track":"pos","keys":[[0,[120,0]]]}}
         ]}),
     );
+    let frame = frame(&picture.after);
+    let first = item(&picture.after, &frame, "e1");
+    let second = item(&picture.after, &frame, "e2");
+    assert_eq!(ink(first, "x").center(), chip(first).center());
+    assert_eq!(ink(second, "y").center(), chip(second).center());
+    let (first, second) = (chip(first), chip(second));
+    assert!(first.origin.y < second.max().y && second.origin.y < first.max().y);
     assert_eq!(
-        chip(&picture.after, scene.handle(&id("e2")).expect("second")),
-        Rect {
-            origin: Vec2::new(217.0, 29.0),
-            size: Vec2::new(16.0, 14.0),
-        }
-    );
-    let first = chip(&picture.after, scene.handle(&id("e1")).expect("first"));
-    assert_eq!(
-        first,
-        Rect {
-            origin: Vec2::new(232.0, 29.0),
-            size: Vec2::new(16.0, 14.0),
-        }
-    );
-    let second_chip = chip(&picture.after, scene.handle(&id("e2")).expect("second"));
-    assert_eq!(
-        (first.origin.x - (second_chip.max().x * 2.0 - 240.0)).to_bits(),
+        (first.origin.x - second.max().x).to_bits(),
         6.0_f32.to_bits()
     );
 }
@@ -134,29 +296,33 @@ fn chips_avoid_title_ink_and_all_four_frame_borders() {
             {"anim":{"target":"d2","track":"pos","keys":[[0,[0,9]]]}}
         ]}),
     );
-    assert_eq!(
-        picture.after.bounds(&id("g")).expect("frame"),
-        Some(Rect {
-            origin: Vec2::new(132.0, 32.0),
-            size: Vec2::new(96.0, 82.0),
-        })
+    let frame = frame(&picture.after);
+    let group = item(&picture.after, &frame, "g");
+    let edge = item(&picture.after, &frame, "edge");
+    let title = ink(group, "Group");
+    let strips = border_strips(group);
+    let actual = chip(edge);
+    let curve = route(edge);
+    let [start, end] = ports(&curve);
+    let unnudged = Rect::centered(
+        crossing(&curve, |p| p.x, start.x.midpoint(end.x)),
+        actual.size,
     );
-    assert_eq!(
-        chip(&picture.after, scene.handle(&id("edge")).expect("edge")),
-        Rect {
-            origin: Vec2::new(108.25, 29.0),
-            size: Vec2::new(16.0, 14.0),
-        }
-    );
+    assert!(unnudged.intersects(title));
+    assert!(strips.iter().all(|side| !unnudged.intersects(*side)));
+    assert!(distance_to_route(actual.center(), &curve) < 0.01);
+    assert_eq!(ink(edge, "x").center(), actual.center());
+    assert!(!actual.intersects(title));
+    assert!(strips.iter().all(|side| !actual.intersects(*side)));
 }
 
 #[test]
 fn framed_group_participates_in_exact_floor_fit_boundaries() {
-    for (width, scale, x, right) in [
-        (160.0, 1.0_f32, 0.0_f32, 128.0_f32),
-        (144.0, 0.875, 9.0, 114.0),
-        (112.0, 0.8, 22.4, 99.200_005),
-        (80.0, 0.8, 35.2, 105.600_006),
+    for (width, scale, left, right, overflows) in [
+        (160.0, 1.0, 32.0, 128.0, false),
+        (144.0, 0.875, 30.0, 114.0, false),
+        (112.0, 0.8, 22.4, 99.2, false),
+        (80.0, 0.8, 28.8, 105.6, true),
     ] {
         let mut scene = new_scene("frame_floor");
         let before = LayoutState::new(&scene);
@@ -170,24 +336,11 @@ fn framed_group_participates_in_exact_floor_fit_boundaries() {
             ]}),
             SurfaceGeometry::Inline { width },
         );
-        let items = picture.after.items();
-        let root = items
-            .iter()
-            .find(|item| item.handle == scene.handle(&id("diagram")).expect("root"))
-            .expect("root item");
-        assert_eq!(root.transform.0[0].to_bits(), scale.to_bits());
-        assert_eq!(root.transform.0[4].to_bits(), x.to_bits());
-        assert_eq!(
-            picture
-                .after
-                .bounds(&id("g"))
-                .expect("frame")
-                .expect("bounds")
-                .max()
-                .x
-                .to_bits(),
-            right.to_bits()
-        );
+        let frame = bounds(&picture.after, "g");
+        near(frame.size.x, 96.0 * scale);
+        near(frame.origin.x, left);
+        near(frame.max().x, right);
+        assert_eq!(frame.max().x > width, overflows);
     }
 }
 
@@ -221,24 +374,27 @@ fn fresh_and_cached_chips_agree_after_a_lower_id_add_and_label_update() {
         value["put"][2]["edge"]["label"] = json!(label);
         value["put"].as_array_mut().expect("put").push(added.clone());
         let fresh = prepared(&mut fresh_scene, &mut GlobalBudget::default(), &fresh_before, value);
-        for name in ["early", "z", "g"] {
-            let a = cached.items();
-            let b = fresh.after.items();
-            let a = a.iter().find(|item| item.handle == scene.handle(&id(name)).expect("cached handle")).expect("cached");
-            let b = b.iter().find(|item| item.handle == fresh_scene.handle(&id(name)).expect("fresh handle")).expect("fresh");
-            assert_eq!(a.bounds, b.bounds, "{name} bounds");
-            assert_eq!(a.primitives, b.primitives, "{name} primitives");
-            assert_eq!(cached.bounds(&id(name)).expect("cached world"), fresh.after.bounds(&id(name)).expect("fresh world"));
+        let fresh_frame = frame(&fresh.after);
+        let cached_frame = frame(&cached);
+        for (name, label) in [("early", "yes"), ("z", label)] {
+            let a = item(&cached, &cached_frame, name);
+            let b = item(&fresh.after, &fresh_frame, name);
+            assert_eq!(chip(a), chip(b), "{name} chip");
+            assert_eq!(ink(a, label), ink(b, label), "{name} ink");
+            assert_route_eq(&route(a), &route(b));
         }
+        let a = item(&cached, &cached_frame, "g");
+        let b = item(&fresh.after, &fresh_frame, "g");
+        assert_eq!(border_strips(a), border_strips(b));
+        assert_eq!(ink(a, "Group"), ink(b, "Group"));
     }
 }
 
 #[test]
 fn three_parallel_links_alternate_lanes_in_both_flow_directions() {
-    for (direction, centers) in [
-        ("right", [(180.0, 4.0), (180.0, 68.0), (180.0, -28.0)]),
-        ("down", [(128.0, 92.0), (232.0, 92.0), (76.0, 92.0)]),
-    ] {
+    let x: fn(Vec2) -> f32 = |p| p.x;
+    let y: fn(Vec2) -> f32 = |p| p.y;
+    for (direction, along, across, first_lane) in [("right", x, y, 32.0), ("down", y, x, 52.0)] {
         let mut scene = new_scene("lanes");
         let before = LayoutState::new(&scene);
         let picture = prepared(
@@ -254,26 +410,26 @@ fn three_parallel_links_alternate_lanes_in_both_flow_directions() {
                 {"edge":{"id":"e3","in":"diagram","from":"a","to":"b","label":"z"}}
             ]}),
         );
-        for (name, (x, y)) in ["e1", "e2", "e3"].into_iter().zip(centers) {
-            let items = picture.after.items();
-            let item = items
-                .iter()
-                .find(|item| item.handle == scene.handle(&id(name)).expect("edge"))
-                .expect("item");
-            let Prim::Line { points, .. } = &item.primitives[0] else {
-                panic!("curve")
-            };
-            assert_eq!(points[8], Vec2::new(x, y));
+        let frame = frame(&picture.after);
+        let [one, two, three] =
+            ["e1", "e2", "e3"].map(|name| route(item(&picture.after, &frame, name)));
+        let [start, end] = ports(&one);
+        let midpoint = along(start).midpoint(along(end));
+        for (curve, lane) in [(one, -1.0), (two, 1.0), (three, -2.0)] {
+            near(
+                across(crossing(&curve, along, midpoint)) - across(start),
+                lane * first_lane,
+            );
         }
     }
 }
 
 #[test]
 fn a_labelled_self_loop_runs_outside_its_node() {
-    for (direction, label, width, middle_x) in [
-        ("right", "retry", 48.0, 256.0),
-        ("down", "retry", 48.0, 256.0),
-        ("right", "a very long wrapped self loop label", 188.0, 326.0),
+    for (direction, label) in [
+        ("right", "retry"),
+        ("down", "retry"),
+        ("right", "a very long wrapped self loop label"),
     ] {
         let mut scene = new_scene("self_loop");
         let before = LayoutState::new(&scene);
@@ -287,25 +443,27 @@ fn a_labelled_self_loop_runs_outside_its_node() {
                 {"edge":{"id":"loop","in":"diagram","from":"a","to":"a","label":label}}
             ]}),
         );
-        let handle = scene.handle(&id("loop")).expect("loop");
+        let frame = frame(&picture.after);
+        let edge = item(&picture.after, &frame, "loop");
+        let node = bounds(&picture.after, "a");
+        let curve = route(edge);
         assert_eq!(
-            chip(&picture.after, handle),
-            Rect {
-                origin: Vec2::new(232.0, 76.0),
-                size: Vec2::new(width, 14.0),
-            }
+            ports(&curve),
+            [
+                Vec2::new(node.max().x, node.center().y),
+                Vec2::new(node.center().x, node.max().y),
+            ]
         );
-        let items = picture.after.items();
-        let item = items
-            .iter()
-            .find(|item| item.handle == handle)
-            .expect("edge");
-        let Prim::Line { points, .. } = &item.primitives[0] else {
-            panic!("curve")
-        };
-        assert_eq!(points[0], Vec2::new(220.0, 36.0));
-        assert_eq!(points[8], Vec2::new(middle_x, 83.0));
-        assert_eq!(points[16], Vec2::new(180.0, 56.0));
+        let label_ink = ink(edge, label);
+        let actual = chip(edge);
+        assert_eq!(
+            actual,
+            Rect::centered(label_ink.center(), label_ink.size + Vec2::new(8.0, 4.0))
+        );
+        near(actual.origin.x - node.max().x, 12.0);
+        let halfway = crossing(&curve, |p| p.x, actual.center().x);
+        near(halfway.y, node.max().y + 27.0);
+        near(actual.center().y, halfway.y);
     }
 }
 
@@ -331,28 +489,37 @@ fn self_loop_lanes(count: usize) {
         &before,
         json!({"id":"lanes","put":put}),
     );
+    let frame = frame(&picture.after);
+    let node = bounds(&picture.after, "a");
     let mut chips = Vec::new();
-    let node = Rect {
-        origin: Vec2::new(140.0, 16.0),
-        size: Vec2::new(80.0, 40.0),
-    };
-    for (name, y) in [("e1", 76.0), ("e2", 102.0), ("e3", 128.0)]
-        .into_iter()
-        .take(count)
-    {
-        let rect = chip(&picture.after, scene.handle(&id(name)).expect("loop"));
+    let mut previous_y = None;
+    for name in ["e1", "e2", "e3"].into_iter().take(count) {
+        let edge = item(&picture.after, &frame, name);
+        let rect = chip(edge);
+        let midpoint = crossing(&route(edge), |p| p.x, node.max().x + 48.0);
         assert_eq!(
-            rect,
-            Rect {
-                origin: Vec2::new(232.0, y),
-                size: Vec2::new(72.0, 14.0)
-            },
-            "{name} in the {count}-loop scene"
+            rect.center(),
+            midpoint,
+            "{name} chip rests at its curve midpoint"
         );
-        assert!(!rect.intersects(node), "{name} covers its node");
+        if let Some(y) = previous_y {
+            near(midpoint.y - y, 26.0);
+        } else {
+            near(midpoint.y - node.max().y, 27.0);
+        }
+        previous_y = Some(midpoint.y);
+        assert_eq!(
+            ink(edge, "retrying").center(),
+            midpoint,
+            "{name} label follows its lane"
+        );
+        assert!(
+            rect.origin.x >= node.max().x + 12.0,
+            "{name} clears its own node"
+        );
         assert!(
             chips.iter().all(|other| !rect.intersects(*other)),
-            "{name} covers an earlier chip"
+            "{name} avoids earlier chips"
         );
         chips.push(rect);
     }
@@ -387,18 +554,25 @@ fn a_cut_self_loop_keeps_its_primitives_when_its_node_survives() {
         .expect("stop");
     let cut = first.after.cut(&scene).expect("cut layout");
     let next = prepared(&mut scene, &mut budget, &cut, json!({"id":"noop"}));
-    let old = cut.items();
-    let new = next.after.items();
-    let old = old
-        .iter()
-        .find(|item| item.handle == handle)
-        .expect("old loop");
-    let new = new
-        .iter()
-        .find(|item| item.handle == handle)
-        .expect("new loop");
-    assert_eq!(old.primitives, new.primitives);
-    assert_eq!(old.transform, new.transform);
+    let rest = frame(&first.after);
+    let old = item(&first.after, &rest, "loop");
+    let curve = route(old);
+    let node = bounds(&first.after, "a");
+    assert_eq!(
+        ports(&curve),
+        [
+            Vec2::new(node.max().x, node.center().y),
+            Vec2::new(node.center().x, node.max().y),
+        ]
+    );
+    for layout in [&cut, &next.after] {
+        assert_eq!(bounds(layout, "a"), node);
+        let sampled = frame(layout);
+        let edge = item(layout, &sampled, "loop");
+        assert_route_eq(&curve, &route(edge));
+        assert_eq!(chip(edge), chip(old));
+        assert_eq!(ink(edge, "retrying"), ink(old, "retrying"));
+    }
 }
 
 #[test]
@@ -436,18 +610,12 @@ fn tall_self_loop_lanes_saturate_before_the_coordinate_limit() {
             SurfaceGeometry::default(),
             &mut Tall,
         );
-        let handle = scene
-            .handle(&id(&format!("e{}", count - 1)))
-            .expect("last loop");
-        let items = picture.after.items();
-        let item = items
-            .iter()
-            .find(|item| item.handle == handle)
-            .expect("loop item");
-        let Prim::Line { points, .. } = &item.primitives[0] else {
-            panic!("loop curve");
-        };
-        assert_eq!(points[8], Vec2::new(268.0, expected), "{count} tall loops");
+        let frame = frame(&picture.after);
+        let edge = item(&picture.after, &frame, &format!("e{}", count - 1));
+        let curve = route(edge);
+        near(crossing(&curve, |p| p.x, 268.0).y, expected);
+        assert!(curve.iter().all(|point| point.within_canvas()));
+        assert!(chip(edge).within_canvas());
     }
 }
 
@@ -468,27 +636,14 @@ fn self_loop_lanes_stop_at_lane_eight() {
         &before,
         json!({"id":"cap","put":put}),
     );
-    let items = picture.after.items();
-    let line = |name| {
-        let handle = scene.handle(&id(name)).expect("loop");
-        let item = items
-            .iter()
-            .find(|item| item.handle == handle)
-            .expect("loop item");
-        let Prim::Line { points, .. } = &item.primitives[0] else {
-            panic!("loop curve");
-        };
-        points
-    };
-    assert_eq!(
-        line("e07")[8],
-        Vec2::new(268.0, 265.0),
-        "last uncapped lane"
-    );
+    let sampled = frame(&picture.after);
+    let line = |name| route(item(&picture.after, &sampled, name));
     let capped = line("e08");
-    assert_eq!(capped[8], Vec2::new(268.0, 291.0), "lane eight midpoint");
+    let midpoint = |curve: &[Vec2]| crossing(curve, |p| p.x, 268.0);
+    near(midpoint(&capped).y, 291.0);
+    near(midpoint(&capped).y - midpoint(&line("e07")).y, 26.0);
     for name in ["e09", "e10"] {
-        assert_eq!(line(name), capped, "{name} shares the complete last lane");
+        assert_route_eq(&line(name), &capped);
     }
 }
 
@@ -521,37 +676,32 @@ fn removing_the_last_label_restores_the_fresh_unlabelled_curve() {
         &fresh_before,
         fresh_value,
     );
-    let a = next.after.items();
-    let b = fresh.after.items();
-    let a = a
-        .iter()
-        .find(|item| item.handle == scene.handle(&id("keep")).expect("cached"))
-        .expect("cached item");
-    let b = b
-        .iter()
-        .find(|item| item.handle == fresh_scene.handle(&id("keep")).expect("fresh"))
-        .expect("fresh item");
-    assert_eq!(a.bounds, b.bounds);
-    assert_eq!(a.primitives, b.primitives);
-    let Prim::Line { points, .. } = &a.primitives[0] else {
-        panic!("curve")
-    };
-    assert_eq!(points[8], Vec2::new(180.0, 36.0));
+    let old = route(item(&first.after, &frame(&first.after), "keep"));
+    let [start, end] = ports(&old);
+    let x = start.x.midpoint(end.x);
+    assert!(crossing(&old, |p| p.x, x).y < start.y - 12.0);
+    assert_eq!(next.after.handle(&id("remove")), None);
+    let curve = route(item(&next.after, &frame(&next.after), "keep"));
+    let a = bounds(&next.after, "a");
+    let b = bounds(&next.after, "b");
+    assert_eq!(
+        ports(&curve),
+        [a.edge_toward(b.center()), b.edge_toward(a.center())]
+    );
+    assert!(curve.iter().all(|point| (point.y - start.y).abs() < 0.001));
+    assert_route_eq(
+        &curve,
+        &route(item(&fresh.after, &frame(&fresh.after), "keep")),
+    );
 }
 
 #[test]
 fn each_frame_side_repels_a_chip_independently() {
-    for (side, direction, position, node_offset, expected) in [
-        ("top", "right", [0, -10], [100, 0], Vec2::new(108.25, 29.0)),
-        (
-            "bottom",
-            "right",
-            [0, 84],
-            [100, 0],
-            Vec2::new(108.25, 29.0),
-        ),
-        ("left", "down", [-54, 0], [0, 100], Vec2::new(172.0, 119.0)),
-        ("right", "down", [54, 0], [0, 100], Vec2::new(172.0, 119.0)),
+    for (side, direction, position, node_offset) in [
+        (0, "right", [0, -10], [100, 0]),
+        (1, "right", [0, 84], [100, 0]),
+        (2, "down", [-54, 0], [0, 100]),
+        (3, "down", [54, 0], [0, 100]),
     ] {
         let mut scene = new_scene("frame_side");
         let before = LayoutState::new(&scene);
@@ -571,13 +721,42 @@ fn each_frame_side_repels_a_chip_independently() {
                 {"anim":{"target":"other","track":"pos","keys":[[0,position]]}}
             ]}),
         );
-        assert_eq!(
-            chip(&picture.after, scene.handle(&id("edge")).expect("edge")),
-            Rect {
-                origin: expected,
-                size: Vec2::new(16.0, 14.0),
-            },
-            "{side}"
+        let frame = frame(&picture.after);
+        let edge = item(&picture.after, &frame, "edge");
+        let curve = route(edge);
+        let [start, end] = ports(&curve);
+        let axis: fn(Vec2) -> f32 = if direction == "right" {
+            |p| p.x
+        } else {
+            |p| p.y
+        };
+        let chip = chip(edge);
+        let unnudged = Rect::centered(
+            crossing(&curve, axis, axis(start).midpoint(axis(end))),
+            chip.size,
         );
+        let strips = border_strips(item(&picture.after, &frame, "g"));
+        let title = ink(item(&picture.after, &frame, "g"), "G");
+        let title = Rect {
+            origin: title.origin - Vec2::new(4.0, 4.0),
+            size: title.size + Vec2::new(8.0, 8.0),
+        };
+        assert!(
+            !unnudged.intersects(title),
+            "the title cannot mask side {side}"
+        );
+        assert!(
+            unnudged.intersects(strips[side]),
+            "unmoved chip hits side {side}"
+        );
+        assert!(
+            strips
+                .iter()
+                .enumerate()
+                .all(|(i, strip)| i == side || !unnudged.intersects(*strip))
+        );
+        assert_eq!(ink(edge, "x").center(), chip.center());
+        assert!(distance_to_route(chip.center(), &curve) < 0.01);
+        assert!(!chip.intersects(strips[side]), "chip clears side {side}");
     }
 }

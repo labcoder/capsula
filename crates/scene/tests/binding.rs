@@ -85,12 +85,17 @@ fn bind_charges_an_unbound_scene_once_and_adopts_a_batch_bound_one() {
     let mut source = SceneState::begin(header()).expect("valid header");
     commit(&mut source, &mut brain, &text("a", "t1"));
     let replayed = || SceneState::replay(header(), source.recovery_log()).expect("replay");
-    let usage = replayed().usage();
+    let usage = Usage {
+        objects: 1,
+        scenes: 1,
+        ..Usage::default()
+    };
 
     let mut global = GlobalBudget::default();
+    let initial = global.generation();
     let empty = bound(&mut global);
     assert_eq!(global.usage(), Usage::default());
-    assert_eq!(global.generation(), 0);
+    assert_eq!(global.generation(), initial);
     assert_eq!(empty.view().revision(), 0);
     let generation = global.generation();
     let binding = SceneBinding::bind(Deferred::new(replayed(), 0), &mut global).expect("charged");
@@ -100,7 +105,7 @@ fn bind_charges_an_unbound_scene_once_and_adopts_a_batch_bound_one() {
         usage,
         "the binding owns that charge"
     );
-    assert_eq!(global.generation(), generation + 1, "one budget change");
+    assert_ne!(global.generation(), generation, "the prior stamp is stale");
 
     let mut full = GlobalBudget::default();
     let held: Vec<_> = (0..MAX_VISIBLE_SCENES)
@@ -211,37 +216,40 @@ fn stale_foreign_or_shared_candidates_change_nothing() {
     let mut global = GlobalBudget::default();
     let mut scene = bound(&mut global);
     let other = bound(&mut global);
+    let handles =
+        |scene: &SceneBinding| ["t1", "t2", "t3"].map(|name| scene.view().handle(&id(name)));
     apply(&mut scene, &mut global, &text("a", "t1")).expect("first step");
     let next = step(&text("b", "t2"));
     let before = snapshot(&scene, &global);
+    let first = scene.view().handle(&id("t1")).expect("first object");
 
     let foreign = other.read();
     let candidate = foreign.admit_detached(&next).expect("valid step");
-    let error = scene.apply_detached(foreign, candidate, &mut global);
     assert_eq!(
-        error.expect_err("foreign read"),
-        BindingError::WrongOwner,
-        "another scene's read"
+        scene
+            .apply_detached(foreign, candidate, &mut global)
+            .expect_err("another scene's read"),
+        BindingError::WrongOwner
     );
     let foreign = other.read();
     let candidate = foreign.admit_detached(&next).expect("valid step");
     drop(foreign);
-    let error = scene.apply_detached(scene.read(), candidate, &mut global);
     assert_eq!(
-        error.expect_err("foreign"),
-        BindingError::WrongOwner,
-        "another scene's candidate"
+        scene
+            .apply_detached(scene.read(), candidate, &mut global)
+            .expect_err("another scene's candidate"),
+        BindingError::WrongOwner
     );
 
     let mut replaced = GlobalBudget::default();
     let budget = (replaced.usage(), replaced.generation());
     let read = scene.read();
     let candidate = read.admit_detached(&next).expect("valid step");
-    let error = scene.apply_detached(read, candidate, &mut replaced);
     assert_eq!(
-        error.expect_err("foreign"),
-        BindingError::WrongContext,
-        "a replaced budget"
+        scene
+            .apply_detached(read, candidate, &mut replaced)
+            .expect_err("a replaced budget"),
+        BindingError::WrongContext
     );
     assert_eq!(
         (replaced.usage(), replaced.generation()),
@@ -264,11 +272,13 @@ fn stale_foreign_or_shared_candidates_change_nothing() {
         before,
         "every rejection changed nothing"
     );
+    assert_eq!(handles(&scene), [Some(first), None, None]);
 
     let read = scene.read();
     let stale = read.admit_detached(&next).expect("valid step");
     drop(read);
     apply(&mut scene, &mut global, &text("c", "t3")).expect("an intervening commit");
+    let third = scene.view().handle(&id("t3")).expect("intervening object");
     let before = snapshot(&scene, &global);
     let error = scene.apply_detached(scene.read(), stale, &mut global);
     assert_eq!(
@@ -281,6 +291,7 @@ fn stale_foreign_or_shared_candidates_change_nothing() {
         before,
         "a stale revision changed nothing"
     );
+    assert_eq!(handles(&scene), [Some(first), None, Some(third)]);
 
     let read = scene.read();
     let stale = read.admit_detached(&next).expect("valid step");
@@ -298,8 +309,14 @@ fn stale_foreign_or_shared_candidates_change_nothing() {
         before,
         "stale candidates changed nothing"
     );
+    assert_eq!(handles(&scene), [Some(first), None, Some(third)]);
 
     apply(&mut scene, &mut global, &text("b", "t2")).expect("a fresh candidate still applies");
+    assert_eq!(scene.view().revision(), 3);
+    assert_eq!(
+        scene.view().handle(&id("t2")),
+        Some(Handle::new(3, 0).expect("retry's handle"))
+    );
 }
 
 #[test]
@@ -361,14 +378,26 @@ fn release_subtracts_exactly_its_charge_and_a_foreign_budget_changes_nothing() {
     let two = r#"{"id":"b","put":[{"text":{"id":"u1","text":"","at":[0,0]}},{"text":{"id":"u2","text":"","at":[0,0]}}]}"#;
     apply(&mut released, &mut global, two).expect("two objects");
     assert_eq!(global.usage().objects, 3, "both scenes charged");
-    let generation = global.generation();
+    let before_release = global.generation();
     released.release(&mut global).expect("its own budget");
     assert_eq!(
         global.usage(),
-        kept.view().usage(),
+        Usage {
+            objects: 1,
+            scenes: 1,
+            ..Usage::default()
+        },
         "only the released charge left"
     );
-    assert_eq!(global.generation(), generation + 1, "one budget change");
+    assert_ne!(
+        global.generation(),
+        before_release,
+        "the released charge changes the stamp"
+    );
+    assert_eq!(
+        kept.view().handle(&id("t1")),
+        Some(Handle::new(1, 0).expect("retained handle"))
+    );
 
     let mut foreign = GlobalBudget::default();
     let before = (foreign.usage(), foreign.generation());
@@ -391,6 +420,7 @@ fn stop_and_retire_mutate_only_a_unique_binding_through_its_own_budget() {
     let mut scene = bound(&mut global);
     apply(&mut scene, &mut global, &text("a", "t1")).expect("first step");
     apply(&mut scene, &mut global, &text("b", "t2")).expect("second step");
+    let first = scene.view().handle(&id("t1")).expect("first object");
     let before = snapshot(&scene, &global);
 
     let read = scene.read();
@@ -446,6 +476,8 @@ fn stop_and_retire_mutate_only_a_unique_binding_through_its_own_budget() {
         1,
         "the unactivated object is dropped"
     );
+    assert_eq!(scene.view().handle(&id("t1")), Some(first));
+    assert_eq!(scene.view().handle(&id("t2")), None);
     assert_eq!(global.usage(), scene.view().usage(), "the cut is charged");
 }
 
@@ -536,7 +568,7 @@ fn refused_at_cap(
 }
 
 #[test]
-fn every_global_cap_is_checked_at_apply_at_the_cap_and_one_over() {
+fn global_objects_cells_marks_and_segments_are_checked_at_apply_at_the_cap_and_one_over() {
     let extra = vec![json!({"text":{"id":"extra","at":[0,0],"text":""}})];
     refused_at_cap(
         3,
@@ -548,7 +580,8 @@ fn every_global_cap_is_checked_at_apply_at_the_cap_and_one_over() {
     );
     let mut tables: Vec<_> = (0..12).map(|n| (0, table(&format!("a{n}"), 40))).collect();
     tables.push((0, table("last", 20)));
-    let row = vec![json!({"row":{"id":"extra","in":"lasttable","cells":[]}})];
+    tables.push((0, vec![json!({"table":{"id":"narrow","cols":[""]}})]));
+    let row = vec![json!({"row":{"id":"extra","in":"narrow","cells":[]}})];
     refused_at_cap(
         1,
         tables,

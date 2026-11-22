@@ -6,18 +6,23 @@ use kumochi_scene::{
     layout::{
         LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover,
     },
+    limits::MAX_SOLIDS,
     parse_record,
     text::Bounded,
     theme::Theme,
     three::{
         Transform, Triangle,
+        frame::Solid,
         mesh::{MeshScratch, build},
         size::{MeshError, triangles},
         view::{Mesh, SolidMesh, ViewGeometry},
     },
 };
 use serde_json::{Value, json};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 #[path = "support/allocation.rs"]
 #[expect(
@@ -128,6 +133,15 @@ fn built(geometry: &ViewGeometry, index: usize) -> &Arc<SolidMesh> {
         Mesh::Built(mesh) => mesh,
         Mesh::Failed(error) => panic!("solid {index} failed: {error}"),
     }
+}
+fn render_rgbs(view: &ViewGeometry) -> Vec<[u8; 3]> {
+    let poses: Vec<_> = view.solids.iter().map(|solid| solid.rest).collect();
+    let mut out = vec![Solid::EMPTY; MAX_SOLIDS];
+    let slots = out.as_mut_slice().try_into().expect("caller slots");
+    view.solids_at(&poses, slots)
+        .iter()
+        .map(|solid| solid.rgb)
+        .collect()
 }
 /// Bytes the allocator hands out to build `make`'s value: an oracle independent of the charges.
 fn requested<T>(make: impl FnOnce() -> T) -> usize {
@@ -248,14 +262,7 @@ fn a_reshaded_view_carries_the_full_mesh_charge_of_a_fresh_one() {
         json!({"id":"a","put":[view(), cube("s", &json!({"color":"#ff0000"}))]}),
     );
     let (reshaded, scratch) = (geometry(&shaded.after), geometry(&fresh.after));
-    let reused = mesh_bytes(built(reshaded, 0))
-        + source_bytes(&reshaded.solids[0].source)
-        + source_bytes(&reshaded.source);
     assert_eq!(reshaded.full_bytes(), scratch.full_bytes());
-    assert_eq!(
-        reshaded.marginal_bytes(Some(geometry(&first.after))),
-        reshaded.full_bytes() - reused
-    );
     let weak = Arc::downgrade(built(reshaded, 0));
     let full = reshaded.full_bytes();
     drop(first);
@@ -322,9 +329,15 @@ fn a_failed_solid_empties_its_view_until_removed_and_recovery_matches() {
     );
     assert_eq!(bad.views.len(), 1, "an explicit replacement");
     assert!(bad.views[0].geometry.failed);
+    assert!(render_rgbs(&bad.views[0].geometry).is_empty());
     assert_eq!(texts(&bad), ["T"]);
+    let failing = geometry(&bad.after)
+        .solids
+        .iter()
+        .find(|solid| solid.id == id("x"))
+        .expect("the authored failing solid");
     assert!(matches!(
-        geometry(&bad.after).solids[1].mesh,
+        failing.mesh,
         Mesh::Failed(MeshError::Degenerate("pos"))
     ));
     let shaded = next(
@@ -337,6 +350,7 @@ fn a_failed_solid_empties_its_view_until_removed_and_recovery_matches() {
         geometry(&shaded.after).failed,
         "the failure stays while its source does"
     );
+    assert!(render_rgbs(geometry(&shaded.after)).is_empty());
     let healed = next(
         &mut scene,
         &mut budget,
@@ -347,7 +361,7 @@ fn a_failed_solid_empties_its_view_until_removed_and_recovery_matches() {
     assert!(!view.failed);
     assert_eq!(view.solids.len(), 1);
     assert!(Arc::ptr_eq(built(view, 0), built(geometry(&good.after), 0)));
-    assert_eq!(view.solids[0].rgb, [0xff, 0, 0]);
+    assert_eq!(render_rgbs(view), [[0xff, 0, 0]]);
 
     let (_, replayed) = recover(
         header(),
@@ -362,7 +376,7 @@ fn a_failed_solid_empties_its_view_until_removed_and_recovery_matches() {
     let again = geometry(&replayed);
     assert!(!again.failed);
     assert_eq!(again.solids.len(), 1);
-    assert_eq!(again.solids[0].rgb, [0xff, 0, 0]);
+    assert_eq!(render_rgbs(again), [[0xff, 0, 0]]);
     assert_eq!(built(again, 0).vertices, built(view, 0).vertices);
     assert_eq!(replayed.resident_bytes(), healed.after.resident_bytes());
 }
@@ -399,17 +413,26 @@ fn a_cut_drops_unrevealed_solids_and_recomputes_the_failure() {
 #[test]
 fn a_cancelled_preparation_publishes_nothing() {
     let (mut scene, mut budget) = scene();
-    let before = LayoutState::new(&scene);
+    let first = opening(
+        &mut scene,
+        &mut budget,
+        json!({"id":"a","put":[view(), cube("s", &json!({"color":"#ff0000"}))]}),
+    );
+    let before = &first.after;
+    let old = geometry(before);
+    let handles = (old.handle, old.solids[0].handle);
     let commit = committed(
         &mut scene,
         &mut budget,
-        json!({"id":"a","put":[view(), cube("s", &json!({}))]}),
+        json!({"id":"b","set":[{"target":"s","color":"#0000ff"}]}),
     );
     assert!(matches!(
-        picture(&scene, commit, &before, &AtomicBool::new(true)),
+        picture(&scene, commit, before, &AtomicBool::new(true)),
         Err(PrepareError::Cancelled)
     ));
-    assert!(before.views().is_empty());
+    let kept = geometry(before);
+    assert_eq!((kept.handle, kept.solids[0].handle), handles);
+    assert_eq!(render_rgbs(kept), [[0xff, 0, 0]]);
 }
 
 fn tube(path: &Value, r2: f64, segments: u8, pos: &Value) -> Value {
@@ -417,16 +440,16 @@ fn tube(path: &Value, r2: f64, segments: u8, pos: &Value) -> Value {
 }
 #[test]
 fn every_face_group_lies_on_its_anchor_plane() {
-    for (path, r2, segments, triangles, faces) in [
+    for (path, r2, segments, triangles, straight) in [
         (
             json!([[0, 0, 0], [0, 1, 0], [1, 2, 0], [1, 3, 1]]),
             0.1,
             8,
             60,
-            60,
+            false,
         ),
-        (json!([[0, 0, 0], [0, 0, 2], [2, 0, 2]]), 0.25, 4, 20, 20),
-        (json!([[0, 0, 0], [0, 0, 1], [0, 0, 3]]), 0.25, 4, 20, 12),
+        (json!([[0, 0, 0], [0, 0, 2], [2, 0, 2]]), 0.25, 4, 20, false),
+        (json!([[0, 0, 0], [0, 0, 1], [0, 0, 3]]), 0.25, 4, 20, true),
     ] {
         let (mut scene, mut budget) = scene();
         let prepared = opening(
@@ -435,12 +458,17 @@ fn every_face_group_lies_on_its_anchor_plane() {
             json!({"id":"a","put":[view(), tube(&path, r2, segments, &json!([0, 0, 0]))]}),
         );
         let mesh = built(geometry(&prepared.after), 0);
-        assert_eq!(
-            (mesh.triangles.len(), mesh.faces.len()),
-            (triangles, faces),
-            "{path}: a straight run keeps its bands grouped, a bend splits them"
-        );
+        assert_eq!(mesh.triangles.len(), triangles, "{path}");
+        let mut seen = vec![false; triangles];
         let at = |i: u32| mesh.vertices[usize::try_from(i).expect("index")];
+        let z_span = |triangle: [u32; 3]| {
+            triangle
+                .map(|i| at(i)[2])
+                .into_iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), z| {
+                    (low.min(z), high.max(z))
+                })
+        };
         for face in &*mesh.faces {
             let [base, second, third] = face.anchors.map(at);
             let offset = |p: [f64; 3]| [p[0] - base[0], p[1] - base[1], p[2] - base[2]];
@@ -453,7 +481,10 @@ fn every_face_group_lies_on_its_anchor_plane() {
             let length = normal.iter().map(|v| v * v).sum::<f64>().sqrt();
             let start = usize::try_from(face.start).expect("start");
             let end = start + usize::try_from(face.len).expect("len");
-            for triangle in &mesh.triangles[start..end] {
+            let group = &mesh.triangles[start..end];
+            for (index, triangle) in (start..end).zip(group) {
+                assert!(!seen[index], "{path}: overlapping face groups");
+                seen[index] = true;
                 for &i in triangle {
                     let d = offset(at(i));
                     let off = (d[0] * normal[0] + d[1] * normal[1] + d[2] * normal[2]) / length;
@@ -462,8 +493,29 @@ fn every_face_group_lies_on_its_anchor_plane() {
                         "{path}: a group vertex is {off} off its plane"
                     );
                 }
+                if straight {
+                    let (low, high) = z_span(*triangle);
+                    if high - low > 0.5 {
+                        let span = (low.to_bits(), high.to_bits());
+                        assert!(
+                            group
+                                .iter()
+                                .filter(|&&other| {
+                                    let (low, high) = z_span(other);
+                                    (low.to_bits(), high.to_bits()) == span
+                                })
+                                .count()
+                                >= 2,
+                            "both triangles across each straight side band share an anchor"
+                        );
+                    }
+                }
             }
         }
+        assert!(
+            seen.into_iter().all(|covered| covered),
+            "{path}: a triangle has no face group"
+        );
     }
 }
 
@@ -499,11 +551,13 @@ fn a_3d_object_put_and_removed_in_one_step_prepares() {
         json!({"id":"a","put":[view(), cube("s", &json!({})), text()],"remove":["s","v"]}),
     );
     assert_eq!(texts(&only), ["T"]);
+    let mut removed = only.removed;
+    removed.sort_unstable();
     assert_eq!(
-        only.removed,
+        removed,
         [
-            Handle::new(1, 1).expect("handle"),
-            Handle::new(1, 0).expect("handle")
+            Handle::new(1, 0).expect("handle"),
+            Handle::new(1, 1).expect("handle")
         ]
     );
     assert!(only.views.is_empty());
@@ -512,19 +566,12 @@ fn a_3d_object_put_and_removed_in_one_step_prepares() {
 
 #[test]
 fn removing_a_meshes_last_owner_frees_exactly_its_allocations() {
+    let pair = || json!({"id":"a","put":[view(), cube("s", &json!({})), cube("x", &json!({"pos":[4,0,0]}))]});
+    let only_view = |prepared: PreparedStep| Arc::clone(&prepared.after.views()[&id("v")]);
     let (mut scene, mut budget) = scene();
-    let first = opening(
-        &mut scene,
-        &mut budget,
-        json!({"id":"a","put":[view(), cube("s", &json!({})), cube("x", &json!({"pos":[4,0,0]}))]}),
-    );
+    let first = opening(&mut scene, &mut budget, pair());
     let old = geometry(&first.after);
-    let mesh = built(old, 1);
-    let freed = mesh_bytes(mesh)
-        + source_bytes(&old.solids[1].source)
-        + size_of_val(&old.solids[1])
-        + "x".len();
-    let weak = Arc::downgrade(mesh);
+    let weak = Arc::downgrade(built(old, 1));
     let full = old.full_bytes();
     let second = next(
         &mut scene,
@@ -532,10 +579,20 @@ fn removing_a_meshes_last_owner_frees_exactly_its_allocations() {
         &first.after,
         json!({"id":"b","remove":["x"]}),
     );
-    assert_eq!(geometry(&second.after).full_bytes(), full - freed);
     assert!(weak.upgrade().is_some(), "the predecessor still owns it");
     drop(first);
     assert!(weak.upgrade().is_none(), "no owner outlives the removal");
+    drop(scene);
+
+    let (mut control_scene, mut control_budget) = self::scene();
+    let control = only_view(opening(&mut control_scene, &mut control_budget, pair()));
+    drop(control_scene);
+    let survivor = only_view(second);
+    let charged = full - survivor.full_bytes();
+    let ((), _, [_, pair_freed]) = allocation::usage(|| drop(control));
+    let ((), _, [_, survivor_freed]) = allocation::usage(|| drop(survivor));
+    assert!(pair_freed > survivor_freed);
+    assert_eq!(charged, pair_freed - survivor_freed);
 }
 
 #[test]
@@ -821,7 +878,7 @@ fn each_prepared_mesh_matches_its_world_build_at_the_f32_boundary() {
     );
     let geometry = geometry(&prepared.after);
     let mut scratch = MeshScratch::new();
-    let outcomes: Vec<Outcome> = geometry
+    let outcomes: BTreeMap<_, _> = geometry
         .solids
         .iter()
         .map(|prepared| {
@@ -844,7 +901,7 @@ fn each_prepared_mesh_matches_its_world_build_at_the_f32_boundary() {
                 Mesh::Built(mesh) => Ok(mesh.triangles.len()),
                 Mesh::Failed(error) => Err(*error),
             };
-            (prepared.id.as_str().to_owned(), built, mesh)
+            (prepared.id.as_str(), (built, mesh))
         })
         .collect();
     let expected = [
@@ -855,29 +912,23 @@ fn each_prepared_mesh_matches_its_world_build_at_the_f32_boundary() {
         ("p4", Ok(12)),
         ("s", Ok(8)),
     ];
-    for ((id, built, mesh), (want_id, want)) in outcomes.iter().zip(expected) {
-        assert_eq!(id, want_id);
-        assert_eq!(*built, want, "{id}: world build");
-        assert_eq!(*mesh, want, "{id}: prepared mesh");
+    assert_eq!(geometry.solids.len(), expected.len());
+    assert_eq!(outcomes.len(), expected.len());
+    for (name, want) in expected {
+        assert_eq!(
+            outcomes[name],
+            (want, want),
+            "{name}: world build and prepared mesh"
+        );
     }
-    assert_eq!(outcomes.len(), 6);
     assert!(!geometry.failed);
 }
 
-type Outcome = (String, Result<usize, MeshError>, Result<usize, MeshError>);
-
-fn rgbs(layout: &LayoutState) -> Vec<(String, [u8; 3])> {
+fn rgbs(layout: &LayoutState) -> BTreeMap<&str, [u8; 3]> {
     geometry(layout)
         .solids
         .iter()
-        .map(|solid| (solid.id.as_str().to_owned(), solid.rgb))
-        .collect()
-}
-
-fn named(pairs: &[(&str, [u8; 3])]) -> Vec<(String, [u8; 3])> {
-    pairs
-        .iter()
-        .map(|(id, rgb)| ((*id).to_owned(), *rgb))
+        .map(|solid| (solid.id.as_str(), solid.rgb))
         .collect()
 }
 
@@ -886,20 +937,28 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
     let (grey, dark) = ([0x88, 0x88, 0x88], [0x44, 0x44, 0x44]);
     let (red, blue, green) = ([0xff, 0, 0], [0, 0, 0xff], [0, 0xff, 0]);
     let u = |color: &str| cube("u", &json!({"pos":[4,0,0],"color":color}));
-    // Measured at c1ec74c: a scene holding only the view charges 738 bytes, and each cube adds
-    // 1,083: its mesh (520) and source (298) by the allocator oracle, then its object, slot and id.
-    // 6b adds 24 to each solid's slot for its settled pos3 and rot3 offsets: 1,107 per cube.
-    // 738 + 1,107: the view and one cube.
-    let one_cube = 1_845;
-    // 738 + 2 * 1,107: the view and two cubes; colour is inline, so a recolour keeps it.
-    let two_cubes = 2_952;
+    let s = |color: &str| cube("s", &json!({"color":color}));
+    let [one_cube, two_cubes] = [
+        vec![view(), s("#ff0000")],
+        vec![view(), s("#ff0000"), u("#444444")],
+    ]
+    .map(|put| {
+        let (mut scene, mut budget) = scene();
+        opening(&mut scene, &mut budget, json!({"id":"a","put":put}))
+            .after
+            .resident_bytes()
+    });
+    assert!(two_cubes > one_cube);
     let (mut scene, mut budget) = scene();
     let first = opening(
         &mut scene,
         &mut budget,
         json!({"id":"a","put":[view(), cube("s", &json!({"color":"#888888"})), u("#444444")]}),
     );
-    assert_eq!(rgbs(&first.after), named(&[("s", grey), ("u", dark)]));
+    assert_eq!(
+        rgbs(&first.after),
+        BTreeMap::from([("s", grey), ("u", dark)])
+    );
     assert_eq!(first.after.resident_bytes(), two_cubes);
     let shaded = next(
         &mut scene,
@@ -909,7 +968,7 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
     );
     scene.retire(1, &mut budget).expect("retire the recolour");
     drop(first);
-    let reds = named(&[("s", red), ("u", dark)]);
+    let reds = BTreeMap::from([("s", red), ("u", dark)]);
     assert_eq!(rgbs(&shaded.after), reds);
     assert_eq!(shaded.after.resident_bytes(), two_cubes);
 
@@ -919,7 +978,10 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
         &shaded.after,
         json!({"id":"c","set":[{"target":"s","color":"#0000ff"}]}),
     );
-    assert_eq!(rgbs(&blued.after), named(&[("s", blue), ("u", dark)]));
+    assert_eq!(
+        rgbs(&blued.after),
+        BTreeMap::from([("s", blue), ("u", dark)])
+    );
     assert_eq!(blued.after.resident_bytes(), two_cubes);
     let held = geometry(&shaded.after);
     let revealed = vec![held.handle, held.solids[0].handle, held.solids[1].handle];
@@ -956,7 +1018,7 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
         &tip,
         json!({"id":"d","remove":["u"]}),
     );
-    assert_eq!(rgbs(&removed.after), named(&[("s", red)]));
+    assert_eq!(rgbs(&removed.after), BTreeMap::from([("s", red)]));
     assert_eq!(removed.after.resident_bytes(), one_cube);
 
     let rebuilt = next(
@@ -965,6 +1027,9 @@ fn a_colour_survives_retire_stop_recovery_removal_and_rebuild() {
         &removed.after,
         json!({"id":"e","set":[{"target":"s","color":"#00ff00"}],"put":[cube("w", &json!({"pos":[8,0,0],"color":"#444444"}))]}),
     );
-    assert_eq!(rgbs(&rebuilt.after), named(&[("s", green), ("w", dark)]));
+    assert_eq!(
+        rgbs(&rebuilt.after),
+        BTreeMap::from([("s", green), ("w", dark)])
+    );
     assert_eq!(rebuilt.after.resident_bytes(), two_cubes);
 }

@@ -368,12 +368,14 @@ mod tests {
     }
 
     #[test]
-    fn curve_bounds_scale_without_building_flattened_vertices() {
+    fn counting_walked_curve_segments_scales_without_allocating() {
         let quadratic = walk("M0 0 Q0 4 4 4", |_, _| Ok(())).expect("quadratic");
-        assert_eq!(quadratic.segments(1.0).expect("bounded"), 4);
-        assert_eq!(quadratic.segments(4.0).expect("bounded"), 8);
         let cubic = walk("M0 0 C0 4 4 4 4 0", |_, _| Ok(())).expect("cubic");
-        assert_eq!(cubic.segments(1.0).expect("bounded"), 8);
-        assert_eq!(cubic.segments(4.0).expect("bounded"), 16);
+        let (counts, allocations) = crate::allocation::count(|| {
+            [quadratic, cubic]
+                .map(|curve| [1.0, 4.0].map(|scale| curve.segments(scale).expect("bounded")))
+        });
+        assert_eq!(counts, [[4, 8], [8, 16]]);
+        assert_eq!(allocations, 0);
     }
 }

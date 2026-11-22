@@ -419,21 +419,24 @@ mod tests {
     }
 
     #[test]
-    fn statement_boundaries_and_comment_lines_keep_the_cursor_exact() {
-        let mut reader = at(" \t%% ignored\nstyle A;");
-        reader.spaces();
-        assert_eq!(reader.pos, 2);
-        reader.skip_line();
-        assert_eq!(reader.pos, 12);
-        assert!(reader.at_end_of_statement());
-        reader.pos = 13;
-        assert!(reader.keyword("style"));
-        assert!(!reader.keyword("sty"));
-        reader.pos = 20;
-        assert!(reader.at_end_of_statement());
-        reader.pos = 21;
-        assert!(reader.at_end_of_statement());
-        assert_eq!(reader.peek_at(200), None);
+    fn indented_comments_and_statement_separators_leave_the_expected_graph() {
+        let chart = super::super::parse::parse(
+            "flowchart LR\n \t%% ignored --> absent\nA --> styleNode; styleNode --> B\nB --> C;",
+            8,
+        )
+        .expect("complete graph");
+        assert_eq!(
+            chart.nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+            ["A", "styleNode", "B", "C"]
+        );
+        assert_eq!(
+            chart
+                .edges
+                .iter()
+                .map(|edge| (chart.nodes[edge.from].id, chart.nodes[edge.to].id))
+                .collect::<Vec<_>>(),
+            [("A", "styleNode"), ("styleNode", "B"), ("B", "C")]
+        );
     }
 
     #[test]
@@ -524,21 +527,23 @@ mod tests {
     }
 
     #[test]
-    fn links_read_their_stroke_heads_label_and_length() {
-        for (src, stroke, head, label, end) in [
-            ("-->|go| B", Stroke::Normal, Head::End, Some("go"), 7),
-            ("-- go --> B", Stroke::Normal, Head::End, Some("go"), 9),
-            ("-.-> B", Stroke::Dotted, Head::End, None, 5),
-            ("<==> B", Stroke::Thick, Head::Both, None, 5),
+    fn links_read_their_stroke_heads_and_label_before_the_next_node() {
+        for (src, stroke, head, label) in [
+            ("-->|go| B", Stroke::Normal, Head::End, Some("go")),
+            ("-- go --> B", Stroke::Normal, Head::End, Some("go")),
+            ("-.-> B", Stroke::Dotted, Head::End, None),
+            ("<==> B", Stroke::Thick, Head::Both, None),
         ] {
             let mut reader = at(src);
             let link = reader.link().expect("a D1 link");
             let shown = link.label.as_ref().map(Text::as_str);
             assert_eq!(
-                (link.stroke, link.head, shown, reader.pos),
-                (stroke, head, label, end),
+                (link.stroke, link.head, shown),
+                (stroke, head, label),
                 "link {src:?}"
             );
+            reader.spaces();
+            assert_eq!(reader.node_id(), Ok("B"), "link {src:?}");
         }
         for (src, code) in [
             ("----> B", ErrorCode::Unsupported),

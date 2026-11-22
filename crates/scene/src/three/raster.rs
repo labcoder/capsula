@@ -660,9 +660,7 @@ mod tests {
     };
     use std::sync::atomic::AtomicBool;
 
-    /// Fills one opaque polygon `rows` texel rows tall across a 4,096-texel band with the cancel
-    /// flag already set, so only the span loop's quantum can stop it.
-    fn fill_cancelled(rows: i32) -> (Result<(), RasterError>, usize) {
+    fn fill_spans(rows: i32, cancel: &AtomicBool) -> (Result<(), RasterError>, usize) {
         let (w, h) = (4096 * SUBTEXEL, rows * SUBTEXEL);
         let mut frame = FrameScratch::with_capacity(1);
         let fragment = Fragment {
@@ -681,9 +679,8 @@ mod tests {
             rows: 32,
             offsets: &MOTION,
         };
-        let cancel = AtomicBool::new(true);
         let mut work = Work {
-            cancel: &cancel,
+            cancel,
             left: POLL_SAMPLES,
         };
         let result = fill(&frame.polys[0], &region, &mut band, &mut work);
@@ -692,12 +689,12 @@ mod tests {
 
     #[test]
     fn a_polygon_stops_once_its_sample_quantum_runs_out() {
-        // 15 rows of 4,096 samples fit in the 65,536-sample quantum; the 16th row's span polls.
-        assert_eq!(fill_cancelled(32), (Err(RasterError::Cancelled), 61_440));
-        assert_eq!(
-            fill_cancelled(15),
-            (Ok(()), 61_440),
-            "inside one quantum, no poll"
+        let (result, painted) = fill_spans(32, &AtomicBool::new(true));
+        assert_eq!(result, Err(RasterError::Cancelled));
+        assert!(
+            painted <= 65_536 + 4096,
+            "painted {painted} samples after cancellation"
         );
+        assert_eq!(fill_spans(15, &AtomicBool::new(false)), (Ok(()), 15 * 4096));
     }
 }

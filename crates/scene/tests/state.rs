@@ -148,18 +148,20 @@ fn same_step_references_and_expanded_slots_are_deterministic() {
     ]}"#,
     );
     assert_eq!((committed.index, committed.revision), (0, 1));
-    assert_eq!(
-        committed
-            .handles
-            .iter()
-            .map(|(_, h)| h.get())
-            .collect::<Vec<_>>(),
-        [1024, 1026, 1027, 1028]
-    );
+    let expected = [("a", 1024), ("d", 1026), ("b", 1027), ("e", 1028)];
+    assert_eq!(committed.handles.len(), expected.len());
+    for (name, raw) in expected {
+        let found = committed.handles.iter().find(|(key, _)| *key == id(name));
+        assert_eq!(found.map(|(_, handle)| handle.get()), Some(raw), "{name}");
+    }
     for _ in 0..2 {
         let replay = SceneState::replay(header(), state.recovery_log()).expect("valid recovery");
-        for (id, handle) in &committed.handles {
-            assert_eq!(replay.handle(id), Some(*handle));
+        for (name, raw) in expected {
+            assert_eq!(
+                replay.handle(&id(name)).map(Handle::get),
+                Some(raw),
+                "{name}"
+            );
         }
     }
 }
@@ -242,12 +244,29 @@ fn duplicate_steps_compare_typed_values_even_after_being_dropped() {
             &mut global,
         )
         .expect("valid cut");
-    let generation = global.generation();
+    let equivalent = step(
+        r#"{"put":[{"text":{"text":"","at":[0,0],"id":"b"}}],"id":"second","start":"speech","set":[],"remove":[]}"#,
+    );
+    let before = (
+        state.revision(),
+        state.object_count(),
+        state.recovery_log().len(),
+        global.generation(),
+    );
     assert!(matches!(
-        state.admit(&original, &global),
+        state.admit(&equivalent, &global),
         Ok(Admission::Duplicate)
     ));
-    assert_eq!(global.generation(), generation);
+    assert_eq!(
+        (
+            state.revision(),
+            state.object_count(),
+            state.recovery_log().len(),
+            global.generation(),
+        ),
+        before
+    );
+    assert_eq!(state.handle(&id("b")), None);
     rejected(
         &state,
         &global,

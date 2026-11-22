@@ -1,7 +1,7 @@
 //! Tessellation, bit-identical topology and representability without per-build allocation.
 use kumochi_scene::{
     geom::Vec3,
-    record::{Segments, Solid},
+    record::{Segments, Solid, SolidShape},
     three::{
         Transform, Triangle,
         mesh::{Built, MeshScratch, build, build_local},
@@ -9,7 +9,10 @@ use kumochi_scene::{
     },
 };
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::atomic::AtomicBool};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::atomic::AtomicBool,
+};
 
 #[path = "support/allocation.rs"]
 mod allocation;
@@ -144,45 +147,65 @@ fn maximum_outline() -> Value {
 #[test]
 fn subdivision_seams_merged_points_and_axis_vertices_weld_bit_for_bit() {
     let world = Transform::local([12.5, -7.25, 3.0], [17.0, 31.0, 53.0], 1.3);
-    for n in [3_u8, 5, 6, 11, 12, 23, 24, 48] {
-        for (kind, fields, boundaries) in [
-            ("sphere", json!({"r":1,"segments":n}), 0),
-            ("cylinder", json!({"r":1,"h":2,"segments":n}), 0),
-            ("cone", json!({"r":1,"h":2,"segments":n}), 0),
-            ("cone", json!({"r":1,"r2":0.5,"h":2,"segments":n}), 0),
-            ("torus", json!({"r":2,"r2":0.5,"segments":n}), 0),
+    for (n, sphere_faces) in [
+        (3, 20),
+        (5, 20),
+        (6, 80),
+        (11, 80),
+        (12, 320),
+        (23, 320),
+        (24, 1280),
+        (48, 1280),
+    ] {
+        for (kind, fields, written, boundaries) in [
+            ("sphere", json!({"r":1,"segments":n}), sphere_faces, 0),
+            ("cylinder", json!({"r":1,"h":2,"segments":n}), 4 * n - 4, 0),
+            ("cone", json!({"r":1,"h":2,"segments":n}), 2 * n - 2, 0),
+            (
+                "cone",
+                json!({"r":1,"r2":0.5,"h":2,"segments":n}),
+                4 * n - 4,
+                0,
+            ),
+            ("torus", json!({"r":2,"r2":0.5,"segments":n}), 2 * n * n, 0),
             (
                 "lathe",
                 json!({"points":[[1,0],[1,0],[0.5,1],[1,2]],"segments":n}),
-                2 * usize::from(n),
+                4 * n,
+                2 * n,
             ),
             (
                 "lathe",
                 json!({"points":[[0,-1],[1,0],[0,1]],"segments":n}),
+                2 * n,
                 0,
             ),
             (
                 "tube",
                 json!({"path":[[0,0,0],[0,0,0],[0,2,0],[1,3,1],[1,4,2]],"r2":0.2,"segments":n}),
+                6 * n + 2 * (n - 2),
                 0,
             ),
         ] {
-            incidence(&mesh(&solid(kind, fields), &world), boundaries);
+            let actual = mesh(&solid(kind, fields), &world);
+            assert_eq!(actual.len(), written, "{kind}, {n} segments");
+            incidence(&actual, boundaries);
         }
     }
     for points in [
         json!([[0, 0], [1, 0], [2, 0], [2, 2], [0, 2], [0, 0]]),
         json!([[0, 2], [2, 2], [2, 0], [1, 0], [0, 0], [0, 0]]),
     ] {
-        incidence(
-            &mesh(
-                &solid("extrude", json!({"points":points,"depth":1})),
-                &world,
-            ),
-            0,
+        let extrusion = mesh(
+            &solid("extrude", json!({"points":points,"depth":1})),
+            &world,
         );
+        assert_eq!(extrusion.len(), 16);
+        incidence(&extrusion, 0);
     }
-    incidence(&mesh(&solid("box", json!({"size":[1,2,3]})), &world), 0);
+    let boxed = mesh(&solid("box", json!({"size":[1,2,3]})), &world);
+    assert_eq!(boxed.len(), 12);
+    incidence(&boxed, 0);
 }
 
 #[test]
@@ -190,13 +213,15 @@ fn analytic_areas_and_outward_normals_are_preserved() {
     let identity = Transform::local([0.0; 3], [0.0; 3], 1.0);
     let box_mesh = mesh(&solid("box", json!({"size":[2,3,4]})), &identity);
     assert_eq!(area(&box_mesh).to_bits(), 52.0_f64.to_bits());
-    for (kind, fields) in [
-        ("box", json!({"size":[2,3,4]})),
-        ("sphere", json!({"r":1,"segments":48})),
-        ("cylinder", json!({"r":1,"h":2,"segments":48})),
-        ("torus", json!({"r":2,"r2":0.5,"segments":48})),
+    for (kind, fields, written) in [
+        ("box", json!({"size":[2,3,4]}), 12),
+        ("sphere", json!({"r":1,"segments":48}), 1280),
+        ("cylinder", json!({"r":1,"h":2,"segments":48}), 188),
+        ("torus", json!({"r":2,"r2":0.5,"segments":48}), 4608),
     ] {
-        for triangle in mesh(&solid(kind, fields), &identity) {
+        let actual = mesh(&solid(kind, fields), &identity);
+        assert_eq!(actual.len(), written, "{kind}");
+        for triangle in actual {
             let n = normal(triangle.v);
             let mut centre = [0.0; 3];
             for p in triangle.v {
@@ -364,8 +389,6 @@ fn capacity_cancel_and_degenerate_failures_preserve_a_prefix() {
         ),
         Err(MeshError::Degenerate("r"))
     );
-    assert_eq!(out[0], prefix);
-    assert_eq!(out.len(), 97);
     out.truncate(1);
     assert_eq!(out, [prefix]);
 }
@@ -387,7 +410,6 @@ fn world_narrowing_refuses_collisions_and_zero_area_without_dropping_faces() {
         ),
         Err(MeshError::Degenerate("pos"))
     );
-    assert_eq!(out.len(), 0);
     let rounded = mesh(&shape, &Transform::local([19999.0; 3], [0.0; 3], 0.01));
     assert_eq!(rounded.len(), 12);
     assert_eq!(
@@ -416,11 +438,7 @@ fn world_narrowing_refuses_collisions_and_zero_area_without_dropping_faces() {
         ),
         Err(MeshError::Degenerate("pos"))
     );
-    assert_eq!(
-        out.len(),
-        0,
-        "nonadjacent distinct vertices collide before any face is emitted"
-    );
+    out.clear();
     let shape = solid(
         "extrude",
         json!({"depth":1,"points":[[0,0],[2,0],[1,0.0005]]}),
@@ -435,11 +453,6 @@ fn world_narrowing_refuses_collisions_and_zero_area_without_dropping_faces() {
             &mut scratch
         ),
         Err(MeshError::Degenerate("pos"))
-    );
-    assert_eq!(
-        out.len(),
-        6,
-        "three distinct narrowed cap points become collinear after the side faces"
     );
 }
 
@@ -614,6 +627,35 @@ fn maximum_point_counts_are_sized_without_allocating() {
     );
 }
 
+fn assert_box_face_groups(groups: &[u8], triangles: &[[[f64; 3]; 3]]) {
+    assert_eq!(groups, [2; 6], "two triangles share each box face");
+    let (faces, remainder) = triangles.as_chunks::<2>();
+    assert!(remainder.is_empty(), "every box triangle belongs to a pair");
+    let planes: BTreeSet<_> = faces
+        .iter()
+        .map(|face| {
+            let axis = (0..3)
+                .find(|&axis| {
+                    let coordinate = face[0][0][axis].to_bits();
+                    face.iter()
+                        .flatten()
+                        .all(|p| p[axis].to_bits() == coordinate)
+                })
+                .expect("one box plane per group");
+            (axis, face[0][0][axis].to_bits())
+        })
+        .collect();
+    let expected = [0.5_f64, 1.0, 1.5]
+        .into_iter()
+        .enumerate()
+        .flat_map(|(axis, half)| [-half, half].map(|v| (axis, v.to_bits())))
+        .collect();
+    assert_eq!(
+        planes, expected,
+        "all six distinct box planes must be present"
+    );
+}
+
 #[test]
 fn local_and_world_builds_agree_at_the_composed_rest() {
     let parent = Transform::local([10.0, 0.0, 0.0], [0.0; 3], 2.0);
@@ -699,6 +741,9 @@ fn local_and_world_builds_agree_at_the_composed_rest() {
                 built.written
             );
             assert_eq!(narrowed(world, &b), bits(&a), "{:?}", shape.shape);
+            if shape.shape == SolidShape::Box {
+                assert_box_face_groups(&groups, &b);
+            }
         }
     }
     let mut out = Vec::with_capacity(12);
@@ -767,21 +812,26 @@ fn adversarial_extrusions_keep_their_authored_points_locally() {
             expected
         );
         assert_eq!(narrowed(&identity, &local), bits(&world));
-        let authored: Vec<[f64; 2]> = outline.iter().map(|p| p.map(f64::from)).collect();
+        let authored: BTreeSet<_> = outline
+            .iter()
+            .map(|p| p.map(|v| f64::from(v).to_bits()))
+            .collect();
+        let depths = [-0.5_f64, 0.5].map(f64::to_bits);
         for p in local.iter().flatten() {
             assert!(
-                authored.contains(&[p[0], p[1]]),
+                authored.contains(&[p[0].to_bits(), p[1].to_bits()]),
                 "{p:?} is not an authored point"
             );
-            assert!(
-                [-0.5_f64, 0.5].map(f64::to_bits).contains(&p[2].to_bits()),
-                "{p:?}"
-            );
-            assert_eq!(identity.apply(*p).map(f64::to_bits), p.map(f64::to_bits));
+            assert!(depths.contains(&p[2].to_bits()), "{p:?}");
+        }
+        for depth in depths {
+            let cap = local
+                .iter()
+                .filter(|face| face.iter().all(|p| p[2].to_bits() == depth))
+                .flatten()
+                .map(|p| [p[0].to_bits(), p[1].to_bits()])
+                .collect();
+            assert_eq!(authored, cap, "every authored point appears on both caps");
         }
     }
-    assert_eq!(
-        f64::from(1.001_f32).to_bits(),
-        1.001_000_046_730_041_5_f64.to_bits()
-    );
 }

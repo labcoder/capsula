@@ -463,22 +463,33 @@ impl LayoutState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::display::{MeasureError, TextMeasure, TextStyle};
+    use crate::display::{MeasureError, Prim, TextMeasure, TextStyle};
     use crate::layout::{PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover};
     use crate::{
-        Admission, GlobalBudget, Record, StopCut, parse_record, text::Bounded, theme::Theme,
+        Admission, Frame, FrameItem, GlobalBudget, Record, SceneView, StopCut, parse_record,
+        text::Bounded, theme::Theme,
     };
     use std::sync::atomic::AtomicBool;
     struct Measure;
     impl TextMeasure for Measure {
         fn measure(
             &mut self,
-            _text: &str,
+            text: &str,
             _style: TextStyle,
             _width: Option<f32>,
         ) -> Result<[f32; 2], MeasureError> {
-            Ok([8.0, 10.0])
+            Ok([if text == "long" { 180.0 } else { 8.0 }, 10.0])
         }
+    }
+
+    fn sample(view: &SceneView, time: u64) -> Vec<FrameItem> {
+        let mut frame = Frame::new();
+        view.frame(time, &mut frame).expect("sample");
+        frame.items().to_vec()
+    }
+
+    fn id(name: &str) -> WireId {
+        name.to_owned().try_into().expect("id")
     }
     fn picture(
         scene: &mut SceneState,
@@ -528,12 +539,7 @@ mod tests {
         assert_eq!(second.glides.len(), 1);
         let kept = Bounded::new(
             ["d", "b", "c", "overflow"]
-                .map(|id| {
-                    second
-                        .after
-                        .handle(&id.to_owned().try_into().expect("id"))
-                        .expect("handle")
-                })
+                .map(|name| second.after.handle(&id(name)).expect("handle"))
                 .to_vec(),
         )
         .expect("cut");
@@ -557,38 +563,54 @@ mod tests {
             None,
         )
         .expect("recover");
-        assert_eq!(rest.objects.len(), 4);
-        for (id, object) in &rest.objects {
-            let replayed = &replayed.objects[id];
-            assert_eq!(object.rest, replayed.rest);
-            assert_eq!(object.rank, replayed.rank);
-            assert_eq!(object.motion, replayed.motion);
-        }
         let next = r#"{"step":{"id":"next","put":[{"node":{"id":"next","in":"d","label":"N"}}]}}"#;
-        let d: WireId = "d".to_owned().try_into().expect("id");
-        let kept = rest.objects[&d].motion.as_deref().cloned();
+        let d = id("d");
+        let envelope = |layout: &LayoutState| {
+            let motion = layout.objects[&d]
+                .motion
+                .as_ref()
+                .expect("diagram envelope")["pos"];
+            (motion.min, motion.max)
+        };
+        let mut live_view = SceneView::new(&rest, rest.revision());
+        let mut replay_view = SceneView::new(&replayed, replayed.revision());
+        let kept = envelope(&rest);
+        assert_eq!(rest.revealed_at_rest().len(), 4);
+        let old_picture = sample(&live_view, 0);
+        assert_eq!(old_picture, sample(&replay_view, 0));
         let live = picture(&mut scene, &mut budget, &rest, next);
         let replayed = picture(&mut restored, &mut GlobalBudget::default(), &replayed, next);
-        assert_eq!(live.after.items(), replayed.after.items());
-        assert_eq!(live.glides, replayed.glides);
-        assert_eq!(live.glides.len(), 1);
-        let motion = |state: &LayoutState| {
-            Arc::clone(
-                state.objects[&d]
-                    .motion
-                    .as_ref()
-                    .expect("the diagram glided"),
-            )
-        };
-        assert!(
-            !Arc::ptr_eq(&motion(&rest), &motion(&live.after)),
-            "the next glide writes a copy of the shared map"
-        );
+        let targets: Vec<_> = live.glides.iter().map(|glide| glide.target).collect();
+        assert_eq!(targets, [rest.handle(&d).expect("diagram handle")]);
         assert_eq!(
-            rest.objects[&d].motion.as_deref(),
-            kept.as_ref(),
+            envelope(&rest),
+            kept,
             "the kept prefix's envelope is unchanged"
         );
+        assert_eq!(
+            sample(&SceneView::new(&rest, rest.revision()), 0),
+            old_picture
+        );
+        let handle = rest.handle(&id("b")).expect("a retained node");
+        let transform = |items: &[FrameItem]| {
+            items
+                .iter()
+                .find(|item| item.handle == handle)
+                .expect("retained node paints")
+                .transform
+        };
+        for (view, step) in [(&mut live_view, live), (&mut replay_view, replayed)] {
+            view.activate(step, 1000, 0, &mut Frame::new())
+                .expect("activate continuation");
+        }
+        let positions = [1000, 1225, 1450].map(|time| {
+            let live = sample(&live_view, time);
+            assert_eq!(live, sample(&replay_view, time));
+            transform(&live)
+        });
+        assert_eq!(positions[0], transform(&old_picture));
+        assert_ne!(positions[0], positions[1], "the retained node glides");
+        assert_ne!(positions[1], positions[2], "the glide keeps progressing");
     }
     #[test]
     fn edges_inside_child_clusters_do_not_count_toward_the_parents_edge_cap() {
@@ -624,17 +646,6 @@ mod tests {
     }
     #[test]
     fn initial_sibling_clusters_reserve_their_long_edge_labels() {
-        struct Wide;
-        impl TextMeasure for Wide {
-            fn measure(
-                &mut self,
-                text: &str,
-                _style: TextStyle,
-                _width: Option<f32>,
-            ) -> Result<[f32; 2], MeasureError> {
-                Ok([if text == "long" { 180.0 } else { 8.0 }, 10.0])
-            }
-        }
         let Record::Begin(header) =
             parse_record(br#"{"begin":{"v":1,"scene":"labels","surface":"inline","alt":""}}"#)
                 .expect("header")
@@ -657,41 +668,69 @@ mod tests {
             ));
         }
         let source = format!(r#"{{"step":{{"id":"first","put":[{}]}}}}"#, put.join(","));
-        let Record::Step(step) = parse_record(source.as_bytes()).expect("step") else {
-            panic!("step");
-        };
-        let Admission::New(candidate) = scene.admit(&step, &budget).expect("admit") else {
-            panic!("new");
-        };
-        let ticket = scene
-            .commit(candidate, &mut budget)
-            .expect("commit")
-            .preparation;
-        let input = PrepareInput::new(
-            ticket,
-            before,
-            SurfaceGeometry::default(),
-            Arc::new(Theme::default()),
-        )
-        .expect("input");
-        let prepared = prepare(input, &mut Wide, &AtomicBool::new(false)).expect("prepared");
+        let prepared = picture(&mut scene, &mut budget, &before, &source);
         let bounds = ["a", "b"].map(|group| {
             prepared
                 .after
-                .bounds(&group.to_owned().try_into().expect("id"))
+                .bounds(&id(group))
                 .expect("safe")
                 .expect("group")
         });
-        assert_eq!(bounds[0].size.x.to_bits(), 188.0_f32.to_bits());
-        assert_eq!(bounds[0].size.y.to_bits(), 152.0_f32.to_bits());
-        assert_eq!(
-            bounds[1].origin.x.to_bits(),
-            (bounds[0].max().x + 62.0).to_bits()
-        );
         assert!(
             !bounds[0].intersects(bounds[1]),
             "sibling groups stay apart"
         );
+        let contains = |outer: Rect, inner: Rect| {
+            outer.origin.x <= inner.origin.x
+                && outer.origin.y <= inner.origin.y
+                && outer.max().x >= inner.max().x
+                && outer.max().y >= inner.max().y
+        };
+        for (index, edge) in ["ae", "be"].into_iter().enumerate() {
+            let edge = &prepared.after.objects[&id(edge)].item;
+            let transform = prepared
+                .after
+                .resting_transform(edge.handle)
+                .expect("safe transform");
+            let chip = edge
+                .primitives
+                .iter()
+                .find_map(|p| match p {
+                    Prim::Rect {
+                        rect,
+                        fill: Some(_),
+                        ..
+                    } => Some(*rect),
+                    _ => None,
+                })
+                .expect("label chip");
+            let ink = edge
+                .primitives
+                .iter()
+                .find_map(|p| match p {
+                    Prim::Text {
+                        origin,
+                        text,
+                        max_width: Some(width),
+                        ..
+                    } if text.as_str() == "long" => Some(Rect {
+                        origin: *origin + Vec2::new((*width - 180.0) * 0.5, 0.0),
+                        size: Vec2::new(180.0, 10.0),
+                    }),
+                    _ => None,
+                })
+                .expect("long label");
+            let (chip, ink) = (transform.bounds(chip), transform.bounds(ink));
+            assert!(contains(chip, ink), "the chip covers its label");
+            assert!(
+                contains(bounds[index], chip),
+                "the cluster contains its label chip"
+            );
+            assert!(
+                !bounds[1 - index].intersects(chip),
+                "the chip clears its sibling"
+            );
+        }
     }
     #[test]
     fn cluster_edges_end_on_their_endpoints_resting_bounds() {
@@ -710,15 +749,30 @@ mod tests {
             &before,
             r#"{"step":{"id":"first","put":[{"diagram":{"id":"r"}},{"diagram":{"id":"g","in":"r"}},{"node":{"id":"a","in":"g","label":"A"}},{"node":{"id":"b","in":"g","label":"B"}},{"edge":{"id":"e","in":"g","from":"a","to":"b"}},{"anim":{"target":"b","track":"y","keys":[[0,100]]}}]}}"#,
         );
-        let id = |name: &str| -> WireId { name.to_owned().try_into().expect("id") };
         let after = &prepared.after;
-        let edge = &after.objects[&id("e")];
-        let end = after
-            .resting_transform(edge.item.parent.expect("the edge sits in g"))
-            .expect("safe")
-            .point(edge.anchors[1]);
+        let edge = &after.objects[&id("e")].item;
+        let stroke = edge
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                Prim::Line {
+                    points,
+                    closed: false,
+                    ..
+                } => Some(points.as_ref()),
+                _ => None,
+            })
+            .expect("painted edge stroke");
+        let transform = after.resting_transform(edge.handle).expect("safe");
+        let a = after.bounds(&id("a")).expect("safe").expect("a");
         let b = after.bounds(&id("b")).expect("safe").expect("b");
-        assert_eq!(end.y.to_bits(), b.origin.y.to_bits());
-        assert_eq!(end.x.to_bits(), (b.origin.x + 40.0).to_bits());
+        assert_eq!(
+            transform.point(*stroke.first().expect("source point")),
+            Vec2::new(a.center().x, a.max().y)
+        );
+        assert_eq!(
+            transform.point(*stroke.last().expect("destination point")),
+            Vec2::new(b.center().x, b.origin.y)
+        );
     }
 }

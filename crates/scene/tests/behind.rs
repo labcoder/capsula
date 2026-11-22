@@ -7,6 +7,7 @@ use kumochi_scene::{
     StopCut,
     layout::{LayoutState, SurfaceGeometry, recover},
     parse_record,
+    record::{Color, Start},
     text::Bounded,
     theme::Theme,
 };
@@ -612,12 +613,27 @@ fn unknown_removed_container_and_three_dimensional_links_are_refused() {
 
 #[test]
 fn a_behind_id_is_never_given_to_a_generated_mermaid_object() {
+    let graph = json!({"id":"graph","put":[
+        {"diagram":{"id":"target"}},
+        {"mermaid":{"in":"target","src":"flowchart TB\nA\n"}}
+    ]});
+    let (mut control, mut budget, _) = drawn(vec![cloud()]);
+    let kumochi_scene::Admission::New(admitted) =
+        control.admit(&typed(&graph), &budget).expect("valid graph")
+    else {
+        panic!("new graph");
+    };
+    let committed = control.commit(admitted, &mut budget).expect("committed");
+    let generated = committed
+        .handles
+        .iter()
+        .find(|(id, _)| !matches!(id.as_str(), "target" | "A"))
+        .expect("unnamed Mermaid root");
+    let mut referenced = graph;
+    referenced["set"] = json!([{"target":"c1","behind":generated.0.as_str()}]);
     refused(
         &[cloud()],
-        &json!({"id":"graph","put":[
-            {"diagram":{"id":"target"}},
-            {"mermaid":{"in":"target","src":"flowchart TB\nA\n"}}
-        ],"set":[{"target":"c1","behind":"--2.0"}]}),
+        &referenced,
         ErrorCode::UnknownRef,
         "set[0].behind",
     );
@@ -628,11 +644,26 @@ fn a_stored_step_written_before_behind_existed_still_decodes() {
     // The step event inside a stored row, in the form the format before `behind` wrote.
     let stored = r##"{"step":{"revision":3,"step":{"id":"red","say":null,"put":[],"set":[{"target":"c1","text":null,"label":null,"color":"#ff0000","cells":null,"data":null,"emphasis":null,"info":null}],"remove":[],"start":"speech"}}}"##;
     let event: SceneEvent = serde_json::from_str(stored).expect("old stored step decodes");
-    let mut expected: Value = serde_json::from_str(stored).expect("JSON");
-    expected["step"]["step"]["set"][0]["behind"] = Value::Null;
+    let SceneEvent::Step { revision, step } = &event else {
+        panic!("stored step");
+    };
     assert_eq!(
-        serde_json::to_value(&event).expect("JSON"),
-        expected,
-        "it decodes with no behind and nothing else changed"
+        (*revision, step.id.as_str(), &step.start),
+        (3, "red", &Start::Speech)
+    );
+    let [change] = &step.set[..] else {
+        panic!("one stored change");
+    };
+    assert_eq!(change.target.as_str(), "c1");
+    assert_eq!(
+        change.color,
+        Some(Color::Hex(0x00FF_0000_u32.try_into().expect("red RGB")))
+    );
+    assert_eq!(change.behind, None);
+    assert_eq!(
+        serde_json::to_value(&event)
+            .expect("JSON")
+            .pointer("/step/step/set/0/behind"),
+        Some(&Value::Null)
     );
 }

@@ -242,12 +242,12 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    /// Reports the name of the thread that destroys it.
-    struct Sentinel(Sender<Option<String>>);
+    struct Sentinel(Sender<thread::ThreadId>);
     impl Drop for Sentinel {
         fn drop(&mut self) {
-            let name = thread::current().name().map(str::to_owned);
-            self.0.send(name).expect("the test still listens");
+            self.0
+                .send(thread::current().id())
+                .expect("the test still listens");
         }
     }
 
@@ -265,12 +265,9 @@ mod tests {
             "no test in this binary starts the global dropper"
         );
         assert_eq!((pending(), take_peak()), (Pending::default(), 0));
-        let (names, reports) = mpsc::channel();
-        drop(Deferred::new(Sentinel(names), 40));
-        assert_eq!(
-            reports.try_recv(),
-            Ok(thread::current().name().map(str::to_owned))
-        );
+        let (ids, reports) = mpsc::channel();
+        drop(Deferred::new(Sentinel(ids), 40));
+        assert_eq!(reports.try_recv(), Ok(thread::current().id()));
     }
 
     #[test]
@@ -293,8 +290,9 @@ mod tests {
             assert!(Instant::now() < deadline, "the panicking thread exits");
             thread::sleep(Duration::from_millis(1));
         }
-        let (names, reports) = mpsc::channel();
-        dropper.send(Box::new(Sentinel(names)), 40);
+        let pending = dropper.pending();
+        let (ids, reports) = mpsc::channel();
+        dropper.send(Box::new(Sentinel(ids)), 40);
         assert_eq!(
             reports.try_recv(),
             Err(TryRecvError::Empty),
@@ -302,11 +300,8 @@ mod tests {
         );
         assert_eq!(
             dropper.pending(),
-            Pending {
-                values: 1,
-                bytes: 7
-            },
-            "the failed destructor never finished; the leaked value is not pending"
+            pending,
+            "the leaked value is not pending"
         );
     }
 }

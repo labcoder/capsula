@@ -590,15 +590,12 @@ fn reflow(
 mod tests {
     use super::axis::compact;
     use super::*;
-    use crate::layout::{
-        Glide, PrepareInput, PreparedStep, SurfaceGeometry, heap, prepare, state::Motions,
-    };
+    use crate::layout::{PrepareInput, PreparedStep, SurfaceGeometry, prepare};
     use crate::{
-        Admission, GlobalBudget, Record, SceneState, StopCut,
+        Admission, Frame, GlobalBudget, Record, SceneState, SceneView, StopCut, allocation,
         display::{MeasureError, TextMeasure},
         parse_record,
         record::Chart,
-        state::work::Motion,
         text::Bounded,
         theme::Theme,
     };
@@ -625,6 +622,7 @@ mod tests {
         budget: &mut GlobalBudget,
         before: &LayoutState,
         source: &str,
+        theme: &Arc<Theme>,
     ) -> PreparedStep {
         let Record::Step(step) = parse_record(source.as_bytes()).expect("step") else {
             panic!("step");
@@ -637,10 +635,30 @@ mod tests {
             ticket,
             before.clone(),
             SurfaceGeometry::default(),
-            Arc::new(Theme::default()),
+            Arc::clone(theme),
         )
         .expect("input");
         prepare(input, &mut Measure, &AtomicBool::new(false)).expect("picture")
+    }
+
+    fn filled_bounds(primitive: &Prim) -> Option<Rect> {
+        match primitive {
+            Prim::Rect {
+                rect,
+                fill: Some(paint),
+                ..
+            } if paint.opacity > 0.0 => Some(*rect),
+            Prim::Fill { points, color } if color.opacity > 0.0 => {
+                let &first = points.first()?;
+                let bounds = points
+                    .iter()
+                    .fold(Rect::centered(first, Vec2::default()), |bounds, &p| {
+                        bounds.union(Rect::centered(p, Vec2::default()))
+                    });
+                Some(bounds)
+            }
+            _ => None,
+        }
     }
     fn basis(kind: ChartKind) -> Basis {
         Basis {
@@ -733,9 +751,11 @@ mod tests {
             screen: None,
         };
         let out = draw(&series("[-2]"), &basis, &mut build).expect("draw");
-        let Prim::Rect { rect, .. } = out.output[0] else {
-            panic!("bar");
-        };
+        let rect = out
+            .output
+            .iter()
+            .find_map(filled_bounds)
+            .expect("filled bar");
         assert!(
             (rect.origin.y - 70.0).abs() < 1e-5 && (rect.size.y - 10.0).abs() < 1e-5,
             "negative stack occupies -4 to -6"
@@ -784,7 +804,7 @@ mod tests {
         );
     }
     #[test]
-    fn area_keeps_only_the_top_stroke_and_single_points_are_native_dots() {
+    fn area_keeps_only_the_top_stroke_and_a_single_sample_is_a_dot() {
         let theme = Theme::default();
         let mut build = Build {
             viewport: Rect::default(),
@@ -802,36 +822,66 @@ mod tests {
             "empty area has no primitives"
         );
         let single = draw(&series("[1]"), &basis(ChartKind::Area), &mut build).expect("single");
-        assert_eq!(single.output.len(), 1);
+        let dot = single
+            .output
+            .iter()
+            .find_map(filled_bounds)
+            .expect("filled dot");
+        assert!((dot.center().x).abs() < 1e-5 && (dot.center().y - 45.0).abs() < 1e-5);
+        assert!(dot.size.x > 0.0 && dot.size.y > 0.0);
         assert!(
-            matches!(single.output[0], Prim::Rect { .. }),
-            "one point is a native dot"
+            single
+                .output
+                .iter()
+                .all(|p| !matches!(p, Prim::Line { .. }))
         );
         let out = draw(&series("[1,2]"), &basis(ChartKind::Area), &mut build).expect("area");
-        let lines: Vec<_> = out
-            .output
-            .iter()
-            .filter_map(|p| {
-                if let Prim::Line { points, closed, .. } = p {
-                    Some((points.len(), *closed))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let fills: Vec<_> = out
-            .output
-            .iter()
-            .filter_map(|p| {
-                if let Prim::Fill { points, .. } = p {
-                    Some(points.len())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(lines, [(2, false)]);
-        assert_eq!(fills, [4]);
+        let mut spans = Vec::new();
+        for primitive in &out.output {
+            if let Prim::Line {
+                points,
+                closed,
+                color,
+                width,
+                ..
+            } = primitive
+            {
+                assert!(!closed && color.opacity > 0.0 && *width > 0.0);
+                assert!(
+                    points.iter().all(|p| {
+                        (0.0..=100.0).contains(&p.x) && (p.y - (45.0 - p.x * 0.05)).abs() < 1e-5
+                    }),
+                    "only the data line is stroked"
+                );
+                spans.extend(
+                    points
+                        .windows(2)
+                        .map(|pair| (pair[0].x.min(pair[1].x), pair[0].x.max(pair[1].x))),
+                );
+            }
+        }
+        spans.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        let mut covered = 0.0_f32;
+        for (left, right) in spans {
+            assert!((left - covered).abs() < 1e-5, "no gap or doubled stroke");
+            covered = right;
+        }
+        assert!(
+            (covered - 100.0).abs() < 1e-5,
+            "the whole data line is stroked"
+        );
+        assert!(
+            out.output.iter().any(|p| {
+                matches!(p, Prim::Fill { .. })
+                    && filled_bounds(p).is_some_and(|rect| {
+                        rect.origin.x.abs() < 1e-5
+                            && (rect.max().x - 100.0).abs() < 1e-5
+                            && (rect.origin.y - 40.0).abs() < 1e-5
+                            && (rect.max().y - 50.0).abs() < 1e-5
+                    })
+            }),
+            "the fill reaches the zero baseline"
+        );
     }
     #[test]
     fn pie_uses_its_retained_span_and_empty_allocation_can_become_positive() {
@@ -938,7 +988,7 @@ mod tests {
     #[test]
     #[expect(
         clippy::too_many_lines,
-        reason = "one lifecycle pins attached, cut and updated residency and inherited opacity"
+        reason = "the fixture spans a prepare, refit, Stop cut and detached update"
     )]
     fn residency_and_opacity_follow_the_chart_lifecycle() {
         let Record::Begin(header) =
@@ -950,92 +1000,68 @@ mod tests {
         let mut scene = SceneState::begin(header).expect("scene");
         let mut budget = GlobalBudget::default();
         let before = LayoutState::new(&scene);
-        let [c, s, t]: [WireId; 3] =
-            ["c", "s", "t"].map(|id| id.to_owned().try_into().expect("id"));
-        let arc = heap::ARC_HEADER;
-        // Both trees fit one leaf, each one-byte id has two heap copies and the version is one Arc.
-        let index = |objects: usize| {
-            heap::btree::<WireId, Placed>(objects)
-                + heap::btree::<Handle, WireId>(objects)
-                + 2 * objects
-                + arc
+        let [s, t]: [WireId; 2] = ["s", "t"].map(|id| id.to_owned().try_into().expect("id"));
+        let theme = Arc::new(Theme::default());
+        let check_release = |step: PreparedStep| {
+            let charge = step.resident_bytes;
+            let ((), _, [_, released]) = allocation::usage(|| drop(step));
+            assert_eq!(
+                charge, released,
+                "charge the bytes this result holds beyond its predecessor"
+            );
         };
-        // A series source owns its id, "c" and two points.
-        let series = arc + size_of::<Op>() + 2 + 2 * size_of::<Point>();
-        let motion = arc + size_of::<Motions>() + heap::btree::<&str, Motion>(1);
-        let own = |step: &PreparedStep| {
-            step.display.items.capacity() * size_of::<Item>()
-                + step.removed.capacity() * size_of::<Handle>()
-                + step.glides.capacity() * size_of::<Glide>()
-                + arc
-                + size_of::<BTreeMap<usize, usize>>()
-        };
-        // Three primitive arrays and six two-point lines, then the plot and both bases.
-        let full = 18 * size_of::<Prim>()
-            + 12 * size_of::<Vec2>()
-            + 10
-            + 9 * arc
-            + index(3)
-            + arc
-            + size_of::<Plot>()
-            + 2 * size_of::<Text>()
-            + 3
-            + 2 * (arc + size_of::<Basis>() + 2 * size_of::<[f64; 2]>());
-        let bases = |state: &LayoutState| {
-            [&s, &t].map(|id| Arc::clone(state.objects[id].chart_basis.as_ref().expect("basis")))
-        };
-        let opacity = |state: &LayoutState| {
-            let object = &state.objects[&s];
-            (
-                object.item.opacity.to_bits(),
-                object.rest.opacity.map(f32::to_bits),
-                object.inherited_opacity.to_bits(),
-            )
-        };
-        let bits = |own: f32, rest: f32, inherited: f32| {
-            (own.to_bits(), Some(rest.to_bits()), inherited.to_bits())
+        let painted = |layout: &LayoutState, id: &WireId| {
+            let mut frame = Frame::new();
+            SceneView::new(layout, layout.revision())
+                .frame(0, &mut frame)
+                .expect("sample");
+            let handle = layout.handle(id).expect("series handle");
+            let item = frame
+                .items()
+                .iter()
+                .find(|item| item.handle == handle)
+                .expect("series paint");
+            let mut bars: Vec<_> = item
+                .primitives
+                .iter()
+                .filter_map(|prim| match prim {
+                    Prim::Rect {
+                        fill: Some(paint),
+                        rect,
+                        ..
+                    } if paint.opacity > 0.0 => Some((item.transform.bounds(*rect), paint.rgb)),
+                    _ => None,
+                })
+                .collect();
+            bars.sort_by(|a, b| a.0.origin.x.total_cmp(&b.0.origin.x));
+            assert_eq!(bars.len(), 2, "one bar per category");
+            (bars, item.opacity.to_bits())
         };
         let first = picture(
             &mut scene,
             &mut budget,
             &before,
             r#"{"step":{"id":"first","put":[{"chart":{"id":"c","kind":"bar","stacked":true,"box":[0,0,400,300],"opacity":0.5,"categories":["ab","c"],"x":{"min":-0.5,"max":1.5},"y":{"min":-5,"max":5}}},{"series":{"id":"s","in":"c","opacity":0.5,"data":[1,2]}},{"series":{"id":"t","in":"c","data":[2,1]}},{"anim":{"target":"s","track":"opacity","keys":[[0,0.75]]}}]}}"#,
+            &theme,
         );
-        // The chart source owns its id, two category texts and their three bytes.
-        let chart = arc + size_of::<Op>() + 4 + 2 * size_of::<Text>();
-        assert_eq!(
-            first.resident_bytes,
-            full + chart + 2 * series + motion + own(&first),
-            "every source once, and s's track owns a motion map"
-        );
-        let initial = bases(&first.after);
-        assert!(
-            Arc::ptr_eq(&initial[0].plot, &initial[1].plot),
-            "series share one plot"
-        );
-        assert_eq!(
-            first.after.objects[&c].item.opacity.to_bits(),
-            0.5_f32.to_bits()
-        );
-        assert_eq!(opacity(&first.after), bits(0.5, 0.75, 1.0));
+        let (initial, alpha) = painted(&first.after, &s);
+        assert_eq!(alpha, 0.375_f32.to_bits());
+        assert!(initial[0].0.size.y > 0.0);
+        assert!((initial[1].0.size.y - 2.0 * initial[0].0.size.y).abs() < 1e-4);
+        assert!((initial[0].0.max().y - initial[1].0.max().y).abs() < 1e-4);
         let second = picture(
             &mut scene,
             &mut budget,
             &first.after,
-            r#"{"step":{"id":"color","set":[{"target":"s","color":"red"}]}}"#,
+            r##"{"step":{"id":"color","set":[{"target":"s","color":"#ff0000"}]}}"##,
+            &theme,
         );
-        assert_eq!(
-            second.resident_bytes,
-            full + series + own(&second),
-            "the refit shares s's motion map"
-        );
-        let refit = bases(&second.after);
-        assert!(
-            !Arc::ptr_eq(&initial[0], &refit[0])
-                && !Arc::ptr_eq(&initial[1], &refit[1])
-                && Arc::ptr_eq(&refit[0].plot, &refit[1].plot),
-            "an attached refit replaces both bases around one new plot"
-        );
+        let red = crate::record::Rgb::try_from(0x00ff_0000).expect("red");
+        let refit = initial
+            .iter()
+            .map(|&(rect, _)| (rect, red))
+            .collect::<Vec<_>>();
+        assert_eq!(painted(&second.after, &s), (refit.clone(), alpha));
         let revealed = [&s, &t].map(|id| second.after.handle(id).expect("handle"));
         scene
             .stop(
@@ -1046,51 +1072,46 @@ mod tests {
                 &mut budget,
             )
             .expect("stop");
-        let detached = second.after.cut(&scene).expect("detached layout");
-        let frozen = bases(&detached);
+        let (detached, _, [allocated, released]) =
+            allocation::usage(|| second.after.cut(&scene).expect("detached layout"));
+        let cut_bytes = allocated - released;
         assert!(
-            Arc::ptr_eq(&frozen[0], &refit[0])
-                && Arc::ptr_eq(&frozen[1], &refit[1])
-                && Arc::ptr_eq(&frozen[0].plot, &frozen[1].plot),
-            "the cut keeps both bases and their plot"
+            cut_bytes < detached.resident_bytes(),
+            "cut shares retained chart storage"
         );
-        assert_eq!(
-            opacity(&detached),
-            bits(0.5, 0.75, 0.5),
-            "the cut moves the chart's 0.5 into the inherited factor, not the own base"
-        );
+        let other = painted(&detached, &t);
+        assert_eq!(painted(&first.after, &t), other);
+        assert_eq!(painted(&second.after, &t), other);
+        assert_eq!(painted(&detached, &s), (refit.clone(), 0.375_f32.to_bits()));
         let next = picture(
             &mut scene,
             &mut budget,
             &detached,
             r#"{"step":{"id":"data","put":[{"anim":{"target":"s","track":"opacity","keys":[[0,0.25]]}}],"set":[{"target":"s","data":[2,1]}]}}"#,
+            &theme,
         );
-        assert_eq!(
-            next.resident_bytes,
-            arc + 2 * size_of::<Prim>() + index(2) + series + motion + own(&next),
-            "the new track copies s's motion map instead of writing through the detached prefix"
-        );
-        let envelope = |state: &LayoutState| {
-            let motion = state.objects[&s]
-                .motion
-                .as_ref()
-                .expect("s owns an opacity track");
-            motion["opacity"].min[0].to_bits()
-        };
-        assert_eq!(
-            (envelope(&detached), envelope(&next.after)),
-            (0.75_f32.to_bits(), 0.25_f32.to_bits()),
-            "the detached prefix keeps its own envelope"
-        );
-        let kept = bases(&next.after);
-        assert!(
-            Arc::ptr_eq(&kept[0], &frozen[0]) && Arc::ptr_eq(&kept[1], &frozen[1]),
-            "a detached update allocates no new basis"
-        );
-        assert_eq!(
-            opacity(&next.after),
-            bits(0.5, 0.25, 0.5),
-            "a detached update keeps its base and inherited factor; the new track owns the rest"
-        );
+        let (updated, alpha) = painted(&next.after, &s);
+        assert_eq!(alpha, 0.125_f32.to_bits());
+        for i in 0..2 {
+            assert!(
+                (updated[i].0.origin.x - refit[i].0.origin.x).abs() < 1e-4,
+                "category position survives detachment"
+            );
+            assert!(
+                (updated[i].0.size.x - refit[i].0.size.x).abs() < 1e-4,
+                "bar width survives detachment"
+            );
+            assert!((updated[i].0.size.y - refit[1 - i].0.size.y).abs() < 1e-4);
+            assert!((updated[i].0.max().y - refit[i].0.max().y).abs() < 1e-4);
+            assert_eq!(updated[i].1, red);
+        }
+        assert_eq!(painted(&next.after, &t), other);
+        assert_eq!(painted(&detached, &s), (refit, 0.375_f32.to_bits()));
+        assert_eq!(painted(&first.after, &s), (initial, 0.375_f32.to_bits()));
+        check_release(next);
+        let ((), _, [_, released]) = allocation::usage(|| drop(detached));
+        assert_eq!(released, cut_bytes, "cut-only storage is released");
+        check_release(second);
+        check_release(first);
     }
 }

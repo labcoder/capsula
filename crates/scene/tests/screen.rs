@@ -8,7 +8,7 @@ use kumochi_scene::{
     limits::{MAX_MARKER_OPACITY, MAX_SPOTLIGHT_DIM},
     parse_draw_record, parse_screen_draw_record,
     record::{ScreenDisplay, Surface},
-    screen::{self, MARK_RGB, PLACEHOLDER_BOX, SPOTLIGHT_RGB},
+    screen::{self, LABEL_GAP, MARK_RGB, PLACEHOLDER_BOX, SPOTLIGHT_RGB},
     theme::Theme,
 };
 use serde_json::{Value, json};
@@ -138,6 +138,37 @@ fn near(actual: Rect, expected: [f32; 4]) -> bool {
     ];
     got.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-3)
 }
+fn outline(drawn: &[Drawn], rgb: u32) -> Drawn {
+    drawn
+        .iter()
+        .copied()
+        .find(|(_, _, _, border)| border.is_some_and(|(paint, _)| paint.rgb.get() == rgb))
+        .expect("colored outline")
+}
+
+fn inside(inner: Rect, outer: Rect) -> bool {
+    inner.origin.x >= outer.origin.x
+        && inner.origin.y >= outer.origin.y
+        && inner.max().x <= outer.max().x
+        && inner.max().y <= outer.max().y
+}
+
+fn canvas() -> Rect {
+    rect([0.0, 0.0, 1280.0, 720.0])
+}
+
+fn save_label(result: &PreparedStep) -> Rect {
+    let label = item(result, "c");
+    assert!(
+        label
+            .primitives
+            .iter()
+            .any(|prim| matches!(prim, Prim::Text { text, .. } if text.as_str() == "Save")),
+        "the Save label paints its text"
+    );
+    assert!(inside(label.bounds, canvas()), "label stays on the picture");
+    label.bounds
+}
 fn rect(value: [f32; 4]) -> Rect {
     Rect {
         origin: Vec2::new(value[0], value[1]),
@@ -226,6 +257,11 @@ fn the_model_may_write_the_pictures_size_but_never_another_or_the_display() {
         panic!("header with size");
     };
     screen::stamp(begin, PICTURE, DISPLAY).expect("the picture's own size");
+    assert_eq!(
+        begin.size.map(|size| size.map(kumochi_scene::Finite::get)),
+        Some([1280.0, 720.0])
+    );
+    assert_eq!(begin.display, Some(DISPLAY));
     let Ok(Record::Begin(mut other)) =
         record(&json!({"begin":{"scene":"m","surface":"screen","alt":"","size":[1280,721]}}))
     else {
@@ -279,30 +315,33 @@ fn draw_still_refuses_the_screen_surface_and_box_targets_and_does_not_offer_them
         ("put[0].target", ErrorCode::Unsupported)
     );
     let offered = |schema: &Value| {
-        let targets = schema["$defs"]["Target"]["anyOf"]
-            .as_array()
-            .expect("targets");
-        let ops = schema["$defs"]["Op"]["oneOf"].as_array().expect("ops");
+        let defs = &schema["$defs"];
+        let targets = defs["Target"]["anyOf"].as_array().expect("targets");
+        let surfaces = defs["Surface"]["oneOf"].as_array().expect("surfaces");
+        let ops = defs["Op"]["oneOf"].as_array().expect("ops");
+        assert!(
+            !defs["Begin"]["properties"]
+                .as_object()
+                .expect("Begin properties")
+                .contains_key("display")
+        );
+        let offers = |field| ops.iter().any(|op| op["properties"].get(field).is_some());
         (
-            schema["$defs"]["Surface"].to_string().contains("screen"),
+            surfaces.iter().any(|surface| surface["const"] == "screen"),
             targets
                 .iter()
-                .any(|target| !target["properties"]["box"].is_null()),
-            schema.to_string().contains("display"),
-            ops.iter()
-                .filter(|op| {
-                    !op["properties"]["line"].is_null() || !op["properties"]["arrow"].is_null()
-                })
-                .count(),
+                .any(|target| target["properties"].get("box").is_some()),
+            offers("line"),
+            offers("arrow"),
         )
     };
     assert_eq!(
         offered(&kumochi_scene::draw_schema()),
-        (false, false, false, 2)
+        (false, false, true, true)
     );
     assert_eq!(
         offered(&kumochi_scene::screen_draw_schema()),
-        (true, true, false, 0)
+        (true, true, false, false)
     );
 }
 
@@ -382,10 +421,15 @@ fn a_box_must_be_non_empty_and_inside_the_picture() {
         );
     }
     let edge = step(&json!([{"highlight":{"id":"h","target":{"box":[1270,710,10,10]}}}]));
-    SceneState::begin(header())
-        .expect("scene")
-        .admit(&edge, &GlobalBudget::default())
-        .expect("a box touching the picture's corner");
+    assert!(
+        matches!(
+            SceneState::begin(header())
+                .expect("scene")
+                .admit(&edge, &GlobalBudget::default()),
+            Ok(Admission::New(_))
+        ),
+        "a box touching the picture's corner admits a new step"
+    );
 }
 
 #[test]
@@ -481,10 +525,13 @@ fn screen_labels_refuse_hidden_formatting_and_line_separators_at_admission() {
         missing.is_empty(),
         "wrong or missing refusals: {missing:X?}"
     );
-    assert_eq!(
-        ErrorCode::LabelTooLong.to_string(),
-        "scene.LabelTooLong: a label on the screen is one line of at most 24 characters, without hidden formatting controls"
-    );
+    let guidance = ErrorCode::LabelTooLong.to_string();
+    for phrase in ["one line", "at most 24 characters", "hidden formatting"] {
+        assert!(
+            guidance.contains(phrase),
+            "missing admission guidance: {phrase}"
+        );
+    }
 }
 
 #[test]
@@ -564,31 +611,40 @@ fn a_box_mark_is_a_two_tone_outline_outside_the_padded_box_in_logical_pixels() {
     ])
     .expect("prepared");
     let drawn = rects(&item(&result, "h"));
-    assert_eq!(drawn.len(), 2);
-    // Two logical pixels per picture pixel: pad 2, edge 0.5, stroke 1, corner 3 grown by 3(1 - 1/√2).
-    let (outer, radius, fill, border) = drawn[0];
-    assert!(
-        near(outer, [95.121_32, 95.121_32, 49.757_36, 29.757_36]),
-        "{outer:?}"
-    );
-    assert!((radius - 5.0).abs() < 1e-4 && fill.is_none());
-    let (paint, width) = border.expect("white edge");
+    let padded = rect([98.0, 98.0, 44.0, 24.0]);
+    let white = outline(&drawn, 0x00FF_FFFF);
+    let purple = outline(&drawn, MARK_RGB);
+    for layer in [white, purple] {
+        assert!(
+            layer.1 > 0.0 && layer.2.is_none() && clears(padded, layer),
+            "the rounded outline must leave the padded target clear"
+        );
+    }
+    let (paint, width) = white.3.expect("white edge");
     assert_eq!(
-        (paint.rgb.get(), paint.opacity, width),
-        (0x00FF_FFFF, 1.0, 2.0)
+        (paint.opacity.to_bits(), (width * 2.0).to_bits()),
+        (1.0_f32.to_bits(), 4.0_f32.to_bits())
     );
-    let (inner, radius, _, border) = drawn[1];
-    assert!(
-        near(inner, [95.621_32, 95.621_32, 48.757_36, 28.757_36]),
-        "{inner:?}"
+    let (paint, width) = purple.3.expect("purple stroke");
+    assert_eq!(
+        (paint.opacity.to_bits(), (width * 2.0).to_bits()),
+        (1.0_f32.to_bits(), 2.0_f32.to_bits())
     );
-    assert!((radius - 4.5).abs() < 1e-4);
-    let (paint, width) = border.expect("stroke");
-    assert_eq!((paint.rgb.get(), width), (MARK_RGB, 1.0));
+    for edge in [
+        purple.0.origin.x - white.0.origin.x,
+        purple.0.origin.y - white.0.origin.y,
+        white.0.max().x - purple.0.max().x,
+        white.0.max().y - purple.0.max().y,
+    ] {
+        assert!(
+            (edge * 2.0 - 1.0).abs() < 1e-3,
+            "one logical pixel of white surrounds the purple"
+        );
+    }
 }
 
 #[test]
-fn rings_underlines_markers_and_spotlights_keep_their_numbers() {
+fn screen_marks_leave_the_target_clear_or_dim_only_the_surroundings() {
     let mark = |style: &str| {
         let result = prepared(&[
             json!([{"highlight":{"id":"h","target":{"box":[100,100,40,20]},"style":style}}]),
@@ -597,33 +653,76 @@ fn rings_underlines_markers_and_spotlights_keep_their_numbers() {
         rects(&item(&result, "h"))
     };
     let ring = mark("ring");
-    assert!(
-        near(ring[0].0, [91.029_44, 91.029_44, 57.941_12, 37.941_12]),
-        "{:?}",
-        ring[0].0
-    );
-    assert!((ring[0].1 - 18.970_56).abs() < 1e-3, "a loop: round ends");
-    let underline = mark("underline");
-    assert!(near(underline[0].0, [100.0, 122.0, 40.0, 2.0]));
-    assert!(near(underline[1].0, [100.5, 122.5, 39.0, 1.0]));
-    assert_eq!((underline[0].1, underline[1].1), (1.0, 0.5));
-    let marker = mark("marker");
-    assert_eq!(marker.len(), 1);
-    assert!(near(marker[0].0, [98.0, 98.0, 44.0, 24.0]));
-    assert_eq!(
-        marker[0].2.map(|paint| paint.opacity),
-        Some(MAX_MARKER_OPACITY)
-    );
-    let spotlight = mark("spotlight");
-    let dims: Vec<_> = spotlight.iter().filter(|drawn| drawn.3.is_none()).collect();
-    assert_eq!(dims.len(), 4);
-    for dim in dims {
-        let paint = dim.2.expect("dimming");
-        assert_eq!(
-            (paint.rgb.get(), paint.opacity),
-            (SPOTLIGHT_RGB, MAX_SPOTLIGHT_DIM)
+    let target = rect([100.0, 100.0, 40.0, 20.0]);
+    let padded = rect([98.0, 98.0, 44.0, 24.0]);
+    for rgb in [0x00FF_FFFF, MARK_RGB] {
+        let outline = outline(&ring, rgb);
+        assert!(
+            (outline.1 - outline.0.size.y * 0.5).abs() < 1e-3,
+            "a ring has round ends"
+        );
+        assert!(
+            clears(padded, outline),
+            "the padded target fits inside the ring"
         );
     }
+
+    let underline = mark("underline");
+    for (rgb, height) in [(0x00FF_FFFF, 2.0), (MARK_RGB, 1.0)] {
+        let (bar, radius, ..) = underline
+            .iter()
+            .find(|(_, _, fill, _)| fill.is_some_and(|paint| paint.rgb.get() == rgb))
+            .expect("the underline color is visible");
+        assert!(bar.origin.y >= padded.max().y && bar.size.x > 0.0);
+        assert!((bar.size.y - height).abs() < 1e-3);
+        assert!(
+            (radius - bar.size.y * 0.5).abs() < 1e-3,
+            "the underline has round ends"
+        );
+        if rgb == 0x00FF_FFFF {
+            assert!((bar.origin.y - padded.max().y).abs() < 1e-3);
+            assert!((bar.origin.x - target.origin.x).abs() < 1e-3);
+            assert!((bar.max().x - target.max().x).abs() < 1e-3);
+        }
+    }
+
+    let marker = mark("marker");
+    assert!(
+        marker.iter().any(|(bounds, _, fill, _)| {
+            near(*bounds, [98.0, 98.0, 44.0, 24.0])
+                && fill.is_some_and(|paint| paint.opacity.to_bits() == MAX_MARKER_OPACITY.to_bits())
+        }),
+        "the padded marker uses the allowed opacity"
+    );
+
+    let spotlight = mark("spotlight");
+    let aperture = outline(&spotlight, 0x00FF_FFFF).0;
+    assert!(inside(padded, aperture) && inside(aperture, canvas()));
+    let mut dimmed = Vec::<Rect>::new();
+    let area = |r: Rect| f64::from(r.size.x) * f64::from(r.size.y);
+    for (bounds, radius, fill, _) in spotlight.iter().filter(|drawn| drawn.2.is_some()) {
+        let paint = fill.expect("dimming");
+        assert_eq!(
+            (paint.rgb.get(), paint.opacity.to_bits()),
+            (SPOTLIGHT_RGB, MAX_SPOTLIGHT_DIM.to_bits())
+        );
+        assert_eq!(
+            radius.to_bits(),
+            0.0_f32.to_bits(),
+            "each dim panel covers its rectangle"
+        );
+        assert!(inside(*bounds, canvas()) && !bounds.intersects(aperture));
+        assert!(
+            dimmed.iter().all(|prior| !bounds.intersects(*prior)),
+            "dimming cannot stack"
+        );
+        dimmed.push(*bounds);
+    }
+    let coverage: f64 = dimmed.into_iter().map(area).sum();
+    assert!(
+        (coverage - (area(canvas()) - area(aperture))).abs() < 0.1,
+        "the dim paint covers the entire picture outside the aperture"
+    );
 }
 
 #[test]
@@ -678,41 +777,58 @@ fn no_outline_ever_covers_its_target_whatever_its_shape_or_pad() {
 #[test]
 fn a_label_sits_on_the_named_side_outside_its_mark_or_the_next_free_side() {
     let label = |target: [u32; 4], side: &str, others: Value| {
-        let result = prepared(&[
+        prepared(&[
             others,
             json!([{"callout":{"id":"c","target":{"box":target},"text":"Save","side":side}}]),
         ])
-        .expect("prepared");
-        item(&result, "c").bounds
+        .expect("prepared")
     };
     let marks = |target: [u32; 4]| json!([{"highlight":{"id":"h","target":{"box":target}}}]);
-    // Label 40 by 15, 3 canvas units (the 6 px gap, halved) off the ring, whose outline reaches
-    // 5.757 out: pad 2, the 6-unit corner's growth 1.757 and outline 2.
-    let top = label([600, 300, 80, 40], "top", marks([600, 300, 80, 40]));
-    assert!(near(top, [620.0, 276.243, 40.0, 15.0]), "{top:?}");
-    let left = label([600, 300, 80, 40], "left", marks([600, 300, 80, 40]));
-    assert!(near(left, [551.243, 312.5, 40.0, 15.0]), "{left:?}");
-    let bottom = label([600, 2, 80, 40], "top", marks([600, 2, 80, 40]));
-    assert!(near(bottom, [620.0, 50.757, 40.0, 15.0]), "{bottom:?}");
+    let target = [600, 300, 80, 40];
+    let top = label(target, "top", marks(target));
+    let gap = LABEL_GAP * 0.5;
+    assert!((item(&top, "h").bounds.origin.y - save_label(&top).max().y - gap).abs() < 1e-3);
+    let left = label(target, "left", marks(target));
+    assert!((item(&left, "h").bounds.origin.x - save_label(&left).max().x - gap).abs() < 1e-3);
+
+    let target = [600, 2, 80, 40];
+    let alternate = label(target, "top", marks(target));
+    let bounds = save_label(&alternate);
+    let own = item(&alternate, "h").bounds;
+    assert!(
+        own.origin.y < 0.0,
+        "no top placement fits inside the picture"
+    );
+    assert!(!bounds.intersects(own) && bounds.origin.y > own.origin.y);
+
     let blocked = json!([
-        {"highlight":{"id":"h","target":{"box":[600,2,80,40]}}},
+        {"highlight":{"id":"h","target":{"box":target}}},
         {"highlight":{"id":"k","target":{"box":[600,50,80,20]}}}
     ]);
-    let right = label([600, 2, 80, 40], "top", blocked);
-    assert!(near(right, [688.757, 14.5, 40.0, 15.0]), "{right:?}");
+    let result = label(target, "top", blocked);
+    let bounds = save_label(&result);
+    for mark in ["h", "k"] {
+        assert!(
+            !bounds.intersects(item(&result, mark).bounds),
+            "alternate side clears {mark}"
+        );
+    }
+    assert!(bounds.origin.y > item(&result, "h").bounds.origin.y);
 }
 
 #[test]
 fn a_label_on_a_looped_mark_s_own_box_sits_beside_the_mark() {
     let result = prepared(&[json!([
         {"highlight":{"id":"h","target":{"box":[100,100,200,20]},"style":"box"}},
-        {"callout":{"id":"c","target":{"box":[100,100,200,20]},"text":"Save"}}
+        {"callout":{"id":"c","target":{"box":[100,100,200,20]},"text":"Save","side":"top"}}
     ])])
     .expect("prepared");
-    // The round-ended outline reaches 8.97 units out (pad 2, the radius's growth 4.97, outline
-    // 2), past the label's fixed 7; the label keeps its 3-unit gap from the outline instead.
-    let top = item(&result, "c").bounds;
-    assert!(near(top, [180.0, 73.029, 40.0, 15.0]), "{top:?}");
+    let mark = item(&result, "h").bounds;
+    assert!(
+        100.0 - mark.origin.y > 7.0,
+        "the wide outline outgrows the nominal keep-out"
+    );
+    assert!((mark.origin.y - save_label(&result).max().y - LABEL_GAP * 0.5).abs() < 1e-3);
 }
 
 #[test]
@@ -722,24 +838,40 @@ fn a_label_keeps_off_every_mark_of_its_step_and_moves_off_a_later_one() {
     let mark = json!({"highlight":{"id":"h","target":{"box":[610,262,60,10]},"style":"box"}});
     let other = json!({"callout":{"id":"d","target":{"box":[610,270,60,10]},"text":"Here"}});
     let far = json!({"highlight":{"id":"f","target":{"box":[10,10,20,20]}}});
-    let alone = item(&prepared(&[json!([callout])]).expect("prepared"), "c").bounds;
-    assert!(near(alone, [620.0, 278.0, 40.0, 15.0]), "{alone:?}");
-    let kept = item(
-        &prepared(&[json!([callout]), json!([far])]).expect("prepared"),
-        "c",
-    )
-    .bounds;
-    assert!(near(kept, [620.0, 278.0, 40.0, 15.0]), "{kept:?}");
-    for steps in [
-        vec![json!([callout, mark])],
-        vec![json!([callout, other])],
-        vec![json!([callout]), json!([mark])],
+    let alone = save_label(&prepared(&[json!([callout])]).expect("prepared"));
+    assert!(
+        alone.max().y < 300.0,
+        "the unblocked label sits above its target"
+    );
+    let kept = save_label(&prepared(&[json!([callout]), json!([far])]).expect("prepared"));
+    assert_eq!(kept, alone);
+    for (steps, obstacle, target) in [
+        (
+            vec![json!([callout, mark])],
+            "h",
+            rect([610.0, 262.0, 60.0, 10.0]),
+        ),
+        (
+            vec![json!([callout, other])],
+            "d",
+            rect([610.0, 270.0, 60.0, 10.0]),
+        ),
+        (
+            vec![json!([callout]), json!([mark])],
+            "h",
+            rect([610.0, 262.0, 60.0, 10.0]),
+        ),
     ] {
-        let label = item(&prepared(&steps).expect("prepared"), "c").bounds;
+        let result = prepared(&steps).expect("prepared");
+        let label = save_label(&result);
+        let painted = item(&result, obstacle).bounds;
         assert!(
-            near(label, [620.0, 347.0, 40.0, 15.0]),
-            "{steps:?}: {label:?}"
+            alone.intersects(painted) || alone.intersects(target),
+            "the obstacle blocks the original pose"
         );
+        assert_ne!(label, alone);
+        assert!(!label.intersects(painted) && !label.intersects(target));
+        assert!(!label.intersects(rect([600.0, 300.0, 80.0, 40.0])));
     }
 }
 
@@ -760,18 +892,15 @@ fn an_earlier_label_with_no_side_left_sits_out_until_one_frees() {
     );
     let freed =
         prepared(&[callout.clone(), fence.clone(), json!({"remove":["t"]})]).expect("prepared");
-    let label = item(&freed, "c");
     let unfenced = prepared(std::slice::from_ref(&callout)).expect("prepared without fences");
-    assert!(
-        label
-            .primitives
-            .iter()
-            .any(|prim| matches!(prim, Prim::Text { text, .. } if text.as_str() == "Save")),
-        "the earlier label is visible once space frees"
-    );
+    let label = save_label(&freed);
+    assert!(label.max().y < 300.0, "the earlier label returns on top");
+    for mark in ["b", "l", "r"] {
+        assert!(!label.intersects(item(&freed, mark).bounds));
+    }
     assert_eq!(
-        label.bounds,
-        item(&unfenced, "c").bounds,
+        label,
+        save_label(&unfenced),
         "the earlier label returns to its open placement"
     );
     // c sat out at its old centre (640, 285.5), which d's named side covers.
@@ -826,9 +955,10 @@ fn a_screen_scene_holds_one_spotlight() {
         ("put[0].style", ErrorCode::Unsupported)
     );
     let boxed = json!([{"highlight":{"id":"b","target":{"box":[40,10,20,20]}}}]);
-    scene
-        .admit(&later(boxed), &budget)
-        .expect("a box after the spotlight");
+    assert!(
+        matches!(scene.admit(&later(boxed), &budget), Ok(Admission::New(_))),
+        "a box after the spotlight is a new step"
+    );
 }
 
 #[test]
@@ -905,21 +1035,24 @@ fn the_canvas_maps_onto_its_own_display_in_logical_pixels_and_nowhere_else() {
 #[test]
 fn no_box_or_display_number_reaches_a_debug_output_or_the_stored_step() {
     let marker = "zq-sentinel";
-    let planted = 777.25;
+    let mark_box = [177.25, 277.5, 37.125, 47.625];
+    let label_box = [371.25, 471.5, 51.125, 61.625];
+    let display = ScreenDisplay {
+        origin: [77_725, -77_726],
+        size: [2751, 1429],
+        dpi: 97,
+    };
     let mut begin = header();
-    begin.display = Some(ScreenDisplay {
-        origin: [77_725, 77_726],
-        size: [2560, 1440],
-        dpi: 77_727,
-    });
+    begin.display = Some(display);
     let authored = step(&json!([
-        {"highlight":{"id":"h","target":{"box":[planted,planted,planted,planted]}}},
-        {"callout":{"id":"c","target":{"box":[planted,10,20,20]},"text":marker}}
+        {"highlight":{"id":"h","target":{"box":mark_box}}},
+        {"callout":{"id":"c","target":{"box":label_box},"text":marker}}
     ]));
     let stored = screen::without_boxes(&authored);
     let mut outputs = vec![
         format!("{authored:?}"),
         format!("{stored:?}"),
+        format!("{display:?}"),
         format!("{begin:?}"),
         format!("{:?}", Record::Begin(begin)),
     ];
@@ -930,24 +1063,50 @@ fn no_box_or_display_number_reaches_a_debug_output_or_the_stored_step() {
             .chain(stored.put.iter())
             .map(|op| format!("{op:?}")),
     );
+    let coordinates: Vec<_> = mark_box
+        .into_iter()
+        .chain(label_box)
+        .map(|n| n.to_string())
+        .chain(display.origin.map(|n| n.to_string()))
+        .chain(display.size.map(|n| n.to_string()))
+        .chain([display.dpi.to_string()])
+        .collect();
+    let coordinate_lists = [
+        format!("{mark_box:?}"),
+        format!("{label_box:?}"),
+        format!("{:?}", display.origin),
+        format!("{:?}", display.size),
+    ];
     for output in &outputs {
-        for absent in ["777", "77725", "77727", marker] {
-            assert!(!output.contains(absent), "{absent} in {output}");
+        for absent in coordinates
+            .iter()
+            .chain(&coordinate_lists)
+            .map(String::as_str)
+            .chain([marker])
+        {
+            assert!(
+                !output.contains(absent),
+                "Debug exposed a privacy sentinel: {absent}"
+            );
             assert!(
                 !output.contains(&format!("{:?}", absent.as_bytes())),
-                "{absent} bytes"
+                "Debug exposed a privacy sentinel as bytes: {absent}"
             );
         }
     }
-    let bytes = serde_json::to_string(&stored).expect("stored JSON");
-    assert!(!bytes.contains("777"), "a box in the stored step");
-    assert!(bytes.contains(marker), "labels are kept");
-    for op in stored.put.iter() {
-        let target = match op {
-            Op::Highlight(mark) => &mark.target,
-            Op::Callout(label) => &label.target,
-            _ => panic!("only marks"),
-        };
+    let encoded = serde_json::to_string(&stored).expect("stored JSON");
+    for coordinate in coordinates {
+        assert!(
+            !encoded.contains(&coordinate),
+            "the stored step contains a private coordinate"
+        );
+    }
+    let decoded: Step = serde_json::from_str(&encoded).expect("stored step decodes");
+    let [Op::Highlight(mark), Op::Callout(label)] = &decoded.put[..] else {
+        panic!("both stored marks survive");
+    };
+    assert_eq!(label.text.as_str(), marker);
+    for target in [&mark.target, &label.target] {
         let kumochi_scene::record::Target::Box(bounds) = target else {
             panic!("a box target");
         };

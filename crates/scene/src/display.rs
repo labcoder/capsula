@@ -876,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn within_stops_counting_once_a_bounded_scene_passes_its_cap() {
+    fn fills_and_crossings_must_fit_the_remaining_preparation_room() {
         let spent = |fill_vertices| PaintWork {
             fill_vertices,
             ..PaintWork::default()

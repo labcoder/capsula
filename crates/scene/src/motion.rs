@@ -160,10 +160,6 @@ pub fn synthetic_duration_ms(say: Option<&Text>) -> u64 {
         .max(MIN_SYNTHETIC_MS)
 }
 
-/// Offset of word `word` within a narration segment of `segment_ms`, proportional to its index.
-pub fn at_word_offset_ms(say: &str, word: u16, segment_ms: u64) -> u64 {
-    word_offset_ms(word_count(say), word, segment_ms)
-}
 fn word_count(say: &str) -> usize {
     say.split_whitespace().count()
 }
@@ -1282,6 +1278,9 @@ mod tests {
                 })
                 .collect();
             let track = if scale { "scale" } else { "x" };
+            let last = keys.last().expect("at least two keys");
+            let end = last[0].as_u64().expect("authored time");
+            let final_value = last[1].as_f64().expect("authored value");
             let record = serde_json::json!({"step":{"id":"s","put":[{"anim":{
                 "target":"t","track":track,"ease":"spring","keys":keys}}]}});
             let bytes = serde_json::to_vec(&record).expect("fixture JSON");
@@ -1294,10 +1293,17 @@ mod tests {
             let envelope = work::motion(anim, 0, &step).expect("admitted track");
             let handle = Handle::new(1, 0).expect("fixture handle");
             let live = Live::new(anim, handle, 0, &Theme::default());
-            for now in 0..=live.end() {
+            assert_eq!(live.end(), end);
+            for now in 0..=end {
                 let Value::Num(value) = live.sample(now) else {
                     panic!("numeric track");
                 };
+                if now == end {
+                    assert!(
+                        (f64::from(value) - final_value).abs()
+                            <= f64::from(value.abs().next_up() - value.abs())
+                    );
+                }
                 let ulp = value.abs().next_up() - value.abs();
                 assert!(
                     value >= envelope.min[0] - ulp && value <= envelope.max[0] + ulp,
@@ -1415,23 +1421,28 @@ mod tests {
 
     #[test]
     fn entrance_effects_stay_inside_their_admission_envelopes() {
-        let alphas = [
-            (Enter::None, [1.0, 1.0, 1.0]),
-            (Enter::Fade, [0.0, 0.5, 1.0]),
-            (Enter::Draw, [1.0, 1.0, 1.0]),
-            (Enter::Pop, [0.0, 1.0, 1.0]),
-            (Enter::Slide, [0.0, 0.875, 1.0]),
-            (Enter::Grow, [0.0, 0.5, 1.0]),
-            (Enter::Fly, [0.0, 1.0, 1.0]),
-        ];
-        for (enter, expected) in alphas {
-            let alpha = [0.0, 0.5, 1.0].map(|progress| effect(enter, progress).alpha.to_bits());
-            assert_eq!(
-                alpha,
-                expected.map(f32::to_bits),
-                "{enter:?} alpha at 0, 0.5 and 1"
-            );
+        for enter in [
+            Enter::None,
+            Enter::Fade,
+            Enter::Draw,
+            Enter::Pop,
+            Enter::Slide,
+            Enter::Grow,
+            Enter::Fly,
+        ] {
+            let opaque = matches!(enter, Enter::None | Enter::Draw);
+            let start = effect(enter, 0.0);
+            let middle = effect(enter, 0.5);
             let rest = effect(enter, 1.0);
+            assert_eq!(start.alpha.to_bits(), f32::from(u8::from(opaque)).to_bits());
+            assert_eq!(rest.alpha.to_bits(), 1.0_f32.to_bits());
+            if matches!(enter, Enter::Fade | Enter::Slide | Enter::Grow) {
+                assert!(middle.alpha > 0.0 && middle.alpha < 1.0, "{enter:?}");
+            }
+            if enter == Enter::Draw {
+                assert_eq!(start.draw.to_bits(), 0.0_f32.to_bits());
+                assert!(middle.draw > 0.0 && middle.draw < 1.0);
+            }
             assert_eq!(
                 [rest.scale, rest.offset, rest.draw].map(f32::to_bits),
                 [1.0_f32, 0.0, 1.0].map(f32::to_bits),
@@ -1444,9 +1455,13 @@ mod tests {
                 assert!(
                     lo <= sampled.scale
                         && sampled.scale <= hi
-                        && (0.0..=offset).contains(&sampled.offset),
+                        && (0.0..=offset).contains(&sampled.offset)
+                        && (0.0..=1.0).contains(&sampled.alpha),
                     "{enter:?} at {progress}: {sampled:?} outside ({lo}, {hi}, {offset})"
                 );
+                if opaque {
+                    assert_eq!(sampled.alpha.to_bits(), 1.0_f32.to_bits());
+                }
             }
         }
     }
@@ -1513,8 +1528,15 @@ mod tests {
         let Ok(Record::Step(step)) = parse_record(&bytes) else {
             panic!("typed fixture");
         };
+        assert_eq!(step.put.len(), cases.len());
         for (op, (fixture, expected)) in step.put.iter().zip(&cases) {
             assert_eq!(default_duration(op), *expected, "{fixture}");
         }
+    }
+
+    #[test]
+    fn word_offsets_preserve_the_full_u64_segment_without_overflow() {
+        assert_eq!(word_offset_ms(2, 1, u64::MAX), u64::MAX / 2);
+        assert_eq!(word_offset_ms(2, 2, u64::MAX), u64::MAX);
     }
 }

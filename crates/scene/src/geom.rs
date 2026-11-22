@@ -265,7 +265,14 @@ mod tests {
         let a = Rect::centered(Vec2::new(5.0, 5.0), Vec2::new(10.0, 10.0));
         let b = Rect::centered(Vec2::new(15.0, 5.0), Vec2::new(10.0, 10.0));
         assert!(!a.intersects(b), "touching is not overlap");
-        assert_eq!(a.union(b).size, Vec2::new(20.0, 10.0));
+        assert!(a.intersects(Rect::centered(Vec2::new(14.0, 5.0), b.size)));
+        assert_eq!(
+            a.union(b),
+            Rect {
+                origin: Vec2::default(),
+                size: Vec2::new(20.0, 10.0),
+            }
+        );
         assert!(a.within_canvas(), "ordinary dimensions fit");
         assert!(
             !Rect {
