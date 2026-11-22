@@ -1,6 +1,8 @@
 //! Issue actions' rows (docs/development/issues.md): one transaction per change, live threads
 //! only, and a fresh approval revision with every stage that offers a decision.
 
+use std::num::NonZeroU64;
+
 use kumochi_protocol::message::{
     ApprovalRev, ContentHash, Decision, DraftId, FailReason, GitHubLogin, IssueBody, IssueRefused,
     IssueTitle, RepoName, StateVersion, ThreadId,
@@ -415,19 +417,28 @@ fn consent_row(
         if at.is_some_and(|at| action.version != at) {
             return Some(Err(IssueRefused::StaleApproval));
         }
-        let before = action.stage.clone();
+        let (before, before_id) = (action.stage.clone(), action.repo_id);
         let consent = action.consent(hash, approval, decision, live);
         if decision != Decision::File || consent.is_err() || action.stage == before {
             return Some(consent);
         }
         let account = action.account.as_ref()?;
         let repo = action.repo.as_ref()?;
-        // shortcut: only repository names are retained; store numeric IDs to recognize full renames.
+        let repo_id = action
+            .repo_id
+            .map(|repo| i64::try_from(repo.get()))
+            .transpose()
+            .ok()?;
+        // Two ids decide, so a rename still matches and a new repository under the old name doesn't.
+        // shortcut: rows from before V10 have no id and match by name; they exist only for
+        // attempts pending across that upgrade.
         let other: Option<i64> = tx
             .query_row(
                 "SELECT a.id FROM actions a
                      WHERE a.id <> ?1
-                     AND a.account_id = ?2 AND a.repo = ?3 COLLATE NOCASE AND a.title = ?4 AND a.body = ?5
+                     AND a.account_id = ?2 AND a.title = ?4 AND a.body = ?5
+                     AND CASE WHEN a.repo_id IS NULL OR ?6 IS NULL THEN a.repo = ?3 COLLATE NOCASE
+                              ELSE a.repo_id = ?6 END
                      AND (json_extract(a.stage, '$.kind') IN ('preflight', 'posting', 'unknown')
                           OR (json_extract(a.stage, '$.kind') = 'discarded' AND a.uncertain > 0))
                      ORDER BY a.id LIMIT 1",
@@ -436,7 +447,8 @@ fn consent_row(
                     account.id.to_string(),
                     repo.as_str(),
                     action.title.as_str(),
-                    action.body.as_str()
+                    action.body.as_str(),
+                    repo_id
                 ],
                 |row| row.get(0),
             )
@@ -444,7 +456,7 @@ fn consent_row(
             .ok()?;
         if let Some(other) = other {
             let draft = u64::try_from(other).ok().filter(|id| *id != 0)?;
-            action.stage = before;
+            (action.stage, action.repo_id) = (before, before_id);
             return Some(Err(IssueRefused::UnresolvedDraft {
                 draft: DraftId(draft),
             }));
@@ -473,7 +485,7 @@ fn change_row(
     }
     tx.execute(
         "UPDATE actions SET repo = ?2, account_id = ?3, account_login = ?4, title = ?5, body = ?6,
-         consumed = ?7 WHERE id = ?1",
+         consumed = ?7, repo_id = ?8 WHERE id = ?1",
         params![
             id,
             after.repo.as_ref().map(RepoName::as_str),
@@ -484,6 +496,10 @@ fn change_row(
             after
                 .consumed
                 .map(|rev| sql_id(rev.0, StoreError::Issue))
+                .transpose()?,
+            after
+                .repo_id
+                .map(|repo| sql_id(repo.get(), StoreError::Issue))
                 .transpose()?
         ],
     )?;
@@ -536,7 +552,7 @@ fn stage_json(stage: &Stage) -> Result<String, StoreError> {
 pub(super) fn load(conn: &Connection, id: i64) -> Result<Option<Action>, StoreError> {
     conn.query_row(
         "SELECT a.id, a.thread, a.version, a.stage, a.repo, a.account_id, a.account_login, a.title,
-         a.body, a.approval, a.consumed, a.uncertain
+         a.body, a.approval, a.consumed, a.uncertain, a.repo_id
          FROM actions a JOIN threads t ON t.id = a.thread AND t.state = 'live' WHERE a.id = ?1",
         params![id],
         |row| Ok(decode(row)),
@@ -583,6 +599,15 @@ fn decode(row: &Row<'_>) -> Result<Action, StoreError> {
             .map(RepoName::try_from)
             .transpose()
             .map_err(bad)?,
+        repo_id: row
+            .get::<_, Option<i64>>(12)?
+            .map(|id| {
+                u64::try_from(id)
+                    .ok()
+                    .and_then(NonZeroU64::new)
+                    .ok_or(StoreError::Issue)
+            })
+            .transpose()?,
         account,
         title: IssueTitle::try_from(row.get::<_, String>(7)?).map_err(bad)?,
         body: IssueBody::try_from(row.get::<_, String>(8)?).map_err(bad)?,

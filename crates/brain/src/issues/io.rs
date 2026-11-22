@@ -1,6 +1,7 @@
 //! Typed issue operations for the existing store thread; filing policy stays in the runtime.
 
 use std::fmt;
+use std::num::NonZeroU64;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -56,6 +57,8 @@ pub struct Snapshot {
     pub account: Option<GitHubUser>,
     /// The complete repository authority, or an empty list when unavailable.
     pub repos: Vec<RepoName>,
+    /// GitHub's id for each of `repos`, in the same order.
+    pub repo_ids: Vec<NonZeroU64>,
 }
 
 impl Snapshot {
@@ -64,6 +67,7 @@ impl Snapshot {
             capacity: self.capacity,
             account: self.account.as_ref(),
             repos: &self.repos,
+            repo_ids: &self.repo_ids,
         }
     }
 }
@@ -163,6 +167,7 @@ impl fmt::Debug for Snapshot {
             .field("capacity", &self.capacity)
             .field("connected", &self.account.is_some())
             .field("repos", &self.repos.len())
+            .field("repo_ids", &self.repo_ids.len())
             .finish()
     }
 }

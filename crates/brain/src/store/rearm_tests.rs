@@ -37,6 +37,7 @@ fn consent(action: &Action, cancelled: bool) -> Write {
         capacity: true,
         account: Some(user(7)),
         repos: vec![repo()],
+        repo_ids: Vec::new(),
     };
     if cancelled {
         Write::CancelledConsent {

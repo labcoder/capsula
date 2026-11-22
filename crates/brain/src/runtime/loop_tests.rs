@@ -640,6 +640,7 @@ async fn a_known_unavailable_proposal_reaches_the_model_as_refusal_without_a_dra
                     RepoName::new("owner/other").expect("repo"),
                 ])
                 .expect("one listed repo"),
+                ids: Vec::new(),
             }),
         },
     );

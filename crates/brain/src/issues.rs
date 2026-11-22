@@ -12,7 +12,7 @@ use kumochi_scene::text::Bounded;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::connections::github::{api::GitHubUser, issues::CreateOutcome};
+use crate::connections::github::{api::GitHubUser, device::id_of, issues::CreateOutcome};
 
 mod io;
 pub use io::{Snapshot, Write, WriteScope};
@@ -33,6 +33,9 @@ pub struct Action {
     pub stage: Stage,
     /// The bound repository, if one is chosen.
     pub repo: Option<RepoName>,
+    /// GitHub's id for `repo` when the attempt was last consented to; none on rows from before
+    /// the id was stored.
+    pub repo_id: Option<NonZeroU64>,
     /// The bound account, if any.
     pub account: Option<GitHubUser>,
     /// The exact title.
@@ -121,6 +124,8 @@ pub struct Live<'a> {
     pub account: Option<&'a GitHubUser>,
     /// The repositories the connection lists.
     pub repos: &'a [RepoName],
+    /// GitHub's id for each of `repos`, in the same order.
+    pub repo_ids: &'a [NonZeroU64],
 }
 
 /// A lookup's verdict on an action's uncertain attempts.
@@ -246,12 +251,11 @@ impl Action {
         if bound.id != connected.id {
             return Err(IssueRefused::OtherAccount);
         }
-        if !self
-            .repo
-            .as_ref()
-            .is_some_and(|repo| live.repos.contains(repo))
-        {
+        let Some(repo) = self.repo.as_ref().filter(|repo| live.repos.contains(repo)) else {
             return Err(IssueRefused::RepoNotListed);
+        };
+        if matches!(next, Stage::Preflight { .. }) {
+            self.repo_id = id_of(live.repos, live.repo_ids, repo);
         }
         self.stage = next;
         Ok(())
@@ -459,6 +463,7 @@ impl fmt::Debug for Action {
             .field("version", &self.version)
             .field("stage", &self.stage)
             .field("repo", &self.repo)
+            .field("repo_id", &self.repo_id)
             .field("account", &self.account)
             .field("title", &self.title)
             .field("body", &self.body)

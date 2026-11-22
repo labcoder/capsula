@@ -285,16 +285,19 @@ The checks run in order:
 3. The hash matches. Otherwise `ContentChanged`.
 4. The action has an account, and `Live` has a user with a nonzero id. Otherwise `NotConnected`.
 5. Their numeric ids are equal; logins don't count. Otherwise `OtherAccount`.
-6. The bound repository is listed. Otherwise `RepoNotListed`.
+6. The bound repository is listed. Otherwise `RepoNotListed`. A decision that starts a send
+   stores the id GitHub lists for that name (`repo_id`, V10) on the action.
 7. File has no different retained draft with the same numeric account, repository, exact
    title and normalized body in Preflight, Posting or Unknown, or dismissed with retained
    uncertainty. Otherwise `UnresolvedDraft` names that earlier draft. This check runs in the
    same transaction as approval consumption, not just when the new draft is created.
 
-Only this duplicate-identity comparison uses SQLite `NOCASE` for repository names. Cards,
-content hashes and current-membership checks keep the literal spelling. The decoded API and
-saved actions retain names, not numeric repository IDs, so a full rename or transfer cannot be
-recognized as the same repository (OSC-648). Existing bindings are never silently retargeted.
+The duplicate check compares repository ids when both rows have one, so a renamed or
+transferred repository is still the same one and a new repository under an old name isn't.
+A row from before V10 has no id; it, and only it, falls back to the name under SQLite
+`NOCASE` (shortcut: such rows exist only for attempts pending across that upgrade). Cards,
+content hashes and current-membership checks keep the literal spelling, and the id isn't part of
+the content hash. Existing bindings are never silently retargeted.
 
 A refusal never changes stage, content or binding. Because the refused revision is used up, a
 stale click can't file once its cause is fixed, and a double click on a sending card is a no-op.
@@ -319,8 +322,10 @@ revision. Unresolved actions are skipped, and bind never files.
 One reserved owner covers consent, client construction, authority/preflight GETs, durable
 Posting, a fresh account-owner permit, the single POST and its durable result. The provisional
 60-second absolute deadline and 16-request cap cover all phases without renewal or refunds.
-The final permit checks the current numeric identity, expiry, complete repository authority
-and exact destination again. Only a real matching-generation 401 invalidates the account.
+Preflight and each recovery lookup refuse with `NotFound`, before anything is sent, when the
+name now lists a different repository id from the one stored at review; a row with no id is
+checked by name only. The final permit checks the current numeric identity, expiry, complete
+repository authority and exact destination again. Only a real matching-generation 401 invalidates the account.
 
 Admission, recovery reads and the transition to Posting share the operation's original
 cancellation and deadline on the ordered store writer. A scoped SQLite progress handler

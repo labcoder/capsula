@@ -70,7 +70,7 @@ pub(in crate::runtime) async fn fetch(
                 }
                 check_page(reply.total_count, page, reply.repositories.len())?;
                 repository_total = Some(reply.total_count);
-                for name in reply.repositories {
+                for (name, id) in reply.repositories {
                     let canonical = name.as_str().to_ascii_lowercase();
                     if !seen.insert(canonical.clone()) {
                         return Err(ApiError::Response);
@@ -78,19 +78,20 @@ pub(in crate::runtime) async fn fetch(
                     if !names.contains_key(&canonical) && names.len() == MAX_GITHUB_REPOS {
                         return Err(ApiError::Response);
                     }
-                    names.entry(canonical).or_insert(name);
+                    names.entry(canonical).or_insert((name, id));
                 }
                 if reply.total_count <= u64::from(page) * 100 {
                     break;
                 }
             }
         }
-        let names = Bounded::<RepoName, MAX_GITHUB_REPOS>::new(names.into_values().collect())
-            .map_err(|_| ApiError::Response)?;
+        let (names, ids): (Vec<RepoName>, Vec<_>) = names.into_values().unzip();
+        let names =
+            Bounded::<RepoName, MAX_GITHUB_REPOS>::new(names).map_err(|_| ApiError::Response)?;
         if Instant::now() >= deadline {
             return Err(ApiError::Http(HttpError::Timeout));
         }
-        Ok(device::Repositories { names })
+        Ok(device::Repositories { names, ids })
     })
     .await
     .map_err(|_| ApiError::Http(HttpError::Timeout))?
