@@ -243,15 +243,16 @@ fn a_model_result_round_trips_but_never_records_its_choice() {
 
     const MODEL: &str = "private-model-sentinel";
     for applied in [false, true] {
-        let result = ControlToShell::ThreadModelSet {
+        let model_result = |slug| ControlToShell::ThreadModelSet {
             thread: ThreadId(8),
             choice: ModelChoice {
-                model: ModelSlug::new(MODEL).expect("valid"),
+                model: ModelSlug::new(slug).expect("valid"),
                 effort: Effort::XHigh,
                 connection: ConnectionKind::ChatGpt,
             },
             applied,
         };
+        let result = model_result(MODEL);
         let bytes = encode(&result, Pipe::Control).expect("encodes");
         assert_eq!(
             crate::frame::read::<ControlToShell>(&mut bytes.as_slice(), Pipe::Control)
@@ -259,10 +260,14 @@ fn a_model_result_round_trips_but_never_records_its_choice() {
             Some(result.clone())
         );
         let debug = format!("{result:?}");
-        assert!(!debug.contains(MODEL), "{debug}");
+        assert!(
+            debug == format!("{:?}", model_result("another-engine-version")),
+            "model choice affected result Debug"
+        );
+        assert!(!debug.contains(MODEL), "result Debug contains a model slug");
         assert!(
             !debug.contains(&format!("{:?}", MODEL.as_bytes())),
-            "{debug}"
+            "result Debug contains model slug bytes"
         );
         let record = record(Direction::ToShell, &result);
         assert_eq!(record.payload, None);

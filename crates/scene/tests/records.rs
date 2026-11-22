@@ -545,12 +545,21 @@ mod three {
             }
             let solid = solid(&value);
             assert_eq!(solid.geometry().expect("geometry"), expected[index]);
+            let mut alternate = value.clone();
+            alternate["label"] = json!("another-object-caption");
+            alternate["info"] = json!("different-model-notes");
+            let alternate: Solid = serde_json::from_value(alternate).expect("alternate solid");
+            let debug = format!("{solid:?}");
+            assert!(
+                debug == format!("{alternate:?}"),
+                "solid label or info affected Debug"
+            );
             let input = json!({"step":{"id":"s","put":[{"solid":value}]}});
             let record =
                 parse_record(&serde_json::to_vec(&input).expect("fixture")).expect("record");
             exact_round_trip(&record);
-            assert!(!format!("{solid:?}").contains("private"));
-            assert!(!format!("{solid:?}").contains("1.0"));
+            assert!(!debug.contains("private"));
+            assert!(!debug.contains("1.0"));
         }
         let mut cone = fixture(json!({"shape":"cone","r":2,"h":3}));
         assert_eq!(
@@ -605,6 +614,16 @@ mod three {
         assert_eq!(encoded["orbit"], false);
         assert_eq!(encoded["spin"], -90.0);
         let debug = format!("{full:?}");
+        let other: View3d = serde_json::from_value(json!({
+            "id":"another-frame-label","box":[11,22,500,600],
+            "camera":{"yaw":65,"pitch":-15,"dist":9,"fov":48,"target":[8,13,21]},
+            "light":{"dir":[7,9,12],"ambient":0.75},"orbit":false,"spin":45
+        }))
+        .expect("alternate viewport");
+        assert!(
+            debug == format!("{other:?}"),
+            "viewport id or geometry affected Debug"
+        );
         assert!(!debug.contains("private"));
         assert!(!debug.contains("300"));
         let camera: kumochi_scene::record::Camera = serde_json::from_str("{}").expect("camera");
