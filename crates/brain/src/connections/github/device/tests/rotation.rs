@@ -433,6 +433,7 @@ async fn rotation_checks_the_numeric_user_and_saves_the_whole_new_pair_before_co
             generation: m.stamp().generation,
             result: Ok(Repositories {
                 names: Bounded::new(vec![repo.clone()]).unwrap(),
+                ids: Vec::new(),
             }),
         },
         Instant::now(),

@@ -69,6 +69,7 @@ pub(in crate::runtime) fn connected_owner() -> GitHub {
                     repo("owner/other"),
                 ])
                 .unwrap(),
+                ids: Vec::new(),
             }),
         },
         now,
@@ -168,6 +169,7 @@ fn a_complete_empty_membership_list_is_authority_not_an_incomplete_snapshot() {
             generation: owner.machine.stamp().generation,
             result: Ok(Repositories {
                 names: kumochi_scene::text::Bounded::default(),
+                ids: Vec::new(),
             }),
         },
         Instant::now(),

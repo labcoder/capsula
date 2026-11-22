@@ -12,6 +12,7 @@ fn list(m: &mut Machine, names: &[&str]) {
                         .collect(),
                 )
                 .unwrap(),
+                ids: Vec::new(),
             }),
         },
         Instant::now(),
@@ -47,6 +48,7 @@ async fn repository_authority_requires_a_complete_current_listing_and_is_revoked
             generation: generation - 1,
             result: Ok(Repositories {
                 names: Bounded::new(vec![repo]).unwrap(),
+                ids: Vec::new(),
             }),
         },
     );
