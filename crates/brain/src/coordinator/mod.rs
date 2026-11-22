@@ -35,7 +35,7 @@ mod thread_op;
 mod tools;
 
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{
     ConnectionKind, Content, ControlToShell, Cursor, DataToShell, Deleted, ModelChoice,
@@ -44,6 +44,7 @@ use kumochi_protocol::message::{
 };
 
 use crate::engines::{RunRequest, TurnEvent};
+use crate::recall::control::Control as ReadControl;
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 use crate::voice::reply::ReportMode;
 
@@ -1344,9 +1345,7 @@ impl Coordinator {
         if let Some(hold) = &mut hold {
             hold.defaults.origin = admission::origin(thread, self.main_thread);
         }
-        let mut control = crate::recall::control::Control::new(
-            std::time::Instant::now() + self.tuning.wall_clock,
-        );
+        let mut control = ReadControl::new(Instant::now() + self.tuning.wall_clock);
         if let Some(hold) = &hold {
             control = control.observe(std::sync::Arc::clone(&hold.cancel));
         }
