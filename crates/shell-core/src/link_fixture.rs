@@ -193,6 +193,17 @@ pub struct Attended {
 
 #[cfg(debug_assertions)]
 impl Attended {
+    /// Reads one frame from the connected test peer with its existing timeout.
+    ///
+    /// # Panics
+    /// Panics if the peer closes or a frame cannot be read.
+    pub fn next_control(&self) -> kumochi_protocol::message::ControlToBrain {
+        use kumochi_protocol::frame::{self, Pipe};
+        frame::read(&mut &self.control, Pipe::Control)
+            .expect("a valid control receipt")
+            .expect("the pipe is connected")
+    }
+
     /// Checks the peer's exact shutdown frames, closes the peer and joins the link.
     /// # Panics
     /// Panics on an unexpected frame, pipe error or link failure.
