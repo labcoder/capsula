@@ -167,6 +167,12 @@ it. Each read uses one snapshot transaction, finished before returning, so no sn
 Reads neither stop the purge's copy nor postpone it: a page request never reaches the store
 thread's queue, so it doesn't reset the quiet deadline an owed purge waits for.
 
+The plain task list and ranked search attach task facts after selecting their rows. In the same
+snapshot, an indexed lookup reads each selected task's latest run by ID and checks for a committed
+Draft or Failed action with a filing approval. The activity timestamp is the latest of the stored
+thread update, run start and real terminal time; the time written by crash recovery is excluded.
+These reads do not update storage or affect the list's ordering keys.
+
 A page marks a user event as failed only if that event's own run is stored as failed.
 Its held-screen metadata and any partial assistant reply stay on the page. A crash also
 sets this bit, so it indicates neither failed delivery nor a safe retry. The query reads
@@ -235,8 +241,8 @@ held: before that change the right-hand column was 24, 89, 97 and 156 ms. The me
 the store alone, with no checkpoint helper, so nothing copies the WAL between samples and it grows
 larger than it would in the brain.
 
-Besides the store thread, the live store has two readers: the page reader, whose one-statement
-reads a write never waits for, and the purge's copy. A write never commits under the copy's
+Besides the store thread, the live store has two readers: the page reader, which does not
+block writes, and the purge's copy. A write never commits under the copy's
 snapshot: before any write the store thread stops the copy and waits until it
 has let go of the live store, and nothing more of the copy. Letting go means two things: its drain
 has finished its checkpoint on the helper's connection, which stays open for the helper, and its

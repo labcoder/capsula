@@ -865,6 +865,7 @@ mod tests {
             kind: ThreadKind::Main,
             updated_ms: 0,
             choice: None,
+            task: None,
         };
         let task = ThreadRow {
             id: ThreadId(5),
@@ -872,6 +873,7 @@ mod tests {
             kind: ThreadKind::Thread,
             updated_ms: 0,
             choice: None,
+            task: None,
         };
         assert!(row_is_target(&main, Target::Kumo));
         assert!(!row_is_target(&main, Target::Task(ThreadId(5))));

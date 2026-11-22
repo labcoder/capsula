@@ -564,6 +564,7 @@ fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dro
             updated_ms: 9,
             kind: ThreadKind::Thread,
             choice: None,
+            task: None,
         }],
         next: Some(ThreadCursor {
             id: ThreadId(3),

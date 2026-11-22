@@ -44,6 +44,7 @@ mod tests {
                 updated_ms: 0,
                 kind: ThreadKind::Thread,
                 choice: None,
+                task: None,
             })
             .to_vec();
         state.open = Some(ThreadId(1));
