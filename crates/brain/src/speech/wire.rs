@@ -158,7 +158,7 @@ mod tests {
         };
         let decode = SpeechRequest::Decode {
             rate: 16_000,
-            pcm: pcm.bytes().map(i16::from).collect(),
+            pcm: pcm.as_bytes().to_vec(),
         };
         let text = SpeechReply::Text(transcript.into());
         let debug = format!("{request:?} {decode:?} {text:?}");

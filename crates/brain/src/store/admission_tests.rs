@@ -246,10 +246,10 @@ fn filed_flags_and_card_values_survive_a_reopen() {
     }
     let editable = draft(&mut store, owner);
     assert_eq!(editable.draft, DraftId(5));
-    let failed = draft(&mut store, owner);
-    let preflight = changed(decide(&mut store, &failed, Decision::File));
+    let interrupted = draft(&mut store, owner);
+    let preflight = changed(decide(&mut store, &interrupted, Decision::File));
     changed(store.preflighted(
-        failed.draft,
+        interrupted.draft,
         preflight.version,
         Err(FailReason::Interrupted),
     ));

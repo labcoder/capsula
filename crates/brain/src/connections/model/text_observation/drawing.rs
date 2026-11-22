@@ -124,7 +124,7 @@ mod tests {
             let capture = Arc::clone(&out);
             let observation =
                 super::super::fixture_mode(1, Some(DrawReceipt::default()), move |line| {
-                    capture.lock().unwrap().push(line.to_owned())
+                    capture.lock().unwrap().push(line.to_owned());
                 });
             observation.mark_draw(run, Some(100), DrawStage::Call);
             for (index, step) in REPLAY_STEPS.into_iter().enumerate() {

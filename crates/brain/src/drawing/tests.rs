@@ -2233,10 +2233,10 @@ fn stops_past_the_queue_ceiling_behind_a_lookup_break_the_session() {
     let lookup = drawing
         .handle(streamed("c", 0, &begin("s", "")))
         .expect("a fresh begin");
-    let step = drawing
+    let queued = drawing
         .handle(streamed("c", 1, &step(&text("a", "x"))))
         .expect("a step behind the lookup");
-    assert!(step.effects.is_empty());
+    assert!(queued.effects.is_empty());
     let stop = || Input::StopScenes {
         run: RunId(1),
         cuts: SceneCuts::default(),
@@ -3001,7 +3001,7 @@ fn a_refusal_says_whether_a_repair_follows_and_the_repair_reuses_the_unsaved_sce
     ] {
         let first = store.run(
             &mut drawing,
-            call(run, "c3", args(name, &[bad_step.clone()])),
+            call(run, "c3", args(name, std::slice::from_ref(&bad_step))),
         );
         assert_eq!(error(&first.calls[0]), code);
         let repair = store.run(&mut drawing, call(run, "c4", args(name, &[bad_step])));

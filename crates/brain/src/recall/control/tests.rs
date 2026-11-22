@@ -60,18 +60,18 @@ fn sum(conn: &Connection) -> Result<i64, Error> {
 fn owners_cancel_children_and_deadlines_never_extend() {
     let start = Instant::now();
     let end = start + Duration::from_secs(60);
-    let early = end - READ_TIME;
+    let early = end.checked_sub(READ_TIME).unwrap();
     let owner = Control::new(end);
     let child = owner.child();
     let shortened = child.until(early);
     let extended = child.until(end + READ_TIME);
 
-    *child.test.time.lock().unwrap() = Some(early - Duration::from_millis(1));
+    *child.test.time.lock().unwrap() = Some(early.checked_sub(Duration::from_millis(1)).unwrap());
     assert_eq!(shortened.check(), Ok(()));
     *child.test.time.lock().unwrap() = Some(early);
     assert_eq!(shortened.check(), Err(Error::Timeout));
     assert_eq!(extended.check(), Ok(()));
-    *child.test.time.lock().unwrap() = Some(end - Duration::from_millis(1));
+    *child.test.time.lock().unwrap() = Some(end.checked_sub(Duration::from_millis(1)).unwrap());
     assert_eq!(extended.check(), Ok(()));
     *child.test.time.lock().unwrap() = Some(end);
     assert_eq!(extended.check(), Err(Error::Timeout));

@@ -192,7 +192,7 @@ use crate::connections::github::{
     device::{Effect as GitHubEffect, Input as GitHubInput},
 };
 use crate::platform::credential::{CredentialStoreError, SecretBytes};
-use kumochi_protocol::message::{Cleanup, GitHubLogin, GitHubOp, GitHubView, RepoName, UserCode};
+use kumochi_protocol::message::{Cleanup, GitHubLogin, GitHubOp, GitHubView, UserCode};
 use std::sync::{
     Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -1600,7 +1600,10 @@ async fn a_stale_wake_cannot_poll_a_new_attempt_and_unexecuted_effects_keep_thei
     struct DeviceHttp(mpsc::UnboundedSender<()>);
 
     impl Http for DeviceHttp {
-        async fn execute(&self, request: Request) -> Result<Response, HttpError> {
+        fn execute(
+            &self,
+            request: Request,
+        ) -> impl std::future::Future<Output = Result<Response, HttpError>> {
             let body: &[u8] = match request.endpoint {
                 Endpoint::GitHub(GitHubEndpoint::DeviceCode { .. }) => {
                     br#"{"device_code":"device-fixture","user_code":"ABCD-EFGH","verification_uri":"https://github.com/login/device","expires_in":900,"interval":1}"#
@@ -1611,7 +1614,7 @@ async fn a_stale_wake_cannot_poll_a_new_attempt_and_unexecuted_effects_keep_thei
                 }
                 _ => panic!("unexpected device-flow endpoint"),
             };
-            Ok(user_response(200, body, ResponseMeta::default()))
+            std::future::ready(Ok(user_response(200, body, ResponseMeta::default())))
         }
     }
 
@@ -1679,9 +1682,9 @@ async fn a_stale_wake_cannot_poll_a_new_attempt_and_unexecuted_effects_keep_thei
     assert_eq!(seen.try_recv(), Ok(()));
     assert_eq!(seen.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     accounts.handle(Event::Verification(poll));
-    let next = verification_event(&mut accounts).await;
-    assert_eq!(next.stage, VerificationStage::Wake);
-    assert_eq!(next.session, Some(2));
+    let scheduled = verification_event(&mut accounts).await;
+    assert_eq!(scheduled.stage, VerificationStage::Wake);
+    assert_eq!(scheduled.session, Some(2));
     assert_eq!(accounts.handle(Event::Verification(current)), []);
     assert!(
         !accounts.github.verifying(),

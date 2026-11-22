@@ -193,13 +193,15 @@ fn masks_clip_to_the_display_and_black_every_pixel_including_the_right_edge() {
     masks.push(rect([-2000, 100], [2, 1]));
     masks.push(rect([i32::MAX - 1, 0], [u32::MAX, u32::MAX]));
     let clean = sanitize(&mut raw, &masks).unwrap();
-    for (at, pixel) in clean.image().1.chunks_exact(4).enumerate() {
+    let (pixels, tail) = clean.image().1.as_chunks::<4>();
+    assert_eq!(tail, []);
+    for (at, pixel) in pixels.iter().enumerate() {
         let expected = if (14..16).contains(&at) {
             [0, 0, 0, 255]
         } else {
             [255; 4]
         };
-        assert_eq!(pixel, expected, "pixel {at}");
+        assert_eq!(*pixel, expected, "pixel {at}");
     }
 }
 

@@ -1036,16 +1036,21 @@ fn a_load_asked_for_while_a_loss_is_cleaned_up_still_reaches_the_worker() {
             SttResult::NotLoaded,
             "the lost model's waiter is settled, not carried over"
         );
-        assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
-        if !during_cleanup {
+        if during_cleanup {
+            assert_eq!(
+                harness.reports(2),
+                [report(1, LoadEvent::Lost), report(2, LoadEvent::Loaded)]
+            );
+        } else {
+            assert_eq!(harness.reports(1), [report(1, LoadEvent::Lost)]);
             assert_eq!(
                 answer(harness.decode(3).expect("answered")),
                 SttResult::NotLoaded
             );
             harness.no_event();
             harness.handle.load("models".into(), 2);
+            assert_eq!(harness.reports(1), [report(2, LoadEvent::Loaded)]);
         }
-        assert_eq!(harness.reports(1), [report(2, LoadEvent::Loaded)]);
         assert_eq!(harness.event(), Event::Loaded("models".into()));
         harness.wait_ready();
         let next = harness.decode(3).expect("runs");

@@ -210,7 +210,7 @@ fn a_ticket_read_late_ends_at_the_brains_deadline_before_its_own_length() {
                 .set(Duration::from_millis(capture_time - u64::from(on_time)));
             let took = rig.take(2, size, start);
             if on_time {
-                let expected = meta(2, size, start);
+                let expected = meta(2, size, u32::try_from(start).unwrap());
                 assert_eq!(took, Ok(expected));
                 assert_eq!(rig.screen.frame().image(), Some((expected, pixels)));
             } else {

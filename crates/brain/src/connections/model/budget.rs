@@ -80,7 +80,7 @@ fn limit(value: Option<&str>) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Budget, limit};
+    use super::limit;
 
     #[test]
     fn the_variable_sets_the_cap_and_garbage_allows_nothing() {

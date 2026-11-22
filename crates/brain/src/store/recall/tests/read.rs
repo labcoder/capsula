@@ -118,6 +118,10 @@ fn exact_encoded_read_boundary_and_one_over_are_distinguished() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one recall selection through continuation and a later append"
+)]
 fn selected_ranges_keep_actual_continuation_and_do_not_grow_after_append() {
     let (_scratch, store) = world("recall-range");
     task(&store, 2, "B");

@@ -428,10 +428,15 @@ fn duplicate_draft_keys_never_create_a_second_action_event_or_result() {
     let events = draft_events(&store.conn);
     let ledger = rows(&store.conn);
     let mut changed = first.clone();
-    let LocalWrite::DraftIssue { title, body, .. } = &mut changed.write else {
+    let LocalWrite::DraftIssue {
+        title: changed_title,
+        body,
+        ..
+    } = &mut changed.write
+    else {
         panic!("draft fixture");
     };
-    *title = IssueTitle::new("replacement must not persist").unwrap();
+    *changed_title = IssueTitle::new("replacement must not persist").unwrap();
     *body = IssueBody::new("different body").unwrap();
     for duplicate in [&first, &changed] {
         let error = store.commit_call(duplicate).unwrap_err();

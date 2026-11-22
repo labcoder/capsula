@@ -699,6 +699,10 @@ fn history_event(id: u64, kind: PageEventKind, text: &str) -> PageEvent {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered history fixture across two requests"
+)]
 fn typed_history_keeps_exact_identity_neighboring_text_and_raw_cursor() {
     let scratch = Scratch::new("pages-typed-history");
     let mut store = Store::open(&scratch.db()).expect("store");
@@ -1106,6 +1110,10 @@ fn invalid_visual_metadata_in_the_fifty_first_row_keeps_the_page_and_cursor() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "parallel boundary cases for visual and ordinary frames"
+)]
 fn visual_markers_participate_in_the_full_encoded_page_budget_and_continuation() {
     for visual in [false, true] {
         let scratch = Scratch::new("pages-visual-budget");

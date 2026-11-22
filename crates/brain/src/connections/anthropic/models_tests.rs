@@ -373,7 +373,7 @@ async fn only_auth_refusals_reject_and_neither_provider_errors_nor_content_are_l
     let [row] = catalog.as_slice() else {
         panic!("one known model");
     };
-    assert_eq!(row.info.display_name, marker);
+    assert_eq!(row.info.display_name.as_str(), marker);
     let printed = format!("{:?} {:?}", Some(Ok::<_, CheckError>(catalog)), key());
     let logs = captured.text();
     assert!(logs.contains("capture-control"), "capture active");

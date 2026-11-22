@@ -539,6 +539,10 @@ fn started(call: &str) -> TurnEvent {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table of malformed stream cases and their exact events"
+)]
 fn calls_that_break_the_stream_rules_fail_the_round() {
     let longest = "c".repeat(CallId::MAX);
     let too_long = "c".repeat(CallId::MAX + 1);

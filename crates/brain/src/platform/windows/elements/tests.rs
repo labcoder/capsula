@@ -3,6 +3,11 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::*;
+
+fn assert_private(text: &str, sentinel: &str) {
+    assert!(!text.contains(sentinel));
+    assert!(!text.contains(&format!("{:?}", sentinel.as_bytes())));
+}
 use crate::screen::Walk as _;
 use crate::screen::{Availability, CaptureId, Cut, ElementTree};
 

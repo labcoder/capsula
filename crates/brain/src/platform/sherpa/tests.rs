@@ -35,7 +35,7 @@ use super::super::windows::{dacl_sddl, final_path_matches, local_app_data};
 use super::abi::{LAYOUT, RawRecognizer, RawStream, RecognizerConfig, RecognizerResult};
 use super::{
     Fns, MAX_TRANSCRIPT_BYTES, MODEL_FILES, NATIVE_CLOSURE, NativeError, ORT, SHERPA, Sherpa,
-    check_closure, only_expected_added, sample_count, stage, verify,
+    check_closure, only_expected_added, sample_count, stage,
 };
 use crate::scratch::Scratch as ScratchDir;
 use crate::speech::SpeechSupervisor;

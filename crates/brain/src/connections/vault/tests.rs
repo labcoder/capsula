@@ -7,7 +7,6 @@ use rusqlite::Connection;
 
 use super::fake::{FakeStore, Fault, Mutation};
 use super::*;
-use crate::connections::marker::SignOut;
 use crate::connections::records::{Origin, Revocable, Tokens};
 use crate::platform::credential::CredentialStoreError;
 use crate::test_support::Scratch;
@@ -438,7 +437,13 @@ fn a_refused_head_update_rolls_back_the_whole_commit() {
             VaultError::Authority
         ))
     ));
-    assert!(read_key(&mut vault).expose().as_str() == original_key.expose().as_str());
+    assert!(
+        read_key(&mut vault)
+            .expose()
+            .as_str()
+            .bytes()
+            .eq(original_key.expose().as_str().bytes())
+    );
     refuse
         .execute_batch("DROP TRIGGER refuse_head;")
         .expect("drop refusal trigger");
@@ -462,7 +467,13 @@ fn a_refused_head_update_rolls_back_the_whole_commit() {
         is_current(&vault, Kind::AnthropicKey),
         "the removal rolled back"
     );
-    assert!(read_key(&mut vault).expose().as_str() == original_key.expose().as_str());
+    assert!(
+        read_key(&mut vault)
+            .expose()
+            .as_str()
+            .bytes()
+            .eq(original_key.expose().as_str().bytes())
+    );
     assert_key_removal_only_clears_its_names(&mut vault, &store, &old);
     committed(vault.save_account(&account("new")));
     let fresh = current_names(&vault);

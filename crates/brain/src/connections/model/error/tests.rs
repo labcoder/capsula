@@ -31,6 +31,10 @@ fn user_error(key: ErrorKey, actions: &[Action]) -> UserError {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table of exact ledger error outcomes"
+)]
 fn each_ledger_code_maps_to_its_recovery_before_its_status() {
     use Action::{ManageUsage, Retry, SignIn};
     let cases: [Case; 9] = [

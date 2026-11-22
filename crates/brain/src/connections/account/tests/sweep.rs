@@ -301,10 +301,10 @@ fn empty_list_cleanup_recovers_from_a_crash_or_refusal_at_every_step() {
     h.store.0.lock().expect("fake lock").mutations.clear();
     let confirmed = h.revoking[0].clone();
     h.feed(Input::Revoked(confirmed));
+    let steps = h.store.0.lock().expect("fake lock").mutations.len();
     assert!(h.revocations().is_empty());
     assert_eq!(h.marker(), None, "the sweep fact cleared with the list");
     assert!(!h.store.names().iter().any(|name| name.contains("/revoke/")));
-    let steps = h.store.0.lock().expect("fake lock").mutations.len();
     for step in 0..steps {
         for fault in [Fault::CrashAfter, Fault::Refuse] {
             let mut h = listed_one();

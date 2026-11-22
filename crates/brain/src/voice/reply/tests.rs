@@ -471,7 +471,7 @@ fn a_late_final_chunk_holds_finality_until_it_plays() {
         }
         for n in 0..2 {
             run(&mut reply, |r, out| {
-                r.played(seg(n), 10, out).expect("plays")
+                r.played(seg(n), 10, out).expect("plays");
             });
         }
         assert!(
@@ -488,7 +488,7 @@ fn a_late_final_chunk_holds_finality_until_it_plays() {
             assert!(!reply.is_final());
         }
         run(&mut reply, |r, out| {
-            r.played(seg(2), 10, out).expect("plays")
+            r.played(seg(2), 10, out).expect("plays");
         });
         assert!(reply.is_final());
     }
@@ -648,7 +648,7 @@ fn a_failed_scene_drops_its_say_and_the_text_after_it_still_plays() {
     let mut reply = self::reply();
     for (index, text) in ["One.", "Two.", "Three."].into_iter().enumerate() {
         run(&mut reply, |r, out| {
-            r.say(step(4, u32::try_from(index).unwrap()), text, out)
+            r.say(step(4, u32::try_from(index).unwrap()), text, out);
         });
     }
     run(&mut reply, |r, out| r.text("After. ", out));

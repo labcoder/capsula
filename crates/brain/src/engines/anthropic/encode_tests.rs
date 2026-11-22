@@ -1196,6 +1196,8 @@ fn an_authorized_picture_goes_once_as_one_image_block_at_its_place() {
 /// is built; a JPEG at the cap goes.
 #[test]
 fn a_picture_the_body_cant_carry_builds_nothing() {
+    use base64::Engine as _;
+
     let input = |images: Vec<Jpeg>| {
         let mut input = vec![message(Role::User, "look")];
         input.extend(images.into_iter().map(InputItem::Image));
@@ -1222,8 +1224,6 @@ fn a_picture_the_body_cant_carry_builds_nothing() {
             Some(BodyError::Image)
         );
     }
-    use base64::Engine as _;
-
     let image = sealed(crate::screen::JPEG_CAP);
     let (jpeg, _) = image.capture().expect("sealed");
     let request = input(vec![image.clone()]);
