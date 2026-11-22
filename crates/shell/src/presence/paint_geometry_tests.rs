@@ -12,7 +12,10 @@ use super::super::{
     paint_paths,
     paint_phase::{self, Phase},
 };
-use super::{Scratch, paths};
+use super::{
+    FillScratch, RECT_EVENT_LIMIT, RECT_INDEX_LIMIT, RECT_VERTEX_LIMIT, Scratch, events, paths,
+    tessellated,
+};
 
 fn ink() -> Paint {
     Paint::from(Rgb::try_from(0x33_66_99).expect("RGB"))
@@ -319,6 +322,84 @@ fn largest_charged_rects_and_mirrored_strokes_preserve_parity_and_refusal() {
 }
 
 #[test]
+fn a_thin_rounded_border_with_crossing_chords_matches_the_transient_fill() {
+    let rect = Rect {
+        origin: Vec2::new(17_000.0, 17_000.0),
+        size: Vec2::new(200.0, 200.0),
+    };
+    let mut scratch = Scratch::new();
+    let transform = Affine::pose(4.0, 0.3, Vec2::default());
+    let warm = Prim::Rect {
+        rect,
+        radius: 6.0,
+        fill: None,
+        border: Some((ink(), 1.0)),
+    };
+    drop(
+        paths(&mut scratch, &warm, transform, 1.0, 0.0, MAX_COMPOSED_SCALE)
+            .expect("warm rounded border"),
+    );
+    let thin = Prim::Rect {
+        rect,
+        radius: 6.0,
+        fill: None,
+        border: Some((ink(), 0.001)),
+    };
+    parity(&mut scratch, &thin, transform, 1.0, 0.0);
+}
+
+#[test]
+fn a_sweep_with_small_input_and_large_output_releases_its_scratch() {
+    use gpui_kit::{FillOptions, FillRule};
+
+    let contour = |x, y, far_x, far_y| {
+        events(
+            [
+                Vec2::new(x, y),
+                Vec2::new(far_x, y),
+                Vec2::new(far_x, far_y),
+                Vec2::new(x, far_y),
+            ]
+            .into_iter(),
+        )
+    };
+    let stripes: Vec<_> = (1..=40_u16)
+        .flat_map(|at| {
+            let near = f32::from(at) * 2.0;
+            contour(0.0, near, 82.0, near + 1.0).chain(contour(near, 0.0, near + 1.0, 82.0))
+        })
+        .collect();
+    assert_eq!(stripes.len(), 400);
+    assert!(stripes.len() <= RECT_EVENT_LIMIT);
+    let rule = FillRule::EvenOdd;
+    let mut transient = FillScratch::new();
+    transient
+        .build(
+            stripes.iter().copied(),
+            FillOptions::default().with_fill_rule(rule),
+        )
+        .expect("intersection-aware sweep");
+    assert!(transient.buffers.vertices.len() > RECT_VERTEX_LIMIT);
+    assert!(transient.buffers.indices.len() > RECT_INDEX_LIMIT);
+    let (scratch, _, [allocated, released]) = crate::allocation::usage(|| {
+        let mut scratch = FillScratch::new();
+        let path = tessellated(
+            &mut scratch,
+            stripes.iter().copied(),
+            rule,
+            Affine::default(),
+        )
+        .expect("a discarded sweep still paints")
+        .expect("a nonempty path");
+        assert_eq!(path.vertices.len(), transient.buffers.indices.len());
+        scratch
+    });
+    assert_eq!(allocated, released);
+    assert_eq!(scratch.buffers.vertices.capacity(), 0);
+    assert_eq!(scratch.buffers.indices.capacity(), 0);
+}
+
+#[test]
 #[ignore = "bounded parity corpus; select explicitly after execution and timeout admission"]
 fn changing_geometry_matches_the_reference_over_the_charged_segments_and_off_grid_draws() {
     let mut scratch = Scratch::new();
@@ -440,78 +521,98 @@ fn one_straight_stroke_requests_only_one_exact_handoff() {
 }
 
 #[test]
-fn each_transient_fill_releases_its_own_allocations_before_returning() {
-    use std::collections::BTreeMap;
-    let prim = Prim::Rect {
-        rect: Rect {
-            origin: Vec2::default(),
-            size: Vec2::new(40.0, 24.0),
-        },
-        radius: 6.0,
-        fill: Some(ink()),
-        border: Some((ink(), 4.0)),
+fn the_rect_work_ceiling_keeps_no_more_than_the_fixed_scratch_charge() {
+    use kumochi_scene::display::PaintWork;
+
+    let rect = Rect {
+        origin: Vec2::default(),
+        size: Vec2::new(8_000.0, 7_000.0),
     };
-    let mut scratch = Scratch::new();
-    let ((), events) = crate::allocation::requests(10_000, || {
-        let _app = paint_phase::enter(Phase::App);
-        drop(
-            paths(
-                &mut scratch,
-                &prim,
-                Affine::pose(1.0, 0.3, Vec2::default()),
-                0.5,
+    let primitives = [
+        Prim::Rect {
+            rect,
+            radius: 3_282.0,
+            fill: Some(ink()),
+            border: None,
+        },
+        Prim::Rect {
+            rect,
+            radius: 453.0,
+            fill: None,
+            border: Some((ink(), 4.0)),
+        },
+    ];
+    let work = PaintWork::of(&primitives, MAX_COMPOSED_SCALE);
+    assert!(work.within_limits());
+    assert_eq!((work.fill_vertices, work.outline_points), (2_045, 765));
+    let transform = Affine::pose(MAX_COMPOSED_SCALE, 0.25, Vec2::default());
+    let paint = |scratch: &mut Scratch| {
+        for (index, draw) in [(0, 1.0), (1, 1.0), (1, 0.999)] {
+            let paths = paths(
+                scratch,
+                &primitives[index],
+                transform,
+                draw,
                 0.0,
                 MAX_COMPOSED_SCALE,
             )
-            .expect("background and sector"),
-        );
-    });
-    let mut live = BTreeMap::new();
-    let mut builds = 0;
-    for event in &events {
-        match (event.action, event.tag) {
-            (2, 2) => {
-                assert!(live.is_empty(), "no earlier build may retain storage");
-                builds += 1;
-            }
-            (0, 2) => {
-                assert_eq!(live.insert(event.pointer, (event.size, event.align)), None);
-            }
-            (1, 2) => {
-                assert_eq!(live.remove(&event.pointer), Some((event.size, event.align)));
-            }
-            (3, 2) => assert!(
-                live.is_empty(),
-                "all fill-owned lifetimes end inside this build"
-            ),
-            _ => {}
+            .expect("the admitted Rect fallback");
+            let path = &paths[index].as_ref().expect("the Rect path").0;
+            assert!(path.vertices.len() >= 3);
+            assert!(paths[1 - index].is_none());
         }
-    }
-    assert_eq!(builds, 2);
-    let handoffs: Vec<_> = events.iter().filter(|e| e.action == 4).collect();
-    assert_eq!(handoffs.len(), 2);
-    let app: Vec<_> = events
-        .iter()
-        .filter(|e| e.action == 0 && e.tag == 1)
-        .collect();
-    assert_eq!(app.len(), 2);
-    for handoff in handoffs {
-        assert_eq!(
-            app.iter()
-                .filter(|e| (e.pointer, e.size, e.align)
-                    == (handoff.pointer, handoff.size, handoff.align))
-                .count(),
-            1
-        );
-        assert_eq!(
-            events
-                .iter()
-                .filter(|e| e.action == 1
-                    && e.pointer == handoff.pointer
-                    && e.size == handoff.size
-                    && e.align == handoff.align)
-                .count(),
-            1
-        );
-    }
+    };
+    let (scratch, _, [allocated, released]) = crate::allocation::usage(|| {
+        let mut scratch = Scratch::new();
+        paint(&mut scratch);
+        scratch
+    });
+    let held = allocated - released;
+    assert!(held <= scratch.bytes(), "scratch held {held} bytes");
+    let ((), _, [allocated, freed]) = crate::allocation::usage(|| drop(scratch));
+    assert_eq!(
+        (allocated, freed),
+        (0, held),
+        "scratch releases exactly what it kept"
+    );
+}
+
+#[test]
+fn a_contour_over_the_rect_limit_leaves_no_extra_retained_scratch() {
+    use kumochi_scene::display::PaintWork;
+
+    let prim = |radius| Prim::Rect {
+        rect: Rect {
+            origin: Vec2::default(),
+            size: Vec2::new(8_000.0, 7_000.0),
+        },
+        radius,
+        fill: Some(ink()),
+        border: None,
+    };
+    let over = prim(3_295.0);
+    let work = PaintWork::of(std::slice::from_ref(&over), MAX_COMPOSED_SCALE);
+    assert_eq!(work.fill_vertices, 2_049);
+    assert!(!work.within_limits());
+    let transform = Affine::pose(MAX_COMPOSED_SCALE, 0.25, Vec2::default());
+    let paint = |scratch: &mut Scratch, prim: &Prim| {
+        let [Some((path, _)), None] = paths(scratch, prim, transform, 1.0, 0.0, MAX_COMPOSED_SCALE)
+            .expect("the existing single-path bound admits it")
+        else {
+            panic!("one prepared path");
+        };
+        assert!(path.vertices.len() >= 3);
+    };
+    let (fresh, _, [allocated, released]) = crate::allocation::usage(Scratch::new);
+    let baseline = allocated - released;
+    drop(fresh);
+    let (scratch, _, [allocated, released]) = crate::allocation::usage(|| {
+        let mut scratch = Scratch::new();
+        paint(&mut scratch, &prim(3_282.0));
+        paint(&mut scratch, &over);
+        scratch
+    });
+    assert_eq!(allocated - released, baseline);
+    let ((), _, [allocated, freed]) = crate::allocation::usage(|| drop(scratch));
+    assert_eq!((allocated, freed), (0, baseline));
 }

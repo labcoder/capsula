@@ -480,7 +480,9 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
             + size_of::<RefCell<paint_stroke::Scratch>>()
             + paint_stroke::VERTICES * size_of::<lyon::math::Point>()
             + paint_stroke::RUN_POINTS * size_of::<gpui_kit::Point<gpui_kit::Pixels>>();
-        let fixed = fixed + super::super::super::paint_cache::FONT_FEATURE_BYTES;
+        let fixed = fixed
+            + super::super::super::paint_cache::FONT_FEATURE_BYTES
+            + super::super::super::paint_geometry::FILL_SCRATCH_BYTES;
         assert_eq!(
             crate::presenter::tests::residency(&this.presenter),
             fixed

@@ -160,8 +160,19 @@ fn owned_static_canvas(
     gpui_kit::AnyWindowHandle,
     async_channel::Receiver<ControlToBrain>,
 ) {
+    owned_canvas(cx, |_| ready_canvas())
+}
+
+fn owned_canvas(
+    cx: &mut TestAppContext,
+    prepare: impl FnOnce(&Rc<RefCell<super::Scratch>>) -> Presenter,
+) -> (
+    gpui_kit::Entity<Presence>,
+    gpui_kit::AnyWindowHandle,
+    async_channel::Receiver<ControlToBrain>,
+) {
     let owner = test_fixture::presence(cx);
-    let presenter = ready_canvas();
+    let presenter = owner.read_with(cx, |this, _| prepare(&this.paint_scratch));
     let frames = presenter.frames();
     let (notice, scratch, controls) = owner.update(cx, |this, _| {
         this.presenter = presenter;
@@ -249,6 +260,66 @@ fn a_hidden_epoch_cannot_acknowledge_a_success_already_waiting_in_the_defer(
     });
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
     owner.read_with(&visual, |this, _| assert!(!this.paint_notice.pending.get()));
+    visual.update(|window, _| window.remove_window());
+}
+
+#[gpui::test]
+fn a_warm_overlay_rect_at_placement_two_allocates_only_its_path_handoffs(cx: &mut TestAppContext) {
+    let (owner, window, _controls) = owned_canvas(cx, |scratch| {
+        let now = Instant::now();
+        let mut presenter = begun_at(Box::new(Stager::new(scratch)), now);
+        prepare_canvas_step_at(&mut presenter, 0, br#"{"step":{"id":"rect","start":"now","put":[{"shape":{"id":"box","kind":"rect","box":[0,0,40,24],"radius":6,"fill":"blue","width":4,"enter":"none"}},{"anim":{"target":"box","track":"rotate","keys":[[0,7]]}}]}}"#, now);
+        presenter
+    });
+    let frames = owner.update(cx, |this, _| {
+        assert!(this.presenter.set_stage(Rect {
+            origin: Vec2::default(),
+            size: Vec2::new(3840.0, 2160.0),
+        }));
+        let (sample, effects) = crate::presenter::tests::sample(&mut this.presenter, 0);
+        assert!(sample.visible);
+        assert!(effects.is_empty());
+        this.presenter.frames()
+    });
+    assert!(!frames.borrow().paint(|frame, _| {
+        let (item, _, prims) = frame.paint_items().next().expect("the visible rect");
+        assert!(matches!(
+            prims,
+            [Prim::Rect {
+                fill: Some(_),
+                border: Some(_),
+                ..
+            }]
+        ));
+        assert!((super::super::paint_paths::scale(item.transform) - 2.0).abs() < 1e-5);
+        assert!(
+            item.transform.0[1].abs() > 0.1,
+            "rotation forces the fallback"
+        );
+        Ok::<(), BuildError>(())
+    }));
+
+    let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let ((), events) = crate::allocation::requests(16_384, || {
+        for _ in 0..4 {
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+        }
+    });
+    assert_eq!(events.iter().filter(|event| event.action == 5).count(), 4);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|r| r.action == 0 && r.tag == 2)
+            .count(),
+        0,
+        "warmed fallback tessellation allocates nothing"
+    );
+    assert_eq!(super::paint_phase::tests::assert_paths(&events, 3), 8);
+    assert_eq!(
+        crate::presenter::tests::painted(&frames.borrow(), TWINNED).map(|(_, bound)| bound),
+        Some(1)
+    );
     visual.update(|window, _| window.remove_window());
 }
 
@@ -629,6 +700,68 @@ fn the_deepest_turned_chain_builds_its_fallback_within_its_charge() {
         Ok::<(), BuildError>(())
     });
     assert!(!failed);
+}
+
+#[test]
+fn a_large_admitted_scene_releases_its_rect_scratch_within_the_owner_charge() {
+    let now = Instant::now();
+    let mut presenter = begun_at(Box::new(Stager(size_of::<Stager>())), now);
+    assert!(presenter.set_stage(Rect {
+        origin: Vec2::default(),
+        size: Vec2::new(81_000.0, 81_000.0),
+    }));
+    prepare_canvas_step_at(
+        &mut presenter,
+        0,
+        br#"{"step":{"id":"bound","start":"now","put":[{"diagram":{"id":"g"}},{"anim":{"target":"g","track":"scale","keys":[[0,2]]}},{"shape":{"id":"fill","in":"g","kind":"rect","box":[-10000,-10000,20000,20000],"radius":10000,"fill":"blue","width":0,"enter":"none"}},{"shape":{"id":"ring","in":"g","kind":"rect","box":[-10000,-10000,20000,20000],"radius":7250,"width":4,"enter":"none"}}]}}"#,
+        now,
+    );
+    assert!(
+        presenter
+            .advance(1, now)
+            .expect("activate bounds")
+            .is_empty()
+    );
+    let (sample, _) = crate::presenter::tests::sample(&mut presenter, 60_000);
+    assert!(sample.visible);
+    let frames = presenter.frames();
+    let (scratch, _, [allocated, released]) = crate::allocation::usage(|| {
+        let mut scratch = super::Scratch::new();
+        let mut work = kumochi_scene::display::PaintWork::default();
+        let mut rects = 0;
+        assert!(!frames.borrow().paint(|frame, _| {
+            for (item, _, prims) in frame.paint_items() {
+                if prims.is_empty() {
+                    continue;
+                }
+                assert!((super::super::paint_paths::scale(item.transform) - 4.0).abs() < 1e-5);
+                work = work + kumochi_scene::display::PaintWork::of(prims, item.paint_scale);
+                for prim in prims {
+                    assert!(matches!(prim, Prim::Rect { .. }));
+                    rects += 1;
+                    for draw in [0.999, 1.0] {
+                        let paths = super::super::paint_geometry::paths(
+                            &mut scratch,
+                            prim,
+                            item.transform,
+                            draw,
+                            0.0,
+                            item.paint_scale,
+                        )?;
+                        assert_eq!(paths.into_iter().flatten().count(), 1);
+                    }
+                }
+            }
+            Ok::<(), BuildError>(())
+        }));
+        assert_eq!(rects, 2);
+        assert_eq!((work.fill_vertices, work.outline_points), (897, 765));
+        scratch
+    });
+    let retained = allocated - released;
+    assert!(retained <= scratch.bytes());
+    let ((), _, [allocated, released]) = crate::allocation::usage(|| drop(scratch));
+    assert_eq!((allocated, released), (0, retained));
 }
 
 #[test]
