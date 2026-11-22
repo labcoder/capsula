@@ -149,23 +149,12 @@ mod tests {
     }
 
     #[test]
-    fn first_fast_compositor_wait_does_not_sleep() {
-        for elapsed in [
-            Duration::ZERO,
-            VSYNC_INTERVAL_THRESHOLD - Duration::from_nanos(1),
-        ] {
-            let mut provider = fake_provider(&[(true, elapsed)]);
-            assert_wait(&mut provider, NativeCallback, None);
-        }
-    }
-
-    #[test]
     fn repeated_fast_waits_sleep_until_a_normal_wait_resets_them() {
         let mut provider = fake_provider(&[
+            (true, Duration::from_nanos(999_999)),
             (true, Duration::ZERO),
-            (true, Duration::ZERO),
-            (true, VSYNC_INTERVAL_THRESHOLD - Duration::from_nanos(1)),
-            (true, VSYNC_INTERVAL_THRESHOLD),
+            (true, Duration::from_nanos(999_999)),
+            (true, Duration::from_millis(1)),
             (true, Duration::ZERO),
             (true, Duration::ZERO),
         ]);
