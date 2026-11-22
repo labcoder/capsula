@@ -5,14 +5,14 @@
 
 use std::collections::BTreeSet;
 
-use kumochi_protocol::message::{ConnectionKind, RunId, ThreadId};
+use kumochi_protocol::message::{ConnectionKind, ModelSlug, RunId, ThreadId};
 use serde_json::{Value, json};
 
 use super::{EventKind, NewEvent, Store, StoreError};
 use crate::connections::anthropic::request::{literal, members};
 use crate::context::{Body, ConnectionTag, Route};
 use crate::dispatch::ToolOutput;
-use crate::engines::anthropic::encode::ToolUse;
+use crate::engines::anthropic::encode::{KeyHistory, ToolUse};
 use crate::engines::{CallId, Opaque};
 
 /// The longest stored result read back: a full tool output, plus its call id, escaped, and the
@@ -76,7 +76,7 @@ impl Store {
         calls: &[ToolUse],
         results: &[(CallId, ToolOutput)],
     ) -> Result<(), StoreError> {
-        self.append_key_round_events(ids, tag, plain_text(text).as_slice(), calls, results)
+        self.append_key_round_events(ids, tag, plain_text(text).as_slice(), calls, results, None)
     }
 
     pub(crate) fn append_key_round_events(
@@ -86,6 +86,7 @@ impl Store {
         text: &[NewEvent<'_>],
         calls: &[ToolUse],
         results: &[(CallId, ToolOutput)],
+        screen_model: Option<&ModelSlug>,
     ) -> Result<(), StoreError> {
         let mut pending: BTreeSet<_> = calls.iter().map(ToolUse::id).collect();
         if pending.len() != calls.len()
@@ -99,11 +100,20 @@ impl Store {
         let natives = calls
             .iter()
             .map(|call| {
-                let body = format!(
-                    r#"{{"connection":{},"kind":"anthropic_key","item":{}}}"#,
-                    tag.0,
-                    call.json()
-                );
+                let body = if let Some(model) = screen_model {
+                    format!(
+                        r#"{{"connection":{},"kind":"anthropic_key","screen_model":{},"item":{}}}"#,
+                        tag.0,
+                        json!(model),
+                        call.clone().scrubbed(KeyHistory::Scrubbed).json(),
+                    )
+                } else {
+                    format!(
+                        r#"{{"connection":{},"kind":"anthropic_key","item":{}}}"#,
+                        tag.0,
+                        call.json(),
+                    )
+                };
                 match native(&body)? {
                     Body::Native {
                         kind: Some(ConnectionKind::AnthropicKey),
@@ -198,6 +208,14 @@ pub(super) fn native(body: &str) -> Result<Body, StoreError> {
     if !item.is_object() {
         return Err(StoreError::RoundRecord);
     }
+    let screen_model = value.get("screen_model").and_then(|model| {
+        let model = model.as_str().and_then(|model| ModelSlug::new(model).ok());
+        if model.is_none() || kind != Some(ConnectionKind::AnthropicKey) {
+            kind = None;
+            return None;
+        }
+        model
+    });
     let bytes = if kind == Some(ConnectionKind::AnthropicKey) {
         let written = members(body)
             .and_then(|members| members.into_iter().find(|(name, _)| name == "item"))
@@ -213,6 +231,7 @@ pub(super) fn native(body: &str) -> Result<Body, StoreError> {
     Ok(Body::Native {
         kind,
         connection: ConnectionTag(connection),
+        screen_model,
         item: Opaque::new(bytes).map_err(|_| StoreError::RoundRecord)?,
     })
 }

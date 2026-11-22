@@ -9,11 +9,12 @@ use serde_json::{Value, json};
 use super::bound::{fixed_bytes, item_bytes};
 use super::{
     Body, BuildError, Built, ConnectionTag, HistoryRef, InputItem, Item, MAX_NOTES, ModelRequest,
-    Origin, RAW_RUNS, REMOVED, REREAD_CAP, Role, RunSnapshot, Supplied, UNAVAILABLE, note_item,
-    summary_item, tools,
+    Origin, PictureRecipient, RAW_RUNS, REMOVED, REREAD_CAP, Role, RunSnapshot, Supplied,
+    UNAVAILABLE, note_item, summary_item, tools,
 };
-use crate::engines::Opaque;
-use crate::engines::anthropic::encode::ToolUse;
+use crate::dispatch::ToolOutput;
+use crate::engines::anthropic::encode::{KeyHistory, ToolUse};
+use crate::engines::{CallId, Opaque};
 use crate::store::StoreError;
 use crate::store::context::Snapshot;
 
@@ -28,6 +29,8 @@ pub(crate) struct Turn<'a> {
     pub(crate) run: RunId,
     /// The user's local time, already formatted.
     pub(crate) local_time: &'a str,
+    pub(crate) picture: Option<&'a PictureRecipient>,
+    pub(crate) key_results: &'a [(CallId, ToolOutput)],
 }
 
 /// Builds the next round of `turn` within `bound` bytes, then ends `snapshot`, so the request
@@ -83,24 +86,16 @@ fn assemble(
     let summary = supplied
         .summary
         .map(|summary| summary_item(summary.first, summary.last, &summary.text));
-    let mut current = render(snapshot, run, current, Some(turn.local_time), &mut sources)?;
-    if let Some(InputItem::Message { text, .. }) = current.iter_mut().find(|item| {
-        matches!(
-            item,
-            InputItem::Message {
-                role: Role::User,
-                ..
-            }
-        )
-    }) {
-        text.push_str("\nDrawings on screen: ");
-        let drawings = &supplied.drawings;
-        text.push_str(if super::takes_images(run.choice.as_ref()) {
-            drawings.as_str()
-        } else {
-            drawings.off_screen()
-        });
-    }
+    let mut current = render(
+        snapshot,
+        run,
+        current,
+        Some(turn.local_time),
+        turn.picture,
+        turn.key_results,
+        &mut sources,
+    )?;
+    append_drawings(&mut current, &supplied.drawings, turn.picture);
     let unsummarized =
         fixed_bytes(&instructions, &tools) + current.iter().map(item_bytes).sum::<usize>();
     let mut total = unsummarized + summary.iter().map(item_bytes).sum::<usize>();
@@ -123,9 +118,18 @@ fn assemble(
             break;
         }
         let mut reached = BTreeSet::new();
-        let mut rendered = match segment {
-            Some(segment) => render(snapshot, run, segment, None, &mut reached)?,
-            None => Vec::new(),
+        let mut rendered = if let Some(segment) = segment {
+            render(
+                snapshot,
+                run,
+                segment,
+                None,
+                turn.picture,
+                &[],
+                &mut reached,
+            )?
+        } else {
+            Vec::new()
         };
         let start = segment.map_or(EventId(0), |segment| segment[0].id);
         let at = notes.partition_point(|note| note.id <= start);
@@ -155,6 +159,27 @@ fn assemble(
         },
         sources: sources.into_iter().collect(),
     })
+}
+
+fn append_drawings(
+    input: &mut [InputItem],
+    drawings: &crate::drawing::Digest,
+    picture: Option<&PictureRecipient>,
+) {
+    if let Some(text) = input.iter_mut().find_map(|item| match item {
+        InputItem::Message {
+            role: Role::User,
+            text,
+        } => Some(text),
+        _ => None,
+    }) {
+        text.push_str("\nDrawings on screen: ");
+        text.push_str(
+            picture
+                .and_then(|recipient| drawings.line_for(recipient))
+                .unwrap_or_else(|| drawings.off_screen()),
+        );
+    }
 }
 
 /// Groups ordered items into whole runs, the current one last. Each call is followed by its
@@ -223,6 +248,8 @@ pub(super) fn render(
     run: &RunSnapshot,
     items: &[Item],
     local_time: Option<&str>,
+    picture: Option<&PictureRecipient>,
+    key_results: &[(CallId, ToolOutput)],
     sources: &mut BTreeSet<ThreadId>,
 ) -> Result<Vec<InputItem>, StoreError> {
     // Native items replay only on `ChatGPT` and the Anthropic key; any other route gets text.
@@ -231,6 +258,11 @@ pub(super) fn render(
         .as_ref()
         .map_or(ConnectionKind::ChatGpt, |choice| choice.connection);
     let native = kind != ConnectionKind::ClaudeCode && replayable(kind, run.connection, items);
+    let key_route = native && kind == ConnectionKind::AnthropicKey;
+    if !key_results.is_empty() && !key_route {
+        return Err(StoreError::RoundRecord);
+    }
+    let mut key = KeyReplay::new(picture, items, key_results)?;
     // A `ChatGPT` round's items carry its text; the key's carry only its calls, so its text stays.
     let carried = native && kind == ConnectionKind::ChatGpt;
     let narration = if carried {
@@ -249,6 +281,12 @@ pub(super) fn render(
         .filter(|_| carried);
     let mut input: Vec<InputItem> = Vec::with_capacity(items.len());
     for (at, item) in items.iter().enumerate() {
+        if key_route
+            && let Some(item) = key.render(snapshot, run.origin, &item.body, at, sources)?
+        {
+            input.push(item);
+            continue;
+        }
         match &item.body {
             Body::Assistant(_) if after_rounds.is_some_and(|last| at < last) => {}
             Body::Narration { call, .. } if narration.contains_key(call.as_str()) => {}
@@ -288,39 +326,123 @@ pub(super) fn render(
                     output: json!({ "quoted_history": quoted }).to_string(),
                 });
             }
-            Body::Native { item, .. } => {
-                if native {
-                    input.push(InputItem::Native(item.clone()));
-                    if !narration.is_empty()
-                        && let Some(call) = called(item)
-                        && let Some(text) = narration.get(call.as_str())
-                    {
-                        input.push(InputItem::Message {
-                            role: Role::Assistant,
-                            text: text.clone(),
-                        });
-                    }
-                }
-            }
-            Body::Result { call, output } => {
-                if native {
-                    input.push(InputItem::FunctionOutput {
-                        call: call.clone(),
-                        output: output.clone(),
+            Body::Native { item, .. } if native => {
+                input.push(InputItem::Native(item.clone()));
+                if !narration.is_empty()
+                    && let Some(call) = called(item)
+                    && let Some(text) = narration.get(call.as_str())
+                {
+                    input.push(InputItem::Message {
+                        role: Role::Assistant,
+                        text: text.clone(),
                     });
                 }
             }
-            Body::Recall { call, selection } => {
-                if native {
-                    input.push(InputItem::FunctionOutput {
-                        call: call.clone(),
-                        output: snapshot.render_recall(run.origin, selection, sources)?,
-                    });
-                }
-            }
+            Body::Result { call, output } if native => input.push(InputItem::FunctionOutput {
+                call: call.clone(),
+                output: output.clone(),
+            }),
+            Body::Recall { call, selection } if native => input.push(InputItem::FunctionOutput {
+                call: call.clone(),
+                output: snapshot.render_recall(run.origin, selection, sources)?,
+            }),
+            _ => {}
         }
     }
     Ok(input)
+}
+
+struct KeyReplay<'a> {
+    recipient: Option<&'a PictureRecipient>,
+    live_at: usize,
+    results: &'a [(CallId, ToolOutput)],
+    protected: BTreeMap<String, KeyHistory>,
+}
+
+impl<'a> KeyReplay<'a> {
+    fn new(
+        recipient: Option<&'a PictureRecipient>,
+        items: &[Item],
+        results: &'a [(CallId, ToolOutput)],
+    ) -> Result<Self, StoreError> {
+        let live_at = items
+            .len()
+            .checked_sub(results.len())
+            .ok_or(StoreError::RoundRecord)?;
+        if !items[live_at..].iter().zip(results).all(|(item, (id, _))| {
+            matches!(&item.body, Body::Result { call, .. } | Body::Recall { call, .. } if call == id)
+        }) {
+            return Err(StoreError::RoundRecord);
+        }
+        Ok(Self {
+            recipient,
+            live_at,
+            results,
+            protected: BTreeMap::new(),
+        })
+    }
+
+    fn render(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        origin: Origin,
+        body: &Body,
+        at: usize,
+        sources: &mut BTreeSet<ThreadId>,
+    ) -> Result<Option<InputItem>, StoreError> {
+        let call = match body {
+            Body::Native {
+                item,
+                connection,
+                screen_model,
+                ..
+            } => {
+                if screen_model.is_none() && self.protected.is_empty() {
+                    return Ok(None);
+                }
+                let call = ToolUse::stored(item.bytes()).ok_or(StoreError::RoundRecord)?;
+                let Some(model) = screen_model else {
+                    self.protected.remove(call.id());
+                    return Ok(None);
+                };
+                let history = if self.recipient.is_some_and(|target| {
+                    target.route.kind == ConnectionKind::AnthropicKey
+                        && target.route.tag == *connection
+                        && target.model == *model
+                }) {
+                    KeyHistory::Scrubbed
+                } else {
+                    KeyHistory::Neutral
+                };
+                self.protected.insert(call.id().to_owned(), history);
+                let item = Opaque::new(call.scrubbed(history).json().into_bytes())
+                    .map_err(|_| StoreError::RoundRecord)?;
+                return Ok(Some(InputItem::Native(item)));
+            }
+            Body::Result { call, .. } | Body::Recall { call, .. } => call,
+            _ => return Ok(None),
+        };
+        let live = at
+            .checked_sub(self.live_at)
+            .and_then(|index| self.results.get(index));
+        let output = match (self.protected.get(call.as_str()), live) {
+            (Some(KeyHistory::Scrubbed), Some((_, ToolOutput::Text(text)))) => text.clone(),
+            (Some(KeyHistory::Scrubbed), Some((_, ToolOutput::Recall(selection)))) => {
+                snapshot.render_recall(origin, selection, sources)?
+            }
+            (Some(KeyHistory::Scrubbed), Some((_, output))) => output.stored(),
+            (Some(KeyHistory::Scrubbed), None) => crate::dispatch::PICTURE_RESULT.to_owned(),
+            (Some(KeyHistory::Neutral), None) => {
+                "Tool result not available on this model.".to_owned()
+            }
+            (_, Some(_)) => return Err(StoreError::RoundRecord),
+            (None, None) => return Ok(None),
+        };
+        Ok(Some(InputItem::FunctionOutput {
+            call: call.clone(),
+            output,
+        }))
+    }
 }
 
 fn native_narration(items: &[Item]) -> BTreeMap<&str, String> {
@@ -361,6 +483,7 @@ fn replayable(kind: ConnectionKind, tag: ConnectionTag, items: &[Item]) -> bool 
                 kind: made,
                 connection,
                 item,
+                ..
             } => {
                 if *made != Some(kind) || *connection != tag {
                     return false;

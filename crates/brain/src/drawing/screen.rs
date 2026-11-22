@@ -7,7 +7,7 @@ use kumochi_scene::screen::{admit, stamp, without_boxes};
 use kumochi_scene::{Begin, Record, Tokenizer, parse_screen_draw_record};
 
 use super::{CallError, Drawing, Output, Pend, Pending, Wait};
-use crate::context::{Geometry, NoCanvas};
+use crate::context::{Geometry, NoCanvas, PictureRecipient};
 use crate::engines::{DRAW, Opaque};
 
 /// Whether `draw` may mark the user's screen.
@@ -25,13 +25,33 @@ impl Drawing {
     /// that was never told parses its records without the screen surface.
     /// A skip's `Changed` stays for the rest of the run: a later announcement of the same
     /// picture never reopens it, and only another withdrawal replaces it.
-    pub(crate) fn canvas(&mut self, run: RunId, canvas: Result<Geometry, NoCanvas>) {
+    pub(crate) fn canvas(
+        &mut self,
+        run: RunId,
+        canvas: Result<Geometry, NoCanvas>,
+        recipient: Option<&PictureRecipient>,
+    ) {
         if run <= self.closed {
             return;
         }
         let ledger = self.ledger(run);
         if canvas.is_err() || ledger.canvas != Some(Err(NoCanvas::Changed)) {
             ledger.canvas = Some(canvas);
+            if canvas.is_ok() && ledger.picture_recipient.is_none() {
+                ledger.picture_recipient = recipient.cloned();
+            }
+        }
+    }
+
+    /// `run`'s requests carried protected material for `recipient`, so every scene it draws, on
+    /// any surface, is that recipient's. The first recipient stays for the rest of the run.
+    pub(crate) fn author(&mut self, run: RunId, recipient: Option<&PictureRecipient>) {
+        if run > self.closed
+            && let Some(recipient) = recipient
+        {
+            self.ledger(run)
+                .picture_recipient
+                .get_or_insert_with(|| recipient.clone());
         }
     }
 

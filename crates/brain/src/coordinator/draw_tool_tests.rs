@@ -1384,7 +1384,7 @@ fn turning_sharing_off_tells_the_drawing_only_while_marks_are_on() {
             sent_picture(&mut core);
         }
         core.drawing
-            .canvas(R, Ok(crate::context::Geometry::FIXTURE));
+            .canvas(R, Ok(crate::context::Geometry::FIXTURE), None);
         core.handle(Input::ShowScreenOff).expect("the setting");
         let out = core
             .drawing

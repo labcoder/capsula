@@ -419,6 +419,8 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
                 crate::context::ConnectionTag(0),
             ),
             drawings: crate::drawing::Digest::default(),
+            picture_models: Vec::new(),
+            key_results: Vec::new(),
         }))])
     );
 }

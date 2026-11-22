@@ -5,13 +5,13 @@
 
 use std::collections::BTreeSet;
 
-use kumochi_protocol::message::{ConnectionKind, RunId, ThreadId};
+use kumochi_protocol::message::{ConnectionKind, ModelSlug, RunId, ThreadId};
 
 use super::inline::Inline;
 use super::{Coordinator, Effect, SendKey, Stale, StoreOp};
-use crate::context::{Built, ConnectionTag, Origin, RunSnapshot};
+use crate::context::{Built, ConnectionTag, Origin, PictureRecipient, Route, RunSnapshot};
 use crate::engines::anthropic::live::Motion;
-use crate::engines::{DRAW, RunRequest, ToolName};
+use crate::engines::{CallId, DRAW, RunRequest, ToolName};
 use crate::store::Failure;
 
 /// One build attempt of one round of a run. A rebuild gets a new attempt, so a late result of
@@ -44,6 +44,8 @@ pub struct BuildContext {
     pub(crate) arrived: super::Arrived,
     /// The thread's drawings on screen when the build began, headers and objects together.
     pub(crate) drawings: crate::drawing::Digest,
+    pub(crate) picture_models: Vec<(Route, Vec<ModelSlug>)>,
+    pub(crate) key_results: Vec<(CallId, crate::dispatch::ToolOutput)>,
 }
 
 impl PartialEq for BuildContext {
@@ -55,6 +57,8 @@ impl PartialEq for BuildContext {
             && self.first == other.first
             && self.arrived == other.arrived
             && self.drawings == other.drawings
+            && self.picture_models == other.picture_models
+            && self.key_results == other.key_results
     }
 }
 impl Eq for BuildContext {}
@@ -123,6 +127,7 @@ pub(super) struct Build {
     offers_draw: bool,
     /// The admitted request carries the hold's image.
     pictured: bool,
+    pub(super) screen_digests: Vec<PictureRecipient>,
     /// The dispatcher's tools the admitted request offered.
     offered: Vec<ToolName>,
     /// The admitted request's sources, checked again before each send.
@@ -147,6 +152,7 @@ impl Build {
             provider_failed: false,
             offers_draw: false,
             pictured: false,
+            screen_digests: Vec::new(),
             offered: Vec::new(),
             sources: Vec::new(),
             inline,
@@ -237,12 +243,23 @@ impl Coordinator {
             return;
         };
         let control = current.control.0.child();
-        current.build = Some(Build::new(key, exposed, None, control.clone()));
         let (thread, snapshot, arrived) = (
             current.thread,
             current.effective_snapshot(),
             current.arrived,
         );
+        let key_results = current.tools.key_results.clone();
+        let drawings = self.drawing.digest(thread);
+        let picture_models = self.picture_models();
+        let mut build = Build::new(key, exposed, None, control.clone());
+        build.screen_digests = drawings
+            .recipients()
+            .filter(|recipient| self.pictured(recipient.route, Some(&recipient.model)))
+            .cloned()
+            .collect();
+        self.current(run)
+            .expect("the current run did not change")
+            .build = Some(build);
         effects.push(Effect::Store(StoreOp::BuildContext(BuildContext {
             control,
             key,
@@ -251,7 +268,9 @@ impl Coordinator {
             first: snapshot.is_none(),
             arrived,
             snapshot,
-            drawings: self.drawing.digest(thread),
+            drawings,
+            picture_models,
+            key_results,
         })));
     }
 

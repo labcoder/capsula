@@ -283,6 +283,7 @@ pub(super) struct RunLedger {
     pub(super) loss: Option<ThreadId>,
     /// What its screen scenes may be drawn on; `None` while `draw` can't mark the screen.
     pub(super) canvas: Option<Result<crate::context::Geometry, crate::context::NoCanvas>>,
+    pub(super) picture_recipient: Option<crate::context::PictureRecipient>,
 }
 
 impl RunLedger {
@@ -687,6 +688,10 @@ impl Drawing {
     }
 
     /// Admits a step and writes its first-step replacements in the same durable transaction.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the stored write and its pending settlement share one read of the run's recipient"
+    )]
     fn step(&mut self, at: usize, step: Step, out: &mut Output) -> Result<(), StepError> {
         let (run, thread) = (self.calls[at].run, self.calls[at].thread);
         let existing = match &self.calls[at].scene {
@@ -760,6 +765,11 @@ impl Drawing {
         } else {
             Arc::clone(&step)
         };
+        let recipient = self
+            .runs
+            .iter()
+            .find(|ledger| ledger.run == run)
+            .and_then(|ledger| ledger.picture_recipient.clone());
         let write = Write::Step {
             thread,
             run,
@@ -768,6 +778,7 @@ impl Drawing {
             revision,
             layout_version,
             step: stored,
+            protected: recipient.is_some(),
         };
         let wait = StepWait {
             run,
@@ -780,6 +791,7 @@ impl Drawing {
             loss_dropped: false,
             interrupted: None,
             laid: None,
+            recipient,
         };
         self.prepare_step(wait, write, out);
         Ok(())
@@ -1136,6 +1148,7 @@ impl Drawing {
                     exhausted: false,
                     loss: None,
                     canvas: None,
+                    picture_recipient: None,
                 });
                 self.runs.len() - 1
             });

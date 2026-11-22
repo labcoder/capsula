@@ -792,6 +792,7 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
                         &text,
                         &round.key_calls,
                         &round.calls,
+                        round.pictured_key_model.as_ref(),
                     ),
                 // `append_round` refuses the key's route, so its opaque items are never written.
                 _ if round.key_calls.is_empty() => store.append_round_events(

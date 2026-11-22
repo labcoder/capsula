@@ -5,9 +5,11 @@ use kumochi_protocol::message::{
     DataToShell, MAX_VISIBLE_SCENES, RunId, SceneFailure, SceneHeader, SceneId, ThreadId,
 };
 use kumochi_scene::layout::LayoutState;
+use kumochi_scene::record::Surface;
 use kumochi_scene::text::Bounded;
 use kumochi_scene::{ReplacementDisposition, Step, StopCut};
 
+use super::Author;
 use super::io::Write;
 use super::{
     CutKind, Drawing, Held, Job, LAYOUT_VERSION, Output, Paint, Pend, Pending, StepWait, Wait,
@@ -112,7 +114,7 @@ impl Drawing {
             loss_dropped,
             interrupted,
             laid,
-            ..
+            recipient,
         } = write;
         let begun = matches!(scene, Pend::New { .. });
         let (scene, index) = match scene {
@@ -129,6 +131,7 @@ impl Drawing {
                     return;
                 }
                 let held = &mut self.scenes[at];
+                held.author = held.author.clone().and(recipient);
                 let committed = held
                     .state
                     .commit(admitted, &mut self.global)
@@ -193,11 +196,17 @@ impl Drawing {
                     .push(Effect::Data(DataToShell::SceneBegin { scene: id, header }));
                 let paint =
                     laid.map(|laid| Paint::begun(LayoutState::new(&state), committed.index, laid));
+                let author = if recipient.is_none() && state.header().surface == Surface::Screen {
+                    Author::Unknown
+                } else {
+                    Author::Public.and(recipient)
+                };
                 self.scenes.push(Held {
                     scene: id,
                     thread,
                     layout_version: LAYOUT_VERSION,
                     state,
+                    author,
                     committers: vec![Some(run)],
                     refused_through: 0,
                     gone: false,
