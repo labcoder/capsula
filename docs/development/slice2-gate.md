@@ -37,7 +37,9 @@ flowchart LR
   to the held child before its Hello; the control pipe is checked before the capability is read.
   An early open waits for capability publication, and a refused capability is never sent
   again. A replacement must be observed before retrying the handshake. One absolute
-  deadline bounds the handshake, reads and writes. The frame and byte caps count admitted
+  deadline bounds the handshake, reads and writes. If the Windows event wait expires before
+  that deadline, the client waits again on the same pending transfer, without renewing the
+  allowance. The frame and byte caps count admitted
   post-handshake frames, including ignored frames; each reader can have decoded one extra
   frame bounded by its pipe's per-frame maximum (64 KiB control, 256 KiB data, plus
   headers). Frames are reduced to facts before queuing. Truncation isn't a clean pipe end.

@@ -667,11 +667,13 @@ mod tests {
         fs::create_dir_all(dir.join("src/unicode_tables")).unwrap();
         fs::write(dir.join("src/unicode_tables/LICENSE-UNICODE"), unicode).unwrap();
         fs::create_dir(dir.join("tests")).unwrap();
-        fs::write(dir.join("tests/LICENSE"), "Unrelated fixture license.").unwrap();
+        let unrelated = "Unrelated fixture license.";
+        fs::write(dir.join("tests/LICENSE"), unrelated).unwrap();
         let package = serde_json::json!({
             "name":"fixture", "version":"1.0.0", "manifest_path":dir.join("Cargo.toml"), "license":"ISC"
         });
         let output = policy.package(&package).unwrap();
+        assert!(output.iter().all(|(_, text)| !text.contains(unrelated)));
         assert_eq!(
             output
                 .iter()

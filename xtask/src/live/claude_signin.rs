@@ -416,6 +416,41 @@ mod tests {
         }
     }
 
+    struct TerminalFixture(Fixture);
+
+    impl Wire for &mut TerminalFixture {
+        fn send(&mut self, message: &ControlToBrain) -> Result<()> {
+            (&mut self.0).send(message)
+        }
+
+        fn until<T>(
+            &mut self,
+            limit: Duration,
+            pick: impl FnMut(&Frame) -> Option<T>,
+        ) -> Result<T> {
+            assert!(!self.0.frames.is_empty(), "read after terminal discovery");
+            (&mut self.0).until(limit, pick)
+        }
+    }
+
+    fn run_observed(fixture: &mut TerminalFixture, ask: Ask) -> (String, Option<String>, bool) {
+        let mut out = Vec::new();
+        let (result, quit_sent) = session(Ok(&mut *fixture), &mut out, |wire, out| {
+            drive(wire, out, ask)
+        });
+        let out = String::from_utf8(out).expect("utf-8");
+        let printed = result.as_ref().err().map(|error| format!("{error:?}"));
+        let error = result.err().map(|error| format!("{error:#}"));
+        for text in [Some(&out), printed.as_ref(), error.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            assert!(!text.contains(SENTINEL), "a planted value leaked: {text}");
+            assert!(!text.contains("4919"), "a version leaked: {text}");
+        }
+        (out, error, quit_sent)
+    }
+
     #[test]
     fn a_sign_in_waits_for_discovery_and_prints_only_states() {
         use ClaudeCodeView::{Finding, NotFound, SigningIn};
@@ -501,19 +536,16 @@ mod tests {
         ];
         for (found, words) in cases {
             // Today's main ships `Undecided`: discovery ends at the first case.
-            let mut brain = fixture(vec![
+            let mut brain = TerminalFixture(fixture(vec![
                 Step::View(ClaudeCodeView::NotFound),
                 Step::View(found),
-            ]);
-            let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-            assert_eq!(out, format!("claude code: {words}\n"));
-            assert_eq!(
-                error.as_deref(),
-                Some(format!("not signing in while claude code is {words}").as_str())
-            );
-            assert_eq!(brain.sent, [QUIT]);
+            ]));
+            let (out, error, quit_sent) = run_observed(&mut brain, Ask::SignIn);
+            assert!(out.contains(words), "{out}");
+            let error = error.expect("unavailable state is refused");
+            assert!(error.contains(words), "{error}");
+            assert_eq!(brain.0.sent, [QUIT]);
             assert!(quit_sent);
-            assert_eq!(brain.limits.len(), 2, "no wait after the view: {words}");
         }
     }
 
