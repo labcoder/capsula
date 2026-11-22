@@ -10,7 +10,7 @@ use kumochi_protocol::message::{AccountOp, AssistantName, ControlToBrain, MaxFra
 use super::super::{
     Foreground, OpenError, Presence, PresenceSurface, configure_surface, options, platform,
 };
-use super::SettingsView;
+use super::{SettingsTab, SettingsView};
 use crate::settings::{Field, TaskbarChoice};
 use crate::strings::{Strings, Text};
 
@@ -125,19 +125,19 @@ impl Presence {
         &mut self,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        self.open_settings_tab(1, cx)
+        self.open_settings_tab(SettingsTab::Accounts, cx)
     }
 
     pub(in crate::presence) fn open_general(
         &mut self,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        self.open_settings_tab(0, cx)
+        self.open_settings_tab(SettingsTab::General, cx)
     }
 
     fn open_settings_tab(
         &mut self,
-        tab: usize,
+        tab: SettingsTab,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
         if !self.settings_open() {
