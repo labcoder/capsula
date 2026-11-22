@@ -5,12 +5,16 @@ pub(crate) struct FakePlayback(super::Playback);
 
 impl FakePlayback {
     #[cfg(test)]
+    /// Reports an underrun and wakes its worker, as the native error callback does.
     pub(crate) fn xrun(&self) {
         super::OutputEvent::latch(&self.0.shared.pending, super::ErrorKind::Xrun);
+        self.0.control.wake();
     }
 
+    /// Reports the stream lost and wakes its worker, as the native error callback does.
     pub(crate) fn lose(&self) {
         super::OutputEvent::latch(&self.0.shared.pending, super::ErrorKind::StreamInvalidated);
+        self.0.control.wake();
     }
 
     #[cfg(test)]
