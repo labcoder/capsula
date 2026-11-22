@@ -16,8 +16,9 @@ use std::task::{Poll, ready};
 use kumochi_protocol::constants::MCP_SERVER_NAME;
 use kumochi_protocol::frame::{self, Pipe};
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 use serde_json::value::RawValue;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
@@ -483,7 +484,7 @@ struct CallParams<'a> {
     #[serde(borrow, default, deserialize_with = "present")]
     arguments: Option<&'a RawValue>,
     #[serde(rename = "_meta", default)]
-    _meta: Option<Map<String, Value>>,
+    _meta: Option<IgnoredAny>,
 }
 
 /// A present `arguments`, `null` included: only an omitted one means none.
