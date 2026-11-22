@@ -791,10 +791,16 @@ fn close_returns_at_once_and_finishes_the_queued_write_and_its_reads() {
 
 #[test]
 fn a_panicking_store_thread_fails_the_reads_waiting_on_it() {
+    use std::time::Instant;
+
+    use crate::recall::{Error, control::Control};
+
     let scratch = Scratch::new("store-panic");
     let store = Store::open(&scratch.db()).expect("store");
     let side = store.side();
-    let barrier = Arc::new(Barrier::default());
+    let (observed, seen) = mpsc::unbounded_channel();
+    let seen = forward(seen);
+    let barrier = Arc::new(Barrier::new(Some(observed)));
     let exit = Exit {
         side: Arc::clone(&side),
         barrier: Arc::clone(&barrier),
@@ -802,14 +808,24 @@ fn a_panicking_store_thread_fails_the_reads_waiting_on_it() {
     };
     let (waited, wait) = std_mpsc::channel();
     let waiting = Arc::clone(&barrier);
-    std::thread::spawn(move || waited.send(waiting.wait(1)));
+    let reader = std::thread::spawn(move || {
+        let control = Control::new(Instant::now() + PATIENCE);
+        waited
+            .send(waiting.wait_until(1, &control))
+            .expect("read result");
+    });
+    assert!(matches!(
+        seen.recv_timeout(PATIENCE).expect("reader is waiting"),
+        Seen::ReadWaiting
+    ));
     let panicked = std::thread::spawn(move || {
         let _exit = exit;
         panic!("a store op panicked");
     })
     .join();
     assert!(panicked.is_err());
-    assert_eq!(wait.recv_timeout(PATIENCE), Ok(false));
+    assert_eq!(wait.recv_timeout(PATIENCE), Ok(Err(Error::Ended)));
+    reader.join().expect("reader joined");
     assert!(matches!(side.read(|_| Ok(())), Err(StoreError::Closed)));
     drop(store);
 }

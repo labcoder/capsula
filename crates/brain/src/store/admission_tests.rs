@@ -3,8 +3,8 @@
 //! dispatch.
 
 use kumochi_protocol::message::{
-    ActionState, ApprovalRev, Decision, DraftId, FailReason, GitHubLogin, IssueRefused, IssueUrl,
-    LookupResult, RepoName, StateVersion, ThreadId,
+    ActionState, ApprovalRev, ContentHash, Decision, DraftId, FailReason, GitHubLogin, IssueCard,
+    IssueRefused, IssueUrl, LookupResult, RepoName, StateVersion, ThreadId,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -224,77 +224,8 @@ fn legacy_filed_flags_do_not_erase_retained_uncertainty() {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one restart scenario, read top to bottom"
-)]
-#[expect(clippy::disallowed_methods, reason = "spawns while holding spawn_lock")]
-fn filed_flags_and_card_values_survive_a_child_restart() {
-    const CHILD_DB: &str = "ISSUE_CARDS_RESTART_DB";
-    if let Some(path) = std::env::var_os(CHILD_DB) {
-        let mut store = Store::open(&std::path::PathBuf::from(path)).unwrap();
-        store.recover().unwrap();
-        let batch = crate::coordinator::Cards::new(
-            crate::coordinator::PageKey::for_tests(1, 7),
-            &kumochi_scene::text::Bounded::new((1..=7).map(DraftId).collect()).unwrap(),
-        );
-        let read = crate::store::context::Snapshot::begin(&store.conn).unwrap();
-        let cards = read.cards(&batch).unwrap();
-        read.end().unwrap();
-        assert_eq!(cards.len(), 7);
-        for (at, row) in cards.iter().enumerate() {
-            assert_eq!(row.card.draft, DraftId(u64::try_from(at).unwrap() + 1));
-            assert_eq!(row.card.thread, ThreadId(1));
-            assert_eq!(row.card.title, title("T"));
-            assert_eq!(row.card.body, body("B"));
-            assert_eq!(
-                row.card.hash.0,
-                <[u8; 32]>::from(Sha256::digest(
-                    br#"{"repo":"octo/repo","account":7,"title":"T","body":"B"}"#
-                ))
-            );
-        }
-        for (row, (confirmed, warning, count)) in cards[..4].iter().zip([
-            (false, false, 1),
-            (true, false, 1),
-            (false, true, 1),
-            (true, true, 2),
-        ]) {
-            assert_eq!(row.card.version, StateVersion(1));
-            assert_eq!(row.card.approval, None);
-            assert_eq!(
-                row.card.state,
-                ActionState::Filed {
-                    number: 7,
-                    url: url(7),
-                    confirmed_by_user: confirmed,
-                    maybe_duplicate: warning
-                }
-            );
-            assert_eq!(
-                store.action(row.card.draft).unwrap().unwrap().uncertain,
-                count
-            );
-        }
-        for (row, (version, approval, state)) in cards[4..].iter().zip([
-            (1, 5, ActionState::Draft),
-            (3, 7, ActionState::Failed(FailReason::Interrupted)),
-            (
-                4,
-                9,
-                ActionState::Unknown {
-                    lookup: LookupResult::Pending,
-                    maybe_duplicate: false,
-                },
-            ),
-        ]) {
-            assert_eq!(row.card.version, StateVersion(version));
-            assert_eq!(row.card.approval, Some(ApprovalRev(approval)));
-            assert_eq!(row.card.state, state);
-        }
-        return;
-    }
-    let scratch = Scratch::new("filed-child-restart");
+fn filed_flags_and_card_values_survive_a_reopen() {
+    let scratch = Scratch::new("filed-restart");
     let mut store = opened(&scratch);
     let owner = store.main_thread().unwrap();
     for (confirmed, warning, count) in [
@@ -315,43 +246,75 @@ fn filed_flags_and_card_values_survive_a_child_restart() {
     }
     let editable = draft(&mut store, owner);
     assert_eq!(editable.draft, DraftId(5));
-    let failed = draft(&mut store, owner);
-    let preflight = changed(decide(&mut store, &failed, Decision::File));
+    let interrupted = draft(&mut store, owner);
+    let preflight = changed(decide(&mut store, &interrupted, Decision::File));
     changed(store.preflighted(
-        failed.draft,
+        interrupted.draft,
         preflight.version,
         Err(FailReason::Interrupted),
     ));
     assert_eq!(unknown_once(&mut store, owner).draft, DraftId(7));
     drop(store);
-    let mut child = {
-        let _spawning = crate::platform::spawn_lock();
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "store::admission_tests::filed_flags_and_card_values_survive_a_child_restart",
-            ])
-            .env(CHILD_DB, scratch.db())
-            .spawn()
-            .unwrap()
+    let store = opened(&scratch);
+    let batch = crate::coordinator::Cards::new(
+        crate::coordinator::PageKey::for_tests(1, 7),
+        &kumochi_scene::text::Bounded::new((1..=7).map(DraftId).collect()).unwrap(),
+    );
+    let read = super::context::Snapshot::begin(&store.conn).unwrap();
+    let cards = read.cards(&batch).unwrap();
+    read.end().unwrap();
+    let hash = ContentHash(
+        Sha256::digest(br#"{"repo":"octo/repo","account":7,"title":"T","body":"B"}"#).into(),
+    );
+    let filed = |confirmed_by_user, maybe_duplicate| ActionState::Filed {
+        number: 7,
+        url: url(7),
+        confirmed_by_user,
+        maybe_duplicate,
     };
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            assert!(status.success());
-            break;
-        }
-        if std::time::Instant::now() >= end {
-            if child.kill().is_err() {
-                assert!(
-                    child.try_wait().unwrap().is_some(),
-                    "restart child could not be stopped"
-                );
+    let expected = [
+        (1, 1, None, filed(false, false), 1),
+        (2, 1, None, filed(true, false), 1),
+        (3, 1, None, filed(false, true), 1),
+        (4, 1, None, filed(true, true), 2),
+        (5, 1, Some(5), ActionState::Draft, 0),
+        (
+            6,
+            3,
+            Some(7),
+            ActionState::Failed(FailReason::Interrupted),
+            0,
+        ),
+        (
+            7,
+            4,
+            Some(9),
+            ActionState::Unknown {
+                lookup: LookupResult::Pending,
+                maybe_duplicate: false,
+            },
+            1,
+        ),
+    ];
+    assert_eq!(cards.len(), expected.len());
+    for (row, (id, version, approval, state, uncertain)) in cards.iter().zip(expected) {
+        let draft = DraftId(id);
+        assert_eq!(
+            row.card,
+            IssueCard {
+                draft,
+                thread: ThreadId(1),
+                repo: Some(repo()),
+                account: Some(GitHubLogin::new("octo").unwrap()),
+                title: title("T"),
+                body: body("B"),
+                hash,
+                approval: approval.map(ApprovalRev),
+                version: StateVersion(version),
+                state,
             }
-            child.wait().unwrap();
-            panic!("restart child exceeded its deadline");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        );
+        assert_eq!(store.action(draft).unwrap().unwrap().uncertain, uncertain);
     }
 }
 

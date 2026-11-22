@@ -600,30 +600,6 @@ fn a_resumed_erase_removes_the_whole_account_record() {
     }
 }
 
-/// CAPS-89's R4-H1 trace: an unconfirmed revocation, the checkpoint, every delete, then a crash
-/// before Finish. The restart only finishes, and still warns.
-#[test]
-fn a_crash_between_delete_and_finish_keeps_the_decided_warning() {
-    let mut h = Harness::seeded("sign-out-r4h1", account_only);
-    h.op(AccountOp::SignOut);
-    h.hold = true;
-    h.feed(Input::Revoked(Vec::new()));
-    h.hold = true;
-    h.release();
-    assert_eq!(h.marker(), pending("Keep", "Deleting", false, false, true));
-    assert!(matches!(
-        h.reader().delete_for_sign_out(),
-        crate::connections::vault::DeleteResult::Gone
-    ));
-    let h = h.restart();
-    assert_eq!(
-        h.views,
-        [signing_out(Cleanup::Running, true), signed_out_with(true)]
-    );
-    assert!(h.revoking.is_empty());
-    assert_eq!(names(&h), left(true));
-}
-
 /// OSC-233: Delete and Finish follow the authority alone. Deletes that report success but leave
 /// their names, as Credential Manager's did, never hold the sign-out, and the next start sweeps
 /// them; Keep retains only the registration.
@@ -1103,39 +1079,40 @@ fn a_refused_checkpoint_deletes_nothing_before_retry() {
     assert_eq!(names(&h), left(true));
 }
 
-/// CAPS-138 M2: a refused Finish leaves the decided notice in a Deleting marker, and a restart
-/// only finishes, reporting that notice.
+/// A crash before Finish and a refused Finish both preserve the decided notice.
 #[test]
 fn a_refused_finish_keeps_the_decided_notice_across_a_restart() {
-    let held = || {
-        let mut h = Harness::seeded("sign-out-refused-finish", account_only);
+    for (refused, name) in [(false, "sign-out-r4h1"), (true, "sign-out-refused-finish")] {
+        let mut h = Harness::seeded(name, account_only);
         h.op(AccountOp::SignOut);
         h.hold = true;
         h.feed(Input::Revoked(Vec::new()));
         h.hold = true;
         h.release();
-        h
-    };
-    let mut h = held();
-    // Delete writes no marker, so Finish's is the job's first.
-    h.refuse_marker_writes(0);
-    h.release();
-    assert_eq!(h.view(), &signing_out(Cleanup::Refused, true));
-    assert_eq!(h.marker(), pending("Keep", "Deleting", false, false, true));
-    assert_eq!(
-        names(&h),
-        left(true),
-        "Delete finished; only its marker write was refused"
-    );
-    h.allow_marker_writes();
-    let h = h.restart();
-    assert_eq!(
-        h.views,
-        [signing_out(Cleanup::Running, true), signed_out_with(true)]
-    );
-    assert!(h.revoking.is_empty());
-    assert_eq!(h.marker(), Some(NOTICE_ONLY.to_owned()));
-    assert_eq!(names(&h), left(true));
+        assert_eq!(h.marker(), pending("Keep", "Deleting", false, false, true));
+        if refused {
+            // Delete writes no marker, so Finish's is the job's first.
+            h.refuse_marker_writes(0);
+            h.release();
+            assert_eq!(h.view(), &signing_out(Cleanup::Refused, true));
+            assert_eq!(h.marker(), pending("Keep", "Deleting", false, false, true));
+            assert_eq!(names(&h), left(true), "only the marker write was refused");
+            h.allow_marker_writes();
+        } else {
+            assert!(matches!(
+                h.reader().delete_for_sign_out(),
+                crate::connections::vault::DeleteResult::Gone
+            ));
+        }
+        let h = h.restart();
+        assert_eq!(
+            h.views,
+            [signing_out(Cleanup::Running, true), signed_out_with(true)]
+        );
+        assert!(h.revoking.is_empty());
+        assert_eq!(h.marker(), Some(NOTICE_ONLY.to_owned()));
+        assert_eq!(names(&h), left(true));
+    }
 }
 
 /// CAPS-130 87-H2: with no revocation list and a damaged account, the uncertainty Prepare persists

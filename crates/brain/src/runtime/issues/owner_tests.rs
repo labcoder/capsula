@@ -220,17 +220,37 @@ async fn an_older_lookup_cannot_complete_a_new_job_in_the_same_uncertain_episode
         brain.issue_written(18, Ok(Answer::Unchanged(action.clone()))),
         Vec::new()
     );
-    let retained = brain.filing.job.take().unwrap();
-    assert_eq!(retained.id, 20);
-    assert_eq!(retained.request, 202);
-    assert_eq!(retained.action, Some(action));
-    assert!(matches!(
-        retained.phase,
-        Phase::Store {
-            serial: 21,
-            after: AfterWrite::Read
-        }
-    ));
-    assert!(!retained.control.cancelled());
+    let draft = action.draft;
+    let state = kumochi_protocol::message::ActionState::Unknown {
+        lookup: kumochi_protocol::message::LookupResult::Pending,
+        maybe_duplicate: false,
+    };
+    assert_eq!(
+        brain.issue_written(21, Ok(Answer::Unchanged(action))),
+        vec![
+            Effect::Control(ControlToShell::ActionState {
+                request: None,
+                draft,
+                version: StateVersion(4),
+                state: state.clone(),
+                approval: Some(ApprovalRev(2)),
+            }),
+            Effect::Control(ControlToShell::ActionState {
+                request: Some(202),
+                draft,
+                version: StateVersion(4),
+                state,
+                approval: Some(ApprovalRev(2)),
+            }),
+            Effect::Control(ControlToShell::IssueRefused {
+                request: 202,
+                draft,
+                version: StateVersion(4),
+                approval: Some(ApprovalRev(2)),
+                reason: IssueRefused::NotConnected,
+            }),
+        ]
+    );
+    assert_eq!(brain.issue_written(21, Err(())), Vec::new());
     brain.close().await;
 }

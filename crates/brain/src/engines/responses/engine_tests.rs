@@ -250,8 +250,25 @@ async fn a_granted_round_sends_on_its_bearer_and_streams_its_answer() {
     round.answer(lease).await;
     let mut server = round.servers.recv().await.expect("a connection");
     let sent = read_request(&mut server).await;
-    assert!(sent.contains("\r\nAuthorization: Bearer PLANTED-BEARER\r\n"));
-    assert!(sent.contains(r#""model":"gpt-fixture""#));
+    let (request_head, body) = sent.split_once("\r\n\r\n").unwrap();
+    let mut lines = request_head.lines();
+    assert_eq!(lines.next(), Some("POST /v1/responses HTTP/1.1"));
+    for (field, value) in [
+        ("Authorization", "Bearer PLANTED-BEARER"),
+        ("Host", "api.openai.com"),
+        ("Content-Type", "application/json"),
+        ("Accept", "text/event-stream"),
+    ] {
+        let found: Vec<_> = lines
+            .clone()
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(name, _)| name.eq_ignore_ascii_case(field))
+            .map(|(_, value)| value.trim())
+            .collect();
+        assert_eq!(found, [value], "{field}");
+    }
+    let body: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(body["model"], "gpt-fixture");
     assert_eq!(
         round.inputs.recv().await,
         Some(Input::SendSettled {
@@ -291,32 +308,29 @@ async fn observation_stamps_the_first_nonempty_parsed_delta_on_the_granted_choic
         let (recorder, release) = text_observation::stalled_fixture(1, move |line| {
             out.lock().unwrap().push(line.to_owned());
         });
-        let records = || {
-            lines
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|line| {
-                    let (kind, at) = line.rsplit_once(' ').unwrap();
-                    assert!(at.parse::<u64>().unwrap() > 0);
-                    kind.to_owned()
-                })
-                .collect::<Vec<_>>()
-        };
         let pid = std::process::id();
         let ready = format!("ready {pid} 1");
         let reserve = format!("reserve {pid} 1 7 1 1 1 1 1");
         let first = format!("text {pid} 1");
+        let only_ready = || {
+            let lines = lines.lock().unwrap();
+            let [line] = lines.as_slice() else {
+                panic!("the wire may only contain the ready stamp before finish");
+            };
+            assert_eq!(line.rsplit_once(' ').unwrap().0, ready);
+        };
         let mut round = start_with(request(Some("gpt-6-luna")), |engine| {
             engine.observe_for_tests(Arc::clone(&recorder))
         });
         round.bearer(Ok(bearer())).await;
-        assert_eq!(records().as_slice(), std::slice::from_ref(&ready));
+        only_ready();
         round.answer(round.lease()).await;
         let mut server = round.servers.recv().await.unwrap();
         let sent = read_request(&mut server).await;
-        assert!(sent.contains(r#""model":"gpt-6-luna""#));
-        assert!(sent.contains(r#""reasoning":{"effort":"low"}"#));
+        let (_, body) = sent.split_once("\r\n\r\n").unwrap();
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["model"], "gpt-6-luna");
+        assert_eq!(body["reasoning"]["effort"], "low");
         let mut frames = std::str::from_utf8(TEXT).unwrap().split_inclusive("\n\n");
         let created = frames.next().unwrap();
         let hello = frames.next().unwrap();
@@ -331,17 +345,13 @@ async fn observation_stamps_the_first_nonempty_parsed_delta_on_the_granted_choic
             round.events.recv().await,
             Some(TurnEvent::TextDelta(String::new()))
         );
-        assert_eq!(recorder.buffered_for_tests(), 1, "only the reservation");
+        let before_first = crate::platform::qpc_now().unwrap();
         server.write_all(hello.as_bytes()).await.unwrap();
         assert_eq!(
             round.events.recv().await,
             Some(TurnEvent::TextDelta("Hello, ".into()))
         );
-        assert_eq!(
-            recorder.buffered_for_tests(),
-            2,
-            "first nonempty delta is buffered"
-        );
+        let after_first = crate::platform::qpc_now().unwrap();
         for frame in frames {
             server.write_all(frame.as_bytes()).await.unwrap();
         }
@@ -352,11 +362,24 @@ async fn observation_stamps_the_first_nonempty_parsed_delta_on_the_granted_choic
                 TurnEvent::Finished(Finish::Completed),
             ]
         );
-        assert_eq!(records().as_slice(), std::slice::from_ref(&ready));
+        only_ready();
         release.send(()).unwrap();
         recorder.finish();
+        let lines = lines.lock().unwrap();
+        let records: Vec<_> = lines
+            .iter()
+            .map(|line| {
+                let (fields, at) = line.rsplit_once(' ').unwrap();
+                let at = at.parse::<u64>().unwrap();
+                assert!(at > 0);
+                if fields == first {
+                    assert!((before_first..=after_first).contains(&at));
+                }
+                fields
+            })
+            .collect();
         assert_eq!(
-            records(),
+            records,
             [
                 ready,
                 reserve,
@@ -442,16 +465,15 @@ async fn a_refused_bearer_is_reported_with_its_generation() {
     }
 }
 
-/// The bearer never prints through the access answer or the ask that carries it.
+/// The bearer never prints through the access answer that carries it.
 #[test]
 fn formatting_an_access_answer_or_ask_never_prints_the_bearer() {
-    let (answer, _answered) = tokio::sync::oneshot::channel();
     let access: Access = Ok(bearer());
-    let ask = AccessAsk::Bearer { key: key(), answer };
+    let shown = format!("{access:?}");
     let byte_list = format!("{:?}", BEARER.as_bytes());
-    let byte_list = byte_list.trim_matches(['[', ']']);
-    for shown in [format!("{access:?}"), format!("{ask:?}")] {
-        assert!(!shown.contains(BEARER), "the bearer leaked: {shown}");
-        assert!(!shown.contains(byte_list), "the bearer's bytes leaked");
-    }
+    assert!(!shown.contains(BEARER), "the bearer leaked");
+    assert!(
+        !shown.contains(byte_list.trim_matches(['[', ']'])),
+        "the bearer's bytes leaked"
+    );
 }

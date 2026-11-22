@@ -1034,15 +1034,15 @@ fn recovery_reads_only_stages_and_rolls_back_whole_on_a_corrupt_one() {
 fn counters_fail_closed_at_their_limits() {
     let scratch = Scratch::new("actions-limits");
     let mut store = opened(&scratch);
-    let thread = thread(&mut store);
-    let editable = draft(&mut store, thread).draft;
+    let owner = thread(&mut store);
+    let editable = draft(&mut store, owner).draft;
     let edit = |store: &mut Store| store.edit_draft(editable, &title("E"), &body("E"), None);
     store
         .conn
         .execute("UPDATE approval_mark SET last = 9223372036854775807", [])
         .expect("mark at its limit");
     let before = snapshot(&store.conn);
-    let created = store.create_draft(thread, &title("N"), &body("N"), None, None);
+    let created = store.create_draft(owner, &title("N"), &body("N"), None, None);
     assert!(matches!(created, Err(StoreError::Issue)));
     assert!(matches!(edit(&mut store), Err(StoreError::Issue)));
     let disconnected = Live {
@@ -1069,7 +1069,7 @@ fn counters_fail_closed_at_their_limits() {
     let before = snapshot(&store.conn);
     assert!(matches!(edit(&mut store), Err(StoreError::Issue)));
     assert_eq!(snapshot(&store.conn), before, "the version holds");
-    let sending = draft(&mut store, thread).draft;
+    let sending = draft(&mut store, owner).draft;
     seed(&store, sending, &posting(A), u32::MAX);
     let before = snapshot(&store.conn);
     let posted = store.posted(sending, StateVersion(1), &uncertain());
@@ -1081,6 +1081,52 @@ fn counters_fail_closed_at_their_limits() {
     );
     assert!(matches!(store.recover(), Err(StoreError::Issue)));
     assert_eq!(snapshot(&store.conn), before, "the count holds");
+
+    let max = 9_223_372_036_854_775_807;
+    for (mark, version, expected_approval, expected_version) in
+        [(max - 1, 1, max, 2), (1, max - 1, 2, max)]
+    {
+        let scratch = Scratch::new("issue-rearm-exhaustion");
+        let mut store = opened(&scratch);
+        let owner = thread(&mut store);
+        let action = draft(&mut store, owner);
+        store
+            .conn
+            .execute("UPDATE approval_mark SET last = ?1", [sql(mark)])
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE actions SET version = ?1 WHERE id = 1",
+                [sql(version)],
+            )
+            .unwrap();
+        let current = store.action(action.draft).unwrap().unwrap();
+        let Ok(Answer::Changed(fresh)) =
+            store.issue_write(&super::rearm_tests::rearm(&current), None)
+        else {
+            panic!("the last available value must commit");
+        };
+        assert_eq!(
+            fresh,
+            Action {
+                version: StateVersion(expected_version),
+                approval: Some(ApprovalRev(expected_approval)),
+                ..action
+            }
+        );
+        let before = (snapshot(&store.conn), issue_events(&store));
+        assert_eq!(before.0.1, sql(expected_approval));
+        assert!(matches!(
+            store.issue_write(&super::rearm_tests::rearm(&fresh), None),
+            Err(StoreError::Issue)
+        ));
+        assert_eq!((snapshot(&store.conn), issue_events(&store)), before);
+        assert_eq!(store.action(fresh.draft).unwrap(), Some(fresh));
+        if expected_approval != max {
+            assert_eq!(draft(&mut store, owner).approval, Some(ApprovalRev(3)));
+        }
+    }
 }
 
 #[test]

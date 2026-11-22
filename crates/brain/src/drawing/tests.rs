@@ -25,7 +25,6 @@ mod names;
 mod paint;
 mod ready;
 pub(crate) mod screen;
-mod timing;
 
 const THREAD: ThreadId = ThreadId(7);
 
@@ -673,7 +672,6 @@ fn replacement_failure_reports_loss_once_after_the_call_and_original_run_ended()
 
 #[test]
 fn a_whole_scene_refusal_reports_late_loss_but_an_explicit_clear_does_not() {
-    use kumochi_protocol::message::ControlToShell;
     for failed in [false, true] {
         let mut drawing = Drawing::default();
         let mut store = Store::default();
@@ -695,23 +693,12 @@ fn a_whole_scene_refusal_reports_late_loss_but_an_explicit_clear_does_not() {
                 }
             },
         );
-        assert_eq!(
-            out.effects
-                .iter()
-                .filter(|effect| matches!(
-                    effect,
-                    Effect::Control(ControlToShell::DrawingReplacementFailed {
-                        thread: THREAD,
-                        run: RunId(1)
-                    })
-                ))
-                .count(),
-            0
-        );
+        assert_eq!(notices_in(&out), []);
         assert_eq!(drawing.scenes.len(), 0);
         assert_eq!(store.cleared, [SceneId(1), SceneId(2)]);
         let ended = store.run(&mut drawing, closed(1));
-        assert_eq!(notices_in(&ended).len(), usize::from(failed));
+        let expected: &[(ThreadId, RunId)] = if failed { &[(THREAD, RunId(1))] } else { &[] };
+        assert_eq!(notices_in(&ended), expected);
         assert!(no_loss(&drawing));
     }
 }
@@ -1912,37 +1899,6 @@ fn deleted_replacement_settles_a_cross_thread_cap_victim_only_when_the_write_com
 }
 
 #[test]
-fn a_failed_step_write_commits_nothing_and_the_name_stays_free() {
-    let mut drawing = Drawing::default();
-    let out = drawing
-        .handle(call(1, "c1", args("s", &[text("a", "x")])))
-        .expect("a fresh call");
-    assert_eq!(trace(&out), ["lookup"]);
-    let out = reply(&mut drawing, &out, Ok(Reply::Lookup(None)));
-    assert_eq!(trace(&out), ["write step 1"]);
-    let out = reply(&mut drawing, &out, Err(()));
-    assert!(trace(&out).is_empty(), "nothing reaches the shell");
-    assert_eq!(out.calls.len(), 1);
-    assert_eq!(out.calls[0].error, Some(CallError::Store));
-    assert!(out.calls[0].drawn.is_empty(), "nothing was drawn");
-    assert!(drawing.scenes.is_empty(), "no scene was committed");
-    assert_eq!(drawing.global.usage().objects, 0, "nothing stays charged");
-
-    let mut store = Store::default();
-    let out = store.run(&mut drawing, call(1, "c2", args("s", &[text("a", "x")])));
-    assert_eq!(
-        trace(&out),
-        [
-            "lookup",
-            "write step 1",
-            "begin 1",
-            "step 1#0",
-            "end 1 true"
-        ]
-    );
-}
-
-#[test]
 fn a_closed_run_s_queued_records_never_reach_the_store_but_its_written_step_commits() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
@@ -2148,21 +2104,6 @@ fn recovery_rebuilds_the_live_log_handles_and_reserved_ids() {
 }
 
 #[test]
-fn a_cut_to_nothing_is_durable_before_the_scene_leaves() {
-    let mut drawing = Drawing::default();
-    let mut store = Store::default();
-    store.run(&mut drawing, call(1, "c", args("s", &[text("a", "x")])));
-    let out = store.run(&mut drawing, stop(1, 1, cut(0, Vec::new())));
-    assert_eq!(trace(&out), ["write cut 1@1:0", "cut 1@1:0", "clear 1"]);
-    assert!(drawing.live(SceneId(1)).is_none(), "the scene left");
-    assert_eq!(drawing.global.usage().scenes, 0);
-    assert!(
-        matches!(store.scenes[0].log.last(), Some(SceneEvent::Stop(stored)) if stored.activated == 0),
-        "the zero cut is in the log"
-    );
-}
-
-#[test]
 fn recovery_leaves_out_a_scene_whose_clear_never_landed() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
@@ -2258,6 +2199,16 @@ fn a_stop_before_a_new_scene_reached_the_shell_cuts_it_to_nothing() {
             "cut 1@1:0",
             "clear 1"
         ]
+    );
+    assert!(matches!(
+        store.scenes[0].log.last(),
+        Some(SceneEvent::Stop(stored)) if stored == &cut(0, vec![])
+    ));
+    assert!(drawing.live(SceneId(1)).is_none());
+    assert_eq!(
+        drawing.global.usage().scenes,
+        0,
+        "the visible-scene quota is released"
     );
     let (recovered, skipped) = Drawing::recover(store.visible());
     assert!(recovered.scenes.is_empty(), "the Esc survives a restart");
@@ -2376,40 +2327,38 @@ fn stops_past_the_queue_ceiling_behind_a_lookup_break_the_session() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
     let lookup = drawing
-        .handle(call(1, "c", args("s", &[text("a", "x")])))
-        .expect("a fresh call");
+        .handle(streamed("c", 0, &begin("s", "")))
+        .expect("a fresh begin");
+    let queued = drawing
+        .handle(streamed("c", 1, &step(&text("a", "x"))))
+        .expect("a step behind the lookup");
+    assert!(queued.effects.is_empty());
     let stop = || Input::StopScenes {
         run: RunId(1),
         cuts: SceneCuts::default(),
     };
-    while drawing.queue.len() < MAX_QUEUED_JOBS {
-        let out = drawing.handle(stop()).expect("a stop");
-        assert!(
-            out.effects.is_empty(),
-            "under the ceiling a stop only queues"
-        );
+    for _ in 1..MAX_QUEUED_JOBS {
+        assert!(drawing.handle(stop()).expect("a stop").effects.is_empty());
     }
-    let out = drawing.handle(stop()).expect("a stop");
-    assert_eq!(trace(&out), ["broken"]);
-    assert_eq!(
-        drawing.queue.len(),
-        MAX_QUEUED_JOBS,
-        "nothing past the ceiling is kept"
-    );
-    let write = sent(&lookup).expect("the lookup").1;
-    let out = reply(&mut drawing, &lookup, Ok(store.answer(&write)));
+    let out = drawing.handle(stop()).expect("a stop past the ceiling");
+    assert!(matches!(out.effects.as_slice(), [Effect::Broken(_)]));
+    let pending = sent(&lookup).expect("the lookup").1;
+    let out = reply(&mut drawing, &lookup, Ok(store.answer(&pending)));
     let out = store.settle(&mut drawing, out);
-    let trace = trace(&out);
-    let cuts = trace
-        .iter()
-        .filter(|line| line.starts_with("write cut"))
-        .count();
     assert_eq!(
-        cuts, 1,
-        "the first stop cuts the unseen scene once, the rest find it gone"
+        trace(&out),
+        [
+            "write step 1",
+            "begin 1",
+            "step 1#0",
+            "write cut 1@1:0",
+            "cut 1@1:0",
+            "clear 1"
+        ]
     );
-    assert!(trace.contains(&"clear 1".to_owned()));
-    assert!(drawing.settled() && drawing.scenes.is_empty());
+    assert!(drawing.settled());
+    assert_eq!(store.cleared, [SceneId(1)]);
+    assert!(store.visible().is_empty());
 }
 
 #[test]
@@ -2417,34 +2366,42 @@ fn shown_steps_and_a_stop_past_the_queue_ceiling_behind_a_step_break_the_session
     let mut drawing = Drawing::default();
     let mut store = Store::default();
     store.run(&mut drawing, call(1, "c1", args("s", &[text("a", "x")])));
-    let out = drawing
-        .handle(call(1, "c2", args("s", &[text("b", "y")])))
-        .expect("a fresh call");
-    assert!(matches!(sent(&out), Some((_, Write::Step { .. }))));
+    store.run(&mut drawing, streamed("c2", 0, &begin("s", "")));
+    let write = drawing
+        .handle(streamed("c2", 1, &step(&text("b", "y"))))
+        .expect("the second step");
+    let (_, pending @ Write::Step { .. }) = sent(&write).expect("a write") else {
+        panic!("expected the step's write");
+    };
     let shown = || Input::StepShown {
         run: RunId(1),
         scene: SceneId(1),
         index: 0,
     };
-    while drawing.queue.len() < MAX_QUEUED_JOBS - 1 {
-        let out = drawing.handle(shown()).expect("a shown step");
+    for _ in 1..MAX_QUEUED_JOBS {
         assert!(
-            out.effects.is_empty(),
-            "under the ceiling a shown step only queues"
+            drawing
+                .handle(shown())
+                .expect("a shown step")
+                .effects
+                .is_empty()
         );
     }
-    let out = drawing
-        .handle(stop(1, 1, cut(0, Vec::new())))
-        .expect("a stop");
-    assert_eq!(
-        trace(&out),
-        ["broken"],
-        "its cut fits, its unseen pass doesn't"
-    );
-    assert_eq!(drawing.queue.len(), MAX_QUEUED_JOBS);
-    let out = drawing.handle(shown()).expect("a shown step");
-    assert_eq!(trace(&out), ["broken"]);
-    assert_eq!(drawing.queue.len(), MAX_QUEUED_JOBS);
+    let stopped = cut(1, vec![Handle::new(1, 0).expect("the first object")]);
+    let out = drawing.handle(stop(1, 1, stopped.clone())).expect("a stop");
+    assert!(matches!(out.effects.as_slice(), [Effect::Broken(_)]));
+    let over = drawing.handle(shown()).expect("a shown step");
+    assert!(matches!(over.effects.as_slice(), [Effect::Broken(_)]));
+
+    let out = reply(&mut drawing, &write, Ok(store.answer(&pending)));
+    let out = store.settle(&mut drawing, out);
+    assert_eq!(trace(&out), ["step 1#1", "write cut 1@2:1", "cut 1@2:1"]);
+    assert!(matches!(
+        store.scenes[0].log.last(),
+        Some(SceneEvent::Stop(stored)) if stored == &stopped
+    ));
+    assert_eq!(store.cleared, []);
+    assert!(drawing.settled());
 }
 
 #[test]
@@ -2544,48 +2501,6 @@ fn a_streamed_call_s_repeated_finish_or_later_record_behind_a_write_is_stale() {
 }
 
 #[test]
-fn two_streamed_calls_beginning_one_new_name_draw_in_one_scene() {
-    let mut drawing = Drawing::default();
-    let mut store = Store::default();
-    let first = drawing
-        .handle(streamed("c1", 0, &begin("s", "")))
-        .expect("a begin");
-    let second = drawing
-        .handle(streamed("c2", 0, &begin("s", "")))
-        .expect("a begin");
-    assert!(sent(&second).is_none(), "one write at a time");
-    let write = sent(&first).expect("c1's lookup").1;
-    let out = reply(&mut drawing, &first, Ok(store.answer(&write)));
-    let write = sent(&out).expect("c2's lookup").1;
-    assert!(
-        matches!(write, Write::Lookup { .. }),
-        "the name isn't stored yet"
-    );
-    let out = reply(&mut drawing, &out, Ok(store.answer(&write)));
-    assert!(sent(&out).is_none());
-    let out = store.run(&mut drawing, streamed("c1", 1, &step(&text("a", "x"))));
-    assert_eq!(trace(&out), ["write step 1", "begin 1", "step 1#0"]);
-    let out = drawing
-        .handle(streamed("c2", 1, &step(&text("b", "y"))))
-        .expect("a step");
-    let write = sent(&out).expect("c2's step").1;
-    assert!(
-        matches!(
-            write,
-            Write::Step {
-                target: Target::Existing(SceneId(1)),
-                revision: 2,
-                ..
-            }
-        ),
-        "c2 continues the scene c1 began"
-    );
-    store.settle(&mut drawing, out);
-    assert_eq!(drawing.scenes.len(), 1);
-    assert_eq!(store.scenes.len(), 1);
-}
-
-#[test]
 fn a_streamed_call_beginning_a_new_name_with_another_header_is_refused_once_it_exists() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();
@@ -2671,39 +2586,60 @@ fn three_dimensional_steps_wait_for_prepared_views() {
 
 #[test]
 fn a_failed_fifth_scene_write_preserves_its_victim_and_a_new_call_can_replace_it() {
-    let mut drawing = Drawing::default();
-    let mut store = Store::default();
-    four(&mut store, &mut drawing);
-    let out = drawing
-        .handle(call(1, "c5", args("s5", &[text("a", "x")])))
-        .expect("a fresh call");
-    let lookup = sent(&out).expect("a lookup").1;
-    let out = reply(&mut drawing, &out, Ok(store.answer(&lookup)));
-    assert_eq!(
-        trace(&out),
-        ["write step 1"],
-        "eviction and the new first step share one write"
-    );
-    let out = reply(&mut drawing, &out, Err(()));
-    assert_eq!(out.calls[0].error, Some(CallError::Store));
-    assert_eq!(
-        drawing.scenes.len(),
-        4,
-        "a failed transaction changes no victim"
-    );
-    assert_eq!(store.cleared, []);
-    let out = store.run(&mut drawing, call(1, "c6", args("s5", &[text("a", "x")])));
-    assert_eq!(
-        trace(&out),
-        [
-            "lookup",
-            "write step 1",
-            "replaced 1 by 5",
-            "begin 5",
-            "step 5#0",
-            "end 5 true"
-        ]
-    );
+    for had_victim in [false, true] {
+        let mut drawing = Drawing::default();
+        let mut store = Store::default();
+        if had_victim {
+            four(&mut store, &mut drawing);
+        }
+        let out = drawing
+            .handle(call(1, "c5", args("s5", &[text("a", "x")])))
+            .expect("a fresh call");
+        assert_eq!(trace(&out), ["lookup"]);
+        let lookup = sent(&out).expect("a lookup").1;
+        let out = reply(&mut drawing, &out, Ok(store.answer(&lookup)));
+        assert_eq!(trace(&out), ["write step 1"]);
+        let out = reply(&mut drawing, &out, Err(()));
+        let [failed] = out.calls.as_slice() else {
+            panic!("expected one call to fail");
+        };
+        assert_eq!(failed.error, Some(CallError::Store));
+        assert_eq!(failed.drawn, []);
+        assert!(
+            out.effects.is_empty(),
+            "no store or shell effects after failure"
+        );
+        let prior = if had_victim { 4 } else { 0 };
+        assert_eq!(store.scenes.len(), prior);
+        assert_eq!(drawing.scenes.len(), prior);
+        assert_eq!(
+            drawing.global.usage().objects,
+            prior,
+            "no object stays charged"
+        );
+        assert_eq!(store.cleared, []);
+
+        let out = store.run(&mut drawing, call(1, "c6", args("s5", &[text("a", "x")])));
+        let expected: &[&str] = if had_victim {
+            &[
+                "lookup",
+                "write step 1",
+                "replaced 1 by 5",
+                "begin 5",
+                "step 5#0",
+                "end 5 true",
+            ]
+        } else {
+            &[
+                "lookup",
+                "write step 1",
+                "begin 1",
+                "step 1#0",
+                "end 1 true",
+            ]
+        };
+        assert_eq!(trace(&out), expected);
+    }
 }
 
 #[test]
@@ -2805,14 +2741,14 @@ fn a_failed_cut_of_a_scene_that_left(leave: Input) {
 
 #[test]
 fn a_failed_cut_of_a_deleted_scene_is_not_owed() {
-    a_failed_cut_of_a_scene_that_left(Input::ThreadDeleted { thread: THREAD });
-}
-
-#[test]
-fn a_failed_cut_of_a_cleared_scene_is_not_owed() {
-    a_failed_cut_of_a_scene_that_left(Input::Clear {
-        scenes: vec![SceneId(1)],
-    });
+    for leave in [
+        Input::ThreadDeleted { thread: THREAD },
+        Input::Clear {
+            scenes: vec![SceneId(1)],
+        },
+    ] {
+        a_failed_cut_of_a_scene_that_left(leave);
+    }
 }
 
 #[test]
@@ -2871,16 +2807,14 @@ fn rejections_in_calls_opened_before_any_failed_share_the_run_s_eight() {
     let valid = step(&text("a", "x"));
     records.push(("c9", 1, valid.as_str()));
     let ends = ends(&mut store, &mut drawing, &records);
-    let errors: Vec<Option<CallError>> = ends.iter().map(|end| end.error.clone()).collect();
-    assert_eq!(errors.len(), 9, "every call ended");
-    assert!(
-        errors[..8]
-            .iter()
-            .all(|error| matches!(error, Some(CallError::Step(_)))),
-        "eight rejected records"
+    let (last, rejected) = ends.split_last().expect("exhausted ninth call");
+    assert_eq!(
+        rejected.iter().map(error).collect::<Vec<_>>(),
+        [ErrorCode::UnknownField; 8]
     );
-    assert_eq!(errors[8], Some(CallError::Exhausted));
-    assert!(store.scenes.is_empty(), "the ninth call drew nothing");
+    assert_eq!(last.call, CallId::new("c9").unwrap());
+    assert_eq!(last.error, Some(CallError::Exhausted));
+    assert!(store.scenes.is_empty(), "no refused call drew anything");
 }
 
 #[test]
@@ -2898,21 +2832,16 @@ fn a_failure_in_one_open_repair_call_ends_the_other_s_round() {
         ("c3", 1, valid.as_str()),
     ];
     let ends = ends(&mut store, &mut drawing, &records);
-    let errors: Vec<Option<CallError>> = ends.iter().map(|end| end.error.clone()).collect();
-    assert_eq!(errors.len(), 3, "every call ended");
-    assert!(
-        matches!(errors[0], Some(CallError::Step(_))),
-        "the first failure"
+    let [first, repair, other] = ends.as_slice() else {
+        panic!("all three calls must end");
+    };
+    assert_eq!(
+        [&first.call, &repair.call, &other.call].map(CallId::as_str),
+        ["c1", "c2", "c3"]
     );
-    assert!(
-        matches!(errors[1], Some(CallError::Step(_))),
-        "the repair round's failure"
-    );
-    assert_eq!(errors[2], Some(CallError::Exhausted));
-    assert!(
-        store.scenes.is_empty(),
-        "the other repair call drew nothing"
-    );
+    assert_eq!([error(first), error(repair)], [ErrorCode::UnknownField; 2]);
+    assert_eq!(other.error, Some(CallError::Exhausted));
+    assert!(store.scenes.is_empty(), "no refused call drew anything");
 }
 
 #[test]

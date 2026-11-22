@@ -271,24 +271,6 @@ fn a_later_call_continues_the_stamped_scene_and_a_different_size_is_refused() {
 }
 
 #[test]
-fn a_label_with_no_room_refuses_its_step_by_path() {
-    let mut drawing = told(Ok(Geometry::FIXTURE));
-    let mut store = Store::default();
-    let crowded = r#"{"id":"s1","put":[{"callout":{"id":"l","target":{"box":[0,0,1280,720]},"text":"everything"}}]}"#;
-    let out = store.run(
-        &mut drawing,
-        screen_call(1, "c", &screen_begin("marks", ""), &[crowded.to_owned()]),
-    );
-    assert_eq!(
-        out.calls[0].tool_text(),
-        format!(
-            "drawn: []; stopped: step s1: put[0].callout: scene.NoRoom: no free side outside the marks has room for this label{RETRY}{NOT_KEPT}"
-        )
-    );
-    assert!(store.scenes.is_empty());
-}
-
-#[test]
 fn recovery_leaves_out_a_screen_scene_and_restores_the_scene_beside_it() {
     let mut drawing = told(Ok(Geometry::FIXTURE));
     let mut store = Store::default();
@@ -429,20 +411,24 @@ fn no_mark_s_box_or_display_reaches_a_debug_a_result_or_a_stored_box() {
 
 #[test]
 fn a_label_with_no_room_after_a_mark_names_its_own_put_index() {
-    let mut drawing = told(Ok(Geometry::FIXTURE));
-    let mut store = Store::default();
-    let crowded = r#"{"id":"s1","put":[{"highlight":{"id":"m","target":{"box":[40,40,20,20]},"style":"box"}},{"callout":{"id":"l","target":{"box":[0,0,1280,720]},"text":"everything"}}]}"#;
-    let out = store.run(
-        &mut drawing,
-        screen_call(1, "c", &screen_begin("marks", ""), &[crowded.to_owned()]),
-    );
-    assert_eq!(
-        out.calls[0].tool_text(),
-        format!(
-            "drawn: []; stopped: step s1: put[1].callout: scene.NoRoom: no free side outside the marks has room for this label{RETRY}{NOT_KEPT}"
-        )
-    );
-    assert!(store.scenes.is_empty());
+    let mark = r#"{"highlight":{"id":"m","target":{"box":[40,40,20,20]},"style":"box"}},"#;
+    let label = r#"{"callout":{"id":"l","target":{"box":[0,0,1280,720]},"text":"everything"}}"#;
+    for (index, prefix) in [(0, ""), (1, mark)] {
+        let mut drawing = told(Ok(Geometry::FIXTURE));
+        let mut store = Store::default();
+        let crowded = format!(r#"{{"id":"s1","put":[{prefix}{label}]}}"#);
+        let out = store.run(
+            &mut drawing,
+            screen_call(1, "c", &screen_begin("marks", ""), &[crowded]),
+        );
+        assert_eq!(
+            out.calls[0].tool_text(),
+            format!(
+                "drawn: []; stopped: step s1: put[{index}].callout: scene.NoRoom: no free side outside the marks has room for this label{RETRY}{NOT_KEPT}"
+            )
+        );
+        assert!(store.scenes.is_empty());
+    }
 }
 
 const OFF: &str = "surface: drawing.ScreenOff; the user turned off sharing the screen; explain in words or draw a card";

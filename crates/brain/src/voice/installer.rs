@@ -169,10 +169,6 @@ struct Entry {
     /// The asks of every load started with no final report yet, whatever the phase: a cancel or
     /// an unload doesn't free a model until its report says so.
     models: Vec<u64>,
-    #[cfg(test)]
-    last_write: Option<(&'static str, u64, Result<(), ErrorKey>)>,
-    #[cfg(test)]
-    last_delete: Option<(u64, Folder)>,
 }
 
 #[cfg(test)]
@@ -191,8 +187,6 @@ impl std::fmt::Debug for Diagnostic<'_> {
                 "held",
                 &entry.intent.as_ref().map(|intent| intent.held.len()),
             )
-            .field("last_write", &entry.last_write)
-            .field("last_delete", &entry.last_delete)
             .finish()
     }
 }
@@ -241,10 +235,6 @@ impl Installer {
                 install_after: false,
                 intent: None,
                 models: Vec::new(),
-                #[cfg(test)]
-                last_write: None,
-                #[cfg(test)]
-                last_delete: None,
             }),
             fetching: None,
             quitting: false,
@@ -659,10 +649,6 @@ impl Installer {
         result: Result<(), ErrorKey>,
     ) -> Vec<Effect> {
         let entry = &mut self.parts[index(part)];
-        #[cfg(test)]
-        {
-            entry.last_write = Some(("activate", token, result));
-        }
         if result.is_ok() {
             entry.durable = Durable::Installed;
         }
@@ -706,10 +692,6 @@ impl Installer {
         result: Result<(), ErrorKey>,
     ) -> Vec<Effect> {
         let entry = &mut self.parts[index(part)];
-        #[cfg(test)]
-        {
-            entry.last_write = Some(("intent", token, result));
-        }
         if result.is_ok() {
             entry.durable = Durable::Removing;
         }
@@ -764,10 +746,6 @@ impl Installer {
     /// there, the removal stays durable, in Cleanup, and an install waiting for it is dropped.
     pub(crate) fn deleted(&mut self, part: VoicePart, token: u64, folder: Folder) -> Vec<Effect> {
         let entry = &mut self.parts[index(part)];
-        #[cfg(test)]
-        {
-            entry.last_delete = Some((token, folder));
-        }
         if entry.token != token || entry.phase != Phase::Deleting {
             return self.take();
         }
@@ -784,10 +762,6 @@ impl Installer {
     /// The `RemoveDone` write's result. A failed one leaves the removal durable, in Cleanup.
     pub(crate) fn cleared(&mut self, part: VoicePart, result: Result<(), ErrorKey>) -> Vec<Effect> {
         let entry = &mut self.parts[index(part)];
-        #[cfg(test)]
-        {
-            entry.last_write = Some(("clear", entry.token, result));
-        }
         if result.is_ok() {
             entry.durable = Durable::Absent;
         }

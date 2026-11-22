@@ -13,15 +13,19 @@ use super::*;
 const PROBE: &str = "platform::windows::spawn::tests::child_probe";
 /// Marks where the probe's own arguments start among the test harness's filters.
 const MARK: &str = "spawn-probe";
+const WIRE_PROBE: &str = "platform::windows::spawn::tests::argv0_and_echo_probe";
+const ECHO_START: &[u8] = b"<echo>";
+const ECHO_END: &[u8] = b"</echo>";
 
 fn exe() -> PathBuf {
     std::env::current_exe().expect("test executable")
 }
 
 fn probe_args(mode: &str, extra: &[OsString]) -> Vec<OsString> {
+    let probe = if mode == "echo" { WIRE_PROBE } else { PROBE };
     let harness = [
         "--exact",
-        PROBE,
+        probe,
         "--ignored",
         "--nocapture",
         "--test-threads=1",
@@ -136,6 +140,31 @@ fn child_probe() {
 }
 
 #[test]
+#[ignore = "only runs as the argv and echo tests' child"]
+fn argv0_and_echo_probe() {
+    let mut args = std::env::args_os();
+    let program = args.next().expect("argv[0]");
+    let Some(mode) = args.skip_while(|arg| arg != MARK).nth(1) else {
+        return;
+    };
+    let mut out = io::stdout();
+    match mode.to_str() {
+        Some("report") => {
+            writeln!(out, "ARG {program:?}").expect("argv[0]");
+            out.flush().expect("flush");
+            child_probe();
+        }
+        Some("echo") => {
+            out.write_all(ECHO_START).expect("echo start");
+            child_probe();
+            out.write_all(ECHO_END).expect("echo end");
+            out.flush().expect("flush");
+        }
+        _ => panic!("unknown wire fixture mode"),
+    }
+}
+
+#[test]
 fn arguments_round_trip_through_the_command_line() {
     let job = Job::new().expect("job");
     let args: Vec<OsString> = [
@@ -224,17 +253,21 @@ fn pipes_carry_stdin_to_the_child_and_its_stdout_back() {
     let mut child = start("echo", &[], &base_env(), Stdio::Piped, &job).expect("spawn");
     let ended = read_to_end(child.stdout.take().expect("stdout"));
     let mut stdin = child.stdin.take().expect("stdin");
-    stdin.write_all(b"ping\n").expect("write");
+    let payload = b"ping\r\n\x80\0pong\n";
+    stdin.write_all(payload).expect("write");
     drop(stdin);
     let out = ended
         .recv_timeout(Duration::from_secs(10))
         .expect("stdout ends");
-    let text = String::from_utf8_lossy(&out);
-    assert_eq!(
-        text.lines().filter(|line| *line == "ping").count(),
-        1,
-        "{text:?}"
-    );
+    let positions = |marker: &[u8]| {
+        out.windows(marker.len())
+            .enumerate()
+            .filter_map(|(at, bytes)| (bytes == marker).then_some(at))
+            .collect::<Vec<_>>()
+    };
+    let [start]: [usize; 1] = positions(ECHO_START).try_into().expect("one echo start");
+    let [end]: [usize; 1] = positions(ECHO_END).try_into().expect("one echo end");
+    assert_eq!(&out[start + ECHO_START.len()..end], payload);
 }
 
 /// Runs the ignored test `name` alone in a child of this test binary, so a handle it makes

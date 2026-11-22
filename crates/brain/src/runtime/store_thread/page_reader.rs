@@ -70,26 +70,6 @@ impl Barrier {
         self.moved.notify_all();
     }
 
-    /// Waits until `stamp` ops have finished; false when the store's thread ended first.
-    #[cfg(test)]
-    pub(super) fn wait(&self, stamp: u64) -> bool {
-        let progress = lock(&self.progress);
-        #[cfg(test)]
-        if progress.completed < stamp
-            && !progress.terminal
-            && let Some(waiting) = &self.waiting
-        {
-            waiting.send(super::super::Seen::ReadWaiting).ok();
-        }
-        let progress = self
-            .moved
-            .wait_while(progress, |progress| {
-                progress.completed < stamp && !progress.terminal
-            })
-            .unwrap_or_else(PoisonError::into_inner);
-        !progress.terminal
-    }
-
     fn wait_until(
         &self,
         stamp: u64,
