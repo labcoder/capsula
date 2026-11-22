@@ -134,9 +134,10 @@ fn known_folder(folder: windows_sys::core::GUID) -> io::Result<PathBuf> {
 }
 
 /// Opens every component of the absolute folder `path`, from the volume root down, and checks
-/// each through its own handle while the ones above it stay open. None is opened with delete
-/// sharing, so while they're held no component can be renamed or removed; the checks make sure
-/// no one untrusted may change one in place.
+/// each through its own handle while the ones above it stay open. The handles have no data access,
+/// so they take no part in share checks and don't stop a rename or removal. The checks keep the
+/// chain in place: each refuses a component that someone untrusted may rename, remove or change,
+/// or whose children they may delete. This user's own processes are outside that threat model.
 pub(crate) fn hold_chain(path: &Path) -> Result<Vec<File>, Untrusted> {
     let trusted = Trusted::new()?;
     let mut held = Vec::new();
