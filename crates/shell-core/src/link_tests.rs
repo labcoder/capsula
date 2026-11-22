@@ -3772,7 +3772,12 @@ fn queued_reconnect_waits_for_the_exact_microphone_retirement() {
     );
     let (inhibit, denied) = output.retire(inhibit, Retirement::Retired).unwrap_err();
     assert_eq!(denied, Denied::Inhibited, "cancel is not retirement");
-    let worker = thread::spawn(move || start.link.attend(connection, &start.events));
+    let reconnect_by = Instant::now() + super::CONNECT_TIMEOUT;
+    let worker = thread::spawn(move || {
+        start
+            .link
+            .attend_until(connection, &start.events, reconnect_by)
+    });
     control.set_timeout(Some(Duration::from_millis(500)));
     let early = frame::read::<ControlToBrain>(&mut &control, Pipe::Control);
     assert!(
@@ -3788,7 +3793,22 @@ fn queued_reconnect_waits_for_the_exact_microphone_retirement() {
         gesture: GestureId(1),
         sent_on: Some(1),
     });
-    output.retire(inhibit, Retirement::Retired).unwrap();
+    let mut inhibit = inhibit;
+    loop {
+        match output.retire(inhibit, Retirement::Retired) {
+            Ok(()) => break,
+            Err((token, Denied::Busy)) => {
+                let left = reconnect_by.saturating_duration_since(Instant::now());
+                assert!(
+                    !left.is_zero(),
+                    "the exact retired microphone releases its inhibit before reconnect expires"
+                );
+                inhibit = token;
+                thread::sleep(Duration::from_millis(10).min(left));
+            }
+            Err((_, denied)) => panic!("the exact retired microphone was refused: {denied:?}"),
+        }
+    }
     let session = connected(next(&received));
     assert_eq!(session.generation(), 2);
     let LinkEvent::Settings { generation, .. } = next(&received) else {
