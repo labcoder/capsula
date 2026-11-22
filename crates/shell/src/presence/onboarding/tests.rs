@@ -335,7 +335,8 @@ fn an_unsent_finish_says_so_and_can_be_pressed_again(cx: &mut TestAppContext) {
                 .expect("showing")
                 .view
                 .read(cx)
-                .unsent
+                .state
+                .unsent()
         })
     };
     assert!(unsent(&owner, cx));
