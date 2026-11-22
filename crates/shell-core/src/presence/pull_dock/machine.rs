@@ -4,7 +4,7 @@ use crate::presence::pull_picture::machine::{RowFull, Rows};
 
 /// Whether the dock has rendered the picture it accepted last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::presence) enum Drawing {
+pub enum Drawing {
     Drawn,
     /// It may not be on screen yet.
     Pending,
@@ -12,7 +12,7 @@ pub(in crate::presence) enum Drawing {
 
 /// What one dock frame did with the next picture.
 #[derive(Debug, PartialEq, Eq)]
-pub(in crate::presence) enum Commit<E> {
+pub enum Commit<E> {
     /// The dock hasn't drawn the picture it accepted last, so nothing new is uploaded.
     Waiting,
     /// Windows holds the mask, so the dock draws the picture now.
@@ -25,7 +25,7 @@ pub(in crate::presence) enum Commit<E> {
 
 /// What the dock holds of a pull, as a resting pull gives the line the dock back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::presence) enum Holding {
+pub enum Holding {
     /// A picture, drawn or not.
     Picture,
     /// No picture, but the frame without it isn't drawn yet.
@@ -35,7 +35,7 @@ pub(in crate::presence) enum Holding {
 
 /// What a resting pull does at a dock frame to give the line the dock back.
 #[derive(Debug, PartialEq, Eq)]
-pub(in crate::presence) enum Rest {
+pub enum Rest {
     /// The dock still draws the body: it stops, and the peek shows it.
     Release,
     /// That frame isn't drawn yet, or the line has been asked already.
@@ -46,21 +46,21 @@ pub(in crate::presence) enum Rest {
 
 /// The dock's state during a pull. Its rows are sized once, so a frame grows none.
 #[derive(Debug, Default)]
-pub(in crate::presence) struct PullDock {
-    pub(in crate::presence) frames: FrameLoop,
+pub struct PullDock {
+    pub frames: FrameLoop,
     /// Where the overlay is, while a pull holds it.
-    pub(in crate::presence) area: Option<[i32; 4]>,
+    pub area: Option<[i32; 4]>,
     /// The pixels of the picture the dock accepted last, which it draws or has drawn.
-    pub(in crate::presence) shown: Rows,
+    pub shown: Rows,
     /// The next upload's rows.
     mask: Rows,
     /// The line has been asked to take the dock back.
-    pub(in crate::presence) reclaiming: bool,
+    pub reclaiming: bool,
 }
 
 impl PullDock {
     /// Rows for a pull area up to `rows` tall.
-    pub(in crate::presence) fn new(rows: usize) -> Self {
+    pub fn new(rows: usize) -> Self {
         Self {
             shown: Rows::with_capacity(rows),
             mask: Rows::with_capacity(rows),
@@ -70,7 +70,7 @@ impl PullDock {
 
     /// A resting pull's next step. The line's mask is its band alone, so it may take over only
     /// once the dock has drawn a frame with no body in it.
-    pub(in crate::presence) fn rest(&mut self, holding: Holding) -> Rest {
+    pub fn rest(&mut self, holding: Holding) -> Rest {
         match holding {
             Holding::Picture => Rest::Release,
             Holding::Clearing => Rest::Wait,
@@ -86,7 +86,7 @@ impl PullDock {
     /// the line's band, `next` and the picture shown now. Once accepted, `next` is shown.
     /// While the last accepted picture's drawing is pending, nothing is uploaded: the mask
     /// must keep owning it.
-    pub(in crate::presence) fn commit<E>(
+    pub fn commit<E>(
         &mut self,
         drawing: Drawing,
         line: &LineFrame,

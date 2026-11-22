@@ -16,7 +16,7 @@ use super::observer::{self, Drawn};
 use super::pull_picture::PullPicture;
 use super::{Presence, platform};
 
-pub(super) mod machine;
+pub(super) use kumochi_shell_core::presence::pull_dock::machine;
 
 pub(super) use machine::{Commit, Drawing, Holding, PullDock, Rest};
 

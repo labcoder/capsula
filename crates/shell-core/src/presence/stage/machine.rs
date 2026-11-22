@@ -1,8 +1,8 @@
 use crate::presence::geometry::Layout;
 use kumochi_scene::geom::{Rect, Vec2};
 
-#[cfg(test)]
-pub(in crate::presence) mod fixture;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixture;
 
 /// Clearance from the work-area edges and the occupied dock/panel footprint.
 const MARGIN: f32 = 32.0;
@@ -11,7 +11,7 @@ const MIN_STAGE_SIZE: Vec2 = Vec2::new(240.0, 160.0);
 
 /// The stage drawings were given and the physical geometry it was chosen from.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(in crate::presence) struct Placed {
+pub struct Placed {
     area: [i32; 4],
     layout: Layout,
     scale: f32,
@@ -19,12 +19,7 @@ pub(in crate::presence) struct Placed {
 }
 
 impl Placed {
-    pub(in crate::presence) fn new(
-        area: [i32; 4],
-        layout: Layout,
-        scale: f32,
-        panel: Option<[i32; 4]>,
-    ) -> Self {
+    pub fn new(area: [i32; 4], layout: Layout, scale: f32, panel: Option<[i32; 4]>) -> Self {
         Self {
             area,
             layout,
@@ -33,14 +28,14 @@ impl Placed {
         }
     }
 
-    pub(in crate::presence) fn stage(&self) -> Rect {
+    pub fn stage(&self) -> Rect {
         self.stage
     }
 }
 
 /// Drawings on screen keep their stage while it still fits inside the best one for the same
 /// work area, dock and scale, so a panel closing never moves them; anything else re-places them.
-pub(in crate::presence) fn settle(shown: Option<Placed>, next: Placed) -> Placed {
+pub fn settle(shown: Option<Placed>, next: Placed) -> Placed {
     let Some(kept) = shown else {
         return next;
     };
@@ -67,7 +62,7 @@ fn contains(outer: Rect, inner: Rect) -> bool {
     clippy::as_conversions,
     reason = "desktop pixel coordinates fit f32 precision"
 )]
-pub(in crate::presence) fn logical([x, y, w, h]: [i32; 4], scale: f32) -> Rect {
+pub fn logical([x, y, w, h]: [i32; 4], scale: f32) -> Rect {
     Rect {
         origin: Vec2::new(x as f32 / scale, y as f32 / scale),
         size: Vec2::new(w as f32 / scale, h as f32 / scale),

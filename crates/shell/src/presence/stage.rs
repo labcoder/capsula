@@ -1,6 +1,6 @@
 //! Free drawing area around the dock, its status peek and the open panel.
 
-pub(super) mod machine;
+pub(super) use kumochi_shell_core::presence::stage::machine;
 
 pub(super) use machine::Placed;
 use machine::settle;

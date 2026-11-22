@@ -13,7 +13,7 @@ use super::kumo::{
 };
 use super::pulling::PullSpace;
 
-pub(super) mod machine;
+pub(super) use kumochi_shell_core::presence::pull_picture::machine;
 
 use machine::whole;
 pub(super) use machine::{PictureError, RowFull, Rows, largest_area};

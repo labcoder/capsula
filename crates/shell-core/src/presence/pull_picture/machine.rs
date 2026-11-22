@@ -4,7 +4,7 @@ use crate::presence::line::machine::{ROW_SPANS, RowSpans};
 /// The largest pull area for a dock `slot` at `scale`, physical pixels: the slot grown on every
 /// side by the snap length and the carry width, with a pixel to spare for rounding. The hit
 /// mask is allocated this size once.
-pub(in crate::presence) fn largest_area(slot: [i32; 2], scale: f32) -> [i32; 2] {
+pub fn largest_area(slot: [i32; 2], scale: f32) -> [i32; 2] {
     let reach = whole(f64::from((SNAP_LEN + CARRY_WIDTH) * scale).ceil()) + 1;
     slot.map(|side| side + 2 * reach)
 }
@@ -12,48 +12,44 @@ pub(in crate::presence) fn largest_area(slot: [i32; 2], scale: f32) -> [i32; 2] 
 /// A mask row would need more than [`ROW_SPANS`] spans.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("mask row {0} needs more than {ROW_SPANS} spans")]
-pub(in crate::presence) struct RowFull(i32);
+pub struct RowFull(i32);
 
 /// Owned columns for each screen row from `top`, at most [`ROW_SPANS`] a row, left to right.
 /// Spans that touch or overlap merge; one more than a row holds is refused, never truncated.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(in crate::presence) struct Rows {
+pub struct Rows {
     top: i32,
     rows: Vec<RowSpans>,
 }
 
 impl Rows {
     /// Room for `rows` rows, so filling them never allocates.
-    pub(in crate::presence) fn with_capacity(rows: usize) -> Self {
+    pub fn with_capacity(rows: usize) -> Self {
         Self {
             top: 0,
             rows: Vec::with_capacity(rows),
         }
     }
 
-    #[cfg(test)]
-    pub(in crate::presence) fn capacity(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn capacity(&self) -> usize {
         self.rows.capacity()
     }
 
     /// Empties it for `rows` rows from `top`, keeping what it has allocated.
-    pub(in crate::presence) fn clear(&mut self, top: i32, rows: usize) {
+    pub fn clear(&mut self, top: i32, rows: usize) {
         self.top = top;
         self.rows.clear();
         self.rows.resize(rows, [None; ROW_SPANS]);
     }
 
-    pub(in crate::presence) fn row(&self, y: i32) -> RowSpans {
+    pub fn row(&self, y: i32) -> RowSpans {
         self.index(y)
             .map_or([None; ROW_SPANS], |index| self.rows[index])
     }
 
     /// Adds `[left, right)` to row `y`. Outside the rows it's dropped: nothing draws there.
-    pub(in crate::presence) fn push(
-        &mut self,
-        y: i32,
-        [left, right]: [i32; 2],
-    ) -> Result<(), RowFull> {
+    pub fn push(&mut self, y: i32, [left, right]: [i32; 2]) -> Result<(), RowFull> {
         let Some(index) = self.index(y).filter(|_| left < right) else {
             return Ok(());
         };
@@ -82,7 +78,7 @@ impl Rows {
     }
 
     /// Adds every span of `other`.
-    pub(in crate::presence) fn extend(&mut self, other: &Self) -> Result<(), RowFull> {
+    pub fn extend(&mut self, other: &Self) -> Result<(), RowFull> {
         for (y, row) in (other.top..).zip(&other.rows) {
             for span in row.iter().flatten() {
                 self.push(y, *span)?;
@@ -100,7 +96,7 @@ impl Rows {
 
 /// Why a pulled picture couldn't be made; the dock keeps the one it shows.
 #[derive(Debug, thiserror::Error)]
-pub(in crate::presence) enum PictureError {
+pub enum PictureError {
     #[error(transparent)]
     Body(#[from] SizeMismatch),
     #[error(transparent)]
@@ -116,7 +112,7 @@ pub(in crate::presence) enum PictureError {
     clippy::cast_possible_truncation,
     reason = "whole screen coordinates fit i32"
 )]
-pub(in crate::presence) fn whole(value: f64) -> i32 {
+pub fn whole(value: f64) -> i32 {
     value as i32
 }
 
