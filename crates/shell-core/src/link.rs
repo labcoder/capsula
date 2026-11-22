@@ -2106,6 +2106,7 @@ fn watch(
                 if queued.is_some() {
                     if shared.output.show_screen_changes(generation, &view) {
                         let _revoked = shared.revoke_input();
+                        shared.choice.fetch_add(1, Ordering::AcqRel);
                     }
                     if let Err(reason) = shared
                         .output
