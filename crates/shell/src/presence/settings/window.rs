@@ -66,6 +66,22 @@ impl Presence {
         clippy::fn_params_excessive_bools,
         reason = "the checkbox and wire setter carry this boolean unchanged"
     )]
+    pub(in crate::presence) fn save_talk_back(&mut self, on: bool, cx: &mut Context<'_, Self>) {
+        let (link, session) = (&self.link, &self.session);
+        self.settings.update(cx, |state, cx| {
+            state.send_talk_back(on, |op| {
+                session
+                    .as_ref()
+                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
+            });
+            cx.notify();
+        });
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the checkbox and wire setter carry this boolean unchanged"
+    )]
     pub(in crate::presence) fn save_hold_to_talk(
         &mut self,
         on: bool,
