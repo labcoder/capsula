@@ -294,6 +294,7 @@ mod tests {
             updated_ms: 0,
             kind: ThreadKind::Thread,
             choice: None,
+            task: None,
         };
         vec![
             Ok(Frame::Control(ControlToShell::Settings {

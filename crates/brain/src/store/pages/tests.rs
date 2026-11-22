@@ -141,38 +141,33 @@ fn task_rows(store: &Store, search: Option<&str>, now: i64) -> Vec<ThreadRow> {
 
 #[test]
 fn task_age_uses_a_strict_five_day_boundary_and_keeps_saved_outcomes() {
+    use TaskEvidence::{FilingReview, LatestRun};
     use TaskRunOutcome::{Active, Done, Failed, Interrupted};
 
     let activity = 400;
     let five_days = 432_000_000;
-    for (outcome, expected) in [
-        (None, TaskState::Earlier),
-        (Some(Active), TaskState::Earlier),
-        (Some(Done), TaskState::Done),
-        (Some(Failed), TaskState::NeedsYou),
-        (Some(Interrupted), TaskState::NeedsYou),
+    for (evidence, expected) in [
+        (LatestRun(None), TaskState::Earlier),
+        (LatestRun(Some(Active)), TaskState::Earlier),
+        (LatestRun(Some(Done)), TaskState::Done),
+        (LatestRun(Some(Failed)), TaskState::NeedsYou),
+        (LatestRun(Some(Interrupted)), TaskState::NeedsYou),
+        (FilingReview, TaskState::NeedsYou),
     ] {
         for elapsed in [five_days - 1, five_days, -1] {
-            let now = activity + elapsed;
-            assert_eq!(task_state(now, activity, outcome, false), expected);
-            assert_eq!(
-                task_state(now, activity, outcome, true),
-                TaskState::NeedsYou
-            );
+            assert_eq!(task_state(activity + elapsed, activity, evidence), expected);
         }
-        for filing_review in [false, true] {
-            assert_eq!(
-                task_state(activity + five_days + 1, activity, outcome, filing_review),
-                TaskState::Sleeping
-            );
-        }
+        assert_eq!(
+            task_state(activity + five_days + 1, activity, evidence),
+            TaskState::Sleeping
+        );
     }
     assert_eq!(
-        task_state(i64::MIN, i64::MAX, Some(Done), false),
+        task_state(i64::MIN, i64::MAX, LatestRun(Some(Done))),
         TaskState::Done
     );
     assert_eq!(
-        task_state(i64::MAX, i64::MIN, Some(Failed), false),
+        task_state(i64::MAX, i64::MIN, LatestRun(Some(Failed))),
         TaskState::Sleeping
     );
 }
