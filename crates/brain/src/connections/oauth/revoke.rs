@@ -18,8 +18,6 @@ use crate::connections::records::{Origin, Revocable};
 
 /// Local policy: one run's network budget, covering discovery, every request and the backoff.
 pub const BUDGET: Duration = Duration::from_secs(10);
-/// Local policy: the waits before an entry's second and third attempts.
-const BACKOFF: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(1)];
 
 #[derive(Deserialize)]
 struct Discovery {
@@ -33,6 +31,7 @@ pub async fn revoke(
     http: &impl Http,
     entries: Vec<Secret<Revocable>>,
     deadline: Instant,
+    backoff: [Duration; 2],
 ) -> Vec<Secret<Revocable>> {
     let Some(url) = endpoint(http, deadline).await else {
         return Vec::new();
@@ -43,7 +42,7 @@ pub async fn revoke(
     ordered.extend(others);
     let mut confirmed = Vec::new();
     for entry in ordered {
-        if revoke_one(http, &url, entry.expose(), deadline).await {
+        if revoke_one(http, &url, entry.expose(), deadline, backoff).await {
             confirmed.push(entry);
         }
     }
@@ -51,6 +50,9 @@ pub async fn revoke(
 }
 
 async fn endpoint(http: &impl Http, deadline: Instant) -> Option<IssuerUrl> {
+    if Instant::now() >= deadline {
+        return None;
+    }
     let request = Request {
         endpoint: Endpoint::Discovery,
         fields: Vec::new(),
@@ -76,8 +78,9 @@ async fn revoke_one(
     url: &IssuerUrl,
     entry: &Revocable,
     deadline: Instant,
+    backoff: [Duration; 2],
 ) -> bool {
-    for wait in std::iter::once(None).chain(BACKOFF.map(Some)) {
+    for wait in std::iter::once(None).chain(backoff.map(Some)) {
         if Instant::now() >= deadline {
             return false;
         }
@@ -87,6 +90,9 @@ async fn revoke_one(
                 return false;
             }
             sleep_until(wake).await;
+            if Instant::now() >= deadline {
+                return false;
+            }
         }
         let fields = [
             ("token", entry.refresh_token.as_str()),

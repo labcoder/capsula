@@ -164,7 +164,12 @@ async fn the_product_registration_controls_device_flow_without_using_real_creden
     )]);
     let mut net = crate::test_support::net();
     net.http = http.factory();
-    let mut accounts = crate::runtime::account::Accounts::spawn(worker, net).unwrap();
+    let mut accounts = crate::runtime::account::Accounts::spawn(
+        worker,
+        net,
+        crate::config::tuning::OAuthTuning::default(),
+    )
+    .unwrap();
     settle_owner(&mut accounts).await;
     assert_eq!(http.seen(), Vec::<RequestKind>::new());
     let mut brain = brain_with_github_owner(&scratch, accounts);

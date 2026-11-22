@@ -259,7 +259,12 @@ async fn production_off_is_observed_before_account_startup_and_survives_all_sess
         }),
         Arc::new(crate::connections::clock::SystemClock),
     );
-    let accounts = crate::runtime::account::Accounts::spawn(worker, net).unwrap();
+    let accounts = crate::runtime::account::Accounts::spawn(
+        worker,
+        net,
+        crate::config::tuning::OAuthTuning::default(),
+    )
+    .unwrap();
     assert_eq!(store.reads.load(Ordering::SeqCst), 0);
     assert_eq!(store.writes.load(Ordering::SeqCst), 0);
     let mut brain = brain_with_github_owner(&scratch, accounts);

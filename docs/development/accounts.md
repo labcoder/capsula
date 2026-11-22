@@ -227,10 +227,11 @@ doesn't mean the account has been verified; that is the exchange's responsibilit
 
 **Local policies:** an entire header, including its terminator, is at most 32 KiB and
 has one absolute 2 s read deadline. A response has up to 1 s to write. The whole attempt,
-including accepts, reads and replies, ends at five minutes on `tokio::time`. The listener
+including accepts, reads and replies, ends after `[tuning.oauth] sign_in_s` on `tokio::time`
+(five minutes by default, and never longer). The listener
 is serial: each idle preconnect can delay a queued valid callback by its 2 s read plus
 up to 1 s writing its rejection, and multiple idle connections can queue within that
-five-minute deadline. Sustained backlog starvation is a local denial of service: sign-in
+original deadline. Sustained backlog starvation is a local denial of service: sign-in
 times out, but nothing leaks. Timing tests use in-memory duplex streams and a paused clock;
 socket tests cover an idle preconnect followed by a valid callback. No test uses outside hosts
 or DNS; socket tests use only `127.0.0.1` port 0.
@@ -502,7 +503,8 @@ start or Retry finishes the job.
 `oauth::revoke` discovers `revocation_endpoint` (the document's issuer must match, and the URL
 passes the same checks as `jwks_uri`), then POSTs `token`, `token_type_hint=refresh_token` and
 `client_id`. Only an empty 200 confirms. A transport failure or a `5xx` is tried three times in
-all, 0.5 s then 1 s apart, and the whole pass has one 10 s budget [local policy]. A discovery
+all, 0.5 s then 1 s apart by default. The whole pass keeps one deadline, including discovery
+and backoff, set by `[tuning.oauth] revoke_s` (10 s by default). A discovery
 document that fails a check sends no token anywhere.
 
 **Age-out.** An entry leaves the list unrevoked once `now ≥ added_at + 32 days`: the documented
@@ -533,7 +535,7 @@ sequenceDiagram
     C->>M: access()
     M->>V: write request_pending
     M->>V: mark the refresh token sent
-    M->>P: refresh_token grant (30 s deadline)
+    M->>P: refresh_token grant (30 s by default, shortened by tuning.oauth refresh_s)
     P-->>M: rotated set
     M->>V: save it unmarked, pending_identity_validation set, request_pending cleared
     M->>P: discovery and JWKS, verify against the saved subject

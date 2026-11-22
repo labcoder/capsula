@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use toml::Table;
 
-use super::{GITHUB, GROUPS, GitHubTuning, ModelTuning, RUNS, RunTuning};
+use super::{GITHUB, GROUPS, GitHubTuning, ModelTuning, OAuthTuning, RUNS, RunTuning};
 use crate::test_support::Captured;
 
 const DOCS: &str = include_str!("../../../../docs/user/tuning.md");
@@ -153,6 +153,28 @@ fn model_and_run_values_default_to_the_built_in_constants_and_keep_their_rules()
 }
 
 #[test]
+fn oauth_backoffs_have_to_fit_inside_one_revocation_budget() {
+    let tuned = |text: &str| OAuthTuning::from_table(&text.parse().expect("fixture parses"));
+    assert_eq!(
+        tuned(
+            "[tuning.oauth]\nsign_in_s = 100\nrefresh_s = 15\nrevoke_s = 3\nfirst_backoff_ms = 1000\nsecond_backoff_ms = 1999"
+        ),
+        OAuthTuning {
+            sign_in: Duration::from_secs(100),
+            refresh: Duration::from_secs(15),
+            revoke: Duration::from_secs(3),
+            backoff: [Duration::from_secs(1), Duration::from_millis(1999)],
+        }
+    );
+    for invalid in [
+        "[tuning.oauth]\nsign_in_s = 100\nrevoke_s = 3\nfirst_backoff_ms = 1000\nsecond_backoff_ms = 2000",
+        "[tuning.oauth]\nsign_in_s = 100\nrevoke_s = 3\nfirst_backoff_ms = 1001\nsecond_backoff_ms = 1000",
+    ] {
+        assert_eq!(tuned(invalid), OAuthTuning::default());
+    }
+}
+
+#[test]
 fn the_user_docs_list_every_key_with_its_default_and_range() {
     let blocks: Vec<&str> = DOCS
         .split("```toml")
@@ -193,4 +215,5 @@ fn the_user_docs_list_every_key_with_its_default_and_range() {
     assert_eq!(GitHubTuning::from_table(&all), GitHubTuning::default());
     assert_eq!(ModelTuning::from_table(&all), ModelTuning::default());
     assert_eq!(RunTuning::from_table(&all), RunTuning::default());
+    assert_eq!(OAuthTuning::from_table(&all), OAuthTuning::default());
 }

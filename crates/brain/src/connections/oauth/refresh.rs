@@ -31,6 +31,7 @@ pub async fn refresh(
     http: &impl Http,
     client: &str,
     refresh_token: &str,
+    limit: Duration,
 ) -> Result<TokenSet, ExchangeError> {
     if client.is_empty()
         || client.len() > MAX_ID_BYTES
@@ -52,7 +53,7 @@ pub async fn refresh(
         endpoint: Endpoint::Token,
         fields,
     });
-    let response = tokio::time::timeout(DEADLINE, request)
+    let response = tokio::time::timeout(limit, request)
         .await
         .map_err(|_| HttpError::Timeout)??;
     parse_response(&response)

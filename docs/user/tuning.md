@@ -78,3 +78,25 @@ wall_clock_s = 120
 # 8–60 seconds: how long a message to Claude Code waits while Kumochi is still looking for it.
 finding_wait_s = 30
 ```
+
+## ChatGPT sign-in and tokens
+
+These set waits for signing in, refreshing a session, and revoking old tokens. A refresh may
+already have reached the provider when it times out; Kumochi doesn't send that same refresh
+again. Revocation that doesn't finish within its budget leaves unconfirmed tokens for a later
+run.
+
+```toml
+[tuning.oauth]
+# 75–300 seconds: the local sign-in window, including sending the result to your browser.
+sign_in_s = 300
+# 8–30 seconds: waiting for one token refresh.
+refresh_s = 30
+# 3–40 seconds: the full revocation run, including discovery, requests, and both waits.
+revoke_s = 10
+# 125–2000 milliseconds: the wait before a first revocation retry.
+first_backoff_ms = 500
+# Both waits together must be shorter than revoke_s.
+# 250–4000 milliseconds: the wait before a second retry, at least as long as the first.
+second_backoff_ms = 1000
+```

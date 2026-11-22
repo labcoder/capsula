@@ -30,7 +30,7 @@ const RESOURCE: &str = "https://api.openai.com/v1";
 const SCOPES: &str =
     "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
 /// Local policy: pending authorization lives no longer than five minutes, including replies.
-const ATTEMPT_LIMIT: Duration = Duration::from_secs(300);
+pub(crate) const ATTEMPT_LIMIT: Duration = Duration::from_secs(300);
 
 /// Whether the user explicitly requested another consent screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +47,7 @@ pub enum SignInError {
     /// The local listener failed.
     #[error("sign-in loopback failed")]
     Io,
-    /// The five-minute attempt deadline elapsed.
+    /// The attempt's deadline elapsed.
     #[error("sign-in expired")]
     Expired,
     /// A state-matching callback couldn't complete this registration.
@@ -166,8 +166,9 @@ impl SignIn {
         host: &str,
         saved: Option<&Account>,
         intent: Intent,
+        limit: Duration,
     ) -> Result<Self, BindError> {
-        let deadline = Instant::now() + ATTEMPT_LIMIT;
+        let deadline = Instant::now() + limit;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|_| BindError::Io)?;
