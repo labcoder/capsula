@@ -517,9 +517,9 @@ selected model must still be offered by the current verified key and explicitly 
 input support in that key's fresh catalog. Claude Code's picture switch stays off, and its
 reviewed version row lists no picture-capable alias. Before a picture may have been written,
 losing that model's picture support drops the picture at the build or grant and lets the
-words go on. After a picture may have been written, losing support stops the run with
-`ScreenPictureStopped` rather than continuing with the old picture (engines.md,
-"A held run's screen").
+words go on. After a picture may have been written, losing support can stop an upload still
+in progress or block a later resend with `ScreenPictureStopped`. A final round whose upload
+already finished can still complete normally (engines.md, "A held run's screen").
 
 Whether this system can capture a window is the worker's answer, not the brain's. The worker
 asks when it opens its capturer, on a hold's first capture, and a no comes back as the
