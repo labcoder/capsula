@@ -11,6 +11,7 @@ use crate::connections::http_client::{Http, HttpError, MAX_BODY_BYTES, Request, 
 use crate::connections::records::{Origin, Revocable};
 
 const DISCOVERY: &str = r#"{"issuer":"https://auth.openai.com","revocation_endpoint":"https://auth.openai.com/api/accounts/oauth/revoke"}"#;
+const BACKOFF: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(1)];
 
 enum Reply {
     Now(Result<Response, HttpError>),
@@ -109,7 +110,7 @@ async fn an_empty_200_confirms_each_entry_the_account_first_with_the_documented_
         entry("exchange", Origin::Exchange),
         entry("account", Origin::Account),
     ];
-    let confirmed = revoke(&http, entries, deadline()).await;
+    let confirmed = revoke(&http, entries, deadline(), BACKOFF).await;
     assert_eq!(tokens(&confirmed), ["account", "exchange"]);
     let requests = http.requests();
     assert_eq!(
@@ -146,7 +147,13 @@ async fn only_an_empty_200_confirms_and_other_answers_are_not_tried_again() {
         Reply::Now(Err(HttpError::BodyTooLarge)),
     ] {
         let http = Scripted::new([discovered(), reply]);
-        let confirmed = revoke(&http, vec![entry("a", Origin::Exchange)], deadline()).await;
+        let confirmed = revoke(
+            &http,
+            vec![entry("a", Origin::Exchange)],
+            deadline(),
+            BACKOFF,
+        )
+        .await;
         assert!(confirmed.is_empty());
         assert_eq!(http.requests().len(), 2, "one attempt");
     }
@@ -160,7 +167,13 @@ async fn a_transport_failure_or_5xx_is_tried_three_times_in_all_with_backoff() {
         Reply::Now(Err(HttpError::Transport)),
         status(200, b""),
     ]);
-    let confirmed = revoke(&http, vec![entry("a", Origin::Exchange)], deadline()).await;
+    let confirmed = revoke(
+        &http,
+        vec![entry("a", Origin::Exchange)],
+        deadline(),
+        BACKOFF,
+    )
+    .await;
     assert_eq!(tokens(&confirmed), ["a"]);
     let requests = http.requests();
     let gaps: Vec<_> = requests
@@ -183,7 +196,13 @@ async fn a_transport_failure_or_5xx_is_tried_three_times_in_all_with_backoff() {
         status(599, b""),
         status(200, b""),
     ]);
-    let confirmed = revoke(&http, vec![entry("a", Origin::Exchange)], deadline()).await;
+    let confirmed = revoke(
+        &http,
+        vec![entry("a", Origin::Exchange)],
+        deadline(),
+        BACKOFF,
+    )
+    .await;
     assert!(confirmed.is_empty(), "a fourth attempt is never made");
     assert_eq!(http.requests().len(), 4);
 }
@@ -193,7 +212,11 @@ async fn the_budget_ends_a_stalled_request_and_a_backoff_that_would_pass_it() {
     let start = Instant::now();
     let http = Scripted::new([discovered(), Reply::Hang]);
     let entries = vec![entry("a", Origin::Account), entry("b", Origin::Exchange)];
-    assert!(revoke(&http, entries, start + BUDGET).await.is_empty());
+    assert!(
+        revoke(&http, entries, start + BUDGET, BACKOFF)
+            .await
+            .is_empty()
+    );
     assert_eq!(
         Instant::now() - start,
         BUDGET,
@@ -205,7 +228,7 @@ async fn the_budget_ends_a_stalled_request_and_a_backoff_that_would_pass_it() {
     let http = Scripted::new([discovered(), status(503, b""), status(503, b"")]);
     let short = start + Duration::from_millis(1_500);
     assert!(
-        revoke(&http, vec![entry("a", Origin::Exchange)], short)
+        revoke(&http, vec![entry("a", Origin::Exchange)], short, BACKOFF)
             .await
             .is_empty()
     );
@@ -219,11 +242,39 @@ async fn the_budget_ends_a_stalled_request_and_a_backoff_that_would_pass_it() {
     let start = Instant::now();
     let http = Scripted::new([Reply::Hang]);
     assert!(
-        revoke(&http, vec![entry("a", Origin::Exchange)], start + BUDGET)
+        revoke(
+            &http,
+            vec![entry("a", Origin::Exchange)],
+            start + BUDGET,
+            BACKOFF
+        )
+        .await
+        .is_empty()
+    );
+    assert_eq!(Instant::now() - start, BUDGET);
+}
+
+#[tokio::test(start_paused = true)]
+async fn tuned_backoff_shares_the_original_revocation_deadline() {
+    let started = Instant::now();
+    let http = Scripted::new([discovered(), status(503, b""), status(503, b"")]);
+    let backoff = [Duration::from_secs(1), Duration::from_secs(2)];
+    let deadline = started + Duration::from_secs(3);
+    let entries = vec![entry("a", Origin::Exchange)];
+    assert!(revoke(&http, entries, deadline, backoff).await.is_empty());
+    let requests = http.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2].2 - started, Duration::from_secs(1));
+    drop(requests);
+
+    let http = Scripted::new([]);
+    let entries = vec![entry("b", Origin::Account)];
+    assert!(
+        revoke(&http, entries, Instant::now(), backoff)
             .await
             .is_empty()
     );
-    assert_eq!(Instant::now() - start, BUDGET);
+    assert!(http.requests().is_empty());
 }
 
 #[tokio::test]
@@ -251,7 +302,13 @@ async fn a_bad_discovery_document_sends_no_token_anywhere() {
     ];
     for (code, body) in documents {
         let http = Scripted::new([status(code, body.as_bytes())]);
-        let confirmed = revoke(&http, vec![entry("a", Origin::Exchange)], deadline()).await;
+        let confirmed = revoke(
+            &http,
+            vec![entry("a", Origin::Exchange)],
+            deadline(),
+            BACKOFF,
+        )
+        .await;
         assert!(confirmed.is_empty());
         assert_eq!(
             http.requests().len(),
@@ -262,7 +319,13 @@ async fn a_bad_discovery_document_sends_no_token_anywhere() {
     let longest = format!("https://auth.openai.com/{}", "a".repeat(2_024));
     assert_eq!(longest.len(), 2_048);
     let http = Scripted::new([status(200, endpoint(&longest).as_bytes()), status(200, b"")]);
-    let confirmed = revoke(&http, vec![entry("a", Origin::Exchange)], deadline()).await;
+    let confirmed = revoke(
+        &http,
+        vec![entry("a", Origin::Exchange)],
+        deadline(),
+        BACKOFF,
+    )
+    .await;
     assert_eq!(
         tokens(&confirmed),
         ["a"],

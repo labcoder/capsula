@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use toml::{Table, Value};
 
-use crate::connections::{anthropic::messages, model};
+use crate::connections::{anthropic::messages, model, oauth};
 use crate::coordinator;
 
 const TUNING: &str = "tuning";
@@ -33,8 +33,12 @@ const fn limit(key: &'static str, default: u64, min: u64, max: u64) -> Limit {
 
 /// Every group by its name under `[tuning]`, for the docs check.
 #[cfg(test)]
-pub(crate) const GROUPS: [(&str, &[Limit]); 3] =
-    [("github", &GITHUB), ("model", &MODEL), ("runs", &RUNS)];
+pub(crate) const GROUPS: [(&str, &[Limit]); 4] = [
+    ("github", &GITHUB),
+    ("model", &MODEL),
+    ("runs", &RUNS),
+    ("oauth", &OAUTH),
+];
 
 /// `[tuning.github]`. These bound requests to the user's account, so every build keeps them in
 /// range and they only tighten.
@@ -73,6 +77,24 @@ pub(crate) const RUNS: [Limit; 4] = [
     limit("calls_count", 16, 2, 16),
     limit("wall_clock_s", coordinator::WALL_CLOCK.as_secs(), 30, 240),
     limit("finding_wait_s", coordinator::FINDING_WAIT.as_secs(), 8, 60),
+];
+
+const OAUTH: [Limit; 5] = [
+    limit(
+        "sign_in_s",
+        oauth::ATTEMPT_LIMIT.as_secs(),
+        75,
+        oauth::ATTEMPT_LIMIT.as_secs(),
+    ),
+    limit(
+        "refresh_s",
+        oauth::refresh::DEADLINE.as_secs(),
+        8,
+        oauth::refresh::DEADLINE.as_secs(),
+    ),
+    limit("revoke_s", oauth::revoke::BUDGET.as_secs(), 3, 40),
+    limit("first_backoff_ms", 500, 125, 2000),
+    limit("second_backoff_ms", 1000, 250, 4000),
 ];
 
 /// Requests a filing makes besides its listing: the user, two match pages and the create.
@@ -207,6 +229,42 @@ impl RunTuning {
             calls: count(calls),
             wall_clock: Duration::from_secs(wall_clock_s),
             finding_wait: Duration::from_secs(finding_wait_s),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OAuthTuning {
+    pub(crate) sign_in: Duration,
+    pub(crate) refresh: Duration,
+    pub(crate) revoke: Duration,
+    pub(crate) backoff: [Duration; 2],
+}
+
+impl Default for OAuthTuning {
+    fn default() -> Self {
+        Self::from_values(defaults(&OAUTH))
+    }
+}
+
+impl OAuthTuning {
+    pub(crate) fn from_table(table: &Table) -> Self {
+        Self::from_values(read(
+            table,
+            "oauth",
+            &OAUTH,
+            |[_, _, revoke_s, first_ms, second_ms]| {
+                first_ms <= second_ms && first_ms + second_ms < revoke_s * 1000
+            },
+        ))
+    }
+
+    fn from_values([sign_in_s, refresh_s, revoke_s, first_ms, second_ms]: [u64; 5]) -> Self {
+        Self {
+            sign_in: Duration::from_secs(sign_in_s),
+            refresh: Duration::from_secs(refresh_s),
+            revoke: Duration::from_secs(revoke_s),
+            backoff: [first_ms, second_ms].map(Duration::from_millis),
         }
     }
 }

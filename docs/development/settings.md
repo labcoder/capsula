@@ -447,7 +447,13 @@ send-grant deadline. A group with `content_idle_s` below `idle_s` takes its defa
 `[tuning.runs]` sits on the
 `Coordinator`: the round and call counts only lower the compile-time ceilings `MAX_ROUNDS` and
 `MAX_CALLS` (the engine's attempt budget is sized from `MAX_ROUNDS`), and `wall_clock_s` and
-`finding_wait_s` replace `WALL_CLOCK` and `FINDING_WAIT`, which stay the defaults. The user
+`finding_wait_s` replace `WALL_CLOCK` and `FINDING_WAIT`, which stay the defaults.
+
+`[tuning.oauth]` is copied into the ChatGPT account lane at startup. The local sign-in window
+and refresh request cannot outlast their built-in limits. Revocation maintains one absolute
+deadline across discovery, requests, and backoff; the nondecreasing backoffs must sum to less
+than that budget, or all OAuth keys use their defaults. Token validation, shutdown settlement
+and the number of retry attempts are unchanged. The user
 reference, with the examples the docs-match test checks, is [tuning](../user/tuning.md).
 
 ## Claude Code

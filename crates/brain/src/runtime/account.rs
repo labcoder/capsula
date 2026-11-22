@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
+use std::time::Duration;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
@@ -18,6 +19,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
+use crate::config::tuning::OAuthTuning;
 use crate::connections::account::{
     AccountState, Denied, Effect, Input, Job, Listened, Received, Worker,
 };
@@ -27,7 +29,7 @@ use crate::connections::http_client::{HttpError, SharedHttp};
 use crate::connections::oauth::exchange::{ExchangeError, exchange};
 use crate::connections::oauth::id_token::{IdentityError, verify, verify_refreshed};
 use crate::connections::oauth::refresh::refresh;
-use crate::connections::oauth::revoke::{BUDGET, revoke};
+use crate::connections::oauth::revoke::revoke;
 use crate::connections::oauth::{Authorization, Intent, LaunchError, Launcher, SignIn};
 use crate::connections::records::{Account, Revocable};
 use crate::context::ConnectionTag;
@@ -147,6 +149,7 @@ impl Catalog {
 #[derive(Debug)]
 pub(crate) struct Accounts {
     pub(super) github: github::GitHub,
+    oauth: OAuthTuning,
     state: AccountState,
     pub(super) jobs: Option<std_mpsc::Sender<Work>>,
     /// Fires once the credential thread has dropped the vault and its session lock.
@@ -177,8 +180,9 @@ impl Accounts {
     pub(crate) fn spawn<S: CredentialStore + 'static>(
         worker: Worker<S>,
         net: Net,
+        oauth: OAuthTuning,
     ) -> std::io::Result<Self> {
-        Self::spawn_with_github(worker, net, github::GitHub::new())
+        Self::spawn_with_github(worker, net, github::GitHub::new(), oauth)
     }
 
     #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
@@ -186,13 +190,19 @@ impl Accounts {
         worker: Worker<S>,
         net: Net,
     ) -> std::io::Result<Self> {
-        Self::spawn_with_github(worker, net, github::GitHub::with_client(None))
+        Self::spawn_with_github(
+            worker,
+            net,
+            github::GitHub::with_client(None),
+            OAuthTuning::default(),
+        )
     }
 
     fn spawn_with_github<S: CredentialStore + 'static>(
         worker: Worker<S>,
         net: Net,
         github: github::GitHub,
+        oauth: OAuthTuning,
     ) -> std::io::Result<Self> {
         let (state, started) = AccountState::start();
         let (events_tx, events) = mpsc::unbounded_channel();
@@ -202,6 +212,7 @@ impl Accounts {
         let salt = getrandom::u64().map_err(std::io::Error::other)?;
         let mut accounts = Self {
             github,
+            oauth,
             state,
             jobs: Some(jobs),
             released: Some(released),
@@ -517,6 +528,7 @@ impl Accounts {
                         host,
                         saved,
                         intent,
+                        self.oauth.sign_in,
                         Arc::clone(&self.net.launcher),
                         self.events_tx.clone(),
                     )));
@@ -540,6 +552,7 @@ impl Accounts {
                 ))),
                 Effect::Revoke(entries) => drop(tokio::spawn(revoke_task(
                     entries,
+                    self.oauth,
                     Arc::clone(&self.net.http),
                     self.events_tx.clone(),
                 ))),
@@ -552,6 +565,7 @@ impl Accounts {
                     generation,
                     client,
                     refresh_token,
+                    self.oauth.refresh,
                     self.net.clone(),
                     self.events_tx.clone(),
                 ))),
@@ -818,13 +832,19 @@ async fn listen(
     host: Secret<Zeroizing<String>>,
     saved: Option<Secret<Account>>,
     intent: Intent,
+    limit: Duration,
     launcher: Arc<dyn Launcher + Send + Sync>,
     events: mpsc::UnboundedSender<Input>,
 ) {
     let result = async {
-        let sign_in = SignIn::bind(host.expose(), saved.as_ref().map(Secret::expose), intent)
-            .await
-            .map_err(Listened::Bind)?;
+        let sign_in = SignIn::bind(
+            host.expose(),
+            saved.as_ref().map(Secret::expose),
+            intent,
+            limit,
+        )
+        .await
+        .map_err(Listened::Bind)?;
         // Opening the browser is OS work that can block, so it runs off the core loop.
         let (sign_in, opened) = tokio::task::spawn_blocking(move || {
             let opened = sign_in.open_browser(launcher.as_ref());
@@ -847,12 +867,13 @@ async fn listen(
 
 async fn revoke_task(
     entries: Vec<Secret<Revocable>>,
+    tuning: OAuthTuning,
     http: HttpFactory,
     events: mpsc::UnboundedSender<Input>,
 ) {
-    let deadline = Instant::now() + BUDGET;
+    let deadline = Instant::now() + tuning.revoke;
     let confirmed = match tokio::task::spawn_blocking(move || http()).await {
-        Ok(Ok(http)) => revoke(&http, entries, deadline).await,
+        Ok(Ok(http)) => revoke(&http, entries, deadline, tuning.backoff).await,
         _ => Vec::new(),
     };
     events.send(Input::Revoked(confirmed)).ok();
@@ -907,6 +928,7 @@ async fn refresh_task(
     generation: u64,
     client: Secret<Zeroizing<String>>,
     refresh_token: Secret<Zeroizing<String>>,
+    limit: Duration,
     net: Net,
     events: mpsc::UnboundedSender<Input>,
 ) {
@@ -917,7 +939,7 @@ async fn refresh_task(
             .await
             .map_err(|_| ExchangeError::Http(HttpError::Configuration))?
             .map_err(ExchangeError::Http)?;
-        refresh(&http, client.expose(), refresh_token.expose()).await
+        refresh(&http, client.expose(), refresh_token.expose(), limit).await
     })
     .await
     .unwrap_or_else(|_| {

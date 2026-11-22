@@ -42,9 +42,14 @@ impl Launcher for RecordingLauncher {
 }
 
 async fn attempt() -> (SignIn, SocketAddr, mpsc::UnboundedReceiver<Event>) {
-    let mut attempt = SignIn::bind("urn:uuid:synthetic-host", None, Intent::SignIn)
-        .await
-        .expect("bind");
+    let mut attempt = SignIn::bind(
+        "urn:uuid:synthetic-host",
+        None,
+        Intent::SignIn,
+        super::ATTEMPT_LIMIT,
+    )
+    .await
+    .expect("bind");
     let address = attempt.listener.local_addr().expect("bound address");
     let (events, seen) = mpsc::unbounded_channel();
     attempt.events = Some(events);
@@ -513,6 +518,20 @@ async fn pending_attempt_expires_after_five_minutes() {
     assert_eq!(receive.await.unwrap_err(), SignInError::Expired);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_tuned_sign_in_attempt_expires_at_its_own_deadline() {
+    let limit = Duration::from_secs(75);
+    let attempt = SignIn::bind("urn:uuid:synthetic-host", None, Intent::SignIn, limit)
+        .await
+        .expect("loopback binds");
+    let mut receive = Box::pin(attempt.receive());
+    pending(receive.as_mut()).await;
+    tokio::time::advance(Duration::from_secs(74)).await;
+    pending(receive.as_mut()).await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(receive.await.unwrap_err(), SignInError::Expired);
+}
+
 #[tokio::test]
 async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
     let saved = Account {
@@ -531,9 +550,14 @@ async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
             connection: 0,
         }),
     };
-    let attempt = SignIn::bind("urn:uuid:synthetic-host", Some(&saved), Intent::SignIn)
-        .await
-        .expect("bind");
+    let attempt = SignIn::bind(
+        "urn:uuid:synthetic-host",
+        Some(&saved),
+        Intent::SignIn,
+        super::ATTEMPT_LIMIT,
+    )
+    .await
+    .expect("bind");
     let launcher = RecordingLauncher::default();
     attempt.open_browser(&launcher).expect("injected launch");
     let url = launcher.0.into_inner().expect("launch recorded");
@@ -574,10 +598,15 @@ async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
 
 #[tokio::test]
 async fn new_attempts_have_independent_secrets_and_explicit_consent_only_when_requested() {
-    let first = SignIn::bind("urn:uuid:host", None, Intent::EnablePlan)
-        .await
-        .expect("bind");
-    let second = SignIn::bind("urn:uuid:host", None, Intent::SignIn)
+    let first = SignIn::bind(
+        "urn:uuid:host",
+        None,
+        Intent::EnablePlan,
+        super::ATTEMPT_LIMIT,
+    )
+    .await
+    .expect("bind");
+    let second = SignIn::bind("urn:uuid:host", None, Intent::SignIn, super::ATTEMPT_LIMIT)
         .await
         .expect("bind");
     let values = [
