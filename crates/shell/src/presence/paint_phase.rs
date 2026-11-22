@@ -61,22 +61,24 @@ pub(super) mod tests {
             match (event.action, event.tag) {
                 (2, 2) => {
                     assert!(!filling);
-                    assert!(fills.is_empty());
                     filling = true;
                 }
                 (0, 2) => {
                     assert!(filling);
                     assert_eq!(fills.insert(event.pointer, (event.size, event.align)), None);
                 }
-                (1, 2) => assert_eq!(
-                    fills.remove(&event.pointer),
-                    Some((event.size, event.align))
-                ),
+                (1, 2) => {
+                    assert!(filling);
+                    if let Some(layout) = fills.remove(&event.pointer) {
+                        assert_eq!(layout, (event.size, event.align));
+                    }
+                }
                 (3, 2) => {
                     assert!(filling);
                     assert!(
-                        fills.is_empty(),
-                        "each fill releases its own allocation lifetimes"
+                        fills.values().map(|(bytes, _)| bytes).sum::<usize>()
+                            <= super::super::paint_geometry::FILL_SCRATCH_BYTES,
+                        "fill scratch growth stays inside its fixed allowance"
                     );
                     filling = false;
                 }
@@ -119,7 +121,6 @@ pub(super) mod tests {
             }
         }
         assert!(!filling);
-        assert!(fills.is_empty());
         assert_eq!(
             allocations,
             events.iter().filter(|event| event.action == 4).count(),
@@ -164,7 +165,7 @@ pub(super) mod tests {
             },
             Request {
                 pointer: 9,
-                size: 8,
+                size: super::super::paint_geometry::FILL_SCRATCH_BYTES + 1,
                 tag: 2,
                 ..allocation
             },

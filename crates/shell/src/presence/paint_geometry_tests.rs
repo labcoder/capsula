@@ -440,8 +440,67 @@ fn one_straight_stroke_requests_only_one_exact_handoff() {
 }
 
 #[test]
-fn each_transient_fill_releases_its_own_allocations_before_returning() {
-    use std::collections::BTreeMap;
+fn rect_scratch_stays_with_the_painter_and_is_charged_once() {
+    use super::{FILL_SCRATCH_BYTES, Rounded, events, tessellated};
+    use gpui_kit::FillRule;
+
+    let mut scratch = Scratch::new();
+    let rect = Rect {
+        origin: Vec2::default(),
+        size: Vec2::new(20_000.0, 18_000.0),
+    };
+    let global = kumochi_scene::limits::MAX_GLOBAL_FILL_VERTICES;
+    let fill_segments = u32::try_from((global - 1) / 4 - 1).unwrap();
+    let outline = kumochi_scene::limits::MAX_GLOBAL_OUTLINE_POINTS;
+    let ring_segments = u32::try_from((outline - 1) / 4 - 1).unwrap();
+    let far = Rounded::new(rect, 8_000.0, fill_segments);
+    let outer = Rounded::new(rect, 8_000.0, ring_segments);
+    let inner = Rounded::new(
+        Rect {
+            origin: Vec2::new(4.0, 4.0),
+            size: rect.size - Vec2::new(8.0, 8.0),
+        },
+        7_996.0,
+        ring_segments,
+    );
+    let transform = Affine::pose(2.0, 0.25, Vec2::default());
+    let ((), _, [allocated, released]) = crate::allocation::usage(|| {
+        drop(
+            tessellated(
+                &mut scratch.fill,
+                events(far.iter()),
+                FillRule::NonZero,
+                transform,
+            )
+            .expect("a cap-sized fill")
+            .expect("has path vertices"),
+        );
+        drop(
+            tessellated(
+                &mut scratch.fill,
+                events(outer.iter()).chain(events(inner.iter())),
+                FillRule::EvenOdd,
+                transform,
+            )
+            .expect("a cap-sized ring")
+            .expect("has path vertices"),
+        );
+    });
+    let held = allocated - released;
+    assert!(
+        held > 0 && held <= FILL_SCRATCH_BYTES,
+        "scratch held {held} bytes"
+    );
+    let ((), _, [allocated, freed]) = crate::allocation::usage(|| drop(scratch.fill));
+    assert_eq!(
+        (allocated, freed),
+        (0, held),
+        "scratch releases exactly what it kept"
+    );
+}
+
+#[test]
+fn warmed_rect_fallback_allocates_only_the_path_handoffs_at_placement_two() {
     let prim = Prim::Rect {
         rect: Rect {
             origin: Vec2::default(),
@@ -452,66 +511,35 @@ fn each_transient_fill_releases_its_own_allocations_before_returning() {
         border: Some((ink(), 4.0)),
     };
     let mut scratch = Scratch::new();
-    let ((), events) = crate::allocation::requests(10_000, || {
-        let _app = paint_phase::enter(Phase::App);
-        drop(
-            paths(
-                &mut scratch,
-                &prim,
-                Affine::pose(1.0, 0.3, Vec2::default()),
-                0.5,
-                0.0,
-                MAX_COMPOSED_SCALE,
-            )
-            .expect("background and sector"),
-        );
-    });
-    let mut live = BTreeMap::new();
-    let mut builds = 0;
-    for event in &events {
-        match (event.action, event.tag) {
-            (2, 2) => {
-                assert!(live.is_empty(), "no earlier build may retain storage");
-                builds += 1;
-            }
-            (0, 2) => {
-                assert_eq!(live.insert(event.pointer, (event.size, event.align)), None);
-            }
-            (1, 2) => {
-                assert_eq!(live.remove(&event.pointer), Some((event.size, event.align)));
-            }
-            (3, 2) => assert!(
-                live.is_empty(),
-                "all fill-owned lifetimes end inside this build"
-            ),
-            _ => {}
-        }
-    }
-    assert_eq!(builds, 2);
-    let handoffs: Vec<_> = events.iter().filter(|e| e.action == 4).collect();
-    assert_eq!(handoffs.len(), 2);
-    let app: Vec<_> = events
-        .iter()
-        .filter(|e| e.action == 0 && e.tag == 1)
-        .collect();
-    assert_eq!(app.len(), 2);
-    for handoff in handoffs {
-        assert_eq!(
-            app.iter()
-                .filter(|e| (e.pointer, e.size, e.align)
-                    == (handoff.pointer, handoff.size, handoff.align))
-                .count(),
-            1
-        );
-        assert_eq!(
-            events
+    let transform = Affine::pose(2.0, 0.3, Vec2::default());
+    let draws = [0.25, 0.5, 0.999, 1.0];
+    for draw in draws {
+        assert!(
+            paths(&mut scratch, &prim, transform, draw, 0.0, 2.0)
+                .expect("warm the same fallback")
                 .iter()
-                .filter(|e| e.action == 1
-                    && e.pointer == handoff.pointer
-                    && e.size == handoff.size
-                    && e.align == handoff.align)
-                .count(),
-            1
+                .all(Option::is_some)
         );
     }
+    let ((), events) = crate::allocation::requests(8_192, || {
+        let _app = paint_phase::enter(Phase::App);
+        for draw in draws {
+            drop(
+                paths(&mut scratch, &prim, transform, draw, 0.0, 2.0)
+                    .expect("fill and border stay paintable"),
+            );
+        }
+    });
+    let scratch_allocations = events
+        .iter()
+        .filter(|event| event.action == 0 && event.tag == 2)
+        .count();
+    assert_eq!(
+        scratch_allocations, 0,
+        "warm fallback tessellation allocates nothing"
+    );
+    assert_eq!(
+        paint_phase::tests::assert_paths(&events, 1),
+        2 * draws.len()
+    );
 }

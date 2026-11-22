@@ -4,6 +4,7 @@ use gpui_kit::{FillOptions, FillRule, Path, Pixels};
 use kumochi_scene::{
     display::{Contour, Paint, Prim, fallback_corner_segments},
     geom::{Affine, Rect, Vec2},
+    limits::MAX_GLOBAL_FILL_VERTICES,
 };
 use lyon::{
     path::PathEvent,
@@ -18,6 +19,23 @@ use super::{
 
 /// A primitive's fill and stroke paths, each with its paint.
 pub(super) type PrimPaths = [Option<(Path<Pixels>, Paint)>; 2];
+
+/// Fixed residency allowance for the reusable Lyon sweep and output below the paint caps.
+pub(super) const FILL_SCRATCH_BYTES: usize = MAX_GLOBAL_FILL_VERTICES * 256;
+
+pub(super) struct FillScratch {
+    tessellator: FillTessellator,
+    buffers: VertexBuffers<lyon::math::Point, u16>,
+}
+
+impl FillScratch {
+    pub(super) fn new() -> Self {
+        Self {
+            tessellator: FillTessellator::new(),
+            buffers: VertexBuffers::with_capacity(0, 0),
+        }
+    }
+}
 
 pub(super) fn paths(
     scratch: &mut Scratch,
@@ -67,8 +85,13 @@ pub(super) fn paths(
             let (radius, segments) = corners(*rect, *radius, scale(transform), charge)?;
             let outer = Rounded::new(*rect, radius, segments);
             if let Some(paint) = fill {
-                paths[0] =
-                    filled(outer.iter(), FillRule::NonZero, transform)?.map(|path| (path, *paint));
+                paths[0] = filled(
+                    &mut scratch.fill,
+                    outer.iter(),
+                    FillRule::NonZero,
+                    transform,
+                )?
+                .map(|path| (path, *paint));
             }
             if let Some((paint, width)) = border {
                 let half = rect.size.x.min(rect.size.y) / 2.0;
@@ -84,15 +107,21 @@ pub(super) fn paths(
                         segments,
                     );
                     let path = if draw < 1.0 {
-                        sector(outer, inner, draw, transform)?
+                        sector(&mut scratch.fill, outer, inner, draw, transform)?
                     } else if width < half {
                         tessellated(
+                            &mut scratch.fill,
                             events(outer.iter()).chain(events(inner.iter())),
                             FillRule::EvenOdd,
                             transform,
                         )?
                     } else {
-                        filled(outer.iter(), FillRule::NonZero, transform)?
+                        filled(
+                            &mut scratch.fill,
+                            outer.iter(),
+                            FillRule::NonZero,
+                            transform,
+                        )?
                     };
                     paths[1] = path.map(|path| (path, *paint));
                 }
@@ -150,6 +179,7 @@ impl Rounded {
     reason = "a and b bound the outer edge, c and d the inner edge, and t the revealed fraction"
 )]
 fn sector(
+    scratch: &mut FillScratch,
     outer: Rounded,
     inner: Rounded,
     draw: f32,
@@ -175,7 +205,7 @@ fn sector(
                 .take(index + 1)
                 .chain([a + (b - a) * t, c + (d - c) * t])
                 .chain(inner.iter().take(index + 1).rev());
-            return filled(contour, FillRule::NonZero, transform);
+            return filled(scratch, contour, FillRule::NonZero, transform);
         }
         left -= span;
     }
@@ -204,40 +234,38 @@ fn events(points: impl Iterator<Item = Vec2> + Clone) -> impl Iterator<Item = Pa
 }
 
 fn filled(
+    scratch: &mut FillScratch,
     points: impl Iterator<Item = Vec2> + Clone,
     rule: FillRule,
     transform: Affine,
 ) -> Result<Option<Path<Pixels>>, BuildError> {
-    tessellated(events(points), rule, transform)
+    tessellated(scratch, events(points), rule, transform)
 }
 
 fn tessellated(
+    scratch: &mut FillScratch,
     events: impl Iterator<Item = PathEvent>,
     rule: FillRule,
     transform: Affine,
 ) -> Result<Option<Path<Pixels>>, BuildError> {
-    // shortcut: lyon fill allocates per build (OSC-249 exception, counted and reported); revisit after D1 (OSC-174)
-    let _fill = paint_phase::enter(Phase::LyonFill);
-    let buffers = {
-        let mut buffers = VertexBuffers::<lyon::math::Point, u16>::new();
-        FillTessellator::new()
-            .tessellate(
-                events,
-                &FillOptions::default().with_fill_rule(rule),
-                &mut BuffersBuilder::new(&mut buffers, |vertex: FillVertex<'_>| vertex.position()),
-            )
-            .map_err(|_| BuildError::Fill)?;
-        buffers
-    };
-    let app = paint_phase::enter(Phase::App);
+    let fill = paint_phase::enter(Phase::LyonFill);
+    let buffers = &mut scratch.buffers;
+    buffers.clear();
+    scratch
+        .tessellator
+        .tessellate(
+            events,
+            &FillOptions::default().with_fill_rule(rule),
+            &mut BuffersBuilder::new(buffers, |vertex: FillVertex<'_>| vertex.position()),
+        )
+        .map_err(|_| BuildError::Fill)?;
+    drop(fill);
+    let _app = paint_phase::enter(Phase::App);
     let triangles = buffers.indices.iter().map(|index| {
         let at = buffers.vertices[usize::from(*index)];
         Vec2::new(at.x, at.y)
     });
-    let path = super::paint_paths::placed(triangles, transform);
-    drop(app);
-    drop(buffers);
-    Ok(path)
+    Ok(super::paint_paths::placed(triangles, transform))
 }
 
 #[cfg(test)]
