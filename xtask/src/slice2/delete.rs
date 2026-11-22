@@ -161,6 +161,8 @@ fn done(client: &mut Client, run: RunId) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
+
     use super::super::{GONE, KEPT, marker};
     use super::Texts;
 
@@ -171,21 +173,36 @@ mod tests {
         let (gone, kept) = (marker(GONE), marker(KEPT));
         assert_ne!(gone.as_bytes()[0], kept.as_bytes()[0], "{gone} and {kept}");
         let texts = Texts::new(&gone, &kept);
-        let words = [
-            &texts.gone_script,
-            &texts.gone_turn,
-            &texts.kept_script,
-            &texts.kept_turn,
-        ]
-        .into_iter()
-        .flat_map(|text| text.split_whitespace())
-        .map(str::to_ascii_lowercase)
-        .filter(|word| *word != gone && *word != kept);
-        for word in words {
-            assert!(
-                !word.starts_with(&gone[..1]) && !word.starts_with(&kept[..1]),
-                "{word} shares a marker's first letter"
-            );
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE fixture USING fts5(text);
+             CREATE VIRTUAL TABLE terms USING fts5vocab(fixture, 'row');",
+        )
+        .unwrap();
+        for (text, marker) in [
+            (&texts.gone_script, &gone),
+            (&texts.gone_turn, &gone),
+            (&texts.kept_script, &kept),
+            (&texts.kept_turn, &kept),
+        ] {
+            db.execute("DELETE FROM fixture", []).unwrap();
+            db.execute("INSERT INTO fixture VALUES (?1)", [text])
+                .unwrap();
+            let mut query = db.prepare("SELECT term FROM terms").unwrap();
+            let words = query.query_map([], |row| row.get::<_, String>(0)).unwrap();
+            let mut found = false;
+            for word in words {
+                let word = word.unwrap();
+                if word == *marker {
+                    found = true;
+                } else {
+                    assert!(
+                        !word.starts_with(&gone[..1]) && !word.starts_with(&kept[..1]),
+                        "{word} shares a marker's first letter"
+                    );
+                }
+            }
+            assert!(found, "FTS5 did not index the fixture's own marker");
         }
     }
 }

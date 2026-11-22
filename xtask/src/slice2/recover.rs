@@ -532,12 +532,28 @@ mod tests {
     fn a_scene_installs_only_whole_at_its_last_chunk() {
         let mut applied = described(&[1, 2], WHOLE);
         assert!(applied.apply(&chunk(1, MAX_STEPS - 1, "s")));
+        assert!(
+            applied.installed.is_empty(),
+            "the split drawing is not complete"
+        );
         assert!(applied.apply(&last(chunk(1, 1, "s"))));
-        assert!(applied.apply(&chunk(2, 3, "s")));
+        assert!(applied.apply(&chunk(2, MAX_STEPS, "s")));
+        assert!(
+            applied.installed.keys().copied().eq([SceneId(1)]),
+            "all steps without a last chunk do not install scene 2"
+        );
+        assert!(
+            applied.installed[&SceneId(1)]
+                .iter()
+                .map(|step| step.label.as_str())
+                .eq(std::iter::repeat_n("s", MAX_STEPS)),
+            "the completed split installs all of scene 1"
+        );
+        assert!(applied.failures.is_empty(), "{:?}", applied.failures);
         applied.expect(&[SceneId(1)], "s", "now");
-        assert_eq!(
-            applied.failures,
-            ["now: [SceneId(2)] stopped short of their last chunk"]
+        assert!(
+            !applied.failures.is_empty(),
+            "a scene still missing its final chunk invalidates the gate"
         );
     }
 

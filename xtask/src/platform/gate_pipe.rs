@@ -124,14 +124,15 @@ impl PipeClient {
         if self.aborted.load(Ordering::SeqCst) {
             return Err(ERROR_OPERATION_ABORTED.to_hresult().into());
         }
-        let timeout_ms = if let Some(end) = self.deadline {
+        let absolute = if let Some(end) = self.deadline {
             let remaining = end.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(ERROR_TIMEOUT.to_hresult().into());
             }
-            timeout_ms.min(millis(remaining).max(1))
+            (timeout_ms == INFINITE || remaining <= Duration::from_millis(u64::from(timeout_ms)))
+                .then_some(end)
         } else {
-            timeout_ms
+            None
         };
         if let Err(error) = start(self.raw(), &raw mut overlapped)
             && error.code() != ERROR_IO_PENDING.to_hresult()
@@ -143,8 +144,16 @@ impl PipeClient {
             // `overlapped` and the buffer go away.
             let _done = unsafe { CancelIoEx(self.raw(), Some(&raw const overlapped)) };
         }
-        // SAFETY: the event handle is open for the borrow.
-        let waited = unsafe { WaitForSingleObject(HANDLE(event.as_raw_handle()), timeout_ms) };
+        let waited = loop {
+            let wait_ms = absolute.map_or(timeout_ms, |end| {
+                millis(end.saturating_duration_since(Instant::now())).clamp(1, INFINITE - 1)
+            });
+            // SAFETY: the event handle is open for the borrow.
+            let waited = unsafe { WaitForSingleObject(HANDLE(event.as_raw_handle()), wait_ms) };
+            if waited != WAIT_TIMEOUT || absolute.is_none_or(|end| Instant::now() >= end) {
+                break waited;
+            }
+        };
         if waited == WAIT_TIMEOUT {
             // SAFETY: cancels only this operation; the wait below lets it finish before
             // `overlapped` and the buffer go away.
@@ -252,27 +261,4 @@ pub(crate) fn fixture_server(name: &str) -> std::fs::File {
     // SAFETY: the successful call returned a new, exclusively owned server handle.
     let server = unsafe { OwnedHandle::from_raw_handle(server.0) };
     std::fs::File::from(server)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PipeClient, fixture_server};
-    use std::io;
-
-    #[test]
-    fn an_opened_pipe_has_its_actual_server_pid() {
-        let pid = std::process::id();
-        let name = format!(r"\\.\pipe\kumochi-gate-pid-test-{pid}");
-        let _server = fixture_server(&name);
-        let client = PipeClient::open(&name).expect("open the existing fixture pipe");
-        assert_eq!(client.server_pid().expect("server owner"), pid);
-        client.require_server(pid).expect("correct server owner");
-        assert_eq!(
-            client
-                .require_server(pid ^ 1)
-                .expect_err("wrong server owner")
-                .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-    }
 }

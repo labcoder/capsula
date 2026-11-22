@@ -55,23 +55,6 @@ fn pair(label: &str, info: Option<&str>) -> (String, Option<String>) {
 }
 
 #[test]
-fn a_labelled_solid_gives_its_label_and_info() {
-    let (mut state, mut global) = (
-        SceneState::begin(header()).expect("scene"),
-        GlobalBudget::default(),
-    );
-    let put = first(
-        &mut state,
-        &mut global,
-        r#","label":"Wheel","info":"Front left""#,
-    );
-    assert_eq!(
-        text(state.part(handle(&put, "a"))),
-        Some(pair("Wheel", Some("Front left")))
-    );
-}
-
-#[test]
 fn later_kept_sets_apply_in_order_and_a_partial_set_keeps_the_other_field() {
     let (mut state, mut global) = (
         SceneState::begin(header()).expect("scene"),
@@ -83,6 +66,7 @@ fn later_kept_sets_apply_in_order_and_a_partial_set_keeps_the_other_field() {
         r#","label":"Wheel","info":"Front left""#,
     );
     let a = handle(&put, "a");
+    assert_eq!(text(state.part(a)), Some(pair("Wheel", Some("Front left"))));
     commit(
         &mut state,
         &mut global,
@@ -121,6 +105,7 @@ fn a_set_a_cut_dropped_never_counts_even_after_replay() {
         &mut global,
         r#"{"id":"s2","set":[{"target":"a","label":"Hub","info":"Late"}]}"#,
     );
+    assert_eq!(text(state.part(a)), Some(pair("Hub", Some("Late"))));
     let revealed =
         Bounded::new(put.handles.iter().map(|&(_, handle)| handle).collect()).expect("two");
     state
@@ -218,20 +203,23 @@ fn live_solids_sharing_a_slot_across_revisions_resolve_by_their_own_handles() {
 
 #[test]
 fn a_parts_debug_prints_lengths_never_its_text() {
-    let (mut state, mut global) = (
-        SceneState::begin(header()).expect("scene"),
-        GlobalBudget::default(),
+    let debug = |fields| {
+        let (mut state, mut global) = (
+            SceneState::begin(header()).expect("scene"),
+            GlobalBudget::default(),
+        );
+        let put = first(&mut state, &mut global, fields);
+        format!("{:?}", state.part(handle(&put, "a")).expect("labelled"))
+    };
+    let shown = debug(r#","label":"SENTINELLABEL","info":"SENTINELINFO""#);
+    assert!(
+        shown == debug(r#","label":"ALTERNATEWORD","info":"ANOTHERWORDS""#),
+        "part text affected Debug"
     );
-    let put = first(
-        &mut state,
-        &mut global,
-        r#","label":"SENTINELLABEL","info":"SENTINELINFO""#,
-    );
-    let shown = format!("{:?}", state.part(handle(&put, "a")).expect("labelled"));
     for sentinel in ["SENTINELLABEL", "SENTINELINFO"] {
-        assert!(!shown.contains(sentinel), "{shown}");
+        assert!(!shown.contains(sentinel), "part Debug contains text");
         let bytes = format!("{:?}", sentinel.as_bytes());
         let bytes = bytes.trim_matches(['[', ']']);
-        assert!(!shown.contains(bytes), "{shown}");
+        assert!(!shown.contains(bytes), "part Debug contains text bytes");
     }
 }

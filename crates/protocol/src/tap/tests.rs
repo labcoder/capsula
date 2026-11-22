@@ -40,7 +40,9 @@ fn drawing_failure_controls_record_only_their_closed_kinds() {
 fn github_refusal_is_content_free_while_its_repository_request_remains_redacted() {
     use crate::message::{ErrorKey, GitHubOp, RepoName};
     let marker = "sentinel/private-repository";
-    let request = ControlToBrain::GitHub(GitHubOp::SetDefaultRepo(RepoName::new(marker).unwrap()));
+    let request_for =
+        |repo| ControlToBrain::GitHub(GitHubOp::SetDefaultRepo(RepoName::new(repo).unwrap()));
+    let request = request_for(marker);
     let refusal = ControlToShell::GitHubError(ErrorKey::GitHubUnavailable.into());
     let records = [
         record(Direction::ToBrain, &request),
@@ -67,6 +69,13 @@ fn github_refusal_is_content_free_while_its_repository_request_remains_redacted(
     let debug = format!("{request:?} {refusal:?} {records:?} {out}");
     assert!(!debug.contains(marker));
     assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+    let other = request_for("alternate/another-workspace");
+    let other_records = [record(Direction::ToBrain, &other), records[1].clone()];
+    assert!(
+        debug == format!("{other:?} {refusal:?} {other_records:?} {out}")
+            && file == recording(&other_records),
+        "repository affected diagnostics"
+    );
 }
 
 fn wire_len(message: &impl Tapped, pipe: Pipe) -> usize {
@@ -124,22 +133,48 @@ fn content_free_ops_keep_their_fields_and_others_only_their_name_and_length() {
         incarnation: Incarnation(7),
         issue_epoch: 11,
     };
-    let hello = ControlToBrain::Hello(Hello {
-        build_id: "0.1.0+abc".to_owned(),
-        capability: Secret::new([9; 32]),
-    });
-    let rename = ControlToBrain::Settings(SettingsOp::SetAssistantName(
-        AssistantName::new(NAME).expect("valid"),
-    ));
+    let hello_for = |capability| {
+        ControlToBrain::Hello(Hello {
+            build_id: "0.1.0+abc".to_owned(),
+            capability: Secret::new(capability),
+        })
+    };
+    let rename_to = |name| {
+        ControlToBrain::Settings(SettingsOp::SetAssistantName(
+            AssistantName::new(name).expect("valid"),
+        ))
+    };
+    let hello = hello_for([9; 32]);
+    let rename = rename_to(NAME);
     let records = [
         record(Direction::ToBrain, &hello),
         record(Direction::ToShell, &welcome),
         record(Direction::ToBrain, &rename),
         record(Direction::ToShell, &view()),
     ];
+    assert!(
+        records[0].payload.is_none(),
+        "control Hello retains a payload"
+    );
     let file = recording(&records);
+    let mut other_view = view();
+    let ControlToShell::Settings { view: settings, .. } = &mut other_view else {
+        panic!("settings fixture");
+    };
+    settings.assistant_name = AssistantName::new("Alternatebot").expect("valid");
+    settings.user_name = Some(UserName::new("Testpal").expect("valid"));
+    let other_records = [
+        record(Direction::ToBrain, &hello_for([37; 32])),
+        record(Direction::ToShell, &welcome),
+        record(Direction::ToBrain, &rename_to("Alternatebot")),
+        record(Direction::ToShell, &other_view),
+    ];
+    assert!(
+        file == recording(&other_records),
+        "private fields affected the tap file"
+    );
     for secret in [&[9; 32][..], NAME.as_bytes(), USER.as_bytes(), b"0.1.0+abc"] {
-        assert!(!contains(&file, secret), "{secret:?} was recorded");
+        assert!(!contains(&file, secret), "private value was recorded");
     }
     let mut out = Vec::new();
     assert_eq!(dump(&mut file.as_slice(), &mut out).expect("dumps"), 4);
@@ -168,16 +203,31 @@ fn content_free_ops_keep_their_fields_and_others_only_their_name_and_length() {
 #[test]
 fn a_data_pipe_hello_keeps_only_its_op_name_and_length() {
     let capability = *b"Zqxcapabilityzqxcapabilityzqx123";
-    let hello = DataToBrain::Hello(Hello {
-        build_id: "0.1.0+abc".to_owned(),
-        capability: Secret::new(capability),
-    });
+    let hello_for = |capability| {
+        DataToBrain::Hello(Hello {
+            build_id: "0.1.0+abc".to_owned(),
+            capability: Secret::new(capability),
+        })
+    };
+    let hello = hello_for(capability);
     let len = wire_len(&hello, Pipe::Data);
     let record = Record::of(Pipe::Data, Direction::ToBrain, &hello, len).expect("records");
     assert_eq!(record.payload, None);
     let file = recording(&[record]);
+    let other = hello_for([37; 32]);
+    let other = Record::of(
+        Pipe::Data,
+        Direction::ToBrain,
+        &other,
+        wire_len(&other, Pipe::Data),
+    )
+    .expect("records");
+    assert!(
+        file == recording(&[other]),
+        "capability affected the tap file"
+    );
     for secret in [&capability[..], b"0.1.0+abc"] {
-        assert!(!contains(&file, secret), "{secret:?} was recorded");
+        assert!(!contains(&file, secret), "private value was recorded");
     }
     let mut out = Vec::new();
     dump(&mut file.as_slice(), &mut out).expect("dumps");
@@ -193,15 +243,16 @@ fn a_model_result_round_trips_but_never_records_its_choice() {
 
     const MODEL: &str = "private-model-sentinel";
     for applied in [false, true] {
-        let result = ControlToShell::ThreadModelSet {
+        let model_result = |slug| ControlToShell::ThreadModelSet {
             thread: ThreadId(8),
             choice: ModelChoice {
-                model: ModelSlug::new(MODEL).expect("valid"),
+                model: ModelSlug::new(slug).expect("valid"),
                 effort: Effort::XHigh,
                 connection: ConnectionKind::ChatGpt,
             },
             applied,
         };
+        let result = model_result(MODEL);
         let bytes = encode(&result, Pipe::Control).expect("encodes");
         assert_eq!(
             crate::frame::read::<ControlToShell>(&mut bytes.as_slice(), Pipe::Control)
@@ -209,10 +260,14 @@ fn a_model_result_round_trips_but_never_records_its_choice() {
             Some(result.clone())
         );
         let debug = format!("{result:?}");
-        assert!(!debug.contains(MODEL), "{debug}");
+        assert!(
+            debug == format!("{:?}", model_result("another-engine-version")),
+            "model choice affected result Debug"
+        );
+        assert!(!debug.contains(MODEL), "result Debug contains a model slug");
         assert!(
             !debug.contains(&format!("{:?}", MODEL.as_bytes())),
-            "{debug}"
+            "result Debug contains model slug bytes"
         );
         let record = record(Direction::ToShell, &result);
         assert_eq!(record.payload, None);
@@ -234,51 +289,83 @@ fn a_model_result_round_trips_but_never_records_its_choice() {
 #[test]
 fn a_rename_keeps_only_its_op_name_and_length() {
     const TITLE: &str = "Zqxrenamedtitle";
-    let rename = ControlToBrain::ThreadOp(ThreadOp::Rename {
-        thread: ThreadId(2),
-        title: ThreadTitle::new(TITLE).expect("valid"),
-    });
-    let record = record(Direction::ToBrain, &rename);
-    assert_eq!(record.payload, None);
-    let file = recording(&[record]);
+    let rename_to = |title| {
+        ControlToBrain::ThreadOp(ThreadOp::Rename {
+            thread: ThreadId(2),
+            title: ThreadTitle::new(title).expect("valid"),
+        })
+    };
+    let rename = rename_to(TITLE);
+    let original = record(Direction::ToBrain, &rename);
+    assert!(
+        original.payload.is_none(),
+        "rename recording contains a payload"
+    );
+    let file = recording(&[original]);
     assert!(!contains(&file, TITLE.as_bytes()), "the title was recorded");
     let mut out = Vec::new();
-    dump(&mut file.as_slice(), &mut out).expect("dumps");
-    assert_eq!(
-        String::from_utf8(out).expect("utf-8"),
-        format!(
-            "    0 Control shell -> brain  ThreadOp ({} bytes)\n1 frames\n",
-            wire_len(&rename, Pipe::Control)
-        )
+    assert_eq!(dump(&mut file.as_slice(), &mut out).expect("dumps"), 1);
+    let dump = String::from_utf8(out).expect("utf-8");
+    assert!(dump.contains(&format!(
+        "ThreadOp ({} bytes)",
+        wire_len(&rename, Pipe::Control)
+    )));
+    let other = rename_to("Abcupdatedlabel");
+    let other_file = recording(&[record(Direction::ToBrain, &other)]);
+    let mut other_dump = Vec::new();
+    super::dump(&mut other_file.as_slice(), &mut other_dump).expect("dumps");
+    assert!(
+        format!("{rename:?}") == format!("{other:?}")
+            && file == other_file
+            && dump.as_bytes() == other_dump,
+        "thread title affected diagnostics"
     );
+    for output in [format!("{rename:?}"), dump] {
+        assert!(!output.contains(TITLE));
+        assert!(!output.contains(&format!("{:?}", TITLE.as_bytes())));
+    }
 }
 
 #[test]
 fn an_account_op_keeps_its_fields_and_the_account_view_only_its_name() {
     const EMAIL: &str = "zqxperson@example.invalid";
     let op = ControlToBrain::AccountOp(AccountOp::SignIn);
-    let view = ControlToShell::Account(AccountView::SignedIn {
-        email: Some(AccountEmail::new(EMAIL).expect("valid")),
-        plan: PlanState::Enabled,
-        recovery: None,
-    });
+    let account = |email| {
+        ControlToShell::Account(AccountView::SignedIn {
+            email: Some(AccountEmail::new(email).expect("valid")),
+            plan: PlanState::Enabled,
+            recovery: None,
+        })
+    };
+    let view = account(EMAIL);
     let records = [
         record(Direction::ToBrain, &op),
         record(Direction::ToShell, &view),
     ];
-    assert!(records[0].payload.is_some(), "the op is content-free");
+    assert_eq!(records[0].payload.as_deref(), Some(&[11, 0][..]));
     assert_eq!(records[1].payload, None);
     let file = recording(&records);
     assert!(!contains(&file, EMAIL.as_bytes()), "the email was recorded");
     let mut out = Vec::new();
-    dump(&mut file.as_slice(), &mut out).expect("dumps");
-    assert_eq!(
-        String::from_utf8(out).expect("utf-8"),
-        format!(
-            "    0 Control shell -> brain  AccountOp(SignIn)\n    1 Control brain -> shell  Account ({} bytes)\n2 frames\n",
-            wire_len(&view, Pipe::Control)
-        )
+    assert_eq!(dump(&mut file.as_slice(), &mut out).expect("dumps"), 2);
+    let dump = String::from_utf8(out).expect("utf-8");
+    assert!(dump.contains("SignIn"));
+    assert!(dump.contains(&format!(
+        "Account ({} bytes)",
+        wire_len(&view, Pipe::Control)
+    )));
+    let other_file = recording(&[
+        records[0].clone(),
+        record(Direction::ToShell, &account("abcsomeone@local.testsite")),
+    ]);
+    let mut other_dump = Vec::new();
+    super::dump(&mut other_file.as_slice(), &mut other_dump).expect("dumps");
+    assert!(
+        file == other_file && dump.as_bytes() == other_dump,
+        "email affected the tap"
     );
+    assert!(!dump.contains(EMAIL));
+    assert!(!dump.contains(&format!("{:?}", EMAIL.as_bytes())));
 }
 
 #[test]
@@ -387,33 +474,42 @@ fn a_forged_payload_for_an_unlisted_op_still_prints_redacted() {
         len: u32::try_from(payload.len()).expect("small"),
         payload: Some(payload),
     };
-    let described = forged.describe();
-    assert!(!described.contains(NAME), "{described}");
-    assert!(described.starts_with("Settings ("), "{described}");
+    assert_eq!(
+        forged.describe(),
+        format!("Settings ({} bytes)", forged.len)
+    );
 }
 
 #[test]
 fn headers_must_be_this_version() {
-    assert!(read_header(&mut &MAGIC[..]).is_ok());
+    use super::DumpError;
+
+    read_header(&mut &b"KTAP\x02"[..]).expect("version 2");
     assert!(matches!(
-        read_header(&mut &MAGIC[..3]),
+        read_header(&mut &b"KTA"[..]),
         Err(FrameError::Truncated)
     ));
-    for bad in [*b"KTAP\x01", *b"XXXX\x02", [0, 0, 0, 0, 0]] {
+    for bad in [*b"XXXX\x02", [0, 0, 0, 0, 0]] {
         assert!(
             matches!(read_header(&mut &bad[..]), Err(FrameError::Malformed(_))),
             "{bad:?}"
         );
     }
     let mut out = Vec::new();
-    assert!(dump(&mut &b"KTAP\x01"[..], &mut out).is_err());
+    assert!(matches!(
+        dump(&mut &b"KTAP\x01"[..], &mut out),
+        Err(DumpError::Record {
+            seq: 0,
+            source: FrameError::Malformed(_)
+        })
+    ));
 }
 
 #[test]
 fn cut_and_corrupt_records_are_errors() {
     let file = recording(&[record(Direction::ToBrain, &ControlToBrain::Pong)]);
     let body = &file[MAGIC.len()..];
-    assert!(read(&mut &body[..0]).expect("clean end").is_none());
+    assert_eq!(read(&mut &body[..0]).expect("clean end"), None);
     for cut in 1..body.len() {
         assert!(
             matches!(read(&mut &body[..cut]), Err(FrameError::Truncated)),
@@ -421,38 +517,30 @@ fn cut_and_corrupt_records_are_errors() {
         );
     }
     let flag_at = body.len() - 1 - 1;
-    let corrupt = |at: usize, value: u8| {
+    for (at, value, field) in [
+        (0, 7, "pipe"),
+        (1, 7, "direction"),
+        (2, 0, "empty op"),
+        (3, b' ', "op text"),
+        (flag_at, 2, "flag"),
+    ] {
         let mut bytes = body.to_vec();
         bytes[at] = value;
-        read(&mut bytes.as_slice()).map(|_| ())
-    };
-    assert!(
-        matches!(corrupt(0, 7), Err(FrameError::Malformed(_))),
-        "pipe"
-    );
-    assert!(
-        matches!(corrupt(1, 7), Err(FrameError::Malformed(_))),
-        "direction"
-    );
-    assert!(
-        matches!(corrupt(2, 0), Err(FrameError::Malformed(_))),
-        "empty op"
-    );
-    assert!(
-        matches!(corrupt(3, b' '), Err(FrameError::Malformed(_))),
-        "op text"
-    );
-    assert!(
-        matches!(corrupt(flag_at, 2), Err(FrameError::Malformed(_))),
-        "flag"
-    );
+        assert!(
+            matches!(read(&mut bytes.as_slice()), Err(FrameError::Malformed(_))),
+            "{field}"
+        );
+    }
     let op_end = 3 + usize::from(body[2]);
     let mut over = body[..op_end].to_vec();
     over.extend(u32::MAX.to_le_bytes());
     over.push(0);
     assert!(matches!(
         read(&mut over.as_slice()),
-        Err(FrameError::TooLarge { .. })
+        Err(FrameError::TooLarge {
+            len: 4_294_967_295,
+            max: 65_536
+        })
     ));
 }
 
@@ -460,5 +548,8 @@ fn cut_and_corrupt_records_are_errors() {
 fn a_listed_payload_must_match_its_length() {
     let mut pong = record(Direction::ToBrain, &ControlToBrain::Pong);
     pong.len += 1;
-    assert!(write(&mut Vec::new(), &pong).is_err());
+    assert!(matches!(
+        write(&mut Vec::new(), &pong),
+        Err(FrameError::Malformed(_))
+    ));
 }

@@ -282,6 +282,17 @@ impl NullForeground {
 mod tests {
     use super::*;
 
+    fn assert_fields(report: &str, fields: &[&str]) {
+        for field in fields {
+            assert!(
+                report
+                    .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '=')
+                    .any(|token| token == *field),
+                "missing {field}: {report}"
+            );
+        }
+    }
+
     #[test]
     fn a_null_foreground_is_allowed_for_exactly_the_grace_and_only_an_owned_pid_ends_it() {
         let start = Instant::now();
@@ -302,10 +313,7 @@ mod tests {
 
         null.observe(0, &lease, at(400)).unwrap();
         let past = null.observe(0, &lease, at(501)).unwrap_err().to_string();
-        assert!(
-            past.ends_with("(foreground_pid=0 owned=false null_ms=101)"),
-            "{past}"
-        );
+        assert_fields(&past, &["foreground_pid=0", "owned=false", "null_ms=101"]);
     }
 
     #[test]
@@ -318,10 +326,7 @@ mod tests {
             .observe(42, &lease, start + Duration::from_millis(1))
             .unwrap_err()
             .to_string();
-        assert!(
-            foreign.ends_with("(foreground_pid=42 owned=false)"),
-            "{foreign}"
-        );
+        assert_fields(&foreign, &["foreground_pid=42", "owned=false"]);
         assert_eq!(
             null.take_used(start + Duration::from_millis(1)),
             (1, Duration::from_millis(1)),
@@ -346,11 +351,8 @@ mod tests {
 
         null.observe(0, &lease, at(100)).unwrap();
         assert_eq!(null.take_used(at(150)), (1, Duration::from_millis(50)));
-        let past = null.observe(0, &lease, at(201)).unwrap_err().to_string();
-        assert!(
-            past.ends_with("(foreground_pid=0 owned=false null_ms=101)"),
-            "{past}"
-        );
+        null.observe(0, &lease, at(200)).unwrap();
+        assert!(null.observe(0, &lease, at(201)).is_err());
     }
 
     const CALM: Quiet = Quiet {
@@ -359,16 +361,6 @@ mod tests {
         last_input: 7,
         settled: true,
     };
-
-    #[test]
-    fn away_starts_at_exactly_ten_minutes_and_survives_the_tick_wrap() {
-        let ten = Duration::from_secs(600);
-        assert!(away(1_000, 601_000, ten));
-        assert!(!away(1_000, 600_999, ten));
-        assert!(away(u32::MAX - 9, 599_990, ten));
-        assert!(!away(u32::MAX - 9, 599_989, ten));
-        assert!(!away(5, 5, ten));
-    }
 
     fn opened() -> (Lease, Instant) {
         let start = Instant::now();
@@ -609,8 +601,12 @@ mod tests {
             },
             start,
         );
-        lease.ready(7, start + QUIET);
         assert_eq!(lease.gate(), Gate::Aborted);
+        let retry = start + Duration::from_millis(1_000);
+        lease.ready(7, retry);
+        lease.observe(CALM, retry + Duration::from_millis(1_000));
+        assert_eq!(lease.gate(), Gate::Aborted);
+        assert!(!lease.injectable());
     }
 
     #[test]

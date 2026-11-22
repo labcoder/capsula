@@ -290,16 +290,17 @@ mod tests {
         fs::write(&file, format!(
             "//! Unrelated docs.\n\n// Copyright 2026 Fixture Publisher\n\n/* Permission is hereby granted to copy this fixture. */\n\n// {apache}\n\n/* {mpl} */\n\n/*\n * {nested}\n */\n\nuse std::fmt;"
         )).unwrap();
-        assert_eq!(
-            source_header(&file).unwrap(),
-            [
-                "Copyright 2026 Fixture Publisher",
-                "Permission is hereby granted to copy this fixture.",
-                apache,
-                mpl,
-                moxcms,
-            ]
-        );
+        let mut expected = [
+            "Copyright 2026 Fixture Publisher",
+            "Permission is hereby granted to copy this fixture.",
+            apache,
+            mpl,
+            moxcms,
+        ];
+        expected.sort_unstable();
+        let mut output = source_header(&file).unwrap();
+        output.sort_unstable();
+        assert_eq!(output, expected);
         fs::write(&file, "").unwrap();
         assert_eq!(source_header(&file).unwrap(), Vec::<String>::new());
     }

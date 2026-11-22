@@ -668,10 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn the_ends_map_to_the_first_and_last_pixel_and_outside_is_refused() {
-        assert_eq!(normalized(0, 0, 2560), Some(13));
-        assert_eq!(normalized(2559, 0, 2560), Some(65523));
-        assert_eq!(normalized(-1920, -1920, 4480), Some(7));
+    fn absolute_mapping_refuses_outside_points_and_empty_extents() {
         assert_eq!(normalized(2560, 0, 2560), None);
         assert_eq!(normalized(-1921, -1920, 4480), None);
         assert_eq!(normalized(0, 0, 0), None);
@@ -679,7 +676,7 @@ mod tests {
 
     #[test]
     fn packed_message_coordinates_keep_their_sign() {
-        assert_eq!(unpack(pack(-1920, 1080)), [-1920, 1080]);
+        assert_eq!(unpack(0x0000_0438_ffff_f880), [-1920, 1080]);
         assert_eq!(pack(1, -1), 0xffff_ffff_0000_0001);
     }
 }

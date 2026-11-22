@@ -153,19 +153,53 @@ fn a_fragmented_welcome_uses_one_absolute_deadline() {
     let mut wire = Vec::new();
     frame::write(&mut wire, &welcome_frame(), Pipe::Control).expect("valid Welcome");
     server.write_all(&wire[..HEADER_LEN]).expect("write header");
-    let client = client.until(Instant::now() + Duration::from_millis(180));
+    let budget = Duration::from_millis(800);
     thread::scope(|scope| {
-        scope.spawn(move || {
-            thread::sleep(Duration::from_millis(110));
+        let (ready, start) = mpsc::sync_channel(1);
+        let writes = scope.spawn(move || {
+            let deadline = Instant::now() + budget;
+            ready.send(deadline).expect("publish the fixture deadline");
+            let fragment_time = deadline
+                .checked_sub(Duration::from_millis(400))
+                .expect("fragment time is within the fixture budget");
+            thread::sleep(fragment_time.saturating_duration_since(Instant::now()));
             server
                 .write_all(&wire[HEADER_LEN..=HEADER_LEN])
                 .expect("write fragment");
-            thread::sleep(Duration::from_millis(110));
+            let fragment_at = Instant::now();
+            let tail_time = deadline + Duration::from_millis(200);
+            thread::sleep(tail_time.saturating_duration_since(Instant::now()));
+            let tail_started = Instant::now();
             server
                 .write_all(&wire[HEADER_LEN + 1..])
                 .expect("write tail");
+            (fragment_at, tail_started, Instant::now(), server)
         });
+        let deadline = start
+            .recv_timeout(Duration::from_secs(5))
+            .expect("fragment writer is ready");
+        let client = client.until(deadline);
         let result = welcome(&client, &hello(capability()));
+        let finished_at = Instant::now();
+        let (fragment_at, tail_started, tail_written, _server) =
+            writes.join().expect("fragmented Welcome");
+        assert!(
+            fragment_at < deadline,
+            "payload fragment was not sent in time"
+        );
+        assert!(tail_started > deadline, "tail was sent too soon");
+        assert!(
+            finished_at >= deadline,
+            "the client timed out before its deadline"
+        );
+        assert!(
+            fragment_at < finished_at && finished_at < tail_started,
+            "the client timed out between the two payload writes"
+        );
+        assert!(
+            tail_written < fragment_at + budget,
+            "tail was too late even for a reset deadline"
+        );
         assert_eq!(
             result
                 .expect_err("whole Welcome was late")

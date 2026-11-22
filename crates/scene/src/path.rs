@@ -261,10 +261,18 @@ mod tests {
             Ok(())
         })
         .expect("valid subset");
-        assert_eq!(segments.len(), 8);
         assert_eq!(
-            segments.last(),
-            Some(&Segment::Quad([[30.0, 10.0], [35.0, 5.0]]))
+            segments,
+            [
+                Segment::Move([0.0, 0.0]),
+                Segment::Line([10.0, 0.0]),
+                Segment::Line([10.0, 10.0]),
+                Segment::Close,
+                Segment::Move([20.0, 0.0]),
+                Segment::Line([25.0, 0.0]),
+                Segment::Line([25.0, 5.0]),
+                Segment::Quad([[30.0, 10.0], [35.0, 5.0]]),
+            ]
         );
         assert_eq!(work.segments(1.0).expect("bounded"), 9);
         let mut compact = Vec::new();

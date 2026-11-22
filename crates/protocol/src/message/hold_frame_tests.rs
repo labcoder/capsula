@@ -110,7 +110,11 @@ fn screen_hold_states_append_a_redacted_control_tag() {
 #[test]
 fn a_held_screens_outcome_appends_a_redacted_control_tag() {
     use super::{HeldScreen, ScreenClass};
-    let mut outcomes = vec![(HeldScreen::Attached, 7)];
+    let mut outcomes = vec![
+        (HeldScreen::Attached, 7),
+        (HeldScreen::Withdrawn, 7),
+        (HeldScreen::Screen, 7),
+    ];
     for (index, class) in [
         ScreenClass::NotReady,
         ScreenClass::NothingThere,
@@ -133,10 +137,10 @@ fn a_held_screens_outcome_appends_a_redacted_control_tag() {
         (HeldScreen::Attached, 0),
         (HeldScreen::NotIncluded(ScreenClass::NotReady), 1),
         (HeldScreen::Withdrawn, 2),
+        (HeldScreen::Screen, 3),
     ] {
         assert_eq!(postcard::to_allocvec(&outcome).expect("encodes")[0], tag);
     }
-    outcomes.push((HeldScreen::Withdrawn, 7));
     for (outcome, size) in outcomes {
         let message = ControlToShell::HoldScreen {
             gesture: GESTURE,
@@ -159,6 +163,21 @@ fn round_trip<M: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
     assert_eq!(
         frame::decode::<M>(&frame[HEADER_LEN..]).expect("decodes"),
         *message
+    );
+}
+
+fn round_trip_within_cap<M: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
+    message: &M,
+    pipe: Pipe,
+) {
+    let frame = frame::encode(message, pipe).expect("encodes within cap");
+    let size = frame.len() - HEADER_LEN;
+    assert!(size <= pipe.max_payload());
+    assert_eq!(
+        frame::read::<M>(&mut frame.as_slice(), pipe)
+            .expect("decodes")
+            .as_ref(),
+        Some(message)
     );
 }
 
@@ -303,7 +322,7 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
         RunOrigin::Typed { turn: u32::MAX },
         RunOrigin::Hold { gesture: GESTURE },
     ] {
-        round_trip(
+        round_trip_within_cap(
             &ControlToShell::RunState {
                 run: RunId(u64::MAX),
                 thread: ThreadId(u64::MAX),
@@ -312,10 +331,9 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
                 origin: Some(origin),
             },
             Pipe::Control,
-            30,
         );
     }
-    round_trip(
+    round_trip_within_cap(
         &ControlToShell::RunState {
             run: RunId(u64::MAX),
             thread: ThreadId(u64::MAX),
@@ -324,21 +342,16 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
             origin: None,
         },
         Pipe::Control,
-        24,
     );
-    round_trip(
+    round_trip_within_cap(
         &ControlToShell::TurnRefused {
             turn: u32::MAX,
             thread: Some(ThreadId(u64::MAX)),
         },
         Pipe::Control,
-        17,
     );
-    for (screen, size) in [
-        (ScreenChoice::None, 19),
-        (ScreenChoice::Include { lease: LEASE }, 24),
-    ] {
-        round_trip(
+    for screen in [ScreenChoice::None, ScreenChoice::Include { lease: LEASE }] {
+        round_trip_within_cap(
             &DataToBrain::TextSubmit {
                 turn: u32::MAX,
                 screen,
@@ -346,7 +359,6 @@ fn run_origins_screen_choices_and_refusals_round_trip() {
                 text: Content::default(),
             },
             Pipe::Data,
-            size,
         );
     }
 }
@@ -472,15 +484,16 @@ fn a_pointer_path_holds_at_most_2048_points() {
 fn where_the_user_pointed_is_absent_from_debug_and_from_the_tap() {
     const IN_PATH: i32 = 1_357_924_680;
     const AT_RELEASE: i32 = -1_246_813_579;
-    let message = ControlToBrain::ScreenRelease {
+    let release = |in_path, at_release| ControlToBrain::ScreenRelease {
         gesture: GestureId(1),
         lease: LeaseGeneration(2),
         t_qpc: 3,
         excluded_qpc: 4,
-        pointer: ReleasePointer(PhysicalPoint([AT_RELEASE, AT_RELEASE])),
-        path: PointerPath(vec![PhysicalPoint([IN_PATH, IN_PATH])]),
+        pointer: ReleasePointer(PhysicalPoint([at_release, at_release])),
+        path: PointerPath(vec![PhysicalPoint([in_path, in_path])]),
         notice: None,
     };
+    let message = release(IN_PATH, AT_RELEASE);
     assert_eq!(
         format!("{message:?}"),
         "ScreenRelease { gesture: GestureId(1), lease: LeaseGeneration(2), t_qpc: 3, \
@@ -496,6 +509,28 @@ fn where_the_user_pointed_is_absent_from_debug_and_from_the_tap() {
         format!("{record:?}"),
         record.describe(),
     ];
+    let other = release(1_682_015_497, -1_579_802_416);
+    let other_payload = postcard::to_allocvec(&other).expect("encodes");
+    assert_eq!(payload.len(), other_payload.len());
+    let other_record = Record::of(
+        Pipe::Control,
+        Direction::ToBrain,
+        &other,
+        other_payload.len(),
+    )
+    .expect("records");
+    let mut other_recording = Vec::new();
+    tap::write(&mut other_recording, &other_record).expect("writes");
+    assert!(
+        texts
+            == [
+                format!("{other:?}"),
+                format!("{other_record:?}"),
+                other_record.describe()
+            ]
+            && recording == other_recording,
+        "pointer coordinates affected diagnostics"
+    );
     let within = |bytes: &[u8], part: &[u8]| bytes.windows(part.len()).any(|at| at == part);
     for sentinel in [IN_PATH, AT_RELEASE] {
         let wire = postcard::to_allocvec(&sentinel).expect("encodes");
@@ -512,31 +547,26 @@ fn where_the_user_pointed_is_absent_from_debug_and_from_the_tap() {
 }
 
 #[test]
-fn a_screen_picture_appends_a_held_screen_value() {
-    use super::HeldScreen;
-    assert_eq!(
-        postcard::to_allocvec(&HeldScreen::Screen).expect("encodes"),
-        [3]
-    );
-    let message = ControlToShell::HoldScreen {
-        gesture: GESTURE,
-        outcome: HeldScreen::Screen,
-    };
-    assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], 32);
-    round_trip(&message, Pipe::Control, 7);
-    redacted(&message, Direction::ToShell, "HoldScreen", 7);
-}
-
-#[test]
 fn held_words_and_their_receipt_append_redacted_data_tags() {
     let sentinel = "zqxsentinellabel";
-    let words = super::DataToShell::HoldWords {
+    let words = |text: &str| super::DataToShell::HoldWords {
         gesture: GESTURE,
-        words: Content::from(sentinel),
+        words: Content::from(text),
     };
+    let diagnostics = |message: &super::DataToShell, size| {
+        let record = Record::of(Pipe::Data, Direction::ToShell, message, size).expect("records");
+        let mut bytes = Vec::new();
+        tap::write(&mut bytes, &record).expect("writes");
+        (format!("{message:?} {record:?}"), bytes)
+    };
+    let size = 7 + sentinel.len();
+    assert!(
+        diagnostics(&words(sentinel), size) == diagnostics(&words("abcanotherphrase"), size),
+        "held transcript affected diagnostics"
+    );
     let stored = super::DataToShell::HoldStored { gesture: GESTURE };
     for (message, tag, size, op) in [
-        (words, 22, 7 + sentinel.len(), "HoldWords"),
+        (words(sentinel), 22, size, "HoldWords"),
         (stored, 23, 6, "HoldStored"),
     ] {
         assert_eq!(postcard::to_allocvec(&message).expect("encodes")[0], tag);
@@ -554,12 +584,16 @@ fn held_words_and_their_receipt_append_redacted_data_tags() {
     }
     let longest = super::DataToShell::HoldWords {
         gesture: GESTURE,
-        words: Content::from("a".repeat(super::MAX_TRANSCRIPT_BYTES)),
+        words: Content::from("a".repeat(16_384)),
     };
-    assert!(frame::encode(&longest, Pipe::Data).is_ok());
+    let bytes = frame::encode(&longest, Pipe::Data).expect("max transcript fits");
+    assert_eq!(
+        frame::read(&mut bytes.as_slice(), Pipe::Data).expect("decodes"),
+        Some(longest)
+    );
 }
 #[test]
-fn a_thread_events_change_appends_data_tag_24_and_the_next_tag_is_refused() {
+fn a_thread_events_change_appends_data_tag_24_and_an_unknown_tag_is_refused() {
     let message = super::DataToShell::EventsChanged {
         thread: ThreadId(u64::MAX),
     };
@@ -570,7 +604,10 @@ fn a_thread_events_change_appends_data_tag_24_and_the_next_tag_is_refused() {
         (record.op.as_str(), record.payload.as_ref()),
         ("EventsChanged", None)
     );
-    assert!(frame::decode::<super::DataToShell>(&[25, 7]).is_err());
+    assert!(matches!(
+        frame::decode::<super::DataToShell>(&[0x7f, 7]),
+        Err(frame::FrameError::Malformed(_))
+    ));
     assert_eq!(
         frame::decode::<super::DataToShell>(&[24, 7]).expect("decodes"),
         super::DataToShell::EventsChanged {

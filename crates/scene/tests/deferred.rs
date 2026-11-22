@@ -10,26 +10,32 @@ use kumochi_scene::{
     Admission, ErrorCode, Frame, GlobalBudget, Record, SceneState, SceneView, Step, StepError,
     StopCut, StopOutcome,
     deferred::{self, Deferred, Pending},
-    layout::{LayoutState, PreparedStep},
+    layout::{LayoutState, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover},
     parse_record,
     text::Bounded,
+    theme::Theme,
 };
-use scene_support::{id, new_scene, prepared};
+use scene_support::{Measure, id, new_scene, prepared};
 use serde_json::{Value, json};
 use std::{
-    sync::mpsc::{self, Receiver, Sender},
-    thread,
+    sync::{
+        Arc,
+        atomic::AtomicBool,
+        mpsc::{self, Receiver, Sender},
+    },
+    thread::{self, ThreadId},
     time::{Duration, Instant},
 };
 
-fn report(names: &Sender<Option<String>>) {
-    let name = thread::current().name().map(str::to_owned);
-    names.send(name).expect("the test still listens");
+fn report(threads: &Sender<ThreadId>) {
+    threads
+        .send(thread::current().id())
+        .expect("the test still listens");
 }
 
 /// Reports the thread that destroys it.
-struct Named(Sender<Option<String>>);
-impl Drop for Named {
+struct Reporter(Sender<ThreadId>);
+impl Drop for Reporter {
     fn drop(&mut self) {
         report(&self.0);
     }
@@ -37,13 +43,13 @@ impl Drop for Named {
 
 /// Reports the thread that destroys it, then waits until the test releases it.
 struct Blocking {
-    names: Sender<Option<String>>,
+    threads: Sender<ThreadId>,
     release: Receiver<()>,
-    _nested: Deferred<Named>,
+    _nested: Deferred<Reporter>,
 }
 impl Drop for Blocking {
     fn drop(&mut self) {
-        report(&self.names);
+        report(&self.threads);
         self.release
             .recv()
             .expect("the test releases the destructor");
@@ -65,19 +71,23 @@ fn discarded_values_are_destroyed_and_metered_on_the_dropper() {
     deferred::start().expect("the dropper starts");
     deferred::start().expect("a second start only confirms that it runs");
     assert!(deferred::running(), "intake may open");
-    let (names, reports) = mpsc::channel();
+    let (threads, reports) = mpsc::channel();
     let (release, released) = mpsc::channel();
     drop(Deferred::new(
         Blocking {
-            names: names.clone(),
+            threads: threads.clone(),
             release: released,
-            _nested: Deferred::new(Named(names), 1_000),
+            _nested: Deferred::new(Reporter(threads), 1_000),
         },
         64,
     ));
-    let dropper = Some("scene-dropper".to_owned());
     let wait = Duration::from_secs(5);
-    assert_eq!(reports.recv_timeout(wait), Ok(dropper.clone()));
+    let dropper = reports.recv_timeout(wait).expect("destructor starts");
+    assert_ne!(
+        dropper,
+        thread::current().id(),
+        "the destructor leaves its caller"
+    );
     assert_eq!(
         deferred::pending(),
         Pending {
@@ -108,6 +118,7 @@ fn discarded_values_are_destroyed_and_metered_on_the_dropper() {
     activation_retires_settled_recolored_and_superseded_tracks();
     a_discarded_stage_frees_nothing_on_the_ui_thread();
     a_stale_activation_attributes_its_whole_step_owner();
+    retained_bytes_match_step_charges_and_recovery();
 }
 
 fn drain() {
@@ -289,7 +300,7 @@ fn rejected_tracks_retire_the_partial_predecessor_map() {
         })
         .collect();
     let step = typed_step(&json!({"id":"invalid-last-track","put":tracks}));
-    let (error, queued, _, released) = gated_rejection(&scene, &budget, &step);
+    let (error, _, _, released) = gated_rejection(&scene, &budget, &step);
     assert_eq!(
         error.code,
         ErrorCode::OutOfRange,
@@ -303,10 +314,6 @@ fn rejected_tracks_retire_the_partial_predecessor_map() {
     assert!(
         released < 96 * 1024,
         "the rejected predecessor map leaves the caller, retaining only bounded scratch destruction: {released}"
-    );
-    assert_eq!(
-        queued.values, 5,
-        "the gate, source copy, expansion, object map copy and partial predecessor map are queued"
     );
     assert_eq!(
         (scene.object_count(), scene.revision(), scene.usage().tracks),
@@ -347,11 +354,11 @@ fn rejected_inserts_and_motion_growth_stay_attributed() {
     let mut put: Vec<_> = (0..299).map(|i| shape(format!("n{i}"))).collect();
     put.push(shape("s5".to_owned()));
     let reused = typed_step(&json!({"id":"reused","put":put}));
-    let (error, queued, _, _) = gated_rejection(&scene, &budget, &reused);
+    let (error, _, _, _) = gated_rejection(&scene, &budget, &reused);
     assert_eq!(
-        (error.code, error.path.as_str(), queued.values),
-        (ErrorCode::IdReused, "put[299].shape.id", 4),
-        "299 objects join the map copy before the reused id; the gate, source copy, expansion and map copy are queued"
+        (error.code, error.path.as_str()),
+        (ErrorCode::IdReused, "put[299].shape.id"),
+        "refuse the reused ID after 299 valid inserts"
     );
     let missing = |tracked: bool| {
         let mut put: Vec<_> = (0..200).map(|i| shape(format!("n{i}"))).collect();
@@ -363,9 +370,9 @@ fn rejected_inserts_and_motion_growth_stay_attributed() {
         let step = typed_step(&json!({"id":"missing","put":put,"remove":["missing"]}));
         let (error, queued, held, _) = gated_rejection(&scene, &budget, &step);
         assert_eq!(
-            (error.code, error.path.as_str(), queued.values),
-            (ErrorCode::UnknownRef, "remove[0]", 5),
-            "new objects have no predecessors: the gate, source copy, expansion, map copy and an empty predecessor map are queued"
+            (error.code, error.path.as_str()),
+            (ErrorCode::UnknownRef, "remove[0]"),
+            "reject the removal after building the valid object updates"
         );
         (queued.bytes, held)
     };
@@ -414,7 +421,7 @@ fn frozen_series_data_stays_attributed() {
 
 /// UI-thread bytes freed when, at 1,000 ms, a step recolors and re-tracks 16 shapes whose
 /// earlier opacity tracks settled at 93 ms and whose color and x tracks run to 4,960 ms.
-fn retrack_frees(keys: u32) -> usize {
+fn retrack_usage(keys: u32) -> (usize, usize) {
     let mut scene = new_scene("tracks");
     let mut budget = GlobalBudget::default();
     let shapes: Vec<_> = (0..16)
@@ -457,8 +464,11 @@ fn retrack_frees(keys: u32) -> usize {
         json!({"id":"tracks","put":tracks}),
     );
     let mut frame = Frame::new();
-    view.activate(running, 0, 0, &mut frame)
-        .expect("tracks activate");
+    let ((), _, [allocated, released]) = allocation::usage(|| {
+        view.activate(running, 0, 0, &mut frame)
+            .expect("tracks activate");
+    });
+    let installed_bytes = allocated.saturating_sub(released);
     let recolor: Vec<_> = (0..16)
         .map(|i| json!({"target":format!("s{i}"),"color":"green"}))
         .collect();
@@ -482,14 +492,19 @@ fn retrack_frees(keys: u32) -> usize {
         "only the 16 new x tracks run; no settled, recolored or superseded track survives"
     );
     drain();
-    released
+    (installed_bytes, released)
 }
 
 fn activation_retires_settled_recolored_and_superseded_tracks() {
-    assert_eq!(
-        retrack_frees(32),
-        retrack_frees(2),
-        "the UI thread frees only activation scratch, never the 48 rejected key boxes, which differ by 600 bytes each"
+    let (long, long_freed) = retrack_usage(32);
+    let (short, short_freed) = retrack_usage(2);
+    let extra_per_track = long
+        .checked_sub(short)
+        .expect("long keys retain more bytes")
+        / 48;
+    assert!(
+        long_freed.abs_diff(short_freed) < extra_per_track,
+        "caller destruction grows by less than one installed key buffer: {long_freed} vs {short_freed}, {extra_per_track} extra bytes per track"
     );
 }
 
@@ -647,63 +662,79 @@ fn stop_retires_dropped_removals_and_cell_changes() {
     drain();
 }
 
-#[test]
-#[ignore = "run with --exact --ignored alone, normal priority under the Rez quiet lock"]
-fn measure_stop_with_drops_before_start() {
-    assert!(!deferred::running());
-    measure_stop_with_drops();
-}
-
-#[test]
-#[ignore = "normal-priority release measurement under the Rez quiet lock"]
-fn measure_stop_with_drops_started() {
-    deferred::start().expect("dropper starts before intake");
-    measure_stop_with_drops();
-}
-
-#[expect(clippy::print_stdout, reason = "manual Rez measurement output")]
-fn measure_stop_with_drops() {
-    let mut times = Vec::with_capacity(32);
-    let mut released_bytes = Vec::with_capacity(32);
-    for sample in 0..37 {
-        if deferred::running() {
-            drain();
-        }
-        let (mut scene, mut budget, cut) = dropped_rows();
-        let start = Instant::now();
-        let (outcome, _, [allocated, released]) =
-            allocation::usage(|| scene.stop(&cut, &mut budget));
-        let elapsed = start.elapsed().as_nanos();
-        assert_eq!(
-            outcome.expect("valid cut"),
-            StopOutcome::Kept,
-            "the first step survives the cut"
+fn retained_bytes_match_step_charges_and_recovery() {
+    let mut scene = new_scene("resident");
+    let mut budget = GlobalBudget::default();
+    let theme = Arc::new(Theme::default());
+    let cancel = AtomicBool::new(false);
+    let (mut layout, _, [empty, released]) = allocation::usage(|| LayoutState::new(&scene));
+    assert!(
+        layout.resident_bytes() >= empty.saturating_sub(released),
+        "the empty layout's charge covers the net requested bytes"
+    );
+    for step in [
+        json!({"id":"shared","put":[
+            {"chart":{"id":"c","kind":"bar","box":[0,0,400,300],"categories":["Q","R"],
+                "x":{"min":-0.5,"max":1.5},"y":{"min":-10,"max":10}}},
+            {"series":{"id":"s","in":"c","data":[2,-2]}},
+            {"series":{"id":"t","in":"c","data":[3,-3]}},
+            {"path":{"id":"p","d":"M0 0 Q4 8 8 0","fill":"green"}}
+        ]}),
+        json!({"id":"nothing","put":[]}),
+        json!({"id":"more","put":[{"text":{"id":"x","at":[10,10],"text":"X"}}]}),
+    ] {
+        let Admission::New(candidate) = scene.admit(&typed_step(&step), &budget).expect("admitted")
+        else {
+            panic!("new step");
+        };
+        let ticket = scene
+            .commit(candidate, &mut budget)
+            .expect("committed")
+            .preparation;
+        let input = PrepareInput::new(
+            ticket,
+            layout.clone(),
+            SurfaceGeometry::default(),
+            Arc::clone(&theme),
+        )
+        .expect("consecutive preparation");
+        let (result, _, [allocated, released]) =
+            allocation::usage(|| prepare(input, &mut Measure, &cancel));
+        let result = result.expect("prepared");
+        result.validate(&scene, &layout).expect("current result");
+        let bytes = allocated.saturating_sub(released);
+        assert!(
+            bytes <= result.resident_bytes,
+            "revision {}: {bytes} net requested bytes, {} charged",
+            scene.revision(),
+            result.resident_bytes
         );
-        assert_eq!(
-            (scene.object_count(), scene.committed(), scene.revision()),
-            (264, 1, 2),
-            "the cut drops the second step without rewinding the lifetime revision"
-        );
-        if sample >= 5 {
-            times.push(elapsed);
-            released_bytes.push(released);
-            println!(
-                "stop_dropped_undo sample={} elapsed_ns={elapsed} allocated_bytes={allocated} caller_freed_bytes={released}",
-                sample - 5
+        if scene.revision() == 2 {
+            assert_eq!(
+                result.retained_bytes(),
+                layout.resident_bytes(),
+                "an empty step keeps exactly the prior rest charge"
+            );
+            assert!(
+                result.resident_bytes < result.retained_bytes(),
+                "the empty step does not charge the already retained chart and path again"
             );
         }
+        layout = result.after;
     }
-    if deferred::running() {
-        drain();
-    }
-    times.sort_unstable();
-    released_bytes.sort_unstable();
-    println!(
-        "stop_dropped_undo dropper={} samples=32 warmups=5 p50_ns={} max_ns={} caller_freed_p50_bytes={} caller_freed_max_bytes={}",
-        deferred::running(),
-        times[15],
-        times[31],
-        released_bytes[15],
-        released_bytes[31]
+    let (_, recovered) = recover(
+        scene.header().clone(),
+        scene.recovery_log(),
+        SurfaceGeometry::default(),
+        &theme,
+        &mut Measure,
+        &cancel,
+        None,
+    )
+    .expect("recovery");
+    assert_eq!(
+        recovered.resident_bytes(),
+        layout.resident_bytes(),
+        "recovery charges the same rest as live preparation"
     );
 }

@@ -1,6 +1,10 @@
 //! Scene-format behavior and privacy regressions.
-use kumochi_scene::record::{Anchor, Cell, Color, KeyValue, Point, Start};
-use kumochi_scene::{ErrorCode, Finite, StepError, Text, WireId, parse_draw_record, parse_record};
+use kumochi_scene::record::{
+    Anchor, Cell, Color, KeyValue, Others, Point, Start, Surface, Version,
+};
+use kumochi_scene::{
+    Begin, ErrorCode, Finite, Record, StepError, Text, WireId, parse_draw_record, parse_record,
+};
 use serde::{Serialize, de::DeserializeOwned};
 
 fn round_trip<T: Serialize + DeserializeOwned + PartialEq>(value: &T) {
@@ -58,72 +62,68 @@ fn strict_records() {
     assert_eq!(missing.code, ErrorCode::MissingField);
     assert_eq!(missing.path.as_str(), "alt");
     let inline = br#"{"begin":{"v":1,"scene":"s","surface":"inline","alt":""}}"#;
-    assert!(parse_record(inline).is_ok());
+    let expected = Begin {
+        v: Version::V1,
+        scene: WireId::try_from("s".to_owned()).expect("valid id"),
+        surface: Surface::Inline,
+        size: None,
+        title: None,
+        alt: Text::try_from(String::new()).expect("empty alt is valid"),
+        others: Others::Clear,
+        display: None,
+    };
+    assert_eq!(
+        parse_record(inline).expect("generic inline begin"),
+        Record::Begin(expected.clone())
+    );
     let unsupported = parse_draw_record(inline).expect_err("draw tool rejects inline begin");
     assert_eq!(unsupported.step, None);
     assert_eq!(unsupported.code, ErrorCode::Unsupported);
     assert_eq!(unsupported.path.as_str(), "surface");
     assert_eq!(unsupported.tool_text(), "surface: scene.Unsupported");
-    assert!(
-        parse_draw_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":""}}"#).is_ok()
+    assert_eq!(
+        parse_draw_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":""}}"#)
+            .expect("draw tool overlay begin"),
+        Record::Begin(Begin {
+            surface: Surface::Overlay,
+            ..expected
+        })
     );
 }
 #[test]
-fn the_draw_tool_supplies_the_only_version_when_a_begin_omits_it() {
-    let unversioned = br#"{"begin":{"scene":"s","surface":"overlay","alt":"a"}}"#;
-    let missing = parse_record(unversioned).expect_err("the generic contract keeps v required");
-    assert_eq!(
-        (missing.path.as_str(), missing.code),
-        ("v", ErrorCode::MissingField)
-    );
-    assert_eq!(
-        parse_draw_record(unversioned).expect("the draw tool supplies v"),
-        parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}}"#)
-            .expect("an explicit version")
-    );
-    for (json, path, code) in [
+fn the_draw_tool_defaults_only_omitted_begin_surface_and_version() {
+    let explicit = parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}}"#)
+        .expect("explicit header");
+    for (json, missing) in [
+        (r#"{"begin":{"scene":"s","alt":"a"}}"#, None),
+        (r#"{"begin":{"v":1,"scene":"s","alt":"a"}}"#, None),
         (
-            r#"{"begin":{"v":2,"scene":"s","surface":"overlay","alt":"a"}}"#,
-            "v",
-            ErrorCode::WrongVersion,
+            r#"{"begin":{"scene":"s","surface":"overlay","alt":"a"}}"#,
+            Some("v"),
         ),
+    ] {
+        assert_eq!(
+            parse_draw_record(json.as_bytes()).expect("draw defaults"),
+            explicit
+        );
+        let error = parse_record(json.as_bytes()).expect_err("generic parsing stays strict");
+        assert_eq!(error.code, ErrorCode::MissingField, "{json}");
+        if let Some(path) = missing {
+            assert_eq!(error.path.as_str(), path, "{json}");
+        }
+    }
+    for (json, path, code) in [
+        (r#"{"begin":{"scene":"s"}}"#, "alt", ErrorCode::MissingField),
         (
             r#"{"begin":{"scene":"s","surface":"overlay"}}"#,
             "alt",
             ErrorCode::MissingField,
         ),
         (
-            r#"{"begin":{"scene":"s","surface":"inline","alt":"a"}}"#,
-            "surface",
-            ErrorCode::Unsupported,
+            r#"{"begin":{"v":2,"scene":"s","surface":"overlay","alt":"a"}}"#,
+            "v",
+            ErrorCode::WrongVersion,
         ),
-    ] {
-        let error = parse_draw_record(json.as_bytes()).expect_err("still refused");
-        assert_eq!((error.path.as_str(), error.code), (path, code), "{json}");
-    }
-}
-
-#[test]
-fn the_draw_tool_defaults_only_omitted_begin_surface_and_version() {
-    let explicit = parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":"a"}}"#)
-        .expect("explicit header");
-    for json in [
-        r#"{"begin":{"scene":"s","alt":"a"}}"#,
-        r#"{"begin":{"v":1,"scene":"s","alt":"a"}}"#,
-    ] {
-        assert_eq!(
-            parse_draw_record(json.as_bytes()).expect("draw defaults"),
-            explicit
-        );
-        assert_eq!(
-            parse_record(json.as_bytes())
-                .expect_err("generic parsing stays strict")
-                .code,
-            ErrorCode::MissingField
-        );
-    }
-    for (json, path, code) in [
-        (r#"{"begin":{"scene":"s"}}"#, "alt", ErrorCode::MissingField),
         (
             r#"{"begin":{"v":2,"scene":"s","alt":"a"}}"#,
             "v",
@@ -193,8 +193,9 @@ fn draw_defaults_reject_duplicate_outer_begins_instead_of_picking_the_last() {
 
 #[test]
 fn text_and_list_boundaries_are_not_truncated() {
-    let accepted = Text::try_from("é".repeat(400));
-    assert!(accepted.is_ok(), "400 Unicode scalars are legal");
+    let exact = "é".repeat(400);
+    let accepted = Text::try_from(exact.clone()).expect("400 Unicode scalars are legal");
+    assert_eq!(accepted.as_str(), exact);
     assert_eq!(
         Text::try_from("é".repeat(401)).err(),
         Some(ErrorCode::TooLong)
@@ -305,14 +306,22 @@ fn binary_payloads_cannot_bypass_validation() {
 }
 #[test]
 fn errors_and_debug_do_not_echo_drawing_content() {
-    let sentinel = "private-label-sentinel".repeat(25);
-    let json = serde_json::json!({"step":{"id":"private-id-sentinel","put":[{"node":{"id":"n","label":sentinel}}]}});
-    let bytes = serde_json::to_vec(&json).expect("fixture encodes");
-    let mut failure = parse_record(&bytes).expect_err("long label fails");
-    assert_eq!(failure.code, ErrorCode::TooLong);
-    assert_eq!(failure.path.as_str(), "put[0].node.label");
-    failure.step = Some(WireId::try_from("private-id-sentinel".to_owned()).expect("valid id"));
+    let long_label_error = |id: &str, label: &str| {
+        let json = serde_json::json!({"step":{"id":id,"put":[{"node":{"id":"n","label":label.repeat(25)}}]}});
+        let bytes = serde_json::to_vec(&json).expect("fixture encodes");
+        let mut failure = parse_record(&bytes).expect_err("long label fails");
+        assert_eq!(failure.code, ErrorCode::TooLong);
+        assert_eq!(failure.path.as_str(), "put[0].node.label");
+        failure.step = Some(WireId::try_from(id.to_owned()).expect("valid id"));
+        failure
+    };
+    let failure = long_label_error("private-id-sentinel", "private-label-sentinel");
     let safe = format!("{failure} {failure:?}");
+    let other = long_label_error("another-wired-label", "another-title-fragment");
+    assert!(
+        safe == format!("{other} {other:?}"),
+        "drawing content affected the error"
+    );
     assert!(!safe.contains("private"), "diagnostics redact ids and text");
     assert!(
         failure.tool_text().contains("private-id-sentinel"),
@@ -324,10 +333,14 @@ fn errors_and_debug_do_not_echo_drawing_content() {
     );
     let text = Text::try_from("private-text-sentinel".to_owned()).expect("valid text");
     let id = WireId::try_from("private-id-sentinel".to_owned()).expect("valid id");
+    let other_text = Text::try_from("another-user-fragment".to_owned()).expect("valid text");
+    let other_id = WireId::try_from("another-wired-label".to_owned()).expect("valid id");
+    let debug = format!("{text:?} {id:?}");
     assert!(
-        !format!("{text:?} {id:?}").contains("private"),
-        "debug is length only"
+        debug == format!("{other_text:?} {other_id:?}"),
+        "text or id affected Debug"
     );
+    assert!(!debug.contains("private"), "debug is length only");
     for (json, code, path) in [
         (
             r#"{"step":{"id":"s","private-key-sentinel":"private-value-sentinel"}}"#,
@@ -364,6 +377,16 @@ fn errors_and_debug_do_not_echo_drawing_content() {
         assert_eq!(failure.code, code);
         assert_eq!(failure.path.as_str(), path);
         let safe = format!("{failure} {failure:?} {}", failure.tool_text());
+        let other = error(
+            &json
+                .replace("private-key-sentinel", "another-user-key")
+                .replace("private-op-sentinel", "another-operation")
+                .replace("private-value-sentinel", "another-input-value"),
+        );
+        assert!(
+            safe == format!("{other} {other:?} {}", other.tool_text()),
+            "malformed content affected the parser diagnostics"
+        );
         assert!(
             !safe.contains("private"),
             "parser messages and unknown keys are discarded"
@@ -522,12 +545,21 @@ mod three {
             }
             let solid = solid(&value);
             assert_eq!(solid.geometry().expect("geometry"), expected[index]);
+            let mut alternate = value.clone();
+            alternate["label"] = json!("another-object-caption");
+            alternate["info"] = json!("different-model-notes");
+            let alternate: Solid = serde_json::from_value(alternate).expect("alternate solid");
+            let debug = format!("{solid:?}");
+            assert!(
+                debug == format!("{alternate:?}"),
+                "solid label or info affected Debug"
+            );
             let input = json!({"step":{"id":"s","put":[{"solid":value}]}});
             let record =
                 parse_record(&serde_json::to_vec(&input).expect("fixture")).expect("record");
             exact_round_trip(&record);
-            assert!(!format!("{solid:?}").contains("private"));
-            assert!(!format!("{solid:?}").contains("1.0"));
+            assert!(!debug.contains("private"));
+            assert!(!debug.contains("1.0"));
         }
         let mut cone = fixture(json!({"shape":"cone","r":2,"h":3}));
         assert_eq!(
@@ -582,6 +614,16 @@ mod three {
         assert_eq!(encoded["orbit"], false);
         assert_eq!(encoded["spin"], -90.0);
         let debug = format!("{full:?}");
+        let other: View3d = serde_json::from_value(json!({
+            "id":"another-frame-label","box":[11,22,500,600],
+            "camera":{"yaw":65,"pitch":-15,"dist":9,"fov":48,"target":[8,13,21]},
+            "light":{"dir":[7,9,12],"ambient":0.75},"orbit":false,"spin":45
+        }))
+        .expect("alternate viewport");
+        assert!(
+            debug == format!("{other:?}"),
+            "viewport id or geometry affected Debug"
+        );
         assert!(!debug.contains("private"));
         assert!(!debug.contains("300"));
         let camera: kumochi_scene::record::Camera = serde_json::from_str("{}").expect("camera");

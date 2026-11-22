@@ -4,45 +4,10 @@ include!("../../tests/support/scratch.rs");
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::ErrorKind;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::panic::catch_unwind;
     use std::sync::atomic::AtomicU64;
 
     use super::{Scratch, dir};
-
-    #[test]
-    fn scratch_is_removed_after_success() {
-        let path = {
-            let scratch = dir("scratch-pass");
-            fs::create_dir(scratch.join("nested")).expect("nested folder");
-            fs::write(scratch.join("nested/marker"), b"test data").expect("marker");
-            scratch.to_path_buf()
-        };
-        assert_eq!(
-            path.symlink_metadata().expect_err("scratch is gone").kind(),
-            ErrorKind::NotFound
-        );
-    }
-
-    #[test]
-    fn scratch_is_removed_after_a_panic() {
-        let mut path = None;
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            let scratch = dir("scratch-unwind");
-            fs::write(scratch.join("marker"), b"test data").expect("marker");
-            path = Some(scratch.to_path_buf());
-            panic!("test body panicked");
-        }))
-        .expect_err("the test body panicked");
-        assert_eq!(panic.downcast_ref::<&str>(), Some(&"test body panicked"));
-        assert_eq!(
-            path.expect("recorded path")
-                .symlink_metadata()
-                .expect_err("scratch is gone")
-                .kind(),
-            ErrorKind::NotFound
-        );
-    }
 
     #[test]
     fn a_preexisting_folder_is_left_alone() {

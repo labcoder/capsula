@@ -1,7 +1,8 @@
 //! Expanded-work admission, retirement and final-result replay budgets.
 use kumochi_scene::{
     Admission, Begin, Budget, ErrorCode, GlobalBudget, Handle, Record, ReplacementDisposition,
-    SceneEvent, SceneState, Step, StepError, StopCut, WireId, parse_record, text::Bounded,
+    SceneEvent, SceneState, Step, StepError, StopCut, WireId, budget::Usage, parse_record,
+    text::Bounded,
 };
 use serde_json::{Value, json};
 
@@ -201,7 +202,7 @@ fn replacement_at_the_cap_is_owned_atomic_and_does_not_release_twice() {
 }
 
 #[test]
-fn replacement_refusal_and_stale_settlement_preserve_the_victims() {
+fn replacement_refusal_and_an_intervening_budget_change_preserve_the_victim() {
     let mut global = GlobalBudget::default();
     let mut old = scene("old");
     put(&mut old, &mut global, texts(0, 1));
@@ -209,6 +210,8 @@ fn replacement_refusal_and_stale_settlement_preserve_the_victims() {
     let rejected = step(json!({"id":"bad","remove":["missing"]}));
     let usage = global.usage();
     let generation = global.generation();
+    let first_handle = old.handle(&id("t0")).expect("original object");
+    let original_log = old.recovery_log().to_vec();
     assert_eq!(
         kumochi_scene::ReplacementAdmission::checked(scene("bad"), &rejected, &[&old], &global)
             .expect_err("missing removal target")
@@ -219,11 +222,23 @@ fn replacement_refusal_and_stale_settlement_preserve_the_victims() {
         (old.object_count(), global.usage(), global.generation()),
         (1, usage, generation)
     );
+    assert_eq!(old.handle(&id("t0")), Some(first_handle));
+    assert_eq!(old.recovery_log(), original_log);
     let admission =
         kumochi_scene::ReplacementAdmission::checked(scene("next"), &first, &[&old], &global)
             .expect("valid admission");
     put(&mut old, &mut global, texts(1, 1));
     let changed = (global.usage(), global.generation());
+    assert_eq!(
+        changed.0,
+        Usage {
+            scenes: 1,
+            objects: 2,
+            ..Usage::default()
+        }
+    );
+    let second_handle = old.handle(&id("t1")).expect("intervening object");
+    let changed_log = old.recovery_log().to_vec();
     assert_eq!(
         admission
             .settle(
@@ -231,9 +246,12 @@ fn replacement_refusal_and_stale_settlement_preserve_the_victims() {
                 &mut global,
                 ReplacementDisposition::Install
             )
-            .expect_err("stale original stamp"),
+            .expect_err("the intervening commit changed the budget"),
         kumochi_scene::StaleAdmission
     );
+    assert_eq!(old.handle(&id("t0")), Some(first_handle));
+    assert_eq!(old.handle(&id("t1")), Some(second_handle));
+    assert_eq!(old.recovery_log(), changed_log);
     assert_eq!(
         (
             old.object_count(),
@@ -266,10 +284,14 @@ fn suppressed_replacement_settles_only_the_frozen_victims() {
             .is_none()
     );
     assert!(old.is_cleared());
-    assert_eq!(global.usage(), kumochi_scene::budget::Usage::default());
-    assert_eq!(global.generation(), generation + 1);
+    assert_eq!(global.usage(), Usage::default());
+    let settled = global.generation();
+    assert_ne!(settled, generation);
     old.clear(&mut global).expect("later sweep");
-    assert_eq!(global.generation(), generation + 1);
+    assert_eq!(
+        (global.usage(), global.generation()),
+        (Usage::default(), settled)
+    );
 }
 
 #[test]
@@ -425,7 +447,9 @@ fn pending_removals_count_until_shown_and_replay_does_not_invent_activation() {
         (replay.revision(), replay.usage()),
         (state.revision(), state.usage())
     );
-    assert_eq!(replay.handle(&id("t1200")), state.handle(&id("t1200")));
+    let newest = Some(Handle::new(8, 0).expect("last batch's first object"));
+    assert_eq!(state.handle(&id("t1200")), newest);
+    assert_eq!(replay.handle(&id("t1200")), newest);
 
     let mut stopped = scene("stopped");
     let mut budget = GlobalBudget::default();
@@ -450,7 +474,7 @@ fn pending_removals_count_until_shown_and_replay_does_not_invent_activation() {
 }
 
 #[test]
-fn removal_and_replacement_charges_are_asymmetric_and_idempotent() {
+fn removal_charges_converge_when_step_shown_arrives_and_do_not_release_twice() {
     let mut brain = scene("s");
     let mut shell = scene("s");
     let mut a = GlobalBudget::default();
@@ -465,7 +489,6 @@ fn removal_and_replacement_charges_are_asymmetric_and_idempotent() {
     }
     shell.retire(1, &mut b).expect("activation");
     assert_eq!((a.usage().objects, b.usage().objects), (300, 0));
-    assert!(b.usage().objects <= a.usage().objects);
     brain.retire(1, &mut a).expect("StepShown");
     assert_eq!(a.usage(), b.usage());
     let generation = a.generation();
@@ -986,6 +1009,7 @@ fn a_detached_replay_has_its_own_mutation_fence_before_budget_installation() {
         SceneState::replay(header("source"), source.recovery_log()).expect("inspection replay");
     let mut first = GlobalBudget::default();
     let mut second = GlobalBudget::default();
+    let initial = first.generation();
     let Admission::New(pending) =
         candidate(&detached, &first, json!({"id":"new","put":texts(1,1)})).expect("candidate")
     else {
@@ -994,13 +1018,16 @@ fn a_detached_replay_has_its_own_mutation_fence_before_budget_installation() {
     detached
         .stop(&cut(1, vec![]), &mut second)
         .expect("cut binds a different budget");
-    assert_eq!(first.generation(), 0);
+    assert_eq!(first.generation(), initial);
     assert_eq!(detached.revision(), 1);
     assert_eq!(
         detached.commit(pending, &mut first),
         Err(kumochi_scene::StaleAdmission)
     );
-    assert_eq!(first.usage(), kumochi_scene::budget::Usage::default());
+    assert_eq!(
+        (first.usage(), first.generation()),
+        (Usage::default(), initial)
+    );
     assert_eq!((second.usage().objects, second.usage().scenes), (0, 1));
 }
 
@@ -1292,12 +1319,6 @@ fn delay_generated_motion_foreign_admission_and_replay_batch_limits_are_checked(
     put(
         &mut state,
         &mut budget,
-        vec![json!({"text":{"id":"t","at":[0,0],"text":"","enter":"fade"}})],
-    );
-    assert_eq!((budget.usage().tracks, budget.usage().keys), (0, 0));
-    put(
-        &mut state,
-        &mut budget,
         vec![
             json!({"diagram":{"id":"d"}}),
             json!({"node":{"id":"a","in":"d","label":""}}),
@@ -1311,10 +1332,18 @@ fn delay_generated_motion_foreign_admission_and_replay_batch_limits_are_checked(
         vec![json!({"edge":{"id":"e","in":"d","from":"a","to":"b","flow":100}})],
     );
     assert_eq!((budget.usage().tracks, budget.usage().keys), (0, 0));
+    assert!(matches!(
+        candidate(
+            &state,
+            &budget,
+            json!({"id":"exact","put":[{"anim":{"target":"a","track":"opacity","repeat":1,"keys":[[0,0],[30000,1]]}}]})
+        ),
+        Ok(Admission::New(_))
+    ));
     let error = rejected(
         &state,
         &budget,
-        json!({"id":"long","put":[{"anim":{"target":"t","track":"opacity","delay":1,"repeat":1,"keys":[[0,0],[30000,1]]}}]}),
+        json!({"id":"long","put":[{"anim":{"target":"a","track":"opacity","delay":1,"repeat":1,"keys":[[0,0],[30000,1]]}}]}),
         ErrorCode::OutOfRange,
     );
     assert_eq!(error.path.as_str(), "put[0].anim.repeat");

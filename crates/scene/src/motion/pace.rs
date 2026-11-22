@@ -122,6 +122,7 @@ mod tests {
 
     #[test]
     fn strokes_draw_in_and_the_rest_fade_in_each_starting_60_percent_through_the_last() {
+        assert!(pace(&[]).is_empty(), "an empty step has no entrances");
         assert_eq!(
             pace(&[stroke(600), other(350), other(250)]),
             [
@@ -148,10 +149,10 @@ mod tests {
             ..stroke(600)
         };
         assert_eq!(
-            pace(&[none, pop, other(250), grow]),
+            pace(&[pop, none, other(250), grow]),
             [
-                paced(0, Enter::None, 0),
                 paced(0, Enter::Pop, 900),
+                paced(540, Enter::None, 0),
                 paced(540, Enter::Fade, 250),
                 paced(690, Enter::Grow, 600),
             ]
@@ -212,22 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn an_authored_length_past_4_s_ends_late_without_squeezing_the_rest() {
-        let long = Authored {
-            dur: Some(5_000),
-            ..stroke(600)
-        };
-        assert_eq!(
-            pace(&[stroke(600), long, other(350)]),
-            [
-                paced(0, Enter::Draw, 600),
-                paced(360, Enter::Draw, 5_000),
-                paced(3_360, Enter::Fade, 350),
-            ]
-        );
-    }
-
-    #[test]
     fn an_authored_length_shrinks_the_defaults_to_a_quarter_at_most_and_past_that_ends_late() {
         let around = |dur| {
             pace(&[
@@ -253,6 +238,7 @@ mod tests {
             (3_999, 2_759),
             (4_000, 2_760),
             (4_001, 2_760),
+            (5_000, 3_360),
         ] {
             assert_eq!(
                 around(dur),
@@ -264,10 +250,5 @@ mod tests {
                 "{dur} ms ends late at the default pace"
             );
         }
-    }
-
-    #[test]
-    fn a_step_with_no_objects_paces_nothing() {
-        assert!(pace(&[]).is_empty());
     }
 }

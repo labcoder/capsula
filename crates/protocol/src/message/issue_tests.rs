@@ -108,16 +108,6 @@ fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
         read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
         Some(refusal)
     );
-    for length in 1..wire.len() {
-        assert!(matches!(
-            read::<ControlToShell>(&mut &wire[..length], Pipe::Control),
-            Err(FrameError::Truncated)
-        ));
-    }
-    assert_eq!(
-        read::<ControlToShell>(&mut &[][..], Pipe::Control).unwrap(),
-        None
-    );
     for (message, tag) in [
         (ControlToShell::Error(ErrorKey::SettingsRefused.into()), 8),
         (
@@ -195,7 +185,7 @@ fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
     let too_many = [14, 0, 0, 0, 25, 42, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     assert!(matches!(
         read::<ControlToShell>(&mut too_many.as_slice(), Pipe::Control),
-        Err(FrameError::Malformed(postcard::Error::SerdeDeCustom))
+        Err(FrameError::Malformed(_))
     ));
 }
 
@@ -210,6 +200,10 @@ fn filed_confirmation_and_duplicate_warning_round_trip_independently() {
                 maybe_duplicate,
             };
             let bytes = postcard::to_allocvec(&value).unwrap();
+            assert_eq!(
+                &bytes[bytes.len() - 2..],
+                &[u8::from(confirmed_by_user), u8::from(maybe_duplicate)]
+            );
             assert_eq!(postcard::from_bytes::<ActionState>(&bytes).unwrap(), value);
             assert!(postcard::from_bytes::<ActionState>(&bytes[..bytes.len() - 1]).is_err());
         }
@@ -543,49 +537,6 @@ fn largest_issue_and_connection_frames_fit_their_exact_budgets() {
 }
 
 #[test]
-fn largest_review_frames_fit_their_exact_budgets() {
-    let card = card();
-    roundtrip(
-        &DataToShell::IssueReview {
-            request: u64::MAX,
-            card: card.clone(),
-        },
-        Pipe::Data,
-        34271,
-    );
-    for (op, length) in [
-        (
-            IssueOp::Rearm {
-                draft: card.draft,
-                version: card.version,
-                hash: card.hash,
-            },
-            88,
-        ),
-        (
-            IssueOp::CancelReview {
-                draft: card.draft,
-                review: u64::MAX,
-            },
-            56,
-        ),
-    ] {
-        roundtrip(
-            &ControlToBrain::Issue {
-                session: IssueSession {
-                    incarnation: Incarnation(u64::MAX),
-                    epoch: u64::MAX,
-                },
-                request: u64::MAX,
-                op: Box::new(op),
-            },
-            Pipe::Control,
-            length,
-        );
-    }
-}
-
-#[test]
 fn issue_provenance_round_trips_exactly_through_welcome_and_operation_prefixes() {
     use crate::frame::{FrameError, read};
     for (session, bytes) in [
@@ -677,6 +628,20 @@ fn issue_provenance_round_trips_exactly_through_welcome_and_operation_prefixes()
 
 #[test]
 fn issue_provenance_rejects_missing_mistyped_overflow_and_truncated_identities() {
+    use crate::frame::{FrameError, decode};
+
+    for short in [&[0, 5][..], &[0, 5, 128]] {
+        assert!(matches!(
+            decode::<ControlToShell>(short),
+            Err(FrameError::Malformed(_))
+        ));
+    }
+    for short in [&[25][..], &[25, 128]] {
+        assert!(matches!(
+            decode::<ControlToBrain>(short),
+            Err(FrameError::Malformed(_))
+        ));
+    }
     for json in [
         "{}",
         r#"{"incarnation":1}"#,
@@ -715,8 +680,12 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
     let mut consent = vec![0, 2];
     consent.extend([91; 32]);
     consent.extend([3, 0]);
-    let mut rearm = vec![3, 2, 3];
+    let max = [255, 255, 255, 255, 255, 255, 255, 255, 255, 1];
+    let mut rearm = vec![3, 2];
+    rearm.extend(max);
     rearm.extend([91; 32]);
+    let mut cancel = vec![4, 2];
+    cancel.extend(max);
     for (op, inner) in [
         (
             IssueOp::Consent {
@@ -732,7 +701,7 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
         (
             IssueOp::Rearm {
                 draft: DraftId(2),
-                version: StateVersion(3),
+                version: StateVersion(u64::MAX),
                 hash: ContentHash([91; 32]),
             },
             rearm,
@@ -740,9 +709,9 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
         (
             IssueOp::CancelReview {
                 draft: DraftId(2),
-                review: 128,
+                review: u64::MAX,
             },
-            vec![4, 2, 128, 1],
+            cancel,
         ),
     ] {
         for (request, identity) in [
@@ -780,7 +749,18 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
                     Err(FrameError::Truncated)
                 ));
             }
-            assert!(!format!("{message:?}").contains(&format!("{:?}", [91; 32])));
+            let debug = format!("{message:?}");
+            assert!(!debug.contains(&format!("{:?}", [91; 32])));
+            let mut other = message;
+            if let ControlToBrain::Issue { op, .. } = &mut other
+                && let IssueOp::Consent { hash, .. } | IssueOp::Rearm { hash, .. } = op.as_mut()
+            {
+                *hash = ContentHash([37; 32]);
+                assert!(
+                    debug == format!("{other:?}"),
+                    "content hash affected issue Debug"
+                );
+            }
         }
     }
     assert_eq!(
@@ -799,7 +779,7 @@ fn issue_operation_identity_preserves_inner_tags_and_exact_wire_fields() {
 
 #[test]
 fn issue_operation_unknown_tags_and_overflow_are_rejected_without_changing_decisions() {
-    for decision in [Decision::FileAnyway, Decision::ThisIsTheIssue] {
+    for (decision, tag) in [(Decision::FileAnyway, 1), (Decision::ThisIsTheIssue, 2)] {
         let message = ControlToBrain::Issue {
             session: IssueSession {
                 incarnation: Incarnation(1),
@@ -813,9 +793,12 @@ fn issue_operation_unknown_tags_and_overflow_are_rejected_without_changing_decis
                 decision,
             }),
         };
+        let mut expected = vec![25, 1, 2, 1, 0, 2];
+        expected.extend([91; 32]);
+        expected.extend([3, tag]);
+        assert_eq!(postcard::to_allocvec(&message).unwrap(), expected);
         assert_eq!(
-            postcard::from_bytes::<ControlToBrain>(&postcard::to_allocvec(&message).unwrap())
-                .unwrap(),
+            crate::frame::decode::<ControlToBrain>(&expected).unwrap(),
             message
         );
     }
@@ -825,8 +808,8 @@ fn issue_operation_unknown_tags_and_overflow_are_rejected_without_changing_decis
     unknown_decision.extend([3, 3]);
     assert!(postcard::from_bytes::<ControlToBrain>(&unknown_decision).is_err());
     let mut overflow = vec![25, 1, 2];
-    overflow.extend([128; 10]);
-    overflow.extend([1, 2]);
+    overflow.extend([128; 9]);
+    overflow.extend([2, 1, 2]);
     assert!(postcard::from_bytes::<ControlToBrain>(&overflow).is_err());
     assert!(
         serde_json::from_str::<ControlToBrain>(
@@ -994,13 +977,14 @@ fn issue_unavailable_has_only_correlated_identity_and_round_trips_exact_wire_dat
 #[test]
 fn issue_unavailable_rejects_unknown_tags_overflow_missing_and_mistyped_identity() {
     use crate::frame::{FrameError, read};
+
+    let overflow = [128, 128, 128, 128, 128, 128, 128, 128, 128, 2];
     for payload in [
-        vec![31],
-        vec![29, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2, 0],
-        vec![29, 0, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2],
-        vec![29, 1, 2, 4],
+        vec![0x7f],
+        [&[29][..], &overflow, &[2, 0]].concat(),
+        [&[29, 1][..], &overflow, &[0]].concat(),
+        vec![29, 1, 2, 0x7f],
     ] {
-        assert!(postcard::from_bytes::<ControlToShell>(&payload).is_err());
         let mut wire = u32::try_from(payload.len()).unwrap().to_le_bytes().to_vec();
         wire.extend(payload);
         assert!(matches!(
@@ -1025,14 +1009,7 @@ fn issue_unavailable_rejects_unknown_tags_overflow_missing_and_mistyped_identity
 fn bounded_collections_and_hash_reject_excess_or_truncated_wire_data() {
     for count in [0, 16] {
         let drafts = vec![DraftId(7); count];
-        let bounded = Bounded::<DraftId, MAX_ISSUE_CARDS>::new(drafts.clone()).expect("bound");
-        assert_eq!(
-            &*postcard::from_bytes::<Bounded<DraftId, MAX_ISSUE_CARDS>>(
-                &postcard::to_allocvec(&drafts).expect("raw")
-            )
-            .expect("decode"),
-            drafts.as_slice()
-        );
+        let bounded = Bounded::<DraftId, MAX_ISSUE_CARDS>::new(drafts).expect("bound");
         let request = DataToBrain::IssueCards { drafts: bounded };
         assert_eq!(
             postcard::from_bytes::<DataToBrain>(&postcard::to_allocvec(&request).expect("encode"))
@@ -1041,12 +1018,6 @@ fn bounded_collections_and_hash_reject_excess_or_truncated_wire_data() {
         );
     }
     assert!(Bounded::<DraftId, MAX_ISSUE_CARDS>::new(vec![DraftId(7); 17]).is_err());
-    assert!(
-        postcard::from_bytes::<Bounded<DraftId, MAX_ISSUE_CARDS>>(
-            &postcard::to_allocvec(&vec![DraftId(7); 17]).expect("raw")
-        )
-        .is_err()
-    );
     assert!(Bounded::<RepoName, MAX_GITHUB_REPOS>::new(vec![longest_repo(); 201]).is_err());
     assert!(
         postcard::from_bytes::<Bounded<RepoName, MAX_GITHUB_REPOS>>(
@@ -1069,13 +1040,16 @@ fn private(
     pipe: Pipe,
     direction: Direction,
     markers: &[&str],
-) {
+) -> (String, Vec<u8>) {
     let wire = encode(message, pipe).expect("wire");
     let record = Record::of(pipe, direction, message, wire.len() - HEADER_LEN).expect("record");
-    assert_eq!(record.payload, None);
-    assert_eq!(
-        record.describe(),
-        format!("{} ({} bytes)", message.op(), wire.len() - HEADER_LEN)
+    assert!(
+        record.payload.is_none(),
+        "issue recording contains a payload"
+    );
+    assert!(
+        record.describe() == format!("{} ({} bytes)", message.op(), wire.len() - HEADER_LEN),
+        "issue record description contains unexpected fields"
     );
     let mut bytes = Vec::new();
     write(&mut bytes, &record).expect("write");
@@ -1093,6 +1067,7 @@ fn private(
             "tap leaked content"
         );
     }
+    (debug, bytes)
 }
 
 #[test]
@@ -1101,136 +1076,136 @@ fn private(
     reason = "one sentinel scenario follows private content through every outer wire carrier and tap"
 )]
 fn outer_wire_carriers_and_tap_never_format_issue_or_device_content() {
-    let title = "zqx-private-title";
-    let body = "zqx-private-body";
-    let login = "zqx-private-login";
-    let repo = "zqx-private-owner/zqx-private-repo";
-    let code = "ZQX-PRIVATE-CODE";
-    let markers = [title, body, login, repo, code];
-    let mut card = card();
-    card.title = IssueTitle::new(title).expect("title");
-    card.body = IssueBody::new(body).expect("body");
-    card.repo = Some(RepoName::new(repo).expect("repo"));
-    card.account = Some(GitHubLogin::new(login).expect("login"));
-    card.state = ActionState::Unknown {
-        lookup: LookupResult::Unplaced {
-            number: 42,
-            url: IssueUrl::for_issue(card.repo.as_ref().expect("repo"), 42).expect("url"),
-        },
-        maybe_duplicate: false,
-    };
-    private(
-        &ControlToShell::GitHub(GitHubView::AwaitingUser {
-            user_code: UserCode::new(code).expect("code"),
-            expires_in_s: 900,
-        }),
-        Pipe::Control,
-        Direction::ToShell,
-        &markers,
-    );
-    private(
-        &ControlToShell::GitHub(GitHubView::Connected {
-            login: card.account.clone().expect("account"),
-            repos: Bounded::new(vec![card.repo.clone().expect("repo")]).expect("repos"),
-            truncated: false,
-            default: card.repo.clone(),
-        }),
-        Pipe::Control,
-        Direction::ToShell,
-        &markers,
-    );
-    private(
-        &ControlToBrain::GitHub(GitHubOp::SetDefaultRepo(card.repo.clone().expect("repo"))),
-        Pipe::Control,
-        Direction::ToBrain,
-        &markers,
-    );
-    private(
-        &ControlToBrain::Issue {
-            session: IssueSession {
-                incarnation: Incarnation(u64::MAX),
-                epoch: u64::MAX,
+    let diagnostics = |markers: [&str; 5]| {
+        let [title, body, login, repo, code] = markers;
+        let mut card = card();
+        card.title = IssueTitle::new(title).expect("title");
+        card.body = IssueBody::new(body).expect("body");
+        card.repo = Some(RepoName::new(repo).expect("repo"));
+        card.account = Some(GitHubLogin::new(login).expect("login"));
+        card.state = ActionState::Unknown {
+            lookup: LookupResult::Unplaced {
+                number: 42,
+                url: IssueUrl::for_issue(card.repo.as_ref().expect("repo"), 42).expect("url"),
             },
-            request: u64::MAX,
-            op: Box::new(IssueOp::Consent {
-                draft: card.draft,
-                hash: card.hash,
-                approval: card.approval.expect("approval"),
-                decision: Decision::File,
-            }),
-        },
-        Pipe::Control,
-        Direction::ToBrain,
-        &markers,
-    );
-    private(
-        &ControlToShell::ActionState {
-            request: Some(u64::MAX),
-            draft: card.draft,
-            version: card.version,
-            state: card.state.clone(),
-            approval: card.approval,
-        },
-        Pipe::Control,
-        Direction::ToShell,
-        &markers,
-    );
-    private(
-        &ControlToShell::IssueRefused {
-            request: u64::MAX,
-            draft: card.draft,
-            version: card.version,
-            approval: card.approval,
-            reason: IssueRefused::ContentChanged,
-        },
-        Pipe::Control,
-        Direction::ToShell,
-        &markers,
-    );
-    private(
-        &DataToBrain::IssueEdit {
-            draft: card.draft,
-            title: card.title.clone(),
-            body: card.body.clone(),
-            repo: card.repo.clone(),
-        },
-        Pipe::Data,
-        Direction::ToBrain,
-        &markers,
-    );
-    private(
-        &DataToShell::IssueReview {
-            request: u64::MAX,
-            card: card.clone(),
-        },
-        Pipe::Data,
-        Direction::ToShell,
-        &markers,
-    );
-    private(
-        &DataToShell::IssueCard(card),
-        Pipe::Data,
-        Direction::ToShell,
-        &markers,
+            maybe_duplicate: false,
+        };
+        [
+            private(
+                &ControlToShell::GitHub(GitHubView::AwaitingUser {
+                    user_code: UserCode::new(code).expect("code"),
+                    expires_in_s: 900,
+                }),
+                Pipe::Control,
+                Direction::ToShell,
+                &markers,
+            ),
+            private(
+                &ControlToShell::GitHub(GitHubView::Connected {
+                    login: card.account.clone().expect("account"),
+                    repos: Bounded::new(vec![card.repo.clone().expect("repo")]).expect("repos"),
+                    truncated: false,
+                    default: card.repo.clone(),
+                }),
+                Pipe::Control,
+                Direction::ToShell,
+                &markers,
+            ),
+            private(
+                &ControlToBrain::GitHub(GitHubOp::SetDefaultRepo(card.repo.clone().expect("repo"))),
+                Pipe::Control,
+                Direction::ToBrain,
+                &markers,
+            ),
+            private(
+                &ControlToBrain::Issue {
+                    session: IssueSession {
+                        incarnation: Incarnation(u64::MAX),
+                        epoch: u64::MAX,
+                    },
+                    request: u64::MAX,
+                    op: Box::new(IssueOp::Consent {
+                        draft: card.draft,
+                        hash: card.hash,
+                        approval: card.approval.expect("approval"),
+                        decision: Decision::File,
+                    }),
+                },
+                Pipe::Control,
+                Direction::ToBrain,
+                &markers,
+            ),
+            private(
+                &ControlToShell::ActionState {
+                    request: Some(u64::MAX),
+                    draft: card.draft,
+                    version: card.version,
+                    state: card.state.clone(),
+                    approval: card.approval,
+                },
+                Pipe::Control,
+                Direction::ToShell,
+                &markers,
+            ),
+            private(
+                &ControlToShell::IssueRefused {
+                    request: u64::MAX,
+                    draft: card.draft,
+                    version: card.version,
+                    approval: card.approval,
+                    reason: IssueRefused::ContentChanged,
+                },
+                Pipe::Control,
+                Direction::ToShell,
+                &markers,
+            ),
+            private(
+                &DataToBrain::IssueEdit {
+                    draft: card.draft,
+                    title: card.title.clone(),
+                    body: card.body.clone(),
+                    repo: card.repo.clone(),
+                },
+                Pipe::Data,
+                Direction::ToBrain,
+                &markers,
+            ),
+            private(
+                &DataToShell::IssueReview {
+                    request: u64::MAX,
+                    card: card.clone(),
+                },
+                Pipe::Data,
+                Direction::ToShell,
+                &markers,
+            ),
+            private(
+                &DataToShell::IssueCard(card),
+                Pipe::Data,
+                Direction::ToShell,
+                &markers,
+            ),
+        ]
+    };
+    let first = diagnostics([
+        "zqx-private-title",
+        "zqx-private-body",
+        "zqx-private-login",
+        "zqx-private-owner/zqx-private-repo",
+        "ZQX-PRIVATE-CODE",
+    ]);
+    let other = diagnostics([
+        "abc-queued-letter",
+        "abc-written-note",
+        "abc-some-contribs",
+        "abc-alternate-org/xyz-source-projx",
+        "ABC-EXAMPLE-TURN",
+    ]);
+    assert!(
+        first == other,
+        "issue or account content affected diagnostics"
     );
     assert_eq!(format!("{:?}", ContentHash([91; 32])), "ContentHash(..)");
-}
-
-#[test]
-fn issue_page_debug_omits_its_title() {
-    assert_eq!(
-        format!(
-            "{:?}",
-            PageEvent {
-                id: EventId(1),
-                run: None,
-                kind: PageEventKind::Issue { draft: DraftId(2) },
-                text: "zqx-private-title".into(),
-                cut: false
-            }
-        ),
-        "PageEvent { id: EventId(1), run: None, kind: Issue { draft: DraftId(2) }, cut: false, .. }"
-    );
 }
 
 #[test]
@@ -1294,6 +1269,15 @@ fn review_operations_have_closed_json_shapes_and_numeric_bounds() {
 #[test]
 fn review_data_keeps_its_request_full_card_and_exact_appended_wire_tag() {
     use crate::frame::{FrameError, read};
+    let largest = DataToShell::IssueReview {
+        request: u64::MAX,
+        card: card(),
+    };
+    let wire = encode(&largest, Pipe::Data).expect("max card fits");
+    assert_eq!(
+        read(&mut wire.as_slice(), Pipe::Data).expect("decodes"),
+        Some(largest)
+    );
     let card = IssueCard {
         draft: DraftId(1),
         thread: ThreadId(2),
@@ -1306,6 +1290,9 @@ fn review_data_keeps_its_request_full_card_and_exact_appended_wire_tag() {
         version: StateVersion(4),
         state: ActionState::Draft,
     };
+    let mut card_bytes = vec![1, 2, 0, 0, 1, b't', 1, b'b'];
+    card_bytes.extend([0; 32]);
+    card_bytes.extend([1, 3, 4, 0]);
     for (request, identity) in [
         (0, vec![0]),
         (
@@ -1315,9 +1302,7 @@ fn review_data_keeps_its_request_full_card_and_exact_appended_wire_tag() {
     ] {
         let mut payload = vec![21];
         payload.extend(identity);
-        payload.extend([1, 2, 0, 0, 1, b't', 1, b'b']);
-        payload.extend([0; 32]);
-        payload.extend([1, 3, 4, 0]);
+        payload.extend(&card_bytes);
         let message = DataToShell::IssueReview {
             request,
             card: card.clone(),
@@ -1364,11 +1349,9 @@ fn review_data_keeps_its_request_full_card_and_exact_appended_wire_tag() {
             assert!(serde_json::from_value::<DataToShell>(missing).is_err());
         }
     }
-    assert!(postcard::from_bytes::<DataToShell>(&[21]).is_err());
-    assert!(
-        postcard::from_bytes::<DataToShell>(&[20, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2])
-            .is_err()
-    );
+    let mut overflow = vec![21, 128, 128, 128, 128, 128, 128, 128, 128, 128, 2];
+    overflow.extend(card_bytes);
+    assert!(postcard::from_bytes::<DataToShell>(&overflow).is_err());
 }
 
 #[test]

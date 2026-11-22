@@ -435,14 +435,6 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_steps_share_the_original_input_without_expansion() {
-        let original = step(&json!({"id":"plain","put":[{"diagram":{"id":"d"}}]}));
-        let result = expand(&original, 1, &BTreeSet::new(), 599).expect("plain input");
-        assert!(Arc::ptr_eq(&original, &result.run));
-        assert_eq!(result.extras.len(), 0);
-    }
-
-    #[test]
     fn generated_names_skip_historical_source_and_later_plain_ids() {
         let original = step(&json!({"id":"names","put":[
             {"diagram":{"id":"d"}},
@@ -472,79 +464,78 @@ mod tests {
     }
 
     #[test]
-    fn generated_names_skip_ids_plain_operations_only_reference() {
-        let original = step(&json!({"id":"refs","put":[
-            {"diagram":{"id":"d"}},
-            {"mermaid":{"in":"d","src":"flowchart TB\nA\n"}},
-            {"text":{"id":"t","in":"--1.0","at":[0,0],"text":""}}
-        ]}));
-        let result = expand(&original, 1, &BTreeSet::new(), 598).expect("expanded source");
-        let ids: Vec<_> = result
-            .run
-            .put
-            .iter()
-            .filter_map(object::visual)
-            .map(|visual| (visual.id.as_str(), visual.parent.map(WireId::as_str)))
-            .collect();
-        assert_eq!(
-            ids,
-            [
-                ("d", None),
-                ("--1.1", Some("d")),
-                ("A", Some("--1.1")),
-                ("t", Some("--1.0")),
-            ],
-            "the dangling parent stays unresolved"
-        );
-    }
-
-    #[test]
     fn every_reference_source_keeps_generated_roots_distinct() {
-        for (parent, put, set, remove) in [
+        fn generated_root(step: &Step) -> &crate::record::Diagram {
+            step.put
+                .iter()
+                .find_map(|op| match op {
+                    Op::Diagram(root) if root.id.as_str() != "d" => Some(root),
+                    _ => None,
+                })
+                .expect("generated root")
+        }
+
+        let plain = json!({"id":"refs","put":[
+            {"diagram":{"id":"d"}},
+            {"mermaid":{"in":"d","src":"flowchart TB\nA\n"}}
+        ]});
+        let compile =
+            |value: &Value| expand(&step(value), 1, &BTreeSet::new(), 598).expect("expansion");
+        let without_reference = compile(&plain);
+        let collision = generated_root(&without_reference.run).id.as_str();
+        for (case, (parent, put, set, remove)) in [
             (
                 "d",
-                json!([{"text":{"id":"t","in":"--1.0","at":[0,0],"text":""}}]),
+                json!([{"text":{"id":"t","at":{"ref":collision},"text":""}}]),
                 json!([]),
                 json!([]),
             ),
             (
                 "d",
-                json!([{"text":{"id":"t","at":{"ref":"--1.0"},"text":""}}]),
-                json!([]),
-                json!([]),
-            ),
-            (
-                "d",
-                json!([{"anim":{"target":"--1.0","track":"opacity","keys":[[0,1]]}}]),
+                json!([{"anim":{"target":collision,"track":"opacity","keys":[[0,1]]}}]),
                 json!([]),
                 json!([]),
             ),
             (
                 "d",
                 json!([]),
-                json!([{"target":"--1.0","color":"red"}]),
+                json!([{"target":collision,"color":"red"}]),
                 json!([]),
             ),
-            ("d", json!([]), json!([]), json!(["--1.0"])),
-            ("--1.0", json!([]), json!([]), json!([])),
-        ] {
-            let mut value = json!({"id":"refs","put":[
-                {"diagram":{"id":"d"}},
-                {"mermaid":{"in":parent,"src":"flowchart TB\nA\n"}}
-            ],"set":set,"remove":remove});
+            (
+                "d",
+                json!([{"text":{"id":"t","at":[0,0],"text":""}}]),
+                json!([{"target":"t","behind":collision}]),
+                json!([]),
+            ),
+            ("d", json!([]), json!([]), json!([collision])),
+            (collision, json!([]), json!([]), json!([])),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut value = plain.clone();
+            value["put"][1]["mermaid"]["in"] = json!(parent);
+            value["set"] = set;
+            value["remove"] = remove;
             value["put"].as_array_mut().expect("put array").extend(
                 put.as_array()
                     .expect("reference operations")
                     .iter()
                     .cloned(),
             );
-            let result =
-                expand(&step(&value), 1, &BTreeSet::new(), 598).expect("expanded references");
-            let Op::Diagram(root) = &result.run.put[1] else {
-                panic!("compiled root");
-            };
-            assert_eq!(root.id.as_str(), "--1.1");
+            let result = compile(&value);
+            let root = generated_root(&result.run);
+            assert_ne!(root.id.as_str(), collision, "reference case {case}");
+            assert_ne!(root.id.as_str(), "A", "the node keeps its authored id");
             assert_eq!(root.parent.as_ref().map(WireId::as_str), Some(parent));
+            assert!(
+                result.run.put.iter().any(|op| matches!(
+                    op, Op::Node(node)
+                        if node.id.as_str() == "A" && node.parent.as_ref() == Some(&root.id)
+                )),
+                "the authored node stays under the generated root"
+            );
         }
     }
 

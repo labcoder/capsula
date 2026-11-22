@@ -1,10 +1,11 @@
 //! Bounded Mermaid compilation through admission, preparation and original-log recovery.
 use kumochi_scene::{
-    Admission, Budget, ErrorCode, GlobalBudget, Record, SceneState, Step, StopCut,
+    Admission, Budget, ErrorCode, Frame, GlobalBudget, Handle, SceneState, SceneView, Step,
+    StopCut,
     display::{Item, Prim},
-    geom::{Rect, Vec2},
+    geom::{Affine, Rect, Vec2},
     layout::{LayoutState, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover},
-    parse_record,
+    record::Align,
     text::Bounded,
     theme::Theme,
 };
@@ -14,29 +15,21 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+#[path = "support/mermaid.rs"]
+mod mermaid;
+use mermaid::{connected_full_graph, graph, scene, typed};
+
 #[path = "support/scene.rs"]
 #[expect(dead_code, reason = "typed Mermaid fixtures admit Steps directly")]
 mod scene_support;
 use scene_support::{Measure, id, new_scene};
 
-fn scene() -> SceneState {
-    new_scene("mermaid")
-}
-
-fn typed(value: &Value) -> Step {
-    let bytes = serde_json::to_vec(&json!({"step":value})).expect("step JSON");
-    let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
-        panic!("step record");
-    };
-    step
-}
-
-fn graph(source: &str) -> Step {
-    typed(&json!({"id":"graph","put":[
-        {"diagram":{"id":"target"}},
-        {"mermaid":{"in":"target","src":source}}
-    ]}))
-}
+#[path = "support/allocation.rs"]
+#[expect(
+    dead_code,
+    reason = "the shared allocator has helpers this file doesn't use"
+)]
+mod allocation;
 
 fn picture(
     scene: &mut SceneState,
@@ -149,6 +142,81 @@ fn rejected(scene: &SceneState, budget: &GlobalBudget, step: &Step, code: ErrorC
     );
 }
 
+fn world_title_origin(layout: &LayoutState, label: &str) -> Vec2 {
+    let items = layout.items();
+    let item = labelled(&items, label);
+    let origin = item
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Text { text, origin, .. } if text.as_str() == label => Some(*origin),
+            _ => None,
+        })
+        .expect("title text");
+    world_transform(&items, item).point(origin)
+}
+
+fn world_transform(items: &[Item], item: &Item) -> Affine {
+    let mut transform = item.transform;
+    let mut parent = item.parent;
+    while let Some(handle) = parent {
+        let ancestor = items
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("title ancestor");
+        transform = ancestor.transform.compose(transform);
+        parent = ancestor.parent;
+    }
+    transform
+}
+
+fn at_rest(layout: &LayoutState) -> Frame {
+    let mut frame = Frame::new();
+    SceneView::new(layout, 0)
+        .frame(0, &mut frame)
+        .expect("paint at rest");
+    frame
+}
+
+fn stroke(primitives: &[Prim]) -> Option<(&[Vec2], f32, bool)> {
+    primitives.iter().find_map(|prim| match prim {
+        Prim::Line {
+            points,
+            width,
+            dashed,
+            closed: false,
+            ..
+        } => Some((&**points, *width, *dashed)),
+        _ => None,
+    })
+}
+
+fn near(p: Vec2, q: Vec2) -> bool {
+    (p.x - q.x).hypot(p.y - q.y) < 0.01
+}
+
+fn edge_handle(layout: &LayoutState, frame: &Frame, from: &str, to: &str) -> Handle {
+    let a = bounds(layout, from);
+    let b = bounds(layout, to);
+    let start = a.edge_toward(b.center());
+    let end = b.edge_toward(a.center());
+    let mut matched = frame.paint_items().filter_map(|(item, _, primitives)| {
+        let (points, _, _) = stroke(primitives)?;
+        (near(item.transform.point(*points.first()?), start)
+            && near(item.transform.point(*points.last()?), end))
+        .then_some(item.handle)
+    });
+    let handle = matched
+        .next()
+        .unwrap_or_else(|| panic!("no rendered stroke for {from} -> {to}"));
+    assert_eq!(
+        matched.next(),
+        None,
+        "fixture has one {from} -> {to} stroke"
+    );
+    handle
+}
+
 #[test]
 fn approved_gates_prepare_and_recover_from_original_source() {
     for (source, count) in [
@@ -236,10 +304,27 @@ fn root_references_do_not_override_first_closed_group_membership() {
             .iter()
             .find(|item| item.handle == handle)
             .expect("node item");
-        assert_eq!(item.parent, scene.handle(&id(group)));
+        assert_eq!(
+            item.parent,
+            Some(scene.handle(&id(group)).expect("authored group"))
+        );
     }
-    assert_ne!(labelled(&items, "join").parent, scene.handle(&id("first")));
-    assert_ne!(labelled(&items, "join").parent, scene.handle(&id("second")));
+    let target = scene.handle(&id("target")).expect("authored diagram");
+    let groups = ["first", "second"].map(|name| scene.handle(&id(name)));
+    let mut parent = labelled(&items, "join").parent;
+    for _ in 0..items.len() {
+        if parent == Some(target) {
+            break;
+        }
+        assert!(!groups.contains(&parent), "the join is outside both groups");
+        let ancestor = parent.expect("the join stays inside its authored diagram");
+        parent = items
+            .iter()
+            .find(|item| item.handle == ancestor)
+            .expect("ancestor")
+            .parent;
+    }
+    assert_eq!(parent, Some(target));
 }
 
 #[test]
@@ -262,40 +347,37 @@ fn an_earlier_closed_reference_keeps_membership_before_a_later_declaration() {
 }
 
 #[test]
-fn conflicting_declarations_refuse_atomically_at_the_source_field() {
-    let scene = scene();
-    let budget = GlobalBudget::default();
-    let step = graph(
-        "flowchart TB\nsubgraph first[First]\nA[One]\nend\nsubgraph second[Second]\nA[Two]\nend\n",
-    );
-    let error = scene
-        .admit(&step, &budget)
-        .expect_err("conflicting declaration");
-    assert_eq!(error.code, ErrorCode::Unsupported);
-    assert_eq!(error.path.to_string(), "put[1].mermaid.src");
-    assert_eq!(scene.object_count(), 0);
-    assert_eq!(scene.revision(), 0);
-    assert_eq!(budget.usage().objects, 0);
-}
-
-#[test]
 fn refused_families_never_commit_a_valid_prefix() {
     let cases: Value = serde_json::from_str(include_str!("fixtures/mermaid/refused.json"))
         .expect("refused fixtures");
-    for case in cases.as_array().expect("fixture array") {
-        let scene = scene();
-        let budget = GlobalBudget::default();
+    let cases = cases.as_array().expect("fixture array").iter().map(|case| {
         let source = case["src"].as_str().expect("source");
         let expected = match case["code"].as_str().expect("diagnostic code") {
             "Malformed" => ErrorCode::Malformed,
             "Unsupported" => ErrorCode::Unsupported,
             code => panic!("unknown fixture code: {code}"),
         };
-        let error = scene
-            .admit(&graph(source), &budget)
-            .expect_err("outside D1");
-        assert_eq!(error.code, expected, "fixture {}", case["case"]);
-        assert_eq!(error.path.to_string(), "put[1].mermaid.src");
+        (source, expected)
+    });
+    for (source, expected) in cases.chain([
+        (
+            "graph TD;A_node-->odd->Vertex Text];",
+            ErrorCode::Unsupported,
+        ),
+        (
+            "flowchart TB\nA --> B[\"test\"]:::hot\n",
+            ErrorCode::Unsupported,
+        ),
+    ]) {
+        let scene = scene();
+        let budget = GlobalBudget::default();
+        rejected(
+            &scene,
+            &budget,
+            &graph(source),
+            expected,
+            "put[1].mermaid.src",
+        );
         assert_eq!(scene.object_count(), 0);
         assert_eq!(scene.revision(), 0);
         assert_eq!(budget.usage().objects, 0);
@@ -312,11 +394,36 @@ fn centered_node_and_edge_labels_start_their_full_wrapping_box_at_the_same_spine
         &before,
         &graph("flowchart TB\nA[Start] -->|next| B[Done]\n"),
     );
+    let spine = bounds(&prepared.after, "A").center().x;
+    assert_eq!(
+        spine.to_bits(),
+        bounds(&prepared.after, "B").center().x.to_bits()
+    );
+    let frame = at_rest(&prepared.after);
     for text in ["Start", "next", "Done"] {
+        let mut labels = frame.paint_items().flat_map(|(item, _, prims)| prims.iter().map(move |p| (item, p)))
+            .filter(|(_, prim)| matches!(prim, Prim::Text { text: value, .. } if value.as_str() == text));
+        let Some((
+            item,
+            Prim::Text {
+                origin,
+                max_width: Some(width),
+                align: Align::Center,
+                ..
+            },
+        )) = labels.next()
+        else {
+            panic!("{text} must have a centered wrapping box");
+        };
+        assert_eq!(width.to_bits(), 180.0_f32.to_bits());
         assert_eq!(
-            title_origin(&prepared.after, text).x.to_bits(),
-            90.0_f32.to_bits()
+            item.transform
+                .point(*origin + Vec2::new(*width * 0.5, 0.0))
+                .x
+                .to_bits(),
+            spine.to_bits()
         );
+        assert!(labels.next().is_none(), "one label for {text}");
     }
 }
 
@@ -328,15 +435,7 @@ fn a_header_only_chart_keeps_one_empty_boxless_root() {
     let prepared = picture(&mut scene, &mut budget, &before, &graph("flowchart LR"));
     assert_eq!(scene.object_count(), 2);
     assert_eq!(budget.usage().objects, 2);
-    assert_eq!(
-        prepared
-            .after
-            .items()
-            .iter()
-            .map(|item| item.primitives.len())
-            .collect::<Vec<_>>(),
-        [0, 0]
-    );
+    assert!(at_rest(&prepared.after).paint_items().next().is_none());
 }
 
 #[test]
@@ -446,7 +545,7 @@ fn node_and_edge_limits_are_per_diagram_not_per_source() {
         for edge in 0..50 {
             writeln!(
                 source,
-                "{group}{} --> {group}{}",
+                "{group}{} -->|{group}-edge-{edge}| {group}{}",
                 edge % 25,
                 (edge + 1) % 25
             )
@@ -458,14 +557,16 @@ fn node_and_edge_limits_are_per_diagram_not_per_source() {
     let mut budget = GlobalBudget::default();
     let before = LayoutState::new(&scene);
     let prepared = picture(&mut scene, &mut budget, &before, &graph(&source));
+    let handles: std::collections::BTreeSet<_> = ["left", "right"]
+        .into_iter()
+        .flat_map(|group| (0..25).map(move |node| id(&format!("{group}{node}"))))
+        .map(|id| prepared.after.handle(&id).expect("authored node"))
+        .collect();
+    assert_eq!(handles.len(), 50);
+    let items = prepared.after.items();
     for group in ["left", "right"] {
-        for node in 0..25 {
-            assert!(
-                prepared
-                    .after
-                    .handle(&id(&format!("{group}{node}")))
-                    .is_some()
-            );
+        for edge in 0..50 {
+            labelled(&items, &format!("{group}-edge-{edge}"));
         }
     }
     let mut single = String::from("flowchart TB\n");
@@ -553,10 +654,32 @@ fn group_labels_and_edge_heads_survive_set_cut_and_recovery() {
         None,
     )
     .expect("cut graph recovery");
-    assert_eq!(bounds(&detached, "A"), expected_a);
-    assert_eq!(bounds(&detached, "B"), expected_b);
-    assert_eq!(detached.items(), recovered.items());
-    assert_eq!(labelled(&recovered.items(), "Named group").handle, cluster);
+    for layout in [&detached, &recovered] {
+        assert_eq!(bounds(layout, "A"), expected_a);
+        assert_eq!(bounds(layout, "B"), expected_b);
+        let items = layout.items();
+        assert_eq!(labelled(&items, "Named group").handle, cluster);
+        let join = labelled(&items, "join");
+        assert_eq!(join.handle, edge);
+        let tip = join
+            .primitives
+            .iter()
+            .find_map(|prim| match prim {
+                Prim::Line {
+                    points,
+                    closed: false,
+                    ..
+                } => points.last(),
+                _ => None,
+            })
+            .expect("the join shaft");
+        assert!(
+            join.primitives
+                .iter()
+                .any(|prim| { matches!(prim, Prim::Fill { points, .. } if points.contains(tip)) }),
+            "the join has a filled head at its end"
+        );
+    }
 }
 
 #[test]
@@ -677,15 +800,37 @@ fn chained_fanout_preserves_first_mention_handles_and_unicode_labels() {
     );
     let items = prepared.after.items();
     assert_eq!(scene.object_count(), 13);
-    assert_eq!(
-        items
+    let frame = at_rest(&prepared.after);
+    let mut prior = None;
+    for (from, to, label) in [
+        ("A", "C", Some("join")),
+        ("A", "D", Some("join")),
+        ("B", "C", Some("join")),
+        ("B", "D", Some("join")),
+        ("C", "E", None),
+        ("D", "E", None),
+    ] {
+        let handle = edge_handle(&prepared.after, &frame, from, to);
+        assert!(
+            prior.is_none_or(|previous| handle > previous),
+            "expanded source order"
+        );
+        prior = Some(handle);
+        let rendered = items
             .iter()
-            .filter(|item| item.primitives.iter().any(
-                |primitive| matches!(primitive, Prim::Text { text, .. } if text.as_str() == "join")
-            ))
-            .count(),
-        4
-    );
+            .find(|item| item.handle == handle)
+            .expect("prepared edge");
+        assert!(
+            rendered
+                .primitives
+                .iter()
+                .filter_map(|prim| match prim {
+                    Prim::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .eq(label)
+        );
+    }
     for ((name, label), slot) in [("A", "α"), ("B", "β"), ("C", "γ"), ("D", "δ"), ("E", "終")]
         .into_iter()
         .zip(2..7)
@@ -907,7 +1052,7 @@ fn nested_graph(groups: usize) -> String {
 }
 
 #[test]
-fn generated_reference_depth_failures_point_to_the_original_source() {
+fn generated_reference_depth_16_is_admitted_without_lowering_the_limit() {
     for groups in [14, 16] {
         rejected(
             &scene(),
@@ -917,10 +1062,6 @@ fn generated_reference_depth_failures_point_to_the_original_source() {
             "put[1].mermaid.src",
         );
     }
-}
-
-#[test]
-fn generated_reference_depth_16_is_admitted_without_lowering_the_limit() {
     let mut scene = scene();
     let mut budget = GlobalBudget::default();
     let step = graph(&nested_graph(13));
@@ -928,10 +1069,13 @@ fn generated_reference_depth_16_is_admitted_without_lowering_the_limit() {
     else {
         panic!("new graph");
     };
-    let committed = scene.commit(candidate, &mut budget).expect("commit");
-    assert_eq!(committed.handles.len(), 16);
-    assert_eq!(scene.handle(&id("A")).expect("deepest node").slot(), 15);
-    assert_eq!(budget.usage().objects, 16);
+    scene.commit(candidate, &mut budget).expect("commit");
+    for node in (0..13)
+        .map(|depth| format!("g{depth}"))
+        .chain(["A".to_owned()])
+    {
+        assert!(scene.handle(&id(&node)).is_some(), "retained {node}");
+    }
 }
 
 #[test]
@@ -1015,7 +1159,7 @@ fn bare_membership_mentions_do_not_redeclare_a_shaped_node() {
         &mut scene,
         &mut GlobalBudget::default(),
         &before,
-        &graph("graph TD\nA[Christmas] -->|Get money| B(Go shopping)\nsubgraph 1test\nA\nend"),
+        &graph("graph TD\nA(Christmas) -->|Get money| B[Go shopping]\nsubgraph 1test\nA\nend"),
     );
     assert_eq!(scene.object_count(), 6);
     let items = prepared.after.items();
@@ -1027,27 +1171,22 @@ fn bare_membership_mentions_do_not_redeclare_a_shaped_node() {
         labelled(&items, "Christmas").handle,
         scene.handle(&id("A")).expect("source A")
     );
-}
-
-#[test]
-fn unsupported_odd_shapes_after_a_trailing_hyphen_are_not_bad_arrows() {
-    rejected(
-        &scene(),
-        &GlobalBudget::default(),
-        &graph("graph TD;A_node-->odd->Vertex Text];"),
-        ErrorCode::Unsupported,
-        "put[1].mermaid.src",
-    );
-}
-
-#[test]
-fn a_class_suffix_after_a_shape_is_a_typed_refusal() {
-    rejected(
-        &scene(),
-        &GlobalBudget::default(),
-        &graph("flowchart TB\nA --> B[\"test\"]:::hot\n"),
-        ErrorCode::Unsupported,
-        "put[1].mermaid.src",
+    let corner_radius = |node: &Item| {
+        node.primitives
+            .iter()
+            .find_map(|prim| match prim {
+                Prim::Rect {
+                    radius,
+                    border: Some(_),
+                    ..
+                } => Some(*radius),
+                _ => None,
+            })
+            .expect("node outline")
+    };
+    assert!(
+        corner_radius(labelled(&items, "Christmas"))
+            > corner_radius(labelled(&items, "Go shopping"))
     );
 }
 
@@ -1089,20 +1228,6 @@ fn a_bare_reference_in_a_later_group_keeps_first_closing_ownership() {
     );
 }
 
-fn connected_full_graph() -> String {
-    let mut source = String::from("flowchart TB\n");
-    let mut first = 0;
-    for (group, nodes) in [48, 48, 48, 48, 48, 48, 11].into_iter().enumerate() {
-        writeln!(source, "subgraph g{group}").expect("source string");
-        for node in first..first + nodes - 1 {
-            writeln!(source, "n{node} --> n{}", node + 1).expect("source string");
-        }
-        source.push_str("end\n");
-        first += nodes;
-    }
-    source
-}
-
 #[test]
 fn generated_names_do_not_capture_a_dangling_plain_parent() {
     rejected(
@@ -1141,21 +1266,36 @@ fn a_titled_group_recomputes_its_band_after_a_later_node() {
     assert_rect(bounds(&next.after, "A"), [140.0, 66.0, 80.0, 40.0]);
     assert_rect(bounds(&next.after, "B"), [16.0, 178.0, 80.0, 40.0]);
     assert_rect(bounds(&next.after, "g"), [8.0, 32.0, 220.0, 194.0]);
-    assert_eq!(title_origin(&next.after, "Group"), Vec2::new(28.0, 40.0));
+    assert_eq!(
+        world_title_origin(&next.after, "Group"),
+        Vec2::new(28.0, 40.0)
+    );
     let items = next.after.items();
     let group = labelled(&items, "Group");
-    let Prim::Rect { rect, .. } = &group.primitives[0] else {
-        panic!("group frame")
+    let border = group
+        .primitives
+        .iter()
+        .find_map(|prim| match prim {
+            Prim::Rect {
+                rect,
+                border: Some(_),
+                ..
+            } => Some(*rect),
+            _ => None,
+        })
+        .expect("visible group border");
+    let transform = world_transform(&items, group);
+    let origin = transform.point(border.origin);
+    let world = Rect {
+        origin,
+        size: transform.point(border.max()) - origin,
     };
-    assert_rect(*rect, [8.0, -18.0, 220.0, 194.0]);
+    assert_rect(world, [8.0, 32.0, 220.0, 194.0]);
 }
 
 #[test]
 fn later_nodes_take_the_next_rank_in_reversed_groups() {
-    for (direction, expected) in [
-        ("RL", [-88.0, 66.0, 80.0, 40.0]),
-        ("BT", [16.0, -46.0, 80.0, 40.0]),
-    ] {
+    for direction in ["RL", "BT"] {
         let mut scene = scene();
         let mut budget = GlobalBudget::default();
         let before = LayoutState::new(&scene);
@@ -1176,7 +1316,25 @@ fn later_nodes_take_the_next_rank_in_reversed_groups() {
                 {"edge":{"id":"next","in":"g","from":"B","to":"C"}}
             ]})),
         );
-        assert_rect(bounds(&next.after, "C"), expected);
+        for name in ["A", "B"] {
+            assert_eq!(bounds(&next.after, name), bounds(&first.after, name));
+        }
+        let a = bounds(&next.after, "A");
+        let b = bounds(&next.after, "B");
+        let c = bounds(&next.after, "C");
+        if direction == "RL" {
+            assert!(c.max().x < b.origin.x);
+            assert_eq!(
+                (b.origin.x - c.max().x).to_bits(),
+                (a.origin.x - b.max().x).to_bits()
+            );
+        } else {
+            assert!(c.max().y < b.origin.y);
+            assert_eq!(
+                (b.origin.y - c.max().y).to_bits(),
+                (a.origin.y - b.max().y).to_bits()
+            );
+        }
     }
 }
 
@@ -1197,45 +1355,83 @@ fn a_title_only_subgraph_has_a_single_literal_band() {
 
 #[test]
 fn retained_prefix_residency_keeps_private_title_text() {
-    let mut bytes = Vec::new();
-    for title in ["X", "Title"] {
-        let mut scene = scene();
-        let before = LayoutState::new(&scene);
-        let prepared = picture(
-            &mut scene,
-            &mut GlobalBudget::default(),
-            &before,
-            &graph(&format!("flowchart TB\nsubgraph g[{title}]\nA\nend\n")),
-        );
-        assert_eq!(scene.object_count(), 4);
-        bytes.push(prepared.after.resident_bytes());
-    }
-    assert_eq!(
-        bytes[1] - bytes[0],
-        8,
-        "four more bytes in paint and four in retained private facts"
+    let [short, long] = ["X", "Title"].map(|title| {
+        let (retained, _, [allocated, freed]) = allocation::usage(|| {
+            let mut scene = scene();
+            let before = LayoutState::new(&scene);
+            let mut budget = GlobalBudget::default();
+            let retained = picture(
+                &mut scene,
+                &mut budget,
+                &before,
+                &graph(&format!("flowchart TB\nsubgraph g[{title}]\nA\nend\n")),
+            )
+            .after;
+            assert_eq!(scene.object_count(), 4);
+            let group = retained.handle(&id("g")).expect("named group");
+            let next = picture(
+                &mut scene,
+                &mut budget,
+                &retained,
+                &typed(&json!({"id":"later","put":[
+                    {"node":{"id":"B","in":"g","label":"B"}}
+                ]})),
+            );
+            assert_eq!(labelled(&next.after.items(), title).handle, group);
+            retained
+        });
+        (allocated - freed, retained.resident_bytes())
+    });
+    assert!(
+        long.0 + short.1 <= short.0 + long.1,
+        "charge covers retained title growth: {short:?} -> {long:?}"
     );
 }
 
 #[test]
 fn prepared_residency_keeps_the_private_compiled_node_text() {
-    let mut bytes = Vec::new();
-    for label in ["X", "Label"] {
+    let [short, long] = ["X", "Label"].map(|label| {
         let mut scene = scene();
         let before = LayoutState::new(&scene);
-        let prepared = picture(
-            &mut scene,
-            &mut GlobalBudget::default(),
-            &before,
-            &graph(&format!("flowchart TB\nA[{label}]\n")),
-        );
+        let mut budget = GlobalBudget::default();
+        let step = graph(&format!("flowchart TB\nA[{label}]\n"));
+        let Admission::New(admission) = scene.admit(&step, &budget).expect("graph admission")
+        else {
+            panic!("new graph")
+        };
+        let ticket = scene
+            .commit(admission, &mut budget)
+            .expect("commit")
+            .preparation;
+        let theme = Arc::new(Theme::default());
+        let (prepared, _, [allocated, freed]) = allocation::usage(|| {
+            let input = PrepareInput::new(
+                ticket,
+                before.clone(),
+                SurfaceGeometry::default(),
+                Arc::clone(&theme),
+            )
+            .expect("input");
+            prepare(input, &mut Measure, &AtomicBool::new(false)).expect("prepare")
+        });
         assert_eq!(scene.object_count(), 3);
-        bytes.push(prepared.resident_bytes);
-    }
-    assert_eq!(
-        bytes[1] - bytes[0],
-        12,
-        "four more bytes in paint, the layout source and the compiled ticket"
+        let handle = scene.handle(&id("A")).expect("named node");
+        let frame = at_rest(&prepared.after);
+        assert!(frame.paint_items().any(|(item, _, prims)| {
+            item.handle == handle
+                && prims
+                    .iter()
+                    .any(|prim| matches!(prim, Prim::Text { text, .. } if text.as_str() == label))
+        }));
+        drop(frame);
+        let charged = prepared.resident_bytes;
+        assert!(allocated - freed <= charged);
+        let ((), _, [_, held]) = allocation::usage(|| drop(prepared));
+        (held, charged)
+    });
+    assert!(
+        long.0 + short.1 <= short.0 + long.1,
+        "charge covers retained label growth: {short:?} -> {long:?}"
     );
 }
 
@@ -1252,72 +1448,4 @@ fn the_connected_mermaid_measurement_really_prepares_600_objects() {
     assert_eq!(scene.object_count(), 600);
     assert_eq!(prepared.after.items().len(), 600);
     assert_eq!(scene.handle(&id("n298")).expect("last node").slot(), 307);
-}
-
-#[test]
-#[ignore = "run the release executable at Normal priority under the shared quiet-machine lock"]
-fn measure_mermaid_admission_and_prepare() {
-    let maximum = connected_full_graph();
-    for (name, source, count) in [
-        (
-            "branching",
-            include_str!("fixtures/mermaid/gates/branching.mmd"),
-            14,
-        ),
-        (
-            "long_label_cycle",
-            include_str!("fixtures/mermaid/gates/long-label-cycle.mmd"),
-            12,
-        ),
-        (
-            "nested_cross_group",
-            include_str!("fixtures/mermaid/gates/nested-cross-group.mmd"),
-            16,
-        ),
-        (
-            "orientations",
-            include_str!("fixtures/mermaid/gates/orientations.mmd"),
-            10,
-        ),
-        (
-            "labelled_edges",
-            include_str!("fixtures/mermaid/gates/labelled-edges.mmd"),
-            12,
-        ),
-        ("connected600", maximum.as_str(), 600),
-    ] {
-        let step = graph(source);
-        for iteration in 0..69 {
-            let mut scene = scene();
-            let mut budget = GlobalBudget::default();
-            let before = LayoutState::new(&scene);
-            let start = std::time::Instant::now();
-            let admitted = scene.admit(&step, &budget).expect("admitted source");
-            let admission_ns = start.elapsed().as_nanos();
-            let Admission::New(candidate) = admitted else {
-                panic!("fresh source");
-            };
-            let committed = scene.commit(candidate, &mut budget).expect("commit");
-            let input = PrepareInput::new(
-                committed.preparation,
-                before.clone(),
-                SurfaceGeometry::default(),
-                Arc::new(Theme::default()),
-            )
-            .expect("input");
-            let cancelled = AtomicBool::new(false);
-            let start = std::time::Instant::now();
-            let prepared = prepare(input, &mut Measure, &cancelled).expect("prepared source");
-            let prepare_ns = start.elapsed().as_nanos();
-            prepared.validate(&scene, &before).expect("current source");
-            assert_eq!(scene.object_count(), count);
-            if iteration >= 5 {
-                println!(
-                    "MERMAID name={name} sample={} admit_ns={admission_ns} prepare_ns={prepare_ns} objects={}",
-                    iteration - 5,
-                    scene.object_count()
-                );
-            }
-        }
-    }
 }

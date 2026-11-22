@@ -325,11 +325,11 @@ mod tests {
 
     /// Frames besides Claude Code's view: the account's, with a planted email, and text as
     /// Claude Code might print it, with a planted path and token.
-    fn unrelated() -> Vec<Result<Frame>> {
+    fn unrelated(email: &str, path: &str, token: &str) -> Vec<Result<Frame>> {
         vec![
             Ok(Frame::Control(ControlToShell::Account(
                 AccountView::SignedIn {
-                    email: Some(AccountEmail::new(EMAIL).expect("a valid email")),
+                    email: Some(AccountEmail::new(email).expect("a valid email")),
                     plan: PlanState::Enabled,
                     recovery: None,
                 },
@@ -337,7 +337,7 @@ mod tests {
             Ok(Frame::Data(
                 DataToShell::AssistantText {
                     run: RunId(3),
-                    delta: format!("Login successful. Credentials saved to {PATH} {TOKEN}").into(),
+                    delta: format!("Login successful. Credentials saved to {path} {token}").into(),
                 },
                 0,
             )),
@@ -362,14 +362,18 @@ mod tests {
     }
 
     fn fixture(steps: Vec<Step>) -> Fixture {
+        fixture_with(steps, [EMAIL, PATH, TOKEN])
+    }
+
+    fn fixture_with(steps: Vec<Step>, [email, path, token]: [&str; 3]) -> Fixture {
         let mut frames = VecDeque::new();
         for step in steps {
-            frames.extend(unrelated());
+            frames.extend(unrelated(email, path, token));
             frames.push_back(match step {
                 Step::View(claude_code) => Ok(connections(claude_code, KeyView::Missing)),
                 Step::Snapshot(claude_code, anthropic) => Ok(connections(claude_code, anthropic)),
                 Step::Closed => Ok(Frame::Closed),
-                Step::Late => Err(anyhow!("nothing expected arrived; last: {TOKEN} {PATH}")),
+                Step::Late => Err(anyhow!("nothing expected arrived; last: {token} {path}")),
             });
         }
         Fixture {
@@ -392,8 +396,8 @@ mod tests {
             .into_iter()
             .flatten()
         {
-            assert!(!text.contains(SENTINEL), "a planted value leaked: {text}");
-            assert!(!text.contains("4919"), "a version leaked: {text}");
+            assert!(!text.contains(SENTINEL), "a planted value leaked");
+            assert!(!text.contains("4919"), "a version leaked");
         }
         (out, error, quit_sent)
     }
@@ -416,37 +420,88 @@ mod tests {
         }
     }
 
+    struct TerminalFixture {
+        fixture: Fixture,
+        read_after_terminal: bool,
+    }
+
+    impl Wire for &mut TerminalFixture {
+        fn send(&mut self, message: &ControlToBrain) -> Result<()> {
+            (&mut self.fixture).send(message)
+        }
+
+        fn until<T>(
+            &mut self,
+            limit: Duration,
+            pick: impl FnMut(&Frame) -> Option<T>,
+        ) -> Result<T> {
+            self.read_after_terminal |= self.fixture.frames.is_empty();
+            (&mut self.fixture).until(limit, pick)
+        }
+    }
+
+    fn run_observed(fixture: &mut TerminalFixture, ask: Ask) -> (String, Option<String>, bool) {
+        let mut out = Vec::new();
+        let (result, quit_sent) = session(Ok(&mut *fixture), &mut out, |wire, out| {
+            drive(wire, out, ask)
+        });
+        let out = String::from_utf8(out).expect("utf-8");
+        let printed = result.as_ref().err().map(|error| format!("{error:?}"));
+        let error = result.err().map(|error| format!("{error:#}"));
+        for text in [Some(&out), printed.as_ref(), error.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            assert!(!text.contains(SENTINEL), "a planted value leaked");
+            assert!(!text.contains("4919"), "a version leaked");
+        }
+        (out, error, quit_sent)
+    }
+
     #[test]
     fn a_sign_in_waits_for_discovery_and_prints_only_states() {
-        let mut brain = fixture(vec![
-            Step::View(ClaudeCodeView::NotFound),
-            Step::View(ClaudeCodeView::NotFound),
-            Step::View(signed_out()),
-            Step::View(ClaudeCodeView::SigningIn),
-            Step::View(ClaudeCodeView::SigningIn),
-            Step::View(ready()),
-        ]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(
-            out,
-            format!("claude code: signed out\n{WAITING}claude code: ready\n")
-        );
-        assert_eq!(error, None);
-        assert_eq!(brain.sent, [CONNECT, QUIT]);
-        assert!(quit_sent);
-        let [first, finding, found, answer, settle, again] = brain.limits[..] else {
-            panic!("six waits: {:?}", brain.limits);
-        };
-        assert_eq!(first, VIEW);
-        assert!(answer <= VIEW, "{answer:?}");
-        assert!(
-            finding <= FIND && found < finding,
-            "{finding:?} then {found:?}"
-        );
-        assert!(
-            settle <= SIGNIN && again < settle,
-            "{settle:?} then {again:?}"
-        );
+        use ClaudeCodeView::{Finding, NotFound, SigningIn};
+
+        for (first, next) in [
+            (NotFound, NotFound),
+            (Finding, Finding),
+            (NotFound, Finding),
+        ] {
+            let mut brain = fixture(vec![
+                Step::View(first),
+                Step::View(next),
+                Step::View(signed_out()),
+                Step::Snapshot(signed_out(), KeyView::Checking),
+                Step::View(SigningIn),
+                Step::View(SigningIn),
+                Step::View(ready()),
+            ]);
+            let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
+            assert_eq!(
+                out,
+                format!("claude code: signed out\n{WAITING}claude code: ready\n")
+            );
+            assert_eq!(error, None);
+            assert_eq!(brain.sent, [CONNECT, QUIT]);
+            assert!(quit_sent);
+            let [initial, finding, found, ack @ .., settle, again] = &brain.limits[..] else {
+                panic!("missing discovery or settling waits: {:?}", brain.limits);
+            };
+            assert_eq!(*initial, VIEW);
+            assert!(
+                ack.first().is_some_and(|limit| *limit <= VIEW)
+                    && ack.windows(2).all(|pair| pair[1] < pair[0]),
+                "{ack:?}"
+            );
+            assert!(
+                *finding <= FIND && found < finding,
+                "{finding:?} then {found:?}"
+            );
+            assert!(
+                *settle <= SIGNIN && again < settle,
+                "{settle:?} then {again:?}"
+            );
+        }
     }
 
     #[test]
@@ -459,44 +514,6 @@ mod tests {
         );
         assert_eq!(error, None);
         assert_eq!(brain.sent, [QUIT]);
-        assert!(quit_sent);
-    }
-
-    #[test]
-    fn the_authoritative_finding_state_settles_before_connect() {
-        let mut brain = fixture(vec![
-            Step::View(ClaudeCodeView::Finding),
-            Step::View(ClaudeCodeView::Finding),
-            Step::View(signed_out()),
-            Step::View(ClaudeCodeView::SigningIn),
-            Step::View(ready()),
-        ]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(
-            out,
-            format!("claude code: signed out\n{WAITING}claude code: ready\n")
-        );
-        assert_eq!(error, None);
-        assert_eq!(brain.sent, [CONNECT, QUIT]);
-        assert!(quit_sent);
-    }
-
-    #[test]
-    fn placeholder_then_finding_still_waits_for_settled_discovery() {
-        let mut brain = fixture(vec![
-            Step::View(ClaudeCodeView::NotFound),
-            Step::View(ClaudeCodeView::Finding),
-            Step::View(signed_out()),
-            Step::View(ClaudeCodeView::SigningIn),
-            Step::View(ready()),
-        ]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(
-            out,
-            format!("claude code: signed out\n{WAITING}claude code: ready\n")
-        );
-        assert_eq!(error, None);
-        assert_eq!(brain.sent, [CONNECT, QUIT]);
         assert!(quit_sent);
     }
 
@@ -526,19 +543,20 @@ mod tests {
         ];
         for (found, words) in cases {
             // Today's main ships `Undecided`: discovery ends at the first case.
-            let mut brain = fixture(vec![
-                Step::View(ClaudeCodeView::NotFound),
-                Step::View(found),
-            ]);
-            let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-            assert_eq!(out, format!("claude code: {words}\n"));
-            assert_eq!(
-                error.as_deref(),
-                Some(format!("not signing in while claude code is {words}").as_str())
-            );
-            assert_eq!(brain.sent, [QUIT]);
+            let mut brain = TerminalFixture {
+                fixture: fixture(vec![
+                    Step::View(ClaudeCodeView::NotFound),
+                    Step::View(found),
+                ]),
+                read_after_terminal: false,
+            };
+            let (out, error, quit_sent) = run_observed(&mut brain, Ask::SignIn);
+            assert!(!brain.read_after_terminal, "read after terminal discovery");
+            assert!(out.contains(words), "{out}");
+            let error = error.expect("unavailable state is refused");
+            assert!(error.contains(words), "{error}");
+            assert_eq!(brain.fixture.sent, [QUIT]);
             assert!(quit_sent);
-            assert_eq!(brain.limits.len(), 2, "no wait after the view: {words}");
         }
     }
 
@@ -611,81 +629,81 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_still_showing_signed_out_isnt_the_connects_answer() {
-        let mut brain = fixture(vec![
-            Step::View(signed_out()),
-            Step::Snapshot(signed_out(), KeyView::Checking),
-            Step::View(ClaudeCodeView::SigningIn),
-            Step::View(ready()),
-        ]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(
-            out,
-            format!("claude code: signed out\n{WAITING}claude code: ready\n")
-        );
-        assert_eq!(error, None);
-        assert_eq!(brain.sent, [CONNECT, QUIT]);
-        assert!(quit_sent);
-    }
-
-    #[test]
-    fn a_snapshot_still_showing_ready_isnt_the_disconnects_answer() {
-        let mut brain = fixture(vec![
-            Step::View(ready()),
-            Step::Snapshot(ready(), KeyView::Checking),
-            Step::View(ClaudeCodeView::CleanupPending),
-            Step::View(signed_out()),
-        ]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::Disconnect);
-        assert_eq!(
-            out,
-            format!("claude code: ready\n{CLEANING}claude code: signed out\n")
-        );
-        assert_eq!(error, None);
-        assert_eq!(brain.sent, [DISCONNECT, QUIT]);
-        assert!(quit_sent);
-    }
-
-    #[test]
     fn the_deadline_ends_the_sign_in_by_quitting_without_a_cancel() {
-        let mut brain = fixture(vec![
-            Step::View(signed_out()),
-            Step::View(ClaudeCodeView::SigningIn),
-            Step::Late,
-        ]);
-        let (out, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(out, format!("claude code: signed out\n{WAITING}"));
-        assert_eq!(
-            error.as_deref(),
-            Some("the sign-in didn't settle in 330s; Quitting ends it")
+        let diagnostics = |(private, version)| {
+            let mut brain = fixture_with(
+                vec![
+                    Step::View(ClaudeCodeView::SignedOut { version }),
+                    Step::View(ClaudeCodeView::SigningIn),
+                    Step::Late,
+                ],
+                private,
+            );
+            let mut out = Vec::new();
+            let (result, quit_sent) = session(Ok(&mut brain), &mut out, |wire, out| {
+                drive(wire, out, Ask::SignIn)
+            });
+            let error = result.expect_err("sign-in times out");
+            assert_eq!(brain.sent, [CONNECT, QUIT]);
+            assert!(quit_sent);
+            (out, format!("{error:#}"), format!("{error:?}"))
+        };
+        let [shown, other] = [
+            ([EMAIL, PATH, TOKEN], VERSION),
+            (
+                [
+                    "other-person@localmail.example",
+                    r"D:\Profiles\another\Settings\Tool",
+                    "fixture-alternate-key-1290",
+                ],
+                ClaudeVersion {
+                    major: 2537,
+                    minor: 3561,
+                    patch: 7843,
+                },
+            ),
+        ]
+        .map(diagnostics);
+        assert!(shown == other, "key or path affected sign-in diagnostics");
+        assert!(
+            shown.0 == format!("claude code: signed out\n{WAITING}").as_bytes()
+                && shown.1 == "the sign-in didn't settle in 330s; Quitting ends it"
+                && !shown.2.contains(SENTINEL)
+                && !shown.2.contains("4919"),
+            "sign-in deadline diagnostics are not sanitized"
         );
-        assert_eq!(brain.sent, [CONNECT, QUIT]);
-        assert!(quit_sent);
     }
 
     #[test]
     fn a_disconnect_waits_through_the_cleanup() {
         let mut brain = fixture(vec![
             Step::View(ready()),
+            Step::Snapshot(ready(), KeyView::Checking),
             Step::View(ClaudeCodeView::CleanupPending),
             Step::View(ClaudeCodeView::CleanupPending),
             Step::View(signed_out()),
         ]);
         let (out, error, quit_sent) = run(&mut brain, Ask::Disconnect);
-        assert_eq!(
-            out,
-            format!("claude code: ready\n{CLEANING}claude code: signed out\n")
+        assert!(
+            out.starts_with("claude code: ready\n")
+                && out.contains("45s")
+                && out.ends_with("claude code: signed out\n"),
+            "{out}"
         );
         assert_eq!(error, None);
         assert_eq!(brain.sent, [DISCONNECT, QUIT]);
         assert!(quit_sent);
-        let [first, answer, cleanup, again] = brain.limits[..] else {
-            panic!("four waits: {:?}", brain.limits);
+        let [first, ack @ .., cleanup, again] = &brain.limits[..] else {
+            panic!("missing initial or cleanup waits: {:?}", brain.limits);
         };
-        assert_eq!(first, VIEW);
-        assert!(answer <= VIEW, "{answer:?}");
+        assert_eq!(*first, VIEW);
         assert!(
-            cleanup <= CLEANUP && again < cleanup,
+            ack.first().is_some_and(|limit| *limit <= VIEW)
+                && ack.windows(2).all(|pair| pair[1] < pair[0]),
+            "{ack:?}"
+        );
+        assert!(
+            *cleanup <= CLEANUP && again < cleanup,
             "{cleanup:?} then {again:?}"
         );
     }
@@ -840,18 +858,6 @@ mod tests {
             Some("couldn't send ConnectClaudeCode to the brain")
         );
         assert!(quit_sent);
-    }
-
-    #[test]
-    fn a_failed_quitting_ends_the_brain() {
-        let mut brain = fixture(vec![Step::View(ready())]);
-        brain.refuse = Some(QUIT);
-        let (_, error, quit_sent) = run(&mut brain, Ask::SignIn);
-        assert_eq!(
-            error.as_deref(),
-            Some("couldn't send Quitting; the brain was ended")
-        );
-        assert!(!quit_sent);
     }
 
     #[test]

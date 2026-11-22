@@ -1,43 +1,15 @@
 //! Additional semantic-boundary and Stop/replay conformance cases.
 use kumochi_scene::{
-    Admission, Begin, CallState, ErrorCode, GlobalBudget, Handle, Record, SceneEvent, SceneState,
-    Step, StopCut, StopOutcome, WireId, parse_record, text::Bounded,
+    Admission, CallState, ErrorCode, GlobalBudget, Handle, Record, SceneEvent, SceneState, StopCut,
+    StopOutcome, WireId, parse_record, text::Bounded,
 };
 
-fn record(json: &str) -> Record {
-    parse_record(json.as_bytes()).expect("valid fixture")
-}
-fn header() -> Begin {
-    let Record::Begin(header) =
-        record(r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":""}}"#)
-    else {
-        panic!("begin fixture");
-    };
-    header
-}
-fn scene() -> SceneState {
-    SceneState::begin(header()).expect("valid header")
-}
-fn step(json: &str) -> Step {
-    let Record::Step(step) = record(&format!(r#"{{"step":{json}}}"#)) else {
-        panic!("step fixture");
-    };
-    step
-}
+#[path = "support/state_followups.rs"]
+mod state_followups;
+use state_followups::{commit, header, record, scene, step};
+
 fn id(value: &str) -> WireId {
     value.to_owned().try_into().expect("valid id")
-}
-fn commit(state: &mut SceneState, global: &mut GlobalBudget, json: &str) -> Vec<Handle> {
-    let Admission::New(admitted) = state.admit(&step(json), global).expect("valid step") else {
-        panic!("new step");
-    };
-    state
-        .commit(admitted, global)
-        .expect("fresh candidate")
-        .handles
-        .into_iter()
-        .map(|(_, h)| h)
-        .collect()
 }
 fn cut(activated: u32, handles: Vec<Handle>) -> StopCut {
     StopCut {
@@ -351,40 +323,6 @@ fn preparation_failure_is_an_ordered_cut_before_the_next_call() {
 }
 
 #[test]
-fn first_step_preparation_failure_clears_without_an_extra_event_kind() {
-    let mut state = scene();
-    let mut global = GlobalBudget::default();
-    commit(
-        &mut state,
-        &mut global,
-        r#"{"id":"failed","put":[{"text":{"id":"x","at":[0,0],"text":""}}]}"#,
-    );
-    assert_eq!(
-        state
-            .stop(&cut(0, vec![]), &mut global)
-            .expect("first-step failure"),
-        StopOutcome::Cleared
-    );
-    assert_eq!(
-        (
-            state.revision(),
-            state.committed(),
-            state.object_count(),
-            state.recovery_log().len()
-        ),
-        (1, 0, 0, 2)
-    );
-    assert!(matches!(
-        &state.recovery_log()[1],
-        SceneEvent::Stop(StopCut { activated: 0, .. })
-    ));
-    let replay =
-        SceneState::replay(header(), state.recovery_log()).expect("cleared failure replay");
-    assert!(replay.is_cleared());
-    assert_eq!((replay.revision(), replay.committed()), (1, 0));
-}
-
-#[test]
 fn an_effective_cut_after_a_gap_preserves_original_handles_and_reservations() {
     let mut state = scene();
     let mut global = GlobalBudget::default();
@@ -506,34 +444,50 @@ fn call_phase_and_oversized_replay_fail_at_the_exact_boundary() {
 
 #[test]
 fn new_state_types_never_debug_print_ids_or_drawing_text() {
-    let mut state = scene();
-    let mut global = GlobalBudget::default();
-    let source = step(
+    let inspect = |fixture, expected_id| {
+        let mut state = scene();
+        let mut global = GlobalBudget::default();
+        let source = step(fixture);
+        let Admission::New(candidate) = state.admit(&source, &global).expect("valid") else {
+            panic!("new");
+        };
+        let candidate_debug = format!("{candidate:?}");
+        let admission_debug = format!("{:?}", Admission::New(candidate));
+        let Admission::New(candidate) = state.admit(&source, &global).expect("pure") else {
+            panic!("new");
+        };
+        let committed = state.commit(candidate, &mut global).expect("fresh");
+        let values = [
+            candidate_debug,
+            admission_debug,
+            format!("{state:?}"),
+            format!("{committed:?}"),
+            format!(
+                "{:?}",
+                SceneEvent::Step {
+                    revision: 1,
+                    step: source.into()
+                }
+            ),
+            format!("{:?}", cut(1, vec![committed.handles[0].1])),
+        ];
+        assert_eq!(state.header(), &header());
+        assert!(state.step(0).is_some_and(|step| step.id == id(expected_id)));
+        assert!(state.step(u32::MAX).is_none());
+        values
+    };
+    let values = inspect(
         r#"{"id":"PRIVATE_STEP","put":[{"text":{"id":"PRIVATE_OBJECT","at":[0,0],"text":"PRIVATE_CONTENT"}}]}"#,
+        "PRIVATE_STEP",
     );
-    let Admission::New(candidate) = state.admit(&source, &global).expect("valid") else {
-        panic!("new");
-    };
-    let candidate_debug = format!("{candidate:?}");
-    let admission_debug = format!("{:?}", Admission::New(candidate));
-    let Admission::New(candidate) = state.admit(&source, &global).expect("pure") else {
-        panic!("new");
-    };
-    let committed = state.commit(candidate, &mut global).expect("fresh");
-    let values = [
-        candidate_debug,
-        admission_debug,
-        format!("{state:?}"),
-        format!("{committed:?}"),
-        format!(
-            "{:?}",
-            SceneEvent::Step {
-                revision: 1,
-                step: source.into()
-            }
-        ),
-        format!("{:?}", cut(1, vec![committed.handles[0].1])),
-    ];
+    assert!(
+        values
+            == inspect(
+                r#"{"id":"other_step_2","put":[{"text":{"id":"other_object_2","at":[0,0],"text":"other_content_2"}}]}"#,
+                "other_step_2",
+            ),
+        "Debug must not depend on the authored IDs or text"
+    );
     for value in values {
         for sentinel in ["PRIVATE_STEP", "PRIVATE_OBJECT", "PRIVATE_CONTENT"] {
             assert!(
@@ -542,58 +496,4 @@ fn new_state_types_never_debug_print_ids_or_drawing_text() {
             );
         }
     }
-    assert_eq!(state.header(), &header());
-    assert!(
-        state
-            .step(0)
-            .is_some_and(|step| step.id == id("PRIVATE_STEP"))
-    );
-    assert!(state.step(u32::MAX).is_none());
-}
-
-#[test]
-#[ignore = "normal-priority timing on a quiet Rez with the measurement lock"]
-fn measure_whole_scene_removal_admit() {
-    use std::{
-        hint::black_box,
-        time::{Duration, Instant},
-    };
-    let mut state = scene();
-    let mut global = GlobalBudget::default();
-    for (name, range) in [("first", 0..300), ("second", 300..600)] {
-        let operations = range
-            .map(|n| format!(r#"{{"text":{{"id":"t{n}","at":[0,0],"text":""}}}}"#))
-            .collect::<Vec<_>>()
-            .join(",");
-        commit(
-            &mut state,
-            &mut global,
-            &format!(r#"{{"id":"{name}","put":[{operations}]}}"#),
-        );
-    }
-    let ids = (0..600)
-        .map(|n| format!(r#""t{n}""#))
-        .collect::<Vec<_>>()
-        .join(",");
-    let removal = step(&format!(r#"{{"id":"remove","remove":[{ids}]}}"#));
-    assert_eq!(state.object_count(), 600);
-    for _ in 0..5 {
-        black_box(state.admit(&removal, &global).expect("valid full removal"));
-    }
-    let mut total = Duration::ZERO;
-    let mut longest = Duration::ZERO;
-    for _ in 0..128 {
-        let started = Instant::now();
-        let candidate = state.admit(&removal, &global).expect("valid full removal");
-        let elapsed = started.elapsed();
-        total += elapsed;
-        longest = longest.max(elapsed);
-        black_box(candidate);
-    }
-    assert_eq!((state.revision(), state.object_count()), (2, 600));
-    eprintln!(
-        "admit: objects=600 removals=600 warmups=5 samples=128 mean_us={:.3} max_us={:.3}",
-        total.as_secs_f64() * 1_000_000.0 / 128.0,
-        longest.as_secs_f64() * 1_000_000.0
-    );
 }

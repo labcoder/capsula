@@ -807,15 +807,12 @@ This parser is a reduced port of Pele's flowchart lexer/parser, with its MIT not
 and pinned revision in `THIRD-PARTY-NOTICES.md`. Unsupported families are deliberate
 differences, not claims of full Mermaid or upstream-suite compatibility.
 
-The ignored `measure_whole_scene_removal_admit` test measures the complete
+The `measure_whole_scene_removal_admit` benchmark measures the complete
 admission call for 600 existing text objects and 600 removals, including the
 metadata-map clone and semantic checks. It uses five warm-ups and 128 samples;
 fixture construction and candidate destruction are outside the timed interval.
-Build `--release --test state_followups --no-run` below normal priority, acquire
-the shared measurement lock and wait for 30 seconds without cargo/rustc, then run
-that executable with `--exact measure_whole_scene_removal_admit --ignored
---nocapture --test-threads=1` at normal priority. Results belong in the PR/report,
-not this page. This is an admission measurement, not a frame or end-to-end latency.
+Run it as a [standalone timing workload](#standalone-timing-workloads).
+This is an admission measurement, not a frame or end-to-end latency.
 
 ## Stop and recovery
 
@@ -1396,14 +1393,30 @@ flowchart LR
     C --> P
 ```
 
-The ignored `frame_four_views_max` and `activation_at_caps` tests measure CPU sampling
+The `frame_four_views_max` and `activation_at_caps` benchmarks measure CPU sampling
 and activation with deterministic text measurement, not a painter or real fonts.
-`prepare_four_views_at_caps` measures four-scene initial preparation at the global
+The ignored `prepare_four_views_at_caps` test measures four-scene initial preparation at the global
 object cap, with a common local-edge control and a separate cross-group-edge workload.
 Run their release binaries at normal priority on a quiet machine with no other
 builds running, and record the machine, workload, priority and sample counts.
 The original frame numbers are after-only because main then had no sampler; follow-up
 comparisons retain that original workload and label the wider glide/property variant.
+
+#### Standalone timing workloads
+
+Build with `cargo bench --locked -p kumochi-scene --bench <target> --no-run` below
+normal priority. The command prints the executable path. Under the Rez measurement
+lock, wait for 30 seconds without Cargo or rustc and run that executable at normal
+priority with one workload name (or `--list` to see the names without timing).
+Use the same workload before and after and keep the sample logs with the report.
+
+| Target | Workload arguments |
+| --- | --- |
+| `scene-workloads` | `measure_mermaid_admission_and_prepare`, `measure_whole_scene_removal_admit` |
+| `scene-counted-workloads` | `frame_four_views_max`, `activation_at_caps`, `measure_raster_and_tessellation`, `measure_admit`, `measure_pick`, `measure_frame_pose_cull_clip_project_shade`, `measure_tokenizer` |
+
+The targets keep the original allocator configurations separate. These workloads
+don't register as tests or run in the behavioral suite.
 
 `layout::diagram::layout` is the owned S1 layered-layout port: insertion-order DFS breaks
 cycles, longest paths determine ranks, and four barycenter sweeps order each rank.
@@ -2416,7 +2429,7 @@ unchanged.
 
 ### Tokenizer measurement method
 
-The ignored `measure_tokenizer` test uses a 512 KiB drawing with 21 typed-valid
+The `measure_tokenizer` benchmark uses a 512 KiB drawing with 21 typed-valid
 records: a begin, a step creating 64 text objects, 18 steps updating their
 400-character text, and an end. Trailing whitespace fills the exact drawing cap.
 It runs five warm-ups and 64 timed drawings for each of 40-byte and 4 KiB deltas.

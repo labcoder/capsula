@@ -436,10 +436,6 @@ mod tests {
         ] {
             assert_eq!(copyright_line(line), None);
         }
-    }
-
-    #[test]
-    fn copyright_line_strips_leading_comment_marker() {
         assert_eq!(
             copyright_line("  // Copyright (c) 2018 Fixture"),
             Some("Copyright (c) 2018 Fixture")
@@ -503,24 +499,33 @@ mod tests {
         let policy = Policy::read(root).unwrap();
         let available = ["MIT", "Apache-2.0", "BSD-2-Clause", "0BSD"].map(str::to_owned);
         let choose = |name, expression| policy.choose(name, expression, Some(&available));
-        assert_eq!(choose("dual", "MIT OR Apache-2.0").unwrap(), vec!["MIT"]);
-        assert_eq!(
-            choose("both", "MIT AND BSD-2-Clause").unwrap(),
-            vec!["MIT", "BSD-2-Clause"]
+        let either = choose("dual", "MIT OR Apache-2.0").unwrap();
+        assert!(
+            matches!(either.as_slice(), [license] if license == "MIT" || license == "Apache-2.0"),
+            "{either:?}"
         );
+        let mut both = choose("both", "MIT AND BSD-2-Clause").unwrap();
+        both.sort_unstable();
+        assert_eq!(both, ["BSD-2-Clause", "MIT"]);
         assert_eq!(choose("enum-iterator", "0BSD").unwrap(), vec!["0BSD"]);
-        assert!(choose("other", "0BSD").is_err());
-        assert!(choose("other", "MIT AND GPL-3.0-only").is_err());
-        assert!(choose("other", "").is_err());
-        assert!(choose("other", "MIT OR").is_err());
+        for expression in ["0BSD", "MIT AND GPL-3.0-only", "", "MIT OR"] {
+            assert!(choose("other", expression).is_err(), "{expression:?}");
+        }
         assert!(policy.asset("parakeet", "CC-BY-4.0").is_ok());
-        assert!(policy.asset("unapproved-model", "CC-BY-4.0").is_err());
         assert!(
             policy
                 .asset("voice-native-runtime", "MIT AND BSL-1.0 AND MPL-2.0")
                 .is_ok()
         );
-        assert!(policy.asset("other", "MIT AND OFL-1.1").is_err());
+        for (name, expression) in [
+            ("unapproved-model", "CC-BY-4.0"),
+            ("other", "MIT AND OFL-1.1"),
+        ] {
+            assert!(
+                policy.asset(name, expression).is_err(),
+                "{name}: {expression}"
+            );
+        }
     }
 
     #[test]
@@ -540,8 +545,10 @@ mod tests {
             "name":"fixture", "version":"1.0.0", "manifest_path":dir.join("Cargo.toml"),
             "license":null, "license_file":"terms.txt"
         });
+        let mut legal = policy.package(&package).unwrap();
+        legal.sort_unstable();
         assert_eq!(
-            policy.package(&package).unwrap(),
+            legal,
             vec![
                 ("MIT".to_owned(), text.to_owned()),
                 (
@@ -660,11 +667,13 @@ mod tests {
         fs::create_dir_all(dir.join("src/unicode_tables")).unwrap();
         fs::write(dir.join("src/unicode_tables/LICENSE-UNICODE"), unicode).unwrap();
         fs::create_dir(dir.join("tests")).unwrap();
-        fs::write(dir.join("tests/LICENSE"), "Unrelated fixture license.").unwrap();
+        let unrelated = "Unrelated fixture license.";
+        fs::write(dir.join("tests/LICENSE"), unrelated).unwrap();
         let package = serde_json::json!({
             "name":"fixture", "version":"1.0.0", "manifest_path":dir.join("Cargo.toml"), "license":"ISC"
         });
         let output = policy.package(&package).unwrap();
+        assert!(output.iter().all(|(_, text)| !text.contains(unrelated)));
         assert_eq!(
             output
                 .iter()

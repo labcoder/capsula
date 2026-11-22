@@ -396,15 +396,22 @@ mod tests {
     }
 
     #[test]
-    fn sha256_matches_standard_empty_file_vector() {
+    fn sha256_matches_standard_file_vectors() {
         let directory = crate::scratch::dir("hash-test");
-        let path = directory.join("empty");
-        drop(std::fs::File::create_new(&path).unwrap());
-        let result = file_sha256(&path);
-        assert_eq!(
-            result.unwrap(),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
+        let path = directory.join("fixture");
+        for (bytes, expected) in [
+            (
+                b"".as_slice(),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                b"abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(file_sha256(&path).unwrap(), expected);
+        }
     }
 
     #[test]

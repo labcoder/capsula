@@ -2208,8 +2208,12 @@ mod tests {
     }
 
     #[test]
-    fn worker_startup_decoder_failure_closes_output_and_allows_retry() {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    fn worker_startup_failure_closes_output_and_joins_any_started_decoder() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let (tx, rx) = mpsc::sync_channel(1);
         let stream = SpeechStream {
             rx: Some(rx),
             sample_rate: 24000,
@@ -2219,28 +2223,6 @@ mod tests {
         let result = stream.with_worker(Err(std::io::Error::from(std::io::ErrorKind::WouldBlock)));
         assert!(matches!(result, Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock));
         assert!(tx.send(Ok(vec![0.1])).is_err());
-
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let stream = SpeechStream {
-            rx: Some(rx),
-            sample_rate: 24000,
-            failed: false,
-            workers: Some(Vec::with_capacity(2)),
-        };
-        let mut stream = stream
-            .with_worker(std::thread::Builder::new().spawn(move || {
-                tx.send(Ok(vec![0.25])).unwrap();
-            }))
-            .unwrap();
-        assert_eq!(stream.next().unwrap().unwrap(), vec![0.25]);
-        assert!(stream.next().is_none());
-    }
-
-    #[test]
-    fn worker_startup_backbone_failure_closes_output_and_joins_the_started_decoder() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::mpsc;
-        use std::time::{Duration, Instant};
 
         let wait = Duration::from_secs(2);
         let (pcm_tx, pcm_rx) = mpsc::sync_channel(1);

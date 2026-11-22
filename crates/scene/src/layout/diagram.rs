@@ -240,13 +240,12 @@ mod tests {
         )
         .expect("bounded chain");
         assert_eq!(p.ranks, vec![0, 1, 2, 3]);
+        assert_eq!(p.rects.len(), 4);
         assert!(
-            p.rects[0].center().x < p.rects[1].center().x,
-            "rank order increases"
-        );
-        assert!(
-            p.rects[2].center().x < p.rects[3].center().x,
-            "later ranks increase"
+            p.rects
+                .windows(2)
+                .all(|pair| pair[0].max().x < pair[1].origin.x),
+            "each rank is separated to the right of the previous one"
         );
     }
 
@@ -262,11 +261,19 @@ mod tests {
         )
         .expect("bounded siblings");
         assert_eq!(p.ranks, vec![0, 1, 1]);
+        let [root, a, b] = p.rects.as_slice() else {
+            panic!("one root and two siblings");
+        };
         assert!(
-            (p.rects[1].center().y - p.rects[2].center().y).abs() < 1e-3,
-            "siblings share a rank"
+            root.max().y < a.origin.y
+                && root.max().y < b.origin.y
+                && (a.center().y - b.center().y).abs() < 1e-3,
+            "both siblings share one rank below the root"
         );
-        assert!(!p.rects[1].intersects(p.rects[2]), "siblings have a gap");
+        assert!(
+            a.max().x < b.origin.x || b.max().x < a.origin.x,
+            "siblings have a horizontal gap"
+        );
     }
 }
 
@@ -291,19 +298,28 @@ mod boundary_tests {
             0.0,
         )
         .expect("singleton");
-        assert_eq!(
-            singleton.rects,
-            vec![Rect::centered(Vec2::new(40.0, 0.0), Vec2::new(80.0, 40.0))]
-        );
+        assert_eq!(singleton.ranks, [0]);
+        assert_eq!(singleton.rects, [singleton.bounds]);
+        assert_eq!(singleton.bounds.size, Vec2::new(80.0, 40.0));
         let sizes = vec![Vec2::new(80.0, 40.0); MAX_DIAGRAM_NODES];
         let edges = vec![(0, 1); MAX_DIAGRAM_EDGES];
-        let first =
+        let exact =
             layout(&sizes, 48, &edges, (Direction::Down, false), RANK_GAP).expect("exact caps");
-        assert_eq!(
-            first,
-            layout(&sizes, 48, &edges, (Direction::Down, false), RANK_GAP).expect("repeat")
+        assert!(exact.bounds.within_canvas(), "the maximum diagram fits");
+        assert!(
+            exact.rects.iter().all(|rect| {
+                rect.size == Vec2::new(80.0, 40.0)
+                    && rect.origin.x >= exact.bounds.origin.x
+                    && rect.origin.y >= exact.bounds.origin.y
+                    && rect.max().x <= exact.bounds.max().x
+                    && rect.max().y <= exact.bounds.max().y
+            }),
+            "all 48 nodes keep their size and are covered by the diagram bounds"
         );
-        assert_eq!(first.rects.len(), 48);
+        let mut ranks = [0; 48];
+        ranks[1] = 1;
+        assert_eq!(exact.ranks, ranks);
+        assert_eq!(exact.rects.len(), 48);
         assert_eq!(
             layout(
                 &vec![Vec2::new(1.0, 1.0); 49],

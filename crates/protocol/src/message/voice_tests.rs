@@ -20,6 +20,7 @@ fn voice_tags_are_pinned() {
             [tag],
             "{part:?}"
         );
+        assert_eq!(postcard::from_bytes::<VoicePart>(&[tag]), Ok(part));
     }
     for (state, tag) in [
         (PartState::NotInstalled, 0),
@@ -37,11 +38,9 @@ fn voice_tags_are_pinned() {
         ),
         (PartState::Unavailable, 7),
     ] {
-        assert_eq!(
-            postcard::to_allocvec(&state).expect("encodes")[0],
-            tag,
-            "{state:?}"
-        );
+        let bytes = postcard::to_allocvec(&state).expect("encodes");
+        assert_eq!(bytes[0], tag, "{state:?}");
+        assert_eq!(postcard::from_bytes::<PartState>(&bytes), Ok(state));
     }
     for (unload, tag) in [
         (SttUnload::Kept, 0),
@@ -54,46 +53,31 @@ fn voice_tags_are_pinned() {
             "{unload:?}"
         );
     }
-}
-
-#[test]
-fn voice_parts_and_part_states_round_trip() {
-    for part in VoicePart::ALL {
-        let bytes = postcard::to_allocvec(&part).expect("encodes");
-        assert_eq!(postcard::from_bytes::<VoicePart>(&bytes), Ok(part));
+    assert!(postcard::from_bytes::<VoicePart>(&[0x7f]).is_err());
+    assert!(postcard::from_bytes::<PartState>(&[0x7f]).is_err());
+    let downloading = PartState::Downloading {
+        done: u64::MAX - 1,
+        total: u64::MAX,
+    };
+    for view in [
+        VoiceView {
+            speech_input: downloading,
+            spoken_replies: PartState::Failed {
+                key: ErrorKey::VoiceCorrupt,
+                installed: false,
+            },
+        },
+        VoiceView {
+            speech_input: PartState::Failed {
+                key: ErrorKey::VoiceLoad,
+                installed: true,
+            },
+            spoken_replies: downloading,
+        },
+    ] {
+        let bytes = postcard::to_allocvec(&view).expect("encodes");
+        assert_eq!(postcard::from_bytes::<VoiceView>(&bytes), Ok(view));
     }
-    assert!(postcard::from_bytes::<VoicePart>(&[2]).is_err());
-    let states = [
-        PartState::NotInstalled,
-        PartState::Verifying,
-        PartState::Downloading {
-            done: 0,
-            total: u64::MAX,
-        },
-        PartState::Loading,
-        PartState::Ready,
-        PartState::Unloaded,
-        PartState::Unavailable,
-        PartState::Failed {
-            key: ErrorKey::VoiceCorrupt,
-            installed: false,
-        },
-        PartState::Failed {
-            key: ErrorKey::VoiceLoad,
-            installed: true,
-        },
-    ];
-    for speech_input in states {
-        for spoken_replies in states {
-            let view = VoiceView {
-                speech_input,
-                spoken_replies,
-            };
-            let bytes = postcard::to_allocvec(&view).expect("encodes");
-            assert_eq!(postcard::from_bytes::<VoiceView>(&bytes), Ok(view));
-        }
-    }
-    assert!(postcard::from_bytes::<PartState>(&[8]).is_err());
 }
 
 fn mic(rate: u32, len: usize, seq: u32) -> MicPcm {
@@ -159,7 +143,7 @@ fn a_hold_sends_at_most_3000_chunks() {
     assert_eq!(
         MicPcm {
             last: true,
-            ..mic(48_000, 960, MAX_HOLD_CHUNKS - 1)
+            ..mic(48_000, 960, 2_999)
         }
         .check(),
         Ok(())
@@ -167,7 +151,7 @@ fn a_hold_sends_at_most_3000_chunks() {
     assert_eq!(
         MicPcm {
             last: true,
-            ..mic(48_000, 960, MAX_HOLD_CHUNKS)
+            ..mic(48_000, 960, 3_000)
         }
         .check(),
         Err(VoiceBound::Chunks)
@@ -294,31 +278,57 @@ fn truncated_and_mistyped_voice_frames_are_refused() {
 #[test]
 fn debug_and_the_tap_show_no_audio_or_text() {
     let marker = "kumochi-voice-sentinel";
+    let transcript = |text: &str| {
+        DataToShell::Transcript(Transcript {
+            run: RunId(1),
+            text: text.to_owned(),
+        })
+    };
     let sample: i16 = 12_345;
+    let other_sample: i16 = -23_456;
     let messages: [(String, Record); 3] = [
         {
-            let message = DataToBrain::MicPcm(MicPcm {
-                samples: vec![sample; 960],
-                ..mic(48_000, 960, 0)
-            });
+            let pcm = |value| {
+                DataToBrain::MicPcm(MicPcm {
+                    samples: vec![value; 960],
+                    ..mic(48_000, 960, 0)
+                })
+            };
+            let message = pcm(sample);
+            let debug = format!("{message:?}");
+            assert!(
+                debug == format!("{:?}", pcm(other_sample)),
+                "microphone samples affected voice Debug"
+            );
             let record = Record::of(Pipe::Data, Direction::ToBrain, &message, 10).expect("records");
-            (format!("{message:?}"), record)
+            (debug, record)
         },
         {
-            let message = DataToShell::SpeechPcm(SpeechPcm {
-                samples: vec![sample; 3],
-                ..speech(3, Some(3))
-            });
+            let pcm = |value| {
+                DataToShell::SpeechPcm(SpeechPcm {
+                    samples: vec![value; 3],
+                    ..speech(3, Some(3))
+                })
+            };
+            let message = pcm(sample);
+            let debug = format!("{message:?}");
+            assert!(
+                debug == format!("{:?}", pcm(other_sample)),
+                "speech samples affected voice Debug"
+            );
             let record = Record::of(Pipe::Data, Direction::ToShell, &message, 10).expect("records");
-            (format!("{message:?}"), record)
+            (debug, record)
         },
         {
-            let message = DataToShell::Transcript(Transcript {
-                run: RunId(1),
-                text: marker.to_owned(),
-            });
+            let message = transcript(marker);
+            let other = transcript("another-spoken-message");
+            let debug = format!("{message:?}");
+            assert!(
+                debug == format!("{other:?}"),
+                "transcript affected voice Debug"
+            );
             let record = Record::of(Pipe::Data, Direction::ToShell, &message, 10).expect("records");
-            (format!("{message:?}"), record)
+            (debug, record)
         },
     ];
     let bytes = format!("{:?}", marker.as_bytes());
@@ -326,11 +336,17 @@ fn debug_and_the_tap_show_no_audio_or_text() {
     for (debug, record) in messages {
         assert!(
             !debug.contains("12345") && !debug.contains(marker),
-            "{debug}"
+            "voice Debug contains a private value"
         );
-        assert!(!debug.contains(bytes), "{debug}");
+        assert!(!debug.contains(bytes), "voice Debug contains text bytes");
         // 12,345 as little-endian bytes, the way a byte list of the PCM would print.
-        assert!(!debug.contains("57, 48"), "{debug}");
-        assert_eq!(record.payload, None, "{debug}");
+        assert!(
+            !debug.contains("57, 48"),
+            "voice Debug contains sample bytes"
+        );
+        assert!(
+            record.payload.is_none(),
+            "voice recording contains a payload"
+        );
     }
 }
