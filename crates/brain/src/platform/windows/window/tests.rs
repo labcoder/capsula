@@ -48,13 +48,24 @@ fn eligible() -> Facts {
 #[test]
 fn the_walk_takes_the_first_window_a_click_would_land_on() {
     assert_eq!(step(eligible()), Step::Take);
-    assert_eq!(
-        step(Facts {
-            desktop: true,
-            ..eligible()
-        }),
-        Step::Stop
-    );
+    for (facts, expected) in [
+        (
+            Facts {
+                unclear: true,
+                ..eligible()
+            },
+            Step::Unclear,
+        ),
+        (
+            Facts {
+                desktop: true,
+                ..eligible()
+            },
+            Step::Stop,
+        ),
+    ] {
+        assert_eq!(step(facts), expected);
+    }
     for (why, skipped) in [
         (
             "kumochi",

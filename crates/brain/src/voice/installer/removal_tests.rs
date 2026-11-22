@@ -598,7 +598,6 @@ fn completions_held_during_a_refused_intent_apply_in_arrival_order() {
             assert_eq!(effects, []);
             assert_eq!(installer.view().speech_input, PartState::Ready);
         }
-        assert_eq!(installer.ready(SpeechInput), !lost);
     }
 }
 

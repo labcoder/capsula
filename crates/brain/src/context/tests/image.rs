@@ -134,7 +134,21 @@ fn debug_shows_an_images_length_and_never_its_bytes() {
 
 #[test]
 fn a_screen_scene_is_drawn_only_on_the_picture_the_request_attaches() {
-    let image = jpeg(&SOI);
+    for (len, expected) in [
+        (3, "data:image/jpeg;base64,/9j/"),
+        (4, "data:image/jpeg;base64,/9j/Qg=="),
+        (5, "data:image/jpeg;base64,/9j/QkI="),
+        (6, "data:image/jpeg;base64,/9j/QkJC"),
+        (7, "data:image/jpeg;base64,/9j/QkJCQg=="),
+    ] {
+        let mut bytes = SOI.to_vec();
+        bytes.resize(len, 0x42);
+        let image = jpeg(&bytes);
+        assert_eq!(image.data_url_len(), expected.len(), "{len} bytes");
+        assert_eq!(image.data_url().as_str(), expected, "{len} bytes");
+    }
+
+    let image = jpeg(&[0xFF, 0xD8, 0xFF, 0x42]);
     let picture = Screen::Picture(image.clone(), None, Geometry::FIXTURE);
     let input = vec![
         message(Role::User, "look"),
@@ -172,6 +186,19 @@ fn a_screen_scene_is_drawn_only_on_the_picture_the_request_attaches() {
             } else {
                 assert_eq!(attached, Err(ImageRefused::Route), "{connection:?}");
                 assert_eq!(request, before);
+            }
+            if connection == Some(ConnectionKind::ChatGpt) && pictured {
+                let sent = crate::engines::responses::body(&request).expect("small request");
+                assert_eq!(
+                    sent["input"][3],
+                    serde_json::json!({
+                        "type": "message", "role": "user", "content": [{
+                            "type": "input_image",
+                            "image_url": "data:image/jpeg;base64,/9j/Qg==",
+                            "detail": "high",
+                        }],
+                    })
+                );
             }
             let canvas = if sent {
                 Ok(Geometry::FIXTURE)

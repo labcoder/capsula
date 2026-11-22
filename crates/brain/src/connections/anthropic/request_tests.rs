@@ -196,12 +196,12 @@ fn json_is_checked_then_sent_as_written_up_to_the_bound() {
         MessagesBody::from_json(Zeroizing::new(padded)),
         Err(Failure::Request)
     ));
-
     let mut value = request();
+    let marker = "PRIVATE_REQUEST_MARKER";
     value["tools"] = json!([{"name":"example","input_schema":{"type":"object","properties":{
         "cache_control":{"type":"string"}}}}]);
     value["messages"] = json!([
-        {"role":"user","content":"first"},
+        {"role":"user","content":marker},
         {"role":"assistant","content":[{"type":"tool_use","id":"one","name":"example",
             "input":{"cache_control":{"type":"persistent"},"content":[{"cache_control":false}]}}]},
         {"role":"user","content":"next"}
@@ -212,6 +212,13 @@ fn json_is_checked_then_sent_as_written_up_to_the_bound() {
         let body =
             MessagesBody::from_json(Zeroizing::new(written.clone())).expect("supported envelope");
         assert_eq!(body.bytes(), written.as_slice());
+        let formatted = format!("{body:?}");
+        assert!(!formatted.contains(marker), "request text is redacted");
+        let bytes = format!("{:?}", marker.as_bytes());
+        assert!(
+            !formatted.contains(bytes.trim_matches(['[', ']'])),
+            "request bytes are redacted"
+        );
     }
 
     let uncapped = String::from_utf8_lossy(written).replace("2048", "2049");

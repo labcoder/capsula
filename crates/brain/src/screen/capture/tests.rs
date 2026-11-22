@@ -202,14 +202,6 @@ fn a_ticket_read_late_ends_at_the_brains_deadline_before_its_own_length() {
     rig.knobs.takes.set(Duration::from_millis(499));
     assert_eq!(rig.take(2, [4, 3], 0), Ok(meta(2, [4, 3], 0)));
     assert_eq!(rig.knobs.calls.get(), 2);
-
-    rig.knobs.size.set([2, 2]);
-    rig.knobs.fill.set(5);
-    assert_eq!(rig.take(3, [2, 2], 0), Ok(meta(3, [2, 2], 0)));
-    assert_eq!(
-        rig.screen.frame().image(),
-        Some((meta(3, [2, 2], 0), [5_u8; 16].as_slice()))
-    );
 }
 
 #[test]
@@ -268,6 +260,23 @@ fn a_copy_that_fails_partway_after_a_good_frame_leaves_no_image() {
         assert_eq!(rig.take(generation, [4, 3], 0), Err(failure));
         assert_eq!(rig.screen.frame().image(), None);
     }
+}
+
+#[test]
+fn the_cpu_buffer_keeps_its_allocation_for_an_equal_or_smaller_frame() {
+    let mut rig = Rig::new([4, 3], 1);
+    assert_eq!(rig.take(1, [4, 3], 0), Ok(meta(1, [4, 3], 0)));
+    let warm = rig.screen.frame().allocation();
+    assert_eq!(rig.take(2, [4, 3], 0), Ok(meta(2, [4, 3], 0)));
+    assert_eq!(rig.screen.frame().allocation(), warm);
+    rig.knobs.size.set([2, 2]);
+    rig.knobs.fill.set(5);
+    assert_eq!(rig.take(3, [2, 2], 0), Ok(meta(3, [2, 2], 0)));
+    assert_eq!(rig.screen.frame().allocation(), warm);
+    assert_eq!(
+        rig.screen.frame().image(),
+        Some((meta(3, [2, 2], 0), [5_u8; 16].as_slice()))
+    );
 }
 
 #[test]

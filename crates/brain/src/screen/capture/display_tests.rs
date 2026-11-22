@@ -23,6 +23,16 @@ fn seal(rig: &mut Rig) -> Result<ScreenContext, Failure> {
 }
 
 #[test]
+fn an_unchanged_display_seals_once() {
+    let mut rig = held([4, 3], Vec::new());
+    rig.screen.display_at = |bounds| Some((bounds, 144));
+    let context = seal(&mut rig).expect("sealed");
+    assert_eq!(context.ink(), None);
+    assert_eq!(rig.screen.frame().image(), None);
+    assert_eq!(seal(&mut rig), Err(Refusal::Stale.into()));
+}
+
+#[test]
 fn a_display_that_moved_rescaled_or_vanished_refuses_and_releases_its_frame() {
     let moved: fn(PhysicalRect) -> Option<(PhysicalRect, u32)> = |bounds| {
         Some((
@@ -78,6 +88,15 @@ fn neither_the_context_nor_its_bounds_print_where_the_user_pointed() {
     let mut rig = held([40, 30], path);
     rig.screen.display_at = |bounds| Some((bounds, 144));
     let context = seal(&mut rig).expect("sealed");
+    assert_eq!(
+        context.ink(),
+        Some(InkBounds {
+            left: 8,
+            top: 8,
+            right: 23,
+            bottom: 13,
+        })
+    );
     let debug = format!("{context:?}");
     for sentinel in ["-2550", "-2540", "-2560"] {
         assert!(!debug.contains(sentinel));

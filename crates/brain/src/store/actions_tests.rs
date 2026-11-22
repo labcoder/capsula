@@ -1058,8 +1058,6 @@ fn recovery_reads_only_stages_and_rolls_back_whole_on_a_corrupt_one() {
 
 #[test]
 fn counters_fail_closed_at_their_limits() {
-    use super::rearm_tests::{events, rearm};
-
     let scratch = Scratch::new("actions-limits");
     let mut store = opened(&scratch);
     let owner = thread(&mut store);
@@ -1126,12 +1124,14 @@ fn counters_fail_closed_at_their_limits() {
         store
             .conn
             .execute(
-                "UPDATE actions SET version = ?1 WHERE id = ?2",
-                params![sql(version), sql(action.draft.0)],
+                "UPDATE actions SET version = ?1 WHERE id = 1",
+                [sql(version)],
             )
             .unwrap();
         let current = store.action(action.draft).unwrap().unwrap();
-        let Ok(Answer::Changed(fresh)) = store.issue_write(&rearm(&current), None) else {
+        let Ok(Answer::Changed(fresh)) =
+            store.issue_write(&super::rearm_tests::rearm(&current), None)
+        else {
             panic!("the last available value must commit");
         };
         assert_eq!(
@@ -1142,13 +1142,13 @@ fn counters_fail_closed_at_their_limits() {
                 ..action
             }
         );
-        let before = (snapshot(&store.conn), events(&store));
+        let before = (snapshot(&store.conn), issue_events(&store));
         assert_eq!(before.0.1, sql(expected_approval));
         assert!(matches!(
-            store.issue_write(&rearm(&fresh), None),
+            store.issue_write(&super::rearm_tests::rearm(&fresh), None),
             Err(StoreError::Issue)
         ));
-        assert_eq!((snapshot(&store.conn), events(&store)), before);
+        assert_eq!((snapshot(&store.conn), issue_events(&store)), before);
         assert_eq!(store.action(fresh.draft).unwrap(), Some(fresh));
         if expected_approval != max {
             assert_eq!(draft(&mut store, owner).approval, Some(ApprovalRev(3)));

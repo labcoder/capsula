@@ -838,7 +838,9 @@ fn a_failed_write_changes_neither_the_file_nor_the_settings() {
     ] {
         let pending = config.stage(op).expect("staged");
         assert_eq!(config.view(), &view);
-        assert!(matches!(pending.write(), Err(ConfigError::Write(_))));
+        let refused = pending.write().expect_err("blocked temporary file");
+        assert!(matches!(refused, ConfigError::Write(_)));
+        assert_eq!(refused.key(), ErrorKey::SettingsRefused);
         drop(pending);
         assert_eq!(config.view(), &view);
         assert_eq!(std::fs::read_to_string(&path).expect("readable"), before);
@@ -1299,16 +1301,22 @@ fn a_config_that_cant_be_written_serves_onboarded_and_still_refuses_every_write(
         account: 1,
         repo: RepoName::new("owner/repo").expect("valid repo"),
     };
-    for (mut config, refusal) in [
+    for (mut config, refusal, key) in [
         (
             Config::load(Some(dir), ThreadId(1)),
             ConfigError::Unreadable,
+            ErrorKey::ConfigUnreadable,
         ),
         (
             Config::load(Some(blocked), ThreadId(1)),
             ConfigError::Unreadable,
+            ErrorKey::ConfigUnreadable,
         ),
-        (Config::load(None, ThreadId(1)), ConfigError::NoHome),
+        (
+            Config::load(None, ThreadId(1)),
+            ConfigError::NoHome,
+            ErrorKey::SettingsRefused,
+        ),
     ] {
         assert_eq!(
             config.view().assistant_name.as_str(),
@@ -1352,6 +1360,7 @@ fn a_config_that_cant_be_written_serves_onboarded_and_still_refuses_every_write(
                 std::mem::discriminant(&refusal),
                 "{refusal} write {index}"
             );
+            assert_eq!(error.key(), key, "{refusal} write {index}");
         }
         assert_eq!(config.view(), &view);
     }
