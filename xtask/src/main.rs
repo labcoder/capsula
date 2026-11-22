@@ -38,13 +38,13 @@ fn usage() -> String {
         "usage: cargo xtask <task>
 
 The gate tasks (cold-start, gate-session, hover-gate, measure-gate, bench, slice2-gate) run only
-as the gate identity, never as Kumochi or Kumochi Dev, and build the images they launch
-themselves:
+as the gate identity, never as Kumochi or Kumochi Dev. Unless explicitly prebuilt,
+they build the images they launch:
   cargo run --release --package xtask --features kumochi-protocol/gate-identity -- <task>
 See docs/development/gate-identity.md.
 
 tasks:
-  cold-start <path-session.txt>
+  cold-start <path-session.txt> [--prebuilt <shell-sha256> <brain-sha256>]
                     approved input-free ten-launch cold gate; create-new redirect
                     stdout and stderr to this file; separate from owner Ready session
   gate-session <path-session.txt>
@@ -66,7 +66,8 @@ tasks:
   input-quiet <seconds>
                     observe raw input on a hidden window for 1..120 seconds;
                     class, motion and marker only; no keys/text or injected input
-  bench idle [--duration 1..60] [--baseline <checkout> | --panel]
+  bench idle [--duration 1..60] [--baseline <checkout> | --prebuilt <shell-sha256> <brain-sha256>]
+             [--panel | --onboarding]
                     release idle CPU/private bytes on Rez (default 60s)
                     refuses existing product processes; normal-priority launch,
                     30s settle, GetProcessTimes + private bytes, bounded autoquit;
@@ -74,6 +75,7 @@ tasks:
                     three 2s saturated-thread trials calibrate the highest cycle rate
                     before launch; cycles CPU is the gate, GetProcessTimes stays beside it
                     baseline builds that checkout's images and closes its own shell window
+                    prebuilt verifies sibling release Gate images and never starts Cargo
                     panel opens the current shell's panel before settling, without input
                     the current shell must paint no dock frame from the settle to Quit
   live account      print only the dev brain's non-secret account state; never signs in
