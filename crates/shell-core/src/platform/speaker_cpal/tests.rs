@@ -588,6 +588,114 @@ fn dropping_the_backend_before_the_transport_silences_a_surviving_callback() {
 }
 
 #[test]
+fn saturated_presentation_keeps_exact_pcm_across_a_recycled_segment() {
+    use super::Source;
+    use kumochi_protocol::message::{RunId, SegmentId};
+    use std::time::Duration;
+
+    let (mut submit, mut playback) = pair(SOURCE_RATE, 1);
+    let first = Source {
+        run: RunId(5),
+        generation: 3,
+        segment: SegmentId(0),
+        at: 0,
+    };
+    let second = Source {
+        segment: SegmentId(1),
+        at: 9,
+        ..first
+    };
+    submit
+        .packet_for(&[16_384; 9], PacketKind::End, Some(first))
+        .unwrap();
+    submit
+        .packet_for(&[8192; 2], PacketKind::End, Some(second))
+        .unwrap();
+    for _ in 0..8 {
+        let mut out = [0.0];
+        playback.fill_at(&mut out, Some(Duration::ZERO));
+        assert_eq!(out.map(f32::to_bits), [0.5f32.to_bits()]);
+    }
+    let mut blocked = [99.0; 3];
+    playback.fill_at(&mut blocked, Some(Duration::from_millis(1)));
+    assert_eq!(blocked.map(f32::to_bits), [0; 3]);
+    assert_eq!(submit.control.handed(), 8);
+    assert!(!submit.control.overflowed());
+
+    let first_receipt = submit.observed.pop().unwrap();
+    assert_eq!((first_receipt.first, first_receipt.through), (0, 1));
+    let mut boundary = [99.0; 3];
+    playback.fill_at(&mut boundary, Some(Duration::from_millis(2)));
+    assert_eq!(boundary.map(f32::to_bits), [0.5f32.to_bits(), 0, 0]);
+    assert_eq!(submit.control.handed(), 9);
+    assert_eq!(
+        submit.free.len(),
+        BLOCKS - 1,
+        "the earlier PCM block recycled"
+    );
+    let third = Source {
+        segment: SegmentId(2),
+        at: 11,
+        ..first
+    };
+    submit
+        .packet_for(&[-16_384], PacketKind::End, Some(third))
+        .unwrap();
+    for through in 2..=9 {
+        let receipt = submit.observed.pop().unwrap();
+        assert_eq!(receipt.source, first);
+        assert_eq!((receipt.first, receipt.through), (through - 1, through));
+    }
+    let mut resumed = [99.0; 4];
+    playback.fill_at(&mut resumed, Some(Duration::from_millis(3)));
+    assert_eq!(
+        resumed.map(f32::to_bits),
+        [0.25, 0.25, -0.5, 0.0].map(f32::to_bits)
+    );
+    let tail: Vec<_> = std::iter::from_fn(|| submit.observed.pop())
+        .map(|receipt| (receipt.source, receipt.first, receipt.through))
+        .collect();
+    assert_eq!(tail, [(second, 9, 11), (third, 11, 12)]);
+    assert!(!submit.control.overflowed());
+}
+
+#[test]
+fn receipt_pressure_at_an_unequal_rate_keeps_the_fractional_resume_position() {
+    use super::Source;
+    use kumochi_protocol::message::{RunId, SegmentId};
+    use std::time::Duration;
+
+    let (mut submit, mut playback) = pair(48_000, 1);
+    let source = Source {
+        run: RunId(5),
+        generation: 3,
+        segment: SegmentId(0),
+        at: 0,
+    };
+    submit
+        .packet_for(&[16_384; 120], PacketKind::End, Some(source))
+        .unwrap();
+    let time = Some(Duration::ZERO);
+    for _ in 0..8 {
+        playback.fill_at(&mut [0.0; 2], time);
+    }
+    let mut blocked = [99.0];
+    playback.fill_at(&mut blocked, time);
+    assert_eq!(blocked.map(f32::to_bits), [0]);
+    assert_eq!(submit.control.handed(), 8);
+    for through in 1..=8 {
+        assert_eq!(submit.observed.pop().unwrap().through, through);
+    }
+    playback.fill_at(&mut [0.0], time);
+    assert_eq!(submit.control.handed(), 9);
+    assert_eq!(submit.observed.pop(), None);
+    playback.fill_at(&mut [0.0], time);
+    let resumed = submit.observed.pop().unwrap();
+    assert_eq!((resumed.first, resumed.through), (8, 9));
+    assert_eq!(submit.observed.pop(), None);
+}
+
+#[test]
 fn adjacent_source_spans_keep_distinct_run_and_generation_tags() {
     use super::{Presented, Source};
     use kumochi_protocol::message::{RunId, SegmentId};
