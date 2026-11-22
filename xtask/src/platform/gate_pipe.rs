@@ -124,14 +124,15 @@ impl PipeClient {
         if self.aborted.load(Ordering::SeqCst) {
             return Err(ERROR_OPERATION_ABORTED.to_hresult().into());
         }
-        let timeout_ms = if let Some(end) = self.deadline {
+        let absolute = if let Some(end) = self.deadline {
             let remaining = end.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(ERROR_TIMEOUT.to_hresult().into());
             }
-            timeout_ms.min(millis(remaining).max(1))
+            (timeout_ms == INFINITE || remaining <= Duration::from_millis(u64::from(timeout_ms)))
+                .then_some(end)
         } else {
-            timeout_ms
+            None
         };
         if let Err(error) = start(self.raw(), &raw mut overlapped)
             && error.code() != ERROR_IO_PENDING.to_hresult()
@@ -143,8 +144,16 @@ impl PipeClient {
             // `overlapped` and the buffer go away.
             let _done = unsafe { CancelIoEx(self.raw(), Some(&raw const overlapped)) };
         }
-        // SAFETY: the event handle is open for the borrow.
-        let waited = unsafe { WaitForSingleObject(HANDLE(event.as_raw_handle()), timeout_ms) };
+        let waited = loop {
+            let wait_ms = absolute.map_or(timeout_ms, |end| {
+                millis(end.saturating_duration_since(Instant::now())).clamp(1, INFINITE - 1)
+            });
+            // SAFETY: the event handle is open for the borrow.
+            let waited = unsafe { WaitForSingleObject(HANDLE(event.as_raw_handle()), wait_ms) };
+            if waited != WAIT_TIMEOUT || absolute.is_none_or(|end| Instant::now() >= end) {
+                break waited;
+            }
+        };
         if waited == WAIT_TIMEOUT {
             // SAFETY: cancels only this operation; the wait below lets it finish before
             // `overlapped` and the buffer go away.

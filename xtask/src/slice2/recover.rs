@@ -568,15 +568,22 @@ mod tests {
 
     #[test]
     fn a_whole_payload_over_a_short_commit_overruns_and_never_installs() {
-        let mut applied = described(&[1], 1);
-        applied.apply(&last(chunk(1, MAX_STEPS, "s")));
-        applied.expect(&[SceneId(1)], "s", "now");
+        let mut applied = described(&[7], 1);
+        applied.apply(&last(chunk(7, MAX_STEPS, "s")));
+        applied.expect(&[SceneId(7)], "s", "now");
         assert!(applied.installed.is_empty(), "the shell restores nothing");
         assert!(
             applied.failures.iter().any(|report| {
                 let mut values: Vec<_> = numbers(report).collect();
                 values.sort_unstable();
-                report.contains("whole drawing") && values == ["1", "1", "64", "64"]
+                let fields: Vec<_> = report
+                    .split(|ch: char| !ch.is_ascii_alphanumeric())
+                    .filter(|part| !part.is_empty())
+                    .collect();
+                report.contains("whole drawing")
+                    && values == ["1", "64", "64", "7"]
+                    && fields.windows(2).any(|field| field == ["revision", "64"])
+                    && fields.windows(2).any(|field| field == ["committed", "1"])
             }),
             "{:?}",
             applied.failures
@@ -585,12 +592,12 @@ mod tests {
             applied.failures.iter().any(|report| {
                 report.contains("overran")
                     && report.contains("1 committed steps")
-                    && numbers(report).eq(["1", "1"])
+                    && numbers(report).eq(["7", "1"])
             }),
             "{:?}",
             applied.failures
         );
-        assert_missing_scene_one(&applied.failures);
+        assert_missing_scene(&applied.failures, "7");
     }
 
     #[test]
@@ -612,7 +619,7 @@ mod tests {
             "{:?}",
             applied.failures
         );
-        assert_missing_scene_one(&applied.failures);
+        assert_missing_scene(&applied.failures, "1");
     }
 
     fn numbers(report: &str) -> impl Iterator<Item = &str> {
@@ -621,10 +628,12 @@ mod tests {
             .filter(|word| !word.is_empty())
     }
 
-    fn assert_missing_scene_one(failures: &[String]) {
+    fn assert_missing_scene(failures: &[String], scene: &str) {
         assert!(
             failures.iter().any(|report| {
-                report.contains("installed") && report.contains("not") && numbers(report).eq(["1"])
+                report.contains("installed")
+                    && report.contains("not")
+                    && numbers(report).eq([scene])
             }),
             "{failures:?}"
         );

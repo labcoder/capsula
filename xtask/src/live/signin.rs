@@ -220,9 +220,18 @@ pub(super) fn assert_one_deadline(
         (cap - Duration::from_secs(1)..=cap).contains(&remaining),
         "initial allowance was {remaining:?}, expected {cap:?}"
     );
-    let latest = first + remaining + Duration::from_millis(10);
+    let deadline = first + remaining;
+    let tolerance = Duration::from_millis(10);
     for (at, remaining) in waits {
-        assert!(at + remaining <= latest, "the phase deadline was extended");
+        let later = at + remaining;
+        assert!(
+            later <= deadline + tolerance,
+            "the phase deadline was extended"
+        );
+        assert!(
+            later + tolerance >= deadline,
+            "the phase deadline was shortened"
+        );
     }
 }
 
@@ -254,6 +263,7 @@ mod tests {
         Initial,
         Answer,
         SignIn,
+        Cancel,
     }
 
     /// A fixture brain at the client's boundary: frames as the client's readers would hand them
@@ -285,7 +295,9 @@ mod tests {
             limit: Duration,
             mut pick: impl FnMut(&Frame) -> Option<T>,
         ) -> Result<T> {
-            let phase = if self.signing_in {
+            let phase = if self.sent.last() == Some(&CANCEL) {
+                WaitFor::Cancel
+            } else if self.signing_in {
                 WaitFor::SignIn
             } else if self.sent.last() == Some(&SIGN_IN) {
                 WaitFor::Answer
@@ -632,8 +644,15 @@ mod tests {
         );
         let error = error.expect("cancel remained unconfirmed");
         assert!(
-            error.contains("no answer") && error.contains("CancelSignIn") && error.contains("10s"),
+            error.contains("no answer") && error.contains("CancelSignIn"),
             "{error}"
+        );
+        assert_eq!(
+            brain
+                .waits
+                .iter()
+                .find_map(|&(phase, _, limit)| (phase == WaitFor::Cancel).then_some(limit)),
+            Some(Duration::from_secs(10))
         );
         assert_eq!(ops(&brain), [SIGN_IN, CANCEL, QUIT]);
         assert!(quit_sent);

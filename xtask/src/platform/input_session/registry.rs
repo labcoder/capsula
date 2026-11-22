@@ -309,24 +309,29 @@ mod tests {
         }
     }
 
-    fn assert_unreadable(error: &str, path: &str, fields: [[&str; 2]; 3]) {
-        for when in ["before", "after"] {
-            assert!(
-                error.split(';').any(|record| {
-                    let words: Vec<_> = record
-                        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '\\')
-                        .filter(|word| !word.is_empty())
-                        .collect();
-                    words.contains(&"unreadable")
-                        && words.contains(&when)
-                        && words.contains(&path)
-                        && fields
-                            .iter()
-                            .all(|field| words.windows(2).any(|pair| pair == field))
-                }),
-                "missing unreadable {when} at {path} with {fields:?}: {error}"
-            );
-        }
+    fn assert_unreadable(error: &str, when: &str, path: &str, fields: [[&str; 2]; 3]) {
+        assert!(
+            error.split([';', '\n', '.', '|']).any(|record| {
+                let words: Vec<_> = record
+                    .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '\\')
+                    .filter(|word| !word.is_empty())
+                    .collect();
+                words.contains(&"unreadable")
+                    && words
+                        .iter()
+                        .copied()
+                        .filter(|word| matches!(*word, "before" | "after"))
+                        .eq([when])
+                    && words.contains(&path)
+                    && fields.iter().all(|field| {
+                        words
+                            .windows(2)
+                            .filter(|pair| pair[0] == field[0])
+                            .eq([field])
+                    })
+            }),
+            "missing unreadable {when} at {path} with {fields:?}: {error}"
+        );
     }
 
     #[test]
@@ -361,11 +366,14 @@ mod tests {
             .ensure_unchanged(&registry(denied()))
             .unwrap_err()
             .to_string();
-        assert_unreadable(
-            &error,
-            r"HKCU\Preload",
-            [["open", "5"], ["read", "0"], ["truncated", "false"]],
-        );
+        for when in ["before", "after"] {
+            assert_unreadable(
+                &error,
+                when,
+                r"HKCU\Preload",
+                [["open", "5"], ["read", "0"], ["truncated", "false"]],
+            );
+        }
     }
 
     #[test]
@@ -384,11 +392,35 @@ mod tests {
             .ensure_unchanged(&registry(deep()))
             .unwrap_err()
             .to_string();
-        assert_unreadable(
-            &error,
-            r"HKCU\Preload\deep",
-            [["open", "0"], ["read", "0"], ["truncated", "true"]],
-        );
+        for when in ["before", "after"] {
+            assert_unreadable(
+                &error,
+                when,
+                r"HKCU\Preload\deep",
+                [["open", "0"], ["read", "0"], ["truncated", "true"]],
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_snapshots_name_each_phases_own_reading() {
+        let before = registry(Key {
+            opened: 5,
+            ..preload()
+        });
+        let after = registry(Key {
+            read: 6,
+            ..preload()
+        });
+        let error = before.ensure_unchanged(&after).unwrap_err().to_string();
+        for (when, open, read) in [("before", "5", "0"), ("after", "0", "6")] {
+            assert_unreadable(
+                &error,
+                when,
+                r"HKCU\Preload",
+                [["open", open], ["read", read], ["truncated", "false"]],
+            );
+        }
     }
 
     #[test]

@@ -278,18 +278,21 @@ mod tests {
         assert!(member.try_wait().expect("check second member").is_none());
         let ended = super::end_all(job.raw(), std::process::id(), BOUND);
         let member_exited = member.try_wait().expect("check second member");
+        let grandchild_exited = stdin.write_all(b"rem\r\n").map_err(|error| error.kind());
         let untouched = outsider.try_wait().expect("reads").is_none();
         if untouched {
             outsider.kill().expect("the outsider ends");
         }
         outsider.wait().expect("the outsider is reaped");
+        drop(job);
+        member.wait().expect("the member is reaped");
         ended.expect("every member ended");
         assert!(
             member_exited.is_some(),
             "the second member outlived the end"
         );
         assert_eq!(
-            stdin.write_all(b"rem\r\n").map_err(|error| error.kind()),
+            grandchild_exited,
             Err(ErrorKind::BrokenPipe),
             "the grandchild outlived the end"
         );

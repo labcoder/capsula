@@ -120,11 +120,13 @@ mod tests {
             "focused_opens=2",
             "unfocused_opens=1",
         ] {
+            let (name, _) = metric.split_once('=').unwrap();
             assert!(
                 report
                     .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '=')
-                    .any(|word| word == metric),
-                "missing {metric}: {report}"
+                    .filter(|word| word.split_once('=').is_some_and(|(key, _)| key == name))
+                    .eq([metric]),
+                "expected one {metric}: {report}"
             );
         }
         assert!(

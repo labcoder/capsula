@@ -149,6 +149,7 @@ fn keep(child: Child) {
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::os::windows::process::CommandExt as _;
     use std::process::{Child, Command, Stdio};
     use std::sync::mpsc;
     use std::thread;
@@ -158,19 +159,32 @@ mod tests {
 
     #[test]
     fn a_brain_whose_kill_fails_is_kept_for_the_gate_not_waited_on() {
-        let child = Command::new("cmd")
+        let mut child = Command::new("cmd")
+            .args(["/D", "/C"])
+            .raw_arg("set /p go=")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("cmd starts");
         let pid = child.id();
+        let stdin = child
+            .stdin
+            .take()
+            .expect("held child has an open input pipe");
         let (done, returned) = mpsc::channel();
-        thread::spawn(move || {
+        let worker = thread::spawn(move || {
             end_or_keep(child, |_| Err(io::Error::other("refused")));
             done.send(()).expect("the test waits");
         });
-        let returned = returned.recv_timeout(Duration::from_secs(10));
+        if returned.recv_timeout(Duration::from_secs(10)).is_err() {
+            drop(stdin);
+            worker
+                .join()
+                .expect("worker ends after the fixture is released");
+            panic!("dropping waited for the live child");
+        }
+        worker.join().expect("dropping it returned");
         let mut kept = leftovers();
         let pids: Vec<_> = kept.iter().map(Child::id).collect();
         let mut still_running = false;
@@ -185,7 +199,7 @@ mod tests {
             }
             brain.wait().expect("the test child is reaped");
         }
-        assert!(returned.is_ok(), "dropping it returned");
+        drop(stdin);
         assert_eq!(pids, [pid]);
         assert!(still_running, "retained the live child, not just its PID");
     }

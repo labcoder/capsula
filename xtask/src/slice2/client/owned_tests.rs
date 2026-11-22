@@ -182,10 +182,11 @@ fn a_fragmented_welcome_uses_one_absolute_deadline() {
     frame::write(&mut wire, &welcome_frame(), Pipe::Control).expect("valid Welcome");
     server.write_all(&wire[..HEADER_LEN]).expect("write header");
     let budget = Duration::from_millis(800);
-    let deadline = Instant::now() + budget;
-    let client = client.until(deadline);
     thread::scope(|scope| {
+        let (ready, start) = mpsc::sync_channel(1);
         let writes = scope.spawn(move || {
+            let deadline = Instant::now() + budget;
+            ready.send(deadline).expect("publish the fixture deadline");
             let fragment_time = deadline - Duration::from_millis(400);
             thread::sleep(fragment_time.saturating_duration_since(Instant::now()));
             server
@@ -200,6 +201,10 @@ fn a_fragmented_welcome_uses_one_absolute_deadline() {
                 .expect("write tail");
             (fragment_at, tail_started, Instant::now(), server)
         });
+        let deadline = start
+            .recv_timeout(Duration::from_secs(5))
+            .expect("fragment writer is ready");
+        let client = client.until(deadline);
         let result = welcome(&client, &hello(capability()));
         let finished_at = Instant::now();
         let (fragment_at, tail_started, tail_written, _server) =
@@ -209,6 +214,10 @@ fn a_fragmented_welcome_uses_one_absolute_deadline() {
             "payload fragment was not sent in time"
         );
         assert!(tail_started > deadline, "tail was sent too soon");
+        assert!(
+            finished_at >= deadline,
+            "the client timed out before its deadline"
+        );
         assert!(
             fragment_at < finished_at && finished_at < tail_started,
             "the client timed out between the two payload writes"
@@ -238,13 +247,18 @@ fn a_stalled_payload_fails_at_the_transport_deadline() {
     server
         .write_all(&wire[..HEADER_LEN])
         .expect("write only the header");
-    let client = client.until(Instant::now() + Duration::from_millis(100));
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let client = client.until(deadline);
     thread::scope(|scope| {
         scope.spawn(move || {
             thread::sleep(Duration::from_millis(240));
             drop(server);
         });
         let result = read::<ControlToShell>(&client, Pipe::Control);
+        assert!(
+            Instant::now() >= deadline,
+            "the client timed out before its deadline"
+        );
         assert_eq!(
             result
                 .expect_err("payload never arrived")
@@ -263,6 +277,9 @@ fn legacy_stamp_follows_credit_but_projected_stamp_preserves_the_read() {
     for stamp in [None, Some(read_at - Duration::from_millis(1))] {
         let credited = Cell::new(None);
         let (seen, size) = credited_data(data(), stamp, |size| {
+            if stamp.is_none() {
+                thread::sleep(Duration::from_millis(1));
+            }
             credited.set(Some((size, Instant::now())));
             Ok(())
         });
