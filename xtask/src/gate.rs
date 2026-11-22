@@ -22,7 +22,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use kumochi_protocol::constants::{BRAIN_EXE, DATA_DIR, DISPLAY_NAME, SHELL_EXE};
 use windows::Win32::Foundation::{POINT, RECT};
 
-use crate::hermetic::{self, Folders, Profile, Run};
+use crate::hermetic::{self, Folders, Prebuilt, Profile, Run};
 use crate::platform::{
     self, gate_capture,
     input_session::{
@@ -133,7 +133,7 @@ fn evidence_directory(transcript: &Path) -> Result<PathBuf> {
     Ok(transcript.with_file_name(stem))
 }
 
-/// The gate release images this run built, and the folders every launch of them uses.
+/// The gate release images and the folders every launch of them uses.
 #[derive(Debug)]
 struct Images {
     shell: PathBuf,
@@ -160,6 +160,19 @@ impl Images {
             brain_sha256,
             folders: run.folders("app")?,
             build,
+        })
+    }
+
+    fn prepared(run: &Run, release: &Path, pins: Prebuilt) -> Result<Self> {
+        let folders = run.folders("app")?;
+        let bin = pins.stage(release, &folders)?;
+        Ok(Self {
+            shell: bin.join(SHELL_EXE),
+            brain: bin.join(BRAIN_EXE),
+            shell_sha256: pins.shell_sha256,
+            brain_sha256: pins.brain_sha256,
+            folders,
+            build: Duration::ZERO,
         })
     }
 

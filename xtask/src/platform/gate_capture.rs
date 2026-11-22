@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::Read as _;
+use std::io::Read;
 use std::os::windows::io::AsRawHandle as _;
 use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
@@ -285,7 +285,10 @@ pub(crate) fn stop_trace(name: &str) -> Result<TraceLoss> {
 }
 
 pub(crate) fn file_sha256(path: &Path) -> Result<String> {
-    let mut file = File::open(path)?;
+    sha256_reader(File::open(path)?)
+}
+
+pub(crate) fn sha256_reader(mut reader: impl Read) -> Result<String> {
     let mut algorithm = BCRYPT_ALG_HANDLE::default();
     // SAFETY: the algorithm handle output is writable and the algorithm identifier is a static Win32 string.
     unsafe {
@@ -303,11 +306,11 @@ pub(crate) fn file_sha256(path: &Path) -> Result<String> {
         unsafe { BCryptCreateHash(algorithm, &raw mut hash, None, None, 0) }.ok()?;
         let mut bytes = vec![0; 64 * 1024];
         loop {
-            let count = file.read(&mut bytes)?;
+            let count = reader.read(&mut bytes)?;
             if count == 0 {
                 break;
             }
-            // SAFETY: hash is live and the byte slice contains only the file bytes read above.
+            // SAFETY: hash is live and the byte slice contains only the bytes read above.
             unsafe { BCryptHashData(hash, &bytes[..count], 0) }.ok()?;
         }
         let mut digest = [0; 32];

@@ -40,28 +40,44 @@ cargo run --release --package xtask --features kumochi-protocol/gate-identity --
 `slice2-gate` builds a debug brain whatever xtask's profile, since only a debug brain plays
 fixture scripts.
 
-A tool builds the images it launches itself, right before it uses them, with the feature, into
-`gate` beside its own profile folders (`<target>/gate/{debug,release}`), and launches nothing
-from anywhere else. Cargo rebuilds an image there that was built without the feature. `bench idle
---baseline <checkout>` builds that source checkout the same way into `<target>/gate-baseline`; a
-checkout from before the feature existed fails to build, so it can't launch a real identity.
+Without `--prebuilt`, a tool builds its own images in `<target>/gate/{debug,release}`.
+`bench idle --baseline <checkout>` builds older Gate source in `<target>/gate-baseline`.
+These forms can start Cargo even on a warm cache; don't use them in a no-build timing hold.
 
-The measured sessions want no build running while they measure, so build first and then run the
-built xtask, whose own build is then only cargo's up-to-date check. Each tool records how long its
-build took as `build_seconds=` (in `identity.txt`, or on bench's and slice2-gate's output); a
-timed result whose build took more than a few seconds started on a busy machine:
+### Prebuilt idle and cold-start
+
+Build the driver and both images with the Gate feature together, from the final checkout.
+Do this outside the timing hold, in the admitted owned target directory. Record the source
+and SHA-256s of those three files; do not use or hash-pin installed or Dev binaries here.
 
 ```bash
-cargo build --release --package xtask --features kumochi-protocol/gate-identity
-cargo build --release --package kumochi-shell --package kumochi-brain \
-  --features kumochi-protocol/gate-identity --target-dir target/gate
-./target/release/xtask.exe gate-session "$transcript"
+cargo build --release --locked --offline --target-dir "$target"   --package xtask --package kumochi-shell --package kumochi-brain   --features kumochi-protocol/gate-identity
+sha256sum "$target/release/xtask.exe" "$target/release/kumochi.exe" "$target/release/kumochid.exe"
 ```
 
-The tool's own build drops the `CARGO_MANIFEST_*` and `CARGO_PKG_*` variables that `cargo run` sets,
-because ring's build script reruns when they change. That removes this one rebuild trigger; a
-change to the build's real inputs still rebuilds. Prebuild after the last commit or checkout: the build id follows
-HEAD's reflog, so either rebuilds them.
+After verifying the driver hash, run it directly in the assigned quiet window. For cold-start,
+retain stdout and stderr in a new absolute `*-session.txt` as usual. Use the recorded shell and
+brain pins in that order, not hashes taken from a different build for this invocation.
+
+```bash
+"$target/release/xtask.exe" bench idle --prebuilt "$shell_sha" "$brain_sha"
+"$target/release/xtask.exe" cold-start "$transcript" --prebuilt "$shell_sha" "$brain_sha"
+```
+
+The release Gate driver verifies both sibling executables before admitting the run. It then
+copies them into the run's own folder, verifies the copies, and launches only those copies
+with the same job and isolated app data as the built forms. At both points it checks the
+SHA-256 pins and looks for each app's startup marker and the Gate instance service in the
+image, rejecting the Release and Dev service names. Those strings catch accidental mix-ups,
+but don't prove the build profile or attest an arbitrary binary. A debug Gate image may pass;
+use the recorded hashes from the intended release build. Missing, changed or mismatched images
+fail without a fallback build or launch. The receipt records `build_seconds=0.0`.
+This mode can't also build a `--baseline` checkout. Copying the images doesn't make the
+cold-start result a cold executable-cache measurement.
+
+Gate commands that build their own images strip `CARGO_MANIFEST_*`
+and `CARGO_PKG_*` so the parent's `cargo run` environment doesn't invalidate ring's cache.
+Real input changes still rebuild: in particular, the build ID follows HEAD's reflog.
 
 ## What a run does
 
@@ -69,7 +85,7 @@ HEAD's reflog, so either rebuilds them.
 flowchart TD
   A[gate xtask] -->|refuse unless the gate identity| B[take the gate-run lock]
   B -->|refuse while any kumochi.exe or kumochid.exe runs| C[hold a kill-on-close job]
-  C --> D[build the images with the feature]
+  C --> D[build Gate images or stage verified prebuilt copies]
   D --> E[launch with the run's own folders, Claude Code off]
   E --> F[clean up, on success and failure]
 ```
