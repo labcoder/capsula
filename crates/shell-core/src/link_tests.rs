@@ -4744,7 +4744,22 @@ fn narrated_absence_survives_delayed_delivery_and_reclaims_retired_scenes() {
         settle(presenter, effects, bytes);
     };
     let activate = |presenter: &mut Presenter, scene| {
-        assert!(presenter.advance(generation, now).unwrap().is_empty());
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            assert!(presenter.advance(generation, now).unwrap().is_empty());
+            if fixture::activated(presenter, scene) != 0 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the scene activates after contention"
+            );
+            let ready = session
+                .retry_narration()
+                .expect("only bridge contention defers activation");
+            ready();
+            assert!(session.resumes_narration(&session));
+        }
         assert_eq!(fixture::activated(presenter, scene), 1);
     };
 
@@ -4905,6 +4920,10 @@ fn stopped_narrated_run_drains_only_its_valid_late_announcement() {
 
 #[cfg(debug_assertions)]
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps the two live pairs and the replacement in one ordered fixture"
+)]
 fn narrated_pump_rejects_foreign_equal_generations_without_sending_or_aborting() {
     use crate::speaker::{conductor::Assignment, queued::DrawingIo as _};
     use kumochi_protocol::message::{OutputGeneration, SceneId, SegmentId, StepRef};
@@ -4992,6 +5011,20 @@ fn narrated_pump_rejects_foreign_equal_generations_without_sending_or_aborting()
             frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).unwrap(),
             Some(ControlToBrain::Pong),
             "no foreign control offer before Pong"
+        );
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::SpeechRevoked { run: RunId(7) },
+            Pipe::Control,
+        )
+        .unwrap();
+        assert_eq!(
+            frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).unwrap(),
+            Some(ControlToBrain::SpeechStopped {
+                run: RunId(7),
+                cursor: None,
+            }),
+            "the worker proves quiet before the fixture replaces its pair"
         );
         link.handle.end(&session);
         assert!(link.link.join().unwrap());

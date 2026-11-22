@@ -2564,7 +2564,7 @@ fn refused_scene_paint_does_not_orphan_queued_narration(cx: &mut gpui_kit::TestA
         );
         assert!(
             Instant::now() < deadline,
-            "the first RunEnd and exact credit arrive"
+            "the first RunEnd, exact credit, and quiet receipt arrive"
         );
         if let Ok(event) = events.recv_timeout(Duration::from_millis(5)) {
             match &event {
@@ -2601,7 +2601,9 @@ fn refused_scene_paint_does_not_orphan_queued_narration(cx: &mut gpui_kit::TestA
             apply(event, cx);
         }
         let total = probe.sent_bytes();
-        if ended == Some(run) && probe.data_credits() == (total + seed, total - prefix_bytes + seed)
+        if ended == Some(run)
+            && probe.data_credits() == (total + seed, total - prefix_bytes + seed)
+            && probe.quiet_receipt() == Some((run, None))
         {
             break;
         }
