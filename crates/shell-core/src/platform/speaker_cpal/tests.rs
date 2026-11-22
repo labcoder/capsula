@@ -674,6 +674,57 @@ fn saturated_presentation_keeps_exact_pcm_across_a_recycled_segment() {
 }
 
 #[test]
+fn a_full_presentation_ring_does_not_delay_stop_fade_or_publish_extra_source() {
+    use super::{Source, TailAck};
+    use kumochi_protocol::message::{RunId, SegmentId};
+    use std::time::Duration;
+
+    let (mut submit, mut playback) = pair(SOURCE_RATE, 1);
+    let source = Source {
+        run: RunId(5),
+        generation: 3,
+        segment: SegmentId(0),
+        at: 0,
+    };
+    submit
+        .packet_for(
+            &[16_384; PRESENTATION_SLOTS + 1],
+            PacketKind::End,
+            Some(source),
+        )
+        .unwrap();
+    for _ in 0..PRESENTATION_SLOTS {
+        playback.fill_at(&mut [0.0], Some(Duration::ZERO));
+    }
+    let full = u64::try_from(PRESENTATION_SLOTS).unwrap();
+    assert_eq!(submit.control.handed(), full);
+    submit.control.stop();
+    let start = Duration::from_millis(20);
+    let mut fade = [99.0; 120];
+    playback.fill_at(&mut fade, Some(start));
+    assert!(fade[..119].iter().all(|frame| *frame > 0.0 && *frame < 0.5));
+    assert_eq!(fade[119].to_bits(), 0);
+    assert_eq!(
+        submit.control.tail(),
+        TailAck::At(start + Duration::from_nanos(118 * 1_000_000_000 / u64::from(SOURCE_RATE)))
+    );
+    assert_eq!(submit.control.fenced_handoff(), Some(full));
+    for through in 1..=full {
+        let receipt = submit.observed.pop().unwrap();
+        assert_eq!(
+            (receipt.source, receipt.first, receipt.through),
+            (source, through - 1, through)
+        );
+    }
+    assert_eq!(submit.observed.pop(), None);
+    assert!(!submit.control.overflowed());
+    let mut after = [99.0; 4];
+    playback.fill_at(&mut after, Some(start));
+    assert_eq!(after.map(f32::to_bits), [0; 4]);
+    assert_eq!(submit.control.fenced_handoff(), Some(full));
+}
+
+#[test]
 fn receipt_pressure_at_an_unequal_rate_keeps_the_fractional_resume_position() {
     use super::Source;
     use kumochi_protocol::message::{RunId, SegmentId};

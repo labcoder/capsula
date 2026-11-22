@@ -15,15 +15,26 @@ impl FakePlayback {
     }
 
     #[cfg(test)]
-    pub(crate) fn fill_before_publish(
+    pub(crate) fn fill_during_copy(
         &mut self,
         out: &mut [f32],
         at: std::time::Duration,
-        after_copy: impl FnMut(),
+        action: impl FnOnce(&Control),
     ) {
+        let mut action = Some(action);
         self.0.control.note_callback();
-        self.0
-            .render(out, Some(at), Control::begin_copy, after_copy);
+        self.0.render(
+            out,
+            Some(at),
+            |control| {
+                control.begin_copy()?;
+                if let Some(action) = action.take() {
+                    action(control);
+                }
+                Ok(())
+            },
+            || {},
+        );
     }
 
     #[cfg(test)]

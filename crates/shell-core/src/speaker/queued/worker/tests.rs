@@ -1,6 +1,6 @@
 use super::*;
 use crate::platform::speaker_cpal::tests::FakePlayback;
-use kumochi_protocol::message::{Cursor, SpeechPcm, SpeechRetirement};
+use kumochi_protocol::message::SpeechPcm;
 
 pub(in crate::speaker::queued) const RUN: RunId = RunId(17);
 const OUTPUT: OutputGeneration = OutputGeneration(2);
@@ -24,7 +24,6 @@ fn fake() -> (Worker, Input, Port, Receiver<Request>, SyncSender<Reply>) {
             replies,
             route_closed: false,
             retired_route: None,
-            stop_cutoff: None,
             virtual_route: false,
             drawing: None,
         },
@@ -152,133 +151,69 @@ fn a_full_presentation_timeline_drains_at_its_deadline_without_new_callbacks() {
 }
 
 #[test]
-fn stop_waits_for_the_last_publication_and_uses_the_original_cutoff() {
-    const CUTOFF: Duration = Duration::from_millis(10);
-    static OCCUPIED: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
-    let full = u32::try_from(PRESENTATION_SLOTS).unwrap();
-    for ((last_at, due), occupied) in [(9, full), (11, full - 1)].into_iter().zip(&OCCUPIED) {
-        let (mut worker, input, port, requests, replies) = fake();
-        let (mut playback, control) =
-            stage_receipts(&mut worker, &input, &port, &requests, &replies, occupied);
-        for _ in 1..full {
-            playback.fill(&mut [0.0], INSTANT);
-        }
-        let mut receipts = Receipts::default();
-        let mut reports = Vec::new();
-        let mut last = [0.0];
-        playback.fill_before_publish(&mut last, Duration::from_millis(last_at), || {
-            assert!(input.stop());
-            worker
-                .step(&port, &mut [0; 480], &mut |_| {}, CUTOFF)
-                .unwrap();
-            assert_eq!(control.fenced_handoff(), Some(u64::from(full)));
-            assert_eq!(control.tail(), TailAck::Pending);
-            assert!(receipts.publish(&worker.engine, CUTOFF, &mut |report| {
-                reports.push(report);
-                true
-            }));
-            assert!(
-                reports.is_empty(),
-                "the terminal report cannot overtake publication"
-            );
-        });
-        assert_eq!(last.map(f32::to_bits), [0.5f32.to_bits()]);
-        let fade_at = Duration::from_millis(12);
-        let mut fade = [99.0; 120];
-        playback.fill(&mut fade, fade_at);
-        assert!(
-            fade[..119]
-                .iter()
-                .all(|sample| *sample > 0.0 && *sample < 0.5)
-        );
-        assert_eq!(fade[119].to_bits(), 0);
-        let TailAck::At(quiet) = control.tail() else {
-            panic!("fade should publish quiet even with the receipt ring full");
-        };
-        worker
-            .step(&port, &mut [0; 480], &mut |_| {}, quiet)
-            .unwrap();
-        assert!(receipts.publish(&worker.engine, quiet, &mut |report| {
-            reports.push(report);
-            true
-        }));
-        let cursor = Cursor {
-            segment: SegmentId(0),
-            sample: due,
-        };
-        assert_eq!(
-            reports,
-            [
-                ControlToBrain::SpeechRetired(SpeechRetirement {
-                    run: RUN,
-                    output: OUTPUT,
-                    segment: cursor.segment,
-                    retired: due,
-                    heard: due,
-                    final_segment: false,
-                }),
-                ControlToBrain::SpeechStopped {
-                    run: RUN,
-                    cursor: Some(cursor)
-                },
-            ]
-        );
-    }
-}
+fn a_stop_deadline_does_not_discard_the_in_flight_fade() {
+    use kumochi_protocol::message::Cursor;
 
-#[test]
-fn an_expired_stop_drain_cannot_become_quiet_after_late_publication() {
-    const CUTOFF: Duration = Duration::from_millis(10);
     static OCCUPIED: AtomicBool = AtomicBool::new(false);
-    let full = u32::try_from(PRESENTATION_SLOTS).unwrap();
     let (mut worker, input, port, requests, replies) = fake();
     let (mut playback, control) =
         stage_receipts(&mut worker, &input, &port, &requests, &replies, &OCCUPIED);
-    for _ in 1..full {
-        playback.fill(&mut [0.0], INSTANT);
-    }
-    let deadline = CUTOFF + DRAIN;
-    let mut receipts = Receipts::default();
-    let mut reports = Vec::new();
-    let mut last = [0.0];
-    playback.fill_before_publish(&mut last, CUTOFF, || {
+    playback.fill(&mut [0.0], INSTANT);
+    let cutoff = Duration::from_millis(2);
+    let deadline = cutoff + DRAIN;
+    let mut samples = [0.0; 180];
+    playback.fill_during_copy(&mut samples, Duration::from_millis(1), |control| {
         assert!(input.stop());
         worker
-            .step(&port, &mut [0; 480], &mut |_| {}, CUTOFF)
+            .step(&port, &mut [0; 480], &mut |_| {}, cutoff)
             .unwrap();
-        assert_eq!(control.fenced_handoff(), Some(u64::from(full)));
+        assert_eq!(worker.deadline(cutoff), Some(deadline));
+        worker
+            .step(&port, &mut [0; 480], &mut |_| {}, deadline)
+            .unwrap();
+        assert_eq!(control.fenced_handoff(), None);
         assert_eq!(control.tail(), TailAck::Pending);
-        worker.settle_stop(deadline, &mut |_| {});
-        assert!(receipts.publish(&worker.engine, deadline, &mut |report| {
+        assert!(
+            requests.try_recv().is_err(),
+            "the exact callback still owns its copy"
+        );
+        assert!(!worker.engine.final_at(deadline));
+    });
+    assert!(
+        samples[..60]
+            .iter()
+            .all(|sample| sample.to_bits() == 0.5f32.to_bits())
+    );
+    assert!(
+        samples[60..179]
+            .iter()
+            .all(|sample| *sample > 0.0 && *sample < 0.5)
+    );
+    assert_eq!(samples[179].to_bits(), 0);
+    assert_eq!(control.fenced_handoff(), Some(61));
+    assert!(matches!(control.tail(), TailAck::At(_)));
+    worker
+        .step(&port, &mut [0; 480], &mut |_| {}, deadline)
+        .unwrap();
+    assert!(matches!(requests.try_recv(), Ok(Request::Retire(1))));
+    let mut reports = Vec::new();
+    assert!(
+        Receipts::default().publish(&worker.engine, deadline, &mut |report| {
             reports.push(report);
             true
-        }));
-    });
-    assert_eq!(last.map(f32::to_bits), [0.5f32.to_bits()]);
-    let at = deadline + Duration::from_millis(1);
-    playback.fill(&mut [0.0; 120], at);
-    let TailAck::At(quiet) = control.tail() else {
-        panic!("the device drained after the publication deadline");
-    };
-    worker.drive(quiet);
-    assert!(matches!(requests.try_recv(), Ok(Request::Retire(1))));
-    assert!(receipts.publish(&worker.engine, quiet, &mut |report| {
-        reports.push(report);
-        true
-    }));
-    assert_eq!(
-        reports,
-        [ControlToBrain::SpeechRetired(SpeechRetirement {
-            run: RUN,
-            output: OUTPUT,
-            segment: SegmentId(0),
-            retired: full - 1,
-            heard: full - 1,
-            final_segment: false,
-        })],
-        "late tail must not turn a partial count into final quiet"
+        })
     );
-    assert!(!worker.engine.final_at(quiet));
+    assert_eq!(
+        reports.last(),
+        Some(&ControlToBrain::SpeechStopped {
+            run: RUN,
+            cursor: Some(Cursor {
+                segment: SegmentId(0),
+                sample: 1
+            })
+        }),
+        "main's cutoff keeps the confirmed prefix and real late quiet still settles debt"
+    );
 }
 
 #[test]
