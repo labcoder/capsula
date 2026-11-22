@@ -72,9 +72,15 @@ does not complete it; a refusal restores the authoritative choice and remains vi
 a successful retry of that setting. A failed enqueue never changes the saved value. Disconnect
 clears pending policy and voice status, and generation checks reject late snapshots.
 
+**Speak answers aloud** uses the same FIFO with `SetTalkBack`. It saves on toggle, including
+when leaving Settings, and a refused write restores the saved value. Like the other voice
+preferences, it can be set before a model is installed and does not install one. Legacy
+receives the saved answer on the same connection. A queued connection ends when Talk-back
+changes; Settings is unavailable until the next connection supplies the persisted value.
+
 The control reader forwards `Voice.speech_input` to the settings model with its connection
 generation instead of dropping the whole Voice view. Status comes only from that snapshot,
-not the selected policy. SpokenReplies is not presented or activated here. The existing backend
+not the selected policy. SpokenReplies installation status is not shown. The existing backend
 owns all idle timing and physical-release ordering; this UI adds no timer, microphone or hold
 behavior.
 
@@ -84,7 +90,7 @@ Load using the backend's installed-file reload path. All three send `InstallVoic
 Verifying, Downloading and Loading offer the existing global `CancelVoiceInstall`. Adjacent
 Fluent help and the button's accessible name explain that cancellation covers all pending voice
 setup, keeps installed files and cannot stop some loading/finishing work, including startup.
-There are no SpokenReplies controls, model selection, removal or automatic hold actions.
+There are no SpokenReplies setup controls, model selection, removal or automatic hold actions.
 
 The row captures the accepted Voice generation with the specific action. Immediately before
 enqueue, the Settings-window owner checks the current Session against that generation, and
