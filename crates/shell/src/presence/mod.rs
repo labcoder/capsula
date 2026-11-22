@@ -449,17 +449,9 @@ impl Presence {
         Ok(())
     }
 
-    /// The live speech lease's session and run.
-    fn live_speech(&self, now: Instant) -> Option<(u64, kumochi_protocol::message::RunId)> {
-        self.speech
-            .get()
-            .filter(|(.., until)| *until > now)
-            .map(|(session, run, _)| (session, run))
-    }
-
     /// Speech holds global Esc unless a focused Kumochi panel takes the key itself, Stop first.
     fn speaking(&self, now: Instant) -> bool {
-        self.live_speech(now).is_some()
+        self.speech.get().is_some_and(|(.., until)| until > now)
             && !(self.settings_focused() || self.threads_focused() || self.text_open())
     }
 
@@ -470,8 +462,7 @@ impl Presence {
         }
     }
 
-    /// Reads the native speech lease after an owner change and holds or releases Esc for it,
-    /// reading again when it runs out. A busy owner keeps only a lease that still holds.
+    /// Rereads the speech lease on an owner change or expiry; a busy owner keeps only a live one.
     pub(super) fn refresh_speech(&mut self, cx: &mut Context<'_, Self>) {
         let now = Instant::now();
         let session = self.session.as_ref().map(Session::generation);

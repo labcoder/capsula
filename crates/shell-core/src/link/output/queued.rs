@@ -236,11 +236,10 @@ impl State {
 }
 
 impl OutputOwner {
-    /// The run whose audio `session`'s native route is presenting, and when that evidence runs
-    /// out. Never waits.
+    /// The run `session`'s native route is presenting, and when that evidence runs out.
     ///
     /// # Errors
-    /// `Busy` on contention: keep only a claim that hasn't run out.
+    /// `Busy` on contention.
     pub fn speech(&self, session: u64) -> Result<Option<(RunId, Instant)>, Denied> {
         // Not `try_lock`: this frequent read must not use up a test's scripted contention.
         let mut state = match self.state.try_lock() {

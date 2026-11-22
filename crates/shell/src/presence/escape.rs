@@ -165,12 +165,13 @@ impl Presence {
 
     /// One Esc press from the typing panel or Stop, targeting the speech lease that holds now.
     pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        self.escape_for(self.live_speech(std::time::Instant::now()), cx)
+        let now = std::time::Instant::now();
+        let speech = self.speech.get().filter(|(.., until)| *until > now);
+        self.escape_for(speech.map(|(session, run, _)| (session, run)), cx)
     }
 
     /// One Esc press. The local effect happens here, and only then is `Stop` or `ClearDrawing`
-    /// queued for the brain, which nothing waits on. `speech` is the lease the press saw: once
-    /// its run is no longer the moving one, the press stops only that run's speaker, locally.
+    /// queued for the brain, which nothing waits on.
     #[expect(
         clippy::too_many_lines,
         reason = "one Esc press keeps its local decision and every effect of it in order"
@@ -245,6 +246,7 @@ impl Presence {
                 answer.and_then(|_| self.runs.stop())
             }
             Escape::Stop => {
+                // Only a press deferred past its run: Done waits for the final reply, then RunEnd retires the speaker.
                 if let Some((session, run)) =
                     speech.filter(|(_, run)| self.runs.stoppable() != Some(*run))
                 {
