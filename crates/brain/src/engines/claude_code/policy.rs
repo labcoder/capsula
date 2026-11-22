@@ -8,7 +8,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants::CLAUDE_ONE_TURN_ENV;
-use kumochi_protocol::message::{ClaudeVersion, PolicyFailed, Unsupported};
+use kumochi_protocol::message::{ClaudeVersion, Effort, PolicyFailed, Unsupported};
 
 use super::audit::AuditSchema;
 use super::stream::MAX_NATIVE_TURNS;
@@ -22,7 +22,7 @@ pub(crate) struct Reviewed {
     pub(crate) audit: AuditSchema,
     /// The aliases a run may name on this version, with the names the picker shows, in the
     /// order it lists them. Only these reach `--model`.
-    pub(crate) models: &'static [(&'static str, &'static str)],
+    pub(crate) models: &'static [ReviewedModel],
     /// The aliases in `models` this version's own probe showed taking a picture on its input.
     /// One alias's evidence says nothing about another, so an unprobed alias isn't here.
     pub(crate) images: &'static [&'static str],
@@ -30,6 +30,21 @@ pub(crate) struct Reviewed {
     /// so their order decides nothing.
     pub(crate) default_model: &'static str,
 }
+
+#[derive(Debug)]
+pub(crate) struct ReviewedModel {
+    pub(crate) alias: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) efforts: &'static [Effort],
+}
+
+const EFFORTS_2_1_306: &[Effort] = &[
+    Effort::Low,
+    Effort::Medium,
+    Effort::High,
+    Effort::XHigh,
+    Effort::Max,
+];
 
 /// Adding a version is a reviewed PR that adds a row here, from that version's probe.
 pub(crate) static REVIEWED_CLAUDE_CODE: &[Reviewed] = &[Reviewed {
@@ -56,10 +71,26 @@ pub(crate) static REVIEWED_CLAUDE_CODE: &[Reviewed] = &[Reviewed {
     },
     // The owner's list (OSC-742). P0's `default` alias is left out: it names no fixed model.
     models: &[
-        ("sonnet", "Sonnet"),
-        ("opus", "Opus"),
-        ("haiku", "Haiku"),
-        ("fable", "Fable"),
+        ReviewedModel {
+            alias: "sonnet",
+            name: "Sonnet",
+            efforts: EFFORTS_2_1_306,
+        },
+        ReviewedModel {
+            alias: "opus",
+            name: "Opus",
+            efforts: EFFORTS_2_1_306,
+        },
+        ReviewedModel {
+            alias: "haiku",
+            name: "Haiku",
+            efforts: EFFORTS_2_1_306,
+        },
+        ReviewedModel {
+            alias: "fable",
+            name: "Fable",
+            efforts: EFFORTS_2_1_306,
+        },
     ],
     // No alias is probed for pictures yet.
     images: &[],
