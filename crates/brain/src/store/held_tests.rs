@@ -309,7 +309,7 @@ fn a_picture_still_pending_at_a_crash_is_recovered_as_sent() {
     let store = reopened(&scratch);
     assert_eq!(
         kinds(&store, live),
-        [PageEventKind::HeldTurn {
+        [PageEventKind::FailedHeldTurn {
             screen: HeldScreen::Attached
         }]
     );
@@ -331,10 +331,10 @@ fn a_picture_cleared_after_an_unsent_send_is_not_recovered_as_sent() {
     store.withdraw_screen(run).expect("withdrawn");
     drop(store);
     let store = reopened(&scratch);
-    assert_eq!(kinds(&store, forgotten), [PageEventKind::User]);
+    assert_eq!(kinds(&store, forgotten), [PageEventKind::FailedUser]);
     assert_eq!(
         kinds(&store, withdrawn),
-        [PageEventKind::HeldTurn {
+        [PageEventKind::FailedHeldTurn {
             screen: HeldScreen::Withdrawn
         }]
     );
