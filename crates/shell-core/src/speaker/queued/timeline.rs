@@ -81,6 +81,7 @@ pub(super) struct Engine {
     inhibit: Option<(u64, bool)>,
     unresolved: [Option<u64>; 2],
     quiet_at: Duration,
+    stop_proof_expired: bool,
     anchors: VecDeque<Anchor>,
     last_anchor_at: Option<Duration>,
     #[cfg(all(windows, debug_assertions))]
@@ -107,6 +108,7 @@ impl Engine {
             inhibit: None,
             unresolved: [None; 2],
             quiet_at: Duration::ZERO,
+            stop_proof_expired: false,
             anchors: VecDeque::with_capacity(ANCHORS),
             last_anchor_at: None,
             #[cfg(all(windows, debug_assertions))]
@@ -439,8 +441,12 @@ impl Engine {
         self.queue.stop()
     }
 
+    pub(super) fn expire_stop_proof(&mut self) {
+        self.stop_proof_expired = true;
+    }
+
     pub(super) fn tail(&self) -> Tail {
-        if self.unresolved.iter().any(Option::is_some) {
+        if self.stop_proof_expired || self.unresolved.iter().any(Option::is_some) {
             Tail::Unknown
         } else {
             Tail::At(self.quiet_at)

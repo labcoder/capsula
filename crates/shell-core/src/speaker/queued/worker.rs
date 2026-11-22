@@ -748,10 +748,11 @@ impl Worker {
         };
         if let Some(route) = &self.physical
             && route.transport.control().tail() == TailAck::Pending
-            && route.retire_deadline.is_some_and(|deadline| now < deadline)
-            && !self.route_closed
         {
-            return;
+            if route.retire_deadline.is_some_and(|deadline| now < deadline) && !self.route_closed {
+                return;
+            }
+            self.engine.expire_stop_proof();
         }
         self.observations(cutoff);
         self.stop_cutoff = None;
