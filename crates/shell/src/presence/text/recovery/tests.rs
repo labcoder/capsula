@@ -492,6 +492,7 @@ fn stale_retry_is_not_rendered_after_switching_tasks(cx: &mut TestAppContext) {
                     updated_ms: 0,
                     kind: ThreadKind::Thread,
                     choice: None,
+                    task: None,
                 },
                 cx,
             );

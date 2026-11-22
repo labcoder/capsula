@@ -208,6 +208,7 @@ fn switching_a_cached_main_row_before_settings_keeps_kumo_symbolic() {
         kind: ThreadKind::Main,
         updated_ms: 0,
         choice: None,
+        task: None,
     };
     let mut runs = Runs::default();
     runs.select_thread(Some(ThreadId(9)));

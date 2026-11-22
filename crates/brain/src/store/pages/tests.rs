@@ -123,6 +123,228 @@ fn events(store: &Store, thread: ThreadId, before: Option<EventId>) -> DataToShe
         .expect("page")
 }
 
+fn task_rows(store: &Store, search: Option<&str>, now: i64) -> Vec<ThreadRow> {
+    let page = PageOf::Threads {
+        search: search.map(str::to_owned),
+        after: None,
+    };
+    let DataToShell::ThreadList {
+        threads,
+        next: None,
+        ..
+    } = store.pages().read_page_with_clock(1, page, || now).unwrap()
+    else {
+        panic!("one task list page");
+    };
+    threads
+}
+
+#[test]
+fn task_age_uses_a_strict_five_day_boundary_and_keeps_saved_outcomes() {
+    use TaskRunOutcome::{Active, Done, Failed, Interrupted};
+
+    let activity = 400;
+    let five_days = 432_000_000;
+    for (outcome, expected) in [
+        (None, TaskState::Earlier),
+        (Some(Active), TaskState::Earlier),
+        (Some(Done), TaskState::Done),
+        (Some(Failed), TaskState::NeedsYou),
+        (Some(Interrupted), TaskState::NeedsYou),
+    ] {
+        for elapsed in [five_days - 1, five_days, -1] {
+            assert_eq!(task_state(activity + elapsed, activity, outcome), expected);
+        }
+        assert_eq!(
+            task_state(activity + five_days + 1, activity, outcome),
+            TaskState::Sleeping
+        );
+    }
+    assert_eq!(task_state(i64::MIN, i64::MAX, Some(Done)), TaskState::Done);
+    assert_eq!(
+        task_state(i64::MAX, i64::MIN, Some(Failed)),
+        TaskState::Sleeping
+    );
+}
+
+#[test]
+fn a_task_without_a_saved_run_reads_as_earlier_on_a_query_only_connection() {
+    let scratch = Scratch::new("task-before-first-run");
+    let store = crate::store::actions_tests::opened(&scratch);
+    store
+        .conn
+        .execute_batch(
+            "INSERT INTO threads (title, created_ms, updated_ms) VALUES ('task', 100, 100);
+         PRAGMA query_only = ON;",
+        )
+        .unwrap();
+    let rows = task_rows(&store, None, 101);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[1].task,
+        Some(TaskFact {
+            latest_run: None,
+            last_activity_ms: 100,
+            state: TaskState::Earlier,
+        })
+    );
+}
+
+#[test]
+fn task_pages_project_the_latest_saved_run_of_each_live_task() {
+    use crate::store::actions_tests::opened;
+
+    let scratch = Scratch::new("task-list-facts");
+    let mut store = opened(&scratch);
+    let main = store.main_thread().unwrap();
+    let task = add(&mut store, "found", "look here");
+    let older = store.high_water().unwrap().1;
+    let unrelated = add(&mut store, "unrelated", "different text");
+    let unrelated_run = store.high_water().unwrap().1;
+    let hidden = add(&mut store, "hidden", "look here");
+    let newer = RunId(store.high_water().unwrap().1.0 + 1);
+    store
+        .begin_turn(task, None, newer, "look here again")
+        .unwrap();
+    store.end_run(task, newer, &[], RunEnd::Done).unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE runs SET started_ms = 300, ended_ms = 305 WHERE id = ?1",
+            [bounded_id(older.0)],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE runs SET started_ms = 100, ended_ms = 110 WHERE id = ?1",
+            [bounded_id(newer.0)],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE threads SET updated_ms = 105 WHERE id = ?1",
+            [bounded_id(task.0)],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE threads SET state = 'deleting' WHERE id = ?1",
+            [bounded_id(hidden.0)],
+        )
+        .unwrap();
+
+    let done = TaskFact {
+        latest_run: Some(TaskRun {
+            id: newer,
+            outcome: TaskRunOutcome::Done,
+        }),
+        last_activity_ms: 110,
+        state: TaskState::Done,
+    };
+    let plain = task_rows(&store, None, 120);
+    assert_eq!(
+        plain.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [main, task, unrelated]
+    );
+    assert_eq!(plain[0].task, None);
+    assert_eq!(plain[1].task, Some(done));
+    assert_eq!(plain[1].updated_ms, 105);
+    assert_eq!(
+        plain[2].task.unwrap().latest_run,
+        Some(TaskRun {
+            id: unrelated_run,
+            outcome: TaskRunOutcome::Done,
+        })
+    );
+    let search = task_rows(&store, Some("look here"), 121);
+    assert_eq!(search, [plain[1].clone()]);
+}
+
+#[test]
+fn recovery_projects_failure_without_restarting_the_task_clock() {
+    use crate::store::actions_tests::opened;
+
+    let scratch = Scratch::new("task-recovered-facts");
+    let mut store = opened(&scratch);
+    let thread = ThreadId(store.high_water().unwrap().0.0 + 1);
+    let run = RunId(1);
+    store
+        .begin_turn(thread, Some("old"), run, "recover this task")
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE threads SET updated_ms = 100 WHERE id = ?1",
+            [bounded_id(thread.0)],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute("UPDATE runs SET started_ms = 101 WHERE id = 1", [])
+        .unwrap();
+    let search = |store: &Store, now| task_rows(store, Some("recover"), now)[0].task.unwrap();
+    let earlier = TaskFact {
+        latest_run: Some(TaskRun {
+            id: run,
+            outcome: TaskRunOutcome::Active,
+        }),
+        last_activity_ms: 101,
+        state: TaskState::Earlier,
+    };
+    assert_eq!(search(&store, 102), earlier);
+    assert_eq!(store.recover().unwrap().crashed_runs, 1);
+    let failed = TaskFact {
+        latest_run: Some(TaskRun {
+            id: run,
+            outcome: TaskRunOutcome::Failed,
+        }),
+        state: TaskState::NeedsYou,
+        ..earlier
+    };
+    assert_eq!(search(&store, 102), failed);
+    let after_five_days = 432_000_102;
+    assert_eq!(
+        search(&store, after_five_days),
+        TaskFact {
+            state: TaskState::Sleeping,
+            ..failed
+        }
+    );
+
+    let new_run = RunId(2);
+    store
+        .begin_turn(thread, None, new_run, "recover and continue")
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE threads SET updated_ms = ?2 WHERE id = ?1",
+            params![bounded_id(thread.0), after_five_days],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE runs SET started_ms = ?1 WHERE id = 2",
+            [after_five_days - 1],
+        )
+        .unwrap();
+    assert_eq!(
+        search(&store, after_five_days),
+        TaskFact {
+            latest_run: Some(TaskRun {
+                id: new_run,
+                outcome: TaskRunOutcome::Active
+            }),
+            last_activity_ms: after_five_days,
+            ..earlier
+        }
+    );
+}
+
 #[test]
 fn saved_failure_marks_only_its_user_event_and_preserves_partial_history() {
     use crate::store::{Failure, Interruption};

@@ -83,6 +83,8 @@ pub struct ThreadRow {
     pub kind: ThreadKind,
     /// The stored model and effort, even one the catalog no longer offers.
     pub choice: Option<ModelChoice>,
+    /// Saved task facts as of this page read; absent for Kumo’s chat.
+    pub task: Option<TaskFact>,
 }
 
 impl fmt::Debug for ThreadRow {
@@ -94,6 +96,52 @@ impl fmt::Debug for ThreadRow {
             .field("choice", &self.choice)
             .finish_non_exhaustive()
     }
+}
+
+/// The latest saved facts for a task, independent of any live run announcement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskFact {
+    /// The task's latest stored run, if it has started one.
+    pub latest_run: Option<TaskRun>,
+    /// Unix milliseconds of the last real run or conversation activity.
+    pub last_activity_ms: i64,
+    /// Derived on the read, never written as task state.
+    pub state: TaskState,
+}
+
+/// A saved run reference and its stored outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRun {
+    /// Its store id.
+    pub id: RunId,
+    /// The persisted outcome, even when the task has aged into Sleeping.
+    pub outcome: TaskRunOutcome,
+}
+
+/// The stored run's outcome. Active is not evidence that a task is Working.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskRunOutcome {
+    /// The store has no terminal outcome for this run.
+    Active,
+    /// The run completed.
+    Done,
+    /// The run was stopped before it completed.
+    Interrupted,
+    /// The run failed, including one recovered after a crash.
+    Failed,
+}
+
+/// What persisted evidence alone can say about a task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskState {
+    /// No saved completion or explicit need for attention.
+    Earlier,
+    /// A saved interruption or failure needs attention.
+    NeedsYou,
+    /// The latest saved run completed.
+    Done,
+    /// Its last real activity was over five days ago.
+    Sleeping,
 }
 
 /// What a stored event records.
@@ -297,6 +345,14 @@ mod tests {
             updated_ms: 2,
             kind: ThreadKind::Thread,
             choice: Some(choice),
+            task: Some(TaskFact {
+                latest_run: Some(TaskRun {
+                    id: RunId(4),
+                    outcome: TaskRunOutcome::Failed,
+                }),
+                last_activity_ms: 2,
+                state: TaskState::NeedsYou,
+            }),
         };
         let event = PageEvent {
             id: EventId(3),
