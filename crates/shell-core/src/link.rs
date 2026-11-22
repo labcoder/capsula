@@ -22,8 +22,8 @@ use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, AudioSession, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
     DataToShell, Deleted, ErrorKey, GestureId, GitHubView, Hello, HoldStatus, Incarnation,
-    IssueSession, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, OutputGeneration, Phase, RunId, RunOrigin,
-    SceneDescriptor, SceneDescriptorV1, SettingsOp, SettingsView, ThreadId, ThreadOp, UserError,
+    IssueSession, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor,
+    SceneDescriptorV1, SettingsOp, SettingsView, ThreadId, ThreadOp, UserError,
 };
 use kumochi_protocol::voice::VoicePart;
 
@@ -33,7 +33,8 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::credential::{self, CredentialError};
 use crate::platform::microphone::CollectionGate;
 use crate::platform::{self, PipeClient};
-use crate::speaker::{self, Command, Data, Opener, Outlet, Packet, Speaker};
+#[cfg(any(test, feature = "test-support"))]
+use crate::speaker;
 
 mod microphone;
 mod narrated;
@@ -915,8 +916,8 @@ impl LinkHandle {
         Some(gesture)
     }
 
-    /// Marks Quit, so the link starts no brain from here on and no speaker opening now is
-    /// accepted. Does not wait on the output owner, outbox or pipe.
+    /// Marks Quit, so the link starts no brain from here on. Does not wait on the output owner,
+    /// outbox or pipe.
     /// Returns false when Quit was already under way.
     pub fn begin_quit(&self) -> bool {
         let first = self.shared.input.fetch_or(QUIT_INPUT, Ordering::SeqCst) & QUIT_INPUT == 0;
@@ -1221,7 +1222,7 @@ impl LinkHandle {
         link.recording = Some(recording);
         link.shared.generations.store(1, Ordering::Release);
         // Session 1's output, as a normal launch has it: none, so a hold's claim can be granted.
-        link.shared.output.begin(1, None);
+        link.shared.output.begin_quiet(1);
         (link, requests)
     }
 
@@ -1274,8 +1275,6 @@ struct Link {
     session: u32,
     audio: AudioSession,
     shared: Arc<Shared>,
-    /// Opens each connection's speaker; none in a normal launch.
-    speaker: Option<Opener>,
 }
 
 /// A link that hasn't started connecting, so the UI can arm the keyboard first. Dropping it
@@ -1302,7 +1301,6 @@ pub fn prepare(
         session: platform::session_id()?,
         audio,
         shared: Arc::new(Shared::default()),
-        speaker: None,
     };
     Ok(start(link, events))
 }
@@ -1459,32 +1457,6 @@ impl Link {
         } else {
             (Instant::now() >= reconnect_by).then_some(Attendance::Retry)
         }
-    }
-
-    /// The connection's speaker for the generation its output owner reserved; it announces its
-    /// own output, and its worker ends the connection when it ends. A normal launch has none.
-    fn open_speaker(
-        &self,
-        (generation, tail): (OutputGeneration, Arc<speaker::Tail>),
-        control: &Sender<ControlToBrain>,
-        credit: &Arc<SessionIo>,
-        alive: &AtomicBool,
-    ) -> Option<Speaker> {
-        let open = self.speaker.as_ref()?;
-        let credit = Arc::clone(credit);
-        let speaker = (open.0)(Outlet {
-            generation,
-            control: control.clone(),
-            grant: Box::new(move |bytes| credit.grant(bytes)),
-            tail,
-            wake: self.shared.output.waker(),
-        })?;
-        // An early exit only: the owner decides again under its lock.
-        if self.quitting() || !alive.load(Ordering::Acquire) {
-            drop(speaker);
-            return None;
-        }
-        Some(speaker)
     }
 
     #[cfg(windows)]
@@ -1681,50 +1653,10 @@ impl Link {
             })
         })();
         // Before Connected, so nothing can claim the session's output before its owner knows it.
-        let opening = (!queued)
-            .then(|| {
-                self.shared.output.begin(
-                    generation,
-                    (self.speaker.is_some() && spawned.is_ok()).then(|| {
-                        let pipes = [Arc::clone(&control), Arc::clone(&data)];
-                        let abort: output::Abort =
-                            Arc::new(move || pipes.iter().for_each(|pipe| pipe.abort()));
-                        abort
-                    }),
-                )
-            })
-            .flatten();
+        if !queued {
+            self.shared.output.begin_quiet(generation);
+        }
         let open = legacy_connected.is_none_or(|connected| events.send_blocking(connected).is_ok());
-        // Only on a live session, so a speaker never outlives a connection that didn't start, and
-        // fenced before its reader starts.
-        let mut speaker = match opening {
-            Some(opening) if open && !self.quitting() => {
-                let output = opening.0;
-                let opened = self.open_speaker(opening, &control_out, &credit, &ended.alive);
-                let kept = self
-                    .shared
-                    .output
-                    .opened(output, opened, || self.quitting(), &ended.alive)
-                    .unwrap_or_else(|speaker| {
-                        drop(speaker);
-                        control.abort();
-                        data.abort();
-                        None
-                    });
-                // Armed only once kept, so letting a refused one go ends nothing.
-                if let Some(speaker) = &kept {
-                    let pipes = [Arc::clone(&control), Arc::clone(&data)];
-                    speaker.arm(Box::new(move || {
-                        for pipe in &pipes {
-                            pipe.abort();
-                        }
-                    }));
-                }
-                kept
-            }
-            _ => None,
-        };
-        let input = speaker.as_mut().and_then(Speaker::input);
         let read = spawned.and_then(|()| {
             // Only now, so nothing from the brain reaches the UI before Connected.
             spawn_helper("link-data-reader", &mut helpers, {
@@ -1745,7 +1677,6 @@ impl Link {
                         },
                         &events,
                         generation,
-                        input.as_ref(),
                         &credit,
                         queued.then_some((&ended.shared.output, credit.narrated.as_deref())),
                     );
@@ -1759,7 +1690,6 @@ impl Link {
                 events,
                 generation,
                 &self.shared,
-                speaker.as_ref(),
                 queued.then_some(&credit),
             ),
             Ok(()) => {}
@@ -1777,7 +1707,6 @@ impl Link {
             .control
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
-        // A speaker's worker left behind keeps a sender, so the queue is closed, not just dropped.
         let _closed = control_out.close();
         drop(control_out);
         // The writers and the reader return once their pipes fail.
@@ -1785,9 +1714,6 @@ impl Link {
             control.abort();
             data.abort();
         }
-        // Its worker holds a control sender, so it goes before the writers are joined; its own
-        // wait is bounded.
-        drop(speaker);
         for helper in helpers {
             if helper.join().is_err() {
                 tracing::error!("a link thread panicked");
@@ -2044,7 +1970,6 @@ fn watch(
     events: &Sender<LinkEvent>,
     generation: u64,
     shared: &Arc<Shared>,
-    speaker: Option<&Speaker>,
     queued: Option<&Arc<SessionIo>>,
 ) {
     let mut named = RunId(0);
@@ -2141,9 +2066,6 @@ fn watch(
                         if matches!(origin, RunOrigin::Hold { .. }) {
                             shared.with_queued_input(generation, |input| input.hold = None);
                         }
-                    }
-                    if speaker.is_some_and(|speaker| !speaker.command(Command::Name(run))) {
-                        return;
                     }
                 }
                 if events
@@ -2440,9 +2362,6 @@ fn watch(
                 if queued.is_some() && !shared.output.revoke_queued(generation, run) {
                     return;
                 }
-                if speaker.is_some_and(|speaker| !speaker.command(Command::Stop(run))) {
-                    return;
-                }
             }
             Ok(Some(ControlToShell::ThreadModelSet { .. } | ControlToShell::NoVisual { .. })) => {}
             Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
@@ -2479,7 +2398,6 @@ fn read_data(
     finish: impl FnOnce(),
     events: &Sender<LinkEvent>,
     generation: u64,
-    speaker: Option<&speaker::Input>,
     credit: &SessionIo,
     queued: Option<(&output::OutputOwner, Option<&narrated::Narrated>)>,
 ) {
@@ -2503,28 +2421,14 @@ fn read_data(
                 } else {
                     message
                 };
-                let message = match (message, speaker) {
-                    (DataToShell::SegmentQueued { run, segment, .. }, Some(input)) => {
-                        let data = Data::Queued { run, segment };
-                        if input.send(Packet { bytes, data }).is_err() {
-                            break;
-                        }
-                        continue;
-                    }
-                    (DataToShell::SpeechPcm(pcm), Some(input)) => {
-                        let data = Data::Pcm(pcm);
-                        if input.send(Packet { bytes, data }).is_err() {
-                            break;
-                        }
-                        continue;
-                    }
-                    // No output was announced, so audio is unexpected: dropped, never shown.
-                    (DataToShell::SpeechPcm(mut pcm), None) => {
+                // No output was announced on Legacy. Unexpected PCM is never shown.
+                let message = match message {
+                    DataToShell::SpeechPcm(mut pcm) => {
                         pcm.samples.zeroize();
                         credit.grant(bytes);
                         continue;
                     }
-                    (message, _) => message,
+                    message => message,
                 };
                 let event = if matches!(
                     &message,

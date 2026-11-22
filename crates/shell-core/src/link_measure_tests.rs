@@ -218,7 +218,6 @@ fn run(method: Method, label: &str) {
                     || shell_control.abort(),
                     &events,
                     GENERATION,
-                    None,
                     &credit,
                     None,
                 );

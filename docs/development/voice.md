@@ -222,7 +222,7 @@ stateDiagram-v2
 
 - **The window.** At most one Speak is out at a time. A new one goes out only while the unplayed audio is under 20 s and at most two segments lie beyond the playing one.
 - **Credit.** The pump reads TTS only on credit, which keeps forwarded audio inside the window. `SpeechProgress` gives credit back as it plays, so a 30 s segment streams through the 20 s window.
-- **Queued output (dormant).** Instead of legacy progress and played reports, ordered retirement
+- **Queued output (dormant).** Ordered retirement
   refunds the synthesis window even for unheard samples. Only the separate heard prefix updates
   history; duplicate retirement and a producer-side drop cannot refund the same samples twice.
 - **Speech-start admission (dormant).** The producer holds the next queued Speech-start segment
@@ -230,11 +230,11 @@ stateDiagram-v2
   to its announced segment; a duplicate cannot dispatch it again. Discard still owes the ordered
   final. A closed reply waiting only on eligibility invalidates its drain timer; resolving that
   wait immediately checks completion or resumes ordinary drain. The future shell adapter owns
-  the eligibility deadline. The legacy opener does not use this decision path.
+  the eligibility deadline.
   Authoritative whole-scene removal cancels only its queued Speech assignments, settling their
   existing decisions and ordered finals without stopping other narration.
 - **Chunks.** Audio goes out as it's made, in chunks of at most 100 ms. Every queued segment ends with one empty chunk whose `last` carries the samples sent. TTS reaching `Done`, a failure, a zero-output segment and a failed scene all end a segment that way. Final chunks go out in segment order, so a dropped segment's waits for every earlier one's.
-- **Finality.** The producer must be closed and synthesis idle. Legacy output then waits for every surviving segment to play. Queued output waits for worker finals, even for a scene failure that already refunded synthesis debt. After revoke, both wait for confirmed `SpeechStopped`.
+- **Finality.** The producer must be closed and synthesis idle. Queued output waits for worker finals, even for a scene failure that already refunded synthesis debt. After revoke it waits for confirmed `SpeechStopped`.
 - **Revoke.** A revoke stops the run's speech for good, and nothing more goes out for the run, a later scene failure included. A Stop from the shell isn't told back to it; any revoke from the brain sends `SpeechRevoked`. A new output-device generation mid-run revokes too: the text stays, and nothing is replayed at the new rate.
 - **Refused reports.** A report that can't be true is refused: an unknown segment, one out of order, a total that isn't the samples sent, or a false quiet answer or cursor. Legacy reports ignore dropped segments; queued receipts still account for their actual heard prefix.
 - **The stall timer.** Every move of a draining run re-arms it, under a new epoch, and only the latest epoch counts. A repeated or backward progress report, or a scene failure that drops nothing, doesn't re-arm it.
@@ -293,10 +293,9 @@ flowchart LR
 
 ### A spoken run
 
-A run speaks when spoken replies are loaded and the connection has sent `AudioOutput` when the run
-is admitted. Otherwise it gets no reply, and its text and steps run as before. Spoken replies
-count as loaded while the part is `Ready` and talk-back is on; the brain tells the coordinator
-each time that changes, including when a `SetTalkBack` commits.
+Only a registered queued pair can play a reply. The brain admits speech when its voice is
+`Ready` and Talk-back is on. Stock Legacy sessions never register output, so their text
+and steps still run without audio.
 
 ```mermaid
 sequenceDiagram
@@ -309,7 +308,7 @@ sequenceDiagram
   C->>L: Speak, Credit
   L->>C: Tts (audio, done, failed)
   C->>S: SpeechPcm ... final chunk
-  S->>C: SpeechProgress, SegmentPlayed
+  S->>C: SpeechRetired
   C->>C: final? end Done
 ```
 
@@ -1042,33 +1041,27 @@ stateDiagram-v2
     Ending --> [*]: retired on its proof
 ```
 
-One dispatcher task per presence makes every UI-side acquire, bind and retirement. The native
-callback, the owner's change hints, the receipt task and its own timers wake it through one
-bounded channel, and it runs after the delivery that woke it, so an Esc's speaker `Stop` is
-queued before any `Resume`. A busy owner gets an attempt budget of three: any wake retries, and a
-10 ms timer is only the fallback wake.
+One dispatcher task per presence handles UI-side acquire, bind and retirement. The native
+callback, changes from the output owner, the microphone receipt and the dispatcher's timers
+wake it through one bounded channel. A busy owner has an attempt budget of three, with a
+10 ms timer as a fallback wake.
 
-An admitted hold doesn't open the microphone at once: its gate waits, with a quiet deadline set
-once at admission (2 s, a guess). Each wake rechecks the hold's session, settings, input and mode,
-then asks the owner for a claim; `Opening` and `NotQuiet` wait for the next wake, and the claim
-reserves the start. Wakes never refill the rechecks or move the deadline, and the deadline stops
-applying once the start is reserved. The started worker's `Running` receipt is accepted under
-that claim with its copies still closed; the hold records the acceptance and publishes the
-Listening state, and only then does `collect` check the claim again and open the copies. Its
-painting follows and isn't awaited, so the order is one of state, not of pixels. A release
-or end in between wins and nothing is copied; a terminal refusal or exhausted Busy stops and drains that worker, and nothing
-reopens. Acceptance also refuses a generation no longer running, so a key-up native input took
-before it cancels the hold without Listening, however late presence gets that key-up.
+Before starting the microphone, the dispatcher rechecks the session, settings, input and mode
+and asks the output owner for a capture claim. Legacy has no playback device, so its claim
+names the session's no-output epoch. A queued claim names the registered output of that pair
+and requires the Hold admission checks above. The admission deadline bounds the wait until
+start is reserved; wakes do not extend it or refill the attempt budget. The dispatcher
+accepts the worker's `Running` receipt under the claim with copying still closed. It records
+Listening before `collect` checks the claim again and allows copying. A release or session end
+that wins before collection keeps copying closed, even when Presence gets the key-up late.
 
-Retirement needs proof: `NoMic` with no microphone bound, `Unstarted` for a generation that
-never started (the gate is its one discard, and `VoiceHoldStopped` follows as before), and
-`Retired` once the physical receipt came or the generation finished. A started microphone waits
-for its receipt, even after its hold is gone. A busy retire retries on its own. No retirement
-resumes speech ahead of its stop: each waits while a speaker stop is pending, an Esc is undecided,
-or a session whose brain refused a stop is still ending. A session ends from the shell by
-withdrawing its speaker's commands, so a late link-thread teardown can't let a Resume reach the old
-speaker. A refused proof keeps the token and speech paused, and shows `hold-unconfirmed` once no
-hold is pending.
+Retirement needs proof: `NoMic` if nothing was bound, `Unstarted` if the owner can discard a
+generation that never started, and `Retired` once the worker's receipt arrives or the
+generation finishes. A busy retirement retries. The dispatcher keeps the inhibit while a
+queued stop is pending or Esc is still being resolved, so releasing capture can't overtake
+that stop. On a speaking queued Hold it sends KeyUp only after both the Joined receipt and
+successful retirement of that gesture's inhibit. A refused proof leaves the inhibit held
+and shows `hold-unconfirmed` once no Hold is pending.
 
 ### Held words after a lost brain
 

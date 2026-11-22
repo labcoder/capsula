@@ -6,7 +6,6 @@ mod folders;
 pub(super) mod microphone;
 pub(super) mod pipe;
 mod process;
-pub(super) mod speaker;
 
 pub(crate) use credential::WindowsKeyStageWriter;
 #[cfg(test)]

@@ -1132,30 +1132,3 @@ fn revocation_does_not_reclassify_discarded_packets_as_before_listening() {
     assert_eq!(boundary.kept_packets, 0);
     assert_eq!(boundary.kept_frames, 0);
 }
-
-#[test]
-fn the_speaker_writes_exact_pcm16_and_float_frames_and_no_other_format() {
-    let format = |sample, channels| Format {
-        rate: 48_000,
-        channels,
-        sample,
-    };
-    let write = |sample, channels, mono: &[i16]| {
-        let render = format(sample, channels)
-            .render(0)
-            .expect("a speaker format");
-        let mut out = vec![0xaa; mono.len() * render.frame()];
-        render.write(mono, &mut out);
-        out
-    };
-    assert_eq!(write(Sample::I16, 1, &[-256, 1]), [0x00, 0xff, 0x01, 0x00]);
-    assert_eq!(write(Sample::I16, 2, &[0x1234]), [0x34, 0x12, 0x34, 0x12]);
-    assert_eq!(write(Sample::F32, 1, &[i16::MIN]), [0x00, 0x00, 0x80, 0xbf]);
-    assert_eq!(
-        write(Sample::F32, 2, &[16_384]),
-        [0x00, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x00, 0x3f]
-    );
-    for sample in [Sample::U8, Sample::I24, Sample::I32] {
-        assert_eq!(format(sample, 2).render(0), None, "{sample:?}");
-    }
-}
