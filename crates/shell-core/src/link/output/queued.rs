@@ -13,6 +13,10 @@ use crate::speaker::DRAIN;
 use crate::speaker::conductor::Assignment;
 use crate::speaker::queued::{Command, Input, Packet, RATE, spawn, spawn_plain};
 
+#[cfg(test)]
+#[path = "queued_tests.rs"]
+mod tests;
+
 const LOCAL_QUIET: u8 = 1;
 const RECEIPT_QUEUED: u8 = 2;
 const RETIRING: u8 = 4;
