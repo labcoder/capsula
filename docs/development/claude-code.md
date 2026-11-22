@@ -197,7 +197,8 @@ sequenceDiagram
 
 - **Finding.** Only `CLAUDE_CODE_PATHS` under the user's profile, never `PATH`. A path that isn't
   a native `.exe`, or that runs through `node_modules`, is `Unsupported::Shim` before anything is
-  looked at. The version is `--version`'s first word, and it must have a reviewed row.
+  looked at. The version is `--version`'s first word, and it must have a reviewed row. That row
+  pins the model alias Kumochi requests, not the backend the CLI resolves on an internal retry.
 - **Before every start.** The lane needs this brain's own lock on `claude-code.lock`, beside the
   vault's, and takes it on its first call only while the account worker reports the vault lock
   held. Before Version every managed-policy source must be absent; before Status the reviewed
@@ -368,7 +369,10 @@ one at a time. A run whose choice names Claude Code starts one through `Claude::
   one pipe call, then checks Stop, observed stdout EOF and the deadline before marking the held
   lease and writing. The reader publishes EOF or a terminal read error before cleaning up its
   pipe. Every chunk, short-write remainder and interrupted retry needs a fresh
-  reservation. If close wins, there is no new admission; if admission wins, that one write may
+  reservation. Stop closes the question's picture grant before scheduling cancellation.
+  Turning off Show Screen closes its grant and ends the active question that was granted
+  that screen picture, even if the child already read it and could retry with it. If close
+  wins, there is no new admission; if admission wins, that one write may
   still begin or finish after close returns. Only confirmed teardown proves the child and pumps
   have stopped. A first attempt counts even if the pipe accepted no bytes; control writes don't
   count. Picture chunks are zeroed on drop, including queued chunks the pump discards. No alias

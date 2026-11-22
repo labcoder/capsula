@@ -198,7 +198,8 @@ impl Coordinator {
         }
         self.revoke_pictures();
         if let Some(run) = self.current.as_ref().filter(|run| {
-            run.key_granted && matches!(run.screen, Some(crate::context::Screen::Withdrawn))
+            matches!(run.screen, Some(crate::context::Screen::Withdrawn))
+                && (run.key_granted || self.code_picture_grants(run.id).next().is_some())
         }) {
             self.fail_with(
                 run.id,
