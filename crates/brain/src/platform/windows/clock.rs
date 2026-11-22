@@ -126,6 +126,14 @@ mod tests {
     }
 
     #[test]
+    fn the_real_counter_ages_a_stamp_of_now_and_refuses_a_later_one() {
+        let now = qpc_now().expect("the counter reads");
+        let age = qpc_age(now).expect("a stamp of now is not later than now");
+        assert!(age < Duration::from_secs(1), "{age:?}");
+        assert_eq!(qpc_age(u64::MAX), None);
+    }
+
+    #[test]
     fn a_deadline_stamps_round_down_and_one_now_or_past_has_nothing_left() {
         assert_eq!(
             stamp(10_000_000, 10_000_000, Duration::from_millis(1_500)),
