@@ -325,11 +325,11 @@ mod tests {
 
     /// Frames besides Claude Code's view: the account's, with a planted email, and text as
     /// Claude Code might print it, with a planted path and token.
-    fn unrelated() -> Vec<Result<Frame>> {
+    fn unrelated(email: &str, path: &str, token: &str) -> Vec<Result<Frame>> {
         vec![
             Ok(Frame::Control(ControlToShell::Account(
                 AccountView::SignedIn {
-                    email: Some(AccountEmail::new(EMAIL).expect("a valid email")),
+                    email: Some(AccountEmail::new(email).expect("a valid email")),
                     plan: PlanState::Enabled,
                     recovery: None,
                 },
@@ -337,7 +337,7 @@ mod tests {
             Ok(Frame::Data(
                 DataToShell::AssistantText {
                     run: RunId(3),
-                    delta: format!("Login successful. Credentials saved to {PATH} {TOKEN}").into(),
+                    delta: format!("Login successful. Credentials saved to {path} {token}").into(),
                 },
                 0,
             )),
@@ -362,14 +362,18 @@ mod tests {
     }
 
     fn fixture(steps: Vec<Step>) -> Fixture {
+        fixture_with(steps, [EMAIL, PATH, TOKEN])
+    }
+
+    fn fixture_with(steps: Vec<Step>, [email, path, token]: [&str; 3]) -> Fixture {
         let mut frames = VecDeque::new();
         for step in steps {
-            frames.extend(unrelated());
+            frames.extend(unrelated(email, path, token));
             frames.push_back(match step {
                 Step::View(claude_code) => Ok(connections(claude_code, KeyView::Missing)),
                 Step::Snapshot(claude_code, anthropic) => Ok(connections(claude_code, anthropic)),
                 Step::Closed => Ok(Frame::Closed),
-                Step::Late => Err(anyhow!("nothing expected arrived; last: {TOKEN} {PATH}")),
+                Step::Late => Err(anyhow!("nothing expected arrived; last: {token} {path}")),
             });
         }
         Fixture {
@@ -619,25 +623,15 @@ mod tests {
 
     #[test]
     fn the_deadline_ends_the_sign_in_by_quitting_without_a_cancel() {
-        let diagnostics = |detail: &str| {
-            let mut brain = fixture(vec![
-                Step::View(signed_out()),
-                Step::View(ClaudeCodeView::SigningIn),
-                Step::Late,
-            ]);
-            *brain
-                .frames
-                .iter_mut()
-                .find(|frame| frame.is_err())
-                .expect("deadline error") =
-                Err(anyhow!("nothing expected arrived; last: {detail}"));
-            brain.frames.push_front(Ok(Frame::Data(
-                DataToShell::AssistantText {
-                    run: RunId(3),
-                    delta: detail.into(),
-                },
-                0,
-            )));
+        let diagnostics = |(private, version)| {
+            let mut brain = fixture_with(
+                vec![
+                    Step::View(ClaudeCodeView::SignedOut { version }),
+                    Step::View(ClaudeCodeView::SigningIn),
+                    Step::Late,
+                ],
+                private,
+            );
             let mut out = Vec::new();
             let (result, quit_sent) = session(Ok(&mut brain), &mut out, |wire, out| {
                 drive(wire, out, Ask::SignIn)
@@ -647,10 +641,20 @@ mod tests {
             assert!(quit_sent);
             (out, format!("{error:#}"), format!("{error:?}"))
         };
-        let original = format!("{TOKEN} {PATH}");
         let [shown, other] = [
-            original.as_str(),
-            r"abcalternate-key-1290 D:\Profiles\another\Settings\Tool",
+            ([EMAIL, PATH, TOKEN], VERSION),
+            (
+                [
+                    "other-person@localmail.example",
+                    r"D:\Profiles\another\Settings\Tool",
+                    "fixture-alternate-key-1290",
+                ],
+                ClaudeVersion {
+                    major: 2537,
+                    minor: 3561,
+                    patch: 7843,
+                },
+            ),
         ]
         .map(diagnostics);
         assert!(shown == other, "key or path affected sign-in diagnostics");

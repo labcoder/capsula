@@ -293,10 +293,10 @@ mod tests {
     }
 
     /// Frames the brain sends besides the account, each carrying a planted name or title.
-    fn unrelated() -> Vec<Result<Frame>> {
+    fn unrelated(name: &str, title: &str) -> Vec<Result<Frame>> {
         let settings = SettingsView {
-            assistant_name: AssistantName::new(NAME).expect("a valid name"),
-            user_name: Some(UserName::new(NAME).expect("a valid name")),
+            assistant_name: AssistantName::new(name).expect("a valid name"),
+            user_name: Some(UserName::new(name).expect("a valid name")),
             onboarded: true,
             onboarding_from: kumochi_protocol::message::OnboardingStep::Welcome,
             main_thread: ThreadId(1),
@@ -312,7 +312,7 @@ mod tests {
         };
         let row = ThreadRow {
             id: ThreadId(2),
-            title: TITLE.to_owned(),
+            title: title.to_owned(),
             updated_ms: 0,
             kind: ThreadKind::Thread,
             choice: None,
@@ -333,7 +333,7 @@ mod tests {
             Ok(Frame::Data(
                 DataToShell::AssistantText {
                     run: RunId(3),
-                    delta: format!("{NAME} {TITLE}").into(),
+                    delta: format!("{name} {title}").into(),
                 },
                 0,
             )),
@@ -362,13 +362,17 @@ mod tests {
     }
 
     fn fixture(steps: Vec<Step>) -> Fixture {
+        fixture_with(steps, [NAME, TITLE, EMAIL, TOKEN])
+    }
+
+    fn fixture_with(steps: Vec<Step>, [name, title, email, token]: [&str; 4]) -> Fixture {
         let mut frames = VecDeque::new();
         for step in steps {
-            frames.extend(unrelated());
+            frames.extend(unrelated(name, title));
             frames.push_back(match step {
                 Step::View(view) => Ok(Frame::Control(ControlToShell::Account(view))),
                 Step::Closed => Ok(Frame::Closed),
-                Step::Late => Err(anyhow!("nothing expected arrived; last: {TOKEN} {EMAIL}")),
+                Step::Late => Err(anyhow!("nothing expected arrived; last: {token} {email}")),
             });
         }
         Fixture {
@@ -655,26 +659,16 @@ mod tests {
 
     #[test]
     fn the_deadline_cancels_the_sign_in() {
-        let diagnostics = |detail: &str| {
-            let mut brain = fixture(vec![
-                Step::View(signed_out()),
-                Step::View(AccountView::SigningIn),
-                Step::Late,
-                Step::View(signed_out()),
-            ]);
-            *brain
-                .frames
-                .iter_mut()
-                .find(|frame| frame.is_err())
-                .expect("deadline error") =
-                Err(anyhow!("nothing expected arrived; last: {detail}"));
-            brain.frames.push_front(Ok(Frame::Data(
-                DataToShell::AssistantText {
-                    run: RunId(3),
-                    delta: detail.into(),
-                },
-                0,
-            )));
+        let diagnostics = |private| {
+            let mut brain = fixture_with(
+                vec![
+                    Step::View(signed_out()),
+                    Step::View(AccountView::SigningIn),
+                    Step::Late,
+                    Step::View(signed_out()),
+                ],
+                private,
+            );
             let mut out = Vec::new();
             let (result, quit_sent) = session(Ok(&mut brain), &mut out, drive);
             let error = result.expect_err("sign-in times out");
@@ -682,10 +676,14 @@ mod tests {
             assert!(quit_sent);
             (out, format!("{error:#}"), format!("{error:?}"))
         };
-        let original = format!("{TOKEN} {EMAIL}");
         let [shown, other] = [
-            original.as_str(),
-            "abcalternate-key-1290 abcother@fakemail.testsite",
+            [NAME, TITLE, EMAIL, TOKEN],
+            [
+                "another-person-alias",
+                "alternate-dialog-text",
+                "other-person@localmail.example",
+                "fixture-alternate-key-1290",
+            ],
         ]
         .map(diagnostics);
         assert!(

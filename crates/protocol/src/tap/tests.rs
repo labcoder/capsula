@@ -152,6 +152,10 @@ fn content_free_ops_keep_their_fields_and_others_only_their_name_and_length() {
         record(Direction::ToBrain, &rename),
         record(Direction::ToShell, &view()),
     ];
+    assert!(
+        records[0].payload.is_none(),
+        "control Hello retains a payload"
+    );
     let file = recording(&records);
     let mut other_view = view();
     let ControlToShell::Settings { view: settings, .. } = &mut other_view else {
