@@ -6,7 +6,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 
 use super::{
     Images,
@@ -14,13 +14,33 @@ use super::{
     observation::{self, Kind, Observation},
     present::Present,
 };
-use crate::hermetic::Run;
+use crate::hermetic::{Prebuilt, Run};
 use crate::platform::{self, Process, gate_capture, input_session::WindowKind};
 use crate::session;
 
-pub(in crate::gate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
-    super::retained_run(args, Run::finish, |output, run| {
-        Images::build(run).and_then(|images| batch(output, &images))
+pub(in crate::gate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let transcript = args
+        .next()
+        .context("task needs an existing create-new redirected path-session.txt")?;
+    let prepared = match args.next().as_deref() {
+        None => None,
+        Some("--prebuilt") => {
+            let pins = Prebuilt::parse(&mut args)?;
+            ensure!(
+                args.next().is_none(),
+                "unexpected argument after --prebuilt pins"
+            );
+            let release = pins.release()?;
+            Some((pins, release))
+        }
+        Some(_) => bail!("cold-start takes a transcript and optional --prebuilt pins"),
+    };
+    super::retained_run(std::iter::once(transcript), Run::finish, |output, run| {
+        let images = match prepared {
+            Some((pins, release)) => Images::prepared(run, &release, pins),
+            None => Images::build(run),
+        }?;
+        batch(output, &images)
     })
 }
 
@@ -83,6 +103,7 @@ fn batch(output: &Path, images: &Images) -> Result<()> {
             }
         }
     }
+    images.unchanged()?;
     samples.sort_by(f64::total_cmp);
     writeln!(
         report,

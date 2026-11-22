@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, bail, ensure};
 use kumochi_protocol::constants::SHELL_EXE;
 
-use crate::hermetic::{self, Folders, Profile, Run};
+use crate::hermetic::{self, Folders, Prebuilt, Profile, Run};
 use crate::platform::{self, Process};
 use crate::session::{self, Startup, unchanged};
 
@@ -110,16 +110,23 @@ enum Workload {
     Onboarding,
 }
 
-fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBuf>, Workload)> {
+#[derive(Debug, PartialEq, Eq)]
+enum Images {
+    Build(Option<PathBuf>),
+    Prepared(Prebuilt),
+}
+
+fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Images, Workload)> {
     let mut workload = match args.next().as_deref() {
         Some("idle") => Workload::Idle,
         Some("stretch") => bail!("motion trials return with the pull (C2a)"),
         _ => bail!(
-            "use bench idle [--duration 1..60] [--baseline <checkout> | --panel] [--onboarding]"
+            "use bench idle [--duration 1..60] [--baseline <checkout> | --prebuilt <shell-sha> <brain-sha>] [--panel | --onboarding]"
         ),
     };
     let mut duration = None;
     let mut baseline = None;
+    let mut prepared = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--duration" if duration.is_none() => {
@@ -138,6 +145,7 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBu
                     args.next().context("--baseline needs a checkout")?,
                 ));
             }
+            "--prebuilt" if prepared.is_none() => prepared = Some(Prebuilt::parse(&mut args)?),
             "--panel" if workload == Workload::Idle => workload = Workload::Panel,
             "--onboarding" if workload == Workload::Idle => workload = Workload::Onboarding,
             _ => bail!("unknown or duplicate benchmark option"),
@@ -147,12 +155,27 @@ fn options(mut args: impl Iterator<Item = String>) -> Result<(u64, Option<PathBu
         !(workload == Workload::Panel && baseline.is_some()),
         "--panel requires the current shell"
     );
-    Ok((duration.unwrap_or(60), baseline, workload))
+    ensure!(
+        prepared.is_none() || baseline.is_none(),
+        "--prebuilt cannot be combined with --baseline"
+    );
+    let images = match prepared {
+        Some(pins) => Images::Prepared(pins),
+        None => Images::Build(baseline),
+    };
+    Ok((duration.unwrap_or(60), images, workload))
 }
 
-/// Measures the gate release shell built from this workspace, or from the `--baseline` checkout.
+/// Measures prepared Gate images, or builds the images before sampling.
 pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
-    let (seconds, baseline, workload) = options(args)?;
+    let (seconds, images, workload) = options(args)?;
+    let (baseline, prepared) = match images {
+        Images::Prepared(pins) => {
+            let release = pins.release()?;
+            (None, Some((pins, release)))
+        }
+        Images::Build(baseline) => (baseline, None),
+    };
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let root = std::env::current_exe()?
         .parent()
@@ -162,16 +185,28 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .join(stamp.to_string());
     let run = Run::begin(root)?;
     let measured = (|| {
+        let folders = run.folders("app")?;
+        if workload == Workload::Onboarding {
+            folders.owe_onboarding()?;
+        }
+        if let Some((pins, release)) = prepared {
+            let release = pins.stage(&release, &folders)?;
+            println!(
+                "driver_build_id={} identity={} shell_sha256={} brain_sha256={} build_seconds=0.0",
+                kumochi_protocol::BUILD_ID,
+                kumochi_protocol::constants::DATA_DIR,
+                pins.shell_sha256,
+                pins.brain_sha256
+            );
+            let measured = idle(&release.join(SHELL_EXE), &folders, seconds, None, workload);
+            return session::combine([measured, pins.verify(&release)]);
+        }
         let (release, build) = hermetic::build(
             &["kumochi-shell", "kumochi-brain"],
             Profile::Release,
             baseline.as_deref(),
         )?;
         println!("build_seconds={:.1}", build.as_secs_f64());
-        let folders = run.folders("app")?;
-        if workload == Workload::Onboarding {
-            folders.owe_onboarding()?;
-        }
         idle(
             &release.join(SHELL_EXE),
             &folders,
@@ -524,15 +559,19 @@ fn cycle_percent(cycles: u64, rate: f64, wall: Duration) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Workload, cycle_percent, options, percent, settled_paints};
     use std::path::PathBuf;
     use std::time::Duration;
+
+    use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
+
+    use super::{Images, Workload, cycle_percent, options, percent, settled_paints};
+    use crate::hermetic::{Folders, Prebuilt};
 
     #[test]
     fn baseline_and_duration_options_combine_in_either_order() {
         assert_eq!(
             options(["idle".to_owned()].into_iter()).unwrap(),
-            (60, None, Workload::Idle),
+            (60, Images::Build(None), Workload::Idle),
             "default duration and binary location remain unchanged"
         );
         for args in [
@@ -541,7 +580,11 @@ mod tests {
         ] {
             assert_eq!(
                 options(args.into_iter().map(str::to_owned)).unwrap(),
-                (1, Some(PathBuf::from("release")), Workload::Idle),
+                (
+                    1,
+                    Images::Build(Some(PathBuf::from("release"))),
+                    Workload::Idle
+                ),
                 "combined options"
             );
         }
@@ -559,7 +602,7 @@ mod tests {
         }
         assert_eq!(
             options(["idle", "--panel"].into_iter().map(str::to_owned)).unwrap(),
-            (60, None, Workload::Panel)
+            (60, Images::Build(None), Workload::Panel)
         );
         assert_eq!(
             options(
@@ -568,7 +611,11 @@ mod tests {
                     .map(str::to_owned)
             )
             .unwrap(),
-            (60, Some(PathBuf::from("a")), Workload::Onboarding)
+            (
+                60,
+                Images::Build(Some(PathBuf::from("a"))),
+                Workload::Onboarding
+            )
         );
         assert!(
             options(
@@ -579,6 +626,128 @@ mod tests {
             .is_err(),
             "one workload at a time"
         );
+    }
+
+    #[test]
+    fn a_timed_bench_refuses_when_prebuilt_pins_are_incomplete() {
+        let pin = "1".repeat(64);
+        let idle = ["idle".to_owned(), "--prebuilt".to_owned(), pin.clone()];
+        let cold = [
+            "unused-session.txt".to_owned(),
+            "--prebuilt".to_owned(),
+            pin,
+        ];
+        for result in [
+            super::run(idle.into_iter()),
+            crate::gate::cold(cold.into_iter()),
+        ] {
+            let error = result.expect_err("an incomplete prebuild cannot run");
+            assert_eq!(
+                error.to_string(),
+                "--prebuilt needs the shell and brain SHA-256 pins"
+            );
+        }
+
+        let dir = crate::scratch::dir("prebuilt-release-pair");
+        let gate = kumochi_protocol::constants::ProductIdentity::GATE.instance_service;
+        let shell = format!("shell started|{gate}");
+        let brain = format!("brain started|{gate}");
+        let mut hashes = [shell.as_bytes(), brain.as_bytes()]
+            .into_iter()
+            .map(|bytes| {
+                crate::platform::gate_capture::sha256_reader(bytes).expect("hash fixture")
+            });
+        let prebuilt = Prebuilt::parse(&mut hashes).expect("two SHA-256 pins");
+        std::fs::write(dir.join(SHELL_EXE), shell.as_bytes()).expect("write shell fixture");
+        assert_eq!(
+            prebuilt
+                .verify(&dir)
+                .expect_err("missing brain")
+                .to_string(),
+            format!("prebuilt {BRAIN_EXE} is unavailable; no build fallback")
+        );
+        std::fs::write(dir.join(BRAIN_EXE), b"xyz").expect("write different brain");
+        assert_eq!(
+            prebuilt
+                .verify(&dir)
+                .expect_err("changed brain")
+                .to_string(),
+            format!("prebuilt {BRAIN_EXE} SHA-256 differs from its pin")
+        );
+        std::fs::write(dir.join(BRAIN_EXE), brain.as_bytes()).expect("write matching brain");
+        prebuilt.verify(&dir).expect("the exact pair is ready");
+        let folders = Folders::create(&dir.join("owned")).expect("isolated folders");
+        let bin = prebuilt
+            .stage(&dir, &folders)
+            .expect("stage the exact pair");
+        std::fs::write(dir.join(BRAIN_EXE), b"xyz").expect("replace the source brain");
+        assert_eq!(
+            std::fs::read(bin.join(BRAIN_EXE)).expect("read the staged brain"),
+            brain.as_bytes()
+        );
+        let refused = Folders::create(&dir.join("refused")).expect("fresh isolated folders");
+        assert_eq!(
+            prebuilt
+                .stage(&dir, &refused)
+                .expect_err("the source changed after the successful preflight")
+                .to_string(),
+            format!("prebuilt {BRAIN_EXE} SHA-256 differs from its pin")
+        );
+    }
+
+    #[test]
+    fn matching_hashes_cannot_admit_a_non_gate_or_swapped_image() {
+        use crate::platform::gate_capture::file_sha256;
+        use kumochi_protocol::constants::ProductIdentity;
+
+        let gate = ProductIdentity::GATE.instance_service;
+        let release = ProductIdentity::RELEASE.instance_service;
+        let dev = ProductIdentity::DEV.instance_service;
+        for (shell, brain, wrong) in [
+            (
+                format!("shell started|{release}"),
+                format!("brain started|{gate}"),
+                SHELL_EXE,
+            ),
+            (
+                format!("shell started|{gate}"),
+                format!("brain started|{dev}"),
+                BRAIN_EXE,
+            ),
+            (
+                format!("shell started|{gate}"),
+                format!("brain started|{gate}|{release}"),
+                BRAIN_EXE,
+            ),
+            (
+                format!("brain started|{gate}"),
+                format!("shell started|{gate}"),
+                SHELL_EXE,
+            ),
+        ] {
+            let dir = crate::scratch::dir("prebuilt-wrong-identity");
+            std::fs::write(dir.join(SHELL_EXE), shell).expect("shell fixture");
+            std::fs::write(dir.join(BRAIN_EXE), brain).expect("brain fixture");
+            let mut hashes = [SHELL_EXE, BRAIN_EXE]
+                .into_iter()
+                .map(|name| file_sha256(&dir.join(name)).expect("matching pin"));
+            let pins = Prebuilt::parse(&mut hashes).expect("both supplied hashes match");
+            let folders = Folders::create(&dir.join("owned")).expect("isolated folders");
+            let expected =
+                format!("prebuilt {wrong} does not have the expected Gate identity and role");
+            assert_eq!(
+                pins.stage(&dir, &folders)
+                    .expect_err("matching hashes do not establish which app will run")
+                    .to_string(),
+                expected
+            );
+            assert_eq!(
+                pins.verify(&dir)
+                    .expect_err("preflight checks identity")
+                    .to_string(),
+                expected
+            );
+        }
     }
 
     #[test]

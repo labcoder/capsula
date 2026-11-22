@@ -1,7 +1,7 @@
 //! What keeps a gate tool off the developer's own Kumochi (OSC-680). A gate tool runs only as the
-//! gate identity, launches only images it built with that identity right before, gives its brains
-//! folders of their own with Claude Code off, runs alone, and at the end deletes what its brains
-//! left. See `docs/development/gate-identity.md`.
+//! gate identity, uses freshly built or pinned Gate images, and gives its brains folders of their
+//! own with Claude Code off. It runs alone and deletes what its brains left at the end. See
+//! `docs/development/gate-identity.md`.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
-    ACCOUNT_MAX_CHUNKS, AUTHORITY_FILE, CONFIG_FILE, ProductIdentity, anthropic_key_target,
-    anthropic_staging_target, generation_hex, generation_target, instance_target,
+    ACCOUNT_MAX_CHUNKS, AUTHORITY_FILE, BRAIN_EXE, CONFIG_FILE, ProductIdentity, SHELL_EXE,
+    anthropic_key_target, anthropic_staging_target, generation_hex, generation_target,
+    instance_target,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -44,6 +45,87 @@ pub(crate) fn require_gate(active: ProductIdentity) -> Result<()> {
         "a gate tool runs only as the gate identity: {COMMAND}"
     );
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Prebuilt {
+    pub(crate) shell_sha256: String,
+    pub(crate) brain_sha256: String,
+}
+
+impl Prebuilt {
+    pub(crate) fn parse(args: &mut impl Iterator<Item = String>) -> Result<Self> {
+        let (Some(shell), Some(brain)) = (args.next(), args.next()) else {
+            bail!("--prebuilt needs the shell and brain SHA-256 pins");
+        };
+        ensure!(
+            [&shell, &brain]
+                .iter()
+                .all(|pin| pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_hexdigit())),
+            "--prebuilt pins must be 64 hexadecimal digits"
+        );
+        Ok(Self {
+            shell_sha256: shell.to_ascii_lowercase(),
+            brain_sha256: brain.to_ascii_lowercase(),
+        })
+    }
+
+    pub(crate) fn release(&self) -> Result<PathBuf> {
+        require_gate(ProductIdentity::ACTIVE)?;
+        ensure!(
+            !cfg!(debug_assertions),
+            "--prebuilt requires a release Gate driver"
+        );
+        let exe = std::env::current_exe()?;
+        let dir = exe.parent().context("missing prebuilt image directory")?;
+        self.verify(dir)?;
+        Ok(dir.to_path_buf())
+    }
+
+    pub(crate) fn stage(&self, release: &Path, folders: &Folders) -> Result<PathBuf> {
+        let bin = folders
+            .local
+            .parent()
+            .context("missing owned launch directory")?
+            .join("bin");
+        fs::create_dir(&bin)?;
+        for name in [SHELL_EXE, BRAIN_EXE] {
+            fs::copy(release.join(name), bin.join(name))
+                .with_context(|| format!("staging prebuilt {name}"))?;
+        }
+        self.verify(&bin)?;
+        Ok(bin)
+    }
+
+    pub(crate) fn verify(&self, dir: &Path) -> Result<()> {
+        for (name, expected, role) in [
+            (SHELL_EXE, &self.shell_sha256, "shell started"),
+            (BRAIN_EXE, &self.brain_sha256, "brain started"),
+        ] {
+            let bytes = fs::read(dir.join(name))
+                .with_context(|| format!("prebuilt {name} is unavailable; no build fallback"))?;
+            let actual = platform::gate_capture::sha256_reader(bytes.as_slice())
+                .with_context(|| format!("hashing prebuilt {name}"))?;
+            ensure!(
+                actual == *expected,
+                "prebuilt {name} SHA-256 differs from its pin"
+            );
+            let contains = |marker: &str| {
+                bytes
+                    .windows(marker.len())
+                    .any(|window| window == marker.as_bytes())
+            };
+            // shortcut: existing UTF-8 strings catch mix-ups, not debug Gate or tampering; use attestation if provenance is needed.
+            ensure!(
+                contains(GATE.instance_service)
+                    && contains(role)
+                    && !contains(ProductIdentity::RELEASE.instance_service)
+                    && !contains(ProductIdentity::DEV.instance_service),
+                "prebuilt {name} does not have the expected Gate identity and role"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
