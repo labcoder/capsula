@@ -1140,7 +1140,7 @@ pub(super) fn source(
                     let mut collected = false;
                     if prepared.is_ok() {
                         running
-                            .try_send(Running::for_tests(token.gesture(), 8_000))
+                            .try_send(Running::for_tests(token.gesture(), 16_000))
                             .unwrap();
                         while token.mode(session, Instant::now()) == Ok(Mode::Preparing) {
                             thread::park_timeout(Duration::from_millis(1));
@@ -1160,9 +1160,9 @@ pub(super) fn source(
                             pcm.try_send(MicPcm {
                                 gesture: token.gesture(),
                                 seq: 0,
-                                rate: 8_000,
+                                rate: 16_000,
                                 last: true,
-                                samples: vec![17, -93, 405],
+                                samples: vec![173, -19],
                             })
                             .unwrap();
                             Ok(Finalization::Released { packets: 1 })
@@ -1278,6 +1278,222 @@ fn queued_presence_claims_silent_output_and_cancels_the_fake_microphone(cx: &mut
     cx.run_until_parked();
 }
 
+#[cfg(all(windows, debug_assertions))]
+fn spoken_run(
+    owner: &Entity<Presence>,
+    pipe: &crate::link::fixture::Authenticated,
+    events: &Receiver<LinkEvent>,
+    probe: &kumochi_brain::ipc::AudioProbe,
+    origin: kumochi_protocol::message::RunOrigin,
+    cx: &mut TestAppContext,
+) -> RunId {
+    use kumochi_protocol::message::{DataToShell, Phase};
+    use std::time::Instant;
+
+    let (mut named, mut done, mut ended) = (None, None, None);
+    let (mut playback, mut rendered) = (None, false);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the {origin:?} run finishes: named={named:?}, done={done:?}, ended={ended:?}, rendered={rendered}"
+        );
+        for event in events.try_iter() {
+            match &event {
+                LinkEvent::RunState {
+                    run,
+                    phase: Phase::Thinking,
+                    origin: Some(seen),
+                    ..
+                } => {
+                    assert_eq!(*seen, origin);
+                    named = Some(*run);
+                }
+                LinkEvent::RunState {
+                    run,
+                    phase: Phase::Done,
+                    ..
+                } => done = Some(*run),
+                LinkEvent::Data {
+                    message: DataToShell::RunEnd { run },
+                    ..
+                } => ended = Some(*run),
+                _ => {}
+            }
+            owner.update(cx, |owner, cx| {
+                owner.link_events(Batch::Plain(vec![event]), cx).unwrap();
+            });
+        }
+        if let Some(run) = named
+            && done == Some(run)
+            && ended == Some(run)
+            && probe.quiet() == run
+        {
+            assert!(rendered, "the {origin:?} reply reached the fake callback");
+            return run;
+        }
+        if playback.is_none() {
+            playback = pipe.playback.try_recv().ok();
+        }
+        if let Some(playback) = &mut playback
+            && (playback.ready() || playback.stopped())
+        {
+            let mut samples = [0.0; 48];
+            playback.render(&mut samples);
+            rendered |= samples.contains(&(15_430.0_f32 / 32_768.0));
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one authenticated session from a spoken reply through the next held one"
+)]
+fn a_speaking_hold_releases_only_after_its_own_inhibit_retires(cx: &mut TestAppContext) {
+    use crate::link::fixture;
+    use kumochi_protocol::message::{PartState, RunOrigin};
+
+    let _device = fixture::serialize_playback();
+    let (id, hello, probe, brain) =
+        kumochi_brain::ipc::offline_speaking_hold_peer("0 text Distinct sound. End.".into(), 8);
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+    let pipe = fixture::authenticated_primed(id, hello);
+    let events = fixture::patient(pipe.events.clone());
+    let owner = crate::presence::test_fixture::presence(cx);
+    owner.update(cx, |owner, _| owner.link = pipe.handle.clone());
+    let apply = |event, cx: &mut TestAppContext| {
+        owner.update(cx, |owner, cx| {
+            owner.link_events(Batch::Plain(vec![event]), cx).unwrap();
+        });
+    };
+    let session = fixture::connected(fixture::next(&events));
+    apply(LinkEvent::Connected(session.clone()), cx);
+    loop {
+        let event = fixture::next(&events);
+        let voice_ready = matches!(
+            &event,
+            LinkEvent::Voice {
+                speech_input: PartState::Ready,
+                ..
+            }
+        );
+        apply(event, cx);
+        if voice_ready {
+            break;
+        }
+    }
+    until(cx, |_| pipe.handle.admits_text(Some(&session)));
+    super::super::run_fence_tests::submit_draft(&owner, "the spoken turn", cx);
+    let spoken = spoken_run(
+        &owner,
+        &pipe,
+        &events,
+        &probe,
+        RunOrigin::Typed { turn: 1 },
+        cx,
+    );
+    fixture::await_fake_disposal();
+    fixture::prime_next_playback(&pipe.handle);
+    until(cx, |_| pipe.handle.admits_voice(session.generation()));
+
+    let (open, finish, started, samples) = source(&owner, cx, None);
+    let (token, stamp) = hold(&owner, 1, cx);
+    loop {
+        let event = fixture::next(&events);
+        let admitted = matches!(
+            &event,
+            LinkEvent::VoiceHold {
+                gesture: GestureId(1),
+                status: HoldStatus::Admitted,
+                ..
+            }
+        );
+        apply(event, cx);
+        if admitted {
+            break;
+        }
+    }
+    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    open.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| {
+            owner.voice.status == Some(Text::HoldListening)
+        })
+    });
+    samples.recv_timeout(Duration::from_secs(3)).unwrap();
+    let barrier = owner.read_with(cx, |owner, _| owner.voice.gates.hold_back());
+    owner.update(cx, |owner, cx| {
+        owner.link.microphone_gate().release(GestureId(1));
+        owner.voice_intent(
+            Intent::End {
+                gesture: GestureId(1),
+                cancelled: false,
+            },
+            stamp,
+            443,
+            None,
+            TalkHeld::default(),
+            cx,
+        );
+    });
+    finish.send(()).unwrap();
+    until(cx, |cx| {
+        while let Ok(event) = events.try_recv() {
+            apply(event, cx);
+        }
+        token.retired()
+            && probe.received_mic() == 1
+            && owner.read_with(cx, |owner, _| {
+                owner
+                    .voice
+                    .pending
+                    .as_ref()
+                    .is_some_and(|hold| matches!(hold.source, Source::Joined(1)))
+            })
+    });
+    owner.read_with(cx, |owner, _| {
+        let hold = owner.voice.pending.as_ref().unwrap();
+        assert!(
+            hold.unretired && matches!(hold.source, Source::Joined(1)),
+            "a retired microphone alone doesn't release a speaking hold"
+        );
+    });
+    assert_eq!(probe.decoded(), 0);
+
+    drop(barrier);
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| {
+            owner
+                .voice
+                .pending
+                .as_ref()
+                .is_some_and(|hold| matches!(hold.source, Source::Sent))
+        })
+    });
+    let held = spoken_run(
+        &owner,
+        &pipe,
+        &events,
+        &probe,
+        RunOrigin::Hold {
+            gesture: GestureId(1),
+        },
+        cx,
+    );
+    assert!(held > spoken);
+    assert_eq!(probe.decoded(), 1);
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().unwrap());
+    assert!(brain.join().unwrap());
+    drop(owner);
+    cx.run_until_parked();
+}
+
 #[gpui::test]
 #[expect(
     clippy::too_many_lines,
@@ -1379,9 +1595,9 @@ fn running_and_true_receipt_rendezvous_with_release_in_either_ui_order(cx: &mut 
             DataToBrain::MicPcm(MicPcm {
                 gesture: GestureId(1),
                 seq: 0,
-                rate: 8_000,
+                rate: 16_000,
                 last: true,
-                samples: vec![17, -93, 405],
+                samples: vec![173, -19],
             })
         );
         assert!(data.is_empty());

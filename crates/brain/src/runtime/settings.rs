@@ -126,8 +126,8 @@ impl Brain {
             return true;
         }
         Registration::admits(link.registration)
-            && link.queued_silent
-            && self.config.queued_hold_preferences_off()
+            && link.queued_talk_back.is_some()
+            && self.config.queued_hold_preferences_known()
             && !self.hold_consent_pending()
     }
 
@@ -198,8 +198,8 @@ impl Brain {
         let Some(link) = link else {
             return Ok(());
         };
-        if self.config.view().talk_back {
-            link.queued_silent = false;
+        if link.queued_talk_back != Some(self.config.view().talk_back) {
+            link.queued_talk_back = None;
         }
         if epoch == self.epoch {
             if let Outcome::Refused(key) = outcome {

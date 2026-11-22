@@ -123,6 +123,9 @@ pub(super) struct Hold {
     terminal: Option<Text>,
     /// Later run states carry no origin, so they match the hold by the run its first one named.
     pub(super) run: Option<RunTail>,
+    /// A speaking queued hold's release waits for its own inhibit's retirement: its reply can
+    /// start before then.
+    unretired: bool,
 }
 
 /// An accepted hold's words, kept until the brain says its turn is stored, so a lost brain
@@ -989,9 +992,7 @@ impl Presence {
         let settings = self.settings.read(cx);
         let consent_pending = queued
             && (!self.link.admits_voice(stamp.session)
-                || settings
-                    .view()
-                    .is_none_or(|view| view.talk_back || view.show_screen)
+                || settings.view().is_none_or(|view| view.show_screen)
                 || settings.show_screen_pending()
                 || self.voice.gates.offer_of(gesture).is_some());
         if let Some(notice) = settings.hold_to_talk_notice().or_else(|| {
@@ -1134,6 +1135,12 @@ impl Presence {
                 offer: offer.filter(|_| screen),
                 terminal: None,
                 run: None,
+                unretired: queued
+                    && self
+                        .settings
+                        .read(cx)
+                        .view()
+                        .is_some_and(|view| view.talk_back),
             });
             self.chat_notice.clear();
             self.error = None;
@@ -1152,7 +1159,9 @@ impl Presence {
         let Some(hold) = self.voice.pending.as_mut() else {
             return;
         };
-        if let (Source::Joined(chunks), Some(t_qpc)) = (hold.source, hold.released) {
+        if !hold.unretired
+            && let (Source::Joined(chunks), Some(t_qpc)) = (hold.source, hold.released)
+        {
             if self.link.send_control(
                 &hold.session,
                 ControlToBrain::KeyUp {

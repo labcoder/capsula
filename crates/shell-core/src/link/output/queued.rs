@@ -13,6 +13,10 @@ use crate::speaker::DRAIN;
 use crate::speaker::conductor::Assignment;
 use crate::speaker::queued::{Command, Input, Packet, RATE, spawn, spawn_plain};
 
+#[cfg(test)]
+#[path = "queued_tests.rs"]
+mod tests;
+
 const LOCAL_QUIET: u8 = 1;
 const RECEIPT_QUEUED: u8 = 2;
 const RETIRING: u8 = 4;
@@ -159,11 +163,16 @@ impl Queued {
         self.talk_back.is_some() && self.ack.is_none()
     }
 
-    fn silent_hold(&self) -> bool {
+    /// A speaking pair also needs the previous run's delivered quiet receipt and nothing reserved.
+    fn hold_ready(&self) -> bool {
         self.ready()
-            && self.talk_back == Some(false)
             && self.show_screen == Some(false)
             && !self.closing.load(Ordering::Acquire)
+            && (self.talk_back == Some(false)
+                || self.narrated.is_none()
+                    && self.pending.is_none()
+                    && self.predecessor.is_none()
+                    && !self.owes_proof(RECEIPT_QUEUED))
     }
 
     fn delivery(&mut self, run: RunId) -> Result<DeliveryTarget<'_>, ()> {
@@ -189,11 +198,11 @@ impl Queued {
 }
 
 impl State {
-    pub(super) fn silent_queued(&self) -> Option<OutputGeneration> {
+    pub(super) fn queued_hold(&self) -> Option<OutputGeneration> {
         if let Output::Queued(output) = self.output
             && self.session.is_some()
             && !self.off
-            && self.queued.as_ref().is_some_and(Queued::silent_hold)
+            && self.queued.as_ref().is_some_and(Queued::hold_ready)
         {
             return Some(output);
         }
@@ -263,8 +272,11 @@ impl OutputOwner {
         turn: Option<u32>,
         send: impl FnOnce() -> bool,
     ) -> bool {
-        self.lock()
+        let mut state = self.lock();
+        let capturing = state.inhibit.is_some();
+        state
             .queue(session)
+            .filter(move |(_, owner)| !capturing || owner.talk_back != Some(true))
             .filter(|(_, owner)| {
                 owner.ready()
                     && !owner.owes_proof(RECEIPT_QUEUED)
@@ -288,18 +300,18 @@ impl OutputOwner {
 
     pub(in crate::link) fn try_queued_hold_ready(&self, session: u64) -> bool {
         self.try_lock()
-            .is_ok_and(|state| state.session == Some(session) && state.silent_queued().is_some())
+            .is_ok_and(|state| state.session == Some(session) && state.queued_hold().is_some())
     }
 
     pub(in crate::link) fn queued_hold_ready(&self, session: u64) -> bool {
         let state = self.lock();
-        state.session == Some(session) && state.silent_queued().is_some()
+        state.session == Some(session) && state.queued_hold().is_some()
     }
 
     pub(in crate::link) fn can_reserve_hold(&self, session: u64) -> bool {
         self.lock()
             .queue(session)
-            .is_some_and(|(_, owner)| owner.silent_hold() && owner.pending.is_none())
+            .is_some_and(|(_, owner)| owner.hold_ready() && owner.pending.is_none())
     }
 
     pub(in crate::link) fn register_queued(
@@ -378,7 +390,10 @@ impl OutputOwner {
             };
             let offered = match turn {
                 RunOrigin::Typed { turn } => owner.pending == Some(turn),
-                RunOrigin::Hold { .. } => owner.talk_back == Some(false) && owner.pending.is_none(),
+                RunOrigin::Hold { .. } => {
+                    owner.pending.is_none()
+                        && (owner.talk_back == Some(false) || owner.narrated.is_none())
+                }
             };
             if !offered {
                 return false;
