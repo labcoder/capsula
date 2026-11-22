@@ -834,8 +834,8 @@ fn lines_near_and_over_the_cap_go_through_the_real_reader_relay_and_pipe() {
         brain.connect().await.expect("connects");
         hello(&mut brain, 60_000).await;
         feed.send(format!("{near}\n").into_bytes()).expect("fed");
-        let params = format!(r#"{{ "text" : "{text}" }}"#).into_bytes();
-        let key = read_capped_request(&mut brain, params).await;
+        let key = read_capped_request(&mut brain, format!(r#"{{ "text" : "{text}" }}"#).into_bytes())
+            .await;
         let reply = ToBridge::Reply {
             key,
             chunk: b"{}".to_vec(),

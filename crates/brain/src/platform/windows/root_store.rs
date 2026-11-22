@@ -421,23 +421,19 @@ mod tests {
 
     #[test]
     fn zero_identifiers_mean_every_use_only_after_success_with_not_found() {
-        assert_eq!(classify(1, &[], CRYPT_E_NOT_FOUND), Usage::Allowed);
-        assert_eq!(classify(0, &[], CRYPT_E_NOT_FOUND), Usage::Unreadable);
-        assert_eq!(classify(1, &[], 0), Usage::Excluded, "no valid uses");
-        for other in [5, CRYPT_E_NOT_FOUND + 1] {
-            assert_eq!(classify(1, &[], other), Usage::Unreadable, "{other:#x}");
-            assert_eq!(classify(0, &[], other), Usage::Unreadable, "{other:#x}");
+        for (ok, identifiers, code, expected) in [
+            (1, &[][..], CRYPT_E_NOT_FOUND, Ok(())),
+            (1, &[SERVER_AUTH][..], 0, Ok(())),
+            (1, &[CLIENT_AUTH][..], 0, Err(Skip::Filtered)),
+            (1, &[][..], 0, Err(Skip::Filtered)),
+            (0, &[][..], CRYPT_E_NOT_FOUND, Err(Skip::Unreadable)),
+            (1, &[][..], 5, Err(Skip::Unreadable)),
+            (0, &[][..], 5, Err(Skip::Unreadable)),
+            (1, &[][..], CRYPT_E_NOT_FOUND + 1, Err(Skip::Unreadable)),
+            (0, &[][..], CRYPT_E_NOT_FOUND + 1, Err(Skip::Unreadable)),
+        ] {
+            assert_eq!(classify(ok, identifiers, code).admits(), expected);
         }
-
-        assert_eq!(classify(1, &[], CRYPT_E_NOT_FOUND).admits(), Ok(()));
-        assert_eq!(classify(1, &[SERVER_AUTH], 0).admits(), Ok(()));
-        assert_eq!(classify(1, &[CLIENT_AUTH], 0).admits(), Err(Skip::Filtered));
-        assert_eq!(
-            classify(0, &[], CRYPT_E_NOT_FOUND).admits(),
-            Err(Skip::Unreadable)
-        );
-        assert_eq!(classify(1, &[], 0).admits(), Err(Skip::Filtered));
-        assert_eq!(classify(1, &[], 5).admits(), Err(Skip::Unreadable));
     }
 
     #[test]

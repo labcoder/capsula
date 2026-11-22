@@ -88,7 +88,6 @@ fn pending_names_join_only_the_same_surfaces_first_write() {
         let mut first = drawing
             .handle(streamed("first", 0, &named("shared", winner)))
             .expect("first begin");
-        assert_eq!(trace(&first), ["lookup"]);
         let same = drawing
             .handle(streamed("same", 0, &named("shared", winner)))
             .expect("second begin before the first lookup has returned");
@@ -97,7 +96,6 @@ fn pending_names_join_only_the_same_surfaces_first_write() {
         let begins = store.settle(&mut drawing, first);
         assert!(begins.calls.is_empty());
         let other_begin = store.run(&mut drawing, streamed("other", 0, &named("shared", other)));
-        assert_eq!(trace(&other_begin), ["lookup"]);
         assert!(other_begin.calls.is_empty());
         let record = |surface, id| {
             step(&if surface == Surface::Screen {

@@ -183,6 +183,7 @@ fn a_draft_replay_joins_then_returns_the_original_result_without_another_write()
         &draft(&mut ledger, model("draft"), changed[0]),
         &error(ToolError::Reused),
     );
+    assert_eq!(ledger.committed(&first.key), None);
 }
 
 #[test]
