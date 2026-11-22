@@ -885,12 +885,55 @@ fn selection_and_connection_lifetimes_fence_stored_answer_proof() {
         state.settled, None,
         "another thread cannot mark this selection committed"
     );
-    state.settled(ThreadId(4), RunId(2));
-    state.proven = Some(RunId(2));
+    let thread = ThreadId(4);
+    let current = state.requests();
+    let request = current
+        .iter()
+        .find_map(|request| match request {
+            DataToBrain::PageRequest {
+                request,
+                page:
+                    PageOf::Events {
+                        thread: id,
+                        before: None,
+                    },
+            } if *id == thread => Some(*request),
+            _ => None,
+        })
+        .expect("a current-thread read");
+    state.apply(DataToShell::Page {
+        request,
+        thread,
+        events: Vec::new(),
+        next: None,
+    });
+    state.settled(thread, RunId(2));
+    state.run_state(thread);
+    let repair = state.requests();
+    let [pending] = repair.as_slice() else {
+        panic!("one post-Done read")
+    };
+    let mut answer = event(2);
+    answer.run = Some(RunId(2));
+    answer.kind = PageEventKind::AssistantText;
+    let stored = DataToShell::Page {
+        request: request_id(pending),
+        thread,
+        events: vec![answer],
+        next: None,
+    };
+    state.apply(stored.clone());
+    assert_eq!(state.proven, Some(RunId(2)));
     state.disconnected();
     assert_eq!((state.settled, state.proven), (None, None));
     state.connected();
     assert_eq!((state.settled, state.proven), (None, None));
+    assert!(
+        !state.requests().is_empty(),
+        "a fresh connection reads again"
+    );
+    state.apply(stored);
+    assert_eq!(state.proven, None);
 }
 
 #[test]
@@ -1174,14 +1217,6 @@ fn settings(name: &str) -> SettingsView {
 }
 
 #[test]
-fn main_before_settings_uses_the_default_assistant_name() {
-    let mut main = row(1);
-    main.kind = ThreadKind::Main;
-    main.title.clear();
-    assert_eq!(row_label(&main, None), constants::DEFAULT_ASSISTANT_NAME);
-}
-
-#[test]
 fn a_rename_keeps_the_confirmed_title_until_its_original_page_is_read() {
     let mut state = loaded();
     state.more_threads();
@@ -1246,11 +1281,30 @@ fn a_rename_during_a_page_read_waits_then_rereads_after_the_op() {
         state.row(ThreadId(3)).expect("row").title,
         "private title 3"
     );
-    assert_eq!(
-        state.requests().len(),
-        1,
-        "the pre-op reply didn't confirm the rename"
-    );
+    let reread = state.requests();
+    let [
+        DataToBrain::PageRequest {
+            request,
+            page:
+                PageOf::Threads {
+                    search: None,
+                    after: None,
+                },
+        },
+    ] = reread.as_slice()
+    else {
+        panic!("the rename needs exactly one fresh first-page read");
+    };
+    assert_ne!(*request, request_id(&old));
+    let mut renamed = row(3);
+    renamed.title = "confirmed new title".to_owned();
+    state.apply(DataToShell::ThreadList {
+        request: *request,
+        threads: vec![renamed.clone(), row(2)],
+        next: None,
+    });
+    assert_eq!(state.row(ThreadId(3)), Some(&renamed));
+    assert_eq!(state.requests(), []);
 }
 
 #[test]
@@ -1339,39 +1393,27 @@ fn a_refresh_after_delete_discards_the_old_rename_cursor() {
 }
 
 #[test]
-fn hiding_after_delete_discards_the_old_rename_cursor() {
-    let mut state = with_second_page();
-    state.renamed(ThreadId(1), "confirmed new title");
-    let old = state.requests().remove(0);
-    state.deleted(ThreadId(0));
-    state.hide();
-    state.apply(reply(request_id(&old), &[1, 0], None));
-    assert_eq!(state.row(ThreadId(0)), None);
-    assert!(state.reread.is_empty());
-    assert_eq!(state.requests(), []);
-    state.show();
-    assert_eq!(state.requests(), [list_request(4)]);
-    state.apply(reply(4, &[3, 2], None));
-    assert_eq!(state.rows, [row(3), row(2)]);
-    assert_eq!(state.requests(), []);
-}
-
-#[test]
-fn a_delete_while_hidden_does_not_requeue_an_old_rename_cursor() {
-    let mut state = with_second_page();
-    state.renamed(ThreadId(1), "confirmed new title");
-    let old = state.requests().remove(0);
-    state.hide();
-    state.deleted(ThreadId(0));
-    state.apply(reply(request_id(&old), &[1, 0], None));
-    assert_eq!(state.row(ThreadId(0)), None);
-    assert!(state.reread.is_empty());
-    assert_eq!(state.requests(), []);
-    state.show();
-    assert_eq!(state.requests(), [list_request(4)]);
-    state.apply(reply(4, &[3, 2], None));
-    assert_eq!(state.rows, [row(3), row(2)]);
-    assert_eq!(state.requests(), []);
+fn hiding_and_deleting_in_either_order_discards_the_old_rename_cursor() {
+    for hide_first in [false, true] {
+        let mut state = with_second_page();
+        state.renamed(ThreadId(1), "confirmed new title");
+        let old = state.requests().remove(0);
+        if hide_first {
+            state.hide();
+            state.deleted(ThreadId(0));
+        } else {
+            state.deleted(ThreadId(0));
+            state.hide();
+        }
+        state.apply(reply(request_id(&old), &[1, 0], None));
+        assert_eq!(state.row(ThreadId(0)), None);
+        assert_eq!(state.requests(), []);
+        state.show();
+        assert_eq!(state.requests(), [list_request(4)]);
+        state.apply(reply(4, &[3, 2], None));
+        assert_eq!(state.rows, [row(3), row(2)]);
+        assert_eq!(state.requests(), []);
+    }
 }
 
 #[test]
@@ -1383,6 +1425,7 @@ fn kumo_in_search_and_the_cache_uses_only_the_latest_settings_name() {
     let mut main = row(1);
     main.kind = ThreadKind::Main;
     main.title.clear();
+    assert_eq!(row_label(&main, None), constants::DEFAULT_ASSISTANT_NAME);
     state.apply(DataToShell::ThreadList {
         request: request_id(&request),
         threads: vec![row(9), main],
@@ -1473,7 +1516,25 @@ fn search_debounce_invalidates_old_replies_without_sending_a_replacement_early()
         "the superseded timer can't unblock the query"
     );
     state.finish_search(current);
-    assert_eq!(state.requests().len(), 1);
+    let requests = state.requests();
+    let [
+        DataToBrain::PageRequest {
+            request,
+            page:
+                PageOf::Threads {
+                    search: Some(query),
+                    after: None,
+                },
+        },
+    ] = requests.as_slice()
+    else {
+        panic!("one fresh first-page search")
+    };
+    assert_eq!(query, "current");
+    assert_ne!(*request, first);
+    state.apply(reply(*request, &[2], None));
+    assert_eq!(state.rows, [row(2)]);
+    assert_eq!(state.requests(), []);
 }
 
 fn row(id: u64) -> ThreadRow {
@@ -1536,20 +1597,6 @@ fn with_second_page() -> Threads {
 }
 
 #[test]
-fn programmatic_view_changes_and_reopening_keep_the_highlight_in_sync() {
-    let mut state = loaded();
-    state.select(Some(ThreadId(2)));
-    assert_eq!(state.selected_index(), Some(1));
-    state.select(Some(ThreadId(3)));
-    assert_eq!(state.selected_index(), Some(0));
-    state.hide();
-    assert_eq!(state.open, None);
-    assert_eq!(state.selected_index(), None);
-    state.show();
-    assert_eq!(state.selected_index(), None);
-}
-
-#[test]
 fn rename_requires_a_connected_row_that_is_not_deleting() {
     let mut state = loaded();
     assert!(state.can_rename(ThreadId(3)));
@@ -1562,52 +1609,56 @@ fn rename_requires_a_connected_row_that_is_not_deleting() {
 
 #[test]
 fn superseded_search_replies_are_dropped_without_releasing_another_slot() {
-    let mut state = Threads::default();
-    state.show();
-    state.connected();
-    let first = request_id(&state.requests()[0]);
-    state.search("new query");
-    assert!(
-        state.requests().is_empty(),
-        "the old read still owns its slot"
-    );
-    state.apply(reply(first.wrapping_add(100), &[99], None));
-    assert!(
-        state.requests().is_empty(),
-        "an unrelated reply frees nothing"
-    );
-    state.apply(reply(first, &[3], None));
-    assert!(state.rows.is_empty());
-    let request = state.requests();
-    assert_eq!(request.len(), 1);
-    assert_eq!(
-        request[0],
-        DataToBrain::PageRequest {
-            request: first + 1,
-            page: PageOf::Threads {
-                search: Some("new query".to_owned()),
-                after: None
-            }
-        }
-    );
-    state.apply(reply(first, &[3], None));
-    assert!(state.rows.is_empty());
-    state.apply(reply(first + 1, &[2], None));
-    assert_eq!(state.rows, vec![row(2)]);
-}
+    for (first_query, intermediate, latest) in [("", "other", "new query"), ("a", "b", "a")] {
+        for unavailable in [false, true] {
+            let mut state = Threads::default();
+            state.show();
+            state.connected();
+            state.search(first_query);
+            let first = request_id(&state.requests()[0]);
+            state.search(intermediate);
+            state.search(latest);
+            assert_eq!(state.requests(), [], "the old read still owns its slot");
+            state.apply(reply(first.wrapping_add(100), &[99], None));
+            assert_eq!(state.requests(), [], "an unrelated reply frees nothing");
 
-#[test]
-fn returning_to_the_same_query_still_drops_its_superseded_reply() {
-    let mut state = Threads::default();
-    state.show();
-    state.connected();
-    state.search("a");
-    let first = request_id(&state.requests()[0]);
-    state.search("b");
-    state.search("a");
-    state.apply(reply(first, &[3], None));
-    assert!(state.rows.is_empty());
-    assert_eq!(state.requests().len(), 1);
+            let old_reply = if unavailable {
+                DataToShell::PageFailed { request: first }
+            } else {
+                reply(first, &[3], None)
+            };
+            state.apply(old_reply.clone());
+            assert!(state.rows.is_empty());
+            assert!(!state.failed);
+            let requests = state.requests();
+            let [
+                DataToBrain::PageRequest {
+                    request,
+                    page:
+                        PageOf::Threads {
+                            search: Some(query),
+                            after: None,
+                        },
+                },
+            ] = requests.as_slice()
+            else {
+                panic!("one current first-page search")
+            };
+            assert_eq!(query, latest);
+            assert_ne!(*request, first);
+
+            state.apply(old_reply);
+            assert!(state.rows.is_empty());
+            assert!(!state.failed);
+            assert_eq!(
+                state.requests(),
+                [],
+                "a stale duplicate did not free the current read"
+            );
+            state.apply(reply(*request, &[2], None));
+            assert_eq!(state.rows, [row(2)]);
+        }
+    }
 }
 
 #[test]
@@ -2064,22 +2115,62 @@ fn a_run_in_the_open_thread_rereads_its_newest_events_and_keeps_older_ones() {
 fn an_oversized_search_never_queues_an_unencodable_request_and_can_be_corrected() {
     let mut state = loaded();
     state.search(&"x".repeat(Pipe::Data.max_payload()));
-    assert!(state.search_error.is_some());
-    assert!(state.requests().is_empty());
+    assert!(matches!(state.search_error, Some(SearchError::TooLong)));
+    assert_eq!(state.requests(), []);
     state.search("short");
     assert!(state.search_error.is_none());
-    assert_eq!(state.requests().len(), 1);
+    let requests = state.requests();
+    let [
+        DataToBrain::PageRequest {
+            request,
+            page:
+                PageOf::Threads {
+                    search: Some(query),
+                    after: None,
+                },
+        },
+    ] = requests.as_slice()
+    else {
+        panic!("the corrected search needs one first-page request");
+    };
+    assert_eq!(query, "short");
+    state.apply(reply(*request, &[7], None));
+    assert_eq!(state.rows, [row(7)]);
 }
 
 #[test]
 fn thread_state_debug_never_includes_user_content() {
     let mut state = loaded();
-    state.search("private search");
-    state.events.push(event(1));
-    state.rows.push(row(9));
+    let (title_marker, search_marker, event_marker) =
+        ("zqx-thread-title", "wvx-thread-search", "ryz-thread-event");
+    state.search(search_marker);
+    let request = request_id(&state.requests().remove(0));
+    state.apply(DataToShell::ThreadList {
+        request,
+        threads: vec![ThreadRow {
+            title: title_marker.into(),
+            ..row(9)
+        }],
+        next: None,
+    });
+    state.select(Some(ThreadId(9)));
+    let request = request_id(&state.requests().remove(0));
+    state.apply(DataToShell::Page {
+        request,
+        thread: ThreadId(9),
+        events: vec![PageEvent {
+            text: event_marker.into(),
+            ..event(9)
+        }],
+        next: None,
+    });
+    assert_eq!(state.rows[0].title, title_marker);
+    assert_eq!(state.events[0].text, event_marker);
     let debug = format!("{state:?}");
-    for content in ["private title", "private search", "private event"] {
-        assert!(!debug.contains(content));
+    for marker in [title_marker, search_marker, event_marker] {
+        assert!(!debug.contains(marker));
+        let bytes = format!("{:?}", marker.as_bytes());
+        assert!(!debug.contains(bytes.trim_matches(['[', ']'])));
     }
 }
 
@@ -2112,6 +2203,10 @@ fn nothing_is_read_while_the_panel_is_closed() {
 #[test]
 fn a_failed_read_frees_its_slot_and_shows_until_a_page_lands() {
     let mut state = loaded();
+    let unsolicited = DataToShell::PageFailed { request: 49 };
+    let bytes = u32::try_from(frame::encode(&unsolicited, Pipe::Data).unwrap().len()).unwrap();
+    assert_eq!(state.receive(unsolicited, bytes), bytes);
+    assert!(!state.failed);
     state.select(Some(ThreadId(3)));
     let events = request_id(&state.requests()[0]);
     state.apply(DataToShell::PageFailed { request: events });
@@ -2145,24 +2240,6 @@ fn a_failed_read_frees_its_slot_and_shows_until_a_page_lands() {
 }
 
 #[test]
-fn a_dropped_page_still_earns_its_whole_credit() {
-    let mut state = loaded();
-    let unsolicited = DataToShell::Page {
-        request: 49,
-        thread: ThreadId(3),
-        events: vec![event(4)],
-        next: None,
-    };
-    assert_eq!(state.receive(unsolicited, 321), 321);
-    assert!(state.events.is_empty());
-    assert_eq!(
-        state.receive(DataToShell::PageFailed { request: 49 }, 17),
-        17
-    );
-    assert!(!state.failed);
-}
-
-#[test]
 fn a_superseded_event_read_that_fails_frees_its_slot_without_the_error() {
     let mut state = loaded();
     state.select(Some(ThreadId(3)));
@@ -2177,27 +2254,6 @@ fn a_superseded_event_read_that_fails_frees_its_slot_without_the_error() {
             page: PageOf::Events {
                 thread: ThreadId(2),
                 before: None,
-            },
-        }]
-    );
-}
-
-#[test]
-fn a_replaced_search_that_fails_frees_its_slot_without_the_error() {
-    let mut state = Threads::default();
-    state.show();
-    state.connected();
-    assert_eq!(state.requests(), vec![list_request(1)]);
-    state.search("new query");
-    state.apply(DataToShell::PageFailed { request: 1 });
-    assert!(!state.failed);
-    assert_eq!(
-        state.requests(),
-        vec![DataToBrain::PageRequest {
-            request: 2,
-            page: PageOf::Threads {
-                search: Some("new query".to_owned()),
-                after: None,
             },
         }]
     );

@@ -12,27 +12,31 @@ const BYTES: u32 = 10;
 
 #[test]
 fn keyed_refusals_shrink_only_the_deletion_prefixes_that_include_them() {
-    let mut runs = connected();
-    submit(&mut runs);
-    assert!(runs.confirm_delete(ThreadId(9)));
-    runs.deleted(ThreadId(9), Deleted::Removed, None);
-    submit(&mut runs);
-    assert!(runs.confirm_delete(ThreadId(8)));
-    runs.deleted(ThreadId(8), Deleted::Hidden, None);
-    submit(&mut runs);
-    assert_eq!(runs.gone, [(ThreadId(9), 1), (ThreadId(8), 2)]);
-    runs.refused(3, Some(ThreadId(1)));
-    assert_eq!(runs.gone, [(ThreadId(9), 1), (ThreadId(8), 2)]);
-    runs.refused(2, Some(ThreadId(1)));
-    assert_eq!(runs.gone, [(ThreadId(9), 1), (ThreadId(8), 1)]);
-    assert_eq!(runs.submitted.len(), 1);
-    assert_eq!(runs.submitted[0].turn, 1);
-    runs.refused(2, Some(ThreadId(1)));
-    runs.refused(1, None);
-    assert_eq!(runs.gone, [(ThreadId(9), 1), (ThreadId(8), 1)]);
-    runs.refused(1, Some(ThreadId(1)));
-    assert!(runs.gone.is_empty());
-    assert!(runs.submitted.is_empty());
+    let inner = ThreadId(9);
+    let outer = ThreadId(8);
+    let main = Some(ThreadId(1));
+    for first in [1, 2] {
+        let mut runs = connected();
+        for (thread, outcome) in [(inner, Deleted::Removed), (outer, Deleted::Hidden)] {
+            submit(&mut runs);
+            assert!(runs.confirm_delete(thread));
+            runs.deleted(thread, outcome, None);
+        }
+        submit(&mut runs);
+        for (turn, target) in [(1, None), (3, main)] {
+            runs.refused(turn, target);
+            assert!(!runs.select_thread(Some(inner)));
+            assert!(!runs.select_thread(Some(outer)));
+        }
+        for _ in 0..2 {
+            runs.refused(first, main);
+            assert_eq!(runs.select_thread(Some(inner)), first == 1);
+            assert!(!runs.select_thread(Some(outer)));
+        }
+        runs.refused(3 - first, main);
+        assert!(runs.select_thread(Some(inner)));
+        assert!(runs.select_thread(Some(outer)));
+    }
 }
 
 fn connected() -> Runs {
@@ -96,65 +100,34 @@ fn target_after_new_brain(runs: &mut Runs) -> Option<ThreadId> {
 }
 
 #[test]
-fn a_new_thread_s_text_or_step_before_answering_proves_it_stored() {
+fn data_before_or_after_its_run_state_proves_the_thread_stored() {
     for proof in [text(1), step(1)] {
-        let mut runs = connected();
-        runs.select_thread(None);
-        assert_eq!(submit(&mut runs), None);
-        state(
-            &mut runs,
-            1,
-            7,
-            Phase::Thinking,
-            Some(RunOrigin::Typed { turn: 1 }),
-        );
-        runs.apply_data(proof.clone(), BYTES);
-        assert_eq!(
-            target_after_new_brain(&mut runs),
-            Some(ThreadId(7)),
-            "{proof:?}"
-        );
-    }
-}
-
-#[test]
-fn held_data_released_by_its_run_state_proves_the_thread_stored() {
-    for proof in [text(1), step(1)] {
-        let mut runs = connected();
-        runs.select_thread(None);
-        submit(&mut runs);
-        assert_eq!(runs.apply_data(proof.clone(), BYTES), 0, "held");
-        assert_eq!(
-            runs.apply_state(
+        for state_first in [false, true] {
+            let mut runs = connected();
+            runs.select_thread(None);
+            assert_eq!(submit(&mut runs), None);
+            if !state_first {
+                assert_eq!(runs.apply_data(proof.clone(), BYTES), 0, "held");
+            }
+            let applied = runs.apply_state(
                 RunId(1),
                 ThreadId(7),
                 Phase::Thinking,
-                Some(RunOrigin::Typed { turn: 1 })
-            )
-            .credit,
-            BYTES
-        );
-        assert_eq!(
-            target_after_new_brain(&mut runs),
-            Some(ThreadId(7)),
-            "{proof:?}"
-        );
+                Some(RunOrigin::Typed { turn: 1 }),
+            );
+            if state_first {
+                assert_eq!(applied.credit, 0);
+                assert_eq!(runs.apply_data(proof.clone(), BYTES), BYTES);
+            } else {
+                assert_eq!(applied.credit, BYTES);
+            }
+            assert_eq!(
+                target_after_new_brain(&mut runs),
+                Some(ThreadId(7)),
+                "{proof:?}"
+            );
+        }
     }
-}
-
-#[test]
-fn an_unproved_new_thread_is_dropped_by_a_new_brain() {
-    let mut runs = connected();
-    runs.select_thread(None);
-    submit(&mut runs);
-    state(
-        &mut runs,
-        1,
-        7,
-        Phase::Thinking,
-        Some(RunOrigin::Typed { turn: 1 }),
-    );
-    assert_eq!(target_after_new_brain(&mut runs), Some(ThreadId(1)));
 }
 
 #[test]
@@ -267,14 +240,20 @@ fn a_refusal_leaves_the_target_and_its_durability_alone() {
     submit(&mut runs);
     runs.refused(2, Some(ThreadId(7)));
     assert_eq!(target_after_new_brain(&mut runs), Some(ThreadId(1)));
-}
 
-#[test]
-fn a_refusal_with_nothing_pending_changes_nothing() {
     let mut runs = connected();
-    runs.refused(1, Some(ThreadId(1)));
-    submit(&mut runs);
-    assert!(runs.working());
+    runs.refused(1, Some(ThreadId(9)));
+    assert!(runs.select_thread(Some(ThreadId(9))));
+    assert_eq!(submit(&mut runs), Some(ThreadId(9)));
+    state(
+        &mut runs,
+        1,
+        9,
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    assert_eq!(runs.apply_data(text(1), BYTES), BYTES);
+    assert_eq!(runs.shown().map(|shown| shown.text.as_str()), Some("t"));
 }
 
 #[test]

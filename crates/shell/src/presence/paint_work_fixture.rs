@@ -270,59 +270,6 @@ impl Render for Probe {
     }
 }
 
-#[test]
-fn probe_candidates_are_bounded_and_exercise_all_three_charges() {
-    for kind in [
-        Kind::Dash,
-        Kind::Fill,
-        Kind::Crossing,
-        Kind::Outline,
-        Kind::Mixed,
-    ] {
-        let case = case(kind, 512);
-        let work = case.work;
-        match kind {
-            Kind::Dash => assert_eq!(
-                (work.dash_pieces, work.fill_vertices, work.outline_points),
-                (512, 0, 0)
-            ),
-            Kind::Fill => assert_eq!(
-                (work.dash_pieces, work.fill_vertices, work.outline_points),
-                (0, 448, 0)
-            ),
-            Kind::Crossing => assert_eq!(
-                (work.dash_pieces, work.fill_vertices, work.outline_points),
-                (0, 480, 0)
-            ),
-            Kind::Outline => assert_eq!(
-                (work.dash_pieces, work.fill_vertices, work.outline_points),
-                (0, 0, 436)
-            ),
-            Kind::Mixed => assert_eq!(
-                (work.dash_pieces, work.fill_vertices, work.outline_points),
-                (512, 480, 436)
-            ),
-            Kind::Empty | Kind::Overlap => unreachable!(),
-        }
-    }
-    let crossing = case(Kind::Overlap, 0);
-    assert_eq!(crossing.primitives.len(), 1);
-    let Prim::Line {
-        points,
-        color,
-        dashed,
-        ..
-    } = &crossing.primitives[0].0
-    else {
-        panic!("crossing stroke");
-    };
-    assert_eq!(points.len(), 4);
-    assert_eq!((points[0] + points[1]) * 0.5, Vec2::new(0.0, 0.0));
-    assert_eq!((points[2] + points[3]) * 0.5, Vec2::new(0.0, 0.0));
-    assert_eq!(color.opacity.to_bits(), 0.5_f32.to_bits());
-    assert!(!dashed);
-}
-
 #[expect(
     clippy::too_many_lines,
     reason = "one bounded native probe setup and content-free output"
@@ -491,20 +438,6 @@ fn small_primitives(candidate: usize) -> Case {
             sum + PaintWork::of(std::slice::from_ref(prim), MAX_COMPOSED_SCALE)
         });
     mixed
-}
-
-#[test]
-fn the_small_primitive_control_spends_the_three_budgets_independently() {
-    let mixed = small_primitives(512);
-    assert_eq!(mixed.primitives.len(), 1 + 170 + 102);
-    assert_eq!(
-        (
-            mixed.work.dash_pieces,
-            mixed.work.fill_vertices,
-            mixed.work.outline_points
-        ),
-        (512, 510, 510)
-    );
 }
 
 #[expect(

@@ -141,34 +141,31 @@ mod tests {
 
     #[test]
     fn every_saved_position_maps_to_its_tray_and_geometry_entry() {
+        use crate::strings::Text;
         use kumochi_protocol::message::DockPosition;
+
         let expected = [
-            Position::TopLeft,
-            Position::TopCenter,
-            Position::TopRight,
-            Position::MiddleLeft,
-            Position::Center,
-            Position::MiddleRight,
-            Position::BottomLeft,
-            Position::BottomCenter,
-            Position::BottomRight,
+            (Text::TopLeft, [-1000, 40, 100, 40]),
+            (Text::TopCenter, [-600, 40, 100, 40]),
+            (Text::TopRight, [-200, 40, 100, 40]),
+            (Text::MiddleLeft, [-1000, 320, 100, 40]),
+            (Text::Center, [-600, 320, 100, 40]),
+            (Text::MiddleRight, [-200, 320, 100, 40]),
+            (Text::BottomLeft, [-1000, 600, 100, 40]),
+            (Text::BottomCenter, [-600, 600, 100, 40]),
+            (Text::BottomRight, [-200, 600, 100, 40]),
         ];
-        assert_eq!(Position::ALL, expected);
-        for (index, position) in DockPosition::ALL.into_iter().enumerate() {
-            assert_eq!(Position::from(position), expected[index]);
+        for (index, (label, dock)) in expected.into_iter().enumerate() {
+            let position = Position::from(DockPosition::ALL[index]);
+            assert_eq!(position, Position::ALL[index]);
+            assert_eq!(Text::POSITIONS[index], label);
+            assert_eq!(
+                position
+                    .layout([-1000, 40, 900, 600], [100, 40], [300, 120], 0)
+                    .dock,
+                dock
+            );
         }
-        let labels = DockPosition::ALL.map(|position| match position {
-            DockPosition::TopLeft => crate::strings::Text::TopLeft,
-            DockPosition::TopCenter => crate::strings::Text::TopCenter,
-            DockPosition::TopRight => crate::strings::Text::TopRight,
-            DockPosition::MiddleLeft => crate::strings::Text::MiddleLeft,
-            DockPosition::Center => crate::strings::Text::Center,
-            DockPosition::MiddleRight => crate::strings::Text::MiddleRight,
-            DockPosition::BottomLeft => crate::strings::Text::BottomLeft,
-            DockPosition::BottomCenter => crate::strings::Text::BottomCenter,
-            DockPosition::BottomRight => crate::strings::Text::BottomRight,
-        });
-        assert_eq!(crate::strings::Text::POSITIONS, labels);
     }
 
     #[test]

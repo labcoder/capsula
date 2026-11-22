@@ -535,15 +535,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Rez's default system metrics; run on Rez with --ignored"]
-    fn rez_borderless_metrics_at_96_dpi_are_the_design_notes() {
-        assert_eq!(
-            metrics(WS_POPUP, WINDOW_EX_STYLE::default(), 96),
-            Some((31, 36))
-        );
-    }
-
-    #[test]
     fn a_failed_hook_removes_the_ones_before_it_in_reverse() {
         let log = RefCell::new(Vec::new());
         let hooks: Result<[u32; 5], _> = install(

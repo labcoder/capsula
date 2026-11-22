@@ -114,10 +114,14 @@ mod tests {
     fn a_nested_press_keeps_the_outer_stamp() {
         let input = Input::default();
         input.press(|| {
-            let outer = input.pressed();
-            input.press(|| assert_ne!(input.pressed(), outer));
-            assert_eq!(input.pressed(), outer, "the inner press gave it back");
+            let outer = input.pressed().expect("outer press stamped");
+            input.press(|| {
+                let inner = input.pressed().expect("inner press stamped");
+                assert!(inner > outer);
+            });
+            assert_eq!(input.pressed(), Some(outer));
         });
+        assert_eq!(input.pressed(), None);
     }
 
     #[test]

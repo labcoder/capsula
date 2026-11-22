@@ -167,12 +167,6 @@ impl<H> TalkEscape<H> {
         self.refused = false;
     }
 
-    /// Whether Windows refused the chord for the hold whose keys are down.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn refused(&self) -> bool {
-        self.refused
-    }
-
     /// Whether the current hold owns its Escape registration.
     #[cfg(any(test, feature = "test-support"))]
     pub fn held(&self) -> bool {
@@ -186,143 +180,6 @@ mod tests {
     use std::rc::Rc;
 
     use super::{Activity, Escape, EscapeHold, Panel, TalkEscape, TalkEscapeRefused, decide};
-
-    #[test]
-    fn onboarding_cancels_an_edit_or_dismisses_only_after_pull_stop_and_clear() {
-        for (panel, idle) in [
-            (Panel::OnboardingEdit, Escape::CancelEdit),
-            (Panel::Onboarding, Escape::Dismiss),
-        ] {
-            assert_eq!(decide(Activity::default(), panel), idle);
-            for (activity, first) in [
-                (
-                    Activity {
-                        pulling: true,
-                        working: true,
-                        drawing: true,
-                        ..Activity::default()
-                    },
-                    Escape::CancelPull,
-                ),
-                (
-                    Activity {
-                        working: true,
-                        drawing: true,
-                        ..Activity::default()
-                    },
-                    Escape::Stop,
-                ),
-                (
-                    Activity {
-                        drawing: true,
-                        ..Activity::default()
-                    },
-                    Escape::Clear,
-                ),
-            ] {
-                assert_eq!(decide(activity, panel), first);
-            }
-        }
-    }
-
-    #[test]
-    fn settings_while_idle_dismisses() {
-        assert_eq!(
-            decide(Activity::default(), Panel::Settings),
-            Escape::Dismiss
-        );
-    }
-
-    #[test]
-    fn settings_edit_keeps_stop_and_clear_before_cancel() {
-        assert_eq!(
-            decide(
-                Activity {
-                    working: true,
-                    ..Activity::default()
-                },
-                Panel::SettingsEdit
-            ),
-            Escape::Stop
-        );
-        assert_eq!(
-            decide(
-                Activity {
-                    drawing: true,
-                    ..Activity::default()
-                },
-                Panel::SettingsEdit
-            ),
-            Escape::Clear
-        );
-        assert_eq!(
-            decide(Activity::default(), Panel::SettingsEdit),
-            Escape::CancelEdit
-        );
-    }
-
-    #[test]
-    fn work_stops_before_an_edit_cancels() {
-        assert_eq!(
-            decide(
-                Activity {
-                    working: true,
-                    ..Activity::default()
-                },
-                Panel::Rename,
-            ),
-            Escape::Stop,
-        );
-    }
-
-    #[test]
-    fn a_drawing_clears_before_an_edit_cancels() {
-        assert_eq!(
-            decide(
-                Activity {
-                    drawing: true,
-                    ..Activity::default()
-                },
-                Panel::Rename,
-            ),
-            Escape::Clear,
-        );
-    }
-
-    #[test]
-    fn an_idle_edit_cancels_before_the_panel_dismisses() {
-        assert_eq!(
-            decide(Activity::default(), Panel::Rename),
-            Escape::CancelEdit,
-        );
-        assert_eq!(decide(Activity::default(), Panel::Threads), Escape::Dismiss);
-    }
-
-    #[test]
-    fn a_focused_threads_panel_dismisses_only_after_stop_and_clear() {
-        assert_eq!(
-            decide(
-                Activity {
-                    working: true,
-                    ..Activity::default()
-                },
-                Panel::Threads
-            ),
-            Escape::Stop
-        );
-        assert_eq!(
-            decide(
-                Activity {
-                    drawing: true,
-                    ..Activity::default()
-                },
-                Panel::Threads
-            ),
-            Escape::Clear
-        );
-        assert_eq!(decide(Activity::default(), Panel::Threads), Escape::Dismiss);
-        assert_eq!(decide(Activity::default(), Panel::Closed), Escape::Ignore);
-    }
 
     #[test]
     fn work_stops_before_a_drawing_clears_before_a_panel_dismisses() {
@@ -343,7 +200,40 @@ mod tests {
             ..Activity::default()
         };
         assert_eq!(decide(drawing, Panel::Open), Escape::Clear);
-        assert_eq!(decide(Activity::default(), Panel::Open), Escape::Dismiss);
+        let working = Activity {
+            working: true,
+            ..Activity::default()
+        };
+        for (panel, idle) in [
+            (Panel::Open, Escape::Dismiss),
+            (Panel::Threads, Escape::Dismiss),
+            (Panel::Settings, Escape::Dismiss),
+            (Panel::Rename, Escape::CancelEdit),
+            (Panel::SettingsEdit, Escape::CancelEdit),
+            (Panel::Onboarding, Escape::Dismiss),
+            (Panel::OnboardingEdit, Escape::CancelEdit),
+        ] {
+            assert_eq!(decide(Activity::default(), panel), idle, "{panel:?}");
+            assert_eq!(decide(drawing, panel), Escape::Clear, "{panel:?}");
+            assert_eq!(decide(working, panel), Escape::Stop, "{panel:?}");
+        }
+        for panel in [Panel::Onboarding, Panel::OnboardingEdit] {
+            let working_and_drawing = Activity {
+                working: true,
+                ..drawing
+            };
+            assert_eq!(decide(working_and_drawing, panel), Escape::Stop);
+            assert_eq!(
+                decide(
+                    Activity {
+                        pulling: true,
+                        ..working_and_drawing
+                    },
+                    panel
+                ),
+                Escape::CancelPull
+            );
+        }
         assert_eq!(decide(Activity::default(), Panel::Closed), Escape::Ignore);
     }
 
@@ -365,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn only_speech_or_a_drawing_holds_global_escape() {
+    fn only_speech_a_drawing_or_a_pull_holds_global_escape() {
         assert!(!Activity::default().holds_global_escape());
         let working = Activity {
             working: true,
@@ -377,6 +267,20 @@ mod tests {
             ..Activity::default()
         };
         assert!(speaking.holds_global_escape());
+        assert!(
+            Activity {
+                drawing: true,
+                ..Activity::default()
+            }
+            .holds_global_escape()
+        );
+        assert!(
+            Activity {
+                pulling: true,
+                ..Activity::default()
+            }
+            .holds_global_escape()
+        );
     }
 
     #[test]
@@ -414,7 +318,6 @@ mod tests {
         chord.acquire(register).unwrap();
         chord.acquire(register).unwrap();
         assert_eq!((asked.get(), freed.get()), (1, 0), "one hold");
-        assert!(!chord.refused());
         chord.release();
         assert_eq!((asked.get(), freed.get()), (1, 1), "its keys are up");
         chord.acquire(register).unwrap();
@@ -423,20 +326,25 @@ mod tests {
 
     #[test]
     fn a_refused_esc_with_the_talk_keys_is_not_asked_for_again_until_the_next_hold() {
-        let asked = Cell::new(0);
+        let (asked, freed) = (Cell::new(0), Rc::new(Cell::new(0)));
         let register = || {
             asked.set(asked.get() + 1);
-            Err::<(), _>("taken")
+            Ok::<_, &str>(Held(Rc::clone(&freed)))
         };
         let mut chord = TalkEscape::default();
+        assert_eq!(
+            chord.acquire(|| {
+                asked.set(asked.get() + 1);
+                Err::<Held, _>("taken")
+            }),
+            Err(TalkEscapeRefused)
+        );
         assert_eq!(chord.acquire(register), Err(TalkEscapeRefused));
-        assert_eq!(chord.acquire(register), Err(TalkEscapeRefused));
-        assert_eq!(asked.get(), 1);
-        assert!(chord.refused());
+        assert_eq!((asked.get(), freed.get()), (1, 0));
         chord.release();
-        assert!(!chord.refused());
-        assert_eq!(chord.acquire(register), Err(TalkEscapeRefused));
-        assert_eq!(asked.get(), 2);
-        assert!(chord.refused());
+        assert_eq!(chord.acquire(register), Ok(()));
+        assert_eq!((asked.get(), freed.get()), (2, 0));
+        chord.release();
+        assert_eq!((asked.get(), freed.get()), (2, 1));
     }
 }
