@@ -297,7 +297,7 @@ impl Presence {
                 .is_some_and(|s| s.generation() == stamp.session && s.open())
     }
 
-    fn voice_notice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
+    pub(super) fn voice_notice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
         tracing::debug!(stage = ?FailureStage::Notice, reason = ?text, "held speech input notice");
         self.voice.status = Some(text);
         // A microphone that may still be open matters more than the lost brain's notice.

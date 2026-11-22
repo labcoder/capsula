@@ -942,6 +942,9 @@ fn escape_after_session_loss(reconnect: bool, cx: &mut TestAppContext) {
     owner.update(cx, |owner, cx| {
         assert!(!owner.link.input_is(GestureId(1)));
         assert!(owner.voice.pending.is_some(), "the captured press waits");
+        owner
+            .link
+            .set_recorded_generation(if reconnect { 2 } else { 0 });
         let mut events = vec![LinkEvent::State(crate::link::LinkState::Reconnecting)];
         if reconnect {
             events.extend([
@@ -2284,6 +2287,7 @@ fn superseding_native_hold_returns_before_outbox_release_and_sends_cancel_first(
     let send = native(&owner, cx);
     let at = Instant::now();
     chord(&send, Edge::Down, at);
+    cx.run_until_parked();
     assert!(matches!(
         pipe.next_control(),
         ControlToBrain::KeyDown { gesture, .. } if gesture == old
@@ -2293,6 +2297,7 @@ fn superseding_native_hold_returns_before_outbox_release_and_sends_cancel_first(
     pipe.handle.track_input(old);
     let at = at + Duration::from_secs(1);
     chord(&send, Edge::Down, at);
+    cx.run_until_parked();
     assert!(matches!(
         pipe.next_control(),
         ControlToBrain::KeyDown { gesture, .. } if gesture == replacement
@@ -2316,4 +2321,217 @@ fn superseding_native_hold_returns_before_outbox_release_and_sends_cancel_first(
         pipe.next_control(),
         ControlToBrain::VoiceHoldRecognized { gesture, .. } if gesture == replacement
     ));
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CancelAt {
+    RawEscape,
+    HotkeyEscape,
+    End,
+    OpenInput,
+    ClockFailure,
+    ClosedQueue,
+}
+
+impl CancelAt {
+    fn deliver(self, send: &Deliver, now: Instant) {
+        use crate::presence::gesture::{CLOSE_DELIVERY, FAIL_CLOCK};
+
+        match self {
+            Self::RawEscape => {
+                send(
+                    Event::Key {
+                        key: Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
+                        edge: Edge::Down,
+                    },
+                    after(now, 320),
+                );
+            }
+            Self::HotkeyEscape => {
+                send(Event::Escape, after(now, 320));
+            }
+            Self::End => {
+                send(Event::Reset, after(now, 320));
+            }
+            Self::OpenInput => {
+                chord(send, Edge::Up, now + Duration::from_millis(30));
+            }
+            Self::ClockFailure => {
+                FAIL_CLOCK.set(true);
+                send(Event::Deadline, after(now, 320));
+            }
+            Self::ClosedQueue => {
+                CLOSE_DELIVERY.set(true);
+                let mut time = after(now, 10).with_keyboard_read(Some);
+                time.defer_terminal = true;
+                send(
+                    Event::Key {
+                        key: Key::LeftAlt,
+                        edge: Edge::Down,
+                    },
+                    time,
+                );
+            }
+        }
+    }
+}
+
+fn check_native_cancel(cx: &mut TestAppContext, at: CancelAt) {
+    use crate::link::fixture;
+
+    let (owner, _data, _controls) = ready(cx);
+    let pipe = fixture::attended(&format!("native-cancel-{at:?}"));
+    let events = fixture::patient(pipe.events.clone());
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| {
+        this.link = pipe.handle.clone();
+        this.session = Some(session.clone());
+    });
+    let send = native(&owner, cx);
+    let now = Instant::now();
+    let (gesture, mic) = if matches!(at, CancelAt::End) {
+        chord(&send, Edge::Down, now);
+        send(Event::Deadline, after(now, 301));
+        cx.run_until_parked();
+        assert!(matches!(
+            pipe.next_control(),
+            ControlToBrain::KeyDown {
+                gesture: GestureId(1),
+                ..
+            }
+        ));
+        assert!(matches!(
+            pipe.next_control(),
+            ControlToBrain::VoiceHoldRecognized {
+                gesture: GestureId(1),
+                ..
+            }
+        ));
+        let token = owner.read_with(cx, |owner, _| {
+            owner.voice.pending.as_ref().unwrap().token.clone()
+        });
+        (GestureId(1), token)
+    } else {
+        if matches!(at, CancelAt::OpenInput) {
+            chord(&send, Edge::Down, now);
+            chord(&send, Edge::Up, now + Duration::from_millis(10));
+            chord(&send, Edge::Down, now + Duration::from_millis(20));
+            cx.run_until_parked();
+            for id in [1, 2] {
+                assert!(
+                    matches!(pipe.next_control(), ControlToBrain::KeyDown { gesture, .. } if gesture == GestureId(id))
+                );
+            }
+        }
+        if matches!(at, CancelAt::ClosedQueue) {
+            send(
+                Event::Key {
+                    key: Key::LeftControl,
+                    edge: Edge::Down,
+                },
+                EventTime::new(now),
+            );
+        }
+        let gesture = GestureId(10);
+        pipe.handle.track_input(gesture);
+        let token = pipe.handle.microphone_gate().arm(gesture).unwrap();
+        (gesture, token)
+    };
+    assert!(pipe.handle.input_is(gesture));
+    assert_eq!(
+        mic.mode(&session.alive(), Instant::now()),
+        Ok(Mode::Preparing)
+    );
+
+    fixture::with_outbox_held(&pipe.handle, &session, || {
+        at.deliver(&send, now);
+        assert!(
+            !pipe.handle.input_is(gesture),
+            "the callback revokes the tracked gesture"
+        );
+        assert_eq!(
+            mic.mode(&session.alive(), Instant::now()),
+            Err(MicError::Cancelled)
+        );
+    });
+
+    cx.run_until_parked();
+    assert_eq!(
+        pipe.next_control(),
+        ControlToBrain::GestureCancel { gesture }
+    );
+    if matches!(at, CancelAt::OpenInput) {
+        owner.read_with(cx, |owner, _| assert!(owner.text_open()));
+    }
+}
+
+#[gpui::test]
+fn native_cancel_never_waits_on_raw_escape(cx: &mut TestAppContext) {
+    check_native_cancel(cx, CancelAt::RawEscape);
+}
+
+#[gpui::test]
+fn native_cancel_never_waits_on_hotkey_escape(cx: &mut TestAppContext) {
+    check_native_cancel(cx, CancelAt::HotkeyEscape);
+}
+
+#[gpui::test]
+fn native_cancel_never_waits_on_cancelled_end(cx: &mut TestAppContext) {
+    check_native_cancel(cx, CancelAt::End);
+}
+
+#[gpui::test]
+fn native_cancel_never_waits_on_open_input(cx: &mut TestAppContext) {
+    check_native_cancel(cx, CancelAt::OpenInput);
+}
+
+#[gpui::test]
+fn native_cancel_never_waits_on_clock_failure(cx: &mut TestAppContext) {
+    check_native_cancel(cx, CancelAt::ClockFailure);
+}
+
+#[gpui::test]
+fn native_cancel_never_waits_on_closed_queue(cx: &mut TestAppContext) {
+    check_native_cancel(cx, CancelAt::ClosedQueue);
+}
+
+#[gpui::test]
+fn native_cancel_never_waits_or_offers_a_replacement_after_a_stale_cancel(cx: &mut TestAppContext) {
+    use crate::link::fixture;
+
+    let (owner, _data, _controls) = ready(cx);
+    let pipe = fixture::attended("native-replacement-stale");
+    let events = fixture::patient(pipe.events.clone());
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| {
+        this.link = pipe.handle.clone();
+        this.session = Some(session.clone());
+    });
+    let send = native(&owner, cx);
+    let at = Instant::now();
+    chord(&send, Edge::Down, at);
+    cx.run_until_parked();
+    assert!(matches!(
+        pipe.next_control(),
+        ControlToBrain::KeyDown {
+            gesture: GestureId(1),
+            ..
+        }
+    ));
+    pipe.handle
+        .track_input_on(GestureId(9), session.generation() - 1);
+
+    fixture::with_outbox_held(&pipe.handle, &session, || {
+        send(Event::Deadline, after(at, 301));
+        assert!(pipe.handle.input_is(GestureId(1)));
+    });
+    cx.run_until_parked();
+
+    assert!(pipe.handle.send_control(&session, ControlToBrain::Pong));
+    assert_eq!(pipe.next_control(), ControlToBrain::Pong);
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert!(!owner.link.input_is(GestureId(1)));
+        assert_eq!(owner.voice.status, Some(Text::HoldFailed));
+    });
 }

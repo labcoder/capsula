@@ -601,7 +601,7 @@ struct Shared {
     microphone: CollectionGate,
     microphone_stop: Mutex<Option<microphone::Stop>>,
     input: AtomicU64,
-    // Only the native input owner publishes this, before tracking a gesture.
+    // Only the UI thread reads or writes this stamp, so Relaxed is enough.
     input_generation: AtomicU64,
     choice: AtomicU64,
     quit_sent: AtomicBool,
@@ -809,6 +809,13 @@ impl Shared {
 pub struct InputCancel {
     generation: u64,
     gesture: GestureId,
+}
+
+impl InputCancel {
+    /// The revoked gesture and the link generation that tracked it.
+    pub fn target(&self) -> (GestureId, u64) {
+        (self.gesture, self.generation)
+    }
 }
 
 /// The UI's handle on the link.
@@ -1271,6 +1278,14 @@ impl LinkHandle {
         // Session 1's output, as a normal launch has it: none, so a hold's claim can be granted.
         link.shared.output.begin(1, None);
         (link, requests)
+    }
+
+    pub fn set_recorded_generation(&self, generation: u64) {
+        assert!(
+            self.control_recording.is_some(),
+            "only a recording can simulate link generations"
+        );
+        self.shared.generations.store(generation, Ordering::Release);
     }
 
     pub fn record_controls(&mut self) -> Receiver<ControlToBrain> {
