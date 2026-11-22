@@ -442,7 +442,7 @@ impl Worker {
         if self.apply_stop(port, give, now) {
             return Ok(false);
         }
-        self.observations(now, false);
+        self.observations(now);
         self.watch_playback(now);
         if self.pending_packet.is_none() && self.engine.queue.held.is_none() {
             self.pending_packet = port.packets.try_recv().ok();
@@ -613,7 +613,8 @@ impl Worker {
         }
     }
 
-    fn observations(&mut self, now: Duration, stopping: bool) {
+    fn observations(&mut self, now: Duration) {
+        let stopping = self.stop_cutoff.is_some();
         let Some(route) = &mut self.physical else {
             return;
         };
@@ -752,7 +753,7 @@ impl Worker {
         {
             return;
         }
-        self.observations(cutoff, true);
+        self.observations(cutoff);
         self.stop_cutoff = None;
         if let (_, Some(credit)) = self.engine.stop(cutoff) {
             give(credit);
