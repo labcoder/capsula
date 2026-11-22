@@ -336,6 +336,11 @@ impl Presence {
 impl Presence {
     pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         if !self.link.admits_text(self.session.as_ref()) {
+            if self.session.is_some() {
+                let previous = (self.error.clone(), self.refusal);
+                submission_notice(&mut self.error, &mut self.refusal, Err(Refused::Busy));
+                self.notices_changed(&previous, cx);
+            }
             return Ok(());
         }
         self.cancel_voice(cx);

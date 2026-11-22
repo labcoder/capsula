@@ -65,6 +65,11 @@ impl FixturePlayback {
         self.control.presented_prefix()
     }
 
+    /// Reports the stream lost, as an unplugged device does.
+    pub fn lose(&self) {
+        self.callback.lose();
+    }
+
     pub fn stopped(&self) -> bool {
         self.control.stopped()
     }
