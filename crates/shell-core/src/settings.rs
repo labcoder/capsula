@@ -183,7 +183,7 @@ pub struct Settings {
     speech_send_failed: bool,
     stt_error: Option<UserError>,
     stt_send_failed: bool,
-    talk_back_send_failed: bool,
+    talk_back_send_error: Option<Text>,
     /// Each catalog on offer, in arrival order.
     models: Vec<(ConnectionKind, Vec<ModelInfo>)>,
     /// The newest default model sent and not yet answered.
@@ -629,7 +629,7 @@ impl Settings {
         self.speech_error = None;
         self.speech_send_failed = false;
         self.stt_send_failed = false;
-        self.talk_back_send_failed = false;
+        self.talk_back_send_error = None;
         self.pending.clear();
         self.models.clear();
         self.model_queued = None;

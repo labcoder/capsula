@@ -174,6 +174,7 @@ texts! {
     GitHubRefreshing => "github-refreshing",
     Voice => "settings-voice",
     SpeakAnswersAloud => "speak-answers-aloud",
+    TalkBackBusy => "talk-back-busy",
     Privacy => "settings-privacy",
     SpeechInput => "voice-speech-input",
     VoiceIdlePolicy => "voice-idle-policy",
