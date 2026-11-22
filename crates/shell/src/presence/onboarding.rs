@@ -4,6 +4,8 @@
 
 mod accounts;
 #[cfg(test)]
+mod close_tests;
+#[cfg(test)]
 mod tests;
 
 use std::sync::Arc;
@@ -27,7 +29,7 @@ use super::{
     Foreground, LinkState, OpenError, PanelVisibility, Presence, PresenceEvent, PresenceSurface,
     configure_surface, options, platform, send, status_text,
 };
-use crate::onboarding::{Landing, Next, Onboarding, Step, ThisRun};
+use crate::onboarding::{Exit, Landing, Leave, Next, Onboarding, Step, ThisRun};
 use crate::settings::{Field, Settings};
 use crate::strings::{Strings, Text};
 
@@ -45,8 +47,6 @@ pub(super) struct OnboardingView {
     pub(super) state: Onboarding,
     /// The link's state, for the status line while there's no settings view.
     link: LinkState,
-    /// The last finish couldn't be sent.
-    unsent: bool,
     model: Entity<Settings>,
     owner: WeakEntity<Presence>,
     events: async_channel::Sender<PresenceEvent>,
@@ -150,7 +150,6 @@ impl OnboardingView {
         Self {
             state,
             link: LinkState::Connected,
-            unsent: false,
             model,
             owner,
             events,
@@ -384,11 +383,12 @@ impl Render for OnboardingView {
         let (saving, error) = step
             .field()
             .map_or((None, None), |field| field_status(state, field, strings));
-        let failed = error.is_some() || state.finish_refusal().is_some() || self.unsent;
+        let unsent = self.state.unsent();
+        let failed = error.is_some() || state.finish_refusal().is_some() || unsent;
         let status = saving
             .or(error)
             .or_else(|| state.finish_refusal().map(|error| strings.error(error)))
-            .or_else(|| self.unsent.then(|| strings.get(Text::SettingsUnavailable)))
+            .or_else(|| unsent.then(|| strings.get(Text::SettingsUnavailable)))
             .or_else(|| {
                 (!online && self.link != LinkState::Connected)
                     .then(|| strings.get(status_text(self.link)))
@@ -509,7 +509,6 @@ impl Presence {
         }
         let settings = self.settings.clone();
         let (from, next) = view.update(cx, |view, cx| {
-            view.unsent = false;
             cx.notify();
             (view.state.step(), view.state.submit(settings.read(cx)))
         });
@@ -556,8 +555,7 @@ impl Presence {
         match next {
             Next::Stay => Ok(()),
             Next::Moved => {
-                // Leaving the account step hands its sign-ins over for the window's whole life.
-                if from == Step::Accounts {
+                if from.hands_over_sign_ins() {
                     self.onboarding_chatgpt.hand_over();
                     self.onboarding_claude.hand_over();
                 }
@@ -585,24 +583,49 @@ impl Presence {
                 view.update(cx, |view, cx| {
                     if queued {
                         view.state.finish_queued(landing);
+                    } else {
+                        view.state.finish_unsent();
                     }
-                    view.unsent = !queued;
                     cx.notify();
                 });
                 Ok(())
             }
             Next::Close(landing) => {
-                self.cancel_onboarding_edit(cx);
-                self.onboarding_chatgpt.hand_over();
-                self.onboarding_claude.hand_over();
-                self.close_onboarding(cx)?;
-                match landing {
-                    Landing::Peek => self.set_panel(PanelVisibility::Visible, cx),
-                    Landing::Typing => self.focus_text(cx),
-                    Landing::Quiet => Ok(()),
-                }
+                let plan =
+                    (panel.view.read(cx).state).leave(Exit::Close(landing), self.settings.read(cx));
+                self.leave_onboarding(plan, cx)
             }
         }
+    }
+
+    /// Runs the plain state's plan for the window going, in its order.
+    fn leave_onboarding(
+        &mut self,
+        plan: Vec<Leave>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        for step in plan {
+            match step {
+                Leave::Save(field) => {
+                    self.save_setting(field, cx);
+                }
+                Leave::CancelEdit => self.cancel_onboarding_edit(cx),
+                Leave::CancelSignIns => self.cancel_onboarding_sign_ins(cx),
+                Leave::HandOverSignIns => {
+                    self.onboarding_chatgpt.hand_over();
+                    self.onboarding_claude.hand_over();
+                }
+                Leave::PutOff => {
+                    self.onboarding_run = ThisRun::PutOff;
+                    tracing::info!("onboarding put off for this run");
+                }
+                Leave::Close => self.close_onboarding(cx)?,
+                Leave::Land(Landing::Peek) => self.set_panel(PanelVisibility::Visible, cx)?,
+                Leave::Land(Landing::Typing) => self.focus_text(cx)?,
+                Leave::Land(Landing::Quiet) => {}
+            }
+        }
+        Ok(())
     }
 
     fn open_onboarding(
@@ -713,16 +736,8 @@ impl Presence {
         let Some(panel) = &self.onboarding else {
             return Ok(());
         };
-        if let Some(field) = panel.view.read(cx).state.step().field()
-            && self.settings.read(cx).editing(field)
-        {
-            self.save_setting(field, cx);
-            self.cancel_onboarding_edit(cx);
-        }
-        self.cancel_onboarding_sign_ins(cx);
-        self.onboarding_run = ThisRun::PutOff;
-        tracing::info!("onboarding put off for this run");
-        self.close_onboarding(cx)
+        let plan = (panel.view.read(cx).state).leave(Exit::Dismiss, self.settings.read(cx));
+        self.leave_onboarding(plan, cx)
     }
 
     /// Esc with an unsaved name: the field goes back to the saved name and keeps focus.
@@ -752,20 +767,24 @@ impl Presence {
         })
     }
 
+    /// Removes the window first and only then lets go of it and unpauses holds, as `hide_text`
+    /// does, so a close that fails keeps both and a later one can try again.
     fn close_onboarding(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        let Some(panel) = self.onboarding.take() else {
+        let Some(panel) = &self.onboarding else {
             return Ok(());
         };
-        self.voice.paused.set(false);
+        let previous = panel.previous;
         panel
             .window
             .update(cx, |_, window, _| {
-                if let Some(previous) = panel.previous {
+                if let Some(previous) = previous {
                     platform::restore_foreground(window, previous);
                 }
                 window.remove_window();
             })
             .map_err(|error| OpenError::Gpui(error.into()))?;
+        self.onboarding = None;
+        self.voice.paused.set(false);
         tracing::info!("onboarding closed");
         self.place_drawings(cx.weak_entity(), cx);
         self.pointer_changed(cx)
