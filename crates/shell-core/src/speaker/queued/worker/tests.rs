@@ -180,6 +180,7 @@ fn a_stop_deadline_does_not_discard_the_in_flight_fade() {
             "the exact callback still owns its copy"
         );
         assert!(!worker.engine.final_at(deadline));
+        assert_eq!(worker.speech.until(), None, "Stop cleared the speech lease");
     });
     assert!(
         samples[..60]
@@ -198,6 +199,11 @@ fn a_stop_deadline_does_not_discard_the_in_flight_fade() {
         .step(&port, &mut [0; 480], &mut |_| {}, deadline)
         .unwrap();
     assert!(matches!(requests.try_recv(), Ok(Request::Retire(1))));
+    assert_eq!(
+        worker.speech.until(),
+        None,
+        "the drain after Stop never re-arms the lease"
+    );
     let mut reports = Vec::new();
     assert!(
         Receipts::default().publish(&worker.engine, deadline, &mut |report| {
