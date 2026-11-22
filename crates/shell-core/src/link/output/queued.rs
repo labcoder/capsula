@@ -263,10 +263,8 @@ impl OutputOwner {
         turn: Option<u32>,
         send: impl FnOnce() -> bool,
     ) -> bool {
-        self.try_lock()
-            .ok()
-            .as_mut()
-            .and_then(|state| state.queue(session))
+        self.lock()
+            .queue(session)
             .filter(|(_, owner)| {
                 owner.ready()
                     && !owner.owes_proof(RECEIPT_QUEUED)
@@ -288,16 +286,19 @@ impl OutputOwner {
         }
     }
 
-    pub(in crate::link) fn queued_hold_ready(&self, session: u64) -> bool {
+    pub(in crate::link) fn try_queued_hold_ready(&self, session: u64) -> bool {
         self.try_lock()
             .is_ok_and(|state| state.session == Some(session) && state.silent_queued().is_some())
     }
 
+    pub(in crate::link) fn queued_hold_ready(&self, session: u64) -> bool {
+        let state = self.lock();
+        state.session == Some(session) && state.silent_queued().is_some()
+    }
+
     pub(in crate::link) fn can_reserve_hold(&self, session: u64) -> bool {
-        self.try_lock()
-            .ok()
-            .as_mut()
-            .and_then(|state| state.queue(session))
+        self.lock()
+            .queue(session)
             .is_some_and(|(_, owner)| owner.silent_hold() && owner.pending.is_none())
     }
 

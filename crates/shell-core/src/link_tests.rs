@@ -2950,6 +2950,85 @@ fn queued_text(turn: u32, text: &str) -> DataToBrain {
     }
 }
 
+#[cfg(debug_assertions)]
+#[test]
+fn queued_admission_waits_for_the_outbox_but_the_first_voice_edge_refuses() {
+    use std::sync::mpsc::{self, RecvTimeoutError};
+
+    let link = attended_queued("queued-admission-contended");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let generation = session.generation();
+    frame::write(
+        &mut &link.control,
+        &ControlToShell::Settings {
+            view: kumochi_protocol::message::SettingsView {
+                show_screen: false,
+                ..settings_view()
+            },
+            answer: false,
+        },
+        Pipe::Control,
+    )
+    .unwrap();
+    let Some(ControlToBrain::QueuedAudioOutput(_, output)) =
+        frame::read(&mut &link.control, Pipe::Control).unwrap()
+    else {
+        panic!("a queued output registration");
+    };
+    acknowledge_queued(&link.control, output);
+
+    let (starting, started) = mpsc::channel();
+    let (text_result, typed) = mpsc::channel();
+    let (voice_result, voiced) = mpsc::channel();
+    let mut while_held = None;
+    let handle = &link.handle;
+    let pair = &session;
+    thread::scope(|scope| {
+        with_outbox_held(handle, pair, || {
+            let text_starting = starting.clone();
+            scope.spawn(move || {
+                text_starting.send(()).unwrap();
+                text_result.send(handle.admits_text(Some(pair))).unwrap();
+            });
+            scope.spawn(move || {
+                starting.send(()).unwrap();
+                voice_result.send(handle.admits_voice(generation)).unwrap();
+            });
+            for _ in 0..2 {
+                started.recv_timeout(PATIENCE).unwrap();
+            }
+            let native = handle.can_start_voice_gesture(generation);
+            let window = Duration::from_millis(125);
+            while_held = Some((
+                native,
+                typed.recv_timeout(window),
+                voiced.recv_timeout(window),
+            ));
+        });
+    });
+    let after_release = (typed.recv_timeout(PATIENCE), voiced.recv_timeout(PATIENCE));
+
+    let text = queued_text(1, "accepted after the outbox is released");
+    assert!(handle.send_data(pair, text.clone()));
+    assert_eq!(
+        frame::read(&mut &*link.data, Pipe::Data).unwrap(),
+        Some(text)
+    );
+    handle.end(pair);
+    queued_pair_closed(link.link, &link.control, &link.data);
+    assert_eq!(
+        while_held,
+        Some((
+            false,
+            Err(RecvTimeoutError::Timeout),
+            Err(RecvTimeoutError::Timeout)
+        )),
+        "the native edge refuses immediately, while both authoritative checks wait"
+    );
+    assert_eq!(after_release, (Ok(true), Ok(true)));
+}
+
 #[test]
 fn queued_hold_waits_for_its_saved_preferences_and_rejects_another_run_origin() {
     use kumochi_protocol::message::{GestureId, HoldStatus, OutputGeneration, SettingsOp};

@@ -827,30 +827,45 @@ impl LinkHandle {
     pub fn admits_text(&self, session: Option<&Session>) -> bool {
         self.audio_session() == AudioSession::Legacy
             || session.is_some_and(|session| {
-                session.open()
-                    && self.shared.outbox.try_lock().is_ok_and(|outbox| {
-                        outbox.as_ref().is_some_and(|outbox| {
-                            outbox.generation == session.generation
-                                && outbox.queued_input.hold.is_none()
-                                && self
-                                    .shared
-                                    .output
-                                    .queued_turn(session.generation, None, || true)
-                        })
+                self.shared
+                    .outbox(session, |outbox| {
+                        outbox.queued_input.hold.is_none()
+                            && self
+                                .shared
+                                .output
+                                .queued_turn(session.generation, None, || session.open())
                     })
+                    .unwrap_or(false)
             })
     }
 
-    /// Whether this connection can attempt ordinary voice input without changing its audio mode.
-    pub fn admits_voice(&self, generation: u64) -> bool {
+    // shortcut: A contended first edge refuses the press; if it shows in use, publish eligibility as one atomic word.
+    pub fn can_start_voice_gesture(&self, generation: u64) -> bool {
         self.audio_session() == AudioSession::Legacy
             || self.shared.outbox.try_lock().is_ok_and(|outbox| {
                 outbox.as_ref().is_some_and(|outbox| {
                     outbox.generation == generation
                         && outbox.queued_input.consent_answers == 0
-                        && self.shared.output.queued_hold_ready(generation)
+                        && self.shared.output.try_queued_hold_ready(generation)
                 })
             })
+    }
+
+    /// Checks the exact pair before presence changes voice panels or attempts the offer.
+    pub fn admits_voice(&self, generation: u64) -> bool {
+        self.audio_session() == AudioSession::Legacy
+            || self
+                .shared
+                .outbox
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|outbox| {
+                    outbox.generation == generation
+                        && !outbox.pipe.is_aborted()
+                        && outbox.queued_input.consent_answers == 0
+                        && self.shared.output.queued_hold_ready(generation)
+                })
     }
 
     pub fn output(&self) -> &output::OutputOwner {
