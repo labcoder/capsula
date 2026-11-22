@@ -81,6 +81,10 @@ impl Pump {
         }
     }
 
+    pub(crate) fn output(&self) -> OutputMode {
+        self.output
+    }
+
     /// The TTS handle the pump reads, for loads and unloads.
     pub(crate) fn tts(&self) -> &TtsHandle {
         &self.tts
