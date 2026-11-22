@@ -1,7 +1,6 @@
 //! Complete, bounded repository authority from the user's installed GitHub App intersections.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
 
 use kumochi_protocol::{
     Secret,
@@ -10,6 +9,7 @@ use kumochi_protocol::{
 use kumochi_scene::text::Bounded;
 use tokio::time::Instant;
 
+use crate::config::tuning::GitHubTuning;
 use crate::connections::{
     github::{
         GitHubToken, Page,
@@ -22,26 +22,19 @@ use crate::connections::{
 #[cfg(test)]
 mod tests;
 
-// shortcut: refresh stops at 12 requests, 60 seconds and 200 repositories; extend only with bounded traversal support.
-const MAX_PAGE_REQUESTS: usize = 12;
-const REFRESH_BUDGET: Duration = Duration::from_secs(60);
-
-/// Provisional whole-operation filing deadline, awaiting the owner's review.
-pub(in crate::runtime) const FILING_DEADLINE: Duration = Duration::from_secs(60);
-/// Provisional counted filing request cap, awaiting the owner's review.
-pub(in crate::runtime) const MAX_FILING_REQUESTS: usize = 16;
-
+// shortcut: refresh stops at `[tuning.github]`'s request and time budgets and 200 repositories; extend only with bounded traversal support.
 pub(in crate::runtime) async fn fetch(
     http: &impl Http,
     token: &Secret<GitHubToken>,
+    tuning: GitHubTuning,
 ) -> Result<device::Repositories, ApiError> {
-    let deadline = Instant::now() + REFRESH_BUDGET;
+    let deadline = Instant::now() + tuning.listing_budget;
     tokio::time::timeout_at(deadline, async {
         let mut requests = 0;
         let mut installations = BTreeSet::new();
         let mut installation_total = None;
         for page in 1..=2 {
-            admit(&mut requests, deadline)?;
+            admit(&mut requests, tuning.listing_requests, deadline)?;
             let reply = api::installations(http, token, Page::new(page)?).await?;
             if installation_total.is_some_and(|total| total != reply.total_count) {
                 return Err(ApiError::Response);
@@ -63,7 +56,7 @@ pub(in crate::runtime) async fn fetch(
             let mut seen = BTreeSet::new();
             let mut repository_total = None;
             for page in 1..=2 {
-                admit(&mut requests, deadline)?;
+                admit(&mut requests, tuning.listing_requests, deadline)?;
                 let reply = api::repositories(http, token, installation, Page::new(page)?).await?;
                 if repository_total.is_some_and(|total| total != reply.total_count) {
                     return Err(ApiError::Response);
@@ -96,11 +89,11 @@ pub(in crate::runtime) async fn fetch(
     .map_err(|_| ApiError::Http(HttpError::Timeout))?
 }
 
-fn admit(requests: &mut usize, deadline: Instant) -> Result<(), ApiError> {
+fn admit(requests: &mut usize, limit: usize, deadline: Instant) -> Result<(), ApiError> {
     if Instant::now() >= deadline {
         return Err(ApiError::Http(HttpError::Timeout));
     }
-    if *requests >= MAX_PAGE_REQUESTS {
+    if *requests >= limit {
         return Err(ApiError::Response);
     }
     *requests += 1;

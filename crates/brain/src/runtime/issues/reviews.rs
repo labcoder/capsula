@@ -6,7 +6,6 @@ use tokio::time::Instant;
 
 use super::{Brain, Effect, Filing, StoreOp};
 use crate::issues::{Answer, Stage, Write, WriteScope};
-use crate::runtime::account::github::repositories::FILING_DEADLINE;
 
 #[derive(Debug)]
 pub(super) struct Offered {
@@ -92,7 +91,7 @@ impl Brain {
             );
         }
         let serial = self.filing.serial();
-        let deadline = Instant::now() + FILING_DEADLINE;
+        let deadline = Instant::now() + self.account.github.tuning.filing_deadline;
         let scope = WriteScope::new(deadline);
         self.filing.rearms.push(Rearm {
             serial,

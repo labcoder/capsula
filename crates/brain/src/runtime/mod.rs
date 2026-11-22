@@ -279,6 +279,7 @@ impl Brain {
         mut account: Accounts,
     ) -> std::io::Result<Self> {
         account.github.restore_default(config.github_default());
+        account.github.tuning = config.github_tuning();
         account.connections.configure_transport();
         #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
         let (engine, access, fixture) = match engine {

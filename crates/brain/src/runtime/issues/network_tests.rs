@@ -4,6 +4,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use crate::config::tuning::GitHubTuning;
 use crate::connections::github::{GitHubEndpoint, Page};
 use crate::connections::http_client::{
     Endpoint, Http, HttpError, Request, Response, ResponseMeta, SharedHttp,
@@ -126,7 +127,7 @@ fn bounded(steps: Vec<Step>) -> (BoundedHttp, Arc<Control>, Arc<Script>) {
         steps: Mutex::new(steps),
         calls: AtomicUsize::new(0),
     });
-    let control = Control::new();
+    let control = Control::new(GitHubTuning::default());
     let http = BoundedHttp::new(SharedHttp::new(Arc::clone(&script)), Arc::clone(&control));
     (http, control, script)
 }
