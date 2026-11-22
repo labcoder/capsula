@@ -1,9 +1,10 @@
 //! Exact geometry for the diagram look review's visible-link and clearance regressions.
 use kumochi_scene::{
     GlobalBudget, Handle, StopCut,
-    display::Prim,
+    display::{Prim, TextMeasure},
     geom::{Rect, Vec2},
     layout::{LayoutState, SurfaceGeometry},
+    motion::{Frame, FrameItem, SceneView},
     text::Bounded,
 };
 use serde_json::json;
@@ -11,6 +12,68 @@ use serde_json::json;
 #[path = "support/scene.rs"]
 mod scene_support;
 use scene_support::{id, new_scene, prepared, prepared_on};
+
+fn frame(layout: &LayoutState) -> Frame {
+    let mut frame = Frame::new();
+    SceneView::new(layout, 0)
+        .frame(u64::MAX, &mut frame)
+        .expect("resting frame");
+    frame
+}
+
+fn item<'a>(layout: &LayoutState, frame: &'a Frame, name: &str) -> &'a FrameItem {
+    let handle = layout.handle(&id(name)).expect("prepared handle");
+    frame
+        .items()
+        .iter()
+        .find(|item| item.handle == handle)
+        .expect("painted item")
+}
+
+fn painted_chip(item: &FrameItem) -> Rect {
+    item.primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Rect {
+                rect,
+                fill: Some(fill),
+                ..
+            } if item.opacity * fill.opacity > 0.0 => Some(item.transform.bounds(*rect)),
+            _ => None,
+        })
+        .expect("chip")
+}
+
+fn ink(item: &FrameItem, label: &str) -> Rect {
+    let (origin, size) = item
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Text {
+                origin,
+                text,
+                style,
+                max_width,
+                align,
+                color,
+                ..
+            } if text.as_str() == label && item.opacity * color.opacity > 0.0 => {
+                let [w, h] = scene_support::Measure
+                    .measure(label, *style, *max_width)
+                    .expect("ink");
+                let spare = max_width.unwrap_or(w) - w;
+                let x = match align {
+                    kumochi_scene::record::Align::Left => 0.0,
+                    kumochi_scene::record::Align::Center => spare * 0.5,
+                    kumochi_scene::record::Align::Right => spare,
+                };
+                Some((*origin + Vec2::new(x, 0.0), Vec2::new(w, h)))
+            }
+            _ => None,
+        })
+        .expect("painted label");
+    item.transform.bounds(Rect { origin, size })
+}
 
 fn chip(layout: &LayoutState, handle: Handle) -> Rect {
     layout
@@ -92,24 +155,15 @@ fn neighbouring_chips_keep_an_exact_six_pixel_world_gap() {
             {"anim":{"target":"d","track":"pos","keys":[[0,[120,0]]]}}
         ]}),
     );
+    let frame = frame(&picture.after);
+    let first = item(&picture.after, &frame, "e1");
+    let second = item(&picture.after, &frame, "e2");
+    assert_eq!(ink(first, "x").center(), painted_chip(first).center());
+    assert_eq!(ink(second, "y").center(), painted_chip(second).center());
+    let (first, second) = (painted_chip(first), painted_chip(second));
+    assert!(first.origin.y < second.max().y && second.origin.y < first.max().y);
     assert_eq!(
-        chip(&picture.after, scene.handle(&id("e2")).expect("second")),
-        Rect {
-            origin: Vec2::new(217.0, 29.0),
-            size: Vec2::new(16.0, 14.0),
-        }
-    );
-    let first = chip(&picture.after, scene.handle(&id("e1")).expect("first"));
-    assert_eq!(
-        first,
-        Rect {
-            origin: Vec2::new(232.0, 29.0),
-            size: Vec2::new(16.0, 14.0),
-        }
-    );
-    let second_chip = chip(&picture.after, scene.handle(&id("e2")).expect("second"));
-    assert_eq!(
-        (first.origin.x - (second_chip.max().x * 2.0 - 240.0)).to_bits(),
+        (first.origin.x - second.max().x).to_bits(),
         6.0_f32.to_bits()
     );
 }

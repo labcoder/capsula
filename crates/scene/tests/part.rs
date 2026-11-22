@@ -105,6 +105,7 @@ fn a_set_a_cut_dropped_never_counts_even_after_replay() {
         &mut global,
         r#"{"id":"s2","set":[{"target":"a","label":"Hub","info":"Late"}]}"#,
     );
+    assert_eq!(text(state.part(a)), Some(pair("Hub", Some("Late"))));
     let revealed =
         Bounded::new(put.handles.iter().map(|&(_, handle)| handle).collect()).expect("two");
     state

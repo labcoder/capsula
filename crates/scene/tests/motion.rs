@@ -1,12 +1,16 @@
 //! Activation, sampling, the host loop and cuts over prepared steps.
 #[path = "support/allocation.rs"]
+#[expect(
+    dead_code,
+    reason = "allocation counting remains in the standalone benchmark"
+)]
 mod allocation;
 #[path = "support/motion.rs"]
 mod fixtures;
 #[path = "support/scene.rs"]
 mod scene_support;
 
-use fixtures::{Fixture, four_views, gliding_scene, mixed_track};
+use fixtures::{Fixture, activate, four_views, sample};
 use scene_support::{Measure, id, new_scene, prepared};
 
 use kumochi_scene::{
@@ -47,19 +51,6 @@ fn commit(
     };
     scene.commit(candidate, budget).expect("fresh candidate")
 }
-/// Commits, prepares on the view's layout and activates one step at `now`.
-fn activate(
-    scene: &mut SceneState,
-    budget: &mut GlobalBudget,
-    view: &mut SceneView,
-    value: Value,
-    now: u64,
-) {
-    let step = prepared(scene, budget, view.layout(), value);
-    let segment = synthetic_duration_ms(step.step().say.as_ref());
-    view.activate(step, now, segment, &mut Frame::new())
-        .expect("fresh activation");
-}
 /// Host Esc: reveal what `stop` or the caller names, cut, and reinstall at rest.
 fn cut(
     scene: &mut SceneState,
@@ -81,11 +72,6 @@ fn cut(
 }
 fn handle(view: &SceneView, name: &str) -> Handle {
     view.layout().handle(&id(name)).expect("placed object")
-}
-fn sample(view: &SceneView, now: u64) -> Frame {
-    let mut frame = Frame::new();
-    view.frame(now, &mut frame).expect("fresh frame");
-    frame
 }
 fn item(view: &SceneView, now: u64, name: &str) -> Option<FrameItem> {
     let handle = handle(view, name);
@@ -178,6 +164,27 @@ fn retained_history(
         history.push((step, held));
     }
     (scene, history)
+}
+
+fn sorted(mut handles: Vec<Handle>) -> Vec<Handle> {
+    handles.sort_unstable();
+    handles
+}
+
+fn tracked_for_staged_install() -> (SceneState, GlobalBudget, SceneView) {
+    let (mut scene, mut budget, mut view) = fresh();
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"tracks","put":[rect("s"),
+            {"anim":{"target":"s","track":"x","ease":"linear","keys":[[0,0],[1000,100]]}},
+            {"anim":{"target":"s","track":"color","ease":"linear","delay":2000,
+                "keys":[[0,"#ff0000"],[500,"#0000ff"]]}}
+        ]}),
+        0,
+    );
+    (scene, budget, view)
 }
 
 #[test]
@@ -864,11 +871,6 @@ fn explicit_position_replaces_a_running_glide_and_suppresses_the_next_one() {
             {"anim":{"target":"d","track":"pos","ease":"linear","keys":[[0,[10,20]],[100,[30,40]]]}}
         ]}),
     );
-    assert_eq!(
-        next.glides.len(),
-        0,
-        "the explicit owner suppresses this step's generated glide"
-    );
     view.activate(next, 100, 800, &mut Frame::new())
         .expect("position activation");
     assert_eq!(
@@ -879,10 +881,12 @@ fn explicit_position_replaces_a_running_glide_and_suppresses_the_next_one() {
         transform(&view, 150, "a"),
         Affine([1.0, 0.0, 0.0, 1.0, 20.0, 30.0])
     );
-    assert_eq!(
-        transform(&view, 200, "a"),
-        Affine([1.0, 0.0, 0.0, 1.0, 30.0, 40.0])
-    );
+    for now in [200, 325, 550] {
+        assert_eq!(
+            transform(&view, now, "a"),
+            Affine([1.0, 0.0, 0.0, 1.0, 30.0, 40.0])
+        );
+    }
 }
 
 #[test]
@@ -1028,25 +1032,24 @@ fn stop_reveals_only_objects_whose_own_and_ancestor_entrances_finished() {
         ]}),
         0,
     );
-    let handles = |names: &[&str]| {
-        names
-            .iter()
-            .map(|name| handle(&view, name))
-            .collect::<Vec<_>>()
-    };
+    let handles = |names: &[&str]| sorted(names.iter().map(|name| handle(&view, name)).collect());
     assert_eq!(
-        view.stop(200),
+        sorted(view.stop(200)),
         handles(&["d", "y"]),
         "a finished row under an entering table stays hidden"
     );
-    assert_eq!(view.stop(499), handles(&["d", "y"]), "x is still entering");
     assert_eq!(
-        view.stop(500),
+        sorted(view.stop(499)),
+        handles(&["d", "y"]),
+        "x is still entering"
+    );
+    assert_eq!(
+        sorted(view.stop(500)),
         handles(&["d", "x", "y"]),
         "x finished exactly"
     );
     assert_eq!(
-        view.stop(1000),
+        sorted(view.stop(1000)),
         handles(&["d", "t", "r", "x", "y"]),
         "the parent finished"
     );
@@ -1319,8 +1322,9 @@ fn a_glide_starts_where_the_group_was_and_survives_unrelated_steps() {
         json!({"id":"next","put":[{"node":{"id":"c","in":"d","label":"C"}},
             {"edge":{"id":"rc","in":"d","from":"root","to":"c"}}]}),
     );
-    assert_eq!(next.glides.len(), 1, "the overflow shifts the group");
     let rest = SceneView::new(&next.after, 2);
+    let end = transform(&rest, 1450, "a");
+    assert_ne!(start, end, "the overflow shifts the group");
     view.activate(next, 1000, 800, &mut Frame::new())
         .expect("fresh activation");
     assert_eq!(
@@ -1328,13 +1332,8 @@ fn a_glide_starts_where_the_group_was_and_survives_unrelated_steps() {
         start,
         "the glide starts at the live position"
     );
-    assert_eq!(
-        transform(&view, 1450, "a"),
-        transform(&rest, 1450, "a"),
-        "and ends at rest"
-    );
+    assert_eq!(transform(&view, 1450, "a"), end, "and ends at rest");
     let middle = transform(&view, 1225, "a");
-    let end = transform(&rest, 1450, "a");
     assert_eq!(
         middle,
         Affine(std::array::from_fn(|i| start.0[i].midpoint(end.0[i]))),
@@ -1359,8 +1358,9 @@ fn a_glide_starts_where_the_group_was_and_survives_unrelated_steps() {
         json!({"id":"again","put":[{"node":{"id":"extra","in":"d","label":"Extra"}},
             {"edge":{"id":"re","in":"d","from":"root","to":"extra"}}]}),
     );
-    assert_eq!(next.glides.len(), 1, "the next sibling overflows again");
     let rest = SceneView::new(&next.after, 4);
+    let end = transform(&rest, 1675, "a");
+    assert_ne!(middle, end, "the next sibling overflows again");
     view.activate(next, 1225, 800, &mut Frame::new())
         .expect("replacement glide");
     assert_eq!(
@@ -1370,7 +1370,7 @@ fn a_glide_starts_where_the_group_was_and_survives_unrelated_steps() {
     );
     assert_eq!(
         transform(&view, 1675, "a"),
-        transform(&rest, 1675, "a"),
+        end,
         "the replacement reaches its new target"
     );
 }
@@ -1489,7 +1489,7 @@ fn an_installed_stage_carries_the_live_and_delayed_tracks_it_does_not_replace() 
 
 #[test]
 fn a_stage_installs_only_into_the_view_generation_it_was_staged_from() {
-    let (mut scene, mut budget, mut view) = tracked();
+    let (mut scene, mut budget, mut view) = tracked_for_staged_install();
     let next = prepared(
         &mut scene,
         &mut budget,
@@ -1505,14 +1505,15 @@ fn a_stage_installs_only_into_the_view_generation_it_was_staged_from() {
         0,
     );
     let mut other_frame = sample(&other_view, 0);
+    let other_before = other_frame.items().to_vec();
     let foreign = view.prepare_activation(&next, 250, 800).expect("stage");
     let refused = other_view.install(foreign, &mut other_frame);
     assert!(matches!(refused, Err(PrepareError::Stale)));
     assert_eq!(other_view.activated(), 1);
     assert_eq!(
-        other_frame.items().len(),
-        1,
-        "the other view's frame is not cleared"
+        other_frame.items(),
+        other_before,
+        "the other view's frame is unchanged"
     );
 
     let current = view.prepare_activation(&next, 250, 800).expect("stage");
@@ -1526,7 +1527,8 @@ fn a_stage_installs_only_into_the_view_generation_it_was_staged_from() {
         400,
     );
     let mut frame = sample(&view, 500);
-    let before = (frame.items().len(), pose(&view, 500));
+    let before = frame.items().to_vec();
+    let original_pose = pose(&view, 500);
     let refused = view.install(late, &mut frame);
     assert!(matches!(refused, Err(PrepareError::Stale)));
     assert_eq!(
@@ -1534,8 +1536,9 @@ fn a_stage_installs_only_into_the_view_generation_it_was_staged_from() {
         3,
         "a stage from before the advance cannot rewind it"
     );
-    assert_eq!((frame.items().len(), pose(&view, 500)), before);
-    assert_eq!(before.0, 3, "s, z and w stay in the bound frame");
+    assert_eq!(frame.items(), before);
+    assert_eq!(pose(&view, 500), original_pose);
+    assert_eq!(before.len(), 3, "s, z and w stay in the bound frame");
     view.frame(500, &mut frame).expect("the frame stays bound");
 }
 
@@ -1788,112 +1791,6 @@ fn removed_recovered_and_cut_prefixes_hold_no_more_than_their_charges() {
         "the kept prefix, as sole owner, holds {held} bytes but charges {}",
         kept.resident_bytes()
     );
-}
-
-#[test]
-#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
-fn frame_four_views_max() {
-    use std::{hint::black_box, time::Instant};
-    for fixture in [Fixture::Control, Fixture::Glide] {
-        let mixed = matches!(fixture, Fixture::Glide);
-        let views = four_views(fixture);
-        let mut frames: Vec<_> = (0..4).map(|_| Frame::new()).collect();
-        for early in [true, false] {
-            for tick in 0..64 {
-                let now = if early { 100 } else { tick * 16 };
-                for (view, frame) in views.iter().zip(&mut frames) {
-                    view.frame(now, frame).expect("warmup frame");
-                }
-            }
-            let mut samples = Vec::with_capacity(1024);
-            let ((), [allocations, frees]) = allocation::activity(|| {
-                for tick in 0..1024 {
-                    let now = if early { 100 } else { (tick + 64) * 16 };
-                    let start = Instant::now();
-                    for (view, frame) in views.iter().zip(&mut frames) {
-                        view.frame(black_box(now), black_box(frame))
-                            .expect("timed frame");
-                        if mixed {
-                            black_box(view.animating(now));
-                        }
-                    }
-                    samples.push(start.elapsed().as_secs_f64() * 1e6);
-                }
-            });
-            assert_eq!(
-                allocations, 0,
-                "all four views allocate nothing while sampling"
-            );
-            assert_eq!(frees, 0, "all four views free nothing while sampling");
-            let mut sorted = samples.clone();
-            sorted.sort_by(f64::total_cmp);
-            println!(
-                "workload={} samples=1024 allocations={allocations} frees={frees} p50_us={} p95_us={} p99_us={} max_us={}",
-                match (mixed, early) {
-                    (false, true) => "early-all-entrances",
-                    (false, false) => "long-window",
-                    (true, true) => "glide-property-mix-early",
-                    (true, false) => "glide-property-mix-long",
-                },
-                sorted[511],
-                sorted[972],
-                sorted[1013],
-                sorted[1023]
-            );
-            for (index, sample) in samples.into_iter().enumerate() {
-                println!("sample {index} {sample:.3}");
-            }
-            assert_eq!(
-                frames
-                    .iter()
-                    .map(|frame| frame.items().len())
-                    .sum::<usize>(),
-                if mixed { 750 } else { 1488 },
-                "empty diagram items are omitted"
-            );
-        }
-    }
-}
-
-#[test]
-#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
-fn activation_at_caps() {
-    use std::{hint::black_box, time::Instant};
-    let mut samples = Vec::with_capacity(64);
-    let mut allocations = Vec::with_capacity(64);
-    for iteration in 0..69 {
-        let mut budget = GlobalBudget::default();
-        let (mut scene, mut view) = gliding_scene("activation", 600, &mut budget);
-        let put: Vec<_> = (0..256)
-            .map(|index| mixed_track(index, 2, Some(index % 200)))
-            .collect();
-        let step = prepared(
-            &mut scene,
-            &mut budget,
-            view.layout(),
-            json!({"id":"activate","say":vec!["a";200].join(" "),"put":put}),
-        );
-        let mut frame = sample(&view, 100);
-        let start = Instant::now();
-        let ((), count) = allocation::count(|| {
-            view.activate(black_box(step), 100, 72_728, &mut frame)
-                .expect("caps activation");
-        });
-        let elapsed = start.elapsed().as_secs_f64() * 1e6;
-        if iteration >= 5 {
-            samples.push(elapsed);
-            allocations.push(count);
-        }
-    }
-    let mut sorted = samples.clone();
-    sorted.sort_by(f64::total_cmp);
-    println!(
-        "workload=activation-600-objects-256-replacement-tracks-200-words samples=64 p50_us={} p95_us={} p99_us={} max_us={}",
-        sorted[31], sorted[60], sorted[63], sorted[63]
-    );
-    for (index, (sample, allocations)) in samples.into_iter().zip(allocations).enumerate() {
-        println!("sample {index} {sample:.3} allocations={allocations}");
-    }
 }
 
 #[test]

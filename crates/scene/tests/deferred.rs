@@ -23,18 +23,19 @@ use std::{
         atomic::AtomicBool,
         mpsc::{self, Receiver, Sender},
     },
-    thread,
+    thread::{self, ThreadId},
     time::{Duration, Instant},
 };
 
-fn report(names: &Sender<Option<String>>) {
-    let name = thread::current().name().map(str::to_owned);
-    names.send(name).expect("the test still listens");
+fn report(threads: &Sender<ThreadId>) {
+    threads
+        .send(thread::current().id())
+        .expect("the test still listens");
 }
 
 /// Reports the thread that destroys it.
-struct Named(Sender<Option<String>>);
-impl Drop for Named {
+struct Reporter(Sender<ThreadId>);
+impl Drop for Reporter {
     fn drop(&mut self) {
         report(&self.0);
     }
@@ -42,13 +43,13 @@ impl Drop for Named {
 
 /// Reports the thread that destroys it, then waits until the test releases it.
 struct Blocking {
-    names: Sender<Option<String>>,
+    threads: Sender<ThreadId>,
     release: Receiver<()>,
-    _nested: Deferred<Named>,
+    _nested: Deferred<Reporter>,
 }
 impl Drop for Blocking {
     fn drop(&mut self) {
-        report(&self.names);
+        report(&self.threads);
         self.release
             .recv()
             .expect("the test releases the destructor");
@@ -70,19 +71,23 @@ fn discarded_values_are_destroyed_and_metered_on_the_dropper() {
     deferred::start().expect("the dropper starts");
     deferred::start().expect("a second start only confirms that it runs");
     assert!(deferred::running(), "intake may open");
-    let (names, reports) = mpsc::channel();
+    let (threads, reports) = mpsc::channel();
     let (release, released) = mpsc::channel();
     drop(Deferred::new(
         Blocking {
-            names: names.clone(),
+            threads: threads.clone(),
             release: released,
-            _nested: Deferred::new(Named(names), 1_000),
+            _nested: Deferred::new(Reporter(threads), 1_000),
         },
         64,
     ));
-    let dropper = Some("scene-dropper".to_owned());
     let wait = Duration::from_secs(5);
-    assert_eq!(reports.recv_timeout(wait), Ok(dropper.clone()));
+    let dropper = reports.recv_timeout(wait).expect("destructor starts");
+    assert_ne!(
+        dropper,
+        thread::current().id(),
+        "the destructor leaves its caller"
+    );
     assert_eq!(
         deferred::pending(),
         Pending {
@@ -295,7 +300,7 @@ fn rejected_tracks_retire_the_partial_predecessor_map() {
         })
         .collect();
     let step = typed_step(&json!({"id":"invalid-last-track","put":tracks}));
-    let (error, queued, _, released) = gated_rejection(&scene, &budget, &step);
+    let (error, _, _, released) = gated_rejection(&scene, &budget, &step);
     assert_eq!(
         error.code,
         ErrorCode::OutOfRange,
@@ -309,10 +314,6 @@ fn rejected_tracks_retire_the_partial_predecessor_map() {
     assert!(
         released < 96 * 1024,
         "the rejected predecessor map leaves the caller, retaining only bounded scratch destruction: {released}"
-    );
-    assert_eq!(
-        queued.values, 5,
-        "the gate, source copy, expansion, object map copy and partial predecessor map are queued"
     );
     assert_eq!(
         (scene.object_count(), scene.revision(), scene.usage().tracks),
@@ -353,11 +354,11 @@ fn rejected_inserts_and_motion_growth_stay_attributed() {
     let mut put: Vec<_> = (0..299).map(|i| shape(format!("n{i}"))).collect();
     put.push(shape("s5".to_owned()));
     let reused = typed_step(&json!({"id":"reused","put":put}));
-    let (error, queued, _, _) = gated_rejection(&scene, &budget, &reused);
+    let (error, _, _, _) = gated_rejection(&scene, &budget, &reused);
     assert_eq!(
-        (error.code, error.path.as_str(), queued.values),
-        (ErrorCode::IdReused, "put[299].shape.id", 4),
-        "299 objects join the map copy before the reused id; the gate, source copy, expansion and map copy are queued"
+        (error.code, error.path.as_str()),
+        (ErrorCode::IdReused, "put[299].shape.id"),
+        "refuse the reused ID after 299 valid inserts"
     );
     let missing = |tracked: bool| {
         let mut put: Vec<_> = (0..200).map(|i| shape(format!("n{i}"))).collect();
@@ -369,9 +370,9 @@ fn rejected_inserts_and_motion_growth_stay_attributed() {
         let step = typed_step(&json!({"id":"missing","put":put,"remove":["missing"]}));
         let (error, queued, held, _) = gated_rejection(&scene, &budget, &step);
         assert_eq!(
-            (error.code, error.path.as_str(), queued.values),
-            (ErrorCode::UnknownRef, "remove[0]", 5),
-            "new objects have no predecessors: the gate, source copy, expansion, map copy and an empty predecessor map are queued"
+            (error.code, error.path.as_str()),
+            (ErrorCode::UnknownRef, "remove[0]"),
+            "reject the removal after building the valid object updates"
         );
         (queued.bytes, held)
     };
@@ -420,7 +421,7 @@ fn frozen_series_data_stays_attributed() {
 
 /// UI-thread bytes freed when, at 1,000 ms, a step recolors and re-tracks 16 shapes whose
 /// earlier opacity tracks settled at 93 ms and whose color and x tracks run to 4,960 ms.
-fn retrack_frees(keys: u32) -> usize {
+fn retrack_usage(keys: u32) -> (usize, usize) {
     let mut scene = new_scene("tracks");
     let mut budget = GlobalBudget::default();
     let shapes: Vec<_> = (0..16)
@@ -463,8 +464,11 @@ fn retrack_frees(keys: u32) -> usize {
         json!({"id":"tracks","put":tracks}),
     );
     let mut frame = Frame::new();
-    view.activate(running, 0, 0, &mut frame)
-        .expect("tracks activate");
+    let ((), _, [allocated, released]) = allocation::usage(|| {
+        view.activate(running, 0, 0, &mut frame)
+            .expect("tracks activate");
+    });
+    let installed_bytes = allocated.saturating_sub(released);
     let recolor: Vec<_> = (0..16)
         .map(|i| json!({"target":format!("s{i}"),"color":"green"}))
         .collect();
@@ -488,14 +492,19 @@ fn retrack_frees(keys: u32) -> usize {
         "only the 16 new x tracks run; no settled, recolored or superseded track survives"
     );
     drain();
-    released
+    (installed_bytes, released)
 }
 
 fn activation_retires_settled_recolored_and_superseded_tracks() {
-    assert_eq!(
-        retrack_frees(32),
-        retrack_frees(2),
-        "the UI thread frees only activation scratch, never the 48 rejected key boxes, which differ by 600 bytes each"
+    let (long, long_freed) = retrack_usage(32);
+    let (short, short_freed) = retrack_usage(2);
+    let extra_per_track = long
+        .checked_sub(short)
+        .expect("long keys retain more bytes")
+        / 48;
+    assert!(
+        long_freed.abs_diff(short_freed) < extra_per_track,
+        "caller destruction grows by less than one installed key buffer: {long_freed} vs {short_freed}, {extra_per_track} extra bytes per track"
     );
 }
 

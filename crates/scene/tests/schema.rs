@@ -1,6 +1,8 @@
 //! The offered JSON contract agrees with the independent validator and typed decoder.
 
-use kumochi_scene::{draw_schema, parse_record};
+use kumochi_scene::{
+    Admission, ErrorCode, GlobalBudget, Record, SceneState, draw_schema, parse_record,
+};
 use serde_json::{Value, json};
 
 fn valid(record: &Value) -> bool {
@@ -75,31 +77,80 @@ fn every_two_dimensional_operation_and_mixed_form_fits_the_schema() {
 
 #[test]
 fn scalar_dimension_minimums_match_admission() {
-    let put = |operation: Value| json!({"step": {"id": "s", "put": [operation]}});
+    let Record::Begin(header) =
+        parse_record(br#"{"begin":{"v":1,"scene":"s","surface":"overlay","alt":""}}"#)
+            .expect("valid begin")
+    else {
+        panic!("not a begin");
+    };
+    let scene = SceneState::begin(header).expect("valid scene");
+    let global = GlobalBudget::default();
+    let check = |operation: Value, path: &str, expected: bool| {
+        let record = json!({"step": {"id": "s", "put": [operation]}});
+        assert_eq!(valid(&record), expected, "{path}");
+        let Record::Step(step) = parse_record(&serde_json::to_vec(&record).expect("fixture JSON"))
+            .expect("dimension values decode for admission")
+        else {
+            panic!("not a step");
+        };
+        if expected {
+            assert!(
+                matches!(scene.admit(&step, &global), Ok(Admission::New(_))),
+                "{path}"
+            );
+        } else {
+            let error = scene.admit(&step, &global).expect_err("invalid dimension");
+            assert_eq!(error.code, ErrorCode::OutOfRange);
+            assert_eq!(error.path.as_str(), format!("put[0].{path}"));
+        }
+    };
     for field in ["width", "radius"] {
         for (value, expected) in [(json!(0), true), (json!(-1), false)] {
-            let mut shape = json!({"id": "s", "kind": "rect"});
+            let mut shape = json!({"id": "s", "kind": "rect", "box": [0, 0, 4, 5]});
             shape[field] = value;
-            assert_eq!(
-                valid(&put(json!({ "shape": shape }))),
-                expected,
-                "shape {field} takes zero"
-            );
+            check(json!({"shape": shape}), &format!("shape.{field}"), expected);
         }
     }
     for (value, expected) in [(json!(0.5), true), (json!(0), false)] {
-        for operation in [
-            json!({"line": {"id": "l", "from": [0, 0], "to": [1, 1], "width": value}}),
-            json!({"arrow": {"id": "a", "from": [0, 0], "to": [1, 1], "width": value}}),
-            json!({"path": {"id": "p", "d": "M0 0", "width": value}}),
-            json!({"path": {"id": "p", "d": "M0 0", "scale": value}}),
-            json!({"shape": {"id": "s", "kind": "circle", "r": value}}),
-            json!({"text": {"id": "t", "at": [0, 0], "text": "", "size": value}}),
-            json!({"text": {"id": "t", "at": [0, 0], "text": "", "max_width": value}}),
-            json!({"callout": {"id": "c", "target": [0, 0], "text": "", "max_width": value}}),
-            json!({"highlight": {"id": "h", "target": [0, 0], "pad": value}}),
+        for (operation, path) in [
+            (
+                json!({"line": {"id": "l", "from": [0, 0], "to": [1, 1], "width": value}}),
+                "line.width",
+            ),
+            (
+                json!({"arrow": {"id": "a", "from": [0, 0], "to": [1, 1], "width": value}}),
+                "arrow.width",
+            ),
+            (
+                json!({"path": {"id": "p", "d": "M0 0 L1 1", "width": value}}),
+                "path.width",
+            ),
+            (
+                json!({"path": {"id": "p", "d": "M0 0 L1 1", "scale": value}}),
+                "path.scale",
+            ),
+            (
+                json!({"shape": {"id": "s", "kind": "circle", "at": [0, 0], "r": value}}),
+                "shape.r",
+            ),
+            (
+                json!({"text": {"id": "t", "at": [0, 0], "text": "", "size": value}}),
+                "text.size",
+            ),
+            (
+                json!({"text": {"id": "t", "at": [0, 0], "text": "", "max_width": value}}),
+                "text.max_width",
+            ),
+            (
+                json!({"callout": {"id": "c", "target": [0, 0], "text": "", "max_width": value}}),
+                "callout.max_width",
+            ),
+            (
+                json!({"highlight": {"id": "h", "target": [0, 0], "pad": value}}),
+                "highlight.pad",
+            ),
         ] {
-            assert_eq!(valid(&put(operation.clone())), expected, "{operation}");
+            check(operation, path, expected);
         }
     }
 }

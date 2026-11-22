@@ -243,7 +243,6 @@ fn descendant_anchors_cancel_nested_and_already_ranked_cluster_transforms() {
             {"text":{"id":"tag2","in":"left","at":{"ref":"a"},"text":"LOCAL"}}
         ]}),
     );
-    assert_rect(bounds(&third.after, "tag2"), [160.0, 77.0, 40.0, 10.0]);
     let (_, recovered) = recover(
         scene.header().clone(),
         scene.recovery_log(),
@@ -254,7 +253,34 @@ fn descendant_anchors_cancel_nested_and_already_ranked_cluster_transforms() {
         None,
     )
     .expect("recovered anchors");
-    assert_eq!(third.after.items(), recovered.items());
+    for layout in [&third.after, &recovered] {
+        for (name, expected) in [
+            ("a", [140.0, 62.0, 80.0, 40.0]),
+            ("b", [140.0, 250.0, 80.0, 40.0]),
+            ("box", [60.0, 32.0, 240.0, 100.0]),
+            ("tag", [160.0, 77.0, 40.0, 10.0]),
+            ("tag2", [160.0, 77.0, 40.0, 10.0]),
+        ] {
+            assert_rect(bounds(layout, name), expected);
+            assert_eq!(
+                layout.handle(&id(name)),
+                Some(scene.handle(&id(name)).expect("committed identity"))
+            );
+        }
+        let items = layout.items();
+        for name in ["tag", "tag2"] {
+            let handle = layout.handle(&id(name)).expect("tag handle");
+            let item = items
+                .iter()
+                .find(|item| item.handle == handle)
+                .expect("tag");
+            assert!(
+                item.primitives.iter().any(
+                    |prim| matches!(prim, Prim::Text { text, .. } if text.as_str() == "LOCAL")
+                )
+            );
+        }
+    }
 }
 
 #[test]
@@ -382,8 +408,11 @@ fn reverse_anchor_chain_prepares_all_locally_owned_texts() {
     assert_eq!(budget.usage().objects, 403);
     let picture = prepare(input, &mut Measure, &AtomicBool::new(false)).expect("reverse chain");
     assert_eq!(picture.after.items().len(), 403);
-    for name in ["t0", "t399"] {
-        assert_rect(bounds(&picture.after, name), [176.0, 47.0, 8.0, 10.0]);
+    for index in 0..400 {
+        assert_rect(
+            bounds(&picture.after, &format!("t{index}")),
+            [176.0, 47.0, 8.0, 10.0],
+        );
     }
 }
 

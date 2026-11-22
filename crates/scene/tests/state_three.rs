@@ -1,7 +1,7 @@
 //! 3D admission: views, solids, attachments, budgets and transform bounds.
 use kumochi_scene::{
-    Admission, BindingError, Budget, Committed, ErrorCode, GlobalBudget, Handle, Record,
-    SceneBinding, SceneEvent, SceneState, Step, StopCut, StopOutcome, WireId,
+    Admission, BindingError, Budget, ErrorCode, GlobalBudget, Handle, SceneBinding, SceneEvent,
+    SceneState, StopCut, StopOutcome, WireId,
     deferred::Deferred,
     parse_record,
     record::Op,
@@ -14,6 +14,10 @@ use kumochi_scene::{
 };
 use std::sync::atomic::AtomicBool;
 
+#[path = "support/state_three.rs"]
+mod state_three;
+use state_three::{commit, compact, cube, header, lathe, put, scene, step, view};
+
 #[path = "support/allocation.rs"]
 #[expect(
     dead_code,
@@ -21,58 +25,17 @@ use std::sync::atomic::AtomicBool;
 )]
 mod allocation;
 
-fn header() -> kumochi_scene::Begin {
-    let source = br#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":""}}"#;
-    let Ok(Record::Begin(header)) = parse_record(source) else {
-        panic!("begin fixture");
-    };
-    header
-}
-fn step(json: &str) -> Step {
-    let record = format!(r#"{{"step":{json}}}"#);
-    match parse_record(record.as_bytes()) {
-        Ok(Record::Step(step)) => step,
-        other => panic!("step fixture: {other:?}"),
-    }
-}
-fn put(name: &str, ops: &[String]) -> String {
-    format!(r#"{{"id":"{name}","put":[{}]}}"#, ops.join(","))
-}
 fn id(value: &str) -> WireId {
     value.to_owned().try_into().expect("valid id")
 }
-fn view(name: &str) -> String {
-    format!(r#"{{"view3d":{{"id":"{name}"}}}}"#)
-}
-/// A 12-triangle box in view v.
-fn cube(name: &str, extra: &str) -> String {
-    format!(r#"{{"solid":{{"in":"v","id":"{name}","shape":"box","size":[2,2,2]{extra}}}}}"#)
-}
 fn sphere(name: &str, extra: &str) -> String {
     format!(r#"{{"solid":{{"in":"v","id":"{name}","shape":"sphere","r":1{extra}}}}}"#)
-}
-/// A lathe of radius 1 with 2 × segments × (points − 1) triangles.
-fn lathe(name: &str, points: usize, segments: u8) -> String {
-    let profile: Vec<String> = (0..points).map(|i| format!("[1,{i}]")).collect();
-    format!(
-        r#"{{"solid":{{"in":"v","id":"{name}","shape":"lathe","points":[{}],"segments":{segments}}}}}"#,
-        profile.join(",")
-    )
 }
 fn track(target: &str, track: &str, to: [f32; 3], ease: &str) -> String {
     format!(
         r#"{{"anim":{{"target":"{target}","track":"{track}","keys":[[0,[0,0,0]],[1000,[{},{},{}]]],"ease":"{ease}"}}}}"#,
         to[0], to[1], to[2]
     )
-}
-fn scene() -> SceneState {
-    SceneState::begin(header()).expect("valid header")
-}
-fn commit(state: &mut SceneState, global: &mut GlobalBudget, json: &str) -> Committed {
-    let Admission::New(admitted) = state.admit(&step(json), global).expect("valid step") else {
-        panic!("new step");
-    };
-    state.commit(admitted, global).expect("fresh admission")
 }
 fn refused(state: &SceneState, global: &GlobalBudget, json: &str) -> (ErrorCode, String) {
     let before = (
@@ -880,20 +843,6 @@ fn set_info_keeps_its_utf8_text_through_a_stored_replay() {
     assert_eq!(infos, ["é½中"]);
 }
 
-/// `tests/mesh_size.rs`'s maximum outline: 64 retained perimeter points, 252 triangles.
-fn compact(name: &str) -> String {
-    let points: Vec<String> = (0..16)
-        .map(|i| format!("[{i},0]"))
-        .chain((0..16).map(|i| format!("[16,{i}]")))
-        .chain((0..16).map(|i| format!("[{},16]", 16 - i)))
-        .chain((0..16).map(|i| format!("[0,{}]", 16 - i)))
-        .collect();
-    format!(
-        r#"{{"solid":{{"in":"v","id":"{name}","shape":"extrude","points":[{}],"depth":2}}}}"#,
-        points.join(",")
-    )
-}
-
 #[test]
 fn a_step_admits_at_most_2304_extrude_outline_points() {
     let ops = |count: usize| {
@@ -953,97 +902,6 @@ fn a_step_of_2305_extrude_outline_points_is_refused() {
         refused(&state, &global, &put("a", &ops)),
         over(Budget::OutlinePoints)
     );
-}
-
-fn polygon(name: &str) -> String {
-    let points: Vec<String> = (0..64)
-        .map(|i| {
-            let angle = f64::from(i) * std::f64::consts::TAU / 64.0;
-            format!("[{:.0},{:.0}]", 1000.0 * angle.cos(), 1000.0 * angle.sin())
-        })
-        .collect();
-    format!(
-        r#"{{"solid":{{"in":"v","id":"{name}","shape":"extrude","points":[{}],"depth":2}}}}"#,
-        points.join(",")
-    )
-}
-
-#[test]
-#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
-fn measure_admit() {
-    use kumochi_scene::limits::MAX_STEP_OUTLINE_POINTS;
-    use std::{hint::black_box, time::Instant};
-
-    let extrudes = |outline: fn(&str) -> String, first: Option<String>| {
-        let mut ops: Vec<String> = first.into_iter().collect();
-        let mut count = 0;
-        loop {
-            ops.push(outline(&format!("e{count}")));
-            if count == MAX_STEP_OUTLINE_POINTS / 64
-                || format!(r#"{{"step":{}}}"#, put("a", &ops)).len() > 32 * 1024
-            {
-                ops.pop();
-                return (count, step(&put("a", &ops)));
-            }
-            count += 1;
-        }
-    };
-    let (count, largest) = extrudes(polygon, Some(view("v")));
-    let (_, late) = extrudes(polygon, None);
-    let (compact_count, compact_largest) = extrudes(compact, Some(view("v")));
-    let (_, compact_late) = extrudes(compact, None);
-    let mut full = (scene(), GlobalBudget::default());
-    commit(
-        &mut full.0,
-        &mut full.1,
-        &put("f", &[view("v"), lathe("l", 251, 48)]),
-    );
-    let mut boxes = vec![view("v")];
-    boxes.extend((0..160).map(|i| cube(&format!("s{i}"), "")));
-    let empty = (scene(), GlobalBudget::default());
-    println!(
-        "largest legal steps: {count} round and {compact_count} compact extrudes of 64 points"
-    );
-    for (workload, (state, global), step, refused) in [
-        ("largest-legal-extrude-step", &empty, largest, None),
-        (
-            "extrude-step-refused-late",
-            &full,
-            late,
-            Some(ErrorCode::OverBudget(Budget::Triangles)),
-        ),
-        (
-            "largest-compact-extrude-step",
-            &empty,
-            compact_largest,
-            None,
-        ),
-        (
-            "compact-step-refused-late",
-            &full,
-            compact_late,
-            Some(ErrorCode::OverBudget(Budget::Triangles)),
-        ),
-        ("160-small-solids", &empty, step(&put("a", &boxes)), None),
-    ] {
-        assert_eq!(
-            state.admit(&step, global).err().map(|error| error.code),
-            refused,
-            "{workload}"
-        );
-        let mut samples: Vec<f64> = (0..200)
-            .map(|_| {
-                let start = Instant::now();
-                drop(black_box(state.admit(black_box(&step), global)));
-                start.elapsed().as_secs_f64() * 1e6
-            })
-            .collect();
-        samples.sort_by(f64::total_cmp);
-        println!(
-            "{workload}: n=200 p50={:.1}us p99={:.1}us max={:.1}us",
-            samples[100], samples[197], samples[199]
-        );
-    }
 }
 
 #[test]
