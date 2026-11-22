@@ -90,6 +90,8 @@ pub(crate) struct Live {
     held: Mutex<Option<Held>>,
     fence: Fence,
     budget: Arc<Budget>,
+    #[cfg(test)]
+    test_pictures: Option<crate::coordinator::PictureRoutes>,
 }
 
 impl fmt::Debug for Live {
@@ -106,7 +108,18 @@ impl Live {
             held: Mutex::default(),
             fence: Fence::default(),
             budget,
+            #[cfg(test)]
+            test_pictures: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_pictures(
+        mut self,
+        pictures: crate::coordinator::PictureRoutes,
+    ) -> Self {
+        self.test_pictures = Some(pictures);
+        self
     }
 
     fn held(&self) -> MutexGuard<'_, Option<Held>> {
@@ -237,7 +250,13 @@ impl Live {
         tag: ConnectionTag,
         motion: Motion,
     ) -> Result<(MessagesBody, Conversation), ()> {
-        let fresh = || encode::body(&request.request, tag).map_err(drop);
+        let fresh = || {
+            #[cfg(test)]
+            if let Some(routes) = self.test_pictures {
+                return encode::body_under(&request.request, tag, routes).map_err(drop);
+            }
+            encode::body(&request.request, tag).map_err(drop)
+        };
         if motion == Motion::Standalone {
             return fresh();
         }
