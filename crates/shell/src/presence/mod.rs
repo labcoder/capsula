@@ -175,13 +175,16 @@ struct Presence {
     scene_timer: Option<Task<()>>,
     scene_deadline: Option<Instant>,
     /// Speaker stops a busy owner hasn't taken yet, oldest first, each with its tries left.
-    pending_stops: std::collections::VecDeque<(Session, kumochi_protocol::message::RunId, u8)>,
+    pending_stops:
+        std::collections::VecDeque<(Session, kumochi_protocol::message::RunId, u8, bool)>,
     /// The next offer of the front pending stop, or the end of its session.
     stop_retry: Option<Task<()>>,
     /// The native speech lease last read: its session, run and when it runs out.
     speech: Rc<std::cell::Cell<Option<(u64, kumochi_protocol::message::RunId, Instant)>>>,
     /// The next read of the speech lease, when it runs out or after a busy owner.
     speech_expiry: Option<Task<()>>,
+    /// Busy reads of the speech lease in a row, which back its rereads off.
+    speech_busy: u32,
     escape_hold: EscapeHold<EscapeHotkey>,
     /// Esc with the talk keys down, held only while a hold's keys are.
     talk_escape: TalkEscape<EscapeHotkey>,
@@ -311,6 +314,12 @@ impl Presence {
 
     fn text_open(&self) -> bool {
         self.text.as_ref().is_some_and(|text| text.typing.visible)
+    }
+
+    fn text_focused(&self) -> bool {
+        self.text
+            .as_ref()
+            .is_some_and(|text| text.typing.visible && text.focused)
     }
 
     /// Whether the pointer is over the line's band, where the hit proxy takes it, or over the
@@ -452,7 +461,7 @@ impl Presence {
     /// Speech holds global Esc unless a focused Kumochi panel takes the key itself, Stop first.
     fn speaking(&self, now: Instant) -> bool {
         self.speech.get().is_some_and(|(.., until)| until > now)
-            && !(self.settings_focused() || self.threads_focused() || self.text_open())
+            && !(self.settings_focused() || self.threads_focused() || self.text_focused())
     }
 
     /// A Kumochi panel gained or lost focus, which decides who takes Esc for speech.
@@ -480,8 +489,11 @@ impl Presence {
         };
         self.speech.set(lease);
         let next = if matches!(read, Some(Err(_))) {
-            Some(now + SPEECH_RETRY)
+            let delay = SPEECH_RETRY * 2_u32.pow(self.speech_busy);
+            self.speech_busy = (self.speech_busy + 1).min(3);
+            Some(now + delay)
         } else {
+            self.speech_busy = 0;
             lease.map(|(.., until)| until)
         };
         self.speech_expiry = next.map(|at| {
@@ -1113,6 +1125,7 @@ pub(crate) fn open(
             stop_retry: None,
             speech: Rc::default(),
             speech_expiry: None,
+            speech_busy: 0,
             escape_hold: EscapeHold::default(),
             talk_escape: TalkEscape::default(),
             escape_fixture: flags.escape_fixture,
@@ -1205,7 +1218,7 @@ fn schedule_diagnostic_launch(owner: &Entity<Presence>, flags: &Launch, cx: &mut
 
 /// The peek's height in logical pixels: Kumo's row, one row of actions and the insets.
 const PEEK_HEIGHT: f32 = 124.0;
-/// How soon a busy output owner's speech lease is read again.
+/// How soon a busy output owner's speech lease is read again, doubling up to 80 ms.
 const SPEECH_RETRY: Duration = Duration::from_millis(10);
 
 fn listen(

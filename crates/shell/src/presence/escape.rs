@@ -12,6 +12,14 @@ impl Presence {
         speech: Option<(u64, RunId)>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
+        // A press that saw another session's speech is that session's, and nothing here is.
+        if speech.is_some_and(|(session, _)| {
+            self.session
+                .as_ref()
+                .is_none_or(|current| current.generation() != session)
+        }) {
+            return Ok(());
+        }
         self.voice.gates.forget_runs();
         // This press revoked the input of a hold that is already torn down: by its cancelled
         // `End`, in this delivery or at the raw Esc-down before it, or by the brain's reply or
@@ -166,7 +174,11 @@ impl Presence {
     /// One Esc press from the typing panel or Stop, targeting the speech lease that holds now.
     pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         let now = std::time::Instant::now();
-        let speech = self.speech.get().filter(|(.., until)| *until > now);
+        let session = self.session.as_ref().map(Session::generation);
+        let speech = self
+            .speech
+            .get()
+            .filter(|(held, _, until)| Some(*held) == session && *until > now);
         self.escape_for(speech.map(|(session, run, _)| (session, run)), cx)
     }
 
@@ -246,16 +258,20 @@ impl Presence {
                 answer.and_then(|_| self.runs.stop())
             }
             Escape::Stop => {
-                // Only a press deferred past its run: Done waits for the final reply, then RunEnd retires the speaker.
-                if let Some((session, run)) =
-                    speech.filter(|(_, run)| self.runs.stoppable() != Some(*run))
-                {
-                    if let Some(current) = self
+                if let Some((session, run)) = speech {
+                    let current = self
                         .session
                         .clone()
-                        .filter(|current| current.generation() == session)
-                    {
-                        self.stop_speaker(current, run, cx);
+                        .filter(|current| current.generation() == session);
+                    if let Some(current) = current {
+                        // Done comes on control before RunEnd on data, so an ended run can still speak.
+                        if self.runs.state_ended(run)
+                            || self.moving_run(std::time::Instant::now()) != Some(run)
+                        {
+                            self.stop_speech_locally(current, run, cx);
+                        } else {
+                            self.fence_spoken(run, &current, cx);
+                        }
                     }
                 } else {
                     self.stop_moving(cx);

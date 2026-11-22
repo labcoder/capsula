@@ -25,8 +25,6 @@ mod gate;
 
 const COMMANDS: usize = 16;
 const SERVICE: usize = 8;
-/// How long accepted presentation keeps speech evidence past its last presented frame.
-const SPEECH_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OwnerExit {
@@ -656,8 +654,7 @@ impl Worker {
             };
             match self.engine.observe(anchor) {
                 Observation::Accepted => {
-                    self.speech
-                        .hold(Instant::now() + anchor.at.saturating_sub(now) + SPEECH_GRACE);
+                    self.speech.hold(anchor.at, now);
                     if let Some(drawing) = &mut self.drawing {
                         drawing.observe(anchor, now);
                     }

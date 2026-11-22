@@ -65,6 +65,8 @@ pub(super) struct TextPanel {
     pub(super) window: AnyWindowHandle,
     pub(super) view: Entity<TextView>,
     pub(super) typing: Typing,
+    /// Its window is active, so it keeps Esc from speech.
+    pub(super) focused: bool,
     pub(super) bounds: [i32; 4],
     pub(super) input: Entity<InputState>,
     /// The window in front before the panel took focus, given back when it closes.
@@ -97,6 +99,7 @@ impl TextPanel {
             window,
             view,
             typing: Typing::default(),
+            focused: false,
             bounds: [0; 4],
             input,
             previous: None,
@@ -239,10 +242,15 @@ impl Presence {
             let result = window.update(cx, |_, window, cx| {
                 owner.update(cx, |this, cx| {
                     let activation = cx.observe_window_activation(window, |this, window, cx| {
-                        if window.is_window_active() {
-                            if let Some(text) = &mut this.text {
+                        let active = window.is_window_active();
+                        if let Some(text) = &mut this.text {
+                            text.focused = active;
+                            if active {
                                 text.typing.activated();
                             }
+                        }
+                        this.focus_changed(cx);
+                        if active {
                             return;
                         }
                         let owner = cx.weak_entity();
@@ -255,7 +263,8 @@ impl Presence {
                         });
                     });
                     if let Some(text) = &mut this.text {
-                        if window.is_window_active() {
+                        text.focused = window.is_window_active();
+                        if text.focused {
                             text.typing.activated();
                         }
                         text.activation = Some(activation);
@@ -277,6 +286,7 @@ impl Presence {
         Ok(TextPanel {
             window,
             typing: Typing::default(),
+            focused: false,
             bounds: [0; 4],
             input,
             view,
