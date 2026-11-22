@@ -226,6 +226,11 @@ impl Coordinator {
         }
     }
 
+    pub(crate) fn use_uncounted_measure(&mut self, metrics: Option<TextMetricsV1>) {
+        debug_assert!(self.settled(), "the visible set must already be settled");
+        self.drawing.use_uncounted_measure(metrics);
+    }
+
     /// Lays drawing steps out through the runtime's preparation thread, as the shipped brain does.
     #[cfg(test)]
     pub(crate) fn defer_drawing_preparation(&mut self) {

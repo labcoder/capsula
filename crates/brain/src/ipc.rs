@@ -11,7 +11,7 @@ use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::frame::{self, FrameError, HEADER_LEN, Pipe};
 use kumochi_protocol::message::{
     AudioSession, Capability, ControlToBrain, ControlToShell, DataToBrain, Hello, Incarnation,
-    TEXT_METRICS_MAX_BYTES,
+    IssueSession, TEXT_METRICS_MAX_BYTES,
 };
 use kumochi_protocol::tap::Direction;
 use kumochi_scene::display::TextMetricsV1;
@@ -38,7 +38,7 @@ pub use audio_fixture::{
     offline_plain_peer, offline_speaking_hold_peer, offline_text_peer,
 };
 
-/// How long a connected client has to complete each step of the handshake.
+/// The budget for the control hello and, separately, the whole data handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the brain waits with no shell before exiting [guess]. A shell that gave up on it,
 /// or quit before it was up, leaves nobody to tell it to stop; the next shell starts another.
@@ -240,39 +240,21 @@ impl Pipes {
         };
         send(&mut self.control, &welcome, tap).await?;
 
-        let second_leg_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-        timeout_at(second_leg_deadline, self.data.connect())
-            .await
-            .map_err(|_| SessionError::Timeout)??;
-        check_client(&self.data, &identity.shell_image)?;
-        let data_deadline = match audio {
-            AudioSession::Legacy => Instant::now() + HANDSHAKE_TIMEOUT,
-            AudioSession::QueuedRequired => second_leg_deadline,
-        };
-        let first = timeout_at(
-            data_deadline,
-            read_sized::<DataToBrain>(&mut self.data, Pipe::Data),
+        let (process, text_metrics) = read_startup_data(
+            identity,
+            (audio == AudioSession::QueuedRequired).then_some(session),
+            tap,
+            async {
+                self.data.connect().await?;
+                check_client(&self.data, &identity.shell_image)?;
+                Ok(&mut self.data)
+            },
+            |data| {
+                platform::shell_connection(&self.control, data, &identity.shell_image)
+                    .map_err(SessionError::from)
+            },
         )
-        .await
-        .map_err(|_| SessionError::Timeout)??;
-        let Some((first, len)) = first else {
-            return Err(SessionError::ClosedEarly);
-        };
-        tap.record(Pipe::Data, Direction::ToBrain, &first, len);
-        let (hello, paired) = match first {
-            DataToBrain::Hello(hello) => (hello, None),
-            DataToBrain::QueuedHello(hello, session) => (hello, Some(session)),
-            _ => return Err(SessionError::ClosedEarly),
-        };
-        if check_hello(&hello, identity) != Verdict::Welcome {
-            return Err(SessionError::WrongCapability);
-        }
-        let expected = (audio == AudioSession::QueuedRequired).then_some(session);
-        if paired != expected {
-            return Err(SessionError::Protocol("data hello does not match control"));
-        }
-        let process = platform::shell_connection(&self.control, &self.data, &identity.shell_image)?;
-        let text_metrics = read_text_metrics(&mut self.data, data_deadline).await?;
+        .await?;
         if audio == AudioSession::QueuedRequired {
             brain.install_issue_session(session);
         }
@@ -292,6 +274,40 @@ impl Pipes {
             },
         )
     }
+}
+
+async fn read_startup_data<R: AsyncRead + Unpin, P>(
+    identity: &Identity,
+    expected: Option<IssueSession>,
+    tap: &mut Tap,
+    connect: impl Future<Output = Result<R, SessionError>>,
+    check_connection: impl FnOnce(&R) -> Result<P, SessionError>,
+) -> Result<(P, Option<TextMetricsV1>), SessionError> {
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let mut data = timeout_at(deadline, connect)
+        .await
+        .map_err(|_| SessionError::Timeout)??;
+    let first = timeout_at(deadline, read_sized::<DataToBrain>(&mut data, Pipe::Data))
+        .await
+        .map_err(|_| SessionError::Timeout)??;
+    let Some((first, len)) = first else {
+        return Err(SessionError::ClosedEarly);
+    };
+    tap.record(Pipe::Data, Direction::ToBrain, &first, len);
+    let (hello, paired) = match first {
+        DataToBrain::Hello(hello) => (hello, None),
+        DataToBrain::QueuedHello(hello, session) => (hello, Some(session)),
+        _ => return Err(SessionError::ClosedEarly),
+    };
+    if check_hello(&hello, identity) != Verdict::Welcome {
+        return Err(SessionError::WrongCapability);
+    }
+    if paired != expected {
+        return Err(SessionError::Protocol("data hello does not match control"));
+    }
+    let process = check_connection(&data)?;
+    let text_metrics = read_text_metrics(&mut data, deadline).await?;
+    Ok((process, text_metrics))
 }
 
 /// Resolves when the relaunched shell has ended, or when the relaunch dropped its sender
@@ -364,17 +380,21 @@ async fn read_text_metrics(
     if Instant::now() >= deadline {
         return Err(SessionError::Timeout);
     }
-    match timeout_at(
+    let metrics = match timeout_at(
         deadline,
         read_capped::<DataToBrain>(pipe, TEXT_METRICS_MAX_BYTES),
     )
     .await
     .map_err(|_| SessionError::Timeout)??
     {
-        Some((DataToBrain::TextMetrics(profile), _)) => Ok(profile.filter(TextMetricsV1::valid)),
-        Some(_) => Err(SessionError::Protocol("expected startup TextMetrics")),
-        None => Err(SessionError::ClosedEarly),
+        Some((DataToBrain::TextMetrics(profile), _)) => profile.filter(TextMetricsV1::valid),
+        Some(_) => return Err(SessionError::Protocol("expected startup TextMetrics")),
+        None => return Err(SessionError::ClosedEarly),
+    };
+    if Instant::now() >= deadline {
+        return Err(SessionError::Timeout);
     }
+    Ok(metrics)
 }
 
 async fn read_capped<T: DeserializeOwned>(
