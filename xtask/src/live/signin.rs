@@ -384,28 +384,38 @@ mod tests {
 
     #[test]
     fn a_sign_in_prints_only_states_and_keeps_one_deadline() {
-        let mut brain = fixture(vec![
-            Step::View(signed_out()),
-            Step::View(AccountView::SigningIn),
-            Step::View(AccountView::SigningIn),
-            Step::View(signed_in(None)),
-        ]);
-        let (out, error, quit_sent) = run(&mut brain);
-        assert_eq!(
-            out,
-            format!("account: signed out\n{WAITING}account: signed in, plan enabled\n")
-        );
-        assert_eq!(error, None);
-        assert_eq!(ops(&brain), [SIGN_IN, QUIT]);
-        assert!(quit_sent);
-        let [first, answer, settle, again] = brain.limits[..] else {
-            panic!("four waits: {:?}", brain.limits);
+        let declined = AccountView::SignedIn {
+            email: None,
+            plan: PlanState::Declined,
+            recovery: None,
         };
-        assert_eq!((first, answer), (VIEW, VIEW));
-        assert!(
-            settle <= SIGNIN && again < settle,
-            "{settle:?} then {again:?}"
-        );
+        for (end, words) in [
+            (signed_in(None), "plan enabled"),
+            (declined, "plan declined"),
+        ] {
+            let mut brain = fixture(vec![
+                Step::View(signed_out()),
+                Step::View(AccountView::SigningIn),
+                Step::View(AccountView::SigningIn),
+                Step::View(end),
+            ]);
+            let (out, error, quit_sent) = run(&mut brain);
+            assert_eq!(
+                out,
+                format!("account: signed out\n{WAITING}account: signed in, {words}\n")
+            );
+            assert_eq!(error, None);
+            assert_eq!(ops(&brain), [SIGN_IN, QUIT]);
+            assert!(quit_sent);
+            let [first, answer, settle, again] = brain.limits[..] else {
+                panic!("four waits: {:?}", brain.limits);
+            };
+            assert_eq!((first, answer), (VIEW, VIEW));
+            assert!(
+                settle <= SIGNIN && again < settle,
+                "{settle:?} then {again:?}"
+            );
+        }
     }
 
     #[test]
@@ -435,26 +445,6 @@ mod tests {
             assert_eq!(ops(&brain), [QUIT]);
             assert!(quit_sent);
         }
-    }
-
-    #[test]
-    fn a_declined_plan_still_counts_as_signed_in() {
-        let declined = AccountView::SignedIn {
-            email: None,
-            plan: PlanState::Declined,
-            recovery: None,
-        };
-        let mut brain = fixture(vec![
-            Step::View(signed_out()),
-            Step::View(AccountView::SigningIn),
-            Step::View(declined),
-        ]);
-        let (out, error, _) = run(&mut brain);
-        assert_eq!(
-            out,
-            format!("account: signed out\n{WAITING}account: signed in, plan declined\n")
-        );
-        assert_eq!(error, None);
     }
 
     #[test]

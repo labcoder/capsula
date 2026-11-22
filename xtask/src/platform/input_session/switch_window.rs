@@ -218,7 +218,7 @@ pub(super) fn failed(fixture: Window, error: anyhow::Error) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::placement;
+    use super::{HEIGHT, WIDTH, placement};
     use windows::Win32::Foundation::RECT;
 
     #[test]
@@ -236,35 +236,53 @@ mod tests {
             bottom: 880,
         };
         let dock = RECT {
-            left: -1100,
-            top: -200,
-            right: -700,
-            bottom: 0,
+            left: -1910,
+            top: -199,
+            right: -1700,
+            bottom: -100,
         };
         let typing = RECT {
-            left: -1100,
-            top: 0,
-            right: -700,
-            bottom: 300,
+            left: -300,
+            top: 670,
+            right: -200,
+            bottom: 830,
         };
+        let avoid = [main, typing, dock];
+        let rect = placement(work, avoid).expect("a free window fits on the monitor");
         assert_eq!(
-            placement(work, [main, typing, dock]),
-            Some(RECT {
-                left: -256,
-                top: 704,
-                right: -16,
-                bottom: 864
-            }),
-            "the lower-right corner is free on the fixture's monitor"
+            (rect.right - rect.left, rect.bottom - rect.top),
+            (WIDTH, HEIGHT)
         );
-        assert_eq!(placement(work, [work; 3]), None, "fully blocked work area");
+        assert!(
+            work.left <= rect.left
+                && work.top <= rect.top
+                && rect.right <= work.right
+                && rect.bottom <= work.bottom,
+            "{rect:?} is outside {work:?}"
+        );
+        for (slot, obstacle) in avoid.into_iter().enumerate() {
+            assert!(
+                rect.right <= obstacle.left
+                    || obstacle.right <= rect.left
+                    || rect.bottom <= obstacle.top
+                    || obstacle.bottom <= rect.top,
+                "{rect:?} covers obstacle {slot}: {obstacle:?}"
+            );
+            let mut blocked = [RECT::default(); 3];
+            blocked[slot] = work;
+            assert_eq!(
+                placement(work, blocked),
+                None,
+                "obstacle {slot} fills the monitor"
+            );
+        }
         assert_eq!(
             placement(
                 RECT {
                     left: 0,
                     top: 0,
-                    right: 100,
-                    bottom: 100
+                    right: WIDTH - 1,
+                    bottom: HEIGHT - 1
                 },
                 [RECT::default(); 3]
             ),

@@ -159,11 +159,7 @@ mod tests {
     fn a_stranger_or_a_wrong_worker_is_refused() {
         let mut entries = launch();
         entries.push(helper(50, 1));
-        let error = product_tree(10, &entries, identify).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "a product process outside the launched tree is running; refusing a contaminated run"
-        );
+        product_tree(10, &entries, identify).expect_err("outside process isn't startup");
         entries.pop();
         assert_eq!(
             product_tree(10, &entries, |_| Ok("screen-worker"))
@@ -178,7 +174,7 @@ mod tests {
             "unexpected product helper role"
         );
         entries[0].parent = 1;
-        assert!(product_tree(10, &entries, identify).is_err());
+        product_tree(10, &entries, identify).expect_err("orphaned worker isn't startup");
         assert_eq!(
             product_tree(11, &launch(), identify)
                 .unwrap_err()

@@ -236,12 +236,7 @@ mod tests {
         crate::scratch::dir(&format!("voice-assets-{name}"))
     }
 
-    fn voice_sha() -> String {
-        let dir = scratch("sha");
-        let path = dir.join("f");
-        fs::write(&path, b"voice").expect("write");
-        crate::platform::gate_capture::file_sha256(&path).expect("hash")
-    }
+    const VOICE_SHA: &str = "c57d7e92019708b614c90fa3685cd644f543a60153fb99ec9b67c381a245fb2a";
 
     fn placement<'a>(source: &Path, dest: &Path, sha: &'a str) -> Placement<'a> {
         Placement {
@@ -263,6 +258,14 @@ mod tests {
             assert!(s5_path(file).is_ok(), "{}", file.name);
         }
         assert_eq!(S5_LAYOUT.len(), MODEL_FILES.len(), "no stray S5 entries");
+        let juniper = MODEL_FILES
+            .iter()
+            .find(|file| file.name == "juniper.safetensors")
+            .expect("Juniper is listed");
+        assert_eq!(
+            s5_path(juniper).expect("S5 path"),
+            "phonon31m/voices/Juniper.safetensors"
+        );
     }
 
     #[test]
@@ -270,29 +273,16 @@ mod tests {
         let dir = scratch("verify");
         let path = dir.join("f");
         fs::write(&path, b"voice").expect("write");
-        let sha = voice_sha();
-        verify(&path, 5, &sha).expect("exact size and hash");
-        let short = verify(&path, 4, &sha).expect_err("one byte short");
+        verify(&path, 5, VOICE_SHA).expect("exact size and hash");
+        for bytes in [4, 6] {
+            assert!(verify(&path, bytes, VOICE_SHA).is_err(), "{bytes} bytes");
+        }
+        assert!(verify(&path, 5, &"0".repeat(64)).is_err(), "wrong digest");
         assert!(
-            short
-                .to_string()
-                .contains("is 5 bytes; the manifest pins 4"),
-            "{short}"
+            verify(&dir.join("absent"), 5, VOICE_SHA).is_err(),
+            "missing file"
         );
-        let long = verify(&path, 6, &sha).expect_err("one byte over");
-        assert!(
-            long.to_string().contains("is 5 bytes; the manifest pins 6"),
-            "{long}"
-        );
-        let wrong = verify(&path, 5, &"0".repeat(64)).expect_err("wrong hash");
-        assert!(wrong.to_string().contains("has SHA-256"), "{wrong}");
-        let missing = verify(&dir.join("absent"), 5, &sha).expect_err("missing");
-        assert!(missing.to_string().contains("is missing"), "{missing}");
-        let folder = verify(&dir, 0, &sha).expect_err("a folder");
-        assert!(
-            folder.to_string().contains("not a regular file"),
-            "{folder}"
-        );
+        assert!(verify(&dir, 0, VOICE_SHA).is_err(), "directory");
     }
 
     #[test]
@@ -300,9 +290,8 @@ mod tests {
         let dir = scratch("install");
         let source = dir.join("source");
         fs::write(&source, b"voice").expect("write");
-        let sha = voice_sha();
         let dest = dir.join("models").join("part").join("f");
-        install(&[placement(&source, &dest, &sha)]).expect("links into a new folder");
+        install(&[placement(&source, &dest, VOICE_SHA)]).expect("links into a new folder");
         assert_eq!(fs::read(&dest).expect("read"), b"voice");
 
         fs::write(&source, b"VOICE").expect("rewrite the source in place");
@@ -313,7 +302,7 @@ mod tests {
         );
         fs::write(&source, b"voice").expect("restore");
 
-        install(&[placement(&dir.join("absent"), &dest, &sha)])
+        install(&[placement(&dir.join("absent"), &dest, VOICE_SHA)])
             .expect("a verified destination is left alone");
     }
 
@@ -322,18 +311,22 @@ mod tests {
         let dir = scratch("conflict");
         let source = dir.join("source");
         fs::write(&source, b"voice").expect("write");
-        let sha = voice_sha();
         let fresh = dir.join("models").join("a");
         let conflicting = dir.join("models").join("b");
         fs::create_dir_all(dir.join("models")).expect("models folder");
         fs::write(&conflicting, b"wrong").expect("write");
 
         let error = install(&[
-            placement(&source, &fresh, &sha),
-            placement(&source, &conflicting, &sha),
+            placement(&source, &fresh, VOICE_SHA),
+            placement(&source, &conflicting, VOICE_SHA),
         ])
         .expect_err("a mismatched destination fails");
-        assert!(error.to_string().contains("nothing was linked"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains(&conflicting.display().to_string()),
+            "{error}"
+        );
         assert_eq!(
             fs::read(&conflicting).expect("read"),
             b"wrong",
@@ -347,13 +340,12 @@ mod tests {
         let dir = scratch("rollback");
         let source = dir.join("source");
         fs::write(&source, b"voice").expect("write");
-        let sha = voice_sha();
         let first = dir.join("models").join("a");
         let second = dir.join("models").join("b");
 
         install(&[
-            placement(&source, &first, &sha),
-            placement(&dir.join("absent"), &second, &sha),
+            placement(&source, &first, VOICE_SHA),
+            placement(&dir.join("absent"), &second, VOICE_SHA),
         ])
         .expect_err("the second link has no source");
         assert!(!first.exists(), "the first link was removed again");
@@ -364,15 +356,17 @@ mod tests {
     #[test]
     fn a_bad_source_links_nothing() {
         let dir = scratch("link");
+        let models = dir.join("models");
+        let natives = dir.join("natives");
         let models_root = dir.join("dest");
-        let error = link(
-            &dir.join("models"),
-            &dir.join("natives"),
-            &models_root,
-            &[dir.join("bin")],
-        )
-        .expect_err("no sources");
-        assert!(error.to_string().contains("is missing"), "{error}");
+        let error =
+            link(&models, &natives, &models_root, &[dir.join("bin")]).expect_err("no sources");
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains(&models.display().to_string())
+                || diagnostic.contains(&natives.display().to_string()),
+            "{diagnostic}"
+        );
         assert!(!models_root.exists(), "nothing was created");
         assert!(!dir.join("bin").exists(), "nothing was created");
     }

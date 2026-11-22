@@ -679,7 +679,7 @@ mod tests {
 
     #[test]
     fn packed_message_coordinates_keep_their_sign() {
-        assert_eq!(unpack(pack(-1920, 1080)), [-1920, 1080]);
+        assert_eq!(unpack(0x0000_0438_ffff_f880), [-1920, 1080]);
         assert_eq!(pack(1, -1), 0xffff_ffff_0000_0001);
     }
 }

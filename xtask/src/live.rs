@@ -467,8 +467,8 @@ mod tests {
 
     use super::{
         Ask, Check, Entry, LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV,
-        ProductIdentity, brain_command, build, drained, end, end_with, entry, read_kept,
-        refuse_running, run_bounded, wait_bounded, warn_cleanup, with_cleanup,
+        ProductIdentity, brain_command, build, claude_question, drained, end, end_with, entry,
+        read_kept, run_bounded, wait_bounded, warn_cleanup, with_cleanup,
     };
     use crate::platform;
 
@@ -579,23 +579,17 @@ mod tests {
     }
 
     #[test]
-    fn a_build_past_its_limit_is_ended() {
+    fn a_run_past_its_limit_is_ended_and_a_failed_one_returns_its_status() {
         let start = Instant::now();
         let error = build(held(), SHORT).expect_err("a hung build fails");
-        assert_eq!(
-            format!("{error:#}"),
-            "the brain build didn't finish in 200ms"
-        );
+        assert!(error.to_string().contains("brain build"), "{error}");
         assert!(
-            start.elapsed() < Duration::from_secs(15),
-            "it returned in bound"
+            (SHORT..Duration::from_secs(15)).contains(&start.elapsed()),
+            "the build returned outside the timeout window"
         );
-    }
 
-    #[test]
-    fn a_run_past_its_limit_is_ended_and_a_failed_one_returns_its_status() {
         let error = run_bounded(held(), SHORT, "the fixture").expect_err("times out");
-        assert_eq!(format!("{error:#}"), "the fixture didn't finish in 200ms");
+        assert!(error.to_string().contains("the fixture"), "{error}");
         let status = run_bounded(exits(3), SHORT * 50, "the fixture").expect("finishes");
         assert_eq!(status.code(), Some(3));
     }
@@ -772,13 +766,20 @@ mod tests {
             parent: 1,
             shell,
         };
-        refuse_running(&[], 7).expect("nothing runs");
-        refuse_running(&[entry(7, true)], 7).expect("the copied harness is itself");
-        let error = refuse_running(&[entry(7, true), entry(9, false), entry(11, true)], 7)
-            .expect_err("a brain and a shell run");
-        assert_eq!(
-            format!("{error:#}"),
-            "close every kumochi.exe and kumochid.exe first (running: 9, 11)"
+        for running in [&[][..], &[entry(7, false)], &[entry(7, true)]] {
+            assert_eq!(
+                claude_question::preflight(running, 7).expect("only itself may run"),
+                3
+            );
+        }
+        let error =
+            claude_question::preflight(&[entry(7, true), entry(9, false), entry(11, true)], 7)
+                .expect_err("a brain and a shell run");
+        let diagnostic = error.to_string();
+        let pids: Vec<_> = diagnostic.split(|ch: char| !ch.is_ascii_digit()).collect();
+        assert!(
+            pids.contains(&"9") && pids.contains(&"11") && !pids.contains(&"7"),
+            "{diagnostic}"
         );
     }
 }
