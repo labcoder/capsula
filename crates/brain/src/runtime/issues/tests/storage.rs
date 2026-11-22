@@ -22,55 +22,8 @@ pub(super) async fn settle(brain: &mut Brain) -> Vec<ControlToShell> {
 }
 
 #[tokio::test]
-async fn a_failed_discard_store_write_must_settle_its_correlated_attempt() {
-    let scratch = Scratch::new("github-filing-discard-storage-failure");
-    let server = Arc::new(FilingServer::default());
-    let (mut brain, action) = filing_owner(&scratch, &server).await;
-    let conn = rusqlite::Connection::open(scratch.db()).unwrap();
-    conn.execute_batch(
-        "CREATE TRIGGER refuse_discard BEFORE UPDATE OF stage ON actions
-         WHEN json_extract(NEW.stage, '$.kind') = 'discarded'
-         BEGIN SELECT RAISE(ABORT, 'test discard save refused'); END;",
-    )
-    .unwrap();
-    let effects = brain
-        .issue_op(
-            brain.issue_session().unwrap(),
-            901,
-            &IssueOp::Discard {
-                draft: action.draft,
-            },
-            Some(brain.epoch),
-        )
-        .unwrap();
-    brain.apply(effects, None).unwrap();
-    assert_eq!(
-        settle(&mut brain).await,
-        vec![ControlToShell::IssueUnavailable {
-            kind: IssueUnavailableKind::Action,
-            request: 901,
-            draft: action.draft
-        }]
-    );
-    assert!(!brain.filing.pending());
-    drop(conn);
-    brain.close().await;
-    assert_eq!(
-        Store::open(&scratch.db())
-            .unwrap()
-            .action(action.draft)
-            .unwrap(),
-        Some(action)
-    );
-    assert_eq!(server.factories.load(Ordering::SeqCst), 0);
-    assert_eq!(server.gets.load(Ordering::SeqCst), 0);
-    assert_eq!(server.posts.load(Ordering::SeqCst), 0);
-    assert_eq!(server.receipt.load(Ordering::Acquire), 0);
-}
-
-#[tokio::test]
 async fn every_non_job_operation_and_an_admitted_recovery_read_settle_a_store_error() {
-    for operation in 0..6 {
+    for operation in 0..7 {
         let scratch = Scratch::new("github-filing-shared-storage-failure");
         let server = Arc::new(FilingServer::default());
         let (mut brain, action) = if (1..=3).contains(&operation) {
@@ -79,10 +32,24 @@ async fn every_non_job_operation_and_an_admitted_recovery_read_settle_a_store_er
             filing_owner(&scratch, &server).await
         };
         let conn = rusqlite::Connection::open(scratch.db()).unwrap();
-        conn.execute_batch("ALTER TABLE actions RENAME TO unavailable_actions;")
-            .unwrap();
+        let (disrupt, restore, request) = if operation == 6 {
+            (
+                "CREATE TRIGGER refuse_discard BEFORE UPDATE OF stage ON actions
+                 WHEN json_extract(NEW.stage, '$.kind') = 'discarded'
+                 BEGIN SELECT RAISE(ABORT, 'test discard save refused'); END;",
+                "DROP TRIGGER refuse_discard;",
+                901,
+            )
+        } else {
+            (
+                "ALTER TABLE actions RENAME TO unavailable_actions;",
+                "ALTER TABLE unavailable_actions RENAME TO actions;",
+                902,
+            )
+        };
+        conn.execute_batch(disrupt).unwrap();
         let op = match operation {
-            0 => IssueOp::Discard {
+            0 | 6 => IssueOp::Discard {
                 draft: action.draft,
             },
             1..=3 => IssueOp::Consent {
@@ -99,9 +66,9 @@ async fn every_non_job_operation_and_an_admitted_recovery_read_settle_a_store_er
                 draft: action.draft,
             },
         };
-        let epoch = (operation == 5).then_some(brain.epoch);
+        let epoch = matches!(operation, 5 | 6).then_some(brain.epoch);
         let effects = brain
-            .issue_op(brain.issue_session().unwrap(), 902, &op, epoch)
+            .issue_op(brain.issue_session().unwrap(), request, &op, epoch)
             .unwrap();
         let mut replies: Vec<_> = effects
             .iter()
@@ -110,19 +77,21 @@ async fn every_non_job_operation_and_an_admitted_recovery_read_settle_a_store_er
                 _ => None,
             })
             .collect();
+        if operation == 6 {
+            assert!(replies.is_empty(), "the discard has not reached SQL yet");
+        }
         brain.apply(effects, None).unwrap();
         replies.extend(settle(&mut brain).await);
         assert_eq!(
             replies,
             vec![ControlToShell::IssueUnavailable {
                 kind: IssueUnavailableKind::Action,
-                request: 902,
+                request,
                 draft: action.draft
             }]
         );
         assert!(!brain.filing.pending());
-        conn.execute_batch("ALTER TABLE unavailable_actions RENAME TO actions;")
-            .unwrap();
+        conn.execute_batch(restore).unwrap();
         drop(conn);
         brain.close().await;
         assert_eq!(

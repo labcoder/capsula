@@ -219,6 +219,10 @@ fn the_point_only_moves_forward() {
     assert_eq!(point(&store.conn, ended), set(1, 101, 10));
     store.heard(ended, heard(2, 0, 20)).expect("later segment");
     assert_eq!(point(&store.conn, ended), set(2, 0, 20));
+    store.heard(ended, heard(3, 4, 5)).expect("written");
+    drop(store);
+    let store = Store::open(&scratch.db()).expect("reopens");
+    assert_eq!(point(&store.conn, ended), set(3, 4, 5));
 }
 
 #[test]
@@ -255,15 +259,4 @@ fn an_active_missing_or_deleted_run_is_left_alone() {
     let before = runs(&store);
     store.heard(deleted, heard(0, 1, 1)).expect("no error");
     assert_eq!(runs(&store), before, "a deleted run isn't made again");
-}
-
-#[test]
-fn a_stored_point_survives_a_restart() {
-    let scratch = Scratch::new("heard-restart");
-    let mut store = Store::open(&scratch.db()).expect("store");
-    let (_, ended) = run(&mut store);
-    store.heard(ended, heard(3, 4, 5)).expect("written");
-    drop(store);
-    let store = Store::open(&scratch.db()).expect("reopens");
-    assert_eq!(point(&store.conn, ended), set(3, 4, 5));
 }

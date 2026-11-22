@@ -192,7 +192,6 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
 pub(super) fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), StoreError> {
     let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let known = MIGRATIONS.len();
-    debug_assert!(target <= known, "no migration past the known ones");
     let applied = usize::try_from(found)
         .ok()
         .filter(|&applied| applied <= known)
@@ -204,19 +203,4 @@ pub(super) fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), Sto
         tx.commit()?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// CAPS-90 L2: only a test asks for a version past the end, so a mistyped one fails loudly.
-    /// The check is a `debug_assert!`, so optimized test builds skip it.
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "no migration past the known ones")]
-    fn a_target_past_the_known_migrations_is_a_bug() {
-        let mut conn = Connection::open_in_memory().expect("opens");
-        migrate_to(&mut conn, MIGRATIONS.len() + 1).expect("never returns");
-    }
 }

@@ -180,26 +180,71 @@ fn autocheckpoint(store: &Store) -> i64 {
 
 #[test]
 fn a_swap_holds_both_side_connections_until_the_store_is_back() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use crate::recall::control::Control;
+
     let scratch = Scratch::new("side-swap");
     let mut store = owing(&scratch);
     let side = store.side();
     assert_eq!(live(&store), [ThreadId(2)]);
-    side.checkpoint().expect("the helper's connection opens");
+    assert!(side.checkpoint().expect("the helper's connection opens"));
     let copied = copied(&store);
-    let watched = Arc::clone(&side);
-    let swapped = store.swap_with(&copied, |db, old| {
-        assert!(
-            watched.reader.try_lock().is_err(),
-            "the reader's slot is held"
+    let limit = Duration::from_secs(10);
+    let control = Control::new(Instant::now() + limit);
+    let (read, read_result) = mpsc::channel();
+    let (checkpoint, checkpoint_result) = mpsc::channel();
+    let (waiting, helper_waiting) = mpsc::channel();
+
+    std::thread::scope(|workers| {
+        let swapped = store.swap_with(&copied, |db, old| {
+            let side = &side;
+            let reading = &control;
+            workers.spawn(move || {
+                read.send(side.read_until::<i64, StoreError>(reading, |conn, _| {
+                    Ok(conn.query_row("SELECT count(*) FROM purge_pending", [], |row| row.get(0))?)
+                }))
+                .expect("reader result");
+            });
+            workers.spawn(move || {
+                let held = side.hold_helper_after(|| waiting.send(()).expect("helper waits"));
+                checkpoint
+                    .send(side.checkpoint_held(held))
+                    .expect("helper result");
+            });
+            while !control.test.waiting.load(Ordering::SeqCst) {
+                assert!(Instant::now() < control.end, "reader entered the wait");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            helper_waiting
+                .recv_timeout(limit)
+                .expect("helper entered the wait");
+            assert!(matches!(
+                read_result.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                checkpoint_result.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            fs::hard_link(db, old)
+        });
+        assert_eq!(swapped.expect("swap"), Swap::Done);
+        assert_eq!(
+            read_result
+                .recv_timeout(limit)
+                .expect("reader replied")
+                .expect("read"),
+            0
         );
         assert!(
-            watched.helper.try_lock().is_err(),
-            "the helper's slot is held"
+            checkpoint_result
+                .recv_timeout(limit)
+                .expect("helper replied")
+                .expect("checkpoint")
         );
-        assert!(!watched.available.load(Ordering::SeqCst));
-        fs::hard_link(db, old)
     });
-    assert_eq!(swapped.expect("swap"), Swap::Done);
     store
         .begin_turn(ThreadId(3), Some("t"), RunId(3), "words")
         .expect("a write after the swap");
@@ -226,6 +271,21 @@ fn a_side_connection_in_use_blocks_the_swap_and_closes_nothing() {
 fn reads_fail_while_the_serving_connection_cant_reopen() {
     let scratch = Scratch::new("side-unavailable");
     let mut store = owing(&scratch);
+    let doomed = (ThreadId(3), RunId(3));
+    store
+        .begin_turn(doomed.0, Some("old"), doomed.1, "retired sentinel")
+        .unwrap();
+    let sentinel = b"retired sentinel";
+    let has_sentinel = || {
+        super::super::tests::raw_bytes(&scratch.db())
+            .windows(sentinel.len())
+            .any(|bytes| bytes == sentinel)
+    };
+    assert!(has_sentinel(), "the marker was stored before deletion");
+    assert_eq!(
+        store.delete(doomed.0).outcome,
+        kumochi_protocol::message::Deleted::Removed
+    );
     let copied = copied(&store);
     let wal = store.swap_failing_reopen(&copied);
     assert!(matches!(
@@ -233,11 +293,43 @@ fn reads_fail_while_the_serving_connection_cant_reopen() {
         Err(StoreError::Closed)
     ));
     assert!(matches!(store.side().checkpoint(), Err(StoreError::Closed)));
+    assert!(store.reconnect().is_err());
+    assert!(
+        store.high_water().is_err(),
+        "an unavailable store cannot return allocator state"
+    );
+    assert!(
+        store
+            .begin_turn(ThreadId(4), Some("refused"), RunId(4), "refused write")
+            .is_err(),
+        "the unavailable writer may not acknowledge a turn"
+    );
     fs::remove_dir(&wal).expect("out of the way");
     store.reconnect().expect("reconnect");
     assert_eq!(autocheckpoint(&store), 0, "reopened with the same settings");
     assert_eq!(live(&store), [ThreadId(2)]);
+    assert!(!store.purge_pending(), "reopened the clean file");
+    assert_eq!(
+        store.pages().search_ids("refused write").expect("search"),
+        []
+    );
+    store
+        .begin_turn(ThreadId(4), Some("after"), RunId(4), "served again")
+        .expect("writable");
+    store
+        .end_run(ThreadId(4), RunId(4), &[], RunEnd::Done)
+        .expect("ended");
+    assert_eq!(
+        store.pages().search_ids("served again").expect("search"),
+        [ThreadId(4)]
+    );
+    store.leftovers().remove().expect("removed");
+    assert!(!store.leftovers().exist());
     assert!(store.side().checkpoint().expect("checkpoint"));
+    assert!(
+        !has_sentinel(),
+        "the deleted marker is gone after the purge"
+    );
 }
 
 #[test]
@@ -263,8 +355,16 @@ fn a_missing_store_fails_its_side_connections_rather_than_creating_one() {
             fs::remove_file(file).expect("removed");
         }
     }
-    assert!(side.read(|_| Ok(())).is_err());
-    assert!(side.checkpoint().is_err());
+    assert!(matches!(
+        side.read(|_| Ok(())),
+        Err(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
+            if error.code == rusqlite::ErrorCode::CannotOpen
+    ));
+    assert!(matches!(
+        side.checkpoint(),
+        Err(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
+            if error.code == rusqlite::ErrorCode::CannotOpen
+    ));
     assert!(!scratch.db().exists(), "nothing created it");
 }
 

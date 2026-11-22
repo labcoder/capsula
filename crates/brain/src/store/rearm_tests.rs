@@ -1,26 +1,16 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
-use std::time::Duration;
-
 use kumochi_protocol::message::{
     ApprovalRev, ContentHash, Decision, Deleted, DraftId, FailReason, IssueRefused, StateVersion,
 };
-use rusqlite::{
-    Connection,
-    hooks::{Action as HookAction, Wal},
-};
-use tokio::time::Instant;
+use rusqlite::Connection;
 
 use super::actions_tests::{
     A, draft, opened, posting, repo, seed, snapshot, thread, unknown, user,
 };
 use super::{Store, StoreError};
-use crate::issues::{Action, Answer, Snapshot, Stage, Write, WriteScope};
+use crate::issues::{Action, Answer, Snapshot, Stage, Write};
 use crate::test_support::Scratch;
 
-fn rearm(action: &Action) -> Write {
+pub(super) fn rearm(action: &Action) -> Write {
     Write::Rearm {
         draft: action.draft,
         at: action.version,
@@ -252,131 +242,6 @@ fn rearm_event_failure_rolls_back_the_mint_version_and_content_atomically() {
 }
 
 #[test]
-fn rearm_scopes_roll_back_before_commit_but_keep_a_late_committed_answer() {
-    for boundary in ["cancelled", "expired", "event", "committed"] {
-        let scratch = Scratch::new("issue-rearm-scope");
-        let mut store = opened(&scratch);
-        let owner = thread(&mut store);
-        let action = draft(&mut store, owner);
-        let before = (snapshot(&store.conn), events(&store));
-        let scope = WriteScope::new(
-            Instant::now() + Duration::from_secs(if boundary == "expired" { 0 } else { 60 }),
-        );
-        let hits = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::clone(&hits);
-        let cancel = scope.clone();
-        match boundary {
-            "cancelled" => scope.cancel(),
-            "expired" => {}
-            "event" => store
-                .conn
-                .update_hook(Some(
-                    move |kind: HookAction, database: &str, table: &str, _row: i64| {
-                        if kind == HookAction::SQLITE_INSERT
-                            && database == "main"
-                            && table == "events"
-                        {
-                            observed.fetch_add(1, Ordering::SeqCst);
-                            cancel.cancel();
-                        }
-                    },
-                ))
-                .unwrap(),
-            "committed" => store
-                .conn
-                .wal_hook(Some(move |_wal: &mut Wal, _pages: i32| {
-                    observed.fetch_add(1, Ordering::SeqCst);
-                    cancel.cancel();
-                    Ok(())
-                }))
-                .unwrap(),
-            _ => unreachable!(),
-        }
-        let result = store.issue_write(&rearm(&action), Some(&scope));
-        store
-            .conn
-            .update_hook(None::<fn(HookAction, &str, &str, i64)>)
-            .unwrap();
-        store
-            .conn
-            .wal_hook(None::<fn(&mut Wal, i32) -> rusqlite::Result<()>>)
-            .unwrap();
-        assert!(scope.stopped());
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            usize::from(matches!(boundary, "event" | "committed"))
-        );
-        if boundary == "committed" {
-            let expected = Action {
-                version: StateVersion(2),
-                approval: Some(ApprovalRev(2)),
-                ..action
-            };
-            assert_eq!(changed(result), expected);
-            assert_eq!(
-                Store::open(&scratch.db())
-                    .unwrap()
-                    .action(expected.draft)
-                    .unwrap(),
-                Some(expected)
-            );
-            assert_eq!(snapshot(&store.conn).1, 2);
-            assert_eq!(events(&store).len(), before.1.len() + 1);
-        } else {
-            assert!(matches!(result, Err(StoreError::Issue)));
-            assert_eq!((snapshot(&store.conn), events(&store)), before);
-            assert_eq!(snapshot(&Connection::open(scratch.db()).unwrap()), before.0);
-        }
-    }
-}
-
-#[test]
-fn rearm_counters_reach_the_limit_once_and_never_wrap_or_burn_a_rolled_back_mint() {
-    for allocator in [false, true] {
-        let scratch = Scratch::new("issue-rearm-exhaustion");
-        let mut store = opened(&scratch);
-        let owner = thread(&mut store);
-        let action = draft(&mut store, owner);
-        store
-            .conn
-            .execute_batch(if allocator {
-                "UPDATE approval_mark SET last = 9223372036854775806;"
-            } else {
-                "UPDATE actions SET version = 9223372036854775806;"
-            })
-            .unwrap();
-        let current = store.action(action.draft).unwrap().unwrap();
-        let fresh = changed(store.issue_write(&rearm(&current), None));
-        assert_eq!(
-            fresh,
-            Action {
-                version: StateVersion(if allocator {
-                    2
-                } else {
-                    9_223_372_036_854_775_807
-                }),
-                approval: Some(ApprovalRev(if allocator {
-                    9_223_372_036_854_775_807
-                } else {
-                    2
-                })),
-                ..action
-            }
-        );
-        let before = (snapshot(&store.conn), events(&store));
-        assert!(matches!(
-            store.issue_write(&rearm(&fresh), None),
-            Err(StoreError::Issue)
-        ));
-        assert_eq!((snapshot(&store.conn), events(&store)), before);
-        assert_eq!(
-            snapshot(&store.conn).1,
-            if allocator { i64::MAX } else { 2 }
-        );
-    }
-}
-
-#[test]
 fn writer_consent_and_cancellation_check_version_before_consuming_a_current_approval() {
     for cancelled in [false, true] {
         let scratch = Scratch::new("issue-consent-version");
@@ -455,19 +320,44 @@ fn version_checked_writes_preserve_the_identical_unresolved_guard() {
 
 #[test]
 fn rearm_and_versioned_writes_have_content_free_debug() {
+    let marker = b"private-issue-approval-hash-text";
+    let hash = ContentHash(*marker);
     let write = Write::Rearm {
         draft: DraftId(23),
         at: StateVersion(17),
-        hash: ContentHash([83; 32]),
+        hash,
     };
-    assert_eq!(format!("{write:?}"), "IssueRearm");
-    let scratch = Scratch::new("issue-rearm-debug");
-    let mut store = opened(&scratch);
-    let owner = thread(&mut store);
-    let action = draft(&mut store, owner);
-    assert_eq!(format!("{:?}", consent(&action, false)), "IssueConsent");
-    assert_eq!(
-        format!("{:?}", consent(&action, true)),
-        "IssueCancelledConsent"
-    );
+    let make_consent = |cancelled| {
+        let live = Snapshot {
+            capacity: true,
+            account: Some(user(7)),
+            repos: vec![repo()],
+        };
+        if cancelled {
+            Write::CancelledConsent {
+                draft: DraftId(23),
+                at: StateVersion(17),
+                hash,
+                approval: ApprovalRev(29),
+                live,
+            }
+        } else {
+            Write::Consent {
+                draft: DraftId(23),
+                at: StateVersion(17),
+                hash,
+                approval: ApprovalRev(29),
+                decision: Decision::File,
+                live,
+            }
+        }
+    };
+    let text = std::str::from_utf8(marker).unwrap();
+    let bytes = format!("{marker:?}");
+    for operation in [write, make_consent(false), make_consent(true)] {
+        let debug = format!("{operation:?}");
+        assert!(!debug.contains(text));
+        assert!(!debug.contains(&bytes));
+        assert!(!debug.contains("octo"));
+    }
 }

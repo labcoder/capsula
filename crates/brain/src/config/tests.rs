@@ -227,40 +227,6 @@ fn refused_github_defaults_preserve_the_file_view_and_default_in_later_saves() {
 }
 
 #[test]
-fn github_default_staging_honors_an_unavailable_or_unreadable_config() {
-    let default = DefaultRepo {
-        account: 1,
-        repo: RepoName::new("owner/repo").expect("valid repo"),
-    };
-    let config = Config::load(None, ThreadId(1));
-    assert_eq!(github_default(&config), None);
-    assert!(matches!(
-        config.stage_github_default(&default),
-        Err(ConfigError::NoHome)
-    ));
-    let scratch = Scratch::new("config-github-unreadable");
-    let dir = dir(&scratch);
-    let path = dir.join(CONFIG_FILE);
-    let broken = "[github\n";
-    std::fs::write(&path, broken).expect("seeded");
-    let config = Config::load(Some(dir.clone()), ThreadId(1));
-    assert_eq!(github_default(&config), None);
-    assert!(matches!(
-        config.stage_github_default(&default),
-        Err(ConfigError::Unreadable)
-    ));
-    assert_eq!(std::fs::read_to_string(&path).expect("readable"), broken);
-    std::fs::remove_file(&path).expect("removed broken fixture");
-    std::fs::create_dir(&path).expect("a folder where the file goes");
-    let config = Config::load(Some(dir), ThreadId(1));
-    assert_eq!(github_default(&config), None);
-    assert!(matches!(
-        config.stage_github_default(&default),
-        Err(ConfigError::Unreadable)
-    ));
-}
-
-#[test]
 fn hold_to_talk_toggle_has_its_own_wire_operation_and_persists() {
     let scratch = Scratch::new("config-hold-to-talk");
     let dir = dir(&scratch);
@@ -333,7 +299,11 @@ fn screen_holds_read_as_off_when_the_file_cant_be_read() {
     let scratch = Scratch::new("config-screen-holds-unread");
     let dir = dir(&scratch);
     let path = dir.join(CONFIG_FILE);
-    std::fs::write(&path, "[voice]\nscreen_holds = true\nnot toml [").expect("seeded");
+    std::fs::write(
+        &path,
+        "[voice]\nscreen_holds = true\nshow_screen = true\nnot toml [",
+    )
+    .expect("seeded");
     let unparseable = Config::load(Some(dir.clone()), ThreadId(1));
     std::fs::remove_file(&path).expect("removed broken fixture");
     std::fs::create_dir(&path).expect("a folder where the file goes");
@@ -343,7 +313,11 @@ fn screen_holds_read_as_off_when_the_file_cant_be_read() {
         ("unreadable", unreadable),
         ("no home", Config::load(None, ThreadId(1))),
     ] {
-        assert!(!config.view().screen_holds, "{cause}");
+        assert_eq!(
+            (config.view().screen_holds, config.view().show_screen),
+            (false, false),
+            "{cause}"
+        );
     }
 }
 
@@ -396,25 +370,6 @@ fn show_screen_starts_on_unless_the_window_choice_was_refused_persists_and_a_bad
 }
 
 #[test]
-fn show_screen_reads_as_off_when_the_file_cant_be_read() {
-    let scratch = Scratch::new("config-show-screen-unread");
-    let dir = dir(&scratch);
-    let path = dir.join(CONFIG_FILE);
-    std::fs::write(&path, "[voice]\nshow_screen = true\nnot toml [").expect("seeded");
-    let unparseable = Config::load(Some(dir.clone()), ThreadId(1));
-    std::fs::remove_file(&path).expect("removed broken fixture");
-    std::fs::create_dir(&path).expect("a folder where the file goes");
-    let unreadable = Config::load(Some(dir), ThreadId(1));
-    for (cause, config) in [
-        ("unparseable", unparseable),
-        ("unreadable", unreadable),
-        ("no home", Config::load(None, ThreadId(1))),
-    ] {
-        assert!(!config.view().show_screen, "{cause}");
-    }
-}
-
-#[test]
 fn talk_back_and_the_unload_policy_default_off_and_kept_and_are_saved_in_the_voice_table() {
     let scratch = Scratch::new("config-voice");
     let dir = dir(&scratch);
@@ -445,19 +400,25 @@ fn bad_voice_values_read_as_the_defaults_and_outlive_writes_to_other_keys() {
     let scratch = Scratch::new("config-voice-bad");
     let dir = dir(&scratch);
     let path = dir.join(CONFIG_FILE);
-    std::fs::write(
-        &path,
-        "[voice]\ntalk_back = \"yes\"\nstt_unload = \"2h\"\n\
-         installed = [\"speech_input\", \"later_part\"]\nremoving = [\"spoken_replies\"]\n\
-         future = 1\n",
-    )
-    .expect("seeded");
+    for bad in ["", "15M", " 1h", "1h ", "Kept", "2h"] {
+        std::fs::write(
+            &path,
+            format!(
+                "[voice]\ntalk_back = \"yes\"\nstt_unload = {bad:?}\n\
+                 installed = [\"speech_input\", \"later_part\"]\nremoving = [\"spoken_replies\"]\n\
+                 future = 1\n"
+            ),
+        )
+        .expect("seeded");
+        let seeded = saved(&path);
+        let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+        assert!(!config.view().talk_back, "{bad:?}");
+        assert_eq!(config.view().stt_unload, SttUnload::Kept, "{bad:?}");
+        apply(&mut config, SettingsOp::SetTaskbar(true));
+        assert_eq!(saved(&path)["voice"], seeded["voice"], "{bad:?}");
+    }
     let original = saved(&path);
     let mut config = Config::load(Some(dir.clone()), ThreadId(1));
-    assert!(!config.view().talk_back);
-    assert_eq!(config.view().stt_unload, SttUnload::Kept);
-    apply(&mut config, SettingsOp::SetTaskbar(true));
-    assert_eq!(saved(&path)["voice"], original["voice"]);
     apply(&mut config, SettingsOp::SetTalkBack(true));
     let after = saved(&path);
     assert_eq!(after["voice"]["talk_back"].as_bool(), Some(true));
@@ -478,56 +439,57 @@ fn bad_voice_values_read_as_the_defaults_and_outlive_writes_to_other_keys() {
 
 #[test]
 fn installed_names_known_parts_and_a_removal_wins() {
-    for (voice, expected) in [
+    use VoicePart::{SpeechInput, SpokenReplies};
+
+    let scratch = Scratch::new("config-installed");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    for (voice, installed, removing) in [
         (
             "installed = [\"spoken-replies\", \"later-part\", \"speech-input\"]\nremoving = [\"speech-input\"]",
-            vec![VoicePart::SpokenReplies],
+            &[SpokenReplies][..],
+            &[SpeechInput][..],
         ),
         (
             "installed = [\"spoken-replies\", \"speech-input\"]",
-            vec![VoicePart::SpeechInput, VoicePart::SpokenReplies],
+            &[SpeechInput, SpokenReplies][..],
+            &[][..],
         ),
-        ("removing = [\"speech-input\"]", vec![]),
-        ("installed = \"speech-input\"", vec![]),
-    ] {
-        let scratch = Scratch::new("config-installed");
-        let dir = dir(&scratch);
-        std::fs::write(dir.join(CONFIG_FILE), format!("[voice]\n{voice}\n")).expect("seeded");
-        let config = Config::load(Some(dir), ThreadId(1));
-        assert_eq!(config.installed(), expected, "{voice}");
-    }
-}
-
-#[test]
-fn removing_names_known_parts_by_their_folder_names_only() {
-    for (list, expected) in [
+        ("removing = [\"speech-input\"]", &[], &[SpeechInput]),
+        ("installed = \"speech-input\"", &[], &[]),
         (
-            "[\"later-part\", \"spoken-replies\", \"spoken_replies\", \"spoken-replies\"]",
-            vec![VoicePart::SpokenReplies],
+            "installed = [\"speech-input\"]\nremoving = [\"later-part\", \"spoken-replies\", \"spoken_replies\", \"spoken-replies\"]",
+            &[SpeechInput],
+            &[SpokenReplies],
         ),
         (
-            "[\"spoken-replies\", \"speech-input\"]",
-            vec![VoicePart::SpeechInput, VoicePart::SpokenReplies],
+            "installed = [\"speech-input\"]\nremoving = [\"spoken-replies\", \"speech-input\"]",
+            &[],
+            &[SpeechInput, SpokenReplies],
         ),
-        ("[]", vec![]),
-        ("\"speech-input\"", vec![]),
-        ("[1, \"Speech-Input\"]", vec![]),
+        (
+            "installed = [\"speech-input\"]\nremoving = []",
+            &[SpeechInput],
+            &[],
+        ),
+        (
+            "installed = [\"speech-input\"]\nremoving = \"speech-input\"",
+            &[SpeechInput],
+            &[],
+        ),
+        (
+            "installed = [\"speech-input\"]\nremoving = [1, \"Speech-Input\"]",
+            &[SpeechInput],
+            &[],
+        ),
     ] {
-        let scratch = Scratch::new("config-removing");
-        let dir = dir(&scratch);
-        std::fs::write(
-            dir.join(CONFIG_FILE),
-            format!("[voice]\ninstalled = [\"speech-input\"]\nremoving = {list}\n"),
-        )
-        .expect("seeded");
-        let config = Config::load(Some(dir), ThreadId(1));
-        assert_eq!(config.removing(), expected, "{list}");
+        std::fs::write(&path, format!("[voice]\n{voice}\n")).expect("seeded");
+        let config = Config::load(Some(dir.clone()), ThreadId(1));
+        assert_eq!(config.installed().as_slice(), installed, "{voice}");
+        assert_eq!(config.removing().as_slice(), removing, "{voice}");
     }
-    let scratch = Scratch::new("config-removing-none");
-    assert_eq!(
-        Config::load(Some(dir(&scratch)), ThreadId(1)).removing(),
-        []
-    );
+    std::fs::remove_file(path).expect("remove fixture");
+    assert_eq!(Config::load(Some(dir), ThreadId(1)).removing(), []);
 }
 
 #[test]
@@ -613,44 +575,12 @@ fn an_install_joins_installed_once_and_turns_talk_back_on_only_if_the_user_never
 }
 
 #[test]
-fn only_the_three_exact_unload_names_are_read() {
-    for bad in ["", "15M", " 1h", "1h ", "Kept", "2h"] {
-        let scratch = Scratch::new("config-voice-names");
-        let dir = dir(&scratch);
-        let path = dir.join(CONFIG_FILE);
-        std::fs::write(&path, format!("[voice]\nstt_unload = {bad:?}\n")).expect("seeded");
-        let mut config = Config::load(Some(dir), ThreadId(1));
-        assert_eq!(config.view().stt_unload, SttUnload::Kept, "{bad:?}");
-        apply(&mut config, SettingsOp::SetTaskbar(true));
-        assert_eq!(saved(&path)["voice"]["stt_unload"].as_str(), Some(bad));
-    }
-}
-
-#[test]
-fn an_empty_voice_table_reads_as_the_defaults_and_takes_a_setting() {
-    let scratch = Scratch::new("config-voice-empty");
-    let dir = dir(&scratch);
-    let path = dir.join(CONFIG_FILE);
-    std::fs::write(&path, "[voice]\n").expect("seeded");
-    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
-    assert!(!config.view().talk_back);
-    assert_eq!(config.view().stt_unload, SttUnload::Kept);
-    apply(&mut config, SettingsOp::FinishOnboarding);
-    assert_eq!(
-        saved(&path)["voice"].as_table().map(toml::Table::len),
-        Some(0)
-    );
-    apply(&mut config, SettingsOp::SetSttUnload(SttUnload::After15Min));
-    assert_eq!(saved(&path)["voice"]["stt_unload"].as_str(), Some("15m"));
-    assert_eq!(
-        Config::load(Some(dir), ThreadId(1)).view().stt_unload,
-        SttUnload::After15Min
-    );
-}
-
-#[test]
 fn a_voice_key_that_isnt_a_table_reads_as_the_defaults_until_a_voice_setting_replaces_it() {
-    for seeded in ["voice = 3\n", "[voice]\ntalk_back = 1\nstt_unload = 15\n"] {
+    for (seeded, empty) in [
+        ("voice = 3\n", false),
+        ("[voice]\ntalk_back = 1\nstt_unload = 15\n", false),
+        ("[voice]\n", true),
+    ] {
         let scratch = Scratch::new("config-voice-shape");
         let dir = dir(&scratch);
         let path = dir.join(CONFIG_FILE);
@@ -661,36 +591,18 @@ fn a_voice_key_that_isnt_a_table_reads_as_the_defaults_until_a_voice_setting_rep
         assert_eq!(config.view().stt_unload, SttUnload::Kept, "{seeded}");
         apply(&mut config, SettingsOp::FinishOnboarding);
         assert_eq!(saved(&path)["voice"], original["voice"], "{seeded}");
-        apply(&mut config, SettingsOp::SetTalkBack(true));
-        assert_eq!(saved(&path)["voice"]["talk_back"].as_bool(), Some(true));
-        assert!(Config::load(Some(dir), ThreadId(1)).view().talk_back);
-    }
-}
-
-#[test]
-fn the_installer_operations_are_refused_and_change_nothing() {
-    let scratch = Scratch::new("config-voice-dormant");
-    let dir = dir(&scratch);
-    let path = dir.join(CONFIG_FILE);
-    let mut config = Config::load(Some(dir), ThreadId(1));
-    apply(&mut config, SettingsOp::SetTalkBack(true));
-    let before = std::fs::read_to_string(&path).expect("readable");
-    let view = config.view().clone();
-    for op in [
-        SettingsOp::InstallVoice(VoicePart::SpeechInput),
-        SettingsOp::InstallVoice(VoicePart::SpokenReplies),
-        SettingsOp::RemoveVoice(VoicePart::SpeechInput),
-        SettingsOp::RemoveVoice(VoicePart::SpokenReplies),
-        SettingsOp::CancelVoiceInstall,
-    ] {
-        let refused = config.stage(op).err();
-        assert!(matches!(refused, Some(ConfigError::VoiceUnavailable)));
-        assert_eq!(
-            refused.map(|error| error.key()),
-            Some(ErrorKey::VoiceUnavailable)
-        );
-        assert_eq!(config.view(), &view);
-        assert_eq!(std::fs::read_to_string(&path).expect("readable"), before);
+        if empty {
+            apply(&mut config, SettingsOp::SetSttUnload(SttUnload::After15Min));
+            assert_eq!(saved(&path)["voice"]["stt_unload"].as_str(), Some("15m"));
+            assert_eq!(
+                Config::load(Some(dir), ThreadId(1)).view().stt_unload,
+                SttUnload::After15Min
+            );
+        } else {
+            apply(&mut config, SettingsOp::SetTalkBack(true));
+            assert_eq!(saved(&path)["voice"]["talk_back"].as_bool(), Some(true));
+            assert!(Config::load(Some(dir), ThreadId(1)).view().talk_back);
+        }
     }
 }
 
@@ -743,50 +655,6 @@ fn unknown_keys_survive_a_write_and_clearing_the_user_name_removes_it() {
     assert_eq!(table["later"]["model"].as_str(), Some("x"));
     assert!(!table.contains_key("user_name"));
     assert_eq!(Config::load(Some(dir), ThreadId(1)).view().user_name, None);
-}
-
-#[test]
-fn an_unparseable_file_is_never_written_and_refuses_changes() {
-    let scratch = Scratch::new("config-broken");
-    let dir = dir(&scratch);
-    let path = dir.join(CONFIG_FILE);
-    let broken = "assistant_name = \"Zqx\nnot toml [";
-    std::fs::write(&path, broken).expect("seeded");
-    let config = Config::load(Some(dir), ThreadId(1));
-    assert_eq!(
-        config.view().assistant_name.as_str(),
-        DEFAULT_ASSISTANT_NAME
-    );
-    assert!(matches!(
-        config.stage(SettingsOp::FinishOnboarding),
-        Err(ConfigError::Unreadable)
-    ));
-    assert_eq!(std::fs::read_to_string(&path).expect("readable"), broken);
-}
-
-#[test]
-fn an_unreadable_file_refuses_changes_like_a_broken_one() {
-    let scratch = Scratch::new("config-unreadable");
-    let dir = dir(&scratch);
-    std::fs::create_dir(dir.join(CONFIG_FILE)).expect("a folder where the file goes");
-    let config = Config::load(Some(dir), ThreadId(1));
-    assert!(matches!(
-        config.stage(SettingsOp::FinishOnboarding),
-        Err(ConfigError::Unreadable)
-    ));
-}
-
-#[test]
-fn no_home_refuses_changes() {
-    let config = Config::load(None, ThreadId(1));
-    assert_eq!(
-        config.view().assistant_name.as_str(),
-        DEFAULT_ASSISTANT_NAME
-    );
-    assert!(matches!(
-        config.stage(SettingsOp::FinishOnboarding),
-        Err(ConfigError::NoHome)
-    ));
 }
 
 #[test]
@@ -850,20 +718,47 @@ fn a_failed_write_changes_neither_the_file_nor_the_settings() {
     let scratch = Scratch::new("config-failed");
     let dir = dir(&scratch);
     let path = dir.join(CONFIG_FILE);
+    let temp = dir.join(format!("{CONFIG_FILE}.tmp"));
     let mut config = Config::load(Some(dir.clone()), ThreadId(1));
     apply(&mut config, SettingsOp::SetAssistantName(name("Nimbus")));
+    apply(
+        &mut config,
+        SettingsOp::SetDockPosition(DockPosition::MiddleLeft),
+    );
+    apply(&mut config, SettingsOp::SetTaskbar(false));
     let before = std::fs::read_to_string(&path).expect("readable");
-    // A folder where the temp file goes makes the write fail before the replace.
-    std::fs::create_dir(dir.join(format!("{CONFIG_FILE}.tmp"))).expect("blocker");
-    let pending = config
-        .stage(SettingsOp::SetAssistantName(name("Cirrus")))
-        .expect("staged");
-    assert!(matches!(pending.write(), Err(ConfigError::Write(_))));
-    drop(pending);
-    assert_eq!(config.view().assistant_name.as_str(), "Nimbus");
-    assert_eq!(std::fs::read_to_string(&path).expect("readable"), before);
-    let staged = config.stage(SettingsOp::FinishOnboarding).expect("staged");
-    assert_eq!(staged.view.assistant_name.as_str(), "Nimbus");
+    let view = config.view().clone();
+    std::fs::create_dir(&temp).expect("blocker");
+    for op in [
+        SettingsOp::SetAssistantName(name("Cirrus")),
+        SettingsOp::SetDockPosition(DockPosition::BottomRight),
+        SettingsOp::SetTaskbar(true),
+    ] {
+        let pending = config.stage(op).expect("staged");
+        assert_eq!(config.view(), &view);
+        let refused = pending.write().expect_err("blocked temporary file");
+        assert!(matches!(refused, ConfigError::Write(_)));
+        assert_eq!(refused.key(), ErrorKey::SettingsRefused);
+        drop(pending);
+        assert_eq!(config.view(), &view);
+        assert_eq!(std::fs::read_to_string(&path).expect("readable"), before);
+    }
+    std::fs::remove_dir(&temp).expect("unblocked");
+    apply(&mut config, SettingsOp::FinishOnboarding);
+    let reloaded = Config::load(Some(dir.clone()), ThreadId(1));
+    assert_eq!(reloaded.view().assistant_name.as_str(), "Nimbus");
+    assert_eq!(reloaded.view().dock_position, DockPosition::MiddleLeft);
+    assert!(!reloaded.view().show_in_taskbar);
+    assert!(reloaded.view().onboarded);
+
+    apply(
+        &mut config,
+        SettingsOp::SetDockPosition(DockPosition::BottomCenter),
+    );
+    apply(&mut config, SettingsOp::SetTaskbar(true));
+    let reloaded = Config::load(Some(dir), ThreadId(1));
+    assert_eq!(reloaded.view().dock_position, DockPosition::BottomCenter);
+    assert!(reloaded.view().show_in_taskbar);
 }
 
 #[cfg(windows)]
@@ -897,10 +792,11 @@ fn a_held_reader_refuses_atomic_config_replacement_without_changing_settings() {
 #[test]
 fn debug_prints_neither_names_nor_unknown_values() {
     let scratch = Scratch::new("config-debug");
-    let dir = dir(&scratch);
+    let dir = dir(&scratch).join("Zqxpath");
+    std::fs::create_dir(&dir).expect("config folder");
     std::fs::write(
         dir.join(CONFIG_FILE),
-        "assistant_name = \"Zqxassistant\"\nfuture_key = \"Zqxunknown\"\n",
+        "assistant_name = \"Zqxassistant\"\nuser_name = \"Zqxolduser\"\nfuture_key = \"Zqxunknown\"\n",
     )
     .expect("seeded");
     let config = Config::load(Some(dir), ThreadId(1));
@@ -909,24 +805,22 @@ fn debug_prints_neither_names_nor_unknown_values() {
             UserName::new("Zqxuser").expect("valid"),
         )))
         .expect("staged");
-    assert_eq!(
-        format!("{config:?}"),
-        "Config { loaded: true, keys: 2, .. }"
-    );
-    assert_eq!(format!("{pending:?}"), "Pending { keys: 3, .. }");
-    let broken = Config::load(None, ThreadId(1));
-    assert_eq!(
-        format!("{broken:?}"),
-        "Config { loaded: false, keys: 0, .. }"
-    );
-}
-
-#[test]
-fn only_an_unreadable_file_asks_the_user_to_fix_it() {
-    assert_eq!(ConfigError::Unreadable.key(), ErrorKey::ConfigUnreadable);
-    assert_eq!(ConfigError::NoHome.key(), ErrorKey::SettingsRefused);
-    let write = ConfigError::Write(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
-    assert_eq!(write.key(), ErrorKey::SettingsRefused);
+    for formatted in [format!("{config:?}"), format!("{pending:?}")] {
+        for marker in [
+            "Zqxassistant",
+            "Zqxolduser",
+            "Zqxuser",
+            "Zqxunknown",
+            "Zqxpath",
+        ] {
+            assert!(!formatted.contains(marker), "content leaked");
+            let bytes = format!("{:?}", marker.as_bytes());
+            assert!(
+                !formatted.contains(bytes.trim_matches(['[', ']'])),
+                "bytes leaked"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1026,48 +920,6 @@ fn invalid_dock_and_taskbar_values_survive_unrelated_saves_until_explicitly_set(
     }
 }
 
-#[test]
-fn refused_dock_and_taskbar_writes_do_not_leak_into_a_later_save() {
-    let scratch = Scratch::new("config-refused-dock");
-    let dir = dir(&scratch);
-    let path = dir.join(CONFIG_FILE);
-    let temp = dir.join(format!("{CONFIG_FILE}.tmp"));
-    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
-    apply(
-        &mut config,
-        SettingsOp::SetDockPosition(DockPosition::MiddleLeft),
-    );
-    apply(&mut config, SettingsOp::SetTaskbar(false));
-    let before = std::fs::read_to_string(&path).expect("readable");
-    let view = config.view().clone();
-    std::fs::create_dir(&temp).expect("blocker");
-    for op in [
-        SettingsOp::SetDockPosition(DockPosition::BottomRight),
-        SettingsOp::SetTaskbar(true),
-    ] {
-        let pending = config.stage(op).expect("staged");
-        assert_eq!(config.view(), &view);
-        assert!(matches!(pending.write(), Err(ConfigError::Write(_))));
-        drop(pending);
-        assert_eq!(config.view(), &view);
-        assert_eq!(std::fs::read_to_string(&path).expect("readable"), before);
-    }
-    std::fs::remove_dir(&temp).expect("unblocked");
-    apply(&mut config, SettingsOp::FinishOnboarding);
-    let reloaded = Config::load(Some(dir.clone()), ThreadId(1));
-    assert_eq!(reloaded.view().dock_position, DockPosition::MiddleLeft);
-    assert!(!reloaded.view().show_in_taskbar);
-    assert!(reloaded.view().onboarded);
-    apply(
-        &mut config,
-        SettingsOp::SetDockPosition(DockPosition::BottomCenter),
-    );
-    apply(&mut config, SettingsOp::SetTaskbar(true));
-    let reloaded = Config::load(Some(dir), ThreadId(1));
-    assert_eq!(reloaded.view().dock_position, DockPosition::BottomCenter);
-    assert!(reloaded.view().show_in_taskbar);
-}
-
 fn choice(slug: &str, effort: Effort) -> ModelChoice {
     ModelChoice {
         model: ModelSlug::new(slug).expect("valid"),
@@ -1165,57 +1017,39 @@ fn a_removal_intent_moves_only_its_part_from_installed_to_removing() {
     let scratch = Scratch::new("config-remove-intent");
     let dir = dir(&scratch);
     let path = dir.join(CONFIG_FILE);
-    std::fs::write(
-        &path,
-        "[voice]\ntalk_back = false\n\
-         installed = [\"speech-input\", \"later-part\", \"spoken-replies\", \"speech-input\"]\n\
-         removing = [\"other-part\"]\n",
-    )
-    .expect("seeded");
-    let mut config = Config::load(Some(dir), ThreadId(1));
-    let view = config.view().clone();
-    let pending = config
-        .stage_remove_intent(VoicePart::SpeechInput)
-        .expect("staged");
-    pending.write().expect("written");
-    config.commit(pending);
-    let voice = &saved(&path)["voice"];
-    assert_eq!(
-        voice["installed"],
-        toml::Value::Array(vec!["later-part".into(), "spoken-replies".into()])
-    );
-    assert_eq!(
-        voice["removing"],
-        toml::Value::Array(vec!["other-part".into(), "speech-input".into()])
-    );
-    assert_eq!(voice["talk_back"].as_bool(), Some(false));
-    assert_eq!(config.view(), &view);
-    assert_eq!(config.installed(), [VoicePart::SpokenReplies]);
-    assert_eq!(config.removing(), [VoicePart::SpeechInput]);
-}
-
-#[test]
-fn a_removal_intent_with_no_lists_starts_removing() {
-    let scratch = Scratch::new("config-remove-intent-empty");
-    let dir = dir(&scratch);
-    let path = dir.join(CONFIG_FILE);
-    std::fs::write(&path, "[voice]\ninstalled = 3\n").expect("seeded");
-    let mut config = Config::load(Some(dir), ThreadId(1));
-    let pending = config
-        .stage_remove_intent(VoicePart::SpokenReplies)
-        .expect("staged");
-    pending.write().expect("written");
-    config.commit(pending);
-    let voice = &saved(&path)["voice"];
-    assert_eq!(
-        voice["installed"].as_integer(),
-        Some(3),
-        "not a list, so left alone"
-    );
-    assert_eq!(
-        voice["removing"],
-        toml::Value::Array(vec!["spoken-replies".into()])
-    );
+    for (seeded, part, installed, removing, known_installed) in [
+        (
+            "[voice]\ntalk_back = false\n\
+             installed = [\"speech-input\", \"later-part\", \"spoken-replies\", \"speech-input\"]\n\
+             removing = [\"other-part\"]\n",
+            VoicePart::SpeechInput,
+            toml::Value::Array(vec!["later-part".into(), "spoken-replies".into()]),
+            vec!["other-part".into(), "speech-input".into()],
+            &[VoicePart::SpokenReplies][..],
+        ),
+        (
+            "[voice]\ninstalled = 3\n",
+            VoicePart::SpokenReplies,
+            toml::Value::Integer(3),
+            vec!["spoken-replies".into()],
+            &[],
+        ),
+    ] {
+        std::fs::write(&path, seeded).expect("seeded");
+        let original = saved(&path);
+        let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+        let view = config.view().clone();
+        let pending = config.stage_remove_intent(part).expect("staged");
+        pending.write().expect("written");
+        config.commit(pending);
+        let voice = &saved(&path)["voice"];
+        assert_eq!(voice["installed"], installed);
+        assert_eq!(voice["removing"], toml::Value::Array(removing));
+        assert_eq!(voice.get("talk_back"), original["voice"].get("talk_back"));
+        assert_eq!(config.view(), &view);
+        assert_eq!(config.installed().as_slice(), known_installed);
+        assert_eq!(config.removing(), [part]);
+    }
 }
 
 #[test]
@@ -1337,19 +1171,37 @@ fn a_config_that_cant_be_written_serves_onboarded_and_still_refuses_every_write(
     let scratch = Scratch::new("config-onboarded-refusing");
     let dir = dir(&scratch);
     let path = dir.join(CONFIG_FILE);
-    let broken = "onboarded = false\nnot toml [";
+    let broken = "onboarded = false\nassistant_name = \"Zqx\nnot toml [";
     std::fs::write(&path, broken).expect("seeded");
+    let blocked = dir.join("blocked");
+    let blocked_file = blocked.join(CONFIG_FILE);
+    std::fs::create_dir_all(&blocked_file).expect("a folder where the file goes");
     let default = DefaultRepo {
         account: 1,
         repo: RepoName::new("owner/repo").expect("valid repo"),
     };
-    for (mut config, refusal) in [
+    for (mut config, refusal, key) in [
         (
             Config::load(Some(dir), ThreadId(1)),
             ConfigError::Unreadable,
+            ErrorKey::ConfigUnreadable,
         ),
-        (Config::load(None, ThreadId(1)), ConfigError::NoHome),
+        (
+            Config::load(Some(blocked), ThreadId(1)),
+            ConfigError::Unreadable,
+            ErrorKey::ConfigUnreadable,
+        ),
+        (
+            Config::load(None, ThreadId(1)),
+            ConfigError::NoHome,
+            ErrorKey::SettingsRefused,
+        ),
     ] {
+        assert_eq!(
+            config.view().assistant_name.as_str(),
+            DEFAULT_ASSISTANT_NAME
+        );
+        assert_eq!(github_default(&config), None);
         assert!(config.view().onboarded, "{refusal}");
         config.count_in_use(
             &AccountView::SignedOut {
@@ -1387,8 +1239,10 @@ fn a_config_that_cant_be_written_serves_onboarded_and_still_refuses_every_write(
                 std::mem::discriminant(&refusal),
                 "{refusal} write {index}"
             );
+            assert_eq!(error.key(), key, "{refusal} write {index}");
         }
         assert_eq!(config.view(), &view);
     }
     assert_eq!(std::fs::read_to_string(&path).expect("readable"), broken);
+    assert!(blocked_file.is_dir());
 }

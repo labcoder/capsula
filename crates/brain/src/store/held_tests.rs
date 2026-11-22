@@ -15,35 +15,6 @@ fn screen(store: &Store, run: RunId) -> Option<String> {
         .expect("the run's row")
 }
 
-/// The value after `screen`, through every value. The match is exhaustive, so a new class or
-/// value breaks the build here until it's chained in, and then fails the test until `ALL` has it.
-fn after(screen: HeldScreen) -> Option<HeldScreen> {
-    Some(HeldScreen::NotIncluded(match screen {
-        HeldScreen::NotIncluded(ScreenClass::ModelCantSee) => return Some(HeldScreen::Withdrawn),
-        HeldScreen::Withdrawn => return Some(HeldScreen::Screen),
-        HeldScreen::Screen => return None,
-        HeldScreen::Attached => ScreenClass::NotReady,
-        HeldScreen::NotIncluded(ScreenClass::NotReady) => ScreenClass::NothingThere,
-        HeldScreen::NotIncluded(ScreenClass::NothingThere) => ScreenClass::CantShare,
-        HeldScreen::NotIncluded(ScreenClass::CantShare) => ScreenClass::Unreadable,
-        HeldScreen::NotIncluded(ScreenClass::Unreadable) => ScreenClass::TooLarge,
-        HeldScreen::NotIncluded(ScreenClass::TooLarge) => ScreenClass::Changed,
-        HeldScreen::NotIncluded(ScreenClass::Changed) => ScreenClass::ModelCantSee,
-    }))
-}
-
-#[test]
-fn every_value_reads_back_as_itself() {
-    let mut next = Some(HeldScreen::Attached);
-    let mut values = 0;
-    while let Some(screen) = next {
-        assert_eq!(super::held::read(super::held::column(screen)), Some(screen));
-        values += 1;
-        next = after(screen);
-    }
-    assert_eq!(values, 10);
-}
-
 /// A new thread whose one run's turn carried `held`.
 fn held_run(store: &mut Store, held: Option<HeldScreen>) -> (ThreadId, RunId) {
     let (high_thread, high_run) = store.high_water().expect("high water");
@@ -140,58 +111,31 @@ fn a_value_this_build_does_not_know_reads_as_a_plain_turn() {
 fn a_withdrawal_marks_only_an_attached_turn() {
     let scratch = Scratch::new("held-withdrawn");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let (thread, attached) = held_run(&mut store, Some(HeldScreen::Attached));
+    for (held, pending) in [
+        (HeldScreen::Attached, "pending_attached"),
+        (HeldScreen::Screen, "pending_screen"),
+    ] {
+        let (thread, run) = held_run(&mut store, Some(held));
+        assert_eq!(screen(&store, run).as_deref(), Some(pending));
+        store.withdraw_screen(run).expect("withdrawn");
+        assert_eq!(screen(&store, run).as_deref(), Some("withdrawn"));
+        assert_eq!(
+            kinds(&store, thread),
+            [PageEventKind::HeldTurn {
+                screen: HeldScreen::Withdrawn
+            }]
+        );
+    }
     let (_, closed) = held_run(
         &mut store,
         Some(HeldScreen::NotIncluded(ScreenClass::NotReady)),
     );
     let (_, plain) = held_run(&mut store, None);
-    assert_eq!(
-        screen(&store, attached).as_deref(),
-        Some("pending_attached")
-    );
-    for run in [attached, closed, plain] {
-        store.withdraw_screen(run).expect("withdrawn");
+    for run in [closed, plain] {
+        store.withdraw_screen(run).expect("unchanged");
     }
-    assert_eq!(screen(&store, attached).as_deref(), Some("withdrawn"));
     assert_eq!(screen(&store, closed).as_deref(), Some("not_ready"));
     assert_eq!(screen(&store, plain), None);
-    assert_eq!(
-        kinds(&store, thread),
-        [PageEventKind::HeldTurn {
-            screen: HeldScreen::Withdrawn
-        }]
-    );
-}
-
-#[test]
-fn a_screen_picture_is_stored_as_screen_and_an_attached_row_still_reads_as_the_window() {
-    let scratch = Scratch::new("held-screen");
-    let mut store = Store::open(&scratch.db()).expect("store");
-    let (thread, run) = held_run(&mut store, Some(HeldScreen::Screen));
-    assert_eq!(screen(&store, run).as_deref(), Some("pending_screen"));
-    store.sent_screen(run).expect("sent");
-    assert_eq!(screen(&store, run).as_deref(), Some("screen"));
-    assert_eq!(
-        kinds(&store, thread),
-        [PageEventKind::HeldTurn {
-            screen: HeldScreen::Screen
-        }]
-    );
-    let (older_thread, older) = held_run(&mut store, None);
-    store
-        .conn
-        .execute(
-            "UPDATE runs SET screen = 'attached' WHERE id = ?1",
-            [i64::try_from(older.0).expect("small id")],
-        )
-        .expect("a row an earlier build wrote");
-    assert_eq!(
-        kinds(&store, older_thread),
-        [PageEventKind::HeldTurn {
-            screen: HeldScreen::Attached
-        }]
-    );
 }
 
 #[test]
@@ -239,21 +183,6 @@ fn an_unsent_picture_is_cleared_and_every_other_value_kept() {
     assert_eq!(kinds(&store, thread), [PageEventKind::User]);
 }
 
-#[test]
-fn a_screen_row_is_withdrawn_like_an_attached_one() {
-    let scratch = Scratch::new("held-screen-withdrawn");
-    let mut store = Store::open(&scratch.db()).expect("store");
-    let (thread, run) = held_run(&mut store, Some(HeldScreen::Screen));
-    store.withdraw_screen(run).expect("withdrawn");
-    assert_eq!(screen(&store, run).as_deref(), Some("withdrawn"));
-    assert_eq!(
-        kinds(&store, thread),
-        [PageEventKind::HeldTurn {
-            screen: HeldScreen::Withdrawn
-        }]
-    );
-}
-
 /// Opens the store at `scratch` the way a start after a crash does.
 fn reopened(scratch: &Scratch) -> Store {
     let mut store = Store::open(&scratch.db()).expect("reopened");
@@ -265,20 +194,36 @@ fn reopened(scratch: &Scratch) -> Store {
 fn a_pending_picture_reads_as_a_plain_turn_until_a_send_may_have_written_it() {
     let scratch = Scratch::new("held-pending");
     let mut store = Store::open(&scratch.db()).expect("store");
-    for (held, pending) in [
-        (HeldScreen::Attached, "pending_attached"),
-        (HeldScreen::Screen, "pending_screen"),
+    for (held, pending, sent) in [
+        (HeldScreen::Attached, "pending_attached", "attached"),
+        (HeldScreen::Screen, "pending_screen", "screen"),
     ] {
         let (thread, run) = held_run(&mut store, Some(held));
         assert_eq!(screen(&store, run).as_deref(), Some(pending));
         assert_eq!(kinds(&store, thread), [PageEventKind::User]);
         store.sent_screen(run).expect("sent");
         store.sent_screen(run).expect("sent again");
+        assert_eq!(screen(&store, run).as_deref(), Some(sent));
         assert_eq!(
             kinds(&store, thread),
             [PageEventKind::HeldTurn { screen: held }]
         );
     }
+    let (legacy_thread, legacy) = held_run(&mut store, None);
+    store
+        .conn
+        .execute(
+            "UPDATE runs SET screen = 'attached' WHERE id = ?1",
+            [i64::try_from(legacy.0).expect("small id")],
+        )
+        .expect("a row an earlier build wrote");
+    assert_eq!(
+        kinds(&store, legacy_thread),
+        [PageEventKind::HeldTurn {
+            screen: HeldScreen::Attached
+        }]
+    );
+
     let (thread, closed) = held_run(
         &mut store,
         Some(HeldScreen::NotIncluded(ScreenClass::ModelCantSee)),

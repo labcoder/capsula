@@ -76,27 +76,61 @@ fn route_choice_keeps_the_same_slug_on_each_connection_after_reopen() {
         ConnectionKind::ClaudeCode,
         ConnectionKind::AnthropicKey,
     ] {
-        let thread = task(&mut store, "route");
-        let picked = ModelChoice {
-            connection,
-            ..choice("same-slug", Effort::High)
-        };
-        assert!(store.set_model(thread, &picked).expect("save"));
-        expected.push((thread, picked));
+        for unknown_effort in [false, true] {
+            let thread = task(&mut store, "route");
+            let picked = ModelChoice {
+                connection,
+                ..choice("same-slug", Effort::High)
+            };
+            assert!(store.set_model(thread, &picked).expect("save"));
+            if unknown_effort {
+                store
+                    .conn
+                    .execute(
+                        "UPDATE threads SET effort = 'ultra' WHERE id = ?1",
+                        [sql(thread)],
+                    )
+                    .expect("effort from a later version");
+            }
+            expected.push((thread, picked, unknown_effort));
+        }
     }
     drop(store);
     let store = opened(&scratch);
     let (rows, _) = list(&store, None);
-    for (thread, picked) in expected {
+    let default = choice("different-model", Effort::Max);
+    for (thread, picked, unknown_effort) in expected {
+        let shown = if unknown_effort {
+            Effort::Medium
+        } else {
+            Effort::High
+        };
+        let executed = if unknown_effort {
+            Effort::Low
+        } else {
+            Effort::High
+        };
         assert_eq!(
             rows.iter()
                 .find(|row| row.id == thread)
                 .expect("listed")
                 .choice,
-            Some(picked.clone())
+            Some(ModelChoice {
+                effort: shown,
+                ..picked.clone()
+            })
         );
         let read = Snapshot::begin(&store.conn).expect("snapshot");
-        assert_eq!(read.choice(thread).expect("context choice"), Some(picked));
+        assert_eq!(
+            read.stored_choice(thread)
+                .expect("saved route")
+                .execution(Some(default.clone()))
+                .expect("context choice"),
+            Some(ModelChoice {
+                effort: executed,
+                ..picked
+            })
+        );
     }
 }
 
@@ -131,43 +165,78 @@ fn route_choice_migration_backfills_selected_rows_only() {
 
 #[test]
 fn route_choice_unknown_or_missing_kind_never_becomes_absent() {
-    use super::choice::StoredChoice;
     let scratch = Scratch::new("route-choice-invalid-kind");
     let mut store = opened(&scratch);
     let thread = task(&mut store, "invalid");
-    let picked = choice("same-slug", Effort::High);
-    store.set_model(thread, &picked).expect("save");
-    for connection in [Some("unknown"), None] {
-        store
-            .conn
-            .execute(
-                "UPDATE threads SET connection = ?2 WHERE id = ?1",
-                rusqlite::params![sql(thread), connection],
-            )
-            .expect("plant");
-        let read = Snapshot::begin(&store.conn).expect("snapshot");
+    let default = choice("different-model", Effort::High);
+    let (rows, _) = list(&store, None);
+    assert_eq!(rows[1].id, thread);
+    assert_eq!(rows[1].choice, None);
+    let read = Snapshot::begin(&store.conn).expect("snapshot");
+    let absent = read.stored_choice(thread).expect("unset route");
+    assert_eq!(absent.clone().execution(None).expect("unselected"), None);
+    for connection in [
+        default.connection,
+        kumochi_protocol::message::ConnectionKind::ClaudeCode,
+        kumochi_protocol::message::ConnectionKind::AnthropicKey,
+    ] {
+        let fallback = ModelChoice {
+            connection,
+            ..default.clone()
+        };
         assert_eq!(
-            read.stored_choice(thread).expect("decoded"),
-            StoredChoice::Invalid
+            absent
+                .clone()
+                .execution(Some(fallback.clone()))
+                .expect("default"),
+            Some(fallback)
         );
+    }
+    read.end().expect("snapshot ends");
+
+    store
+        .conn
+        .pragma_update(None, "ignore_check_constraints", true)
+        .expect("allow malformed stored rows");
+    for (model, effort, connection) in [
+        (Some("same-slug"), None, None),
+        (None, Some("high"), None),
+        (None, None, Some("chatgpt")),
+        (Some("same-slug"), Some("high"), None),
+        (Some("same-slug"), None, Some("chatgpt")),
+        (None, Some("high"), Some("chatgpt")),
+        (Some("same-slug"), Some("high"), Some("unknown")),
+        (Some("Not A Slug"), Some("high"), Some("chatgpt")),
+        (Some(""), Some("high"), Some("chatgpt")),
+    ] {
+        assert_eq!(
+            store
+                .conn
+                .execute(
+                    "UPDATE threads SET model = ?2, effort = ?3, connection = ?4 WHERE id = ?1",
+                    rusqlite::params![sql(thread), model, effort, connection],
+                )
+                .expect("plant"),
+            1
+        );
+        let read = Snapshot::begin(&store.conn).expect("snapshot");
         assert!(matches!(
             read.stored_choice(thread)
                 .expect("decoded")
-                .execution(Some(picked.clone())),
+                .execution(Some(default.clone())),
             Err(StoreError::Read)
         ));
-        assert!(
-            store
-                .pages()
-                .read_page(
-                    1,
-                    PageOf::Threads {
-                        search: None,
-                        after: None
-                    }
-                )
-                .is_err()
-        );
+        read.end().expect("snapshot ends");
+        assert!(matches!(
+            store.pages().read_page(
+                1,
+                PageOf::Threads {
+                    search: None,
+                    after: None
+                }
+            ),
+            Err(StoreError::Read)
+        ));
     }
 }
 
@@ -332,7 +401,11 @@ fn a_main_thread_insert_that_fails_leaves_none_and_the_next_start_creates_one() 
              BEGIN SELECT RAISE(ABORT, 'injected'); END;",
         )
         .expect("injected failure");
-    assert!(store.recover().is_err());
+    assert!(matches!(
+        store.recover(),
+        Err(StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
+            if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
+    ));
     assert!(matches!(store.main_thread(), Err(StoreError::NoThread)));
     store
         .conn
@@ -361,13 +434,24 @@ fn the_schema_allows_one_main_thread_and_a_model_only_with_its_effort() {
         "INSERT INTO threads (title, kind, created_ms, updated_ms) VALUES ('', 'main', 1, 1)",
         [],
     );
-    assert!(second_main.is_err());
+    assert!(matches!(
+        second_main,
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+    ));
     for half in ["model = 'gpt-6'", "effort = 'high'"] {
         let set = store.conn.execute(
             &format!("UPDATE threads SET {half} WHERE id = ?1"),
             [sql(thread)],
         );
-        assert!(set.is_err(), "{half} alone was stored");
+        assert!(
+            matches!(
+                set,
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK
+            ),
+            "{half} must fail its constraint"
+        );
     }
     let both = store.conn.execute(
         "UPDATE threads SET model = 'gpt-6', effort = 'high' WHERE id = ?1",
@@ -440,23 +524,73 @@ fn a_list_of_only_kumo_ends_there_and_a_full_first_page_counts_it() {
 /// CAPS-65 H1: pinning Kumo must not cost the first page its task.
 #[test]
 fn an_impossible_title_after_kumo_is_shortened_and_the_list_goes_on() {
-    let scratch = Scratch::new("main-title");
-    let mut store = opened(&scratch);
-    let older = task(&mut store, "older");
     let long = "界".repeat(100_000);
-    let newest = task(&mut store, &long);
-    let (rows, next) = list(&store, None);
-    assert_eq!(
-        ids_and_kinds(&rows),
-        [(1, ThreadKind::Main), (newest.0, ThreadKind::Thread)]
-    );
-    assert_eq!(rows[0].title, "");
-    assert!(!rows[1].title.is_empty() && rows[1].title.len() < long.len());
-    assert!(long.starts_with(&rows[1].title));
-    assert_eq!(next.map(|key| key.id), Some(newest));
-    let (rows, next) = list(&store, next);
-    assert_eq!(ids_and_kinds(&rows), [(older.0, ThreadKind::Thread)]);
-    assert_eq!(next, None);
+    for (pinned, search) in [
+        (true, None),
+        (false, None),
+        (false, Some("needle".to_owned())),
+    ] {
+        let scratch = Scratch::new("main-title");
+        let mut store = Store::open(&scratch.db()).expect("store");
+        if pinned {
+            store.recover().expect("main");
+        }
+        let older = task(&mut store, "older");
+        let newest = task(&mut store, &long);
+        let page = |after| {
+            store
+                .pages()
+                .read_page(
+                    1,
+                    PageOf::Threads {
+                        search: search.clone(),
+                        after,
+                    },
+                )
+                .expect("page")
+        };
+        let reply = page(None);
+        assert!(frame::encode(&reply, Pipe::Data).expect("frame").len() <= MAX_PAGE_BYTES);
+        let DataToShell::ThreadList {
+            request,
+            mut threads,
+            next,
+        } = reply
+        else {
+            panic!("list");
+        };
+        if pinned {
+            assert_eq!(
+                ids_and_kinds(&threads),
+                [(1, ThreadKind::Main), (newest.0, ThreadKind::Thread)]
+            );
+            assert_eq!(threads[0].title, "");
+        } else {
+            assert_eq!(ids_and_kinds(&threads), [(newest.0, ThreadKind::Thread)]);
+        }
+        let shortened = &mut threads.last_mut().expect("shortened task").title;
+        assert!(!shortened.is_empty() && shortened.len() < long.len());
+        assert!(long.starts_with(shortened.as_str()));
+        assert_eq!(next.map(|key| key.id), Some(newest));
+        shortened.push('界');
+        let over = DataToShell::ThreadList {
+            request,
+            threads,
+            next,
+        };
+        assert!(
+            frame::encode(&over, Pipe::Data)
+                .expect("one more character")
+                .len()
+                > MAX_PAGE_BYTES
+        );
+        let DataToShell::ThreadList { threads, next, .. } = page(next) else {
+            panic!("continued list");
+        };
+        assert_eq!(ids_and_kinds(&threads), [(older.0, ThreadKind::Thread)]);
+        assert_eq!(threads[0].title, "older");
+        assert_eq!(next, None);
+    }
 }
 
 #[test]
@@ -483,25 +617,6 @@ fn search_rows_carry_kind_and_choice_and_rank_kumo_like_any_thread() {
             (thread, ThreadKind::Thread, Some(picked)),
         ]
     );
-}
-
-#[test]
-fn a_user_title_always_wins_and_a_model_title_only_replaces_first_words() {
-    let scratch = Scratch::new("titles");
-    let mut store = opened(&scratch);
-    let (a, b) = (task(&mut store, "words a"), task(&mut store, "words b"));
-    let current = TitleSource::Model(Generation(0));
-    rename(&mut store, a, "Model a", current);
-    assert_eq!(title(&store, a), Some(titled("Model a", "model")));
-    rename(&mut store, a, "Model again", current);
-    assert_eq!(title(&store, a), Some(titled("Model a", "model")));
-    rename(&mut store, a, "User a", TitleSource::User);
-    assert_eq!(title(&store, a), Some(titled("User a", "user")));
-    rename(&mut store, b, "User b", TitleSource::User);
-    rename(&mut store, b, "Late model", current);
-    assert_eq!(title(&store, b), Some(titled("User b", "user")));
-    rename(&mut store, b, "User again", TitleSource::User);
-    assert_eq!(title(&store, b), Some(titled("User again", "user")));
 }
 
 /// CAPS-65 M4: a model title from before a deletion never lands.
@@ -753,31 +868,54 @@ fn the_first_ask_reads_only_while_the_title_is_first_words_and_a_title_says_if_i
 fn titles_and_their_sources_survive_a_restart() {
     let scratch = Scratch::new("title-restart");
     let mut store = opened(&scratch);
-    let task = task(&mut store, "words");
+    let renamed = task(&mut store, "words");
     drop(store);
     let mut store = opened(&scratch);
     assert_eq!(
-        title(&store, task),
+        title(&store, renamed),
         Some(titled("words", "words")),
         "a job that failed or was cancelled leaves the first words"
     );
     rename(
         &mut store,
-        task,
+        renamed,
         "Model title",
         TitleSource::Model(Generation(0)),
     );
     drop(store);
     let mut store = opened(&scratch);
-    assert_eq!(title(&store, task), Some(titled("Model title", "model")));
-    rename(&mut store, task, "Mine", TitleSource::User);
+    assert_eq!(title(&store, renamed), Some(titled("Model title", "model")));
+    let again = ThreadTitle::new("Another model title").expect("valid");
+    assert!(
+        !store
+            .set_title(renamed, &again, TitleSource::Model(Generation(0)))
+            .expect("set")
+    );
+    assert_eq!(title(&store, renamed), Some(titled("Model title", "model")));
+    rename(&mut store, renamed, "Mine", TitleSource::User);
     let late = ThreadTitle::new("Late model").expect("valid");
     assert!(
         !store
-            .set_title(task, &late, TitleSource::Model(Generation(0)))
+            .set_title(renamed, &late, TitleSource::Model(Generation(0)))
             .expect("set")
+    );
+    assert_eq!(title(&store, renamed), Some(titled("Mine", "user")));
+    drop(store);
+    let mut store = opened(&scratch);
+    assert_eq!(title(&store, renamed), Some(titled("Mine", "user")));
+    rename(&mut store, renamed, "Mine again", TitleSource::User);
+    let from_words = task(&mut store, "Only first words");
+    rename(&mut store, from_words, "User first", TitleSource::User);
+    assert!(
+        !store
+            .set_title(from_words, &late, TitleSource::Model(Generation(0)))
+            .expect("set")
+    );
+    assert_eq!(
+        title(&store, from_words),
+        Some(titled("User first", "user"))
     );
     drop(store);
     let store = opened(&scratch);
-    assert_eq!(title(&store, task), Some(titled("Mine", "user")));
+    assert_eq!(title(&store, renamed), Some(titled("Mine again", "user")));
 }

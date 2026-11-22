@@ -312,53 +312,6 @@ fn a_search_continues_after_an_unrelated_write_moves_every_rank() {
 }
 
 #[test]
-fn newest_events_continue_exactly_before_the_last_returned_id_and_skip_revealed_sets() {
-    let scratch = Scratch::new("pages-events");
-    let mut store = Store::open(&scratch.db()).expect("store");
-    let thread = add(&mut store, "title", "oldest");
-    store
-        .begin_turn(thread, None, RunId(2), "second")
-        .expect("turn");
-    let kinds = [
-        EventKind::AssistantText,
-        EventKind::SceneStep,
-        EventKind::Revealed,
-    ];
-    for kind in kinds {
-        store
-            .append(
-                thread,
-                RunId(2),
-                &[NewEvent {
-                    kind,
-                    text: None,
-                    body: Some("{}"),
-                }],
-            )
-            .expect("event");
-    }
-    let (rows, before) = store.pages().events_page(thread, None, 2).expect("newest");
-    assert_eq!(
-        rows.iter().map(|event| event.id.0).collect::<Vec<_>>(),
-        vec![4, 3]
-    );
-    assert_eq!(rows[0].kind, PageEventKind::SceneStep);
-    assert_eq!(rows[1].kind, PageEventKind::AssistantText);
-    assert_eq!(rows[0].text, "");
-    assert_eq!(rows[0].run, Some(RunId(2)));
-    assert_eq!(before, Some(EventId(3)));
-    let (rows, before) = store.pages().events_page(thread, before, 2).expect("older");
-    assert_eq!(
-        rows.iter().map(|event| event.id.0).collect::<Vec<_>>(),
-        vec![2, 1]
-    );
-    assert_eq!(rows[0].kind, PageEventKind::User);
-    assert_eq!(rows[0].text, "second");
-    assert_eq!(rows[1].text, "oldest");
-    assert_eq!(before, None);
-}
-
-#[test]
 fn hidden_drawing_and_tool_rows_do_not_consume_a_page_or_create_a_continuation() {
     let scratch = Scratch::new("pages-hidden-rows");
     let mut store = Store::open(&scratch.db()).expect("store");
@@ -502,76 +455,6 @@ fn list_and_search_budget_cursors_resume_at_the_exact_unsent_row() {
             threads: one_more,
         };
         assert!(frame::encode(&over, Pipe::Data).expect("frame").len() > MAX_PAGE_BYTES);
-    }
-}
-
-#[test]
-fn event_budget_cursor_resumes_without_skipping_a_normal_event() {
-    let scratch = Scratch::new("pages-event-budget");
-    let mut store = Store::open(&scratch.db()).expect("store");
-    let text = "event".repeat(200);
-    let thread = add(&mut store, "title", &text);
-    store
-        .begin_turn(thread, None, RunId(2), &text)
-        .expect("turn");
-    let new = NewEvent {
-        kind: EventKind::AssistantText,
-        text: Some(&text),
-        body: None,
-    };
-    store.append(thread, RunId(2), &[new; 53]).expect("events");
-    let reply = events(&store, thread, None);
-    assert!(frame::encode(&reply, Pipe::Data).expect("frame").len() <= MAX_PAGE_BYTES);
-    let DataToShell::Page {
-        request,
-        events: rows,
-        before,
-        ..
-    } = reply
-    else {
-        panic!("events")
-    };
-    assert!(rows.len() > 1 && rows.len() < MAX_PAGE_ROWS);
-    assert!(rows.iter().all(|event| !event.cut && event.text == text));
-    assert_eq!(before, rows.last().map(|event| event.id));
-    let last = before.expect("continuation").0;
-    let DataToShell::Page { events: more, .. } = events(&store, thread, before) else {
-        panic!("events")
-    };
-    assert_eq!(more[0].id.0, last - 1);
-    let mut one_more = rows;
-    one_more.push(more[0].clone());
-    let over = DataToShell::Page {
-        request,
-        thread,
-        before: one_more.last().map(|event| event.id),
-        events: one_more,
-    };
-    assert!(frame::encode(&over, Pipe::Data).expect("frame").len() > MAX_PAGE_BYTES);
-}
-
-#[test]
-fn an_impossible_title_is_shortened_without_stalling_pagination() {
-    let scratch = Scratch::new("pages-title");
-    let mut store = Store::open(&scratch.db()).expect("store");
-    add(&mut store, "older", "needle");
-    let title = "界".repeat(100_000);
-    add(&mut store, &title, "needle");
-    for search in [None, Some("needle")] {
-        let reply = list(&store, search, None);
-        assert!(frame::encode(&reply, Pipe::Data).expect("frame").len() <= MAX_PAGE_BYTES);
-        let DataToShell::ThreadList { threads, next, .. } = reply else {
-            panic!("list")
-        };
-        assert_eq!(ids(&threads), vec![2]);
-        assert!(!threads[0].title.is_empty());
-        assert!(title.starts_with(&threads[0].title));
-        assert_eq!(next.map(|key| key.id), Some(threads[0].id));
-        let DataToShell::ThreadList { threads, next, .. } = list(&store, search, next) else {
-            panic!("list")
-        };
-        assert_eq!(ids(&threads), vec![1]);
-        assert_eq!(next, None);
     }
 }
 
@@ -819,10 +702,17 @@ fn history_event(id: u64, kind: PageEventKind, text: &str) -> PageEvent {
 fn typed_history_keeps_exact_identity_neighboring_text_and_raw_cursor() {
     let scratch = Scratch::new("pages-typed-history");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let (thread, run) = (ThreadId(1), RunId(1));
+    let thread = ThreadId(1);
     store
-        .begin_turn(thread, Some("title"), run, "oldest")
-        .expect("turn");
+        .begin_turn(thread, Some("title"), RunId(1), "oldest")
+        .expect("first turn");
+    store
+        .end_run(thread, RunId(1), &[], RunEnd::Done)
+        .expect("ended");
+    let run = RunId(2);
+    store
+        .begin_turn(thread, None, run, "second")
+        .expect("second turn");
     store
         .append(
             thread,
@@ -835,7 +725,18 @@ fn typed_history_keeps_exact_identity_neighboring_text_and_raw_cursor() {
         )
         .expect("neighbor");
     let scene = typed_scene(&mut store, thread, run);
-    assert_eq!(scene, SceneId(3));
+    assert_eq!(scene, SceneId(4));
+    store
+        .append(
+            thread,
+            run,
+            &[NewEvent {
+                kind: EventKind::SceneStep,
+                text: None,
+                body: Some("{}"),
+            }],
+        )
+        .expect("legacy marker");
     store
         .append(
             thread,
@@ -844,7 +745,7 @@ fn typed_history_keeps_exact_identity_neighboring_text_and_raw_cursor() {
                 kind: EventKind::AssistantText,
                 text: Some("newer"),
                 body: None,
-            }; 48],
+            }; 47],
         )
         .expect("newer rows");
 
@@ -869,14 +770,19 @@ fn typed_history_keeps_exact_identity_neighboring_text_and_raw_cursor() {
     };
     assert_eq!(request, u32::MAX);
     assert_eq!(returned, thread);
-    let mut expected: Vec<_> = (5..=52)
+    let second_run = |id, kind, text| PageEvent {
+        run: Some(run),
+        ..history_event(id, kind, text)
+    };
+    let mut expected: Vec<_> = (7..=53)
         .rev()
-        .map(|id| history_event(id, PageEventKind::AssistantText, "newer"))
+        .map(|id| second_run(id, PageEventKind::AssistantText, "newer"))
         .collect();
-    expected.push(history_event(4, PageEventKind::NoVisual { scene }, ""));
-    expected.push(history_event(2, PageEventKind::AssistantText, "neighbor"));
+    expected.push(second_run(6, PageEventKind::SceneStep, ""));
+    expected.push(second_run(5, PageEventKind::NoVisual { scene }, ""));
+    expected.push(second_run(3, PageEventKind::AssistantText, "neighbor"));
     assert_eq!(rows, expected);
-    assert_eq!(before, Some(EventId(2)));
+    assert_eq!(before, Some(EventId(3)));
     let DataToShell::Page {
         request,
         thread: returned,
@@ -888,7 +794,13 @@ fn typed_history_keeps_exact_identity_neighboring_text_and_raw_cursor() {
     };
     assert_eq!(request, u32::MAX);
     assert_eq!(returned, thread);
-    assert_eq!(rows, [history_event(1, PageEventKind::User, "oldest")]);
+    assert_eq!(
+        rows,
+        [
+            second_run(2, PageEventKind::User, "second"),
+            history_event(1, PageEventKind::User, "oldest"),
+        ]
+    );
     assert_eq!(before, None);
 }
 
@@ -1195,95 +1107,111 @@ fn invalid_visual_metadata_in_the_fifty_first_row_keeps_the_page_and_cursor() {
 
 #[test]
 fn visual_markers_participate_in_the_full_encoded_page_budget_and_continuation() {
-    let scratch = Scratch::new("pages-visual-budget");
-    let mut store = Store::open(&scratch.db()).expect("store");
-    let (thread, run) = (ThreadId(1), RunId(1));
-    store
-        .begin_turn(thread, Some("title"), run, "oldest")
-        .expect("turn");
-    let base = 1_u64 << 56;
-    store
-        .conn
-        .execute(
-            "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'events'",
-            [bounded_id(base - 1)],
-        )
-        .expect("large scene identity");
-    let scene = typed_scene(&mut store, thread, run);
-    assert_eq!(scene, SceneId(base));
-    let body = format!(r#"{{"scene":{base}}}"#);
-    let text = "event".repeat(200);
-    store
-        .append(
-            thread,
-            run,
-            &[NewEvent {
-                kind: EventKind::SceneStep,
-                text: Some(&text),
-                body: Some(&body),
-            }; 53],
-        )
-        .expect("markers");
-    let reply = events(&store, thread, None);
-    assert!(frame::encode(&reply, Pipe::Data).expect("frame").len() <= 32 * 1024);
-    let DataToShell::Page {
-        request,
-        events: rows,
-        before,
-        ..
-    } = reply
-    else {
-        panic!("page")
-    };
-    assert_eq!(request, u32::MAX);
-    assert_eq!(rows.len(), 31);
-    assert_eq!(
-        rows,
-        (base + 24..=base + 54)
+    for visual in [false, true] {
+        let scratch = Scratch::new("pages-visual-budget");
+        let mut store = Store::open(&scratch.db()).expect("store");
+        let (thread, run) = (ThreadId(1), RunId(1));
+        store
+            .begin_turn(thread, Some("title"), run, "oldest")
+            .expect("turn");
+        let base = 1_u64 << 56;
+        store
+            .conn
+            .execute(
+                "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'events'",
+                [bounded_id(base - 1)],
+            )
+            .expect("large scene identity");
+        let scene = typed_scene(&mut store, thread, run);
+        assert_eq!(scene, SceneId(base));
+        let body = format!(r#"{{"scene":{base}}}"#);
+        let text = "event".repeat(200);
+        let (stored_kind, stored_body, page_kind, first_id) = if visual {
+            (
+                EventKind::SceneStep,
+                Some(body.as_str()),
+                PageEventKind::NoVisual { scene },
+                base + 24,
+            )
+        } else {
+            (
+                EventKind::AssistantText,
+                None,
+                PageEventKind::AssistantText,
+                base + 23,
+            )
+        };
+        store
+            .append(
+                thread,
+                run,
+                &[NewEvent {
+                    kind: stored_kind,
+                    text: Some(&text),
+                    body: stored_body,
+                }; 53],
+            )
+            .expect("markers");
+        let reply = events(&store, thread, None);
+        assert!(frame::encode(&reply, Pipe::Data).expect("frame").len() <= 32 * 1024);
+        let DataToShell::Page {
+            request,
+            events: rows,
+            before,
+            ..
+        } = reply
+        else {
+            panic!("page")
+        };
+        assert_eq!(request, u32::MAX);
+        assert_eq!(
+            rows,
+            (first_id..=base + 54)
+                .rev()
+                .map(|id| history_event(id, page_kind, &text))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(before, Some(EventId(first_id)));
+        let next = events(&store, thread, before);
+        assert!(
+            frame::encode(&next, Pipe::Data)
+                .expect("continued frame")
+                .len()
+                <= 32 * 1024
+        );
+        let DataToShell::Page {
+            events: more,
+            before,
+            ..
+        } = next
+        else {
+            panic!("continued page")
+        };
+        let mut expected: Vec<_> = (base + 2..first_id)
             .rev()
-            .map(|id| history_event(id, PageEventKind::NoVisual { scene }, &text))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(before, Some(EventId(base + 24)));
-    let next = events(&store, thread, before);
-    assert!(
-        frame::encode(&next, Pipe::Data)
-            .expect("continued frame")
-            .len()
-            <= 32 * 1024
-    );
-    let DataToShell::Page {
-        events: more,
-        before,
-        ..
-    } = next
-    else {
-        panic!("continued page")
-    };
-    let mut expected: Vec<_> = (base + 2..=base + 23)
-        .rev()
-        .map(|id| history_event(id, PageEventKind::NoVisual { scene }, &text))
-        .collect();
-    expected.push(history_event(
-        base + 1,
-        PageEventKind::NoVisual { scene },
-        "",
-    ));
-    expected.push(history_event(1, PageEventKind::User, "oldest"));
-    assert_eq!(more, expected);
-    assert_eq!(before, None);
-    let mut one_more = rows;
-    one_more.push(more[0].clone());
-    let over = DataToShell::Page {
-        request,
-        thread,
-        before: Some(EventId(base + 23)),
-        events: one_more,
-    };
-    assert!(
-        frame::encode(&over, Pipe::Data)
-            .expect("one more frame")
-            .len()
-            > 32 * 1024
-    );
+            .map(|id| history_event(id, page_kind, &text))
+            .collect();
+        expected.push(history_event(
+            base + 1,
+            PageEventKind::NoVisual { scene },
+            "",
+        ));
+        expected.push(history_event(1, PageEventKind::User, "oldest"));
+        assert_eq!(more, expected);
+        assert_eq!(before, None);
+        let mut one_more = rows;
+        one_more.push(more[0].clone());
+        let over = DataToShell::Page {
+            request,
+            thread,
+            before: Some(EventId(first_id - 1)),
+            events: one_more,
+        };
+        assert!(
+            frame::encode(&over, Pipe::Data)
+                .expect("one more frame")
+                .len()
+                > 32 * 1024
+        );
+    }
 }

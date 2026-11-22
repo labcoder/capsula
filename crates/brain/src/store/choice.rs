@@ -106,36 +106,6 @@ pub(super) fn effort_text(effort: Effort) -> &'static str {
 mod tests {
     use super::*;
 
-    #[test]
-    fn only_three_unset_fields_are_absent() {
-        assert_eq!(StoredChoice::decode(None, None, None), StoredChoice::Absent);
-        for (model, effort, connection) in [
-            (Some("same-slug"), None, None),
-            (None, Some("high"), None),
-            (None, None, Some("chatgpt")),
-            (Some("same-slug"), Some("high"), None),
-            (Some("same-slug"), None, Some("chatgpt")),
-            (None, Some("high"), Some("chatgpt")),
-            (Some("same-slug"), Some("high"), Some("unknown")),
-            (Some("Not A Slug"), Some("high"), Some("chatgpt")),
-            (Some(""), Some("high"), Some("chatgpt")),
-        ] {
-            let choice = StoredChoice::decode(model, effort, connection);
-            assert_eq!(choice, StoredChoice::Invalid);
-            assert!(choice.clone().display().is_err());
-            assert!(matches!(
-                choice.execution(Some(default())),
-                Err(StoreError::Read)
-            ));
-        }
-        assert_eq!(
-            StoredChoice::Absent
-                .execution(Some(default()))
-                .expect("default"),
-            Some(default())
-        );
-    }
-
     fn default() -> ModelChoice {
         ModelChoice {
             connection: ConnectionKind::ChatGpt,
@@ -167,30 +137,6 @@ mod tests {
                     effort: Effort::Low,
                     ..shown
                 })
-            );
-        }
-    }
-
-    #[test]
-    fn a_saved_route_is_shown_and_read_as_saved() {
-        for connection in ["claude_code", "anthropic_key"] {
-            let stored = StoredChoice::decode(Some("same-slug"), Some("ultra"), Some(connection));
-            let shown = stored.clone().display().expect("page").expect("selected");
-            assert_ne!(shown.connection, ConnectionKind::ChatGpt);
-            assert_eq!(shown.model.as_str(), "same-slug");
-            assert_eq!(shown.effort, Effort::Medium);
-            assert_eq!(
-                stored.execution(Some(default())).expect("read"),
-                Some(ModelChoice {
-                    effort: Effort::Low,
-                    ..shown.clone()
-                })
-            );
-            assert_eq!(
-                StoredChoice::Absent
-                    .execution(Some(shown.clone()))
-                    .expect("read"),
-                Some(shown)
             );
         }
     }

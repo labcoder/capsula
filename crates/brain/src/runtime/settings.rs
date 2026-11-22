@@ -416,14 +416,6 @@ impl Brain {
                 Outcome::Applied
             }
             Ok((_, Err(error))) => {
-                #[cfg(test)]
-                if let crate::config::ConfigError::Write(source) = &error {
-                    eprintln!(
-                        "settings write refused: kind={:?} os_code={:?}",
-                        source.kind(),
-                        source.raw_os_error()
-                    );
-                }
                 tracing::warn!(%error, "settings change refused");
                 Outcome::Refused(error.key())
             }

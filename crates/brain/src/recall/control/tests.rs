@@ -58,19 +58,28 @@ fn sum(conn: &Connection) -> Result<i64, Error> {
 
 #[test]
 fn owners_cancel_children_and_deadlines_never_extend() {
-    let owner = control();
+    let start = Instant::now();
+    let end = start + Duration::from_secs(60);
+    let early = end - READ_TIME;
+    let owner = Control::new(end);
     let child = owner.child();
-    assert_eq!(child.until(owner.end + READ_TIME).end, owner.end);
-    assert_eq!(
-        child.until(owner.end.checked_sub(READ_TIME).unwrap()).end,
-        owner.end.checked_sub(READ_TIME).unwrap()
-    );
+    let shortened = child.until(early);
+    let extended = child.until(end + READ_TIME);
+
+    *child.test.time.lock().unwrap() = Some(early - Duration::from_millis(1));
+    assert_eq!(shortened.check(), Ok(()));
+    *child.test.time.lock().unwrap() = Some(early);
+    assert_eq!(shortened.check(), Err(Error::Timeout));
+    assert_eq!(extended.check(), Ok(()));
+    *child.test.time.lock().unwrap() = Some(end - Duration::from_millis(1));
+    assert_eq!(extended.check(), Ok(()));
+    *child.test.time.lock().unwrap() = Some(end);
+    assert_eq!(extended.check(), Err(Error::Timeout));
+
     owner.cancel();
     assert_eq!(child.check(), Err(Error::Ended));
-    assert_eq!(
-        child.until(Instant::now() + READ_TIME).check(),
-        Err(Error::Ended)
-    );
+    assert_eq!(extended.check(), Err(Error::Ended));
+    assert_eq!(child.until(end + READ_TIME).check(), Err(Error::Ended));
 }
 
 #[test]

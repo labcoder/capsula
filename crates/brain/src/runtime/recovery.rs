@@ -254,10 +254,24 @@ mod tests {
             chunk(3, 2, vec![event(3, "a3")], true),
             kept_last.clone(),
         ]);
-        assert_eq!(
-            format!("{recovery:?}"),
-            "Recovery { drawings: 5, scenes: 0, sent: 0, .. }"
-        );
+        let shown = format!("{recovery:?}");
+        for marker in [
+            "private-scene",
+            "private-alt",
+            "private-narration",
+            "object-a1",
+            "object-b2",
+            "13337.25",
+            "dense",
+            "series-7",
+        ] {
+            assert!(!shown.contains(marker), "scene text leaked");
+            let bytes = format!("{:?}", marker.as_bytes());
+            assert!(
+                !shown.contains(bytes.trim_matches(['[', ']'])),
+                "scene bytes leaked"
+            );
+        }
         assert_eq!(
             recovery.next_chunk(),
             Some(DataToShell::SceneSnapshotV1 { chunk: first })

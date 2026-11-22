@@ -1,6 +1,6 @@
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
@@ -97,57 +97,122 @@ fn cancelled_or_expired_issue_scopes_leave_actions_revisions_and_events_untouche
     }
 }
 
+enum Cut {
+    Cancelled,
+    Expired,
+    Event,
+    Committed,
+}
+
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the same real transaction fixture covers all cancellation boundaries"
+)]
 fn cancellation_after_the_action_event_insert_rolls_back_the_whole_issue_transaction() {
-    let scratch = Scratch::new("issue-scope-rollback");
-    let mut store = opened(&scratch);
-    let owner = thread(&mut store);
-    let action = draft(&mut store, owner);
-    store
-        .conn
-        .busy_timeout(Duration::from_millis(1234))
-        .unwrap();
-    let before = snapshot(&store.conn);
-    let before_events = events(&store);
-    let scope = WriteScope::new(Instant::now() + Duration::from_secs(60));
-    let cancel = scope.clone();
-    let inserted = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&inserted);
-    store
-        .conn
-        .update_hook(Some(
-            move |kind: HookAction, database: &str, table: &str, _row: i64| {
-                if kind == HookAction::SQLITE_INSERT && database == "main" && table == "events" {
-                    observed.fetch_add(1, Ordering::SeqCst);
+    for (rearming, cut) in [
+        (false, Cut::Event),
+        (true, Cut::Cancelled),
+        (true, Cut::Expired),
+        (true, Cut::Event),
+        (true, Cut::Committed),
+    ] {
+        let scratch = Scratch::new("issue-scope-rollback");
+        let mut store = opened(&scratch);
+        let owner = thread(&mut store);
+        let action = draft(&mut store, owner);
+        store
+            .conn
+            .busy_timeout(Duration::from_millis(1234))
+            .unwrap();
+        let before = snapshot(&store.conn);
+        let before_events = events(&store);
+        let limit = if matches!(cut, Cut::Expired) {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(60)
+        };
+        let scope = WriteScope::new(Instant::now() + limit);
+        let cancel = scope.clone();
+        let reached = Arc::new(AtomicBool::new(false));
+        let mark = Arc::clone(&reached);
+        match cut {
+            Cut::Cancelled => scope.cancel(),
+            Cut::Expired => (),
+            Cut::Event => store
+                .conn
+                .update_hook(Some(
+                    move |kind: HookAction, database: &str, table: &str, _row: i64| {
+                        if kind == HookAction::SQLITE_INSERT
+                            && database == "main"
+                            && table == "events"
+                        {
+                            mark.store(true, Ordering::SeqCst);
+                            cancel.cancel();
+                        }
+                    },
+                ))
+                .unwrap(),
+            Cut::Committed => store
+                .conn
+                .wal_hook(Some(move |_wal: &mut Wal, _pages: i32| {
+                    mark.store(true, Ordering::SeqCst);
                     cancel.cancel();
-                }
-            },
-        ))
-        .unwrap();
-    let result = store.issue_write(&consent(&action), Some(&scope));
-    store
-        .conn
-        .update_hook(None::<fn(HookAction, &str, &str, i64)>)
-        .unwrap();
-    assert!(matches!(result, Err(StoreError::Issue)));
-    assert_eq!(inserted.load(Ordering::SeqCst), 1);
-    assert!(scope.stopped());
-    assert_eq!(snapshot(&store.conn), before);
-    assert_eq!(events(&store), before_events);
-    let reader = Connection::open(scratch.db()).unwrap();
-    assert_eq!(snapshot(&reader), before);
-    restored_connection(&store);
-    let after = changed(store.edit_draft(action.draft, &title("After"), &body("B"), Some(&repo())));
-    assert_eq!(
-        after,
-        Action {
-            title: title("After"),
-            version: StateVersion(2),
-            approval: Some(ApprovalRev(2)),
-            ..action
+                    Ok(())
+                }))
+                .unwrap(),
         }
-    );
-    restored_connection(&store);
+        let write = if rearming {
+            super::rearm_tests::rearm(&action)
+        } else {
+            consent(&action)
+        };
+        let result = store.issue_write(&write, Some(&scope));
+        store
+            .conn
+            .update_hook(None::<fn(HookAction, &str, &str, i64)>)
+            .unwrap();
+        store
+            .conn
+            .wal_hook(None::<fn(&mut Wal, i32) -> rusqlite::Result<()>>)
+            .unwrap();
+        assert!(scope.stopped());
+        assert_eq!(
+            reached.load(Ordering::SeqCst),
+            matches!(cut, Cut::Event | Cut::Committed)
+        );
+        if matches!(cut, Cut::Committed) {
+            let expected = Action {
+                version: StateVersion(2),
+                approval: Some(ApprovalRev(2)),
+                ..action
+            };
+            assert_eq!(changed(result), expected);
+            let reopened = Store::open(&scratch.db()).unwrap();
+            assert_eq!(reopened.action(expected.draft).unwrap(), Some(expected));
+            assert_eq!(snapshot(&store.conn).1, 2);
+            assert_eq!(events(&store).len(), before_events.len() + 1);
+        } else {
+            assert!(matches!(result, Err(StoreError::Issue)));
+            assert_eq!(snapshot(&store.conn), before);
+            assert_eq!(events(&store), before_events);
+            let reader = Connection::open(scratch.db()).unwrap();
+            assert_eq!(snapshot(&reader), before);
+            restored_connection(&store);
+            let after =
+                changed(store.edit_draft(action.draft, &title("After"), &body("B"), Some(&repo())));
+            assert_eq!(
+                after,
+                Action {
+                    title: title("After"),
+                    version: StateVersion(2),
+                    approval: Some(ApprovalRev(2)),
+                    ..action
+                }
+            );
+        }
+        restored_connection(&store);
+    }
 }
 
 #[test]
