@@ -10,20 +10,20 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 /// What the consent decisions read: the view's threads and the owner's connection, if any.
-pub(super) struct Facts<'a> {
-    pub(super) model: &'a Threads,
-    pub(super) connection: Option<(&'a Session, &'a Settings)>,
+pub struct Facts<'a> {
+    pub model: &'a Threads,
+    pub connection: Option<(&'a Session, &'a Settings)>,
 }
 
 /// The view's window as the decision sees it.
-pub(super) struct Window {
-    pub(super) active: bool,
-    pub(super) visible: bool,
-    pub(super) dialog: bool,
+pub struct Window {
+    pub active: bool,
+    pub visible: bool,
+    pub dialog: bool,
 }
 
 /// A confirmation that may open: what it rearms and the intent it becomes once a review exists.
-pub(super) struct Opening {
+pub struct Opening {
     draft: DraftId,
     thread: ThreadId,
     version: StateVersion,
@@ -36,7 +36,7 @@ pub(super) struct Opening {
     live: Rc<Cell<bool>>,
 }
 
-pub(in crate::presence) struct Pending<D> {
+pub struct Pending<D> {
     opening: Opening,
     review: u64,
     stage: Stage<D>,
@@ -79,15 +79,12 @@ fn eligible<'a>(facts: &Facts<'a>, draft: DraftId) -> Option<Ref<'a, IssueCard>>
     fileable(&card, facts.connection).then_some(card)
 }
 
-pub(super) fn fileable(card: &IssueCard, connection: Option<(&Session, &Settings)>) -> bool {
+pub fn fileable(card: &IssueCard, connection: Option<(&Session, &Settings)>) -> bool {
     matches!(card.state, ActionState::Draft | ActionState::Failed(_))
         && bound_to_connection(card, connection)
 }
 
-pub(super) fn bound_to_connection(
-    card: &IssueCard,
-    connection: Option<(&Session, &Settings)>,
-) -> bool {
+pub fn bound_to_connection(card: &IssueCard, connection: Option<(&Session, &Settings)>) -> bool {
     let Some((session, settings)) = connection else {
         return false;
     };
@@ -102,7 +99,7 @@ pub(super) fn bound_to_connection(
 }
 
 /// Discard and check again apply only to a current card in a state that offers them.
-pub(super) fn action_allowed(op: &IssueOp, window: &Window, model: &Threads) -> bool {
+pub fn action_allowed(op: &IssueOp, window: &Window, model: &Threads) -> bool {
     if !window.active || !window.visible {
         return false;
     }
@@ -127,7 +124,7 @@ pub(super) fn action_allowed(op: &IssueOp, window: &Window, model: &Threads) -> 
 }
 
 impl Opening {
-    pub(super) fn new<D>(
+    pub fn new<D>(
         pending: Option<&Pending<D>>,
         draft: DraftId,
         window: &Window,
@@ -152,7 +149,7 @@ impl Opening {
         })
     }
 
-    pub(super) fn rearm(&self) -> IssueOp {
+    pub fn rearm(&self) -> IssueOp {
         IssueOp::Rearm {
             draft: self.draft,
             version: self.version,
@@ -160,11 +157,11 @@ impl Opening {
         }
     }
 
-    pub(super) fn live(&self) -> Rc<Cell<bool>> {
+    pub fn live(&self) -> Rc<Cell<bool>> {
         Rc::clone(&self.live)
     }
 
-    pub(super) fn pending<D>(self, review: u64) -> Pending<D> {
+    pub fn pending<D>(self, review: u64) -> Pending<D> {
         Pending {
             opening: self,
             review,
@@ -174,11 +171,11 @@ impl Opening {
 }
 
 impl<D> Pending<D> {
-    pub(super) fn review(&self) -> u64 {
+    pub fn review(&self) -> u64 {
         self.review
     }
 
-    pub(super) fn awaiting(&self) -> bool {
+    pub fn awaiting(&self) -> bool {
         matches!(self.stage, Stage::Awaiting)
     }
 
@@ -217,14 +214,14 @@ impl<D> Pending<D> {
     }
 
     /// No longer live, its dialog gone, or the session, scope or card it was offered for moved on.
-    pub(super) fn stale(&self, facts: &Facts<'_>, dialog_live: impl Fn(&D) -> bool) -> bool {
+    pub fn stale(&self, facts: &Facts<'_>, dialog_live: impl Fn(&D) -> bool) -> bool {
         !self.opening.live.get()
             || matches!(&self.stage, Stage::Offered { dialog, .. } if !dialog_live(dialog))
             || !self.matches(facts)
     }
 
     /// Ends this intent: the review to cancel and the dialog to dismiss, if one was offered.
-    pub(super) fn retire(self) -> (u64, Option<D>) {
+    pub fn retire(self) -> (u64, Option<D>) {
         self.opening.live.set(false);
         let dialog = match self.stage {
             Stage::Offered { dialog, .. } => Some(dialog),
@@ -238,7 +235,7 @@ impl<D> Pending<D> {
         clippy::fn_params_excessive_bools,
         reason = "the confirmation callback supplies a boolean decision"
     )]
-    pub(super) fn consent(
+    pub fn consent(
         &self,
         confirmed: bool,
         window: &Window,
@@ -268,13 +265,13 @@ impl<D> Pending<D> {
     }
 
     /// The reply this intent waits for.
-    pub(super) fn awaits(&self, request: u64) -> bool {
+    pub fn awaits(&self, request: u64) -> bool {
         self.review == request && self.awaiting()
     }
 
     /// The reply can't be offered: the intent or window moved on, or the card isn't the newer
     /// approval of the same fileable draft.
-    pub(super) fn refuses(&self, card: &IssueCard, window: &Window, facts: &Facts<'_>) -> bool {
+    pub fn refuses(&self, card: &IssueCard, window: &Window, facts: &Facts<'_>) -> bool {
         let pending = &self.opening;
         !pending.live.get()
             || !window.active
@@ -289,7 +286,7 @@ impl<D> Pending<D> {
             || !fileable(card, facts.connection)
     }
 
-    pub(super) fn offer(
+    pub fn offer(
         &mut self,
         model: &mut Threads,
         version: StateVersion,
