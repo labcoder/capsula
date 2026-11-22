@@ -12,7 +12,6 @@ use std::{
 };
 
 use async_channel::Sender;
-use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, BorderStyle, Bounds, Context, DecorationRun, Element,
     ElementId, Entity, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad,
@@ -37,7 +36,7 @@ use super::paint_phase::{self, Phase};
 use super::paint_stroke::Scratch;
 use super::{OpenError, Presence, options, scaled};
 use crate::platform::{self, PresenceEvent};
-use crate::presenter::{Frames, Sample};
+use crate::presenter::{Frames, PairFont, Sample};
 
 /// One overlay window and its root, opened hidden and closed once hidden again.
 pub(super) struct Overlay {
@@ -879,9 +878,10 @@ fn paint_text(
     else {
         unreachable!("only text prims become text pieces");
     };
-    let family = {
+    let font = {
         let _gpui = paint_phase::enter(Phase::Gpui);
-        cx.theme().font_family.clone()
+        let (family, backend) = PairFont::selection(cx);
+        (family, backend.map(AsRef::as_ref))
     };
     let (mut origin, font_size, wrap) = label(item.transform, *origin, style.size, *max_width);
     let shaper = {
@@ -893,14 +893,7 @@ fn paint_text(
     };
     let shaped = {
         let _shape = paint_phase::enter(Phase::GpuiShape);
-        entry.shape(
-            fonts,
-            &family,
-            &shaper,
-            font_size,
-            wrap,
-            window.scale_factor(),
-        )?
+        entry.shape(fonts, font, &shaper, font_size, wrap, window.scale_factor())?
     };
     let align = match align {
         Align::Left => TextAlign::Left,

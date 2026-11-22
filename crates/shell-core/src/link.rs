@@ -23,7 +23,7 @@ use kumochi_protocol::message::{
     AccountView, AudioSession, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
     DataToShell, Deleted, ErrorKey, GestureId, GitHubView, Hello, HoldStatus, Incarnation,
     IssueSession, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor,
-    SceneDescriptorV1, SettingsOp, SettingsView, ThreadId, ThreadOp, UserError,
+    SceneDescriptorV1, SettingsOp, SettingsView, TextMetricsV1, ThreadId, ThreadOp, UserError,
 };
 use kumochi_protocol::voice::VoicePart;
 
@@ -345,6 +345,11 @@ impl Session {
         self.issue_origin
     }
 
+    /// The local drawing font selected with this pair's metrics, even if sampling failed.
+    pub fn drawing_font_family(&self) -> Option<&Arc<str>> {
+        self.io.drawing_font_family.as_ref()
+    }
+
     #[inline]
     pub fn has_narration(&self) -> bool {
         self.io.narrated.is_some()
@@ -423,6 +428,7 @@ struct SessionIo {
     control: Option<WeakSender<ControlToBrain>>,
     bytes: AtomicU32,
     wake: WeakSender<DataOut>,
+    drawing_font_family: Option<Arc<str>>,
 }
 
 #[derive(Clone)]
@@ -474,6 +480,7 @@ struct Connection {
     control: Arc<PipeClient>,
     data: Arc<PipeClient>,
     issue_origin: IssueSession,
+    drawing_font_family: Option<Arc<str>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1386,6 +1393,7 @@ impl Session {
                 control: None,
                 bytes: AtomicU32::new(0),
                 wake: wake.downgrade(),
+                drawing_font_family: None,
             }),
             issue_origin: IssueSession {
                 incarnation,
@@ -1417,6 +1425,13 @@ pub struct LinkStart {
     events: Sender<LinkEvent>,
     retries: Receiver<()>,
     alive: Sender<()>,
+}
+
+/// One attempt's drawing snapshot. Only the numeric profile goes over the pipe.
+#[derive(Default)]
+pub struct DrawingText {
+    pub profile: Option<TextMetricsV1>,
+    pub font_family: Option<Arc<str>>,
 }
 
 /// Prepares the link. It reports on `events` once started, and ends when the UI drops the
@@ -1461,10 +1476,14 @@ fn start(link: Link, events: Sender<LinkEvent>) -> (LinkHandle, LinkStart) {
 
 impl LinkStart {
     /// Starts connecting on the link thread, which may start the brain.
+    /// The host selects its drawing font and samples it, with a bounded wait, on each attempt.
     ///
     /// # Errors
     /// Fails when the thread can't start.
-    pub fn spawn(self) -> std::io::Result<()> {
+    pub fn spawn(
+        self,
+        text_metrics: impl FnMut(Instant) -> DrawingText + Send + 'static,
+    ) -> std::io::Result<()> {
         let Self {
             link,
             events,
@@ -1474,7 +1493,7 @@ impl LinkStart {
         thread::Builder::new()
             .name("link".to_owned())
             .spawn(move || {
-                link.run(&events, &retries);
+                link.run(&events, &retries, text_metrics);
                 drop(alive);
             })?;
         Ok(())
@@ -1484,7 +1503,12 @@ impl LinkStart {
 impl Link {
     /// Connects, attends, and reconnects after a loss. The first loss relaunches the brain on
     /// its own; another within [`REPEAT_WINDOW`], or a failed connect, waits for Retry.
-    fn run(&self, events: &Sender<LinkEvent>, retries: &Receiver<()>) {
+    fn run(
+        &self,
+        events: &Sender<LinkEvent>,
+        retries: &Receiver<()>,
+        mut text_metrics: impl FnMut(Instant) -> DrawingText,
+    ) {
         let mut state = LinkState::Connecting;
         let mut last_loss: Option<Instant> = None;
         loop {
@@ -1492,7 +1516,9 @@ impl Link {
                 return;
             }
             let reconnect_by = Instant::now() + CONNECT_TIMEOUT;
-            let connection = match self.connect(reconnect_by) {
+            let connection = match self.connect_with(reconnect_by, |attempt| {
+                self.handshake(attempt, || text_metrics(reconnect_by))
+            }) {
                 Ok(connection) => connection,
                 Err(_) if self.quitting() => return,
                 Err(error) => {
@@ -1618,6 +1644,7 @@ impl Link {
             control,
             data,
             issue_origin,
+            drawing_font_family,
         } = connection;
         let queued = self.audio == AudioSession::QueuedRequired;
         if queued && let Some(refused) = self.queued_start_refusal(&control, events, reconnect_by) {
@@ -1649,6 +1676,7 @@ impl Link {
             control: Some(control_out.downgrade()),
             bytes: AtomicU32::new(0),
             wake: data_out.downgrade(),
+            drawing_font_family,
         });
         let mut helpers = Vec::new();
         let closing = Arc::<AtomicBool>::default();
@@ -1862,10 +1890,6 @@ impl Link {
     }
 
     /// Connects, starting the brain once if none answers, until [`CONNECT_TIMEOUT`].
-    fn connect(&self, deadline: Instant) -> Result<Connection, LinkError> {
-        self.connect_with(deadline, |attempt| self.handshake(attempt))
-    }
-
     fn connect_with(
         &self,
         deadline: Instant,
@@ -1916,7 +1940,11 @@ impl Link {
         }
     }
 
-    fn handshake(&self, attempt: Option<Instant>) -> Result<Connection, LinkError> {
+    fn handshake(
+        &self,
+        attempt: Option<Instant>,
+        text_metrics: impl FnOnce() -> DrawingText,
+    ) -> Result<Connection, LinkError> {
         let control = open(&Pipe::Control.name(self.session), &self.brain, attempt)?;
         // A brain that hangs mid-handshake must not hang the shell with it.
         control.set_timeout(Some(HANDSHAKE_TIMEOUT));
@@ -1924,7 +1952,7 @@ impl Link {
             build_id: BUILD_ID.to_owned(),
             capability: credential::read(self.session)?,
         };
-        handshake_pair(control, hello, self.audio, attempt, || {
+        handshake_pair(control, hello, self.audio, attempt, text_metrics(), || {
             open(&Pipe::Data.name(self.session), &self.brain, attempt)
         })
     }
@@ -1935,6 +1963,7 @@ fn handshake_pair(
     hello: Hello,
     audio: AudioSession,
     attempt: Option<Instant>,
+    drawing: DrawingText,
     open_data: impl FnOnce() -> Result<PipeClient, LinkError>,
 ) -> Result<Connection, LinkError> {
     let greeting = match audio {
@@ -1945,23 +1974,28 @@ fn handshake_pair(
     frame::write(&mut handshake, &greeting, Pipe::Control)?;
     let issue_origin = welcome(&mut handshake)?;
     check_attempt(attempt)?;
+    let data_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let data_deadline = attempt.map_or(data_deadline, |deadline| deadline.min(data_deadline));
     let data = open_data()?;
     let greeting = match audio {
         AudioSession::Legacy => DataToBrain::Hello(hello),
-        AudioSession::QueuedRequired => {
-            data.set_timeout(Some(HANDSHAKE_TIMEOUT));
-            DataToBrain::QueuedHello(hello, issue_origin)
-        }
+        AudioSession::QueuedRequired => DataToBrain::QueuedHello(hello, issue_origin),
     };
-    frame::write(&mut HandshakeIo(&data, attempt), &greeting, Pipe::Data)?;
-    if audio == AudioSession::QueuedRequired {
-        data.set_timeout(None);
-    }
+    let mut handshake = HandshakeIo(&data, Some(data_deadline));
+    frame::write(&mut handshake, &greeting, Pipe::Data)?;
+    let profile = drawing.profile.filter(TextMetricsV1::valid);
+    frame::write(
+        &mut handshake,
+        &DataToBrain::TextMetrics(profile),
+        Pipe::Data,
+    )?;
+    data.set_timeout(None);
     control.set_timeout(None);
     Ok(Connection {
         control: Arc::new(control),
         data: Arc::new(data),
         issue_origin,
+        drawing_font_family: drawing.font_family,
     })
 }
 

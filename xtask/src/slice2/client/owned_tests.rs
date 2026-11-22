@@ -62,6 +62,13 @@ fn the_owned_server_opens_before_its_capability_is_published() {
     assert_eq!(seen.build_id, kumochi_protocol::BUILD_ID);
     assert_eq!(seen.capability.expose(), capability().expose());
     assert_eq!(
+        read::<DataToBrain>(&mut data_server, Pipe::Data)
+            .expect("valid startup frame")
+            .expect("text metrics")
+            .0,
+        DataToBrain::TextMetrics(None)
+    );
+    assert_eq!(
         shared.control.server_pid().expect("control owner"),
         std::process::id()
     );

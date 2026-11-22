@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Secret;
 use crate::geometry::{PhysicalPoint, PhysicalRect, PointerPath, ReleasePointer, WindowRef};
+pub use kumochi_scene::display::TextMetricsV1;
 
 mod account;
 mod connections;
@@ -882,6 +883,9 @@ pub enum ScreenOff {
     TurnedOff,
 }
 
+/// Maximum payload bytes of the connection's single post-Hello text-metrics frame.
+pub const TEXT_METRICS_MAX_BYTES: usize = 304;
+
 /// Shell to brain, on the data pipe.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataToBrain {
@@ -948,6 +952,8 @@ pub enum DataToBrain {
     },
     /// First data frame for queued output, echoing this control pipe's Welcome.
     QueuedHello(Hello, IssueSession),
+    /// Once after the authenticated data Hello, before session traffic; absent uses built-in metrics.
+    TextMetrics(Option<TextMetricsV1>),
 }
 
 /// Brain to shell, on the data pipe.
@@ -1202,6 +1208,39 @@ mod tests {
             })),
             [1, 1, b'b']
         );
+    }
+
+    #[test]
+    fn text_metrics_append_one_fixed_tuple_after_hello() {
+        use super::{TEXT_METRICS_MAX_BYTES, TextMetricsV1};
+
+        let metrics = DataToBrain::TextMetrics(Some(TextMetricsV1 {
+            advances: [64; 95],
+            line_height: 512,
+            range_maxima: [1024, 1536, 2048],
+        }));
+        let mut bytes = vec![10, 1];
+        bytes.extend([64; 95]);
+        bytes.extend([128, 4, 128, 8, 128, 12, 128, 16]);
+        assert_eq!(
+            postcard::to_allocvec(&DataToBrain::TextMetrics(None)).unwrap(),
+            [10, 0]
+        );
+        assert_eq!(postcard::to_allocvec(&metrics).unwrap(), bytes);
+        assert_eq!(frame::decode::<DataToBrain>(&bytes).unwrap(), metrics);
+        assert!(frame::decode::<DataToBrain>(&bytes[..bytes.len() - 1]).is_err());
+        bytes.push(0);
+        assert!(frame::decode::<DataToBrain>(&bytes).is_err());
+
+        let invalid = DataToBrain::TextMetrics(Some(TextMetricsV1 {
+            advances: [u16::MAX; 95],
+            line_height: u16::MAX,
+            range_maxima: [u16::MAX; 3],
+        }));
+        let bytes = postcard::to_allocvec(&invalid).unwrap();
+        assert_eq!(bytes.len(), 299);
+        assert!(bytes.len() <= TEXT_METRICS_MAX_BYTES);
+        assert_eq!(frame::decode::<DataToBrain>(&bytes).unwrap(), invalid);
     }
 
     #[test]
