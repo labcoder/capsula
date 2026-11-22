@@ -315,9 +315,10 @@ fn answer_history(
                         request,
                         thread,
                         events: events.to_vec(),
-                        before: None,
+                        next: None,
                     }
                 }
+                PageOf::EventsAfter { .. } => panic!("no newer page has been requested"),
             };
             LinkEvent::Data {
                 generation: 1,
@@ -413,6 +414,7 @@ fn a_completed_visible_turn_and_its_reopened_first_page_both_replace_the_preview
     });
     let stored = [2, 1].map(|id| PageEvent {
         id: EventId(id),
+        created_ms: 0,
         run: Some(RunId(1)),
         kind: PageEventKind::AssistantText,
         text: format!("distinct stored section {id}"),
@@ -500,12 +502,13 @@ fn actual_page_batches_route_to_one_history_and_grant_current_session_credit_onc
                 thread,
                 events: vec![PageEvent {
                     id: EventId(id),
+                    created_ms: 0,
                     run: None,
                     kind: PageEventKind::User,
                     text: text.into(),
                     cut: false,
                 }],
-                before: None,
+                next: None,
             },
         };
         let list = |request, bytes| LinkEvent::Data {
@@ -596,6 +599,7 @@ fn unavailable_history_drops_stale_pages_without_crediting_a_replacement_session
         });
         let marker = |id| PageEvent {
             id: EventId(id),
+            created_ms: 0,
             run: Some(RunId(7)),
             kind: PageEventKind::NoVisual { scene: SceneId(1) },
             text: String::new(),
@@ -608,7 +612,7 @@ fn unavailable_history_drops_stale_pages_without_crediting_a_replacement_session
                 request,
                 thread,
                 events,
-                before: Some(EventId(8)),
+                next: Some(EventId(8)),
             },
         };
         owner
@@ -738,7 +742,7 @@ fn a_delete_that_fails_before_hiding_rereads_only_its_open_thread(cx: &mut TestA
                         request: 2,
                         thread: ThreadId(1),
                         events: Vec::new(),
-                        before: None,
+                        next: None,
                     },
                     0,
                 );

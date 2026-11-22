@@ -168,12 +168,13 @@ fn outer_page_carriers_never_print_search_or_page_content() {
         thread: ThreadId(1),
         events: vec![kumochi_protocol::message::PageEvent {
             id: kumochi_protocol::message::EventId(1),
+            created_ms: 0,
             run: None,
             kind: kumochi_protocol::message::PageEventKind::User,
             text: marker.into(),
             cut: false,
         }],
-        before: None,
+        next: None,
     };
     let input = Input::PageRead {
         key: key.clone(),
@@ -797,7 +798,7 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
                 request: 7,
                 thread: ThreadId(1),
                 events: Vec::new(),
-                before: None
+                next: None
             })
         );
     };
@@ -955,7 +956,7 @@ async fn read_pages_and_text(
                 request,
                 thread,
                 events,
-                before,
+                next: before,
             } => {
                 assert_eq!(thread, ThreadId(1));
                 assert_eq!(events.len(), 1);
@@ -1015,7 +1016,7 @@ async fn old_connection_page_success_and_failure_cannot_reach_a_new_connection()
             request: 7,
             thread: ThreadId(999),
             events: Vec::new(),
-            before: None,
+            next: None,
         },
         DataToShell::PageFailed { request: 7 },
     ] {

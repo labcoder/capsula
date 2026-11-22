@@ -743,7 +743,7 @@ fn every_operation_gets_one_reply_in_order() {
                     request: 9,
                     thread: ThreadId(999),
                     events: Vec::new(),
-                    before: None
+                    next: None
                 },
             },
         ]

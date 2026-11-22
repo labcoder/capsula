@@ -1,18 +1,21 @@
 use super::*;
 use kumochi_protocol::message::{PageEventKind, RunId, ThreadKind};
 
+mod history_window;
+
 fn issue_page(request: u32, thread: u64) -> DataToShell {
     DataToShell::Page {
         request,
         thread: ThreadId(thread),
         events: vec![PageEvent {
             id: EventId(9),
+            created_ms: 0,
             run: None,
             kind: PageEventKind::Issue { draft: DraftId(9) },
             text: "title".into(),
             cut: false,
         }],
-        before: None,
+        next: None,
     }
 }
 
@@ -551,12 +554,13 @@ fn unknown_issue_repair_replaces_queued_older_read_when_shared_admission_is_full
         thread: ThreadId(3),
         events: vec![PageEvent {
             id: EventId(9),
+            created_ms: 0,
             run: None,
             kind: PageEventKind::Issue { draft: DraftId(9) },
             text: "title".into(),
             cut: false,
         }],
-        before: Some(EventId(8)),
+        next: Some(EventId(8)),
     });
     assert_eq!(
         browse.requests(),
@@ -606,6 +610,7 @@ fn displayed_ids_are_deduplicated_and_batched_at_sixteen_without_another_schedul
     let mut events: Vec<_> = (1..=17)
         .map(|id| PageEvent {
             id: EventId(id),
+            created_ms: 0,
             run: None,
             kind: PageEventKind::Issue { draft: DraftId(id) },
             text: "title".into(),
@@ -617,7 +622,7 @@ fn displayed_ids_are_deduplicated_and_batched_at_sixteen_without_another_schedul
         request: 2,
         thread: ThreadId(3),
         events,
-        before: None,
+        next: None,
     });
     assert_eq!(
         state.requests(),
@@ -731,7 +736,7 @@ fn terminal_kind_must_match_before_either_pending_page_slot_is_released() {
             request: 1,
             thread: ThreadId(3),
             events: vec![event(99)],
-            before: None,
+            next: None,
         });
         assert_eq!(
             state.reads.borrow().pending,
@@ -750,7 +755,7 @@ fn terminal_kind_must_match_before_either_pending_page_slot_is_released() {
                 request: 2,
                 thread: ThreadId(3),
                 events: vec![event(42)],
-                before: None,
+                next: None,
             },
         ];
         if events_first {
@@ -794,7 +799,7 @@ fn only_a_repair_issued_after_committed_done_proves_the_stored_answer() {
         request: request_id(&first[1]),
         thread: ThreadId(3),
         events: vec![event(1)],
-        before: None,
+        next: None,
     });
     assert_eq!(state.proven, None, "the request preceded Done");
     let repair = state.requests();
@@ -810,7 +815,7 @@ fn only_a_repair_issued_after_committed_done_proves_the_stored_answer() {
         request: request_id(&repair[0]),
         thread: ThreadId(3),
         events: stored.clone(),
-        before: None,
+        next: None,
     });
     assert_eq!(state.proven, Some(RunId(1)));
     assert_eq!(state.events, stored);
@@ -820,7 +825,7 @@ fn only_a_repair_issued_after_committed_done_proves_the_stored_answer() {
         request: request_id(&next[0]),
         thread: ThreadId(3),
         events: stored.clone(),
-        before: None,
+        next: None,
     });
     assert_eq!(
         state.events, stored,
@@ -839,7 +844,7 @@ fn an_older_page_cannot_replace_a_failed_post_done_repair_as_proof() {
         request: request_id(&first[1]),
         thread: ThreadId(3),
         events: vec![event(8)],
-        before: Some(EventId(8)),
+        next: Some(EventId(8)),
     });
     state.settled(ThreadId(3), RunId(1));
     state.run_state(ThreadId(3));
@@ -853,7 +858,7 @@ fn an_older_page_cannot_replace_a_failed_post_done_repair_as_proof() {
         request: request_id(&older[0]),
         thread: ThreadId(3),
         events: vec![event(7)],
-        before: None,
+        next: None,
     });
     assert_eq!(state.proven, None);
     assert_eq!(state.events, [event(8), event(7)]);
@@ -871,7 +876,7 @@ fn selection_and_connection_lifetimes_fence_stored_answer_proof() {
         request: request_id(&first[1]),
         thread: ThreadId(3),
         events: vec![event(1)],
-        before: None,
+        next: None,
     });
     assert_eq!(state.proven, None);
     assert_eq!(state.events, []);
@@ -900,7 +905,7 @@ fn selection_and_connection_lifetimes_fence_stored_answer_proof() {
         request,
         thread,
         events: Vec::new(),
-        before: None,
+        next: None,
     });
     state.settled(thread, RunId(2));
     state.run_state(thread);
@@ -915,7 +920,7 @@ fn selection_and_connection_lifetimes_fence_stored_answer_proof() {
         request: request_id(pending),
         thread,
         events: vec![answer],
-        before: None,
+        next: None,
     };
     state.apply(stored.clone());
     assert_eq!(state.proven, Some(RunId(2)));
@@ -1045,7 +1050,7 @@ fn reopening_the_same_focus_reads_first_not_older_events() {
         request: 2,
         thread: ThreadId(3),
         events: vec![event(8)],
-        before: Some(EventId(8)),
+        next: Some(EventId(8)),
     });
     assert!(!state.follow(Some(ThreadId(3))));
     assert_eq!(state.events, [event(8)]);
@@ -1107,7 +1112,7 @@ fn both_reducers_hold_exactly_four_slots_until_their_stale_pages_land() {
             request,
             thread,
             events: vec![event(99)],
-            before: None,
+            next: None,
         });
         assert_eq!(owner.events, []);
         assert!(!owner.loaded);
@@ -1183,7 +1188,7 @@ fn delete_and_committed_rename_fanout_update_both_reducers() {
             request: request_id(&requests[1]),
             thread: ThreadId(3),
             events: vec![event(99)],
-            before: None,
+            next: None,
         });
         assert_eq!(state.open, None);
         assert_eq!(state.events, []);
@@ -1545,6 +1550,7 @@ fn row(id: u64) -> ThreadRow {
 fn event(id: u64) -> PageEvent {
     PageEvent {
         id: EventId(id),
+        created_ms: 0,
         run: Some(RunId(1)),
         kind: PageEventKind::User,
         text: "private event".to_owned(),
@@ -1714,9 +1720,64 @@ fn reconnect_rereads_both_first_pages_with_new_request_ids() {
         request: old,
         thread: ThreadId(2),
         events: vec![event(1)],
-        before: None,
+        next: None,
     });
     assert!(state.events.is_empty());
+}
+
+#[test]
+fn older_after_a_failed_reconnect_read_replaces_the_unverified_legacy_cache() {
+    let (_, mut chat) = Threads::pair();
+    let thread = ThreadId(3);
+    chat.show_for(Some(thread));
+    chat.connected();
+    let first = chat.requests();
+    let mut cached: Vec<_> = (51..=100).rev().map(event).collect();
+    cached[0].kind = PageEventKind::HeldTurn {
+        screen: kumochi_protocol::message::HeldScreen::Attached,
+    };
+    chat.apply(DataToShell::Page {
+        request: request_id(&first[1]),
+        thread,
+        events: cached.clone(),
+        next: Some(EventId(51)),
+    });
+    assert!(chat.loaded);
+
+    chat.disconnected();
+    chat.connected();
+    let reconnect = chat.requests();
+    chat.apply(DataToShell::PageFailed {
+        request: request_id(&reconnect[1]),
+    });
+    assert!(chat.failed && !chat.loaded);
+    assert_eq!(chat.events, cached);
+
+    chat.older_events();
+    let older = chat.requests();
+    let request = request_id(&older[0]);
+    assert_eq!(
+        older,
+        [DataToBrain::PageRequest {
+            request,
+            page: PageOf::Events {
+                thread,
+                before: Some(EventId(51)),
+            },
+        }]
+    );
+    let events: Vec<_> = (1..=50).rev().map(event).collect();
+    chat.apply(DataToShell::Page {
+        request,
+        thread,
+        events: events.clone(),
+        next: None,
+    });
+    assert!(chat.loaded && !chat.failed);
+    assert_eq!(chat.before, None);
+    assert_eq!(chat.proven, None);
+    assert_eq!(chat.events.len(), 50, "unverified rows must go");
+    assert_eq!(chat.events, events);
 }
 
 #[test]
@@ -1817,7 +1878,7 @@ fn a_repair_that_misses_the_shown_events_keeps_the_gap_reachable() {
         request: first,
         thread: ThreadId(3),
         events: vec![event(5), event(4)],
-        before: Some(EventId(4)),
+        next: Some(EventId(4)),
     });
     state.run_state(ThreadId(3));
     let repair = state
@@ -1838,7 +1899,7 @@ fn a_repair_that_misses_the_shown_events_keeps_the_gap_reachable() {
         request: request_id(&repair),
         thread: ThreadId(3),
         events: vec![event(9), event(8)],
-        before: Some(EventId(8)),
+        next: Some(EventId(8)),
     });
     state.older_events();
     let older = state.requests();
@@ -1856,7 +1917,7 @@ fn a_repair_that_misses_the_shown_events_keeps_the_gap_reachable() {
         request: request_id(&older[0]),
         thread: ThreadId(3),
         events: vec![event(7), event(6), event(5), event(4)],
-        before: None,
+        next: None,
     });
     let ids: Vec<u64> = state.events.iter().map(|event| event.id.0).collect();
     assert_eq!(ids, [9, 8, 7, 6, 5, 4]);
@@ -1873,6 +1934,7 @@ fn a_repair_brings_a_shown_turn_s_screen_mark_up_to_date_and_keeps_its_history()
     };
     let turn = |kind: PageEventKind, text: &str, cut: bool| PageEvent {
         id: EventId(6),
+        created_ms: 0,
         run: Some(RunId(1)),
         kind,
         text: text.to_owned(),
@@ -1886,7 +1948,7 @@ fn a_repair_brings_a_shown_turn_s_screen_mark_up_to_date_and_keeps_its_history()
             request: first,
             thread: ThreadId(3),
             events: vec![turn(marked, "the whole turn", false), event(5), event(4)],
-            before: Some(EventId(4)),
+            next: Some(EventId(4)),
         });
         state.run_state(ThreadId(3));
         let repair = state
@@ -1906,7 +1968,7 @@ fn a_repair_brings_a_shown_turn_s_screen_mark_up_to_date_and_keeps_its_history()
             request: request_id(&repair),
             thread: ThreadId(3),
             events: vec![event(8), event(7), turn(stored, "the", true)],
-            before: Some(EventId(6)),
+            next: Some(EventId(6)),
         });
         let ids: Vec<u64> = state.events.iter().map(|event| event.id.0).collect();
         assert_eq!(ids, [8, 7, 6, 5, 4]);
@@ -1930,7 +1992,7 @@ fn switching_or_closing_threads_drops_old_events_and_never_sends_two_event_reads
         request: first,
         thread: ThreadId(3),
         events: vec![event(5)],
-        before: None,
+        next: None,
     });
     assert!(state.events.is_empty());
     let next = request_id(&state.requests()[0]);
@@ -1939,7 +2001,7 @@ fn switching_or_closing_threads_drops_old_events_and_never_sends_two_event_reads
         request: next,
         thread: ThreadId(2),
         events: vec![event(4)],
-        before: None,
+        next: None,
     });
     assert!(state.events.is_empty());
     assert!(state.requests().is_empty());
@@ -1955,7 +2017,7 @@ fn older_events_continue_once_and_an_empty_first_page_marks_the_thread_gone() {
         request: first,
         thread: ThreadId(3),
         events: vec![event(5), event(4)],
-        before: Some(EventId(4)),
+        next: Some(EventId(4)),
     });
     state.older_events();
     let requests = state.requests();
@@ -1975,7 +2037,7 @@ fn older_events_continue_once_and_an_empty_first_page_marks_the_thread_gone() {
         request: first + 1,
         thread: ThreadId(3),
         events: vec![event(3)],
-        before: None,
+        next: None,
     });
     assert_eq!(state.events, vec![event(5), event(4), event(3)]);
     state.select(Some(ThreadId(99)));
@@ -1984,7 +2046,7 @@ fn older_events_continue_once_and_an_empty_first_page_marks_the_thread_gone() {
         request: missing,
         thread: ThreadId(99),
         events: vec![],
-        before: None,
+        next: None,
     });
     assert!(state.loaded && state.events.is_empty());
 }
@@ -2012,7 +2074,7 @@ fn a_run_in_the_open_thread_rereads_its_newest_events_and_keeps_older_ones() {
         request: first,
         thread: ThreadId(3),
         events: vec![event(5), event(4)],
-        before: Some(EventId(4)),
+        next: Some(EventId(4)),
     });
     state.run_state(ThreadId(8));
     assert!(state.requests().iter().all(|request| !matches!(
@@ -2038,7 +2100,7 @@ fn a_run_in_the_open_thread_rereads_its_newest_events_and_keeps_older_ones() {
         request,
         thread: ThreadId(3),
         events: vec![event(7), event(6), event(5)],
-        before: Some(EventId(5)),
+        next: Some(EventId(5)),
     });
     assert_eq!(
         state.events,
@@ -2099,7 +2161,7 @@ fn thread_state_debug_never_includes_user_content() {
             text: event_marker.into(),
             ..event(9)
         }],
-        before: None,
+        next: None,
     });
     assert_eq!(state.rows[0].title, title_marker);
     assert_eq!(state.events[0].text, event_marker);
@@ -2272,6 +2334,7 @@ fn a_screen_note_is_left_once_in_the_open_conversation_when_the_models_answer_ch
     threads.loaded = true;
     threads.events = vec![PageEvent {
         id: EventId(9),
+        created_ms: 0,
         run: None,
         kind: PageEventKind::User,
         text: "hi".into(),
@@ -2355,7 +2418,7 @@ fn an_events_change_rereads_the_open_thread_and_drops_its_older_cached_rows() {
         request: 2,
         thread: ThreadId(3),
         events: vec![event(9)],
-        before: Some(EventId(9)),
+        next: Some(EventId(9)),
     });
     state.older_events();
     let older = state.requests();
@@ -2363,7 +2426,7 @@ fn an_events_change_rereads_the_open_thread_and_drops_its_older_cached_rows() {
         request: request_id(&older[0]),
         thread: ThreadId(3),
         events: vec![event(4)],
-        before: None,
+        next: None,
     });
     assert_eq!(state.events, [event(9), event(4)]);
     state.events_changed(ThreadId(5));
@@ -2387,7 +2450,7 @@ fn an_events_change_rereads_the_open_thread_and_drops_its_older_cached_rows() {
         request: request_id(&refresh[0]),
         thread: ThreadId(3),
         events: vec![event(9)],
-        before: Some(EventId(9)),
+        next: Some(EventId(9)),
     });
     assert_eq!(state.events, [event(9)], "the older cached row goes");
     assert_eq!(state.before, Some(EventId(9)));
@@ -2397,7 +2460,7 @@ fn an_events_change_rereads_the_open_thread_and_drops_its_older_cached_rows() {
         request: request_id(&again[0]),
         thread: ThreadId(3),
         events: vec![event(9)],
-        before: Some(EventId(9)),
+        next: Some(EventId(9)),
     });
     assert_eq!(state.requests(), []);
     state.older_events();
@@ -2412,7 +2475,7 @@ fn an_events_change_rereads_the_open_thread_and_drops_its_older_cached_rows() {
         request: request_id(&reload[0]),
         thread: ThreadId(3),
         events: vec![sent.clone()],
-        before: None,
+        next: None,
     });
     assert_eq!(state.events, [event(9), sent]);
 }

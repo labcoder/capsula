@@ -577,12 +577,13 @@ fn page_frames_decode_on_their_session_and_earn_exact_credit_when_applied_or_dro
         thread: ThreadId(3),
         events: vec![PageEvent {
             id: EventId(4),
+            created_ms: 0,
             run: Some(RunId(5)),
             kind: PageEventKind::User,
             text: "private text".to_owned(),
             cut: true,
         }],
-        before: Some(EventId(4)),
+        next: Some(EventId(4)),
     };
     for sent in [list, page] {
         frame::write(&mut &*link.data, &sent, Pipe::Data).expect("page written");

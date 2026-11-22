@@ -105,7 +105,8 @@ and nonblocking requests; `presence/thread_view.rs` composes the task list with 
   existing drawing placeholder or contain assistant segments hidden by the provisional preview
   continue until an older visible row or the true start is reached. A failed event read advances
   the history revision, so later successful reads cannot revive its pending navigation.
-  Selection changes and reconnects also cancel that navigation.
+  Selection changes and reconnects also cancel that navigation. If the first event read after
+  reconnect fails, a successful Older read replaces the unverified cache instead of extending it.
   Page Up and Page Down scroll
   the focused message region; its scrollbar and Older messages command are also available.
   The messages are the user's turns, the stored answers and the drawing steps; a Stop's record
@@ -235,16 +236,23 @@ to the top. The older-page cursor stays where it was. Ranked search results aren
 arrives while a list read is in flight earns one more read once that reply lands, since the
 reply may predate it.
 
-A RunState for the open thread rereads its newest events and puts the ones newer than what's
-shown on top, keeping older pages and their cursor. When that page doesn't reach the
-newest event shown, it replaces the list with its own cursor, so the events between stay
-reachable by scrolling. A Stop or failure is told before its
+A RunState for the open thread rereads its newest events. A reader following the tail
+gets the new events; when the new page doesn't overlap, its cursor keeps the gap reachable.
+In a bounded view, an older reader keeps the same window and can page forward to new events.
+A Stop or failure is told before its
 outcome is written, so that read can miss the last text until the thread's next RunState.
 
 shortcut: more than 50 threads updated between first-page reads can leave one out of order
 until reopening the panel. Revisit this when one turn can update many threads concurrently.
 
-Events use the existing `(thread, id)` index, newest first on the wire, with a `before` id.
+Events use the existing `(thread, id)` index in either direction and travel newest first.
+GPUI still reads only backwards and retains all older pages it loaded. A view constructed with
+`Threads::bounded_pair` retains at most 200 events and 128 KiB of event text per view.
+Loading a page evicts the opposite edge and makes those events reachable from the nearest
+retained id. That view supplies an actual visible event id and offset, and the core preserves
+the exact anchor if that event is still present. A saved-event refresh re-reads the retained
+range; a screen-capability note anchors at the stored tail but shows only with its anchor row.
+Each event includes its stored timestamp, but time never orders a page.
 Deleting or nonexistent threads return an empty page with no continuation. An event larger
 than a page is cut at a character boundary and marked `cut`; the panel says it was shortened.
 shortcut: a cut event cannot be read in full until the chat panel can page within an event.

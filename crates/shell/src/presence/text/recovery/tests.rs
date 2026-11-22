@@ -1395,13 +1395,14 @@ fn actual_history_older_sends_the_exact_cursor_and_keeps_the_draft(cx: &mut Test
                 .rev()
                 .map(|id| PageEvent {
                     id: EventId(id),
+                    created_ms: 0,
                     run: Some(RunId(1)),
                     kind: PageEventKind::AssistantText,
                     text: format!("message {id}"),
                     cut: false,
                 })
                 .collect(),
-            before: Some(EventId(1)),
+            next: Some(EventId(1)),
         },
         &[DataToBrain::PageRequest {
             request: 3,
@@ -1474,6 +1475,7 @@ fn older_button_reveals_each_page_of_drawing_dense_history(cx: &mut TestAppConte
             .rev()
             .map(|id| PageEvent {
                 id: EventId(id),
+                created_ms: 0,
                 run: Some(RunId(id / 10 + 1)),
                 kind: match id % 5 {
                     0 => PageEventKind::User,
@@ -1490,7 +1492,7 @@ fn older_button_reveals_each_page_of_drawing_dense_history(cx: &mut TestAppConte
                 cut: false,
             })
             .collect(),
-        before: before.map(EventId),
+        next: before.map(EventId),
     };
     let (owner, window, data) = opened_history(page(2, 151, 200, Some(151)), cx);
     draft(&owner, "keep this history draft", cx);
@@ -1573,6 +1575,7 @@ fn older_button_continues_pages_that_only_extend_a_drawing_row(cx: &mut TestAppC
             .rev()
             .map(|id| PageEvent {
                 id: EventId(id),
+                created_ms: 0,
                 run: Some(RunId(1)),
                 kind: if id == 1 {
                     PageEventKind::User
@@ -1583,7 +1586,7 @@ fn older_button_continues_pages_that_only_extend_a_drawing_row(cx: &mut TestAppC
                 cut: false,
             })
             .collect(),
-        before: before.map(EventId),
+        next: before.map(EventId),
     };
     let (owner, window, data) = opened_history(page(2, 102, 151, Some(102)), cx);
     click_recovery(window, "chat-older-control", cx);
@@ -1642,13 +1645,14 @@ fn older_failure_stays_cancelled_after_list_or_repair_success(cx: &mut TestAppCo
             .rev()
             .map(|id| PageEvent {
                 id: EventId(id),
+                created_ms: 0,
                 run: Some(RunId(1)),
                 kind: PageEventKind::AssistantText,
                 text: "fixture message".into(),
                 cut: false,
             })
             .collect(),
-        before: before.map(EventId),
+        next: before.map(EventId),
     };
     for repair in [false, true] {
         let (owner, window, data) = opened_history(page(2, 11, 60, Some(11)), cx);
@@ -1806,13 +1810,14 @@ fn older_button_skips_assistant_segments_hidden_by_the_provisional_preview(
                 .rev()
                 .map(|id| PageEvent {
                     id: EventId(id),
+                    created_ms: 0,
                     run: Some(RunId(1)),
                     kind: PageEventKind::NoVisual { scene: SceneId(3) },
                     text: String::new(),
                     cut: false,
                 })
                 .collect(),
-            before: Some(EventId(4)),
+            next: Some(EventId(4)),
         },
         cx,
     );
@@ -1853,12 +1858,13 @@ fn older_button_skips_assistant_segments_hidden_by_the_provisional_preview(
                 thread: ThreadId(3),
                 events: vec![PageEvent {
                     id: EventId(2),
+                    created_ms: 0,
                     run: Some(RunId(1)),
                     kind: PageEventKind::AssistantText,
                     text: "stored segment".into(),
                     cut: false,
                 }],
-                before: Some(EventId(2)),
+                next: Some(EventId(2)),
             },
             bytes: 19,
         }],
@@ -1886,12 +1892,13 @@ fn older_button_skips_assistant_segments_hidden_by_the_provisional_preview(
                 thread: ThreadId(3),
                 events: vec![PageEvent {
                     id: EventId(1),
+                    created_ms: 0,
                     run: Some(RunId(1)),
                     kind: PageEventKind::User,
                     text: "oldest user turn".into(),
                     cut: false,
                 }],
-                before: None,
+                next: None,
             },
             bytes: 19,
         }],

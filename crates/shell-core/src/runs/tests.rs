@@ -523,7 +523,7 @@ fn pages_are_never_held_for_a_run_state() {
         request: 1,
         thread: ThreadId(999),
         events: Vec::new(),
-        before: None,
+        next: None,
     };
     assert_eq!(runs.apply_data(page, BYTES), BYTES);
     assert!(runs.held.is_empty());

@@ -879,12 +879,14 @@ mod tests {
                                 threads: Vec::new(),
                                 next: None,
                             },
-                            PageOf::Events { .. } => DataToShell::Page {
-                                request,
-                                thread: ThreadId(3),
-                                events: Vec::new(),
-                                before: (!retry).then_some(EventId(1)),
-                            },
+                            PageOf::Events { .. } | PageOf::EventsAfter { .. } => {
+                                DataToShell::Page {
+                                    request,
+                                    thread: ThreadId(3),
+                                    events: Vec::new(),
+                                    next: (!retry).then_some(EventId(1)),
+                                }
+                            }
                         });
                     }
                     state.failed = retry;

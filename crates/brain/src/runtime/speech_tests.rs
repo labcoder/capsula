@@ -270,7 +270,7 @@ async fn closed_speech_waits_across_live_data_credits_then_dispatches_once() {
                 .unwrap();
             let frame = shell.data().await;
             assert!(
-                matches!(&frame, DataToShell::Page { request: reply, thread, events, before: None }
+                matches!(&frame, DataToShell::Page { request: reply, thread, events, next: None }
                     if *reply == request && *thread == history && events.len() == 1),
                 "{frame:?}"
             );

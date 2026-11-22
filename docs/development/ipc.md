@@ -403,10 +403,15 @@ flowchart LR
 
 | Page message | Direction | Fields |
 |---|---|---|
-| `PageRequest` | Shell to brain, data | `request`, `PageOf::Threads { search, after }` or `PageOf::Events { thread, before }` |
+| `PageRequest` | Shell to brain, data | `request`, `PageOf::Threads { search, after }`, `PageOf::Events { thread, before }` or `PageOf::EventsAfter { thread, after }` |
 | `ThreadList` | Brain to shell, data | `request`, thread rows (`id`, `title`, `updated_ms`, `kind`, optional `choice`), `next` |
-| `Page` | Brain to shell, data | `request`, `thread`, events (`id`, optional `run`, `kind`, `text`, `cut`), `before` |
+| `Page` | Brain to shell, data | `request`, `thread`, events (`id`, `created_ms`, optional `run`, `kind`, `text`, `cut`), `next` |
 | `PageFailed` | Brain to shell, data | `request`; the read failed and the brain logged its kind |
+
+An event request walks from its exclusive id in the requested direction. The reply is
+always newest first; `next` is the farthest id actually sent in that direction.
+`created_ms` is the stored Unix time for display; ids still order every page. These
+frames use the existing exact-build handshake, not mixed-build decoding.
 
 - **Credit.** The brain may send 512 KiB of data frames, headers included, before the shell
   grants more with `Credit`. That holds the largest frame the pipe allows, so no frame is too
