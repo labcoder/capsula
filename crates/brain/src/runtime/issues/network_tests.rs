@@ -175,6 +175,38 @@ fn row(number: u64, created_at: &str) -> Value {
 }
 
 #[tokio::test(start_paused = true)]
+async fn scripted_authority_responses_are_independent_of_request_order() {
+    let (http, control, script) = bounded(authority(Some(100)));
+    let token = token();
+    let installations = api::installations(&http, &token, Page::new(1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(installations.installations, [9]);
+    assert_eq!(installations.total_count, 1);
+    assert_eq!(control.server_date_s(), None);
+    let user = api::user(&http, &token).await.unwrap();
+    assert_eq!(user.id, 7);
+    assert_eq!(user.login.as_str(), "verified-owner");
+    assert_eq!(control.server_date_s(), Some(100));
+    let repositories = api::repositories(&http, &token, 9, Page::new(1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(repositories.total_count, 2);
+    assert_eq!(
+        repositories
+            .repositories
+            .iter()
+            .map(RepoName::as_str)
+            .collect::<Vec<_>>(),
+        ["owner/repo", "owner/other"]
+    );
+    assert_eq!(control.server_date_s(), Some(100));
+    assert_eq!(script.calls.load(Ordering::SeqCst), 3);
+    assert!(script.steps.lock().unwrap().is_empty());
+    assert!(!control.may_have_sent());
+}
+
+#[tokio::test(start_paused = true)]
 async fn preflight_uses_server_dates_fresh_identity_and_exact_original_content() {
     let mut steps = authority(Some(100));
     let mut wrong_title = row(5, "1970-01-01T00:01:50Z");
