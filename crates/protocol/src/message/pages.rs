@@ -105,8 +105,6 @@ pub struct TaskFact {
     pub latest_run: Option<TaskRun>,
     /// Unix milliseconds of the last real run or conversation activity.
     pub last_activity_ms: i64,
-    /// A committed draft still calls for a review before filing.
-    pub filing_review: bool,
     /// Derived on the read, never written as task state.
     pub state: TaskState,
 }
@@ -138,7 +136,7 @@ pub enum TaskRunOutcome {
 pub enum TaskState {
     /// No saved completion or explicit need for attention.
     Earlier,
-    /// A saved interruption, failure, or filing review needs attention.
+    /// A saved interruption or failure needs attention.
     NeedsYou,
     /// The latest saved run completed.
     Done,
@@ -353,7 +351,6 @@ mod tests {
                     outcome: TaskRunOutcome::Failed,
                 }),
                 last_activity_ms: 2,
-                filing_review: true,
                 state: TaskState::NeedsYou,
             }),
         };

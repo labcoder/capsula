@@ -388,9 +388,9 @@ frames use the existing exact-build handshake, not mixed-build decoding.
 
 The plain list and search attach the same read-only task fact from the page's store snapshot.
 Kumo's chat has no task fact. A task carries its latest saved run ID and outcome, last real
-activity, a committed filing-review flag and a state derived at read time. None of those
-fields changes the page's order or cursor. A stored active run does not establish live Working
-status; run failure, interruption, and a filing draft that can be reviewed read as Needs you.
+activity and a state derived at read time. None of those fields changes the page's order or
+cursor. A stored active run does not establish live Working status; a run failure or
+interruption reads as Needs you.
 After strictly more than five quiet days, the state is Sleeping without discarding the saved
 outcome. A crash recovery timestamp does not count as activity. Done has no acknowledgement
 write, and these facts add no GPUI presentation.

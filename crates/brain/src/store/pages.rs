@@ -180,12 +180,7 @@ impl Pages<'_> {
             .0
             .prepare(
                 "SELECT r.id, r.state, r.started_ms,
-                        CASE WHEN r.reason IS NOT 'crash' THEN r.ended_ms END,
-                        EXISTS (
-                            SELECT 1 FROM actions
-                            WHERE thread = t.id AND approval IS NOT NULL
-                              AND json_extract(stage, '$.kind') IN ('draft', 'failed')
-                        )
+                        CASE WHEN r.reason IS NOT 'crash' THEN r.ended_ms END
                  FROM threads AS t
                  LEFT JOIN runs AS r ON r.id = (SELECT max(id) FROM runs WHERE thread = t.id)
                  WHERE t.id = ?1",
@@ -218,17 +213,14 @@ impl Pages<'_> {
                         .into_iter()
                         .chain(ended_ms)
                         .fold(thread.updated_ms, i64::max);
-                    let filing_review = row.get(4)?;
-                    let evidence = if filing_review {
-                        TaskEvidence::FilingReview
-                    } else {
-                        TaskEvidence::LatestRun(latest_run.map(|run| run.outcome))
-                    };
                     Ok(TaskFact {
                         latest_run,
                         last_activity_ms,
-                        filing_review,
-                        state: task_state(now, last_activity_ms, evidence),
+                        state: task_state(
+                            now,
+                            last_activity_ms,
+                            latest_run.map(|run| run.outcome),
+                        ),
                     })
                 })
                 .map_err(|_| StoreError::Read)?;
@@ -564,23 +556,14 @@ fn bounded_id(id: u64) -> i64 {
     i64::try_from(id).unwrap_or(i64::MAX)
 }
 
-#[derive(Clone, Copy)]
-enum TaskEvidence {
-    FilingReview,
-    LatestRun(Option<TaskRunOutcome>),
-}
-
-fn task_state(now: i64, activity: i64, evidence: TaskEvidence) -> TaskState {
+fn task_state(now: i64, activity: i64, outcome: Option<TaskRunOutcome>) -> TaskState {
     if now.saturating_sub(activity) > TASK_QUIET_MS {
         return TaskState::Sleeping;
     }
-    match evidence {
-        TaskEvidence::FilingReview
-        | TaskEvidence::LatestRun(Some(TaskRunOutcome::Failed | TaskRunOutcome::Interrupted)) => {
-            TaskState::NeedsYou
-        }
-        TaskEvidence::LatestRun(Some(TaskRunOutcome::Done)) => TaskState::Done,
-        TaskEvidence::LatestRun(Some(TaskRunOutcome::Active) | None) => TaskState::Earlier,
+    match outcome {
+        Some(TaskRunOutcome::Failed | TaskRunOutcome::Interrupted) => TaskState::NeedsYou,
+        Some(TaskRunOutcome::Done) => TaskState::Done,
+        Some(TaskRunOutcome::Active) | None => TaskState::Earlier,
     }
 }
 

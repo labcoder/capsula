@@ -1440,7 +1440,6 @@ mod tests {
                     outcome: super::TaskRunOutcome::Failed,
                 }),
                 last_activity_ms: i64::MIN,
-                filing_review: true,
                 state: super::TaskState::Sleeping,
             }),
         };
@@ -1455,7 +1454,7 @@ mod tests {
         };
         // Per row: id, a 2-byte length and 320 bytes of title, time, kind, Some, a 1-byte length
         // and 64 bytes of slug, effort, connection.
-        let task_len = 1 + 1 + 10 + 1 + 10 + 1 + 1;
+        let task_len = 1 + 1 + 10 + 1 + 10 + 1;
         let row_len = 10 + 2 + 320 + 10 + 1 + 1 + 1 + 64 + 1 + 1 + task_len;
         let payload = payload(&list, Pipe::Data);
         assert_eq!(payload, 1 + 5 + 1 + MAX_PAGE_ROWS * row_len + 1 + 30);

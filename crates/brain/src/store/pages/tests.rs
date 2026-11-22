@@ -141,33 +141,31 @@ fn task_rows(store: &Store, search: Option<&str>, now: i64) -> Vec<ThreadRow> {
 
 #[test]
 fn task_age_uses_a_strict_five_day_boundary_and_keeps_saved_outcomes() {
-    use TaskEvidence::{FilingReview, LatestRun};
     use TaskRunOutcome::{Active, Done, Failed, Interrupted};
 
     let activity = 400;
     let five_days = 432_000_000;
-    for (evidence, expected) in [
-        (LatestRun(None), TaskState::Earlier),
-        (LatestRun(Some(Active)), TaskState::Earlier),
-        (LatestRun(Some(Done)), TaskState::Done),
-        (LatestRun(Some(Failed)), TaskState::NeedsYou),
-        (LatestRun(Some(Interrupted)), TaskState::NeedsYou),
-        (FilingReview, TaskState::NeedsYou),
+    for (outcome, expected) in [
+        (None, TaskState::Earlier),
+        (Some(Active), TaskState::Earlier),
+        (Some(Done), TaskState::Done),
+        (Some(Failed), TaskState::NeedsYou),
+        (Some(Interrupted), TaskState::NeedsYou),
     ] {
         for elapsed in [five_days - 1, five_days, -1] {
-            assert_eq!(task_state(activity + elapsed, activity, evidence), expected);
+            assert_eq!(task_state(activity + elapsed, activity, outcome), expected);
         }
         assert_eq!(
-            task_state(activity + five_days + 1, activity, evidence),
+            task_state(activity + five_days + 1, activity, outcome),
             TaskState::Sleeping
         );
     }
     assert_eq!(
-        task_state(i64::MIN, i64::MAX, LatestRun(Some(Done))),
+        task_state(i64::MIN, i64::MAX, Some(Done)),
         TaskState::Done
     );
     assert_eq!(
-        task_state(i64::MAX, i64::MIN, LatestRun(Some(Failed))),
+        task_state(i64::MAX, i64::MIN, Some(Failed)),
         TaskState::Sleeping
     );
 }
@@ -190,15 +188,14 @@ fn a_task_without_a_saved_run_reads_as_earlier_on_a_query_only_connection() {
         Some(TaskFact {
             latest_run: None,
             last_activity_ms: 100,
-            filing_review: false,
             state: TaskState::Earlier,
         })
     );
 }
 
 #[test]
-fn task_pages_project_the_latest_id_and_only_a_committed_review_on_that_task() {
-    use crate::store::actions_tests::{draft, opened};
+fn task_pages_project_the_latest_saved_run_of_each_live_task() {
+    use crate::store::actions_tests::opened;
 
     let scratch = Scratch::new("task-list-facts");
     let mut store = opened(&scratch);
@@ -206,9 +203,8 @@ fn task_pages_project_the_latest_id_and_only_a_committed_review_on_that_task() {
     let task = add(&mut store, "found", "look here");
     let older = store.high_water().unwrap().1;
     let unrelated = add(&mut store, "unrelated", "different text");
-    draft(&mut store, unrelated);
+    let unrelated_run = store.high_water().unwrap().1;
     let hidden = add(&mut store, "hidden", "look here");
-    draft(&mut store, hidden);
     let newer = RunId(store.high_water().unwrap().1.0 + 1);
     store
         .begin_turn(task, None, newer, "look here again")
@@ -249,7 +245,6 @@ fn task_pages_project_the_latest_id_and_only_a_committed_review_on_that_task() {
             outcome: TaskRunOutcome::Done,
         }),
         last_activity_ms: 110,
-        filing_review: false,
         state: TaskState::Done,
     };
     let plain = task_rows(&store, None, 120);
@@ -260,39 +255,15 @@ fn task_pages_project_the_latest_id_and_only_a_committed_review_on_that_task() {
     assert_eq!(plain[0].task, None);
     assert_eq!(plain[1].task, Some(done));
     assert_eq!(plain[1].updated_ms, 105);
-    assert_eq!(plain[2].task.unwrap().state, TaskState::NeedsYou);
+    assert_eq!(
+        plain[2].task.unwrap().latest_run,
+        Some(TaskRun {
+            id: unrelated_run,
+            outcome: TaskRunOutcome::Done,
+        })
+    );
     let search = task_rows(&store, Some("look here"), 121);
     assert_eq!(search, [plain[1].clone()]);
-
-    let action = draft(&mut store, task);
-    let needs_review = TaskFact {
-        filing_review: true,
-        state: TaskState::NeedsYou,
-        ..done
-    };
-    assert_eq!(
-        task_rows(&store, Some("look here"), 122)[0].task,
-        Some(needs_review)
-    );
-    for (stage, approval, expected) in [
-        ("draft", None, done),
-        ("failed", Some(1_i64), needs_review),
-        ("unknown", Some(1_i64), done),
-        ("filed", None, done),
-    ] {
-        store
-            .conn
-            .execute(
-                "UPDATE actions SET stage = json_object('kind', ?2), approval = ?3 WHERE id = ?1",
-                params![bounded_id(action.draft.0), stage, approval],
-            )
-            .unwrap();
-        assert_eq!(
-            task_rows(&store, Some("look here"), 123)[0].task,
-            Some(expected),
-            "action stage {stage}"
-        );
-    }
 }
 
 #[test]
@@ -324,7 +295,6 @@ fn recovery_projects_failure_without_restarting_the_task_clock() {
             outcome: TaskRunOutcome::Active,
         }),
         last_activity_ms: 101,
-        filing_review: false,
         state: TaskState::Earlier,
     };
     assert_eq!(search(&store, 102), earlier);

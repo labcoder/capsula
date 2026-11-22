@@ -168,10 +168,9 @@ Reads neither stop the purge's copy nor postpone it: a page request never reache
 thread's queue, so it doesn't reset the quiet deadline an owed purge waits for.
 
 The plain task list and ranked search attach task facts after selecting their rows. In the same
-snapshot, an indexed lookup reads each selected task's latest run by ID and checks for a committed
-Draft or Failed action with a filing approval. The activity timestamp is the latest of the stored
-thread update, run start and real terminal time; the time written by crash recovery is excluded.
-These reads do not update storage or affect the list's ordering keys.
+snapshot, an indexed lookup reads each selected task's latest run by ID. Activity is the latest
+of the stored thread update, run start and real terminal time; the time written by crash recovery
+is excluded. These reads do not update storage or affect the list's ordering keys.
 
 A page marks a user event as failed only if that event's own run is stored as failed.
 Its held-screen metadata and any partial assistant reply stay on the page. A crash also
