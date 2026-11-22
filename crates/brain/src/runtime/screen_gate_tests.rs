@@ -49,25 +49,38 @@ fn on(connection: ConnectionKind) -> ScreenHolds {
 const BOTH: PictureRoutes = PictureRoutes::new(true, true);
 
 #[test]
-fn every_build_ships_both_claude_switches_off() {
-    assert_eq!(PictureRoutes::SHIPPED, PictureRoutes::new(false, false));
-    assert!(!PictureRoutes::SHIPPED.allows(ConnectionKind::AnthropicKey));
-    assert!(!PictureRoutes::SHIPPED.allows(ConnectionKind::ClaudeCode));
-    assert!(PictureRoutes::SHIPPED.allows(ConnectionKind::ChatGpt));
-}
+fn only_the_shipped_key_route_shows_its_picture_capable_model() {
+    use ConnectionKind::{AnthropicKey, ClaudeCode};
 
-#[test]
-fn a_shipped_claude_route_never_shows_a_model_that_reports_pictures() {
-    for kind in [ConnectionKind::AnthropicKey, ConnectionKind::ClaudeCode] {
+    assert!(PictureRoutes::SHIPPED.allows(ConnectionKind::ChatGpt));
+    for (kind, images, expected) in [
+        (AnthropicKey, &["seen"][..], on(AnthropicKey)),
+        (
+            AnthropicKey,
+            &["blind"][..],
+            ScreenHolds::Off(ScreenOff::ModelCantSee),
+        ),
+        (
+            AnthropicKey,
+            &[][..],
+            ScreenHolds::Off(ScreenOff::ModelCantSee),
+        ),
+        (
+            ClaudeCode,
+            &["seen"][..],
+            ScreenHolds::Off(ScreenOff::ModelCantSee),
+        ),
+    ] {
         assert_eq!(
             claude(
-                &ready(&["seen"]),
+                &ready(images),
                 &choice(kind),
                 PictureRoutes::SHIPPED,
                 true,
                 true
             ),
-            ScreenHolds::Off(ScreenOff::ModelCantSee),
+            expected,
+            "{kind:?}, {images:?}",
         );
     }
 }
