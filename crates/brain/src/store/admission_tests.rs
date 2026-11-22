@@ -9,8 +9,8 @@ use kumochi_protocol::message::{
 use sha2::{Digest as _, Sha256};
 
 use super::actions_tests::{
-    A, B, C, body, draft, issue, mark, opened, posting, repo, seed, snapshot, thread, title,
-    uncertain, unknown, user,
+    A, B, C, ID, OTHER, bind, body, issue, mark, opened, posting, repo, reviewed, seed, snapshot,
+    thread, title, uncertain, unknown, user,
 };
 use super::{Store, StoreError};
 use crate::connections::github::api::GitHubUser;
@@ -67,7 +67,7 @@ fn decide(store: &mut Store, action: &Action, decision: Decision) -> Result<Answ
         account: Some(&account),
         capacity: true,
         repos: &repos,
-        repo_ids: &[],
+        repo_ids: &[ID],
     };
     let approval = action.approval.expect("offered");
     store.consent(action.draft, &action.hash(), approval, decision, &live)
@@ -81,7 +81,7 @@ fn unavailable_capacity_consumes_consent_without_an_unowned_preflight_or_replay(
         let scratch = Scratch::new("admission-capacity");
         let mut store = opened(&scratch);
         let owner = thread(&mut store);
-        let first = draft(&mut store, owner);
+        let first = reviewed(&mut store, owner);
         let first = if failed {
             let sending = changed(decide(&mut store, &first, Decision::File));
             changed(store.preflighted(first.draft, sending.version, Err(FailReason::Network)))
@@ -93,7 +93,7 @@ fn unavailable_capacity_consumes_consent_without_an_unowned_preflight_or_replay(
             capacity: false,
             account: Some(&account),
             repos: &repos,
-            repo_ids: &[],
+            repo_ids: &[ID],
         };
         let Answer::Refused(why, refused) = store
             .consent(
@@ -148,7 +148,7 @@ fn unavailable_capacity_consumes_consent_without_an_unowned_preflight_or_replay(
 
 /// A draft whose first send ended uncertain: Unknown with mark A and one uncertain attempt.
 fn unknown_once(store: &mut Store, thread: ThreadId) -> Action {
-    let first = draft(store, thread);
+    let first = reviewed(store, thread);
     let preflight = changed(decide(store, &first, Decision::File));
     let posting = changed(store.preflighted(first.draft, preflight.version, Ok(mark(A))));
     changed(store.posted(first.draft, posting.version, &uncertain()))
@@ -160,7 +160,7 @@ fn filed_duplicate_risk_keeps_created_and_placement_provenance_separate() {
     let mut store = opened(&scratch);
     let owner = thread(&mut store);
     for (count, warning) in [(0, false), (1, true), (2, true)] {
-        let action = draft(&mut store, owner);
+        let action = reviewed(&mut store, owner);
         seed(&store, action.draft, &posting(A), count);
         let filed = changed(store.posted(action.draft, action.version, &created(7)));
         assert_eq!(filed.uncertain, count);
@@ -176,7 +176,7 @@ fn filed_duplicate_risk_keeps_created_and_placement_provenance_separate() {
     }
     for (count, warning) in [(1, false), (2, true)] {
         for confirm in [false, true] {
-            let action = draft(&mut store, owner);
+            let action = reviewed(&mut store, owner);
             seed(&store, action.draft, &unknown(r#""Pending""#), count);
             let filed = if confirm {
                 let unplaced =
@@ -206,7 +206,7 @@ fn legacy_filed_flags_do_not_erase_retained_uncertainty() {
     let owner = thread(&mut store);
     for confirmed in [false, true] {
         for (count, warning) in [(0, false), (1, false), (2, true)] {
-            let action = draft(&mut store, owner);
+            let action = reviewed(&mut store, owner);
             let json = format!(r#"{{"kind":"filed","number":7,"confirmed":{confirmed}}}"#);
             seed(&store, action.draft, &json, count);
             let read = store.action(action.draft).unwrap().unwrap();
@@ -305,7 +305,7 @@ fn filed_flags_and_card_values_survive_a_child_restart() {
         (false, true, 1),
         (true, true, 2),
     ] {
-        let action = draft(&mut store, owner);
+        let action = reviewed(&mut store, owner);
         let stage = if warning {
             format!(
                 r#"{{"kind":"filed","number":7,"confirmed":{confirmed},"maybe_duplicate":true}}"#
@@ -315,9 +315,9 @@ fn filed_flags_and_card_values_survive_a_child_restart() {
         };
         seed(&store, action.draft, &stage, count);
     }
-    let editable = draft(&mut store, owner);
+    let editable = reviewed(&mut store, owner);
     assert_eq!(editable.draft, DraftId(5));
-    let failed = draft(&mut store, owner);
+    let failed = reviewed(&mut store, owner);
     let preflight = changed(decide(&mut store, &failed, Decision::File));
     changed(store.preflighted(
         failed.draft,
@@ -375,7 +375,7 @@ fn the_hash_binds_exactly_repository_account_title_and_body() {
         Some(&widest),
     );
     let hashes = [
-        draft(&mut store, thread),
+        reviewed(&mut store, thread),
         unbound.expect("draft"),
         wide.expect("draft"),
     ]
@@ -401,6 +401,7 @@ fn consent_checks_in_order_and_uses_up_the_current_revision() {
     let first = store
         .create_draft(thread, &title("T"), &body("B"), Some(&repo()), Some(&owner))
         .expect("draft");
+    let first = bind(&mut store, &first);
     let (zero, namesake) = (user(0), user(u64::MAX - 1));
     let (listed, other) = ([repo()], [RepoName::new("octo/other").expect("repo")]);
     let altered = |title_text: &str, body_text: &str| {
@@ -468,7 +469,7 @@ fn consent_checks_in_order_and_uses_up_the_current_revision() {
         capacity: true,
         account: Some(&owner),
         repos: &listed,
-        repo_ids: &[],
+        repo_ids: &[ID],
     };
     let consent = |store: &mut Store, rev: u64| {
         store.consent(
@@ -516,7 +517,7 @@ fn completions_land_only_at_their_dispatch_version() {
     let scratch = Scratch::new("admission-fence");
     let mut store = opened(&scratch);
     let thread = thread(&mut store);
-    let first = draft(&mut store, thread);
+    let first = reviewed(&mut store, thread);
     let id = first.draft;
     let entered = changed(decide(&mut store, &first, Decision::File));
     assert_eq!(entered.version, StateVersion(2));
@@ -564,7 +565,7 @@ fn completions_land_only_at_their_dispatch_version() {
     refused_unwritten(&mut store, IssueRefused::NotAllowedNow, |store| {
         store.interrupted(id, StateVersion(5))
     });
-    let second = draft(&mut store, thread);
+    let second = reviewed(&mut store, thread);
     let entered = changed(decide(&mut store, &second, Decision::File));
     let posting = changed(store.preflighted(second.draft, entered.version, Ok(mark(A))));
     let unknown = changed(store.interrupted(second.draft, posting.version));
@@ -671,7 +672,7 @@ fn each_completion_takes_only_its_stage() {
     ];
     for (stage, count, expected) in cases {
         for (input, expected) in expected.into_iter().enumerate() {
-            let id = draft(&mut store, thread).draft;
+            let id = reviewed(&mut store, thread).draft;
             seed(&store, id, &stage, count);
             let before = snapshot(&store.conn);
             let at = StateVersion(1);
@@ -923,7 +924,7 @@ fn bind_reaches_every_live_draft_and_files_nothing() {
     let chosen = store
         .create_draft(two, &title("T"), &body("B"), Some(&chosen_repo), None)
         .expect("draft");
-    let sent = draft(&mut store, two);
+    let sent = reviewed(&mut store, two);
     let entered = changed(decide(&mut store, &sent, Decision::File));
     let failed = changed(store.preflighted(sent.draft, entered.version, Err(FailReason::Network)));
     let unresolved = unknown_once(&mut store, one);
@@ -932,7 +933,7 @@ fn bind_reaches_every_live_draft_and_files_nothing() {
         account: Some(&seven),
         capacity: true,
         repos: &listed,
-        repo_ids: &[],
+        repo_ids: &[ID, OTHER],
     };
     let consent = |store: &mut Store, action: &Action| {
         let approval = action.approval.expect("offered");
@@ -977,6 +978,7 @@ fn bind_reaches_every_live_draft_and_files_nothing() {
         ..bare
     };
     assert_eq!(bound, std::slice::from_ref(&bare));
+    let bare = bind(&mut store, &bare);
     let sending = changed(consent(&mut store, &bare));
     assert_eq!(sending.stage, Stage::Preflight { unresolved: None });
     let before = snapshot(&store.conn);
@@ -1021,7 +1023,7 @@ fn a_revision_used_before_a_restart_stays_used() {
     let scratch = Scratch::new("admission-restart");
     let mut store = opened(&scratch);
     let thread = thread(&mut store);
-    let first = draft(&mut store, thread);
+    let first = reviewed(&mut store, thread);
     let entered = changed(decide(&mut store, &first, Decision::File));
     changed(store.preflighted(first.draft, entered.version, Ok(mark(A))));
     drop(store);

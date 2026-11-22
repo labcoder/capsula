@@ -170,7 +170,10 @@ async fn filing_owner(scratch: &Scratch, server: &Arc<FilingServer>) -> (Brain, 
                 }),
             )
             .unwrap();
-        (action, ApprovalRev(u64::try_from(previous).unwrap() + 1))
+        (
+            bound(scratch, &action),
+            ApprovalRev(u64::try_from(previous).unwrap() + 1),
+        )
     };
     assert_eq!(action.title.as_str(), "  Local café  ");
     assert_eq!(action.body.as_str(), "first\n\tcafé\n");
@@ -199,7 +202,7 @@ async fn filing_owner(scratch: &Scratch, server: &Arc<FilingServer>) -> (Brain, 
                     RepoName::new("owner/repo").unwrap(),
                 ])
                 .unwrap(),
-                ids: Vec::new(),
+                ids: vec![NonZeroU64::new(8).unwrap(), NonZeroU64::new(7).unwrap()],
             }),
         },
     );
@@ -207,6 +210,23 @@ async fn filing_owner(scratch: &Scratch, server: &Arc<FilingServer>) -> (Brain, 
     let mut brain = brain_with_github_owner(scratch, accounts);
     brain.prepare_issue_session(Incarnation(1));
     (brain, action)
+}
+
+/// The draft with owner/repo bound to its listed id 7, as a review leaves it, without that
+/// review's new revision.
+fn bound(scratch: &Scratch, action: &Action) -> Action {
+    rusqlite::Connection::open(scratch.db())
+        .unwrap()
+        .execute(
+            "UPDATE actions SET repo_id = 7 WHERE id = ?1",
+            [i64::try_from(action.draft.0).unwrap()],
+        )
+        .unwrap();
+    Store::open(&scratch.db())
+        .unwrap()
+        .action(action.draft)
+        .unwrap()
+        .unwrap()
 }
 
 async fn rearm_filing(
@@ -227,6 +247,7 @@ async fn rearm_filing(
     let expected = Action {
         version: StateVersion(action.version.0 + 1),
         approval: Some(ApprovalRev(u64::try_from(last).unwrap() + 1)),
+        repo_id: action.repo_id.or(NonZeroU64::new(7)),
         ..action.clone()
     };
     let effects = brain

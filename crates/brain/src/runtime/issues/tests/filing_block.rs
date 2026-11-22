@@ -36,12 +36,15 @@ fn unknown_draft(scratch: &Scratch, owner: &Action) -> Action {
             owner.account.as_ref(),
         )
         .unwrap();
+    drop(store);
+    let unknown = super::bound(scratch, &unknown);
+    let mut store = Store::open(&scratch.db()).unwrap();
     let repos = [owner.repo.clone().unwrap()];
     let live = Live {
         capacity: true,
         account: owner.account.as_ref(),
         repos: &repos,
-        repo_ids: &[],
+        repo_ids: &[NonZeroU64::new(7).unwrap()],
     };
     let IssueAnswer::Changed(preflight) = store
         .consent(
