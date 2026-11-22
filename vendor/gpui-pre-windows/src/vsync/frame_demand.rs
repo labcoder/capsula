@@ -41,6 +41,8 @@ pub(crate) static FRAME_DEMAND: FrameDemand = FrameDemand::new();
 pub(crate) struct FrameDemand {
     pending: Mutex<bool>,
     changed: Condvar,
+    #[cfg(test)]
+    before_wait: Mutex<Option<std::sync::mpsc::Sender<Instant>>>,
 }
 
 impl FrameDemand {
@@ -48,6 +50,8 @@ impl FrameDemand {
         Self {
             pending: Mutex::new(false),
             changed: Condvar::new(),
+            #[cfg(test)]
+            before_wait: Mutex::new(None),
         }
     }
 
@@ -72,6 +76,10 @@ impl FrameDemand {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Wake::Idle;
+            }
+            #[cfg(test)]
+            if let Some(ready) = self.before_wait.lock().expect("wait probe lock").take() {
+                ready.send(deadline).expect("wait probe is still listening");
             }
             pending = self
                 .changed
@@ -231,9 +239,12 @@ impl ForcedFrame {
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::atomic::{AtomicBool, Ordering},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use super::{ForcedFrame, FrameDemand, FramePoll, FrameRequest, Wake};
@@ -298,27 +309,47 @@ mod tests {
         assert_eq!(demand.wait(&AtomicBool::new(false), NEVER), Wake::Frame);
     }
 
-    #[test]
-    fn a_blocked_thread_wakes_on_request() {
+    fn wakes_from_wait(signal: impl FnOnce(&FrameDemand, &AtomicBool), expected: Wake) {
         let demand = demand();
         let stop = AtomicBool::new(false);
+        let (ready, entered) = mpsc::channel();
+        *demand.before_wait.lock().expect("wait probe lock") = Some(ready);
         thread::scope(|scope| {
-            let waiter = scope.spawn(|| demand.wait(&stop, NEVER));
-            demand.request();
-            assert_eq!(waiter.join().expect("the waiter doesn't panic"), Wake::Frame);
+            let (done, returned) = mpsc::channel();
+            let stop_ref = &stop;
+            scope.spawn(move || {
+                let wake = demand.wait(stop_ref, Duration::from_secs(5));
+                done.send((wake, Instant::now())).expect("receive the wake");
+            });
+            let deadline = entered
+                .recv_timeout(Duration::from_secs(2))
+                .expect("waiter reached the condition wait with the predicate locked");
+            signal(demand, &stop);
+            let (wake, at) = returned
+                .recv_timeout(Duration::from_secs(2))
+                .expect("signal wakes the waiter promptly");
+            assert_eq!(wake, expected);
+            assert!(
+                at < deadline,
+                "an idle timeout isn't a wake from the signal"
+            );
         });
     }
 
     #[test]
+    fn a_blocked_thread_wakes_on_request() {
+        wakes_from_wait(|demand, _| demand.request(), Wake::Frame);
+    }
+
+    #[test]
     fn a_blocked_thread_exits_on_stop() {
-        let demand = demand();
-        let stop = AtomicBool::new(false);
-        thread::scope(|scope| {
-            let waiter = scope.spawn(|| demand.wait(&stop, NEVER));
-            stop.store(true, Ordering::Release);
-            demand.wake_all();
-            assert_eq!(waiter.join().expect("the waiter doesn't panic"), Wake::Stop);
-        });
+        wakes_from_wait(
+            |demand, stop| {
+                stop.store(true, Ordering::Release);
+                demand.wake_all();
+            },
+            Wake::Stop,
+        );
     }
 
     #[test]

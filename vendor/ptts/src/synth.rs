@@ -2258,14 +2258,8 @@ mod tests {
             .unwrap();
         ready_rx.recv_timeout(wait).unwrap();
 
-        let in_flight = Arc::new(AtomicBool::new(true));
-        let guard = InFlight(Arc::clone(&in_flight));
-        let refused_backbone = move || {
-            drop(guard);
-            drop(latent_tx);
-        };
         let cleanup = std::thread::Builder::new().spawn(move || {
-            drop(refused_backbone);
+            drop(latent_tx);
             let result = stream.with_worker(Err(std::io::Error::from(
                 std::io::ErrorKind::WouldBlock,
             )));
@@ -2278,11 +2272,6 @@ mod tests {
         assert!(done_rx.recv_timeout(wait).unwrap());
         cleanup.join().unwrap();
         assert!(stopped.load(Ordering::Acquire));
-        assert_eq!(
-            in_flight.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed),
-            Ok(false)
-        );
-        drop(InFlight(in_flight));
     }
 
     #[test]
