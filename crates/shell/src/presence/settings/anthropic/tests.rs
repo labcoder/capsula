@@ -107,6 +107,38 @@ fn production_accounts_renders_the_key_row(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn accounts_renders_the_specific_reason_for_a_refused_key(cx: &mut TestAppContext) {
+    use gpui_kit::{px, size};
+
+    let (window, view) = accounts(cx);
+    view.update(cx, |view, cx| {
+        view.model.update(cx, |state, cx| {
+            state
+                .key_paste
+                .receive(KeyView::Rejected(KeyRejection::WorkspaceRequired), Some(1));
+            cx.notify();
+        });
+    });
+    let mut visual = VisualTestContext::from_window(window, cx);
+    visual.simulate_resize(size(px(768.), px(1600.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        visual
+            .debug_bounds("anthropic-status:Key not accepted")
+            .is_some()
+    );
+    assert!(
+        visual
+            .debug_bounds(
+                "This key needs a workspace header. Paste a key scoped to a workspace instead."
+            )
+            .is_some_and(|bounds| bounds.size.width > px(0.)),
+        "Accounts must render the specific refusal reason"
+    );
+}
+
+#[gpui::test]
 fn the_row_pastes_only_from_the_test_clipboard_and_never_writes_it(cx: &mut TestAppContext) {
     let (window, _owner, controls) = isolated_row(cx);
     let mut visual = VisualTestContext::from_window(window, cx);
