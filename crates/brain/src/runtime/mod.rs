@@ -42,7 +42,7 @@ use tokio::time::Instant;
 use crate::config::Config;
 use crate::connections::account::Input as AccountInput;
 use crate::context::{ConnectionTag, Origin, RunSnapshot};
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
 use crate::coordinator::{Availability, Ready};
 use crate::coordinator::{
     BuildContext, BuildKey, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, SendKey, StoreOp,
@@ -143,7 +143,7 @@ pub(crate) enum Selected {
     /// The dev fixture answers every run, with no account; a release build can't pick it.
     #[cfg(any(test, debug_assertions))]
     Fixture(Box<dyn Engine>),
-    #[cfg(all(windows, debug_assertions))]
+    #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
     DrawReplay(Box<dyn Engine>),
     /// The account's engine answers, so runs need a usable account. Its rounds ask for the
     /// bearer on `asks`.
@@ -162,7 +162,7 @@ pub(crate) struct Brain {
     store: Option<StoreThread>,
     engine: Box<dyn Engine>,
     /// The dev fixture was picked, so runs never wait on the account.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
     fixture: Option<Ready>,
     /// Store replies, never paused.
     inputs_tx: mpsc::UnboundedSender<Input>,
@@ -280,12 +280,13 @@ impl Brain {
     ) -> std::io::Result<Self> {
         account.github.restore_default(config.github_default());
         account.connections.configure_transport();
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
         let (engine, access, fixture) = match engine {
+            #[cfg(any(test, debug_assertions))]
             Selected::Fixture(engine) => {
                 (engine, mpsc::unbounded_channel().1, Some(Ready::fixture()))
             }
-            #[cfg(all(windows, debug_assertions))]
+            #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
             Selected::DrawReplay(engine) => (
                 engine,
                 mpsc::unbounded_channel().1,
@@ -293,7 +294,7 @@ impl Brain {
             ),
             Selected::Account { engine, asks } => (engine, asks, None),
         };
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, debug_assertions, all(windows, feature = "gate-draw-replay"))))]
         let Selected::Account {
             engine,
             asks: access,
@@ -321,7 +322,7 @@ impl Brain {
             coordinator: Box::new(coordinator),
             store: Some(store),
             engine,
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
             fixture,
             inputs_tx,
             inputs,
@@ -384,12 +385,12 @@ impl Brain {
     /// Tells the coordinator whether runs can be answered now; the same answer again changes
     /// nothing.
     fn availability_changed(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
-        #[cfg(any(test, debug_assertions))]
+        #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
         let now = self
             .fixture
             .clone()
             .map_or_else(|| self.account.availability(), Availability::Ready);
-        #[cfg(not(any(test, debug_assertions)))]
+        #[cfg(not(any(test, debug_assertions, all(windows, feature = "gate-draw-replay"))))]
         let now = self.account.availability();
         let input = Input::Engines(kumochi_protocol::message::ConnectionKind::ChatGpt, now);
         self.hold_fence(&input);
@@ -1904,7 +1905,7 @@ impl<'a, 't> Link<'a, 't> {
         if let Some(probe) = audio_fixture::probe() {
             probe.queued_scene_data(message);
         }
-        #[cfg(all(windows, debug_assertions))]
+        #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
         if let DataToShell::SceneStepCommit {
             run,
             scene,

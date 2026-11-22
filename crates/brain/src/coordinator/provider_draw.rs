@@ -219,7 +219,7 @@ impl Coordinator {
                 let p = current.provider_draw(call)?;
                 p.tokenizer.next(&mut rest).map(|record| {
                     record.map(|record| {
-                        #[cfg(all(windows, debug_assertions))]
+                        #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
                         if REPLAY {
                             mark_close(run, record.index, record.bytes.len());
                         }
@@ -553,7 +553,7 @@ impl Coordinator {
     }
 }
 
-#[cfg(all(windows, debug_assertions))]
+#[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
 fn mark_close(run: RunId, index: u32, bytes: usize) {
     use crate::connections::model::text_observation::{DrawStage, Observation, REPLAY_STEPS};
 

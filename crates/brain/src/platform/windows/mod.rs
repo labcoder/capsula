@@ -25,7 +25,7 @@ mod spawn;
 mod window;
 
 pub(crate) use capture::{WINDOW_CAPTURE, display_at, screen_capturer};
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "gate-draw-replay"))]
 pub(crate) use clock::qpc_now;
 pub(crate) use clock::{qpc_age, qpc_at, qpc_left};
 pub(crate) use credential::WindowsCredentialStore;

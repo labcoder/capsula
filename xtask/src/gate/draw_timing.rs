@@ -1,4 +1,4 @@
-//! One offline paint timing trial with prebuilt Debug GATE images.
+//! One offline paint timing trial with prepared Gate images.
 
 mod evidence;
 
@@ -15,7 +15,7 @@ use kumochi_protocol::constants::{
 };
 
 use super::{observation, retained_run};
-use crate::hermetic::{self, Folders, Run};
+use crate::hermetic::{self, Folders, Prebuilt, Run};
 use crate::platform::{self, gate_capture, input_session::WindowKind};
 use crate::session;
 
@@ -24,40 +24,47 @@ const SHELL_LIMIT_MS: u64 = 65_000;
 
 pub(super) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     hermetic::require_gate(ProductIdentity::ACTIVE)?;
-    ensure!(
-        cfg!(debug_assertions),
-        "draw-timing requires prebuilt Debug GATE images"
-    );
     let transcript = args.next().context("draw-timing needs a transcript path")?;
-    let hashes = [
-        args.next()
-            .context("draw-timing needs the pinned shell SHA-256")?,
-        args.next()
-            .context("draw-timing needs the pinned brain SHA-256")?,
-    ];
+    let mut args = args.peekable();
+    let release_mode = args.next_if(|arg| arg == "--prebuilt").is_some();
+    let pins = Prebuilt::parse(&mut args)?;
     ensure!(
-        args.next().is_none()
-            && hashes
-                .iter()
-                .all(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())),
-        "draw-timing takes only a transcript path and two SHA-256 pins"
+        args.next().is_none(),
+        "unexpected argument after draw-timing pins"
     );
     let exe = std::env::current_exe()?;
+    let images = if release_mode {
+        pins.release()?
+    } else {
+        ensure!(
+            cfg!(debug_assertions),
+            "release draw-timing requires --prebuilt"
+        );
+        exe.parent()
+            .context("missing prebuilt image directory")?
+            .to_owned()
+    };
     retained_run(
         std::iter::once(transcript),
         Run::finish_discard,
         |output, _| {
-            let bins = exe.parent().context("missing prebuilt image directory")?;
-            let (folders, shell, stamps) = prepare(output, bins, &hashes)?;
+            let (folders, shell, stamps) = if release_mode {
+                prepare(output, |bin| pins.stage_into(&images, bin))?
+            } else {
+                prepare(output, |bin| {
+                    stage_debug(&images, bin, [&pins.shell_sha256, &pins.brain_sha256])
+                })?
+            };
             fs::write(
                 output.join("identity.txt"),
                 format!(
-                    "driver_build_id={}\nidentity={}\nprofile=debug\ndriver_sha256={}\nshell_sha256={}\nbrain_sha256={}\n",
+                    "driver_build_id={}\nidentity={}\nprofile={}\ndriver_sha256={}\nshell_sha256={}\nbrain_sha256={}\n",
                     kumochi_protocol::BUILD_ID,
                     ProductIdentity::ACTIVE.data_dir,
+                    if release_mode { "release" } else { "debug" },
                     gate_capture::file_sha256(&exe)?,
-                    hashes[0],
-                    hashes[1],
+                    pins.shell_sha256,
+                    pins.brain_sha256,
                 ),
             )?;
             trial(output, &shell, &stamps, &folders)
@@ -67,15 +74,24 @@ pub(super) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
 
 fn prepare(
     output: &Path,
-    images: &Path,
-    hashes: &[String; 2],
+    stage: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<(Folders, PathBuf, PathBuf)> {
     let app = output.join("data/app");
     let folders = Folders::create(&app)?;
     folders.choose_model("ChatGpt", "draw-replay")?;
     let launch = app.join(LIVE_RUNS_DIR).join("1");
     let bin = launch.join(LIVE_RUN_BIN_DIR);
-    fs::create_dir_all(&bin)?;
+    fs::create_dir_all(&launch)?;
+    stage(&bin)?;
+    Ok((
+        folders,
+        bin.join(SHELL_EXE),
+        launch.join(LIVE_CHATGPT_TEXT_STAMPS_FILE),
+    ))
+}
+
+fn stage_debug(images: &Path, bin: &Path, hashes: [&str; 2]) -> Result<()> {
+    fs::create_dir(bin)?;
     for (name, expected) in [SHELL_EXE, BRAIN_EXE].into_iter().zip(hashes) {
         let copy = bin.join(name);
         fs::copy(images.join(name), &copy).with_context(|| format!("copying pinned {name}"))?;
@@ -84,11 +100,7 @@ fn prepare(
             "prebuilt {name} SHA-256 does not match its pin; no launch"
         );
     }
-    Ok((
-        folders,
-        bin.join(SHELL_EXE),
-        launch.join(LIVE_CHATGPT_TEXT_STAMPS_FILE),
-    ))
+    Ok(())
 }
 
 fn trial(output: &Path, shell: &Path, stamps: &Path, folders: &Folders) -> Result<()> {
@@ -157,6 +169,35 @@ fn trial(output: &Path, shell: &Path, stamps: &Path, folders: &Folders) -> Resul
 
 #[cfg(test)]
 #[test]
+fn release_draw_stages_the_pinned_pair_in_the_owned_live_layout() {
+    let dir = crate::scratch::dir("draw-prebuilt-layout");
+    let images = dir.join("images");
+    fs::create_dir(&images).unwrap();
+    let service = ProductIdentity::GATE.instance_service;
+    let shell = format!("shell started|{service}");
+    let brain = format!("brain started|{service}");
+    fs::write(images.join(SHELL_EXE), shell.as_bytes()).unwrap();
+    fs::write(images.join(BRAIN_EXE), brain.as_bytes()).unwrap();
+    let mut hashes = [SHELL_EXE, BRAIN_EXE]
+        .into_iter()
+        .map(|name| gate_capture::file_sha256(&images.join(name)).unwrap());
+    let pins = Prebuilt::parse(&mut hashes).unwrap();
+    let (folders, staged, stamps) = prepare(&dir, |bin| pins.stage_into(&images, bin)).unwrap();
+    let app = dir.join("data/app");
+    let launch = app.join(LIVE_RUNS_DIR).join("1");
+    assert_eq!(folders.local, app.join("local"));
+    assert_eq!(staged, launch.join(LIVE_RUN_BIN_DIR).join(SHELL_EXE));
+    assert_eq!(stamps, launch.join(LIVE_CHATGPT_TEXT_STAMPS_FILE));
+    assert!(!stamps.exists());
+    assert_eq!(fs::read(staged).unwrap(), shell.as_bytes());
+    assert_eq!(
+        fs::read(launch.join(LIVE_RUN_BIN_DIR).join(BRAIN_EXE)).unwrap(),
+        brain.as_bytes()
+    );
+}
+
+#[cfg(test)]
+#[test]
 fn draw_trial_a_broken_or_missing_pin_does_not_poison_the_next_claim() {
     for missing in [false, true] {
         let dir = crate::scratch::dir("draw-bad-pin");
@@ -169,7 +210,10 @@ fn draw_trial_a_broken_or_missing_pin_does_not_poison_the_next_claim() {
             fs::write(images.join(BRAIN_EXE), b"fake brain").unwrap();
         }
         hermetic::assert_claim_after_refusal(&dir, |output| {
-            let error = prepare(output, &images, &[shell_pin, "0".repeat(64)]).unwrap_err();
+            let error = prepare(output, |bin| {
+                stage_debug(&images, bin, [&shell_pin, &"0".repeat(64)])
+            })
+            .unwrap_err();
             assert_eq!(
                 error.to_string(),
                 if missing {
