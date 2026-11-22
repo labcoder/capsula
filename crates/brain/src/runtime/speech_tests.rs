@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    AudioSession, ControlToBrain, ControlToShell, DataToBrain, DataToShell, OutputGeneration,
-    PageOf, Phase, RunId, SegmentId, SegmentStart, SpeechDecision, SpeechDispatch, SpeechPcm,
-    SpeechPromise, SpeechRetirement, StepRef, ThreadId,
+    AudioSession, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Narration,
+    OutputGeneration, PageOf, Phase, RunId, SegmentId, SegmentStart, SpeechDecision,
+    SpeechDispatch, SpeechPcm, SpeechPromise, SpeechRetirement, StepRef, ThreadId,
 };
 use tokio::io::AsyncWriteExt as _;
 use tokio::time::{sleep, timeout};
@@ -20,7 +20,7 @@ use crate::engines::{self, Finish, Round, RunRequest, SendGate, TurnEvent};
 use crate::store::{RunEnd, Store};
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
-use crate::voice::pump::{OutputMode, Pump};
+use crate::voice::pump::Pump;
 use crate::voice::reply::Heard;
 use crate::voice::tts::{Engine, TtsError, TtsHandle};
 
@@ -63,18 +63,18 @@ impl Engine for Silence {
 /// A brain playing `script` with spoken replies on, speaking through `Silence`.
 fn spoken(scratch: &Scratch, script: &str) -> Brain {
     let mut brain = test_support::brain(scratch, script);
-    enable_spoken(&mut brain, OutputMode::Legacy);
+    enable_spoken(&mut brain);
     brain
 }
 
-fn enable_spoken(brain: &mut Brain, output: OutputMode) {
+fn enable_spoken(brain: &mut Brain) {
     let (reports, _) = crate::voice::Reports::new();
     let tts = TtsHandle::spawn_with(tokio::runtime::Handle::current(), reports, |_: &Path| {
         Ok(Silence)
     })
     .expect("the owner thread starts");
     tts.load("models".into(), 1);
-    brain.pump = Some(Pump::new(tts, output));
+    brain.pump = Some(Pump::new(tts));
     brain.offline(Input::SpokenReplies { loaded: true });
     brain.offline(Input::AudioOutput {
         rate: 24_000,
@@ -108,8 +108,7 @@ async fn closed_speech_waits_across_live_data_credits_then_dispatches_once() {
         r#""kind":"rect","box":[0,0,10,10]}}]}},{"end":{}}]}"#,
     );
     brain.engine = Box::new(DrawThenFinish(Fixture::parse(script).unwrap()));
-    // This shell conducts: it decides each speech-start segment.
-    enable_spoken(&mut brain, OutputMode::Conducted);
+    enable_spoken(&mut brain);
     let inputs = brain.inputs_tx.clone();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
@@ -118,7 +117,11 @@ async fn closed_speech_waits_across_live_data_credits_then_dispatches_once() {
         inputs.send(draw_stream_tests::provider_ready()).unwrap();
         let output = OutputGeneration(7);
         shell
-            .send(&ControlToBrain::QueuedAudioOutput(24_000, output))
+            .send(&ControlToBrain::QueuedAudioOutput(
+                24_000,
+                output,
+                Narration::Conducted,
+            ))
             .await;
         assert_eq!(
             shell.control().await,

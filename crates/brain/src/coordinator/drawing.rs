@@ -1,7 +1,7 @@
 //! V1 drawing effects share the coordinator's run fences, store FIFO and clear debt.
 
 use kumochi_protocol::message::{
-    DataToShell, RunId, SceneId, SegmentId, SegmentStart, StepRef, ThreadId,
+    DataToShell, Narration, RunId, SceneId, SegmentId, SegmentStart, StepRef, ThreadId,
 };
 use kumochi_scene::record::Start;
 
@@ -339,7 +339,7 @@ impl Coordinator {
     }
 
     fn forward_drawing_effect(&mut self, mut effect: Effect, effects: &mut Vec<Effect>) {
-        let plain_say = self.plain_say;
+        let plain_say = self.narration == Some(Narration::Plain);
         if let Effect::Data(DataToShell::SceneStepCommit {
             run,
             scene,

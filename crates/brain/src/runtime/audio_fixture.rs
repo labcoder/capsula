@@ -21,7 +21,7 @@ use crate::engines::responses::replay::Turns;
 use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
 use crate::voice::download::{DownloadError, Fetch, Progress};
 use crate::voice::installer::{Durable, Installer};
-use crate::voice::pump::{OutputMode, Pump};
+use crate::voice::pump::Pump;
 use crate::voice::stt::SttHandle;
 use crate::voice::tts::{Engine, TtsError, TtsHandle};
 use crate::voice::{LoadEvent, Reports};
@@ -737,14 +737,7 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
         (1, LoadEvent::Loaded),
         "the fake model must be ready"
     );
-    brain.pump = Some(Pump::new(
-        tts,
-        if narrated {
-            OutputMode::Conducted
-        } else {
-            OutputMode::Legacy
-        },
-    ));
+    brain.pump = Some(Pump::new(tts));
     brain.offline(Input::SpokenReplies { loaded: true });
     brain
 }

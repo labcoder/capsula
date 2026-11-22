@@ -38,7 +38,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use kumochi_protocol::message::{
-    ConnectionKind, Content, ControlToShell, Cursor, DataToShell, Deleted, ModelChoice,
+    ConnectionKind, Content, ControlToShell, Cursor, DataToShell, Deleted, ModelChoice, Narration,
     OutputGeneration, PageOf, Phase, RunId, SceneId, SegmentId, SpeechDecision, SpeechDispatch,
     SpeechRetirement, Step, ThreadId, ThreadOp, UserError,
 };
@@ -350,8 +350,6 @@ pub enum Input {
         /// The device's generation.
         generation: OutputGeneration,
     },
-    /// Output rate and logical generation for the queued receipt path.
-    QueuedAudioOutput(u32, OutputGeneration),
     /// The shell withdrew its output device of `generation`.
     AudioOutputUnavailable {
         /// The generation withdrawn.
@@ -831,8 +829,8 @@ pub struct Coordinator {
     withdrawn: Option<OutputGeneration>,
     /// Spoken replies are loaded.
     spoken: bool,
-    /// A Plain queued pair with no conductor: a step's `say` is spoken as a plain segment.
-    plain_say: bool,
+    /// The registered queued pair's narration; `None` on a Legacy pair or before registration.
+    narration: Option<Narration>,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -895,7 +893,7 @@ impl Coordinator {
             output: None,
             withdrawn: None,
             spoken: false,
-            plain_say: false,
+            narration: None,
         }
     }
 
@@ -1078,7 +1076,7 @@ impl Coordinator {
                 }
                 self.output = None;
                 self.withdrawn = None;
-                self.plain_say = false;
+                self.narration = None;
                 let runs: Vec<_> = self.ending.iter().map(|run| run.id).collect();
                 for run in runs {
                     self.release(run, &mut effects);
@@ -1172,7 +1170,6 @@ impl Coordinator {
                 }
             }
             input @ (Input::AudioOutput { .. }
-            | Input::QueuedAudioOutput(..)
             | Input::AudioOutputUnavailable { .. }
             | Input::SpokenReplies { .. }
             | Input::Tts { .. }
