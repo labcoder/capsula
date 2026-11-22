@@ -567,20 +567,23 @@ real one only in a live turn the Captain assigned, from the reviewed head.
   water cycle, then for a graph of y = x². Each goes through the product's request path on the
   default model at low effort, with short fixed instructions and `draw` exactly as Kumo's model is
   offered it. A refusal of the account (401, 403, 429 or a usage-limit, plan, route or sign-in
-  code) stops the run. Nothing is retried.
+  code) stops the run, and so does a reply that couldn't be read whole, since it may hide one (a
+  429 whose body was cut short). Nothing is retried.
 - The first function call, if it is `draw` within the tool's 16 KiB argument bound, is checked as
   a new scene with no picture: each closed record through `parse_screen_draw_record`, the scene's
   begin, and every step's `refuse_three_dimensional`, `admit_checked` and commit. A screen begin
-  is refused as `drawing.NoScreenPicture`, as the product refuses one without a picture. Replacing
+  is refused as `drawing.NoScreenPicture`, as the product refuses one without a picture, and a
+  record after the call's `end` as `scene.AfterEnd`. Replacing
   older scenes, the run's step budget and layout aren't checked.
 
-**Requests.** The mode's `Budget` is 2, one per prompt, pinned by a compile-time assert, and
-`KUMOCHI_LIVE_BUDGET` can only lower it; a value that isn't a count allows none. At 0 the vault is
+**Requests.** The mode's `Budget` is 2, one per prompt, pinned by a unit test, and
+`KUMOCHI_LIVE_BUDGET` can only lower it; a value that isn't a count, or isn't Unicode, allows none. At 0 the vault is
 never opened: each request's line says `result=dry`. The brain prints numbers and fixed words only:
 one line per request with its prompt name, body bytes, status, provider code and part, result,
 function-call count, `draw=drawn steps=N`, `draw=refused error=<code> field=<schema path>`,
 `draw=none` or `draw=too-long`, and network milliseconds; then a summary with the model, budget,
-attempts and drawn count. Never the model's text, scene names or arguments.
+attempts and drawn count. Never the model's text, scene names or arguments. xtask's count leaves
+out a line the budget left unsent (`result=spent`).
 
 ```text
 draw check: done (requests: 2)
@@ -588,7 +591,7 @@ draw check: nothing sent, exit 16 (requests: 0)
 ```
 
 Exit codes are the marks check's: 10–17 send nothing, 18 means a body couldn't be built, 20 that
-the session went stale or a line couldn't be written, and 21 that the provider refused the
+the session went stale, a reply couldn't be read whole or a line couldn't be written, and 21 that the provider refused the
 account.
 
 ## `anthropic-key`

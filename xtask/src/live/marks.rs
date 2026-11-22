@@ -55,12 +55,16 @@ fn kept(text: &str) -> Vec<&str> {
         .collect()
 }
 
-/// The run's line. Requests that went out are the request lines with a status; a run that stopped
-/// may have sent one more whose line never printed.
+/// The run's line. Requests that went out are the request lines with a status, less those the
+/// budget left unsent; a run that stopped may have sent one more whose line never printed.
 fn summary(name: &str, code: Option<i32>, lines: &[&str]) -> String {
     let sent = lines
         .iter()
-        .filter(|line| line.starts_with("request=") && line.contains(" status="))
+        .filter(|line| {
+            line.starts_with("request=")
+                && line.contains(" status=")
+                && !line.contains(" result=spent")
+        })
         .count();
     match code {
         Some(0) => format!("{name}: done (requests: {sent})"),
@@ -117,6 +121,18 @@ mod tests {
         assert_eq!(
             summary("draw check", Some(0), &[]),
             "draw check: done (requests: 0)"
+        );
+    }
+
+    #[test]
+    fn a_request_the_budget_left_unsent_is_not_counted() {
+        let lines = [
+            "request=1 prompt=water-cycle body_bytes=9 status=2xx code=- param=- result=completed",
+            "request=2 prompt=y-squared body_bytes=9 status=- code=- param=- result=spent",
+        ];
+        assert_eq!(
+            summary("draw check", Some(0), &lines),
+            "draw check: done (requests: 1)"
         );
     }
 }
