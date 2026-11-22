@@ -152,6 +152,8 @@ fn build_context(run: RunId, thread: ThreadId, attempt: u64) -> Effect {
             crate::context::ConnectionTag(0),
         ),
         drawings: crate::drawing::Digest::default(),
+        picture_models: Vec::new(),
+        key_results: Vec::new(),
     }))
 }
 

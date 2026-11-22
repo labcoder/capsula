@@ -48,6 +48,8 @@ pub enum Write {
         layout_version: u32,
         /// The original typed step.
         step: Arc<Step>,
+        /// The run's requests carried protected material, so its run is marked with this step.
+        protected: bool,
     },
     /// An effective cut as a `scene_cut` event, ordered after every step it follows.
     Cut {
@@ -84,6 +86,8 @@ pub struct StoredScene {
     pub header: SceneHeader,
     /// Every committed step at its revision, interleaved with every effective cut.
     pub log: Vec<SceneEvent>,
+    /// Every run that began it or wrote a step into it is marked public.
+    pub public: bool,
 }
 
 impl fmt::Debug for Target {
@@ -141,6 +145,7 @@ impl fmt::Debug for StoredScene {
             .field("thread", &self.thread)
             .field("header", &self.header)
             .field("log", &self.log.len())
+            .field("public", &self.public)
             .finish()
     }
 }

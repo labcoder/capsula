@@ -61,6 +61,7 @@ fn round_items(round: u32, text: Option<&str>, items: Vec<Opaque>, calls: Vec<Ca
         text: text.map(Into::into),
         items,
         key_calls: Vec::new(),
+        pictured_key_model: None,
         calls: calls
             .into_iter()
             .map(|call| (call, ToolOutput::Error(ToolError::Unknown)))
@@ -80,6 +81,7 @@ fn answered(round: u32, text: Option<&str>, calls: Vec<(CallId, ToolOutput)>) ->
         text: text.map(Into::into),
         items: Vec::new(),
         key_calls: Vec::new(),
+        pictured_key_model: None,
         calls,
     }))
 }
@@ -966,6 +968,7 @@ fn round_writes_show_lengths_never_content() {
         text: Some(format!("said {MARKER}").into()),
         items: vec![item(&format!("{{\"text\":\"{MARKER}\"}}"))],
         key_calls: Vec::new(),
+        pictured_key_model: None,
         calls: vec![(call.clone(), ToolOutput::Text(format!("says {MARKER}")))],
     }));
     let result = crate::context::Body::Result {

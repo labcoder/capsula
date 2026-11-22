@@ -148,6 +148,7 @@ fn write(
         revision,
         layout_version: 2,
         step,
+        protected: false,
     })
 }
 
@@ -185,6 +186,7 @@ fn replacement_clear_lists_are_bounded_unique_and_only_for_new_scenes() {
                 revision: 1,
                 layout_version: 2,
                 step: step("first"),
+                protected: false,
             }),
             Err(StoreError::Drawing)
         ));
@@ -201,6 +203,7 @@ fn replacement_clear_lists_are_bounded_unique_and_only_for_new_scenes() {
             revision: 1,
             layout_version: 2,
             step: step("first"),
+            protected: false,
         })
         .expect("four distinct victims are accepted")
     else {
@@ -244,6 +247,7 @@ fn a_selected_clear_failure_rolls_back_the_entire_replacement_transaction() {
             revision: 1,
             layout_version: 2,
             step: step("first"),
+            protected: false,
         })
         .expect_err("selected clear fails");
     assert!(!format!("{error:?}").contains("private replacement"));
@@ -292,6 +296,7 @@ fn recovery_reconciles_a_committed_replacement_without_a_delivered_reply() {
             revision: 1,
             layout_version: 2,
             step: step("first"),
+            protected: false,
         })
         .expect("committed before losing delivery")
     else {
@@ -1141,4 +1146,160 @@ fn f64_data_from_model_text_recovers_without_changing_one_bit() {
         .map(|value| value.parse::<f64>().expect("std parse").to_bits())
         .collect();
     assert_eq!(bits, expected);
+}
+
+fn marked(
+    store: &mut Store,
+    ids: (ThreadId, RunId),
+    (target, revision, protected): (Target, u32, bool),
+) -> SceneId {
+    let Reply::Step(scene) = store
+        .drawing_write(&Write::Step {
+            thread: ids.0,
+            run: ids.1,
+            clear: Vec::new(),
+            target,
+            revision,
+            layout_version: 2,
+            step: step(&format!("s{revision}")),
+            protected,
+        })
+        .expect("step")
+    else {
+        panic!("wrong reply");
+    };
+    scene
+}
+
+fn next_turn(store: &mut Store, (thread, run): (ThreadId, RunId)) -> (ThreadId, RunId) {
+    let next = RunId(run.0 + 1);
+    store.begin_turn(thread, None, next, "turn").expect("turn");
+    (thread, next)
+}
+
+/// Each scene a reopened store restores, with whether it restores public.
+fn restored(scratch: &Scratch) -> Vec<(SceneId, bool)> {
+    let store = Store::open(&scratch.db()).expect("reopened");
+    let mut scenes: Vec<_> = store
+        .drawing_scenes()
+        .expect("recovery")
+        .scenes
+        .into_iter()
+        .map(|stored| (stored.scene, stored.public))
+        .collect();
+    scenes.sort_unstable();
+    scenes
+}
+
+fn protected(store: &Store, run: RunId) -> Option<i64> {
+    store
+        .conn
+        .query_row(
+            "SELECT protected FROM runs WHERE id = ?1",
+            [i64::try_from(run.0).expect("small")],
+            |row| row.get(0),
+        )
+        .expect("run")
+}
+
+/// A scene restores public only when every run that began it or wrote a step into it was
+/// public. A protected step, even one into a public scene, marks its run for good, and a run
+/// with no marker keeps its scene from every model too.
+#[test]
+fn a_scene_restores_public_only_when_every_run_that_wrote_it_was_public() {
+    use crate::store::RunEnd;
+
+    let scratch = Scratch::new("drawing-authorship");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let public = begin(&mut store);
+    let plain = marked(&mut store, public, (Target::New(header("plain")), 1, false));
+    let edited = marked(
+        &mut store,
+        public,
+        (Target::New(header("edited")), 1, false),
+    );
+    store
+        .end_run(public.0, public.1, &[], RunEnd::Done)
+        .expect("end");
+    let protecting = next_turn(&mut store, public);
+    marked(&mut store, protecting, (Target::Existing(edited), 2, true));
+    let after = marked(
+        &mut store,
+        protecting,
+        (Target::New(header("after")), 1, false),
+    );
+    store
+        .end_run(protecting.0, protecting.1, &[], RunEnd::Done)
+        .expect("end");
+    let older = next_turn(&mut store, protecting);
+    let legacy = marked(&mut store, older, (Target::New(header("legacy")), 1, false));
+    store
+        .end_run(older.0, older.1, &[], RunEnd::Done)
+        .expect("end");
+    assert_eq!(
+        [public.1, protecting.1, older.1].map(|run| protected(&store, run)),
+        [Some(0), Some(1), Some(0)]
+    );
+    store
+        .conn
+        .execute(
+            "UPDATE runs SET protected = NULL WHERE id = ?1",
+            [i64::try_from(older.1.0).expect("small")],
+        )
+        .expect("an older run");
+    drop(store);
+    assert_eq!(
+        restored(&scratch),
+        vec![
+            (plain, true),
+            (edited, false),
+            (after, false),
+            (legacy, false)
+        ]
+    );
+}
+
+/// A protected step marks its run in the same write, so a run that never ended (the brain
+/// stopped mid-run) can't leave the scene it edited public, though it drew a public one first.
+#[test]
+fn a_protected_edit_marks_its_run_in_its_own_write() {
+    use crate::store::RunEnd;
+
+    let scratch = Scratch::new("drawing-authorship-crash");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    let public = begin(&mut store);
+    let kept = marked(&mut store, public, (Target::New(header("kept")), 1, false));
+    let edited = marked(
+        &mut store,
+        public,
+        (Target::New(header("edited")), 1, false),
+    );
+    store
+        .end_run(public.0, public.1, &[], RunEnd::Done)
+        .expect("end");
+    let stopped = next_turn(&mut store, public);
+    let own = marked(&mut store, stopped, (Target::New(header("own")), 1, false));
+    marked(&mut store, stopped, (Target::Existing(edited), 2, true));
+    drop(store);
+    assert_eq!(
+        restored(&scratch),
+        vec![(kept, true), (edited, false), (own, false)]
+    );
+}
+
+/// Runs written before the marker existed read none, so their scenes reach no model.
+#[test]
+fn runs_from_before_the_marker_read_none() {
+    let scratch = Scratch::new("drawing-authorship-migration");
+    std::fs::create_dir_all(scratch.db().parent().expect("a folder")).expect("folder");
+    let mut conn = rusqlite::Connection::open(scratch.db()).expect("file");
+    crate::store::schema::migrate_to(&mut conn, 9).expect("older schema");
+    conn.execute_batch(
+        "INSERT INTO threads (id, title, created_ms, updated_ms) VALUES (5, 'older', 1, 1);
+         INSERT INTO runs (id, thread, state, started_ms, ended_ms) VALUES (7, 5, 'done', 1, 2);",
+    )
+    .expect("older rows");
+    drop(conn);
+    let store = Store::open(&scratch.db()).expect("migrated");
+    assert_eq!(protected(&store, RunId(7)), None);
 }

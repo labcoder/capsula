@@ -663,6 +663,10 @@ struct Run {
     /// The sources of the builds admitted since its first round's, which a key round carries on.
     sent: Vec<ThreadId>,
     key_granted: bool,
+    /// The recipient of the protected material, a picture or a protected digest, an admitted
+    /// request of this run carried: everything the run authors is that recipient's.
+    picture_recipient: Option<crate::context::PictureRecipient>,
+    key_digest_recipient: Option<crate::context::PictureRecipient>,
     /// A typed turn that arrived while Claude Code was being found, until it binds or is released.
     finding: Option<availability::Finding>,
     /// The round that compacted inline since the run's last admitted build.
@@ -1372,6 +1376,8 @@ impl Coordinator {
             route: None,
             sent: Vec::new(),
             key_granted: false,
+            picture_recipient: None,
+            key_digest_recipient: None,
             finding,
             compacted: None,
             draw: None,

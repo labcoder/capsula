@@ -65,6 +65,8 @@ fn build(control: Control) -> BuildContext {
         first: false,
         arrived: crate::coordinator::Arrived::default(),
         drawings: crate::drawing::Digest::default(),
+        picture_models: Vec::new(),
+        key_results: Vec::new(),
     }
 }
 

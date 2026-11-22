@@ -238,6 +238,7 @@ struct Held {
     thread: ThreadId,
     layout_version: u32,
     state: SceneState,
+    author: Author,
     /// The run that committed each lifetime revision; `None` for recovered steps.
     committers: Vec<Option<RunId>>,
     /// Revisions a failed cut already counted as refused, so a later one counts only newer ones.
@@ -249,6 +250,31 @@ struct Held {
     /// Its wide layout and charge; `None` once a preparation failed for any reason but paint
     /// work, leaving the shell's guard as the scene's only check.
     paint: Option<Paint>,
+}
+
+/// Which model may read a scene's metadata, from the protected material the requests of the runs
+/// that drew it carried (a picture or a protected digest), whatever its surface.
+#[derive(Clone, PartialEq, Eq)]
+enum Author {
+    /// Every run that drew it carried none.
+    Public,
+    /// The runs that carried any carried it for this recipient alone.
+    Private(crate::context::PictureRecipient),
+    /// Restored with a run that wasn't marked public, a screen scene with no recipient, or drawn
+    /// for two recipients: no model gets it.
+    Unknown,
+}
+
+impl Author {
+    /// The author after a step from a run whose requests carried material for `recipient`.
+    fn and(self, recipient: Option<crate::context::PictureRecipient>) -> Self {
+        match (self, recipient) {
+            (author, None) => author,
+            (Self::Public, Some(recipient)) => Self::Private(recipient),
+            (Self::Private(held), Some(recipient)) if held == recipient => Self::Private(held),
+            _ => Self::Unknown,
+        }
+    }
 }
 
 /// Work that waits for the store to answer.
@@ -346,6 +372,9 @@ struct StepWait {
     /// The step's wide layout and its resident bytes, which the scene keeps once the write
     /// commits; `None` writes it uncounted.
     laid: Option<(LayoutState, usize)>,
+    /// Its run's recipient when the step was admitted, read once so the stored marker and the
+    /// live stamp agree even when the run closes before the write is acknowledged.
+    recipient: Option<crate::context::PictureRecipient>,
 }
 
 /// The scene a pending step goes into.
@@ -429,6 +458,11 @@ impl Drawing {
                 committers: vec![None; usize::try_from(state.revision()).unwrap_or_default()],
                 refused_through: 0,
                 state,
+                author: if stored.public {
+                    Author::Public
+                } else {
+                    Author::Unknown
+                },
                 gone: false,
                 replaced: false,
                 paint: layout.map(Paint::at_rest),
@@ -725,6 +759,10 @@ impl Drawing {
         element: kumochi_scene::Handle,
     ) -> Option<(ThreadId, &kumochi_scene::Text, kumochi_scene::Part<'_>)> {
         let held = &self.scenes[self.live(scene)?];
+        // The ask becomes stored turn text every later model reads, so only public scenes.
+        if held.author != Author::Public {
+            return None;
+        }
         let part = held.state.part(element)?;
         Some((held.thread, &held.state.header().alt, part))
     }
