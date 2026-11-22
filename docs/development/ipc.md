@@ -46,8 +46,11 @@ The queued shell checks fresh typed intent before changing the composer or its r
 Enter while admission is closed does not submit; it keeps the draft and does not replay it when
 the pair becomes ready. It checks the same owner again while offering the turn to the outbox.
 A refused enqueue reserves no turn and does not discard older recovery. One accepted offer can
-name one run, or be refused by its own turn number. The Plain path admits an ordinary voice Hold
-only with Talk-back and Show Screen confirmed off on that registered pair. A pending change to
+name one run, or be refused by its own turn number. Typed admission checks the outbox and output
+under their short state locks, so contention alone doesn't drop Enter. The native eligibility probe
+never waits for those locks: it refuses the press if it can't check eligibility. The owner checks saved
+consent again before offering the Hold. The Plain path admits an ordinary voice Hold only with
+Talk-back and Show Screen confirmed off on that registered pair. A pending change to
 either preference closes Hold admission; this includes settings and installer writes that can
 change an inherited value. The brain cancels an in-flight Hold when it takes such a change
 before submit. The shell keeps the recognized gesture and its release in the same ordered
