@@ -53,6 +53,16 @@ folder, so missing, empty or relative values never put logs or brain data under 
 directory. They read the variables directly, so the slice 2 gate's per-item `LOCALAPPDATA` is
 respected. The brain's session lock uses the same local data root.
 
+Detached brain startup acquires both pipes before touching the store. It opens and recovers
+the store, loads settings, starts accounts, and builds the Brain. It finishes any interrupted
+voice model removals before creating the helpers' Job Object, then starts the optional workers.
+Only then does it publish the instance capability and serve the shell. The lifecycle owner
+keeps the pipes alive through teardown. Before capability publication, a failure drops the
+resources that started without entering graceful shutdown. After serving, it quits or closes
+the Brain, shuts down the Job off the async thread, and deletes the capability in that order.
+Detached keeps the result of serving as its exit status; an incomplete Quit or capability
+deletion warning does not change that status.
+
 ## Crates
 
 ```mermaid

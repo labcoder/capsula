@@ -32,6 +32,7 @@ mod runtime;
 mod scratch;
 pub mod screen;
 pub mod speech;
+mod startup;
 pub mod store;
 mod supervise;
 mod tap;
@@ -51,9 +52,6 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use kumochi_protocol::BUILD_ID;
-use kumochi_protocol::constants::SHELL_EXE;
-use kumochi_protocol::message::{CAPABILITY_LEN, Capability, Incarnation};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
@@ -67,6 +65,9 @@ use crate::engines::responses::{AccessHandle, Responses};
 use crate::ipc::{Identity, Pipes, Session};
 use crate::platform::Job;
 use crate::runtime::{Brain, Selected};
+use crate::startup::run_admitted;
+
+const STARTUP_LOG_TARGET: &str = module_path!();
 
 /// How long a relaunched shell the brain can't watch gets to connect: past the shell's own
 /// 10 s connect deadline, and short enough that three such losses plus the backoff still fit
@@ -262,125 +263,6 @@ fn draw_admission(
     } else {
         StartMode::Normal
     })
-}
-
-#[expect(
-    clippy::too_many_lines,
-    reason = "keeps the startup and shutdown order of the admitted brain's resources in one place"
-)]
-async fn run_admitted(
-    admission: Result<StartMode, BrainError>,
-    #[cfg(test)] starting: impl FnOnce(),
-) -> Result<(), BrainError> {
-    let mode = admission?;
-    #[cfg(test)]
-    starting();
-    let session = platform::session_id()?;
-    // The pipes come first: a second brain fails here, before it touches anything else.
-    let mut pipes = Pipes::create(session)?;
-    let exe = std::env::current_exe()?;
-    #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
-    Observation::prepare(&exe);
-    #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
-    let replay = (mode == StartMode::Draw).then(draw_engine).transpose()?;
-    #[cfg(not(all(windows, any(debug_assertions, feature = "gate-draw-replay"))))]
-    let replay = {
-        let _ = mode;
-        None
-    };
-    // Before any shell is served, so no run starts ahead of the recovery scan. Blocking is fine:
-    // nothing else runs on the runtime yet.
-    let mut store = store::Store::open(&store::default_path()?)?;
-    let recovered = store.recover()?;
-    tracing::info!(
-        crashed_runs = recovered.crashed_runs,
-        finished_deletions = recovered.finished_deletions,
-        purge_pending = recovered.purge_pending,
-        failed_deletions = recovered.failed_deletions,
-        failed_sends = recovered.failed_sends,
-        unknown_sends = recovered.unknown_sends,
-        "store recovered"
-    );
-    // Recovery created it if it was missing, so its id is below the high water.
-    let main_thread = store.main_thread()?;
-    let high_water = store.high_water()?;
-    let scenes = store.scenes()?;
-    let mut config = config::Config::load(platform::config_dir(), main_thread);
-    #[cfg(all(windows, feature = "gate-draw-replay", not(debug_assertions)))]
-    require_draw_model(&config)?;
-    #[cfg(windows)]
-    let claude_on = config.claude_code_enabled();
-    #[cfg(windows)]
-    tracing::info!(enabled = claude_on, "Claude Code setting");
-    // Before the capability is stored, so its write never overlaps the vault's first reads.
-    let (account, vault_held) = accounts(config.oauth_tuning(), config.token_tuning())?;
-    config.count_in_use(&account.view(), high_water.1);
-    let mut brain = Brain::new(
-        store,
-        main_thread,
-        high_water,
-        scenes,
-        match replay {
-            Some(replay) => replay,
-            None => engine(config.model_tuning())?,
-        },
-        config,
-        account,
-    )
-    .map_err(BrainError::StoreThread)?;
-    #[cfg(windows)]
-    let models = platform::data_dir().map(|data| data.join(kumochi_protocol::voice::MODELS_DIR));
-    #[cfg(windows)]
-    let stuck = models
-        .as_deref()
-        .map(|models| brain.finish_removals(models))
-        .unwrap_or_default();
-    let jobs = std::sync::Arc::new(Job::new().map_err(BrainError::Helpers)?);
-    #[cfg(windows)]
-    {
-        if let Some(models) = models {
-            start_voice(&mut brain, models, &stuck, &exe, &jobs);
-        }
-        let lane = claude_lane(vault_held, &jobs, &exe);
-        brain.attach_claude(match lane {
-            Some(lane) if claude_on => {
-                runtime::claude::Claude::start(lane, runtime::claude::SIGN_IN)
-            }
-            None if claude_on => runtime::claude::Claude::default(),
-            lane => runtime::claude::Claude::turned_off(lane),
-        });
-    }
-    #[cfg(not(windows))]
-    drop(vault_held);
-    start_screen(&mut brain, exe.clone(), Ok(std::sync::Arc::clone(&jobs)));
-    let mut bytes = [0; CAPABILITY_LEN];
-    getrandom::fill(&mut bytes)?;
-    let identity = Identity {
-        capability: Capability::new(bytes),
-        incarnation: Incarnation(getrandom::u64()?),
-        shell_image: exe.with_file_name(SHELL_EXE),
-    };
-    credential::store(session, &identity.capability)?;
-    tracing::info!(incarnation = ?identity.incarnation, build = BUILD_ID, "listening");
-    let ended = serve(&mut pipes, &identity, &mut brain).await;
-    match ended {
-        Ok(Some(deadline)) => {
-            brain.quit(deadline).await;
-        }
-        Ok(None) | Err(_) => brain.close().await,
-    }
-    // Ending the job waits on the processes, so it runs off the async thread.
-    match tokio::task::spawn_blocking(move || jobs.shut_down()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "couldn't end the helpers; closing the job ends them");
-        }
-        Err(error) => tracing::warn!(%error, "ending the helpers panicked"),
-    }
-    if let Err(error) = credential::delete(session) {
-        tracing::warn!(%error, "couldn't delete the instance capability");
-    }
-    ended.map(|_| ()).map_err(BrainError::from)
 }
 
 /// Starts speech input's worker and spoken replies' thread, then voice. A handle that can't start
