@@ -3,7 +3,9 @@
 //! Content (prompts, transcripts, screen text, images, tool arguments) is never logged, so nothing
 //! needs redacting after the fact. Secrets are [`kumochi_protocol::Secret`]s and print as `***`.
 
-use tracing::Level;
+use std::path::Path;
+
+use tracing::{Level, Subscriber};
 use tracing_appender::rolling::{InitError, RollingFileAppender, Rotation};
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -47,6 +49,16 @@ pub fn init(prefix: &str) -> Result<(), LoggingError> {
     let dir = crate::platform::data_dir()
         .ok_or(LoggingError::NoLocalAppData)?
         .join("logs");
+    tracing::subscriber::set_global_default(file_subscriber(&dir, prefix)?)?;
+    install_panic_hook();
+    Ok(())
+}
+
+/// Builds the daily file subscriber at an explicit directory without installing it globally.
+///
+/// # Errors
+/// Fails if the log folder or file can't be created.
+pub fn file_subscriber(dir: &Path, prefix: &str) -> Result<impl Subscriber, InitError> {
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix(prefix)
@@ -58,12 +70,9 @@ pub fn init(prefix: &str) -> Result<(), LoggingError> {
     } else {
         Level::INFO
     };
-    let subscriber = tracing_subscriber::registry()
+    Ok(tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_writer(appender))
-        .with(filter(level));
-    tracing::subscriber::set_global_default(subscriber)?;
-    install_panic_hook();
-    Ok(())
+        .with(filter(level)))
 }
 
 /// Replaces the default panic output, which prints the payload, with the location alone.

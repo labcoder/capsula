@@ -122,6 +122,41 @@ pub enum BrainError {
     Model(#[source] connections::http_client::HttpError),
 }
 
+impl BrainError {
+    /// Returns the fixed startup diagnostic kind and any raw OS code without formatting the error.
+    #[must_use]
+    pub fn diagnostic(&self) -> (&'static str, Option<i64>) {
+        use ipc::IpcError;
+        use platform::TrustRootsError;
+        use store::StoreError;
+
+        let raw = |error: &io::Error| error.raw_os_error().map(i64::from);
+        match self {
+            Self::NativeRuntime(error) => ("native_runtime", raw(error)),
+            Self::Process(error) => ("process", raw(error)),
+            Self::Ipc(IpcError::Create { source, .. }) => ("ipc_create", raw(source)),
+            Self::Ipc(IpcError::Accept(error)) => ("ipc_accept", raw(error)),
+            Self::Random(error) => ("random", error.raw_os_error().map(i64::from)),
+            Self::Credential(error) => ("credential", error.raw_os_error().map(i64::from)),
+            Self::Store(StoreError::Folder(error) | StoreError::Purge(error)) => {
+                ("store", raw(error))
+            }
+            Self::Store(_) => ("store", None),
+            Self::Fixture(error) => ("fixture", raw(error)),
+            Self::StoreThread(error) => ("store_thread", raw(error)),
+            Self::Helpers(error) => ("helpers", raw(error)),
+            Self::Accounts(error) => ("accounts", raw(error)),
+            Self::NativeTrust(TrustRootsError::Open(code) | TrustRootsError::Enumerate(code)) => {
+                ("native_trust", Some(i64::from(*code)))
+            }
+            Self::NativeTrust(TrustRootsError::Unsupported | TrustRootsError::Empty) => {
+                ("native_trust", None)
+            }
+            Self::Model(_) => ("model", None),
+        }
+    }
+}
+
 /// Ends the runtime [`run`] ran on without waiting for blocking work. Quit and close already
 /// waited for a settings write up to their deadline; one still stuck on a slow disk ends with the
 /// process, and `config.toml` stays whole because it's replaced, never written in place.
