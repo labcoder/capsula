@@ -22,8 +22,16 @@ async fn an_error_after_start_helpers_drops_the_job_without_shutting_it_down() {
 
 async fn assert_unwind(stop: Checkpoint, slot: u32) {
     let scratch = Scratch::new("startup-unwind");
-    let session = u32::MAX - std::process::id() - 64 - slot;
-    let lifecycle = Lifecycle::acquire(session).expect("own test pipes");
+    let pipes = Pipes::create_for_startup_test(slot).expect("own test pipes");
+    let lifecycle = Lifecycle {
+        jobs: None,
+        brain: None,
+        opened: None,
+        exe: std::env::current_exe().expect("current test executable"),
+        pipes,
+        session: 0,
+        published: false,
+    };
     let replay = Selected::Fixture(Box::new(Fixture::parse("").expect("empty fixture")));
     let opened = OpenedState::load(
         &scratch.db(),
@@ -59,7 +67,8 @@ async fn assert_unwind(stop: Checkpoint, slot: u32) {
         matches!(error, BrainError::Process(error) if error.kind() == io::ErrorKind::Interrupted),
         "the startup must return the injected error unchanged"
     );
-    let _pipes = Pipes::create(session).expect("both pipe names are reusable after refusal");
+    let _pipes =
+        Pipes::create_for_startup_test(slot).expect("both pipe names are reusable after refusal");
     if stop == Checkpoint::Open {
         assert!(
             writer.is_none() && vault.is_none(),

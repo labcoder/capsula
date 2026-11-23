@@ -54,7 +54,7 @@ directory. They read the variables directly, so the slice 2 gate's per-item `LOC
 respected. The brain's session lock uses the same local data root.
 
 Detached brain startup acquires both pipes before touching the store. It opens and recovers
-the store, loads settings, starts accounts, and builds the Brain. It finishes any interrupted
+the store, loads settings, starts accounts, and builds the Brain. It retries any interrupted
 voice model removals before creating the helpers' Job Object, then starts the optional workers.
 Only then does it publish the instance capability and serve the shell. The lifecycle owner
 keeps the pipes alive through teardown. Before capability publication, a failure drops the
