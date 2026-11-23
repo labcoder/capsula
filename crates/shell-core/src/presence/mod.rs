@@ -1,6 +1,7 @@
 //! The models behind the presence: the drag owner, the capture exclusion's lease, Kumo, the frame
 //! pacing, the dock line's machine, the perch rules, the pull, the layout and the thread selection.
 
+pub mod carry;
 pub mod drag;
 #[expect(
     clippy::as_conversions,
