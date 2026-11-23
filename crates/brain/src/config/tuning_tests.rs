@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use toml::Table;
 
-use super::{GITHUB, GitHubTuning};
+use super::{GITHUB, GROUPS, GitHubTuning, ModelTuning, OAuthTuning, RUNS, RunTuning};
 use crate::test_support::Captured;
 
 const DOCS: &str = include_str!("../../../../docs/user/tuning.md");
@@ -104,35 +104,116 @@ fn logs_name_owned_keys_and_only_count_unknown_ones() {
 }
 
 #[test]
-fn the_user_docs_list_every_key_with_its_default_and_range() {
-    let block = DOCS
-        .split("```toml")
-        .nth(1)
-        .and_then(|rest| rest.split("```").next())
-        .expect("docs/user/tuning.md has a toml example");
-    let table: Table = block.parse().expect("the example parses");
-    let github = table["tuning"]["github"]
-        .as_table()
-        .expect("the example has [tuning.github]");
-    assert_eq!(github.len(), GITHUB.len());
-    let lines: Vec<&str> = block.lines().map(str::trim).collect();
-    for limit in &GITHUB {
-        assert_eq!(
-            github[limit.key].as_integer(),
-            i64::try_from(limit.default).ok(),
-            "{}",
-            limit.key
-        );
-        let at = lines
-            .iter()
-            .position(|line| line.starts_with(&format!("{} = ", limit.key)))
-            .expect("each key has its own line");
-        let range = format!("{}–{}", limit.min, limit.max);
-        assert!(
-            lines[at - 1].starts_with('#') && lines[at - 1].contains(&range),
-            "{}",
-            limit.key
-        );
+fn model_and_run_values_default_to_the_built_in_constants_and_keep_their_rules() {
+    let model = ModelTuning::default();
+    assert_eq!(model.send, crate::connections::model::SEND_DEADLINE);
+    assert_eq!(model.idle, crate::connections::model::IDLE);
+    assert_eq!(model.pool_idle, Duration::from_secs(50));
+    assert_eq!(model.content_idle, Duration::from_secs(600));
+    let runs = RunTuning::default();
+    assert_eq!(
+        (runs.rounds, runs.calls),
+        (
+            crate::coordinator::MAX_ROUNDS,
+            crate::coordinator::MAX_CALLS
+        )
+    );
+    assert_eq!(
+        (RUNS[0].max, RUNS[1].max),
+        (
+            u64::from(crate::coordinator::MAX_ROUNDS),
+            u64::from(crate::coordinator::MAX_CALLS)
+        )
+    );
+    assert_eq!(runs.wall_clock, crate::coordinator::WALL_CLOCK);
+    let table = |text: &str| text.parse::<Table>().expect("fixture parses");
+    let tuned = ModelTuning::from_table(&table(
+        "[tuning.model]\nsend_s = 3\nidle_s = 15\ncontent_idle_s = 150\npool_idle_s = 51",
+    ));
+    assert_eq!(tuned.send, Duration::from_secs(3));
+    assert_eq!(tuned.idle, Duration::from_secs(15));
+    assert_eq!(tuned.content_idle, Duration::from_secs(150));
+    assert_eq!(tuned.pool_idle, Duration::from_secs(50));
+    let widened = "[tuning.model]\nsend_s = 11";
+    assert_eq!(
+        ModelTuning::from_table(&table(widened)).send,
+        Duration::from_secs(10)
+    );
+    let quiet = "[tuning.model]\nidle_s = 200\ncontent_idle_s = 150";
+    assert_eq!(
+        ModelTuning::from_table(&table(quiet)),
+        ModelTuning::default()
+    );
+    let runs = RunTuning::from_table(&table(
+        "[tuning.runs]\nrounds_count = 9\ncalls_count = 1\nwall_clock_s = 241\nfinding_wait_s = 8",
+    ));
+    assert_eq!((runs.rounds, runs.calls), (8, 2));
+    assert_eq!(runs.wall_clock, Duration::from_secs(240));
+    assert_eq!(runs.finding_wait, Duration::from_secs(8));
+}
+
+#[test]
+fn oauth_backoffs_have_to_fit_inside_one_revocation_budget() {
+    let tuned = |text: &str| OAuthTuning::from_table(&text.parse().expect("fixture parses"));
+    assert_eq!(
+        tuned(
+            "[tuning.oauth]\nsign_in_s = 100\nrefresh_s = 15\nrevoke_s = 3\nfirst_backoff_ms = 1000\nsecond_backoff_ms = 1999"
+        ),
+        OAuthTuning {
+            sign_in: Duration::from_secs(100),
+            refresh: Duration::from_secs(15),
+            revoke: Duration::from_secs(3),
+            backoff: [Duration::from_secs(1), Duration::from_millis(1999)],
+        }
+    );
+    for invalid in [
+        "[tuning.oauth]\nsign_in_s = 100\nrevoke_s = 3\nfirst_backoff_ms = 1000\nsecond_backoff_ms = 2000",
+        "[tuning.oauth]\nsign_in_s = 100\nrevoke_s = 3\nfirst_backoff_ms = 1001\nsecond_backoff_ms = 1000",
+    ] {
+        assert_eq!(tuned(invalid), OAuthTuning::default());
     }
-    assert_eq!(tuned(block), GitHubTuning::default());
+}
+
+#[test]
+fn the_user_docs_list_every_key_with_its_default_and_range() {
+    let blocks: Vec<&str> = DOCS
+        .split("```toml")
+        .skip(1)
+        .filter_map(|rest| rest.split("```").next())
+        .collect();
+    assert_eq!(blocks.len(), GROUPS.len());
+    for ((name, limits), block) in GROUPS.iter().zip(&blocks) {
+        let table: Table = block.parse().expect("the example parses");
+        let group = table["tuning"][name]
+            .as_table()
+            .expect("one group per example");
+        assert_eq!(group.len(), limits.len(), "{name}");
+        let lines: Vec<&str> = block.lines().map(str::trim).collect();
+        for limit in *limits {
+            assert_eq!(
+                group[limit.key].as_integer(),
+                i64::try_from(limit.default).ok(),
+                "{}",
+                limit.key
+            );
+            let at = lines
+                .iter()
+                .position(|line| line.starts_with(&format!("{} = ", limit.key)))
+                .expect("each key has its own line");
+            let range = format!("{}–{}", limit.min, limit.max);
+            assert!(
+                lines[at - 1].starts_with('#') && lines[at - 1].contains(&range),
+                "{}",
+                limit.key
+            );
+        }
+    }
+    let all: Table = blocks
+        .concat()
+        .parse()
+        .expect("the examples parse together");
+    assert_eq!(GitHubTuning::from_table(&all), GitHubTuning::default());
+    assert_eq!(ModelTuning::from_table(&all), ModelTuning::default());
+    assert_eq!(RunTuning::from_table(&all), RunTuning::default());
+    assert_eq!(OAuthTuning::from_table(&all), OAuthTuning::default());
 }

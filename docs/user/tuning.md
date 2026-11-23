@@ -39,3 +39,67 @@ listing_s = 60
 # 4–12: requests one listing of your repositories may make.
 listing_requests_count = 12
 ```
+
+## Model replies
+
+These are how long Kumochi waits on ChatGPT or an Anthropic API key at each step of a reply.
+A shorter wait gives up sooner on a slow connection; a longer one keeps a stuck reply on screen
+longer. Checking an API key keeps its built-in waits.
+
+```toml
+[tuning.model]
+# 3–10 seconds: connecting and sending one request.
+send_s = 10
+# 15–240 seconds: the longest pause between parts of a reply. At most content_idle_s.
+idle_s = 60
+# 3–40 seconds: reading the explanation when a service refuses a request.
+error_body_s = 10
+# 250–4000 milliseconds: waiting for a completed ChatGPT reply to finish closing its response.
+drain_ms = 1000
+# 10–50 seconds: the maximum idle age at which a connection can be reused.
+pool_idle_s = 50
+# 15–240 seconds: Anthropic: how long a reply may wait for Kumochi to catch up.
+backpressure_s = 60
+# 150–2400 seconds: Anthropic: the longest a reply may go without a recognized reply event.
+content_idle_s = 600
+```
+
+## Runs
+
+These limit how many tool rounds or calls an answer may use, and how long it may take. The
+rounds limit applies when Kumochi runs the tool loop for a direct provider. Native Claude Code
+uses its own fixed turn limit. The counts below can only be made lower.
+
+```toml
+[tuning.runs]
+# 2–8: tool rounds managed by Kumochi for a direct provider.
+rounds_count = 8
+# 2–16: tool calls one answer may make.
+calls_count = 16
+# 30–240 seconds: the time available to process an answer, separate from discovery.
+wall_clock_s = 120
+# 8–60 seconds: how long a message to Claude Code waits while Kumochi is still looking for it.
+finding_wait_s = 30
+```
+
+## ChatGPT sign-in and tokens
+
+These set waits for signing in, refreshing a session, and revoking old tokens. A refresh may
+already have reached the provider when it times out; Kumochi doesn't send that same refresh
+again. Revocation that doesn't finish within its budget leaves unconfirmed tokens for a later
+run.
+
+```toml
+[tuning.oauth]
+# 75–300 seconds: the local sign-in window, including sending the result to your browser.
+sign_in_s = 300
+# 8–30 seconds: HTTP setup and one token refresh.
+refresh_s = 30
+# 3–40 seconds: revocation's HTTP setup and network budget, including both retry waits.
+revoke_s = 10
+# 125–2000 milliseconds: the wait before a first revocation retry.
+first_backoff_ms = 500
+# Both waits together must be shorter than revoke_s.
+# 250–4000 milliseconds: the wait before a second retry, at least as long as the first.
+second_backoff_ms = 1000
+```

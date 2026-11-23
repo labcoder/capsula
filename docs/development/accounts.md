@@ -197,7 +197,11 @@ id from the vault.
 
 `open_browser` hands a `LaunchTarget` to an injectable `Launcher`. Production uses
 `SystemBrowser` and `webbrowser`; tests record the URL without opening a browser.
-The runtime opens it on tokio's blocking pool, because an OS launch can block the core loop.
+The async attempt keeps the listener and times the launch on Tokio's blocking pool. The worker
+gets only launch material, not the socket, and checks cancellation and expiry under the
+process-spawn guard so a queued launch can't open a stale page. Cancel, replacement and
+shutdown invalidate that permission before aborting the listener task; cancellation does
+not depend on Tokio polling the listener again.
 `webbrowser` owns discovery of the OS browser
 executable and its existing arguments. Neither `id_token_hint` nor `login_hint` is sent,
 even when a saved record has ID, access and refresh tokens. Returning sign-in uses the
@@ -227,10 +231,11 @@ doesn't mean the account has been verified; that is the exchange's responsibilit
 
 **Local policies:** an entire header, including its terminator, is at most 32 KiB and
 has one absolute 2 s read deadline. A response has up to 1 s to write. The whole attempt,
-including accepts, reads and replies, ends at five minutes on `tokio::time`. The listener
+including accepts, reads and replies, ends after `[tuning.oauth] sign_in_s` on `tokio::time`
+(five minutes by default, and never longer). The listener
 is serial: each idle preconnect can delay a queued valid callback by its 2 s read plus
 up to 1 s writing its rejection, and multiple idle connections can queue within that
-five-minute deadline. Sustained backlog starvation is a local denial of service: sign-in
+original deadline. Sustained backlog starvation is a local denial of service: sign-in
 times out, but nothing leaks. Timing tests use in-memory duplex streams and a paused clock;
 socket tests cover an idle preconnect followed by a valid callback. No test uses outside hosts
 or DNS; socket tests use only `127.0.0.1` port 0.
@@ -333,7 +338,9 @@ replies, oversized data and other statuses leave issuance uncertain for the late
 No provider message or body enters an error.
 
 `oauth::refresh::refresh` posts `grant_type=refresh_token`, the saved `client_id`, the refresh
-token and `resource`, with a 30 s deadline [local policy], and parses the answer as an exchange's.
+token and `resource`, then parses the answer as an exchange's. The tunable 30 s default covers
+HTTP client setup and the request under one deadline. A timeout during setup or before dispatch
+is definitely unsent; a timeout after dispatch is not.
 Unlike an exchange, it may leave out `id_token` or `refresh_token`; an exchange without `id_token`
 is unusable. Empty or oversized inputs are refused before anything is sent.
 
@@ -502,7 +509,8 @@ start or Retry finishes the job.
 `oauth::revoke` discovers `revocation_endpoint` (the document's issuer must match, and the URL
 passes the same checks as `jwks_uri`), then POSTs `token`, `token_type_hint=refresh_token` and
 `client_id`. Only an empty 200 confirms. A transport failure or a `5xx` is tried three times in
-all, 0.5 s then 1 s apart, and the whole pass has one 10 s budget [local policy]. A discovery
+all, 0.5 s then 1 s apart by default. The whole pass keeps one deadline, including discovery
+and backoff, set by `[tuning.oauth] revoke_s` (10 s by default). A discovery
 document that fails a check sends no token anywhere.
 
 **Age-out.** An entry leaves the list unrevoked once `now ≥ added_at + 32 days`: the documented
@@ -533,7 +541,7 @@ sequenceDiagram
     C->>M: access()
     M->>V: write request_pending
     M->>V: mark the refresh token sent
-    M->>P: refresh_token grant (30 s deadline)
+    M->>P: refresh_token grant (30 s by default, shortened by tuning.oauth refresh_s)
     P-->>M: rotated set
     M->>V: save it unmarked, pending_identity_validation set, request_pending cleared
     M->>P: discovery and JWKS, verify against the saved subject
@@ -645,7 +653,7 @@ or Retry enters at the first step of the persisted phase:
    isn't rewritten, but the account token is still revoked. So is a list the account token can
    never fit (`Bounds`): `outcome_unknown` is persisted first, the list stays as it was, and the
    token is revoked from memory; if that marker write is refused, the step is `Refused`. A refused read decides nothing: the step is `Refused` and Retry reruns it.
-3. **Revoke.** One run over the list, inside the usual 10 s budget.
+3. **Revoke.** One run over the list, inside the tunable setup and network budget (10 s by default).
 4. **Checkpoint.** The confirmed entries leave the list (a refused rewrite leaves them listed, which
    counts as unconfirmed), then one marker write enters `Deleting` and decides the notice: clear
    only when the saved list is empty and `request_pending` and `outcome_unknown` are clear. With

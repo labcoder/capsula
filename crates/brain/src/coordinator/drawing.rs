@@ -41,7 +41,7 @@ impl Coordinator {
         );
         if allocating
             && current.draw_calls.len()
-                > usize::try_from(super::MAX_CALLS).expect("the call budget fits usize")
+                > usize::try_from(self.tuning.calls).expect("the call budget fits usize")
         {
             self.drawn(key, ToolOutput::Error(ToolError::TooLarge), effects);
             return Dispatch::Committing;

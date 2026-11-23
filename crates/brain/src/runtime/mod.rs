@@ -280,7 +280,9 @@ impl Brain {
     ) -> std::io::Result<Self> {
         account.github.restore_default(config.github_default());
         account.github.tuning = config.github_tuning();
-        account.connections.configure_transport();
+        account
+            .connections
+            .configure_transport(config.model_tuning());
         #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
         let (engine, access, fixture) = match engine {
             #[cfg(any(test, debug_assertions))]
@@ -315,6 +317,7 @@ impl Brain {
         };
         let drawing_scenes = store.drawing_scenes();
         let mut coordinator = Coordinator::new(main_thread, last_thread, last_run, scenes);
+        coordinator.tuning = config.run_tuning();
         let recovery_clears = coordinator.restore_drawings(drawing_scenes);
         let store = StoreThread::spawn(store, inputs_tx.clone(), schedule)?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
@@ -1444,6 +1447,7 @@ impl Brain {
                 Effect::ArmDeadline { run, after } => {
                     self.deadline = Some((run, Instant::now() + after));
                 }
+                Effect::ArmDeadlineAt { run, at } => self.deadline = Some((run, at)),
                 Effect::Broken(reason) => broken = Some(reason),
                 speech @ (Effect::Speak { .. }
                 | Effect::Credit { .. }

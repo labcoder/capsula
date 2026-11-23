@@ -857,7 +857,9 @@ fn classify(failure: &ExchangeError) -> (bool, ErrorKey) {
             code: OAuthCode::InvalidClient,
             ..
         } => (false, ErrorKey::AccountMisconfigured),
-        ExchangeError::Http(HttpError::Connect) => (false, ErrorKey::AccountOffline),
+        ExchangeError::PreDispatchTimeout | ExchangeError::Http(HttpError::Connect) => {
+            (false, ErrorKey::AccountOffline)
+        }
         ExchangeError::Http(HttpError::TrustStoreUnavailable) => {
             (false, ErrorKey::TrustStoreUnavailable)
         }

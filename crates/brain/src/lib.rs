@@ -249,7 +249,7 @@ async fn run_admitted(
     let claude_on = config.claude_code_enabled();
     tracing::info!(enabled = claude_on, "Claude Code setting");
     // Before the capability is stored, so its write never overlaps the vault's first reads.
-    let (account, vault_held) = accounts().map_err(BrainError::Accounts)?;
+    let (account, vault_held) = accounts(config.oauth_tuning()).map_err(BrainError::Accounts)?;
     config.count_in_use(&account.view(), high_water.1);
     let mut brain = Brain::new(
         store,
@@ -258,7 +258,7 @@ async fn run_admitted(
         scenes,
         match replay {
             Some(replay) => replay,
-            None => engine()?,
+            None => engine(config.model_tuning())?,
         },
         config,
         account,
@@ -352,7 +352,9 @@ fn start_screen(brain: &mut Brain, exe: PathBuf, jobs: &std::sync::Arc<Job>) {
 
 /// The account system on the real credential store, browser, clock and network, and the fact that
 /// its worker holds the session lock.
-fn accounts() -> io::Result<(
+fn accounts(
+    tuning: config::tuning::OAuthTuning,
+) -> io::Result<(
     runtime::account::Accounts,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
 )> {
@@ -370,7 +372,10 @@ fn accounts() -> io::Result<(
         clock: Arc::new(SystemClock),
     };
     let held = worker.held();
-    Ok((runtime::account::Accounts::spawn(worker, net)?, held))
+    Ok((
+        runtime::account::Accounts::spawn(worker, net, tuning)?,
+        held,
+    ))
 }
 
 /// Claude Code's lane on the installed `claude.exe`; none when it can't start.
@@ -502,7 +507,7 @@ async fn direct_dev_draw_refuses_before_store_or_vault_startup() {
 /// The engine runs use: in a dev build that names a script in
 /// [`kumochi_protocol::constants::FIXTURE_ENV`], that script answers every run; otherwise the
 /// account's Responses engine answers, once the account is ready.
-fn engine() -> Result<Selected, BrainError> {
+fn engine(tuning: config::tuning::ModelTuning) -> Result<Selected, BrainError> {
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os(kumochi_protocol::constants::FIXTURE_ENV) {
         let script = std::fs::read_to_string(path).map_err(BrainError::Fixture)?;
@@ -512,7 +517,7 @@ fn engine() -> Result<Selected, BrainError> {
         return Ok(Selected::Fixture(Box::new(fixture)));
     }
     let (access, asks) = AccessHandle::new();
-    let client = ModelClient::new(Tls::build().map_err(BrainError::Model)?);
+    let client = ModelClient::new(Tls::build().map_err(BrainError::Model)?).with_tuning(tuning);
     let engine = Responses::new(client, Budget::from_env(), access);
     Ok(Selected::Account {
         engine: Box::new(engine),

@@ -769,8 +769,17 @@ fn tuning_is_read_at_load_and_left_as_written_by_settings_saves() {
     let scratch = Scratch::new("config-tuning");
     let dir = dir(&scratch);
     let path = dir.join(CONFIG_FILE);
-    std::fs::write(&path, "[tuning.github]\nfiling_s = 30\nlisting_s = 25\n").expect("seeded");
+    std::fs::write(
+        &path,
+        "[tuning.github]\nfiling_s = 30\nlisting_s = 25\n[tuning.model]\nsend_s = 5\n[tuning.runs]\ncalls_count = 4\n",
+    )
+    .expect("seeded");
     let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert_eq!(
+        config.model_tuning().send,
+        std::time::Duration::from_secs(5)
+    );
+    assert_eq!(config.run_tuning().calls, 4);
     let tuning = config.github_tuning();
     assert_eq!(tuning.filing_deadline, std::time::Duration::from_secs(30));
     assert_eq!(tuning.listing_budget, std::time::Duration::from_secs(25));
