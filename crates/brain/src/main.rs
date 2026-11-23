@@ -1,48 +1,97 @@
 //! `kumochid`, Kumochi's headless brain. It has no console window.
 #![windows_subsystem = "windows"]
 
-use std::process::ExitCode;
+use std::{ffi::OsString, process::ExitCode};
 
-use kumochi_brain::platform::require_native_runtime;
-use kumochi_brain::{BrainError, logging};
+use kumochi_brain::platform::{Mode, supports};
+use kumochi_brain::{BrainError, MCP_BRIDGE, PARENT_BOUND, SCREEN_WORKER, SPEECH_WORKER, logging};
 use kumochi_protocol::constants;
 
 const UNAVAILABLE: u8 = 69;
+const BAD_ARGUMENTS: u8 = 64;
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "all executable modes must return before falling through to normal runtime startup"
-)]
-fn main() -> ExitCode {
-    if require_native_runtime().is_err() {
-        return ExitCode::from(UNAVAILABLE);
+#[derive(PartialEq, Eq)]
+enum Route {
+    Detached,
+    ParentBound,
+    BadParentBound,
+    Bridge(String),
+    Screen,
+    Speech,
+    Diagnostic(DevCheck),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DevCheck {
+    Image,
+    ImageDiagnostic,
+    Marks,
+    Draw,
+    CatalogProvenance,
+}
+
+fn route(mut args: impl Iterator<Item = OsString>) -> Route {
+    match args.next().as_deref() {
+        Some(arg) if arg == PARENT_BOUND => {
+            if args.next().is_none() {
+                Route::ParentBound
+            } else {
+                Route::BadParentBound
+            }
+        }
+        Some(arg) if arg == MCP_BRIDGE => Route::Bridge(
+            args.next()
+                .and_then(|arg| arg.into_string().ok())
+                .unwrap_or_default(),
+        ),
+        Some(arg) if arg == SCREEN_WORKER => Route::Screen,
+        Some(arg) if arg == SPEECH_WORKER => Route::Speech,
+        Some(arg) if arg == constants::IMAGE_CHECK_ARG => Route::Diagnostic(DevCheck::Image),
+        Some(arg) if arg == constants::IMAGE_DIAGNOSTIC_ARG => {
+            Route::Diagnostic(DevCheck::ImageDiagnostic)
+        }
+        Some(arg) if arg == constants::MARKS_CHECK_ARG => Route::Diagnostic(DevCheck::Marks),
+        Some(arg) if arg == constants::DRAW_CHECK_ARG => Route::Diagnostic(DevCheck::Draw),
+        Some(arg) if arg == constants::CATALOG_PROVENANCE_ARG => {
+            Route::Diagnostic(DevCheck::CatalogProvenance)
+        }
+        _ => Route::Detached,
     }
+}
 
-    let mut args = std::env::args();
-    let worker = args.nth(1);
-    if worker.as_deref() == Some(kumochi_brain::MCP_BRIDGE) {
-        let launch = args.next().unwrap_or_default();
-        return match kumochi_brain::bridge::serve(&launch) {
+fn main() -> ExitCode {
+    let route = route(std::env::args_os().skip(1));
+    let mode = if route == Route::ParentBound {
+        Mode::ParentBound
+    } else {
+        Mode::Detached
+    };
+    match route {
+        Route::BadParentBound => ExitCode::from(BAD_ARGUMENTS),
+        _ if !supports(mode) => ExitCode::from(UNAVAILABLE),
+        Route::ParentBound => match kumochi_brain::run_parent_bound() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(UNAVAILABLE),
+        },
+        Route::Detached => run_detached(),
+        Route::Bridge(launch) => match kumochi_brain::bridge::serve(&launch) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 tracing::error!(%error, "mcp bridge stopped");
                 ExitCode::FAILURE
             }
-        };
-    }
-    if worker.as_deref() == Some(kumochi_brain::SCREEN_WORKER) {
-        if logging::init(constants::SCREEN_LOG).is_err() {
-            return ExitCode::FAILURE;
+        },
+        Route::Screen => {
+            if logging::init(constants::SCREEN_LOG).is_err() {
+                return ExitCode::FAILURE;
+            }
+            if kumochi_brain::screen::serve().is_err() {
+                tracing::error!(code = 1, "screen transport failed");
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
         }
-        if kumochi_brain::screen::serve().is_err() {
-            tracing::error!(code = 1, "screen transport failed");
-            return ExitCode::FAILURE;
-        }
-        return ExitCode::SUCCESS;
-    }
-    if worker.as_deref() == Some(kumochi_brain::SPEECH_WORKER) {
-        #[cfg(windows)]
-        {
+        Route::Speech => {
             if logging::init(constants::SPEECH_LOG).is_err() {
                 return ExitCode::FAILURE;
             }
@@ -50,46 +99,31 @@ fn main() -> ExitCode {
                 tracing::error!(code = 1, "speech transport failed");
                 return ExitCode::FAILURE;
             }
-            return ExitCode::SUCCESS;
+            ExitCode::SUCCESS
         }
-        #[cfg(not(windows))]
-        return ExitCode::from(UNAVAILABLE);
+        Route::Diagnostic(diagnostic) => run_diagnostic(diagnostic),
     }
-    let diagnostic = worker.as_deref() == Some(constants::IMAGE_DIAGNOSTIC_ARG);
-    if diagnostic || worker.as_deref() == Some(constants::IMAGE_CHECK_ARG) {
-        #[cfg(debug_assertions)]
-        return ExitCode::from(kumochi_brain::connections::image_check::run(
-            if diagnostic {
-                kumochi_brain::connections::image_check::Set::Diagnostic
-            } else {
-                kumochi_brain::connections::image_check::Set::Check
-            },
-        ));
-        // Without the mode the flag still never reaches a normal start, which could refresh.
-        #[cfg(not(debug_assertions))]
-        return ExitCode::from(10);
-    }
-    if worker.as_deref() == Some(constants::MARKS_CHECK_ARG) {
-        #[cfg(debug_assertions)]
-        return ExitCode::from(kumochi_brain::connections::marks_check::run());
-        // Without the mode the flag still never reaches a normal start, which could refresh.
-        #[cfg(not(debug_assertions))]
-        return ExitCode::from(10);
-    }
-    if worker.as_deref() == Some(constants::DRAW_CHECK_ARG) {
-        #[cfg(debug_assertions)]
-        return ExitCode::from(kumochi_brain::connections::draw_check::run());
-        // Without the mode the flag still never reaches a normal start, which could refresh.
-        #[cfg(not(debug_assertions))]
-        return ExitCode::from(10);
-    }
-    if worker.as_deref() == Some(constants::CATALOG_PROVENANCE_ARG) {
-        #[cfg(debug_assertions)]
-        return ExitCode::from(kumochi_brain::connections::provenance::run().code());
-        // Without the mode the flag still never reaches a normal start, which could refresh.
-        #[cfg(not(debug_assertions))]
-        return ExitCode::from(10);
-    }
+}
+
+#[cfg(debug_assertions)]
+fn run_diagnostic(diagnostic: DevCheck) -> ExitCode {
+    use kumochi_brain::connections::{draw_check, image_check, marks_check, provenance};
+
+    ExitCode::from(match diagnostic {
+        DevCheck::Image => image_check::run(image_check::Set::Check),
+        DevCheck::ImageDiagnostic => image_check::run(image_check::Set::Diagnostic),
+        DevCheck::Marks => marks_check::run(),
+        DevCheck::Draw => draw_check::run(),
+        DevCheck::CatalogProvenance => provenance::run().code(),
+    })
+}
+
+#[cfg(not(debug_assertions))]
+fn run_diagnostic(_: DevCheck) -> ExitCode {
+    ExitCode::from(10)
+}
+
+fn run_detached() -> ExitCode {
     if logging::init(constants::BRAIN_LOG).is_err() {
         return ExitCode::FAILURE;
     }

@@ -605,11 +605,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result.unwrap(), Session::ShellLost);
+        assert_eq!(old.epoch, 1);
+        assert_eq!(brain.issue_session(), None);
 
         let reconnect = async {
             let (welcome, mut control, mut data) = connect(session, Some(old)).await;
             assert_eq!(welcome.incarnation, old.incarnation);
-            assert_eq!(welcome.epoch, old.epoch + 1);
+            assert_eq!(welcome.epoch, 2);
             assert_eq!(
                 super::read::<ControlToShell>(&mut control, Pipe::Control)
                     .await
@@ -626,7 +628,7 @@ mod tests {
             );
             let (renewed, mut control, _data) = connect(session, None).await;
             assert_eq!(renewed.incarnation, old.incarnation);
-            assert_eq!(renewed.epoch, old.epoch + 2);
+            assert_eq!(renewed.epoch, 3);
             assert!(matches!(
                 super::read::<ControlToShell>(&mut control, Pipe::Control)
                     .await
@@ -647,6 +649,7 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(result.unwrap(), Session::Quit { .. }));
+        assert_eq!(brain.issue_session(), None);
         brain.close().await;
     }
 

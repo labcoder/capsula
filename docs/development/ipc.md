@@ -894,10 +894,12 @@ bounded repository view fits the 64 KiB control cap.
 The correlated Issue, ActionState and IssueRefused shapes retain their existing enum tags
 (25, 18 and 19). This is a paired-build wire change: the exact `BUILD_ID` handshake rejects
 mixed binaries, as for earlier shape changes; there is no independent protocol number.
-Welcome keeps tag 0 and now advertises `issue_epoch` after the brain incarnation. The brain
-reserves that epoch before sending Welcome, even if the remaining handshake fails. The shell
-copies this pair into newly created issue frames; it never rewrites an old frame for a new
-connection. Missing, stale or foreign provenance ends the connection before SQL, client
+Welcome keeps tag 0 and now advertises `issue_epoch` after the brain incarnation. One
+`IssueEpochs` counter lives for the Detached brain process. After the control capability and
+build checks, both modes reserve an epoch before Welcome, even if the data leg later fails.
+Legacy installs it immediately; Queued installs it only after the data leg passes its checks.
+The shell copies this pair into newly created issue frames; it never rewrites an old frame for
+a new connection. Missing, stale or foreign provenance ends the connection before SQL, client
 construction, request-watermark updates or HTTP work. It sends no old correlation into the
 replacement. Transport provenance is constant-size state; it does not prove a human click.
 `Rearm`, `CancelReview` and `IssueReview` are appended variants under the same paired-build rule.

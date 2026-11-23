@@ -211,6 +211,7 @@ pub(crate) struct Brain {
     config_write: Option<settings::Write>,
     /// The account system; its credential work runs on its own thread.
     account: Accounts,
+    issue_epochs: issues::IssueEpochs,
     filing: issues::Filing,
     /// Claude Code's connection; its calls run on its own lane.
     claude: claude::Claude,
@@ -356,6 +357,7 @@ impl Brain {
             settings_ops: VecDeque::new(),
             config_write: None,
             account,
+            issue_epochs: issues::IssueEpochs::default(),
             filing: issues::Filing::new(),
             claude: claude::Claude::default(),
             #[cfg(test)]
