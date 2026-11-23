@@ -99,7 +99,7 @@ fn an_unchecked_saved_account_appends_tag_six_and_unknown_tag_seven_is_refused()
 }
 
 #[test]
-fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
+fn tagged_github_refusal_keeps_frame_validation() {
     use crate::frame::{FrameError, read};
     let refusal = ControlToShell::GitHubError(ErrorKey::GitHubUnavailable.into());
     let wire = encode(&refusal, Pipe::Control).unwrap();
@@ -108,6 +108,23 @@ fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
         read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
         Some(refusal)
     );
+    let mut unknown = wire;
+    unknown[5] = 54;
+    assert!(matches!(
+        read::<ControlToShell>(&mut unknown.as_slice(), Pipe::Control),
+        Err(FrameError::Malformed(_))
+    ));
+    let too_many = [14, 0, 0, 0, 25, 42, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    assert!(matches!(
+        read::<ControlToShell>(&mut too_many.as_slice(), Pipe::Control),
+        Err(FrameError::Malformed(_))
+    ));
+}
+
+#[test]
+fn control_messages_and_error_keys_keep_their_wire_tags() {
+    use crate::frame::read;
+
     for (message, tag) in [
         (ControlToShell::Error(ErrorKey::SettingsRefused.into()), 8),
         (
@@ -176,17 +193,10 @@ fn tagged_github_refusal_appends_wire_tags_and_keeps_error_validation() {
         postcard::to_allocvec(&ErrorKey::ScreenConnectionChanged).unwrap(),
         [52]
     );
-    let mut unknown = wire;
-    unknown[5] = 53;
-    assert!(matches!(
-        read::<ControlToShell>(&mut unknown.as_slice(), Pipe::Control),
-        Err(FrameError::Malformed(_))
-    ));
-    let too_many = [14, 0, 0, 0, 25, 42, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    assert!(matches!(
-        read::<ControlToShell>(&mut too_many.as_slice(), Pipe::Control),
-        Err(FrameError::Malformed(_))
-    ));
+    assert_eq!(
+        postcard::to_allocvec(&ErrorKey::UnsupportedPlatform).unwrap(),
+        [53]
+    );
 }
 
 #[test]

@@ -16,20 +16,30 @@ mod staging;
 
 #[tokio::test]
 async fn production_composition_serves_the_key_route_and_refuses_unadmitted_sends_unasked() {
-    use crate::context::{ModelRequest, Origin};
-    use crate::coordinator::{BuildKey, SendKey};
-    use crate::engines::{Asks, EngineFailure, Finish, RunRequest, SendGate, TurnEvent};
-    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, RunId, ThreadId};
-
     let scratch = Scratch::new("dormant-key-transport");
     let mut brain = test_support::brain(&scratch, "");
+    let unavailable = if cfg!(windows) {
+        model_unavailable()
+    } else {
+        ErrorKey::UnsupportedPlatform.into()
+    };
     assert!(matches!(
         brain.account.connections.route_input(),
         Some(Input::Engines(
             ConnectionKind::AnthropicKey,
             Availability::Unavailable(refusal),
-        )) if refusal == model_unavailable()
+        )) if refusal == unavailable
     ));
+    assert_owned_key_refusal(&mut brain, unavailable).await;
+    brain.close().await;
+}
+
+async fn assert_owned_key_refusal(brain: &mut Brain, unavailable: UserError) {
+    use crate::context::{ModelRequest, Origin};
+    use crate::coordinator::{BuildKey, SendKey};
+    use crate::engines::{Asks, EngineFailure, Finish, RunRequest, SendGate, TurnEvent};
+    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, RunId, ThreadId};
+
     let key = SendKey::Build(BuildKey {
         run: RunId(1),
         round: 1,
@@ -53,19 +63,22 @@ async fn production_composition_serves_the_key_route_and_refuses_unadmitted_send
     };
     let (events, mut seen) = tokio::sync::mpsc::channel(1);
     let (inputs, mut asks) = tokio::sync::mpsc::unbounded_channel();
-    brain
-        .owned_engine(&request)
-        .expect("owned refusal")
-        .start(request, events, SendGate::new(key, Asks::default(), inputs))
-        .await;
-    assert_eq!(
-        seen.recv().await,
-        Some(TurnEvent::Finished(Finish::Failed(EngineFailure::Access(
-            Some(model_unavailable())
-        ))))
-    );
-    assert_eq!(asks.recv().await, None);
-    brain.close().await;
+    timeout(Duration::from_secs(5), async {
+        brain
+            .owned_engine(&request)
+            .expect("owned refusal")
+            .start(request, events, SendGate::new(key, Asks::default(), inputs))
+            .await;
+        assert_eq!(
+            seen.recv().await,
+            Some(TurnEvent::Finished(Finish::Failed(EngineFailure::Access(
+                Some(unavailable)
+            ))))
+        );
+        assert_eq!(asks.recv().await, None);
+    })
+    .await
+    .expect("the unserved engine refuses without asking to send");
 }
 
 fn key() -> Secret<AnthropicKey> {
@@ -76,7 +89,9 @@ fn key() -> Secret<AnthropicKey> {
 }
 
 fn with_transport(mut accounts: Accounts, peer: Scripted, cap: u32) -> Accounts {
-    accounts.connections.transport = Some(Transport::offline(peer, cap, 0));
+    accounts
+        .connections
+        .use_test_transport(Transport::offline(peer, cap, 0));
     accounts
 }
 
@@ -209,6 +224,39 @@ async fn saved_key_startup_and_check_never_send_without_a_catalog_allowance() {
             .close(tokio::time::Instant::now(), tokio::time::Instant::now())
             .await;
     }
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn a_saved_key_stays_unsupported_in_runtime_and_reconnect_snapshots() {
+    let scratch = Scratch::new("key-no-native-transport");
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("key-test.lock");
+    save_key(&store, &lock);
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "key-test", &lock)),
+        Arc::new(FixedClock(0)),
+    );
+    let accounts = Accounts::spawn_unconfigured(worker, test_support::net()).unwrap();
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    settle(&mut brain.account).await;
+    let expected = ControlToShell::Connections(ConnectionsView {
+        anthropic: KeyView::UnsupportedPlatform,
+        anthropic_revision: Some(1),
+        claude_code: ClaudeCodeView::NotFound,
+    });
+    assert_eq!(brain.connections_frame(), expected);
+    assert_eq!(retained_key(&brain.account.connections), None);
+    assert_eq!(
+        brain
+            .account
+            .connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey)),
+        [expected.clone()]
+    );
+    assert!(!brain.account.connections.loading);
+    assert_eq!(brain.account.connections.connected(), expected);
+    assert_owned_key_refusal(&mut brain, ErrorKey::UnsupportedPlatform.into()).await;
+    brain.close().await;
 }
 
 #[tokio::test]

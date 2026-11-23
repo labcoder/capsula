@@ -9,6 +9,7 @@ use super::{
 };
 use crate::config::tuning::TokenTuning;
 use crate::connections::clock::{Clock, SystemClock};
+use crate::connections::http_client::HttpError;
 use kumochi_protocol::{
     Secret,
     message::{
@@ -1053,6 +1054,7 @@ fn token_key(code: TokenError) -> ErrorKey {
 }
 fn api_key(error: ApiError) -> ErrorKey {
     match error {
+        ApiError::Http(HttpError::UnsupportedPlatform) => ErrorKey::UnsupportedPlatform,
         ApiError::Http(_) => ErrorKey::AccountOffline,
         _ => ErrorKey::ResponseUnreadable,
     }

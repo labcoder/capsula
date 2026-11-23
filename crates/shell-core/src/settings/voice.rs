@@ -1,4 +1,4 @@
-use kumochi_protocol::message::{PartState, SttUnload, UserError};
+use kumochi_protocol::message::{ErrorKey, PartState, SttUnload, UserError};
 
 use super::{Pending, Settings, SettingsOp, Slot};
 use crate::link::output::Denied;
@@ -214,12 +214,17 @@ impl Settings {
         self.view.as_ref()?;
         let action = match self.speech_input? {
             PartState::NotInstalled => SpeechInputAction::Install,
+            PartState::Failed {
+                key: ErrorKey::UnsupportedPlatform,
+                ..
+            }
+            | PartState::Ready
+            | PartState::Unavailable => return None,
             PartState::Failed { .. } => SpeechInputAction::Retry,
             PartState::Unloaded => SpeechInputAction::Reload,
             PartState::Verifying | PartState::Downloading { .. } | PartState::Loading => {
                 SpeechInputAction::Cancel
             }
-            PartState::Ready | PartState::Unavailable => return None,
         };
         Some(SpeechInputIntent {
             generation: self.speech_generation?,

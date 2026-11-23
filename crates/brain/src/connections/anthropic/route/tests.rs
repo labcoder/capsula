@@ -40,20 +40,35 @@ fn body() -> MessagesBody {
 }
 
 #[test]
-fn mint_failure_cannot_produce_a_verified_authority_and_native_is_served() {
+fn mint_failure_cannot_produce_a_verified_authority() {
     for invalid in [None, Some(0)] {
         assert!(Verified::from_entropy(7, key(), invalid).is_none());
     }
     let tag = Verified::from_entropy(7, key(), Some(801)).expect("nonzero");
     assert_eq!(tag.tag, ConnectionTag(801));
     assert_eq!(tag.revision, 7);
-    let native =
-        Transport::native(ModelTuning::default()).expect("production serves the key route");
+}
+
+#[cfg(windows)]
+#[test]
+fn native_route_is_served_with_os_roots() {
+    let native = Transport::native(ModelTuning::default())
+        .expect("native trust supported")
+        .expect("production serves the key route");
     assert!(matches!(native.connector, RouteConnector::Native(Some(_))));
 }
 
+#[cfg(not(windows))]
+#[test]
+fn native_route_refuses_before_creating_a_request_budget() {
+    assert!(matches!(
+        Transport::native(ModelTuning::default()),
+        Err(HttpError::UnsupportedPlatform)
+    ));
+}
+
 #[tokio::test]
-async fn unavailable_tls_has_no_fallback_and_a_failed_start_is_not_refunded() {
+async fn unavailable_tls_has_no_fallback() {
     assert_eq!(
         RouteConnector::Native(None)
             .connect()
@@ -63,6 +78,11 @@ async fn unavailable_tls_has_no_fallback_and_a_failed_start_is_not_refunded() {
             .kind(),
         std::io::ErrorKind::NotConnected
     );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn the_native_connector_is_never_allowed_to_dial_in_tests() {
     let tls = AnthropicTls::build().expect("the OS has trust roots");
     assert_eq!(
         RouteConnector::Native(Some(Arc::new(tls)))
@@ -73,6 +93,10 @@ async fn unavailable_tls_has_no_fallback_and_a_failed_start_is_not_refunded() {
             .kind(),
         std::io::ErrorKind::PermissionDenied
     );
+}
+
+#[tokio::test]
+async fn a_failed_start_is_not_refunded() {
     let peer = Scripted::default();
     let transport = Transport::offline(peer.clone(), 0, 1);
     let authority = Verified::from_entropy(1, key(), Some(801)).expect("nonzero");

@@ -180,6 +180,7 @@ pub(super) async fn read_user(
 
 pub(crate) struct GitHub {
     enabled: bool,
+    unsupported: bool,
     next_verification: u64,
     verification: Option<Verification>,
     wake: Option<Wake>,
@@ -228,6 +229,7 @@ impl GitHub {
             client_id.filter(|value| crate::connections::github::ClientId::new(value).is_ok());
         Self {
             enabled: client_id.is_some(),
+            unsupported: false,
             next_verification: 0,
             verification: None,
             wake: None,
@@ -342,6 +344,16 @@ impl GitHub {
         {
             return self.resume_suspended(jobs, events, http);
         }
+        let newly_unsupported = !self.unsupported
+            && matches!(
+                &event.outcome,
+                VerificationOutcome::Built(Err(HttpError::UnsupportedPlatform))
+            );
+        if newly_unsupported {
+            self.unsupported = true;
+            self.wake = None;
+            self.suspended.clear();
+        }
         let input = match event.outcome {
             VerificationOutcome::Built(Ok(client)) => {
                 let operation = verification
@@ -386,7 +398,15 @@ impl GitHub {
             VerificationOutcome::Stopped => Input::Stopped { stamp: event.stamp },
             VerificationOutcome::Wake => return Vec::new(),
         };
-        self.input(input, event.session, jobs, events, http)
+        let mut frames = self.input(input, event.session, jobs, events, http);
+        if newly_unsupported
+            && !frames.iter().any(|frame| matches!(
+                frame, ControlToShell::GitHubError(error) if error.key() == ErrorKey::UnsupportedPlatform
+            ))
+        {
+            frames.extend(self.opened());
+        }
+        frames
     }
 
     fn automatic(&self) -> bool {
@@ -424,7 +444,18 @@ impl GitHub {
         if !self.enabled || self.session.is_none() || self.closing || self.machine.is_loading() {
             return Vec::new();
         }
-        vec![ControlToShell::GitHub(self.machine.view(Instant::now()))]
+        self.view_frames(self.machine.view(Instant::now()))
+            .collect()
+    }
+
+    fn view_frames(
+        &self,
+        view: kumochi_protocol::message::GitHubView,
+    ) -> impl Iterator<Item = ControlToShell> {
+        self.unsupported
+            .then(|| ControlToShell::GitHubError(ErrorKey::UnsupportedPlatform.into()))
+            .into_iter()
+            .chain(std::iter::once(ControlToShell::GitHub(view)))
     }
 
     pub(super) fn session(
@@ -477,7 +508,7 @@ impl GitHub {
     }
 
     pub(in crate::runtime) fn issue_snapshot(&self) -> crate::issues::Snapshot {
-        let usable = self.enabled && !self.closing;
+        let usable = self.enabled && !self.closing && !self.unsupported;
         crate::issues::Snapshot {
             capacity: false,
             account: usable.then(|| self.machine.user().cloned()).flatten(),
@@ -507,7 +538,7 @@ impl GitHub {
         stamp: Stamp,
         action: &crate::issues::Action,
     ) -> Option<Secret<GitHubToken>> {
-        if !self.enabled || self.closing || stamp != self.machine.stamp() {
+        if !self.enabled || self.closing || self.unsupported || stamp != self.machine.stamp() {
             return None;
         }
         let (token, _, _) = self
@@ -525,6 +556,7 @@ impl GitHub {
     ) -> Option<(Secret<GitHubToken>, Instant, u64)> {
         if !self.enabled
             || self.closing
+            || self.unsupported
             || stamp != self.machine.stamp()
             || action.account.as_ref()?.id != user.id
             || !repos.names.as_ref().contains(action.repo.as_ref()?)
@@ -576,6 +608,14 @@ impl GitHub {
         events: &mpsc::UnboundedSender<Event>,
         http: &HttpFactory,
     ) -> Vec<ControlToShell> {
+        if self.unsupported
+            && matches!(
+                op,
+                GitHubOp::Connect | GitHubOp::RefreshRepos | GitHubOp::SetDefaultRepo(_)
+            )
+        {
+            return self.opened();
+        }
         if matches!(op, GitHubOp::Connect) && self.client_id.is_none() {
             return vec![ControlToShell::GitHubError(
                 ErrorKey::AccountMisconfigured.into(),
@@ -725,11 +765,13 @@ impl GitHub {
                 | Effect::Poll { .. }
                 | Effect::RefreshToken { .. }
                 | Effect::RefreshRepos { .. }) => {
-                    if !self.closing || (self.machine.rotating() && !self.rotation_stopped) {
+                    if !self.unsupported
+                        && (!self.closing || (self.machine.rotating() && !self.rotation_stopped))
+                    {
                         frames.extend(self.start_effect(effect, origin, jobs, events, http));
                     }
                 }
-                Effect::Wake(at) if !self.closing => {
+                Effect::Wake(at) if !self.closing && !self.unsupported => {
                     if self.automatic() {
                         self.next_verification = self
                             .next_verification
@@ -759,11 +801,16 @@ impl GitHub {
                         && self.session.is_some()
                         && !self.machine.is_loading()
                     {
-                        frames.push(ControlToShell::GitHub(view));
+                        frames.extend(self.view_frames(view));
                     }
                 }
                 Effect::Error(error) => {
-                    if self.enabled && !self.closing && origin.is_some() && origin == self.session {
+                    if error.key() != ErrorKey::UnsupportedPlatform
+                        && self.enabled
+                        && !self.closing
+                        && origin.is_some()
+                        && origin == self.session
+                    {
                         frames.push(ControlToShell::GitHubError(error));
                     }
                 }
