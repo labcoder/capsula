@@ -1187,10 +1187,18 @@ impl Brain {
                 Ok(question) => Box::new(question),
                 Err(refused) => Box::new(engines::Unserved(self.claude.refused(refused))),
             }),
-            Some(ConnectionKind::AnthropicKey) => Some(
-                self.key_engine(request)
-                    .unwrap_or_else(|| Box::new(engines::Unserved::model_unavailable())),
-            ),
+            Some(ConnectionKind::AnthropicKey) => {
+                Some(self.key_engine(request).unwrap_or_else(|| {
+                    Box::new(
+                        self.account
+                            .connections
+                            .native_refusal()
+                            .map_or_else(engines::Unserved::model_unavailable, |error| {
+                                engines::Unserved(engines::EngineFailure::Access(Some(error)))
+                            }),
+                    )
+                }))
+            }
         }
     }
 
