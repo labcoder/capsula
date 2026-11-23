@@ -1008,22 +1008,31 @@ fn a_cancel_after_the_browser_finished_keeps_the_sign_in() {
     }
 }
 
-/// A cancel while the set is saved keeps it, and drops an Open again that waited for the save:
-/// no new browser opens after the user's last word was Cancel.
+/// A cancel while the set is saved keeps it, including when an Open again waited for the save.
 #[test]
 fn a_cancel_during_the_save_keeps_the_set_and_drops_a_waiting_open_again() {
-    let mut h = Harness::new("account-cancel-saving");
-    h.op(AccountOp::SignIn);
-    h.callback("client-issued");
-    h.hold = true;
-    h.reply(received(Some("refresh-new"), "subject-1", PLAN));
-    h.op(AccountOp::SignIn);
-    h.op(AccountOp::CancelSignIn);
-    h.release();
-    assert_eq!(h.listening.len(), 1, "no new browser after the cancel");
-    assert_eq!(h.view(), &signed_in(PlanState::Enabled, None));
-    assert_eq!(h.refresh_token().as_deref(), Some("refresh-new"));
-    assert!(h.revocations().is_empty());
+    for (waiting, name) in [
+        (false, "account-boundary-cancel"),
+        (true, "account-cancel-saving"),
+    ] {
+        let mut h = Harness::new(name);
+        h.op(AccountOp::SignIn);
+        h.callback("client-issued");
+        h.hold = true;
+        h.reply(received(Some("refresh-new"), "subject-1", PLAN));
+        if waiting {
+            h.op(AccountOp::SignIn);
+        }
+        h.op(AccountOp::CancelSignIn);
+        if !waiting {
+            assert_eq!(h.closed, 0);
+        }
+        h.release();
+        assert_eq!(h.listening.len(), 1, "no new browser after the cancel");
+        assert_eq!(h.view(), &signed_in(PlanState::Enabled, None));
+        assert_eq!(h.refresh_token().as_deref(), Some("refresh-new"));
+        assert!(h.revocations().is_empty());
+    }
 }
 
 #[test]

@@ -255,6 +255,7 @@ async fn model_paths_refuse_a_hard_linked_partial_without_changing_its_alias() {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
+#[derive(Clone, Copy)]
 enum LinkedFolder {
     Root,
     Part,
@@ -426,12 +427,15 @@ async fn linked_folder_refused(location: LinkedFolder, kind: LinkKind) {
 
 #[tokio::test]
 async fn model_paths_refuse_a_part_junction() {
-    linked_folder_refused(LinkedFolder::Part, LinkKind::Junction).await;
-}
-
-#[tokio::test]
-async fn model_paths_refuse_an_ancestor_junction() {
-    linked_folder_refused(LinkedFolder::Ancestor, LinkKind::Junction).await;
+    for location in [
+        LinkedFolder::Root,
+        LinkedFolder::Part,
+        LinkedFolder::Ancestor,
+    ] {
+        for kind in [LinkKind::Junction, LinkKind::Symlink] {
+            linked_folder_refused(location, kind).await;
+        }
+    }
 }
 
 #[tokio::test]
@@ -478,22 +482,14 @@ async fn linked_file_refused(location: LinkedFile, kind: LinkKind) {
 
 #[tokio::test]
 async fn model_paths_refuse_a_final_symlink() {
-    linked_file_refused(LinkedFile::Final, LinkKind::Symlink).await;
-}
-
-#[tokio::test]
-async fn model_paths_refuse_a_partial_symlink() {
-    linked_file_refused(LinkedFile::Partial, LinkKind::Symlink).await;
-}
-
-#[tokio::test]
-async fn model_paths_refuse_a_final_junction() {
-    linked_file_refused(LinkedFile::Final, LinkKind::Junction).await;
-}
-
-#[tokio::test]
-async fn model_paths_refuse_a_partial_junction() {
-    linked_file_refused(LinkedFile::Partial, LinkKind::Junction).await;
+    for (location, kind) in [
+        (LinkedFile::Final, LinkKind::Symlink),
+        (LinkedFile::Final, LinkKind::Junction),
+        (LinkedFile::Partial, LinkKind::Symlink),
+        (LinkedFile::Partial, LinkKind::Junction),
+    ] {
+        linked_file_refused(location, kind).await;
+    }
 }
 
 #[tokio::test]
@@ -1090,6 +1086,10 @@ async fn redirects_and_first_url_refuse_untrusted_destinations() {
 #[test]
 fn production_host_policy_and_parser_boundaries() {
     let rules = Rules::default();
+    for model in kumochi_protocol::voice::MODEL_FILES {
+        let url = Url::parse(model.url).expect("valid manifest URL");
+        assert!(rules.accepts(&url), "manifest URL meets production policy");
+    }
     for (url, expected) in [
         ("https://huggingface.co/a", true),
         ("https://cdn.hf.co/a", true),
@@ -1503,33 +1503,6 @@ fn errors_are_closed_and_content_free() {
     ] {
         assert_eq!(error.to_string(), text, "closed diagnostic");
         assert!(error.source().is_none(), "no raw library error");
-    }
-}
-
-#[tokio::test]
-#[ignore = "live HEAD requests require the owner's explicit approval"]
-async fn measure_download_head() {
-    let downloader = Downloader::new(
-        crate::platform::data_dir()
-            .expect("valid voice fixture")
-            .join(kumochi_protocol::voice::MODELS_DIR),
-    )
-    .expect("valid voice fixture");
-    for model in kumochi_protocol::voice::MODEL_FILES {
-        let url = Url::parse(model.url).expect("valid voice fixture");
-        assert!(
-            downloader.rules.accepts(&url),
-            "manifest URL meets production policy"
-        );
-        let response = downloader
-            .client
-            .head(url)
-            .header(ACCEPT_ENCODING, "identity")
-            .send()
-            .await
-            .expect("valid voice fixture");
-        assert_eq!(response.status(), reqwest::StatusCode::OK, "HEAD succeeded");
-        tracing::info!(host = response.url().host_str(), "voice HEAD destination");
     }
 }
 

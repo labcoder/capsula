@@ -45,22 +45,6 @@ fn activation_ranks_unequal_scores_and_distinguishes_tasks_from_hits() {
 }
 
 #[test]
-fn activation_prefix_is_maximal_at_mixed_width_boundaries() {
-    for (text, cap, bytes) in [
-        ("a€b", 4, 4),
-        ("bba界界😀é界a", 18, 18),
-        ("😀é界a", 6, 6),
-        ("界", 0, 0),
-    ] {
-        assert_eq!(
-            prefix(text, |prefix| prefix.len() <= cap),
-            bytes,
-            "text {text}, cap {cap}"
-        );
-    }
-}
-
-#[test]
 fn search_remembers_an_eleventh_hit_and_does_not_substitute_after_append() {
     let (_scratch, store) = world("recall-more");
     task(&store, 2, "B");

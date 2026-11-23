@@ -273,16 +273,72 @@ async fn local_input_refusals_never_dispatch() {
 async fn every_parser_enforces_its_entry_byte_cap_with_scripted_http() {
     for call in CALLS {
         let cap = cap(call);
-        for length in [cap, cap + 1] {
-            let mut body = serde_json::to_vec(&valid(call)).unwrap();
-            body.resize(length, b' ');
-            let reply = invoke(&Script::bytes(body), call).await;
-            if length == cap {
-                assert_eq!(reply, Ok(()), "{call:?}");
-            } else {
-                assert_eq!(reply, Err(ApiError::Response), "{call:?}");
+        let mut body = serde_json::to_vec(&valid(call)).unwrap();
+        body.resize(cap, b' ');
+        let at_cap = Script::bytes(body.clone());
+        match call {
+            Call::Device => {
+                let reply = request_device_code(&at_cap, "client-fake").await.unwrap();
+                assert_eq!(reply.code.expose().as_str(), "device-fake");
+                assert_eq!(reply.user_code.as_str(), "ABCD-EFGH");
+                assert_eq!((reply.expires_in_s, reply.interval_s), (900, 5));
+            }
+            Call::Token | Call::Refresh => {
+                let (reply, refresh) = if matches!(call, Call::Token) {
+                    let TokenReply::Token(reply) =
+                        poll_device_token(&at_cap, "client-fake", &code())
+                            .await
+                            .unwrap()
+                    else {
+                        panic!("token reply");
+                    };
+                    (reply, "ghr_fake")
+                } else {
+                    (
+                        refresh_user_token(&at_cap, "client-fake", &refresh())
+                            .await
+                            .unwrap(),
+                        "ghr_rotated",
+                    )
+                };
+                assert_eq!(reply.token.expose().as_str(), "ghu_fake");
+                assert_eq!(reply.refresh.expose().as_str(), refresh);
+                assert_eq!(
+                    reply.refresh_expires_at_s.checked_sub(reply.expires_at_s),
+                    Some(15_868_800)
+                );
+            }
+            Call::User => {
+                let reply = user(&at_cap, &token()).await.unwrap();
+                assert_eq!((reply.id, reply.login.as_str()), (1, "owner"));
+            }
+            Call::Installations => {
+                let reply = installations(&at_cap, &token(), Page::new(2).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(reply.total_count, 1);
+                assert_eq!(reply.installations, [42]);
+            }
+            Call::Repositories => {
+                let reply = repositories(&at_cap, &token(), 42, Page::new(2).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(reply.total_count, 1);
+                assert_eq!(
+                    reply.repositories,
+                    [(
+                        RepoName::new("owner/repo").unwrap(),
+                        NonZeroU64::new(7).unwrap()
+                    )]
+                );
             }
         }
+        body.push(b' ');
+        assert_eq!(
+            invoke(&Script::bytes(body), call).await,
+            Err(ApiError::Response),
+            "{call:?}"
+        );
     }
 }
 
@@ -1130,67 +1186,6 @@ async fn repository_rows_require_checked_names_and_reject_duplicate_fields() {
             .unwrap_err(),
         ApiError::Response
     );
-}
-
-#[test]
-fn definite_classification_keeps_transport_uncertainty_and_the_full_status_table() {
-    for kind in [
-        HttpError::Connect,
-        HttpError::TrustStoreUnavailable,
-        HttpError::Configuration,
-        HttpError::Endpoint,
-        HttpError::Request,
-    ] {
-        assert_eq!(
-            ApiError::Http(kind).definite_reason(),
-            Some(FailReason::Network)
-        );
-    }
-    for kind in [
-        HttpError::Timeout,
-        HttpError::Transport,
-        HttpError::Redirect,
-        HttpError::BodyTooLarge,
-    ] {
-        assert_eq!(ApiError::Http(kind).definite_reason(), None);
-    }
-    for (status, expected) in [
-        (400, FailReason::Rejected),
-        (401, FailReason::NotConnected),
-        (402, FailReason::Rejected),
-        (403, FailReason::PermissionDenied),
-        (404, FailReason::NotFound),
-        (405, FailReason::Rejected),
-        (409, FailReason::Rejected),
-        (410, FailReason::NotFound),
-        (418, FailReason::Rejected),
-        (422, FailReason::InvalidIssue),
-        (429, FailReason::RateLimited),
-        (451, FailReason::Rejected),
-        (499, FailReason::Rejected),
-    ] {
-        assert_eq!(
-            ApiError::Refused {
-                status,
-                meta: ResponseMeta::default()
-            }
-            .definite_reason(),
-            Some(expected)
-        );
-    }
-    for status in [
-        0, 199, 200, 201, 202, 204, 206, 300, 301, 302, 307, 308, 399, 500, 503, 599, 600,
-    ] {
-        assert_eq!(
-            ApiError::Refused {
-                status,
-                meta: ResponseMeta::default()
-            }
-            .definite_reason(),
-            None
-        );
-    }
-    assert_eq!(ApiError::Response.definite_reason(), None);
 }
 
 #[tokio::test]

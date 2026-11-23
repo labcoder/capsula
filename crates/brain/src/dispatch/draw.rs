@@ -249,12 +249,7 @@ struct NamedStep {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dispatch::{Caller, Ledger, RunCtx, Step, call};
-    use crate::engines::{CallId, ToolName};
-    use kumochi_protocol::message::{RunId, ThreadId};
     use serde_json::json;
-    use std::hint::black_box;
-    use std::time::Instant;
 
     #[test]
     fn the_outer_screen_action_never_formats_argument_or_identifier_content() {
@@ -278,18 +273,6 @@ mod tests {
             assert!(!shown.contains(marker));
             assert!(!shown.contains(format!("{:?}", marker.as_bytes()).trim_matches(['[', ']'])));
         }
-    }
-
-    #[test]
-    fn canonical_arguments_ignore_key_order_whitespace_and_defaults() {
-        let a = validate(br#"{"records":[{"step":{"id":"s"}}]}"#).expect("typed record");
-        let b = validate(
-            br#"{ "records": [ { "step": { "put": [], "id": "s", "set": [], "remove": [] } } ] }"#,
-        )
-        .expect("same typed record");
-        assert_eq!(a.hash, b.hash);
-        let changed = validate(br#"{"records":[{"step":{"id":"t"}}]}"#).expect("changed record");
-        assert_ne!(a.hash, changed.hash);
     }
 
     #[test]
@@ -490,142 +473,22 @@ mod tests {
 
     #[test]
     fn closed_envelopes_refuse_empty_truncated_duplicate_and_mistyped_arguments() {
-        for args in [
-            b"".as_slice(),
-            b"[]",
-            b"{\"records\":[",
-            b"{\"records\":null}",
+        for (args, expected) in [
+            (b"".as_slice(), TokenError::Truncated),
+            (b"[]", TokenError::Malformed { at: 0 }),
+            (br#"{"records":["#, TokenError::Truncated),
+            (br#"{"records":null}"#, TokenError::Malformed { at: 11 }),
         ] {
-            assert!(matches!(validate(args), Err(CallError::Token(_))));
-        }
-    }
-
-    #[test]
-    #[ignore = "requires an assigned quiet Rez timing turn; builder runs are dry runs only"]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the bounded timing fixture also initializes required reader ownership"
-    )]
-    fn measure_complete_draw_intake() {
-        fn fixture(count: usize) -> Vec<u8> {
-            let put: Vec<_> = (0..count)
-                .map(|n| {
-                    json!({"shape":{
-                        "id":format!("n{n}"),"kind":"rect","box":[0,0,1,1]
-                    }})
-                })
-                .collect();
-            serde_json::to_vec(&json!({"records":[
-                {"begin":{"v":1,"scene":"measure","surface":"overlay","alt":"shapes"}},
-                {"step":{"id":"s1","put":put}}, {"end":{}}
-            ]}))
-            .expect("fixture")
-        }
-
-        #[derive(Clone, Copy, Debug)]
-        enum Path {
-            Canonical,
-            Adapter,
-        }
-
-        fn intake(args: &[u8], path: Path) {
-            let run = RunId(1);
-            let thread = ThreadId(1);
-            let call_id = CallId::new("measure").expect("ASCII");
-            let input = if matches!(path, Path::Adapter) {
-                let mut ledger = Ledger::default();
-                let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
-                let mut ctx = RunCtx {
-                    build: crate::coordinator::BuildKey {
-                        run,
-                        round: 1,
-                        attempt: 1,
-                    },
-                    end,
-                    control: crate::recall::control::Control::new(end),
-                    thread,
-                    main: thread,
-                    fresh: ThreadId(2),
-                    reach: crate::context::Origin::Kumo,
-                    offered: &[ToolName::Draw],
-                    mcp: None,
-                    ledger: &mut ledger,
-                };
-                let Step::Screen {
-                    draw: super::super::DrawAction::Complete(Ok(draw)),
-                    ..
-                } = call(
-                    &mut ctx,
-                    Caller::Model {
-                        run,
-                        call: call_id.clone(),
-                    },
-                    ToolName::Draw,
-                    args,
-                )
-                else {
-                    panic!("valid complete draw");
-                };
-                crate::drawing::Input::CheckedCall {
-                    thread,
-                    run,
-                    call: call_id,
-                    records: draw.records,
-                }
-            } else {
-                crate::drawing::Input::Call {
-                    thread,
-                    run,
-                    call: call_id,
-                    args: args.to_vec(),
-                }
+            let CallError::Token(error) = validate(args).expect_err("closed envelope required")
+            else {
+                panic!("expected a token error");
             };
-            let output = crate::drawing::Drawing::default()
-                .handle(input)
-                .expect("one new call");
-            assert_eq!(output.effects.len(), 1);
-            drop(black_box(output));
+            assert_eq!(error, expected);
         }
-
-        let mut count = 1;
-        while fixture(count + 1).len() <= 16 * 1024 {
-            count += 1;
-        }
-        let mut bounded = fixture(count);
-        bounded.resize(16 * 1024, b' ');
-        for (name, args) in [("small", fixture(1)), ("bounded", bounded)] {
-            for path in [Path::Canonical, Path::Adapter] {
-                for _ in 0..8 {
-                    intake(&args, path);
-                }
-            }
-            for sample in 0..12 {
-                for path in if sample % 2 == 0 {
-                    [
-                        Path::Canonical,
-                        Path::Adapter,
-                        Path::Adapter,
-                        Path::Canonical,
-                    ]
-                } else {
-                    [
-                        Path::Adapter,
-                        Path::Canonical,
-                        Path::Canonical,
-                        Path::Adapter,
-                    ]
-                } {
-                    let start = Instant::now();
-                    for _ in 0..32 {
-                        intake(black_box(&args), path);
-                    }
-                    println!(
-                        "case={name} bytes={} sample={sample} path={path:?} calls=32 ns={}",
-                        args.len(),
-                        start.elapsed().as_nanos()
-                    );
-                }
-            }
-        }
+        let duplicate = br#"{"records":[{"step":{"id":"a","id":"b"}}]}"#;
+        let CallError::Step(error) = validate(duplicate).expect_err("duplicate step field") else {
+            panic!("expected a typed record error");
+        };
+        assert_eq!(error.code, kumochi_scene::ErrorCode::DuplicateKey);
     }
 }

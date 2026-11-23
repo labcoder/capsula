@@ -96,7 +96,15 @@ async fn each_capture_gets_a_fresh_key_and_a_higher_ticket_and_names_its_worker(
         let held = asking.await.expect("joins").expect("held");
         assert_eq!((held.key, held.generation), (key, Generation(0)));
     }
-    assert_eq!(tickets, [(CaptureId(1), 1), (CaptureId(2), 2)]);
+    let [
+        (first_capture, first_ticket),
+        (second_capture, second_ticket),
+    ] = tickets.as_slice()
+    else {
+        panic!("expected two capture requests");
+    };
+    assert!(second_capture.0 > first_capture.0);
+    assert!(second_ticket > first_ticket);
 }
 
 #[tokio::test]
@@ -262,8 +270,22 @@ async fn a_replacement_that_answers_anything_but_the_release_is_left_running() {
     let (id, _) = rig.next().await;
     rig.reply(id, &Reply::Busy).await;
     assert_eq!(retiring.await.expect("joins"), Ok(()));
-    assert_eq!(
-        rig.terminations.load(std::sync::atomic::Ordering::Relaxed),
-        0
-    );
+    let asking = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move {
+            client
+                .context(owner(8), PhysicalPoint([5, 6]), until())
+                .await
+        }
+    });
+    let (id, request) = rig.next().await;
+    let Request::Context { key, .. } = request else {
+        panic!("not a capture: {request:?}")
+    };
+    assert_eq!(key.owner, owner(8));
+    rig.reply(id, &Reply::Acquired(key, meta(key.capture)))
+        .await;
+    rig.reply(id, &Reply::Complete(key)).await;
+    let held = asking.await.expect("joins").expect("held by replacement");
+    assert_eq!((held.key, held.generation), (key, Generation(1)));
 }

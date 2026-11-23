@@ -261,8 +261,10 @@ fn no_provider_prose_reaches_debug_or_display() {
             "the fixture plants its marker"
         );
         let failure = Failure::Provider(ProviderError::answered(400, body));
+        let bytes = format!("{:?}", b"PLANTED");
         for shown in [format!("{failure:?}"), failure.to_string()] {
-            assert!(!shown.contains("PLANTED"), "{shown}");
+            assert!(!shown.contains("PLANTED"));
+            assert!(!shown.contains(bytes.trim_matches(['[', ']'])));
         }
     }
 }

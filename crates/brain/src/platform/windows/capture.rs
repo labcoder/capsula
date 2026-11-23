@@ -610,22 +610,9 @@ mod tests {
     use kumochi_protocol::geometry::PhysicalRect;
     use windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE;
 
-    use kumochi_protocol::geometry::PhysicalPoint;
-    use windows::Graphics::Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem};
-    use windows::Graphics::DirectX::DirectXPixelFormat;
-    use windows::Win32::Foundation::POINT;
-    use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
-    };
-    use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
-    use windows::core::factory;
-
-    use super::{
-        Wgc, copy_rows, drawn, drawn_after, fault, not_before, now_hns, poll, start_after,
-        supported,
-    };
-    use crate::platform::windows::clock::{qpc_hns_up, qpc_now};
-    use crate::screen::{CaptureId, Capturer, Failure, FrameMeta, RawFrame, Refusal};
+    use super::{copy_rows, drawn_after, fault, not_before, poll, start_after, supported};
+    use crate::platform::windows::clock::qpc_hns_up;
+    use crate::screen::{CaptureId, Failure, FrameMeta, RawFrame, Refusal};
 
     #[test]
     fn only_the_systems_no_reads_as_unsupported() {
@@ -884,132 +871,6 @@ mod tests {
             assert_eq!(frame.image(), Some((meta, &packed[..])));
             assert_eq!(copy_rows(&bad, 2, 3, &mut frame), not_implemented);
             assert_eq!(frame.image(), None);
-        }
-    }
-
-    fn primary_monitor() -> (HMONITOR, PhysicalPoint) {
-        // SAFETY: asks which monitor is primary; no pointers.
-        let monitor = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
-        let mut info = MONITORINFO {
-            cbSize: u32::try_from(size_of::<MONITORINFO>()).expect("small struct"),
-            ..MONITORINFO::default()
-        };
-        // SAFETY: `info` is writable and its size is set.
-        let read = unsafe { GetMonitorInfoW(monitor, &raw mut info) };
-        assert!(read.as_bool(), "monitor info");
-        let r = info.rcMonitor;
-        (
-            monitor,
-            PhysicalPoint([r.left.midpoint(r.right), r.top.midpoint(r.bottom)]),
-        )
-    }
-
-    /// Rez evidence, run by hand: `--ignored --nocapture`. Pixels stay in memory.
-    #[test]
-    #[ignore = "Rez only: captures the primary display, in memory"]
-    fn primary_display_cold_and_warm_samples() {
-        let (_, point) = primary_monitor();
-        let mut frame = RawFrame::default();
-        let sample = |wgc: &mut Wgc, frame: &mut RawFrame| {
-            let start = Instant::now();
-            let excluded = qpc_now().expect("counter");
-            let (acquired, bounds) = wgc
-                .capture_display(point, excluded, start + Duration::from_secs(2), frame)
-                .expect("capture");
-            (start.elapsed(), acquired.dpi, bounds.size)
-        };
-        let mut cold = Vec::new();
-        for _ in 0..20 {
-            let start = Instant::now();
-            let mut wgc = Wgc::new().expect("device");
-            let (_, dpi, size) = sample(&mut wgc, &mut frame);
-            cold.push(start.elapsed());
-            println!("display {size:?} dpi {dpi}");
-        }
-        let mut wgc = Wgc::new().expect("device");
-        sample(&mut wgc, &mut frame);
-        let mut warm: Vec<_> = (0..20).map(|_| sample(&mut wgc, &mut frame).0).collect();
-        for (name, times) in [("cold", &mut cold), ("warm", &mut warm)] {
-            times.sort();
-            println!(
-                "{name}: p50 {:?} p95 {:?} max {:?} n {}",
-                times[9],
-                times[18],
-                times[19],
-                times.len()
-            );
-        }
-    }
-
-    /// The first frame of a fresh display session: its draw time minus the session's start, in
-    /// microseconds (negative is earlier), and how long it took to arrive.
-    fn first_frame(wgc: &Wgc, monitor: HMONITOR) -> (i64, Duration) {
-        let interop: IGraphicsCaptureItemInterop =
-            factory::<GraphicsCaptureItem, _>().expect("interop");
-        // SAFETY: `monitor` came from MonitorFromPoint.
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor) }.expect("item");
-        let size = item.Size().expect("size");
-        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-            &wgc.winrt,
-            DirectXPixelFormat::B8G8R8A8UIntNormalized,
-            1,
-            size,
-        )
-        .expect("pool");
-        let session = pool.CreateCaptureSession(&item).expect("session");
-        if let Err(error) = session.SetIsBorderRequired(false) {
-            println!("border kept: {:#x}", error.code().0);
-        }
-        session.SetIsCursorCaptureEnabled(true).expect("cursor");
-        let at = Instant::now();
-        let started = now_hns().expect("counter");
-        session.StartCapture().expect("start");
-        let captured = poll(
-            at + Duration::from_secs(2),
-            || match pool.TryGetNextFrame() {
-                Ok(captured) => Ok(Some(captured)),
-                Err(error) if error.code().is_ok() => Ok(None),
-                Err(error) => Err(fault(&error)),
-            },
-            |late| late.Close().map_err(|e| Failure::Retire(e.code().0)),
-        )
-        .expect("a first frame within 2 s");
-        let arrived = at.elapsed();
-        let drawn = drawn(&captured).expect("draw time");
-        captured.Close().expect("frame closes");
-        session.Close().expect("session closes");
-        pool.Close().expect("pool closes");
-        let offset = i64::try_from(drawn).expect("hns") - i64::try_from(started).expect("hns");
-        (offset / 10, arrived)
-    }
-
-    /// Rez evidence for the frame-time check, run by hand on a still screen:
-    /// `--ignored --nocapture`. Pixels stay in memory and are never read.
-    #[test]
-    #[ignore = "Rez only: captures the primary display, in memory"]
-    fn first_display_frame_against_its_session_start() {
-        let (monitor, _) = primary_monitor();
-        let warm = Wgc::new().expect("device");
-        first_frame(&warm, monitor);
-        for cold in [true, false] {
-            let samples: Vec<_> = (0..10)
-                .map(|_| {
-                    if cold {
-                        first_frame(&Wgc::new().expect("device"), monitor)
-                    } else {
-                        first_frame(&warm, monitor)
-                    }
-                })
-                .collect();
-            let name = if cold { "cold" } else { "warm" };
-            for (offset, arrived) in &samples {
-                println!("{name}: drawn - started {offset} us, arrived after {arrived:?}");
-            }
-            let earlier = samples.iter().filter(|(offset, _)| *offset < 0).count();
-            println!(
-                "{name}: {earlier} of {} drawn before the session started",
-                samples.len()
-            );
         }
     }
 }

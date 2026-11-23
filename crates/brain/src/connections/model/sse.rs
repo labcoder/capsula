@@ -13,10 +13,6 @@ use serde_json::Value;
 use super::error::{Failure, ProviderError};
 use super::framer::{self, Framer, Limit};
 
-/// The longest line, its line feed excluded.
-pub const MAX_LINE_BYTES: usize = framer::MAX_LINE_BYTES;
-/// The most data one event carries, its `data` lines joined by line feeds.
-pub const MAX_EVENT_BYTES: usize = framer::MAX_EVENT_BYTES;
 /// The most bytes one response stream carries.
 pub const MAX_STREAM_BYTES: usize = framer::MAX_STREAM_BYTES;
 /// The most visible text one response streams.

@@ -202,13 +202,16 @@ fn failed_candidate_writes_and_failed_commits_preserve_the_saved_key() {
     let (_scratch, path, service, store) = setup("paste-write-failure");
     let mut vault = open(&store, &service, &path);
     vault.save_anthropic_key(OLD.as_bytes()).expect("old key");
-    for commit in [false, true] {
-        let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
-        plant(&store, &service, &plan, NEW.as_bytes());
-        if commit {
-            raw(&path).execute_batch("CREATE TRIGGER refuse_activation BEFORE UPDATE OF state ON generations WHEN NEW.state = 'active' BEGIN SELECT RAISE(ABORT, 'refused'); END;").expect("activation-only failure");
+    let previous_names = store.names();
+    let long = format!("{NEW}{}", "x".repeat(2048 - NEW.len()));
+    for (failed_chunk, key) in [(Some(0), NEW), (Some(1), long.as_str()), (None, NEW)] {
+        let commit = failed_chunk.is_none();
+        let plan = vault.begin_anthropic_paste(key.len()).expect("plan");
+        plant(&store, &service, &plan, key.as_bytes());
+        if let Some(index) = failed_chunk {
+            store.arm(index, Fault::Refuse);
         } else {
-            store.arm(0, crate::connections::vault::fake::Fault::Refuse);
+            raw(&path).execute_batch("CREATE TRIGGER refuse_activation BEFORE UPDATE OF state ON generations WHEN NEW.state = 'active' BEGIN SELECT RAISE(ABORT, 'refused'); END;").expect("activation-only failure");
         }
         let result = vault.adopt_anthropic_paste(plan.generation);
         if commit {
@@ -238,8 +241,8 @@ fn failed_candidate_writes_and_failed_commits_preserve_the_saved_key() {
             "a write/activation failure deletes the staged copy"
         );
         assert_eq!(
-            store.names().len(),
-            1,
+            store.names(),
+            previous_names,
             "only the previous active key remains"
         );
         assert!(matches!(
@@ -434,14 +437,30 @@ fn absent_staging_is_unavailable_not_format_and_consumes_the_permit() {
 
 #[test]
 fn legacy_bytes_cannot_authorize_a_fresh_plan() {
+    use kumochi_protocol::constants::{anthropic_key_target, anthropic_staging_target};
+    use kumochi_protocol::message::KeyStageId;
+
     let (_scratch, path, service, store) = setup("paste-legacy-unread");
+    let staged = anthropic_staging_target(&service);
+    let plant_legacy = |name: &str| {
+        store
+            .set(name, &Secret::new(Zeroizing::new(NEW.as_bytes().to_vec())))
+            .expect("legacy bytes");
+    };
+    plant_legacy(&anthropic_key_target(&service));
+    plant_legacy(&staged);
     let mut vault = open(&store, &service, &path);
-    store
-        .set(
-            &kumochi_protocol::constants::anthropic_staging_target(&service),
-            &Secret::new(Zeroizing::new(NEW.as_bytes().to_vec())),
-        )
-        .expect("legacy bytes");
+    assert_eq!(loaded(&mut vault), None);
+    assert!(matches!(
+        vault.adopt_anthropic_paste(authority::Generation::from_stage_id(KeyStageId([0; 16]))),
+        Err(PasteError::Changed)
+    ));
+    assert!(
+        store.names().is_empty(),
+        "the open deleted both legacy names"
+    );
+    assert!(!is_current(&vault, Kind::AnthropicKey));
+    plant_legacy(&staged);
     let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
     assert!(matches!(
         vault.adopt_with_clock(plan.generation, &FastClock::new()),
@@ -482,23 +501,4 @@ fn every_begin_requires_fresh_brain_minted_names() {
     assert_eq!((first.bytes, second.bytes), (16, 16));
     assert_ne!(first.generation, second.generation);
     assert_ne!(second.generation.hex(), "00000000000000000000000000000000");
-}
-
-#[test]
-fn partial_candidate_writes_are_deleted_without_touching_the_active_key() {
-    let (_scratch, path, service, store) = setup("paste-partial-candidate");
-    let mut vault = open(&store, &service, &path);
-    vault.save_anthropic_key(OLD.as_bytes()).expect("old key");
-    let plan = vault.begin_anthropic_paste(2048).expect("plan");
-    let key = format!("sk-ant-api{}", "x".repeat(2038));
-    plant(&store, &service, &plan, key.as_bytes());
-    store.arm(1, crate::connections::vault::fake::Fault::Refuse);
-    assert!(matches!(
-        vault.adopt_anthropic_paste(plan.generation),
-        Err(PasteError::Key(KeyError::Vault(VaultError::Store(
-            CredentialStoreError::Write(5)
-        ))))
-    ));
-    assert_eq!(loaded(&mut vault).as_deref(), Some(OLD));
-    assert_eq!(store.names().len(), 1);
 }

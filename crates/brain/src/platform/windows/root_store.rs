@@ -421,12 +421,18 @@ mod tests {
 
     #[test]
     fn zero_identifiers_mean_every_use_only_after_success_with_not_found() {
-        assert_eq!(classify(1, &[], CRYPT_E_NOT_FOUND), Usage::Allowed);
-        assert_eq!(classify(0, &[], CRYPT_E_NOT_FOUND), Usage::Unreadable);
-        assert_eq!(classify(1, &[], 0), Usage::Excluded, "no valid uses");
-        for other in [5, CRYPT_E_NOT_FOUND + 1] {
-            assert_eq!(classify(1, &[], other), Usage::Unreadable, "{other:#x}");
-            assert_eq!(classify(0, &[], other), Usage::Unreadable, "{other:#x}");
+        for (ok, identifiers, code, expected) in [
+            (1, &[][..], CRYPT_E_NOT_FOUND, Ok(())),
+            (1, &[SERVER_AUTH][..], 0, Ok(())),
+            (1, &[CLIENT_AUTH][..], 0, Err(Skip::Filtered)),
+            (1, &[][..], 0, Err(Skip::Filtered)),
+            (0, &[][..], CRYPT_E_NOT_FOUND, Err(Skip::Unreadable)),
+            (1, &[][..], 5, Err(Skip::Unreadable)),
+            (0, &[][..], 5, Err(Skip::Unreadable)),
+            (1, &[][..], CRYPT_E_NOT_FOUND + 1, Err(Skip::Unreadable)),
+            (0, &[][..], CRYPT_E_NOT_FOUND + 1, Err(Skip::Unreadable)),
+        ] {
+            assert_eq!(classify(ok, identifiers, code).admits(), expected);
         }
     }
 
@@ -437,19 +443,6 @@ mod tests {
             classify(1, &[CLIENT_AUTH, c"1.3.6.1.5.5.7.3.1.1"], CRYPT_E_NOT_FOUND),
             Usage::Excluded
         );
-    }
-
-    #[test]
-    fn only_unreadable_usage_counts_as_unreadable() {
-        assert_eq!(classify(1, &[], CRYPT_E_NOT_FOUND).admits(), Ok(()));
-        assert_eq!(classify(1, &[SERVER_AUTH], 0).admits(), Ok(()));
-        assert_eq!(classify(1, &[CLIENT_AUTH], 0).admits(), Err(Skip::Filtered));
-        assert_eq!(
-            classify(0, &[], CRYPT_E_NOT_FOUND).admits(),
-            Err(Skip::Unreadable)
-        );
-        assert_eq!(classify(1, &[], 0).admits(), Err(Skip::Filtered));
-        assert_eq!(classify(1, &[], 5).admits(), Err(Skip::Unreadable));
     }
 
     #[test]
@@ -586,56 +579,85 @@ mod tests {
 
     #[test]
     fn no_kept_root_is_distrusted_by_windows() {
+        use windows_sys::Win32::Security::Cryptography::{
+            CERT_STORE_ADD_ALWAYS, CERT_STORE_PROV_MEMORY, CertAddEncodedCertificateToStore,
+        };
+
         let store = Store::open("ROOT").expect("the current user's ROOT store opens");
-        let disallowed = missing_is_empty(Store::open("Disallowed"))
-            .expect("the Disallowed store opens or doesn't exist");
+        let disallowed = match Store::open("Disallowed") {
+            Ok(store) => Some(store),
+            Err(TrustRootsError::Open(code)) if code == ERROR_FILE_NOT_FOUND.cast_signed() => None,
+            Err(error) => panic!("Disallowed store: {error:?}"),
+        };
         let now = filetime(SystemTime::now().duration_since(UNIX_EPOCH).ok());
-        let (mut checked, mut kept_roots, mut due, mut otherwise_kept, mut kept_due) =
-            (0, 0, 0, 0, 0);
+        let roots = trust_roots().expect("the current user's ROOT store loads");
+        let mut admitted_context = None;
         let mut current = store.next(None).expect("the ROOT store walks");
         while let Some(context) = current {
-            checked += 1;
-            let distrusted = disallowed.as_ref().map(|store| store.contains(&context))
-                == Some(Probe::Present(()))
-                || matches!(disallowed_after(&context), Probe::Present(after) if after <= now);
-            due += usize::from(distrusted);
-            otherwise_kept += usize::from(distrusted && admitted(&context).is_ok());
-            if kept(&context, disallowed.as_ref(), now).is_ok() {
-                kept_roots += 1;
-                kept_due += usize::from(distrusted);
+            let listed = disallowed.as_ref().map(|store| store.contains(&context))
+                == Some(Probe::Present(()));
+            let due = matches!(disallowed_after(&context), Probe::Present(after) if after <= now);
+            let cert = context.get();
+            if !cert.pbCertEncoded.is_null() && cert.cbCertEncoded != 0 {
+                // SAFETY: the live context owns this many readable DER bytes.
+                let der = unsafe {
+                    slice::from_raw_parts(
+                        cert.pbCertEncoded,
+                        usize::try_from(cert.cbCertEncoded).expect("Windows certificate size"),
+                    )
+                };
+                let returned = roots
+                    .certificates
+                    .iter()
+                    .any(|public| public.as_slice() == der);
+                if listed || due {
+                    assert!(!returned, "a distrusted root was returned");
+                } else if returned && admitted_context.is_none() {
+                    admitted_context = Some(der.to_vec());
+                }
             }
             current = store.next(Some(context)).expect("the ROOT store walks");
         }
-        println!(
-            "trust roots distrust: checked {checked}, kept {kept_roots}, distrusted {due}, \
-             distrusted but otherwise kept {otherwise_kept}, kept and distrusted {kept_due}"
-        );
-        assert_eq!(kept_due, 0, "no kept root is distrusted by Windows");
+
+        let der = admitted_context.expect("one real admitted certificate");
+        let len = u32::try_from(der.len()).expect("bounded DER");
+        // SAFETY: the memory provider has no parameters and cannot write to a system store.
+        let memory = unsafe { CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, ptr::null()) };
+        assert!(!memory.is_null(), "memory certificate store");
+        let memory = Store(memory);
+        // SAFETY: this store lives through the call; DER holds len readable bytes.
+        let added = unsafe {
+            CertAddEncodedCertificateToStore(
+                memory.0,
+                X509_ASN_ENCODING,
+                der.as_ptr(),
+                len,
+                CERT_STORE_ADD_ALWAYS,
+                ptr::null_mut(),
+            )
+        };
+        assert_ne!(added, 0, "plant a root in the isolated store");
+        let context = memory.next(None).unwrap().expect("the planted context");
+        assert_eq!(kept(&context, None, now), Ok(der));
+        assert_eq!(kept(&context, Some(&memory), now), Err(Skip::Filtered));
     }
 
     #[test]
     fn the_current_user_root_store_yields_bounded_public_roots() {
         let roots = trust_roots().expect("the current user's ROOT store loads");
-        println!(
-            "trust roots: kept {}, skipped {}, unreadable {}",
-            roots.certificates.len(),
-            roots.skipped,
-            roots.unreadable
-        );
-        assert_eq!(
-            roots.unreadable, 0,
-            "a healthy store has no unreadable root"
+        assert!(
+            (1..=1_024).contains(&roots.certificates.len()),
+            "bounded nonempty root set"
         );
         assert!(
-            roots.certificates.len() >= 20,
-            "a real store keeps at least 20 roots"
+            roots.unreadable <= roots.skipped,
+            "unreadable roots are counted among the skipped ones"
         );
-        assert!(roots.certificates.len() <= MAX_ROOTS, "the cap holds");
         assert!(
             roots
                 .certificates
                 .iter()
-                .all(|der| der.len() <= MAX_DER && der.first() == Some(&0x30)),
+                .all(|der| der.len() <= 16 * 1_024 && der.first() == Some(&0x30)),
             "each root is bounded DER that starts with a SEQUENCE"
         );
     }

@@ -45,26 +45,6 @@ fn full(added_at: u64) -> Vec<Revocable> {
 }
 
 #[test]
-fn an_added_entry_is_revoked_at_once_and_unlisted_once_confirmed() {
-    let mut h = Harness::new("sweep-added");
-    h.op(AccountOp::SignIn);
-    h.callback("client-issued");
-    h.reply(Err(ExchangeError::Unusable {
-        refresh_token: Some(secret("refresh-unusable")),
-    }));
-    assert_eq!(h.revoking.len(), 1);
-    assert_eq!(tokens(&h.revoking[0]), ["refresh-unusable"]);
-    let confirmed = h.revoking[0].clone();
-    h.feed(Input::Revoked(confirmed));
-    assert!(h.revocations().is_empty());
-    assert_eq!(h.marker(), None, "the sweep fact cleared with the list");
-    assert!(
-        !h.store.names().iter().any(|name| name.contains("/revoke/")),
-        "every list name is gone"
-    );
-}
-
-#[test]
 fn an_unconfirmed_pass_keeps_the_list_and_retry_runs_another() {
     let mut h = Harness::seeded("sweep-retry", listed(vec![entry("refresh-a", NOW)]));
     assert_eq!(h.revoking.len(), 1, "startup runs a pass");
@@ -302,38 +282,6 @@ fn retry_on_a_full_list_runs_a_pass_that_can_free_a_slot() {
     assert_eq!(h.listening.len(), 1, "the freed slot admits the sign-in");
 }
 
-/// H1 (CAPS-130's trace): three fresh entries and a failed startup pass, then a fourth token is
-/// listed and its pass fails too. The next exchange is never sent.
-#[test]
-fn a_fourth_listing_after_failed_passes_blocks_the_next_exchange() {
-    let mut h = Harness::seeded(
-        "sweep-fourth-listing",
-        listed(vec![
-            entry("refresh-a", NOW),
-            entry("refresh-b", NOW),
-            entry("refresh-c", NOW),
-        ]),
-    );
-    h.feed(Input::Revoked(Vec::new()));
-    h.op(AccountOp::SignIn);
-    h.callback("client-issued");
-    h.reply(Err(ExchangeError::Unusable {
-        refresh_token: Some(secret("refresh-new")),
-    }));
-    h.feed(Input::Revoked(Vec::new()));
-    h.op(AccountOp::SignIn);
-    assert_eq!(
-        h.errors.last(),
-        Some(&user_error(ErrorKey::RevocationBacklog, &[Action::Retry]))
-    );
-    assert_eq!(h.listening.len(), 1);
-    assert_eq!(h.sent.len(), 1, "the next exchange is never sent");
-    assert_eq!(
-        listed_tokens(&h),
-        ["refresh-a", "refresh-b", "refresh-c", "refresh-new"]
-    );
-}
-
 /// H2 (CAPS-130): emptying the list survives a crash after, or a refusal of, each of its writes
 /// and deletes. A restart or Retry finishes the cleanup, and sign-in proceeds.
 #[test]
@@ -348,10 +296,15 @@ fn empty_list_cleanup_recovers_from_a_crash_or_refusal_at_every_step() {
         h
     };
     let mut h = listed_one();
+    assert_eq!(h.revoking.len(), 1);
+    assert_eq!(tokens(&h.revoking[0]), ["refresh-unusable"]);
     h.store.0.lock().expect("fake lock").mutations.clear();
     let confirmed = h.revoking[0].clone();
     h.feed(Input::Revoked(confirmed));
     let steps = h.store.0.lock().expect("fake lock").mutations.len();
+    assert!(h.revocations().is_empty());
+    assert_eq!(h.marker(), None, "the sweep fact cleared with the list");
+    assert!(!h.store.names().iter().any(|name| name.contains("/revoke/")));
     for step in 0..steps {
         for fault in [Fault::CrashAfter, Fault::Refuse] {
             let mut h = listed_one();

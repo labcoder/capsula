@@ -48,6 +48,24 @@ fn eligible() -> Facts {
 #[test]
 fn the_walk_takes_the_first_window_a_click_would_land_on() {
     assert_eq!(step(eligible()), Step::Take);
+    for (facts, expected) in [
+        (
+            Facts {
+                unclear: true,
+                ..eligible()
+            },
+            Step::Unclear,
+        ),
+        (
+            Facts {
+                desktop: true,
+                ..eligible()
+            },
+            Step::Stop,
+        ),
+    ] {
+        assert_eq!(step(facts), expected);
+    }
     for (why, skipped) in [
         (
             "kumochi",
@@ -188,17 +206,6 @@ fn a_drawn_window_whose_hit_cant_be_told_ends_the_walk_unclear() {
             ..eligible()
         }),
         Step::Unclear
-    );
-}
-
-#[test]
-fn reaching_the_desktop_ends_the_walk_with_nothing_eligible() {
-    assert_eq!(
-        step(Facts {
-            desktop: true,
-            ..eligible()
-        }),
-        Step::Stop
     );
 }
 

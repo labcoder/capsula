@@ -411,11 +411,6 @@ pixels' bounding rectangle in image pixels, left out of its `Debug`, as `InkBoun
 `Debug` prints no numbers. The brain reads it through `ScreenContext::ink`, which returns it only
 when it is non-empty and lies inside the image, so a bad worker answer reaches no model line.
 
-Two ignored native checks keep pixels in memory and are run by hand on Rez:
-`first_display_frame_against_its_session_start` prints each first frame's draw time minus its
-session's start, cold and warm, and is run on a still screen; `primary_display_cold_and_warm_samples`
-times the capture.
-
 ### Slice 6 release-capture gate
 
 The hold takes one picture of the display under the pointer at release and paints the pointer

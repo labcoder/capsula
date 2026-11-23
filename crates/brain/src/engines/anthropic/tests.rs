@@ -913,7 +913,7 @@ fn optional_deltas_preserve_the_final_usage_marker_and_latest_literal_counts() {
 
 #[test]
 fn queued_bytes_include_event_overhead_and_reserved_final_usage_at_exact_limit() {
-    for extra in [0, 1] {
+    for (extra, with_usage) in [(0, false), (0, true), (1, true)] {
         let mut m = started();
         start(&mut m, 0, json!({"type":"text", "text":""}));
         let chunk = "x".repeat(65_536);
@@ -922,22 +922,39 @@ fn queued_bytes_include_event_overhead_and_reserved_final_usage_at_exact_limit()
         }
         let last = "x".repeat(64_448 + extra);
         delta(&mut m, 0, json!({"type":"text_delta", "text":last}));
+        if extra == 0 {
+            start(
+                &mut m,
+                1,
+                json!({"type":"fallback", "data":"s".repeat(4_096)}),
+            );
+            delta(
+                &mut m,
+                1,
+                json!({"type":"future_delta", "data":"s".repeat(4_096)}),
+            );
+            stop(&mut m, 1);
+        }
         stop(&mut m, 0);
-        send(
-            &mut m,
-            json!({"type":"message_delta", "delta":{"stop_reason":"end_turn"}, "usage":{"output_tokens":7}}),
-        );
+        if with_usage {
+            send(
+                &mut m,
+                json!({"type":"message_delta", "delta":{"stop_reason":"end_turn"}, "usage":{"output_tokens":7}}),
+            );
+        }
         let mut expected = vec![TurnEvent::TextDelta(chunk); 15];
         if extra == 0 {
             expected.push(TurnEvent::TextDelta(last));
-            let whole = Tokens {
-                output: 7,
-                ..Tokens::default()
-            };
-            expected.push(TurnEvent::Usage(Usage {
-                whole,
-                first_request: Some(whole),
-            }));
+            if with_usage {
+                let whole = Tokens {
+                    output: 7,
+                    ..Tokens::default()
+                };
+                expected.push(TurnEvent::Usage(Usage {
+                    whole,
+                    first_request: Some(whole),
+                }));
+            }
             assert_eq!(m.finish(Ok(Progress::Completed)), Some(Finish::Completed));
             assert_eq!(m.take(), expected);
         } else {
@@ -1022,32 +1039,4 @@ fn final_failure_usage_has_reserved_space_even_after_queue_budget_failure() {
         assert_eq!(m.finish(Ok(Progress::Completed)), None);
         assert_eq!(m.take(), vec![]);
     }
-}
-
-#[test]
-fn skipped_blocks_need_no_serialization_space_in_a_full_queue() {
-    let mut m = started();
-    start(&mut m, 0, json!({"type":"text", "text":""}));
-    let chunk = "x".repeat(65_536);
-    for _ in 0..15 {
-        delta(&mut m, 0, json!({"type":"text_delta", "text":chunk}));
-    }
-    let last = "x".repeat(64_448);
-    delta(&mut m, 0, json!({"type":"text_delta", "text":last}));
-    start(
-        &mut m,
-        1,
-        json!({"type":"fallback", "data":"s".repeat(4_096)}),
-    );
-    delta(
-        &mut m,
-        1,
-        json!({"type":"future_delta", "data":"s".repeat(4_096)}),
-    );
-    stop(&mut m, 1);
-    stop(&mut m, 0);
-    assert_eq!(m.finish(Ok(Progress::Completed)), Some(Finish::Completed));
-    let mut expected = vec![TurnEvent::TextDelta(chunk); 15];
-    expected.push(TurnEvent::TextDelta(last));
-    assert_eq!(m.take(), expected);
 }

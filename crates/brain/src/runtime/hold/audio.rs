@@ -328,24 +328,35 @@ mod tests {
 
     #[test]
     fn full_sixty_second_bound_and_one_more_are_distinct() {
-        let mut audio = Audio::new();
-        for seq in 0..MAX_HOLD_CHUNKS {
-            audio
-                .push(&packet(
-                    16_000,
-                    seq,
-                    seq + 1 == MAX_HOLD_CHUNKS,
-                    vec![107; 320],
-                ))
-                .unwrap();
+        for terminal in [true, false] {
+            let mut audio = Audio::new();
+            for seq in 0..3_000 {
+                audio
+                    .push(&packet(
+                        16_000,
+                        seq,
+                        terminal && seq == 2_999,
+                        vec![107; 320],
+                    ))
+                    .unwrap();
+            }
+            if terminal {
+                audio.end(3_000).unwrap();
+                audio.stopped().unwrap();
+                assert_eq!(audio.take().unwrap(), vec![107; 960_000]);
+                assert_eq!(
+                    audio.push(&packet(16_000, 3_000, true, vec![7])),
+                    Err(HoldFailure::InvalidAudio),
+                    "a completed hold cannot reopen"
+                );
+            } else {
+                assert_eq!(
+                    audio.push(&packet(16_000, 3_000, true, vec![7])),
+                    Err(HoldFailure::InvalidAudio)
+                );
+                assert_eq!(audio.take(), None);
+            }
         }
-        audio.end(MAX_HOLD_CHUNKS).unwrap();
-        audio.stopped().unwrap();
-        assert_eq!(audio.take().unwrap(), vec![107; SAMPLES]);
-        assert_eq!(
-            audio.push(&packet(16_000, MAX_HOLD_CHUNKS, true, vec![7])),
-            Err(HoldFailure::InvalidAudio)
-        );
     }
 
     #[test]
