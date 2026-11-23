@@ -293,6 +293,22 @@ mod tests {
     }
 
     #[test]
+    fn complete_draw_retry_digest_matches_the_previous_format() {
+        let args = br#"{"records":[
+            {"begin":{"v":1,"scene":"sample","surface":"overlay","alt":"Dot"}},
+            {"step":{"id":"s","say":"Dot"}},{"end":{}}]}"#;
+        let digest = validate(args).expect("valid small draw").hash;
+        assert_eq!(
+            digest,
+            [
+                0x5e, 0x6c, 0x52, 0xf1, 0xe8, 0x38, 0x56, 0x1c, 0x96, 0x61, 0xb0, 0xd6, 0x80, 0xcd,
+                0x71, 0xb0, 0x84, 0xa2, 0x54, 0xea, 0xc7, 0xae, 0xd3, 0x97, 0x16, 0xee, 0xb6, 0x8b,
+                0xdf, 0x15, 0x4d, 0xf9,
+            ]
+        );
+    }
+
+    #[test]
     fn preflight_preserves_the_third_steps_first_typed_failure() {
         let args = serde_json::to_vec(&json!({"records":[
             {"step":{"id":"s1"}}, {"step":{"id":"s2"}},
