@@ -11,6 +11,8 @@ use gpui_kit::{
     AnyWindowHandle, AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, Styled as _, WeakEntity, Window, div,
 };
+use kumochi_shell_core::presence::typing::{self, Admission, Submission};
+pub(super) use kumochi_shell_core::presence::typing::{Hide, Typing};
 
 use super::messages::Messages;
 use super::{
@@ -19,46 +21,10 @@ use super::{
     options, platform, send,
 };
 use crate::chat_notice::{Notice, Source};
-use crate::runs::{Refused, Target};
+use crate::runs::Target;
 use crate::settings::Settings;
 use crate::strings::{Strings, Text};
 use crate::threads::{Threads, row_label};
-
-#[derive(Clone, Copy)]
-pub(super) enum Hide {
-    Dismiss,
-    Deactivated,
-}
-
-#[derive(Clone, Copy, Default)]
-pub(super) struct Typing {
-    pub(super) visible: bool,
-    active_seen: bool,
-}
-
-impl Typing {
-    pub(super) fn open(&mut self) {
-        if !self.visible {
-            self.active_seen = false;
-        }
-        self.visible = true;
-    }
-
-    pub(super) fn activated(&mut self) {
-        if self.visible {
-            self.active_seen = true;
-        }
-    }
-
-    pub(super) fn close(&mut self, reason: Hide) -> bool {
-        if !self.visible || matches!(reason, Hide::Deactivated) && !self.active_seen {
-            return false;
-        }
-        self.visible = false;
-        self.active_seen = false;
-        true
-    }
-}
 
 /// The typing surface: the one window Kumochi activates, and only on a double tap.
 pub(super) struct TextPanel {
@@ -141,10 +107,8 @@ impl Presence {
                 Ok::<_, platform::PresenceError>(())
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
-        let opening = !text.typing.visible;
         text.bounds = bounds;
-        text.typing.open();
-        if opening {
+        if text.typing.open() {
             self.chat.update(cx, |state, cx| {
                 state.show_for(self.runs.thread());
                 cx.notify();
@@ -202,7 +166,7 @@ impl Presence {
         let events = self.events.clone();
         let close_events = self.events.clone();
         let owner = cx.weak_entity();
-        let notice = typing_notice(
+        let notice = typing::notice(
             self.chat_notice
                 .for_thread(self.runs.thread())
                 .and(self.error.as_ref()),
@@ -304,7 +268,7 @@ impl Presence {
         let previous = text
             .previous
             .take()
-            .filter(|_| matches!(reason, Hide::Dismiss));
+            .filter(|_| reason.restores_foreground());
         let hidden = text.window.update(cx, |_, window, _| {
             if let Some(previous) = previous {
                 platform::restore_foreground(window, previous);
@@ -335,13 +299,15 @@ impl Presence {
 
 impl Presence {
     pub(super) fn submit(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        if !self.link.admits_text(self.session.as_ref()) {
-            if self.session.is_some() {
+        match typing::admit(&self.link, self.session.as_ref()) {
+            Admission::Ignore => return Ok(()),
+            Admission::Refused(text) => {
                 let previous = (self.error.clone(), self.refusal);
-                submission_notice(&mut self.error, &mut self.refusal, Err(Refused::Busy));
+                Submission::Refused(text).update_notice(&mut self.error, &mut self.refusal);
                 self.notices_changed(&previous, cx);
+                return Ok(());
             }
-            return Ok(());
+            Admission::Proceed => {}
         }
         self.cancel_voice(cx);
         self.voice.lost = None;
@@ -349,23 +315,17 @@ impl Presence {
             return Ok(());
         };
         let draft = text.input.read(cx).value();
-        let (link, session) = (&self.link, &self.session);
-        let result = self
-            .runs
-            .submit_with_audio(&draft, link.audio_session(), |turn| {
-                session
-                    .as_ref()
-                    .is_some_and(|session| link.send_data(session, turn))
-            });
-        diagnostics::record(cx, format_args!("submit sent={}", result.is_ok()));
+        let result = typing::submit(&mut self.runs, &self.link, self.session.as_ref(), &draft);
+        let sent = result == Submission::Sent;
+        diagnostics::record(cx, format_args!("submit sent={sent}"));
         let previous = (self.error.clone(), self.refusal);
-        submission_notice(&mut self.error, &mut self.refusal, result);
-        if result.is_ok() {
+        result.update_notice(&mut self.error, &mut self.refusal);
+        if sent {
             self.chat_notice.clear();
             self.settings.update(cx, |state, _| state.clear_notice());
         }
         self.notices_changed(&previous, cx);
-        if result.is_ok() {
+        if sent {
             let input = text.input.clone();
             text.window
                 .update(cx, |_, window, cx| {
@@ -382,14 +342,14 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         let strings = cx.global::<Strings>();
-        let notice = typing_notice(
+        let notice = typing::notice(
             self.chat_notice
                 .for_thread(self.runs.thread())
                 .and(self.error.as_ref()),
             self.refusal,
             strings,
         );
-        if typing_notice(previous.0.as_ref(), previous.1, strings) != notice
+        if typing::notice(previous.0.as_ref(), previous.1, strings) != notice
             && let Some(text) = &self.text
         {
             text.view.update(cx, |view, cx| {
@@ -450,7 +410,7 @@ impl Presence {
         let answer = self.runs.shown();
         let target = self.runs.target();
         let recovery = self.chat_notice.for_thread(self.runs.thread());
-        let notice = typing_notice(
+        let notice = typing::notice(
             recovery.and(self.error.as_ref()),
             self.refusal,
             cx.global::<Strings>(),
@@ -697,13 +657,13 @@ impl TextView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        let empty = self.input.read(cx).value().is_empty();
-        if empty {
-            self.input.update(cx, |input, cx| {
-                input.set_value(text.into_string(), window, cx);
-            });
-        }
-        empty
+        let Some(text) = typing::restore(&self.input.read(cx).value(), text) else {
+            return false;
+        };
+        self.input.update(cx, |input, cx| {
+            input.set_value(text.into_string(), window, cx);
+        });
+        true
     }
 }
 
@@ -784,34 +744,6 @@ impl Render for TextView {
     }
 }
 
-fn submission_notice(
-    error: &mut Option<SharedString>,
-    refusal: &mut Option<Text>,
-    result: Result<(), Refused>,
-) {
-    let text = match result {
-        Ok(()) => {
-            *error = None;
-            None
-        }
-        Err(Refused::Blank) => return,
-        Err(Refused::Busy) => Some(Text::TurnBusy),
-        Err(Refused::Offline) => Some(Text::TurnOffline),
-        Err(Refused::TooLong) => Some(Text::TurnTooLong),
-    };
-    *refusal = text;
-}
-
-fn typing_notice(
-    error: Option<&SharedString>,
-    refusal: Option<Text>,
-    strings: &Strings,
-) -> Option<SharedString> {
-    refusal
-        .map(|text| strings.get(text).into())
-        .or_else(|| error.cloned())
-}
-
 #[cfg(test)]
 mod tests {
     use gpui_kit::{
@@ -819,7 +751,7 @@ mod tests {
         WeakEntity, WindowOptions,
     };
 
-    use super::{Hide, Presence, TextView, Typing};
+    use super::{Presence, TextView};
     use crate::presence::threads::ThreadsPanel;
     use crate::strings::Strings;
 
@@ -1043,76 +975,6 @@ mod tests {
             .expect("live typing window");
     }
 
-    #[test]
-    fn blank_enter_preserves_the_retained_notice_until_a_turn_is_sent() {
-        let strings = crate::strings::Strings::english();
-        let mut error = Some(gpui_kit::SharedString::from(
-            "Couldn't save that setting. Try again.",
-        ));
-        let mut refusal = None;
-        super::submission_notice(&mut error, &mut refusal, Err(crate::runs::Refused::Blank));
-        assert_eq!(
-            super::typing_notice(error.as_ref(), refusal, &strings).as_deref(),
-            Some("Couldn't save that setting. Try again.")
-        );
-        assert_eq!(refusal, None);
-        super::submission_notice(&mut error, &mut refusal, Ok(()));
-        assert_eq!(error, None);
-        assert_eq!(refusal, None);
-    }
-
-    #[test]
-    fn a_local_refusal_preserves_the_dock_facing_brain_error() {
-        let strings = crate::strings::Strings::english();
-        let mut error = Some(gpui_kit::SharedString::from(
-            "Your settings file can't be read, so changes aren't saved. Repair or delete config.toml, then restart.",
-        ));
-        let mut refusal = None;
-        for (result, expected) in [
-            (
-                crate::runs::Refused::Offline,
-                "Not sent: the background process isn't connected.",
-            ),
-            (
-                crate::runs::Refused::TooLong,
-                "That message is too long to send.",
-            ),
-        ] {
-            super::submission_notice(&mut error, &mut refusal, Err(result));
-            assert_eq!(
-                error.as_deref(),
-                Some(
-                    "Your settings file can't be read, so changes aren't saved. Repair or delete config.toml, then restart."
-                )
-            );
-            assert_eq!(
-                super::typing_notice(error.as_ref(), refusal, &strings).as_deref(),
-                Some(expected)
-            );
-        }
-        super::submission_notice(&mut error, &mut refusal, Ok(()));
-        assert_eq!(error, None);
-        assert_eq!(refusal, None);
-    }
-
-    #[test]
-    fn a_pre_settings_refusal_never_becomes_a_dock_or_tasks_error() {
-        let strings = crate::strings::Strings::english();
-        let mut runs = crate::runs::Runs::default();
-        runs.connected(1);
-        let result = runs.submit("typed", |_| panic!("not ready"));
-        assert_eq!(result, Err(crate::runs::Refused::Offline));
-        let mut error = None;
-        let mut refusal = None;
-        super::submission_notice(&mut error, &mut refusal, result);
-        assert_eq!(error, None);
-        assert_eq!(refusal, Some(crate::strings::Text::TurnOffline));
-        assert_eq!(
-            super::typing_notice(error.as_ref(), refusal, &strings).as_deref(),
-            Some("Not sent: the background process isn't connected.")
-        );
-    }
-
     /// The headless presence with its chat open on task 3, as a double tap leaves it.
     fn chat_on_a_task(cx: &mut TestAppContext) -> (Entity<Presence>, AnyWindowHandle) {
         use kumochi_protocol::message::ThreadId;
@@ -1128,11 +990,20 @@ mod tests {
         cx.run_until_parked();
         (owner, window)
     }
-
     #[gpui::test]
     fn tasks_in_the_chat_header_swaps_the_chat_for_the_task_list(cx: &mut TestAppContext) {
         let _area = crate::platform::work_area_fixture::set([0, 0, 2560, 1400]);
         let (owner, window) = chat_on_a_task(cx);
+        owner.update(cx, |owner, cx| {
+            let panel = owner.text.as_ref().expect("typing fixture");
+            window
+                .update(cx, |_, window, cx| {
+                    panel.input.update(cx, |input, cx| {
+                        input.set_value("unsent draft", window, cx);
+                    });
+                })
+                .expect("typing window");
+        });
         {
             let mut frame = VisualTestContext::from_window(window, cx);
             let bounds = frame
@@ -1149,8 +1020,21 @@ mod tests {
             assert!(!owner.text_open(), "the chat is hidden");
             assert_eq!(owner.chat.read(cx).open, None);
         });
+        owner.update(cx, |owner, cx| {
+            owner.open_text(cx).expect("reopen chat");
+            assert_eq!(
+                owner
+                    .text
+                    .as_ref()
+                    .expect("typing fixture")
+                    .input
+                    .read(cx)
+                    .value()
+                    .as_ref(),
+                "unsent draft"
+            );
+        });
     }
-
     #[gpui::test]
     fn a_chat_that_failed_to_hide_keeps_its_task_and_esc_still_closes_it(cx: &mut TestAppContext) {
         let _area = crate::platform::work_area_fixture::set([0, 0, 2560, 1400]);
@@ -1170,21 +1054,5 @@ mod tests {
             assert!(!owner.text_open(), "Esc hid the chat");
             assert_eq!(owner.chat.read(cx).open, None);
         });
-    }
-
-    #[test]
-    fn reopening_active_input_keeps_blur_dismissal() {
-        let mut typing = Typing::default();
-        typing.open();
-        typing.activated();
-        typing.open();
-        assert!(typing.close(Hide::Deactivated));
-        assert!(!typing.visible);
-        typing.open();
-        assert!(!typing.close(Hide::Deactivated));
-        assert!(typing.visible);
-        assert!(typing.close(Hide::Dismiss));
-        typing.activated();
-        assert!(!typing.close(Hide::Deactivated));
     }
 }

@@ -85,15 +85,18 @@ The panel is created hidden at startup, so the first click doesn't create a wind
 The same panel is hidden and reused, never recreated for each click. The typing panel is the
 one exception to never activating: it's a tool window without no-activate, created on the first
 double tap, activated only explicitly, and hidden rather than closed. While it's open, pointer
-events and dock clicks leave it alone and the status panel stays hidden. `presence/text.rs`
-owns its lifetime and retains a GPUI `observe_window_activation` subscription. A previously
-active, visible typing surface hides on deactivation, preserving its `InputState` and dropping
+events and dock clicks leave it alone and the status panel stays hidden. Shell Core's
+`presence::typing` decides visibility, typed-submit admission and notice precedence.
+The shell's `presence/text.rs` owns the window, retained draft and GPUI activation subscription.
+A previously active, visible typing surface hides on deactivation, preserving its `InputState` and dropping
 the saved foreground without restoring it. Reopening an already visible surface preserves its
 activation latch; only a hidden-to-visible transition resets it. Initial inactive notifications
 leave an unactivated box clickable, and hiding clears the latch before Esc restores focus.
 GPUI's activation state is queued, not a current native foreground query: rapid away/back
 within one queued activation can still hide a now-active box. Revisit that limit if reproduced.
 Esc and explicit dismiss keep their existing conditional foreground restoration.
+Only a sent turn clears the draft. A local submission refusal takes precedence in the typing
+panel without replacing an error shown on the dock or in Tasks. Notice strings stay in the catalog.
 Neither surface uses GPUI's normal title bar. Native creation, styles, placement and lifetime
 live under `platform/windows`; Rust view code handles no raw window pointers.
 

@@ -5,7 +5,7 @@ mod tests;
 
 use std::rc::Rc;
 
-use super::{Context, OpenError, Presence, TextView, submission_notice};
+use super::{Context, OpenError, Presence, Submission, TextView};
 use crate::chat_notice::{Notice, Route, Source};
 use crate::runs::Refused;
 use crate::strings::{Strings, Text};
@@ -89,7 +89,7 @@ impl Presence {
                     })
                 };
                 let previous = (self.error.clone(), self.refusal);
-                submission_notice(&mut self.error, &mut self.refusal, result);
+                Submission::from(result).update_notice(&mut self.error, &mut self.refusal);
                 if result.is_ok() {
                     self.chat_notice.clear();
                 }
