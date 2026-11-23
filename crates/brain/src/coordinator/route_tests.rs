@@ -603,6 +603,7 @@ pub(crate) fn pictured_claude_run(
 }
 
 impl Coordinator {
+    #[cfg(windows)]
     pub(crate) fn picture_lost_for_test(&self, run: RunId) -> bool {
         self.current
             .as_ref()

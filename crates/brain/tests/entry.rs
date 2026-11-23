@@ -2,6 +2,10 @@
 #![cfg(not(windows))]
 
 #[path = "../../../tests/support/scratch.rs"]
+#[expect(
+    clippy::print_stderr,
+    reason = "the shared fixture reports cleanup failures during unwind"
+)]
 mod scratch;
 
 use std::process::Command;
@@ -25,6 +29,10 @@ fn native_executable_modes_refuse_without_touching_app_data() {
         &[DRAW_CHECK_ARG],
         &[CATALOG_PROVENANCE_ARG],
     ] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this non-Windows test checks the real executable without inheritable Windows handles"
+        )]
         let child = Command::new(env!("CARGO_BIN_EXE_kumochid"))
             .args(args)
             .env_clear()
