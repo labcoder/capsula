@@ -1,4 +1,4 @@
-//! The brain's own layout of every visible scene, laid out with the wide measure, so a step's
+//! The brain's own layout of every visible scene, measured for the current pair, so a step's
 //! paint work is counted before its write. A step is prepared off the coordinator thread while
 //! its admission seals the reducer, as a write does.
 
@@ -8,11 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kumochi_protocol::message::SceneId;
-use kumochi_scene::display::{PaintWork, WideMeasure};
+use kumochi_scene::display::{PaintWork, ProfileMeasure, TextMetricsV1};
 use kumochi_scene::layout::{
-    DEFAULT_CANVAS, LayoutState, PrepareError, PrepareInput, SurfaceGeometry, prepare,
+    DEFAULT_CANVAS, LayoutState, PrepareError, PrepareInput, SurfaceGeometry, prepare, recover,
 };
-use kumochi_scene::{ErrorCode, FieldPath, SceneState, StepError};
+use kumochi_scene::theme::Theme;
+use kumochi_scene::{Begin, ErrorCode, FieldPath, SceneEvent, SceneState, StepError};
 
 use super::{CallError, Drawing, Input, Output, Pend, Pending, StepWait, Wait, Write};
 use crate::coordinator::{Effect, Stale};
@@ -110,66 +111,90 @@ impl Paint {
 }
 
 impl Drawing {
-    /// Lays an admitted step out before its write, sealing the reducer as a write does. A step
-    /// of a scene whose work isn't counted is written at once.
+    /// Lays an admitted step out before its write, sealing the reducer as a write does.
     pub(super) fn prepare_step(&mut self, step: StepWait, write: Write, out: &mut Output) {
-        let ticket = match &step.scene {
-            Pend::Held { scene, admitted } => self.live(*scene).and_then(|at| {
-                let held = &self.scenes[at];
-                let paint = held.paint.as_ref()?;
-                Some((held.state.preview(admitted).ok()?, paint.latest().clone()))
-            }),
-            Pend::New { admission, .. } => Some(admission.preview()),
-        };
-        let input = ticket.and_then(|(ticket, before)| {
-            PrepareInput::new(ticket, before, SURFACE, Arc::clone(&self.theme)).ok()
-        });
-        let Some(input) = input else {
+        let input = self.step_input(&step);
+        if self.paint_metrics.is_none() && !matches!(input, Ok(Some(_))) {
             self.write(Wait::Step(Box::new(step)), write, out);
             return;
-        };
+        }
         self.serial += 1;
         let cancel = Arc::new(AtomicBool::new(false));
-        let job = PrepareJob {
-            serial: self.serial,
-            input: Shared(Arc::new(Mutex::new(Some(
-                input.with_paint_cap(Some(PaintWork::LIMITS)),
-            )))),
-            cancel: Arc::clone(&cancel),
-        };
-        #[cfg(test)]
-        let job = if self.defer_preparation {
-            job
-        } else {
-            let (serial, outcome) = (job.serial, job.outcome());
-            self.pending = Some(Pending {
-                serial,
-                in_flight: true,
-                wait: Wait::Prepare {
-                    step: Box::new(step),
-                    write,
-                    cancel,
-                },
-            });
-            self.prepared(serial, outcome, out)
-                .expect("the step just laid out is the pending one");
-            return;
-        };
-        out.effects.push(Effect::PrepareDrawing(job));
         self.pending = Some(Pending {
             serial: self.serial,
             in_flight: true,
             wait: Wait::Prepare {
                 step: Box::new(step),
                 write,
-                cancel,
+                cancel: Arc::clone(&cancel),
             },
         });
+        let input = match input {
+            Ok(Some(input)) => input,
+            failed => {
+                let error = failed.err().unwrap_or(PrepareError::Stale);
+                self.prepared(self.serial, error.into(), out)
+                    .expect("the step with rejected input is the pending one");
+                return;
+            }
+        };
+        let job = PrepareJob {
+            serial: self.serial,
+            input: Shared(Arc::new(Mutex::new(Some(input)))),
+            cancel,
+            metrics: self.paint_metrics,
+        };
+        #[cfg(test)]
+        if !self.defer_preparation {
+            self.prepared(job.serial, job.outcome(), out)
+                .expect("the step just laid out is the pending one");
+            return;
+        }
+        out.effects.push(Effect::PrepareDrawing(job));
+    }
+
+    fn step_input(&self, step: &StepWait) -> Result<Option<StepInput>, PrepareError> {
+        let (ticket, before) = match &step.scene {
+            Pend::Held { scene, admitted } => {
+                let at = self.live(*scene).ok_or(PrepareError::Stale)?;
+                let held = &self.scenes[at];
+                let Some(paint) = &held.paint else {
+                    if self.paint_metrics.is_none() {
+                        return Ok(None);
+                    }
+                    let prefix = held.state.recovery_log();
+                    let revision = held.state.revision() + 1;
+                    let mut log = Vec::with_capacity(prefix.len() + 1);
+                    log.extend_from_slice(prefix);
+                    log.push(SceneEvent::Step {
+                        revision,
+                        step: Arc::clone(&step.step),
+                    });
+                    return Ok(Some(StepInput::Replay {
+                        header: held.state.header().clone(),
+                        log,
+                        theme: Arc::clone(&self.theme),
+                        revision,
+                    }));
+                };
+                let ticket = held
+                    .state
+                    .preview(admitted)
+                    .map_err(|_| PrepareError::Stale)?;
+                (ticket, paint.latest().clone())
+            }
+            Pend::New { admission, .. } => admission.preview(),
+        };
+        let input = PrepareInput::new(ticket, before, SURFACE, Arc::clone(&self.theme))
+            .map_err(|(error, _)| error)?;
+        Ok(Some(StepInput::Live(
+            input.with_paint_cap(Some(PaintWork::LIMITS)),
+        )))
     }
 
     /// A step was laid out: it's written if everything the shell may then paint fits, and
-    /// refused before anything is written if not. Any other failure, or a layout past
-    /// [`MAX_RETAINED_BYTES`], writes it uncounted, and its scene stays uncounted.
+    /// refused before anything is written if not. A negotiated measure also requires successful
+    /// geometry validation even when the scene has no retained paint charge.
     pub(super) fn prepared(
         &mut self,
         serial: u64,
@@ -208,13 +233,38 @@ impl Drawing {
             self.fail(at, CallError::Step(error), out);
             return Ok(());
         }
+        let outcome = match outcome {
+            Prepared::Refused(StepError {
+                code: ErrorCode::OutOfRange,
+                ..
+            }) if self.paint_metrics.is_some() => Prepared::Geometry,
+            outcome => outcome,
+        };
         step.laid = match outcome {
             Prepared::Layout { layout, bytes } => Some((Arc::unwrap_or_clone(layout.0), bytes)),
-            Prepared::Refused(error) if self.calls[at].picture.is_some() => {
+            Prepared::Geometry => {
+                self.fail(
+                    at,
+                    CallError::Step(StepError {
+                        step: Some(step.step.id.clone()),
+                        path: FieldPath::default(),
+                        code: ErrorCode::OutOfRange,
+                    }),
+                    out,
+                );
+                return Ok(());
+            }
+            Prepared::Refused(error)
+                if self.paint_metrics.is_some() || self.calls[at].picture.is_some() =>
+            {
                 self.fail(at, CallError::Step(error), out);
                 return Ok(());
             }
-            Prepared::Failed | Prepared::Refused(_) => None,
+            Prepared::Failed if self.paint_metrics.is_some() => {
+                self.end(at, Some(CallError::Failed), out);
+                return Ok(());
+            }
+            Prepared::VerifiedUncounted | Prepared::Failed | Prepared::Refused(_) => None,
             Prepared::TooMuch => {
                 self.end(at, Some(CallError::TooMuchToPaint { cleared: false }), out);
                 return Ok(());
@@ -287,17 +337,32 @@ impl Drawing {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the job shares the input by pointer, so boxing would add a second allocation"
+)]
+pub(super) enum StepInput {
+    Live(PrepareInput),
+    Replay {
+        header: Begin,
+        log: Vec<SceneEvent>,
+        theme: Arc<Theme>,
+        revision: u32,
+    },
+}
+
 /// A step to lay out, and the flag that cancels it.
 #[derive(Clone)]
 pub struct PrepareJob {
     pub(super) serial: u64,
     /// Taken by the first copy that runs.
-    pub(super) input: Shared<Mutex<Option<PrepareInput>>>,
+    pub(super) input: Shared<Mutex<Option<StepInput>>>,
     pub(super) cancel: Arc<AtomicBool>,
+    metrics: Option<TextMetricsV1>,
 }
 
 impl PrepareJob {
-    /// The answer when the job can't run at all: the step is written uncounted.
+    /// The answer when the job can't start.
     pub fn unprepared(&self) -> Input {
         Input::Prepared {
             serial: self.serial,
@@ -305,7 +370,7 @@ impl PrepareJob {
         }
     }
 
-    /// Lays the step out with the wide measure, for the drawing system's answer.
+    /// Lays the step out with the pair's measure, for the drawing system's answer.
     pub fn run(self) -> Input {
         Input::Prepared {
             serial: self.serial,
@@ -314,17 +379,58 @@ impl PrepareJob {
     }
 
     fn outcome(&self) -> Prepared {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Prepared::Cancelled;
+        }
         let input = self.input.0.lock().ok().and_then(|mut input| input.take());
-        match input.map(|input| prepare(input, &mut WideMeasure, &self.cancel)) {
-            Some(Ok(step)) => Prepared::Layout {
-                bytes: step.after.resident_bytes(),
-                layout: Shared(Arc::new(step.after)),
+        let mut measure = ProfileMeasure::new(self.metrics);
+        let (result, failed_prefix) = match input {
+            Some(StepInput::Live(input)) => (
+                prepare(input, &mut measure, &self.cancel).map(|step| Some(step.after)),
+                false,
+            ),
+            Some(StepInput::Replay {
+                header,
+                log,
+                theme,
+                revision,
+            }) => {
+                let result = recover(
+                    header,
+                    &log,
+                    SURFACE,
+                    &theme,
+                    &mut measure,
+                    &self.cancel,
+                    Some(PaintWork::LIMITS),
+                );
+                let failed_prefix = result
+                    .as_ref()
+                    .is_err_and(|error| error.revision != revision);
+                (
+                    result.map(|_| None).map_err(|error| error.error),
+                    failed_prefix,
+                )
+            }
+            None => return Prepared::Failed,
+        };
+        if measure.geometry_exceeded() {
+            return Prepared::Geometry;
+        }
+        match result {
+            Ok(Some(after)) => Prepared::Layout {
+                bytes: after.resident_bytes(),
+                layout: Shared(Arc::new(after)),
             },
-            Some(Err(PrepareError::OverPaintWork)) => Prepared::TooMuch,
-            Some(Err(PrepareError::Cancelled)) => Prepared::Cancelled,
-            Some(Err(PrepareError::Layout(error))) => Prepared::Refused(error),
-            // Another copy ran it, or it failed for something other than paint work.
-            None | Some(Err(_)) => Prepared::Failed,
+            Ok(None) => Prepared::VerifiedUncounted,
+            Err(error) => match Prepared::from(error) {
+                Prepared::Refused(error)
+                    if failed_prefix && error.code != ErrorCode::OutOfRange =>
+                {
+                    Prepared::Failed
+                }
+                outcome => outcome,
+            },
         }
     }
 }
@@ -353,15 +459,29 @@ pub enum Prepared {
         /// Its resident bytes, counted off the coordinator thread.
         bytes: usize,
     },
+    /// Detached replay verified the geometry, but yields no live layout or paint charge.
+    VerifiedUncounted,
     /// The scene alone paints more than the shell can.
     TooMuch,
+    /// A negotiated measurement or its derived layout exceeded a geometry bound.
+    Geometry,
     /// The reducer cancelled it.
     Cancelled,
-    /// The step's own geometry can't be laid out: refused in a screen scene, whose model can
-    /// correct it, and written uncounted in any other, as a failure is.
+    /// Layout refused the step. Screen scenes and negotiated pairs reject it before writing.
     Refused(StepError),
-    /// Any other failure: the scene's work is no longer counted, and the shell's guard checks it.
+    /// Validation could not finish. Without negotiated metrics the shell's guard checks the step.
     Failed,
+}
+
+impl From<PrepareError> for Prepared {
+    fn from(error: PrepareError) -> Self {
+        match error {
+            PrepareError::OverPaintWork => Self::TooMuch,
+            PrepareError::Cancelled => Self::Cancelled,
+            PrepareError::Layout(error) => Self::Refused(error),
+            _ => Self::Failed,
+        }
+    }
 }
 
 /// A value handed between threads whole; equal only to itself, and printed without content.

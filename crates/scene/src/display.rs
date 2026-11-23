@@ -7,8 +7,10 @@ use crate::{
 };
 use std::{fmt, sync::Arc};
 
+mod metrics;
 mod wide;
-pub use wide::WideMeasure;
+pub use metrics::TextMetricsV1;
+pub use wide::{ProfileMeasure, WideMeasure};
 
 /// Text shaping parameters shared with painting.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -2,21 +2,61 @@
 
 use std::sync::Arc;
 
-use gpui_kit::{Font, FontWeight, SharedString, TextRun, TextSystem, WindowTextSystem, px};
+use gpui_kit::{
+    Font, FontId, FontWeight, PlatformTextSystem, SharedString, TextRun, TextSystem,
+    WindowTextSystem, px,
+};
 use kumochi_scene::display::{MeasureError, TextMeasure, TextStyle};
 use kumochi_scene::limits::MAX_COORD;
 
 pub(crate) struct Measure {
     text: WindowTextSystem,
     family: SharedString,
+    backend: Option<Arc<dyn PlatformTextSystem>>,
+    faces: [Option<FontId>; 2],
 }
 
 impl Measure {
+    #[cfg(test)]
     pub(crate) fn new(text: Arc<TextSystem>, family: SharedString) -> Self {
+        Self::with_backend(text, family, None)
+    }
+
+    pub(crate) fn with_backend(
+        text: Arc<TextSystem>,
+        family: SharedString,
+        backend: Option<Arc<dyn PlatformTextSystem>>,
+    ) -> Self {
         Self {
             text: WindowTextSystem::new(text),
             family,
+            backend,
+            faces: [None; 2],
         }
+    }
+}
+
+pub(crate) fn drawing_font(family: SharedString, weight: FontWeight) -> Font {
+    Font {
+        family,
+        weight,
+        ..Font::default()
+    }
+}
+
+pub(crate) fn resolve_font(
+    text: &TextSystem,
+    backend: Option<&dyn PlatformTextSystem>,
+    font: &Font,
+) -> Result<FontId, MeasureError> {
+    if let Some(backend) = backend {
+        let exact = backend.font_id(font).map_err(|_| MeasureError)?;
+        // GPUI's convenience resolver can keep a cached substitution for a now-available face.
+        (text.resolve_font(font) == exact)
+            .then_some(exact)
+            .ok_or(MeasureError)
+    } else {
+        Ok(text.resolve_font(font))
     }
 }
 
@@ -35,17 +75,20 @@ impl TextMeasure for Measure {
         {
             return Err(MeasureError);
         }
-        let font = Font {
-            family: self.family.clone(),
-            weight: if style.bold {
-                FontWeight::BOLD
-            } else {
-                FontWeight::NORMAL
-            },
-            ..Font::default()
+        let weight = if style.bold {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
         };
-        // shortcut: no resolvable host font aborts the shell; revisit if drawings name fonts or GPUI gains fallible resolve.
-        let font_id = self.text.resolve_font(&font);
+        let font = drawing_font(self.family.clone(), weight);
+        let face = &mut self.faces[usize::from(style.bold)];
+        let font_id = if let Some(id) = *face {
+            id
+        } else {
+            let id = resolve_font(&self.text, self.backend.as_deref(), &font)?;
+            *face = Some(id);
+            id
+        };
         let size = px(style.size);
         let height = f32::from(self.text.ascent(font_id, size)).abs()
             + f32::from(self.text.descent(font_id, size)).abs();

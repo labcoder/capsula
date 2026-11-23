@@ -1,7 +1,6 @@
-//! The brain's text measure: never smaller than a shell's, so the paint work counted at
-//! admission is at least what the shell's layout paints.
+//! The brain's text estimate for drawing admission, independent of the shell's font backend.
 
-use super::{MeasureError, TextMeasure, TextStyle};
+use super::{MeasureError, TextMeasure, TextMetricsV1, TextStyle};
 use crate::limits::MAX_COORD;
 
 /// Line height in ems. The shell's Segoe UI is 1.33.
@@ -26,8 +25,7 @@ const LINE: f32 = 1.5;
 /// Historic draws some at up to 4.6 em), breaks hidden inside one glyph (a ligature or an emoji
 /// sequence) and a character drawn as several glyphs (the split vowels of Tamil, Malayalam or
 /// Bengali, which give the shell a break inside it) can still under-count, and the shell's guard refuses that scene after the call
-/// ended. Widen the tables, or have the shell send its own advances, when the shell conformance
-/// test or a guard trip finds one.
+/// ended. A negotiated profile replaces these fallback numbers, not the shell's guard.
 ///
 /// shortcut: dashes stay outside this bound, because a dashed edge's length follows the layout
 /// rather than growing with it: a scene within a few dozen pieces of the dash limit whose dashed
@@ -43,36 +41,91 @@ impl TextMeasure for WideMeasure {
         style: TextStyle,
         max_width: Option<f32>,
     ) -> Result<[f32; 2], MeasureError> {
-        if !style.size.is_finite()
-            || style.size <= 0.0
-            || style.size > MAX_COORD
-            || max_width
-                .is_some_and(|width| !width.is_finite() || width <= 0.0 || width > MAX_COORD)
-        {
-            return Err(MeasureError);
+        let size = dimensions(text, style, max_width, LINE, |ch| advance(ch, None))?;
+        within_geometry(size).then_some(size).ok_or(MeasureError)
+    }
+}
+
+/// An admission measure frozen to one validated connection profile, or the built-in table.
+#[derive(Debug)]
+pub struct ProfileMeasure {
+    profile: Option<TextMetricsV1>,
+    exceeded: bool,
+}
+
+impl ProfileMeasure {
+    /// A missing or invalid profile uses the built-in table in its entirety.
+    pub fn new(profile: Option<TextMetricsV1>) -> Self {
+        Self {
+            profile: profile.filter(TextMetricsV1::valid),
+            exceeded: false,
         }
-        let limit = max_width.map_or(f32::INFINITY, |width| width / style.size);
-        let mut width = 0.0_f32;
-        let mut lines = 0.0_f32;
-        for line in text.split('\n') {
-            let (full, breaks) = wrap(line, limit);
-            width = width.max(full.min(limit));
-            lines += breaks + 1.0;
-        }
-        let measured = [width * style.size, lines * LINE * style.size];
-        if measured
-            .iter()
-            .all(|value| value.is_finite() && (0.0..=MAX_COORD).contains(value))
-        {
-            Ok(measured)
+    }
+
+    /// Whether a valid negotiated profile measured text beyond the scene geometry cap.
+    pub fn geometry_exceeded(&self) -> bool {
+        self.exceeded
+    }
+}
+
+impl TextMeasure for ProfileMeasure {
+    fn measure(
+        &mut self,
+        text: &str,
+        style: TextStyle,
+        max_width: Option<f32>,
+    ) -> Result<[f32; 2], MeasureError> {
+        let Some(profile) = self.profile.as_ref() else {
+            return WideMeasure.measure(text, style, max_width);
+        };
+        let size = dimensions(text, style, max_width, em(profile.line_height), |ch| {
+            advance(ch, Some(profile))
+        })?;
+        if within_geometry(size) {
+            Ok(size)
         } else {
+            self.exceeded = true;
             Err(MeasureError)
         }
     }
 }
 
+fn em(units: u16) -> f32 {
+    f32::from(units) / 1024.0
+}
+
+fn within_geometry(size: [f32; 2]) -> bool {
+    size.into_iter()
+        .all(|value| (0.0..=MAX_COORD).contains(&value))
+}
+
+fn dimensions(
+    text: &str,
+    style: TextStyle,
+    max_width: Option<f32>,
+    line_height: f32,
+    advance: impl Fn(char) -> f32,
+) -> Result<[f32; 2], MeasureError> {
+    if !style.size.is_finite()
+        || style.size <= 0.0
+        || style.size > MAX_COORD
+        || max_width.is_some_and(|width| !width.is_finite() || width <= 0.0 || width > MAX_COORD)
+    {
+        return Err(MeasureError);
+    }
+    let limit = max_width.map_or(f32::INFINITY, |width| width / style.size);
+    let mut width = 0.0_f32;
+    let mut lines = 0.0_f32;
+    for line in text.split('\n') {
+        let (full, breaks) = wrap(line, limit, &advance);
+        width = width.max(full.min(limit));
+        lines += breaks + 1.0;
+    }
+    Ok([width * style.size, lines * line_height * style.size])
+}
+
 /// One line's unwrapped width in ems, and how many breaks the rule makes in it at `limit` ems.
-fn wrap(line: &str, limit: f32) -> (f32, f32) {
+fn wrap(line: &str, limit: f32, advance: &impl Fn(char) -> f32) -> (f32, f32) {
     let mut x = 0.0_f32;
     let mut start = (0, 0.0_f32);
     let mut candidate = None;
@@ -85,9 +138,10 @@ fn wrap(line: &str, limit: f32) -> (f32, f32) {
             candidate = Some((index, x));
         }
         text |= ch != ' ';
-        x += advance(ch);
+        let width = advance(ch);
+        x += width;
         if x - start.1 > limit && index > start.0 {
-            start = candidate.take().unwrap_or((index, x - advance(ch)));
+            start = candidate.take().unwrap_or((index, x - width));
             breaks += 1.0;
         }
         previous = ch;
@@ -141,9 +195,7 @@ fn word(ch: char) -> bool {
 /// advance plus a tenth, rounded up to a hundredth, at most 1 em unless Segoe UI's own is wider
 /// (bold `W` is 1.005 em).
 ///
-/// shortcut: Latin advances are Segoe UI's plus a tenth, so a UI font up to a tenth wider still
-/// fits; a platform whose UI font is wider must add its advances here, and the shell conformance
-/// test fails there first.
+/// These are the fallback advances when the shell doesn't supply a valid profile.
 const ASCII: [f32; 95] = [
     0.31, 0.36, 0.55, 0.66, 0.64, 0.96, 0.94, 0.33, 0.41, 0.41, 0.51, 0.78, 0.30, 0.45, 0.30, 0.49,
     0.64, 0.64, 0.64, 0.64, 0.64, 0.64, 0.64, 0.64, 0.64, 0.64, 0.30, 0.30, 0.78, 0.78, 0.78, 0.50,
@@ -157,16 +209,19 @@ const ASCII: [f32; 95] = [
 /// ideographs, kana, hangul and full-width forms at most 1, the rest of the Basic Multilingual
 /// Plane at most 1.5, and the few wider characters, private use and everything past the plane at
 /// most 2.
-fn advance(ch: char) -> f32 {
-    match ch {
-        ' '..='~' => ASCII[usize::from(u8::try_from(ch).expect("printable ASCII") - b' ')],
+fn advance(ch: char, profile: Option<&TextMetricsV1>) -> f32 {
+    let (range, built_in) = match ch {
+        ' '..='~' => {
+            let index = usize::from(u8::try_from(ch).expect("printable ASCII") - b' ');
+            return profile.map_or(ASCII[index], |profile| em(profile.advances[index]));
+        }
         '\u{1100}'..='\u{11FF}'
         | '\u{3040}'..='\u{30FF}'
         | '\u{3130}'..='\u{318F}'
         | '\u{4E00}'..='\u{9FFF}'
         | '\u{AC00}'..='\u{D7AF}'
         | '\u{F900}'..='\u{FAFF}'
-        | '\u{FF00}'..='\u{FFEF}' => 1.0,
+        | '\u{FF00}'..='\u{FFEF}' => (0, 1.0),
         '\0'..='\u{1F}'
         | '\u{7F}'
         | '\u{0603}'..='\u{0604}'
@@ -178,9 +233,10 @@ fn advance(ch: char) -> f32 {
         | '\u{E000}'..='\u{F8FF}'
         | '\u{FDF4}'
         | '\u{FDFC}'
-        | '\u{10000}'.. => 2.0,
-        _ => 1.5,
-    }
+        | '\u{10000}'.. => (2, 2.0),
+        _ => (1, 1.5),
+    };
+    profile.map_or(built_in, |profile| em(profile.range_maxima[range]))
 }
 
 #[cfg(test)]
@@ -219,6 +275,57 @@ mod tests {
         assert_eq!(measure("WW", None), [20.2, 15.0]);
         assert_eq!(measure("\u{2019}\u{4E2D}\u{042E}", None), [40.0, 15.0]);
         assert_eq!(measure("\u{1F680} \u{2E3B}\t\u{E000}", None), [83.1, 15.0]);
+    }
+
+    #[test]
+    fn a_profile_changes_wrap_height_and_all_three_ranges() {
+        let mut custom = ProfileMeasure::new(Some(TextMetricsV1 {
+            advances: [2048; 95],
+            line_height: 2048,
+            range_maxima: [2048, 3072, 4096],
+        }));
+        let style = TextStyle {
+            size: 10.0,
+            bold: false,
+        };
+        assert_eq!(custom.measure("WW", style, Some(25.0)), Ok([25.0, 40.0]));
+        assert_eq!(measure("WW", Some(25.0)), [20.2, 15.0]);
+        assert_eq!(custom.measure("中Ω🚀", style, None), Ok([90.0, 20.0]));
+    }
+
+    #[test]
+    fn only_valid_negotiated_dimensions_can_signal_geometry_overflow() {
+        let metrics = TextMetricsV1 {
+            advances: [8192; 95],
+            line_height: 4096,
+            range_maxima: [8192; 3],
+        };
+        let mut custom = ProfileMeasure::new(Some(metrics));
+        let style = TextStyle {
+            size: 10.0,
+            bold: true,
+        };
+        assert_eq!(
+            custom.measure(&"W".repeat(250), style, None),
+            Ok([MAX_COORD, 40.0])
+        );
+        assert!(!custom.geometry_exceeded());
+        assert_eq!(
+            custom.measure(&"W".repeat(251), style, None),
+            Err(MeasureError)
+        );
+        assert!(custom.geometry_exceeded());
+
+        let mut invalid = metrics;
+        invalid.advances[0] = 8193;
+        for profile in [None, Some(invalid)] {
+            let mut measure = ProfileMeasure::new(profile);
+            assert_eq!(
+                measure.measure("WW", style, None),
+                WideMeasure.measure("WW", style, None)
+            );
+            assert!(!measure.geometry_exceeded());
+        }
     }
 
     #[test]

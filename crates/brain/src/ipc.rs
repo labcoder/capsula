@@ -11,8 +11,10 @@ use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::frame::{self, FrameError, HEADER_LEN, Pipe};
 use kumochi_protocol::message::{
     AudioSession, Capability, ControlToBrain, ControlToShell, DataToBrain, Hello, Incarnation,
+    IssueSession, TEXT_METRICS_MAX_BYTES,
 };
 use kumochi_protocol::tap::Direction;
+use kumochi_scene::display::TextMetricsV1;
 use serde::de::DeserializeOwned;
 use subtle::ConstantTimeEq as _;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
@@ -36,7 +38,7 @@ pub use audio_fixture::{
     offline_plain_peer, offline_speaking_hold_peer, offline_text_peer,
 };
 
-/// How long a connected client has to complete each step of the handshake.
+/// The budget for the control hello and, separately, the whole data handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the brain waits with no shell before exiting [guess]. A shell that gave up on it,
 /// or quit before it was up, leaves nobody to tell it to stop; the next shell starts another.
@@ -238,37 +240,21 @@ impl Pipes {
         };
         send(&mut self.control, &welcome, tap).await?;
 
-        let second_leg_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-        timeout_at(second_leg_deadline, self.data.connect())
-            .await
-            .map_err(|_| SessionError::Timeout)??;
-        check_client(&self.data, &identity.shell_image)?;
-        let first = timeout_at(
-            match audio {
-                AudioSession::Legacy => Instant::now() + HANDSHAKE_TIMEOUT,
-                AudioSession::QueuedRequired => second_leg_deadline,
+        let (process, text_metrics) = read_startup_data(
+            identity,
+            (audio == AudioSession::QueuedRequired).then_some(session),
+            tap,
+            async {
+                self.data.connect().await?;
+                check_client(&self.data, &identity.shell_image)?;
+                Ok(&mut self.data)
             },
-            read_sized::<DataToBrain>(&mut self.data, Pipe::Data),
+            |data| {
+                platform::shell_connection(&self.control, data, &identity.shell_image)
+                    .map_err(SessionError::from)
+            },
         )
-        .await
-        .map_err(|_| SessionError::Timeout)??;
-        let Some((first, len)) = first else {
-            return Err(SessionError::ClosedEarly);
-        };
-        tap.record(Pipe::Data, Direction::ToBrain, &first, len);
-        let (hello, paired) = match first {
-            DataToBrain::Hello(hello) => (hello, None),
-            DataToBrain::QueuedHello(hello, session) => (hello, Some(session)),
-            _ => return Err(SessionError::ClosedEarly),
-        };
-        if check_hello(&hello, identity) != Verdict::Welcome {
-            return Err(SessionError::WrongCapability);
-        }
-        let expected = (audio == AudioSession::QueuedRequired).then_some(session);
-        if paired != expected {
-            return Err(SessionError::Protocol("data hello does not match control"));
-        }
-        let process = platform::shell_connection(&self.control, &self.data, &identity.shell_image)?;
+        .await?;
         if audio == AudioSession::QueuedRequired {
             brain.install_issue_session(session);
         }
@@ -277,7 +263,7 @@ impl Pipes {
         tracing::info!("shell connected");
         Ok(
             match brain
-                .serve_with_audio(&mut self.control, &mut self.data, tap, audio)
+                .serve_with_profile(&mut self.control, &mut self.data, tap, audio, text_metrics)
                 .await
             {
                 Ended::Quit { deadline } => Session::Quit { deadline },
@@ -288,6 +274,40 @@ impl Pipes {
             },
         )
     }
+}
+
+async fn read_startup_data<R: AsyncRead + Unpin, P>(
+    identity: &Identity,
+    expected: Option<IssueSession>,
+    tap: &mut Tap,
+    connect: impl Future<Output = Result<R, SessionError>>,
+    check_connection: impl FnOnce(&R) -> Result<P, SessionError>,
+) -> Result<(P, Option<TextMetricsV1>), SessionError> {
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let mut data = timeout_at(deadline, connect)
+        .await
+        .map_err(|_| SessionError::Timeout)??;
+    let first = timeout_at(deadline, read_sized::<DataToBrain>(&mut data, Pipe::Data))
+        .await
+        .map_err(|_| SessionError::Timeout)??;
+    let Some((first, len)) = first else {
+        return Err(SessionError::ClosedEarly);
+    };
+    tap.record(Pipe::Data, Direction::ToBrain, &first, len);
+    let (hello, paired) = match first {
+        DataToBrain::Hello(hello) => (hello, None),
+        DataToBrain::QueuedHello(hello, session) => (hello, Some(session)),
+        _ => return Err(SessionError::ClosedEarly),
+    };
+    if check_hello(&hello, identity) != Verdict::Welcome {
+        return Err(SessionError::WrongCapability);
+    }
+    if paired != expected {
+        return Err(SessionError::Protocol("data hello does not match control"));
+    }
+    let process = check_connection(&data)?;
+    let text_metrics = read_text_metrics(&mut data, deadline).await?;
+    Ok((process, text_metrics))
 }
 
 /// Resolves when the relaunched shell has ended, or when the relaunch dropped its sender
@@ -350,6 +370,37 @@ pub(crate) async fn read_sized<T: DeserializeOwned>(
     pipe: &mut (impl AsyncRead + Unpin),
     kind: Pipe,
 ) -> Result<Option<(T, usize)>, FrameError> {
+    read_capped(pipe, kind.max_payload()).await
+}
+
+async fn read_text_metrics(
+    pipe: &mut (impl AsyncRead + Unpin),
+    deadline: Instant,
+) -> Result<Option<TextMetricsV1>, SessionError> {
+    if Instant::now() >= deadline {
+        return Err(SessionError::Timeout);
+    }
+    let metrics = match timeout_at(
+        deadline,
+        read_capped::<DataToBrain>(pipe, TEXT_METRICS_MAX_BYTES),
+    )
+    .await
+    .map_err(|_| SessionError::Timeout)??
+    {
+        Some((DataToBrain::TextMetrics(profile), _)) => profile.filter(TextMetricsV1::valid),
+        Some(_) => return Err(SessionError::Protocol("expected startup TextMetrics")),
+        None => return Err(SessionError::ClosedEarly),
+    };
+    if Instant::now() >= deadline {
+        return Err(SessionError::Timeout);
+    }
+    Ok(metrics)
+}
+
+async fn read_capped<T: DeserializeOwned>(
+    pipe: &mut (impl AsyncRead + Unpin),
+    max: usize,
+) -> Result<Option<(T, usize)>, FrameError> {
     let closed = |e: &io::Error| {
         matches!(
             e.kind(),
@@ -373,10 +424,18 @@ pub(crate) async fn read_sized<T: DeserializeOwned>(
     pipe.read_exact(&mut header[first..])
         .await
         .map_err(truncated)?;
-    let mut payload = vec![0; frame::payload_len(header, kind)?];
+    let len = usize::try_from(u32::from_le_bytes(header)).unwrap_or(usize::MAX);
+    if len > max {
+        return Err(FrameError::TooLarge { len, max });
+    }
+    let mut payload = vec![0; len];
     pipe.read_exact(&mut payload).await.map_err(truncated)?;
-    frame::decode(&payload).map(|message| Some((message, payload.len())))
+    frame::decode(&payload).map(|message| Some((message, len)))
 }
+
+#[cfg(test)]
+#[path = "ipc/text_metrics_tests.rs"]
+mod text_metrics_tests;
 
 #[cfg(test)]
 mod tests {
@@ -439,9 +498,41 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn paired_handshake_accepts_only_matching_authenticated_queued_legs() {
+    async fn register_queued_output(
+        control: &mut crate::platform::PipeClient,
+        session: IssueSession,
+    ) {
         use kumochi_protocol::message::{DraftId, IssueOp, OutputGeneration};
+        let output = OutputGeneration(1);
+        for message in [
+            ControlToBrain::Issue {
+                session,
+                request: 2,
+                op: Box::new(IssueOp::CancelReview {
+                    draft: DraftId(1),
+                    review: 1,
+                }),
+            },
+            ControlToBrain::QueuedAudioOutput(24_000, output, Narration::Plain),
+        ] {
+            control
+                .write_all(&frame::encode(&message, Pipe::Control).unwrap())
+                .await
+                .unwrap();
+        }
+        loop {
+            let message = super::read::<ControlToShell>(control, Pipe::Control)
+                .await
+                .unwrap()
+                .expect("the reserved issue session was accepted");
+            if message == ControlToShell::QueuedAudioRegistered(output) {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paired_handshake_accepts_only_matching_authenticated_legs() {
         let mut id = identity();
         id.shell_image = std::env::current_exe().unwrap();
         let scratch = Scratch::new("queued-hello-pair");
@@ -456,6 +547,7 @@ mod tests {
             (2, legacy, queued, 1),
             (3, queued, queued, 2),
             (4, queued, queued, 1),
+            (5, legacy, legacy, 1),
         ] {
             let (control, mut peer_control) =
                 crate::platform::test_pair(&format!("queued-hello-c-{index}"))
@@ -483,40 +575,24 @@ mod tests {
                     .write_all(&frame::encode(&message, Pipe::Data).unwrap())
                     .await
                     .unwrap();
-                if index == 0 {
+                if index == 0 || index == 5 {
+                    peer_data
+                        .write_all(
+                            &frame::encode(&DataToBrain::TextMetrics(None), Pipe::Data).unwrap(),
+                        )
+                        .await
+                        .unwrap();
                     assert!(matches!(
                         super::read::<ControlToShell>(&mut peer_control, Pipe::Control)
                             .await
                             .unwrap(),
                         Some(ControlToShell::Settings { .. })
                     ));
-                    let output = OutputGeneration(1);
-                    for message in [
-                        ControlToBrain::Issue {
-                            session: welcomed,
-                            request: 2,
-                            op: Box::new(IssueOp::CancelReview {
-                                draft: DraftId(1),
-                                review: 1,
-                            }),
-                        },
-                        ControlToBrain::QueuedAudioOutput(24_000, output, Narration::Plain),
-                    ] {
-                        peer_control
-                            .write_all(&frame::encode(&message, Pipe::Control).unwrap())
-                            .await
-                            .unwrap();
-                    }
-                    loop {
-                        let message =
-                            super::read::<ControlToShell>(&mut peer_control, Pipe::Control)
-                                .await
-                                .unwrap()
-                                .expect("the reserved issue session was accepted");
-                        if message == ControlToShell::QueuedAudioRegistered(output) {
-                            break;
-                        }
-                    }
+                }
+                if index == 0 {
+                    register_queued_output(&mut peer_control, welcomed).await;
+                }
+                if index == 0 || index == 5 {
                     peer_control
                         .write_all(
                             &frame::encode(&ControlToBrain::Quitting, Pipe::Control).unwrap(),
@@ -531,7 +607,7 @@ mod tests {
             .await
             .unwrap();
             match index {
-                0 => assert!(matches!(result, Ok(Session::Quit { .. }))),
+                0 | 5 => assert!(matches!(result, Ok(Session::Quit { .. }))),
                 3 => assert!(matches!(result, Err(SessionError::WrongCapability))),
                 _ => assert!(matches!(
                     result,
@@ -561,6 +637,13 @@ mod tests {
             data.write_all(&frame::encode(&message, Pipe::Data).unwrap())
                 .await
                 .unwrap();
+            if replay.is_none() {
+                data.write_all(
+                    &frame::encode(&DataToBrain::TextMetrics(None), Pipe::Data).unwrap(),
+                )
+                .await
+                .unwrap();
+            }
             (welcome, control, data)
         }
 
