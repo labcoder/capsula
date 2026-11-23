@@ -28,6 +28,8 @@ mod held;
 mod held_tests;
 #[cfg(test)]
 mod issue_scope_tests;
+#[cfg(all(test, target_os = "macos"))]
+mod macos_purge;
 mod pages;
 mod purge;
 #[cfg(test)]
@@ -308,6 +310,8 @@ pub struct Store {
     purge_pending: bool,
     /// False after a swap's reopen failed, until [`Store::reconnect`] opens the file again.
     serving: bool,
+    #[cfg(all(test, target_os = "macos"))]
+    mac_published: Option<macos_purge::ActiveSwap>,
     /// The page reader's and the checkpoint helper's connections.
     side: Arc<Side>,
 }
@@ -329,6 +333,8 @@ impl Store {
     /// Fails when the folder or file can't be created, the schema is newer than this build's,
     /// or SQLite fails.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
+        #[cfg(all(test, target_os = "macos"))]
+        let recovered = macos_purge::recover(path).map_err(StoreError::Purge)?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(StoreError::Folder)?;
         }
@@ -338,8 +344,16 @@ impl Store {
         if purge::missing(path) && !purge::missing(&purge::old(path)) {
             return Err(StoreError::Retired);
         }
+        #[cfg(all(test, target_os = "macos"))]
+        let mut conn = match recovered {
+            Some(active) => active.reopen(path)?,
+            None => connect(path, OpenFlags::SQLITE_OPEN_CREATE)?,
+        };
+        #[cfg(not(all(test, target_os = "macos")))]
         let mut conn = connect(path, OpenFlags::SQLITE_OPEN_CREATE)?;
         schema::migrate(&mut conn)?;
+        #[cfg(all(test, target_os = "macos"))]
+        macos_purge::seed_stamp(path, &mut conn)?;
         let purge_pending = owes(&conn)?;
         Ok(Self {
             conn,
@@ -347,6 +361,8 @@ impl Store {
             path: path.to_owned(),
             purge_pending,
             serving: true,
+            #[cfg(all(test, target_os = "macos"))]
+            mac_published: recovered,
             side: Arc::new(Side::new(path.to_owned())),
         })
     }
@@ -369,6 +385,12 @@ impl Store {
 
     /// Opens the file again, reading its owed purge, while the side connections are held.
     fn reopen(&mut self) -> Result<(), StoreError> {
+        #[cfg(all(test, target_os = "macos"))]
+        let conn = match self.mac_published {
+            Some(swap) => swap.reopen(&self.path)?,
+            None => connect(&self.path, OpenFlags::empty())?,
+        };
+        #[cfg(not(all(test, target_os = "macos")))]
         let conn = connect(&self.path, OpenFlags::empty())?;
         self.purge_pending = owes(&conn)?;
         self.conn = conn;

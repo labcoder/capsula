@@ -13,6 +13,9 @@ mod macos;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use macos::write_scratch_settings;
 
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use macos::{PurgeDirectory, PurgeIdentity, PurgeInode, RenameMode};
+
 /// No per-user runtime data root is configured on this platform.
 #[must_use]
 pub fn data_dir() -> Option<PathBuf> {
@@ -60,6 +63,16 @@ pub fn replace_file(_: &Path, _: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
+/// The unprivileged space in the admitted Mac test directory.
+/// # Errors
+/// Fails when the directory is outside the admitted root or its volume can't be queried.
+#[cfg(all(test, target_os = "macos"))]
+pub fn free_space(dir: &Path) -> io::Result<u64> {
+    PurgeDirectory::open(dir)?
+        .ok_or(io::ErrorKind::Unsupported)?
+        .free_space()
+}
+
 /// The bytes available to unprivileged writes on the filesystem containing a Linux test path.
 ///
 /// # Errors
@@ -76,7 +89,7 @@ pub fn free_space(dir: &Path) -> io::Result<u64> {
 ///
 /// # Errors
 /// Returns `Unsupported`; the caller must not assume there is room.
-#[cfg(not(all(test, target_os = "linux")))]
+#[cfg(not(all(test, any(target_os = "linux", target_os = "macos"))))]
 pub fn free_space(_: &Path) -> io::Result<u64> {
     Err(io::ErrorKind::Unsupported.into())
 }

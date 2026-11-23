@@ -18,15 +18,17 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension as _};
 
+#[cfg(all(test, target_os = "macos"))]
+use super::macos_purge;
 use super::{Side, Store, StoreError, checkpoint_now};
 use crate::platform;
 
 /// The snapshot, with the deleted rows' leftovers still in it.
-const SNAPSHOT: &str = ".purge-snapshot";
+pub(super) const SNAPSHOT: &str = ".purge-snapshot";
 /// The clean copy that replaces the store.
-const CLEAN: &str = ".purge-clean";
+pub(super) const CLEAN: &str = ".purge-clean";
 /// The replaced store, deleted rows' leftovers included, until it's removed. Never opened.
-const OLD: &str = ".purge-old";
+pub(super) const OLD: &str = ".purge-old";
 
 /// An owed purge, ready to copy the store on another thread.
 #[derive(Debug)]
@@ -43,7 +45,9 @@ pub struct Owed {
 /// A clean copy of the store, ready to swap in.
 #[derive(Debug)]
 pub struct Copied {
-    writes: u64,
+    pub(super) writes: u64,
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) macos: Option<macos_purge::CopiedMac>,
 }
 
 /// How a swap ended. Whichever way, the purge's files are left for [`Leftovers::remove`].
@@ -165,6 +169,10 @@ impl Pauses {
 #[derive(Clone, Debug)]
 pub struct Leftovers {
     db: PathBuf,
+    #[cfg(all(test, target_os = "macos"))]
+    active: Option<macos_purge::ActiveSwap>,
+    #[cfg(all(test, target_os = "macos"))]
+    unavailable: bool,
 }
 
 impl Store {
@@ -209,6 +217,12 @@ impl Store {
     pub fn leftovers(&self) -> Leftovers {
         Leftovers {
             db: self.path.clone(),
+            #[cfg(all(test, target_os = "macos"))]
+            active: self
+                .mac_published
+                .filter(macos_purge::ActiveSwap::published),
+            #[cfg(all(test, target_os = "macos"))]
+            unavailable: self.mac_published.is_some() && !self.serving,
         }
     }
 
@@ -221,6 +235,10 @@ impl Store {
     /// owed. Should the reopen fail, whichever file it was, the store is unavailable until
     /// [`Store::reconnect`] succeeds, and operations fail rather than write anywhere else.
     pub fn swap(&mut self, copied: &Copied) -> Result<Swap, StoreError> {
+        #[cfg(all(test, target_os = "macos"))]
+        if let Some(copied_mac) = &copied.macos {
+            return macos_purge::promote(self, copied.writes, copied_mac, None);
+        }
         self.swap_with(copied, |db, old| fs::hard_link(db, old))
     }
 
@@ -230,6 +248,10 @@ impl Store {
         copied: &Copied,
         link: impl FnOnce(&Path, &Path) -> io::Result<()>,
     ) -> Result<Swap, StoreError> {
+        #[cfg(all(test, target_os = "macos"))]
+        if let Some(copied_mac) = &copied.macos {
+            return macos_purge::promote(self, copied.writes, copied_mac, Some(Box::new(link)));
+        }
         if self.conn.total_changes() != copied.writes {
             return Ok(Swap::Stale);
         }
@@ -268,6 +290,10 @@ impl Store {
     /// where the reopened store's WAL goes. Removing the returned folder lets the file open again.
     #[cfg(test)]
     pub(crate) fn swap_failing_reopen(&mut self, copied: &Copied) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        if let Some(copied_mac) = &copied.macos {
+            return macos_purge::fail_reopen(self, copied.writes, copied_mac);
+        }
         let wal = sidecar(&self.path, "-wal");
         let swapped = self.swap_with(copied, |db, old| {
             fs::hard_link(db, old)?;
@@ -275,6 +301,12 @@ impl Store {
         });
         assert!(swapped.is_err(), "the move worked but the reopen failed");
         wal
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn leave_purge_link_for_restart(&self, copied: &Copied) -> Result<(), StoreError> {
+        let copied = copied.macos.as_ref().expect("admitted Mac purge copy");
+        macos_purge::leave_link_for_restart(self, copied)
     }
 
     /// Moves the clean copy over the store. The store's name never goes missing: the old file
@@ -324,7 +356,15 @@ impl Owed {
     /// # Errors
     /// Fails when SQLite fails or a file can't be written; nothing is left behind.
     pub fn copy(self, cancel: &Arc<Cancel>) -> Result<Option<Copied>, StoreError> {
-        let leftovers = Leftovers { db: self.db };
+        let leftovers = Leftovers {
+            db: self.db,
+            #[cfg(all(test, target_os = "macos"))]
+            active: None,
+            #[cfg(all(test, target_os = "macos"))]
+            unavailable: false,
+        };
+        #[cfg(all(test, target_os = "macos"))]
+        let mut macos = None;
         let made = leftovers
             .remove()
             .map_err(StoreError::Purge)
@@ -340,6 +380,21 @@ impl Owed {
                 let source = cancel.source.lock().unwrap_or_else(PoisonError::into_inner);
                 let read = drain(&self.side, helper, cancel)? && snapshot(db, cancel)?;
                 drop(source);
+                #[cfg(all(test, target_os = "macos"))]
+                {
+                    if !read || !clean(db, cancel)? {
+                        return Ok(false);
+                    }
+                    let identity = macos_purge::stamp_snapshot(db)?;
+                    if !compact(db, cancel)? {
+                        return Ok(false);
+                    }
+                    macos = identity
+                        .map(|intent| macos_purge::bind_copy(db, intent))
+                        .transpose()?;
+                    Ok(true)
+                }
+                #[cfg(not(all(test, target_os = "macos")))]
                 Ok(read && clean(db, cancel)? && compact(db, cancel)?)
             });
         if !matches!(made, Ok(true)) {
@@ -351,6 +406,8 @@ impl Owed {
         }
         Ok(made?.then_some(Copied {
             writes: self.writes,
+            #[cfg(all(test, target_os = "macos"))]
+            macos,
         }))
     }
 }
@@ -359,6 +416,10 @@ impl Leftovers {
     /// Whether any is left. One that can't be checked counts as left.
     #[must_use]
     pub fn exist(&self) -> bool {
+        #[cfg(all(test, target_os = "macos"))]
+        if macos_purge::evidence_exists(&self.db) {
+            return true;
+        }
         files(&self.db).any(|path| !missing(&path))
     }
 
@@ -372,6 +433,15 @@ impl Leftovers {
     /// removal succeeded: another process holding it with delete sharing can keep a deleted
     /// file's name until it closes the file.
     pub fn remove(&self) -> io::Result<()> {
+        #[cfg(all(test, target_os = "macos"))]
+        {
+            if self.unavailable {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            if macos_purge::reconcile(&self.db, self.active)? {
+                return Ok(());
+            }
+        }
         self.remove_with(|path| fs::remove_file(path))
     }
 

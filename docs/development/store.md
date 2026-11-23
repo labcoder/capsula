@@ -370,6 +370,29 @@ clean copy, built off the store's thread so turns and runs don't wait for it:
    can keep its name after its deletion succeeds, until that process closes it. Rez's NTFS
    removes the name at once.
 
+**Mac scratch tests.** An admitted Mac unit-test process can exercise the purge on a private
+APFS root; regular Mac builds have no store adapter. Under this opt-in, a private SQLite
+test table stamps the store ID and generation ID without changing the shared schema version
+or Windows migrations. Copying the snapshot preserves the store ID and gives its clean
+successor a fresh generation. The writer fences side connections, rejects stale copies,
+checkpoints and closes SQLite, verifies that no old journal can reach the successor, and syncs
+both DBs. It publishes one versioned `.purge-intent` sibling with the old and new stamps
+before creating the recovery link. An unsupported link never authorizes a no-link swap.
+
+The Mac test writer verifies both old names against the held old inode, requires exactly two
+links, then syncs the parent and full-flushes the file. It renames once, verifies the published
+name and retained alias, and repeats the directory and file barriers. Uncertainty exits the
+test process with status 78 so the runner stops its group and preserves the root. A verified
+publication whose reopen fails is unavailable; reconnect only opens and revalidates the
+published generation without creating a DB.
+
+Restart checks the intent and DB stamps before it can create, migrate or clean up. It refuses
+a missing, substituted or ambiguous primary and doesn't promote an alias automatically.
+With a verified primary, it removes only matching candidates and syncs the parent and
+full-flushes the primary before retiring the intent. Existing-name replacement and cleanup
+require the trusted runner's exclusive namespace custody. The fixtures test interrupted
+operation boundaries, not the behavior of hardware under a physical power loss.
+
 **What store work waits for.** Only the swap stops the store thread: 7–21 ms from 46 MiB to
 984 MiB on Rez, 5 purges each (`measure_purge`, release build). During a copy ops share the disk
 with it. The worst op during a copy was 6 ms at 46 MiB, 19 ms at 515 MiB and 25 ms at 984 MiB,

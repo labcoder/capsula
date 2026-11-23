@@ -39,29 +39,39 @@ pub(super) fn write_scratch_settings_with(
     text: &[u8],
     sync_file: impl FnOnce(&File) -> io::Result<()>,
 ) -> io::Result<()> {
-    let process = std::process::id();
-    let refused = Fault::new(Stage::Root, ErrorKind::Unsupported);
-    let admission = RUN.get().ok_or_else(|| io_fault(refused))?;
-    let root = admission.as_ref().map_err(|error| io_fault(*error))?;
-    if root.pid != process {
-        return Err(io_fault(refused));
-    }
-    root.write(path, text, sync_file).map_err(io_fault)
+    admitted_root()
+        .and_then(|root| root.write(path, text, sync_file))
+        .map_err(io_fault)
 }
 
-fn io_fault(error: Fault) -> io::Error {
+pub(super) fn admitted_root() -> Result<&'static SettingsRoot, Fault> {
+    let refused = Fault::new(Stage::Root, ErrorKind::Unsupported);
+    let root = RUN.get().ok_or(refused)?.as_ref().map_err(|error| *error)?;
+    if root.pid != std::process::id() {
+        return Err(refused);
+    }
+    Ok(root)
+}
+
+pub(super) fn io_fault(error: Fault) -> io::Error {
     error.errno.map_or_else(
         || io::Error::new(error.kind, error),
         io::Error::from_raw_os_error,
     )
 }
 
-struct SettingsRoot {
+pub(super) struct SettingsRoot {
     path: PathBuf,
     directory: File,
     pid: u32,
     uid: libc::uid_t,
     device: libc::dev_t,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectoryMode {
+    Existing,
+    Create,
 }
 
 impl SettingsRoot {
@@ -135,11 +145,11 @@ impl SettingsRoot {
         })
     }
 
-    fn child(&self, parent: &File, name: &CStr) -> Result<File, Fault> {
+    fn child(&self, parent: &File, name: &CStr, mode: DirectoryMode) -> Result<File, Fault> {
         let flags = libc::O_RDONLY | libc::O_DIRECTORY;
         let directory = match open_at(parent, name, flags, Stage::Parent) {
             Ok(directory) => directory,
-            Err(error) if error.errno == Some(libc::ENOENT) => {
+            Err(error) if mode == DirectoryMode::Create && error.errno == Some(libc::ENOENT) => {
                 // shortcut: New parent entries aren't synced; add barriers before promising crash durability.
                 make_directory(parent, name, Stage::Parent)?;
                 open_at(parent, name, flags, Stage::Parent)?
@@ -152,6 +162,23 @@ impl SettingsRoot {
         }
         matches_name(parent, name, &sample, Stage::Parent)?;
         Ok(directory)
+    }
+
+    pub(super) fn existing_directory(&self, path: &Path) -> Result<Option<File>, Fault> {
+        let Ok(relative) = path.strip_prefix(&self.path) else {
+            return Ok(None);
+        };
+        absolute_names(path)?;
+        let mut directory = self
+            .directory
+            .try_clone()
+            .map_err(|error| Fault::io(Stage::Parent, &error))?;
+        if !relative.as_os_str().is_empty() {
+            for name in names(relative.as_os_str().as_bytes())? {
+                directory = self.child(&directory, &name, DirectoryMode::Existing)?;
+            }
+        }
+        Ok(Some(directory))
     }
 
     fn write(
@@ -176,9 +203,9 @@ impl SettingsRoot {
             .try_clone()
             .map_err(|error| Fault::io(Stage::Parent, &error))?;
         for name in ancestors {
-            parent = self.child(&parent, name)?;
+            parent = self.child(&parent, name, DirectoryMode::Create)?;
         }
-        let directory = self.child(&parent, last)?;
+        let directory = self.child(&parent, last, DirectoryMode::Create)?;
         let mut scratch = Scratch {
             parent,
             name: last.clone(),

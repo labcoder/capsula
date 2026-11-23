@@ -5,12 +5,14 @@ use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd as _;
 
 mod custody;
+mod purge;
 mod settings;
 mod tests;
 
 use custody::{
     check_name, inspect, make_directory, matches_name, named_stat, open_at, private_mode, unlink,
 };
+pub(crate) use purge::{PurgeDirectory, PurgeIdentity, PurgeInode};
 pub(crate) use settings::write_scratch_settings;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,7 +72,7 @@ enum Destination {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum RenameMode {
+pub(crate) enum RenameMode {
     Replace,
     NoReplace,
 }

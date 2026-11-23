@@ -203,9 +203,18 @@ fn swapped_with_old_left(scratch: &Scratch) -> Store {
         .expect("copy")
         .expect("not stopped");
     assert_eq!(store.swap(&copied).expect("swap"), Swap::Done);
+    let mut found = purge_files(scratch);
+    found.sort();
+    #[cfg(target_os = "macos")]
+    let expected = vec![
+        beside(&scratch.db(), ".purge-intent"),
+        beside(&scratch.db(), ".purge-old"),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let expected = vec![beside(&scratch.db(), ".purge-old")];
     assert_eq!(
-        purge_files(scratch),
-        vec![beside(&scratch.db(), ".purge-old")]
+        found, expected,
+        "both rollback and reconciliation evidence survive"
     );
     store
 }
@@ -588,9 +597,19 @@ fn a_crash_right_after_the_link_keeps_the_store_and_the_purge_finishes() {
         .copy(&Arc::new(Cancel::default()))
         .expect("copy")
         .expect("not stopped");
-    drop((copied, store));
     // The brain dies between the link and the move: two names for the old store.
-    std::fs::hard_link(scratch.db(), beside(&scratch.db(), ".purge-old")).expect("linked");
+    #[cfg(target_os = "macos")]
+    {
+        store
+            .leave_purge_link_for_restart(&copied)
+            .expect("durable intent and link");
+        drop((copied, store));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        drop((copied, store));
+        std::fs::hard_link(scratch.db(), beside(&scratch.db(), ".purge-old")).expect("linked");
+    }
 
     let store = Store::open(&scratch.db()).expect("reopen");
     assert!(store.purge_pending());
