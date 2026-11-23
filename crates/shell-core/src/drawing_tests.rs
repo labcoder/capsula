@@ -342,6 +342,7 @@ fn a_live_scene_evicts_one_still_recovering() {
     let mut drawing = received(1, &four);
     live(&mut drawing, 5, 0, "new");
     assert_eq!(drawing.apply_snapshot(1, last(1, 1, &["x"])), Ok(BYTES));
+    assert_eq!(shown(&drawing), [(5, vec!["new"])]);
     assert_eq!(drawing.clear().clear, Some(clear_of(&[2, 3, 4, 5])));
 }
 

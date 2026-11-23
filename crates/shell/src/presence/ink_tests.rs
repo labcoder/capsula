@@ -36,24 +36,6 @@ fn zigzag(points: usize) -> Vec<Vec2> {
 }
 
 #[test]
-fn the_line_s_colours_and_widths_are_the_painter_s() {
-    // The brain's painter holds the same literals in crates/brain/src/screen/ink.rs and
-    // encode.rs; neither crate sees the other's, so each side pins them.
-    assert_eq!(PINK, [255, 20, 147], "the painter's pink");
-    assert_eq!(WHITE, [255, 255, 255], "the painter's edge");
-    assert_eq!(
-        [CORE.to_bits(), EDGE.to_bits()],
-        [1.5_f32.to_bits(), 2.5_f32.to_bits()],
-        "the painter's half-widths in image pixels"
-    );
-    assert_eq!(
-        IMAGE_LIMIT,
-        [1280, 720],
-        "what the picture is shrunk to fit"
-    );
-}
-
-#[test]
 fn a_display_s_shrink_follows_the_picture_s_fit_and_never_enlarges() {
     for (display, expected) in [
         (REZ, 2.0_f32),

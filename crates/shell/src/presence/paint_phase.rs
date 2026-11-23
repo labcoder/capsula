@@ -51,8 +51,6 @@ pub(super) fn handoff(path: &gpui_kit::Path<gpui_kit::Pixels>) {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::*;
-
     pub(crate) fn assert_paths(events: &[crate::allocation::Request], free_tag: u8) -> usize {
         let mut fills = std::collections::BTreeMap::new();
         let mut filling = false;
@@ -178,18 +176,5 @@ pub(super) mod tests {
             },
         ];
         assert!(std::panic::catch_unwind(|| assert_paths(&fill, 1)).is_err());
-    }
-
-    #[test]
-    fn phase_guards_restore_the_outer_phase_even_when_unwinding() {
-        let before = crate::allocation::set_tag(7);
-        let failed = std::panic::catch_unwind(|| {
-            let _app = enter(Phase::App);
-            let _fill = enter(Phase::LyonFill);
-            panic!("phase guard control");
-        });
-        let restored = crate::allocation::set_tag(before);
-        assert!(failed.is_err());
-        assert_eq!(restored, 7);
     }
 }

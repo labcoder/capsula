@@ -613,24 +613,6 @@ fn a_late_admission_clears_only_its_scene_and_releases_exactly_what_was_mirrored
 }
 
 #[test]
-fn a_step_admitted_after_its_predecessor_is_ready_keeps_the_predecessor_s_time() {
-    let (mut presenter, now) = live();
-    begin(&mut presenter, LIVE, now);
-    let first = only_job(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step"));
-    let frame = commit_frame(LIVE, 1, rect("b"));
-    let admission = only_admission(arrive(&mut presenter, frame, ms(now, 100)).expect("a step"));
-    let effects = presenter
-        .completed(first.run(&mut Shaper), ms(now, 200))
-        .expect("the predecessor");
-    assert!(jobs(effects).is_empty());
-    let effects = presenter
-        .completed(admission.run(), ms(now, 240))
-        .expect("the admission");
-    assert_eq!(only_job(effects).scene(), LIVE);
-    assert_eq!(presenter.deadline(), Some(ms(now, 450)));
-}
-
-#[test]
 fn a_stop_before_or_during_admission_installs_the_step_unprepared_and_its_cut_applies() {
     for dispatched in [true, false] {
         let (mut presenter, now, mut zombies) = if dispatched {
@@ -1330,6 +1312,27 @@ fn a_step_ready_at_200_admitted_at_240_and_started_at_260_is_timed_from_200() {
     let early = presenter.tick(ms(now, 449)).expect("a tick");
     assert!(controls(&early).is_empty());
     let effects = presenter.tick(ms(now, 450)).expect("a tick");
+    assert_eq!(
+        controls(&effects),
+        [&failed(LIVE, 1, SceneFailure::Timeout)]
+    );
+
+    let (mut presenter, now) = live();
+    begin(&mut presenter, LIVE, now);
+    let first = only_job(commit(&mut presenter, LIVE, 0, rect("a"), now).expect("a step"));
+    let frame = commit_frame(LIVE, 1, rect("b"));
+    let admission = only_admission(arrive(&mut presenter, frame, ms(now, 100)).expect("a step"));
+    let effects = presenter
+        .completed(first.run(&mut Shaper), ms(now, 200))
+        .expect("the predecessor");
+    assert!(jobs(effects).is_empty());
+    let effects = presenter
+        .completed(admission.run(), ms(now, 240))
+        .expect("the admission");
+    assert_eq!(only_job(effects).scene(), LIVE);
+    assert_eq!(presenter.deadline(), Some(ms(now, 450)));
+    assert!(controls(&presenter.tick(ms(now, 449)).expect("early tick")).is_empty());
+    let effects = presenter.tick(ms(now, 450)).expect("deadline");
     assert_eq!(
         controls(&effects),
         [&failed(LIVE, 1, SceneFailure::Timeout)]

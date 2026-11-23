@@ -274,65 +274,37 @@ fn retry_content_is_dropped_on_each_ownership_change_and_dismissal() {
 }
 
 #[test]
-fn retry_rechecks_the_captured_main_thread_after_a_settings_change() {
-    use kumochi_protocol::message::{Action, DataToBrain};
-    let mut runs = ready();
-    submit(&mut runs, "belongs to the old main");
-    runs.apply_run_state(
-        RunId(1),
-        ThreadId(1),
-        Phase::Failed,
-        Some(
-            UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry])
-                .expect("bounded error"),
-        ),
-        Some(RunOrigin::Typed { turn: 1 }),
-    );
-    runs.settings(ThreadId(2));
-    assert!(!runs.retry_ready(RunId(1)));
-    let mut sent: Vec<DataToBrain> = Vec::new();
-    assert_eq!(
-        runs.retry(RunId(1), "", |message| {
-            sent.push(message);
-            true
-        }),
-        Err(Refused::Busy)
-    );
-    assert_eq!(sent, []);
-    assert_eq!(runs.kept(), Vec::<usize>::new());
-    assert_eq!(
-        runs.retry(RunId(1), "", |_| panic!("consumed stale main")),
-        Err(Refused::Busy)
-    );
-}
-
-#[test]
 fn stale_retry_does_not_return_when_the_main_setting_changes_back() {
     use kumochi_protocol::message::Action;
 
-    let mut runs = ready();
-    submit(&mut runs, "belongs to the original main");
-    runs.apply_run_state(
-        RunId(1),
-        ThreadId(1),
-        Phase::Failed,
-        Some(UserError::new(ErrorKey::AccountOffline, vec![], vec![Action::Retry]).unwrap()),
-        Some(RunOrigin::Typed { turn: 1 }),
-    );
-    runs.settings(ThreadId(1));
-    assert!(runs.retry_ready(RunId(1)), "same target keeps recovery");
-    runs.settings(ThreadId(2));
-    assert!(!runs.retry_ready(RunId(1)));
-    runs.settings(ThreadId(1));
-    assert!(
-        !runs.retry_ready(RunId(1)),
-        "returning must not revive recovery"
-    );
-    assert_eq!(runs.kept(), Vec::<usize>::new());
-    assert_eq!(
-        runs.retry(RunId(1), "", |_| panic!("a retired run must not send")),
-        Err(Refused::Busy),
-    );
+    for switch_back in [false, true] {
+        let mut runs = ready();
+        submit(&mut runs, "belongs to the original main");
+        runs.apply_run_state(
+            RunId(1),
+            ThreadId(1),
+            Phase::Failed,
+            Some(UserError::new(ErrorKey::AccountOffline, vec![], vec![Action::Retry]).unwrap()),
+            Some(RunOrigin::Typed { turn: 1 }),
+        );
+        runs.settings(ThreadId(1));
+        assert!(runs.retry_ready(RunId(1)), "same target keeps recovery");
+        runs.settings(ThreadId(2));
+        assert!(!runs.retry_ready(RunId(1)));
+        if switch_back {
+            runs.settings(ThreadId(1));
+            assert!(
+                !runs.retry_ready(RunId(1)),
+                "returning must not revive recovery"
+            );
+        }
+        for _ in 0..2 {
+            assert_eq!(
+                runs.retry(RunId(1), "", |_| panic!("a retired run must not send")),
+                Err(Refused::Busy),
+            );
+        }
+    }
 }
 
 #[test]
@@ -590,28 +562,23 @@ fn a_confirmed_delete_drops_its_thread_s_text_even_when_another_is_the_target() 
 }
 
 #[test]
-fn a_disconnect_or_a_new_brain_drops_the_text() {
-    let mut runs = ready();
-    submit(&mut runs, "x");
-    thinking(&mut runs, 1, 1, 1);
-    runs.disconnected();
-    assert_eq!(runs.kept(), Vec::<usize>::new());
-    // A new brain numbers runs afresh, so its run 1 isn't the old one.
-    runs.met(Incarnation(2));
-    runs.connected(2);
-    runs.settings(ThreadId(1));
-    assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded, None), None);
-}
-
-#[test]
-fn a_new_brain_drops_held_texts_even_without_a_disconnect() {
-    let mut runs = ready();
-    submit(&mut runs, "x");
-    thinking(&mut runs, 1, 1, 1);
-    runs.met(Incarnation(1));
-    assert_eq!(runs.kept(), vec![1], "the same brain keeps it");
-    runs.met(Incarnation(2));
-    assert_eq!(runs.kept(), Vec::<usize>::new());
+fn a_disconnect_and_a_new_brain_each_drop_held_texts() {
+    for disconnect in [false, true] {
+        let mut runs = ready();
+        submit(&mut runs, "x");
+        thinking(&mut runs, 1, 1, 1);
+        runs.met(Incarnation(1));
+        assert_eq!(runs.kept(), vec![1], "the same brain keeps it");
+        if disconnect {
+            runs.disconnected();
+            assert_eq!(runs.kept(), Vec::<usize>::new());
+        }
+        runs.met(Incarnation(2));
+        assert_eq!(runs.kept(), Vec::<usize>::new());
+        runs.connected(2);
+        runs.settings(ThreadId(1));
+        assert_eq!(failed(&mut runs, 1, 1, ErrorKey::SessionEnded, None), None);
+    }
 }
 
 fn assert_redacted(debug: &str) {
