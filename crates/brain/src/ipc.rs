@@ -510,6 +510,37 @@ mod tests {
         }
     }
 
+    async fn register_queued_peer(
+        control: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
+        session: IssueSession,
+    ) {
+        use kumochi_protocol::message::{DraftId, IssueOp, OutputGeneration};
+
+        let output = OutputGeneration(1);
+        for message in [
+            ControlToBrain::Issue {
+                session,
+                request: 2,
+                op: Box::new(IssueOp::CancelReview {
+                    draft: DraftId(1),
+                    review: 1,
+                }),
+            },
+            ControlToBrain::QueuedAudioOutput(24_000, output),
+        ] {
+            control
+                .write_all(&frame::encode(&message, Pipe::Control).unwrap())
+                .await
+                .unwrap();
+        }
+        while super::read::<ControlToShell>(control, Pipe::Control)
+            .await
+            .unwrap()
+            .expect("the reserved issue session was accepted")
+            != ControlToShell::QueuedAudioRegistered(output)
+        {}
+    }
+
     async fn request_audio(
         control: &mut crate::platform::PipeClient,
         mode: AudioSession,
@@ -536,44 +567,18 @@ mod tests {
         }
     }
 
-    async fn register_queued_output(
-        control: &mut crate::platform::PipeClient,
-        session: IssueSession,
-    ) {
-        use kumochi_protocol::message::{DraftId, IssueOp, OutputGeneration};
-        let output = OutputGeneration(1);
-        for message in [
-            ControlToBrain::Issue {
-                session,
-                request: 2,
-                op: Box::new(IssueOp::CancelReview {
-                    draft: DraftId(1),
-                    review: 1,
-                }),
-            },
-            ControlToBrain::QueuedAudioOutput(24_000, output),
-        ] {
-            control
-                .write_all(&frame::encode(&message, Pipe::Control).unwrap())
-                .await
-                .unwrap();
-        }
-        loop {
-            let message = super::read::<ControlToShell>(control, Pipe::Control)
-                .await
-                .unwrap()
-                .expect("the reserved issue session was accepted");
-            if message == ControlToShell::QueuedAudioRegistered(output) {
-                return;
-            }
-        }
-    }
-
     #[tokio::test]
     async fn paired_handshake_accepts_only_matching_authenticated_legs() {
         let mut id = identity();
         id.shell_image = std::env::current_exe().unwrap();
         let scratch = Scratch::new("queued-hello-pair");
+        std::fs::create_dir_all(scratch.dir()).unwrap();
+        std::fs::write(
+            scratch.dir().join(kumochi_protocol::constants::CONFIG_FILE),
+            "[tuning.hold]\nstart_ms = 2500\ndrain_ms = 750",
+        )
+        .unwrap();
+        let tuning = ShellTuning::from_ms(2500, 750).unwrap();
         let mut brain = test_support::brain(&scratch, "");
         let mut tap = Tap::from_env();
         let queued = AudioSession::QueuedRequired;
@@ -613,26 +618,23 @@ mod tests {
                     .write_all(&frame::encode(&message, Pipe::Data).unwrap())
                     .await
                     .unwrap();
-                if index == 0 || index == 5 {
-                    peer_data
-                        .write_all(
-                            &frame::encode(&DataToBrain::TextMetrics(None), Pipe::Data).unwrap(),
-                        )
-                        .await
-                        .unwrap();
-                    expect_startup(&mut peer_control, welcomed, ShellTuning::default()).await;
+                if !matches!(index, 0 | 5) {
+                    return;
                 }
+                peer_data
+                    .write_all(
+                        &frame::encode(&DataToBrain::TextMetrics(None), Pipe::Data).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                expect_startup(&mut peer_control, welcomed, tuning).await;
                 if index == 0 {
-                    register_queued_output(&mut peer_control, welcomed).await;
+                    register_queued_peer(&mut peer_control, welcomed).await;
                 }
-                if index == 0 || index == 5 {
-                    peer_control
-                        .write_all(
-                            &frame::encode(&ControlToBrain::Quitting, Pipe::Control).unwrap(),
-                        )
-                        .await
-                        .unwrap();
-                }
+                peer_control
+                    .write_all(&frame::encode(&ControlToBrain::Quitting, Pipe::Control).unwrap())
+                    .await
+                    .unwrap();
             };
             let end = Instant::now() + HANDSHAKE_TIMEOUT;
             let serve = pipes.session(&id, &mut brain, &mut tap, end);

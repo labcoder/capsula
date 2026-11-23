@@ -17,6 +17,49 @@ fn voice_request(gesture: GestureId) -> ControlToBrain {
 }
 
 #[test]
+fn closing_legacy_session_revokes_native_hold_while_the_outbox_is_held() {
+    let link = attended("close-legacy-hold");
+    let session = connected(next(&patient(link.events.clone())));
+    let generation = session.generation();
+    assert!(link.handle.can_start_voice_gesture(generation));
+    with_outbox_held(&link.handle, &session, || {
+        session.close();
+        assert!(!link.handle.can_start_voice_gesture(generation));
+    });
+    link.handle.end(&session);
+    drop(link.control);
+    assert!(link.link.join().unwrap());
+}
+
+#[test]
+fn refusing_a_physical_stop_revokes_legacy_hold_before_link_teardown() {
+    use super::super::{Outbox, QueuedInput};
+
+    let (handle, _data) = LinkHandle::recording();
+    let (_peer, pipe) = pair("stop-aborts-legacy-hold");
+    let (control, _control_queue) = async_channel::bounded(1);
+    let (data, _data_queue) = async_channel::bounded(1);
+    let session = Session::detached(1, Incarnation(1));
+    assert!(handle.can_start_voice_gesture(session.generation()));
+    *handle.shared.outbox.lock().unwrap() = Some(Outbox {
+        generation: session.generation(),
+        control,
+        data,
+        pipe: Arc::new(pipe),
+        submits: 0.into(),
+        queued_input: QueuedInput::default(),
+        closing: Arc::clone(&session.closing),
+    });
+    let gesture = GestureId(1);
+    assert!(handle.send_control(&session, voice_request(gesture)));
+    assert!(handle.send_control(&session, ControlToBrain::VoiceHoldStopped { gesture }));
+    let outbox = handle.shared.outbox.lock().unwrap();
+    assert!(outbox.as_ref().unwrap().pipe.is_aborted());
+    assert!(handle.voice_stop_pending());
+    assert!(!handle.can_start_voice_gesture(session.generation()));
+}
+
+#[test]
 fn microphone_stop_reserves_one_receipt_until_the_brain_accepts_it() {
     let mut link = LinkHandle::detached();
     let queue = link.record_controls();

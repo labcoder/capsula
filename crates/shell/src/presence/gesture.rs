@@ -181,6 +181,7 @@ pub(super) fn deliver(
     let escaped = Cell::new(None);
     let escape_down = Cell::new(false);
     let recovered_hold = Cell::new(None);
+    let modifier_presses = Cell::new([None; 2]);
     let input = Rc::new(Cell::new((0_u64, 0_u64)));
     let reduce: Rc<Reduce> = Rc::new(move |event, mut at| {
         let (serial, reset) = input.get();
@@ -193,6 +194,7 @@ pub(super) fn deliver(
         #[cfg(test)]
         let qpc = if FAIL_CLOCK.take() { -1 } else { qpc };
         let Ok(qpc) = u64::try_from(qpc) else {
+            modifier_presses.set([None; 2]);
             tracing::warn!(stage = ?InputStage::Delivery, reason = ?InputReason::ClockUnavailable, "held speech input failed");
             input.set((serial.saturating_add(1), reset.saturating_add(1)));
             if let Some(cancel) = link.revoke_input_for_dispatch() {
@@ -221,6 +223,25 @@ pub(super) fn deliver(
         if event == Event::Reset {
             escaped.set(None);
             escape_down.set(false);
+        }
+        let modifier = match event {
+            Event::Key {
+                key: Key::LeftControl,
+                edge,
+            } => Some((0, edge)),
+            Event::Key {
+                key: Key::LeftAlt,
+                edge,
+            } => Some((1, edge)),
+            _ => None,
+        };
+        let mut presses = modifier_presses.get();
+        if matches!(event, Event::Reset | Event::Escape) {
+            presses = [None; 2];
+        } else if let Some((key, Edge::Down)) = modifier
+            && !at.repeated_modifier
+        {
+            presses[key] = at.queued_press;
         }
         let mut wire_cancel = None;
         if let Event::Key {
@@ -252,13 +273,26 @@ pub(super) fn deliver(
             &mut state,
             event,
             at.instant,
-            || (!paused.get() && link.can_start_voice_gesture(session)).then_some(session),
+            || {
+                (!paused.get()
+                    && link.can_start_voice_gesture(session)
+                    && presses
+                        .iter()
+                        .flatten()
+                        .min()
+                        .is_none_or(|&at| link.voice_ready_before(at)))
+                .then_some(session)
+            },
             || {
                 let now = at.recovery_time()?;
                 recovered = true;
                 Some(now)
             },
         );
+        if let Some((key, Edge::Up)) = modifier {
+            presses[key] = None;
+        }
+        modifier_presses.set(presses);
         gesture.set(state);
         let mut cancellation = cancelled.is_some();
         for intent in delivery.intents.iter().flatten() {

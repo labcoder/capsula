@@ -761,16 +761,30 @@ impl Brain {
         let admitted = stt
             .ok_or(HoldFailure::NotLoaded)
             .and_then(SttHandle::admit_use);
-        let ask = match admitted {
-            Ok(ask) => ask,
+        let (ask, admitted_at) = match admitted {
+            Ok(admitted) => admitted,
             Err(failure) => return self.hold_end(HoldStatus::Failed(failure), link),
         };
-        let hold = self.holds.pending.as_mut().expect("pending admission");
-        hold.ask = Some(ask);
-        hold.audio = Some(audio::Audio::new());
-        hold.deadline = Instant::now()
+        self.hold_admitted(ask, admitted_at, link)
+    }
+
+    fn hold_admitted(
+        &mut self,
+        ask: u64,
+        admitted_at: Instant,
+        link: &mut Link<'_, '_>,
+    ) -> Result<(), Full> {
+        let deadline = admitted_at
             + self.config.shell_tuning().start()
             + Duration::from_millis(u64::from(MAX_HOLD_CHUNKS) * 20);
+        let audio = audio::Audio::new();
+        if Instant::now() >= deadline {
+            return self.hold_end(HoldStatus::Failed(HoldFailure::TimedOut), link);
+        }
+        let hold = self.holds.pending.as_mut().expect("pending admission");
+        hold.ask = Some(ask);
+        hold.audio = Some(audio);
+        hold.deadline = deadline;
         self.holds.debt = Some(hold.key);
         self.holds.debt_peer = self.holds.peer.clone();
         self.holds.gate.overflow.store(0, Ordering::SeqCst);

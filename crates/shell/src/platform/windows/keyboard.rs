@@ -25,10 +25,11 @@ use windows::Win32::UI::Input::{
     RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEKEYBOARD, RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EVENT_SYSTEM_DESKTOPSWITCH, GetForegroundWindow, GetQueueStatus, GetWindowThreadProcessId,
-    KillTimer, PBT_APMSUSPEND, PostMessageW, QS_ALLINPUT, RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1,
-    SetTimer, WINEVENT_OUTOFCONTEXT, WM_APP, WM_HOTKEY, WM_INPUT, WM_INPUT_DEVICE_CHANGE,
-    WM_INPUTLANGCHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER, WM_WTSSESSION_CHANGE,
+    EVENT_SYSTEM_DESKTOPSWITCH, GetForegroundWindow, GetMessageTime, GetQueueStatus,
+    GetWindowThreadProcessId, KillTimer, PBT_APMSUSPEND, PostMessageW, QS_ALLINPUT, RI_KEY_BREAK,
+    RI_KEY_E0, RI_KEY_E1, SetTimer, WINEVENT_OUTOFCONTEXT, WM_APP, WM_HOTKEY, WM_INPUT,
+    WM_INPUT_DEVICE_CHANGE, WM_INPUTLANGCHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER,
+    WM_WTSSESSION_CHANGE,
 };
 
 use super::presence::{PresenceError, struct_size};
@@ -64,6 +65,7 @@ pub(crate) struct EventTime {
     pub(crate) held: TalkHeld,
     pub(crate) repeated_modifier: bool,
     pub(crate) defer_terminal: bool,
+    pub(crate) queued_press: Option<u64>,
     read_chord: Option<fn(Instant) -> Option<Instant>>,
     layout: Option<HKL>,
 }
@@ -75,6 +77,7 @@ impl EventTime {
             held: TalkHeld::default(),
             repeated_modifier: false,
             defer_terminal: false,
+            queued_press: None,
             read_chord: None,
             layout: None,
         }
@@ -93,6 +96,12 @@ impl EventTime {
     #[cfg(test)]
     pub(crate) fn with_keyboard_read(mut self, read: fn(Instant) -> Option<Instant>) -> Self {
         self.read_chord = Some(read);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_queued_press(mut self, at: u64) -> Self {
+        self.queued_press = Some(at);
         self
     }
 }
@@ -216,6 +225,21 @@ impl Keys {
                 else {
                     return false;
                 };
+                if !at.repeated_modifier
+                    && matches!(
+                        event,
+                        Event::Key {
+                            key: Key::LeftControl | Key::LeftAlt,
+                            edge: Edge::Down
+                        }
+                    )
+                {
+                    // SAFETY: this thread is dispatching the queued WM_INPUT message.
+                    let queued = unsafe { GetMessageTime() }.cast_unsigned();
+                    let now = kumochi_shell_core::platform::keyboard_ticks();
+                    let low = u32::try_from(now & u64::from(u32::MAX)).expect("low clock word");
+                    at.queued_press = Some(now.saturating_sub(u64::from(low.wrapping_sub(queued))));
+                }
                 id = physical;
                 event
             }

@@ -23,4 +23,4 @@ pub(crate) use windows::pipe::test_pair;
 #[cfg(windows)]
 pub(crate) use windows::{PipeClient, launch_detached};
 #[cfg(windows)]
-pub use windows::{data_dir, session_id};
+pub use windows::{data_dir, keyboard_ticks, session_id};

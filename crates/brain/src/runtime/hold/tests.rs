@@ -405,6 +405,44 @@ async fn prepared_hold_across_loading_is_admitted_before_first_serve_iteration()
 }
 
 #[tokio::test]
+async fn preparing_audio_does_not_restart_the_admitted_hold_clock() {
+    let scratch = Scratch::new("hold-admission-clock");
+    let mut brain = test_support::brain(&scratch, "");
+    let (out, mut output) = mpsc::channel(8);
+    let queue = RefCell::new(DataQueue::new(0));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    recording(&mut brain);
+    let hold = brain.holds.pending.as_mut().unwrap();
+    hold.ask = None;
+    hold.audio = None;
+    brain.holds.debt = None;
+
+    tokio::time::pause();
+    let admitted_at = Instant::now();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    brain.hold_admitted(1, admitted_at, &mut link).unwrap();
+    assert_eq!(status(&mut output), HoldStatus::Admitted);
+    tokio::time::advance(Duration::from_secs(65)).await;
+    brain.hold_voice_changed(&mut link).unwrap();
+    let expired = output.try_recv();
+    tokio::time::resume();
+    brain.close().await;
+    let bytes = expired.expect("the original admission ceiling elapsed");
+    assert_eq!(
+        kumochi_protocol::frame::decode::<ControlToShell>(
+            &bytes[kumochi_protocol::frame::HEADER_LEN..],
+        )
+        .unwrap(),
+        ControlToShell::VoiceHoldStatus {
+            gesture: KEY.gesture,
+            status: HoldStatus::Failed(HoldFailure::TimedOut),
+        }
+    );
+}
+
+#[tokio::test]
 async fn stop_before_admission_cancels_the_pending_hold_and_owes_no_debt() {
     use crate::runtime::{Recovery, voice};
     use kumochi_protocol::message::PartState;

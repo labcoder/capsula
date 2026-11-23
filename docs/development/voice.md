@@ -991,8 +991,9 @@ The source independently limits collection to 60 seconds. The Shell schedules
 one status warning five seconds before that same deadline, only for the current
 gesture while the source is collecting. The warning doesn't change collection
 or release. The shell starts `start_ms` at its one microphone reservation. The brain allows
-that same budget plus 60 seconds from STT admission, then `drain_ms` for remaining frames
-after both final count and physical stop. The shell's drain watcher retains its existing
+that same budget plus 60 seconds from the STT grant, before allocating audio buffers.
+It allows `drain_ms` for remaining frames after both final count and physical stop.
+The shell's drain watcher retains its existing
 origin when the source leaves preparation or collection. These deadlines never prove stop.
 Exact finalization moves nonempty PCM once to the existing STT owner. Nonblank
 text becomes ordinary deletable user history with Hold origin, not a typed/Ask
