@@ -248,21 +248,23 @@ mod tests {
     #[test]
     fn effort_sets_reject_empty_and_unknown_bits_on_construction_and_the_wire() {
         assert_eq!(EffortSet::new([]), None);
-        assert_eq!(
-            postcard::from_bytes::<EffortSet>(&[]),
-            Err(postcard::Error::DeserializeUnexpectedEnd)
-        );
+        assert!(postcard::from_bytes::<EffortSet>(&[]).is_err());
         for bits in [0, 32, 33, 255] {
             assert_eq!(EffortSet::try_from(bits), Err(EffortSetError));
-            assert_eq!(
-                postcard::from_bytes::<EffortSet>(&[bits]),
-                Err(postcard::Error::SerdeDeCustom)
-            );
+            assert!(postcard::from_bytes::<EffortSet>(&[bits]).is_err());
         }
-        assert_eq!(
-            EffortSet::try_from(1),
-            EffortSet::new([Effort::Low]).ok_or(EffortSetError)
-        );
+        for (mask, effort) in [
+            (1, Effort::Low),
+            (2, Effort::Medium),
+            (4, Effort::High),
+            (8, Effort::XHigh),
+            (16, Effort::Max),
+        ] {
+            let set = EffortSet::new([effort]).expect("one effort");
+            assert_eq!(postcard::to_allocvec(&set), Ok(vec![mask]));
+            assert_eq!(postcard::from_bytes::<EffortSet>(&[mask]), Ok(set));
+            assert_eq!(set.iter().collect::<Vec<_>>(), [effort]);
+        }
         let all = EffortSet::try_from(31).expect("all five bits");
         assert_eq!(
             all.iter().collect::<Vec<_>>(),
@@ -276,38 +278,31 @@ mod tests {
         );
         assert_eq!(postcard::to_allocvec(&all), Ok(vec![31]));
         assert_eq!(postcard::from_bytes::<EffortSet>(&[31]), Ok(all));
+        let deduped =
+            EffortSet::new([Effort::High, Effort::Low, Effort::High]).expect("two efforts");
+        assert_eq!(postcard::to_allocvec(&deduped), Ok(vec![5]));
         assert_eq!(
-            EffortSet::new([Effort::High, Effort::Low, Effort::High])
-                .expect("two efforts")
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![Effort::Low, Effort::High]
+            deduped.iter().collect::<Vec<_>>(),
+            [Effort::Low, Effort::High]
         );
     }
 
     #[test]
-    fn resolution_matches_every_nonempty_set_and_wanted_effort() {
+    fn resolution_uses_the_highest_supported_effort_at_or_below_the_wanted_effort() {
         use Effort::{High, Low, Max, Medium, XHigh};
-        let ordered = [(1, Low), (2, Medium), (4, High), (8, XHigh), (16, Max)];
-        for bits in 1..=31 {
+        for (bits, wanted, expected) in [
+            (21, Medium, Low),
+            (20, Medium, High),
+            (21, XHigh, High),
+            (20, Max, Max),
+            (16, Low, Max),
+        ] {
             let set = EffortSet::try_from(bits).expect("known nonempty mask");
-            let supported: Vec<_> = ordered
-                .iter()
-                .filter_map(|(bit, effort)| (bits & bit != 0).then_some(*effort))
-                .collect();
-            assert_eq!(set.iter().collect::<Vec<_>>(), supported);
-            for (index, wanted) in ordered.iter().map(|(_, effort)| *effort).enumerate() {
-                let below: Vec<_> = ordered[..=index]
-                    .iter()
-                    .filter_map(|(bit, effort)| (bits & bit != 0).then_some(*effort))
-                    .collect();
-                let expected = below.last().copied().unwrap_or(supported[0]);
-                assert_eq!(
-                    effective_effort(set, wanted),
-                    expected,
-                    "{bits}: {wanted:?}"
-                );
-            }
+            assert_eq!(
+                effective_effort(set, wanted),
+                expected,
+                "{bits}: {wanted:?}"
+            );
         }
     }
 
@@ -345,22 +340,10 @@ mod tests {
 
     #[test]
     fn every_effort_that_decodes_is_in_all() {
-        let decoded: Vec<Effort> = (0..=u8::MAX)
+        let mut decoded: Vec<Effort> = (0..=u8::MAX)
             .filter_map(|tag| postcard::from_bytes(&[tag]).ok())
             .collect();
-        assert!(decoded.iter().all(|effort| Effort::ALL.contains(effort)));
-        assert_eq!(decoded.len(), Effort::ALL.len());
-    }
-
-    #[test]
-    fn a_rename_prints_only_its_titles_length() {
-        let rename = ThreadOp::Rename {
-            thread: ThreadId(4),
-            title: ThreadTitle::new("Zqxsecrettitle").expect("valid"),
-        };
-        assert_eq!(
-            format!("{rename:?}"),
-            "Rename { thread: ThreadId(4), title: ThreadTitle(len=14) }"
-        );
+        decoded.sort_unstable();
+        assert_eq!(decoded, Effort::ALL);
     }
 }

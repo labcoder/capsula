@@ -3,7 +3,7 @@
 //! fill and outline are at least the shell's. Dashes sit outside that bound, so the fixtures
 //! test compares them.
 use kumochi_scene::{
-    Admission, Begin, GlobalBudget, Record, SceneState, StopCut,
+    Admission, Begin, ErrorCode, GlobalBudget, Record, SceneState, StopCut,
     display::{MeasureError, PaintWork, TextMeasure, TextStyle, WideMeasure},
     layout::{LayoutState, PrepareError, PrepareInput, SurfaceGeometry, prepare},
     parse_record,
@@ -372,7 +372,7 @@ fn the_wide_measure_bounds_shell_measures_on_generated_labels() {
 #[test]
 fn the_wide_measure_charges_at_least_the_shell_on_generated_scenes() {
     let mut rng = Rng(SEED);
-    let (mut compared, mut brain_refused, mut skipped) = (0, 0, 0);
+    let (mut compared, mut brain_refused, mut shell_refused) = (0, 0, 0);
     for index in 0..CASES {
         let case = case(&mut rng);
         let kept = case.kept.as_deref();
@@ -384,26 +384,32 @@ fn the_wide_measure_charges_at_least_the_shell_on_generated_scenes() {
                 line: 1.0 + 0.5 * rng.unit(),
                 breaks,
             };
-            match (&brain, work(&case.steps, kept, &mut shell)) {
-                (Ok(brain), Ok(shell_work)) => {
-                    compared += 1;
-                    assert!(
-                        brain.fill_vertices >= shell_work.fill_vertices
-                            && brain.outline_points >= shell_work.outline_points
-                            && brain.largest_fill >= shell_work.largest_fill
-                            && brain.largest_outline >= shell_work.largest_outline,
-                        "case {index} under {shell:?}: brain {brain:?} below shell {shell_work:?}"
-                    );
+            let shell_work = work(&case.steps, kept, &mut shell);
+            for (measure, result) in [("WideMeasure", &brain), ("shell", &shell_work)] {
+                match result {
+                    Ok(_) | Err(PrepareError::OverPaintWork) => {}
+                    Err(PrepareError::Layout(error)) if error.code == ErrorCode::OutOfRange => {}
+                    Err(error) => panic!("case {index}, {measure} under {shell:?}: {error:?}"),
                 }
-                (Err(PrepareError::OverPaintWork), _) => brain_refused += 1,
-                _ => skipped += 1,
+            }
+            brain_refused += u64::from(brain.is_err());
+            shell_refused += u64::from(shell_work.is_err());
+            if let (Ok(brain), Ok(shell_work)) = (&brain, shell_work) {
+                compared += 1;
+                assert!(
+                    brain.fill_vertices >= shell_work.fill_vertices
+                        && brain.outline_points >= shell_work.outline_points
+                        && brain.largest_fill >= shell_work.largest_fill
+                        && brain.largest_outline >= shell_work.largest_outline,
+                    "case {index} under {shell:?}: brain {brain:?} below shell {shell_work:?}"
+                );
             }
         }
     }
-    println!("compared {compared}, brain refused {brain_refused}, skipped {skipped}");
+    println!("compared {compared}, brain refused {brain_refused}, shell refused {shell_refused}");
     assert!(
         compared >= 2 * CASES * 9 / 10,
-        "compared {compared}, brain refused {brain_refused}, skipped {skipped}"
+        "compared {compared}, brain refused {brain_refused}, shell refused {shell_refused}"
     );
 }
 

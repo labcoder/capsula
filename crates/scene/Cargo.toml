@@ -18,5 +18,17 @@ thiserror.workspace = true
 jsonschema = { version = "0.60.2", default-features = false }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 
+[[bench]]
+name = "scene-workloads"
+path = "benches/scene_workloads.rs"
+harness = false
+test = false
+
+[[bench]]
+name = "scene-counted-workloads"
+path = "benches/scene_counted_workloads.rs"
+harness = false
+test = false
+
 [lints]
 workspace = true

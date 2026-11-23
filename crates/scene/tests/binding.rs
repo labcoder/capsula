@@ -4,14 +4,18 @@ use kumochi_scene::{
     Record, SceneBinding, SceneState, Step, StopCut, StopOutcome, WireId,
     budget::Usage,
     deferred::Deferred,
+    display::WideMeasure,
+    layout::{LayoutState, PrepareInput, SurfaceGeometry, prepare},
     limits::{
         MAX_GLOBAL_CHART_MARKS, MAX_GLOBAL_LIVE_OBJECTS, MAX_GLOBAL_PATH_SEGMENTS,
         MAX_GLOBAL_TABLE_CELLS, MAX_VISIBLE_SCENES,
     },
     parse_record,
     text::Bounded,
+    theme::Theme,
 };
 use serde_json::{Value, json};
+use std::sync::{Arc, atomic::AtomicBool};
 
 fn header() -> kumochi_scene::Begin {
     let source = br#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":""}}"#;
@@ -76,15 +80,6 @@ fn snapshot(
 }
 
 #[test]
-fn binding_an_empty_scene_does_not_change_the_budget() {
-    let mut global = GlobalBudget::default();
-    let binding = bound(&mut global);
-    assert_eq!(global.usage(), Usage::default());
-    assert_eq!(global.generation(), 0);
-    assert_eq!(binding.view().revision(), 0);
-}
-
-#[test]
 fn bind_charges_an_unbound_scene_once_and_adopts_a_batch_bound_one() {
     let mut brain = GlobalBudget::default();
     let mut source = SceneState::begin(header()).expect("valid header");
@@ -93,6 +88,10 @@ fn bind_charges_an_unbound_scene_once_and_adopts_a_batch_bound_one() {
     let usage = replayed().usage();
 
     let mut global = GlobalBudget::default();
+    let empty = bound(&mut global);
+    assert_eq!(global.usage(), Usage::default());
+    assert_eq!(global.generation(), 0);
+    assert_eq!(empty.view().revision(), 0);
     let generation = global.generation();
     let binding = SceneBinding::bind(Deferred::new(replayed(), 0), &mut global).expect("charged");
     assert_eq!(global.usage(), usage, "an unbound scene is charged once");
@@ -149,33 +148,45 @@ fn bind_charges_an_unbound_scene_once_and_adopts_a_batch_bound_one() {
 }
 
 #[test]
-fn a_detached_candidate_installs_like_an_ordinary_commit() {
-    let mut brain = GlobalBudget::default();
-    let mut ordinary = SceneState::begin(header()).expect("valid header");
-    let committed = commit(&mut ordinary, &mut brain, &text("a", "t1"));
+fn a_detached_candidate_installs_and_prepares_its_object() {
     let mut global = GlobalBudget::default();
     let mut binding = bound(&mut global);
+    let before = LayoutState::new(binding.view());
     let preparation = apply(&mut binding, &mut global, &text("a", "t1")).expect("applied");
+    let handle = Handle::new(1, 0).expect("first handle");
+    let usage = Usage {
+        objects: 1,
+        scenes: 1,
+        ..Usage::default()
+    };
+    assert_eq!(binding.view().revision(), 1);
+    assert_eq!(binding.view().usage(), usage);
+    assert_eq!(global.usage(), usage);
+    assert_eq!(binding.view().handle(&id("t1")), Some(handle));
+
+    let input = PrepareInput::new(
+        preparation,
+        before.clone(),
+        SurfaceGeometry::default(),
+        Arc::new(Theme::default()),
+    )
+    .expect("joins the bound scene's original layout");
+    let prepared = prepare(input, &mut WideMeasure, &AtomicBool::new(false))
+        .expect("prepares the detached commit");
+    prepared
+        .validate(binding.view(), &before)
+        .expect("current result");
+    assert_eq!(prepared.after.handle(&id("t1")), Some(handle));
     assert_eq!(
-        preparation, committed.preparation,
-        "the same preparation facts"
+        prepared
+            .after
+            .items()
+            .into_iter()
+            .map(|item| item.handle)
+            .collect::<Vec<_>>(),
+        [handle]
     );
-    assert_eq!(
-        binding.view().revision(),
-        committed.revision,
-        "one revision"
-    );
-    assert_eq!(
-        binding.view().usage(),
-        ordinary.usage(),
-        "the same scene charge"
-    );
-    assert_eq!(global.usage(), brain.usage(), "the same global charge");
-    assert_eq!(
-        binding.view().handle(&id("t1")),
-        ordinary.handle(&id("t1")),
-        "the same handle"
-    );
+
     let read = binding.read();
     let retransmitted = read
         .admit_detached(&step(&text("a", "t1")))

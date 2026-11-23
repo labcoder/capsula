@@ -601,12 +601,16 @@ fn control_reader(
     move || {
         loop {
             let (frame, bytes) = match read::<ControlToShell>(&shared.control, Pipe::Control) {
-                Ok(Some((message, bytes))) => match frame_of(message) {
-                    Some(frame) => (frame, bytes),
-                    None if !send(None, bytes) => return,
-                    None if shared.write_control(&ControlToBrain::Pong).is_ok() => continue,
-                    None => (Frame::BadRead, 0),
-                },
+                Ok(Some((ControlToShell::Ping, bytes))) => {
+                    if !send(None, bytes) {
+                        return;
+                    }
+                    if shared.write_control(&ControlToBrain::Pong).is_ok() {
+                        continue;
+                    }
+                    (Frame::BadRead, 0)
+                }
+                Ok(Some((message, bytes))) => (Frame::Control(message), bytes),
                 Ok(None) => (Frame::Closed, 0),
                 Err(_) => (Frame::BadRead, 0),
             };
@@ -619,14 +623,6 @@ fn control_reader(
                 return;
             }
         }
-    }
-}
-
-/// The frame a control message becomes; `None` for a `Ping`, which the reader answers itself.
-fn frame_of(message: ControlToShell) -> Option<Frame> {
-    match message {
-        ControlToShell::Ping => None,
-        message => Some(Frame::Control(message)),
     }
 }
 
@@ -689,13 +685,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use kumochi_protocol::frame::{self, Pipe};
-    use kumochi_protocol::message::{
-        AssistantName, ControlToShell, DEFAULT_HOLD_TO_TALK, DEFAULT_SCREEN_HOLDS,
-        DEFAULT_SHOW_SCREEN, DockPosition, MaxFrameRate, OnboardingStep, SettingsView, SttUnload,
-        ThreadId,
-    };
+    use kumochi_protocol::message::ControlToShell;
 
-    use super::{Frame, Projection, Seen, frame_of, read};
+    use super::{Frame, Projection, Seen, read};
 
     #[test]
     fn a_clean_close_is_empty_input_not_a_truncated_frame() {
@@ -809,43 +801,5 @@ mod tests {
                 ));
             }
         }
-    }
-
-    #[test]
-    fn the_connections_first_settings_reaches_the_client_before_its_scenes() {
-        let view = SettingsView {
-            assistant_name: AssistantName::new("Kumo").expect("a valid name"),
-            user_name: None,
-            onboarded: true,
-            onboarding_from: OnboardingStep::Welcome,
-            main_thread: ThreadId(1),
-            max_frame_rate: MaxFrameRate::default(),
-            default_model: None,
-            dock_position: DockPosition::TopCenter,
-            show_in_taskbar: false,
-            talk_back: false,
-            stt_unload: SttUnload::Kept,
-            hold_to_talk: DEFAULT_HOLD_TO_TALK,
-            screen_holds: DEFAULT_SCREEN_HOLDS,
-            show_screen: DEFAULT_SHOW_SCREEN,
-        };
-        let sent = [
-            ControlToShell::Settings {
-                view,
-                answer: false,
-            },
-            ControlToShell::Ping,
-            ControlToShell::Scenes { scenes: Vec::new() },
-        ];
-        let taken: Vec<&str> = sent
-            .into_iter()
-            .filter_map(frame_of)
-            .map(|frame| match frame {
-                Frame::Control(ControlToShell::Settings { answer: false, .. }) => "settings",
-                Frame::Control(ControlToShell::Scenes { .. }) => "scenes",
-                _ => "other",
-            })
-            .collect();
-        assert_eq!(taken, ["settings", "scenes"]);
     }
 }

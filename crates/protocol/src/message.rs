@@ -1159,10 +1159,10 @@ mod issue_tests;
 mod tests {
     use super::{
         CAPABILITY_LEN, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain, DataToShell,
-        Deleted, Effort, Hello, Incarnation, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_PAGE_BYTES,
-        MAX_PAGE_ROWS, MAX_SLUG_BYTES, MAX_STEP_LABEL, MAX_STEPS, MAX_TITLE_CHARS,
-        MAX_VISIBLE_SCENES, ModelChoice, ModelInfo, ModelName, ModelSlug, RunId, SceneDescriptor,
-        SceneId, Secret, Step, ThreadCursor, ThreadId, ThreadKind, ThreadRow,
+        Effort, Hello, Incarnation, MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_PAGE_BYTES,
+        MAX_PAGE_ROWS, MAX_SLUG_BYTES, MAX_STEP_LABEL, MAX_STEPS, ModelChoice, ModelInfo,
+        ModelName, ModelSlug, RunId, SceneId, Secret, Step, ThreadCursor, ThreadId, ThreadKind,
+        ThreadRow,
     };
     use crate::frame::{self, HEADER_LEN, Pipe};
 
@@ -1382,43 +1382,60 @@ mod tests {
     }
 
     #[test]
-    fn four_worst_case_descriptors_fit_the_control_pipe() {
-        let descriptor = SceneDescriptor {
-            scene: SCENE,
-            revision: u32::MAX,
-            committed: u32::MAX,
-        };
-        let scenes = ControlToShell::Scenes {
-            scenes: vec![descriptor; MAX_VISIBLE_SCENES],
-        };
-        // Tag and length, then 10 + 5 + 5 bytes per descriptor.
-        assert_eq!(payload(&scenes, Pipe::Control), 2 + 4 * 20);
-    }
+    fn maximum_legacy_drawing_and_delete_frames_round_trip_on_their_pipes() {
+        use super::{Deleted, MAX_VISIBLE_SCENES, SceneDescriptor};
 
-    #[test]
-    fn worst_case_delete_frames_fit_their_pipes() {
+        fn check<T>(message: T, pipe: Pipe)
+        where
+            T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        {
+            let bytes = frame::encode(&message, pipe).expect("fits the pipe's cap");
+            let mut reader = bytes.as_slice();
+            assert_eq!(
+                frame::read(&mut reader, pipe).expect("reads one frame"),
+                Some(message)
+            );
+            assert!(reader.is_empty());
+        }
+
         let thread = ThreadId(u64::MAX);
-        let delete = ControlToBrain::DeleteThread {
-            thread,
-            after_turns: u32::MAX,
-            resend: true,
-        };
-        assert_eq!(payload(&delete, Pipe::Control), 1 + 10 + 5 + 1);
-        let deleted = ControlToShell::ThreadDeleted {
-            thread,
-            outcome: Deleted::Removed,
-            last_run: Some(RunId(u64::MAX)),
-        };
-        assert_eq!(payload(&deleted, Pipe::Control), 1 + 10 + 1 + 1 + 10);
-        let refused = ControlToShell::TurnRefused {
-            turn: u32::MAX,
-            thread: Some(thread),
-        };
-        assert_eq!(payload(&refused, Pipe::Control), 1 + 5 + 1 + 10);
-        let removed = DataToShell::ScenesRemoved {
-            scenes: vec![SCENE; MAX_VISIBLE_SCENES],
-        };
-        assert_eq!(payload(&removed, Pipe::Data), 2 + 4 * 10);
+        for message in [
+            ControlToBrain::DeleteThread {
+                thread,
+                after_turns: u32::MAX,
+                resend: true,
+            },
+            ControlToBrain::ClearDrawing {
+                scene_ids: vec![SCENE; MAX_VISIBLE_SCENES],
+            },
+        ] {
+            check(message, Pipe::Control);
+        }
+        for message in [
+            ControlToShell::Scenes {
+                scenes: vec![
+                    SceneDescriptor {
+                        scene: SCENE,
+                        revision: u32::MAX,
+                        committed: u32::MAX,
+                    };
+                    MAX_VISIBLE_SCENES
+                ],
+            },
+            ControlToShell::ThreadDeleted {
+                thread,
+                outcome: Deleted::Removed,
+                last_run: Some(RunId(u64::MAX)),
+            },
+        ] {
+            check(message, Pipe::Control);
+        }
+        check(
+            DataToShell::ScenesRemoved {
+                scenes: vec![SCENE; MAX_VISIBLE_SCENES],
+            },
+            Pipe::Data,
+        );
     }
 
     /// Titles are at most 80 characters when written, so only an older or planted one ever needs
@@ -1427,7 +1444,7 @@ mod tests {
     fn a_full_page_of_the_longest_titles_and_choices_fits_the_page_cap() {
         let row = ThreadRow {
             id: ThreadId(u64::MAX),
-            title: "🌥".repeat(MAX_TITLE_CHARS),
+            title: "🌥".repeat(80),
             updated_ms: i64::MIN,
             kind: ThreadKind::Thread,
             choice: Some(ModelChoice {
@@ -1446,7 +1463,7 @@ mod tests {
         };
         let list = DataToShell::ThreadList {
             request: u32::MAX,
-            threads: vec![row; MAX_PAGE_ROWS],
+            threads: vec![row; 50],
             next: Some(ThreadCursor {
                 updated_ms: i64::MIN,
                 id: ThreadId(u64::MAX),
@@ -1457,22 +1474,18 @@ mod tests {
         // and 64 bytes of slug, effort, connection.
         let task_len = 1 + 1 + 10 + 1 + 10 + 1;
         let row_len = 10 + 2 + 320 + 10 + 1 + 1 + 1 + 64 + 1 + 1 + task_len;
-        let payload = payload(&list, Pipe::Data);
-        assert_eq!(payload, 1 + 5 + 1 + MAX_PAGE_ROWS * row_len + 1 + 30);
-        assert!(payload + HEADER_LEN <= MAX_PAGE_BYTES, "{payload} bytes");
-        let encoded = frame::encode(&list, Pipe::Data).expect("encode full task rows");
+        let bytes = frame::encode(&list, Pipe::Data).unwrap();
+        assert_eq!(MAX_PAGE_ROWS, 50);
+        assert_eq!(MAX_PAGE_BYTES, 32 * 1024);
         assert_eq!(
-            frame::decode::<DataToShell>(&encoded[HEADER_LEN..]).expect("decode full task rows"),
-            list
+            bytes.len(),
+            HEADER_LEN + 1 + 5 + 1 + MAX_PAGE_ROWS * row_len + 1 + 30
         );
-    }
-
-    #[test]
-    fn a_clear_of_four_worst_case_ids_fits_the_control_pipe() {
-        let clear = ControlToBrain::ClearDrawing {
-            scene_ids: vec![SCENE; MAX_VISIBLE_SCENES],
-        };
-        assert_eq!(payload(&clear, Pipe::Control), 2 + 4 * 10);
+        assert!(bytes.len() <= MAX_PAGE_BYTES);
+        assert_eq!(
+            frame::read(&mut bytes.as_slice(), Pipe::Data).unwrap(),
+            Some(list)
+        );
     }
 
     #[test]

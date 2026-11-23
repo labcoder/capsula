@@ -1513,6 +1513,7 @@ mod tests {
         let Ok(Record::Step(step)) = parse_record(&bytes) else {
             panic!("typed fixture");
         };
+        assert_eq!(step.put.len(), cases.len());
         for (op, (fixture, expected)) in step.put.iter().zip(&cases) {
             assert_eq!(default_duration(op), *expected, "{fixture}");
         }

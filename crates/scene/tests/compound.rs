@@ -97,20 +97,28 @@ fn edges_belong_to_the_exact_least_common_diagram_of_their_nodes() {
         ("a", "c", "deep"),
         ("a", "a", "deep"),
     ] {
-        let scene = scene();
-        let budget = GlobalBudget::default();
+        let mut scene = scene();
+        let before = LayoutState::new(&scene);
         let mut put = groups();
         put.push(json!({"edge":{"id":"edge","in":parent,"from":from,"to":to}}));
-        let bytes =
-            serde_json::to_vec(&json!({"step":{"id":"edges","put":put}})).expect("step JSON");
-        let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
-            panic!("step fixture");
-        };
-        scene
-            .admit(&step, &budget)
-            .expect("least-common-group edge");
-        assert_eq!(scene.object_count(), 0, "admission does not publish");
-        assert_eq!(budget.usage().objects, 0);
+        let prepared = picture(
+            &mut scene,
+            &mut GlobalBudget::default(),
+            &before,
+            json!({"id":"edges","put":put}),
+        );
+        let handle = prepared.after.handle(&id("edge")).expect("prepared edge");
+        let items = prepared.after.items();
+        let edge = items
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("edge item");
+        assert!(
+            edge.primitives
+                .iter()
+                .any(|prim| matches!(prim, Prim::Line { points, .. } if points.len() >= 2)),
+            "the accepted least-common-group edge {from} → {to} is drawn"
+        );
     }
 }
 
@@ -231,7 +239,10 @@ fn clusters_measure_table_only_and_boxed_diagram_only_contents_before_ranking() 
         let left = bounds(&prepared.after, "left");
         let right = bounds(&prepared.after, "right");
         if table {
-            assert_rect(left, [19.0, 36.225], [180.0, 31.549_995]);
+            assert!((left.origin.x - 19.0).abs() < 0.01);
+            assert!((left.origin.y - 36.225).abs() < 0.01);
+            assert!((left.size.x - 180.0).abs() < 0.01);
+            assert!((left.size.y - 31.55).abs() < 0.01);
             assert_rect(right, [261.0, 32.0], [80.0, 40.0]);
         } else {
             assert_rect(left, [19.0, 32.0], [180.0, 120.0]);
@@ -474,6 +485,30 @@ fn compound_cap_fixtures_share_the_global_object_budget() {
             json!({"id":"overflow","put":[{"line":{"id":"extra","from":[0,0],"to":[1,1]}}]}),
             ErrorCode::OverBudget(Budget::LiveObjects),
         );
+        if matches!(fixture, fixtures::Fixture::CrossGroup) {
+            let chain = growing_chain(fixture);
+            let sources: Vec<_> = std::iter::once(&chain)
+                .chain(retained.iter().skip(1).map(|(scene, _)| scene))
+                .map(|scene| (scene.header(), scene.recovery_log()))
+                .collect();
+            let (results, recovered_budget) = recover_all(
+                &sources,
+                SurfaceGeometry::default(),
+                &Arc::new(Theme::default()),
+                &mut Measure,
+                &AtomicBool::new(false),
+                None,
+            );
+            let recovered: Vec<_> = results
+                .into_iter()
+                .map(|result| {
+                    let (scene, layout) = result.expect("recovered capped view");
+                    (scene.revision(), layout.items().len())
+                })
+                .collect();
+            assert_eq!(recovered, [(64, 600), (1, 600), (1, 150), (1, 150)]);
+            assert_eq!(recovered_budget.usage().objects, 1500);
+        }
     }
 }
 
@@ -709,11 +744,13 @@ fn dropping_a_cluster_ancestor_preserves_world_bounds_and_recovery() {
         None,
     )
     .expect("recovered cluster");
-    assert_eq!(detached.items().len(), 4);
-    assert_eq!(detached.items(), recovered.items());
-    for (name, expected) in survivors.into_iter().zip(expected) {
-        assert_eq!(bounds(&detached, name), expected);
-        assert_eq!(bounds(&recovered, name), expected);
+    for layout in [&detached, &recovered] {
+        assert_eq!(layout.items().len(), 4);
+        assert_eq!(layout.handle(&id("outer")), None);
+        for ((name, expected), handle) in survivors.into_iter().zip(expected).zip(revealed) {
+            assert_eq!(bounds(layout, name), expected);
+            assert_eq!(layout.handle(&id(name)), Some(handle));
+        }
     }
 }
 

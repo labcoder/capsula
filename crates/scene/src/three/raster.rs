@@ -50,7 +50,7 @@ pub struct Fragment<'a> {
 
 /// A normalised, strictly convex, counter-clockwise screen polygon.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ScreenPoly {
+struct ScreenPoly {
     points: [[i32; 2]; MAX_POLY_VERTICES],
     len: u8,
     plane: [f32; 3],

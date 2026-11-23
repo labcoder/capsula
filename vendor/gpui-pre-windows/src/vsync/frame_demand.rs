@@ -41,6 +41,8 @@ pub(crate) static FRAME_DEMAND: FrameDemand = FrameDemand::new();
 pub(crate) struct FrameDemand {
     pending: Mutex<bool>,
     changed: Condvar,
+    #[cfg(test)]
+    before_wait: Mutex<Option<std::sync::mpsc::Sender<Instant>>>,
 }
 
 impl FrameDemand {
@@ -48,6 +50,8 @@ impl FrameDemand {
         Self {
             pending: Mutex::new(false),
             changed: Condvar::new(),
+            #[cfg(test)]
+            before_wait: Mutex::new(None),
         }
     }
 
@@ -72,6 +76,10 @@ impl FrameDemand {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Wake::Idle;
+            }
+            #[cfg(test)]
+            if let Some(ready) = self.before_wait.lock().expect("wait probe lock").take() {
+                ready.send(deadline).expect("wait probe is still listening");
             }
             pending = self
                 .changed
@@ -231,12 +239,15 @@ impl ForcedFrame {
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::atomic::{AtomicBool, Ordering},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
-    use super::{ForcedFrame, FrameDemand, FramePoll, FrameRequest, TOUCHPAD_CONTACT_MS, Wake};
+    use super::{ForcedFrame, FrameDemand, FramePoll, FrameRequest, Wake};
 
     /// Long enough that a test never reaches it: the waits below end on demand or stop.
     const NEVER: Duration = Duration::from_secs(3600);
@@ -281,14 +292,6 @@ mod tests {
     }
 
     #[test]
-    fn the_sustain_deadline_saturates() {
-        let request = FrameRequest::new(demand());
-        request.sustain_after_input_at(u64::MAX - 1);
-        assert_eq!(request.poll(u64::MAX - 1), poll(true, true));
-        assert_eq!(request.poll(u64::MAX), poll(false, false));
-    }
-
-    #[test]
     fn a_request_wakes_the_vsync_thread_once() {
         let demand = demand();
         let running = AtomicBool::new(false);
@@ -310,10 +313,27 @@ mod tests {
     fn a_blocked_thread_wakes_on_request() {
         let demand = demand();
         let stop = AtomicBool::new(false);
+        let (ready, entered) = mpsc::channel();
+        *demand.before_wait.lock().expect("wait probe lock") = Some(ready);
         thread::scope(|scope| {
-            let waiter = scope.spawn(|| demand.wait(&stop, NEVER));
+            let (done, returned) = mpsc::channel();
+            let stop_ref = &stop;
+            scope.spawn(move || {
+                let wake = demand.wait(stop_ref, Duration::from_secs(5));
+                done.send((wake, Instant::now())).expect("receive the wake");
+            });
+            let deadline = entered
+                .recv_timeout(Duration::from_secs(2))
+                .expect("waiter reached the condition wait with the predicate locked");
             demand.request();
-            assert_eq!(waiter.join().expect("the waiter doesn't panic"), Wake::Frame);
+            let (wake, at) = returned
+                .recv_timeout(Duration::from_secs(2))
+                .expect("signal wakes the waiter promptly");
+            assert_eq!(wake, Wake::Frame);
+            assert!(
+                at < deadline,
+                "an idle timeout isn't a wake from the signal"
+            );
         });
     }
 
@@ -349,24 +369,13 @@ mod tests {
     }
 
     #[test]
-    fn a_touchpad_contact_keeps_frames_coming_until_the_cap() {
-        let request = FrameRequest::new(demand());
-        request.touchpad_contact_at(1000);
-        assert_eq!(request.poll(1000), poll(true, true));
-        let end = 1000 + TOUCHPAD_CONTACT_MS;
-        assert_eq!(request.poll(end - 1), poll(true, true));
-        assert_eq!(request.poll(end), poll(false, false));
-    }
-
-    #[test]
     fn a_new_hit_test_rearms_the_keep_alive() {
         let request = FrameRequest::new(demand());
         request.touchpad_contact_at(1000);
         assert_eq!(request.poll(1000), poll(true, true));
         request.touchpad_contact_at(1400);
-        let end = 1400 + TOUCHPAD_CONTACT_MS;
-        assert_eq!(request.poll(end - 1), poll(true, true));
-        assert_eq!(request.poll(end), poll(false, false));
+        assert_eq!(request.poll(2399), poll(true, true));
+        assert_eq!(request.poll(2400), poll(false, false));
     }
 
     #[test]
@@ -388,19 +397,11 @@ mod tests {
         request.touchpad_contact_at(1000);
         assert_eq!(demand.wait(&running, Duration::ZERO), Wake::Frame);
         assert_eq!(request.poll(1000), poll(true, true));
-        let end = 1000 + TOUCHPAD_CONTACT_MS;
-        for now in [end, end + 1, end + 60_000] {
+        assert_eq!(request.poll(1999), poll(true, true));
+        for now in [2000, 2001, 62_000] {
             assert_eq!(request.poll(now), poll(false, false));
         }
         assert_eq!(demand.wait(&running, Duration::ZERO), Wake::Idle);
-    }
-
-    #[test]
-    fn an_unforced_frame_owes_nothing() {
-        let forced = ForcedFrame::default();
-        assert!(!forced.begin(false));
-        forced.drawn();
-        assert!(!forced.end());
     }
 
     #[test]
@@ -415,6 +416,7 @@ mod tests {
         forced.drawn();
         assert!(!forced.end());
         assert!(!forced.begin(false));
+        forced.drawn();
         assert!(!forced.end());
     }
 

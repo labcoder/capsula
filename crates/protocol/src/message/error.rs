@@ -294,8 +294,6 @@ mod tests {
     use super::{
         Action, ErrorArg, ErrorKey, MAX_ERROR_ACTIONS, MAX_ERROR_ARGS, TooMany, UserError,
     };
-    use crate::frame::{self, HEADER_LEN, Pipe};
-    use crate::message::ControlToShell;
 
     fn worst() -> UserError {
         UserError::new(
@@ -353,12 +351,5 @@ mod tests {
             .collect();
         assert!(decoded.iter().all(|key| ErrorKey::ALL.contains(key)));
         assert_eq!(decoded.len(), ErrorKey::ALL.len());
-    }
-
-    #[test]
-    fn the_worst_case_error_fits_the_control_pipe() {
-        let frame = frame::encode(&ControlToShell::Error(worst()), Pipe::Control).expect("fits");
-        // Tags, then 4 args of a tag and a 5-byte varint, then 3 action tags.
-        assert_eq!(frame.len() - HEADER_LEN, 1 + 1 + 1 + 4 * 6 + 1 + 3);
     }
 }

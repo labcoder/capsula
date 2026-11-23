@@ -1,9 +1,10 @@
 //! Streaming grammar, cursor boundaries, allocation checks and Rez measurements.
 
-use kumochi_scene::{
-    limits::{MAX_DRAWING_BYTES, MAX_RECORD_BYTES},
-    tokenize::{TokenError, Tokenizer},
-};
+#[path = "support/tokenizer_fixture.rs"]
+mod tokenizer_fixture;
+use tokenizer_fixture::{drain_without_copy, measurement_drawing};
+
+use kumochi_scene::tokenize::{TokenError, Tokenizer};
 
 #[path = "support/allocation.rs"]
 mod allocation;
@@ -146,15 +147,15 @@ fn drawing_with_record_size(size: usize) -> Vec<u8> {
 #[test]
 fn byte_and_depth_limits_are_exact() {
     assert_eq!(
-        scan(&drawing_with_record_size(MAX_RECORD_BYTES), 40).expect("record at cap")[0].len(),
-        MAX_RECORD_BYTES
+        scan(&drawing_with_record_size(32_768), 40).expect("record at cap")[0].len(),
+        32_768
     );
     assert_eq!(
-        scan(&drawing_with_record_size(MAX_RECORD_BYTES + 1), 4096).err(),
+        scan(&drawing_with_record_size(32_769), 4096).err(),
         Some(TokenError::RecordTooLarge)
     );
     let mut drawing = b"{\"records\":[]}".to_vec();
-    drawing.resize(MAX_DRAWING_BYTES, b' ');
+    drawing.resize(524_288, b' ');
     assert!(
         scan(&drawing, 4096).expect("drawing at cap").is_empty(),
         "exact drawing cap is legal"
@@ -315,48 +316,10 @@ fn incomplete_stream_and_invalid_utf8_fail() {
     assert_eq!(scan(numbers, 1).expect("valid scalar grammar").len(), 1);
 }
 
-fn measurement_drawing() -> Vec<u8> {
-    let mut records = vec![
-        serde_json::json!({"begin":{"v":1,"scene":"measure","surface":"overlay","alt":""}}),
-        serde_json::json!({"step":{"id":"initial","put":(0..64).map(|i| serde_json::json!({"text":{"id":format!("t{i}"),"at":[0,0],"text":""}})).collect::<Vec<_>>()}}),
-    ];
-    let text = "x".repeat(400);
-    for update in 0..18 {
-        records.push(serde_json::json!({"step":{"id":format!("update{update}"),"set":(0..64).map(|i| serde_json::json!({"target":format!("t{i}"),"text":text})).collect::<Vec<_>>()}}));
-    }
-    records.push(serde_json::json!({"end":{}}));
-    for record in &records {
-        let bytes = serde_json::to_vec(record).expect("generated record encodes");
-        assert!(
-            kumochi_scene::parse_record(&bytes).is_ok(),
-            "benchmark uses typed-valid records"
-        );
-    }
-    let mut drawing = serde_json::to_vec(&serde_json::json!({"records":records}))
-        .expect("generated drawing encodes");
-    assert!(
-        drawing.len() <= MAX_DRAWING_BYTES,
-        "fixture fits the call cap"
-    );
-    drawing.resize(MAX_DRAWING_BYTES, b' ');
-    drawing
-}
-
-fn drain_without_copy(tokenizer: &mut Tokenizer, drawing: &[u8], delta: usize) {
-    let mut count = 0;
-    for chunk in drawing.chunks(delta) {
-        let mut rest = chunk;
-        while let Some(record) = tokenizer.next(&mut rest).expect("valid generated envelope") {
-            std::hint::black_box(record.bytes);
-            count += 1;
-        }
-    }
-    tokenizer.finish().expect("complete generated drawing");
-    assert_eq!(count, 21, "every record emitted");
-}
-
 #[test]
 fn steady_state_uses_the_one_record_buffer() {
+    let (_, count) = allocation::count(|| std::hint::black_box(Vec::<u8>::with_capacity(32)));
+    assert!(count > 0, "the counter observes an allocation");
     let drawing = measurement_drawing();
     for delta in [40, 4096] {
         let mut tokenizer = Tokenizer::new();
@@ -366,68 +329,33 @@ fn steady_state_uses_the_one_record_buffer() {
 }
 
 #[test]
-fn allocation_counter_observes_allocation_zeroing_and_reallocation() {
-    let size = std::hint::black_box(32);
-    let (buffers, count) = allocation::count(|| {
-        let mut growing = Vec::<u8>::with_capacity(size);
-        growing.reserve_exact(size * 2);
-        let zeroed = vec![0_u8; size];
-        std::hint::black_box((growing, zeroed))
-    });
-    assert_eq!(count, 3, "the counter sees all three allocation operations");
-    drop(buffers);
-}
-
-#[test]
 fn debug_and_errors_do_not_expose_buffered_content() {
-    let mut tokenizer = Tokenizer::new();
-    let mut input: &[u8] = br#"{"records":[{"label":"private-content-sentinel"}"#;
-    let record = tokenizer
-        .next(&mut input)
-        .expect("closed record")
-        .expect("emission");
+    let diagnostics = |label| {
+        let mut tokenizer = Tokenizer::new();
+        let json = format!(r#"{{"records":[{{"label":"{label}"}}"#);
+        let mut input = json.as_bytes();
+        let record = tokenizer
+            .next(&mut input)
+            .expect("closed record")
+            .expect("emission");
+        let closed = format!("{record:?}");
+        let open = format!("{tokenizer:?}");
+        let error = tokenizer.finish().expect_err("missing envelope tail");
+        [closed, open, format!("{error} {error:?}")]
+    };
+    let observed = diagnostics("private-content-sentinel");
     assert!(
-        !format!("{record:?}").contains("private"),
+        observed == diagnostics("another-message-fragment"),
+        "buffered content affected tokenizer diagnostics"
+    );
+    let [closed, open, error] = observed;
+    assert!(
+        !closed.contains("private"),
         "closed-record Debug is redacted"
     );
+    assert!(!open.contains("private"), "tokenizer Debug is redacted");
     assert!(
-        !format!("{tokenizer:?}").contains("private"),
-        "tokenizer Debug is redacted"
-    );
-    let error = tokenizer.finish().expect_err("missing envelope tail");
-    assert!(
-        !format!("{error} {error:?}").contains("private"),
+        !error.contains("private"),
         "errors contain no buffered content"
     );
-}
-
-#[test]
-#[ignore = "normal-priority timing on a quiet Rez with the measurement lock"]
-fn measure_tokenizer() {
-    use std::time::{Duration, Instant};
-    let drawing = measurement_drawing();
-    for delta in [40_usize, 4096] {
-        for _ in 0..5 {
-            drain_without_copy(&mut Tokenizer::new(), &drawing, delta);
-        }
-        let mut elapsed = Duration::ZERO;
-        for _ in 0..64 {
-            let mut tokenizer = Tokenizer::new();
-            let start = Instant::now();
-            drain_without_copy(&mut tokenizer, &drawing, delta);
-            elapsed += start.elapsed();
-        }
-        let mut tokenizer = Tokenizer::new();
-        let ((), allocations) =
-            allocation::count(|| drain_without_copy(&mut tokenizer, &drawing, delta));
-        let bytes = u32::try_from(drawing.len()).expect("bounded drawing");
-        let deltas = u32::try_from(drawing.len().div_ceil(delta)).expect("bounded delta count");
-        let seconds = elapsed.as_secs_f64();
-        let mb_s = f64::from(bytes) * 64.0 / seconds / 1_000_000.0;
-        let ns_delta = seconds * 1_000_000_000.0 / (f64::from(deltas) * 64.0);
-        println!(
-            "delta_bytes={delta} drawing_bytes={bytes} runs=64 MB/s={mb_s:.3} ns/delta={ns_delta:.3} steady_allocations={allocations}"
-        );
-        assert_eq!(allocations, 0, "one reused record buffer");
-    }
 }
