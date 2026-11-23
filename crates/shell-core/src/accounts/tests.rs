@@ -4,6 +4,7 @@ use super::{
     AccountOp, AccountRecovery, AccountView, Accounts, Action, Cleanup, ErrorKey, PlanState,
     UserError,
 };
+use crate::link::LinkEvent;
 
 const OPS: [AccountOp; 5] = [
     AccountOp::SignIn,
@@ -63,17 +64,24 @@ fn a_platform_refusal_cannot_retry_or_sign_in_again() {
         [AccountOp::SignIn],
         "unscoped errors aren't account state"
     );
-    assert!(accounts.receive_snapshot(Some(7), 7, signed_out(), true));
+    assert!(accounts.receive_snapshot(
+        Some(7),
+        LinkEvent::AccountUnsupported {
+            generation: 7,
+            view: signed_out(),
+        },
+    ));
     assert_eq!(allowed(&accounts), []);
 
     accounts.disconnected();
     assert!(accounts.receive_snapshot(
         Some(8),
-        8,
-        signed_in(PlanState::Enabled, Some(AccountRecovery::Retry)),
-        true,
+        LinkEvent::AccountUnsupported {
+            generation: 8,
+            view: signed_in(PlanState::Enabled, Some(AccountRecovery::Retry)),
+        },
     ));
-    assert!(!accounts.receive_snapshot(Some(8), 7, signed_out(), false));
+    assert!(!accounts.receive(Some(8), 7, signed_out()));
     assert_eq!(allowed(&accounts), [AccountOp::SignOut]);
 }
 
