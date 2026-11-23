@@ -28,7 +28,7 @@ type Next = Option<(u64, SpeechRequest)>;
 ///
 /// # Errors
 /// Returns a framing or transport failure, never request contents.
-pub fn serve() -> Result<(), FrameError> {
+pub(crate) fn serve() -> Result<(), FrameError> {
     crate::platform::quiet_failures();
     fail_stop(serve_requests)
 }
