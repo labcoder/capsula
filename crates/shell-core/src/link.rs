@@ -2084,12 +2084,8 @@ fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError> {
             | ControlToShell::HoldScreen { .. }
             | ControlToShell::Voice(_),
         ) => Err(LinkError::Rejected),
-        Some(ControlToShell::BuildMismatch { brain_build }) => {
-            tracing::warn!(
-                brain_build,
-                shell_build = BUILD_ID,
-                "brain from another build"
-            );
+        Some(ControlToShell::BuildMismatch { .. }) => {
+            tracing::warn!(shell_build = BUILD_ID, "brain from another build");
             Err(LinkError::BuildMismatch)
         }
         Some(ControlToShell::Welcome {
@@ -2800,6 +2796,10 @@ mod tests;
 #[cfg(test)]
 #[path = "link_delete_tests.rs"]
 mod delete_tests;
+
+#[cfg(test)]
+#[path = "link_diagnostics_tests.rs"]
+mod diagnostics_tests;
 
 #[cfg(all(test, windows))]
 #[path = "link_measure_tests.rs"]

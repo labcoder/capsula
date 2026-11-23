@@ -28,6 +28,22 @@ pub enum CredentialError {
     Unsupported,
 }
 
+impl CredentialError {
+    #[cfg(windows)]
+    pub(crate) fn raw_os_error(&self) -> Option<u32> {
+        std::error::Error::source(&self.0)?
+            .downcast_ref::<keyring::windows::Error>()
+            .map(|error| error.0)
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn raw_os_error(&self) -> Option<u32> {
+        match self {
+            Self::Unsupported => None,
+        }
+    }
+}
+
 #[cfg(not(windows))]
 pub(crate) struct NativeCredentialStore;
 
