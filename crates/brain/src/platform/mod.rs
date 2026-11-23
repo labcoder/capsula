@@ -9,6 +9,7 @@ mod connected_shell;
 #[cfg(not(windows))]
 mod fs;
 mod model_files;
+mod pipe;
 mod process;
 mod session_lock;
 mod shell_process;
@@ -38,10 +39,17 @@ pub(crate) fn test_is_link(metadata: &std::fs::Metadata) -> bool {
 }
 
 pub(crate) use connected_shell::connected_shell_pid;
-#[cfg(windows)]
 pub(super) use connected_shell::register_shell;
 #[cfg(not(windows))]
 pub use fs::{config_dir, data_dir, free_space, links_unsupported, replace_file};
+pub(crate) use pipe::ClientRefused;
+pub use pipe::Instance;
+#[cfg(not(windows))]
+pub(crate) use pipe::{
+    PipeClient, bridge_peer, client_image, open_pipe, server_image, shell_connection,
+};
+#[cfg(not(windows))]
+pub use pipe::{PipeServer, create_owner_only, session_id};
 pub(crate) use process::spawn_if;
 pub use process::{
     ChildPipes, Helper, Job, Launch, Spawned, Stdio, launch_detached, spawn, system_env,
@@ -54,7 +62,7 @@ pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
 pub(crate) use windows::DumpExclusion;
 #[cfg(windows)]
-pub(crate) use windows::shell_connection;
+pub(crate) use windows::{PipeClient, bridge_peer, open_pipe, shell_connection};
 
 #[cfg(windows)]
 #[expect(
@@ -129,7 +137,7 @@ pub(crate) use windows::{
 };
 #[cfg(windows)]
 pub use windows::{
-    Instance, PipeServer, client_image, client_process, config_dir, create_owner_only, data_dir,
+    PipeServer, client_image, client_process, config_dir, create_owner_only, data_dir,
     detached_command, free_space, has_exited, links_unsupported, process_image, quiet_failures,
     replace_file, server_image, session_id, session_lock_path, trust_roots,
 };
@@ -225,4 +233,4 @@ impl ManagedPresence {
     }
 }
 #[cfg(all(test, windows))]
-pub(crate) use windows::{PipeClient, test_pair};
+pub(crate) use windows::test_pair;

@@ -6,9 +6,11 @@ use std::os::windows::ffi::OsStringExt as _;
 use std::os::windows::io::{
     AsHandle as _, AsRawHandle, BorrowedHandle, FromRawHandle as _, OwnedHandle,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::net::windows::named_pipe::{
+    ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
+};
 use windows_sys::Win32::Foundation::{
     ERROR_SUCCESS, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
@@ -29,12 +31,37 @@ use windows_sys::Win32::System::Threading::{
     QueryFullProcessImageNameW, WaitForSingleObject,
 };
 
+use crate::platform::{ClientRefused, Instance, Job};
+
 /// The brain's end of a pipe.
 pub type PipeServer = NamedPipeServer;
 
-/// A test's client end of a pipe.
-#[cfg(test)]
-pub(crate) type PipeClient = tokio::net::windows::named_pipe::NamedPipeClient;
+pub(crate) type PipeClient = NamedPipeClient;
+
+pub(crate) fn open_pipe(name: &str) -> io::Result<PipeClient> {
+    ClientOptions::new().open(name)
+}
+
+/// Holds the checked client process for the lifetime of its bridge session.
+pub(crate) fn bridge_peer(
+    server: &PipeServer,
+    job: &Job,
+    expected: &Path,
+) -> Result<OwnedHandle, ClientRefused> {
+    let query = |_| ClientRefused::Query;
+    let process = client_process(server).map_err(query)?;
+    if has_exited(process.as_handle()).map_err(query)? {
+        return Err(ClientRefused::Exited);
+    }
+    let image = process_image(process.as_handle()).map_err(query)?;
+    if !image.as_os_str().eq_ignore_ascii_case(expected.as_os_str()) {
+        return Err(ClientRefused::NotOurImage);
+    }
+    if !job.contains(process.as_handle()).map_err(query)? {
+        return Err(ClientRefused::NotInJob);
+    }
+    Ok(process)
+}
 
 /// A connected owner-only pipe and its client, under a name no running brain uses, for tests
 /// over a real pipe.
@@ -52,17 +79,6 @@ pub(crate) async fn test_pair(name: &str) -> io::Result<(NamedPipeServer, PipeCl
     let client = tokio::net::windows::named_pipe::ClientOptions::new().open(&name)?;
     server.connect().await?;
     Ok((server, client))
-}
-
-/// Whether a pipe instance is the first with its name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Instance {
-    /// Fails if any process already holds the name.
-    First,
-    /// Replaces an instance this process holds, so the name is never free in between.
-    Next,
-    /// The first and only instance: the OS refuses any later one, whatever its flags.
-    Only,
 }
 
 /// Creates an instance of `name`, refusing remote clients and every other user. At most two
@@ -124,8 +140,7 @@ pub fn create_owner_only(name: &str, instance: Instance) -> io::Result<NamedPipe
         .next()
         .and_then(|sid| sid.strip_suffix(')'))
         .unwrap_or(&user);
-    check_user_only(&dacl_sddl(&server)?, user)
-        .map_err(|reason| io::Error::new(io::ErrorKind::PermissionDenied, reason))?;
+    check_user_only(&dacl_sddl(&server)?, user)?;
     Ok(server)
 }
 
@@ -246,10 +261,10 @@ pub(super) fn user_sid() -> io::Result<String> {
 }
 
 /// Accepts a protected DACL with exactly one allow entry, for `user`.
-fn check_user_only(sddl: &str, user: &str) -> Result<(), String> {
+fn check_user_only(sddl: &str, user: &str) -> io::Result<()> {
     let dacl = sddl
         .strip_prefix("D:")
-        .ok_or_else(|| format!("no DACL in {sddl}"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "pipe has no DACL"))?;
     let (flags, aces) = dacl.split_at(dacl.find('(').unwrap_or(dacl.len()));
     let fields: Vec<&str> = aces
         .strip_prefix('(')
@@ -260,7 +275,10 @@ fn check_user_only(sddl: &str, user: &str) -> Result<(), String> {
     if flags.contains('P') && only_user && aces.get(1..).is_some_and(|rest| !rest.contains('(')) {
         Ok(())
     } else {
-        Err(format!("pipe DACL is not user-only: {sddl}"))
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "pipe DACL is not user-only",
+        ))
     }
 }
 
@@ -429,6 +447,21 @@ mod tests {
         assert!(check_user_only("O:BA", ME).is_err(), "no DACL");
     }
 
+    #[test]
+    fn dacl_refusal_retains_the_kind_but_not_the_descriptor() {
+        for (sddl, message) in [
+            ("O:S-1-5-21-1-2-3-1001", "pipe has no DACL"),
+            (
+                "D:(A;;FA;;;S-1-5-21-1-2-3-1001)",
+                "pipe DACL is not user-only",
+            ),
+        ] {
+            let error = check_user_only(sddl, ME).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(error.to_string(), message);
+            assert!(!format!("{error:?}").contains(ME));
+        }
+    }
     #[tokio::test]
     async fn created_pipe_is_owner_only_and_unique() {
         let name = format!(
@@ -473,7 +506,7 @@ mod tests {
             .expect("expected owner SID");
         for pipe in [&first, &next] {
             let dacl = dacl_sddl(pipe).expect("read live pipe ACL");
-            assert_eq!(check_user_only(&dacl, user), Ok(()));
+            check_user_only(&dacl, user).expect("live pipe DACL is user-only");
         }
     }
 

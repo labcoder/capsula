@@ -346,6 +346,11 @@ urgent messages and **data** for everything that can grow. Frames are a `u32` li
 length followed by a `postcard` payload from the closed enums in `crates/protocol`. The length
 is checked against the pipe's cap (64 KiB control, 256 KiB data) before anything is allocated.
 
+The brain's platform module owns native pipe creation and peer process queries. Without the
+Windows adapter, opening or creating a native pipe is unsupported. Shared frame and relay tests
+can use in-memory streams, but those streams don't authenticate clients or serve as a runtime
+transport.
+
 ## Who may connect
 
 - The brain creates both pipes with a protected DACL that grants only the user who made them,
@@ -354,6 +359,7 @@ is checked against the pipe's cap (64 KiB control, 256 KiB data) before anything
   one closes so another process can never take the name in between.
 - The brain only talks to the `kumochi.exe` beside its own executable, and the shell only to
   the `kumochid.exe` beside its own. Each side checks the other's image path through the pipe.
+  Rejection logs name the failed check, not the image path, DACL contents or peer build string.
 - The control and data clients must be the same process. Once both hellos pass, the brain
   checks the control client's image again and holds its process handle for the whole connection.
   It registers the shell's pid so the screen walk excludes the shell, and clears it on disconnect.

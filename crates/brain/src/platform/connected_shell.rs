@@ -13,18 +13,15 @@ pub(super) fn same_client(control: u32, data: u32) -> bool {
     control != 0 && control == data
 }
 
-#[cfg(windows)]
 pub(crate) fn register_shell(pid: u32) -> Registration<'static> {
     Registration::new(&PID, pid)
 }
 
-#[cfg(any(windows, test))]
 pub(crate) struct Registration<'a> {
     slot: &'a AtomicU32,
     pid: u32,
 }
 
-#[cfg(any(windows, test))]
 impl<'a> Registration<'a> {
     fn new(slot: &'a AtomicU32, pid: u32) -> Self {
         slot.store(pid, Ordering::Release);
@@ -32,7 +29,6 @@ impl<'a> Registration<'a> {
     }
 }
 
-#[cfg(any(windows, test))]
 impl Drop for Registration<'_> {
     fn drop(&mut self) {
         // A failed exchange means a newer connection owns the slot, so it stays.
