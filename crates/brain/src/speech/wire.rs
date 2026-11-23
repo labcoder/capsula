@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::platform::sherpa::NativeError;
 use crate::supervise::WorkerLost;
 
 /// The lowest capture rate accepted, in Hz [guess].
@@ -13,6 +12,58 @@ pub const MAX_RATE: u32 = 48_000;
 pub const MAX_SECONDS: u32 = 60;
 /// The most PCM one decode carries: [`MAX_SECONDS`] at [`MAX_RATE`], 16-bit.
 pub const MAX_PCM_BYTES: usize = 5_760_000;
+
+/// Why speech input's native side failed. It carries no native text and no paths.
+#[derive(
+    Debug, thiserror::Error, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+pub enum NativeError {
+    /// A native library is missing.
+    #[error("a native library is missing")]
+    Missing,
+    /// A folder or native library on the load path is a reparse point or resolves elsewhere.
+    #[error("a folder or native library on the load path is a reparse point or resolves elsewhere")]
+    Reparse,
+    /// Someone other than this user or the system can change the load path.
+    #[error("someone other than this user or the system can change the load path")]
+    Unsafe,
+    /// A native library doesn't match its pin.
+    #[error("a native library doesn't match its pin")]
+    Pin,
+    /// A module the native libraries import is already loaded from another folder.
+    #[error("a module the native libraries import is already loaded from another folder")]
+    Conflict,
+    /// A system library the native libraries need is missing.
+    #[error("a system library the native libraries need is missing")]
+    Dependency,
+    /// Loading brought in a module from an unexpected folder.
+    #[error("loading brought in a module from an unexpected folder")]
+    Unexpected,
+    /// A native library failed to load.
+    #[error("a native library failed to load")]
+    Load,
+    /// A native library lacks an export.
+    #[error("a native library lacks an export")]
+    Symbol,
+    /// The native library isn't the pinned release.
+    #[error("the native library isn't the pinned release")]
+    Abi,
+    /// The recognizer or a stream couldn't be created.
+    #[error("the recognizer or a stream couldn't be created")]
+    Create,
+    /// The audio can't be handed to the recognizer.
+    #[error("the audio can't be handed to the recognizer")]
+    Input,
+    /// Decoding gave no result.
+    #[error("decoding gave no result")]
+    Decode,
+    /// The transcript is too long or isn't UTF-8.
+    #[error("the transcript is too long or isn't UTF-8")]
+    Text,
+    /// The model folder or a model file isn't an ordinary trusted local path.
+    #[error("the speech model path is unsafe")]
+    ModelPath,
+}
 
 /// Why speech input didn't answer. No native text and no paths cross this boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
