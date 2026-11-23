@@ -5,7 +5,7 @@ mod tests;
 
 use std::rc::Rc;
 
-use super::{Context, OpenError, Presence, TextView, submission_notice};
+use super::{Context, OpenError, Presence, Submission, TextView, typing};
 use crate::chat_notice::{Notice, Route, Source};
 use crate::runs::Refused;
 use crate::strings::{Strings, Text};
@@ -19,11 +19,7 @@ use kumochi_protocol::message::{Action, MANAGE_USAGE_URL};
 
 impl Presence {
     fn is_current_recovery(&self, notice: &Rc<Notice>) -> bool {
-        self.refusal.is_none()
-            && self
-                .chat_notice
-                .for_thread(self.runs.thread())
-                .is_some_and(|current| Rc::ptr_eq(current, notice))
+        matches!(self.typing_notice(), typing::Notice::Recovery(current) if Rc::ptr_eq(current, notice))
     }
 
     fn recover_rendered(
@@ -88,12 +84,13 @@ impl Presence {
                             .is_some_and(|session| link.send_data(session, turn))
                     })
                 };
-                let previous = (self.error.clone(), self.refusal);
-                submission_notice(&mut self.error, &mut self.refusal, result);
-                if result.is_ok() {
+                let previous_error = self.error.clone();
+                let submission = Submission::from(result);
+                submission.update_notice(&mut self.error, &mut self.refusal);
+                if submission == Submission::Sent {
                     self.chat_notice.clear();
                 }
-                self.notices_changed(&previous, cx);
+                self.notices_changed(previous_error.as_ref(), cx);
                 self.runs_changed(cx)?;
             }
             Route::Account(op) => {
@@ -126,7 +123,7 @@ impl TextView {
         reason = "one notice keeps each control beside its deferred dispatch"
     )]
     pub(super) fn recovery(&self, cx: &Context<'_, Self>) -> Option<gpui_kit::AnyElement> {
-        let notice = self.recovery.as_ref().filter(|_| self.refusal.is_none())?;
+        let notice = self.recovery.as_ref()?;
         let strings = cx.global::<Strings>();
         let settings = self.settings.read(cx);
         let connected = self.model.read(cx).online();
