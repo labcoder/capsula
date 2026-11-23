@@ -221,9 +221,6 @@ struct NamedStep {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dispatch::{Caller, Ledger, RunCtx, Step, ToolError, call};
-    use crate::engines::{CallId, ToolName};
-    use kumochi_protocol::message::{RunId, ThreadId};
     use serde_json::json;
 
     #[test]
@@ -246,56 +243,6 @@ mod tests {
         let shown = format!("{action:?}");
         assert!(!shown.contains(marker));
         assert!(!shown.contains(format!("{:?}", marker.as_bytes()).trim_matches(['[', ']'])));
-    }
-
-    #[test]
-    fn canonical_arguments_ignore_key_order_whitespace_and_defaults() {
-        let mut ledger = Ledger::default();
-        let run = RunId(1);
-        let thread = ThreadId(1);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let mut ctx = RunCtx {
-            build: crate::coordinator::BuildKey {
-                run,
-                round: 1,
-                attempt: 1,
-            },
-            end,
-            control: crate::recall::control::Control::new(end),
-            thread,
-            main: thread,
-            fresh: ThreadId(2),
-            reach: crate::context::Origin::Kumo,
-            offered: &[ToolName::Draw],
-            mcp: None,
-            ledger: &mut ledger,
-        };
-        let mut send = |args: &[u8]| {
-            call(
-                &mut ctx,
-                Caller::Model {
-                    run,
-                    call: CallId::new("same-draw").expect("ASCII id"),
-                },
-                ToolName::Draw,
-                args,
-            )
-        };
-        assert!(matches!(
-            send(br#"{"records":[{"step":{"id":"s"}}]}"#),
-            Step::Screen {
-                draw: DrawAction::Complete(Ok(_)),
-                ..
-            }
-        ));
-        assert!(matches!(
-            send(br#"{ "records": [ { "step": { "put": [], "id": "s", "set": [], "remove": [] } } ] }"#),
-            Step::Join
-        ));
-        assert!(matches!(
-            send(br#"{"records":[{"step":{"id":"t"}}]}"#),
-            Step::Answer(ToolOutput::Error(ToolError::Reused))
-        ));
     }
 
     #[test]

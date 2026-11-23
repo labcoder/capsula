@@ -638,6 +638,38 @@ fn a_preflight_refusal_spends_the_existing_repair_budget() {
 }
 
 #[test]
+fn canonical_arguments_ignore_key_order_whitespace_and_defaults() {
+    let mut core = offered(vec![T]);
+    let original = br#"{"records":[{"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"diagram"}},{"step":{"id":"s","put":[{"shape":{"id":"a","kind":"rect","box":[0,0,10,10]}}]}},{"end":{}}]}"#;
+    let same = br#"{
+        "records": [
+            {"begin": {"alt": "diagram", "scene": "diagram", "surface": "overlay", "v": 1}},
+            {"step": {"set": [], "put": [{"shape": {"box": [0, 0, 10, 10], "kind": "rect", "id": "a"}}], "remove": [], "id": "s"}},
+            {"end": {}}
+        ]
+    }"#;
+    let changed = br#"{"records":[{"begin":{"v":1,"scene":"diagram","surface":"overlay","alt":"diagram"}},{"step":{"id":"t","put":[{"shape":{"id":"a","kind":"rect","box":[0,0,10,10]}}]}},{"end":{}}]}"#;
+
+    let (dispatch, effects) = call(&mut core, "same-draw", original);
+    assert_eq!(dispatch, Dispatch::Committing);
+    assert!(matches!(
+        pending(&effects),
+        Some((_, crate::drawing::Write::Lookup { .. }))
+    ));
+    assert_eq!(
+        call(&mut core, "same-draw", same),
+        (Dispatch::Joined, Vec::new())
+    );
+    assert_eq!(
+        call(&mut core, "same-draw", changed),
+        (
+            Dispatch::Answered(ToolOutput::Error(ToolError::Reused)),
+            Vec::new()
+        )
+    );
+}
+
+#[test]
 fn retries_join_then_replay_and_changed_arguments_never_redraw() {
     let scratch = Scratch::new("draw-tool-retry");
     let mut store = store(&scratch);
