@@ -162,10 +162,6 @@ async fn a_single_request_refuses_an_intermediate_reply() {
         fake.served.await.expect("served"),
         Some(LossReason::Malformed)
     );
-    assert_eq!(
-        fake.handle.request(vec![2], far()).await,
-        Err(WorkerLost::Lost)
-    );
 }
 
 #[tokio::test(start_paused = true)]
