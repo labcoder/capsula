@@ -9,6 +9,10 @@ use kumochi_protocol::constants;
 
 const UNAVAILABLE: u8 = 69;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "all executable modes must return before falling through to normal runtime startup"
+)]
 fn main() -> ExitCode {
     if require_native_runtime().is_err() {
         return ExitCode::from(UNAVAILABLE);

@@ -2143,7 +2143,13 @@ async fn unsupported_removal_preserves_the_pending_intent_and_refuses_new_work()
     let (fetch, _) = held_fetch();
     let (_, stt) = Reports::new();
     let (_, tts) = Reports::new();
-    brain.attach_voice(models, &stuck, (None, None), [stt, tts], fetch.clone());
+    brain.attach_voice(
+        models,
+        &stuck,
+        (None, None),
+        [stt, tts],
+        Arc::<HeldFetch>::clone(&fetch),
+    );
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     tokio::time::timeout(super::PATIENCE, async {

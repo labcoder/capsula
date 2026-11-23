@@ -54,6 +54,7 @@ impl RawFrame {
 
     /// Runs one capture into this frame, then zeroes and frees it if the capture failed, so a
     /// refused or partial copy never stays in the buffer. Windows and macOS share it.
+    #[cfg(any(test, windows))]
     pub(crate) fn fill<T, E>(
         &mut self,
         capture: impl FnOnce(&mut Self) -> Result<T, E>,

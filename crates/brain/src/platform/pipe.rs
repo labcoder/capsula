@@ -22,7 +22,6 @@ pub(crate) enum ClientRefused {
 
 #[cfg(not(windows))]
 mod unsupported {
-    use std::convert::Infallible;
     use std::future::Ready;
     use std::io;
     use std::path::{Path, PathBuf};
@@ -32,20 +31,15 @@ mod unsupported {
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
     use super::Instance;
-    use crate::platform::{Job, ShellProcess};
+    use crate::platform::ShellProcess;
 
     /// A native server can't exist without a platform pipe adapter.
     #[derive(Debug)]
     pub enum PipeServer {}
     pub(crate) type PipeClient = PipeServer;
-    pub(crate) type ClientRefused = Infallible;
 
     impl PipeServer {
         pub(crate) fn connect(&self) -> Ready<io::Result<()>> {
-            match *self {}
-        }
-
-        pub(crate) fn disconnect(&self) -> io::Result<()> {
             match *self {}
         }
     }
@@ -110,10 +104,6 @@ mod unsupported {
         match *control {}
     }
 
-    pub(crate) fn bridge_peer(pipe: &PipeServer, _: &Job, _: &Path) -> Result<(), ClientRefused> {
-        match *pipe {}
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -142,8 +132,6 @@ mod unsupported {
 }
 
 #[cfg(not(windows))]
-pub(crate) use unsupported::{
-    ClientRefused, PipeClient, bridge_peer, client_image, open_pipe, server_image, shell_connection,
-};
+pub(crate) use unsupported::{PipeClient, client_image, open_pipe, server_image, shell_connection};
 #[cfg(not(windows))]
 pub use unsupported::{PipeServer, create_owner_only, session_id};

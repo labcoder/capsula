@@ -178,6 +178,10 @@ pub(super) async fn read_user(
     Some(api::user(&http, &token).await)
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the feature switch, transport refusal, closing and stopped rotation are independent"
+)]
 pub(crate) struct GitHub {
     enabled: bool,
     unsupported: bool,

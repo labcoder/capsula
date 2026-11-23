@@ -1,6 +1,7 @@
 //! Listener tests. Session tests drive `session` over an in-memory stream. The client checks use
 //! this test binary, re-entered at [`child_client`], as the process that connects.
 
+use std::io;
 use std::time::Duration;
 #[cfg(windows)]
 use std::{
