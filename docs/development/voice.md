@@ -112,6 +112,8 @@ remain supported for the development installer, with writers and rebinding exclu
 Both model constructors hold their checked parents and model files until the loaded engine is
 destroyed. These storage guarantees are the platform adapter contract; model policy has no OS
 conditionals. Intentional linked-folder relocation is not supported.
+Without a protected-path adapter, model checks, installation and removal refuse without touching
+the tree, even in tests that inject TLS roots. An unsupported removal does not count as deleted.
 Installation opens or creates every needed partial before discarding any invalid final, so a
 later acquisition refusal leaves the existing files intact.
 It denies write sharing on the owned model root and part directory through partial acquisition,

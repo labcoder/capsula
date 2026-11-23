@@ -181,6 +181,10 @@ version: its launch policy and the facts its audit expects. Any other version is
 its own thread; `runtime/claude.rs` asks it for work and turns the results into
 `ClaudeCodeView`.
 
+Without a protected-path adapter, holding, creating and removing Claude Code's private paths
+and markers all refuse. A scratch directory does not stand in for native ownership and
+handle checks, and there is no native Claude Code lane on the Linux test host.
+
 ```mermaid
 sequenceDiagram
     participant R as runtime (Claude)

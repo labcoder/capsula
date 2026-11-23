@@ -11,6 +11,7 @@ mod fs;
 mod model_files;
 mod pipe;
 mod process;
+mod protected;
 mod runtime_admission;
 mod session_lock;
 mod shell_process;
@@ -54,6 +55,13 @@ pub use pipe::{PipeServer, create_owner_only, session_id};
 pub(crate) use process::spawn_if;
 pub use process::{
     ChildPipes, Helper, Job, Launch, Spawned, Stdio, launch_detached, spawn, system_env,
+};
+pub(crate) use protected::Untrusted;
+#[cfg(not(windows))]
+pub(crate) use protected::{
+    check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
+    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
+    private_tree, publish_model, remove_model_tree, remove_tree, unmark, validate_model_path,
 };
 pub use runtime_admission::require_native_runtime;
 pub use session_lock::{SessionLock, SessionLockError};
@@ -148,15 +156,15 @@ pub use windows::{
 pub(crate) use windows::{SpawnEdge, observe_next_spawn};
 #[cfg(windows)]
 pub(crate) use windows::{
-    Untrusted, check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_model_creation, local_app_data, mark, marker, model_file, model_final, open_model_write,
-    owner_only_dir, private_tree, profile_dir, publish_model, remove_model_tree, remove_tree,
-    unmark, validate_model_path,
+    WINDOW_CAPTURE, display_at, qpc_age, qpc_at, qpc_left, screen_capturer, screen_elements,
+    window_unchanged,
 };
 #[cfg(windows)]
 pub(crate) use windows::{
-    WINDOW_CAPTURE, display_at, qpc_age, qpc_at, qpc_left, screen_capturer, screen_elements,
-    window_unchanged,
+    check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
+    hold_model_creation, local_app_data, mark, marker, model_file, model_final, open_model_write,
+    owner_only_dir, private_tree, profile_dir, publish_model, remove_model_tree, remove_tree,
+    unmark, validate_model_path,
 };
 
 /// Whether this platform captures one window alone. No platform but Windows does yet.

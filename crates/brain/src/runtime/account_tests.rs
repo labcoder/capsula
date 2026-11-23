@@ -2833,6 +2833,7 @@ async fn a_catalog_renewal_that_goes_unconfirmed_tells_the_shell_why() {
 }
 
 /// A Claude Code connection a launch would be admitted on, on the lane's fake signed in.
+#[cfg(windows)]
 async fn ready_claude(
     base: &crate::engines::claude_code::lane::tests::Base,
 ) -> crate::runtime::claude::Claude {
@@ -2855,6 +2856,7 @@ async fn ready_claude(
 
 /// OSC-754: a wake that makes Claude Code ready writes the row's default, haiku at Low, with no op
 /// from the shell.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_wake_that_makes_claude_code_ready_writes_its_default() {
     let base = crate::engines::claude_code::lane::tests::Base::new("default-on-wake");
@@ -2888,6 +2890,7 @@ async fn a_wake_that_makes_claude_code_ready_writes_its_default() {
 /// M1: Claude Code's default goes in only while `ChatGPT` has no account at all, never while a
 /// `ChatGPT` account's session has ended, and a queued repair recomputed at write time never
 /// turns into the other connection's.
+#[cfg(windows)]
 #[tokio::test]
 async fn claude_codes_default_waits_for_chatgpt_to_have_no_account() {
     let repair = |model: &str, connection| crate::runtime::settings::Queued {
