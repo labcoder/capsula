@@ -286,6 +286,9 @@ Early returns free the held context and close the store. Nothing is installed or
 Rustls parses those DER roots and verifies chains offline with ring. Empty or entirely
 unparsable roots fail as `TrustStoreUnavailable`, without a fallback root bundle or permissive
 verifier. There is no platform verifier, native-certs loader or certificate-override setting.
+On builds without a native trust-store adapter, loading native roots also fails as
+`TrustStoreUnavailable` before constructing a client. Loopback TLS tests can still inject their
+own roots without using a native store.
 The real-store test runs in the normal Windows test suite: it reads bounded public certificates
 only, writes nothing, and exercises the FFI ownership path rather than leaving it ignored.
 
