@@ -5,9 +5,13 @@ use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd as _;
 
 mod custody;
+mod settings;
 mod tests;
 
-use custody::{check_name, inspect, matches_name, named_stat, open_at, private_mode, unlink};
+use custody::{
+    check_name, inspect, make_directory, matches_name, named_stat, open_at, private_mode, unlink,
+};
+pub(crate) use settings::write_scratch_settings;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
@@ -59,6 +63,12 @@ enum Publication {
     Indeterminate(Fault),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Destination {
+    Existing,
+    MayBeAbsent,
+}
+
 struct Scratch {
     parent: File,
     name: CString,
@@ -70,16 +80,13 @@ struct Scratch {
 impl Scratch {
     fn create(parent: File, name: CString) -> Result<Self, Fault> {
         check_name(&name, Stage::Root)?;
-        // SAFETY: No arguments; geteuid only samples the effective user.
-        let owner = unsafe { libc::geteuid() };
+        let owner = custody::user();
         let anchor = inspect(&parent, Stage::Parent)?;
         if owner == 0 || !private_mode(&anchor, owner, libc::S_IFDIR | 0o700) {
             return Err(Fault::new(Stage::Parent, ErrorKind::PermissionDenied));
         }
         volume(&parent, Stage::Parent)?;
-        // SAFETY: The name is one component and the owned parent stays open.
-        let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
-        call(result).map_err(|error| Fault::io(Stage::Root, &error))?;
+        make_directory(&parent, &name, Stage::Root)?;
         let directory = open_at(
             &parent,
             &name,
@@ -146,34 +153,66 @@ impl Scratch {
         Ok((opened, held))
     }
 
-    fn prepare(&self, from: &CStr, to: &CStr) -> Result<(File, libc::stat), Fault> {
+    fn prepare(
+        &self,
+        from: &CStr,
+        to: &CStr,
+        policy: Destination,
+    ) -> Result<(File, libc::stat), Fault> {
         self.active()?;
         let (staged, source) = self.regular(from, libc::O_RDWR, Stage::Source)?;
-        let (_old, destination) = self.regular(to, libc::O_RDONLY, Stage::Destination)?;
-        if source.st_dev != destination.st_dev || source.st_ino == destination.st_ino {
+        let destination = match self.regular(to, libc::O_RDONLY, Stage::Destination) {
+            Ok((_old, sample)) => Some(sample),
+            Err(error)
+                if policy == Destination::MayBeAbsent && error.errno == Some(libc::ENOENT) =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        if destination
+            .as_ref()
+            .is_some_and(|dest| source.st_dev != dest.st_dev || source.st_ino == dest.st_ino)
+        {
             return Err(Fault::new(Stage::Destination, ErrorKind::InvalidInput));
         }
         staged
             .sync_all()
             .map_err(|error| Fault::io(Stage::SourceSync, &error))?;
         matches_name(&self.directory, from, &source, Stage::Source)?;
-        matches_name(&self.directory, to, &destination, Stage::Destination)?;
+        if let Some(destination) = destination {
+            matches_name(&self.directory, to, &destination, Stage::Destination)?;
+        } else {
+            match named_stat(&self.directory, to, Stage::Destination) {
+                Err(error) if error.errno == Some(libc::ENOENT) => {}
+                Err(error) => return Err(error),
+                Ok(_) => return Err(Fault::new(Stage::Destination, ErrorKind::AlreadyExists)),
+            }
+        }
         Ok((staged, source))
     }
 
     fn replace(&mut self, from: &CStr, to: &CStr) -> Publication {
-        self.replace_with(from, to, rename, sync_directory, File::sync_all)
+        self.replace_with(
+            from,
+            to,
+            Destination::Existing,
+            rename,
+            sync_directory,
+            File::sync_all,
+        )
     }
 
     fn replace_with(
         &mut self,
         from: &CStr,
         to: &CStr,
+        policy: Destination,
         rename: impl FnOnce(&File, &CStr, &CStr) -> io::Result<()>,
         sync_directory: impl FnOnce(&File) -> io::Result<()>,
         sync_file: impl FnOnce(&File) -> io::Result<()>,
     ) -> Publication {
-        let (staged, source) = match self.prepare(from, to) {
+        let (staged, source) = match self.prepare(from, to, policy) {
             Ok(ready) => ready,
             Err(error) => return Publication::NotPublished(error),
         };

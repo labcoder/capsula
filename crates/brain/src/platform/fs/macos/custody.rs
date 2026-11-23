@@ -42,6 +42,18 @@ pub(super) fn check_name(name: &CStr, stage: Stage) -> Result<(), Fault> {
     Ok(())
 }
 
+pub(super) fn user() -> libc::uid_t {
+    // SAFETY: No arguments; geteuid only samples the effective user.
+    unsafe { libc::geteuid() }
+}
+
+pub(super) fn make_directory(parent: &File, name: &CStr, stage: Stage) -> Result<(), Fault> {
+    check_name(name, stage)?;
+    // SAFETY: The basename is checked and the directory descriptor remains held.
+    call(unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) })
+        .map_err(|error| Fault::io(stage, &error))
+}
+
 pub(super) fn open_at(
     parent: &File,
     name: &CStr,

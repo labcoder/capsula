@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 )]
 mod macos;
 
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use macos::write_scratch_settings;
+
 /// No per-user runtime data root is configured on this platform.
 #[must_use]
 pub fn data_dir() -> Option<PathBuf> {
