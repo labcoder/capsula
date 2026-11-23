@@ -64,7 +64,7 @@ fn esc(folder: &Path, pressure: Pressure) -> Result<Row> {
     };
     let case = Case::new(folder, name, &script)?;
     let brain = case.start()?;
-    let mut client = Client::connect()?;
+    let mut client = Client::connect(brain.pid())?;
     let mut latencies = Vec::new();
     let mut runs = Vec::new();
     let mut taken = Vec::new();
@@ -163,7 +163,7 @@ pub(super) fn replacement(folder: &Path) -> Result<Row> {
     let script = format!("0 text a\n{}", "20 text b\n".repeat(400));
     let case = Case::new(folder, "replacement", &script)?;
     let brain = case.start()?;
-    let mut client = Client::connect()?;
+    let mut client = Client::connect(brain.pid())?;
     let (mut run, thread) = turn(&mut client, None, "gate replace")?;
     first_text(&mut client, run)?;
     let mut gaps = Vec::new();
@@ -285,7 +285,7 @@ pub(super) fn late_step(folder: &Path) -> Result<Row> {
     let script = format!("0 text a\n0 step first\n5000 step never\nlate {late}\n");
     let case = Case::new(folder, "late-step", &script)?;
     let brain = case.start()?;
-    let mut client = Client::connect()?;
+    let mut client = Client::connect(brain.pid())?;
     let (run, _) = turn(&mut client, None, "gate late")?;
     client.until(PATIENCE, |seen| match seen.frame {
         Frame::Data(DataToShell::StepCommit { run: named, .. }, _) if named == run => Some(()),

@@ -273,6 +273,7 @@ pub(super) fn deliver(
             &mut state,
             event,
             at.instant,
+            at.queued_press.filter(|_| !at.repeated_modifier),
             || {
                 (!paused.get()
                     && link.can_start_voice_gesture(session)

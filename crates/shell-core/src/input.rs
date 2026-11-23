@@ -142,23 +142,35 @@ impl Gesture {
         matches!(self.timing.phase, Phase::Active { .. }) || self.timing.first_tap.is_some()
     }
 
-    fn recover(&mut self, event: Event, read: impl FnOnce() -> Option<Instant>) -> Option<Instant> {
+    fn recover(
+        &mut self,
+        event: Event,
+        queued_press: Option<u64>,
+        read: impl FnOnce() -> Option<Instant>,
+    ) -> Option<Instant> {
         if !matches!(self.timing.phase, Phase::Blocked) {
             return None;
         }
-        let other = match event {
-            Event::Key {
-                key: Key::LeftControl,
-                edge: Edge::Down,
-            } => 1,
-            Event::Key {
-                key: Key::LeftAlt,
-                edge: Edge::Down,
-            } => 0,
+        let Event::Key { key, edge } = event else {
+            return None;
+        };
+        let index = match key {
+            Key::LeftControl => 0,
+            Key::LeftAlt => 1,
             _ => return None,
         };
+        if edge == Edge::Up {
+            self.down[index] = false;
+            return None;
+        }
+        if queued_press.is_none() || self.down[index] {
+            return None;
+        }
+        if !self.down[1 - index] {
+            self.down[index] = true;
+            return None;
+        }
         let now = read()?;
-        self.down[other] = true;
         self.timing.phase = Phase::Ready;
         Some(now)
     }
@@ -782,7 +794,13 @@ mod tests {
                     edge: Edge::Down,
                 };
                 assert_eq!(gesture.handle(make, at), [None; 3]);
-                assert_eq!(gesture.recover(make, || Some(at)), Some(at));
+                assert_eq!(gesture.recover(make, Some(0), || Some(at)), None);
+                assert_eq!(gesture.handle(make, at), [None; 3]);
+                let make = Event::Key {
+                    key: Key::LeftControl,
+                    edge: Edge::Down,
+                };
+                assert_eq!(gesture.recover(make, Some(0), || Some(at)), Some(at));
                 assert_eq!(
                     gesture.handle(make, at),
                     [Some(Effect::Listening), None, None]

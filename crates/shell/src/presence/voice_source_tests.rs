@@ -2330,6 +2330,62 @@ fn two_fresh_modifier_presses_can_arm_after_a_reset(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn a_raw_repeat_without_release_cannot_supply_post_reset_press_evidence(cx: &mut TestAppContext) {
+    assert_eq!(
+        mic_generation_after_raw_reset(cx, Some(Key::LeftControl)),
+        0
+    );
+}
+
+#[gpui::test]
+fn both_queued_makes_after_reset_arm_even_when_first_read_already_sees_both(
+    cx: &mut TestAppContext,
+) {
+    assert_eq!(mic_generation_after_raw_reset(cx, None), 1);
+}
+
+fn mic_generation_after_raw_reset(cx: &mut TestAppContext, initially_held: Option<Key>) -> u64 {
+    use crate::link::fixture;
+    use kumochi_shell_core::platform::keyboard_ticks;
+
+    let (owner, _data, _controls) = ready(cx);
+    let pipe = fixture::attended("raw-hold-after-reset");
+    let events = fixture::patient(pipe.events.clone());
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| {
+        this.link = pipe.handle.clone();
+        this.session = Some(session);
+    });
+    let send = crate::platform::with_raw_modifiers(native(&owner, cx));
+    let tick = keyboard_ticks() + 1;
+    let now = Instant::now();
+    let press = |key, at, read| {
+        send(
+            Event::Key {
+                key,
+                edge: Edge::Down,
+            },
+            EventTime::new(at)
+                .with_keyboard_read(read)
+                .with_queued_press(tick),
+        );
+    };
+    if let Some(key) = initially_held {
+        press(key, now, |_| None);
+    }
+    send(Event::Reset, after(now, 1));
+    let first_read: fn(Instant) -> Option<Instant> = if initially_held.is_some() {
+        |_| None
+    } else {
+        Some
+    };
+    press(Key::LeftControl, after(now, 2).instant, first_read);
+    press(Key::LeftAlt, after(now, 3).instant, Some);
+    send(Event::Deadline, after(now, 304));
+    pipe.handle.microphone_gate().latest()
+}
+
 fn mic_generation_after_reset(cx: &mut TestAppContext, presses: &[Key]) -> u64 {
     use crate::link::fixture;
     use kumochi_shell_core::platform::keyboard_ticks;

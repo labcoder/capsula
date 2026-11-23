@@ -44,7 +44,7 @@ pub(super) fn run(folder: &Path) -> Result<Row> {
     let texts = Texts::new(&gone, &kept);
     let case = Case::new(folder, "delete", &texts.gone_script)?;
     let brain = case.start()?;
-    let mut client = Client::connect()?;
+    let mut client = Client::connect(brain.pid())?;
     let (run, t) = turn(&mut client, None, &texts.gone_turn)?;
     done(&mut client, run)?;
     client.quit()?;
@@ -52,7 +52,7 @@ pub(super) fn run(folder: &Path) -> Result<Row> {
 
     case.script(&texts.kept_script)?;
     let brain = case.start()?;
-    let mut client = Client::connect()?;
+    let mut client = Client::connect(brain.pid())?;
     let (run, _) = turn(&mut client, None, &texts.kept_turn)?;
     done(&mut client, run)?;
     client.control(&ControlToBrain::DeleteThread {
@@ -130,7 +130,7 @@ fn purge(
     loop {
         attempts += 1;
         let brain = case.start()?;
-        let client = Client::connect()?;
+        let client = Client::connect(brain.pid())?;
         thread::sleep(PURGE_WAIT);
         let running = store::live_files(&case.folders.local, gone)?;
         client.quit()?;

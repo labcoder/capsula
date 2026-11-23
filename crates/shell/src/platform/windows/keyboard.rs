@@ -260,6 +260,11 @@ impl Keys {
             }
             _ => return false,
         };
+        if !hwnd.is_invalid() && matches!(event, Event::Reset | Event::Escape) {
+            self.physical
+                .borrow_mut()
+                .observe_held_on_loss(read_held_modifiers());
+        }
         self.forward(hwnd, event, id, at);
         message == WM_TIMER
             || message == DESKTOP_SWITCHED
@@ -314,6 +319,9 @@ impl Keys {
             self.escapes.release_native(hwnd, retiring);
             if !self.escape_trusted() && !matches!(event, Event::Reset | Event::Escape) {
                 let reset = self.physical.borrow_mut().lose();
+                self.physical
+                    .borrow_mut()
+                    .observe_held_on_loss(read_held_modifiers());
                 super::screen_watch::heard(reset, None);
                 deadline = deliver.and_then(|deliver| deliver(reset, at));
             }
@@ -760,6 +768,24 @@ fn read_chord(_: Instant) -> Option<Instant> {
     (exact && foreground == unsafe { GetForegroundWindow() }).then(Instant::now)
 }
 
+fn read_held_modifiers() -> [bool; 2] {
+    // SAFETY: reads only the current foreground window and two virtual keys.
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_invalid() {
+        return [true; 2];
+    }
+    let held = [VK_LCONTROL, VK_LMENU].map(|key| {
+        // SAFETY: reads a fixed virtual-key code without modifying input.
+        unsafe { GetAsyncKeyState(i32::from(key.0)) < 0 }
+    });
+    // SAFETY: rechecks the foreground without touching it.
+    if foreground == unsafe { GetForegroundWindow() } {
+        held
+    } else {
+        [true; 2]
+    }
+}
+
 fn exact_chord(mut down: impl FnMut(u16) -> bool) -> bool {
     let left = [VK_LCONTROL.0, VK_LMENU.0];
     if !left.into_iter().all(&mut down) {
@@ -1109,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn lost_raw_input_clears_live_repeat_identity() {
+    fn lost_raw_input_preserves_uncertainty_until_the_owning_key_releases() {
         let keys = super::Keys::default();
         let mut time = super::EventTime::new(std::time::Instant::now());
         assert!(raw(&keys, 1, 0x1D, 0).is_some());
@@ -1123,8 +1149,14 @@ mod tests {
             Some((Event::Reset, None))
         );
 
-        assert!(!raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
         assert!(raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
+        assert_eq!(
+            raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).unwrap().0,
+            Event::Reset
+        );
+        assert!(raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
+        assert!(raw(&keys, 1, 0x1D, super::RI_KEY_BREAK).is_some());
+        assert!(!raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
     }
 
     #[test]
@@ -1151,6 +1183,12 @@ mod tests {
             let keys = super::Keys::default();
             assert!(raw(&keys, 1, 0x1D, 0).is_some());
             assert_eq!(raw(&keys, 2, 0x1D, flags).unwrap().0, Event::Reset);
+            assert!(raw(&keys, 1, 0x1D, super::RI_KEY_BREAK).is_some());
+            if flags == 0 {
+                assert!(raw(&keys, 2, 0x1D, 0).unwrap().1.repeated_modifier);
+                assert!(raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).is_some());
+            }
+            assert!(!raw(&keys, 2, 0x1D, 0).unwrap().1.repeated_modifier);
         }
     }
 
@@ -1388,6 +1426,7 @@ mod tests {
                         gesture,
                         event,
                         at.instant,
+                        (!at.repeated_modifier).then_some(0),
                         || Some(0),
                         || {
                             (!at.repeated_modifier
@@ -1510,18 +1549,18 @@ mod tests {
             reads.set((true, true, 0));
             input(device, 0x1D, 0, 2_200);
             input(device, 0x38, 0, 2_201);
-            send(Event::Deadline, 2_500);
+            send(Event::Deadline, 2_501);
             let results = results.borrow();
             assert!(
-                matches!(
-                    results[results.len() - 3].intents[0],
-                    Some(Intent::Warm(GestureId(1)))
-                ),
-                "loss {loss} must admit the same edge as its successful read"
+                ineligible(&results[results.len() - 3]),
+                "loss {loss} cannot start the hold before the second raw make"
             );
             assert!(
-                ineligible(&results[results.len() - 2]),
-                "the queued mate must not start the hold again"
+                matches!(
+                    results[results.len() - 2].intents[0],
+                    Some(Intent::Warm(GestureId(1)))
+                ),
+                "loss {loss} must admit the first clean pair of raw makes"
             );
             assert!(matches!(
                 results[results.len() - 1].intents[0],

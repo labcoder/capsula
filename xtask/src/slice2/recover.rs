@@ -20,7 +20,7 @@ pub(super) fn kill(folder: &Path) -> Result<Row> {
                   30000 step never\n";
     let case = Case::new(folder, "kill", script)?;
     let brain = case.start()?;
-    let mut client = Client::connect()?;
+    let mut client = Client::connect(brain.pid())?;
     let (run, thread) = turn(&mut client, None, "gate kill")?;
     let mut steps = Vec::new();
     let mut text = String::new();
@@ -35,7 +35,7 @@ pub(super) fn kill(folder: &Path) -> Result<Row> {
     brain.kill()?;
     drop(client);
     let brain = case.start()?;
-    let mut client = Client::connect()?;
+    let mut client = Client::connect(brain.pid())?;
     client.data(&DataToBrain::PageRequest {
         request: 1,
         page: PageOf::Events {
@@ -103,7 +103,7 @@ pub(super) fn reconnect(folder: &Path) -> Result<Row> {
     let script = format!("0 step {label}\n").repeat(MAX_STEPS);
     let case = Case::new(folder, "reconnect", &script)?;
     let brain = case.start()?;
-    let mut client = Client::connect()?;
+    let mut client = Client::connect(brain.pid())?;
     let mut last = RunId(0);
     let mut thread = None;
     for _ in 0..DRAWINGS {
@@ -116,7 +116,7 @@ pub(super) fn reconnect(folder: &Path) -> Result<Row> {
         last = run;
     }
     drop(client);
-    let mut client = Client::connect_paused()?;
+    let mut client = Client::connect_paused(brain.pid())?;
     let mut second = recover(&mut client, last, &label)?;
     client.data(&DataToBrain::PageRequest {
         request: 1,
@@ -137,7 +137,7 @@ pub(super) fn reconnect(folder: &Path) -> Result<Row> {
         .filter(|descriptor| Some(descriptor.scene) != second.cleared)
         .copied()
         .collect();
-    let mut client = Client::connect()?;
+    let mut client = Client::connect(brain.pid())?;
     let third = settle(&mut client, &kept, &label)?;
     client.quit()?;
     brain.exited()?;
