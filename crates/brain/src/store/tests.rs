@@ -967,17 +967,20 @@ fn a_removal_that_leaves_a_file_behind_isnt_finished() {
     assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn without_hard_links_the_swap_still_replaces_the_store() {
     let scratch = Scratch::new("no-links");
     let mut store = Store::open(&scratch.db()).expect("store");
     owed_purge(&mut store);
     let copied = clean_copy(&store);
-    let swapped = store.swap_with(&copied, |_, _| {
-        Err(std::io::Error::from_raw_os_error(
-            windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED.cast_signed(),
-        ))
-    });
+    #[cfg(windows)]
+    let unsupported = std::io::Error::from_raw_os_error(
+        windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED.cast_signed(),
+    );
+    #[cfg(target_os = "linux")]
+    let unsupported = std::io::Error::from(std::io::ErrorKind::Unsupported);
+    let swapped = store.swap_with(&copied, |_, _| Err(unsupported));
     assert_eq!(swapped.expect("swap"), Swap::Done);
     assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
     assert!(!contains_marker(&scratch.db()));
@@ -1002,6 +1005,7 @@ fn a_link_that_fails_otherwise_keeps_the_old_store() {
 }
 
 #[test]
+#[cfg(windows)]
 fn a_move_that_fails_after_the_link_keeps_the_old_store_under_one_name() {
     use std::os::windows::fs::OpenOptionsExt as _;
     const FILE_SHARE_READ: u32 = 1;
