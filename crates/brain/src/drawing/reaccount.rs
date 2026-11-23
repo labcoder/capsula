@@ -94,13 +94,20 @@ impl Drawing {
                 held.paint = Some(paint);
             }
             self.global = replay.global;
+            self.paint_metrics = source.metrics;
         } else {
+            self.use_uncounted_measure(source.metrics);
+        }
+        true
+    }
+
+    pub(crate) fn use_uncounted_measure(&mut self, metrics: Option<TextMetricsV1>) {
+        if self.paint_metrics != metrics {
             for held in &mut self.scenes {
                 held.paint = None;
             }
+            self.paint_metrics = metrics;
         }
-        self.paint_metrics = source.metrics;
-        true
     }
 }
 
@@ -114,14 +121,18 @@ impl ReaccountJob {
             .iter()
             .map(|scene| (&scene.header, scene.log.as_slice()))
             .collect();
+        let mut measure = ProfileMeasure::new(self.metrics);
         let (laid, global) = recover_all(
             &sources,
             SURFACE,
             &self.theme,
-            &mut ProfileMeasure::new(self.metrics),
+            &mut measure,
             cancel,
             Some(PaintWork::LIMITS),
         );
+        if measure.geometry_exceeded() {
+            return None;
+        }
         let laid = laid.into_iter().collect::<Result<Vec<_>, _>>().ok()?;
         let mut bytes = 0;
         let mut work = PaintWork::default();

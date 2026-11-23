@@ -1137,10 +1137,14 @@ brain doesn't know what that scene paints.
 
 The shell pins the shaping font for preparation and paint through the connection; changed
 fonts are picked up at a natural reconnect, not by disconnecting or changing an active drawing.
-On a changed profile, the brain replays the settled visible scenes before drawing admission,
-using the new state, layout and global budget together. A stale result can't undo a clear or
-cross into a different connection. A replay failure retains the scene and drops its outdated
-paint charge, leaving the shell guard authoritative.
+On a changed profile, the brain replays the settled visible scenes, installing matching
+state, layout and global budget together when the replay succeeds. A stale result can't undo a
+clear or cross into a different connection. If replay fails or runs past the startup deadline,
+the brain serves the already-settled scenes without their outdated paint charges. An expired
+replay cannot restore charges, and the connection still ends as unavailable if required scene
+state did not settle by the deadline. Without a retained paint layout, a proposed continuation
+under a negotiated profile must pass a fresh geometry check before it can be written; it does
+not borrow the old profile or rely on shell-only validation.
 
 The brain charges each scene what the shell may hold for it. It keeps the scene's last shown
 layout and the layout of every committed step not shown yet, and charges their field-by-field
