@@ -151,13 +151,18 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   capture. The shell's exclusion lease keeps Kumochi's windows out of the frame; the worker can't
   prove that a lease is live.
 - **Local validity.** The worker starts the ticket's `ttl_ms` at receipt on its own monotonic
-  clock, and ends it no later than `deadline_qpc`, the brain's deadline as a performance-counter
-  stamp, so a ticket held up in the brain's writer, the pipe or the worker's queue gets no extra
+  clock, and ends it no later than `deadline_qpc`, the brain's deadline in opaque system-wide
+  clock ticks, so a ticket held up in the brain's writer, the pipe or the worker's queue gets no extra
   time. A stamp the worker can't read, or one that isn't later than now, is refused `Expired`. It
   refuses at exactly `ttl_ms` and accepts a millisecond before, checks again right
   before starting the capture session, stops waiting at expiry, and discards a frame that
   completes at or after it. This is a local bound, never a renewed grant: the brain keeps its
   ticket's original deadline and drops a late reply.
+
+  Windows uses QPC for the stamp. macOS uses Mach continuous time, which advances during sleep,
+  and rounds the converted deadline down. This supports only the ticket clock; macOS still
+  refuses native capture and doesn't read shell input age. Verify suspend and resume before
+  enabling capture. Linux has no shared deadline clock and leaves the stamp zero.
 - **Spent generations.** Every generation at or below the highest one this worker has seen is
   refused (`Reused` when equal, `Stale` when lower), and a failed or refused capture still spends
   its generation. A respawned worker starts empty; the brain's single-use tickets guard across
@@ -550,7 +555,7 @@ hold pays this way.
 - **`context(owner, point, until)`** mints a fresh capture id and a ticket whose number is above
   every earlier one (a worker refuses a number it has already spent), minted under the fence's
   lock so tickets reach the worker in order, with `ttl_ms` set to the time left until `until`
-  but never over `MAX_TTL`, `until` itself as a performance-counter stamp (`deadline_qpc`, 0
+  but never over `MAX_TTL`, `until` itself as a system-clock stamp (`deadline_qpc`, 0
   when the counter can't be read), a random nonce and the connected shell's pid. It streams
   `Acquired`, then `Complete`, and returns the `Held` frame with the worker generation that
   holds it.

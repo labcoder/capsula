@@ -2,6 +2,11 @@
 
 pub mod credential;
 
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::clock::{qpc_at, qpc_left};
+
 #[cfg(all(windows, feature = "test-support"))]
 pub use windows::{WindowProbe, WindowSample, WindowSession};
 
@@ -184,15 +189,14 @@ pub(crate) fn qpc_age(_t_qpc: u64) -> Option<std::time::Duration> {
     None
 }
 
-/// A capture deadline's stamp for the screen worker, on the clock `qpc_age` reads, so none here.
-// shortcut: off Windows the worker refuses every ticket; stamp with macOS's clock once it captures.
-#[cfg(not(windows))]
+/// No system-wide deadline clock is implemented here.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn qpc_at(_until: std::time::Instant) -> Option<u64> {
     None
 }
 
 /// How long until a deadline stamp from `qpc_at`, so never known here.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn qpc_left(_stamp: u64) -> Option<std::time::Duration> {
     None
 }
