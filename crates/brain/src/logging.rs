@@ -25,6 +25,9 @@ pub(crate) fn filter(level: Level) -> Targets {
 /// Why logging couldn't start.
 #[derive(Debug, thiserror::Error)]
 pub enum LoggingError {
+    /// This build doesn't admit native file logging.
+    #[error("native file logging is unavailable on this platform")]
+    NativeRuntime(#[source] std::io::Error),
     /// The per-user data folder isn't known.
     #[error("%LOCALAPPDATA% is not set to an absolute path")]
     NoLocalAppData,
@@ -42,9 +45,10 @@ pub enum LoggingError {
 /// panic message has to reach the file before a release build aborts.
 ///
 /// # Errors
-/// Fails when the log folder can't be found or created, or logging already started.
+/// Fails when native logging isn't admitted, the log folder can't be found or created,
+/// or logging already started.
 pub fn init(prefix: &str) -> Result<(), LoggingError> {
-    crate::platform::require_native_runtime().map_err(|_| LoggingError::NoLocalAppData)?;
+    crate::platform::require_native_runtime().map_err(LoggingError::NativeRuntime)?;
     let dir = crate::platform::data_dir()
         .ok_or(LoggingError::NoLocalAppData)?
         .join("logs");
