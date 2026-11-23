@@ -1624,6 +1624,62 @@ async fn read_ended(accounts: &mut Accounts) -> Vec<ControlToShell> {
     .expect("in time")
 }
 
+#[tokio::test]
+async fn a_catalog_refused_offline_is_still_unsupported_for_every_new_shell() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let scratch = Scratch::new("account-catalog-unsupported");
+    let factories = Arc::new(AtomicUsize::new(0));
+    let found = Arc::clone(&factories);
+    let accounts = seeded_on(
+        &scratch,
+        &FakeStore::default(),
+        Arc::new(move || {
+            found.fetch_add(1, Ordering::Relaxed);
+            Err(HttpError::UnsupportedPlatform)
+        }),
+        LATER,
+    );
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    finish_catalog(&mut brain).await;
+    assert_eq!(brain.account.sendable(), None);
+    assert!(matches!(
+        brain.account.availability(),
+        Availability::Unavailable(error)
+            if error.key() == ErrorKey::UnsupportedPlatform && error.actions().is_empty()
+    ));
+    let expected = ControlToShell::AccountUnsupported(brain.account.view());
+    for _ in 0..2 {
+        let ((control, data), mut shell) = duplex();
+        let mut tap = Tap::from_env();
+        let client = async {
+            loop {
+                let frame = shell.frame().await;
+                if matches!(
+                    frame,
+                    ControlToShell::Account(_) | ControlToShell::AccountUnsupported(_)
+                ) {
+                    assert_eq!(frame, expected);
+                    break;
+                }
+            }
+            drop(shell);
+        };
+        let (ended, ()) = timeout(PATIENCE, async {
+            tokio::join!(brain.serve(control, data, &mut tap), client)
+        })
+        .await
+        .expect("the late shell receives a snapshot");
+        assert_eq!(ended, Ended::Lost);
+    }
+    assert_eq!(
+        brain.account.handle(Input::Op(AccountOp::Retry)),
+        [expected]
+    );
+    assert_eq!(factories.load(Ordering::Relaxed), 1);
+    brain.close().await;
+}
+
 /// Design §6: a usable account's catalog is read at startup; a failed read offers Retry, which
 /// reads it again. Signing out clears the list, which the shell hears as empty, and a read the
 /// sign-out outdated is dropped.

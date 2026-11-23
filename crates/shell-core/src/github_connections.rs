@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::strings::Text;
-use kumochi_protocol::message::{Cleanup, GitHubOp, GitHubView, UserCode, UserError};
+use kumochi_protocol::message::{Cleanup, ErrorKey, GitHubOp, GitHubView, UserCode, UserError};
 
 #[derive(Default)]
 pub struct GitHubConnections {
@@ -16,6 +16,7 @@ pub struct GitHubConnections {
     pub controls_origin: Arc<()>,
     waiting: Option<GitHubOp>,
     unexplained: bool,
+    unsupported: bool,
     challenge: Option<UserCode>,
     challenge_until: Option<Instant>,
 }
@@ -51,6 +52,23 @@ impl GitHubConnections {
     }
 
     pub fn commands(&self) -> &'static [(Text, GitHubOp)] {
+        if self.unsupported {
+            return match self.view {
+                Some(
+                    GitHubView::Connected { .. }
+                    | GitHubView::NotVerified { .. }
+                    | GitHubView::NotInstalled { .. }
+                    | GitHubView::NeedsSignIn { .. },
+                ) => &[(Text::GitHubSignOut, GitHubOp::SignOut)],
+                Some(GitHubView::SignedOut {
+                    cleanup: Some(Cleanup::Refused | Cleanup::NotDurable),
+                }) => &[(Text::Retry, GitHubOp::RetryCleanup)],
+                Some(GitHubView::Requesting | GitHubView::AwaitingUser { .. }) => {
+                    &[(Text::AccountCancel, GitHubOp::CancelConnect)]
+                }
+                _ => &[],
+            };
+        }
         match &self.view {
             None | Some(GitHubView::SignedOut { cleanup: None }) => {
                 &[(Text::GitHubConnect, GitHubOp::Connect)]
@@ -79,7 +97,9 @@ impl GitHubConnections {
     }
 
     pub fn error_text(&self) -> Option<Text> {
-        use kumochi_protocol::message::ErrorKey;
+        if self.unsupported {
+            return Some(Text::UnsupportedPlatform);
+        }
         self.error.as_ref().map(|error| match error.key() {
             ErrorKey::GitHubUnavailable => Text::GitHubUnavailable,
             ErrorKey::SignInTimedOut => Text::GitHubTimeout,
@@ -231,6 +251,7 @@ impl GitHubConnections {
         if !self.accept(current, generation) {
             return false;
         }
+        self.unsupported |= error.key() == ErrorKey::UnsupportedPlatform;
         self.error = Some(error);
         self.controls_origin = Arc::default();
         self.challenge = None;
@@ -241,6 +262,9 @@ impl GitHubConnections {
 
     pub fn allows(&self, current: Option<u64>, op: &GitHubOp) -> bool {
         if current.is_none() || current != self.generation {
+            return false;
+        }
+        if self.unsupported && !self.commands().iter().any(|(_, command)| command == op) {
             return false;
         }
         if self.waiting.is_some() && !matches!(op, GitHubOp::CancelConnect) {

@@ -182,6 +182,10 @@ impl KeyPaste {
         self.authority_revision = authority_revision;
         if matches!(view, KeyView::Missing) {
             self.saved = false;
+        } else if view == KeyView::UnsupportedPlatform {
+            self.saved = authority_revision.is_some();
+            self.stage = Stage::Idle;
+            self.reconciliation = None;
         } else if matches!(view, KeyView::Ready | KeyView::Rejected(_)) {
             self.saved = true;
         }
@@ -223,7 +227,9 @@ impl KeyPaste {
     }
 
     pub fn can_paste(&self) -> bool {
-        self.available() && self.failure != Some(PasteFailure::Unconfirmed)
+        self.available()
+            && self.view != Some(KeyView::UnsupportedPlatform)
+            && self.failure != Some(PasteFailure::Unconfirmed)
     }
 
     fn available(&self) -> bool {
@@ -418,6 +424,9 @@ impl KeyPaste {
     }
 
     pub fn check_available(&self) -> bool {
+        if self.view == Some(KeyView::UnsupportedPlatform) {
+            return self.removal() == Removal::Retry;
+        }
         if self.failure == Some(PasteFailure::Unconfirmed) {
             return self.view.is_some() && self.reconciliation.is_none();
         }
@@ -481,7 +490,10 @@ impl KeyPaste {
     }
 
     pub fn removal_confirmation(&self) -> Option<RemovalConfirmation> {
-        if !self.can_paste() || self.view == Some(KeyView::Missing) {
+        if !self.available()
+            || self.failure == Some(PasteFailure::Unconfirmed)
+            || self.view == Some(KeyView::Missing)
+        {
             return None;
         }
         Some(RemovalConfirmation {
@@ -508,7 +520,9 @@ impl KeyPaste {
         if send(ConnectionOp::RemoveAnthropicKey { revision, request }) {
             self.failure = None;
             self.removal = Some(RemovalAttempt::Waiting { request, revision });
-            self.receive(KeyView::Checking, self.authority_revision);
+            if self.view != Some(KeyView::UnsupportedPlatform) {
+                self.receive(KeyView::Checking, self.authority_revision);
+            }
         } else {
             self.failure = Some(PasteFailure::Offline);
         }
@@ -531,7 +545,12 @@ impl KeyPaste {
         match result {
             Ok(()) => {
                 self.removal = None;
-                self.receive(KeyView::Missing, None);
+                let view = if self.view == Some(KeyView::UnsupportedPlatform) {
+                    KeyView::UnsupportedPlatform
+                } else {
+                    KeyView::Missing
+                };
+                self.receive(view, None);
             }
             Err(KeyRemovalFailure::Changed) => {
                 self.removal = None;

@@ -273,6 +273,7 @@ texts! {
     AccountProvider => "accounts-provider",
     AccountWaiting => "accounts-waiting",
     AccountOffline => "accounts-offline",
+    UnsupportedPlatform => "error-unsupported-platform",
     AccountUsePlan => "accounts-use-plan",
     AccountContinue => "accounts-continue",
     AccountSignedOut => "accounts-signed-out",
