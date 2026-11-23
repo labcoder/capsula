@@ -29,11 +29,19 @@ pub(crate) struct Scratch {
 }
 
 impl Scratch {
+    /// Fixture root for path-sensitive Windows tests and ordinary scratch elsewhere.
     pub(crate) fn trusted(name: &str) -> Self {
-        Self::with_guard(scratch::Scratch::under(
-            &crate::platform::local_app_data().expect("local application data"),
-            name,
-        ))
+        #[cfg(windows)]
+        {
+            Self::with_guard(scratch::Scratch::under(
+                &crate::platform::local_app_data().expect("local application data"),
+                name,
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            Self::new(name)
+        }
     }
 
     pub(crate) fn new(name: &str) -> Self {

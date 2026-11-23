@@ -4,10 +4,9 @@
 //! working folder, so the log outlives a Disconnect: its arguments, a tab, then its whole
 //! environment.
 
-use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::os::windows::fs::{OpenOptionsExt as _, symlink_file};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,13 +15,13 @@ use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use kumochi_protocol::constants::{CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK};
-use kumochi_protocol::message::{ClaudeVersion, PolicyFailed};
+use kumochi_protocol::message::PolicyFailed;
 use windows_sys::Win32::Security::{CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
 use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 
 use super::{
     DEADLINE, Done, Failure, Host, LANE_QUEUE, Lane, Outcome, Program, STATUS_CAP, STDERR_CAP,
-    VERSION_CAP, Work, drain, output,
+    VERSION_CAP, Work,
 };
 use crate::engines::claude_code::auth::StatusFailure;
 use crate::engines::claude_code::install::FindError;
@@ -36,12 +35,7 @@ use crate::scratch::Scratch;
 
 pub(crate) const PICTURE_JPEG: &[u8] = b"\xff\xd8\xffoffline-picture-copy-sentinel-476\xff\xd9";
 
-/// The version every fake reports.
-pub(crate) const V: ClaudeVersion = ClaudeVersion {
-    major: 2,
-    minor: 1,
-    patch: 306,
-};
+pub(crate) use super::TEST_VERSION as V;
 
 /// The fake, from `platform::FAKE_CLAUDE`: `args` is its mode, then the entry point's arguments.
 ///
@@ -619,71 +613,6 @@ async fn the_child_sees_only_kumochis_folders_and_the_system_environment() {
             );
         }
     }
-}
-
-/// A pipe that gives each step in turn, then its end.
-struct Script(VecDeque<io::Result<Vec<u8>>>);
-
-impl Script {
-    fn new(steps: impl IntoIterator<Item = io::Result<Vec<u8>>>) -> Self {
-        Self(steps.into_iter().collect())
-    }
-}
-
-impl Read for Script {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self.0.pop_front() {
-            None => Ok(0),
-            Some(Err(error)) => Err(error),
-            Some(Ok(bytes)) => {
-                buf[..bytes.len()].copy_from_slice(&bytes);
-                Ok(bytes.len())
-            }
-        }
-    }
-}
-
-const ANSWER: &[u8] = b"2.1.306 (Claude Code)\n";
-
-fn drained(pipe: Script) -> Option<super::Drained> {
-    drain(pipe, VERSION_CAP)
-        .recv_timeout(Duration::from_secs(5))
-        .ok()
-}
-
-fn whole() -> Script {
-    Script::new([Ok(ANSWER.to_vec())])
-}
-
-fn broken() -> Script {
-    Script::new([Ok(ANSWER.to_vec()), Err(io::ErrorKind::Other.into())])
-}
-
-#[test]
-fn a_pipe_that_fails_after_a_whole_answer_fails_the_call() {
-    assert_eq!(
-        output(drained(broken()), drained(Script::new([]))),
-        Err(Failure::Pipe),
-        "stdout"
-    );
-    assert_eq!(
-        output(drained(whole()), drained(broken())),
-        Err(Failure::Pipe),
-        "stderr"
-    );
-}
-
-#[test]
-fn an_interrupted_read_is_retried_to_the_end() {
-    let interrupted = Script::new([
-        Ok(ANSWER[..4].to_vec()),
-        Err(io::ErrorKind::Interrupted.into()),
-        Ok(ANSWER[4..].to_vec()),
-    ]);
-    assert_eq!(
-        output(drained(interrupted), drained(Script::new([]))),
-        Ok(ANSWER.to_vec())
-    );
 }
 
 #[tokio::test]

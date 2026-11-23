@@ -24,6 +24,7 @@ mod root_store;
 mod spawn;
 mod window;
 
+pub(crate) use super::Untrusted;
 pub(crate) use capture::{WINDOW_CAPTURE, display_at, screen_capturer};
 #[cfg(any(debug_assertions, feature = "gate-draw-replay"))]
 pub(crate) use clock::qpc_now;
@@ -59,10 +60,10 @@ pub(crate) use protected::{
     DaclEntry, dacl_entries, dacl_sddl, pause_after_check, paused, set_dacl, this_user,
 };
 pub(crate) use protected::{
-    Untrusted, check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_file, hold_model_creation, local_app_data, mark, marker, model_file, model_final,
-    open_model_write, owner_only_dir, private_tree, profile_dir, publish_model, remove_model_tree,
-    remove_tree, unmark, validate_model_path,
+    check_model_final, create_model_dir, create_model_write, discard_model, hold_chain, hold_file,
+    hold_model_creation, local_app_data, mark, marker, model_file, model_final, open_model_write,
+    owner_only_dir, private_tree, profile_dir, publish_model, remove_model_tree, remove_tree,
+    unmark, validate_model_path,
 };
 pub use root_store::trust_roots;
 pub use spawn::spawn;

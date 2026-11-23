@@ -22,7 +22,7 @@ use crate::voice::pump::Pump;
 use crate::voice::stt::SttHandle;
 use crate::voice::tts::TtsHandle;
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod path_tests;
 
 pub(crate) struct Voice {
@@ -189,7 +189,11 @@ pub(super) fn delete(models: &Path, part: VoicePart) -> Folder {
         Ok(()) => Folder::Missing,
         Err(error) => {
             tracing::warn!(?part, ?error, "a removed voice part wasn't deleted");
-            Folder::Present
+            Folder::Refused(match error {
+                #[cfg(not(windows))]
+                Untrusted::Unsupported => ErrorKey::UnsupportedPlatform,
+                _ => ErrorKey::VoiceStorage,
+            })
         }
     }
 }
@@ -204,6 +208,8 @@ fn whole(models: &Path, part: VoicePart) -> Result<bool, ErrorKey> {
         Err(Untrusted::Missing) => return Ok(false),
         Err(Untrusted::Reparse | Untrusted::Unsafe) => return Err(ErrorKey::VoiceModelPath),
         Err(Untrusted::Io) => return Err(ErrorKey::VoiceStorage),
+        #[cfg(not(windows))]
+        Err(Untrusted::Unsupported) => return Err(ErrorKey::UnsupportedPlatform),
     };
     for (file, pin) in held.files.iter().zip(manifest) {
         if file.metadata().map_err(|_| ErrorKey::VoiceStorage)?.len() != pin.bytes {
@@ -237,7 +243,7 @@ impl Brain {
     pub(crate) fn attach_voice(
         &mut self,
         models: PathBuf,
-        stuck: &[VoicePart],
+        stuck: &[(VoicePart, Folder)],
         (stt, tts): (Option<SttHandle>, Option<TtsHandle>),
         reports: [UnboundedReceiver<LoadReport>; 2],
         fetcher: Arc<dyn Fetch>,
@@ -464,6 +470,8 @@ impl Brain {
             .and_then(|()| platform::hold_chain(&voice.models.join(part.dir())))
         {
             Err(Untrusted::Missing) => Folder::Missing,
+            #[cfg(not(windows))]
+            Err(Untrusted::Unsupported) => Folder::Refused(ErrorKey::UnsupportedPlatform),
             Ok(_) | Err(_) => Folder::Present,
         };
         let (answer, effects) = voice.installer.remove(part, folder);

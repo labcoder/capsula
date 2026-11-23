@@ -2,20 +2,23 @@
 //! byte caps (§3), and S4's Idle half (T15).
 
 use std::io::{self, Write};
+#[cfg(windows)]
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::RunId;
+#[cfg(windows)]
 use tokio::time::timeout;
 
-use super::tests::{
-    Pause, Stdin, WAIT, barrier, echoed, end, found, pause, pipes, question, queue,
-};
-use super::{
-    CHUNK, Input, MAX_CONTROL, MAX_SEED, Revoked, StdinRefused, Teardown, admit, write_input,
-};
+use super::tests::{Pause, Stdin, WAIT, barrier, pause, question};
+#[cfg(windows)]
+use super::tests::{echoed, end, found, pipes, queue};
+use super::{CHUNK, Input, MAX_CONTROL, MAX_SEED, StdinRefused, admit, write_input};
+#[cfg(windows)]
+use super::{Revoked, Teardown};
 use crate::coordinator::{BuildKey, Input as CoordinatorInput, LeaseId, PictureGrant, SendKey};
 use crate::engines::SendLease;
+#[cfg(windows)]
 use crate::engines::claude_code::lane::tests::Base;
 
 fn far() -> Instant {
@@ -219,6 +222,7 @@ fn pictured_stdin_distinguishes_no_write_from_a_partial_first_chunk() {
 }
 
 /// A seed of exactly the cap reaches the child whole, in full chunks, and uses up the one seed.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_seed_of_exactly_the_cap_reaches_the_child_whole() {
     let base = Base::new("stdin-seed-cap");
@@ -261,6 +265,7 @@ async fn a_seed_of_exactly_the_cap_reaches_the_child_whole() {
 }
 
 /// One byte over the cap is refused whole, and the refusal uses up the one seed.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_seed_one_over_the_cap_queues_nothing() {
     let base = Base::new("stdin-seed-over");
@@ -284,6 +289,7 @@ async fn a_seed_one_over_the_cap_queues_nothing() {
 
 /// The control lines share their own 4 KiB, apart from the seed; a seed one byte over a chunk
 /// goes as two.
+#[cfg(windows)]
 #[tokio::test]
 async fn control_lines_have_their_own_cap_and_the_seed_goes_in_chunks() {
     let base = Base::new("stdin-control");
@@ -331,6 +337,7 @@ async fn control_lines_have_their_own_cap_and_the_seed_goes_in_chunks() {
 /// waits it queues nothing more, its deadline gives `Deadline`, and a revocation gives
 /// `Revoked` once the pump lets go. A control wait that ends any of these ways charges none of
 /// the control allowance, so a whole-allowance control is still taken after each.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_full_stdin_wait_ends_on_drop_deadline_and_revocation() {
     let base = Base::new("stdin-full");
@@ -378,6 +385,7 @@ async fn a_full_stdin_wait_ends_on_drop_deadline_and_revocation() {
 
 /// T15, S4's Idle half: once `revoke()` returns `Idle`, a chunk the pump took just before it
 /// never enters a write, while the teardown is held at the job and after.
+#[cfg(windows)]
 #[tokio::test]
 async fn after_an_idle_revocation_no_write_is_entered() {
     let base = Base::new("stdin-idle");
@@ -416,6 +424,7 @@ async fn after_an_idle_revocation_no_write_is_entered() {
 
 /// §1: the id, deadline, binding and gate are the launch's own from admission, the same ones the
 /// worker and the listener use.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_launch_carries_its_id_deadline_binding_and_gate_from_admission() {
     let base = Base::new("launch-handles");
@@ -446,6 +455,7 @@ async fn a_launch_carries_its_id_deadline_binding_and_gate_from_admission() {
 }
 
 /// A seed whose deadline has passed queues nothing, even with room on stdin.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_seed_past_its_deadline_queues_nothing_with_room() {
     let base = Base::new("stdin-seed-late");
