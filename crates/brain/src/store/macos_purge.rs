@@ -1,24 +1,27 @@
 use std::io::{self, ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rusqlite::{Connection, OpenFlags, params};
 
-use crate::platform::{PurgeDirectory, PurgeIdentity, PurgeInode, RenameMode};
+use crate::platform::{PurgeDirectory, PurgeFileId, PurgeIdentity, PurgeInode, RenameMode};
 
 use super::purge::{CLEAN, OLD, SNAPSHOT, Swap, missing, sidecar};
 use super::{Store, StoreError, checkpoint_now, owes, schema};
 
 const INTENT: &str = ".purge-intent";
 const STAGED: &str = ".purge-intent.tmp";
-const MAGIC: [u8; 4] = *b"KPG1";
-const SIZE: usize = MAGIC.len() + 3 * 16;
+const MAGIC: [u8; 4] = *b"KPG2";
+const SIZE: usize = MAGIC.len() + 3 * 16 + 24;
 const STAMP_SCHEMA: &str = "
 CREATE TABLE mac_test_purge_generation (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     store_id BLOB NOT NULL CHECK (length(store_id) = 16),
     generation_id BLOB NOT NULL CHECK (length(generation_id) = 16)
 ) STRICT;";
+
+type SchemaObject = (String, String, String, String);
+static REQUIRED_SCHEMA: OnceLock<Result<Vec<SchemaObject>, ErrorKind>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Stamp {
@@ -30,6 +33,7 @@ struct Stamp {
 pub(super) struct Intent {
     old: Stamp,
     new: Stamp,
+    original: PurgeFileId,
 }
 
 impl Intent {
@@ -38,12 +42,13 @@ impl Intent {
         bytes[..4].copy_from_slice(&MAGIC);
         bytes[4..20].copy_from_slice(&self.old.store);
         bytes[20..36].copy_from_slice(&self.old.generation);
-        bytes[36..].copy_from_slice(&self.new.generation);
+        bytes[36..52].copy_from_slice(&self.new.generation);
+        bytes[52..].copy_from_slice(&self.original);
         bytes
     }
 
     fn decode(bytes: &[u8; SIZE]) -> io::Result<Self> {
-        if bytes[..4] != MAGIC || bytes[20..36] == bytes[36..] {
+        if bytes[..4] != MAGIC || bytes[20..36] == bytes[36..52] {
             return Err(invalid());
         }
         let store = bytes[4..20].try_into().map_err(|_| invalid())?;
@@ -54,8 +59,9 @@ impl Intent {
             },
             new: Stamp {
                 store,
-                generation: bytes[36..].try_into().map_err(|_| invalid())?,
+                generation: bytes[36..52].try_into().map_err(|_| invalid())?,
             },
+            original: bytes[52..].try_into().map_err(|_| invalid())?,
         })
     }
 }
@@ -99,11 +105,13 @@ struct Recovery<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Boundary {
+    Closed,
     Link,
     Rename,
     Flush,
     Reopen,
     Unlink,
+    Retire,
 }
 
 type TestLink<'a> = Box<dyn FnOnce(&Path, &Path) -> io::Result<()> + 'a>;
@@ -149,9 +157,6 @@ impl<'a> Files<'a> {
             return Err(invalid());
         }
         let Some(mut file) = self.hold_optional(&self.intent)? else {
-            if !self.dir.absent(&self.old)? {
-                return Err(invalid());
-            }
             return Ok(None);
         };
         self.dir.verify(&self.intent, &file, 1)?;
@@ -218,6 +223,7 @@ impl<'a> Files<'a> {
         .map_err(|_| invalid())?;
         let stamp = checked_stamp(&db).map_err(|_| invalid())?;
         let pending = owes(&db).map_err(|_| invalid())?;
+        verify_live_schema(&db)?;
         db.close().map_err(|_| invalid())?;
         self.dir.verify(path, held, links)?;
         Ok((stamp, pending))
@@ -226,6 +232,40 @@ impl<'a> Files<'a> {
 
 fn invalid() -> io::Error {
     ErrorKind::InvalidData.into()
+}
+
+fn schema_objects(conn: &Connection) -> rusqlite::Result<Vec<SchemaObject>> {
+    let mut query = conn.prepare(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema
+         WHERE sql IS NOT NULL ORDER BY type, name",
+    )?;
+    query
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect()
+}
+
+fn verify_live_schema(conn: &Connection) -> io::Result<()> {
+    let expected = REQUIRED_SCHEMA
+        .get_or_init(|| {
+            let mut reference = Connection::open_in_memory().map_err(|_| ErrorKind::InvalidData)?;
+            schema::migrate(&mut reference).map_err(|_| ErrorKind::InvalidData)?;
+            reference
+                .execute_batch(STAMP_SCHEMA)
+                .map_err(|_| ErrorKind::InvalidData)?;
+            schema_objects(&reference).map_err(|_| ErrorKind::InvalidData)
+        })
+        .as_ref()
+        .map_err(|kind| io::Error::from(*kind))?;
+    let actual = schema_objects(conn).map_err(|_| invalid())?;
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check(1)", [], |row| row.get(0))
+        .map_err(|_| invalid())?;
+    if integrity != "ok" || expected.iter().any(|required| !actual.contains(required)) {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn random_id() -> io::Result<[u8; 16]> {
@@ -255,10 +295,7 @@ fn checked_stamp(conn: &Connection) -> Result<Stamp, StoreError> {
     Ok(stamp(conn)?)
 }
 
-pub(super) fn seed_stamp(path: &Path, conn: &mut Connection) -> Result<(), StoreError> {
-    if Files::open(path).map_err(StoreError::Purge)?.is_none() {
-        return Ok(());
-    }
+fn seed_stamp(conn: &mut Connection) -> Result<(), StoreError> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema
           WHERE type = 'table' AND name = 'mac_test_purge_generation')",
@@ -285,6 +322,11 @@ pub(super) fn stamp_snapshot(path: &Path) -> Result<Option<Intent>, StoreError> 
     let Some(files) = Files::open(path).map_err(StoreError::Purge)? else {
         return Ok(None);
     };
+    let canonical = files.dir.hold(path).map_err(StoreError::Purge)?;
+    files
+        .dir
+        .verify(path, &canonical, 1)
+        .map_err(StoreError::Purge)?;
     let snapshot = sidecar(path, SNAPSHOT);
     files.no_journals(&snapshot).map_err(StoreError::Purge)?;
     let held = files.dir.hold(&snapshot).map_err(StoreError::Purge)?;
@@ -292,7 +334,7 @@ pub(super) fn stamp_snapshot(path: &Path) -> Result<Option<Intent>, StoreError> 
         .dir
         .verify(&snapshot, &held, 1)
         .map_err(StoreError::Purge)?;
-    let conn = Connection::open_with_flags(&snapshot, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let conn = open_snapshot(&snapshot)?;
     let old = checked_stamp(&conn)?;
     let generation = random_id().map_err(StoreError::Purge)?;
     if generation == old.generation || owes(&conn)? {
@@ -313,7 +355,39 @@ pub(super) fn stamp_snapshot(path: &Path) -> Result<Option<Intent>, StoreError> 
             store: old.store,
             generation,
         },
+        original: canonical.file_id(),
     }))
+}
+
+fn open_snapshot(path: &Path) -> Result<Connection, StoreError> {
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|error| sanitize(StoreError::Sql(error)))
+}
+
+fn open_canonical(path: &Path) -> Result<Connection, StoreError> {
+    super::connect(path, OpenFlags::SQLITE_OPEN_NOFOLLOW).map_err(sanitize)
+}
+
+pub(super) fn sanitize(error: StoreError) -> StoreError {
+    match error {
+        StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)) => StoreError::Purge(
+            io::Error::other(format!("SQLite {:?} ({})", error.code, error.extended_code)),
+        ),
+        StoreError::Sql(_) => StoreError::Purge(invalid()),
+        other => other,
+    }
+}
+
+pub(super) fn sanitize_open(error: StoreError) -> StoreError {
+    match &error {
+        StoreError::Sql(rusqlite::Error::SqliteFailure(code, _))
+            if code.code == rusqlite::ErrorCode::CannotOpen =>
+        {
+            sanitize(error)
+        }
+        StoreError::Sql(rusqlite::Error::InvalidPath(_)) => sanitize(error),
+        _ => error,
+    }
 }
 
 pub(super) fn bind_copy(path: &Path, intent: Intent) -> Result<CopiedMac, StoreError> {
@@ -338,6 +412,55 @@ pub(super) fn evidence_exists(path: &Path) -> bool {
     [INTENT, STAGED]
         .iter()
         .any(|suffix| !missing(&sidecar(path, suffix)))
+}
+
+pub(super) fn cleanup_preintent(path: &Path) -> io::Result<bool> {
+    let Some(files) = Files::open(path)? else {
+        return Ok(false);
+    };
+    if files.load()?.is_some() {
+        return Err(invalid());
+    }
+    let snapshot = sidecar(path, SNAPSHOT);
+    let candidates = [&snapshot, &files.clean, &files.old];
+    for candidate in candidates {
+        files.no_journals(candidate)?;
+    }
+    if candidates
+        .iter()
+        .all(|path| matches!(files.dir.absent(path), Ok(true)))
+    {
+        return Ok(true);
+    }
+    let current = files.dir.hold(path)?;
+    if !files.dir.absent(&sidecar(path, "-journal"))? {
+        return Err(invalid());
+    }
+    let live = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| invalid())?;
+    let stamp = checked_stamp(&live).map_err(|_| invalid())?;
+    drop(live);
+    files.dir.verify(path, &current, 1)?;
+    let mut owned = Vec::new();
+    for candidate in candidates {
+        if let Some(held) = files.hold_optional(candidate)? {
+            // A stopped VACUUM INTO leaves an empty file: no content, so no owner to confirm.
+            if !held.is_empty()?
+                && files.immutable_stamp(candidate, &held, 1)?.0.store != stamp.store
+            {
+                return Err(invalid());
+            }
+            owned.push((candidate, held));
+        }
+    }
+    for (candidate, held) in owned {
+        files.dir.remove(candidate, &held, 1)?;
+    }
+    files.dir.durable(&current)?;
+    Ok(true)
 }
 
 pub(super) fn promote(
@@ -387,6 +510,7 @@ pub(super) fn leave_link_for_restart(store: &Store, copied: &CopiedMac) -> Resul
     let clean = files.dir.hold(&files.clean).map_err(StoreError::Purge)?;
     if clean.identity() != copied.clean
         || !checkpoint_now(&store.conn)?
+        || old.file_id() != copied.intent.original
         || checked_stamp(&store.conn)? != copied.intent.old
     {
         return Err(StoreError::Purge(invalid()));
@@ -411,6 +535,10 @@ pub(super) fn leave_link_for_restart(store: &Store, copied: &CopiedMac) -> Resul
     files.dir.durable(&old).map_err(StoreError::Purge)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered publication sequence; splitting it would separate each barrier from its step"
+)]
 fn promote_with(
     store: &mut Store,
     writes: u64,
@@ -435,6 +563,7 @@ fn promote_with(
     let clean = files.dir.hold(&files.clean).map_err(StoreError::Purge)?;
     let old = files.dir.hold(files.db).map_err(StoreError::Purge)?;
     if clean.identity() != copied.clean
+        || old.file_id() != copied.intent.original
         || checked_stamp(&store.conn)? != copied.intent.old
         || !owes(&store.conn)?
         || files
@@ -459,6 +588,7 @@ fn promote_with(
     store.serving = false;
     store.mac_published = None;
     fence.unavailable();
+    reach(Boundary::Closed).map_err(StoreError::Purge)?;
     if let Err(error) = files.no_journals(files.db) {
         if let Err(error) = files.dir.verify(files.db, &old, 1) {
             stop_uncertain("verify old store", &error);
@@ -468,8 +598,14 @@ fn promote_with(
             canonical: old.identity(),
             role: Role::Old,
         });
-        store.reopen()?;
-        fence.available();
+        if files
+            .dir
+            .absent(&sidecar(files.db, "-journal"))
+            .map_err(StoreError::Purge)?
+        {
+            store.reopen()?;
+            fence.available();
+        }
         return Err(StoreError::Purge(error));
     }
     let ready = (|| {
@@ -567,21 +703,30 @@ impl ActiveSwap {
             .dir
             .verify(path, &held, 1)
             .map_err(StoreError::Purge)?;
+        if self.published() {
+            files.no_journals(path).map_err(StoreError::Purge)?;
+        } else if !files
+            .dir
+            .absent(&sidecar(path, "-journal"))
+            .map_err(StoreError::Purge)?
+        {
+            return Err(StoreError::Purge(invalid()));
+        }
         let expected = match self.role {
             Role::Old => (self.intent.old, true),
-            Role::Successor => {
-                let expected = (self.intent.new, false);
-                if files
-                    .immutable_stamp(path, &held, 1)
-                    .map_err(StoreError::Purge)?
-                    != expected
-                {
-                    return Err(StoreError::Purge(invalid()));
-                }
-                expected
-            }
+            Role::Successor => (self.intent.new, false),
         };
-        let conn = super::connect(path, OpenFlags::empty())?;
+        if files
+            .immutable_stamp(path, &held, 1)
+            .map_err(StoreError::Purge)?
+            != expected
+        {
+            return Err(StoreError::Purge(invalid()));
+        }
+        if self.published() {
+            reconcile(path, Some(self)).map_err(StoreError::Purge)?;
+        }
+        let conn = open_canonical(path)?;
         files
             .dir
             .verify(path, &held, 1)
@@ -601,12 +746,61 @@ pub(super) fn recover(path: &Path) -> io::Result<Option<ActiveSwap>> {
         return Ok(None);
     };
     let attempt = recovery.attempt;
-    if attempt.published() {
-        recovery.files.dir.durable(&recovery.current)?;
-    } else {
+    if !attempt.published() {
         recovery.cleanup(|_| Ok(()))?;
     }
     Ok(Some(attempt))
+}
+
+pub(super) fn open_initial(
+    path: &Path,
+    recovered: Option<ActiveSwap>,
+) -> Result<Option<Connection>, StoreError> {
+    if let Some(active) = recovered {
+        return active.reopen(path).map(Some);
+    }
+    let Some(files) = Files::open(path).map_err(StoreError::Purge)? else {
+        return Ok(None);
+    };
+    let held = if let Some(held) = files.hold_optional(path).map_err(StoreError::Purge)? {
+        files
+            .dir
+            .verify(path, &held, 1)
+            .map_err(StoreError::Purge)?;
+        if !files
+            .dir
+            .absent(&sidecar(path, "-journal"))
+            .map_err(StoreError::Purge)?
+        {
+            return Err(StoreError::Purge(invalid()));
+        }
+        for suffix in ["-wal", "-shm"] {
+            let journal = sidecar(path, suffix);
+            if let Some(held) = files.hold_optional(&journal).map_err(StoreError::Purge)? {
+                files
+                    .dir
+                    .verify(&journal, &held, 1)
+                    .map_err(StoreError::Purge)?;
+            }
+        }
+        files.dir.durable(&held).map_err(StoreError::Purge)?;
+        held
+    } else {
+        files.no_journals(path).map_err(StoreError::Purge)?;
+        files.dir.create(path).map_err(StoreError::Purge)?
+    };
+    let mut conn = open_canonical(path)?;
+    files
+        .dir
+        .verify(path, &held, 1)
+        .map_err(StoreError::Purge)?;
+    schema::migrate(&mut conn).map_err(sanitize)?;
+    seed_stamp(&mut conn).map_err(sanitize)?;
+    files
+        .dir
+        .verify(path, &held, 1)
+        .map_err(StoreError::Purge)?;
+    Ok(Some(conn))
 }
 
 pub(super) fn reconcile(path: &Path, active: Option<ActiveSwap>) -> io::Result<bool> {
@@ -616,9 +810,21 @@ pub(super) fn reconcile(path: &Path, active: Option<ActiveSwap>) -> io::Result<b
 fn reconcile_with(
     path: &Path,
     active: Option<ActiveSwap>,
-    reach: impl FnOnce(Boundary) -> io::Result<()>,
+    mut reach: impl FnMut(Boundary) -> io::Result<()>,
 ) -> io::Result<bool> {
     let Some(recovery) = classify(path, active)? else {
+        if let Some(active) = active.filter(ActiveSwap::published) {
+            let files = Files::open(path)?.ok_or_else(invalid)?;
+            let held = files.dir.hold(path)?;
+            if held.identity() != active.canonical
+                || files.immutable_stamp(path, &held, 1)? != (active.intent.new, false)
+            {
+                return Err(invalid());
+            }
+            reach(Boundary::Retire)?;
+            files.dir.durable(&held)?;
+            return Ok(true);
+        }
         return Ok(false);
     };
     recovery.cleanup(reach)?;
@@ -626,7 +832,7 @@ fn reconcile_with(
 }
 
 impl Recovery<'_> {
-    fn cleanup(self, reach: impl FnOnce(Boundary) -> io::Result<()>) -> io::Result<()> {
+    fn cleanup(self, mut reach: impl FnMut(Boundary) -> io::Result<()>) -> io::Result<()> {
         let Self {
             files,
             attempt,
@@ -637,21 +843,22 @@ impl Recovery<'_> {
         } = self;
         files.dir.verify(&files.intent, &record, 1)?;
         files.dir.durable(&current)?;
-        if let Some(alias) = &alias {
-            files
-                .dir
-                .remove(&files.old, alias, if attempt.published() { 1 } else { 2 })?;
+        if let Some(alias) = alias.as_ref().filter(|_| !attempt.published()) {
+            files.dir.remove(&files.old, alias, 2)?;
         }
         if let Some(clean) = &clean {
             files.dir.remove(&files.clean, clean, 1)?;
         }
         reach(Boundary::Unlink)?;
         files.dir.verify(files.db, &current, 1)?;
-        if !files.dir.absent(&files.old)? || !files.dir.absent(&files.clean)? {
+        if (!attempt.published() && !files.dir.absent(&files.old)?)
+            || !files.dir.absent(&files.clean)?
+        {
             return Err(invalid());
         }
         files.dir.durable(&current)?;
         files.dir.remove(&files.intent, &record, 1)?;
+        reach(Boundary::Retire)?;
         files.dir.durable(&current)
     }
 }
@@ -665,9 +872,7 @@ fn classify(path: &Path, active: Option<ActiveSwap>) -> io::Result<Option<Recove
         };
     };
     let Some((intent, record)) = files.load()? else {
-        if (!files.dir.absent(&files.clean)? || !files.dir.absent(&sidecar(path, SNAPSHOT))?)
-            && files.dir.hold(path)?.is_empty()?
-        {
+        if files.dir.absent(path)? && super::purge::files(path).any(|file| !missing(&file)) {
             return Err(invalid());
         }
         return Ok(None);
@@ -705,6 +910,9 @@ fn classify(path: &Path, active: Option<ActiveSwap>) -> io::Result<Option<Recove
     };
 
     if stamp == intent.old {
+        if current.file_id() != intent.original {
+            return Err(invalid());
+        }
         if let Some(alias) = &alias {
             if alias.identity() != current.identity() {
                 return Err(invalid());
@@ -718,7 +926,8 @@ fn classify(path: &Path, active: Option<ActiveSwap>) -> io::Result<Option<Recove
         }
     } else if stamp == intent.new && clean.is_none() {
         if let Some(alias) = &alias
-            && files.immutable_stamp(&files.old, alias, 1)? != (intent.old, true)
+            && (alias.file_id() != intent.original
+                || files.immutable_stamp(&files.old, alias, 1)? != (intent.old, true))
         {
             return Err(invalid());
         }

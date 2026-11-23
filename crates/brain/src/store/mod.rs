@@ -345,15 +345,19 @@ impl Store {
             return Err(StoreError::Retired);
         }
         #[cfg(all(test, target_os = "macos"))]
-        let mut conn = match recovered {
-            Some(active) => active.reopen(path)?,
-            None => connect(path, OpenFlags::SQLITE_OPEN_CREATE)?,
+        let conn = if let Some(conn) = macos_purge::open_initial(path, recovered)? {
+            conn
+        } else {
+            let mut conn = connect(path, OpenFlags::SQLITE_OPEN_CREATE)?;
+            schema::migrate(&mut conn)?;
+            conn
         };
         #[cfg(not(all(test, target_os = "macos")))]
-        let mut conn = connect(path, OpenFlags::SQLITE_OPEN_CREATE)?;
-        schema::migrate(&mut conn)?;
-        #[cfg(all(test, target_os = "macos"))]
-        macos_purge::seed_stamp(path, &mut conn)?;
+        let conn = {
+            let mut conn = connect(path, OpenFlags::SQLITE_OPEN_CREATE)?;
+            schema::migrate(&mut conn)?;
+            conn
+        };
         let purge_pending = owes(&conn)?;
         Ok(Self {
             conn,
@@ -362,7 +366,7 @@ impl Store {
             purge_pending,
             serving: true,
             #[cfg(all(test, target_os = "macos"))]
-            mac_published: recovered,
+            mac_published: None,
             side: Arc::new(Side::new(path.to_owned())),
         })
     }
@@ -394,6 +398,10 @@ impl Store {
         let conn = connect(&self.path, OpenFlags::empty())?;
         self.purge_pending = owes(&conn)?;
         self.conn = conn;
+        #[cfg(all(test, target_os = "macos"))]
+        {
+            self.mac_published = None;
+        }
         self.serving = true;
         Ok(())
     }

@@ -14,7 +14,7 @@ mod macos;
 pub(crate) use macos::write_scratch_settings;
 
 #[cfg(all(test, target_os = "macos"))]
-pub(crate) use macos::{PurgeDirectory, PurgeIdentity, PurgeInode, RenameMode};
+pub(crate) use macos::{PurgeDirectory, PurgeFileId, PurgeIdentity, PurgeInode, RenameMode};
 
 /// No per-user runtime data root is configured on this platform.
 #[must_use]

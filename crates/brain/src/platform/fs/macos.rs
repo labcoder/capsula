@@ -12,7 +12,7 @@ mod tests;
 use custody::{
     check_name, inspect, make_directory, matches_name, named_stat, open_at, private_mode, unlink,
 };
-pub(crate) use purge::{PurgeDirectory, PurgeIdentity, PurgeInode};
+pub(crate) use purge::{PurgeDirectory, PurgeFileId, PurgeIdentity, PurgeInode};
 pub(crate) use settings::write_scratch_settings;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

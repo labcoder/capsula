@@ -386,12 +386,23 @@ test process with status 78 so the runner stops its group and preserves the root
 publication whose reopen fails is unavailable; reconnect only opens and revalidates the
 published generation without creating a DB.
 
+The intent also records the old primary's file identity (inode and birth time), so a copy
+of the old DB can't stand in for it. Before either generation takes a write, its required
+schema and `integrity_check` pass and the intent is retired, with the final flush retried if
+it fails. The old generation then stays as an ordinary `.purge-old` leftover. A rollback
+journal beside the primary keeps the old store unavailable, also on reconnect; a WAL another
+connection holds refuses the swap while the old store keeps serving.
+
 Restart checks the intent and DB stamps before it can create, migrate or clean up. It refuses
 a missing, substituted or ambiguous primary and doesn't promote an alias automatically.
 With a verified primary, it removes only matching candidates and syncs the parent and
-full-flushes the primary before retiring the intent. Existing-name replacement and cleanup
-require the trusted runner's exclusive namespace custody. The fixtures test interrupted
-operation boundaries, not the behavior of hardware under a physical power loss.
+full-flushes the primary before retiring the intent. With no intent, cleanup removes a
+candidate only when its store ID matches the primary's or it is empty, as a stopped
+`VACUUM INTO` leaves it; journals and anything else stay. A primary must be a single-link
+regular file before its first stamp, and leftover journals alone never lead to a new one.
+SQLite open failures reach the log as their codes, without paths. Existing-name replacement
+and cleanup require the trusted runner's exclusive namespace custody. The fixtures test
+interrupted operation boundaries, not the behavior of hardware under a physical power loss.
 
 **What store work waits for.** Only the swap stops the store thread: 7–21 ms from 46 MiB to
 984 MiB on Rez, 5 purges each (`measure_purge`, release build). During a copy ops share the disk

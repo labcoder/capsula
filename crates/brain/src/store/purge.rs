@@ -404,7 +404,11 @@ impl Owed {
                 tracing::warn!(%error, "a purge's copy couldn't be removed; it's retried later");
             }
         }
-        Ok(made?.then_some(Copied {
+        #[cfg(all(test, target_os = "macos"))]
+        let made = made.map_err(macos_purge::sanitize_open)?;
+        #[cfg(not(all(test, target_os = "macos")))]
+        let made = made?;
+        Ok(made.then_some(Copied {
             writes: self.writes,
             #[cfg(all(test, target_os = "macos"))]
             macos,
@@ -441,6 +445,9 @@ impl Leftovers {
             if macos_purge::reconcile(&self.db, self.active)? {
                 return Ok(());
             }
+            if macos_purge::cleanup_preintent(&self.db)? {
+                return Ok(());
+            }
         }
         self.remove_with(|path| fs::remove_file(path))
     }
@@ -473,7 +480,7 @@ impl Leftovers {
 }
 
 /// Every file a purge may leave beside `db`, the old store first.
-fn files(db: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+pub(super) fn files(db: &Path) -> impl Iterator<Item = PathBuf> + '_ {
     [sidecar(db, OLD)]
         .into_iter()
         .chain([SNAPSHOT, CLEAN].into_iter().flat_map(move |copy| {

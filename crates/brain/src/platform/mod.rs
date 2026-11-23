@@ -6,7 +6,7 @@ pub mod credential;
 pub(crate) use fs::write_scratch_settings;
 
 #[cfg(all(test, target_os = "macos"))]
-pub(crate) use fs::{PurgeDirectory, PurgeIdentity, PurgeInode, RenameMode};
+pub(crate) use fs::{PurgeDirectory, PurgeFileId, PurgeIdentity, PurgeInode, RenameMode};
 
 #[cfg(all(windows, feature = "test-support"))]
 pub use windows::{WindowProbe, WindowSample, WindowSession};

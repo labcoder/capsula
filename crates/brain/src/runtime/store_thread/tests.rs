@@ -203,18 +203,9 @@ fn swapped_with_old_left(scratch: &Scratch) -> Store {
         .expect("copy")
         .expect("not stopped");
     assert_eq!(store.swap(&copied).expect("swap"), Swap::Done);
-    let mut found = purge_files(scratch);
-    found.sort();
-    #[cfg(target_os = "macos")]
-    let expected = vec![
-        beside(&scratch.db(), ".purge-intent"),
-        beside(&scratch.db(), ".purge-old"),
-    ];
-    #[cfg(not(target_os = "macos"))]
-    let expected = vec![beside(&scratch.db(), ".purge-old")];
     assert_eq!(
-        found, expected,
-        "both rollback and reconciliation evidence survive"
+        purge_files(scratch),
+        vec![beside(&scratch.db(), ".purge-old")]
     );
     store
 }

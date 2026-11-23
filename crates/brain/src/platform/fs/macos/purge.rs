@@ -20,14 +20,21 @@ pub(crate) struct PurgeDirectory {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PurgeIdentity(libc::dev_t, libc::ino_t);
 
+pub(crate) type PurgeFileId = [u8; 24];
+
 pub(crate) struct PurgeInode {
     file: File,
     identity: PurgeIdentity,
+    file_id: PurgeFileId,
 }
 
 impl PurgeInode {
     pub(crate) fn identity(&self) -> PurgeIdentity {
         self.identity
+    }
+
+    pub(crate) fn file_id(&self) -> PurgeFileId {
+        self.file_id
     }
 
     pub(crate) fn read_exact(&mut self, bytes: &mut [u8]) -> io::Result<()> {
@@ -102,12 +109,7 @@ impl PurgeDirectory {
         let stage = Stage::Source;
         let name = self.name(path, stage).map_err(io_fault)?;
         let file = open_at(&self.directory, &name, libc::O_RDWR, stage).map_err(io_fault)?;
-        let sample = self.sample(&file, stage).map_err(io_fault)?;
-        matches_name(&self.directory, &name, &sample, stage).map_err(io_fault)?;
-        Ok(PurgeInode {
-            file,
-            identity: PurgeIdentity(sample.st_dev, sample.st_ino),
-        })
+        self.bind(file, &name, stage)
     }
 
     pub(crate) fn verify(&self, path: &Path, inode: &PurgeInode, links: u16) -> io::Result<()> {
@@ -122,22 +124,37 @@ impl PurgeDirectory {
     }
 
     pub(crate) fn stage_intent(&self, path: &Path, contents: &[u8]) -> io::Result<PurgeInode> {
+        let mut inode = self.create(path)?;
+        inode.file.write_all(contents)?;
+        inode.sync()?;
+        self.verify(path, &inode, 1)?;
+        Ok(inode)
+    }
+
+    pub(crate) fn create(&self, path: &Path) -> io::Result<PurgeInode> {
         let stage = Stage::Create;
         let name = self.name(path, stage).map_err(io_fault)?;
-        let mut file = open_at(
+        let file = open_at(
             &self.directory,
             &name,
             libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
             stage,
         )
         .map_err(io_fault)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
+        self.bind(file, &name, stage)
+    }
+
+    fn bind(&self, file: File, name: &std::ffi::CStr, stage: Stage) -> io::Result<PurgeInode> {
         let sample = self.sample(&file, stage).map_err(io_fault)?;
-        matches_name(&self.directory, &name, &sample, stage).map_err(io_fault)?;
+        matches_name(&self.directory, name, &sample, stage).map_err(io_fault)?;
+        let mut file_id = [0; 24];
+        file_id[..8].copy_from_slice(&sample.st_ino.to_le_bytes());
+        file_id[8..16].copy_from_slice(&sample.st_birthtime.to_le_bytes());
+        file_id[16..].copy_from_slice(&sample.st_birthtime_nsec.to_le_bytes());
         Ok(PurgeInode {
             file,
             identity: PurgeIdentity(sample.st_dev, sample.st_ino),
+            file_id,
         })
     }
 
