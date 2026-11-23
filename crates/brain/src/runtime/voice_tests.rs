@@ -21,6 +21,7 @@ use tokio::sync::{Notify, mpsc, watch};
 
 use super::{Brain, Ended, Shell, duplex};
 use crate::coordinator::Input;
+#[cfg(windows)]
 use crate::platform::sherpa::tests::stage_root;
 use crate::runtime::data::DataQueue;
 use crate::runtime::settings::Gate;
@@ -1080,6 +1081,7 @@ async fn a_cancelled_install_goes_back_and_the_next_fetches_once_the_first_ends(
     assert_eq!(loads.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_removal_whose_last_write_fails_shows_a_storage_failure_and_fetches_nothing() {
     let scratch = Scratch::trusted("voice-cleared-refused");
@@ -1459,6 +1461,7 @@ async fn an_install_finishes_while_no_shell_is_connected() {
 
 /// Spoken replies installed under a trusted models folder, with talk-back on; it loads once the
 /// returned sender sends. Returns its folder too.
+#[cfg(windows)]
 fn removable(scratch: &Scratch, root: &Path) -> (Brain, std_mpsc::Sender<()>, PathBuf) {
     let models = seeded_at(
         scratch,
@@ -1690,6 +1693,7 @@ async fn cancel_received_during_remove_done_fences_only_older_installs() {
 
 /// Row 5: until the intent commits, the part keeps its model and speaks; a refused intent is the
 /// op's answer and changes nothing.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_refused_removal_keeps_the_part_speaking_and_its_files() {
     let scratch = Scratch::trusted("voice-remove-refused");
@@ -1729,6 +1733,7 @@ async fn a_refused_removal_keeps_the_part_speaking_and_its_files() {
 
 /// Row 6: a committed removal is the op's answer and stops the part speaking, then its folder is
 /// deleted and the removal written as finished.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_removal_answers_with_its_intent_then_deletes_and_finishes() {
     let scratch = Scratch::trusted("voice-remove");
@@ -1770,6 +1775,7 @@ async fn a_removal_answers_with_its_intent_then_deletes_and_finishes() {
 }
 
 /// Row 19: Quit lets a queued intent land and stops the removal there, so start-up finishes it.
+#[cfg(windows)]
 #[tokio::test]
 async fn quit_lands_a_held_intent_and_leaves_the_delete_to_start_up() {
     let scratch = Scratch::trusted("voice-remove-quit");
@@ -1799,6 +1805,7 @@ async fn quit_lands_a_held_intent_and_leaves_the_delete_to_start_up() {
 }
 
 /// Row 19: an intent held past Quit's deadline still lands once released, and the file says so.
+#[cfg(windows)]
 #[tokio::test]
 async fn an_intent_held_past_quit_still_lands_on_disk() {
     let scratch = Scratch::trusted("voice-remove-late");
@@ -1840,6 +1847,7 @@ async fn an_intent_held_past_quit_still_lands_on_disk() {
 /// a talk-back write is held, the removal queues behind it, and the load then finishes. `intent`
 /// is what the removal's intent write does once it's staged, `None` to write it as usual. Returns the brain, the held write's gate and the
 /// part's folder.
+#[cfg(windows)]
 async fn activate_behind_a_removal(
     scratch: &Scratch,
     root: &Path,
@@ -1887,6 +1895,7 @@ async fn activate_behind_a_removal(
 }
 
 /// Runs the brain with no shell until `done` holds for what's on disk.
+#[cfg(windows)]
 async fn idle_until(brain: &mut Brain, scratch: &Scratch, done: impl Fn(&toml::Value) -> bool) {
     let mut saved = None;
     let waited = tokio::time::timeout(super::PATIENCE, async {
@@ -2069,6 +2078,7 @@ const TICK: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// An Activate queued behind a removal is never written once the removal commits, so the part
 /// doesn't come back in `installed` when the removal finishes.
+#[cfg(windows)]
 #[tokio::test]
 async fn an_activate_queued_behind_a_committed_removal_isnt_written() {
     let scratch = Scratch::trusted("voice-remove-activate");
@@ -2097,6 +2107,7 @@ async fn an_activate_queued_behind_a_committed_removal_isnt_written() {
 }
 
 /// Behind a refused removal, the same Activate is written and the part is ready.
+#[cfg(windows)]
 #[tokio::test]
 async fn an_activate_queued_behind_a_refused_removal_still_lands() {
     let scratch = Scratch::trusted("voice-remove-activate-refused");
@@ -2135,6 +2146,7 @@ async fn an_activate_queued_behind_a_refused_removal_still_lands() {
     brain.close().await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_cancelled_native_load_keeps_its_files_until_its_owner_finishes() {
     let scratch = Scratch::trusted("voice-cancel-load-remove");
@@ -2183,12 +2195,14 @@ async fn a_cancelled_native_load_keeps_its_files_until_its_owner_finishes() {
     assert_eq!(loads.load(Ordering::SeqCst), 1);
 }
 
+#[cfg(windows)]
 #[derive(Debug)]
 struct RetiringFetch {
     cancelled: Notify,
     finish: Notify,
 }
 
+#[cfg(windows)]
 impl Fetch for RetiringFetch {
     fn fetch<'a>(
         &'a self,
@@ -2211,6 +2225,7 @@ impl Fetch for RetiringFetch {
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_cancelled_fetch_keeps_its_files_until_its_task_finishes() {
     let scratch = Scratch::trusted("voice-cancel-fetch-remove");
