@@ -162,6 +162,8 @@ pub enum Input {
         /// Success only when the chat exists, is live and has no per-task choice.
         result: Result<(), ()>,
     },
+    /// A pictured typed attempt. Only the paired runtime can establish capture authority.
+    PicturedTurn(typed_screen::PicturedTurn),
     /// The user clicked a labelled 3D part: a turn about it, in its drawing's thread.
     Ask {
         /// The ask's connection-local number, shared with typed turns.
@@ -1012,7 +1014,8 @@ impl Coordinator {
             Input::Turn { turn, thread, text } => {
                 self.typed(turn, thread, Some(text), &mut effects);
             }
-            Input::RefuseTurn { turn, thread } => {
+            Input::RefuseTurn { turn, thread }
+            | Input::PicturedTurn(typed_screen::PicturedTurn { turn, thread, .. }) => {
                 self.typed(turn, thread, None, &mut effects);
             }
             Input::Ask {

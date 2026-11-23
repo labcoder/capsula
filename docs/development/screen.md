@@ -81,19 +81,30 @@ it remains unimplemented and unverified.
 
 ## Local shell exclusion
 
-The paired wire shapes for a one-shot screenshot do not enable capture. A pictured request
-gets no offer; both the old Include flag and a typed screenshot submit are refused in turn order.
-The exclusion owner checks only the exact current lease and continuous surface receipts.
-An adapter without continuous evidence returns a negative receipt.
-Shell-core binds one opt-in to the displayed recipient, draft revision and selection. It requires
-an exact continuous exclusion receipt before sending proof. Presence does not expose the opt-in
-or consume the replies, and the brain continues to refuse pictured submissions. The one-shot plain
-retry keeps the words on a failed enqueue and never rearms capture.
+Typed submissions must not convert a requested picture into plain text. The legacy
+`ScreenChoice::Include` cannot prove which draft, display or recipient was authorized,
+so the brain refuses it in the normal turn queue without starting capture or a run.
 
-The brain binds dormant offers to the displayed recipient revision, the paired connection and
-the current global model's account. It can verify that an existing chat inherits that model.
-Even a valid opt-in is still refused in turn order on submit; no display is stored or worker
-request possible until the exact display check and capture caller land together.
+The one-shot typed protocol is dormant until the native exclusion and display adapter
+can establish continuous exclusion. The brain keeps at most one offer and one capturing
+turn on a paired connection. It pins the draft, selection, chat, display and committed
+global choice. The brain sends the displayed model and a paired revision that changes with the
+verified account generation or model. The shell asks with the revision it actually displayed;
+an old revision cannot authorize the new recipient. The brain spends the offer before attempting
+capture, even on refusal. An exact cancel can overtake data. A lease lapse fences that generation
+and earlier ones on the pair, so a late submit spends the offer without starting the worker.
+A refusal stays in turn order; credit and other control frames do not wait for capture.
+
+Holds and typed requests share a checked capture ID sequence. A typed request selects
+the exact display and waits for the shell to confirm continuous exclusion for the
+matching lease and held frame before sealing. Dropping the pending request releases
+only its frame; it cannot retire another hold or a newer capture. A hold that can't
+confirm release relies on its frame's expiry while a typed capture might still own the worker.
+Definite refusal, completed seal or exact revocation releases that capture's protection
+immediately. Ambiguous work stays protected only within the worker deadline.
+
+A successfully sealed frame is dropped and the submit is refused before creating a run.
+No typed picture reaches a provider until first-write admission and settlement exist.
 
 Presence owns the exclusion transaction in `presence/exclusion.rs`; the lease and
 its cleanup rules are in `crates/shell-core/src/presence/exclusion/machine.rs`, with no GPUI.

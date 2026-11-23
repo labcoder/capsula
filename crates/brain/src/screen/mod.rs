@@ -31,7 +31,7 @@ pub use crate::supervise::{Generation, WorkerLost};
 pub use actor::serve;
 pub(crate) use capture::{Acquired, Capturer, Failure, Target};
 pub use client::HoldClient;
-pub(crate) use client::{Closed, MAX_TTL};
+pub(crate) use client::{Closed, MAX_TTL, TypedHeld};
 #[cfg(test)]
 pub(crate) use client::{Holds, hold_frame, release_next};
 pub(crate) use context::ScreenContext;

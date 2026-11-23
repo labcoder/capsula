@@ -4,13 +4,13 @@ use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, ReleasePointer, Ty
 use kumochi_protocol::message::{
     AudioSession, ConnectionKind, Effort, EffortSet, LeaseGeneration, ModelChoice, ModelInfo,
     ModelName, ModelSlug, Narration, OutputGeneration, RunOrigin, ScreenChoice, SettingsOp,
-    TypedScreenDraft, TypedScreenOffer, TypedScreenRecipient, TypedScreenRevision,
-    TypedScreenSubmit,
+    TypedScreenDraft, TypedScreenOffer, TypedScreenProof, TypedScreenRecipient,
+    TypedScreenRevision, TypedScreenSubmit,
 };
 
 use super::*;
 use crate::runtime::hold::tests::screen_hold::seeing;
-use crate::screen::Holds;
+use crate::screen::{Holds, ScreenContext};
 use crate::supervise::{Kind, fixture::Rig};
 
 type Request = <Holds as Kind>::Request;
@@ -233,22 +233,117 @@ async fn an_offer_refuses_a_previously_displayed_choice_or_account_revision() {
 }
 
 #[tokio::test]
-async fn a_current_offer_cannot_start_capture_before_the_worker_cut() {
-    let scratch = Scratch::new("offer-only-no-capture");
+async fn a_lapse_before_data_spends_the_offer_without_touching_the_next_lease() {
+    let scratch = Scratch::new("lapse-first-typed-screen");
     let (mut brain, mut rig) = desk(&scratch);
     brain.typed_screen_clock = Some(|_| Some(Duration::ZERO));
     paired(&mut brain, async |mut shell| {
         let revision = recipient(&mut shell).await.revision;
         offer(&mut shell, 1, revision, Some(OFFER)).await;
+        shell
+            .send(&ControlToBrain::ExclusionLapsed { lease: LEASE })
+            .await;
+        offer(&mut shell, 19, revision, None).await;
         submit(&mut shell, 1, screen(OFFER, LEASE)).await;
         assert_eq!(
             shell.control().await,
             Some(ControlToShell::TurnRefused {
                 turn: 1,
-                thread: None,
+                thread: None
             })
         );
         rig.expect_idle(Duration::from_millis(50)).await;
+        let next = TypedScreenOffer(NonZeroU64::new(2).unwrap());
+        let fresh = LeaseGeneration(4);
+        offer(&mut shell, 2, revision, Some(next)).await;
+        submit(&mut shell, 2, screen(next, fresh)).await;
+        let (id, request) = rig.next().await;
+        crate::screen::hold_frame(&rig, id, request).await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::TypedScreenHeld(TypedScreenProof {
+                turn: 2,
+                offer: next,
+                lease: fresh,
+                capture: NonZeroU64::MIN
+            }))
+        );
+    })
+    .await;
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn typed_screen_cancel_overtakes_data_without_starting_capture_or_retargeting() {
+    let scratch = Scratch::new("cancel-first-typed-screen");
+    let (mut brain, mut rig) = desk(&scratch);
+    brain.typed_screen_clock = Some(|stamp| (stamp < 10_000).then(|| Duration::from_millis(stamp)));
+    paired(&mut brain, async |mut shell| {
+        let revision = recipient(&mut shell).await.revision;
+        offer(&mut shell, 1, revision, Some(OFFER)).await;
+        shell
+            .send(&ControlToBrain::CancelTypedScreen {
+                turn: 1,
+                offer: OFFER,
+            })
+            .await;
+        offer(&mut shell, 19, revision, None).await;
+        submit(&mut shell, 1, screen(OFFER, LEASE)).await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::TurnRefused {
+                turn: 1,
+                thread: None
+            })
+        );
+        let next = TypedScreenOffer(NonZeroU64::new(2).unwrap());
+        offer(&mut shell, 2, revision, Some(next)).await;
+        shell
+            .send(&ControlToBrain::CancelTypedScreen {
+                turn: 1,
+                offer: OFFER,
+            })
+            .await;
+        submit(&mut shell, 2, screen(next, LEASE)).await;
+        let (id, request) = rig.next().await;
+        crate::screen::hold_frame(&rig, id, request).await;
+        let Some(ControlToShell::TypedScreenHeld(proof)) = shell.control().await else {
+            panic!("no held frame for the fresh offer");
+        };
+        assert_eq!(
+            proof,
+            TypedScreenProof {
+                turn: 2,
+                offer: next,
+                lease: LEASE,
+                capture: NonZeroU64::MIN
+            }
+        );
+        shell
+            .send(&ControlToBrain::ConfirmTypedScreen(TypedScreenProof {
+                capture: NonZeroU64::new(2).unwrap(),
+                ..proof
+            }))
+            .await;
+        offer(&mut shell, 19, revision, None).await;
+        rig.expect_idle(Duration::from_millis(50)).await;
+        shell.send(&ControlToBrain::ConfirmTypedScreen(proof)).await;
+        let (id, request) = rig.next().await;
+        let Request::Seal(key) = request else {
+            panic!("the proven capture did not seal")
+        };
+        rig.reply(
+            id,
+            &Reply::Sealed(key, ScreenContext::fixture(b"image sentinel")),
+        )
+        .await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::TurnRefused {
+                turn: 2,
+                thread: None,
+            })
+        );
     })
     .await;
     brain.close().await;

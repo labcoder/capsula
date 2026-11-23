@@ -33,7 +33,7 @@ use kumochi_protocol::message::DataToBrain::{Hello, QueuedHello, TextMetrics};
 use kumochi_protocol::message::{
     AudioSession, ConnectionKind, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain,
     DataToShell, Deleted, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId,
-    SegmentStart, SpeechPcm, ThreadId, Transcript,
+    ScreenChoice, SegmentStart, SpeechPcm, ThreadId, Transcript,
 };
 use kumochi_protocol::tap::{Direction, Tapped as _};
 use kumochi_scene::display::TextMetricsV1;
@@ -918,7 +918,7 @@ impl Brain {
             let first_pcm_due = first_pcm.is_some_and(|due| due.at <= Instant::now());
             let send_due = self.next_send_deadline();
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
-            let take_turns = self.admits_turn(&link);
+            let take_turns = self.admits_turn(&link) && !link.typed_screen.capturing();
             let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
             let input = tokio::select! {
                 biased;
@@ -990,6 +990,12 @@ impl Brain {
                     }
                     input
                 },
+                progress = link.typed_screen.next() => {
+                    if let Err(ended) = self.typed_screen_progress(progress, &mut link) {
+                        return ended;
+                    }
+                    continue;
+                }
                 event = hold::next(&mut self.holds) => {
                     if !turns.is_empty() && self.hold_end(kumochi_protocol::message::HoldStatus::Cancelled, &mut link).is_err() {
                         return Ended::Lost;
@@ -1060,17 +1066,32 @@ impl Brain {
                     }
                 }
             };
-            if let Input::TypedTargetRead {
-                epoch,
-                offer,
-                result,
-            } = input
-            {
-                if let Err(ended) = self.typed_screen_read(epoch, offer, result, &mut link) {
-                    return ended;
+            let input = match input {
+                Input::PicturedTurn(crate::coordinator::typed_screen::PicturedTurn {
+                    turn,
+                    thread,
+                    text,
+                    screen,
+                }) => {
+                    if let Err(ended) =
+                        self.typed_screen_submit(turn, thread, text, screen, &mut link)
+                    {
+                        return ended;
+                    }
+                    continue;
                 }
-                continue;
-            }
+                Input::TypedTargetRead {
+                    epoch,
+                    offer,
+                    result,
+                } => {
+                    if let Err(ended) = self.typed_screen_read(epoch, offer, result, &mut link) {
+                        return ended;
+                    }
+                    continue;
+                }
+                input => input,
+            };
             if let Input::HoldPrepared { key, result } = input {
                 if self.hold_prepared(key, result, &mut link).is_err() {
                     return Ended::Lost;
@@ -1733,11 +1754,16 @@ async fn read_data(
                 text,
                 screen,
             })) => {
-                use kumochi_protocol::message::ScreenChoice;
                 let input = match screen {
                     ScreenChoice::None => Input::Turn { turn, thread, text },
-                    ScreenChoice::Include { .. } | ScreenChoice::Typed(_) => {
-                        Input::RefuseTurn { turn, thread }
+                    ScreenChoice::Include { .. } => Input::RefuseTurn { turn, thread },
+                    ScreenChoice::Typed(screen) => {
+                        Input::PicturedTurn(crate::coordinator::typed_screen::PicturedTurn {
+                            turn,
+                            thread,
+                            text,
+                            screen,
+                        })
                     }
                 };
                 if let Some(ended) = take(turns, input) {

@@ -1,25 +1,35 @@
-//! A paired connection's one typed screen offer, before capture admission.
+//! A paired connection's one typed offer and its bounded capture, before a run exists.
 
+use std::future::{Future, pending};
 use std::num::NonZeroU64;
+use std::pin::Pin;
 use std::time::Duration;
 
+use kumochi_protocol::geometry::TypedDisplay;
 use kumochi_protocol::message::{
-    ControlToBrain, ControlToShell, SettingsOp, ThreadId, ThreadOp, TypedScreenDraft,
-    TypedScreenOffer, TypedScreenRecipient, TypedScreenRevision,
+    Content, ControlToBrain, ControlToShell, SettingsOp, ThreadId, ThreadOp, TypedScreenDraft,
+    TypedScreenOffer, TypedScreenProof, TypedScreenRecipient, TypedScreenRevision,
+    TypedScreenSubmit,
 };
+use tokio::time::Instant;
 
 use super::{Brain, Ended, Full, Link, Registration};
 use crate::context::{Origin, PictureRecipient, RunSnapshot};
 use crate::coordinator::StoreOp;
 use crate::coordinator::typed_screen::{ReadTarget, TypedKey};
 use crate::recall::control::{CancelOnDrop, Control, READ_TIME};
+use crate::screen::{Closed, MAX_TTL, ScreenContext, TypedHeld};
 
+const LEASE: Duration = Duration::from_secs(3);
+const LATEST_START: Duration = LEASE.saturating_sub(MAX_TTL);
 pub(super) type Clock = fn(u64) -> Option<Duration>;
+type Work<T> = Pin<Box<dyn Future<Output = Result<T, Closed>> + Send>>;
 
 struct Offer {
     key: TypedKey,
     thread: Option<ThreadId>,
     draft: TypedScreenDraft,
+    display: TypedDisplay,
     recipient_revision: TypedScreenRevision,
     snapshot: RunSnapshot,
     recipient: PictureRecipient,
@@ -38,18 +48,66 @@ impl Offer {
     }
 }
 
+enum Capture {
+    Acquiring(Work<TypedHeld>),
+    Confirming(TypedScreenProof, TypedHeld),
+    Sealing(Work<ScreenContext>),
+}
+
+struct Pending {
+    offer: Offer,
+    text: Content,
+    request: TypedScreenSubmit,
+    until: Instant,
+    capture: Capture,
+}
+
 #[derive(Default)]
 pub(super) struct State {
     serial: u64,
     recipient_serial: u64,
     recipient: Option<(TypedScreenRecipient, PictureRecipient)>,
+    lapsed_lease: u32,
     offer: Option<Offer>,
+    pending: Option<Box<Pending>>,
+}
+
+pub(super) enum Progress {
+    Held(TypedHeld),
+    Sealed(ScreenContext),
+    Refused,
 }
 
 impl State {
     fn recipient_revision(&self) -> Option<TypedScreenRevision> {
         self.recipient.as_ref().map(|(view, _)| view.revision)
     }
+
+    pub(super) fn capturing(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub(super) async fn next(&mut self) -> Progress {
+        let Some(active) = &mut self.pending else {
+            return pending().await;
+        };
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(active.until) => Progress::Refused,
+            result = async {
+                match &mut active.capture {
+                    Capture::Acquiring(work) => work.await.map(Progress::Held),
+                    Capture::Confirming(..) => pending().await,
+                    Capture::Sealing(work) => work.await.map(Progress::Sealed),
+                }
+            } => result.unwrap_or(Progress::Refused)
+        }
+    }
+}
+
+fn refuse(link: &mut Link<'_, '_>, turn: u32, thread: Option<ThreadId>) -> Result<(), Ended> {
+    link.control(&ControlToShell::TurnRefused { turn, thread })
+        .map_err(|Full| Ended::Lost)
 }
 
 impl Brain {
@@ -78,6 +136,14 @@ impl Brain {
                 || self.coordinator.next_typed_turn() != Some(offer.key.turn)
         }) {
             Self::drop_typed_offer(link)?;
+        }
+        if link
+            .typed_screen
+            .pending
+            .as_ref()
+            .is_some_and(|active| !self.typed_screen_current(&active.offer, revision))
+        {
+            Self::refuse_typed_pending(link)?;
         }
         Ok(())
     }
@@ -144,6 +210,15 @@ impl Brain {
         Ok(())
     }
 
+    fn refuse_typed_pending(link: &mut Link<'_, '_>) -> Result<(), Ended> {
+        if let Some(active) = link.typed_screen.pending.take() {
+            let (turn, thread) = (active.offer.key.turn, active.offer.thread);
+            drop(active);
+            refuse(link, turn, thread)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn typed_screen_settings_changed(
         link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
@@ -152,6 +227,7 @@ impl Brain {
                 link.control(&ControlToShell::TypedScreenRecipient(None))?;
             }
             Self::drop_typed_offer(link).map_err(|_| Full)?;
+            Self::refuse_typed_pending(link).map_err(|_| Full)?;
         }
         Ok(())
     }
@@ -167,9 +243,9 @@ impl Brain {
                 thread,
                 draft,
                 recipient,
-                ..
+                ref display,
             } => {
-                self.typed_screen_offer(turn, thread, draft, recipient, link)?;
+                self.typed_screen_offer(turn, thread, draft, recipient, **display, link)?;
             }
             ControlToBrain::CancelTypedScreen { turn, offer } => {
                 let key = TypedKey {
@@ -185,6 +261,37 @@ impl Brain {
                 {
                     Self::drop_typed_offer(link)?;
                 }
+                if link
+                    .typed_screen
+                    .pending
+                    .as_ref()
+                    .is_some_and(|active| active.offer.key == key)
+                {
+                    Self::refuse_typed_pending(link)?;
+                }
+            }
+            ControlToBrain::ConfirmTypedScreen(proof) => {
+                if let Some(active) = &mut link.typed_screen.pending
+                    && Instant::now() < active.until
+                    && matches!(&active.capture, Capture::Confirming(held, _) if *held == proof)
+                    && let Capture::Confirming(_, held) = std::mem::replace(
+                        &mut active.capture,
+                        Capture::Sealing(Box::pin(pending())),
+                    )
+                {
+                    active.capture = Capture::Sealing(Box::pin(held.seal()));
+                }
+            }
+            ControlToBrain::ExclusionLapsed { lease } => {
+                if self.typed_screen_clock.is_some() {
+                    link.typed_screen.lapsed_lease = link.typed_screen.lapsed_lease.max(lease.0);
+                    if link.typed_screen.pending.as_ref().is_some_and(|active| {
+                        active.request.lease.0 <= link.typed_screen.lapsed_lease
+                    }) {
+                        Self::refuse_typed_pending(link)?;
+                    }
+                }
+                return Ok(false);
             }
             ControlToBrain::Settings(SettingsOp::SetShowScreen(false)) => {
                 Self::typed_screen_settings_changed(Some(link)).map_err(|Full| Ended::Lost)?;
@@ -200,6 +307,14 @@ impl Brain {
                 {
                     Self::drop_typed_offer(link)?;
                 }
+                if link
+                    .typed_screen
+                    .pending
+                    .as_ref()
+                    .is_some_and(|active| active.offer.thread == Some(thread))
+                {
+                    Self::refuse_typed_pending(link)?;
+                }
                 return Ok(false);
             }
             _ => return Ok(false),
@@ -213,6 +328,7 @@ impl Brain {
         thread: Option<ThreadId>,
         draft: TypedScreenDraft,
         recipient_revision: TypedScreenRevision,
+        display: TypedDisplay,
         link: &mut Link<'_, '_>,
     ) -> Result<(), Ended> {
         let refused = ControlToShell::TypedScreenOffered {
@@ -227,6 +343,7 @@ impl Brain {
             || !link
                 .registration
                 .is_some_and(|registration| Registration::admits(Some(registration)))
+            || link.typed_screen.capturing()
             || self.coordinator.next_typed_turn() != Some(turn)
             || link.typed_screen.recipient_revision() != Some(recipient_revision)
         {
@@ -258,6 +375,7 @@ impl Brain {
             key,
             thread,
             draft,
+            display,
             recipient_revision,
             snapshot,
             recipient,
@@ -308,5 +426,109 @@ impl Brain {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn typed_screen_submit(
+        &mut self,
+        turn: u32,
+        thread: Option<ThreadId>,
+        text: Content,
+        request: TypedScreenSubmit,
+        link: &mut Link<'_, '_>,
+    ) -> Result<(), Ended> {
+        let expected = self.coordinator.next_typed_turn();
+        let mut effects = Vec::new();
+        let admitted = self.coordinator.typed_attempt(thread, &mut effects);
+        self.apply(effects, Some(link))?;
+        let offer = link
+            .typed_screen
+            .offer
+            .take_if(|offer| offer.key.offer == request.offer);
+        let Some(offer) = offer.filter(|offer| {
+            admitted
+                && expected == Some(turn)
+                && offer.key.turn == turn
+                && offer.thread == thread
+                && offer.draft == request.draft
+                && offer.display == request.display
+                && offer.reading.is_none()
+                && !text.trim().is_empty()
+                && self.typed_screen_current(offer, link.typed_screen.recipient_revision())
+        }) else {
+            return refuse(link, turn, thread);
+        };
+        let Some(age) = self.typed_screen_clock else {
+            return refuse(link, turn, thread);
+        };
+        let now = Instant::now();
+        if request.lease.0 <= link.typed_screen.lapsed_lease
+            || !request.display.contains(request.point.0)
+            || request.display.dpi == 0
+            || request.submitted_qpc == 0
+            || request.excluded_qpc < request.submitted_qpc
+            || age(request.submitted_qpc).is_none_or(|age| age > LATEST_START)
+            || age(request.excluded_qpc).is_none()
+        {
+            return refuse(link, turn, thread);
+        }
+        let Some(client) = self.holds.screen.clone() else {
+            return refuse(link, turn, thread);
+        };
+        let until = now + MAX_TTL;
+        let capture = Capture::Acquiring(Box::pin(async move {
+            client
+                .typed_display(
+                    request.point.0,
+                    request.display,
+                    request.excluded_qpc,
+                    until,
+                )
+                .await
+        }));
+        link.typed_screen.pending = Some(Box::new(Pending {
+            offer,
+            text,
+            request,
+            until,
+            capture,
+        }));
+        Ok(())
+    }
+
+    pub(super) fn typed_screen_progress(
+        &self,
+        progress: Progress,
+        link: &mut Link<'_, '_>,
+    ) -> Result<(), Ended> {
+        let Some(mut active) = link.typed_screen.pending.take() else {
+            return Ok(());
+        };
+        let Offer { key, thread, .. } = &active.offer;
+        if Instant::now() < active.until
+            && self.typed_screen_current(&active.offer, link.typed_screen.recipient_revision())
+        {
+            match progress {
+                Progress::Held(held) => {
+                    if let Some(capture) = NonZeroU64::new(held.capture_id().0) {
+                        let proof = TypedScreenProof {
+                            turn: key.turn,
+                            offer: key.offer,
+                            lease: active.request.lease,
+                            capture,
+                        };
+                        active.capture = Capture::Confirming(proof, held);
+                        link.control(&ControlToShell::TypedScreenHeld(proof))
+                            .map_err(|Full| Ended::Lost)?;
+                        link.typed_screen.pending = Some(active);
+                        return Ok(());
+                    }
+                }
+                Progress::Sealed(frame) => {
+                    drop((frame, active.text));
+                }
+                Progress::Refused => {}
+            }
+        }
+        refuse(link, key.turn, *thread)
     }
 }
