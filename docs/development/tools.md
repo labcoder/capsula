@@ -395,6 +395,8 @@ from the store.
 The run holds its ledger in memory, and it's dropped with the run. The run's 16-call budget bounds
 it, because the loop and `Coordinator::mcp_call` charge the budget before dispatch: an MCP key
 the run hasn't seen costs a call, a retry doesn't, and the seventeenth ends the run as `Budget`.
+The drawing coordinator also caps its own draw owners at sixteen. It refuses an excess call
+before binding its argument identity, so that refusal has no durable call row.
 Each MCP key belongs to its first tool. Reusing it with a different offered tool is
 `Reused`, before any cached reply or join, and does not spend another call.
 A call that couldn't run any more (a finishing run, a deleted or voided source, a cancelled build)

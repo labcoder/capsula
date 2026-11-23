@@ -329,6 +329,68 @@ async fn replaced_build_events_cannot_change_or_finish_the_current_round() {
 }
 
 #[test]
+fn the_draw_owner_cap_refuses_a_seventeenth_call_without_writing_a_result() {
+    use crate::dispatch::{CallInput, DrawAction};
+    use crate::engines::ToolName;
+
+    let scratch = Scratch::new("draw-owner-cap");
+    let mut store = store(&scratch);
+    let mut core = offered(vec![T]);
+    let mut effects = Vec::new();
+    for index in 1..16 {
+        let caller = Caller::Model {
+            run: R,
+            call: id(&format!("stream-{index}")),
+        };
+        assert_eq!(
+            core.tool_input(
+                caller,
+                ToolName::Draw,
+                CallInput::Draw(DrawAction::Start),
+                &mut effects
+            ),
+            Dispatch::Committing
+        );
+    }
+    assert_eq!(effects, []);
+    let valid = args(None);
+    let (dispatch, drawing) = call(&mut core, "sixteenth", &valid);
+    assert_eq!(dispatch, Dispatch::Committing);
+    let drawn = settle(&mut core, &mut store, drawing);
+    assert_eq!(
+        answer(&mut core, &mut store, &drawn),
+        ToolOutput::Text("drawn: [s1, s2]".into())
+    );
+
+    let (dispatch, drawing) = call(&mut core, "over-cap", &valid);
+    assert_eq!(dispatch, Dispatch::Committing);
+    assert_eq!(drawing, []);
+    let refused = Dispatch::Answered(ToolOutput::Error(ToolError::TooLarge));
+    assert_eq!(
+        call(&mut core, "over-cap", b""),
+        (refused.clone(), Vec::new())
+    );
+    let caller = Caller::Model {
+        run: R,
+        call: id("over-cap-stream"),
+    };
+    assert_eq!(
+        core.tool_input(
+            caller,
+            ToolName::Draw,
+            CallInput::Draw(DrawAction::Start),
+            &mut effects
+        ),
+        refused
+    );
+    assert_eq!(effects, []);
+    assert_eq!(
+        call(&mut core, "over-cap-stream", &valid),
+        (refused, Vec::new())
+    );
+}
+
+#[test]
 fn unavailable_drawing_returns_a_fixed_durable_refusal_without_failing_the_run() {
     let scratch = Scratch::new("draw-unavailable");
     let mut store = store(&scratch);
