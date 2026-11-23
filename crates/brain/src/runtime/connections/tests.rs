@@ -31,6 +31,23 @@ async fn production_composition_serves_the_key_route_and_refuses_unadmitted_send
         )) if refusal == unavailable
     ));
     assert_owned_key_refusal(&mut brain, unavailable).await;
+    #[cfg(not(windows))]
+    {
+        brain.account.connections.stage_session(Some(1));
+        assert_eq!(
+            brain.account.stage_op(
+                1,
+                ConnectionOp::BeginAnthropicKeyStage {
+                    request: 1,
+                    len: 16
+                }
+            ),
+            [ControlToShell::AnthropicKeyStage {
+                request: 1,
+                result: Err(KeyStageFailure::Unavailable),
+            }]
+        );
+    }
     brain.close().await;
 }
 
