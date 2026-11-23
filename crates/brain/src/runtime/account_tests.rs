@@ -1748,7 +1748,7 @@ async fn revocation_only_startup_keeps_the_debt_and_replays_unsupported() {
     ));
     assert_unsupported_reconnects(&mut brain).await;
     brain.close().await;
-    assert!(seed().load_revocations().unwrap().unwrap().expose() == &debt);
+    assert_eq!(seed().load_revocations().unwrap(), Some(Secret::new(debt)));
 }
 
 #[tokio::test]

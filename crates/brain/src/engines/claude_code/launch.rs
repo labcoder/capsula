@@ -34,6 +34,7 @@ use crate::engines::{
 };
 
 /// How long a warm launch waits for its question [guess, the design's 30 s].
+#[cfg(windows)]
 pub(crate) const WARM: Duration = Duration::from_secs(30);
 /// How long the audit before input may take once the control lines are queued (C3).
 pub(crate) const AUDIT: Duration = Duration::from_secs(3);
@@ -340,6 +341,7 @@ impl Attempt {
 
     /// The audit before input's hand-over, kept opaque.
     #[cfg(test)]
+    #[cfg(windows)]
     pub(crate) async fn warmed(&mut self) -> Result<impl Sized, Outcome> {
         self.ready().await
     }

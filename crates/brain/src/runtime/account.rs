@@ -142,6 +142,10 @@ impl Catalog {
         changed
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "one predicate drives both the usability edge and the retained flag"
+    )]
     fn set_usable(&mut self, usable: bool) {
         if self.usable && !usable {
             self.epoch += 1;
@@ -533,6 +537,10 @@ impl Accounts {
         std::mem::take(&mut self.catalog.unsent).then(|| self.models().unwrap_or_default().to_vec())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "transport refusal must fence every effect in the batch before publishing the resulting view"
+    )]
     fn apply(&mut self, effects: Vec<Effect>) -> Vec<ControlToShell> {
         let mut frames = Vec::new();
         let unsupported = effects.iter().any(|effect| {

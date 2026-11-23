@@ -23,8 +23,10 @@ use crate::coordinator::{
 };
 use crate::engines::claude_code::install::FindError;
 use crate::engines::claude_code::lane::{self, Done, Failure, Lane, Outcome, Recheck, Work};
+#[cfg(windows)]
+use crate::engines::claude_code::launch::WARM;
 use crate::engines::claude_code::launch::{
-    self, Attempt, ClaudeQuestion, Clock, LaunchSnapshot, Note, Offer, Refresh, Report, WARM,
+    self, Attempt, ClaudeQuestion, Clock, LaunchSnapshot, Note, Offer, Refresh, Report,
 };
 use crate::engines::claude_code::policy::{self, Reviewed, ReviewedModel};
 use crate::engines::claude_code::supervisor::{
@@ -38,8 +40,11 @@ use crate::recall::control::Control as Lifetime;
 pub(crate) enum SignInStore {
     /// Not decided: Connect does nothing and a signed-out install shows as unsupported.
     #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the off position, kept under test")
+        not(all(test, windows)),
+        expect(
+            dead_code,
+            reason = "the native lane tests cover the undecided sign-in policy"
+        )
     )]
     Undecided,
     /// Claude Code's own file in Kumochi's owner-only folder (option a). Only it lets Connect,
@@ -208,6 +213,7 @@ impl Claude {
 
     /// `[claude_code] enabled = false`: nothing is found or started, and `lane` only finishes a
     /// deletion an earlier Disconnect marked.
+    #[cfg(windows)]
     pub(crate) fn turned_off(lane: Option<Lane>) -> Self {
         let mut claude = Self::new(lane, SIGN_IN, ClaudeCodeView::TurnedOff);
         claude.finds = false;
@@ -216,6 +222,7 @@ impl Claude {
     }
 
     /// Discovery through `lane`, starting now.
+    #[cfg(windows)]
     pub(crate) fn start(lane: Lane, sign_in: SignInStore) -> Self {
         let mut claude = Self::new(Some(lane), sign_in, ClaudeCodeView::NotFound);
         claude.find();
@@ -778,6 +785,7 @@ impl Claude {
         not(test),
         expect(dead_code, reason = "C5b-2's engine selection is the first caller")
     )]
+    #[cfg(windows)]
     pub(crate) fn warm(&mut self, snapshot: LaunchSnapshot) -> Result<LaunchId, LaunchRefused> {
         if let Some(warm) = &self.warm
             && *warm.snapshot() == snapshot

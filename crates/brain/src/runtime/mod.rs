@@ -377,6 +377,7 @@ impl Brain {
     /// Gives Claude Code's connection its lane, or its off switch.
     /// Reported at once: lib.rs attaches before any shell connects, so no turn meets the
     /// coordinator's start placeholder (OSC-753).
+    #[cfg(any(test, windows))]
     pub(crate) fn attach_claude(&mut self, claude: claude::Claude) {
         self.claude = claude;
         let reported = self.claude_reported(None);

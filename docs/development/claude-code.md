@@ -186,6 +186,8 @@ its own thread; `runtime/claude.rs` asks it for work and turns the results into
 Without a protected-path adapter, holding, creating and removing Claude Code's private paths
 and markers all refuse. A scratch directory does not stand in for native ownership and
 handle checks, and there is no native Claude Code lane on the Linux test host.
+The native lane, launch supervisor and named-pipe listener compile only on Windows. The offline
+tests still exercise the shared connection policy, bounded stdio and in-memory bridge session.
 
 ```mermaid
 sequenceDiagram

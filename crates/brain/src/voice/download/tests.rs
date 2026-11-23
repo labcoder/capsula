@@ -51,12 +51,14 @@ impl Reply {
         Self::raw("HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabcdef")
     }
 
+    #[cfg(windows)]
     fn redirect(location: &str) -> Self {
         Self::raw(&format!(
             "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         ))
     }
 
+    #[cfg(windows)]
     fn stalled() -> Self {
         Self {
             wire: b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabc".to_vec(),
@@ -68,6 +70,13 @@ impl Reply {
 struct Server {
     base: Url,
     root: Vec<u8>,
+    #[cfg_attr(
+        not(windows),
+        expect(
+            dead_code,
+            reason = "the portable TLS fixture keeps the request receiver alive even when the test does not inspect headers"
+        )
+    )]
     requests: async_mpsc::UnboundedReceiver<String>,
     accepted: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,

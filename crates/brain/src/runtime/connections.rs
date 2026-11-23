@@ -152,6 +152,10 @@ impl fmt::Debug for ConnectionEvent {
     }
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "transport refusal, catalog freshness, pending publication and vault loading are independent"
+)]
 pub(super) struct Connections {
     generation: u64,
     key: Option<Secret<AnthropicKey>>,

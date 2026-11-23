@@ -22,7 +22,7 @@ mod relaunch;
 mod runtime;
 #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
 #[cfg_attr(
-    all(windows, debug_assertions, feature = "test-support"),
+    any(test, all(windows, debug_assertions, feature = "test-support")),
     expect(
         clippy::print_stderr,
         reason = "the shared fixture reports cleanup failures during unwind"
@@ -217,6 +217,10 @@ fn draw_admission(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps the startup and shutdown order of the admitted brain's resources in one place"
+)]
 async fn run_admitted(
     admission: Result<StartMode, BrainError>,
     #[cfg(test)] starting: impl FnOnce(),
@@ -536,7 +540,7 @@ async fn direct_dev_draw_refuses_before_store_or_vault_startup() {
 #[tokio::test]
 async fn native_library_entries_return_unsupported() {
     assert!(matches!(
-        run().await,
+        Box::pin(run()).await,
         Err(BrainError::NativeRuntime(error)) if error.kind() == io::ErrorKind::Unsupported
     ));
     assert!(matches!(
