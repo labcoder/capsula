@@ -35,10 +35,7 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) -> Dispatch {
         let ended = Dispatch::Answered(ToolOutput::Error(ToolError::Ended));
-        if !self.drawing_available() {
-            self.drawn(key, ToolOutput::Error(ToolError::NotHere), effects);
-            return Dispatch::Committing;
-        }
+        let available = self.drawing_available();
         let current = self.current.as_mut().expect("the resolved run is current");
         let allocating = matches!(
             draw,
@@ -46,9 +43,22 @@ impl Coordinator {
         );
         if allocating
             && current.draw_calls.len()
-                > usize::try_from(self.tuning.calls).expect("the call budget fits usize")
+                >= usize::try_from(self.tuning.calls).expect("the call budget fits usize")
         {
+            if matches!(draw, dispatch::DrawAction::Start) {
+                current
+                    .ledger
+                    .refuse(key, crate::engines::ToolName::Draw, ToolError::TooLarge);
+                return Dispatch::Answered(ToolOutput::Error(ToolError::TooLarge));
+            }
             self.drawn(key, ToolOutput::Error(ToolError::TooLarge), effects);
+            return Dispatch::Committing;
+        }
+        if let dispatch::DrawAction::Complete(Ok(draw)) = &draw {
+            current.ledger.bind_draw(key, draw.hash);
+        }
+        if !available {
+            self.drawn(key, ToolOutput::Error(ToolError::NotHere), effects);
             return Dispatch::Committing;
         }
         let call = if allocating {

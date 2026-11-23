@@ -172,7 +172,7 @@ impl Ledger {
         );
     }
 
-    pub(super) fn bind_draw(&mut self, key: &LedgerKey, hash: [u8; 32]) {
+    pub(crate) fn bind_draw(&mut self, key: &LedgerKey, hash: [u8; 32]) {
         let id = (key.route, key.call.clone());
         if let Some((_, entry)) = self.entries.get_mut(&id)
             && let Entry::Reserved { waiting } = entry
