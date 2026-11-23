@@ -2838,6 +2838,7 @@ async fn a_queued_repair_with_nothing_to_write_leaves_a_pending_hold_pending() {
     brain.close().await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_claude_code_generation_change_closes_only_a_pending_claude_code_picture() {
     use crate::engines::claude_code::lane::Lane;

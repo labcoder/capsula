@@ -4,6 +4,9 @@ use crate::issues::{Answer as IssueAnswer, Live};
 use crate::test_support::Captured;
 use kumochi_protocol::message::{IssueRefused, IssueSession};
 use std::ffi::{OsStr, OsString};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt as _;
+#[cfg(windows)]
 use std::os::windows::ffi::OsStringExt as _;
 
 fn denied(request: u64, action: &Action) -> [ControlToShell; 2] {
@@ -201,6 +204,7 @@ async fn serve_once(brain: &mut Brain, inputs: &[ControlToBrain]) {
     assert_eq!(ended, Ended::Lost);
 }
 
+#[cfg(any(windows, unix))]
 #[tokio::test]
 async fn live_filing_block_attests_the_serving_identity_and_latches_even_a_refused_attempt() {
     let scratch = Scratch::new("live-filing-attestation");
@@ -209,7 +213,10 @@ async fn live_filing_block_attests_the_serving_identity_and_latches_even_a_refus
     let captured = Captured::default();
     let _capture = captured.install();
     let incarnation = brain.issue_session().unwrap().incarnation;
+    #[cfg(windows)]
     let non_unicode = OsString::from_wide(&[0xd800]);
+    #[cfg(unix)]
+    let non_unicode = OsString::from_vec(vec![0xff]);
     assert!(non_unicode.to_str().is_none());
 
     brain.filing.set_live_block_for_test(None);

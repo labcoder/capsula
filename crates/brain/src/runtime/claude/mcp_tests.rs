@@ -20,7 +20,7 @@ use crate::context::{Built, ModelRequest, Origin, ToolSchema};
 use crate::coordinator::{BuildKey, ContextBuilt, Effect, Input, SendKey, StoreOp};
 use crate::dispatch::{Caller, Committed, Route, ToolError};
 use crate::engines::ToolName;
-use crate::engines::claude_code::lane::tests::V;
+use crate::engines::claude_code::lane::TEST_VERSION as V;
 use crate::engines::claude_code::launch::{Bind, Offer};
 use crate::engines::claude_code::supervisor::{self, Launch, Question, Start};
 use crate::runtime::Brain;

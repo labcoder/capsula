@@ -1248,7 +1248,7 @@ fn mcp_json(brain_exe: &Path, id: LaunchId) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod stdin_tests;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod teardown_tests;
 #[cfg(test)]
 pub(crate) mod tests;

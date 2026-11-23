@@ -19,7 +19,7 @@ use crate::platform::ModelFiles;
 
 use super::{CONFIG, Engine, SAMPLE_RATE, TOKENIZER, TtsError, VOICE, WEIGHTS};
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests;
 
 const POOL_WIDTH: usize = 8;
@@ -88,6 +88,8 @@ impl Phonon {
                 crate::platform::Untrusted::Missing | crate::platform::Untrusted::Io => {
                     TtsError::Load
                 }
+                #[cfg(not(windows))]
+                crate::platform::Untrusted::Unsupported => TtsError::Load,
             },
         )?;
         pool()?;

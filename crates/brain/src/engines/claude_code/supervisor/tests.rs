@@ -1,28 +1,42 @@
 //! Question launches on the lane's fake `claude.exe` (`lane::tests::fake`), in a scratch base:
 //! no network, no account and no credential store.
 
+#[cfg(windows)]
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc as std_mpsc};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc as std_mpsc};
+#[cfg(windows)]
+use std::sync::{Mutex, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::constants::ENGINE_DIR;
-use kumochi_protocol::message::{RunId, ThreadId};
+use kumochi_protocol::message::ThreadId;
+#[cfg(windows)]
+use kumochi_protocol::{constants::ENGINE_DIR, message::RunId};
 use tokio::sync::mpsc;
+#[cfg(windows)]
 use tokio::time::timeout;
 
-use super::{
-    CHUNK, Input, Launch, LaunchFailed, LaunchId, MAX_LAUNCH, PIPE_QUEUE, Pipes, Question, Revoked,
-    Start, Teardown, admit, mcp_json,
-};
+use super::{CHUNK, Input, LaunchId, MAX_LAUNCH, PIPE_QUEUE, Question, Revoked, admit, mcp_json};
+#[cfg(windows)]
+use super::{Launch, LaunchFailed, Pipes, Start, Teardown};
+#[cfg(windows)]
 use crate::bridge::listener::Listener;
+#[cfg(windows)]
 use crate::coordinator::{BuildKey, Input as CoordinatorInput, LeaseId, PictureGrant, SendKey};
+use crate::engines::claude_code::lane::LANE_QUEUE;
+#[cfg(windows)]
 use crate::engines::claude_code::lane::tests::{Base, host, locked, soon};
-use crate::engines::claude_code::lane::{Failure, LANE_QUEUE, Lane, Outcome, PIPE_GRACE, Work};
+#[cfg(windows)]
+use crate::engines::claude_code::lane::{Failure, Lane, Outcome, PIPE_GRACE, Work};
+#[cfg(windows)]
 use crate::engines::{self, Asks, Engine, Finish, Round, RunRequest, SendGate, TurnEvent};
+#[cfg(windows)]
 use crate::platform::sherpa::tests::set_junction;
+#[cfg(windows)]
 use crate::platform::{self, FAKE_CLAUDE, Job, Stdio};
 
 /// What a test sets on a launch before it's queued.
@@ -155,10 +169,12 @@ pub(crate) fn question(lifetime: Duration) -> Question {
 }
 
 /// A lane on the fake in `mode` that has found the install.
+#[cfg(windows)]
 pub(crate) async fn found(base: &Base, mode: &str) -> Lane {
     found_with(base, mode, |_| {}).await
 }
 
+#[cfg(windows)]
 async fn found_with(
     base: &Base,
     mode: &str,
@@ -173,6 +189,7 @@ async fn found_with(
     lane
 }
 
+#[cfg(windows)]
 pub(crate) async fn version(lane: &mut Lane) -> Result<Outcome, Failure> {
     assert!(lane.submit(0, Work::Version), "admitted");
     timeout(WAIT, lane.next())
@@ -181,10 +198,12 @@ pub(crate) async fn version(lane: &mut Lane) -> Result<Outcome, Failure> {
         .result
 }
 
+#[cfg(windows)]
 pub(crate) fn queue(lane: &Lane, start: Start) {
     assert!(lane.launch(start), "queued");
 }
 
+#[cfg(windows)]
 pub(crate) async fn pipes(launch: &mut Launch) -> Pipes {
     timeout(WAIT, launch.started())
         .await
@@ -193,6 +212,7 @@ pub(crate) async fn pipes(launch: &mut Launch) -> Pipes {
         .expect("started")
 }
 
+#[cfg(windows)]
 pub(crate) async fn failed(launch: &mut Launch) -> LaunchFailed {
     match timeout(WAIT, launch.started())
         .await
@@ -204,12 +224,14 @@ pub(crate) async fn failed(launch: &mut Launch) -> LaunchFailed {
     }
 }
 
+#[cfg(windows)]
 pub(crate) async fn end(launch: Launch) -> Teardown {
     timeout(Duration::from_secs(20), launch.end())
         .await
         .expect("the teardown ends")
 }
 
+#[cfg(windows)]
 fn hold_test_picture(launch: &Launch) -> (LeaseId, mpsc::UnboundedReceiver<CoordinatorInput>) {
     let id = LeaseId {
         key: SendKey::Build(BuildKey {
@@ -228,11 +250,13 @@ fn hold_test_picture(launch: &Launch) -> (LeaseId, mpsc::UnboundedReceiver<Coord
     (id, settled)
 }
 
+#[cfg(windows)]
 fn engine_dir(base: &Base) -> PathBuf {
     base.owned().join(ENGINE_DIR)
 }
 
 /// Every path under the engine folder with its size, sorted.
+#[cfg(windows)]
 fn tree(base: &Base) -> Vec<(PathBuf, u64)> {
     fn walk(dir: &Path, found: &mut Vec<(PathBuf, u64)>) {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -252,6 +276,7 @@ fn tree(base: &Base) -> Vec<(PathBuf, u64)> {
 }
 
 /// The launch folders under the engine folder.
+#[cfg(windows)]
 pub(crate) fn launch_dirs(base: &Base) -> Vec<String> {
     fs::read_dir(engine_dir(base))
         .map(|entries| {
@@ -263,6 +288,7 @@ pub(crate) fn launch_dirs(base: &Base) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[cfg(windows)]
 pub(crate) fn questions(base: &Base) -> usize {
     base.calls()
         .iter()
@@ -271,6 +297,7 @@ pub(crate) fn questions(base: &Base) -> usize {
 }
 
 /// The lengths the echo fake read, in order.
+#[cfg(windows)]
 pub(crate) fn echoed(base: &Base) -> Vec<usize> {
     fs::read_to_string(base.0.join("echo.log"))
         .map(|log| {
@@ -282,6 +309,7 @@ pub(crate) fn echoed(base: &Base) -> Vec<usize> {
 }
 
 /// Waits until `check` holds.
+#[cfg(windows)]
 pub(crate) async fn until(what: &str, check: impl Fn() -> bool) {
     let deadline = Instant::now() + WAIT;
     while !check() {
@@ -291,6 +319,7 @@ pub(crate) async fn until(what: &str, check: impl Fn() -> bool) {
 }
 
 /// Owner-only folders down to `path` under `base`, as a launch makes them.
+#[cfg(windows)]
 fn owned_dirs(base: &Base, path: &Path) {
     let relative = path.strip_prefix(base.0.path()).expect("under the base");
     let mut dir = base.0.path().to_path_buf();
@@ -300,6 +329,7 @@ fn owned_dirs(base: &Base, path: &Path) {
     }
 }
 
+#[cfg(windows)]
 fn leftover(base: &Base, hex: &str) -> PathBuf {
     let work = engine_dir(base).join(hex).join("work");
     owned_dirs(base, &work);
@@ -308,14 +338,17 @@ fn leftover(base: &Base, hex: &str) -> PathBuf {
     file
 }
 
+#[cfg(windows)]
 fn slow_terminate(job: &Job) -> std::io::Result<()> {
     std::thread::sleep(Duration::from_millis(1500));
     job.terminate()
 }
 
 /// Set once a test's lane has found the install: from then on its terminations fail.
+#[cfg(windows)]
 static TERMINATION_FAILS: AtomicBool = AtomicBool::new(false);
 
+#[cfg(windows)]
 fn failed_terminate(job: &Job) -> std::io::Result<()> {
     if TERMINATION_FAILS.load(Ordering::SeqCst) {
         return Err(std::io::Error::other("refused"));
@@ -329,6 +362,7 @@ fn failed_terminate(job: &Job) -> std::io::Result<()> {
     clippy::unnecessary_wraps,
     reason = "it stands in for `Job::terminate`"
 )]
+#[cfg(windows)]
 fn confirmed_early(_job: &Job) -> std::io::Result<()> {
     Ok(())
 }
@@ -388,6 +422,7 @@ fn revocation_fails_the_gate_at_once() {
 }
 
 /// S1.
+#[cfg(windows)]
 #[tokio::test]
 async fn dropping_the_cancel_tears_the_launch_down() {
     struct Holding(Mutex<Option<Launch>>);
@@ -453,6 +488,7 @@ async fn dropping_the_cancel_tears_the_launch_down() {
 }
 
 /// S2.
+#[cfg(windows)]
 #[tokio::test]
 async fn finished_reaches_the_brain_before_teardown() {
     struct Answering(Mutex<Option<Launch>>);
@@ -508,6 +544,7 @@ async fn finished_reaches_the_brain_before_teardown() {
 /// S4: a chunk taken but not yet admitted when the launch is revoked is never written, and chunks
 /// queued behind an admitted write never are either. Writes are heard at the pipe; the second
 /// case also holds the teardown before the job ends, so the child reads the admitted chunk.
+#[cfg(windows)]
 #[tokio::test]
 async fn no_chunk_admitted_after_revoke_reaches_the_child() {
     let base = Base::new("launch-admission");
@@ -586,6 +623,7 @@ async fn no_chunk_admitted_after_revoke_reaches_the_child() {
 
 /// M2: a pump thread that can't start fails the launch as `Spawn`, and the pumps already
 /// started, the job, the listener and the folder are ended in order.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_pump_that_fails_to_start_stops_the_launch() {
     let base = Base::new("launch-pump-fails");
@@ -623,6 +661,7 @@ async fn a_pump_that_fails_to_start_stops_the_launch() {
 
 /// A child still exiting when its job reads empty still holds its working folder: the teardown
 /// waits for the child itself before deleting the folder.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_child_still_exiting_when_its_job_reads_empty_has_its_folder_deleted() {
     let base = Base::new("launch-exits-late");
@@ -637,6 +676,7 @@ async fn a_child_still_exiting_when_its_job_reads_empty_has_its_folder_deleted()
 
 /// C-M1: a listener task the runtime can't drop within the grace leaves the launch `Stuck`, the
 /// folder kept and the lane refusing.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_listener_that_outlives_the_grace_is_stuck() {
     let base = Base::new("launch-listener-held");
@@ -653,6 +693,7 @@ async fn a_listener_that_outlives_the_grace_is_stuck() {
 }
 
 /// End closes stdin: the child reads its end and exits, which ends the launch.
+#[cfg(windows)]
 #[tokio::test]
 async fn end_closes_stdin_and_the_child_exits() {
     let base = Base::new("launch-end-input");
@@ -677,6 +718,7 @@ async fn end_closes_stdin_and_the_child_exits() {
 }
 
 /// S16 (i): a write admitted before the revocation is in flight, and settles before cleanup.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_paused_admitted_write_is_in_flight_and_settles_before_cleanup() {
     let base = Base::new("launch-in-flight");
@@ -718,6 +760,7 @@ async fn a_paused_admitted_write_is_in_flight_and_settles_before_cleanup() {
 }
 
 /// S16 (ii): a write held past the pipe grace leaves the launch stuck, with its folder.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_write_held_past_the_grace_is_stuck() {
     let base = Base::new("launch-held-write");
@@ -740,6 +783,7 @@ async fn a_write_held_past_the_grace_is_stuck() {
 }
 
 /// S16: a revocation before any admission: nothing is admitted.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_revocation_before_admission_admits_nothing() {
     let base = Base::new("launch-before-admission");
@@ -760,6 +804,7 @@ async fn a_revocation_before_admission_admits_nothing() {
 }
 
 /// S17: both pumps end with the round still holding both of its ends.
+#[cfg(windows)]
 #[tokio::test]
 async fn both_pumps_end_with_their_endpoints_still_held() {
     let base = Base::new("launch-endpoints");
@@ -878,6 +923,7 @@ fn stderr_is_read_through_interruptions_to_eof_or_an_error() {
 }
 
 /// The stdout bound: a round that never reads holds exactly four chunks of at most 64 KiB.
+#[cfg(windows)]
 #[tokio::test]
 async fn stdout_holds_four_chunks_for_a_round_that_never_reads() {
     let base = Base::new("launch-stdout-bound");
@@ -899,6 +945,7 @@ async fn stdout_holds_four_chunks_for_a_round_that_never_reads() {
 
 /// The stdin bound: a deaf child takes one chunk into its pipe and four wait; the next is
 /// refused.
+#[cfg(windows)]
 #[tokio::test]
 async fn stdin_holds_four_chunks_for_a_deaf_child() {
     let base = Base::new("launch-stdin-bound");
@@ -927,6 +974,7 @@ async fn stdin_holds_four_chunks_for_a_deaf_child() {
 }
 
 /// The lane's queue: four launches wait behind a running one, and the next is refused.
+#[cfg(windows)]
 #[tokio::test]
 async fn the_lane_queue_holds_four_launches() {
     let base = Base::new("launch-lane-queue");
@@ -954,6 +1002,7 @@ async fn the_lane_queue_holds_four_launches() {
 }
 
 /// One launch at a time: the second starts only after the first's teardown.
+#[cfg(windows)]
 #[tokio::test]
 async fn launches_run_one_at_a_time() {
     let base = Base::new("launch-serial");
@@ -976,6 +1025,7 @@ async fn launches_run_one_at_a_time() {
 }
 
 /// S5.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_queued_launch_revoked_before_its_turn_never_starts() {
     let base = Base::new("launch-revoked-queued");
@@ -999,6 +1049,7 @@ async fn a_queued_launch_revoked_before_its_turn_never_starts() {
 }
 
 /// The deadline: an expired launch never starts, and a live one ends at its deadline.
+#[cfg(windows)]
 #[tokio::test]
 async fn the_deadline_is_kept_from_admission() {
     let base = Base::new("launch-deadline");
@@ -1025,6 +1076,7 @@ async fn the_deadline_is_kept_from_admission() {
 }
 
 /// S12.
+#[cfg(windows)]
 #[tokio::test]
 async fn closing_ends_the_live_launch() {
     let base = Base::new("launch-close");
@@ -1057,6 +1109,7 @@ async fn closing_ends_the_live_launch() {
 
 /// S6: the child exits on its own, so its pipes end and only the failed termination keeps the
 /// folder.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_failed_termination_keeps_everything() {
     let base = Base::new("launch-terminate-fails");
@@ -1091,6 +1144,7 @@ async fn a_failed_termination_keeps_everything() {
 /// A picture the child keeps in its temporary folder is inside its launch folder, and goes with it
 /// whether the child exits, crashes or is stopped. A brain that dies leaves the launch folder to
 /// the next sweep (`a_restarted_lane_sweeps_leftover_launches`).
+#[cfg(windows)]
 #[tokio::test]
 async fn a_picture_in_the_childs_temp_goes_with_its_launch() {
     for how in ["shutdown", "exit", "crash", "stop"] {
@@ -1124,6 +1178,7 @@ async fn a_picture_in_the_childs_temp_goes_with_its_launch() {
 }
 
 /// Empty, truncated and lingering: the job is ended even when the root exits on its own.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_child_that_exits_or_lingers_is_ended_with_its_job() {
     let base = Base::new("launch-exits");
@@ -1150,6 +1205,7 @@ async fn a_child_that_exits_or_lingers_is_ended_with_its_job() {
 }
 
 /// S7.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_restarted_lane_sweeps_leftover_launches() {
     let base = Base::new("launch-sweep");
@@ -1183,6 +1239,7 @@ async fn a_restarted_lane_sweeps_leftover_launches() {
 
 /// Claude Code's session record and MCP log go at the next sweep, and nothing beside them: not
 /// the sign-in file at the root of either swept folder's parent, nor its backups.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_sweep_takes_claude_codes_session_records_and_mcp_logs_and_nothing_beside_them() {
     let base = Base::new("launch-sweep-files");
@@ -1227,6 +1284,7 @@ async fn a_sweep_takes_claude_codes_session_records_and_mcp_logs_and_nothing_bes
 }
 
 /// A swept folder that is a junction is refused, so nothing behind it is deleted.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_swept_folder_that_is_a_junction_is_never_followed() {
     for (name, folder) in [
@@ -1253,6 +1311,7 @@ async fn a_swept_folder_that_is_a_junction_is_never_followed() {
 }
 
 /// S8.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_locked_file_leaves_the_folder_for_the_sweep() {
     let base = Base::new("launch-folder-left");
@@ -1303,6 +1362,7 @@ async fn a_locked_file_leaves_the_folder_for_the_sweep() {
 }
 
 /// S19.
+#[cfg(windows)]
 #[tokio::test]
 async fn the_subtree_handles_are_released_before_deletion() {
     let base = Base::new("launch-released");
@@ -1316,6 +1376,7 @@ async fn the_subtree_handles_are_released_before_deletion() {
 }
 
 /// S20: a start that fails after the listener and the job exist stops them in order.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_partial_start_stops_in_order() {
     let base = Base::new("launch-partial");
@@ -1335,6 +1396,7 @@ async fn a_partial_start_stops_in_order() {
 }
 
 /// The pipe name: taken while the launch lives, free after, and a squatter fails the launch.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_launch_owns_its_pipe_name() {
     let base = Base::new("launch-pipe-name");
@@ -1366,6 +1428,7 @@ async fn a_launch_owns_its_pipe_name() {
 }
 
 /// S18: a second lane on the same base, as a second brain has, never touches a live launch.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_second_lane_never_sweeps_a_live_launch() {
     let base = Base::new("launch-two-lanes");
@@ -1403,6 +1466,7 @@ async fn a_second_lane_never_sweeps_a_live_launch() {
 /// Throughput and resources of the stream pumps: 64 MiB from fake `flood` to a round that
 /// reads. Run alone on a quiet machine:
 /// `cargo test -p kumochi-brain --lib measure_launch_pipes -- --ignored --nocapture`.
+#[cfg(windows)]
 #[tokio::test]
 #[ignore = "a measurement, not a test"]
 async fn measure_launch_pipes() {
