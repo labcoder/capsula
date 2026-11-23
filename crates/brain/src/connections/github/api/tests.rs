@@ -324,7 +324,13 @@ async fn every_parser_enforces_its_entry_byte_cap_with_scripted_http() {
                     .await
                     .unwrap();
                 assert_eq!(reply.total_count, 1);
-                assert_eq!(reply.repositories, [RepoName::new("owner/repo").unwrap()]);
+                assert_eq!(
+                    reply.repositories,
+                    [(
+                        RepoName::new("owner/repo").unwrap(),
+                        NonZeroU64::new(7).unwrap()
+                    )]
+                );
             }
         }
         body.push(b' ');
