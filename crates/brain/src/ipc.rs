@@ -530,12 +530,8 @@ mod tests {
                             break;
                         }
                     }
-                    peer_control
-                        .write_all(
-                            &frame::encode(&ControlToBrain::Quitting, Pipe::Control).unwrap(),
-                        )
-                        .await
-                        .unwrap();
+                    let quit = frame::encode(&ControlToBrain::Quitting, Pipe::Control).unwrap();
+                    peer_control.write_all(&quit).await.unwrap();
                 }
             };
             let (result, ()) = timeout(std::time::Duration::from_secs(7), async {
@@ -550,6 +546,9 @@ mod tests {
                     result,
                     Err(SessionError::Protocol("data hello does not match control"))
                 )),
+            }
+            if index == 1 {
+                assert_eq!(brain.issue_session(), None);
             }
         }
         brain.close().await;

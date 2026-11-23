@@ -7,6 +7,9 @@ use super::{BrainError, DevCheck, Route, constants, log_brain_stopped, logging, 
 #[path = "../../../tests/support/scratch.rs"]
 mod scratch;
 
+#[path = "platform/test_args.rs"]
+mod test_args;
+
 #[test]
 fn only_the_first_flag_selects_a_route_and_only_parent_bound_rejects_a_tail() {
     const LAUNCH: &str = "0123456789abcdef0123456789abcdef";
@@ -56,13 +59,11 @@ fn only_the_first_flag_selects_a_route_and_only_parent_bound_rejects_a_tail() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn non_unicode_arguments_follow_the_same_position_rules_without_panicking() {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt as _;
+    use test_args::non_unicode as invalid;
 
-    let invalid = || OsString::from_vec(vec![0xff]);
+    assert!(invalid().to_str().is_none());
     let launch = "0123456789abcdef0123456789abcdef";
     for (index, (args, expected)) in [
         (vec![invalid(), "--parent-bound".into()], Route::Detached),
