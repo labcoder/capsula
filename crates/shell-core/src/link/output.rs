@@ -645,8 +645,12 @@ impl OutputOwner {
             .map_err(|_| Denied::Stale)
     }
 
-    #[cfg(test)]
-    pub(super) fn start_mic(&self, claim: &Claim) -> Result<Reserved, Denied> {
+    /// Reserves a microphone with built-in tuning for a detached test fixture.
+    ///
+    /// # Errors
+    /// The claim must still authorize a single microphone start.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_mic(&self, claim: &Claim) -> Result<Reserved, Denied> {
         self.start_mic_with_tuning(claim, ShellTuning::default())
     }
 
