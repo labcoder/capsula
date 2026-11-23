@@ -14,15 +14,26 @@ sibling file and sync the directory. If the directory sync fails after the renam
 process exits rather than letting the worker report an ordinary write failure. This is a fixture
 path, not a Linux settings root or a production write adapter.
 
-macOS unit tests can opt in to the settings-only scratch writer. The runner must own a fresh
-`0700` local APFS root, set `TMPDIR` and `MAC_SCRATCH_TEST_PARENT` to that absolute directory,
-set `MAC_SCRATCH_TEST_PID` to the sandboxed test process, and launch with umask 077. The fixture
-trusts the anchor's ancestors, then checks each child relative to a retained directory, opens
-names without following links, and exclusively stages the sibling. A first save may publish an
-absent destination. An indeterminate publication exits the test process with status 78; the
-runner must quarantine that root, not remove it. Self-spawned children do not inherit write
-admission under the same root. Without the opt-in, or in a regular build, this gives no Mac
-settings root. Purge still uses the separate, unchanged replacement path.
+macOS unit tests can opt in to the settings-only scratch writer. A trusted runner creates and
+retains a fresh `0700` local APFS root, passes its open directory descriptor in
+`MAC_SCRATCH_TEST_FD`, sets `TMPDIR` and `MAC_SCRATCH_TEST_PARENT` to the same absolute path,
+sets `MAC_SCRATCH_TEST_PID` to the sandboxed test process, and launches with umask 077. The
+process verifies that the inherited descriptor matches the named root, then keeps its own
+close-on-exec copy and marks the passed descriptor close-on-exec. The descriptor binds the
+root to the trusted launch; it doesn't prove how the runner created it. The PID is checked on
+every write to refuse accidental inheritance, including a fork with cached admission; it isn't
+proof of delegation. The runner retains exclusive custody of the root and trusts its absolute
+ancestors. Below it, the writer checks each child relative to a held directory without following
+links.
+
+The writer refuses an occupied sibling temp name and keeps the original staging descriptor
+through both syncs and the published-name identity check. First save uses an atomic
+no-replace rename. Replacing an existing name and cleanup still assume exclusive namespace
+custody. A first save doesn't sync new directory entries in their own parents, so success
+doesn't prove the whole new path survives power loss. An indeterminate publication exits the
+owner process with status 78; the runner must stop its child users and retain the root. This
+opt-in doesn't enable a Mac settings root in regular builds. Purge still uses the separate,
+unchanged replacement path.
 
 ## Shell editor
 
@@ -431,9 +442,9 @@ no shell is connected, and Quit and close write what's left before they end.
 - **Close** (the shell gone for good, or from another build) gives the settings the same 2 s
   budget. Its waits for ended runs and for the store each keep their own 2 s, so closing as a
   whole can take longer.
-- A change becomes the settings only once the file is replaced, so a failed write changes
-  neither memory nor disk. A leftover `config.toml.tmp` is never read; the next write overwrites
-  it.
+- A change becomes the settings only once the file is replaced, so a definite unpublished
+  write leaves the current settings alone. A leftover `config.toml.tmp` is never read. The
+  Mac unit-test writer refuses an occupied temp name; the regular writer overwrites it.
 - Keys this build doesn't know survive every write, so a newer build's settings outlive a
   downgrade.
 

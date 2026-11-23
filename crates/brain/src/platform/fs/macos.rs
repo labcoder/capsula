@@ -155,12 +155,15 @@ impl Scratch {
 
     fn prepare(
         &self,
+        staged: &File,
         from: &CStr,
         to: &CStr,
         policy: Destination,
-    ) -> Result<(File, libc::stat), Fault> {
+    ) -> Result<(libc::stat, bool), Fault> {
         self.active()?;
-        let (staged, source) = self.regular(from, libc::O_RDWR, Stage::Source)?;
+        let source = inspect(staged, Stage::Source)?;
+        self.check_regular(&source, Stage::Source)?;
+        matches_name(&self.directory, from, &source, Stage::Source)?;
         let destination = match self.regular(to, libc::O_RDONLY, Stage::Destination) {
             Ok((_old, sample)) => Some(sample),
             Err(error)
@@ -182,21 +185,22 @@ impl Scratch {
         matches_name(&self.directory, from, &source, Stage::Source)?;
         if let Some(destination) = destination {
             matches_name(&self.directory, to, &destination, Stage::Destination)?;
-        } else {
-            match named_stat(&self.directory, to, Stage::Destination) {
-                Err(error) if error.errno == Some(libc::ENOENT) => {}
-                Err(error) => return Err(error),
-                Ok(_) => return Err(Fault::new(Stage::Destination, ErrorKind::AlreadyExists)),
-            }
         }
-        Ok((staged, source))
+        Ok((source, destination.is_none()))
     }
 
     fn replace(&mut self, from: &CStr, to: &CStr) -> Publication {
+        if let Err(error) = self.active() {
+            return Publication::NotPublished(error);
+        }
+        let (staged, _) = match self.regular(from, libc::O_RDWR, Stage::Source) {
+            Ok(staged) => staged,
+            Err(error) => return Publication::NotPublished(error),
+        };
         self.replace_with(
             from,
-            to,
-            Destination::Existing,
+            (to, Destination::Existing),
+            &staged,
             rename,
             sync_directory,
             File::sync_all,
@@ -206,22 +210,29 @@ impl Scratch {
     fn replace_with(
         &mut self,
         from: &CStr,
-        to: &CStr,
-        policy: Destination,
-        rename: impl FnOnce(&File, &CStr, &CStr) -> io::Result<()>,
+        (to, policy): (&CStr, Destination),
+        staged: &File,
+        rename: impl FnOnce(&File, &CStr, &CStr, bool) -> io::Result<()>,
         sync_directory: impl FnOnce(&File) -> io::Result<()>,
         sync_file: impl FnOnce(&File) -> io::Result<()>,
     ) -> Publication {
-        let (staged, source) = match self.prepare(from, to, policy) {
+        let (source, first_save) = match self.prepare(staged, from, to, policy) {
             Ok(ready) => ready,
             Err(error) => return Publication::NotPublished(error),
         };
+        let renamed = rename(&self.directory, from, to, first_save);
+        if first_save
+            && let Err(error) = &renamed
+            && error.raw_os_error() == Some(libc::EEXIST)
+        {
+            return Publication::NotPublished(Fault::io(Stage::Rename, error));
+        }
         let published = (|| {
-            rename(&self.directory, from, to).map_err(|error| Fault::io(Stage::Rename, &error))?;
+            renamed.map_err(|error| Fault::io(Stage::Rename, &error))?;
             matches_name(&self.directory, to, &source, Stage::PublishedIdentity)?;
             sync_directory(&self.directory)
                 .map_err(|error| Fault::io(Stage::DirectorySync, &error))?;
-            sync_file(&staged).map_err(|error| Fault::io(Stage::PublishedSync, &error))
+            sync_file(staged).map_err(|error| Fault::io(Stage::PublishedSync, &error))
         })();
         match published {
             Ok(()) => Publication::Completed,
@@ -262,8 +273,14 @@ fn call(result: libc::c_int) -> io::Result<()> {
     }
 }
 
-fn rename(directory: &File, from: &CStr, to: &CStr) -> io::Result<()> {
+fn rename(directory: &File, from: &CStr, to: &CStr, first_save: bool) -> io::Result<()> {
     let fd = directory.as_raw_fd();
+    if first_save {
+        // SAFETY: Both names are checked siblings and the parent fd stays live for the call.
+        return call(unsafe {
+            libc::renameatx_np(fd, from.as_ptr(), fd, to.as_ptr(), libc::RENAME_EXCL)
+        });
+    }
     // SAFETY: Both checked names and the single held parent fd remain valid for the call.
     call(unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) })
 }

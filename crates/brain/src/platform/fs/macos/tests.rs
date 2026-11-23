@@ -4,9 +4,10 @@ use std::io::{self, ErrorKind, Read as _, Seek as _, Write as _};
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::ptr::NonNull;
+use std::time::{Duration, Instant};
 
 use super::custody::acl_absent;
-use super::settings::SettingsRoot;
+use super::settings::{write_scratch_settings, write_scratch_settings_with};
 use super::{
     Destination, Fault, Publication, Scratch, Stage, available_bytes, links_unsupported,
     named_stat, open_at, rename, sync_directory, unlink, volume,
@@ -262,10 +263,10 @@ fn indeterminate_rename_or_sync_retains_data_and_stops_the_owner() {
         let staged = seed(&scratch, c"next", b"new bytes");
         let outcome = scratch.replace_with(
             c"next",
-            c"current",
-            Destination::Existing,
-            |directory, from, to| {
-                rename(directory, from, to)?;
+            (c"current", Destination::Existing),
+            &staged,
+            |directory, from, to, first_save| {
+                rename(directory, from, to, first_save)?;
                 if stage == Stage::Rename {
                     return Err(io::Error::from_raw_os_error(libc::EIO));
                 }
@@ -359,29 +360,32 @@ fn settings_route_publishes_only_beneath_the_owned_root() {
     );
     let root_path = base.join(scratch.name.to_str().expect("fixture name"));
     let outside_path = base.join(outside.name.to_str().expect("fixture name"));
-    let root = SettingsRoot::open(root_path.clone()).expect("trusted synthetic root");
     let sentinel = seed(&outside, c"settings", b"untouched");
+    let unadmitted = base.with_file_name("not-admitted").join("settings");
     assert_eq!(
-        root.write(&outside_path.join("settings"), b"wrong"),
-        Err(Fault::new(Stage::Parent, ErrorKind::PermissionDenied))
+        write_scratch_settings(&unadmitted, b"wrong")
+            .expect_err("outside the admitted root")
+            .kind(),
+        ErrorKind::PermissionDenied
     );
     assert_eq!(
-        root.write(&root_path.join("case/../settings"), b"wrong"),
-        Err(Fault::new(Stage::Parent, ErrorKind::InvalidInput))
+        write_scratch_settings(&root_path.join("case/../settings"), b"wrong")
+            .expect_err("reject lexical traversal")
+            .kind(),
+        ErrorKind::InvalidInput
     );
     std::os::unix::fs::symlink(&outside_path, root_path.join("alias")).expect("fixture symlink");
     assert_eq!(
-        root.write(&root_path.join("alias/settings"), b"wrong")
+        write_scratch_settings(&root_path.join("alias/settings"), b"wrong")
             .expect_err("don't follow a directory link")
-            .stage,
-        Stage::Parent
+            .raw_os_error(),
+        Some(libc::ENOTDIR)
     );
     assert_eq!(contents(&sentinel), b"untouched");
     let path = root_path.join("case/settings");
-    root.write(&path, b"first").expect("first publication");
+    write_scratch_settings(&path, b"first").expect("first publication");
     assert_eq!(std::fs::read(&path).expect("read first save"), b"first");
-    root.write(&path, b"replacement")
-        .expect("second publication");
+    write_scratch_settings(&path, b"replacement").expect("second publication");
     assert_eq!(
         std::fs::read(&path).expect("read replacement"),
         b"replacement"
@@ -393,6 +397,29 @@ fn settings_route_publishes_only_beneath_the_owned_root() {
         Stage::Parent,
     )
     .expect("hold test case directory");
+    let occupied = open_at(
+        &parent,
+        c"settings.tmp",
+        libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+        Stage::Create,
+    )
+    .expect("preoccupy the staging name");
+    (&occupied)
+        .write_all(b"leftover bytes")
+        .expect("seed the occupied stage");
+    assert_eq!(
+        write_scratch_settings(&path, b"wrong")
+            .expect_err("no temp reuse")
+            .raw_os_error(),
+        Some(libc::EEXIST)
+    );
+    assert_eq!(contents(&occupied), b"leftover bytes");
+    assert_eq!(
+        std::fs::read(&path).expect("read unchanged settings"),
+        b"replacement"
+    );
+    let occupied = named_stat(&parent, c"settings.tmp", Stage::Cleanup).expect("occupied identity");
+    unlink(&parent, c"settings.tmp", &occupied, 0).expect("remove only fixture temp");
     let settings = named_stat(&parent, c"settings", Stage::Cleanup).expect("new published inode");
     unlink(&parent, c"settings", &settings, 0).expect("remove only published entry");
     let case = named_stat(&scratch.directory, c"case", Stage::Cleanup).expect("case identity");
@@ -404,4 +431,149 @@ fn settings_route_publishes_only_beneath_the_owned_root() {
         .remove(c"settings", &sentinel)
         .expect("remove untouched sentinel");
     outside.finish().expect("empty outside fixture");
+}
+
+#[test]
+#[ignore = "requires a private owned APFS fixture parent"]
+fn staged_name_substitution_refuses_the_wrong_inode() {
+    let mut scratch = fixture();
+    let old = seed(&scratch, c"current", b"old bytes");
+    let staged = seed(&scratch, c"next", b"intended bytes");
+    rename(&scratch.directory, c"next", c"displaced", false).expect("move the staged name");
+    let substitute = seed(&scratch, c"next", b"substitute bytes");
+    assert_eq!(
+        scratch.replace_with(
+            c"next",
+            (c"current", Destination::MayBeAbsent),
+            &staged,
+            rename,
+            sync_directory,
+            File::sync_all,
+        ),
+        Publication::NotPublished(Fault::new(Stage::Source, ErrorKind::InvalidData))
+    );
+    assert_eq!(contents(&reopened(&scratch, c"current")), b"old bytes");
+    assert_eq!(contents(&reopened(&scratch, c"next")), b"substitute bytes");
+    assert_eq!(contents(&staged), b"intended bytes");
+    scratch.remove(c"current", &old).expect("remove fixture");
+    scratch
+        .remove(c"next", &substitute)
+        .expect("remove fixture");
+    scratch
+        .remove(c"displaced", &staged)
+        .expect("remove fixture");
+    scratch.finish().expect("empty substitution fixture");
+}
+
+#[test]
+#[ignore = "requires a private owned APFS fixture parent"]
+fn first_save_does_not_replace_a_late_destination() {
+    let mut scratch = fixture();
+    let staged = seed(&scratch, c"next", b"first save bytes");
+    assert_eq!(
+        scratch.replace_with(
+            c"next",
+            (c"current", Destination::MayBeAbsent),
+            &staged,
+            |directory, from, to, first_save| {
+                let mut late = open_at(
+                    directory,
+                    to,
+                    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                    Stage::Create,
+                )
+                .expect("destination arrives after the absence sample");
+                late.write_all(b"late bytes").expect("write late fixture");
+                rename(directory, from, to, first_save)
+            },
+            sync_directory,
+            File::sync_all,
+        ),
+        Publication::NotPublished(Fault::io(
+            Stage::Rename,
+            &io::Error::from_raw_os_error(libc::EEXIST)
+        ))
+    );
+    let late = reopened(&scratch, c"current");
+    assert_eq!(contents(&late), b"late bytes");
+    assert_eq!(contents(&reopened(&scratch, c"next")), b"first save bytes");
+    scratch
+        .remove(c"current", &late)
+        .expect("remove late fixture");
+    scratch
+        .remove(c"next", &staged)
+        .expect("remove fixture stage");
+    scratch.finish().expect("empty first-save fixture");
+}
+
+fn settings_refusal(kind: ErrorKind) {
+    let path = std::env::temp_dir().join("admission/settings");
+    let error = write_scratch_settings(&path, b"unadmitted")
+        .expect_err("subprocess must not be able to replace settings");
+    assert_eq!(error.kind(), kind);
+    assert_eq!(
+        error
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<Fault>()),
+        Some(&Fault::new(Stage::Root, kind))
+    );
+    assert_eq!(std::fs::read(path).expect("read old payload"), b"old bytes");
+}
+
+#[test]
+#[ignore = "requires a runner-seeded root with absent or inherited non-owner admission"]
+fn settings_refuses_unowned_subprocess() {
+    settings_refusal(ErrorKind::Unsupported);
+}
+
+#[test]
+#[ignore = "requires runner-passed identity different from the seeded root"]
+fn settings_refuses_mismatched_root() {
+    settings_refusal(ErrorKind::InvalidData);
+}
+
+#[test]
+#[ignore = "requires a supervised private APFS fixture and must exit 78"]
+fn settings_uncertainty_exits_owner() {
+    let path = std::env::temp_dir().join("admission/settings");
+    write_scratch_settings(&path, b"old bytes").expect("admit owner and seed settings");
+    let mut child =
+        std::process::Command::new(std::env::current_exe().expect("fixture executable"))
+            .args([
+                "--exact",
+                "platform::fs::macos::tests::settings_quarantine_child",
+                "--ignored",
+            ])
+            .spawn()
+            .expect("spawn an inherited non-owner in the owner's group");
+    let ready = std::env::temp_dir().join("quarantine-ready");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = ready.is_file().then(|| {
+        writeln!(io::stderr(), "quarantine witness pid={}", child.id())
+            .expect("send the synthetic witness PID to the supervisor");
+        write_scratch_settings_with(&path, b"new bytes", |_| {
+            Err(io::Error::from_raw_os_error(libc::EIO))
+        })
+    });
+    child.kill().expect("stop witness when owner did not exit");
+    child.wait().expect("reap witness when owner did not exit");
+    panic!("expected exit 78 after a ready witness, returned {result:?}");
+}
+
+#[test]
+#[ignore = "runs only as the supervised owner's quarantine witness"]
+fn settings_quarantine_child() {
+    settings_refusal(ErrorKind::Unsupported);
+    let ready = std::env::temp_dir().join("quarantine-ready");
+    let _held = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(ready)
+        .expect("signal non-owner refusal and keep the fixture open");
+    std::thread::sleep(Duration::from_secs(30));
+    panic!("runner did not stop the witness");
 }
