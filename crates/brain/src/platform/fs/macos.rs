@@ -69,6 +69,12 @@ enum Destination {
     MayBeAbsent,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RenameMode {
+    Replace,
+    NoReplace,
+}
+
 struct Scratch {
     parent: File,
     name: CString,
@@ -159,7 +165,7 @@ impl Scratch {
         from: &CStr,
         to: &CStr,
         policy: Destination,
-    ) -> Result<(libc::stat, bool), Fault> {
+    ) -> Result<(libc::stat, RenameMode), Fault> {
         self.active()?;
         let source = inspect(staged, Stage::Source)?;
         self.check_regular(&source, Stage::Source)?;
@@ -185,8 +191,10 @@ impl Scratch {
         matches_name(&self.directory, from, &source, Stage::Source)?;
         if let Some(destination) = destination {
             matches_name(&self.directory, to, &destination, Stage::Destination)?;
+            Ok((source, RenameMode::Replace))
+        } else {
+            Ok((source, RenameMode::NoReplace))
         }
-        Ok((source, destination.is_none()))
     }
 
     fn replace(&mut self, from: &CStr, to: &CStr) -> Publication {
@@ -212,16 +220,16 @@ impl Scratch {
         from: &CStr,
         (to, policy): (&CStr, Destination),
         staged: &File,
-        rename: impl FnOnce(&File, &CStr, &CStr, bool) -> io::Result<()>,
+        rename: impl FnOnce(&File, &CStr, &CStr, RenameMode) -> io::Result<()>,
         sync_directory: impl FnOnce(&File) -> io::Result<()>,
         sync_file: impl FnOnce(&File) -> io::Result<()>,
     ) -> Publication {
-        let (source, first_save) = match self.prepare(staged, from, to, policy) {
+        let (source, mode) = match self.prepare(staged, from, to, policy) {
             Ok(ready) => ready,
             Err(error) => return Publication::NotPublished(error),
         };
-        let renamed = rename(&self.directory, from, to, first_save);
-        if first_save
+        let renamed = rename(&self.directory, from, to, mode);
+        if mode == RenameMode::NoReplace
             && let Err(error) = &renamed
             && error.raw_os_error() == Some(libc::EEXIST)
         {
@@ -273,9 +281,9 @@ fn call(result: libc::c_int) -> io::Result<()> {
     }
 }
 
-fn rename(directory: &File, from: &CStr, to: &CStr, first_save: bool) -> io::Result<()> {
+fn rename(directory: &File, from: &CStr, to: &CStr, mode: RenameMode) -> io::Result<()> {
     let fd = directory.as_raw_fd();
-    if first_save {
+    if mode == RenameMode::NoReplace {
         // SAFETY: Both names are checked siblings and the parent fd stays live for the call.
         return call(unsafe {
             libc::renameatx_np(fd, from.as_ptr(), fd, to.as_ptr(), libc::RENAME_EXCL)
