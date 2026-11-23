@@ -2007,6 +2007,8 @@ pub(in crate::runtime) fn set(brain: &mut Brain, op: SettingsOp) {
     brain.config.commit(pending);
 }
 
+/// Requires native window capture; the fixture worker alone cannot open the screen gate.
+#[cfg(windows)]
 #[tokio::test]
 async fn the_threads_choice_rechecks_the_gate_and_a_closed_gate_closes_the_part_with_its_reason() {
     use crate::context::ScreenClass;
@@ -2415,6 +2417,8 @@ async fn without_window_capture_the_gate_reads_unsupported_whatever_the_client()
     brain.close().await;
 }
 
+/// Requires native window capture; the fixture worker alone cannot open the screen gate.
+#[cfg(windows)]
 #[tokio::test]
 async fn the_gate_is_sent_once_per_connection_and_again_only_when_it_changes() {
     use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};
@@ -2526,6 +2530,8 @@ async fn a_new_sign_in_alone_revises_the_offer_once() {
 /// The revision counts up only when what the offer authorizes changes: a new name for the same
 /// model keeps it, a gate that closed and opened again takes a new one, and a new connection
 /// starts again from the first.
+/// Requires native window capture; the fixture worker alone cannot open the screen gate.
+#[cfg(windows)]
 #[tokio::test]
 async fn only_a_change_in_what_the_offer_authorizes_counts_its_revision_up() {
     use kumochi_protocol::message::{
