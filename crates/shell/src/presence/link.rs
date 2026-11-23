@@ -74,6 +74,9 @@ impl Presence {
                         cx.notify();
                     });
                     self.revoke_exclusion(cx);
+                    if let Some(font) = session.drawing_font_family() {
+                        crate::presenter::PairFont::pin(font, cx);
+                    }
                     self.session = Some(session);
                     self.link_state(LinkState::Connected, cx);
                 }

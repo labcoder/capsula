@@ -6,8 +6,8 @@
 use std::{any::Any, cell::RefCell, fmt, rc::Rc, sync::Arc};
 
 use gpui_kit::{
-    Font, FontFeatures, FontId, FontStyle, FontWeight, PaintQuad, Path, Pixels, SharedString,
-    TextRun, WindowTextSystem, WrappedLine, transparent_black,
+    Font, FontId, FontWeight, PaintQuad, Path, Pixels, PlatformTextSystem, SharedString, TextRun,
+    WindowTextSystem, WrappedLine, transparent_black,
 };
 use kumochi_scene::{
     Handle, SceneView,
@@ -18,7 +18,7 @@ use smallvec::SmallVec;
 
 use super::paint_paths::{self, BuildError};
 use super::paint_stroke::Scratch;
-use crate::presenter::{SceneCache, Stage};
+use crate::presenter::{SceneCache, Stage, drawing_font, resolve_font};
 
 /// Stages the overlay's paint caches for the presenter.
 pub(super) struct Stager(pub(super) usize);
@@ -86,20 +86,16 @@ struct FontSlot {
 
 impl Fonts {
     pub(super) fn new() -> Self {
-        let features = FontFeatures::default();
-        Self(
-            [FontWeight::NORMAL, FontWeight::BOLD].map(|weight| FontSlot {
-                font: Font {
-                    family: SharedString::default(),
-                    features: features.clone(),
-                    fallbacks: None,
-                    weight,
-                    style: FontStyle::default(),
-                },
-                id: None,
-                generation: 0,
-            }),
-        )
+        let regular = drawing_font(SharedString::default(), FontWeight::NORMAL);
+        let bold = Font {
+            weight: FontWeight::BOLD,
+            ..regular.clone()
+        };
+        Self([regular, bold].map(|font| FontSlot {
+            font,
+            id: None,
+            generation: 0,
+        }))
     }
 
     #[expect(
@@ -170,12 +166,13 @@ impl LabelEntry {
     pub(super) fn shape(
         &mut self,
         fonts: &mut Fonts,
-        family: &SharedString,
+        font: (&SharedString, Option<&dyn PlatformTextSystem>),
         shaper: &WindowTextSystem,
         size: Pixels,
         wrap: Option<Pixels>,
         scale: f32,
     ) -> Result<&Shaped, BuildError> {
+        let (family, backend) = font;
         let slot = fonts.select(family, self.bold);
         if !self.shaped.as_ref().is_some_and(|shaped| {
             shaped.font_gen == slot.generation
@@ -184,9 +181,14 @@ impl LabelEntry {
                 && shaped.scale == scale.to_bits()
         }) {
             self.shaped = None;
-            let id = *slot
-                .id
-                .get_or_insert_with(|| shaper.resolve_font(&slot.font));
+            let id = if let Some(id) = slot.id {
+                id
+            } else {
+                let id =
+                    resolve_font(shaper, backend, &slot.font).map_err(|_| BuildError::Label)?;
+                slot.id = Some(id);
+                id
+            };
             let line_height = shaper.ascent(id, size).abs() + shaper.descent(id, size).abs();
             let runs = [TextRun {
                 len: self.text.len(),

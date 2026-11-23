@@ -12,6 +12,7 @@ mod call;
 mod digest;
 pub mod io;
 mod prepare;
+mod reaccount;
 mod ready;
 mod scenes;
 mod screen;
@@ -25,7 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use kumochi_protocol::message::{Content, RunId, SceneCuts, SceneFailure, SceneId, ThreadId};
-use kumochi_scene::display::{PaintWork, WideMeasure};
+use kumochi_scene::display::{PaintWork, TextMetricsV1, WideMeasure};
 use kumochi_scene::layout::LayoutState;
 use kumochi_scene::theme::Theme;
 use kumochi_scene::{Admitted, Begin, GlobalBudget, Record, SceneState, Step, StopCut};
@@ -38,6 +39,7 @@ pub use call::{CallEnd, CallError, Remaining};
 pub(crate) use digest::{Digest, PrivateScene};
 pub use io::{Reply, StoredScene, Target, Write};
 pub use prepare::{PrepareJob, Prepared, Shared};
+pub(crate) use reaccount::{ReaccountJob, Reaccounted};
 pub(crate) use screen::{SCREEN_MARKS, ScreenMarks, stored_item};
 pub(crate) use snapshot::CHUNK_TARGET;
 pub use snapshot::Snapshot;
@@ -201,7 +203,7 @@ pub enum Input {
         /// Its answer, or `Err` when nothing of it was stored.
         reply: Result<Reply, ()>,
     },
-    /// The step `serial` was laid out with the wide measure.
+    /// The step `serial` was laid out for this pair's text measure.
     Prepared {
         /// The preparation.
         serial: u64,
@@ -239,6 +241,8 @@ pub struct Drawing {
     /// never holds more than four uncleared scenes.
     clearing: bool,
     theme: Arc<Theme>,
+    /// The measure behind the retained paint charges, also used for preparation once matched.
+    paint_metrics: Option<TextMetricsV1>,
     /// Unit tests lay steps out inline, answering at once, unless they defer to an effect.
     #[cfg(test)]
     pub(crate) defer_preparation: bool,
