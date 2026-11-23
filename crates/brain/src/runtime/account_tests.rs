@@ -2372,8 +2372,6 @@ async fn a_plan_the_catalog_refuses_shows_the_account_unavailable() {
 
 /// Design §6: a connection hears the catalog on the data pipe, then the settled settings with the
 /// default model the read set, which is saved.
-/// Requires native window capture; the fixture worker alone cannot open the screen gate.
-#[cfg(windows)]
 #[tokio::test]
 async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
     use kumochi_protocol::message::{ScreenHolds, ScreenOff};
@@ -2381,10 +2379,7 @@ async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
     let store = FakeStore::default();
     let accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
     let mut brain = test_support::brain_with(&scratch, "", accounts);
-    let rig = crate::supervise::fixture::start::<crate::screen::Holds>();
-    brain.attach_screen(std::sync::Arc::new(crate::screen::HoldClient::new(
-        rig.handle.clone(),
-    )));
+    let _rig = crate::runtime::hold::tests::attach_capture_fixture(&mut brain);
     let luna = ModelChoice {
         model: ModelSlug::new("gpt-6-luna").expect("valid"),
         effort: Effort::Low,
@@ -2436,10 +2431,8 @@ async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
 }
 
 /// [`Catalog`]'s answers, each held until its release fires.
-#[cfg(windows)]
 struct HeldCatalog(Catalog, Mutex<Option<oneshot::Receiver<()>>>);
 
-#[cfg(windows)]
 impl Http for HeldCatalog {
     fn execute(
         &self,
@@ -2458,7 +2451,6 @@ impl Http for HeldCatalog {
 
 /// A signed-in brain on `http` with a fixture screen worker and Luna, which can't see, already
 /// saved as the default model.
-#[cfg(windows)]
 fn luna_with_a_screen(
     scratch: &Scratch,
     store: &FakeStore,
@@ -2469,8 +2461,7 @@ fn luna_with_a_screen(
 ) {
     let accounts = seeded(scratch, store, http, LATER);
     let mut brain = test_support::brain_with(scratch, "", accounts);
-    let rig = crate::supervise::fixture::start::<crate::screen::Holds>();
-    brain.attach_screen(Arc::new(crate::screen::HoldClient::new(rig.handle.clone())));
+    let rig = crate::runtime::hold::tests::attach_capture_fixture(&mut brain);
     let pending = brain
         .config
         .stage(kumochi_protocol::message::SettingsOp::SetDefaultModel(
@@ -2488,8 +2479,6 @@ fn luna_with_a_screen(
 
 /// With the default model already saved, a catalog read that lands while a shell is connected
 /// moves the screen gate, and the shell hears the new state.
-/// Requires native window capture; the fixture worker alone cannot open the screen gate.
-#[cfg(windows)]
 #[tokio::test]
 async fn a_catalog_read_while_connected_sends_the_screen_gate_it_moved() {
     use kumochi_protocol::message::{ScreenHolds, ScreenOff};
@@ -2540,8 +2529,6 @@ async fn a_catalog_read_while_connected_sends_the_screen_gate_it_moved() {
 
 /// A sign-out the shell sends clears the catalog at once, so its own control frame sends the
 /// gate it moved, before the credential thread or the revocation answers anything.
-/// Requires native window capture; the fixture worker alone cannot open the screen gate.
-#[cfg(windows)]
 #[tokio::test]
 async fn a_sign_out_from_the_shell_sends_the_gate_it_moved_at_once() {
     use kumochi_protocol::message::{ScreenHolds, ScreenOff};

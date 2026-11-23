@@ -125,13 +125,12 @@ fn a_screen_holds_controls_never_become_coordinator_input() {
     }
 }
 
-/// Requires native trust for Anthropic staging admission; the fake vault only supplies storage.
-#[cfg(windows)]
 #[tokio::test]
 async fn offline_staging_controls_drop_admission_and_never_queue_credential_work() {
     use kumochi_protocol::message::{ConnectionOp, KeyStageFailure, KeyStageId, KeyStagePlan};
     let scratch = Scratch::new("offline-key-stage");
     let mut brain = patient_brain(&scratch, "");
+    admit_staging_fixture(&mut brain);
     let (sender, queued) = std::sync::mpsc::channel();
     brain.account.jobs = Some(sender);
     let file = std::fs::File::create_new(scratch.db().with_file_name("offline.tap")).expect("tap");
@@ -213,6 +212,20 @@ async fn offline_staging_controls_drop_admission_and_never_queue_credential_work
         ));
     }
     brain.close().await;
+}
+
+/// Admits staging without authorizing a catalog or Messages request.
+pub(super) fn admit_staging_fixture(brain: &mut Brain) {
+    use crate::connections::anthropic::{route::Transport, tls::Scripted};
+
+    brain
+        .account
+        .connections
+        .use_test_transport(Transport::offline(
+            Scripted(std::sync::Arc::default()),
+            0,
+            0,
+        ));
 }
 
 #[test]
