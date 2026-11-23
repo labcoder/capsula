@@ -19,7 +19,11 @@ use super::super::overlay_fixture::{Mode, resting};
 use super::super::paint_cache::{PaintScene, Stager};
 use super::super::test_fixture;
 use super::{BuildError, Gpui, Pending, Surface, assemble, color, label, open, upright};
-use crate::presenter::{Effect, Frames, Presenter, SceneCache, Stage, tests::drained};
+use crate::{
+    escape::Panel,
+    presenter::{Effect, Frames, Presenter, SceneCache, Stage, tests::drained},
+    runs::Runs,
+};
 
 #[path = "overlay_label_tests.rs"]
 mod labels;
@@ -546,6 +550,26 @@ fn a_rotated_label_stays_upright_at_its_turned_anchor_and_scales_uniformly() {
     assert_eq!(wrap, Some(px(100.0)));
     let (_, _, unwrapped) = label(quarter_turn, Vec2::new(0.0, 0.0), 12.0, None);
     assert_eq!(unwrapped, None);
+}
+
+#[test]
+fn a_shown_overlay_holds_esc_and_a_hidden_one_does_not() {
+    kumochi_scene::deferred::start().expect("the dropper starts");
+    let surface = SurfaceGeometry::Overlay {
+        default_canvas: [1920.0, 1080.0],
+    };
+    let presenter = Presenter::new(
+        surface,
+        Arc::new(Theme::default()),
+        Box::new(Stager(size_of::<Stager>())),
+    );
+    let runs = Runs::default();
+    for shown in [false, true, false] {
+        presenter.frames().borrow_mut().shown = shown;
+        let activity = Presence::activity(&runs, Panel::Closed, &presenter);
+        assert_eq!(activity.drawing, shown);
+        assert_eq!(activity.holds_global_escape(), shown);
+    }
 }
 
 struct Fixed;
