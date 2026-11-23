@@ -125,6 +125,8 @@ fn a_screen_holds_controls_never_become_coordinator_input() {
     }
 }
 
+/// Requires native trust for Anthropic staging admission; the fake vault only supplies storage.
+#[cfg(windows)]
 #[tokio::test]
 async fn offline_staging_controls_drop_admission_and_never_queue_credential_work() {
     use kumochi_protocol::message::{ConnectionOp, KeyStageFailure, KeyStageId, KeyStagePlan};

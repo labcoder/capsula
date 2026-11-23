@@ -1,5 +1,8 @@
 use super::*;
-use kumochi_protocol::message::{ControlToBrain, KeyRejection};
+#[cfg(windows)]
+use kumochi_protocol::message::ControlToBrain;
+use kumochi_protocol::message::KeyRejection;
+#[cfg(windows)]
 use tokio::io::AsyncWriteExt as _;
 
 #[tokio::test]
@@ -195,6 +198,7 @@ async fn runtime_distinguishes_invalid_lengths_and_rejected_present_bytes() {
         .await;
 }
 
+#[cfg(windows)]
 async fn stage_frame(control: &mut tokio::io::DuplexStream) -> ControlToShell {
     timeout(Duration::from_secs(5), async {
         loop {
@@ -226,6 +230,8 @@ async fn stage_frame(control: &mut tokio::io::DuplexStream) -> ControlToShell {
     .expect("paste reply")
 }
 
+/// Requires native trust for Anthropic staging admission; the fake vault only supplies storage.
+#[cfg(windows)]
 #[tokio::test]
 async fn serve_binds_staging_and_clears_it_before_the_next_link() {
     use kumochi_protocol::frame::{self, Pipe};
