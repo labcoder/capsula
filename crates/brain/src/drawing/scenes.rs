@@ -114,7 +114,7 @@ impl Drawing {
             loss_dropped,
             interrupted,
             laid,
-            recipient,
+            author,
         } = write;
         let begun = matches!(scene, Pend::New { .. });
         let (scene, index) = match scene {
@@ -131,7 +131,7 @@ impl Drawing {
                     return;
                 }
                 let held = &mut self.scenes[at];
-                held.author = held.author.clone().and(recipient);
+                held.author = held.author.clone().and(author);
                 let committed = held
                     .state
                     .commit(admitted, &mut self.global)
@@ -196,10 +196,11 @@ impl Drawing {
                     .push(Effect::Data(DataToShell::SceneBegin { scene: id, header }));
                 let paint =
                     laid.map(|laid| Paint::begun(LayoutState::new(&state), committed.index, laid));
-                let author = if recipient.is_none() && state.header().surface == Surface::Screen {
+                let author = if !author.is_protected() && state.header().surface == Surface::Screen
+                {
                     Author::Unknown
                 } else {
-                    Author::Public.and(recipient)
+                    Author::Public.and(author)
                 };
                 self.scenes.push(Held {
                     scene: id,

@@ -258,6 +258,11 @@ impl Coordinator {
     }
 
     pub(super) fn drawing_output(&mut self, output: Output, effects: &mut Vec<Effect>) {
+        self.apply_drawing_output(output, effects);
+        self.revoke_pictures();
+    }
+
+    fn apply_drawing_output(&mut self, output: Output, effects: &mut Vec<Effect>) {
         for effect in output.effects {
             if let Effect::Data(message) = &effect
                 && let Some(thread) = scene_id(message).and_then(|scene| self.drawing.thread(scene))
@@ -465,7 +470,7 @@ impl Coordinator {
 
     pub(super) fn drawing_closed(&mut self, run: RunId, loss: Loss, effects: &mut Vec<Effect>) {
         if let Ok(output) = self.drawing.handle(Input::RunClosed { run, loss }) {
-            self.drawing_output(output, effects);
+            self.apply_drawing_output(output, effects);
         }
     }
 

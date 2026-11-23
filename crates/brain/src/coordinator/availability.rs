@@ -397,6 +397,7 @@ impl Coordinator {
         else {
             return;
         };
+        self.close_grants(run);
         let rejected = crate::connections::anthropic::error::Failure::Credential.user_error();
         self.fail_with(run, Failure::Engine, rejected, effects)
             .expect("the run is current");
