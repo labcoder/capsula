@@ -149,13 +149,35 @@ fn parameters() -> serde_json::Value {
 
 pub(crate) struct DrawArgs {
     pub(crate) hash: [u8; 32],
-    pub(crate) args: Vec<u8>,
+    pub(crate) records: DrawRecords,
+}
+
+/// The typed records of a complete draw that passed preflight, before reducer admission.
+#[derive(Clone, PartialEq)]
+pub struct DrawRecords {
+    records: Vec<Record>,
+    after_records: bool,
+}
+
+impl DrawRecords {
+    pub(crate) fn into_parts(self) -> (Vec<Record>, bool) {
+        (self.records, self.after_records)
+    }
+}
+
+impl fmt::Debug for DrawRecords {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DrawRecords")
+            .field("count", &self.records.len())
+            .field("after_records", &self.after_records)
+            .finish_non_exhaustive()
+    }
 }
 
 impl fmt::Debug for DrawArgs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DrawArgs")
-            .field("bytes", &self.args.len())
+            .field("records", &self.records)
             .finish_non_exhaustive()
     }
 }
@@ -171,14 +193,17 @@ fn checked(
     let mut tokenizer = Tokenizer::new();
     let mut rest = args;
     let mut records = Vec::new();
-    loop {
+    let after_records = loop {
         match tokenizer.next(&mut rest) {
             Ok(Some(record)) => records.push(parsed(record.bytes, &mut parse)?),
-            Ok(None) => break tokenizer.finish().map_err(CallError::Token)?,
-            Err(TokenError::AfterRecords) => break,
+            Ok(None) => {
+                tokenizer.finish().map_err(CallError::Token)?;
+                break false;
+            }
+            Err(TokenError::AfterRecords) => break true,
             Err(error) => return Err(CallError::Token(error)),
         }
-    }
+    };
     let canonical = serde_json::to_vec(&records)
         .map_err(|_| CallError::Step(StepError::new(kumochi_scene::ErrorCode::Malformed)))?;
     let mut hash = Sha256::new();
@@ -186,7 +211,10 @@ fn checked(
     hash.update(&canonical);
     Ok(DrawArgs {
         hash: hash.finalize().into(),
-        args: args.to_vec(),
+        records: DrawRecords {
+            records,
+            after_records,
+        },
     })
 }
 
@@ -237,6 +265,7 @@ mod tests {
         ]}))
         .expect("fixture");
         let draw = validate(&args).expect("valid privacy fixture");
+        let records = format!("{:?}", draw.records);
         let action = crate::dispatch::Step::Screen {
             key: crate::dispatch::LedgerKey {
                 run: kumochi_protocol::message::RunId(1),
@@ -245,9 +274,10 @@ mod tests {
             },
             draw: super::super::DrawAction::Complete(Ok(draw)),
         };
-        let shown = format!("{action:?}");
-        assert!(!shown.contains(marker));
-        assert!(!shown.contains(format!("{:?}", marker.as_bytes()).trim_matches(['[', ']'])));
+        for shown in [records, format!("{action:?}")] {
+            assert!(!shown.contains(marker));
+            assert!(!shown.contains(format!("{:?}", marker.as_bytes()).trim_matches(['[', ']'])));
+        }
     }
 
     #[test]
@@ -260,6 +290,22 @@ mod tests {
         assert_eq!(a.hash, b.hash);
         let changed = validate(br#"{"records":[{"step":{"id":"t"}}]}"#).expect("changed record");
         assert_ne!(a.hash, changed.hash);
+    }
+
+    #[test]
+    fn complete_draw_retry_digest_matches_the_previous_format() {
+        let args = br#"{"records":[
+            {"begin":{"v":1,"scene":"sample","surface":"overlay","alt":"Dot"}},
+            {"step":{"id":"s","say":"Dot"}},{"end":{}}]}"#;
+        let digest = validate(args).expect("valid small draw").hash;
+        assert_eq!(
+            digest,
+            [
+                0x5e, 0x6c, 0x52, 0xf1, 0xe8, 0x38, 0x56, 0x1c, 0x96, 0x61, 0xb0, 0xd6, 0x80, 0xcd,
+                0x71, 0xb0, 0x84, 0xa2, 0x54, 0xea, 0xc7, 0xae, 0xd3, 0x97, 0x16, 0xee, 0xb6, 0x8b,
+                0xdf, 0x15, 0x4d, 0xf9,
+            ]
+        );
     }
 
     #[test]
@@ -430,7 +476,10 @@ mod tests {
             assert_eq!(error.tool_text(), "surface: scene.Unsupported");
         }
         let screen = br#"{"records":[{"begin":{"scene":"screen-mark","surface":"screen","alt":"A marked control"}},{"step":{"id":"point","put":[{"highlight":{"id":"target","target":{"box":[20,30,40,50]},"style":"box"}}]}},{"end":{}}]}"#;
-        assert_eq!(validate(screen).expect("screen preflight").args, screen);
+        assert!(matches!(
+            validate(screen).expect("screen preflight").records.records.as_slice(),
+            [Record::Begin(begin), Record::Step(_), Record::End(_)] if begin.surface == kumochi_scene::record::Surface::Screen
+        ));
         let written_display = br#"{"begin":{"scene":"screen-mark","surface":"screen","alt":"a","display":{"origin":[0,0],"size":[2560,1440],"dpi":96}}}"#;
         let CallError::Step(error) = record(written_display).expect_err("host-only display") else {
             panic!("typed display refusal");
@@ -483,7 +532,7 @@ mod tests {
             let run = RunId(1);
             let thread = ThreadId(1);
             let call_id = CallId::new("measure").expect("ASCII");
-            let args = if matches!(path, Path::Adapter) {
+            let input = if matches!(path, Path::Adapter) {
                 let mut ledger = Ledger::default();
                 let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
                 let mut ctx = RunCtx {
@@ -517,17 +566,22 @@ mod tests {
                 else {
                     panic!("valid complete draw");
                 };
-                draw.args
-            } else {
-                args.to_vec()
-            };
-            let output = crate::drawing::Drawing::default()
-                .handle(crate::drawing::Input::Call {
+                crate::drawing::Input::CheckedCall {
                     thread,
                     run,
                     call: call_id,
-                    args,
-                })
+                    records: draw.records,
+                }
+            } else {
+                crate::drawing::Input::Call {
+                    thread,
+                    run,
+                    call: call_id,
+                    args: args.to_vec(),
+                }
+            };
+            let output = crate::drawing::Drawing::default()
+                .handle(input)
                 .expect("one new call");
             assert_eq!(output.effects.len(), 1);
             drop(black_box(output));

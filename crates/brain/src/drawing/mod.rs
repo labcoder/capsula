@@ -86,6 +86,17 @@ pub enum Input {
         /// The arguments.
         args: Vec<u8>,
     },
+    /// A complete draw whose arguments already passed preflight.
+    CheckedCall {
+        /// The resolved thread.
+        thread: ThreadId,
+        /// The owning run.
+        run: RunId,
+        /// The host's internal call id.
+        call: CallId,
+        /// The typed records in tokenizer order.
+        records: crate::dispatch::DrawRecords,
+    },
     /// One closed record of a streamed call, in tokenizer order.
     Record {
         /// The thread.
@@ -542,7 +553,19 @@ impl Drawing {
                 run,
                 call,
                 args,
-            } => self.complete_call(thread, run, call, &args, &mut out)?,
+            } => self.complete_call(thread, run, call, call::CompleteArgs::Raw(&args), &mut out)?,
+            Input::CheckedCall {
+                thread,
+                run,
+                call,
+                records,
+            } => self.complete_call(
+                thread,
+                run,
+                call,
+                call::CompleteArgs::Checked(records),
+                &mut out,
+            )?,
             Input::Record {
                 thread,
                 run,
@@ -556,19 +579,7 @@ impl Drawing {
                 call,
                 error,
             } => self.call_finished(thread, run, call, error, &mut out)?,
-            Input::StopScenes { run, cuts } => {
-                // shortcut: D1 has one run; OSC-56 needs per-run revocation for concurrency.
-                for cut in cuts.iter() {
-                    let job = Job::Cut {
-                        scene: cut.scene,
-                        cut: cut.cut.clone(),
-                        kind: CutKind::Stop,
-                    };
-                    self.enqueue(job, &mut out);
-                }
-                let named = cuts.iter().map(|cut| cut.scene).collect();
-                self.enqueue(Job::Unseen { run, named }, &mut out);
-            }
+            Input::StopScenes { run, cuts } => self.stop_scenes(run, &cuts, &mut out),
             Input::StepShown { run, scene, index } => {
                 if self.committed_by(run, scene, index, &mut out) {
                     if let Some(at) = self.live(scene) {
@@ -895,6 +906,7 @@ impl fmt::Debug for Input {
         f.write_str(match self {
             Self::Rejected { .. } => "Rejected",
             Self::Call { .. } => "Call",
+            Self::CheckedCall { .. } => "CheckedCall",
             Self::Record { .. } => "Record",
             Self::CallFinished { .. } => "CallFinished",
             Self::StopScenes { .. } => "StopScenes",
