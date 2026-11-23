@@ -688,7 +688,7 @@ impl Presence {
         if !self.runs.releases_screen(gesture, own_model, default) {
             return;
         }
-        // An unchecked box that is still saving is already the user's no.
+        // shortcut: the pending Off veto is local to offers and release; revisit save ordering if pictures are ever granted earlier.
         if self.settings.read(cx).show_screen_choice() == Some(false) {
             self.runs.hold_screen_turned_off();
             return;

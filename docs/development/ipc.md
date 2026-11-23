@@ -214,6 +214,10 @@ things hold at recognition, and a hold's line and the conversation's screen note
    a default change the shell sent and the brain's next `ScreenHolds`, the stored `On` still
    names the old model and counts as not ready.
 
+The conversation note describes what a hold can do, not what every hold will do. A
+`ModelCantSee` refusal carries no model identity, so its note names no model even when
+the shell already has a newer default.
+
 Under that check the shell sends `ScreenHoldRecognized` and takes nothing of the screen. It asks
 the same check once more for that gesture: when the keys come up, or as soon as the check stops
 holding while they are down. Only a yes at release takes the

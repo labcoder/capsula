@@ -433,10 +433,13 @@ fn stored_rows(state: &Threads, cx: &App) -> Rc<[Row]> {
             state,
             cx,
         );
-        line.text = cx
-            .global::<Strings>()
-            .with_model(note.text, note.model.as_str())
-            .into();
+        let strings = cx.global::<Strings>();
+        line.text = if note.text == Text::ScreenNoteCant {
+            strings.get(note.text)
+        } else {
+            strings.with_model(note.text, note.model.as_str())
+        }
+        .into();
         rows.insert(at, line);
     }
     rows.into()
@@ -905,20 +908,39 @@ mod tests {
             assert_eq!(ids(&rows), [("event", 5), ("note", 5), ("event", 7)]);
             assert_eq!(
                 rows[1].text.as_ref(),
-                "GPT-6 Sol doesn't support screenshots, so messages will go without one."
+                "Hold to talk can't include a screenshot right now."
             );
             assert_eq!(rows[1].label, None);
             // Said in an empty conversation, it stays above what came later.
             state.set_screen_note_for_tests(note(None, Text::ScreenNoteCan));
             let rows = stored_rows(&state, cx);
             assert_eq!(ids(&rows), [("note", 0), ("event", 5), ("event", 7)]);
-            assert_eq!(
-                rows[0].text.as_ref(),
-                "GPT-6 Sol supports screenshots, so holding to talk will send one along."
-            );
             // Another conversation is open: the line stays with its own.
             state.open = Some(ThreadId(4));
             assert_eq!(ids(&stored_rows(&state, cx)), [("event", 5), ("event", 7)]);
+        });
+    }
+
+    #[gpui::test]
+    fn a_screen_note_names_the_model_without_promising_a_picture(cx: &mut TestAppContext) {
+        use crate::threads::ScreenNote;
+        use kumochi_protocol::message::ModelName;
+        cx.update(|cx| {
+            cx.set_global(Strings::english());
+            let mut state = Threads::chat_for_tests();
+            let thread = ThreadId(3);
+            state.open = Some(thread);
+            state.set_screen_note_for_tests(ScreenNote {
+                thread,
+                after: None,
+                text: Text::ScreenNoteCan,
+                model: ModelName::new("GPT-6 Sol").unwrap(),
+            });
+            let rows = stored_rows(&state, cx);
+            assert_eq!(
+                rows[0].text.as_ref(),
+                "Holding to talk can send a screenshot to GPT-6 Sol."
+            );
         });
     }
 

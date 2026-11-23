@@ -135,6 +135,8 @@ compositing a restored surface. An already accepted frame keeps its normal captu
 no replacement lease is allowed over restoration debt. A revoke that runs inside a covered
 window's own update, such as a drawing frame on the dock or a button in a panel, can't restore
 that window; its receipt stays as debt until the timer's cleanup, at most three seconds later.
+If a hold tries to take a lease while that debt remains, it goes on as voice and says the
+screen wasn't included. The conversation's capability note is not a promise for that hold.
 Source regressions do not establish
 compositor timing or pixel privacy; the dock, bubble and proxy cases are checked in a capture
 session on Rez.

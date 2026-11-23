@@ -1083,6 +1083,7 @@ impl LinkHandle {
 
     /// Queues a control message for `session`'s brain. False when the connection ended or the
     /// mailbox refused. Stop, drawing clears and queued scene refusals don't take the outbox lock.
+    /// shortcut: control Debug prints physical points for assertions; use only redacted kinds if adding diagnostics here.
     pub fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
         if session.io.queued
             && matches!(

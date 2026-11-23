@@ -882,14 +882,14 @@ mod tests {
                 format!("Screen not included: {reason}"),
             );
         }
+        assert_eq!(
+            strings.get(Text::ScreenNoteCant),
+            "Hold to talk can't include a screenshot right now."
+        );
         for (text, line) in [
             (
-                Text::ScreenNoteCant,
-                "GPT-5.5 doesn't support screenshots, so messages will go without one.",
-            ),
-            (
                 Text::ScreenNoteCan,
-                "GPT-5.5 supports screenshots, so holding to talk will send one along.",
+                "Holding to talk can send a screenshot to GPT-5.5.",
             ),
             (Text::ScreenHoldWillSee, "GPT-5.5 will see this window"),
         ] {

@@ -194,6 +194,7 @@ impl Presence {
         else {
             return;
         };
+        // shortcut: reconnect revokes before replacing the session; bind the lapse to that session if the order changes.
         if let Some(session) = self
             .session
             .as_ref()
