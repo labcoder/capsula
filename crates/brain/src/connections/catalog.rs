@@ -80,6 +80,7 @@ impl CatalogError {
     #[must_use]
     pub(crate) fn failure(self) -> UserError {
         let (key, retry) = match self {
+            Self::Http(HttpError::UnsupportedPlatform) => (ErrorKey::UnsupportedPlatform, false),
             Self::Http(HttpError::TrustStoreUnavailable) => (ErrorKey::TrustStoreUnavailable, true),
             // The only unavailable plan, which arms Erase on sign-out.
             Self::Refused {

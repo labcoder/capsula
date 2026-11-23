@@ -29,7 +29,6 @@ impl fmt::Debug for TrustRoots {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TrustRootsError {
     /// This build has no native trust-store adapter.
-    #[cfg(not(windows))]
     #[error("native trust roots are unsupported on this platform")]
     Unsupported,
     /// The OS refused to open the ROOT or Disallowed store with this error code.
@@ -41,6 +40,10 @@ pub enum TrustRootsError {
     /// No root was usable, so no server could be verified.
     #[error("no usable root certificate")]
     Empty,
+}
+
+pub(crate) const fn native_trust_supported() -> bool {
+    cfg!(windows)
 }
 
 /// Loads the usable public roots from the OS trust store.
