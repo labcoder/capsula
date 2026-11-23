@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use async_channel::{Receiver, Sender};
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
-    DATA_WINDOW, DataToShell, RunId, SceneHeader, SceneId, SceneSnapshotChunk,
+    DATA_WINDOW, DataToShell, RunId, SceneHeader, SceneId, SceneSnapshotChunk, ShellTuning,
 };
 use kumochi_scene::{Record, SceneEvent, Step, deferred, parse_record, text::Bounded};
 
@@ -204,7 +204,7 @@ fn run(method: Method, label: &str) {
         let (brain_control, shell_control) = pair(&format!("{label}-{workload}-control"));
         let (events, received) = async_channel::unbounded();
         let credit = super::SessionIo {
-            tuning: Default::default(),
+            tuning: ShellTuning::default(),
             queued: false,
             narrated: None,
             control: None,
