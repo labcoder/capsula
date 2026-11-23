@@ -1,4 +1,6 @@
+#[cfg(windows)]
 use std::fs::{File, OpenOptions};
+#[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -209,6 +211,7 @@ fn swapped_with_old_left(scratch: &Scratch) -> Store {
 }
 
 /// Opens `path` so it can't be deleted until the handle drops.
+#[cfg(windows)]
 fn hold(path: &Path) -> File {
     const FILE_SHARE_READ: u32 = 1;
     OpenOptions::new()
@@ -234,6 +237,7 @@ fn an_old_store_left_by_a_crash_is_removed_at_start() {
 }
 
 #[test]
+#[cfg(windows)]
 fn an_old_store_that_cant_be_removed_is_retried_in_session_and_at_the_next_start() {
     let scratch = Scratch::new("old-held");
     let store = swapped_with_old_left(&scratch);
@@ -259,6 +263,7 @@ fn an_old_store_that_cant_be_removed_is_retried_in_session_and_at_the_next_start
 }
 
 #[test]
+#[cfg(windows)]
 fn an_old_store_held_with_delete_sharing_is_finished_only_once_its_name_is_gone() {
     const FILE_SHARE_READ_WRITE_DELETE: u32 = 1 | 2 | 4;
     let scratch = Scratch::new("old-shared");

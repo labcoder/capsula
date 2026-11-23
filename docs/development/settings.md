@@ -9,6 +9,11 @@ module. It reads `APPDATA` and requires an absolute path, just as the local data
 an absolute `LOCALAPPDATA`. Missing, empty or relative roots never fall back to the working
 directory.
 
+Linux unit tests can supply an explicit scratch directory. They atomically rename a synced
+sibling file and sync the directory. If the directory sync fails after the rename, the test
+fails as a broken test host instead of reporting an ordinary write failure. This is a fixture
+path, not a Linux settings root or a production write adapter.
+
 ## Shell editor
 
 Accounts also composes Claude Code through `presence/settings/claude.rs`. The plain
