@@ -91,8 +91,8 @@ pub(crate) enum Session {
 /// Why a client was turned away or a session broke.
 #[derive(Debug, thiserror::Error)]
 enum SessionError {
-    #[error("client is {0:?}, not the shell beside the brain")]
-    NotOurShell(PathBuf),
+    #[error("client is not the shell beside the brain")]
+    NotOurShell,
     #[error("client didn't finish the handshake in time")]
     Timeout,
     #[error("client closed before the handshake")]
@@ -221,7 +221,7 @@ impl Pipes {
         match check_hello(&hello, identity) {
             Verdict::WrongCapability => return Err(SessionError::WrongCapability),
             Verdict::BuildMismatch => {
-                tracing::warn!(shell = hello.build_id, brain = BUILD_ID, "build mismatch");
+                tracing::warn!("build mismatch");
                 let reply = ControlToShell::BuildMismatch {
                     brain_build: BUILD_ID.to_owned(),
                 };
@@ -329,14 +329,17 @@ fn create(session: u32, pipe: Pipe, instance: Instance) -> Result<PipeServer, Ip
 }
 
 fn check_client(pipe: &PipeServer, shell_image: &Path) -> Result<(), SessionError> {
-    let image = platform::client_image(pipe)?;
+    check_client_image(&platform::client_image(pipe)?, shell_image)
+}
+
+fn check_client_image(image: &Path, shell_image: &Path) -> Result<(), SessionError> {
     if image
         .as_os_str()
         .eq_ignore_ascii_case(shell_image.as_os_str())
     {
         Ok(())
     } else {
-        Err(SessionError::NotOurShell(image))
+        Err(SessionError::NotOurShell)
     }
 }
 
@@ -797,6 +800,17 @@ mod tests {
             capability: Secret::new(one_byte_off),
         };
         assert_eq!(check_hello(&near, &id), Verdict::WrongCapability);
+    }
+
+    #[test]
+    fn the_rejected_image_is_not_in_the_refusal() {
+        let foreign = std::path::Path::new(r"C:\synthetic-profile\foreign.exe");
+        let error = super::check_client_image(foreign, &identity().shell_image).unwrap_err();
+        assert_eq!(format!("{error:?}"), "NotOurShell");
+        assert_eq!(
+            error.to_string(),
+            "client is not the shell beside the brain"
+        );
     }
 
     #[tokio::test]
