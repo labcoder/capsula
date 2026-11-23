@@ -22,7 +22,7 @@ use crate::voice::pump::Pump;
 use crate::voice::stt::SttHandle;
 use crate::voice::tts::TtsHandle;
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod path_tests;
 
 pub(crate) struct Voice {
@@ -204,6 +204,8 @@ fn whole(models: &Path, part: VoicePart) -> Result<bool, ErrorKey> {
         Err(Untrusted::Missing) => return Ok(false),
         Err(Untrusted::Reparse | Untrusted::Unsafe) => return Err(ErrorKey::VoiceModelPath),
         Err(Untrusted::Io) => return Err(ErrorKey::VoiceStorage),
+        #[cfg(not(windows))]
+        Err(Untrusted::Unsupported) => return Err(ErrorKey::UnsupportedPlatform),
     };
     for (file, pin) in held.files.iter().zip(manifest) {
         if file.metadata().map_err(|_| ErrorKey::VoiceStorage)?.len() != pin.bytes {

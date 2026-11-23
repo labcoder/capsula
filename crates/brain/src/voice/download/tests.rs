@@ -1,3 +1,4 @@
+#[cfg(windows)]
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -12,7 +13,9 @@ use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::sync::mpsc as async_mpsc;
 
 use super::*;
-use crate::test_support::{Captured, SENTINEL, Scratch};
+use crate::test_support::Scratch;
+#[cfg(windows)]
+use crate::test_support::{Captured, SENTINEL};
 
 const MODEL: ModelFile = ModelFile {
     part: VoicePart::SpeechInput,
@@ -207,6 +210,23 @@ impl Downloader {
     }
 }
 
+#[cfg(not(windows))]
+#[tokio::test]
+async fn protected_path_refusal_preserves_files_and_never_connects() {
+    let server = Server::start(vec![]);
+    let (_scratch, downloader) = server.downloader();
+    let partial = part_path(&downloader);
+    seed(&partial, b"abc");
+
+    assert_eq!(
+        fetch(&downloader).await.0,
+        Err(DownloadError::UnsupportedPlatform)
+    );
+    assert_eq!(fs::read(&partial).unwrap(), b"abc");
+    assert!(!final_path(&downloader).exists());
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
+}
+
 fn final_path(downloader: &Downloader) -> PathBuf {
     downloader.models.join(MODEL.part.dir()).join(MODEL.name)
 }
@@ -234,6 +254,7 @@ async fn fetch(downloader: &Downloader) -> (Result<(), DownloadError>, Progress)
     (result, value)
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_refuse_a_redirected_installed_root_without_changing_bytes() {
     let server = Server::start(vec![]);
@@ -249,6 +270,7 @@ async fn model_paths_refuse_a_redirected_installed_root_without_changing_bytes()
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_refuse_a_hard_linked_partial_without_changing_its_alias() {
     let server = Server::start(vec![Reply::full()]);
@@ -264,12 +286,14 @@ async fn model_paths_refuse_a_hard_linked_partial_without_changing_its_alias() {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(windows)]
 enum LinkedFolder {
     Root,
     Part,
     Ancestor,
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_review_h1_held_empty_directory_cannot_redirect_partial_creation() {
     for root in [false, true] {
@@ -309,6 +333,7 @@ async fn model_review_h1_held_empty_directory_cannot_redirect_partial_creation()
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_review_acquisition_refusal_preserves_an_earlier_invalid_final() {
     let server = Server::start(vec![Reply::full()]);
@@ -345,6 +370,7 @@ async fn model_review_acquisition_refusal_preserves_an_earlier_invalid_final() {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_review_h2_preserves_a_replacement_between_hash_and_discard() {
     let server = Server::start(vec![Reply::full()]);
@@ -369,16 +395,19 @@ async fn model_review_h2_preserves_a_replacement_between_hash_and_discard() {
     assert_eq!(fs::read(target).unwrap(), b"abcdef");
 }
 
+#[cfg(windows)]
 enum LinkKind {
     Junction,
     Symlink,
 }
 
+#[cfg(windows)]
 enum LinkedFile {
     Final,
     Partial,
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_keep_verified_read_only_final_hardlinks_working() {
     let server = Server::start(vec![]);
@@ -394,6 +423,7 @@ async fn model_paths_keep_verified_read_only_final_hardlinks_working() {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(windows)]
 async fn linked_folder_refused(location: LinkedFolder, kind: LinkKind) {
     let server = Server::start(vec![]);
     let (scratch, mut downloader) = server.downloader();
@@ -433,31 +463,37 @@ async fn linked_folder_refused(location: LinkedFolder, kind: LinkKind) {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_refuse_a_part_junction() {
     linked_folder_refused(LinkedFolder::Part, LinkKind::Junction).await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_refuse_an_ancestor_junction() {
     linked_folder_refused(LinkedFolder::Ancestor, LinkKind::Junction).await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_refuse_a_root_symlink() {
     linked_folder_refused(LinkedFolder::Root, LinkKind::Symlink).await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_refuse_a_part_symlink() {
     linked_folder_refused(LinkedFolder::Part, LinkKind::Symlink).await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_refuse_an_ancestor_symlink() {
     linked_folder_refused(LinkedFolder::Ancestor, LinkKind::Symlink).await;
 }
 
+#[cfg(windows)]
 async fn linked_file_refused(location: LinkedFile, kind: LinkKind) {
     let server = Server::start(vec![Reply::full()]);
     let (scratch, downloader) = server.downloader();
@@ -485,26 +521,31 @@ async fn linked_file_refused(location: LinkedFile, kind: LinkKind) {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_refuse_a_final_symlink() {
     linked_file_refused(LinkedFile::Final, LinkKind::Symlink).await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_refuse_a_partial_symlink() {
     linked_file_refused(LinkedFile::Partial, LinkKind::Symlink).await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_refuse_a_final_junction() {
     linked_file_refused(LinkedFile::Final, LinkKind::Junction).await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_refuse_a_partial_junction() {
     linked_file_refused(LinkedFile::Partial, LinkKind::Junction).await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_refuse_unc_without_contacting_it() {
     let server = Server::start(vec![]);
@@ -514,6 +555,7 @@ async fn model_paths_refuse_unc_without_contacting_it() {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn model_paths_preflight_the_whole_attempt_before_removing_an_earlier_bad_final() {
     let server = Server::start(vec![]);
@@ -545,6 +587,7 @@ async fn model_paths_preflight_the_whole_attempt_before_removing_an_earlier_bad_
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn sizes_exact_over_short_empty_and_missing_length() {
     for (wire, expected, kept) in [
@@ -622,6 +665,7 @@ async fn sizes_exact_over_short_empty_and_missing_length() {
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn truncated_response_resumes_with_exact_headers() {
     let mut server = Server::start(vec![
@@ -682,6 +726,7 @@ async fn truncated_response_resumes_with_exact_headers() {
     assert_eq!(headers(&second), expected, "only Range added on resume");
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn restart_statuses_and_the_single_restart_bound() {
     for status in [
@@ -750,6 +795,7 @@ async fn restart_statuses_and_the_single_restart_bound() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn existing_files_crash_partials_and_exclusive_lock() {
     let server = Server::start(vec![Reply::full()]);
@@ -821,6 +867,7 @@ async fn existing_files_crash_partials_and_exclusive_lock() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn corrupt_final_is_removed_before_request_and_hash_failures_delete_partials() {
     let mut server = Server::start(vec![Reply::stalled()]);
@@ -862,6 +909,7 @@ async fn corrupt_final_is_removed_before_request_and_hash_failures_delete_partia
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn free_space_exact_need_one_under_and_resume_credit() {
     for (prefix, available, expected, needed) in [
@@ -922,6 +970,7 @@ async fn free_space_exact_need_one_under_and_resume_credit() {
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn part_space_and_progress_are_aggregated_before_the_first_request() {
     let server = Server::start(vec![Reply::full(), Reply::full()]);
@@ -986,6 +1035,7 @@ async fn part_space_and_progress_are_aggregated_before_the_first_request() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn transient_statuses_keep_partial_without_retry() {
     for (status, expected) in [
@@ -1010,6 +1060,7 @@ async fn transient_statuses_keep_partial_without_retry() {
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn redirects_five_pass_six_fail_and_never_send_referer() {
     for hops in [5, 6] {
@@ -1058,6 +1109,7 @@ async fn redirects_five_pass_six_fail_and_never_send_referer() {
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn redirects_and_first_url_refuse_untrusted_destinations() {
     for location in [
@@ -1190,6 +1242,7 @@ fn production_host_policy_and_parser_boundaries() {
     }
 }
 
+#[cfg(windows)]
 async fn wait_for_prefix(path: &Path) {
     let started = std::time::Instant::now();
     while started.elapsed() < Duration::from_secs(4) {
@@ -1201,6 +1254,7 @@ async fn wait_for_prefix(path: &Path) {
     panic!("fixture prefix was not written");
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn cancel_mid_file_keeps_prefix_and_next_fetch_resumes() {
     let server = Server::start(vec![
@@ -1274,6 +1328,7 @@ async fn cancellation_during_prefix_rehash_and_closed_cancel_channel() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test(start_paused = true)]
 async fn stalled_body_times_out_at_exactly_thirty_seconds() {
     let spinner = tokio::spawn(async {
@@ -1401,6 +1456,7 @@ async fn construction_makes_no_request_and_bad_roots_fail_closed() {
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn mismatched_length_is_refused_before_waiting_for_body() {
     let server = Server::start(vec![Reply {
@@ -1416,6 +1472,7 @@ async fn mismatched_length_is_refused_before_waiting_for_body() {
     assert!(!part_path(&downloader).exists(), "bad-size partial removed");
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn cancelled_public_fetch_sends_nothing_and_preserves_partial() {
     fn send_future<T: Send>(value: T) -> T {
@@ -1444,6 +1501,7 @@ async fn cancelled_public_fetch_sends_nothing_and_preserves_partial() {
     assert_eq!(server.accepted.load(Ordering::SeqCst), 0, "no request");
 }
 
+#[cfg(windows)]
 #[tokio::test(start_paused = true)]
 async fn connection_and_tls_handshake_have_a_thirty_second_deadline() {
     let spinner = tokio::spawn(async {
@@ -1515,6 +1573,7 @@ fn errors_are_closed_and_content_free() {
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 #[ignore = "live HEAD requests require the owner's explicit approval"]
 async fn measure_download_head() {
