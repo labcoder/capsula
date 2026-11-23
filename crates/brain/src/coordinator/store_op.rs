@@ -183,6 +183,8 @@ pub enum StoreOp {
     ReadCall(crate::dispatch::ReadCall),
     /// Capture a hold's target choice and live deletion identity on the stamped reader.
     ReadHold(super::HoldRead),
+    /// Read whether a live chat actually inherits the global model.
+    ReadTypedTarget(super::typed_screen::ReadTarget),
     /// Read an inline compaction's request on the page reader, in one read transaction.
     CompactContext(super::CompactContext),
     /// The turn, its run, and the thread when `title` names a new one.
@@ -318,6 +320,11 @@ pub enum StoreOp {
         /// The run.
         run: RunId,
     },
+    /// The original one-shot typed picture request fully flushed.
+    FlushedTypedScreen {
+        /// The run the request carried.
+        run: RunId,
+    },
 }
 
 /// A summary's text. Its `Debug` shows only the length, so formatting a write never prints it.
@@ -351,6 +358,7 @@ impl StoreOp {
             | Self::ReadJob(_)
             | Self::ReadCall(_)
             | Self::ReadHold(_)
+            | Self::ReadTypedTarget(_)
             | Self::CompactContext(_)
             | Self::ClearScenes { .. }
             | Self::KeepScene { .. }
@@ -362,7 +370,8 @@ impl StoreOp {
             | Self::WithdrawScreen { .. }
             | Self::ForgetScreen { .. }
             | Self::CantSeeScreen { .. }
-            | Self::SentScreen { .. } => None,
+            | Self::SentScreen { .. }
+            | Self::FlushedTypedScreen { .. } => None,
         }
     }
 
@@ -373,6 +382,7 @@ impl StoreOp {
                 key: read.snapshot.key,
                 result: Err(()),
             },
+            Self::ReadTypedTarget(read) => read.reply(false),
             Self::Issue { serial, .. } => Input::IssueWritten {
                 serial: *serial,
                 reply: Err(()),
@@ -448,7 +458,8 @@ impl StoreOp {
             | Self::WithdrawScreen { .. }
             | Self::ForgetScreen { .. }
             | Self::CantSeeScreen { .. }
-            | Self::SentScreen { .. } => {
+            | Self::SentScreen { .. }
+            | Self::FlushedTypedScreen { .. } => {
                 return None;
             }
         })

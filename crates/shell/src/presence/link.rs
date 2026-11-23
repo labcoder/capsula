@@ -211,6 +211,7 @@ impl Presence {
                     self.runs.refused(turn, thread);
                     self.sync_deletes(cx);
                 }
+                LinkEvent::TypedScreenOffered { .. } | LinkEvent::TypedScreenHeld { .. } => {}
                 LinkEvent::ThreadsChanged => self.threads_changed(cx),
                 LinkEvent::Connections { generation, view } => {
                     self.connections_changed(generation, view, cx);

@@ -62,6 +62,12 @@ pub trait Surfaces {
     fn restore(&mut self, slot: Slot, receipt: &Self::Receipt) -> Result<(), Error>;
     fn gone(receipt: &Self::Receipt) -> bool;
     fn same(&self, slot: Slot, receipt: &Self::Receipt) -> bool;
+
+    /// Attest continuous protection of the slot, or its absence, since acquisition.
+    /// An adapter that cannot establish this must never provide positive typed proof.
+    fn confirms_exclusion(&self, _slot: Slot, _receipt: Option<&Self::Receipt>) -> bool {
+        false
+    }
 }
 
 pub struct ExclusionLease<R> {
@@ -181,21 +187,55 @@ impl<R> Exclusion<R> {
         now: Instant,
         surfaces: &mut impl Surfaces<Receipt = R>,
     ) -> Result<(), Error> {
-        if self
-            .lease
-            .as_ref()
-            .is_some_and(|lease| lease.key == key && now >= lease.deadline)
-        {
+        if self.expired(key, now) {
             self.cleanup(surfaces)
         } else {
             Ok(())
         }
     }
 
-    pub fn matches(&self, session: u64, input: CaptureFor) -> bool {
+    pub(crate) fn expired(&self, key: Key, now: Instant) -> bool {
         self.lease
             .as_ref()
-            .is_some_and(|lease| lease.key.session == session && lease.key.input == input)
+            .is_some_and(|lease| lease.key == key && now >= lease.deadline)
+    }
+
+    pub(crate) fn key(&self, session: u64, input: CaptureFor) -> Option<Key> {
+        self.lease
+            .as_ref()
+            .map(|lease| lease.key)
+            .filter(|key| key.session == session && key.input == input)
+    }
+
+    /// Restore only this exact lease, leaving a newer owner untouched.
+    ///
+    /// # Errors
+    /// Returns the restoration debt if a surface could not be restored.
+    pub fn restore_matching(
+        &mut self,
+        key: Key,
+        surfaces: &mut impl Surfaces<Receipt = R>,
+    ) -> Result<(), Error> {
+        if self.lease.as_ref().is_some_and(|lease| lease.key == key) {
+            self.cleanup(surfaces)?;
+        }
+        Ok(())
+    }
+
+    /// Check the exact lease and all current surface receipts before restoring.
+    pub fn confirms(&self, key: Key, now: Instant, surfaces: &impl Surfaces<Receipt = R>) -> bool {
+        self.lease.as_ref().is_some_and(|lease| {
+            lease.key == key
+                && !lease.revoked
+                && now < lease.deadline
+                && SLOTS.into_iter().all(|slot| {
+                    surfaces.confirms_exclusion(slot, lease.receipts[slot as usize].as_ref())
+                })
+        })
+    }
+
+    pub fn matches(&self, session: u64, input: CaptureFor) -> bool {
+        self.key(session, input).is_some()
     }
 
     pub fn owns(&self, generation: LeaseGeneration) -> bool {

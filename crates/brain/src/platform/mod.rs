@@ -186,6 +186,14 @@ pub(crate) fn display_at(
     None
 }
 
+/// Reads the exact display instance at a physical point, if the platform can prove it.
+pub(crate) fn typed_display_at(
+    _point: kumochi_protocol::geometry::PhysicalPoint,
+) -> Option<kumochi_protocol::geometry::TypedDisplay> {
+    // shortcut: a reused native handle is not an instance token; N-8.4 must prove identity.
+    None
+}
+
 /// Whether one managed-policy source exists, by existence only. Only a proven-missing source is
 /// `Absent`; access denied and every other unresolved result are `Indeterminate`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

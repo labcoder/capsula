@@ -215,6 +215,8 @@ pub struct SendLease {
     /// `None` once abandoned.
     inputs: Option<mpsc::UnboundedSender<Input>>,
     unsent: bool,
+    typed_picture: bool,
+    flushed: bool,
     /// The coordinator's revocable grant for the picture the request carries.
     picture: Option<PictureGrant>,
     picture_receipt: Option<oneshot::Sender<PictureReceipt>>,
@@ -233,6 +235,8 @@ impl SendLease {
             lease,
             inputs: Some(inputs),
             unsent: true,
+            typed_picture: false,
+            flushed: false,
             picture: None,
             picture_receipt: None,
         }
@@ -241,6 +245,11 @@ impl SendLease {
     /// Lets the send write only while `picture`, the grant for the picture it carries, is open.
     pub(crate) fn with_picture(mut self, picture: Option<PictureGrant>) -> Self {
         self.picture = picture;
+        self
+    }
+
+    pub(crate) fn for_typed_picture(mut self, typed_picture: bool) -> Self {
+        self.typed_picture = typed_picture;
         self
     }
 
@@ -287,6 +296,11 @@ impl crate::connections::model::Lease for SendLease {
         self.unsent = false;
     }
 
+    fn flushed(&mut self) {
+        self.wrote();
+        self.flushed = self.typed_picture;
+    }
+
     fn carries_picture(&self) -> bool {
         SendLease::carries_picture(self)
     }
@@ -299,6 +313,8 @@ impl Drop for SendLease {
         };
         let settled = if self.unsent {
             Input::SendUnsent { lease: self.lease }
+        } else if self.flushed {
+            Input::SendFlushed { lease: self.lease }
         } else {
             Input::SendSettled { lease: self.lease }
         };

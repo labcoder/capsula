@@ -456,7 +456,7 @@ impl ModelRequest {
         clippy::fn_params_excessive_bools,
         reason = "the coordinator's answer that the run's route may carry its picture now"
     )]
-    fn insert_image(&mut self, image: Jpeg, pictured: bool) -> Result<(), ImageRefused> {
+    pub(crate) fn insert_image(&mut self, image: Jpeg, pictured: bool) -> Result<(), ImageRefused> {
         if !pictured || self.choice.is_none() {
             return Err(ImageRefused::Route);
         }

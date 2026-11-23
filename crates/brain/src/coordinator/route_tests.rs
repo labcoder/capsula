@@ -57,7 +57,7 @@ fn unavailable(kind: ConnectionKind, why: UserError) -> Input {
     Input::Engines(kind, Availability::Unavailable(why))
 }
 
-pub(super) fn choice(kind: ConnectionKind, slug: &str) -> ModelChoice {
+pub(in crate::coordinator) fn choice(kind: ConnectionKind, slug: &str) -> ModelChoice {
     ModelChoice {
         connection: kind,
         model: ModelSlug::new(slug).expect("slug"),
@@ -475,7 +475,7 @@ fn another_connections_choice_fails_while_chatgpt_lists_its_slug() {
 }
 
 /// The key ready under `tag` with model `m`, its fresh fact saying `images` take pictures.
-pub(super) fn pictured(tag: u64, images: &[&str]) -> Availability {
+pub(in crate::coordinator) fn pictured(tag: u64, images: &[&str]) -> Availability {
     Availability::Ready(Ready {
         connection: ConnectionTag(tag),
         models: vec![info("m")],
@@ -487,7 +487,7 @@ pub(super) fn pictured(tag: u64, images: &[&str]) -> Availability {
     })
 }
 
-pub(super) fn jpeg() -> crate::context::Jpeg {
+pub(in crate::coordinator) fn jpeg() -> crate::context::Jpeg {
     crate::context::Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).expect("a jpeg")
 }
 

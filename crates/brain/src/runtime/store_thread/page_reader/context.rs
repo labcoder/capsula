@@ -67,6 +67,24 @@ pub(super) fn read_hold(
     Ok(snapshot)
 }
 
+pub(super) fn read_typed_target(
+    side: &Side,
+    target: &crate::coordinator::typed_screen::ReadTarget,
+) -> bool {
+    side.read_until(&target.control, |conn, control| {
+        control.with_handler(conn, |conn, scope| {
+            scope.query(conn, || {
+                let read = Snapshot::begin(conn)?;
+                let inherited = read.generation(target.thread)?.is_some()
+                    && matches!(read.stored_choice(target.thread)?, StoredChoice::Absent);
+                read.end()?;
+                Ok(inherited)
+            })
+        })?
+    })
+    .is_ok_and(|inherited| inherited)
+}
+
 pub(super) fn read_call(
     side: Result<&Side, crate::recall::Error>,
     call: crate::dispatch::ReadCall,

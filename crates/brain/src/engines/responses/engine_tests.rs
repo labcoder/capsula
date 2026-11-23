@@ -200,6 +200,54 @@ async fn a_refused_body_asks_for_no_bearer() {
     assert!(round.inputs.try_recv().is_err(), "no send was asked for");
 }
 
+#[tokio::test]
+async fn typed_picture_reaches_the_responses_wire_and_settles_as_fully_flushed() {
+    let mut request = request(Some("m"));
+    request
+        .request
+        .input
+        .push(crate::context::InputItem::Message {
+            role: crate::context::Role::User,
+            text: "typed words".into(),
+        });
+    request
+        .request
+        .insert_image(
+            crate::context::Jpeg::new(vec![0xff, 0xd8, 0xff, 0xd9]).unwrap(),
+            true,
+        )
+        .unwrap();
+    let mut round = start(request);
+    let lease = LeaseId {
+        key: key(),
+        send: 1,
+    };
+    let grant = SendLease::new(lease, round.inputs_tx.clone())
+        .with_picture(Some(crate::coordinator::PictureGrant::open_for_tests()))
+        .for_typed_picture(true);
+    round.bearer(Ok(bearer())).await;
+    round.answer(Answer::Grant(grant)).await;
+    let mut server = round.servers.recv().await.unwrap();
+    let wire = read_request(&mut server).await;
+    let body: serde_json::Value =
+        serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["model"], "m");
+    let pictures: Vec<_> = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|value| value["content"][0]["type"] == "input_image")
+        .map(|value| value["content"][0]["image_url"].as_str().unwrap())
+        .collect();
+    assert_eq!(pictures, ["data:image/jpeg;base64,/9j/2Q=="]);
+    assert_eq!(
+        round.inputs.recv().await,
+        Some(Input::SendFlushed { lease })
+    );
+    drop(server);
+    round.ended().await;
+}
+
 /// M159-1: no bearer fails the round before its ask, carrying the account's own reason when it
 /// gave one, such as a refresh that couldn't connect or a save the store refused.
 #[tokio::test]

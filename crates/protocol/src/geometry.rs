@@ -1,6 +1,6 @@
 //! Physical desktop coordinates and opaque native window references shared by capture messages.
 
-use std::fmt;
+use std::{fmt, num::NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,34 @@ pub struct PhysicalRect {
 /// The physical bounds of the display containing the pointer when a hold was recognized.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayRef(pub PhysicalRect);
+
+/// The exact native display instance selected for a typed screenshot.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedDisplay {
+    /// A native instance token, never a position, index or nearest-display fallback.
+    pub id: NonZeroU64,
+    /// The display's physical bounds when selected.
+    pub bounds: PhysicalRect,
+    /// The display's effective DPI when selected.
+    pub dpi: u32,
+}
+
+impl TypedDisplay {
+    /// Whether the point lies strictly within this display's half-open pixel bounds.
+    #[must_use]
+    pub fn contains(self, point: PhysicalPoint) -> bool {
+        (0..2).all(|axis| {
+            let offset = i64::from(point.0[axis]) - i64::from(self.bounds.origin[axis]);
+            (0..i64::from(self.bounds.size[axis])).contains(&offset)
+        })
+    }
+}
+
+impl fmt::Debug for TypedDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TypedDisplay").finish_non_exhaustive()
+    }
+}
 
 /// An opaque native window reference: an HWND on Windows or a `CGWindowID` on macOS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,5 +103,30 @@ pub struct ReleasePointer(pub PhysicalPoint);
 impl fmt::Debug for ReleasePointer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReleasePointer").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_display_geometry_is_half_open_and_debug_hides_its_record() {
+        let display = TypedDisplay {
+            id: NonZeroU64::new(81_827).unwrap(),
+            bounds: PhysicalRect {
+                origin: [i32::MIN, -42],
+                size: [u32::MAX, 2],
+            },
+            dpi: 321,
+        };
+        assert!(display.contains(PhysicalPoint([i32::MIN, -42])));
+        assert!(display.contains(PhysicalPoint([i32::MAX - 1, -41])));
+        assert!(!display.contains(PhysicalPoint([i32::MAX, -41])));
+        assert!(!display.contains(PhysicalPoint([i32::MIN, -40])));
+        let debug = format!("{display:?}");
+        for private in ["81827", "-2147483648", "4294967295", "321"] {
+            assert!(!debug.contains(private));
+        }
     }
 }

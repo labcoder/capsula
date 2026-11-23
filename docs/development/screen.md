@@ -78,6 +78,31 @@ it remains unimplemented and unverified.
 
 ## Local shell exclusion
 
+Typed submissions must not convert a requested picture into plain text. The legacy
+`ScreenChoice::Include` cannot prove which draft, display or recipient was authorized,
+so the brain refuses it in the normal turn queue without starting capture or a run.
+
+The one-shot typed protocol is dormant until the native exclusion and display adapter
+can establish continuous exclusion. The brain keeps at most one offer and one capturing
+turn on a paired connection. It pins the draft, selection, chat, display and committed
+global choice, including the verified account generation and image-capable model. It
+spends the offer before attempting capture, even on refusal. Cancelling an offer
+removes that authority before the data pipe has to deliver its turn. A refusal stays
+in turn order; credit and other control frames do not wait for capture.
+
+Holds and typed requests share a checked capture ID sequence. A typed request selects
+the exact display and waits for the shell to confirm continuous exclusion for the
+matching lease and held frame before sealing. Dropping the pending request releases
+only its frame; it cannot retire another hold or a newer capture. Shell-core can
+retry the retained words only as a new, explicit text-only submission for the original
+chat or draft.
+
+Responses is the only modeled route for one-shot typed pictures: its first request
+carries the image, and a later tool round cannot rebuild it. Key continuations resend
+their original prefix, so the Key and Code routes are not offered for typed pictures.
+Only a full Responses flush on the original pictured lease writes the history mark.
+An unknown or incomplete flush leaves no mark and does not imply that no bytes went out.
+
 Presence owns the exclusion transaction in `presence/exclusion.rs`; the lease and
 its cleanup rules are in `crates/shell-core/src/presence/exclusion/machine.rs`, with no GPUI.
 Its one production caller is a screen hold's release (`Presence::release_screen` in

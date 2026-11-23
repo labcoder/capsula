@@ -27,6 +27,8 @@ pub struct Fake {
     pub set_failure: Option<usize>,
     pub restore_failure: u8,
     pub controls: Option<async_channel::Receiver<kumochi_protocol::message::ControlToBrain>>,
+    #[cfg(test)]
+    pub(crate) proof_before_restore: bool,
 }
 
 impl Fake {
@@ -51,6 +53,8 @@ impl Fake {
             set_failure: None,
             restore_failure: 0,
             controls: None,
+            #[cfg(test)]
+            proof_before_restore: false,
         }
     }
 
@@ -107,6 +111,14 @@ impl Surfaces for Fake {
         reason = "asserts the fixture restores the same retained surface"
     )]
     fn restore(&mut self, slot: Slot, prior: &Prior) -> Result<(), Error> {
+        #[cfg(test)]
+        if self.proof_before_restore {
+            assert_eq!(
+                self.controls.as_ref().unwrap().len(),
+                1,
+                "proof precedes restoration"
+            );
+        }
         if prior.destroyed.get() {
             return Ok(());
         }
@@ -130,6 +142,16 @@ impl Surfaces for Fake {
         self.surfaces[slot as usize]
             .as_ref()
             .is_some_and(|surface| Rc::ptr_eq(&surface.destroyed, &prior.destroyed))
+    }
+
+    fn confirms_exclusion(&self, slot: Slot, prior: Option<&Prior>) -> bool {
+        match (&self.surfaces[slot as usize], prior) {
+            (None, None) => true,
+            (Some(surface), Some(prior)) => {
+                self.same(slot, prior) && !Self::gone(prior) && surface.affinity == EXCLUDED
+            }
+            _ => false,
+        }
     }
 }
 

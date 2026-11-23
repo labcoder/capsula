@@ -20,6 +20,7 @@ mod settings;
 mod store_thread;
 #[cfg(test)]
 mod tests;
+mod typed_screen;
 mod voice;
 
 use std::cell::{Cell, RefCell};
@@ -32,7 +33,7 @@ use kumochi_protocol::message::DataToBrain::{Hello, QueuedHello, TextMetrics};
 use kumochi_protocol::message::{
     AudioSession, ConnectionKind, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain,
     DataToShell, Deleted, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId,
-    SegmentStart, SpeechPcm, ThreadId, Transcript,
+    ScreenChoice, SegmentStart, SpeechPcm, ThreadId, Transcript,
 };
 use kumochi_protocol::tap::{Direction, Tapped as _};
 use kumochi_scene::display::TextMetricsV1;
@@ -220,6 +221,7 @@ pub(crate) struct Brain {
     /// Holds the next settings write until it sends or drops.
     #[cfg(test)]
     config_gate: Option<std::sync::mpsc::Receiver<settings::Gate>>,
+    typed_screen_clock: Option<typed_screen::Clock>,
     /// Hears what tests wait on instead of sleeping.
     #[cfg(test)]
     observer: mpsc::UnboundedSender<Seen>,
@@ -364,6 +366,7 @@ impl Brain {
             claude: claude::Claude::default(),
             #[cfg(test)]
             config_gate: None,
+            typed_screen_clock: None,
             #[cfg(test)]
             observer,
             #[cfg(test)]
@@ -788,6 +791,9 @@ impl Brain {
             self.claude.stop();
         }
         self.holds.lost();
+        let typed = self.coordinator.cancel_typed_picture(None, None);
+        self.apply(typed, None)
+            .expect("offline effects cannot fill a shell queue");
         self.filing.cancel();
         queue.borrow_mut().end_reads();
         if reading && !quitting {
@@ -891,6 +897,9 @@ impl Brain {
             return ended;
         }
         loop {
+            if let Err(ended) = self.typed_screen_sync(&mut link) {
+                return ended;
+            }
             if !turns.is_empty() {
                 self.holds
                     .invalidate(kumochi_protocol::message::HoldStatus::Cancelled);
@@ -908,7 +917,7 @@ impl Brain {
             let first_pcm_due = first_pcm.is_some_and(|due| due.at <= Instant::now());
             let send_due = self.next_send_deadline();
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
-            let take_turns = self.admits_turn(&link);
+            let take_turns = self.admits_turn(&link) && !link.typed_screen.capturing();
             let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
             let input = tokio::select! {
                 biased;
@@ -980,6 +989,12 @@ impl Brain {
                     }
                     input
                 },
+                progress = link.typed_screen.next() => {
+                    if let Err(ended) = self.typed_screen_progress(progress, &mut link) {
+                        return ended;
+                    }
+                    continue;
+                }
                 event = hold::next(&mut self.holds) => {
                     if !turns.is_empty() && self.hold_end(kumochi_protocol::message::HoldStatus::Cancelled, &mut link).is_err() {
                         return Ended::Lost;
@@ -1049,6 +1064,32 @@ impl Brain {
                         Err(ended) => return ended,
                     }
                 }
+            };
+            let input = match input {
+                Input::PicturedTurn {
+                    turn,
+                    thread,
+                    text,
+                    screen,
+                } => {
+                    if let Err(ended) =
+                        self.typed_screen_submit(turn, thread, text, screen, &mut link)
+                    {
+                        return ended;
+                    }
+                    continue;
+                }
+                Input::TypedTargetRead {
+                    epoch,
+                    offer,
+                    inherited,
+                } => {
+                    if let Err(ended) = self.typed_screen_read(epoch, offer, inherited, &mut link) {
+                        return ended;
+                    }
+                    continue;
+                }
+                input => input,
             };
             if let Input::HoldPrepared { key, result } = input {
                 if self.hold_prepared(key, result, &mut link).is_err() {
@@ -1453,8 +1494,9 @@ impl Brain {
                         };
                         self.claude.picture_granted(lease.key, kind, grant.clone());
                     }
-                    let granted =
-                        SendLease::new(lease, self.inputs_tx.clone()).with_picture(picture);
+                    let granted = SendLease::new(lease, self.inputs_tx.clone())
+                        .with_picture(picture)
+                        .for_typed_picture(self.coordinator.typed_picture_lease(lease));
                     engines::answer(&self.asks, lease.key, Answer::Grant(granted));
                 }
                 Effect::Rebuild(key) => {
@@ -1702,17 +1744,26 @@ async fn read_data(
             {
                 return Ended::Broken("turn before queued audio registration");
             }
-            Ok(Some(
-                DataToBrain::AskAbout { .. }
-                | DataToBrain::TextSubmit {
-                    screen: kumochi_protocol::message::ScreenChoice::Include { .. },
-                    ..
-                },
-            )) if registration.is_some() => return Ended::Broken("non-Plain queued turn"),
+            Ok(Some(DataToBrain::AskAbout { .. })) if registration.is_some() => {
+                return Ended::Broken("non-Plain queued turn");
+            }
             Ok(Some(DataToBrain::TextSubmit {
-                turn, thread, text, ..
+                turn,
+                thread,
+                text,
+                screen,
             })) => {
-                if let Some(ended) = take(turns, Input::Turn { turn, thread, text }) {
+                let input = match screen {
+                    ScreenChoice::None => Input::Turn { turn, thread, text },
+                    ScreenChoice::Include { .. } => Input::RefuseTurn { turn, thread },
+                    ScreenChoice::Typed(screen) => Input::PicturedTurn {
+                        turn,
+                        thread,
+                        text,
+                        screen,
+                    },
+                };
+                if let Some(ended) = take(turns, input) {
                     return ended;
                 }
             }
@@ -1857,6 +1908,7 @@ struct Link<'a, 't> {
     recovery: Option<Recovery>,
     /// Page replies waiting for room in the data queue.
     held_pages: VecDeque<Input>,
+    typed_screen: typed_screen::State,
 }
 
 impl<'a, 't> Link<'a, 't> {
@@ -1876,6 +1928,7 @@ impl<'a, 't> Link<'a, 't> {
             text_metrics: None,
             recovery: None,
             held_pages: VecDeque::new(),
+            typed_screen: typed_screen::State::default(),
         }
     }
 

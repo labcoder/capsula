@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use kumochi_protocol::message::{ConnectionKind, Deleted, HeldScreen, RunId, ThreadId};
+use kumochi_protocol::message::{
+    ConnectionKind, DataToShell, Deleted, HeldScreen, RunId, ThreadId,
+};
 
 use super::availability::sign_in_needed;
 use super::{BuildKey, Coordinator, Effect, HoldKey, JobKey, Stale, StoreOp};
@@ -134,6 +136,14 @@ pub(super) struct Lease {
     picture: Option<PictureGrant>,
     /// The protected digest this send carries, which its grant also gates.
     digest: Option<DigestGate>,
+    typed_screen: Option<ThreadId>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Settlement {
+    Unsent,
+    Unknown,
+    Flushed,
 }
 
 /// A granted send carrying a hold's picture, which its turn already records as sent.
@@ -174,6 +184,12 @@ impl Coordinator {
             .clone()
     }
 
+    pub(crate) fn typed_picture_lease(&self, lease: LeaseId) -> bool {
+        self.leases
+            .iter()
+            .any(|held| held.id == lease && held.typed_screen.is_some())
+    }
+
     /// Fences new write admissions for each picture grant whose run may no longer send it: its
     /// picture was withdrawn or lost, its recipient no longer takes it, or the drawings its digest
     /// lists no longer read as its build read them. Each grant's first
@@ -190,6 +206,19 @@ impl Coordinator {
                 .chain(&self.current)
                 .find(|run| run.id == key.run);
             let cause = match run {
+                Some(run)
+                    if lease.typed_screen.is_some()
+                        && self.typed_picture_current(run)
+                        && lease
+                            .digest
+                            .as_ref()
+                            .is_none_or(|gate| self.digest_gate_current(run, key, gate)) =>
+                {
+                    continue;
+                }
+                Some(_) if lease.typed_screen.is_some() => {
+                    Some(kumochi_protocol::message::ErrorKey::ScreenPictureStopped.into())
+                }
                 Some(run) if matches!(run.screen, Some(crate::context::Screen::Withdrawn)) => {
                     Some(kumochi_protocol::message::ErrorKey::ScreenUnavailable.into())
                 }
@@ -421,6 +450,26 @@ impl Coordinator {
             effects.push(Effect::Rebuild(SendKey::Build(key)));
             return;
         };
+        let typed_picture = key.round == 1
+            && run
+                .typed_screen
+                .as_ref()
+                .is_some_and(|typed| typed.attempt == Some(key));
+        if run.typed_screen.as_ref().is_some_and(|typed| {
+            if key.round == 1 {
+                !typed_picture
+                    || typed.flushed
+                    || !self.typed_picture_current(run)
+                    || !build.pictured()
+            } else {
+                !typed.flushed || build.pictured()
+            }
+        }) {
+            effects.push(Effect::Rebuild(SendKey::Build(key)));
+            self.fail_typed_picture(key.run, effects)
+                .expect("the run is current");
+            return;
+        }
         let refused = run
             .route
             .map_or_else(|| Some(sign_in_needed()), |route| self.refusal(route))
@@ -454,7 +503,12 @@ impl Coordinator {
         if !voided.is_empty() {
             effects.push(Effect::CancelEngine { run: key.run });
             effects.push(Effect::Rebuild(SendKey::Build(key)));
-            self.rebuild(key, &voided, &pending, effects);
+            if typed_picture {
+                self.fail_typed_picture(key.run, effects)
+                    .expect("the run is current");
+            } else {
+                self.rebuild(key, &voided, &pending, effects);
+            }
             return;
         }
         let sources = build.sources().to_vec();
@@ -495,7 +549,12 @@ impl Coordinator {
                 || !self.build_digest_current(run, key, recipient))
         {
             effects.push(Effect::Rebuild(SendKey::Build(key)));
-            self.rebuild(key, &BTreeSet::new(), &pending, effects);
+            if typed_picture {
+                self.fail_typed_picture(key.run, effects)
+                    .expect("the run is current");
+            } else {
+                self.rebuild(key, &BTreeSet::new(), &pending, effects);
+            }
             return;
         }
         // The request handed to the engine is judged, never the run's account of its screen.
@@ -547,9 +606,13 @@ impl Coordinator {
                 })
             })
             .flatten();
+        let typed_thread = typed_picture.then_some(run.thread);
         if let Some(run) = self.current.as_mut()
             && let Some(route) = run.route
         {
+            if typed_picture && let Some(typed) = &mut run.typed_screen {
+                typed.attempt = None;
+            }
             if route.kind == ConnectionKind::AnthropicKey && !inline {
                 run.key_granted = true;
                 if key.round == 1 {
@@ -578,6 +641,7 @@ impl Coordinator {
         if revocable && let Some(lease) = self.leases.last_mut() {
             lease.picture = Some(PictureGrant::new());
             lease.digest = gated;
+            lease.typed_screen = typed_thread;
         }
     }
 
@@ -604,6 +668,7 @@ impl Coordinator {
             screen,
             picture: None,
             digest: None,
+            typed_screen: None,
         });
         effects.push(Effect::Grant(id));
         effects.push(Effect::ArmSendDeadline {
@@ -622,7 +687,7 @@ impl Coordinator {
     pub(super) fn send_settled(
         &mut self,
         lease: LeaseId,
-        unsent: bool,
+        settlement: Settlement,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
         let at = self
@@ -630,6 +695,31 @@ impl Coordinator {
             .iter()
             .position(|held| held.id == lease)
             .ok_or(Stale)?;
+        let unsent = settlement == Settlement::Unsent;
+        if let Some(thread) = self.leases[at].typed_screen.take()
+            && let SendKey::Build(key) = lease.key
+        {
+            if let Some(grant) = self.leases[at].picture.as_ref() {
+                grant.close();
+            }
+            if settlement == Settlement::Flushed {
+                effects.push(Effect::Store(StoreOp::FlushedTypedScreen { run: key.run }));
+                if !self.deleting_thread(thread) {
+                    effects.push(Effect::Data(DataToShell::EventsChanged { thread }));
+                }
+                if let Some(typed) = self
+                    .current
+                    .as_mut()
+                    .filter(|run| run.id == key.run)
+                    .and_then(|run| run.typed_screen.as_mut())
+                {
+                    typed.flushed = true;
+                }
+            } else if unsent && self.current_run() == Some(key.run) {
+                self.fail_typed_picture(key.run, effects)
+                    .expect("the run is current");
+            }
+        }
         if let Some(carried) = self.leases[at].screen.take() {
             self.screen_settled(carried, unsent, effects);
         }

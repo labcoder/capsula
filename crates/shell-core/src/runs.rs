@@ -11,14 +11,17 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
 mod hold;
+mod typed_screen;
 use hold::Hold;
 pub use hold::{HoldRelease, ScreenHold, ScreenLine, ScreenNotice};
+use typed_screen::TypedScreen;
+pub use typed_screen::{TypedScreenInput, TypedScreenIo};
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
     Action, AudioSession, Content, ControlToBrain, DataToBrain, DataToShell, Deleted, ErrorKey,
     GestureId, Incarnation, MAX_PENDING_DELETES, MAX_PENDING_TURNS, Phase, RunId, RunOrigin,
-    SceneDescriptor, SceneId, ThreadId, ThreadKind, ThreadRow, UserError,
+    SceneDescriptor, SceneId, ScreenChoice, ThreadId, ThreadKind, ThreadRow, UserError,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -136,6 +139,7 @@ struct Submitted {
     /// What was typed, until nothing may put it back.
     text: Option<Content>,
     answering: bool,
+    pictured: bool,
 }
 
 impl fmt::Debug for Submitted {
@@ -146,6 +150,7 @@ impl fmt::Debug for Submitted {
             .field("thread", &self.thread)
             .field("text_len", &self.text.as_ref().map(|text| text.len()))
             .field("answering", &self.answering)
+            .field("pictured", &self.pictured)
             .finish()
     }
 }
@@ -198,6 +203,7 @@ pub struct Runs {
     /// The newest named run's submission, until that run's first terminal `RunState`.
     named: Option<(RunId, Submitted)>,
     recovery: Option<(RunId, Submitted)>,
+    typed_screen: TypedScreen,
     /// How many of the oldest submitted turns Esc cancelled.
     cancelled: usize,
     /// Data frames, with their size, for runs not named yet. Their credit is withheld, so the
@@ -266,6 +272,7 @@ impl Runs {
             return false;
         }
         self.cancel_hold();
+        self.typed_screen.invalidate();
         self.target = match thread {
             Some(thread) if Some(thread) == self.main => Target::Kumo,
             Some(thread) => Target::Task(thread),
@@ -293,19 +300,23 @@ impl Runs {
             .chain(self.named.as_ref().map(|(_, submitted)| submitted))
             .chain(self.recovery.as_ref().map(|(_, submitted)| submitted))
             .filter_map(|submitted| submitted.text.as_ref().map(|text| text.len()))
+            .chain(self.typed_screen.kept())
             .collect()
     }
 
     pub fn settings(&mut self, main: ThreadId) {
         let previous = self.thread();
         self.main = Some(main);
-        if self.thread() != previous {
+        let current = self.thread();
+        if current != previous {
             self.dismiss_retry();
+            self.typed_screen.target_changed(current);
         }
     }
 
     pub fn back_to_kumo(&mut self) {
         self.cancel_hold();
+        self.typed_screen.invalidate();
         self.target = Target::Kumo;
         self.durable = true;
         self.revision = self.revision.wrapping_add(1);
@@ -342,31 +353,6 @@ impl Runs {
             Target::Task(thread) => Some(thread),
             Target::New => None,
         }
-    }
-
-    fn capture(&self, text: &str) -> Result<(DataToBrain, u32, u64), Refused> {
-        if !self.connected || self.main.is_none() {
-            return Err(Refused::Offline);
-        }
-        if self.target == Target::New
-            && self
-                .submitted
-                .iter()
-                .any(|submitted| submitted.revision == self.revision)
-        {
-            return Err(Refused::Busy);
-        }
-        let turn = self.turns_sent.checked_add(1).ok_or(Refused::Busy)?;
-        Ok((
-            DataToBrain::TextSubmit {
-                turn,
-                screen: kumochi_protocol::message::ScreenChoice::None,
-                thread: self.thread(),
-                text: text.into(),
-            },
-            turn,
-            self.revision,
-        ))
     }
 
     /// The highest run any `RunState` has named so far on this brain.
@@ -530,6 +516,7 @@ impl Runs {
     pub fn stop(&mut self) -> Option<ControlToBrain> {
         let run = self.stoppable();
         self.cancel_hold();
+        self.revoke_typed_screen();
         self.forget_texts(|_| true);
         self.cancelled = self.submitted.len();
         let run = run?;
@@ -544,6 +531,7 @@ impl Runs {
     /// returns the `ClearDrawing` to send after. The text stays.
     pub fn clear(&mut self) -> Effect {
         self.cancel_hold();
+        self.revoke_typed_screen();
         self.forget_texts(|_| true);
         self.drawing.clear()
     }
@@ -590,34 +578,58 @@ impl Runs {
         if audio == AudioSession::Legacy {
             self.forget_texts(|_| true);
         }
-        if text.trim().is_empty() {
-            return Err(Refused::Blank);
-        }
-        if text.len() > Pipe::Data.max_payload() - SUBMIT_OVERHEAD {
-            return Err(Refused::TooLong);
-        }
-        let (message, turn, revision) = self.capture(text)?;
-        if self.submitted.len() + 1 >= MAX_PENDING_TURNS {
+        if self.typed_screen.blocks_plain() {
             return Err(Refused::Busy);
         }
-        if self.hold_cancel.is_some() {
-            return Err(Refused::Busy);
-        }
-        if !send(message) {
+        let turn = self.prepare_submit(text, SUBMIT_OVERHEAD)?;
+        if !send(DataToBrain::TextSubmit {
+            turn,
+            screen: ScreenChoice::None,
+            thread: self.thread(),
+            text: text.into(),
+        }) {
             return Err(Refused::Offline);
         }
         if audio == AudioSession::QueuedRequired {
             self.forget_texts(|_| true);
         }
+        self.record_submit(turn, Some(text.into()), false);
+        Ok(())
+    }
+
+    fn prepare_submit(&mut self, text: &str, overhead: usize) -> Result<u32, Refused> {
+        if text.trim().is_empty() {
+            return Err(Refused::Blank);
+        }
+        if text.len() > Pipe::Data.max_payload() - overhead {
+            return Err(Refused::TooLong);
+        }
+        if !self.connected || self.main.is_none() {
+            return Err(Refused::Offline);
+        }
+        if self.submitted.len() + 1 >= MAX_PENDING_TURNS
+            || self.hold_cancel.is_some()
+            || (self.target == Target::New
+                && self
+                    .submitted
+                    .iter()
+                    .any(|submitted| submitted.revision == self.revision))
+        {
+            return Err(Refused::Busy);
+        }
+        self.turns_sent.checked_add(1).ok_or(Refused::Busy)
+    }
+
+    fn record_submit(&mut self, turn: u32, text: Option<Content>, pictured: bool) {
         self.submitted.push_back(Submitted {
-            revision,
+            revision: self.revision,
             turn,
             thread: self.thread(),
-            text: Some(text.into()),
+            text,
             answering: false,
+            pictured,
         });
         self.turns_sent = turn;
-        Ok(())
     }
 
     /// A run's `Focus`. It moves the target, as an explicit switch does, only while `run` is
@@ -642,6 +654,7 @@ impl Runs {
         }
         self.cancel_hold();
         self.hold_cancel = None;
+        self.typed_screen.invalidate();
         self.answered = RunId(0);
         self.fence = RunId(0);
         self.pending_stops.clear();
@@ -693,6 +706,9 @@ impl Runs {
             self.cancel_hold();
         }
         self.forget_texts(|owner| owner == Some(thread));
+        if self.thread() == Some(thread) {
+            self.typed_screen.invalidate();
+        }
         if self.target == Target::Task(thread) {
             self.back_to_kumo();
         }
@@ -755,6 +771,7 @@ impl Runs {
             return;
         };
         if self.submitted.remove(at).is_some() {
+            self.typed_screen.refused(turn, thread);
             self.answered_one(at);
         }
     }
@@ -785,6 +802,7 @@ impl Runs {
     /// The link connected, as connection `generation`.
     pub fn connected(&mut self, generation: u64) {
         self.connected = true;
+        self.typed_screen.connected(generation);
         self.screen_holds = None;
         self.turns_sent = 0;
         self.drawing.connected(generation);
@@ -795,6 +813,7 @@ impl Runs {
     pub fn disconnected(&mut self) {
         self.cancel_hold();
         self.hold_cancel = None;
+        self.typed_screen.disconnected();
         self.connected = false;
         self.screen_holds = None;
         if let Some(shown) = &mut self.shown {
@@ -883,10 +902,18 @@ impl Runs {
                 && let Some(mut submitted) = self.submitted.remove(at)
             {
                 typed = Some((submitted.turn, submitted.revision));
+                let draft = self.typed_draft();
+                let pictured_current = !submitted.pictured
+                    || (!deleted
+                        && at >= self.cancelled
+                        && run > self.fence
+                        && submitted.revision == self.revision
+                        && self.typed_screen.name(turn, draft, thread, run));
                 if submitted.thread.is_none()
                     && submitted.revision == self.revision
                     && self.target == Target::New
                     && !deleted
+                    && pictured_current
                 {
                     self.target = if Some(thread) == self.main {
                         Target::Kumo
@@ -894,7 +921,10 @@ impl Runs {
                         Target::Task(thread)
                     };
                 }
-                let cancelled = at < self.cancelled;
+                let cancelled = at < self.cancelled || !pictured_current;
+                if !pictured_current {
+                    self.typed_screen.revoke_turn(turn);
+                }
                 self.answered_one(at);
                 if cancelled {
                     self.fence = self.fence.max(run);
@@ -946,6 +976,10 @@ impl Runs {
         }
         if matches!(phase, Phase::Done | Phase::Interrupted | Phase::Failed) {
             self.end(run, |live| live.state_ended = true);
+            self.typed_screen.finished(
+                run,
+                error.filter(|_| phase == Phase::Failed).map(UserError::key),
+            );
             // The first terminal state uses the submission up, so a duplicate finds nothing.
             if let Some((_, submitted)) = self.named.take_if(|(named, _)| *named == run)
                 && phase == Phase::Failed
