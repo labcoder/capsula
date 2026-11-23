@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+#[cfg(windows)]
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1169,6 +1170,16 @@ async fn request_ids_are_bounded_graphic_ascii() {
 }
 
 #[test]
+#[cfg(not(windows))]
+fn native_client_refuses_without_a_trust_adapter() {
+    assert!(matches!(
+        super::build(),
+        Err(HttpError::UnsupportedPlatform)
+    ));
+}
+
+#[test]
+#[cfg(windows)]
 #[ignore = "entry point for the isolated proxy child process"]
 fn proxy_probe_child() {
     let url =
@@ -1202,6 +1213,7 @@ fn proxy_probe_child() {
 }
 
 #[test]
+#[cfg(windows)]
 #[expect(
     clippy::disallowed_methods,
     reason = "created under spawn_lock; its output is read after the guard is released"

@@ -369,6 +369,7 @@ error-browser-unavailable = Couldn't open your browser to sign in.
 error-account-offline = Can't reach ChatGPT right now. Try again.
 error-credentials-unavailable = Windows Credential Manager couldn't read or save your ChatGPT sign-in. Try again.
 error-trust-store-unavailable = Couldn't load trusted certificates from Windows, so the app can't connect to ChatGPT safely.
+error-unsupported-platform = This feature isn't supported on this platform.
 error-plan-not-enabled = Plan use wasn't turned on. Enable it to use your ChatGPT plan.
 error-account-misconfigured = ChatGPT didn't accept this app's sign-in. Trying again won't help.
 error-sign-out-not-durable = Couldn't record the sign-out in the system's credential store. The account stays unused, but if the app restarts before Retry works, it will be signed in again.

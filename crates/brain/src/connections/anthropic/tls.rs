@@ -193,7 +193,7 @@ impl sealed::Sealed for Scripted {}
 #[cfg(test)]
 impl AnthropicConnect for Scripted {}
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
