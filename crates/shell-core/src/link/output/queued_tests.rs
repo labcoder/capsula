@@ -2,10 +2,15 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::message::{GestureId, RunId};
+use kumochi_protocol::message::{GestureId, RunId, RunOrigin, SceneId, SegmentId, StepRef};
 
-use super::super::Retirement;
-use super::{Active, LOCAL_QUIET, OutputOwner, Queued, RECEIPT_QUEUED};
+use super::super::{Output, Retirement};
+use super::{
+    Active, Delivery, LOCAL_QUIET, NarratedReservation, OutputOwner, Queued, RECEIPT_QUEUED,
+    StopOrigin,
+};
+use crate::link::{HANDSHAKE_TIMEOUT, Shared, narrated::Narrated, queued::MetadataFrame};
+use crate::speaker::conductor::Assignment;
 
 /// A registered, acknowledged Plain pair with Talk-back on and Show Screen off.
 fn speaking(deadline: Instant) -> Queued {
@@ -33,6 +38,7 @@ fn a_speaking_hold_needs_the_previous_runs_queued_receipt_not_its_local_quiet() 
         proof: Arc::clone(&proof),
         delivery: None,
         locally_stopped: false,
+        run_end_by: None,
     });
     assert!(!owner.hold_ready(), "local quiet alone admits no hold");
     proof.fetch_or(RECEIPT_QUEUED, Ordering::AcqRel);
@@ -61,5 +67,181 @@ fn a_typed_turn_cannot_reserve_a_speaking_pair_while_a_gesture_holds_the_inhibit
     assert!(
         owner.queued_turn(1, Some(1), || true),
         "free once it retired"
+    );
+}
+
+/// An opened narrated speaking pair, session 1.
+fn narrated() -> OutputOwner {
+    let owner = OutputOwner::default();
+    let opened = owner.begin_queued(
+        1,
+        Arc::new(|| {}),
+        Instant::now() + Duration::from_secs(5),
+        || false,
+        |deadline| {
+            let mut owner = speaking(deadline);
+            owner.narrated = Some(Arc::new(Narrated::new()));
+            owner
+        },
+    );
+    assert!(opened.is_some());
+    owner
+}
+
+/// Run 1 as control binds it on a narrated pair: no promise yet.
+fn bound(proof: u8) -> Active {
+    Active {
+        id: RunId(1),
+        input: None,
+        proof: Arc::new(AtomicU8::new(proof)),
+        delivery: Some(Delivery::Unpromised),
+        locally_stopped: false,
+        run_end_by: None,
+    }
+}
+
+#[test]
+fn a_released_holds_early_promise_waits_for_control_to_bind_its_run() {
+    let owner = narrated();
+    let Output::Queued(output) = owner.lock().output else {
+        panic!("a queued pair");
+    };
+    let assignment = Assignment {
+        session: 1,
+        output,
+        run: RunId(1),
+        segment: SegmentId(0),
+        step: StepRef {
+            scene: SceneId(1),
+            index: 0,
+        },
+    };
+    let promise = || owner.narrated_metadata(assignment, MetadataFrame::Commit);
+    assert!(promise().is_err(), "nothing names the run");
+    owner.hold_released.store(true, Ordering::Release);
+    assert!(
+        matches!(promise(), Ok(NarratedReservation::Waiting)),
+        "a released hold's promise waits unaccepted"
+    );
+    owner.hold_released.store(false, Ordering::Release);
+    owner.lock().queued.as_mut().expect("the pair").active = Some(bound(0));
+    assert!(
+        matches!(promise(), Ok(NarratedReservation::Reserved)),
+        "accepted once control bound the run"
+    );
+}
+
+#[test]
+fn a_hold_after_esc_before_the_first_promise_waits_for_that_runs_run_end() {
+    let owner = narrated();
+    let mut state = owner.lock();
+    let queued = state.queued.as_mut().expect("the pair");
+    queued.active = Some(bound(LOCAL_QUIET | RECEIPT_QUEUED));
+    assert!(
+        queued.stop(RunId(1), StopOrigin::Local),
+        "Esc stops the run"
+    );
+    drop(state);
+    let hold = || owner.lock().queued_hold().is_some();
+    let late = Instant::now() + HANDSHAKE_TIMEOUT;
+    assert!(
+        !hold(),
+        "the stopped run's quiet receipt alone admits no hold"
+    );
+    assert!(!owner.run_end_overdue(1, Instant::now()));
+    assert!(
+        owner.run_end_overdue(1, late),
+        "a missing RunEnd ends the pair"
+    );
+    assert!(owner.end_queued_run(1, RunId(1)));
+    assert!(hold(), "the exact RunEnd admits the hold");
+    assert!(!owner.run_end_overdue(1, late));
+}
+
+/// A narrated speaking pair on a real `Shared`, so bind can start its fake speaker.
+fn narrated_shared() -> (
+    Arc<Shared>,
+    mpsc::Receiver<crate::speaker::queued::FixturePlayback>,
+) {
+    let (device, opened) = mpsc::sync_channel(1);
+    let shared = Arc::new(Shared {
+        narrated: true,
+        fake_playback: Some(device),
+        ..Shared::default()
+    });
+    let pair = shared.output.begin_queued(
+        1,
+        Arc::new(|| {}),
+        Instant::now() + Duration::from_secs(5),
+        || false,
+        |deadline| {
+            let mut owner = speaking(deadline);
+            owner.narrated = Some(Arc::new(Narrated::new()));
+            owner
+        },
+    );
+    assert!(pair.is_some());
+    (shared, opened)
+}
+
+#[test]
+fn a_hold_binds_through_brief_bridge_contention() {
+    let (shared, _opened) = narrated_shared();
+    let bridge = shared
+        .output
+        .lock()
+        .queued
+        .as_ref()
+        .and_then(|q| q.narrated.clone());
+    let bridge = bridge.expect("a narrated pair");
+    let (out, _control) = async_channel::bounded(8);
+    let (held, holding) = mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _state = bridge.hold_state();
+        held.send(()).expect("the test waits");
+        std::thread::sleep(Duration::from_millis(200));
+    });
+    holding.recv().expect("the bridge is held");
+    let origin = RunOrigin::Hold {
+        gesture: GestureId(1),
+    };
+    assert!(
+        shared
+            .output
+            .bind_queued(1, RunId(1), origin, &out, |_| {}, Arc::downgrade(&shared)),
+        "a busy bridge delays the bind instead of refusing it"
+    );
+    holder.join().expect("the holder finished");
+}
+
+#[test]
+fn a_typed_successor_keeps_the_stopped_runs_run_end_bound() {
+    let (shared, _opened) = narrated_shared();
+    let owner = &shared.output;
+    let (out, _control) = async_channel::bounded(8);
+    let mut state = owner.lock();
+    let queued = state.queued.as_mut().expect("the pair");
+    queued.active = Some(bound(LOCAL_QUIET | RECEIPT_QUEUED));
+    assert!(
+        queued.stop(RunId(1), StopOrigin::Local),
+        "Esc stops the run"
+    );
+    drop(state);
+    let late = Instant::now() + HANDSHAKE_TIMEOUT;
+    assert!(
+        owner.queued_turn(1, Some(1), || true),
+        "quiet admits a typed turn"
+    );
+    let typed = RunOrigin::Typed { turn: 1 };
+    assert!(owner.bind_queued(1, RunId(2), typed, &out, |_| {}, Arc::downgrade(&shared)));
+    assert!(!owner.run_end_overdue(1, Instant::now()));
+    assert!(
+        owner.run_end_overdue(1, late),
+        "the stopped run's missing RunEnd still ends the pair"
+    );
+    assert!(owner.end_queued_run(1, RunId(1)));
+    assert!(
+        !owner.run_end_overdue(1, late),
+        "its exact RunEnd clears the bound"
     );
 }

@@ -2,8 +2,8 @@
 //! quiet barrier.
 
 use kumochi_protocol::message::{
-    ControlToShell, Cursor, DataToShell, OutputGeneration, Phase, RunId, SegmentId, SpeechDecision,
-    SpeechDispatch, SpeechPcm, SpeechRetirement, StepRef,
+    ControlToShell, Cursor, DataToShell, Narration, OutputGeneration, Phase, RunId, SegmentId,
+    SpeechDecision, SpeechDispatch, SpeechPcm, SpeechRetirement, StepRef,
 };
 
 use super::{
@@ -13,7 +13,6 @@ use super::{
 use crate::coordinator::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
 use crate::engines::{Finish, TurnEvent};
 use crate::store::{Interruption, RunEnd};
-use crate::voice::pump::OutputMode;
 use crate::voice::reply::ReportMode;
 
 const RATE: u32 = 24_000;
@@ -26,14 +25,14 @@ fn queued_registration_reports_only_an_installed_tuple() {
     let mut core = fresh();
     let output = OutputGeneration(7);
     assert_eq!(
-        core.register_queued_output(32_000, output, OutputMode::Legacy),
+        core.register_queued_output(32_000, output, Narration::Plain),
         Ok(vec![])
     );
     assert_eq!(core.output, Some((32_000, output, ReportMode::Queued)));
     core.handle(Input::AudioOutputUnavailable { generation: output })
         .unwrap();
     assert_eq!(
-        core.register_queued_output(RATE, output, OutputMode::Legacy),
+        core.register_queued_output(RATE, output, Narration::Plain),
         Err(Stale)
     );
     assert_eq!(core.output, None);
@@ -114,7 +113,7 @@ fn dispatch(segment: u32) -> SpeechDispatch {
 
 pub(super) fn queued() -> Coordinator {
     let mut core = fresh();
-    core.handle(Input::QueuedAudioOutput(RATE, OutputGeneration(1)))
+    core.register_queued_output(RATE, OutputGeneration(1), Narration::Conducted)
         .unwrap();
     core.handle(Input::SpokenReplies { loaded: true }).unwrap();
     core.handle(Input::Turn {
@@ -235,20 +234,20 @@ fn discarded_closed_head_enters_the_next_wait_then_completes() {
 
 #[test]
 fn stop_replacement_and_session_loss_invalidate_closed_eligibility() {
-    for end in [
-        Input::Stop {
-            run: R,
-            revealed: Vec::new(),
-        },
-        Input::QueuedAudioOutput(RATE, OutputGeneration(2)),
-        Input::ShellLost,
-    ] {
-        let lost = matches!(end, Input::ShellLost);
-        let replaced = matches!(end, Input::QueuedAudioOutput(..));
+    for end in 0..3 {
+        let (replaced, lost) = (end == 1, end == 2);
         let mut core = queued();
         queue_drawing(&mut core, 0);
         assert_eq!(finish(&mut core), []);
-        let ending = core.handle(end).unwrap();
+        let ending = match end {
+            0 => core.handle(Input::Stop {
+                run: R,
+                revealed: Vec::new(),
+            }),
+            1 => core.register_queued_output(RATE, OutputGeneration(2), Narration::Conducted),
+            _ => core.handle(Input::ShellLost),
+        }
+        .unwrap();
         assert!(
             ending
                 .iter()

@@ -4,7 +4,7 @@
 //! drops of a speaker happen after it.
 
 use std::fmt;
-use std::sync::atomic::{Ordering, fence};
+use std::sync::atomic::{AtomicBool, Ordering, fence};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Instant;
@@ -41,6 +41,9 @@ pub type Witness = Box<dyn FnMut(&Command) + Send>;
 // replaces its handle, even in turn, while deferred timers or completions survive.
 pub struct OutputOwner {
     state: Mutex<State>,
+    /// A queued Hold was released and control hasn't bound its run. Never behind the state lock:
+    /// `KeyUp` is sent while it may be held.
+    pub(in crate::link) hold_released: AtomicBool,
     mic_retired: Condvar,
     changed: Sender<()>,
     changes: Receiver<()>,
@@ -54,6 +57,7 @@ impl Default for OutputOwner {
         let (sender, changes) = async_channel::bounded(1);
         Self {
             state: Mutex::default(),
+            hold_released: AtomicBool::new(false),
             mic_retired: Condvar::new(),
             changed: sender,
             changes,
@@ -480,6 +484,7 @@ impl OutputOwner {
         state.output = Output::Queued(OutputGeneration(generation));
         state.abort = Some(abort);
         state.queued = Some(queued(registration_by));
+        self.hold_released.store(false, Ordering::Release);
         Some(registration_by)
     }
 

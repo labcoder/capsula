@@ -436,11 +436,7 @@ impl Brain {
     fn control_taken(&self, input: &Input) {
         if matches!(
             input,
-            Input::Stop { .. }
-                | Input::Clear { .. }
-                | Input::Delete { .. }
-                | Input::ThreadOp(_)
-                | Input::QueuedAudioOutput(..)
+            Input::Stop { .. } | Input::Clear { .. } | Input::Delete { .. } | Input::ThreadOp(_)
         ) {
             // A test that stopped listening doesn't matter.
             self.observer.send(Seen::ControlApplied).ok();
@@ -1477,6 +1473,7 @@ impl Brain {
                 text,
             } => {
                 if let Some(pump) = &mut self.pump {
+                    pump.set_output(self.coordinator.output_mode());
                     pump.speak(run, segment, rate, text.into_string());
                 } else {
                     let made = Synthesized::Failed { run: true };

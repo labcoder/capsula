@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, ErrorKey, Incarnation,
-    IssueSession, Phase, RunId, RunOrigin, ThreadId, UserError,
+    IssueSession, Narration, Phase, RunId, RunOrigin, ThreadId, UserError,
 };
 
 use super::fixture::*;
@@ -2477,7 +2477,15 @@ fn queued_owner_start_deadline_is_not_extended_by_control_traffic() {
     assert!(!session.open());
 }
 
-fn queued_registration(control: &PipeClient) -> kumochi_protocol::message::OutputGeneration {
+fn queued_registration(
+    control: &PipeClient,
+    shared: &Shared,
+) -> kumochi_protocol::message::OutputGeneration {
+    let narration = if shared.narrated {
+        Narration::Conducted
+    } else {
+        Narration::Plain
+    };
     frame::write(
         &mut &*control,
         &ControlToShell::Settings {
@@ -2491,7 +2499,11 @@ fn queued_registration(control: &PipeClient) -> kumochi_protocol::message::Outpu
     )
     .expect("talk-back settings written");
     match frame::read(&mut &*control, Pipe::Control).expect("read registration") {
-        Some(ControlToBrain::QueuedAudioOutput(24_000, output)) => output,
+        Some(ControlToBrain::QueuedAudioOutput(24_000, output, declared))
+            if declared == narration =>
+        {
+            output
+        }
         other => panic!("a 24 kHz queued registration, got {other:?}"),
     }
 }
@@ -2536,7 +2548,7 @@ fn queued_talk_back_waits_for_both_ends_of_a_deleted_reply() {
             view: settings_view(),
             answer: false,
         });
-        let Some(ControlToBrain::QueuedAudioOutput(24_000, output)) =
+        let Some(ControlToBrain::QueuedAudioOutput(24_000, output, Narration::Plain)) =
             frame::read(&mut &link.control, Pipe::Control).unwrap()
         else {
             panic!("silent pair registers");
@@ -2643,7 +2655,7 @@ fn queued_admission_waits_for_the_outbox_but_the_first_voice_edge_refuses() {
         Pipe::Control,
     )
     .unwrap();
-    let Some(ControlToBrain::QueuedAudioOutput(_, output)) =
+    let Some(ControlToBrain::QueuedAudioOutput(_, output, Narration::Plain)) =
         frame::read(&mut &link.control, Pipe::Control).unwrap()
     else {
         panic!("a queued output registration");
@@ -2742,7 +2754,7 @@ fn queued_hold_waits_for_its_saved_preferences_and_rejects_another_run_origin() 
     );
     link.handle.clear_input(gesture);
     settings(true, false);
-    let Some(ControlToBrain::QueuedAudioOutput(_, output)) = receive() else {
+    let Some(ControlToBrain::QueuedAudioOutput(_, output, Narration::Plain)) = receive() else {
         panic!("the pair offers its logical output");
     };
     assert_ne!(output, OutputGeneration(0));
@@ -2838,7 +2850,7 @@ fn a_queued_screen_release_goes_only_while_its_hold_listens_unrevoked() {
             );
         };
         settings(true);
-        let Some(ControlToBrain::QueuedAudioOutput(_, output)) = receive() else {
+        let Some(ControlToBrain::QueuedAudioOutput(_, output, Narration::Plain)) = receive() else {
             panic!("the pair offers its logical output");
         };
         acknowledge_queued(&link.control, output);
@@ -3378,7 +3390,7 @@ fn assert_silent_speech_refused(label: &str, at: SilentSpeechAt) {
         Pipe::Control,
     )
     .expect("send Talk-back-off settings");
-    let Some(ControlToBrain::QueuedAudioOutput(24_000, output_generation)) =
+    let Some(ControlToBrain::QueuedAudioOutput(24_000, output_generation, Narration::Plain)) =
         frame::read(&mut &link.control, Pipe::Control).expect("read logical registration")
     else {
         panic!("expected the logical queued output");
@@ -3507,7 +3519,10 @@ fn refused_queued_stop_closes_admission_before_background_pair_teardown() {
     let link = attended_queued("queued-stop-refused");
     let events = patient(link.events);
     let session = connected(next(&events));
-    acknowledge_queued(&link.control, queued_registration(&link.control));
+    acknowledge_queued(
+        &link.control,
+        queued_registration(&link.control, &link.handle.shared),
+    );
     assert!(link.handle.admits_text(Some(&session)));
     assert_eq!(
         link.handle.output().stop(session.generation(), RunId(42)),
@@ -3698,7 +3713,7 @@ fn queued_named_run(
     events: &std::sync::mpsc::Receiver<LinkEvent>,
 ) -> (Session, kumochi_protocol::message::OutputGeneration) {
     let session = connected(next(events));
-    let output = queued_registration(&link.control);
+    let output = queued_registration(&link.control, &link.handle.shared);
     acknowledge_queued(&link.control, output);
     let text = queued_text(1, "old owner");
     assert!(
@@ -3768,7 +3783,10 @@ fn assert_queued_retry_after_local_quiet(old: &LinkHandle, lost: &Session, label
         session.generation() > lost.generation(),
         "Retry admitted a new exact pair"
     );
-    acknowledge_queued(&next_pair.control, queued_registration(&next_pair.control));
+    acknowledge_queued(
+        &next_pair.control,
+        queued_registration(&next_pair.control, &next_pair.handle.shared),
+    );
     assert!(
         !old.send_control(
             lost,
@@ -3802,7 +3820,7 @@ fn queued_report_refusal_closes_the_full_control_mailbox_and_parked_data_head() 
     let link = attended_queued("queued-report-refused");
     let events = patient(link.events.clone());
     let session = connected(next(&events));
-    let output_generation = queued_registration(&link.control);
+    let output_generation = queued_registration(&link.control, &link.handle.shared);
     acknowledge_queued(&link.control, output_generation);
     let sent = queued_text(1, "old run");
     assert!(link.handle.send_data(&session, sent.clone()));
@@ -4228,7 +4246,7 @@ fn queued_reconnect_waits_for_the_exact_microphone_retirement() {
         Pipe::Control,
     )
     .unwrap();
-    let Some(ControlToBrain::QueuedAudioOutput(_, key)) =
+    let Some(ControlToBrain::QueuedAudioOutput(_, key, Narration::Plain)) =
         frame::read(&mut &control, Pipe::Control).unwrap()
     else {
         panic!("the recovered pair starts its own registration");
@@ -4452,7 +4470,7 @@ fn queued_reconnect_can_be_observed_after_the_timely_admission_decision() {
         Pipe::Control,
     )
     .unwrap();
-    let Some(ControlToBrain::QueuedAudioOutput(_, key)) =
+    let Some(ControlToBrain::QueuedAudioOutput(_, key, Narration::Plain)) =
         frame::read(&mut &control, Pipe::Control).unwrap()
     else {
         panic!("the admitted pair began registration before the UI consumed Connected");
@@ -4803,7 +4821,7 @@ fn queued_fresh_intent_and_full_enqueue_do_not_replay_or_reserve_a_turn() {
     let link = attended_queued("queued-intent");
     let events = patient(link.events);
     let session = connected(next(&events));
-    let output = queued_registration(&link.control);
+    let output = queued_registration(&link.control, &link.handle.shared);
     assert!(
         !link.handle.admits_text(Some(&session)),
         "registration is not an ACK"
@@ -4862,7 +4880,7 @@ fn queued_plain_head_waits_for_the_exact_named_run_without_blocking_control() {
     let link = attended_queued("queued-bind-head");
     let events = patient(link.events);
     let session = connected(next(&events));
-    let output_generation = queued_registration(&link.control);
+    let output_generation = queued_registration(&link.control, &link.handle.shared);
     assert!(matches!(next(&events), LinkEvent::Settings { .. }));
     acknowledge_queued(&link.control, output_generation);
     let head = DataToShell::SegmentQueued {
@@ -4975,7 +4993,7 @@ fn queued_wrong_or_duplicate_registration_ack_ends_the_pair() {
         });
         let events = patient(link.events);
         let _session = connected(next(&events));
-        let output = queued_registration(&link.control);
+        let output = queued_registration(&link.control, &link.handle.shared);
         if duplicate {
             frame::write(
                 &mut &link.control,
@@ -5015,7 +5033,7 @@ fn queued_speech_start_or_scene_promise_closes_without_data_credit() {
         });
         let events = patient(link.events);
         let _session = connected(next(&events));
-        let output = queued_registration(&link.control);
+        let output = queued_registration(&link.control, &link.handle.shared);
         frame::write(
             &mut &link.control,
             &ControlToShell::QueuedAudioRegistered(output),
@@ -5056,6 +5074,155 @@ fn queued_speech_start_or_scene_promise_closes_without_data_credit() {
             events.recv_timeout(PATIENCE),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
         ));
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_narrated_pair_whose_run_end_never_comes_is_torn_down() {
+    let link = narrated_attended("narrated-missing-run-end");
+    let events = patient(link.events.clone());
+    let _named = queued_named_run(&link, &events);
+    let interrupted = run_state(
+        7,
+        ThreadId(1),
+        Phase::Interrupted,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    frame::write(&mut &link.control, &interrupted, Pipe::Control).expect("terminal control");
+    let by = Instant::now() + super::HANDSHAKE_TIMEOUT + PATIENCE;
+    while frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).is_ok() {
+        match frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control) {
+            Ok(Some(ControlToBrain::Pong)) => {}
+            Ok(None) | Err(_) => break,
+            Ok(Some(other)) => panic!("only pongs, got {other:?}"),
+        }
+        assert!(Instant::now() < by, "the pair outlived its missing RunEnd");
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(link.link.join().expect("the attended link didn't panic"));
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_decoded_run_end_outlasts_the_bound_while_the_bridge_is_busy() {
+    let link = narrated_attended("narrated-run-end-busy-bridge");
+    let events = patient(link.events.clone());
+    let (session, _) = queued_named_run(&link, &events);
+    let bridge = Arc::clone(session.io.narrated.as_ref().expect("a narrated pair"));
+    let interrupted = run_state(
+        7,
+        ThreadId(1),
+        Phase::Interrupted,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    frame::write(&mut &link.control, &interrupted, Pipe::Control).expect("terminal control");
+    let (held, holding) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = thread::spawn(move || {
+        let _state = bridge.hold_state();
+        held.send(()).expect("the test waits");
+        released.recv().ok();
+    });
+    holding.recv().expect("the bridge is held");
+    let end = DataToShell::RunEnd { run: RunId(7) };
+    frame::write(&mut &*link.data, &end, Pipe::Data).expect("the exact end");
+    let by = Instant::now() + super::HANDSHAKE_TIMEOUT + Duration::from_secs(1);
+    while Instant::now() < by {
+        frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control)
+            .expect("the pair stays open");
+        while frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control)
+            .expect("control")
+            .expect("the pair stays open")
+            != ControlToBrain::Pong
+        {}
+        thread::sleep(Duration::from_millis(250));
+    }
+    release.send(()).expect("the holder waits");
+    holder.join().expect("the holder finished");
+    assert!(session.open());
+}
+
+#[test]
+fn a_queued_keyup_publishes_its_release_only_when_it_is_sent() {
+    use kumochi_protocol::message::{GestureId, HoldStatus};
+    use std::sync::atomic::Ordering;
+
+    for refused in [true, false] {
+        let link = attended_queued(if refused {
+            "queued-keyup-refused"
+        } else {
+            "queued-keyup-published"
+        });
+        let events = patient(link.events.clone());
+        let session = connected(next(&events));
+        let output = queued_registration(&link.control, &link.handle.shared);
+        acknowledge_queued(&link.control, output);
+        assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+        let view = kumochi_protocol::message::SettingsView {
+            talk_back: true,
+            show_screen: false,
+            ..settings_view()
+        };
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::Settings {
+                view,
+                answer: false,
+            },
+            Pipe::Control,
+        )
+        .expect("settings");
+        assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+        let gesture = GestureId(43);
+        let recognized = ControlToBrain::VoiceHoldRecognized {
+            gesture,
+            thread: None,
+            selection: 1,
+        };
+        link.handle.track_input(gesture);
+        assert!(link.handle.send_control(&session, recognized.clone()));
+        assert_eq!(
+            frame::read(&mut &link.control, Pipe::Control).expect("control"),
+            Some(recognized)
+        );
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::VoiceHoldStatus {
+                gesture,
+                status: HoldStatus::Admitted,
+            },
+            Pipe::Control,
+        )
+        .expect("admitted");
+        assert!(
+            matches!(next(&events), LinkEvent::VoiceHold { gesture: key, status: HoldStatus::Admitted, .. } if key == gesture)
+        );
+        let released = ControlToBrain::KeyUp {
+            gesture,
+            t_qpc: 5,
+            chunks: 0,
+        };
+        let published = &link.handle.shared.output.hold_released;
+        if refused {
+            fill_queued_control_mailbox(&link, &session);
+            assert!(!link.handle.send_control(&session, released.clone()));
+            assert!(
+                !published.load(Ordering::Acquire),
+                "a refused KeyUp withdraws its release"
+            );
+            continue;
+        }
+        assert!(link.handle.send_control(&session, released.clone()));
+        assert!(
+            published.load(Ordering::Acquire),
+            "a sent KeyUp's release is visible to the data reader"
+        );
+        assert_eq!(
+            frame::read(&mut &link.control, Pipe::Control).expect("control"),
+            Some(released)
+        );
+        assert!(session.open());
     }
 }
 
