@@ -38,8 +38,8 @@ fn shims_are_refused_before_anything_is_looked_at() {
         "claude.cmd",
         "claude",
         "claude.ps1",
-        r"npm\node_modules\claude\claude.exe",
-        r"npm\NODE_MODULES\claude.exe",
+        "npm/node_modules/claude/claude.exe",
+        "npm/NODE_MODULES/claude.exe",
     ] {
         assert_eq!(
             locate_in(scratch.dir(), &[shim, "claude.exe"]),

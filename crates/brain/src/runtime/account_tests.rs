@@ -1262,16 +1262,22 @@ async fn a_catalog_row_gaining_support_does_not_replace_the_saved_overflow_model
     }
 }
 
-/// Why a run on a saved default fails when `ready` is what reads ready: Claude Code isn't
-/// installed here, so its own reason; no engine, or an invalid default, answers nothing.
-fn refused_with(ready: Option<kumochi_protocol::message::ConnectionKind>) -> UserError {
-    match ready {
-        Some(kumochi_protocol::message::ConnectionKind::ClaudeCode) => UserError::new(
+/// An uninstalled ready Claude Code returns its own reason. An Anthropic default without a
+/// native transport is unsupported; other unavailable or invalid defaults lack a model.
+fn refused_with(
+    choice: Option<kumochi_protocol::message::ConnectionKind>,
+    ready: Option<kumochi_protocol::message::ConnectionKind>,
+) -> UserError {
+    use kumochi_protocol::message::ConnectionKind;
+    match (choice, ready) {
+        (_, Some(ConnectionKind::ClaudeCode)) => UserError::new(
             ErrorKey::ClaudeCodeNotFound,
             Vec::new(),
             vec![Action::OpenSettings],
         )
         .expect("one action"),
+        #[cfg(not(windows))]
+        (Some(ConnectionKind::AnthropicKey), None) => ErrorKey::UnsupportedPlatform.into(),
         _ => model_unavailable(),
     }
 }
@@ -1594,7 +1600,10 @@ async fn preserved_default_after_restart(
     let mut tap = Tap::from_env();
     let client = async {
         shell.submit("never send this through another route").await;
-        assert_eq!(failed_with(&mut shell).await, Some(refused_with(ready)));
+        assert_eq!(
+            failed_with(&mut shell).await,
+            Some(refused_with(kind, ready))
+        );
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
