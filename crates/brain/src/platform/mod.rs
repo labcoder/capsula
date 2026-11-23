@@ -6,6 +6,8 @@ pub mod credential;
 pub use windows::{WindowProbe, WindowSample, WindowSession};
 
 mod connected_shell;
+#[cfg(not(windows))]
+mod fs;
 mod model_files;
 mod session_lock;
 mod shell_process;
@@ -37,6 +39,8 @@ pub(crate) fn test_is_link(metadata: &std::fs::Metadata) -> bool {
 pub(crate) use connected_shell::connected_shell_pid;
 #[cfg(windows)]
 pub(super) use connected_shell::register_shell;
+#[cfg(not(windows))]
+pub use fs::{config_dir, data_dir, free_space, links_unsupported, replace_file};
 pub use session_lock::{SessionLock, SessionLockError};
 pub(crate) use trust_roots::native_trust_supported;
 #[cfg(not(windows))]
