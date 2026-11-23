@@ -14,8 +14,6 @@ pub(crate) use super::windows::spawn_if;
 #[cfg(windows)]
 pub use super::windows::{Helper, Job, launch_detached, spawn, system_env};
 #[cfg(not(windows))]
-pub(crate) use unsupported::spawn_if;
-#[cfg(not(windows))]
 pub use unsupported::{Helper, Job, launch_detached, spawn, system_env};
 
 /// The parent's non-inheritable ends of a helper's stdin and stdout pipes.

@@ -91,10 +91,8 @@ pub fn spawn(_: &Launch<'_>) -> io::Result<Spawned> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-pub(crate) fn spawn_if(
-    launch: &Launch<'_>,
-    _: &dyn Fn() -> Option<Duration>,
-) -> io::Result<Spawned> {
+#[cfg(test)]
+fn spawn_if(launch: &Launch<'_>, _: &dyn Fn() -> Option<Duration>) -> io::Result<Spawned> {
     spawn(launch)
 }
 

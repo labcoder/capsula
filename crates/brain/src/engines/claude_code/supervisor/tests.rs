@@ -43,26 +43,35 @@ use crate::platform::{self, FAKE_CLAUDE, Job, Stdio};
 #[derive(Default)]
 pub(crate) struct Hooks {
     /// Where the stdin pump waits, with its first chunk taken and not yet admitted.
+    #[cfg(windows)]
     pub(crate) admit: Option<Pause>,
     /// Where the stdin pump waits, between its first admission and its write.
     pub(crate) write: Option<Pause>,
     /// Hears the length of each chunk written to the child's stdin.
+    #[cfg(windows)]
     pub(crate) writes: Option<std_mpsc::Sender<usize>>,
     /// Hears the length of each chunk admitted, before its write starts.
+    #[cfg(windows)]
     pub(crate) entries: Option<std_mpsc::Sender<usize>>,
     /// Where the start waits, once the launch's folder is made and before its listener.
+    #[cfg(windows)]
     pub(crate) folder: Option<Pause>,
     /// Hears the launch's id once it's drawn.
+    #[cfg(windows)]
     pub(crate) id: Option<std_mpsc::Sender<LaunchId>>,
     /// Hears each pump's name as its thread ends.
+    #[cfg(windows)]
     pub(crate) pumps: Option<std_mpsc::Sender<&'static str>>,
     /// The pump whose thread fails to start.
+    #[cfg(windows)]
     pub(crate) spawn_fails: Option<&'static str>,
     /// Where the teardown waits, once the listener is aborted and before it ends the job.
+    #[cfg(windows)]
     pub(crate) terminate: Option<Pause>,
 }
 
 /// The pumps' share of [`Hooks`].
+#[cfg(windows)]
 pub(super) struct Pumps {
     pub(super) stdin: Stdin,
     pub(super) report: Option<std_mpsc::Sender<&'static str>>,
@@ -129,11 +138,13 @@ pub(super) fn pause_picture(
 }
 
 /// A pump's end signal that also tells the test which pump ended.
+#[cfg(windows)]
 pub(super) struct Ending {
     _signal: std_mpsc::Sender<()>,
     report: Option<(std_mpsc::Sender<&'static str>, &'static str)>,
 }
 
+#[cfg(windows)]
 impl Ending {
     pub(super) fn new(
         signal: std_mpsc::Sender<()>,
@@ -147,6 +158,7 @@ impl Ending {
     }
 }
 
+#[cfg(windows)]
 impl Drop for Ending {
     fn drop(&mut self) {
         if let Some((report, name)) = self.report.take() {
