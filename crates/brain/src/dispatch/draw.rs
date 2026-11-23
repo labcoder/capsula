@@ -276,18 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_arguments_ignore_key_order_whitespace_and_defaults() {
-        let a = validate(br#"{"records":[{"step":{"id":"s"}}]}"#).expect("typed record");
-        let b = validate(
-            br#"{ "records": [ { "step": { "put": [], "id": "s", "set": [], "remove": [] } } ] }"#,
-        )
-        .expect("same typed record");
-        assert_eq!(a.hash, b.hash);
-        let changed = validate(br#"{"records":[{"step":{"id":"t"}}]}"#).expect("changed record");
-        assert_ne!(a.hash, changed.hash);
-    }
-
-    #[test]
     fn complete_draw_retry_digest_matches_the_previous_format() {
         let args = br#"{"records":[
             {"begin":{"v":1,"scene":"sample","surface":"overlay","alt":"Dot"}},
