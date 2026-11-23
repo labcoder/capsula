@@ -27,7 +27,9 @@ async fn routed_adoption_and_removal_revoke_at_the_worker_handoff() {
         .into(),
         ..Script::default()
     })));
-    account.connections.transport = Some(Transport::offline(peer.clone(), 4, 0));
+    account
+        .connections
+        .use_test_transport(Transport::offline(peer.clone(), 4, 0));
     account.connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey));
     settle(&mut account).await;
     let first = Arc::clone(account.connections.verified.as_ref().expect("verified"));
@@ -611,7 +613,9 @@ async fn recovery_with_unavailable_catalog(status: Option<u16>) {
         responses: status.into_iter().map(|status| wire(status, "")).collect(),
         ..Script::default()
     })));
-    account.connections.transport = Some(Transport::offline(peer, 1, 0));
+    account
+        .connections
+        .use_test_transport(Transport::offline(peer, 1, 0));
     let snapshot = |anthropic| {
         ControlToShell::Connections(ConnectionsView {
             anthropic,
