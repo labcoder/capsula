@@ -29,7 +29,7 @@ mod store_op;
 mod tests;
 #[cfg(test)]
 pub(crate) use tests::mcp::draft::draft_launch;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) use tests::routes::{built_for, pictured_claude_run, pictured_run};
 mod thread_op;
 mod tools;

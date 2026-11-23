@@ -31,6 +31,7 @@ mod accounts;
 mod anthropic;
 #[path = "ask_tests.rs"]
 mod asks;
+#[cfg(windows)]
 #[path = "claude_publish_tests.rs"]
 mod claude_publish;
 #[path = "delete_tests.rs"]

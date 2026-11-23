@@ -53,6 +53,7 @@ use windows_sys::Win32::UI::Shell::{
 };
 
 use super::pipe::user_sid;
+use crate::platform::Untrusted;
 
 mod models;
 pub(crate) use models::{
@@ -60,19 +61,6 @@ pub(crate) use models::{
     model_file, model_final, open_model_write, publish_model, remove_model_tree,
     validate_model_path,
 };
-
-/// Why a path can't be trusted. It carries no path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum Untrusted {
-    #[error("a path component doesn't exist")]
-    Missing,
-    #[error("a path component is a reparse point or resolves elsewhere")]
-    Reparse,
-    #[error("someone other than this user or the system can change a path component")]
-    Unsafe,
-    #[error("a path component can't be opened or read")]
-    Io,
-}
 
 /// SYSTEM, Administrators and `TrustedInstaller`, which may change anything here; this user joins
 /// them at run time.
