@@ -2,7 +2,6 @@
 //! walk to its image, or its release.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kumochi_protocol::geometry::{PhysicalPoint, PointerPath};
@@ -69,17 +68,18 @@ pub(crate) enum Closed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Unreleased;
 
-/// One brain's client for the hold protocol and its one screen worker. Each capture gets a fresh
-/// capture id and a ticket number above every earlier one, since a worker refuses a number it has
-/// already spent. Dropping the last one stops the worker.
+/// One brain's client for the hold protocol and its one screen worker.
 #[derive(Debug)]
 pub struct HoldClient {
     inner: Handle<Holds>,
-    tickets: AtomicU64,
-    captures: AtomicU64,
-    /// Every hold at or below it is retired. The worker's own fence ends with its process, so
-    /// this one keeps a retired hold from reaching a replacement.
-    fence: Mutex<Option<Owner>>,
+    admission: Mutex<Admission>,
+}
+
+#[derive(Debug, Default)]
+struct Admission {
+    last_capture: u64,
+    /// Keeps retired holds from reaching replacement workers, which start with no fence.
+    hold_fence: Option<Owner>,
 }
 
 impl HoldClient {
@@ -94,9 +94,7 @@ impl HoldClient {
     pub(crate) fn new(inner: Handle<Holds>) -> Self {
         Self {
             inner,
-            tickets: AtomicU64::new(1),
-            captures: AtomicU64::new(1),
-            fence: Mutex::new(None),
+            admission: Mutex::default(),
         }
     }
 
@@ -181,10 +179,6 @@ impl HoldClient {
         until: Instant,
         request: impl FnOnce(Key, TicketWire) -> Request,
     ) -> Result<Held, Closed> {
-        let key = Key {
-            owner,
-            capture: CaptureId(self.captures.fetch_add(1, Ordering::Relaxed)),
-        };
         let mut nonce = [0; 16];
         getrandom::fill(&mut nonce)
             .map_err(|error| Closed::Fault(error.raw_os_error().unwrap_or(-1)))?;
@@ -192,26 +186,29 @@ impl HoldClient {
         let ttl_ms = u32::try_from(ttl.as_millis()).unwrap_or(u32::MAX);
         // 0, which no worker reads as later than now, when the counter can't be read.
         let deadline_qpc = crate::platform::qpc_at(until.into_std()).unwrap_or(0);
-        let mut stream = {
-            let fence = self
-                .fence
+        let (key, mut stream) = {
+            let mut admission = self
+                .admission
                 .lock()
                 .map_err(|_| Closed::Lost(WorkerLost::Lost))?;
-            if fence.is_some_and(|fence| owner <= fence) {
+            if admission.hold_fence.is_some_and(|fence| owner <= fence) {
                 return Err(Closed::Refused(Refusal::Stale));
             }
-            // Minted under the lock, so tickets reach the worker in the order of their numbers.
-            let ticket = TicketWire::new(
-                key.capture,
-                self.tickets.fetch_add(1, Ordering::Relaxed),
-                nonce,
-                ttl_ms,
-                deadline_qpc,
-            )
-            .for_shell(crate::platform::connected_shell_pid());
-            self.inner
+            admission.last_capture = admission
+                .last_capture
+                .checked_add(1)
+                .ok_or(Closed::Lost(WorkerLost::Lost))?;
+            let key = Key {
+                owner,
+                capture: CaptureId(admission.last_capture),
+            };
+            let ticket = TicketWire::new(key.capture, key.capture.0, nonce, ttl_ms, deadline_qpc)
+                .for_shell(crate::platform::connected_shell_pid());
+            let stream = self
+                .inner
                 .request_stream(request(key, ticket), until)
-                .map_err(Closed::Lost)?
+                .map_err(Closed::Lost)?;
+            (key, stream)
         };
         let generation = match stream.next().await {
             Some(Ok((Reply::Acquired(acquired, meta), generation)))
@@ -259,8 +256,8 @@ impl HoldClient {
         until: Instant,
     ) -> Result<(), Unreleased> {
         {
-            let mut fence = self.fence.lock().map_err(|_| Unreleased)?;
-            *fence = (*fence).max(Some(owner));
+            let mut admission = self.admission.lock().map_err(|_| Unreleased)?;
+            admission.hold_fence = admission.hold_fence.max(Some(owner));
         }
         let mut exits = self.inner.exits();
         let worker = match self.inner.request(Request::Retire(owner), until).await {
