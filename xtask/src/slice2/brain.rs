@@ -87,6 +87,10 @@ pub(super) struct Brain {
 }
 
 impl Brain {
+    pub(super) fn pid(&self) -> u32 {
+        self.child.as_ref().expect("running gate brain").id()
+    }
+
     /// Ends it with `TerminateProcess`, as a crash would.
     pub(super) fn kill(mut self) -> Result<()> {
         let mut child = self.child.take().context("the brain was already taken")?;

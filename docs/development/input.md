@@ -123,13 +123,18 @@ sequenceDiagram
   foreground thread, if it can identify one. The deferred release checks sample again,
   so a layout change that changes back between samples can escape detection. The decoded
   tracker uses fixed storage; that doesn't bound the cost of the native queries. After coverage loss,
-  overflow or registered Escape, shell-core clears the remembered keys and blocks recognition.
-  An eligible new modifier make can try once. Windows reads left Ctrl and left Alt before and
+  overflow or registered Escape, shell-core cancels the chord and blocks recognition. The
+  adapter retains uncertainty for modifiers that may still be down; repeats don't furnish new
+  timestamps, and each known owner must send its break before a make can count again. If more
+  than two sources press the same uncertain modifier, the shell must restart after release.
+  The reducer waits for both new raw modifier makes before it can try once. Windows reads
+  left Ctrl and left Alt before and
   after a bounded `GetAsyncKeyState` sweep, using only the down bit; another down keyboard VK
   vetoes that attempt. Aggregate Ctrl/Alt aliases, mouse buttons and toggle state do not count.
-  The same attempt starts a fresh hold if Windows' observable virtual-key state agreed with
-  this chord. A failed read leaves the next attempt eligible; time, another reset and an empty
-  ledger cannot rearm. The scan isn't atomic: a key can go down after its slot was read,
+  The second make can start a fresh hold if the observable keyboard state agrees. A current
+  state read never substitutes for a queued make, and a failed read can only be retried on a
+  later clean raw pair. Time, another reset and an empty ledger cannot rearm. The scan isn't
+  atomic: a key can go down after its slot was read,
   access can change mid-sweep (zero means up or failure), two physical keys can share one VK,
   and firmware-only keys without a VK aren't visible. A stuck or remapped extra key vetoes for
   as long as Windows reports it down. The scan and behavior with elevated foreground windows,

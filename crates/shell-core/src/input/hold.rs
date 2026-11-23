@@ -94,7 +94,14 @@ impl Fence {
         now: Instant,
         paused: &Cell<bool>,
     ) -> Delivery {
-        self.reduce_with_keyboard_read(state, event, now, || (!paused.get()).then_some(0), || None)
+        self.reduce_with_keyboard_read(
+            state,
+            event,
+            now,
+            None,
+            || (!paused.get()).then_some(0),
+            || None,
+        )
     }
 
     pub fn reduce_with_keyboard_read(
@@ -102,10 +109,11 @@ impl Fence {
         state: &mut Gesture,
         event: Event,
         now: Instant,
+        queued_press: Option<u64>,
         session: impl Fn() -> Option<u64>,
         read: impl FnOnce() -> Option<Instant>,
     ) -> Delivery {
-        let now = state.recover(event, read).unwrap_or(now);
+        let now = state.recover(event, queued_press, read).unwrap_or(now);
         let reduced = state.recognize(event, now, |reason| {
             tracing::debug!(stage = ?InputStage::Gesture, ?reason, "held speech input boundary");
         });
@@ -456,7 +464,14 @@ mod tests {
         for (index, origin) in [None, Some(7), Some(8)].into_iter().enumerate() {
             let start = at + Duration::from_secs(u64::try_from(index).unwrap() * 2);
             let mut trigger = |event, when, session| {
-                fence.reduce_with_keyboard_read(&mut state, event, when, || session, || None)
+                fence.reduce_with_keyboard_read(
+                    &mut state,
+                    event,
+                    when,
+                    Some(0),
+                    || session,
+                    || None,
+                )
             };
             for key in [Key::LeftControl, Key::LeftAlt] {
                 trigger(

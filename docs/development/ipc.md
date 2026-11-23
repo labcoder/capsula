@@ -407,8 +407,10 @@ stores the pair in the session's existing shared allocation, so session clones d
 It rejects missing, invalid or wrong-session tuning, and tears down the connection
 on a later duplicate. A reconnect must authenticate its own values. Both physical modifier
 presses must be newer than the current connection's readiness stamp, even if Windows delivers
-an older key message late. Keyboard recovery can't substitute for either press. Closing or
-locally aborting the pair revokes native hold eligibility
+an older key message late. Keyboard recovery waits for both trustworthy raw makes; a
+current-state read validates the pair but cannot substitute for either press. A modifier
+that may still be held at reset must release before it can contribute a new make. Closing
+or locally aborting the pair revokes native hold eligibility
 without waiting for the outbox. This doesn't block local Quit or cancellation.
 
 ## After the handshake

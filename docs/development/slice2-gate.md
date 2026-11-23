@@ -25,6 +25,7 @@ flowchart LR
   client from that copy. The client reads the instance capability from Credential Manager and
   sends `Hello` on both pipes, as the shell does. It sends explicit `TextMetrics(None)` on
   data and requires valid `ShellTuning` for the welcomed session before starting its readers.
+  Both pipes must belong to the held brain process; the control check precedes capability use.
 - Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%` folders, under the gate folder's `data`,
   with Claude Code off, and its own fixture script (`KUMOCHI_FIXTURE`, debug builds only), so items
   never share a store or settings. A brain still names its pipes, its instance capability, its

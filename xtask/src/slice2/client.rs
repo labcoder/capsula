@@ -23,8 +23,6 @@ use crate::platform::gate_pipe::{self, PipeClient};
 
 /// How long a brain that's starting gets to accept the client.
 const CONNECT: Duration = Duration::from_secs(15);
-/// How long the brain gets to complete the handshake.
-const HANDSHAKE: Duration = Duration::from_secs(5);
 
 /// A frame the brain sent, or the end of one of its pipes.
 #[derive(Debug)]
@@ -136,27 +134,38 @@ pub(crate) struct Client<F = Frame> {
 
 impl Client {
     /// Connects and authenticates both pipes, retrying while the brain starts.
-    pub(crate) fn connect() -> Result<Self> {
-        Self::connect_with(None)
+    pub(crate) fn connect(pid: u32) -> Result<Self> {
+        Self::connect_with(pid, None)
     }
 
     /// Connects with the data reader paused, so recovery's chunks can be taken one at a time.
-    pub(super) fn connect_paused() -> Result<Self> {
-        Self::connect_with(Some(0))
+    pub(super) fn connect_paused(pid: u32) -> Result<Self> {
+        Self::connect_with(pid, Some(0))
     }
 
-    fn connect_with(allowed: Option<usize>) -> Result<Self> {
+    fn connect_with(pid: u32, allowed: Option<usize>) -> Result<Self> {
         let session = gate_pipe::session_id()?;
-        let end = Instant::now() + CONNECT;
-        loop {
-            match attempt(session, allowed) {
-                Ok(client) => return Ok(client),
-                Err(error) if Instant::now() >= end => {
-                    return Err(error.context("the brain didn't accept the client"));
+        let mut shared = owned_connect(
+            &Pipe::Control.name(session),
+            &Pipe::Data.name(session),
+            pid,
+            Instant::now() + CONNECT,
+            || capability(session),
+        )
+        .context("the brain didn't accept the client")?;
+        shared.control.clear_deadline();
+        shared.data.clear_deadline();
+        shared.flow().allowed = allowed;
+        let (sender, frames) = mpsc::channel();
+        let send = move |seen: Option<Seen>, _| {
+            seen.is_none_or(|mut seen| {
+                if matches!(seen.frame, Frame::BadRead) {
+                    seen.frame = Frame::Closed;
                 }
-                Err(_) => thread::sleep(Duration::from_millis(50)),
-            }
-        }
+                sender.send(seen).is_ok()
+            })
+        };
+        Client::readers(Arc::new(shared), frames, send.clone(), send)
     }
 
     /// Stops reading the data pipe after the frame being read, if any.
@@ -297,27 +306,6 @@ impl<F> Drop for Client<F> {
     }
 }
 
-fn attempt(session: u32, allowed: Option<usize>) -> Result<Client> {
-    let deadline = Instant::now() + HANDSHAKE;
-    let control = PipeClient::open(&Pipe::Control.name(session))?.until(deadline);
-    let hello = hello(capability(session)?.context("instance capability is not yet published")?);
-    let origin = welcome(&control, &hello)?.context("no welcome")?;
-    let data = PipeClient::open(&Pipe::Data.name(session))?.until(deadline);
-    let mut shared = paired(control, data, hello, origin, allowed)?;
-    shared.control.clear_deadline();
-    shared.data.clear_deadline();
-    let (sender, frames) = mpsc::channel();
-    let send = move |seen: Option<Seen>, _| {
-        seen.is_none_or(|mut seen| {
-            if matches!(seen.frame, Frame::BadRead) {
-                seen.frame = Frame::Closed;
-            }
-            sender.send(seen).is_ok()
-        })
-    };
-    Client::readers(Arc::new(shared), frames, send.clone(), send)
-}
-
 fn hello(capability: Capability) -> Hello {
     Hello {
         build_id: BUILD_ID.to_owned(),
@@ -355,7 +343,6 @@ fn paired(
     data: PipeClient,
     hello: Hello,
     origin: IssueSession,
-    allowed: Option<usize>,
 ) -> Result<Shared> {
     frame::write(&mut &data, &DataToBrain::Hello(hello), Pipe::Data)?;
     frame::write(&mut &data, &DataToBrain::TextMetrics(None), Pipe::Data)?;
@@ -372,10 +359,7 @@ fn paired(
         data,
         control_writer: Mutex::new(()),
         data_writer: Mutex::new(()),
-        flow: Mutex::new(Flow {
-            allowed,
-            ..Flow::default()
-        }),
+        flow: Mutex::default(),
         flow_changed: Condvar::new(),
     })
 }
@@ -386,7 +370,7 @@ fn owned_connect(
     pid: u32,
     deadline: Instant,
     mut published: impl FnMut() -> Result<Option<Capability>>,
-) -> Result<Arc<Shared>> {
+) -> Result<Shared> {
     let mut refused: Option<Capability> = None;
     loop {
         let control = loop {
@@ -422,13 +406,7 @@ fn owned_connect(
         if let Some(origin) = welcome(&control, &hello)? {
             let data = PipeClient::open(data_name)?;
             data.require_server(pid)?;
-            return Ok(Arc::new(paired(
-                control,
-                data.until(deadline),
-                hello,
-                origin,
-                None,
-            )?));
+            return paired(control, data.until(deadline), hello, origin);
         }
         ensure!(
             refused.is_none(),
@@ -569,13 +547,13 @@ impl<F: Send + 'static> Client<Option<F>> {
         mut project: impl FnMut(Frame) -> std::result::Result<Option<F>, ()> + Send + 'static,
     ) -> Result<Self> {
         let session = gate_pipe::session_id()?;
-        let shared = owned_connect(
+        let shared = Arc::new(owned_connect(
             &Pipe::Control.name(session),
             &Pipe::Data.name(session),
             pid,
             deadline,
             || capability(session),
-        )?;
+        )?);
         let (sender, frames) = mpsc::sync_channel(128);
         let mut intake = Projection {
             sender,
