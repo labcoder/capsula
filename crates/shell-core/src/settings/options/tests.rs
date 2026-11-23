@@ -150,5 +150,6 @@ fn saved() -> SettingsView {
         hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
         screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
         show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
+        shortcut: kumochi_protocol::message::ShortcutView::Default,
     }
 }

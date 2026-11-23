@@ -12,7 +12,7 @@ use crate::store::choice::StoredChoice;
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
     AccountView, AssistantName, DockPosition, ErrorKey, MaxFrameRate, OnboardingStep, RepoName,
-    RunId, SettingsOp, SettingsView, SttUnload, ThreadId, UserName,
+    RunId, SettingsOp, SettingsView, ShortcutChord, ShortcutView, SttUnload, ThreadId, UserName,
 };
 use kumochi_protocol::voice::VoicePart;
 use toml::{Table, Value};
@@ -36,6 +36,7 @@ const DEFAULT_ACCOUNT: &str = "default_account";
 const DEFAULT_REPO: &str = "default_repo";
 const DOCK_POSITION: &str = "dock_position";
 const SHOW_IN_TASKBAR: &str = "show_in_taskbar";
+const SHORTCUT: &str = "shortcut";
 const VOICE: &str = "voice";
 const TALK_BACK: &str = "talk_back";
 const STT_UNLOAD: &str = "stt_unload";
@@ -367,6 +368,14 @@ impl Config {
             SettingsOp::SetTaskbar(shown) => {
                 table.insert(SHOW_IN_TASKBAR.to_owned(), Value::Boolean(shown));
             }
+            SettingsOp::SetShortcut(Some(chord)) => {
+                let value =
+                    Value::try_from(chord).expect("a shortcut is a table of small integers");
+                table.insert(SHORTCUT.to_owned(), value);
+            }
+            SettingsOp::SetShortcut(None) => {
+                table.remove(SHORTCUT);
+            }
             SettingsOp::SetTalkBack(on) => {
                 voice_mut(&mut table).insert(TALK_BACK.to_owned(), Value::Boolean(on));
             }
@@ -644,7 +653,21 @@ fn view_of(table: &Table, main_thread: ThreadId, in_use: bool) -> SettingsView {
         hold_to_talk,
         screen_holds,
         show_screen,
+        shortcut: shortcut_of(table),
     }
+}
+
+fn shortcut_of(table: &Table) -> ShortcutView {
+    let Some(value) = table.get(SHORTCUT) else {
+        return ShortcutView::Default;
+    };
+    value
+        .as_table()
+        .filter(|fields| fields.len() <= 2 && fields.values().all(Value::is_integer))
+        .and_then(|fields| fields.clone().try_into::<ShortcutChord>().ok())
+        .map(ShortcutView::Custom)
+        .or_else(|| invalid(SHORTCUT))
+        .unwrap_or(ShortcutView::Invalid)
 }
 
 /// The `onboarded` key; none when it's absent or bad.

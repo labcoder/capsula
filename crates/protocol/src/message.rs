@@ -21,6 +21,7 @@ mod pages;
 mod scenes;
 #[macro_use]
 mod settings;
+mod shortcut;
 mod threads;
 mod voice;
 pub use account::{
@@ -59,6 +60,7 @@ pub use settings::{
     MAX_NAME_CHARS, MaxFrameRate, NameError, NotACap, OnboardingStep, SettingsOp, SettingsView,
     SttUnload, UserName,
 };
+pub use shortcut::{InvalidShortcutChord, ShortcutChord, ShortcutView};
 pub use threads::{
     Effort, EffortSet, EffortSetError, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS,
     MAX_SLUG_BYTES, MAX_TITLE_CHARS, ModelChoice, ModelInfo, ModelName, ModelSlug, SlugError,

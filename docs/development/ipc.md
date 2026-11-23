@@ -459,6 +459,11 @@ write, and these facts add no GPUI presentation.
   `Settings` change the shell sends, in order, applied or refused (`answer: true`), and when a
   change an earlier connection sent is saved (`answer: false`). See
   [settings.md](settings.md).
+  `SettingsOp::SetShortcut` is appended as tag 17 and uses the same reply. Decode checks a
+  present chord's sided modifier mask and optional function key before the brain can stage it.
+  `SettingsView` appends the stored value's Default, Custom or Invalid status. Existing op and
+  greeting tags are unchanged; the positional settings view is for matched builds only, as
+  enforced by the existing exact-build handshake. The shortcut status does not drive input yet.
 - **Errors** the user should see travel as `Error(UserError)`: a closed `ErrorKey` into the
   shell's Fluent catalog, at most 4 typed arguments (`Seconds`, `Count`; never text) and at most
   3 actions. Both limits are checked when one is built and when it's decoded, so a frame over

@@ -9,6 +9,26 @@ module. It reads `APPDATA` and requires an absolute path, just as the local data
 an absolute `LOCALAPPDATA`. Missing, empty or relative roots never fall back to the working
 directory.
 
+## Stored shortcut
+
+`config.toml` can store one optional `[shortcut]` table with a `modifiers` bit mask and an
+optional `function` number (1–24). Bits 0–7 are left/right Ctrl, left/right Alt, left/right
+Shift and left/right Win; the right Alt bit is refused, including for AltGr. No scan codes or
+input history are stored. The chord is two to four distinct sided keys: at least two
+modifier families, or one function key and one to three modifiers including Ctrl, left Alt
+or Win. The set counts each modifier family once. It rules out printable keys, Escape,
+ambiguous keys and multiple trigger keys by representation. The validator also refuses
+Ctrl+left Alt+Shift+Win, Shift+Win+F23, left Alt+F4 and Win+Ctrl+F4, including their sided
+variants and supersets.
+
+The settings snapshot distinguishes a valid override, a missing override and an invalid field.
+Missing or reset means left Ctrl+left Alt. An invalid field falls back to that default without
+rewriting the field; unrelated saves preserve it and other unknown settings. A wholly unreadable
+file keeps the existing read-only defaults. A paired `SetShortcut` save or reset uses the
+existing atomic write and ordered answer. This is storage and wire only: the live chord is
+still left Ctrl+left Alt. No editor sends this operation yet, and nothing installs the stored
+chord or projects its modifiers onto an Escape registration.
+
 ## Shell editor
 
 Accounts also composes Claude Code through `presence/settings/claude.rs`. The plain

@@ -46,6 +46,7 @@ fn dock_refusal_replaces_its_placement_before_the_link_drops(cx: &mut TestAppCon
                             hold_to_talk: DEFAULT_HOLD_TO_TALK,
                             screen_holds: DEFAULT_SCREEN_HOLDS,
                             show_screen: DEFAULT_SHOW_SCREEN,
+                            shortcut: kumochi_protocol::message::ShortcutView::Default,
                         },
                         answer: false,
                     }]),

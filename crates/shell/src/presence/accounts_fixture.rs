@@ -7,6 +7,7 @@ use gpui_kit::{
     App, AppContext as _, Bounds, Pixels, Size, Styled as _, WeakEntity,
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, point, px, size,
 };
+use kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME;
 use kumochi_protocol::message::{
     AccountEmail, AccountRecovery, AccountView, Action, AssistantName, Cleanup, ErrorKey,
     MaxFrameRate, PlanState, SettingsView as Snapshot, ThreadId, UserError,
@@ -118,10 +119,8 @@ impl State {
         assert_eq!(
             model.set_view(
                 Snapshot {
-                    assistant_name: AssistantName::new(
-                        kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME
-                    )
-                    .expect("default assistant name"),
+                    assistant_name: AssistantName::new(DEFAULT_ASSISTANT_NAME)
+                        .expect("default assistant name"),
                     user_name: None,
                     onboarded: true,
                     onboarding_from: kumochi_protocol::message::OnboardingStep::Welcome,
@@ -135,6 +134,7 @@ impl State {
                     hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
                     screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
                     show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
+                    shortcut: kumochi_protocol::message::ShortcutView::Default,
                 },
                 Update::Unsolicited
             ),

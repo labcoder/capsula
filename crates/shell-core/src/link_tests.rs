@@ -477,6 +477,7 @@ fn settings_view() -> kumochi_protocol::message::SettingsView {
         hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
         screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
         show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
+        shortcut: kumochi_protocol::message::ShortcutView::Default,
     }
 }
 
@@ -1660,6 +1661,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         hold_to_talk: kumochi_protocol::message::DEFAULT_HOLD_TO_TALK,
         screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
         show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
+        shortcut: kumochi_protocol::message::ShortcutView::Default,
     };
     for message in [
         ControlToShell::Welcome {

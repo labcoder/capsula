@@ -26,6 +26,7 @@ fn owed() -> SettingsView {
         hold_to_talk: true,
         screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
         show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
+        shortcut: kumochi_protocol::message::ShortcutView::Default,
     }
 }
 

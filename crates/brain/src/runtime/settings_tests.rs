@@ -10,7 +10,7 @@ use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     AssistantName, ControlToBrain, ControlToShell, ErrorKey, Phase, RunId, SettingsOp,
-    SettingsView, ThreadId, UserName,
+    SettingsView, ShortcutChord, ShortcutView, ThreadId, UserName,
 };
 use kumochi_protocol::tap;
 use kumochi_protocol::voice::VoicePart;
@@ -193,6 +193,33 @@ async fn the_view_comes_before_scenes_and_each_change_is_answered_in_order() {
     let saved = scratch.config();
     assert_eq!(saved.view().assistant_name.as_str(), "Nimbus");
     assert!(saved.view().onboarded);
+}
+
+#[tokio::test]
+async fn shortcut_save_and_reset_are_answered_in_order_after_persistence() {
+    let scratch = Scratch::new("settings-shortcut");
+    let mut brain = test_support::brain(&scratch, "");
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let chord = ShortcutChord::new(1, Some(12)).expect("left Ctrl and F12");
+    let client = async {
+        assert_eq!(shell.settled().await.shortcut, ShortcutView::Default);
+        assert!(shell.scenes().await.is_empty());
+        shell.send(&op(SettingsOp::SetShortcut(Some(chord)))).await;
+        assert_eq!(shell.answer().await.shortcut, ShortcutView::Custom(chord));
+        assert_eq!(
+            scratch.config().view().shortcut,
+            ShortcutView::Custom(chord)
+        );
+
+        shell.send(&op(SettingsOp::SetShortcut(None))).await;
+        assert_eq!(shell.answer().await.shortcut, ShortcutView::Default);
+        assert_eq!(scratch.config().view().shortcut, ShortcutView::Default);
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
 }
 
 #[tokio::test]
