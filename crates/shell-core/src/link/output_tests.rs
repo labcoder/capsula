@@ -62,8 +62,12 @@ fn retirement_needs_proof_on_the_bound_microphone() {
     assert_eq!(denied, Denied::Inhibited, "kept");
     let claim = owner.claim(&token, 1).expect("claims");
     let reserved = owner.start_mic(&claim).expect("starts");
-    let mut source =
-        MicOwner::start_reserved(reserved, Arc::new(AtomicBool::new(true))).expect("spawned");
+    let mut source = MicOwner::start_reserved_with_for_tests(
+        reserved,
+        Arc::new(AtomicBool::new(true)),
+        |_, _, _, _| Ok(Finalization::Discarded(MicError::Unavailable)),
+    )
+    .expect("spawned");
     let (token, denied) = owner
         .retire(token, Retirement::Unstarted)
         .expect_err("it started");

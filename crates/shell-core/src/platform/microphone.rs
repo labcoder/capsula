@@ -11,6 +11,13 @@
 //! but still violates the no-lock contract, including borrowed error paths.
 //! `CoreAudio` input calls the same helper at `src/host/coreaudio/macos/device.rs:781`.
 
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "only native capture and PCM tests use this module"
+    )
+)]
 mod pcm;
 #[cfg(test)]
 mod tests;
@@ -26,17 +33,32 @@ use kumochi_protocol::message::MicPcm;
 use kumochi_protocol::message::{GestureId, HOLD_START_TIMEOUT_MS};
 use zeroize::Zeroize;
 
+#[cfg(windows)]
 pub(super) use pcm::{Format, Packetizer, Sample};
 
 /// The capture pump's sleep while the endpoint is empty, one wire chunk long; the reaper and
 /// the UI's hold watcher reuse it as their check interval.
 pub const POLL: Duration = Duration::from_millis(20);
 /// One wire chunk, as the packetizer cuts them.
+#[cfg_attr(
+    all(not(windows), not(any(test, feature = "test-support"))),
+    expect(
+        dead_code,
+        reason = "only native or injected capture sizes a PCM queue"
+    )
+)]
 const CHUNK: Duration = Duration::from_millis(20);
 /// A whole capture buffer drained in one pass, plus three chunks for the forwarder to lag.
 #[expect(
     clippy::as_conversions,
     reason = "a chunk count of a 100 ms buffer fits usize"
+)]
+#[cfg_attr(
+    all(not(windows), not(any(test, feature = "test-support"))),
+    expect(
+        dead_code,
+        reason = "only native or injected capture creates a PCM queue"
+    )
 )]
 const PCM_QUEUE: usize = (CAPTURE_BUFFER.as_millis() / CHUNK.as_millis()) as usize + 3;
 
@@ -63,6 +85,9 @@ pub enum MicError {
     Deadline,
     #[error("microphone is unavailable")]
     Unavailable,
+    #[cfg(not(windows))]
+    #[error("native microphone capture is unsupported on this platform")]
+    Unsupported,
     #[error("microphone format is unsupported")]
     Format,
     #[error("microphone data is discontinuous")]
@@ -76,6 +101,13 @@ pub enum MicError {
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "only native capture and packet tests inspect device status"
+    )
+)]
 pub(super) struct PacketStatus {
     pub(super) frames: u32,
     /// The device's stream position of the packet's first frame, in frames.
@@ -86,12 +118,33 @@ pub(super) struct PacketStatus {
 
 /// The endpoint buffer the adapter asks for: five polls, so the pump can stall up to about
 /// 100 ms before the device overruns and drops audio.
+#[cfg_attr(
+    all(not(windows), not(any(test, feature = "test-support"))),
+    expect(
+        dead_code,
+        reason = "only native or injected capture sizes a PCM queue"
+    )
+)]
 pub(super) const CAPTURE_BUFFER: Duration = Duration::from_millis(100);
 
 /// A hold fails when more than one frame in this many of its span, from the first kept frame
 /// to the last, never reached it: sparse losses pass and a mostly lost hold doesn't.
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "native capture and packet tests enforce this loss bound"
+    )
+)]
 const MISSING_SHARE_DIVISOR: u64 = 4;
 
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "only native capture and packet tests track packet boundaries"
+    )
+)]
 pub(super) struct PacketBoundary {
     startup: bool,
     listening: bool,
@@ -104,6 +157,7 @@ pub(super) struct PacketBoundary {
     kept_frames: u64,
     missing_frames: u64,
     next_position: Option<u64>,
+    #[cfg(windows)]
     queue_high_water: usize,
     discarded_before_listening: u32,
 }
@@ -122,12 +176,20 @@ impl Default for PacketBoundary {
             kept_frames: 0,
             missing_frames: 0,
             next_position: None,
+            #[cfg(windows)]
             queue_high_water: 0,
             discarded_before_listening: 0,
         }
     }
 }
 
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "only native capture and packet tests track packet boundaries"
+    )
+)]
 impl PacketBoundary {
     pub(super) fn started(&mut self, at: Instant) {
         self.started = Some(at);
@@ -193,6 +255,7 @@ impl PacketBoundary {
         }
     }
 
+    #[cfg(windows)]
     pub(super) fn queued(&mut self, high_water: usize) {
         self.queue_high_water = self.queue_high_water.max(high_water);
     }
@@ -213,6 +276,7 @@ impl PacketBoundary {
         Ok(())
     }
 
+    #[cfg(windows)]
     pub(super) fn log(&self) {
         tracing::info!(
             discontinuities = self.discontinuities,
@@ -357,6 +421,13 @@ impl Generation {
         transition(&self.gate, self.gesture, CANCELLED);
     }
 
+    #[cfg_attr(
+        all(not(windows), not(test)),
+        expect(
+            dead_code,
+            reason = "native capture and its tests poll collection authority"
+        )
+    )]
     pub(super) fn collecting(&self, session: &AtomicBool) -> bool {
         self.mode(session, Instant::now()) == Ok(Mode::Collecting)
     }
@@ -391,6 +462,13 @@ impl Generation {
         }
     }
 
+    #[cfg_attr(
+        all(not(windows), not(any(test, feature = "test-support"))),
+        expect(
+            dead_code,
+            reason = "native capture and fixture sources publish readiness"
+        )
+    )]
     pub(crate) fn running(&self) -> Result<(), MicError> {
         self.advance(OPENING, RUNNING)
     }
@@ -460,6 +538,10 @@ pub struct MicOwner {
     pub pcm: Receiver<MicPcm>,
 }
 
+#[cfg_attr(
+    all(not(windows), not(any(test, feature = "test-support"))),
+    expect(dead_code, reason = "only native or injected capture creates a worker")
+)]
 struct WorkerCleanup {
     generation: Generation,
     discard: Receiver<MicPcm>,
@@ -497,6 +579,7 @@ impl MicOwner {
     }
 
     /// Starts a generation whose single start was claimed (see [`Generation::reserve`]).
+    #[cfg(windows)]
     pub fn start_reserved(
         mut reserved: Reserved,
         session: Arc<AtomicBool>,
@@ -508,6 +591,11 @@ impl MicOwner {
             });
         }
         Self::spawn(generation, session, super::windows::microphone::capture)
+    }
+
+    #[cfg(not(windows))]
+    pub fn start_reserved(_: Reserved, _: Arc<AtomicBool>) -> Result<Self, MicError> {
+        Err(MicError::Unsupported)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -565,6 +653,10 @@ impl MicOwner {
         Self::spawn(generation, session, capture)
     }
 
+    #[cfg_attr(
+        all(not(windows), not(any(test, feature = "test-support"))),
+        expect(dead_code, reason = "only native or injected capture starts a worker")
+    )]
     fn spawn(
         generation: Generation,
         session: Arc<AtomicBool>,
