@@ -53,6 +53,9 @@ const STDOUT_QUEUE: usize = 4;
 /// Why the bridge stopped with an error.
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
+    /// This build has no native runtime adapter.
+    #[error("native bridge startup is unsupported")]
+    NativeRuntime(#[source] io::Error),
     /// The launch value isn't 32 lowercase hex digits.
     #[error("bad launch value")]
     Launch,
@@ -82,6 +85,7 @@ pub enum BridgeError {
 /// # Errors
 /// [`BridgeError`]; a lost pipe isn't one, since the launch ends with it.
 pub fn serve(launch: &str) -> Result<(), BridgeError> {
+    platform::require_native_runtime().map_err(BridgeError::NativeRuntime)?;
     // A bridge that failed to start would make the audit refuse every launch, so logging is optional.
     if crate::logging::init(BRIDGE_LOG).is_err() {
         crate::logging::install_panic_hook();
