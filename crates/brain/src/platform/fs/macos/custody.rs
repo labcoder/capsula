@@ -71,9 +71,9 @@ pub(super) fn open_at(
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn stat(fd: RawFd, stage: Stage) -> Result<libc::stat, Fault> {
+pub(super) fn stat(fd: RawFd, stage: Stage) -> Result<libc::stat, Fault> {
     let mut metadata = MaybeUninit::uninit();
-    // SAFETY: fd is held, and metadata provides writable storage for a complete stat.
+    // SAFETY: fstat validates fd; metadata provides writable storage for a complete stat.
     call(unsafe { libc::fstat(fd, metadata.as_mut_ptr()) })
         .map_err(|error| Fault::io(stage, &error))?;
     // SAFETY: Successful fstat initialized the complete stat.

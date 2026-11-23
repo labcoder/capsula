@@ -1,12 +1,12 @@
 use std::ffi::{CStr, CString};
 use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind, Read as _, Seek as _, Write as _};
-use std::os::fd::AsRawFd as _;
+use std::os::fd::{AsRawFd as _, RawFd};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 
-use super::custody::acl_absent;
+use super::custody::{acl_absent, stat};
 use super::settings::{write_scratch_settings, write_scratch_settings_with};
 use super::{
     Destination, Fault, Publication, RenameMode, Scratch, Stage, available_bytes,
@@ -541,6 +541,76 @@ fn settings_refuses_unowned_subprocess() {
 #[ignore = "requires runner-passed identity different from the seeded root"]
 fn settings_refuses_mismatched_root() {
     settings_refusal(ErrorKind::InvalidData);
+}
+
+fn inherited_fixture_fd() -> RawFd {
+    std::env::var("MAC_SCRATCH_TEST_FD")
+        .expect("named inherited fixture descriptor")
+        .parse()
+        .expect("numeric fixture descriptor")
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "spawns under the shared spawn lock"
+)]
+fn assert_exec_does_not_inherit_fixture() {
+    let parent = stat(inherited_fixture_fd(), Stage::Root).expect("original fd is live in owner");
+    let identity = format!("{}:{}", parent.st_dev, parent.st_ino);
+    let output = {
+        let _spawning = crate::platform::spawn_lock();
+        std::process::Command::new(std::env::current_exe().expect("fixture executable"))
+            .args([
+                "--exact",
+                "platform::fs::macos::tests::settings_exec_checks_no_fixture_handle",
+                "--ignored",
+            ])
+            .env("MAC_SCRATCH_TEST_EXPECTED_CLOSED", identity)
+            .output()
+            .expect("exec fixture witness before any settings write")
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "exec witness must run and report no inherited root: {stdout}"
+    );
+}
+
+#[test]
+#[ignore = "requires a real runner-provisioned root before the first settings write"]
+fn settings_exec_does_not_inherit_root_before_first_write() {
+    assert_exec_does_not_inherit_fixture();
+    let settings = std::env::temp_dir().join("handoff/settings");
+    write_scratch_settings(&settings, b"owner bytes").expect("sealed owner can still publish");
+    assert_eq!(
+        std::fs::read(settings).expect("read owner bytes"),
+        b"owner bytes"
+    );
+}
+
+#[test]
+#[ignore = "requires a runner-passed directory that fails root identity validation"]
+fn settings_rejected_startup_does_not_leak_root_to_exec() {
+    assert_exec_does_not_inherit_fixture();
+    settings_refusal(ErrorKind::InvalidData);
+}
+
+#[test]
+#[ignore = "runs only as the pre-write exec witness"]
+fn settings_exec_checks_no_fixture_handle() {
+    let identity = std::env::var("MAC_SCRATCH_TEST_EXPECTED_CLOSED").expect("expected identity");
+    match stat(inherited_fixture_fd(), Stage::Root) {
+        Ok(actual) => assert_ne!(
+            format!("{}:{}", actual.st_dev, actual.st_ino),
+            identity,
+            "exec inherited the runner's directory handle"
+        ),
+        Err(error) => assert_eq!(
+            error.errno,
+            Some(libc::EBADF),
+            "closed fd must report EBADF if its number was not reused"
+        ),
+    }
 }
 
 #[test]

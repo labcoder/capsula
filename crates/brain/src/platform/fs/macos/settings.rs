@@ -13,6 +13,23 @@ use super::{
 
 static RUN: OnceLock<Result<SettingsRoot, Fault>> = OnceLock::new();
 
+// SAFETY: Mach-O calls each pointer in this section with the C ABI before libtest dispatch.
+#[used]
+#[unsafe(link_section = "__DATA,__mod_init_func,mod_init_funcs")]
+static INIT: extern "C" fn() = initialize;
+
+extern "C" fn initialize() {
+    let _admission = RUN.get_or_init(SettingsRoot::admit);
+}
+
+fn stop_startup() -> ! {
+    let _ = writeln!(
+        io::stderr(),
+        "macOS scratch descriptor handoff could not be sealed"
+    );
+    std::process::exit(77);
+}
+
 pub(crate) fn write_scratch_settings(path: &Path, text: &[u8]) -> io::Result<()> {
     write_scratch_settings_with(path, text, File::sync_all)
 }
@@ -24,17 +41,7 @@ pub(super) fn write_scratch_settings_with(
 ) -> io::Result<()> {
     let process = std::process::id();
     let refused = Fault::new(Stage::Root, ErrorKind::Unsupported);
-    let admission = if let Some(cached) = RUN.get() {
-        cached
-    } else {
-        let owner = std::env::var("MAC_SCRATCH_TEST_PID")
-            .ok()
-            .and_then(|id| id.parse::<u32>().ok());
-        if owner != Some(process) {
-            return Err(io_fault(refused));
-        }
-        RUN.get_or_init(|| SettingsRoot::admit(process))
-    };
+    let admission = RUN.get().ok_or_else(|| io_fault(refused))?;
     let root = admission.as_ref().map_err(|error| io_fault(*error))?;
     if root.pid != process {
         return Err(io_fault(refused));
@@ -58,16 +65,37 @@ struct SettingsRoot {
 }
 
 impl SettingsRoot {
-    fn admit(pid: u32) -> Result<Self, Fault> {
+    fn admit() -> Result<Self, Fault> {
         let refused = Fault::new(Stage::Root, ErrorKind::Unsupported);
+        let advertised = std::env::var_os("MAC_SCRATCH_TEST_FD").ok_or(refused)?;
+        let Some(inherited) = advertised
+            .to_str()
+            .and_then(|fd| fd.parse::<RawFd>().ok())
+            .filter(|fd| *fd > libc::STDERR_FILENO)
+        else {
+            stop_startup();
+        };
+
+        // Seal the passed fd before any admission check can return control to libtest.
+        // SAFETY: fcntl validates the integer fd; no Rust ownership is taken by setting this flag.
+        if let Err(error) = call(unsafe { libc::fcntl(inherited, libc::F_SETFD, libc::FD_CLOEXEC) })
+        {
+            if error.raw_os_error() == Some(libc::EBADF) {
+                return Err(refused);
+            }
+            stop_startup();
+        }
+
+        let pid = std::process::id();
+        let owner = std::env::var("MAC_SCRATCH_TEST_PID")
+            .ok()
+            .and_then(|id| id.parse::<u32>().ok());
+        if owner != Some(pid) {
+            return Err(refused);
+        }
         let path = std::env::var_os("MAC_SCRATCH_TEST_PARENT")
             .map(PathBuf::from)
             .filter(|path| *path == std::env::temp_dir())
-            .ok_or(refused)?;
-        let inherited = std::env::var("MAC_SCRATCH_TEST_FD")
-            .ok()
-            .and_then(|fd| fd.parse::<RawFd>().ok())
-            .filter(|fd| *fd > libc::STDERR_FILENO)
             .ok_or(refused)?;
         absolute_names(&path)?;
         // The trusted runner creates and retains the inherited directory; PID guards accidental inheritance.
@@ -98,9 +126,6 @@ impl SettingsRoot {
             return Err(Fault::new(Stage::Root, ErrorKind::PermissionDenied));
         }
         volume(&directory, Stage::Root)?;
-        // SAFETY: The runner leaves this verified descriptor open for the owner process lifetime.
-        call(unsafe { libc::fcntl(inherited, libc::F_SETFD, libc::FD_CLOEXEC) })
-            .map_err(|error| Fault::io(Stage::Root, &error))?;
         Ok(Self {
             path,
             directory,
