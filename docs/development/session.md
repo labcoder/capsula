@@ -13,8 +13,9 @@ on either side. The PSK is the group secret: 32 bytes the brain generates fresh 
 the shell reads back. Every leg uses a fresh ephemeral key on each side.
 
 The prologue is `u8 len ‖ SESSION_LABEL ‖ u8 version=1 ‖ u8 channel ‖ u8 leg`. Channel 0 is
-Release and 1 is Dev; there is no gate value, so a gate build can't form one. Leg 0 is control and
-1 is data, and the data leg appends the control handshake's 32-byte hash. A different secret,
+Release and 1 is Dev. The adapter must refuse the Gate identity when selecting the channel; the
+crate has no Gate wire value. Leg 0 is control and 1 is data, and the data leg appends the
+control handshake's 32-byte hash. A different secret,
 channel, leg or control hash fails that leg's init, the first message the brain reads on it.
 
 ```mermaid
@@ -47,9 +48,9 @@ length; any other is refused before the body is read.
 | BindAck (control) | brain to shell | empty | 16 |
 | Application | either | 1 to 65,519 | 17 to 65,535 |
 
-Each state is consumed by its one step, so the order is fixed by type. A replayed init still gets
-the reply, because the brain can't tell a replay from the first one, but the replayer can't send
-Finished, and a second init on the same pair is refused by length.
+Each state is consumed by its one step, so the order is fixed by type. A fresh responder answers
+a replayed init with a fresh ephemeral, so a recorded Finished won't authenticate. A second init
+on the same pair is refused by length.
 
 ## Records and frames
 
@@ -58,6 +59,7 @@ A frame (today's 4-byte header and postcard payload) goes out as maximally slice
 data frame five. The opener keeps frame boundaries:
 
 - An empty application record is refused.
+- A second envelope before the pending record body is refused.
 - A record belongs to one frame; one that crosses the frame's end is refused.
 - The header may be split anywhere, even 1+3. It is checked against the leg's cap as soon as it is
   complete, before anything from that record is delivered. A header that declares zero passes on
@@ -78,6 +80,8 @@ application use, so the first application nonces are:
 
 A record is sealed once. The sealer keeps its bytes and write offset, so a short write resumes
 from `unwritten()` without sealing again, and a second seal while bytes are unwritten is refused.
+After retirement, both `unwritten()` and `advance()` return `Retired`; that is different from
+a successful write that left no bytes pending.
 
 Each direction of each leg may carry at most 2^32 records, confirmation and binding records
 included. That is an operational limit, not a claim about the cipher's bounds. The next seal or
@@ -86,8 +90,11 @@ open past it fails as `Exhausted`. There is no rekey, no wrap and no resumed rec
 ## Failure
 
 Every refusal is terminal. In each process, the first failure of any state or owner retires the
-whole attempt: both legs and both directions refuse everything after it, valid records included.
-I1b turns that into the pair-wide abort that shuts both sockets.
+whole attempt. New record operations on either leg or direction observe retirement, even when
+their input would otherwise be valid. The core cannot recall bytes it already handed out or
+serialize an operation already past its retirement check. On a fatal cause, the stream adapters
+must shut both sockets, discard pending output, and neither decode nor dispatch an in-flight
+delivery.
 
 ## The bound-pair proof
 
@@ -110,9 +117,12 @@ What this crate does about its own buffers, under the exception's conditions:
 
 - It never builds with a static key, and each attempt's keys are fresh.
 - Its copy of the group secret is overwritten with zeros as soon as the data leg's handshake state
-  is built from it, or when the attempt ends earlier by refusal or drop.
+  is built from it, or when the attempt ends earlier by refusal or drop. A rejected envelope
+  wipes the copy before returning, even if its handshake state is still live.
 - Opened plaintext is overwritten with zeros when its `Delivery` drops, when a record is refused,
-  and when the opener drops. The sealer's record buffer is overwritten with zeros when it drops.
+  and when the opener drops. The opener also clears its saved header bytes after parsing,
+  upon refusal, and when it drops. The sealer's record buffer is overwritten with zeros when
+  it drops.
 
 That limits how long these buffers hold their bytes. It doesn't remove copies the compiler or the
 library made.
