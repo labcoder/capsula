@@ -814,6 +814,8 @@ pub enum ControlToShell {
     SpeechDecisionTaken(SpeechDispatch),
     /// The queued connection's exact logical output has been installed.
     QueuedAudioRegistered(OutputGeneration),
+    /// The local account state when this build cannot use the account's network service.
+    AccountUnsupported(AccountView),
 }
 
 /// What a screen hold carried into its turn. It never says the window was sent: a run can end
@@ -1373,6 +1375,20 @@ mod tests {
         assert_eq!(
             frame::read(&mut bytes.as_slice(), Pipe::Control).unwrap(),
             Some(registered)
+        );
+    }
+
+    #[test]
+    fn permanent_provider_states_append_without_renumbering() {
+        use super::{AccountView, KeyView};
+
+        let account = ControlToShell::AccountUnsupported(AccountView::SignedOut {
+            revocation_unconfirmed: false,
+        });
+        assert_eq!(postcard::to_allocvec(&account).unwrap(), [37, 0, 0]);
+        assert_eq!(
+            postcard::to_allocvec(&KeyView::UnsupportedPlatform).unwrap(),
+            [5]
         );
     }
 

@@ -934,6 +934,36 @@ pub(crate) async fn start_user_request(accounts: &mut Accounts) {
     );
 }
 
+#[tokio::test]
+async fn unsupported_github_construction_is_replayed_on_the_next_session() {
+    let scratch = Scratch::new("github-unsupported-construction");
+    let (mut accounts, _) = verification_accounts(
+        &scratch,
+        Arc::new(|| Err(HttpError::UnsupportedPlatform)),
+        None,
+    );
+    let built = verification_event(&mut accounts).await;
+    assert!(matches!(
+        built.outcome,
+        VerificationOutcome::Built(Err(HttpError::UnsupportedPlatform))
+    ));
+    assert!(accounts.handle(Event::Verification(built)).is_empty());
+    assert!(!accounts.github.verifying());
+    accounts.github_session(Some(2));
+    let expected = [
+        ControlToShell::GitHubError(ErrorKey::UnsupportedPlatform.into()),
+        ControlToShell::GitHub(GitHubView::NotVerified {
+            login: GitHubLogin::new("owner-sentinel").unwrap(),
+        }),
+    ];
+    assert_eq!(accounts.github_opened(), expected);
+    assert!(accounts.github.issue_snapshot().account.is_none());
+    accounts.github_session(None);
+    accounts.github_session(Some(3));
+    assert_eq!(accounts.github_opened(), expected);
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
 async fn next_verifying_attempt(accounts: &mut Accounts) -> Stamp {
     tokio::time::pause();
     drive(accounts, GitHubInput::Op(GitHubOp::Connect));

@@ -64,8 +64,9 @@ impl Presence {
         previous: Option<u64>,
         cx: &mut Context<'_, Self>,
     ) {
-        let view = self.settings.read(cx).accounts.view.as_ref();
-        let complete = account_complete(view);
+        let accounts = &self.settings.read(cx).accounts;
+        let view = accounts.view.as_ref();
+        let complete = !accounts.unsupported && account_complete(view);
         let shows = if matches!(view, Some(AccountView::SigningIn)) {
             Shows::Waiting
         } else {

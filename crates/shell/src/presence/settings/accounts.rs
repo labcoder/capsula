@@ -201,11 +201,18 @@ fn account_actions(
         .items_center()
         .gap_2();
     match &state.view {
-        Some(AccountView::SignedOut { .. }) => {
+        Some(AccountView::SignedOut { .. }) if !state.unsupported => {
             actions = actions.child(button(
                 "account-sign-in",
                 Text::AccountContinue,
                 AccountOp::SignIn,
+            ));
+        }
+        Some(AccountView::SigningIn) if state.unsupported => {
+            actions = actions.child(button(
+                "account-cancel",
+                Text::AccountCancel,
+                AccountOp::CancelSignIn,
             ));
         }
         Some(AccountView::SigningIn) => {
@@ -234,7 +241,7 @@ fn account_actions(
             plan: PlanState::Declined,
             recovery: None,
             ..
-        }) => {
+        }) if !state.unsupported => {
             actions = actions.child(button(
                 "account-enable",
                 Text::AccountEnable,
@@ -243,25 +250,17 @@ fn account_actions(
         }
         _ => {}
     }
-    if state.allows(AccountOp::Retry) || state.waiting == Some(AccountOp::Retry) {
-        actions = actions.child(button(
-            "account-retry",
-            if matches!(state.view, Some(AccountView::Busy)) {
-                Text::AccountTryAgain
-            } else {
-                Text::Retry
-            },
-            AccountOp::Retry,
-        ));
-    }
-    if matches!(
-        state.view,
-        Some(AccountView::SignedIn {
-            plan: PlanState::Enabled | PlanState::Unavailable,
-            recovery: None,
-            ..
-        })
-    ) {
+    actions = actions.children(account_retry_button(state, button));
+    if !state.unsupported
+        && matches!(
+            state.view,
+            Some(AccountView::SignedIn {
+                plan: PlanState::Enabled | PlanState::Unavailable,
+                recovery: None,
+                ..
+            })
+        )
+    {
         actions = actions.child(
             Link::new("account-usage")
                 .href(MANAGE_USAGE_URL)
@@ -278,6 +277,21 @@ fn account_actions(
         );
     }
     actions
+}
+
+fn account_retry_button(
+    state: &Accounts,
+    button: impl FnOnce(&'static str, Text, AccountOp) -> Button,
+) -> Option<Button> {
+    if !state.allows(AccountOp::Retry) && state.waiting != Some(AccountOp::Retry) {
+        return None;
+    }
+    let label = if matches!(state.view, Some(AccountView::Busy)) {
+        Text::AccountTryAgain
+    } else {
+        Text::Retry
+    };
+    Some(button("account-retry", label, AccountOp::Retry))
 }
 
 fn account_header(state: &Accounts, cx: &App) -> Div {

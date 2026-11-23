@@ -281,8 +281,9 @@ impl Presence {
                     run,
                     thread,
                 } => self.focus(generation, run, thread, cx),
-                LinkEvent::Account { generation, view } => {
-                    self.account_changed(generation, view, cx);
+                snapshot @ (LinkEvent::Account { generation, .. }
+                | LinkEvent::AccountUnsupported { generation, .. }) => {
+                    self.account_changed(generation, snapshot, cx);
                 }
                 LinkEvent::GitHub { generation, view } => {
                     let current = self.session.as_ref().map(crate::link::Session::generation);
@@ -443,18 +444,24 @@ impl Presence {
         self.request_pages(cx);
     }
 
-    fn account_changed(&mut self, generation: u64, view: AccountView, cx: &mut Context<'_, Self>) {
+    fn account_changed(
+        &mut self,
+        generation: u64,
+        snapshot: LinkEvent,
+        cx: &mut Context<'_, Self>,
+    ) {
         let current = self.session.as_ref().map(crate::link::Session::generation);
         let previous = self.settings.read(cx).accounts.generation;
         let (accepted, recovered) = self.settings.update(cx, |state, cx| {
-            if state.accounts.receive(current, generation, view) {
+            if state.accounts.receive_snapshot(current, snapshot) {
                 cx.notify();
                 return (
                     true,
                     matches!(
                         state.accounts.view,
                         Some(AccountView::SignedIn { recovery: None, .. })
-                    ) && state.accounts.error.is_none(),
+                    ) && !state.accounts.unsupported
+                        && state.accounts.error.is_none(),
                 );
             }
             (false, false)

@@ -38,6 +38,9 @@ pub(crate) use connected_shell::connected_shell_pid;
 #[cfg(windows)]
 pub(super) use connected_shell::register_shell;
 pub use session_lock::{SessionLock, SessionLockError};
+pub(crate) use trust_roots::native_trust_supported;
+#[cfg(not(windows))]
+pub use trust_roots::trust_roots;
 pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
 pub(crate) use windows::DumpExclusion;

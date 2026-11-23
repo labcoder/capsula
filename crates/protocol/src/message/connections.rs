@@ -175,6 +175,8 @@ pub enum KeyView {
     Rejected(KeyRejection),
     /// The key is kept, but Anthropic couldn't be reached to confirm it.
     Unconfirmed,
+    /// This build cannot contact Anthropic. A saved key can still be removed locally.
+    UnsupportedPlatform,
 }
 
 /// Why a key was refused.

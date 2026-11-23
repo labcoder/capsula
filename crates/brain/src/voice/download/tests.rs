@@ -22,6 +22,15 @@ const MODEL: ModelFile = ModelFile {
     sha256: "bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721",
 };
 
+#[cfg(not(windows))]
+#[test]
+fn native_downloader_refuses_without_a_trust_adapter() {
+    assert!(matches!(
+        Downloader::new(PathBuf::new()),
+        Err(DownloadError::UnsupportedPlatform)
+    ));
+}
+
 struct Reply {
     wire: Vec<u8>,
     hold: bool,

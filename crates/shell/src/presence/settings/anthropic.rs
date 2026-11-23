@@ -206,6 +206,9 @@ fn status(state: &KeyPaste) -> Text {
         Removal::Retry => return Text::AnthropicRemovePending,
         Removal::None => {}
     }
+    if state.view() == Some(KeyView::UnsupportedPlatform) {
+        return Text::UnsupportedPlatform;
+    }
     if state.saving() {
         return Text::AnthropicSaving;
     }
@@ -219,6 +222,7 @@ fn status(state: &KeyPaste) -> Text {
         Some(KeyView::Ready) => Text::AnthropicReady,
         Some(KeyView::Rejected(_)) => Text::AnthropicRejected,
         Some(KeyView::Unconfirmed) => Text::AnthropicUnconfirmed,
+        Some(KeyView::UnsupportedPlatform) => Text::UnsupportedPlatform,
     }
 }
 

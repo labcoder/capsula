@@ -56,6 +56,8 @@ pub(crate) struct Progress {
 
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DownloadError {
+    #[error("model downloads are unsupported on this platform")]
+    UnsupportedPlatform,
     #[error("insufficient model space")]
     NoSpace { needed: u64 },
     #[error("model request refused")]
@@ -141,7 +143,10 @@ impl Rules {
 
 impl Downloader {
     pub(crate) fn new(models: PathBuf) -> Result<Self, DownloadError> {
-        let roots = crate::platform::trust_roots().map_err(|_| DownloadError::Transport)?;
+        let roots = crate::platform::trust_roots().map_err(|error| match error {
+            crate::platform::TrustRootsError::Unsupported => DownloadError::UnsupportedPlatform,
+            _ => DownloadError::Transport,
+        })?;
         Self::from_roots(models, roots.certificates, Rules::default())
     }
 
