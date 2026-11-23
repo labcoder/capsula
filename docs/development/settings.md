@@ -4,10 +4,14 @@ The brain owns the user's settings and keeps them in `config.toml`, in the `Kumo
 under `%APPDATA%` (`Kumochi Dev` for debug builds, so a dev build never touches an install).
 The shell shows them and asks for changes; it never reads the file.
 
-The brain resolves this folder through `platform::config_dir`, implemented in its Windows
-module. It reads `APPDATA` and requires an absolute path, just as the local data folder requires
-an absolute `LOCALAPPDATA`. Missing, empty or relative roots never fall back to the working
-directory.
+On Windows, `platform::config_dir` reads `APPDATA` and requires an absolute path, just as
+the local data folder requires an absolute `LOCALAPPDATA`. Missing, empty or relative roots
+never fall back to the working directory.
+
+On macOS both config and data resolve to the user-domain Application Support folder plus the
+active product's folder name. The lookup uses Darwin's directory API and the OS account home,
+not environment variables. It returns a candidate without checking or creating the directory.
+The macOS brain still refuses to start, and folder discovery doesn't enable settings writes.
 
 Linux unit tests can supply an explicit scratch directory. They atomically rename a synced
 sibling file and sync the directory. If the directory sync fails after the rename, the test
