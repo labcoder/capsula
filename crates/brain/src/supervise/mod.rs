@@ -38,9 +38,9 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use self::wire::Frame;
-pub(crate) use self::wire::{
-    Assembly, Reassembly, Zeroed, read_request, write_message, write_sized,
-};
+#[cfg(any(windows, test))]
+pub(crate) use self::wire::write_message;
+pub(crate) use self::wire::{Assembly, Reassembly, Zeroed, read_request, write_sized};
 use crate::platform::{Helper, Job};
 
 /// Losses are counted over this window for backoff.

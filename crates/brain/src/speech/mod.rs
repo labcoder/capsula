@@ -4,13 +4,14 @@
 
 mod supervisor;
 mod wire;
+#[cfg(windows)]
 mod worker;
 
 pub use supervisor::{DEADLINES, Deadlines, SpeechHandle, SpeechSupervisor};
 #[cfg(debug_assertions)]
 pub use wire::SpeechFault;
-pub use wire::{MAX_PCM_BYTES, MAX_RATE, MAX_SECONDS, MIN_RATE, SpeechError};
+pub use wire::{MAX_PCM_BYTES, MAX_RATE, MAX_SECONDS, MIN_RATE, NativeError, SpeechError};
+#[cfg(windows)]
 pub use worker::serve;
 
-pub use crate::platform::sherpa::NativeError;
 pub use crate::supervise::{Generation, WorkerLost};
