@@ -130,6 +130,10 @@ pub enum LinkEvent {
         generation: u64,
         view: AccountView,
     },
+    AccountUnsupported {
+        generation: u64,
+        view: AccountView,
+    },
     Voice {
         generation: u64,
         speech_input: kumochi_protocol::message::PartState,
@@ -2053,6 +2057,7 @@ fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError> {
             | ControlToShell::ScenesV1 { .. }
             | ControlToShell::NoVisual { .. }
             | ControlToShell::Account(_)
+            | ControlToShell::AccountUnsupported(_)
             | ControlToShell::ThreadsChanged
             | ControlToShell::Focus { .. }
             | ControlToShell::CaptureDone { .. }
@@ -2371,6 +2376,14 @@ fn watch(
             Ok(Some(ControlToShell::Account(view))) => {
                 if events
                     .send_blocking(LinkEvent::Account { generation, view })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::AccountUnsupported(view))) => {
+                if events
+                    .send_blocking(LinkEvent::AccountUnsupported { generation, view })
                     .is_err()
                 {
                     return;

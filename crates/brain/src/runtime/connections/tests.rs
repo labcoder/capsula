@@ -23,12 +23,17 @@ async fn production_composition_serves_the_key_route_and_refuses_unadmitted_send
 
     let scratch = Scratch::new("dormant-key-transport");
     let mut brain = test_support::brain(&scratch, "");
+    let unavailable = if cfg!(windows) {
+        model_unavailable()
+    } else {
+        ErrorKey::UnsupportedPlatform.into()
+    };
     assert!(matches!(
         brain.account.connections.route_input(),
         Some(Input::Engines(
             ConnectionKind::AnthropicKey,
             Availability::Unavailable(refusal),
-        )) if refusal == model_unavailable()
+        )) if refusal == unavailable
     ));
     let key = SendKey::Build(BuildKey {
         run: RunId(1),
@@ -61,7 +66,7 @@ async fn production_composition_serves_the_key_route_and_refuses_unadmitted_send
     assert_eq!(
         seen.recv().await,
         Some(TurnEvent::Finished(Finish::Failed(EngineFailure::Access(
-            Some(model_unavailable())
+            Some(unavailable)
         ))))
     );
     assert_eq!(asks.recv().await, None);
@@ -76,7 +81,9 @@ fn key() -> Secret<AnthropicKey> {
 }
 
 fn with_transport(mut accounts: Accounts, peer: Scripted, cap: u32) -> Accounts {
-    accounts.connections.transport = Some(Transport::offline(peer, cap, 0));
+    accounts
+        .connections
+        .use_test_transport(Transport::offline(peer, cap, 0));
     accounts
 }
 
@@ -209,6 +216,38 @@ async fn saved_key_startup_and_check_never_send_without_a_catalog_allowance() {
             .close(tokio::time::Instant::now(), tokio::time::Instant::now())
             .await;
     }
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn a_saved_key_stays_unsupported_in_runtime_and_reconnect_snapshots() {
+    let scratch = Scratch::new("key-no-native-transport");
+    let store = FakeStore::default();
+    let lock = scratch.db().with_file_name("key-test.lock");
+    save_key(&store, &lock);
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(store.clone(), "key-test", &lock)),
+        Arc::new(FixedClock(0)),
+    );
+    let accounts = Accounts::spawn_unconfigured(worker, test_support::net()).unwrap();
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    settle(&mut brain.account).await;
+    let expected = ControlToShell::Connections(ConnectionsView {
+        anthropic: KeyView::UnsupportedPlatform,
+        anthropic_revision: Some(1),
+        claude_code: ClaudeCodeView::NotFound,
+    });
+    assert_eq!(brain.connections_frame(), expected);
+    assert_eq!(retained_key(&brain.account.connections), None);
+    assert_eq!(
+        brain
+            .account
+            .connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey)),
+        [expected.clone()]
+    );
+    assert!(!brain.account.connections.loading);
+    assert_eq!(brain.account.connections.connected(), expected);
+    brain.close().await;
 }
 
 #[tokio::test]

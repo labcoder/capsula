@@ -201,11 +201,18 @@ fn account_actions(
         .items_center()
         .gap_2();
     match &state.view {
-        Some(AccountView::SignedOut { .. }) => {
+        Some(AccountView::SignedOut { .. }) if !state.unsupported => {
             actions = actions.child(button(
                 "account-sign-in",
                 Text::AccountContinue,
                 AccountOp::SignIn,
+            ));
+        }
+        Some(AccountView::SigningIn) if state.unsupported => {
+            actions = actions.child(button(
+                "account-cancel",
+                Text::AccountCancel,
+                AccountOp::CancelSignIn,
             ));
         }
         Some(AccountView::SigningIn) => {
@@ -234,7 +241,7 @@ fn account_actions(
             plan: PlanState::Declined,
             recovery: None,
             ..
-        }) => {
+        }) if !state.unsupported => {
             actions = actions.child(button(
                 "account-enable",
                 Text::AccountEnable,
@@ -254,14 +261,16 @@ fn account_actions(
             AccountOp::Retry,
         ));
     }
-    if matches!(
-        state.view,
-        Some(AccountView::SignedIn {
-            plan: PlanState::Enabled | PlanState::Unavailable,
-            recovery: None,
-            ..
-        })
-    ) {
+    if !state.unsupported
+        && matches!(
+            state.view,
+            Some(AccountView::SignedIn {
+                plan: PlanState::Enabled | PlanState::Unavailable,
+                recovery: None,
+                ..
+            })
+        )
+    {
         actions = actions.child(
             Link::new("account-usage")
                 .href(MANAGE_USAGE_URL)
