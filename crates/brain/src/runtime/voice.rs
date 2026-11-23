@@ -17,9 +17,13 @@ use super::{Brain, Full, Input, Link};
 use crate::platform::{self, Untrusted};
 use crate::voice::LoadReport;
 use crate::voice::download::{DownloadError, Fetch, FetchPhase, Progress};
-use crate::voice::installer::{self, Durable, Effect, Folder, Installer, RemoveAnswer};
+#[cfg(any(test, windows))]
+use crate::voice::installer::Durable;
+use crate::voice::installer::{self, Effect, Folder, Installer, RemoveAnswer};
+#[cfg(any(test, windows))]
 use crate::voice::pump::Pump;
 use crate::voice::stt::SttHandle;
+#[cfg(any(test, windows))]
 use crate::voice::tts::TtsHandle;
 
 #[cfg(all(test, windows))]
@@ -199,6 +203,7 @@ pub(super) fn delete(models: &Path, part: VoicePart) -> Folder {
 }
 
 /// Whether every file of `part` under `models` has its manifest size.
+#[cfg(any(test, windows))]
 fn whole(models: &Path, part: VoicePart) -> Result<bool, ErrorKey> {
     let dir = models.join(part.dir());
     let manifest = part.files().collect::<Vec<_>>();
@@ -240,6 +245,7 @@ impl Brain {
     /// unfinished removal has its `RemoveDone` queued. A handle that didn't start is `None`, and
     /// its part fails to load for the session. `reports` are the handles' report receivers, in
     /// `VoicePart::ALL` order, and `fetcher` fetches what an install asks for.
+    #[cfg(any(test, windows))]
     pub(crate) fn attach_voice(
         &mut self,
         models: PathBuf,

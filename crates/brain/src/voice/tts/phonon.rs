@@ -7,30 +7,41 @@
 
 use std::cell::Cell;
 use std::io;
+#[cfg(windows)]
 use std::path::Path;
+#[cfg(windows)]
 use std::sync::OnceLock;
 
+#[cfg(windows)]
 use ptts::checkpoint::read_config;
+#[cfg(windows)]
 use ptts::preprocess::Lang;
+#[cfg(windows)]
 use ptts::synth::{DeviceKind, Quant, SpeechStream, Synth};
 use xn::threadpool::PoolConfig;
 
+#[cfg(windows)]
 use crate::platform::ModelFiles;
 
-use super::{CONFIG, Engine, SAMPLE_RATE, TOKENIZER, TtsError, VOICE, WEIGHTS};
+use super::TtsError;
+#[cfg(windows)]
+use super::{CONFIG, Engine, SAMPLE_RATE, TOKENIZER, VOICE, WEIGHTS};
 
 #[cfg(all(test, windows))]
 mod tests;
 
 const POOL_WIDTH: usize = 8;
+#[cfg(windows)]
 const WARM_UP: &str = "Hi.";
 
 pub(super) type Job = Box<dyn FnOnce() + Send + 'static>;
 
 /// xn's operator pool is process-wide and built once, so its outcome is kept for the process:
 /// a pool that came up short can't be rebuilt by a later handle.
+#[cfg(windows)]
 static POOL: OnceLock<Result<(), TtsError>> = OnceLock::new();
 
+#[cfg(windows)]
 fn pool() -> Result<(), TtsError> {
     *POOL.get_or_init(|| {
         start_pool(
@@ -73,11 +84,13 @@ pub(super) fn start_pool(
     Ok(())
 }
 
+#[cfg(windows)]
 pub(super) struct Phonon {
     synth: Synth,
     _models: ModelFiles,
 }
 
+#[cfg(windows)]
 impl Phonon {
     pub(super) fn load(dir: &Path) -> Result<Self, TtsError> {
         let models = ModelFiles::open(dir, &[CONFIG, WEIGHTS, TOKENIZER, VOICE]).map_err(
@@ -117,6 +130,7 @@ impl Phonon {
     }
 }
 
+#[cfg(windows)]
 impl Engine for Phonon {
     type Stream =
         std::iter::Map<SpeechStream, fn(ptts::Result<Vec<f32>>) -> Result<Vec<f32>, TtsError>>;

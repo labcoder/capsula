@@ -3,12 +3,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kumochi_protocol::message::MAX_TRANSCRIPT_BYTES;
 use tokio::sync::{broadcast, watch};
 use tokio::time::Instant;
 
-use super::wire::{MAX_PCM_BYTES, SpeechError, SpeechReply, SpeechRequest, check_audio};
+use super::wire::{
+    MAX_PCM_BYTES, NativeError, SpeechError, SpeechReply, SpeechRequest, check_audio,
+};
 use crate::platform::Job;
-use crate::platform::sherpa::{MAX_TRANSCRIPT_BYTES, NativeError};
 use crate::supervise::{self, Completion, Dispatch, Exit, Generation, Handle, Kind, Retirement};
 
 /// The speech worker's kind for the shared supervisor.

@@ -1262,16 +1262,22 @@ async fn a_catalog_row_gaining_support_does_not_replace_the_saved_overflow_model
     }
 }
 
-/// Why a run on a saved default fails when `ready` is what reads ready: Claude Code isn't
-/// installed here, so its own reason; no engine, or an invalid default, answers nothing.
-fn refused_with(ready: Option<kumochi_protocol::message::ConnectionKind>) -> UserError {
-    match ready {
-        Some(kumochi_protocol::message::ConnectionKind::ClaudeCode) => UserError::new(
+/// An uninstalled ready Claude Code returns its own reason. An Anthropic default without a
+/// native transport is unsupported; other unavailable or invalid defaults lack a model.
+fn refused_with(
+    choice: Option<kumochi_protocol::message::ConnectionKind>,
+    ready: Option<kumochi_protocol::message::ConnectionKind>,
+) -> UserError {
+    use kumochi_protocol::message::ConnectionKind;
+    match (choice, ready) {
+        (_, Some(ConnectionKind::ClaudeCode)) => UserError::new(
             ErrorKey::ClaudeCodeNotFound,
             Vec::new(),
             vec![Action::OpenSettings],
         )
         .expect("one action"),
+        #[cfg(not(windows))]
+        (Some(ConnectionKind::AnthropicKey), None) => ErrorKey::UnsupportedPlatform.into(),
         _ => model_unavailable(),
     }
 }
@@ -1594,7 +1600,10 @@ async fn preserved_default_after_restart(
     let mut tap = Tap::from_env();
     let client = async {
         shell.submit("never send this through another route").await;
-        assert_eq!(failed_with(&mut shell).await, Some(refused_with(ready)));
+        assert_eq!(
+            failed_with(&mut shell).await,
+            Some(refused_with(kind, ready))
+        );
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
@@ -1751,7 +1760,7 @@ async fn revocation_only_startup_keeps_the_debt_and_replays_unsupported() {
     ));
     assert_unsupported_reconnects(&mut brain).await;
     brain.close().await;
-    assert!(seed().load_revocations().unwrap().unwrap().expose() == &debt);
+    assert_eq!(seed().load_revocations().unwrap(), Some(Secret::new(debt)));
 }
 
 #[tokio::test]
@@ -2363,6 +2372,8 @@ async fn a_plan_the_catalog_refuses_shows_the_account_unavailable() {
 
 /// Design §6: a connection hears the catalog on the data pipe, then the settled settings with the
 /// default model the read set, which is saved.
+/// Requires native window capture; the fixture worker alone cannot open the screen gate.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
     use kumochi_protocol::message::{ScreenHolds, ScreenOff};
@@ -2425,8 +2436,10 @@ async fn a_connection_hears_the_catalog_and_the_default_model_it_set() {
 }
 
 /// [`Catalog`]'s answers, each held until its release fires.
+#[cfg(windows)]
 struct HeldCatalog(Catalog, Mutex<Option<oneshot::Receiver<()>>>);
 
+#[cfg(windows)]
 impl Http for HeldCatalog {
     fn execute(
         &self,
@@ -2445,6 +2458,7 @@ impl Http for HeldCatalog {
 
 /// A signed-in brain on `http` with a fixture screen worker and Luna, which can't see, already
 /// saved as the default model.
+#[cfg(windows)]
 fn luna_with_a_screen(
     scratch: &Scratch,
     store: &FakeStore,
@@ -2474,6 +2488,8 @@ fn luna_with_a_screen(
 
 /// With the default model already saved, a catalog read that lands while a shell is connected
 /// moves the screen gate, and the shell hears the new state.
+/// Requires native window capture; the fixture worker alone cannot open the screen gate.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_catalog_read_while_connected_sends_the_screen_gate_it_moved() {
     use kumochi_protocol::message::{ScreenHolds, ScreenOff};
@@ -2524,6 +2540,8 @@ async fn a_catalog_read_while_connected_sends_the_screen_gate_it_moved() {
 
 /// A sign-out the shell sends clears the catalog at once, so its own control frame sends the
 /// gate it moved, before the credential thread or the revocation answers anything.
+/// Requires native window capture; the fixture worker alone cannot open the screen gate.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_sign_out_from_the_shell_sends_the_gate_it_moved_at_once() {
     use kumochi_protocol::message::{ScreenHolds, ScreenOff};

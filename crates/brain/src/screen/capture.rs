@@ -48,6 +48,7 @@ pub(crate) struct Target {
     pub(crate) top: TopWindow,
     /// The platform's second identity word, so a reused handle reads as another window: the
     /// creating thread on Windows.
+    #[cfg(any(test, windows))]
     pub(crate) instance: u32,
     /// Its DPI when resolved.
     pub(crate) dpi: u32,
