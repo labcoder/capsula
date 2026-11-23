@@ -795,6 +795,9 @@ impl Brain {
             self.claude.stop();
         }
         self.holds.lost();
+        let typed = self.coordinator.cancel_typed_picture(None, None);
+        self.apply(typed, None)
+            .expect("offline effects cannot fill a shell queue");
         self.filing.cancel();
         queue.borrow_mut().end_reads();
         if reading && !quitting {
@@ -1497,6 +1500,11 @@ impl Brain {
                     }
                     let granted =
                         SendLease::new(lease, self.inputs_tx.clone()).with_picture(picture);
+                    let granted = if self.coordinator.typed_picture_lease(lease) {
+                        granted.for_typed_picture()
+                    } else {
+                        granted
+                    };
                     engines::answer(&self.asks, lease.key, Answer::Grant(granted));
                 }
                 Effect::Rebuild(key) => {

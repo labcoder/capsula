@@ -744,6 +744,17 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             }
             purger.op_arrived(store);
         }
+        StoreOp::FlushedTypedScreen { run } => {
+            purger.op_arriving();
+            if store
+                .reconnect()
+                .and_then(|()| store.flushed_typed_screen(run))
+                .is_err()
+            {
+                tracing::warn!("a flushed typed screen's mark wasn't stored");
+            }
+            purger.op_arrived(store);
+        }
         StoreOp::SentScreen { run } => {
             purger.op_arriving();
             if store

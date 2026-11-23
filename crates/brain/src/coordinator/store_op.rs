@@ -320,6 +320,11 @@ pub enum StoreOp {
         /// The run.
         run: RunId,
     },
+    /// The original one-shot typed picture request fully flushed.
+    FlushedTypedScreen {
+        /// The run the request carried.
+        run: RunId,
+    },
 }
 
 /// A summary's text. Its `Debug` shows only the length, so formatting a write never prints it.
@@ -365,7 +370,8 @@ impl StoreOp {
             | Self::WithdrawScreen { .. }
             | Self::ForgetScreen { .. }
             | Self::CantSeeScreen { .. }
-            | Self::SentScreen { .. } => None,
+            | Self::SentScreen { .. }
+            | Self::FlushedTypedScreen { .. } => None,
         }
     }
 
@@ -452,7 +458,8 @@ impl StoreOp {
             | Self::WithdrawScreen { .. }
             | Self::ForgetScreen { .. }
             | Self::CantSeeScreen { .. }
-            | Self::SentScreen { .. } => {
+            | Self::SentScreen { .. }
+            | Self::FlushedTypedScreen { .. } => {
                 return None;
             }
         })

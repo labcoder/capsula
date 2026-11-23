@@ -130,6 +130,11 @@ pub trait Lease {
     /// A write of the request was attempted, so bytes of it may have left.
     fn wrote(&mut self);
 
+    /// The entire request was written and its final flush completed.
+    fn flushed(&mut self) {
+        self.wrote();
+    }
+
     /// Whether the coordinator granted this send a picture, so a pictured body may go.
     fn carries_picture(&self) -> bool {
         false
@@ -275,7 +280,7 @@ async fn send<C: Connect, L: Lease>(
     });
     upload.await.map_err(|_| Failure::Transport)??;
     if let Some(mut lease) = attempt.lease.take() {
-        lease.wrote();
+        lease.flushed();
     }
     let conn = attempt
         .conn

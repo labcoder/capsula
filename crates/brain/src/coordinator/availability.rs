@@ -326,7 +326,8 @@ impl Coordinator {
         arrived
     }
 
-    /// `kind` changed. A catalog-only change keeps the current run. Any other change ends a run
+    /// `kind` changed. A catalog-only change keeps the current run unless it revokes a typed
+    /// picture still awaiting its first flush. Any other change ends a run
     /// bound to that kind, and takes the kind out of an unbound run's arrival, which ends the run
     /// once no kind is left; a change to another kind touches neither.
     pub(super) fn available(
@@ -343,6 +344,21 @@ impl Coordinator {
         *entry = now;
         self.lose_pictures(None);
         self.revoke_pictures();
+        if let Some((run, route)) = self.current.as_ref().and_then(|run| {
+            let typed = run.typed_screen.as_ref()?;
+            (!typed.flushed
+                && typed.recipient.route.kind == kind
+                && !self.typed_recipient_current(run, typed))
+            .then_some((run.id, typed.recipient.route))
+        }) {
+            if let Some(reason) = self.refusal(route) {
+                self.fail_with(run, Failure::Engine, reason, effects)
+            } else {
+                self.fail_typed_picture(run, effects)
+            }
+            .expect("the pictured run is current");
+            return;
+        }
         // A `ChatGPT` job follows the account's sign-in and sign-out instead.
         let job = self.job.as_ref().map(|job| job.route);
         if kind != ConnectionKind::ChatGpt

@@ -103,8 +103,17 @@ confirm release relies on its frame's expiry while a typed capture might still o
 Definite refusal, completed seal or exact revocation releases that capture's protection
 immediately. Ambiguous work stays protected only within the worker deadline.
 
-A successfully sealed frame is dropped and the submit is refused before creating a run.
-No typed picture reaches a provider until first-write admission and settlement exist.
+Responses is the only modeled route for one-shot typed pictures: its first request
+carries the image, and a later tool round cannot rebuild it. Key continuations resend
+their original prefix, so the Key and Code routes are not offered for typed pictures.
+Only a full Responses flush on the original pictured lease writes the history mark.
+Losing capability after seal ends the pending pictured send, even before a grant exists and even
+if capability returns later. To preserve words after a named refusal, the brain must also fence
+the exact grant before its first write reservation. The shell then permits one explicit text-only
+retry for the original chat or draft, retaining the words if enqueue fails. An unknown or
+incomplete flush leaves no mark and does not imply that no bytes went out.
+If Esc overtakes the name of a confirmed pictured run, the shell binds its late run ID only
+to match that receipt; the cancelled run stays hidden and its original target does not change.
 
 Presence owns the exclusion transaction in `presence/exclusion.rs`; the lease and
 its cleanup rules are in `crates/shell-core/src/presence/exclusion/machine.rs`, with no GPUI.

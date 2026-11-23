@@ -220,8 +220,11 @@ impl Brain {
     }
 
     pub(super) fn typed_screen_settings_changed(
-        link: Option<&mut Link<'_, '_>>,
+        &mut self,
+        mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
+        let effects = self.coordinator.cancel_typed_picture(None, None);
+        self.apply(effects, link.as_deref_mut()).map_err(|_| Full)?;
         if let Some(link) = link {
             if link.typed_screen.recipient.take().is_some() {
                 link.control(&ControlToShell::TypedScreenRecipient(None))?;
@@ -269,6 +272,8 @@ impl Brain {
                 {
                     Self::refuse_typed_pending(link)?;
                 }
+                let effects = self.coordinator.cancel_typed_picture(Some(key), None);
+                self.apply(effects, Some(link))?;
             }
             ControlToBrain::ConfirmTypedScreen(proof) => {
                 if let Some(active) = &mut link.typed_screen.pending
@@ -294,7 +299,8 @@ impl Brain {
                 return Ok(false);
             }
             ControlToBrain::Settings(SettingsOp::SetShowScreen(false)) => {
-                Self::typed_screen_settings_changed(Some(link)).map_err(|Full| Ended::Lost)?;
+                self.typed_screen_settings_changed(Some(link))
+                    .map_err(|Full| Ended::Lost)?;
                 return Ok(false);
             }
             ControlToBrain::ThreadOp(ThreadOp::SetModel { thread, .. })
@@ -314,6 +320,10 @@ impl Brain {
                     .is_some_and(|active| active.offer.thread == Some(thread))
                 {
                     Self::refuse_typed_pending(link)?;
+                }
+                if matches!(message, ControlToBrain::ThreadOp(_)) {
+                    let effects = self.coordinator.cancel_typed_picture(None, Some(thread));
+                    self.apply(effects, Some(link))?;
                 }
                 return Ok(false);
             }
@@ -496,7 +506,7 @@ impl Brain {
     }
 
     pub(super) fn typed_screen_progress(
-        &self,
+        &mut self,
         progress: Progress,
         link: &mut Link<'_, '_>,
     ) -> Result<(), Ended> {
@@ -524,7 +534,15 @@ impl Brain {
                     }
                 }
                 Progress::Sealed(frame) => {
-                    drop((frame, active.text));
+                    let effects = self.coordinator.start_typed_picture(
+                        *key,
+                        *thread,
+                        active.text,
+                        active.offer.snapshot,
+                        active.offer.recipient,
+                        frame.into_jpeg(),
+                    );
+                    return self.apply(effects, Some(link));
                 }
                 Progress::Refused => {}
             }

@@ -339,9 +339,12 @@ async fn typed_screen_cancel_overtakes_data_without_starting_capture_or_retarget
         .await;
         assert_eq!(
             shell.control().await,
-            Some(ControlToShell::TurnRefused {
-                turn: 2,
-                thread: None,
+            Some(ControlToShell::RunState {
+                run: RunId(1),
+                thread: ThreadId(2),
+                phase: Phase::Thinking,
+                error: None,
+                origin: Some(RunOrigin::Typed { turn: 2 }),
             })
         );
     })
