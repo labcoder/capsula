@@ -14,7 +14,7 @@ struct Device {
 
 impl Device {
     fn neutral(&self) -> bool {
-        self.down == [0; 8]
+        self.down == [0; 8] && self.needs_break == [false; 2]
     }
 
     fn held(&self, slot: u16) -> bool {
@@ -36,24 +36,33 @@ impl Device {
 #[derive(Default)]
 pub(super) struct Physical {
     devices: [Device; 2],
-    untracked_needs_break: bool,
 }
 
 impl Physical {
-    pub(super) fn lose(&mut self) -> Event {
-        self.devices = <[Device; 2]>::default();
-        self.untracked_needs_break = true;
+    pub(super) fn reset(&mut self) -> Event {
+        for device in &mut self.devices {
+            for (index, slot) in [CONTROL, ALT].into_iter().enumerate() {
+                device.needs_break[index] |= device.held(slot);
+            }
+        }
         Event::Reset
     }
 
+    pub(super) fn lose(&mut self) -> Event {
+        let reset = self.reset();
+        for device in &mut self.devices {
+            device.down = [0; 8];
+        }
+        reset
+    }
+
     pub(super) fn device_changed(&mut self, removed: Option<HANDLE>) -> Event {
-        self.untracked_needs_break = true;
         if let Some(removed) = removed
             && let Some(device) = self.devices.iter_mut().find(|d| d.handle == Some(removed))
         {
             *device = Device::default();
         }
-        Event::Reset
+        self.reset()
     }
 
     pub(super) fn key(
@@ -61,6 +70,8 @@ impl Physical {
         handle: HANDLE,
         slot: u16,
         event: Event,
+        queued_press: Option<u64>,
+        covered_after: Option<u64>,
     ) -> Option<(Event, Option<PhysicalKey>, bool)> {
         let reset = |this: &mut Self| Some((this.lose(), None, false));
         let Event::Key { key, edge } = event else {
@@ -94,7 +105,6 @@ impl Physical {
         if device.handle != handle {
             *device = Device {
                 handle,
-                needs_break: [self.untracked_needs_break; 2],
                 ..Device::default()
             };
         }
@@ -103,6 +113,12 @@ impl Physical {
             return reset(self);
         }
         if let Some(index) = modifier {
+            if edge == Edge::Down
+                && covered_after
+                    .is_some_and(|boundary| queued_press.is_none_or(|at| at <= boundary))
+            {
+                device.needs_break[index] = true;
+            }
             if edge == Edge::Down && device.needs_break[index] {
                 return Some((event, None, true));
             }

@@ -405,11 +405,11 @@ The brain sends `ShellTuning` only after the authenticated startup data is compl
 Settings and before queued registration. Before publishing Connected, the shell-core link
 stores the pair in the session's existing shared allocation, so session clones don't grow.
 It rejects missing, invalid or wrong-session tuning, and tears down the connection
-on a later duplicate. A reconnect must authenticate its own values. Both physical modifier
-presses must be newer than the current connection's readiness stamp, even if Windows delivers
-an older key message late. Keyboard recovery waits for both trustworthy raw makes; a
-current-state read validates the pair but cannot substitute for either press. After losing
-coverage, only that source's raw break makes its next press eligible. Closing
+on a later duplicate. A reconnect must authenticate its own values. Both eligible raw modifier
+makes must be queued strictly after the current connection's readiness and any input-coverage
+boundary. A modifier known down at reset needs its own source's break; a first make with no
+prior evidence may be a repeat of an already-held key. The exact-chord read validates the
+recovered pair but supplies neither a make nor evidence of release. Closing
 or locally aborting the pair revokes native hold eligibility
 without waiting for the outbox. This doesn't block local Quit or cancellation.
 

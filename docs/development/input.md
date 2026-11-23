@@ -123,20 +123,19 @@ sequenceDiagram
   foreground thread, if it can identify one. The deferred release checks sample again,
   so a layout change that changes back between samples can escape detection. The decoded
   tracker uses fixed storage; that doesn't bound the cost of the native queries. After coverage loss,
-  overflow or registered Escape, shell-core cancels the chord. A logical reset such as Escape
-  or an observed layout change retains the ordered Raw Input ledger, so a fresh make already in
-  the queue is distinct from a repeat. A coverage gap or initial registration requires a decoded
-  break for each modifier from each source before its next make can count. A device removal
-  drops only that device's ledger, and an untracked source must prove its own breaks. After a
-  gap, one press and release of each modifier on a single keyboard primes the next chord.
-  A zero from `GetAsyncKeyState` doesn't prove neutral: it also means the read failed.
-  The reducer waits for both new raw modifier makes before it can try once. Windows reads
-  left Ctrl and left Alt before and
+  overflow or registered Escape, shell-core cancels the chord. A modifier known down at reset
+  needs a decoded break from that same source before its next make counts. Removing a device
+  retires only its ledger. A source with no evidence starts eligible: its first make may be a
+  repeat of a key held before coverage, since Raw Input cannot distinguish the two. After a
+  coverage gap, a make queued at or before the boundary cannot count or make its later repeats
+  eligible. A logical reset retains the ordered ledger without inventing a coverage gap.
+  The reducer needs two eligible raw modifier makes. On the second recovery make, Windows
+  reads left Ctrl and left Alt before and
   after a bounded `GetAsyncKeyState` sweep, using only the down bit; another down keyboard VK
   vetoes that attempt. Aggregate Ctrl/Alt aliases, mouse buttons and toggle state do not count.
   The second make can start a fresh hold if the observable keyboard state agrees. A current
   state read never substitutes for a queued make, and a failed read can only be retried on a
-  later clean raw pair. Time, another reset and an empty ledger cannot rearm. The scan isn't
+  later eligible raw pair. Time and OS state alone cannot rearm or prove a modifier neutral. The scan isn't
   atomic: a key can go down after its slot was read,
   access can change mid-sweep (zero means up or failure), two physical keys can share one VK,
   and firmware-only keys without a VK aren't visible. A stuck or remapped extra key vetoes for
