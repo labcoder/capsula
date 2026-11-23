@@ -4,6 +4,7 @@
 //! the exchange run as tasks, and everything reports back on one channel the core loop polls.
 
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
@@ -19,10 +20,11 @@ use tokio::time::Instant;
 use zeroize::Zeroizing;
 
 use crate::connections::account::{
-    AccountState, Denied, Effect, Input, Job, Listened, Received, Worker,
+    AccountState, Denied, Done, Effect, Input, Job, Listened, Received, Worker,
 };
 use crate::connections::catalog::{CatalogError, Listing, default_model, read};
 use crate::connections::clock::Clock;
+use crate::connections::error::VaultError;
 use crate::connections::http_client::{HttpError, SharedHttp};
 use crate::connections::oauth::exchange::{ExchangeError, exchange};
 use crate::connections::oauth::id_token::{IdentityError, verify, verify_refreshed};
@@ -33,7 +35,7 @@ use crate::connections::records::{Account, Revocable};
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, Ready};
 use crate::engines::responses::{AccessAsk, Bearer};
-use crate::platform::credential::CredentialStore;
+use crate::platform::credential::{CredentialStore, CredentialStoreError};
 
 use super::connections::{ConnectionEvent, Connections};
 use super::{Brain, Full, Link, settings};
@@ -173,7 +175,7 @@ impl Accounts {
     /// Blocking is fine: nothing else runs on the runtime yet.
     ///
     /// # Errors
-    /// Fails when the credential thread can't be started or stops during the load.
+    /// Fails when native credentials are unsupported, or the thread can't start or load.
     pub(crate) fn spawn<S: CredentialStore + 'static>(
         worker: Worker<S>,
         net: Net,
@@ -220,7 +222,7 @@ impl Accounts {
         accounts.apply(started);
         let (done, key) = loaded
             .recv()
-            .map_err(|_| std::io::Error::other("the credential thread stopped"))?;
+            .map_err(|_| io::Error::other("the credential thread stopped"))??;
         // No shell is connected yet: only the work it starts matters, not what it would say.
         accounts.handle(done);
         accounts.start_key(key);
@@ -750,7 +752,7 @@ impl Brain {
 /// load, to `loaded`.
 fn spawn<S: CredentialStore + 'static>(
     mut worker: Worker<S>,
-    loaded: std_mpsc::Sender<(Input, crate::connections::anthropic::KeyResult)>,
+    loaded: std_mpsc::Sender<io::Result<(Input, crate::connections::anthropic::KeyResult)>>,
     events: mpsc::UnboundedSender<Input>,
     reads: mpsc::UnboundedSender<Event>,
 ) -> std::io::Result<(std_mpsc::Sender<Work>, oneshot::Receiver<()>)> {
@@ -792,15 +794,25 @@ fn spawn<S: CredentialStore + 'static>(
                         continue;
                     }
                 };
-                let done = Input::Vault(worker.run(job));
-                let sent = match loaded.take() {
-                    Some(loaded) => loaded
-                        .send((
-                            done,
+                let sent = match (loaded.take(), worker.run(job)) {
+                    (
+                        Some(loaded),
+                        Done::Loaded(Err(VaultError::Store(
+                            error @ CredentialStoreError::Unsupported,
+                        ))),
+                    ) => {
+                        loaded
+                            .send(Err(io::Error::new(io::ErrorKind::Unsupported, error)))
+                            .ok();
+                        break;
+                    }
+                    (Some(loaded), done) => loaded
+                        .send(Ok((
+                            Input::Vault(done),
                             worker.anthropic(crate::connections::anthropic::KeyOp::Load),
-                        ))
+                        )))
                         .is_ok(),
-                    None => events.send(done).is_ok(),
+                    (None, done) => events.send(Input::Vault(done)).is_ok(),
                 };
                 if !sent {
                     break;
