@@ -123,12 +123,7 @@ enum CancelDispatch {
     clippy::too_many_lines,
     reason = "native revocation and ordered deferred delivery share one owner"
 )]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one argument for each thing the native callback shares with presence"
-)]
 pub(super) fn deliver(
-    gesture: Rc<Cell<Gesture>>,
     dock: AnyWindowHandle,
     owner: WeakEntity<Presence>,
     link: LinkHandle,
@@ -182,6 +177,7 @@ pub(super) fn deliver(
     let escape_down = Cell::new(false);
     let recovered_hold = Cell::new(None);
     let input = Rc::new(Cell::new((0_u64, 0_u64)));
+    let gesture = Cell::new(Gesture::default());
     let reduce: Rc<Reduce> = Rc::new(move |event, mut at| {
         let (serial, reset) = input.get();
         if matches!(event, Event::Reset | Event::Escape) {
