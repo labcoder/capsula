@@ -11,20 +11,34 @@ pub struct Accounts {
     pub error: Option<UserError>,
     pub send_failed: bool,
     pub waiting: Option<AccountOp>,
+    pub unsupported: bool,
     unexplained: bool,
 }
 
 impl Accounts {
     pub fn receive(&mut self, current: Option<u64>, generation: u64, view: AccountView) -> bool {
+        self.receive_snapshot(current, generation, view, false)
+    }
+
+    pub fn receive_snapshot(
+        &mut self,
+        current: Option<u64>,
+        generation: u64,
+        view: AccountView,
+        unsupported: bool,
+    ) -> bool {
         if current != Some(generation) {
             return false;
         }
-        if !self.unexplained && self.view.as_ref() != Some(&view) {
+        if (unsupported && !self.unsupported)
+            || (!self.unexplained && self.view.as_ref() != Some(&view))
+        {
             self.error = None;
         }
         self.unexplained = false;
         self.view = Some(view);
         self.generation = Some(generation);
+        self.unsupported = unsupported;
         self.waiting = None;
         self.send_failed = false;
         true
@@ -80,6 +94,7 @@ impl Accounts {
             | ErrorKey::VoiceModelPath
             | ErrorKey::HoldToTalkOff
             | ErrorKey::GitHubUnavailable
+            | ErrorKey::UnsupportedPlatform
             | ErrorKey::DrawingReplacementFailed
             | ErrorKey::DrawingNotReturned
             | ErrorKey::ScreenUnavailable
@@ -94,7 +109,6 @@ impl Accounts {
             | ErrorKey::CredentialsUnavailable
             | ErrorKey::RevocationBacklog
             | ErrorKey::TrustStoreUnavailable
-            | ErrorKey::UnsupportedPlatform
             | ErrorKey::PlanNotEnabled
             | ErrorKey::AccountMisconfigured
             | ErrorKey::SignOutNotDurable
@@ -113,12 +127,10 @@ impl Accounts {
         if self.waiting.is_some() {
             return false;
         }
-        if self
-            .error
-            .as_ref()
-            .is_some_and(|error| error.key() == ErrorKey::UnsupportedPlatform)
-            && !matches!(self.view, Some(AccountView::SigningOut { .. }))
-            && matches!(op, AccountOp::SignIn | AccountOp::Retry)
+        if self.unsupported
+            && (matches!(op, AccountOp::SignIn | AccountOp::EnablePlan)
+                || op == AccountOp::Retry
+                    && !matches!(self.view, Some(AccountView::SigningOut { .. })))
         {
             return false;
         }
@@ -160,6 +172,9 @@ impl Accounts {
     }
 
     pub fn sign_in_again(&self) -> bool {
+        if self.unsupported {
+            return false;
+        }
         matches!(
             self.view,
             Some(AccountView::SignedIn {

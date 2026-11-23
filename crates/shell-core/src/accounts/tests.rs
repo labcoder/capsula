@@ -58,13 +58,22 @@ fn a_platform_refusal_cannot_retry_or_sign_in_again() {
     let mut accounts = Accounts::default();
     receive(&mut accounts, signed_out());
     accounts.error(&error(ErrorKey::UnsupportedPlatform, vec![]));
+    assert_eq!(
+        allowed(&accounts),
+        [AccountOp::SignIn],
+        "unscoped errors aren't account state"
+    );
+    assert!(accounts.receive_snapshot(Some(7), 7, signed_out(), true));
     assert_eq!(allowed(&accounts), []);
 
-    receive(
-        &mut accounts,
+    accounts.disconnected();
+    assert!(accounts.receive_snapshot(
+        Some(8),
+        8,
         signed_in(PlanState::Enabled, Some(AccountRecovery::Retry)),
-    );
-    accounts.error(&error(ErrorKey::UnsupportedPlatform, vec![]));
+        true,
+    ));
+    assert!(!accounts.receive_snapshot(Some(8), 7, signed_out(), false));
     assert_eq!(allowed(&accounts), [AccountOp::SignOut]);
 }
 

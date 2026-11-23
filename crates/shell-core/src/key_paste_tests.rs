@@ -13,6 +13,35 @@ fn model(view: KeyView) -> KeyPaste {
     state
 }
 
+#[test]
+fn an_unsupported_saved_key_can_only_be_removed_locally() {
+    let mut state = model(KeyView::UnsupportedPlatform);
+    assert!(state.saved());
+    assert!(!state.can_paste());
+    assert!(!state.check_available());
+    state.check(|_| panic!("unsupported transport can't check a key"));
+    let confirmation = state.removal_confirmation().unwrap();
+    state.remove(confirmation, |op| {
+        assert_eq!(
+            op,
+            ConnectionOp::RemoveAnthropicKey {
+                revision: 1,
+                request: 1
+            }
+        );
+        true
+    });
+    state.receive(KeyView::UnsupportedPlatform, None);
+    state.removed(&ControlToShell::AnthropicKeyRemoved {
+        request: 1,
+        result: Ok(()),
+    });
+    assert_eq!(state.view(), Some(KeyView::UnsupportedPlatform));
+    assert!(!state.saved());
+    assert!(!state.check_available());
+    assert!(state.removal_confirmation().is_none());
+}
+
 fn begin(state: &mut KeyPaste, key: &str) -> Attempt {
     state
         .begin(

@@ -246,11 +246,18 @@ fn account_actions(
         .items_center()
         .gap_2();
     match &state.view {
-        Some(AccountView::SignedOut { .. }) => {
+        Some(AccountView::SignedOut { .. }) if !state.unsupported => {
             actions = actions.child(button(
                 "account-sign-in",
                 Text::AccountContinue,
                 AccountOp::SignIn,
+            ));
+        }
+        Some(AccountView::SigningIn) if state.unsupported => {
+            actions = actions.child(button(
+                "account-cancel",
+                Text::AccountCancel,
+                AccountOp::CancelSignIn,
             ));
         }
         Some(AccountView::SigningIn) => {
@@ -279,7 +286,7 @@ fn account_actions(
             plan: PlanState::Declined,
             recovery: None,
             ..
-        }) => {
+        }) if !state.unsupported => {
             actions = actions.child(button(
                 "account-enable",
                 Text::AccountEnable,
@@ -299,14 +306,16 @@ fn account_actions(
             AccountOp::Retry,
         ));
     }
-    if matches!(
-        state.view,
-        Some(AccountView::SignedIn {
-            plan: PlanState::Enabled | PlanState::Unavailable,
-            recovery: None,
-            ..
-        })
-    ) {
+    if !state.unsupported
+        && matches!(
+            state.view,
+            Some(AccountView::SignedIn {
+                plan: PlanState::Enabled | PlanState::Unavailable,
+                recovery: None,
+                ..
+            })
+        )
+    {
         actions = actions.child(
             Link::new("account-usage")
                 .href(MANAGE_USAGE_URL)
@@ -461,17 +470,21 @@ fn account_status(state: &Accounts) -> (Text, Vec<Text>) {
         }) => {
             if *revocation_unconfirmed {
                 lines.push(Text::AccountRevocationUnconfirmed);
-            } else {
+            } else if !state.unsupported {
                 lines.push(Text::AccountUsePlan);
             }
             Text::AccountSignedOut
         }
         Some(AccountView::SigningIn) => {
-            lines.push(Text::AccountReplaceHelp);
+            if !state.unsupported {
+                lines.push(Text::AccountReplaceHelp);
+            }
             Text::AccountSigningIn
         }
         Some(AccountView::Busy) => {
-            lines.push(Text::AccountBusyHelp);
+            if !state.unsupported {
+                lines.push(Text::AccountBusyHelp);
+            }
             Text::AccountBusy
         }
         Some(view @ AccountView::SigningOut { cleanup, .. }) => {
@@ -490,7 +503,7 @@ fn account_status(state: &Accounts) -> (Text, Vec<Text>) {
         Some(AccountView::SignedIn { plan, recovery, .. }) => match recovery {
             Some(AccountRecovery::SignInAgain) => Text::AccountSessionEnded,
             Some(AccountRecovery::Retry) => {
-                if state.error.is_none() {
+                if !state.unsupported && state.error.is_none() {
                     lines.push(Text::AccountRetryHelp);
                 }
                 Text::AccountAttention
@@ -502,7 +515,14 @@ fn account_status(state: &Accounts) -> (Text, Vec<Text>) {
             },
         },
     };
-    (status, lines)
+    if !state.unsupported {
+        (status, lines)
+    } else if matches!(state.view, Some(AccountView::SigningOut { .. })) {
+        lines.push(Text::UnsupportedPlatform);
+        (status, lines)
+    } else {
+        (Text::UnsupportedPlatform, lines)
+    }
 }
 
 fn cleanup_notice(view: &AccountView) -> Option<Text> {
