@@ -11,7 +11,7 @@ use super::super::{
     Foreground, OpenError, Presence, PresenceSurface, configure_surface, options, platform,
 };
 use super::{SettingsTab, SettingsView};
-use crate::settings::{Field, TaskbarChoice};
+use crate::settings::{AfterSave, BeforeSave, Field, Save, SaveOutcome};
 use crate::strings::{Strings, Text};
 
 pub(in crate::presence) struct SettingsPanel {
@@ -25,64 +25,50 @@ pub(in crate::presence) struct SettingsPanel {
 }
 
 impl Presence {
+    pub(in crate::presence) fn request_save(
+        &mut self,
+        save: Save,
+        cx: &mut Context<'_, Self>,
+    ) -> SaveOutcome {
+        match save.before() {
+            Some(BeforeSave::CancelVoice) => self.cancel_voice(cx),
+            Some(BeforeSave::RevokeScreenOffer) => {
+                self.voice.gates.publish(None);
+            }
+            None => {}
+        }
+        let pair = self.session.as_ref().map(|session| (&self.link, session));
+        let outcome = self.settings.update(cx, |state, cx| {
+            let outcome = state.apply_save(save, pair);
+            if outcome.notify {
+                cx.notify();
+            }
+            outcome
+        });
+        match outcome.after {
+            Some(AfterSave::FollowAndCancelVoice) => {
+                // The next press reads the mirror before any link batch refreshes it.
+                self.follow_voice_input(cx);
+                self.cancel_voice(cx);
+            }
+            Some(AfterSave::RefreshScreenOffer { clear_marks }) => {
+                if clear_marks {
+                    self.marks_off(cx);
+                }
+                self.publish_offer(cx);
+            }
+            Some(AfterSave::SyncTaskbar) => self.sync_taskbar(cx),
+            None => {}
+        }
+        outcome
+    }
+
     pub(in crate::presence) fn speech_input_action(
         &mut self,
         intent: crate::settings::SpeechInputIntent,
         cx: &mut Context<'_, Self>,
     ) {
-        self.cancel_voice(cx);
-        let (link, session) = (&self.link, &self.session);
-        self.settings.update(cx, |state, cx| {
-            state.send_speech_input(
-                intent,
-                session.as_ref().map(crate::link::Session::generation),
-                |op| {
-                    session.as_ref().is_some_and(|session| {
-                        link.send_control(session, ControlToBrain::Settings(op))
-                    })
-                },
-            );
-            cx.notify();
-        });
-    }
-
-    pub(in crate::presence) fn save_stt_unload(
-        &mut self,
-        policy: kumochi_protocol::message::SttUnload,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let (link, session) = (&self.link, &self.session);
-        self.settings.update(cx, |state, cx| {
-            state.send_stt_unload(policy, |op| {
-                session
-                    .as_ref()
-                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
-            });
-            cx.notify();
-        });
-    }
-
-    #[expect(
-        clippy::fn_params_excessive_bools,
-        reason = "the checkbox and wire setter carry this boolean unchanged"
-    )]
-    pub(in crate::presence) fn save_talk_back(&mut self, on: bool, cx: &mut Context<'_, Self>) {
-        use crate::link::output::Denied;
-
-        let (link, session) = (&self.link, &self.session);
-        self.settings.update(cx, |state, cx| {
-            state.send_talk_back(on, || {
-                match session
-                    .as_ref()
-                    .map(|session| link.send_talk_back(session, on))
-                {
-                    Some(Ok(())) => Ok(()),
-                    Some(Err(Denied::Busy)) => Err(Text::TalkBackBusy),
-                    Some(Err(_)) | None => Err(Text::SettingsUnavailable),
-                }
-            });
-            cx.notify();
-        });
+        self.request_save(Save::SpeechInput(intent), cx);
     }
 
     #[expect(
@@ -94,22 +80,9 @@ impl Presence {
         on: bool,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        let (link, session) = (&self.link, &self.session);
-        let sent = self.settings.update(cx, |state, cx| {
-            let sent = state.send_hold_to_talk(on, |op| {
-                session
-                    .as_ref()
-                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
-            });
-            cx.notify();
-            sent
-        });
-        if sent && !on {
-            // The next press reads the mirror before any link batch refreshes it.
-            self.follow_voice_input(cx);
-            self.cancel_voice(cx);
-        }
-        sent
+        self.request_save(Save::HoldToTalk(on), cx)
+            .result
+            .unwrap_or(false)
     }
 
     #[expect(
@@ -121,27 +94,9 @@ impl Presence {
         on: bool,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        // The user's no ends every offer a press was seen under before the save is tried, so a
-        // save that can't be queued or comes back refused never gives such a press the screen.
-        if !on {
-            self.voice.gates.publish(None);
-        }
-        let (link, session) = (&self.link, &self.session);
-        let sent = self.settings.update(cx, |state, cx| {
-            let sent = state.send_show_screen(on, |op| {
-                session
-                    .as_ref()
-                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
-            });
-            cx.notify();
-            sent
-        });
-        // An unchecked box is already the user's no, saved or not.
-        if !on {
-            self.marks_off(cx);
-        }
-        self.publish_offer(cx);
-        sent
+        self.request_save(Save::ShowScreen(on), cx)
+            .result
+            .unwrap_or(false)
     }
 
     pub(in crate::presence) fn open_accounts(
@@ -199,41 +154,10 @@ impl Presence {
             sent
         })
     }
-    pub(in crate::presence) fn save_taskbar(
-        &mut self,
-        choice: TaskbarChoice,
-        cx: &mut Context<'_, Self>,
-    ) -> bool {
-        let (link, session) = (&self.link, &self.session);
-        let sent = self.settings.update(cx, |state, cx| {
-            let sent = state.send_taskbar(choice, |op| {
-                session
-                    .as_ref()
-                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
-            });
-            if sent {
-                cx.notify();
-            }
-            sent
-        });
-        if sent {
-            self.sync_taskbar(cx);
-        }
-        sent
-    }
-
     pub(in crate::presence) fn sync_taskbar(&mut self, cx: &mut Context<'_, Self>) {
         let native = &mut self.native;
         self.settings.update(cx, |state, cx| {
-            state.apply_taskbar(|choice| {
-                native
-                    .set_taskbar_button(choice)
-                    .err()
-                    .map(|_| match choice {
-                        TaskbarChoice::Shown => Text::TaskbarAddFailed,
-                        TaskbarChoice::Hidden => Text::TaskbarRemoveFailed,
-                    })
-            });
+            state.apply_taskbar(|choice| native.set_taskbar_button(choice).is_ok());
             cx.notify();
         });
         self.refresh_dock(cx);
@@ -474,20 +398,9 @@ impl Presence {
         name: AssistantName,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), Text> {
-        let (link, session) = (&self.link, &self.session);
-        self.settings.update(cx, |state, cx| {
-            let sent = state.send_assistant(name, |op| {
-                session
-                    .as_ref()
-                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
-            });
-            cx.notify();
-            if sent {
-                Ok(())
-            } else {
-                Err(state.rename_refusal())
-            }
-        })
+        self.request_save(Save::RenameAssistant(name), cx)
+            .result
+            .map(|_| ())
     }
 
     pub(in crate::presence) fn save_max_frame_rate(
@@ -495,17 +408,7 @@ impl Presence {
         rate: MaxFrameRate,
         cx: &mut Context<'_, Self>,
     ) {
-        let (link, session) = (&self.link, &self.session);
-        self.settings.update(cx, |state, cx| {
-            let sent = state.send_max_frame_rate(rate, |op| {
-                session
-                    .as_ref()
-                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
-            });
-            if sent {
-                cx.notify();
-            }
-        });
+        self.request_save(Save::FrameRate(rate), cx);
     }
 
     pub(in crate::presence) fn save_default_model(
@@ -514,17 +417,7 @@ impl Presence {
         model: kumochi_protocol::message::ModelSlug,
         cx: &mut Context<'_, Self>,
     ) {
-        let (link, session) = (&self.link, &self.session);
-        self.settings.update(cx, |state, cx| {
-            let sent = state.send_default_model(connection, model, |op| {
-                session
-                    .as_ref()
-                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
-            });
-            if sent {
-                cx.notify();
-            }
-        });
+        self.request_save(Save::DefaultModel(connection, model), cx);
     }
 
     pub(in crate::presence) fn save_setting(
@@ -532,15 +425,8 @@ impl Presence {
         field: Field,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        let (link, session) = (&self.link, &self.session);
-        self.settings.update(cx, |state, cx| {
-            let sent = state.save(field, |op| {
-                session
-                    .as_ref()
-                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
-            });
-            cx.notify();
-            sent
-        })
+        self.request_save(Save::Name(field), cx)
+            .result
+            .unwrap_or(false)
     }
 }

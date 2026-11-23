@@ -8,12 +8,15 @@ use kumochi_protocol::message::{
     NameError, OnboardingStep, PartState, SettingsOp, SettingsView, SttUnload, UserError, UserName,
 };
 
-use crate::strings::Text;
+use crate::strings::{Strings, Text};
 
 mod dock;
 mod model;
+mod options;
+mod saves;
 mod voice;
-pub use voice::{SpeechInputAction, SpeechInputIntent};
+pub use saves::{AfterSave, BeforeSave, Save, SaveOutcome};
+pub use voice::{STT_UNLOAD_OPTIONS, SpeechInputAction, SpeechInputIntent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
@@ -324,6 +327,30 @@ impl Settings {
         }
     }
 
+    /// Saving and error lines under either name, using the same text in Settings and onboarding.
+    pub fn field_status(
+        &self,
+        field: Field,
+        strings: &Strings,
+    ) -> (Option<String>, Option<String>) {
+        let state = self.field(field);
+        let error = state.error.as_ref().map(|error| match error {
+            Error::Validation(NameError::Empty) => strings.get(Text::RenameEmpty),
+            Error::Validation(NameError::TooLong) => strings.get(Text::RenameNameTooLong),
+            Error::Validation(NameError::NotOneLine) => strings.get(Text::RenameOneLine),
+            Error::Brain(error) => strings.error(error),
+            Error::Offline => strings.get(if self.view().is_none() {
+                Text::SettingsOffline
+            } else {
+                Text::SettingsUnavailable
+            }),
+        });
+        (
+            state.saving.then(|| strings.get(Text::SettingsSaving)),
+            error,
+        )
+    }
+
     fn field_mut(&mut self, field: Field) -> &mut FieldState {
         match field {
             Field::Assistant => &mut self.assistant,
@@ -474,9 +501,12 @@ impl Settings {
             }))
     }
 
-    pub fn apply_taskbar(&mut self, apply: impl FnOnce(TaskbarChoice) -> Option<Text>) {
+    pub fn apply_taskbar(&mut self, apply: impl FnOnce(TaskbarChoice) -> bool) {
         if let Some(choice) = self.taskbar_choice() {
-            self.native_taskbar_notice = apply(choice);
+            self.native_taskbar_notice = (!apply(choice)).then_some(match choice {
+                TaskbarChoice::Shown => Text::TaskbarAddFailed,
+                TaskbarChoice::Hidden => Text::TaskbarRemoveFailed,
+            });
         }
     }
 
@@ -484,18 +514,22 @@ impl Settings {
         &mut self,
         choice: TaskbarChoice,
         send: impl FnOnce(SettingsOp) -> bool,
-    ) -> bool {
-        if self.taskbar_choice().is_none_or(|newest| newest == choice)
-            || !send(SettingsOp::SetTaskbar(choice == TaskbarChoice::Shown))
-        {
-            return false;
+    ) -> Result<bool, Text> {
+        let Some(newest) = self.taskbar_choice() else {
+            return Err(Text::SettingsUnavailable);
+        };
+        if newest == choice {
+            return Ok(false);
+        }
+        if !send(SettingsOp::SetTaskbar(choice == TaskbarChoice::Shown)) {
+            return Err(Text::SettingsUnavailable);
         }
         self.pending.push_back(Pending {
             slot: Slot::Taskbar(choice),
             failed: false,
             reset_draft: false,
         });
-        true
+        Ok(true)
     }
 
     /// Queues `FinishOnboarding` in the ordered answer queue, so the brain's one answer to it

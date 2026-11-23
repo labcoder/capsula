@@ -1,7 +1,8 @@
 use super::{
-    AssistantName, Completion, DockPosition, ErrorKey, Field, MaxFrameRate, Settings, SettingsOp,
-    SettingsView, TaskbarChoice, Update, UserError, UserName,
+    AssistantName, Completion, DockPosition, ErrorKey, Field, MaxFrameRate, Save, SaveOutcome,
+    Settings, SettingsOp, SettingsView, TaskbarChoice, Update, UserError, UserName,
 };
+use crate::strings::Text;
 use kumochi_protocol::message::ThreadId;
 
 fn view() -> SettingsView {
@@ -30,14 +31,17 @@ fn native_taskbar_refusal_keeps_the_saved_choice_and_reports_its_failure() {
     let mut saved = view();
     saved.show_in_taskbar = true;
     state.set_view(saved, Update::Unsolicited);
-    state.apply_taskbar(|_| Some(crate::strings::Text::TaskbarAddFailed));
+    state.apply_taskbar(|choice| {
+        assert_eq!(choice, TaskbarChoice::Shown);
+        false
+    });
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Shown));
     assert!(state.view().expect("saved snapshot").show_in_taskbar);
     assert_eq!(
         state.native_taskbar_notice,
         Some(crate::strings::Text::TaskbarAddFailed)
     );
-    state.apply_taskbar(|_| None);
+    state.apply_taskbar(|_| true);
     assert_eq!(state.native_taskbar_notice, None);
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Shown));
 }
@@ -46,23 +50,41 @@ fn native_taskbar_refusal_keeps_the_saved_choice_and_reports_its_failure() {
 fn taskbar_admits_only_changed_online_choices_after_successful_send() {
     let mut state = Settings::default();
     assert_eq!(state.taskbar_choice(), None);
-    assert!(!state.send_taskbar(TaskbarChoice::Shown, |_| panic!("offline send")));
+    assert_eq!(
+        state.send_taskbar(TaskbarChoice::Shown, |_| panic!("offline send")),
+        Err(Text::SettingsUnavailable)
+    );
     state.set_view(view(), Update::Unsolicited);
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Hidden));
-    assert!(!state.send_taskbar(TaskbarChoice::Hidden, |_| panic!("unchanged send")));
-    assert!(!state.send_taskbar(TaskbarChoice::Shown, |_| false));
+    assert_eq!(
+        state.send_taskbar(TaskbarChoice::Hidden, |_| panic!("unchanged send")),
+        Ok(false)
+    );
+    assert_eq!(
+        state.send_taskbar(TaskbarChoice::Shown, |_| false),
+        Err(Text::SettingsUnavailable)
+    );
     assert_eq!(state.pending.len(), 0);
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Hidden));
     let mut sent = Vec::new();
-    assert!(state.send_taskbar(TaskbarChoice::Shown, |op| {
-        sent.push(op);
-        true
-    }));
-    assert!(!state.send_taskbar(TaskbarChoice::Shown, |_| panic!("duplicate send")));
-    assert!(state.send_taskbar(TaskbarChoice::Hidden, |op| {
-        sent.push(op);
-        true
-    }));
+    assert_eq!(
+        state.send_taskbar(TaskbarChoice::Shown, |op| {
+            sent.push(op);
+            true
+        }),
+        Ok(true)
+    );
+    assert_eq!(
+        state.send_taskbar(TaskbarChoice::Shown, |_| panic!("duplicate send")),
+        Ok(false)
+    );
+    assert_eq!(
+        state.send_taskbar(TaskbarChoice::Hidden, |op| {
+            sent.push(op);
+            true
+        }),
+        Ok(true)
+    );
     assert_eq!(
         sent,
         vec![SettingsOp::SetTaskbar(true), SettingsOp::SetTaskbar(false)]
@@ -80,11 +102,34 @@ fn taskbar_admits_only_changed_online_choices_after_successful_send() {
 }
 
 #[test]
+fn reselecting_taskbar_is_not_a_save_failure_even_without_a_link() {
+    let mut state = Settings::default();
+    state.set_view(view(), Update::Unsolicited);
+    assert_eq!(
+        state.apply_save(Save::Taskbar(TaskbarChoice::Hidden), None),
+        SaveOutcome {
+            result: Ok(false),
+            notify: false,
+            after: None
+        },
+    );
+    assert_eq!(
+        state.apply_save(Save::Taskbar(TaskbarChoice::Shown), None),
+        SaveOutcome {
+            result: Err(Text::SettingsUnavailable),
+            notify: false,
+            after: None
+        },
+    );
+    assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Hidden));
+}
+
+#[test]
 fn taskbar_answers_share_the_fifo_without_completing_name_saves() {
     let mut state = Settings::default();
     state.set_view(view(), Update::Unsolicited);
     state.send_dock_position(DockPosition::BottomLeft, |_| true);
-    assert!(state.send_taskbar(TaskbarChoice::Shown, |_| true));
+    assert_eq!(state.send_taskbar(TaskbarChoice::Shown, |_| true), Ok(true));
     state.change(Field::User, "Alex");
     assert!(state.save(Field::User, |_| true));
     assert_eq!(state.pending.len(), 3);
@@ -112,7 +157,7 @@ fn taskbar_answers_share_the_fifo_without_completing_name_saves() {
 fn taskbar_refusal_stays_failed_and_only_a_taskbar_success_clears_its_notice() {
     let mut state = Settings::default();
     state.set_view(view(), Update::Unsolicited);
-    assert!(state.send_taskbar(TaskbarChoice::Shown, |_| true));
+    assert_eq!(state.send_taskbar(TaskbarChoice::Shown, |_| true), Ok(true));
     let error = UserError::from(ErrorKey::SettingsRefused);
     assert_eq!(state.error(error.clone()), None);
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Hidden));
@@ -139,7 +184,7 @@ fn taskbar_refusal_stays_failed_and_only_a_taskbar_success_clears_its_notice() {
     state.set_view(saved.clone(), Update::Answer);
     assert_eq!(state.notice(), Some(&error));
 
-    assert!(state.send_taskbar(TaskbarChoice::Shown, |_| true));
+    assert_eq!(state.send_taskbar(TaskbarChoice::Shown, |_| true), Ok(true));
     state.set_view(saved.clone(), Update::Unsolicited);
     assert_eq!(state.notice(), Some(&error));
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Shown));
@@ -159,7 +204,9 @@ fn taskbar_success_preserves_dock_frame_rate_and_name_refusals() {
         let mut state = Settings::default();
         state.set_view(view(), Update::Unsolicited);
         match setting {
-            SettingsOp::SetDockPosition(position) => state.send_dock_position(position, |_| true),
+            SettingsOp::SetDockPosition(position) => {
+                assert!(state.send_dock_position(position, |_| true));
+            }
             SettingsOp::SetMaxFrameRate(rate) => {
                 assert!(state.send_max_frame_rate(rate, |_| true));
             }
@@ -172,7 +219,7 @@ fn taskbar_success_preserves_dock_frame_rate_and_name_refusals() {
         let error = UserError::from(ErrorKey::SettingsRefused);
         state.error(error.clone());
         state.set_view(view(), Update::Answer);
-        assert!(state.send_taskbar(TaskbarChoice::Shown, |_| true));
+        assert_eq!(state.send_taskbar(TaskbarChoice::Shown, |_| true), Ok(true));
         let mut saved = view();
         saved.show_in_taskbar = true;
         state.set_view(saved, Update::Answer);
@@ -185,7 +232,7 @@ fn taskbar_success_preserves_dock_frame_rate_and_name_refusals() {
 fn taskbar_disconnect_discards_intent_and_generation_fences_answers() {
     let mut state = Settings::default();
     assert!(state.receive(Some(7), 7, view(), Update::Unsolicited));
-    assert!(state.send_taskbar(TaskbarChoice::Shown, |_| true));
+    assert_eq!(state.send_taskbar(TaskbarChoice::Shown, |_| true), Ok(true));
     for (current, generation) in [(Some(7), 6), (None, 7)] {
         assert!(!state.receive(current, generation, view(), Update::Answer));
         assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Shown));
@@ -195,7 +242,10 @@ fn taskbar_disconnect_discards_intent_and_generation_fences_answers() {
     assert_eq!(state.taskbar_choice(), None);
     assert_eq!(state.view(), None);
     assert_eq!(state.pending.len(), 0);
-    assert!(!state.send_taskbar(TaskbarChoice::Shown, |_| panic!("offline replay")));
+    assert_eq!(
+        state.send_taskbar(TaskbarChoice::Shown, |_| panic!("offline replay")),
+        Err(Text::SettingsUnavailable)
+    );
     let mut shown = view();
     shown.show_in_taskbar = true;
     assert!(!state.receive(Some(8), 7, shown, Update::Answer));
@@ -203,6 +253,6 @@ fn taskbar_disconnect_discards_intent_and_generation_fences_answers() {
     assert!(state.receive(Some(8), 8, view(), Update::Unsolicited));
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Hidden));
     assert_eq!(state.pending.len(), 0);
-    assert!(state.send_taskbar(TaskbarChoice::Shown, |_| true));
+    assert_eq!(state.send_taskbar(TaskbarChoice::Shown, |_| true), Ok(true));
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Shown));
 }

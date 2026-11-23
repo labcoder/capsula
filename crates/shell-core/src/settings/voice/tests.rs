@@ -76,6 +76,38 @@ fn hold_to_talk_waits_for_its_own_answer_and_refusal_restores_the_saved_choice()
 }
 
 #[test]
+fn talk_back_busy_leaves_the_saved_choice_and_only_its_answer_settles_a_retry() {
+    use crate::link::output::Denied;
+
+    let mut state = connected();
+    assert!(!state.send_talk_back(true, || Err(Denied::Busy)));
+    assert_eq!(state.talk_back_send_error(), Some(Text::TalkBackBusy));
+    assert_eq!(state.talk_back_choice(), Some(false));
+    assert!(!state.talk_back_pending());
+
+    assert!(state.send_stt_unload(SttUnload::After15Min, |_| true));
+    assert!(state.send_talk_back(true, || Ok(())));
+    state.set_view(saved(SttUnload::Kept), Update::Unsolicited);
+    assert_eq!(state.talk_back_choice(), Some(true));
+    let mut settled = saved(SttUnload::After15Min);
+    state.set_view(settled.clone(), Update::Answer);
+    assert!(state.talk_back_pending());
+
+    let error = UserError::from(ErrorKey::SettingsRefused);
+    state.error(error.clone());
+    state.set_view(settled.clone(), Update::Answer);
+    assert_eq!(state.talk_back_choice(), Some(false));
+    assert_eq!(state.talk_back_error(), Some(&error));
+    assert!(state.send_talk_back(true, || Ok(())));
+    settled.talk_back = true;
+    state.set_view(settled, Update::Answer);
+    assert_eq!(state.talk_back_choice(), Some(true));
+    assert_eq!(state.talk_back_error(), None);
+    assert_eq!(state.talk_back_send_error(), None);
+    assert!(!state.talk_back_pending());
+}
+
+#[test]
 fn the_load_off_refusal_clears_only_when_enable_is_saved() {
     for first_enable_fails in [false, true] {
         let mut state = connected();

@@ -18,7 +18,6 @@ use crate::input::{Edge, Effect, Event, Gesture, Key};
 use crate::link::{Batch, LinkEvent, LinkState, Session};
 use crate::onboarding::{Onboarding, Step, ThisRun};
 use crate::platform::{Deliver, EventTime, PresenceEvent};
-use crate::presence::settings::field_status;
 use crate::presence::voice_wiring_tests::ready;
 use crate::presence::{PanelVisibility, Presence, test_fixture};
 use crate::settings::{Error, Field, Update};
@@ -281,7 +280,7 @@ fn enter_on_a_name_that_cant_be_saved_stays_with_focus_in_the_input(cx: &mut Tes
         );
         let strings = cx.global::<Strings>();
         assert_eq!(
-            field_status(settings, Field::Assistant, strings),
+            settings.field_status(Field::Assistant, strings),
             (None, Some(strings.get(Text::RenameEmpty)))
         );
         let view = owner

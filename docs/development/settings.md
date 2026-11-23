@@ -25,16 +25,24 @@ No login URL, code or credential contents reach the shell. See [Claude Code](cla
 
 The status panel's **Settings…** opens a retained window, the tasks panel's size and anchored
 with the same work-area clamping. Kit's tabs expose **General**, **Accounts**, **Voice** and **Privacy**.
-`shell-core/settings.rs` owns the plain drafts, validation, per-field saving and errors;
-`presence/settings/window.rs` owns the window and session sends; `presence/settings/mod.rs`
-owns the shared view frame, retained Kit inputs and subscriptions. `general.rs` and `accounts.rs`
-compose their tabs without another settings entity. The shell's UI thread never waits for a save.
+`shell-core/settings.rs` owns the plain drafts, validation, per-field saving and errors.
+`shell-core/settings/saves.rs` routes a save through the current link and returns redraw and
+follow-up decisions; the host executes the native effects, such as revoking screen consent before
+a save or following the microphone choice after a successful enqueue. `presence/settings/window.rs`
+owns the window; `presence/settings/mod.rs` owns the shared view frame, retained Kit inputs and
+subscriptions. `general.rs` and `accounts.rs` compose their tabs from Core's choice rows and account
+status lines without another settings entity. The shell's UI thread never waits for a save.
 The plain model also retains the brain notice across reconnects and fences incoming settings
 by connection generation before changing any draft, save slot or saved view.
+Taskbar reselects return a no-op, distinct from a refused send, so the host doesn't show a
+failure or clear an existing notice when no change was requested.
+A current link refusal also returns a dock rollback as soon as the optimistic choice changes,
+so native placement doesn't wait for a settings snapshot that can be lost on disconnect.
 
 **Model** (`shell-core/settings/model.rs`): Presence hands each `DataToShell::Models` catalog to
 the settings model, which keeps one per connection that has an engine (ChatGPT, and Claude Code
-once it lists models) and drops them on disconnect. General draws one radio per model and sends
+once it lists models) and drops them on disconnect. Core builds the choices, selection and Fluent
+labels; General draws one radio per choice and asks Core to send
 `SetDefaultModel` with the newest choice's wanted effort on the same connection, else `Low`.
 The brain resolves ChatGPT's actual request effort at admission; this layer doesn't rewrite
 the saved choice to match the catalog.

@@ -1,10 +1,11 @@
 use gpui_kit::{App, Context};
-use kumochi_protocol::message::{ControlToBrain, DockPosition};
+use kumochi_protocol::message::DockPosition;
 
 use super::{
     Layout, LineFrame, Observer, OpenError, PEEK_HEIGHT, PanelVisibility, Placement, Position,
     Presence, line, platform, scaled,
 };
+use crate::settings::Save;
 
 impl Presence {
     pub(super) fn pick_dock_position(
@@ -12,7 +13,7 @@ impl Presence {
         position: DockPosition,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        self.send_dock_position(position, cx);
+        self.request_save(Save::DockPosition(position), cx);
         self.position(position.into(), cx)
     }
 
@@ -21,36 +22,25 @@ impl Presence {
         position: DockPosition,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        self.send_dock_position(position, cx);
+        self.request_save(Save::DockPosition(position), cx);
         self.place_position(position.into(), cx)
-    }
-
-    fn send_dock_position(&mut self, position: DockPosition, cx: &mut Context<'_, Self>) {
-        let (link, session) = (&self.link, &self.session);
-        self.settings.update(cx, |state, cx| {
-            state.send_dock_position(position, |op| {
-                session
-                    .as_ref()
-                    .is_some_and(|session| link.send_control(session, ControlToBrain::Settings(op)))
-            });
-            cx.notify();
-        });
     }
 
     pub(super) fn restore_dock_position(
         &mut self,
         position: Option<DockPosition>,
         cx: &mut Context<'_, Self>,
-    ) -> Result<(), OpenError> {
+    ) {
         let mode = if cx.has_global::<Observer>() {
             RestoreMode::ObserverSeed
         } else {
             RestoreMode::Saved
         };
-        let Some(position) = restored_position(position, self.line.position_index(), mode) else {
-            return Ok(());
-        };
-        self.place_position(position, cx)
+        if let Some(position) = restored_position(position, self.line.position_index(), mode)
+            && let Err(error) = self.place_position(position, cx)
+        {
+            tracing::warn!(%error, "can't restore the saved dock position");
+        }
     }
 
     pub(super) fn position(

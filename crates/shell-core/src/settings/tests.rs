@@ -36,6 +36,168 @@ fn connected() -> Settings {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "all save paths share one FIFO and one disconnect, so the table and replay assertions belong together"
+)]
+fn controller_saves_keep_their_wire_operations_and_only_the_dock_move_replays_after_drop() {
+    use super::{AfterSave, Save, SaveOutcome, TaskbarChoice};
+    use crate::link::{LinkHandle, Session};
+    use kumochi_protocol::message::{
+        ConnectionKind, ControlToBrain, DockPosition, Effort, Incarnation, ModelChoice, ModelSlug,
+        PartState, SttUnload,
+    };
+
+    let mut link = LinkHandle::detached();
+    let controls = link.record_controls();
+    let first = Session::detached(7, Incarnation(1));
+    let second = Session::detached(8, Incarnation(1));
+    let initial = view("Kumo", Some("Oscar"));
+    let mut state = Settings::default();
+    assert!(state.receive_and_replay_dock(
+        Some((&link, &first)),
+        7,
+        initial.clone(),
+        Update::Unsolicited
+    ));
+    assert!(state.receive_speech_input(Some(7), 7, PartState::Unloaded));
+    let reload = state.speech_input_intent().expect("speech can load");
+    state.change(Field::User, "Alex");
+    let model = ModelChoice {
+        connection: ConnectionKind::ChatGpt,
+        model: ModelSlug::new("fixture").unwrap(),
+        effort: Effort::Low,
+    };
+    let assistant = AssistantName::new("Cloud").unwrap();
+    let rate = MaxFrameRate::cap(144).unwrap();
+    for (save, op, after) in [
+        (
+            Save::Name(Field::User),
+            SettingsOp::SetUserName(Some(UserName::new("Alex").unwrap())),
+            None,
+        ),
+        (
+            Save::RenameAssistant(assistant.clone()),
+            SettingsOp::SetAssistantName(assistant),
+            None,
+        ),
+        (
+            Save::DefaultModel(model.connection, model.model.clone()),
+            SettingsOp::SetDefaultModel(model),
+            None,
+        ),
+        (
+            Save::FrameRate(rate),
+            SettingsOp::SetMaxFrameRate(rate),
+            None,
+        ),
+        (
+            Save::DockPosition(DockPosition::BottomLeft),
+            SettingsOp::SetDockPosition(DockPosition::BottomLeft),
+            None,
+        ),
+        (
+            Save::Taskbar(TaskbarChoice::Shown),
+            SettingsOp::SetTaskbar(true),
+            Some(AfterSave::SyncTaskbar),
+        ),
+        (
+            Save::HoldToTalk(false),
+            SettingsOp::SetHoldToTalk(false),
+            Some(AfterSave::FollowAndCancelVoice),
+        ),
+        (Save::TalkBack(true), SettingsOp::SetTalkBack(true), None),
+        (
+            Save::ShowScreen(false),
+            SettingsOp::SetShowScreen(false),
+            Some(AfterSave::RefreshScreenOffer { clear_marks: true }),
+        ),
+        (
+            Save::SttUnload(SttUnload::After15Min),
+            SettingsOp::SetSttUnload(SttUnload::After15Min),
+            None,
+        ),
+        (Save::SpeechInput(reload), SettingsOp::LoadSpeechInput, None),
+    ] {
+        assert_eq!(
+            state.apply_save(save, Some((&link, &first))),
+            SaveOutcome {
+                result: Ok(true),
+                notify: true,
+                after
+            }
+        );
+        assert_eq!(controls.try_recv(), Ok(ControlToBrain::Settings(op)));
+    }
+    assert!(state.field(Field::User).saving);
+    assert!(state.field(Field::Assistant).saving);
+    assert_eq!(state.max_frame_rate_choice(), Some(rate));
+    assert!(state.model_saving() && state.hold_to_talk_pending() && state.talk_back_pending());
+    assert!(
+        state.show_screen_pending() && state.stt_unload_pending() && state.speech_input_pending()
+    );
+
+    state.disconnected();
+    assert!(!state.receive_and_replay_dock(
+        Some((&link, &second)),
+        7,
+        initial.clone(),
+        Update::Answer
+    ));
+    assert!(controls.is_empty());
+    assert_eq!(state.view(), None);
+    assert!(state.receive_and_replay_dock(
+        Some((&link, &second)),
+        8,
+        initial.clone(),
+        Update::Unsolicited
+    ));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Settings(SettingsOp::SetDockPosition(
+            DockPosition::BottomLeft
+        )))
+    );
+    assert!(controls.is_empty(), "only the dock preference can replay");
+    assert!(!state.field(Field::User).saving && !state.field(Field::Assistant).saving);
+    assert_eq!(
+        state.value(Field::User),
+        "Alex",
+        "the user's draft survives"
+    );
+    assert_eq!(state.max_frame_rate_choice(), Some(initial.max_frame_rate));
+    assert_eq!(state.default_model_choice(), None);
+    assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Hidden));
+    assert_eq!(state.hold_to_talk_choice(), Some(true));
+    assert_eq!(state.talk_back_choice(), Some(false));
+    assert_eq!(state.show_screen_choice(), Some(true));
+    assert_eq!(state.stt_unload_choice(), Some(SttUnload::Kept));
+    assert_eq!(state.speech_input_intent(), None);
+}
+
+#[test]
+fn a_failed_privacy_save_still_retires_the_screen_offer_and_marks() {
+    use super::{AfterSave, BeforeSave, Save, SaveOutcome};
+
+    let mut state = connected();
+    let nope = Save::ShowScreen(false);
+    assert_eq!(nope.before(), Some(BeforeSave::RevokeScreenOffer));
+    assert_eq!(
+        state.apply_save(nope, None),
+        SaveOutcome {
+            result: Ok(false),
+            notify: true,
+            after: Some(AfterSave::RefreshScreenOffer { clear_marks: true }),
+        }
+    );
+    assert_eq!(
+        state.show_screen_choice(),
+        Some(true),
+        "the save didn't land"
+    );
+}
+
+#[test]
 fn unchanged_normalized_names_never_save_even_with_an_error() {
     let mut settings = connected();
     for field in [Field::Assistant, Field::User] {

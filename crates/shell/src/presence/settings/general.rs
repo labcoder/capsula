@@ -12,14 +12,11 @@ use gpui_kit::{
     Context, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window,
     div,
 };
-use kumochi_protocol::{
-    BUILD_ID,
-    message::{ConnectionKind, DockPosition, MaxFrameRate, ModelSlug},
-};
+use kumochi_protocol::BUILD_ID;
 
 use super::super::{PresenceEvent, frame_rate, send};
-use super::{SettingsView, field_status};
-use crate::settings::{Field, Settings, TaskbarChoice};
+use super::SettingsView;
+use crate::settings::{Field, Save, Settings, TaskbarChoice};
 use crate::strings::{Strings, Text};
 
 impl SettingsView {
@@ -113,8 +110,7 @@ impl SettingsView {
 
     fn dock_positions(&self, cx: &Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
-        let state = self.model.read(cx);
-        let selected = dock_choice_index(state);
+        let selected = self.model.read(cx).dock_position_index();
         let label = strings.get(Text::DockPosition);
         div()
             .flex()
@@ -127,39 +123,35 @@ impl SettingsView {
                     .grid()
                     .grid_cols(3)
                     .gap_2()
-                    .children(
-                        DockPosition::ALL
-                            .into_iter()
-                            .zip(Text::POSITIONS)
-                            .enumerate()
-                            .map(|(ix, (position, label))| {
-                                Radio::new(("dock-position", ix))
-                                    .label(strings.get(label))
-                                    .checked(selected == Some(ix))
-                                    .on_change(cx.listener(move |view, _, _, cx| {
-                                        let owner = view.owner.clone();
-                                        let view = cx.weak_entity();
-                                        cx.defer(move |cx| {
-                                            let moved = owner
-                                                .update(cx, |owner, cx| {
-                                                    owner.save_dock_position(position, cx)
-                                                })
-                                                .is_ok_and(|result| result.is_ok());
-                                            let _gone = view.update(cx, |view, cx| {
-                                                view.dock_notice = (!moved)
-                                                    .then_some(Text::SettingsPositionUnavailable);
-                                                cx.notify();
-                                            });
+                    .children(Settings::dock_position_options().enumerate().map(
+                        |(ix, (position, label))| {
+                            Radio::new(("dock-position", ix))
+                                .label(strings.get(label))
+                                .checked(selected == Some(ix))
+                                .on_change(cx.listener(move |view, _, _, cx| {
+                                    let owner = view.owner.clone();
+                                    let view = cx.weak_entity();
+                                    cx.defer(move |cx| {
+                                        let moved = owner
+                                            .update(cx, |owner, cx| {
+                                                owner.save_dock_position(position, cx)
+                                            })
+                                            .is_ok_and(|result| result.is_ok());
+                                        let _gone = view.update(cx, |view, cx| {
+                                            view.dock_notice = (!moved)
+                                                .then_some(Text::SettingsPositionUnavailable);
+                                            cx.notify();
                                         });
-                                    }))
-                                    .map(|radio| {
-                                        #[cfg(test)]
-                                        let radio = radio
-                                            .debug_selector(move || format!("dock-position-{ix}"));
-                                        radio
-                                    })
-                            }),
-                    ),
+                                    });
+                                }))
+                                .map(|radio| {
+                                    #[cfg(test)]
+                                    let radio =
+                                        radio.debug_selector(move || format!("dock-position-{ix}"));
+                                    radio
+                                })
+                        },
+                    )),
             )
     }
 
@@ -175,14 +167,20 @@ impl SettingsView {
                 } else {
                     TaskbarChoice::Hidden
                 };
-                if view.model.read(cx).taskbar_choice() == Some(choice) {
+                let result = view
+                    .owner
+                    .update(cx, |owner, cx| {
+                        owner.request_save(Save::Taskbar(choice), cx).result
+                    })
+                    .unwrap_or_else(|_| {
+                        view.model.update(cx, |state, _| {
+                            state.apply_save(Save::Taskbar(choice), None).result
+                        })
+                    });
+                if result == Ok(false) {
                     return;
                 }
-                let sent = view
-                    .owner
-                    .update(cx, |owner, cx| owner.save_taskbar(choice, cx))
-                    .unwrap_or(false);
-                view.taskbar_notice = (!sent).then_some(Text::SettingsUnavailable);
+                view.taskbar_notice = result.err();
                 cx.notify();
             }))
             .map(|checkbox| {
@@ -199,7 +197,7 @@ impl SettingsView {
             Field::Assistant => Text::AssistantName,
             Field::User => Text::UserName,
         });
-        let (saving, error) = field_status(state, field, strings);
+        let (saving, error) = state.field_status(field, strings);
         let ix = usize::from(field == Field::User);
         div()
             .flex()
@@ -226,45 +224,17 @@ impl SettingsView {
     fn default_model(&self, cx: &Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
         let state = self.model.read(cx);
-        let current = state.default_model_choice();
-        let is = |connection: ConnectionKind, slug: &ModelSlug| {
-            current
-                .is_some_and(|current| current.connection == connection && current.model == *slug)
-        };
-        let mut choices: Vec<(ConnectionKind, ModelSlug, String)> = state
-            .model_choices()
-            .map(|(connection, model)| {
-                let name = model.display_name.as_str().to_owned();
-                (connection, model.slug.clone(), name)
-            })
-            .collect();
-        let mut labelled = labels(&choices, strings);
-        if let Some(current) = current
-            && !choices
-                .iter()
-                .any(|(connection, slug, _)| is(*connection, slug))
-        {
-            let name = current.model.as_str().to_owned();
-            labelled.insert(0, label(current.connection, &name, &[], strings));
-            choices.insert(0, (current.connection, current.model.clone(), name));
-        }
-        let selected = choices
-            .iter()
-            .position(|(connection, slug, _)| is(*connection, slug));
-        let radios: Vec<_> = labelled
+        let (choices, selected) = state.default_model_options(strings);
+        let (picks, radios): (Vec<_>, Vec<_>) = choices
             .into_iter()
             .enumerate()
-            .map(|(ix, label)| {
+            .map(|(ix, (connection, slug, label))| {
                 let radio = Radio::new(("default-model", ix)).label(label);
                 #[cfg(test)]
                 let radio = radio.debug_selector(move || format!("default-model-{ix}"));
-                radio
+                ((connection, slug), radio)
             })
-            .collect();
-        let picks: Vec<_> = choices
-            .into_iter()
-            .map(|(connection, slug, _)| (connection, slug))
-            .collect();
+            .unzip();
         let owner = self.owner.clone();
         div()
             .flex()
@@ -302,9 +272,10 @@ impl SettingsView {
     /// Automatic, then each cap, with the rate a paced animation draws at now.
     fn frame_rate(&self, window: &Window, cx: &Context<'_, Self>) -> impl IntoElement {
         let strings = cx.global::<Strings>();
-        let view = self.model.read(cx).view();
+        let state = self.model.read(cx);
+        let view = state.view();
         let cap = view.map(|view| view.max_frame_rate).unwrap_or_default();
-        let selected = choice_index(self.model.read(cx));
+        let selected = state.frame_rate_index();
         let label = strings.get(Text::MaxFrameRate);
         let owner = self.owner.clone();
         div()
@@ -314,16 +285,14 @@ impl SettingsView {
             .child(div().text_sm().child(label))
             .child(
                 RadioGroup::horizontal("max-frame-rate")
-                    .child(Radio::new("fps-auto").label(strings.get(Text::FrameRateAutomatic)))
-                    .children(
-                        MaxFrameRate::CAPS.map(|fps| {
-                            Radio::new(("fps", usize::from(fps))).label(fps.to_string())
-                        }),
-                    )
+                    .children(Settings::frame_rate_options().map(|rate| match rate.fps() {
+                        Some(fps) => Radio::new(("fps", usize::from(fps))).label(fps.to_string()),
+                        None => Radio::new("fps-auto").label(strings.get(Text::FrameRateAutomatic)),
+                    }))
                     .selected_index(Some(selected))
                     .disabled(view.is_none())
                     .on_click(move |&ix, _, cx| {
-                        if let Some(rate) = rate_at(ix) {
+                        if let Some(rate) = Settings::frame_rate_at(ix) {
                             let _gone =
                                 owner.update(cx, |owner, cx| owner.save_max_frame_rate(rate, cx));
                         }
@@ -341,61 +310,6 @@ impl SettingsView {
     }
 }
 
-/// Each offered row's label, by [`label`] against the other offered rows.
-fn labels(choices: &[(ConnectionKind, ModelSlug, String)], strings: &Strings) -> Vec<String> {
-    choices
-        .iter()
-        .map(|(connection, _, name)| label(*connection, name, choices, strings))
-        .collect()
-}
-
-/// A key model's row always names the key, since each of its requests is billed; another row names
-/// its connection only when another connection in `offered` has a model of the same name.
-fn label(
-    connection: ConnectionKind,
-    name: &str,
-    offered: &[(ConnectionKind, ModelSlug, String)],
-    strings: &Strings,
-) -> String {
-    let shared = offered
-        .iter()
-        .any(|(other, _, other_name)| *other != connection && other_name == name);
-    let provider = match connection {
-        ConnectionKind::AnthropicKey => Text::AnthropicTitle,
-        _ if !shared => return name.to_owned(),
-        ConnectionKind::ChatGpt => Text::AccountProvider,
-        ConnectionKind::ClaudeCode => Text::ClaudeProvider,
-    };
-    strings.model_on(name, &strings.get(provider))
-}
-
-/// The radio showing the newest choice, queued or saved: Kit gives a checked radio no click
-/// handler, so showing the saved cap while a new one is queued would swallow a quick reversal.
-fn choice_index(model: &Settings) -> usize {
-    model
-        .max_frame_rate_choice()
-        .and_then(MaxFrameRate::fps)
-        .and_then(|fps| MaxFrameRate::CAPS.iter().position(|&each| each == fps))
-        .map_or(0, |ix| ix + 1)
-}
-
-/// The cap behind radio `ix`: Automatic, then each of [`MaxFrameRate::CAPS`].
-fn rate_at(ix: usize) -> Option<MaxFrameRate> {
-    match ix.checked_sub(1) {
-        None => Some(MaxFrameRate::AUTOMATIC),
-        Some(ix) => MaxFrameRate::CAPS
-            .get(ix)
-            .and_then(|&fps| MaxFrameRate::cap(fps).ok()),
-    }
-}
-
-fn dock_choice_index(state: &Settings) -> Option<usize> {
-    let choice = state.dock_position_choice()?;
-    DockPosition::ALL
-        .iter()
-        .position(|position| *position == choice)
-}
-
 #[cfg(test)]
 pub(super) mod tests {
     use std::cell::Cell;
@@ -409,38 +323,8 @@ pub(super) mod tests {
     use kumochi_protocol::message::{AssistantName, MaxFrameRate, SettingsView, ThreadId};
 
     use super::super::SettingsTab;
-    use super::{choice_index, dock_choice_index, labels, rate_at};
     use crate::settings::{Settings, Update};
     use crate::strings::Strings;
-
-    #[test]
-    fn a_key_row_always_names_the_key_and_another_only_on_a_shared_name() {
-        use kumochi_protocol::message::ConnectionKind::{AnthropicKey, ChatGpt, ClaudeCode};
-        let row = |connection, slug: &str, name: &str| {
-            (
-                connection,
-                kumochi_protocol::message::ModelSlug::new(slug).expect("slug"),
-                name.to_owned(),
-            )
-        };
-        let choices = [
-            row(ChatGpt, "m-0", "GPT Luna"),
-            row(AnthropicKey, "claude-haiku-5-5", "Claude Haiku 5.5"),
-            row(AnthropicKey, "claude-opus-5-5", "Claude Opus 5.5"),
-            row(ClaudeCode, "haiku", "Claude Haiku 5.5"),
-            row(ClaudeCode, "sonnet", "Claude Sonnet 5.5"),
-        ];
-        assert_eq!(
-            labels(&choices, &Strings::english()),
-            [
-                "GPT Luna",
-                "Claude Haiku 5.5 (Anthropic API key)",
-                "Claude Opus 5.5 (Anthropic API key)",
-                "Claude Haiku 5.5 (Claude Code)",
-                "Claude Sonnet 5.5",
-            ]
-        );
-    }
 
     #[gpui::test]
     fn the_copy_control_copies_the_running_build(cx: &mut TestAppContext) {
@@ -498,41 +382,6 @@ pub(super) mod tests {
                     Some(crate::strings::Text::SettingsUnavailable)
                 );
             });
-        }
-    }
-
-    #[test]
-    fn the_checked_dock_cell_follows_saved_pending_and_refused_choices() {
-        use kumochi_protocol::message::{DockPosition, ErrorKey, UserError};
-        for (position, index) in [
-            (DockPosition::TopLeft, 0),
-            (DockPosition::TopCenter, 1),
-            (DockPosition::TopRight, 2),
-            (DockPosition::MiddleLeft, 3),
-            (DockPosition::Center, 4),
-            (DockPosition::MiddleRight, 5),
-            (DockPosition::BottomLeft, 6),
-            (DockPosition::BottomCenter, 7),
-            (DockPosition::BottomRight, 8),
-        ] {
-            let mut model = Settings::default();
-            assert_eq!(dock_choice_index(&model), None);
-            let mut snapshot = saved();
-            snapshot.dock_position = position;
-            model.set_view(snapshot, Update::Unsolicited);
-            assert_eq!(dock_choice_index(&model), Some(index));
-            model.send_dock_position(DockPosition::BottomLeft, |_| true);
-            assert_eq!(dock_choice_index(&model), Some(6));
-            model.send_dock_position(DockPosition::Center, |_| true);
-            assert_eq!(dock_choice_index(&model), Some(4));
-            let mut answer = saved();
-            answer.dock_position = DockPosition::BottomLeft;
-            model.set_view(answer.clone(), Update::Answer);
-            assert_eq!(dock_choice_index(&model), Some(4));
-            model.error(UserError::from(ErrorKey::SettingsRefused));
-            assert_eq!(dock_choice_index(&model), Some(6));
-            model.set_view(answer, Update::Answer);
-            assert_eq!(dock_choice_index(&model), Some(6));
         }
     }
 
@@ -789,29 +638,5 @@ pub(super) mod tests {
             })
             .expect("settings window");
         }
-    }
-
-    #[test]
-    fn a_quick_reversal_lands_on_an_unchecked_radio() {
-        let mut model = Settings::default();
-        assert_eq!(model.set_view(saved(), Update::Unsolicited), None);
-        assert_eq!(choice_index(&model), 0);
-        let rate = rate_at(5).expect("a radio");
-        assert_eq!(rate.fps(), Some(144));
-        assert!(model.send_max_frame_rate(rate, |_| true));
-        assert_eq!(
-            choice_index(&model),
-            5,
-            "144 shows checked before the answer"
-        );
-        let automatic = rate_at(0).expect("a radio");
-        assert_ne!(
-            choice_index(&model),
-            0,
-            "so Automatic is unchecked and takes the click"
-        );
-        assert!(model.send_max_frame_rate(automatic, |_| true));
-        assert_eq!(choice_index(&model), 0);
-        assert_eq!(rate_at(6), None);
     }
 }
