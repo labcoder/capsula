@@ -15,49 +15,58 @@ use kumochi_protocol::constants::{
     CATALOG_PROVENANCE_ARG, DRAW_CHECK_ARG, IMAGE_CHECK_ARG, IMAGE_DIAGNOSTIC_ARG, MARKS_CHECK_ARG,
 };
 
-#[cfg(target_os = "macos")]
+const DIRECT_LOGGING_CHILD: &str = "KUMOCHI_TEST_DIRECT_LOGGING_CHILD";
+const DIRECT_LOGGING_CHECKS_RAN: i32 = 77;
+
 #[test]
-fn direct_logging_refuses_before_creating_an_appender() {
-    use std::time::{Duration, Instant};
-
+#[ignore = "subprocess fixture with a private HOME"]
+fn direct_logging_child_fixture() {
     use kumochi_brain::logging::{LoggingError, init};
-    use kumochi_brain::{platform, store};
-    use kumochi_protocol::constants::{ProductIdentity, STORE_FILE};
 
-    const CHILD: &str = "KUMOCHI_TEST_DIRECT_LOGGING_CHILD";
-    const CHECKS_RAN: i32 = 77;
+    if std::env::var_os(DIRECT_LOGGING_CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return;
+    }
+    let home = std::env::current_dir().unwrap().join("home");
+    assert_eq!(std::env::var_os("HOME").as_deref(), Some(home.as_os_str()));
+    assert!(!home.exists());
+    #[cfg(target_os = "macos")]
+    {
+        use kumochi_brain::{platform, store};
+        use kumochi_protocol::constants::{ProductIdentity, STORE_FILE};
 
-    if std::env::var_os(CHILD).is_some() {
-        let home = std::env::current_dir().unwrap().join("home");
-        assert_eq!(std::env::var_os("HOME").as_deref(), Some(home.as_os_str()));
-        assert!(!home.exists());
         let expected = home
             .join("Library/Application Support")
             .join(ProductIdentity::ACTIVE.data_dir);
         assert_eq!(platform::data_dir().as_ref(), Some(&expected));
         assert_eq!(platform::config_dir().as_ref(), Some(&expected));
         assert_eq!(store::default_path().unwrap(), expected.join(STORE_FILE));
-        assert!(matches!(
-            init("refused-entry"),
-            Err(LoggingError::NativeRuntime(error))
-                if error.kind() == std::io::ErrorKind::Unsupported
-        ));
-        std::process::exit(CHECKS_RAN);
     }
+    let error = init("refused-entry").expect_err("native logging should refuse");
+    assert!(matches!(
+        &error,
+        LoggingError::NativeRuntime(source) if source.kind() == std::io::ErrorKind::Unsupported
+    ));
+    assert_eq!(
+        error.to_string(),
+        "native file logging is unavailable on this platform"
+    );
+    std::process::exit(DIRECT_LOGGING_CHECKS_RAN);
+}
+
+#[test]
+fn direct_logging_refuses_before_creating_an_appender() {
+    use std::time::{Duration, Instant};
 
     let scratch = scratch::dir("direct-logging");
     let root = scratch.canonicalize().unwrap();
     #[expect(
         clippy::disallowed_methods,
-        reason = "this macOS test execs itself with a private HOME"
+        reason = "this non-Windows test execs itself with a private HOME"
     )]
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "direct_logging_refuses_before_creating_an_appender",
-        ])
+        .args(["--ignored", "--exact", "direct_logging_child_fixture"])
         .env_clear()
-        .env(CHILD, "1")
+        .env(DIRECT_LOGGING_CHILD, "1")
         .env("HOME", root.join("home"))
         .current_dir(&root)
         .spawn()
@@ -89,7 +98,7 @@ fn direct_logging_refuses_before_creating_an_appender() {
     );
     assert_eq!(
         status.code(),
-        Some(CHECKS_RAN),
+        Some(DIRECT_LOGGING_CHECKS_RAN),
         "child did not prove refusal"
     );
 }
