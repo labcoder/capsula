@@ -65,6 +65,8 @@ pub enum Input {
     },
     /// A revocation run ended with these entries confirmed.
     Revoked(Vec<Secret<Revocable>>),
+    /// A revocation run could not build a native client, so no entries were confirmed.
+    RevocationUnsupported,
     /// A caller wants the bearer, refreshed first if it's due.
     Access {
         /// Names the caller's answer.
@@ -389,6 +391,10 @@ impl AccountState {
             Input::Listened { attempt, result } => self.listened(attempt, result, &mut effects),
             Input::Exchanged { attempt, result } => self.exchanged(attempt, result, &mut effects),
             Input::Revoked(confirmed) => self.revoked(confirmed),
+            Input::RevocationUnsupported => {
+                self.revoked(Vec::new());
+                effects.push(Effect::Error(ErrorKey::UnsupportedPlatform.into()));
+            }
             Input::PlanUnavailable => {
                 self.unavailable = self.leaving.is_none()
                     && self
