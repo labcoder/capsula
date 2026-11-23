@@ -4,22 +4,34 @@ Tuning is an advanced tool: a `[tuning]` table in `config.toml` overrides some o
 built-in limits. Most people never need it. Its keys may change or go away between versions,
 and a key a version doesn't know is ignored.
 
-`config.toml` is in `%APPDATA%\Kumochi` (`%APPDATA%\Kumochi Dev` for debug builds). Kumochi
-never writes a `[tuning]` table itself, and it keeps yours when it saves a setting.
+Kumochi never adds a `[tuning]` table itself. Settings saves keep the table Kumochi read at start.
 
-## Changing a value
+## How to change a limit
 
-1. Quit Kumochi. A setting saved while it runs writes the whole file, so an edit made while
-   Kumochi is running can be lost.
-2. Edit `config.toml` and save it.
-3. Start Kumochi. Values are read once, at start.
+1. Choose **Quit** in Kumochi. A Settings save can overwrite edits you make while Kumochi runs.
+2. Open `%APPDATA%\Kumochi\config.toml` in a text editor. A debug build uses the `Kumochi Dev`
+   folder instead. If the file is missing, create the folder if needed and save a plain text file
+   there. Make sure its full name is `config.toml`, not `config.toml.txt`.
+3. Add your override and save the file. The example below sets a limit of four tool calls per
+   answer. If `[tuning.runs]` is already in your file, add or update only the `calls_count` line
+   under that heading.
+4. Start Kumochi again. The background process reads the file once at start. Reconnecting only
+   the window doesn't reload it.
 
-Each value has a range. A value outside it is moved to the nearer end, and a value that isn't
-a whole number is ignored. Values in one group that don't fit together are all ignored, and that
-group uses its defaults. Kumochi still starts, and its log names the key it didn't take, never
-its value. Don't put secrets or anything personal in this table. If the file isn't valid TOML,
-for example because a key appears twice, Kumochi runs on its defaults and refuses to save
-settings until you fix the file; see [settings](settings.md).
+```
+[tuning.runs]
+calls_count = 4
+```
+
+Look for warnings in `%LOCALAPPDATA%\Kumochi\logs` (`Kumochi Dev` for debug builds). If a value
+isn't a non-negative whole number, Kumochi uses its default. If it is outside the allowed range,
+Kumochi uses the nearer end of the range. If a group's values don't fit together, Kumochi uses
+that group's defaults. Warnings don't include the values you entered. Don't put secrets or
+anything personal in this table.
+
+If the file isn't valid TOML, for example because a key appears twice, Kumochi uses the default
+limits. Settings refuses to save and leaves the file untouched. Fix the file and restart
+Kumochi before trying to save a setting again; see [Settings](settings.md).
 
 ## GitHub
 
