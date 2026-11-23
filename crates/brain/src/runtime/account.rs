@@ -272,6 +272,9 @@ impl Accounts {
         wanted: Option<ConnectionTag>,
         answer: oneshot::Sender<Access>,
     ) -> Vec<ControlToShell> {
+        if self.catalog.unsupported {
+            return self.answer_access(answer);
+        }
         match self.availability() {
             Availability::Ready(ready) if Some(ready.connection) == wanted => {
                 self.answer_access(answer)
@@ -285,7 +288,9 @@ impl Accounts {
 
     fn answer_access(&mut self, answer: oneshot::Sender<Access>) -> Vec<ControlToShell> {
         if self.catalog.unsupported {
-            answer.send(Err(Denied::Unusable)).ok();
+            answer
+                .send(Err(Denied::Failed(ErrorKey::UnsupportedPlatform.into())))
+                .ok();
             return Vec::new();
         }
         let ticket = self.next_ticket;
@@ -371,7 +376,7 @@ impl Accounts {
             }
             Err(None) => Vec::new(),
             Err(Some(error)) if error.key() == ErrorKey::UnsupportedPlatform => {
-                self.catalog.refuse();
+                self.refuse_native_transport();
                 vec![self.account_frame(self.state.view())]
             }
             Err(Some(error)) => {
@@ -530,9 +535,13 @@ impl Accounts {
 
     fn apply(&mut self, effects: Vec<Effect>) -> Vec<ControlToShell> {
         let mut frames = Vec::new();
-        let unsupported = effects.iter().any(
-            |effect| matches!(effect, Effect::Error(error) if error.key() == ErrorKey::UnsupportedPlatform),
-        ) && self.catalog.refuse();
+        let unsupported = effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::Error(error) | Effect::Access { result: Err(Denied::Failed(error)), .. }
+                    if error.key() == ErrorKey::UnsupportedPlatform
+            )
+        }) && self.refuse_native_transport();
         for effect in effects {
             match effect {
                 Effect::View(view) => {
@@ -587,6 +596,9 @@ impl Accounts {
                     self.net.clone(),
                     self.events_tx.clone(),
                 ))),
+                Effect::Revoke(_) if self.catalog.unsupported => {
+                    self.events_tx.send(Input::Revoked(Vec::new())).ok();
+                }
                 Effect::Revoke(entries) => drop(tokio::spawn(revoke_task(
                     entries,
                     Arc::clone(&self.net.http),
@@ -623,7 +635,7 @@ impl Accounts {
                     // A caller that stopped waiting just doesn't hear it.
                     if let Some(answer) = self.tickets.remove(&ticket) {
                         let result = if self.catalog.unsupported {
-                            Err(Denied::Unusable)
+                            Err(Denied::Failed(ErrorKey::UnsupportedPlatform.into()))
                         } else {
                             result.map(|token| Bearer { generation, token })
                         };
@@ -640,6 +652,18 @@ impl Accounts {
             frames.push(self.account_frame(self.state.view()));
         }
         frames
+    }
+
+    fn refuse_native_transport(&mut self) -> bool {
+        if !self.catalog.refuse() {
+            return false;
+        }
+        for (_, answer) in self.tickets.drain() {
+            answer
+                .send(Err(Denied::Failed(ErrorKey::UnsupportedPlatform.into())))
+                .ok();
+        }
+        true
     }
 
     /// Stops taking work and cancels the catalog read. A refresh already out runs to its end, and its result's save, until
@@ -920,11 +944,12 @@ async fn revoke_task(
     events: mpsc::UnboundedSender<Input>,
 ) {
     let deadline = Instant::now() + BUDGET;
-    let confirmed = match tokio::task::spawn_blocking(move || http()).await {
-        Ok(Ok(http)) => revoke(&http, entries, deadline).await,
-        _ => Vec::new(),
+    let ended = match tokio::task::spawn_blocking(move || http()).await {
+        Ok(Ok(http)) => Input::Revoked(revoke(&http, entries, deadline).await),
+        Ok(Err(HttpError::UnsupportedPlatform)) => Input::RevocationUnsupported,
+        _ => Input::Revoked(Vec::new()),
     };
-    events.send(Input::Revoked(confirmed)).ok();
+    events.send(ended).ok();
 }
 
 /// Reads the catalog with the bearer `wait` brings, telling the account on `reads` when the

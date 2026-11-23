@@ -1648,6 +1648,12 @@ async fn a_catalog_refused_offline_is_still_unsupported_for_every_new_shell() {
         Availability::Unavailable(error)
             if error.key() == ErrorKey::UnsupportedPlatform && error.actions().is_empty()
     ));
+    assert_unsupported_reconnects(&mut brain).await;
+    assert_eq!(factories.load(Ordering::Relaxed), 1);
+    brain.close().await;
+}
+
+async fn assert_unsupported_reconnects(brain: &mut crate::runtime::Brain) {
     let expected = ControlToShell::AccountUnsupported(brain.account.view());
     for _ in 0..2 {
         let ((control, data), mut shell) = duplex();
@@ -1676,7 +1682,138 @@ async fn a_catalog_refused_offline_is_still_unsupported_for_every_new_shell() {
         brain.account.handle(Input::Op(AccountOp::Retry)),
         [expected]
     );
-    assert_eq!(factories.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn revocation_only_startup_keeps_the_debt_and_replays_unsupported() {
+    use crate::connections::records::{Origin, Revocable, RevocationList};
+
+    let scratch = Scratch::new("account-revoke-unsupported");
+    let store = FakeStore::default();
+    let seed = || {
+        Vault::with_service(
+            store.clone(),
+            SHUTDOWN_SERVICE,
+            &scratch.dir().join("seed.lock"),
+        )
+        .expect("fixture vault")
+    };
+    let debt = RevocationList {
+        entries: vec![Revocable {
+            client_id: Zeroizing::new("fixture-client".to_owned()),
+            refresh_token: Zeroizing::new("fixture-revocation".to_owned()),
+            added_at: 1_800_000_000,
+            origin: Origin::Exchange,
+        }],
+    };
+    assert!(matches!(
+        seed().save_revocations(&Secret::new(debt.clone())),
+        SaveResult::Committed
+    ));
+    let opening = store.clone();
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(opening.clone(), SHUTDOWN_SERVICE, &lock)),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    let accounts = Accounts::spawn_unconfigured(
+        worker,
+        Net {
+            http: Arc::new(|| Err(HttpError::UnsupportedPlatform)),
+            ..test_support::net()
+        },
+    )
+    .expect("fixture account service");
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    timeout(PATIENCE, async {
+        loop {
+            let event = brain.account.next().await;
+            let revoked = matches!(
+                event,
+                Event::Machine(Input::RevocationUnsupported | Input::Revoked(_))
+            );
+            brain
+                .account_input(event, None)
+                .expect("revocation completion");
+            if revoked {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("revocation pass ends");
+    assert!(matches!(
+        brain.account.view(),
+        AccountView::SignedOut { .. }
+    ));
+    assert_unsupported_reconnects(&mut brain).await;
+    brain.close().await;
+    assert!(seed().load_revocations().unwrap().unwrap().expose() == &debt);
+}
+
+#[tokio::test]
+async fn an_ordinary_bearer_refresh_refusal_reaches_all_waiters_and_later_shells() {
+    use crate::connections::oauth::exchange::ExchangeError;
+
+    let scratch = Scratch::new("account-bearer-unsupported");
+    let wall = Arc::new(AtomicU64::new(1_800_000_000));
+    let starts = Arc::new(AtomicU64::new(0));
+    let calls = Arc::clone(&starts);
+    let http = Catalog::answering([listing()]);
+    let accounts = seeded_at(
+        &scratch,
+        &FakeStore::default(),
+        Arc::new(move || match calls.fetch_add(1, Ordering::Relaxed) {
+            0 => Ok(http.clone()),
+            _ => Err(HttpError::UnsupportedPlatform),
+        }),
+        LATER,
+        Arc::new(Ticking(Arc::clone(&wall))),
+    );
+    let mut brain = test_support::brain_with(&scratch, "", accounts);
+    finish_catalog(&mut brain).await;
+    assert!(brain.account.models().is_some());
+    wall.store(LATER, Ordering::SeqCst);
+    let (first, _) = brain.account.access();
+    let (answer, second) = oneshot::channel();
+    brain
+        .account
+        .access_for(Some(ConnectionTag(SEEDED)), answer);
+    timeout(PATIENCE, async {
+        loop {
+            let event = brain.account.next().await;
+            let refreshed = matches!(
+                event,
+                Event::Machine(Input::Refreshed {
+                    result: Err(ExchangeError::Http(HttpError::UnsupportedPlatform)),
+                    ..
+                })
+            );
+            brain
+                .account_input(event, None)
+                .expect("refresh completion");
+            if refreshed {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("refresh ends");
+    let (third, _) = brain.account.access();
+    let (answer, fourth) = oneshot::channel();
+    brain
+        .account
+        .access_for(Some(ConnectionTag(SEEDED)), answer);
+    for wait in [first, second, third, fourth] {
+        assert!(matches!(
+            timeout(PATIENCE, wait).await.expect("bearer answer in time").unwrap(),
+            Err(Denied::Failed(reason))
+                if reason.key() == ErrorKey::UnsupportedPlatform && reason.actions().is_empty()
+        ));
+    }
+    assert_eq!(brain.account.models(), None);
+    assert_unsupported_reconnects(&mut brain).await;
+    assert_eq!(starts.load(Ordering::Relaxed), 2);
     brain.close().await;
 }
 
