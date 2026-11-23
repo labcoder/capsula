@@ -599,6 +599,43 @@ mod tests {
     }
 
     #[test]
+    fn a_reset_with_a_missing_break_cannot_complete_a_double_tap() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut gesture = Gesture::default();
+        tap(&mut gesture, start);
+        chord(&mut gesture, at(50));
+        assert_eq!(
+            gesture.handle(Event::Reset, at(60)),
+            [Some(Effect::Resting), None, None]
+        );
+        assert_eq!(gesture.deadline(), None);
+        assert_eq!(key(&mut gesture, Key::LeftAlt, Edge::Up, at(70)), [None; 3]);
+        let fresh_make = Event::Key {
+            key: Key::LeftAlt,
+            edge: Edge::Down,
+        };
+        assert_eq!(gesture.recover(fresh_make, || Some(at(100))), Some(at(100)));
+        assert_eq!(
+            gesture.handle(fresh_make, at(100)),
+            [Some(Effect::Listening), None, None]
+        );
+        assert_eq!(
+            key(&mut gesture, Key::LeftAlt, Edge::Up, at(110)),
+            [Some(Effect::Resting), None, None]
+        );
+        assert_eq!(
+            key(&mut gesture, Key::LeftControl, Edge::Up, at(120)),
+            [None; 3]
+        );
+        chord(&mut gesture, at(150));
+        assert_eq!(
+            key(&mut gesture, Key::LeftAlt, Edge::Up, at(160)),
+            [Some(Effect::Resting), Some(Effect::OpenInput), None]
+        );
+    }
+
+    #[test]
     fn pending_tap_expires_while_second_chord_can_become_a_hold() {
         let start = Instant::now();
         let mut gesture = Gesture::default();
