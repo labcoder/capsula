@@ -242,5 +242,17 @@ impl ManagedPresence {
         [settings, folder, mcp, self.machine, self.user]
     }
 }
+
+/// Without a native probe, no managed-policy source can be ruled out.
+#[cfg(not(windows))]
+#[must_use]
+pub fn managed_presence() -> ManagedPresence {
+    ManagedPresence {
+        files: [Presence::Indeterminate; 3],
+        machine: Presence::Indeterminate,
+        user: Presence::Indeterminate,
+    }
+}
+
 #[cfg(all(test, windows))]
 pub(crate) use windows::test_pair;

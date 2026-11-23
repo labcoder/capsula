@@ -57,6 +57,18 @@ const V2_1_306: ClaudeVersion = ClaudeVersion {
     patch: 306,
 };
 
+#[cfg(not(windows))]
+#[test]
+fn missing_native_policy_probe_never_admits_a_reviewed_version() {
+    let policy = reviewed(V2_1_306).expect("2.1.306 is reviewed").policy;
+    let presence = crate::platform::managed_presence();
+    assert_eq!(presence.all(), [Presence::Indeterminate; 5]);
+    assert_eq!(
+        may_launch(policy, presence),
+        Err(PolicyFailed::ManagedPolicy)
+    );
+}
+
 #[test]
 fn only_a_reviewed_version_has_a_policy() {
     let row = reviewed(V2_1_306).expect("2.1.306 is reviewed");
