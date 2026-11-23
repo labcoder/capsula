@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
     AccountView, AssistantName, DockPosition, Effort, ErrorKey, MAX_SLUG_BYTES, MaxFrameRate,
-    ModelChoice, ModelSlug, OnboardingStep, PlanState, RepoName, RunId, SettingsOp, SttUnload,
-    ThreadId, UserName,
+    ModelChoice, ModelSlug, OnboardingStep, PlanState, RepoName, RunId, SettingsOp, ShortcutChord,
+    ShortcutView, SttUnload, ThreadId, UserName,
 };
 use kumochi_protocol::voice::VoicePart;
 
@@ -27,6 +27,83 @@ fn saved(path: &std::path::Path) -> toml::Table {
         .expect("readable")
         .parse()
         .expect("parses")
+}
+
+#[test]
+fn shortcut_storage_is_optional_checked_and_downgrade_safe() {
+    let scratch = Scratch::new("config-shortcut");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let load = || Config::load(Some(dir.clone()), ThreadId(1));
+    let original = "future_key = 7\n";
+    std::fs::write(&path, original).expect("seeded");
+    let mut config = load();
+    assert_eq!(config.view().shortcut, ShortcutView::Default);
+
+    for (mask, key) in [(18, None), (64, Some(24))] {
+        let chord = ShortcutChord::new(mask, key).expect("checked shortcut");
+        apply(&mut config, SettingsOp::SetShortcut(Some(chord)));
+        let table = saved(&path);
+        assert_eq!(table["future_key"].as_integer(), Some(7));
+        assert_eq!(
+            table["shortcut"]["modifiers"].as_integer(),
+            Some(i64::from(mask))
+        );
+        assert_eq!(
+            table["shortcut"]
+                .get("function")
+                .and_then(toml::Value::as_integer),
+            key.map(i64::from)
+        );
+        assert_eq!(load().view().shortcut, ShortcutView::Custom(chord));
+    }
+
+    apply(&mut config, SettingsOp::SetShortcut(None));
+    assert_eq!(load().view().shortcut, ShortcutView::Default);
+    assert!(
+        !saved(&path).contains_key("shortcut"),
+        "reset removes the override"
+    );
+}
+
+#[test]
+fn an_invalid_shortcut_falls_back_without_erasing_it_or_relaxing_privacy() {
+    let scratch = Scratch::new("config-invalid-shortcut");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let load = || Config::load(Some(dir.clone()), ThreadId(1));
+    for field in [
+        "[]",
+        "{}",
+        "{ modifiers = -1 }",
+        "{ modifiers = 256 }",
+        "{ modifiers = 9 }",
+        "{ modifiers = 5, function = \"escape\" }",
+        "{ modifiers = 5, function = [1, 2] }",
+        "{ modifiers = 5, unknown = 1 }",
+    ] {
+        let text = format!("shortcut = {field}\n");
+        std::fs::write(&path, &text).expect("seeded");
+        let mut config = load();
+        assert_eq!(config.view().shortcut, ShortcutView::Invalid, "{field}");
+        assert_eq!(config.view().shortcut.effective(), ShortcutChord::DEFAULT);
+        assert_eq!(std::fs::read_to_string(&path).expect("readable"), text);
+        let invalid = saved(&path)["shortcut"].clone();
+        apply(&mut config, SettingsOp::SetTaskbar(true));
+        assert_eq!(saved(&path)["shortcut"], invalid);
+    }
+
+    let corrupt = "[shortcut";
+    std::fs::write(&path, corrupt).expect("seeded");
+    let config = load();
+    assert_eq!(config.view().shortcut, ShortcutView::Default);
+    assert!(!config.view().show_screen);
+    assert!(!config.view().screen_holds);
+    assert!(matches!(
+        config.stage(SettingsOp::SetShortcut(None)),
+        Err(ConfigError::Unreadable)
+    ));
+    assert_eq!(std::fs::read_to_string(&path).expect("readable"), corrupt);
 }
 
 fn github_default(config: &Config) -> Option<(u64, RepoName)> {
