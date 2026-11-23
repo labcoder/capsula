@@ -79,6 +79,64 @@ jobs:
       - run: cargo clippy -p kumochi-shell-core --lib --locked -- -D warnings
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  linux_portable:
+    if: github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+    name: Linux portable (fmt, clippy, offline tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install ALSA build headers if needed
+        run: |
+          if ! pkg-config --exists alsa; then
+            sudo -n apt-get update
+            sudo -n apt-get install -y --no-install-recommends libasound2-dev
+          fi
+      - name: Install only the pinned toolchain
+        run: |
+          rustup toolchain install
+          pinned="$(rustup show active-toolchain)"
+          pinned="${pinned%% *}"
+          installed="$(rustup toolchain list --quiet)"
+          while read -r toolchain; do
+            if [[ "$toolchain" != "$pinned" ]]; then
+              rustup toolchain uninstall "$toolchain"
+            fi
+          done <<< "$installed"
+          [[ "$(rustup toolchain list --quiet)" == "$pinned" ]]
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.toml') }}
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt --all --check
+      - name: Clippy (portable packages)
+        run: >-
+          cargo clippy --locked --all-targets
+          -p kumochi-protocol -p kumochi-scene -p kumochi-audio
+          -p kumochi-shell-core -p kumochi-brain -p xtask
+          -- -D warnings
+      - name: Tests (offline, loopback only)
+        run: |
+          sudo -n /usr/bin/unshare --net -- /bin/bash -euc '
+            /usr/sbin/ip link set lo up
+            exec /usr/bin/setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --clear-groups --no-new-privs -- "$@"
+          ' -- /usr/bin/env -i PATH="$PATH" HOME="$HOME" TMPDIR="$RUNNER_TEMP" LANG=C.UTF-8 TZ=UTC \
+            CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
+            CARGO_TERM_COLOR="$CARGO_TERM_COLOR" CARGO_INCREMENTAL="$CARGO_INCREMENTAL" \
+            CARGO_PROFILE_DEV_DEBUG="$CARGO_PROFILE_DEV_DEBUG" CARGO_PROFILE_TEST_DEBUG="$CARGO_PROFILE_TEST_DEBUG" \
+            CARGO_NET_OFFLINE=true RUST_TEST_THREADS=4 \
+            cargo test --locked --offline --no-fail-fast \
+              -p kumochi-protocol -p kumochi-scene -p kumochi-audio \
+              -p kumochi-shell-core -p kumochi-brain -p xtask
+
   # Keeps the single job's id, so its cache key and the cache main already saved still match.
   check:
     if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'cloud-ci') && (github.event.action != 'labeled' || github.event.label.name == 'cloud-ci'))
