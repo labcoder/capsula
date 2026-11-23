@@ -29,7 +29,9 @@ mod wire;
 
 pub use crate::supervise::{Generation, WorkerLost};
 pub use actor::serve;
-pub(crate) use capture::{Acquired, Capturer, Failure, Target};
+#[cfg(windows)]
+pub(crate) use capture::{Acquired, Capturer};
+pub(crate) use capture::{Failure, Target};
 pub use client::HoldClient;
 pub(crate) use client::{Closed, MAX_TTL};
 #[cfg(test)]
@@ -44,6 +46,7 @@ pub(crate) use elements::{
     excluded_image,
 };
 pub(crate) use encode::JPEG_CAP;
+#[cfg(windows)]
 pub(crate) use frame::RawFrame;
 pub(crate) use ink::InkBounds;
 #[cfg(all(windows, any(test, feature = "test-support")))]
@@ -55,7 +58,7 @@ pub(crate) use ocr::PAGE_CLASS;
 pub(crate) use reader::Walk;
 #[cfg(windows)]
 pub(crate) use reader::{CONNECTION_TIMEOUT, TRANSACTION_TIMEOUT, ThreadedReader};
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) use wire::FrameMeta;
 #[cfg(debug_assertions)]
 pub use wire::WorkerFault;
