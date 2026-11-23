@@ -1,15 +1,19 @@
 //! Ordinary file operations where Windows' platform adapter is absent.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_os = "macos"))]
+use std::path::PathBuf;
 
 /// No per-user runtime data root is configured on this platform.
+#[cfg(not(target_os = "macos"))]
 #[must_use]
 pub fn data_dir() -> Option<PathBuf> {
     None
 }
 
 /// No per-user runtime config root is configured on this platform.
+#[cfg(not(target_os = "macos"))]
 #[must_use]
 pub fn config_dir() -> Option<PathBuf> {
     None

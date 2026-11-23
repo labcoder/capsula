@@ -44,8 +44,15 @@ pub(crate) fn test_is_link(metadata: &std::fs::Metadata) -> bool {
 
 pub(crate) use connected_shell::connected_shell_pid;
 pub(super) use connected_shell::register_shell;
+#[cfg(not(any(windows, target_os = "macos")))]
+pub use fs::{config_dir, data_dir};
 #[cfg(not(windows))]
-pub use fs::{config_dir, data_dir, free_space, links_unsupported, replace_file};
+pub use fs::{free_space, links_unsupported, replace_file};
+#[cfg(target_os = "macos")]
+#[path = "macos/folders.rs"]
+mod folders;
+#[cfg(target_os = "macos")]
+pub use folders::{config_dir, data_dir};
 #[cfg(windows)]
 pub(crate) use pipe::ClientRefused;
 pub use pipe::Instance;

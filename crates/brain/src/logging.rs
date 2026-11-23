@@ -44,6 +44,7 @@ pub enum LoggingError {
 /// # Errors
 /// Fails when the log folder can't be found or created, or logging already started.
 pub fn init(prefix: &str) -> Result<(), LoggingError> {
+    crate::platform::require_native_runtime().map_err(|_| LoggingError::NoLocalAppData)?;
     let dir = crate::platform::data_dir()
         .ok_or(LoggingError::NoLocalAppData)?
         .join("logs");

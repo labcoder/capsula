@@ -4,11 +4,15 @@ The brain keeps threads, their events and runs in one SQLite file,
 `%LOCALAPPDATA%\<product>\kumochi.db`, through `rusqlite` with SQLite and FTS5 built in. Only the
 brain opens it. The code is `crates/brain/src/store/`.
 
+On macOS the default path is `$HOME/Library/Application Support/<product>/kumochi.db`,
+beside the configuration file, if `HOME` is absolute. Computing it doesn't open the database
+or create the folder. The native runtime and direct file-logging startup remain refused.
+
 Linux unit tests open the store at an explicit scratch path. The test adapter uses same-directory
 rename and directory sync for purge swaps, and uses the OS's available-block count for the
 purger's capacity check. Failure to sync a completed rename exits the test process, even when
 the swap ran on a worker. Windows sharing-mode tests stay Windows-only. No non-Windows
-production data root, swap or capacity fallback is enabled.
+production store startup, swap or capacity fallback is enabled.
 
 ## Settings
 
