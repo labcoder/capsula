@@ -5,14 +5,18 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::frame::{self, Pipe};
 use serde_json::{Value, json};
 use tokio::io::{AsyncWrite, AsyncWriteExt as _, DuplexStream};
+#[cfg(windows)]
 use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+#[cfg(windows)]
+use super::connect;
 use super::id::{JsonRpcId, MAX_STRING_ID};
 use super::stdio::{Body, Incoming, Line, LineReader, RpcError, classify, reply};
 use super::wire::{CHUNK, CallKey, Method, Reassembly, ToBrain, ToBridge, TooLarge, chunks};
-use super::{BridgeError, Input, MAX_INCOMING, MAX_REPLY, connect, relay, run};
+use super::{BridgeError, Input, MAX_INCOMING, MAX_REPLY, relay, run};
+#[cfg(windows)]
 use crate::platform::{Instance, PipeServer, create_owner_only, test_pair};
 
 #[test]
@@ -205,19 +209,28 @@ fn bodies_are_chunked_under_the_frame_cap_and_reassembled_up_to_their_cap() {
     assert_eq!(refused.finish(), Err(TooLarge));
 }
 
-/// The bridge's relay on one end of a real pipe, and the brain's end for the test to drive.
+/// The bridge's relay on a pipe pair (Windows) or an in-memory stream.
 struct Bridge {
     stdin: mpsc::Sender<Input>,
     /// Stdin's end as its reader would report it; kept open.
     _stdin_end: watch::Sender<bool>,
     stdout: mpsc::Receiver<Vec<u8>>,
+    #[cfg(windows)]
     brain: PipeServer,
+    #[cfg(not(windows))]
+    brain: DuplexStream,
     relay: JoinHandle<Result<(), BridgeError>>,
 }
 
 /// A bridge whose brain has said `Hello` with `remaining_ms` left.
 async fn bridge(name: &str, remaining_ms: u64) -> Bridge {
+    #[cfg(windows)]
     let (mut brain, client) = test_pair(name).await.expect("pipe pair");
+    #[cfg(not(windows))]
+    let (mut brain, client) = {
+        let _ = name;
+        tokio::io::duplex(64 * 1024)
+    };
     hello(&mut brain, remaining_ms).await;
     let (stdin, input) = mpsc::channel(16);
     let (stdin_end, ended) = watch::channel(false);
@@ -420,6 +433,7 @@ async fn the_deadline_fails_the_call_in_flight_and_ends_the_bridge() {
     ));
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_pipe_served_by_another_executable_is_refused() {
     let name = format!(
@@ -784,8 +798,10 @@ fn request_params_must_be_an_object_or_an_array() {
 }
 
 /// Stdout lines, sent to the test as they're written.
+#[cfg(windows)]
 struct Lines(std_mpsc::Sender<Vec<u8>>);
 
+#[cfg(windows)]
 impl Write for Lines {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.send(buf.to_vec()).unwrap_or_default();
@@ -797,6 +813,7 @@ impl Write for Lines {
     }
 }
 
+#[cfg(windows)]
 #[test]
 fn lines_near_and_over_the_cap_go_through_the_real_reader_relay_and_pipe() {
     let runtime = tokio::runtime::Builder::new_current_thread()

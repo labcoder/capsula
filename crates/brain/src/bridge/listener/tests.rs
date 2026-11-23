@@ -1,13 +1,17 @@
 //! Listener tests. Session tests drive `session` over an in-memory stream. The client checks use
 //! this test binary, re-entered at [`child_client`], as the process that connects.
 
-use std::ffi::OsString;
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::path::PathBuf;
-use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
+#[cfg(windows)]
+use std::{
+    ffi::OsString,
+    io::{BufRead as _, BufReader, Read as _, Write as _},
+    path::PathBuf,
+    sync::mpsc as std_mpsc,
+};
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
+#[cfg(windows)]
 use tokio::net::windows::named_pipe::ClientOptions;
 
 use kumochi_protocol::message::RunId;
@@ -15,6 +19,7 @@ use kumochi_protocol::message::RunId;
 use super::*;
 use crate::bridge::id::{JsonRpcId, MAX_STRING_ID};
 use crate::bridge::wire::CHUNK;
+#[cfg(windows)]
 use crate::platform::{Launch, Spawned, Stdio, create_owner_only, spawn};
 
 const LAUNCH: LaunchId = LaunchId(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
@@ -25,9 +30,13 @@ const BUILD: BuildKey = BuildKey {
 };
 const NOT_ADMITTED_TEXT: &str = "Kumochi isn't taking tool calls from this session now.";
 const UNAVAILABLE_TEXT: &str = "This tool isn't available over MCP yet.";
+#[cfg(windows)]
 const CHILD: &str = "bridge::listener::tests::child_client";
+#[cfg(windows)]
 const BRIDGE_CHILD: &str = "bridge::listener::tests::child_bridge";
+#[cfg(windows)]
 const PIPE_VAR: &str = "KUMOCHI_TEST_LISTENER_PIPE";
+#[cfg(windows)]
 const MODE_VAR: &str = "KUMOCHI_TEST_LISTENER_MODE";
 
 fn probe() -> ToolSchema {
@@ -39,14 +48,18 @@ fn probe() -> ToolSchema {
 }
 
 struct Fixture {
+    #[cfg(windows)]
     job: Job,
+    #[cfg(windows)]
     exe: PathBuf,
     tools: Vec<ToolSchema>,
 }
 
 fn fixture() -> Fixture {
     Fixture {
+        #[cfg(windows)]
         job: Job::new().expect("job"),
+        #[cfg(windows)]
         exe: std::env::current_exe().expect("test executable"),
         tools: vec![probe()],
     }
@@ -55,8 +68,6 @@ fn fixture() -> Fixture {
 impl Fixture {
     fn context(&self, left: Duration) -> LaunchContext<'_> {
         LaunchContext {
-            job: &self.job,
-            brain_exe: &self.exe,
             deadline: Instant::now() + left,
             tools: &self.tools,
             gate: AuditGate::new(),
@@ -67,6 +78,7 @@ impl Fixture {
 }
 
 /// A launch id no other test in this process uses.
+#[cfg(windows)]
 fn unique_launch(n: u128) -> LaunchId {
     LaunchId(u128::from(std::process::id()) << 64 | n)
 }
@@ -522,6 +534,7 @@ async fn nothing_the_client_sent_reaches_debug_or_an_answer() {
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn the_name_takes_one_instance_and_one_client() {
     let listener = Listener::create(unique_launch(1)).expect("listener");
@@ -545,6 +558,7 @@ async fn the_name_takes_one_instance_and_one_client() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_refused_client_reads_nothing_and_the_name_is_gone_after() {
     let fixture = fixture();
@@ -552,7 +566,11 @@ async fn a_refused_client_reads_nothing_and_the_name_is_gone_after() {
     let name = listener.name().to_owned();
     let mut client = ClientOptions::new().open(&name).expect("client");
     let end = listener
-        .serve(fixture.context(Duration::from_secs(10)))
+        .serve(
+            &fixture.job,
+            &fixture.exe,
+            fixture.context(Duration::from_secs(10)),
+        )
         .await;
     assert_eq!(
         end,
@@ -573,11 +591,16 @@ async fn a_refused_client_reads_nothing_and_the_name_is_gone_after() {
 
     let listener = Listener::create(unique_launch(3)).expect("listener");
     let end = listener
-        .serve(fixture.context(Duration::from_millis(200)))
+        .serve(
+            &fixture.job,
+            &fixture.exe,
+            fixture.context(Duration::from_millis(200)),
+        )
         .await;
     assert_eq!(end, SessionEnd::NoClient);
 }
 
+#[cfg(windows)]
 fn harness(test: &str) -> Vec<OsString> {
     [
         "--exact",
@@ -592,6 +615,7 @@ fn harness(test: &str) -> Vec<OsString> {
 }
 
 /// This test binary as a client of `pipe`, in `jobs`.
+#[cfg(windows)]
 fn start_client(test: &str, pipe: &str, mode: &str, jobs: &[&Job]) -> Spawned {
     let exe = std::env::current_exe().expect("test executable");
     spawn(&Launch {
@@ -613,6 +637,7 @@ fn start_client(test: &str, pipe: &str, mode: &str, jobs: &[&Job]) -> Spawned {
 }
 
 /// The client's stdout once it has exited.
+#[cfg(windows)]
 #[track_caller]
 pub(crate) fn output(mut child: Spawned) -> String {
     assert!(
@@ -632,6 +657,7 @@ pub(crate) fn output(mut child: Spawned) -> String {
     text
 }
 
+#[cfg(windows)]
 pub(crate) fn bridge_with_live_cli(job: &Job) -> (LaunchId, Listener, Spawned, Spawned) {
     let launch = unique_launch(10);
     let listener = Listener::create(launch).expect("listener");
@@ -640,6 +666,7 @@ pub(crate) fn bridge_with_live_cli(job: &Job) -> (LaunchId, Listener, Spawned, S
     (launch, listener, bridge, cli)
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "a client process for the listener's tests; see start_client"]
 fn child_client() {
@@ -664,6 +691,7 @@ fn child_client() {
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn only_a_live_brain_image_in_the_launch_job_is_served() {
     let fixture = fixture();
@@ -673,7 +701,11 @@ async fn only_a_live_brain_image_in_the_launch_job_is_served() {
     let child = start_client(CHILD, listener.name(), "read", &[&fixture.job]);
     assert_eq!(
         listener
-            .serve(fixture.context(Duration::from_secs(10)))
+            .serve(
+                &fixture.job,
+                &fixture.exe,
+                fixture.context(Duration::from_secs(10))
+            )
             .await,
         SessionEnd::Closed
     );
@@ -683,7 +715,11 @@ async fn only_a_live_brain_image_in_the_launch_job_is_served() {
     let child = start_client(CHILD, listener.name(), "read", &[&parent, &other]);
     assert_eq!(
         listener
-            .serve(fixture.context(Duration::from_secs(10)))
+            .serve(
+                &fixture.job,
+                &fixture.exe,
+                fixture.context(Duration::from_secs(10))
+            )
             .await,
         SessionEnd::Refused(ClientRefused::NotInJob),
         "another launch's job"
@@ -693,12 +729,9 @@ async fn only_a_live_brain_image_in_the_launch_job_is_served() {
     let listener = Listener::create(unique_launch(6)).expect("listener");
     let child = start_client(CHILD, listener.name(), "read", &[&fixture.job]);
     let elsewhere = Path::new(r"C:\elsewhere\kumochid.exe");
-    let context = LaunchContext {
-        brain_exe: elsewhere,
-        ..fixture.context(Duration::from_secs(10))
-    };
+    let context = fixture.context(Duration::from_secs(10));
     assert_eq!(
-        listener.serve(context).await,
+        listener.serve(&fixture.job, elsewhere, context).await,
         SessionEnd::Refused(ClientRefused::NotOurImage)
     );
     assert!(output(child).contains("client: nothing"));
@@ -716,13 +749,13 @@ async fn only_a_live_brain_image_in_the_launch_job_is_served() {
             .exits_within(Duration::from_secs(30))
             .expect("wait")
     );
-    let context = fixture.context(Duration::from_secs(10));
     assert_eq!(
-        check_client(&listener.server, &context).err(),
+        platform::bridge_peer(&listener.server, &fixture.job, &fixture.exe).err(),
         Some(ClientRefused::Exited)
     );
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "runs as the bridge for measure_mcp_round_trip"]
 fn child_bridge() {
@@ -742,6 +775,7 @@ fn child_bridge() {
 /// stdout, 1,000 times. Run alone, on a quiet Rez under the measuring lock:
 /// `cargo test -p kumochi-brain --release -- --ignored --exact bridge::listener::tests::measure_mcp_round_trip --nocapture`.
 /// Leaves out claude.exe and any tool's cost: every call is admitted and answered `Unavailable`.
+#[cfg(windows)]
 #[test]
 #[ignore = "a measurement: run alone on Rez under the measuring lock"]
 fn measure_mcp_round_trip() {
@@ -784,7 +818,8 @@ fn measure_mcp_round_trip() {
             .expect("a stdout line in time")
     };
     let (cold, mut samples, reply_len) = std::thread::scope(|scope| {
-        let serving = scope.spawn(|| runtime.block_on(listener.serve(context)));
+        let serving =
+            scope.spawn(|| runtime.block_on(listener.serve(&fixture.job, &fixture.exe, context)));
         let mut send = |text: &str| {
             stdin.write_all(text.as_bytes()).expect("stdin");
             stdin.write_all(b"\n").expect("stdin");
