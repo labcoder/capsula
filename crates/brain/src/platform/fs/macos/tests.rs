@@ -6,9 +6,10 @@ use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::ptr::NonNull;
 
 use super::custody::acl_absent;
+use super::settings::SettingsRoot;
 use super::{
-    Fault, Publication, Scratch, Stage, available_bytes, links_unsupported, named_stat, open_at,
-    rename, sync_directory, unlink, volume,
+    Destination, Fault, Publication, Scratch, Stage, available_bytes, links_unsupported,
+    named_stat, open_at, rename, sync_directory, unlink, volume,
 };
 
 fn approved_parent() -> File {
@@ -262,6 +263,7 @@ fn indeterminate_rename_or_sync_retains_data_and_stops_the_owner() {
         let outcome = scratch.replace_with(
             c"next",
             c"current",
+            Destination::Existing,
             |directory, from, to| {
                 rename(directory, from, to)?;
                 if stage == Stage::Rename {
@@ -345,4 +347,61 @@ fn darwin_link_errors_are_classified_by_raw_errno() {
         assert!(!links_unsupported(&io::Error::from_raw_os_error(errno)));
     }
     assert!(!links_unsupported(&io::Error::from(ErrorKind::Unsupported)));
+}
+
+#[test]
+#[ignore = "requires a private owned APFS fixture parent"]
+fn settings_route_publishes_only_beneath_the_owned_root() {
+    let scratch = fixture();
+    let outside = fixture();
+    let base = std::path::PathBuf::from(
+        std::env::var_os("MAC_SCRATCH_TEST_PARENT").expect("explicit fixture parent"),
+    );
+    let root_path = base.join(scratch.name.to_str().expect("fixture name"));
+    let outside_path = base.join(outside.name.to_str().expect("fixture name"));
+    let root = SettingsRoot::open(root_path.clone()).expect("trusted synthetic root");
+    let sentinel = seed(&outside, c"settings", b"untouched");
+    assert_eq!(
+        root.write(&outside_path.join("settings"), b"wrong"),
+        Err(Fault::new(Stage::Parent, ErrorKind::PermissionDenied))
+    );
+    assert_eq!(
+        root.write(&root_path.join("case/../settings"), b"wrong"),
+        Err(Fault::new(Stage::Parent, ErrorKind::InvalidInput))
+    );
+    std::os::unix::fs::symlink(&outside_path, root_path.join("alias")).expect("fixture symlink");
+    assert_eq!(
+        root.write(&root_path.join("alias/settings"), b"wrong")
+            .expect_err("don't follow a directory link")
+            .stage,
+        Stage::Parent
+    );
+    assert_eq!(contents(&sentinel), b"untouched");
+    let path = root_path.join("case/settings");
+    root.write(&path, b"first").expect("first publication");
+    assert_eq!(std::fs::read(&path).expect("read first save"), b"first");
+    root.write(&path, b"replacement")
+        .expect("second publication");
+    assert_eq!(
+        std::fs::read(&path).expect("read replacement"),
+        b"replacement"
+    );
+    let parent = open_at(
+        &scratch.directory,
+        c"case",
+        libc::O_RDONLY | libc::O_DIRECTORY,
+        Stage::Parent,
+    )
+    .expect("hold test case directory");
+    let settings = named_stat(&parent, c"settings", Stage::Cleanup).expect("new published inode");
+    unlink(&parent, c"settings", &settings, 0).expect("remove only published entry");
+    let case = named_stat(&scratch.directory, c"case", Stage::Cleanup).expect("case identity");
+    unlink(&scratch.directory, c"case", &case, libc::AT_REMOVEDIR).expect("empty case");
+    let link = named_stat(&scratch.directory, c"alias", Stage::Cleanup).expect("alias identity");
+    unlink(&scratch.directory, c"alias", &link, 0).expect("remove fixture link");
+    scratch.finish().expect("empty settings fixture");
+    outside
+        .remove(c"settings", &sentinel)
+        .expect("remove untouched sentinel");
+    outside.finish().expect("empty outside fixture");
 }

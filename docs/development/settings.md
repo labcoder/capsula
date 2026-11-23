@@ -14,6 +14,16 @@ sibling file and sync the directory. If the directory sync fails after the renam
 process exits rather than letting the worker report an ordinary write failure. This is a fixture
 path, not a Linux settings root or a production write adapter.
 
+macOS unit tests can opt in to the settings-only scratch writer. The runner must own a fresh
+`0700` local APFS root, set `TMPDIR` and `MAC_SCRATCH_TEST_PARENT` to that absolute directory,
+set `MAC_SCRATCH_TEST_PID` to the sandboxed test process, and launch with umask 077. The fixture
+trusts the anchor's ancestors, then checks each child relative to a retained directory, opens
+names without following links, and exclusively stages the sibling. A first save may publish an
+absent destination. An indeterminate publication exits the test process with status 78; the
+runner must quarantine that root, not remove it. Self-spawned children do not inherit write
+admission under the same root. Without the opt-in, or in a regular build, this gives no Mac
+settings root. Purge still uses the separate, unchanged replacement path.
+
 ## Shell editor
 
 Accounts also composes Claude Code through `presence/settings/claude.rs`. The plain

@@ -2,6 +2,9 @@
 
 pub mod credential;
 
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use fs::write_scratch_settings;
+
 #[cfg(all(windows, feature = "test-support"))]
 pub use windows::{WindowProbe, WindowSample, WindowSession};
 

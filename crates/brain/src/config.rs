@@ -5,9 +5,15 @@
 //! survive every write, so a later slice's settings outlive a downgrade. Nothing here logs a
 //! value or the parser's diagnostics: both can hold names.
 
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
+use std::io;
+#[cfg(not(all(test, target_os = "macos")))]
+use std::io::Write as _;
+#[cfg(not(all(test, target_os = "macos")))]
+use std::path::Path;
+use std::path::PathBuf;
 
+#[cfg(all(test, target_os = "macos"))]
+use crate::platform::write_scratch_settings as write_replacing;
 use crate::store::choice::StoredChoice;
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
@@ -462,6 +468,7 @@ impl Pending {
 }
 
 /// A leftover temp file from a crash is never read; this overwrites it.
+#[cfg(not(all(test, target_os = "macos")))]
 fn write_replacing(path: &Path, text: &[u8]) -> io::Result<()> {
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     std::fs::create_dir_all(dir)?;
