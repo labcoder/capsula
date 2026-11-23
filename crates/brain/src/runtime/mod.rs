@@ -28,12 +28,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::message::DataToBrain::{Hello, QueuedHello, TextMetrics};
 use kumochi_protocol::message::{
     AudioSession, ConnectionKind, ControlToBrain, ControlToShell, DATA_WINDOW, DataToBrain,
     DataToShell, Deleted, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, RunId, SceneDescriptor, SceneId,
     SegmentStart, SpeechPcm, ThreadId, Transcript,
 };
 use kumochi_protocol::tap::{Direction, Tapped as _};
+use kumochi_scene::display::TextMetricsV1;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Notify, mpsc};
@@ -201,6 +203,7 @@ pub(crate) struct Brain {
     ready_at: Option<Instant>,
     /// Page completions belong only to the connection that requested them.
     epoch: u64,
+    drawing_reaccount: Option<recovery::Reaccount>,
     /// What a recovery chunk packs up to; tests lower it to force several chunks.
     chunk_target: usize,
     /// The settings, owned here: they never touch runs or the store.
@@ -351,6 +354,7 @@ impl Brain {
             retry_at: None,
             ready_at: None,
             epoch: 0,
+            drawing_reaccount: None,
             chunk_target: crate::drawing::CHUNK_TARGET,
             config,
             settings_ops: VecDeque::new(),
@@ -576,6 +580,7 @@ impl Brain {
                     continue;
                 }
                 Some(input) = self.inputs.recv() => input,
+                _ = recovery::reaccounted(&mut self.drawing_reaccount) => continue,
                 // Engines run only for a current run, and nothing is current without a shell.
                 Some(input) = self.engine_events.recv() => input,
                 () = sleep_until(send_due) => self.send_deadline_passed(),
@@ -686,6 +691,7 @@ impl Brain {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn serve_with_audio<C, D>(
         &mut self,
         control: C,
@@ -697,6 +703,11 @@ impl Brain {
         C: AsyncRead + AsyncWrite + Unpin,
         D: AsyncRead + AsyncWrite + Unpin,
     {
+        self.serve_with_profile(control, data, tap, audio, None)
+            .await
+    }
+
+    fn begin_pair(&mut self) {
         self.epoch = self
             .epoch
             .checked_add(1)
@@ -708,6 +719,21 @@ impl Brain {
         self.crashes.begin_session();
         #[cfg(debug_assertions)]
         self.filing.report_live_block();
+    }
+
+    pub(crate) async fn serve_with_profile<C, D>(
+        &mut self,
+        control: C,
+        data: D,
+        tap: &mut Tap,
+        audio: AudioSession,
+        text_metrics: Option<TextMetricsV1>,
+    ) -> Ended
+    where
+        C: AsyncRead + AsyncWrite + Unpin,
+        D: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.begin_pair();
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
         let (controls_tx, mut controls) = mpsc::channel(64);
@@ -741,6 +767,7 @@ impl Brain {
             let data_writer = write_data(&mut data_out, &queue, &ready, &room);
             let mut link = Link::new(&out_tx, &queue, &ready, &mut *tap);
             link.registration = registration;
+            link.text_metrics = text_metrics;
             let core = self.core(&mut controls, &mut turns, &mut pages, &room, link);
             tokio::select! {
                 ended = &mut control_reader => {
@@ -753,6 +780,9 @@ impl Brain {
                 ended = core => ended,
             }
         };
+        if let Some(reaccount) = &self.drawing_reaccount {
+            reaccount.cancel();
+        }
         let quitting = quit.get().is_some();
         if quitting {
             self.claude.stop();
@@ -837,10 +867,10 @@ impl Brain {
     /// queued past the cap are bounded too. `room` wakes the loop when the queue drains.
     ///
     /// Each connection starts awaiting `Scenes`: Stop, Clear and Pong are served, but no turn is
-    /// taken until the visible set has settled and `Scenes` has named it, so the list is never
-    /// one the store has already moved past. If it hasn't settled within [`SCENES_WAIT`], the
-    /// connection ends as unavailable instead. After `Scenes`, the snapshots go out a chunk at
-    /// a time whenever the data queue has room, ahead of engine events.
+    /// taken until the visible set has settled and `Scenes` has named it. If required state
+    /// hasn't settled within [`SCENES_WAIT`], the connection ends as unavailable. Optional
+    /// re-accounting uses the same deadline but doesn't hold up a settled scene past it.
+    /// After `Scenes`, snapshots go out a chunk at a time, ahead of engine events.
     #[expect(clippy::too_many_lines, reason = "one arm per source the loop serves")]
     async fn core(
         &mut self,
@@ -853,7 +883,10 @@ impl Brain {
         let mut ticks = tokio::time::interval(PING_EVERY);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ping_sent: Option<Instant> = None;
-        let barrier = Instant::now() + scenes_wait();
+        let mut barrier = recovery::Barrier {
+            deadline: Instant::now() + scenes_wait(),
+            settled: false,
+        };
         if let Err(ended) = self.open(&mut link) {
             return ended;
         }
@@ -865,11 +898,8 @@ impl Brain {
             if self.hold_voice_changed(&mut link).is_err() {
                 return Ended::Lost;
             }
-            if link.recovery.is_none() && self.coordinator.settled() {
-                let Ok(described) = self.describe(&mut link) else {
-                    return Ended::Lost;
-                };
-                link.recovery = described;
+            if let Err(ended) = self.advance_scene_barrier(&mut link, &mut barrier) {
+                return ended;
             }
             let described = link.recovery.is_some();
             let running = self.coordinator.current_run();
@@ -882,6 +912,7 @@ impl Brain {
             let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
             let input = tokio::select! {
                 biased;
+                () = tokio::time::sleep_until(barrier.deadline), if !described => continue,
                 Some((message, len)) = controls.recv() => {
                     match self.control_frame(message, len, &mut link, &mut ping_sent) {
                         Ok(Some(input)) => input,
@@ -936,6 +967,12 @@ impl Brain {
                     continue;
                 }
                 Some(input) = self.inputs.recv() => input,
+                receipt = recovery::reaccounted(&mut self.drawing_reaccount) => {
+                    if !described && let Some(receipt) = receipt {
+                        self.receive_reaccount(barrier.deadline, receipt);
+                    }
+                    continue;
+                }
                 Some(input) = pages.recv(), if !first_pcm_due => input,
                 Some(input) = turns.recv(), if take_turns => {
                     if self.hold_end(kumochi_protocol::message::HoldStatus::Cancelled, &mut link).is_err() {
@@ -997,10 +1034,6 @@ impl Brain {
                         Some((run, _)) => Input::Deadline { run },
                         None => continue,
                     }
-                }
-                () = tokio::time::sleep_until(barrier), if !described => {
-                    tracing::warn!("the visible scenes didn't settle in time; ending the connection");
-                    return Ended::Unavailable;
                 }
                 // The tick also runs, with no watchdog, while an unanswered stop receipt waits.
                 _ = ticks.tick(), if running.is_some() || self.owes_stop() => {
@@ -1080,6 +1113,48 @@ impl Brain {
             && link.recovery.is_some()
             && link.queue.borrow().bytes() < DATA_CAP
             && self.room_for_turns()
+    }
+
+    fn advance_scene_barrier(
+        &mut self,
+        link: &mut Link<'_, '_>,
+        barrier: &mut recovery::Barrier,
+    ) -> Result<(), Ended> {
+        if link.recovery.is_some() {
+            return Ok(());
+        }
+        let settled = self.coordinator.settled();
+        if Instant::now() >= barrier.deadline {
+            if !barrier.settled || !settled {
+                tracing::warn!("the visible scenes didn't settle in time; ending the connection");
+                return Err(Ended::Unavailable);
+            }
+            if let Some(replay) = &self.drawing_reaccount {
+                replay.cancel();
+            }
+            self.coordinator.use_uncounted_measure(link.text_metrics);
+        } else {
+            barrier.settled = settled;
+            if !settled || self.drawing_reaccount.is_some() {
+                return Ok(());
+            }
+            if let Some(job) = self
+                .coordinator
+                .reaccount_drawings(self.epoch, link.text_metrics)
+            {
+                self.drawing_reaccount = Some(recovery::Reaccount::start(job));
+                return Ok(());
+            }
+        }
+        link.recovery = self.describe(link).map_err(|Full| Ended::Lost)?;
+        Ok(())
+    }
+
+    fn receive_reaccount(&mut self, deadline: Instant, receipt: recovery::ReaccountReceipt) {
+        if Instant::now() < deadline {
+            self.coordinator
+                .install_reaccounted(self.epoch, &receipt.source, receipt.result);
+        }
     }
 
     /// Sends `Scenes` for the settled visible set, and the recovery that sends their snapshots.
@@ -1570,8 +1645,8 @@ async fn read_data(
     let probe = audio_fixture::probe();
     loop {
         match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
-            Ok(Some(DataToBrain::Hello(_) | DataToBrain::QueuedHello(..))) => {
-                return Ended::Broken("Hello sent twice");
+            Ok(Some(Hello(_) | QueuedHello(..) | TextMetrics(_))) => {
+                return Ended::Broken("startup frame on live data pipe");
             }
             Ok(Some(DataToBrain::MicPcm(mut chunk))) => {
                 if let Some(pcm) = pcm.filter(|_| Registration::admits(registration)) {
@@ -1777,6 +1852,7 @@ struct Link<'a, 't> {
     registration: Option<&'a Cell<Registration>>,
     /// The pair's opening Talk-back choice, until its first change in either direction.
     queued_talk_back: Option<bool>,
+    text_metrics: Option<TextMetricsV1>,
     /// The snapshots still to send, once `Scenes` has gone.
     recovery: Option<Recovery>,
     /// Page replies waiting for room in the data queue.
@@ -1797,6 +1873,7 @@ impl<'a, 't> Link<'a, 't> {
             tap,
             registration: None,
             queued_talk_back: None,
+            text_metrics: None,
             recovery: None,
             held_pages: VecDeque::new(),
         }

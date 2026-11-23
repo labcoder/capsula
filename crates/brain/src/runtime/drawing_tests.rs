@@ -461,6 +461,158 @@ async fn timed_out_crash_clear_cannot_authorize_launch() {
     brain.close().await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn reaccount_receipts_are_accepted_before_but_not_at_the_barrier_deadline() {
+    use super::super::recovery::{Reaccount, reaccounted};
+    use tokio::time::Instant;
+
+    for at_deadline in [false, true] {
+        let scratch = Scratch::new("startup-reaccount-result");
+        let (mut brain, _) = typed_brain(&scratch, None);
+        let metrics = Some(reaccount_profile());
+        let job = brain
+            .coordinator
+            .reaccount_drawings(brain.epoch, metrics)
+            .expect("changed measure");
+        brain.drawing_reaccount = Some(Reaccount::start(job));
+        let receipt = reaccounted(&mut brain.drawing_reaccount)
+            .await
+            .expect("not cancelled");
+        assert!(receipt.result.is_some(), "the worker recovered the scene");
+        let deadline = Instant::now() + super::PATIENCE;
+        if at_deadline {
+            tokio::time::advance(super::PATIENCE).await;
+            assert_eq!(Instant::now(), deadline);
+        }
+        brain.receive_reaccount(deadline, receipt);
+        assert_eq!(
+            brain
+                .coordinator
+                .reaccount_drawings(brain.epoch, metrics)
+                .is_some(),
+            at_deadline,
+            "only the before-deadline receipt installs the new measure"
+        );
+        brain.close().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn optional_reaccount_timeout_serves_the_settled_scene_and_fences_its_late_result() {
+    use super::super::recovery::{Barrier, Reaccount, reaccounted};
+    use tokio::sync::oneshot;
+    use tokio::time::Instant;
+
+    let scratch = Scratch::new("startup-reaccount-timeout");
+    let (mut brain, scene) = typed_brain(&scratch, None);
+    let metrics = Some(reaccount_profile());
+    let job = brain
+        .coordinator
+        .reaccount_drawings(brain.epoch, metrics)
+        .expect("changed measure");
+    let (started, running) = oneshot::channel();
+    let (release, held) = oneshot::channel();
+    brain.drawing_reaccount = Some(Reaccount::spawn(job, move |job, cancel| {
+        let result = job.run(cancel).expect("worker recovers the scene");
+        started.send(()).expect("test waits on worker");
+        held.blocking_recv().ok()?;
+        Some(result)
+    }));
+    running.await.expect("blocking worker started");
+
+    let (out, mut controls) = mpsc::channel(4);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.text_metrics = metrics;
+    let mut barrier = Barrier {
+        deadline: Instant::now() + super::PATIENCE,
+        settled: false,
+    };
+    brain
+        .advance_scene_barrier(&mut link, &mut barrier)
+        .unwrap();
+    assert!(barrier.settled);
+    assert_eq!(controls.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+
+    tokio::time::advance(super::PATIENCE).await;
+    brain
+        .advance_scene_barrier(&mut link, &mut barrier)
+        .unwrap();
+    let control = controls
+        .try_recv()
+        .expect("settled membership without reconnect");
+    let message = frame::read::<ControlToShell>(&mut control.as_slice(), Pipe::Control)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(message, ControlToShell::ScenesV1 { scenes }
+        if scenes.len() == 1 && scenes[0].scene == scene && scenes[0].revision == 2));
+    let snapshot = link.recovery.as_mut().unwrap().next_chunk().unwrap();
+    assert!(matches!(snapshot, DataToShell::SceneSnapshotV1 { chunk }
+        if chunk.scene == scene && chunk.events.len() == 2 && chunk.last));
+    assert!(
+        brain
+            .coordinator
+            .reaccount_drawings(brain.epoch, metrics)
+            .is_none(),
+        "the current measure is active even without paint accounting"
+    );
+    release.send(()).expect("blocking worker is still alive");
+    assert!(reaccounted(&mut brain.drawing_reaccount).await.is_none());
+    assert!(brain.drawing_reaccount.is_none(), "one worker was drained");
+    brain.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_required_clear_receipt_at_the_deadline_cannot_open_the_scene_barrier() {
+    use super::super::{Ended, recovery::Barrier};
+    use tokio::time::Instant;
+
+    let scratch = Scratch::new("startup-required-clear");
+    let (mut brain, scene) = typed_brain(&scratch, None);
+    let release =
+        brain.hold_store(|op| matches!(op, crate::coordinator::StoreOp::ClearScenes { .. }));
+    let clear = brain.coordinator.failed_drawings(vec![scene]);
+    brain.apply(clear, None).unwrap();
+    let (out, mut controls) = mpsc::channel(4);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    link.text_metrics = Some(reaccount_profile());
+    let mut barrier = Barrier {
+        deadline: Instant::now() + super::PATIENCE,
+        settled: false,
+    };
+    brain
+        .advance_scene_barrier(&mut link, &mut barrier)
+        .unwrap();
+    assert!(!barrier.settled);
+    release.send(()).unwrap();
+    let reply = brain.inputs.recv().await.expect("required clear receipt");
+    assert!(
+        matches!(&reply, crate::coordinator::Input::ScenesCleared { scenes, ok: true } if scenes == &[scene])
+    );
+    tokio::time::advance(super::PATIENCE).await;
+    brain.offline(reply);
+    assert!(brain.coordinator.settled());
+    assert_eq!(
+        brain.advance_scene_barrier(&mut link, &mut barrier),
+        Err(Ended::Unavailable)
+    );
+    assert_eq!(controls.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    brain.close().await;
+}
+
+fn reaccount_profile() -> kumochi_scene::display::TextMetricsV1 {
+    kumochi_scene::display::TextMetricsV1 {
+        advances: [2048; 95],
+        line_height: 1536,
+        range_maxima: [1024, 1536, 2048],
+    }
+}
+
 #[tokio::test]
 async fn missing_store_cannot_authorize_crash_relaunch() {
     let scratch = Scratch::new("typed-crash-clear-store-gone");

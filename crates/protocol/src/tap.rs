@@ -213,6 +213,7 @@ impl Tapped for DataToBrain {
             Self::Hello(_) => "Hello",
             Self::QueuedHello(..) => "QueuedHello",
             Self::TextSubmit { .. } => "TextSubmit",
+            Self::TextMetrics(_) => "TextMetrics",
             Self::Credit { .. } => "Credit",
             Self::PageRequest { .. } => "PageRequest",
             Self::MicPcm(_) => "MicPcm",

@@ -3,12 +3,15 @@
 use kumochi_protocol::message::{
     DataToShell, Narration, RunId, SceneId, SegmentId, SegmentStart, StepRef, ThreadId,
 };
+use kumochi_scene::display::TextMetricsV1;
 use kumochi_scene::record::Start;
 
 use super::{BuildKey, Coordinator, Effect, Stale, StoreOp, speech};
 use crate::context::{Geometry, NoCanvas, Screen};
 use crate::dispatch::{self, Dispatch, LedgerKey, ToolError, ToolOutput};
-use crate::drawing::{Drawing, Input, Loss, Output, Reply, ScreenMarks, Write};
+use crate::drawing::{
+    Drawing, Input, Loss, Output, ReaccountJob, Reaccounted, Reply, ScreenMarks, Write,
+};
 
 const MAX_RESULTS: usize = 64;
 
@@ -219,6 +222,31 @@ impl Coordinator {
 
     pub(crate) fn drawing_available(&self) -> bool {
         self.drawing.available()
+    }
+
+    pub(crate) fn reaccount_drawings(
+        &mut self,
+        epoch: u64,
+        metrics: Option<TextMetricsV1>,
+    ) -> Option<ReaccountJob> {
+        debug_assert!(self.settled(), "take the settled visible set");
+        self.drawing.reaccount(epoch, metrics)
+    }
+
+    pub(crate) fn install_reaccounted(
+        &mut self,
+        epoch: u64,
+        source: &ReaccountJob,
+        result: Option<Reaccounted>,
+    ) {
+        if self.settled() {
+            self.drawing.install_reaccounted(epoch, source, result);
+        }
+    }
+
+    pub(crate) fn use_uncounted_measure(&mut self, metrics: Option<TextMetricsV1>) {
+        debug_assert!(self.settled(), "the visible set must already be settled");
+        self.drawing.use_uncounted_measure(metrics);
     }
 
     /// Lays drawing steps out through the runtime's preparation thread, as the shipped brain does.
