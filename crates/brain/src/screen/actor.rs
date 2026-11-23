@@ -133,8 +133,9 @@ struct Capture {
 /// unbuffered stdout, since they can carry window text and images.
 ///
 /// # Errors
-/// Returns a framing or transport failure, never request contents.
+/// Returns an unsupported-runtime, framing or transport failure, never request contents.
 pub fn serve() -> Result<(), frame::FrameError> {
+    crate::platform::require_native_runtime()?;
     serve_on(
         std::io::stdin(),
         &mut crate::platform::raw_stdout()?,

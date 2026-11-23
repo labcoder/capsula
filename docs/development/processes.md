@@ -8,6 +8,12 @@ Without a native process adapter, containment and every native launch request re
 exercise its request and retirement policy without a native child. No unmanaged child or
 inherited environment is a fallback.
 
+Without native runtime composition, `kumochid` exits before handling flags, initializing logs,
+creating a runtime, or touching app data. CLI callers and parents that wait for the child can
+distinguish this by exit status 69. The shell's detached launcher doesn't observe that status;
+this does not add a non-Windows shell launch path. The library's brain, bridge and screen entries
+return an unsupported error, while fixture tests still exercise shared policy.
+
 Each process starts its scene dropper before accepting scene data and fails startup if the
 thread cannot start. Retirement never joins that thread from the shell's UI.
 
