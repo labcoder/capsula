@@ -14,6 +14,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     mpsc::Sender,
 };
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -204,11 +205,25 @@ impl std::fmt::Debug for GitHub {
 }
 
 impl GitHub {
-    pub(super) fn new() -> Self {
-        Self::with_client(kumochi_protocol::constants::GITHUB_CLIENT_ID)
+    pub(super) fn new(refresh_lead: Duration) -> Self {
+        Self::with_client_and_refresh_lead(
+            kumochi_protocol::constants::GITHUB_CLIENT_ID,
+            refresh_lead,
+        )
     }
 
+    #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
     pub(in crate::runtime) fn with_client(client_id: Option<&'static str>) -> Self {
+        Self::with_client_and_refresh_lead(
+            client_id,
+            crate::config::tuning::TokenTuning::default().github_refresh_lead,
+        )
+    }
+
+    fn with_client_and_refresh_lead(
+        client_id: Option<&'static str>,
+        refresh_lead: Duration,
+    ) -> Self {
         let client_id =
             client_id.filter(|value| crate::connections::github::ClientId::new(value).is_ok());
         Self {
@@ -220,7 +235,7 @@ impl GitHub {
             defaults: None,
             #[cfg(test)]
             execution: Execution::Automatic,
-            machine: Machine::new(None),
+            machine: Machine::with_refresh_lead(None, refresh_lead),
             session: None,
             closing: false,
             rotation_stopped: false,

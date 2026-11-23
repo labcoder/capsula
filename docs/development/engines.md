@@ -71,9 +71,10 @@ reached either source set cancels and rebuilds the round, leaving the key termin
 Only validated selectors are committed; the caller waits for that commit's acknowledgement.
 These tools are never exposed through MCP, and create/focus remain unoffered to the model.
 
-Read payloads are capped at 32 KiB before the title and outer wrapper. That is not a bound
-on the final encoded response: titles, wrappers and all replayed results count toward the
-whole request's 512 KiB budget. Stored selectors separately obey the 64 KiB output bound.
+New `history.read` payloads use `reread_bytes` (default 32 KiB), counting encoded JSON before the
+title and outer wrapper. Replay uses the saved endpoints and cut under the fixed 32 KiB cap.
+Titles, wrappers and all replayed results still count toward the whole request's 512 KiB budget.
+Stored selectors separately obey the 64 KiB output bound.
 An interrupted task is labelled Stopped for every interruption cause, not only an explicit Stop.
 
 A run's origin is `Kumo` (the main thread) or `Task(t)`. The coordinator derives it from the
@@ -89,7 +90,8 @@ re-read every time a request is built, in the same read transaction as the conve
 - A task that is gone or being deleted renders as `[removed with a deleted task]`. A live task
   with nothing in the range renders as empty text, not as removed. A store failure is an error,
   never a removal.
-- Each re-read is capped at 32 KiB [guess]. Events are shown as `user: …` and `assistant: …` lines.
+- Each older reference re-read is capped by `reread_bytes` (default 32 KiB). Events are shown as
+  `user: …` and `assistant: …` lines.
   The lines that fit whole are kept. An event that alone is over the cap keeps its longest prefix
   ending on a character boundary. The result says which events it shows, whether it was
   truncated, and the first event it left out (`continue_from`). A search snippet is a
@@ -237,16 +239,17 @@ sequenceDiagram
   deleted.
 - **Held deletes.** A delete whose thread an unsettled lease carries waits in `deleting` with no
   writer op. It goes out once, in the order accepted, when no lease carries it.
-- **Deadline.** A lease that hasn't settled 15 s [guess] after its grant fails closed: its held
-  deletes are refused with `NotHidden`, and so is any later delete of its sources; its run fails
+- **Deadline.** A lease that hasn't settled within `send_lease_s` (default 15 s) after its grant
+  fails closed: its held deletes are refused with `NotHidden`, and so is any later delete of its sources; its run fails
   as `failed(engine)`; and nothing is granted again until the brain restarts. A late settlement
   settles only the picture its lease carried, and every fence stays. A delete is never released
   because time ran out.
 - **Held sends.** A sender whose body can go out again until a process tree is confirmed ended
   (a Claude Code question, see [claude-code.md](claude-code.md#launches)) asks with
-  `SendGate::ask_held(hold)`. Its lease's deadline is `hold`, capped at `MAX_HOLD` (165 s), in
-  place of the 15 s, for builds and jobs alike. Past it, the lease fails closed the same way: its
-  run fails, its held deletes are refused, and its sources stay fenced until the brain restarts.
+  `SendGate::ask_held(hold)`. Its lease uses the remaining launch time plus the fixed 15 s
+  teardown allowance, capped at `MAX_HOLD` (165 s), instead of `send_lease_s`. Past it, the lease
+  fails closed the same way: its run fails, its held deletes are refused, and its sources stay
+  fenced until the brain restarts.
   It doesn't stop other grants, though. A held sender is a separate process on its own pipes, not
   the shared transport, so a teardown that never confirmed is that lane's fault alone, and the
   lane already refuses every later launch (see [claude-code.md](claude-code.md#launches)). ChatGPT
@@ -337,19 +340,20 @@ uses the thread's newest summary in place of every event through `last_event`. T
 - **After a run.** When a title job ends on its own (and at once for Kumo's runs, which have no
   title job), a compaction job for the same thread takes the slot, under every fence above. Its
   read sums the byte length of the text and bodies of every ended run no summary covers, ÷ 4 as
-  estimated tokens [guess: the catalog has no context sizes yet]. Under `COMPACT_AT` = 24k [guess]
-  it stops with no request. Debug builds take `KUMOCHI_COMPACT_AT` to lower it for the live check.
-  Measuring the whole uncovered backlog, not the newest eight runs, means runs that leave the raw
-  window are summarized even while the newest stay small.
-- **What it summarizes.** The uncovered runs older than the newest eight [guess] are eligible; with
-  none, there's no request. The request carries `prompts/summary.md` with the run's names, the
-  previous summary, and the longest prefix of whole eligible runs that fits `SUMMARY_INPUT` = 96 KiB
-  [guess], rendered by the builder's own reference rendering in the job's read transaction, so a
-  deleted task's range renders as the removed marker. The cut is always at a run boundary, so a
-  call never leaves its result. If the oldest eligible run alone doesn't fit, the job stops with no
-  request and coverage doesn't move (`shortcut:` one such run stalls compaction behind it until a
-  continuation scheme exists). The new summary replaces the previous one, so it covers from the
-  previous summary's first event through the last whole run it carried.
+  estimated tokens [guess: the catalog has no context sizes yet]. Under
+  `compact_at_token_count` (default 24k) it stops with no request. Debug builds take
+  `KUMOCHI_COMPACT_AT` to lower it for the live check. Measuring the whole uncovered backlog,
+  not just the current raw window, means runs that leave the raw window are summarized even
+  while the newest stay small.
+- **What it summarizes.** The uncovered runs older than the configured raw window (default eight)
+  are eligible. The job stops reading at the next run boundary after its raw UTF-8 text exceeds
+  `summary_input_bytes` (default 96 KiB). The builder then uses that same budget for its input
+  estimate: JSON-escaped strings plus fixed body and item allowances, including the instructions,
+  previous summary, closing message and rendered whole runs. It doesn't measure the provider's
+  serialized request. A deleted task's range renders as removed. If the oldest eligible run
+  alone doesn't fit, the job sends nothing and coverage doesn't move (`shortcut:` it stalls
+  until a continuation scheme exists). A new summary covers from the previous summary's first
+  event through the last whole run it carried.
 - **Answer.** At most 16 KiB of text, taken only when the round completes, trimmed and cut to
   `MAX_SUMMARY` = 8 KiB [guess] on a character boundary. Empty output fails the job.
 - **Write.** `StoreSummary { owner: SendKey::Job(key), generation, covers, … }` inserts only while
@@ -359,8 +363,9 @@ uses the thread's newest summary in place of every event through `last_event`. T
   task keeps that text, as Kumo's replies do (OSC-161), so no summary records its sources; a
   delete accepted while Kumo's compaction is reading or sending voids it like any job.
 
-**Inline (B5).** A build is `TooLarge { room }`, where `room` is what the bound leaves for the
-summary after the fixed parts and the current run, `None` when those alone don't fit. With
+**Inline (B5).** `summary_input_bytes` doesn't apply here. A build is `TooLarge { room }`, where
+`room` is what the bound leaves for the summary after the fixed parts and the current run,
+`None` when those alone don't fit. With
 `None` the run ends as `failed(budget)` and spends no request. With room, the run compacts on its
 own route, Claude Code included, once
 per admission episode (the round, until a build is admitted), so a delete's rebuild can't start a

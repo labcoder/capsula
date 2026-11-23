@@ -13,6 +13,27 @@ use crate::store::{RunEnd, Store};
 use crate::tap::Tap;
 use crate::test_support::Scratch;
 
+#[tokio::test(start_paused = true)]
+async fn tuned_drawing_readiness_timer_arms_for_its_configured_wait() {
+    use crate::coordinator::Effect;
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    let scratch = Scratch::new("typed-drawing-ready-wait");
+    std::fs::create_dir_all(scratch.dir()).unwrap();
+    std::fs::write(
+        scratch.dir().join(kumochi_protocol::constants::CONFIG_FILE),
+        "[tuning.drawing]\nready_wait_ms = 375",
+    )
+    .unwrap();
+    let (mut brain, _) = typed_brain(&scratch, None);
+    let now = Instant::now();
+    brain.apply(vec![Effect::ArmReadyWait], None).unwrap();
+    assert_eq!(brain.ready_at, Some(now + Duration::from_millis(375)));
+    brain.apply(vec![Effect::CancelReadyWait], None).unwrap();
+    assert_eq!(brain.ready_at, None);
+}
+
 fn stored_step(id: &str, object: &str) -> Arc<kumochi_scene::Step> {
     Arc::new(serde_json::from_value(serde_json::json!({"id":id,"put":[{"shape":{"id":object,"kind":"rect","box":[0,0,10,10]}}]})).expect("typed step"))
 }

@@ -263,6 +263,7 @@ async fn production_off_is_observed_before_account_startup_and_survives_all_sess
         worker,
         net,
         crate::config::tuning::OAuthTuning::default(),
+        crate::config::tuning::TokenTuning::default(),
     )
     .unwrap();
     assert_eq!(store.reads.load(Ordering::SeqCst), 0);

@@ -5,15 +5,10 @@
 //! skipped after its steps were prepared, still isn't told to the model.
 
 use std::mem;
-use std::time::Duration;
 
 use kumochi_protocol::message::{MAX_READY_STEPS, RunId, SceneId};
 
 use super::{CallError, Drawing, Output};
-
-/// How long a held call waits with no answer from the shell for its scene: four times the
-/// shell's 250 ms preparation deadline. A tick that finds no answer since the last one ends it.
-pub const READY_WAIT: Duration = Duration::from_secs(1);
 
 impl Drawing {
     /// A call that ended properly: its result goes now, or once the shell answers for the last
@@ -76,7 +71,7 @@ impl Drawing {
         }
     }
 
-    /// [`READY_WAIT`] passed: a held call that heard nothing since the last tick gets its result.
+    /// A ready-wait tick passed: a held call that heard nothing since the last tick gets its result.
     pub(super) fn ready_wait(&mut self, out: &mut Output) {
         for at in 0..self.calls.len() {
             let call = &mut self.calls[at];
@@ -113,7 +108,7 @@ impl Drawing {
         }
     }
 
-    /// A finished call waits for the shell, so the coordinator keeps [`READY_WAIT`] ticking.
+    /// A finished call waits for the shell, so the coordinator keeps the ready-wait timer ticking.
     pub fn holding(&self) -> bool {
         self.calls
             .iter()

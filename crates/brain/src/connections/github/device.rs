@@ -7,6 +7,7 @@ use super::{
         TokenError, TokenReply, Tokens,
     },
 };
+use crate::config::tuning::TokenTuning;
 use crate::connections::clock::{Clock, SystemClock};
 use kumochi_protocol::{
     Secret,
@@ -28,8 +29,6 @@ use tokio::time::Instant;
 
 #[cfg(test)]
 mod tests;
-
-const REFRESH_LEAD: Duration = Duration::from_secs(60);
 
 /// Identifies the admission epoch for both an attempt and its connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,6 +318,7 @@ pub struct Machine {
     verified: bool,
     listed: bool,
     token_end: Option<Instant>,
+    refresh_lead: Duration,
     refresh_due: Option<Instant>,
     clock: Arc<dyn Clock>,
 }
@@ -331,6 +331,10 @@ impl fmt::Debug for Machine {
 impl Machine {
     /// Starts fenced until Loaded arrives. Queue the startup load with `stamp()`.
     pub fn new(default: Option<DefaultRepo>) -> Self {
+        Self::with_refresh_lead(default, TokenTuning::default().github_refresh_lead)
+    }
+
+    pub(crate) fn with_refresh_lead(default: Option<DefaultRepo>, refresh_lead: Duration) -> Self {
         Self {
             state: State::Loading,
             stamp: Stamp { generation: 0 },
@@ -344,6 +348,7 @@ impl Machine {
             verified: false,
             listed: false,
             token_end: None,
+            refresh_lead,
             refresh_due: None,
             clock: Arc::new(SystemClock),
         }
@@ -567,7 +572,8 @@ impl Machine {
         };
         self.advance();
         self.token_end = Some(now + remaining);
-        self.refresh_due = Some(now + remaining.saturating_sub(REFRESH_LEAD.min(remaining / 2)));
+        let lead = self.refresh_lead.min(remaining / 2);
+        self.refresh_due = Some(now + remaining.saturating_sub(lead));
         self.verified = true;
         self.state = State::Connected(account);
         effects.push(Effect::RefreshRepos {

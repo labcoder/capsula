@@ -356,7 +356,13 @@ fn a_refused_startup_fold_still_signs_out_unconfirmed() {
     drop(vault);
     let path = scratch.db().with_file_name(authority::FILE);
     refuse_marker_writes(&path, 0);
-    let mut h = Harness::boot(Rc::new(scratch), service, store, Wall::new());
+    let mut h = Harness::boot(
+        Rc::new(scratch),
+        service,
+        store,
+        Wall::new(),
+        AccountState::start(),
+    );
     assert_eq!(
         h.marker(),
         marker(&["request_pending"]),

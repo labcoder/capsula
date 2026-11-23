@@ -102,6 +102,7 @@ impl Snapshot<'_> {
         from: u64,
         to: u64,
         origin: Origin,
+        limit: usize,
     ) -> Result<Vec<Event>, Error> {
         let mut statement = sql(self.0.prepare(
             "SELECT e.id, e.kind, e.text FROM events e JOIN threads t ON t.id=e.thread
@@ -116,7 +117,7 @@ impl Snapshot<'_> {
                 key(from)?,
                 key(to)?,
                 reach(origin)?,
-                i64::try_from(READ_EVENTS + 1).map_err(|_| Error::Invalid)?
+                i64::try_from(limit + 1).map_err(|_| Error::Invalid)?
             ],
             |row| {
                 Ok(Event {
@@ -172,25 +173,28 @@ impl Snapshot<'_> {
                 if !self.live_task(*task, origin)? {
                     return Err(Error::NoTask);
                 }
-                let rows = self.recall_events(*task, *from, *to, origin)?;
+                let tuning = self.tuning();
+                let limit = tuning.read_events.min(READ_EVENTS);
+                let bytes_limit = tuning.reread.min(TEXT_BYTES);
+                let rows = self.recall_events(*task, *from, *to, origin, limit)?;
                 let mut shown = Vec::new();
                 let mut cut = None;
                 let mut next = None;
                 for (at, row) in rows.iter().enumerate() {
-                    if at == READ_EVENTS {
+                    if at == limit {
                         next = Some(row.id);
                         break;
                     }
                     shown.push(event(row, &row.text));
                     let following = rows.get(at + 1).map(|row| row.id);
-                    if range(*task, &shown, None, following).to_string().len() > TEXT_BYTES {
+                    if range(*task, &shown, None, following).to_string().len() > bytes_limit {
                         shown.pop();
                         if at == 0 {
                             let bytes = prefix(&row.text, |text| {
                                 range(*task, &[event(row, text)], Some(text.len()), following)
                                     .to_string()
                                     .len()
-                                    <= TEXT_BYTES
+                                    <= bytes_limit
                             });
                             cut = Some(bytes);
                             shown.push(event(row, &row.text[..bytes]));
@@ -367,7 +371,7 @@ impl Snapshot<'_> {
                 } => {
                     let mut events = Vec::new();
                     if let (Some(first), Some(last)) = (first_shown, last_shown) {
-                        let rows = self.recall_events(task, *first, *last, origin)?;
+                        let rows = self.recall_events(task, *first, *last, origin, READ_EVENTS)?;
                         if rows.len() > READ_EVENTS {
                             return Err(Error::Invalid);
                         }

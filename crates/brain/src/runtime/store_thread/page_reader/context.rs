@@ -1,6 +1,7 @@
 //! A context build on the page reader: one read transaction, begun after every op accepted
 //! before it, so a delete sent first is always seen.
 
+use crate::config::tuning::ContextTuning;
 use crate::context::build::{Turn, build};
 use crate::context::compact::{compaction, rewrite};
 use crate::context::{BOUND, BuildError, Built, PictureRecipient, Route, Supplied};
@@ -69,6 +70,7 @@ pub(super) fn read_hold(
 pub(super) fn read_call(
     side: Result<&Side, crate::recall::Error>,
     call: crate::dispatch::ReadCall,
+    tuning: ContextTuning,
     #[cfg(test)] hold: impl FnOnce(),
 ) -> crate::dispatch::ReadFinished {
     let result = side.and_then(|side| {
@@ -77,7 +79,9 @@ pub(super) fn read_call(
                 .until(Instant::now() + READ_TIME)
                 .with_handler(conn, |conn, scope| {
                     scope.query(conn, || {
-                        let read = Snapshot::begin(conn).map_err(crate::recall::Error::from)?;
+                        let read = Snapshot::begin(conn)
+                            .map_err(crate::recall::Error::from)?
+                            .with_tuning(tuning);
                         #[cfg(test)]
                         hold();
                         let result = read.recall_call(call.origin, &call.query)?;
@@ -99,6 +103,7 @@ pub(super) fn read_call(
 pub(super) fn read(
     side: Option<&Side>,
     job: BuildContext,
+    tuning: ContextTuning,
     #[cfg(test)] hold: impl FnOnce(),
 ) -> ContextBuilt {
     let BuildContext {
@@ -126,7 +131,9 @@ pub(super) fn read(
             control
                 .until(Instant::now() + READ_TIME)
                 .with_handler(conn, |conn, scope| {
-                    let read = Snapshot::begin(conn)?.controlled(scope.clone());
+                    let read = Snapshot::begin(conn)?
+                        .controlled(scope.clone())
+                        .with_tuning(tuning);
                     #[cfg(test)]
                     hold();
                     if first {
@@ -262,6 +269,7 @@ pub(super) fn read_compact(
 pub(super) fn read_job(
     side: Option<&Side>,
     job: ReadJob,
+    tuning: ContextTuning,
     #[cfg(test)] hold: impl FnOnce(),
 ) -> JobBuilt {
     let ReadJob {
@@ -284,7 +292,9 @@ pub(super) fn read_job(
             control
                 .until(Instant::now() + READ_TIME)
                 .with_handler(conn, |conn, scope| {
-                    let read = Snapshot::begin(conn)?.controlled(scope.clone());
+                    let read = Snapshot::begin(conn)?
+                        .controlled(scope.clone())
+                        .with_tuning(tuning);
                     #[cfg(test)]
                     hold();
                     snapshot.choice = read

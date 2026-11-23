@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use toml::Table;
 
-use super::{GITHUB, GROUPS, GitHubTuning, ModelTuning, OAuthTuning, RUNS, RunTuning};
+use super::{
+    ContextTuning, DrawingTuning, GITHUB, GROUPS, GitHubTuning, ModelTuning, OAuthTuning, RUNS,
+    RunTuning, TokenTuning,
+};
 use crate::test_support::Captured;
 
 const DOCS: &str = include_str!("../../../../docs/user/tuning.md");
@@ -175,6 +178,62 @@ fn oauth_backoffs_have_to_fit_inside_one_revocation_budget() {
 }
 
 #[test]
+fn tuned_drawing_retry_order_is_checked_after_clamping() {
+    let tuned = |text: &str| DrawingTuning::from_table(&text.parse().unwrap());
+    assert_eq!(
+        tuned("[tuning.drawing]\ncalls_count = 3\nfirst_retry_ms = 1001\nlast_retry_ms = 999"),
+        DrawingTuning::default()
+    );
+    assert_eq!(
+        tuned(
+            "[tuning.drawing]\ncalls_count = 17\nrejected_count = 9\nready_wait_ms = 249\nfirst_retry_ms = 1000\nlast_retry_ms = 999"
+        ),
+        DrawingTuning {
+            calls: 16,
+            rejected: 8,
+            ready_wait: Duration::from_millis(250),
+            first_retry: Duration::from_secs(1),
+            last_retry: Duration::from_secs(1),
+        }
+    );
+}
+
+#[test]
+fn tuned_token_leads_and_lease_times_cannot_exceed_the_built_in_bounds() {
+    let table = |text: &str| text.parse().unwrap();
+    assert_eq!(
+        TokenTuning::from_table(&table(
+            "[tuning.tokens]\ngithub_refresh_lead_s = 29\nchatgpt_refresh_lead_s = 61"
+        )),
+        TokenTuning {
+            github_refresh_lead: Duration::from_secs(30),
+            chatgpt_refresh_lead: Duration::from_secs(60),
+        }
+    );
+    let runs = RunTuning::from_table(&table(
+        "[tuning.runs]\nsend_lease_s = 10\nclaude_launch_s = 151",
+    ));
+    assert_eq!(runs.send_lease, Duration::from_secs(11));
+    assert_eq!(runs.claude_launch, Duration::from_secs(150));
+}
+
+#[test]
+fn tuned_context_can_only_tighten_its_selected_inputs() {
+    let values = ContextTuning::from_table(&"[tuning.context]\ncompact_at_token_count = 23999\nsummary_input_bytes = 98305\nraw_runs_count = 1\nnotes_count = 15\nreread_bytes = 16383\nread_events_count = 9".parse().unwrap());
+    assert_eq!(
+        values,
+        ContextTuning {
+            compact_at: 24_000,
+            summary_input: 98_304,
+            raw_runs: 2,
+            notes: 16,
+            reread: 16_384,
+            read_events: 10,
+        }
+    );
+}
+
+#[test]
 fn the_user_docs_list_every_key_with_its_default_and_range() {
     let blocks: Vec<&str> = DOCS
         .split("```toml")
@@ -216,4 +275,7 @@ fn the_user_docs_list_every_key_with_its_default_and_range() {
     assert_eq!(ModelTuning::from_table(&all), ModelTuning::default());
     assert_eq!(RunTuning::from_table(&all), RunTuning::default());
     assert_eq!(OAuthTuning::from_table(&all), OAuthTuning::default());
+    assert_eq!(TokenTuning::from_table(&all), TokenTuning::default());
+    assert_eq!(DrawingTuning::from_table(&all), DrawingTuning::default());
+    assert_eq!(ContextTuning::from_table(&all), ContextTuning::default());
 }

@@ -1044,6 +1044,54 @@ fn at_most_the_newest_eight_runs_stay_raw_and_a_dropped_runs_sources_dont_count(
 }
 
 #[test]
+fn tuned_context_keeps_two_raw_runs_and_truncates_an_older_reference() {
+    let mut world = world("ctx-tuned-window");
+    let main = world.main;
+    let (task, _) = world.run(None, &"b".repeat(20_000), None);
+    world.run(Some(main), "outside the raw window", None);
+    let (_, quoting) = world.run(Some(main), "quote the task", None);
+    let at = *world.events(main).last().unwrap();
+    world.run(Some(task), "gap", None);
+    world.run(Some(task), "gap", None);
+    let (_, current) = world.run(Some(main), "latest", None);
+    let reader = Connection::open(world.scratch.db()).unwrap();
+    let snapshot_read =
+        Snapshot::begin(&reader)
+            .unwrap()
+            .with_tuning(crate::config::tuning::ContextTuning {
+                raw_runs: 2,
+                reread: 16_384,
+                ..Default::default()
+            });
+    let first = world.events(task)[0];
+    let built = build(
+        snapshot_read,
+        &snapshot(Origin::Kumo, None),
+        Turn {
+            thread: main,
+            run: current,
+            local_time: TIME,
+            picture: None,
+            key_results: &[],
+        },
+        Supplied {
+            items: history(quoting, at, vec![whole(&[first], task)]),
+            ..Default::default()
+        },
+        BOUND,
+    )
+    .unwrap();
+    assert_eq!(built.sources, [main, task]);
+    assert_eq!(
+        built.request.input[0],
+        message(Role::User, "quote the task")
+    );
+    let entries = quoted(&built);
+    assert_eq!(entries[0]["truncated"], true);
+    assert_eq!(entries[0]["text"], format!("user: {}", "b".repeat(16_378)));
+}
+
+#[test]
 fn a_title_shown_from_an_empty_range_still_counts_its_task_as_a_source() {
     let mut world = world("ctx-title-source");
     let main = world.main;
@@ -1307,6 +1355,36 @@ fn coverage_only_advances_over_whole_runs_that_fit() {
         found.covers,
         (events[0], events[1]),
         "only the run that fit"
+    );
+}
+
+#[test]
+fn tuned_compaction_covers_only_the_whole_prefix_that_fits_its_lower_input_cap() {
+    let mut world = world("compact-tuned-prefix");
+    let (task, _) = world.run(None, "small", Some("reply"));
+    world.run(Some(task), &"a".repeat(50_000), None);
+    world.runs(task, 2, 4);
+    let reader = Connection::open(world.scratch.db()).unwrap();
+    let read =
+        Snapshot::begin(&reader)
+            .unwrap()
+            .with_tuning(crate::config::tuning::ContextTuning {
+                raw_runs: 2,
+                summary_input: 49_152,
+                ..Default::default()
+            });
+    let found = compaction(&read, &snapshot(Origin::Task(task), None), task, 1)
+        .unwrap()
+        .unwrap();
+    let events = world.events(task);
+    assert_eq!(found.covers, (events[0], events[1]));
+    assert_eq!(
+        found.built.request.input,
+        [
+            message(Role::User, "small"),
+            message(Role::Assistant, "reply"),
+            message(Role::Developer, WRITE_NOW),
+        ]
     );
 }
 
