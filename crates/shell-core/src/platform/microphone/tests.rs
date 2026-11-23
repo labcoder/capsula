@@ -513,7 +513,7 @@ fn startup_expires_until_ui_acceptance_and_never_releases_device_ownership() {
 #[test]
 fn tuned_start_budget_begins_at_the_single_reservation_not_at_key_down() {
     let gate = CollectionGate::default();
-    let chord = Instant::now() - Duration::from_secs(10);
+    let chord = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
     let mic = gate.arm_at(GestureId(1), chord).unwrap();
     let alive = AtomicBool::new(true);
     let start = Instant::now();
