@@ -9,7 +9,8 @@ use kumochi_protocol::message::{
 };
 use kumochi_scene::{
     Admission, Begin, Budget, CallState, End, ErrorCode, FieldPath, Record, SceneState, Step,
-    StepError, TokenError, Tokenizer, WireId, parse_draw_record, parse_screen_draw_record,
+    StepError, TokenError, Tokenizer, WireId, check_overlay_draw_record, parse_draw_record,
+    parse_screen_draw_record,
 };
 use serde::Deserialize;
 
@@ -19,7 +20,19 @@ use kumochi_scene::screen::without_boxes;
 use super::io::{Target, Write};
 use super::{Drawing, Job, LAYOUT_VERSION, Output, Pend, StepWait, Wait};
 use crate::coordinator::{Effect, Stale};
+use crate::dispatch::DrawRecords;
 use crate::engines::CallId;
+
+pub(super) enum CompleteArgs<'a> {
+    Raw(&'a [u8]),
+    Checked(DrawRecords),
+}
+
+#[derive(Clone, Copy)]
+enum RecordSurface {
+    OverlayOnly,
+    ScreenOffered,
+}
 
 /// Hard call ceiling used to size the queue even when the configured limit is lower.
 pub(super) const MAX_CALLS_PER_RUN: usize = 16;
@@ -333,7 +346,7 @@ impl Drawing {
         thread: ThreadId,
         run: RunId,
         id: CallId,
-        args: &[u8],
+        args: CompleteArgs<'_>,
         out: &mut Output,
     ) -> Result<(), Stale> {
         if self
@@ -346,20 +359,45 @@ impl Drawing {
         let Some(at) = self.call_at(thread, run, &id, out)? else {
             return Ok(());
         };
-        match envelope(args) {
-            Err(error) => self.fail(at, CallError::Token(error), out),
-            Ok((records, after_records)) => {
-                for bytes in records {
-                    self.intake(at, &bytes, out);
-                }
-                let job = Job::Finish {
-                    run,
-                    call: id,
-                    error: after_records.then_some(CallError::Token(TokenError::AfterRecords)),
+        let after_records = match args {
+            CompleteArgs::Raw(args) => {
+                let (records, after_records) = match envelope(args) {
+                    Ok(envelope) => envelope,
+                    Err(error) => {
+                        self.fail(at, CallError::Token(error), out);
+                        return Ok(());
+                    }
                 };
-                self.enqueue(job, out);
+                for bytes in records {
+                    self.intake(at, |surface| parse_intake(&bytes, surface), out);
+                }
+                after_records
             }
-        }
+            CompleteArgs::Checked(args) => {
+                let (records, after_records) = args.into_parts();
+                for record in records {
+                    self.intake(
+                        at,
+                        |surface| {
+                            if matches!(surface, RecordSurface::OverlayOnly) {
+                                check_overlay_draw_record(&record)?;
+                            }
+                            Ok(record)
+                        },
+                        out,
+                    );
+                }
+                after_records
+            }
+        };
+        self.enqueue(
+            Job::Finish {
+                run,
+                call: id,
+                error: after_records.then_some(CallError::Token(TokenError::AfterRecords)),
+            },
+            out,
+        );
         Ok(())
     }
 
@@ -382,7 +420,7 @@ impl Drawing {
             return Err(Stale);
         }
         if let Some(at) = self.call_at(thread, run, id, out)? {
-            self.intake(at, bytes, out);
+            self.intake(at, |surface| parse_intake(bytes, surface), out);
         }
         Ok(())
     }
@@ -504,13 +542,23 @@ impl Drawing {
         })
     }
 
-    /// Parses a record and queues it behind any pending write.
-    fn intake(&mut self, at: usize, bytes: &[u8], out: &mut Output) {
+    /// Applies the ingress limits and queues a record behind any pending write.
+    fn intake(
+        &mut self,
+        at: usize,
+        record: impl FnOnce(RecordSurface) -> Result<Record, StepError>,
+        out: &mut Output,
+    ) {
         let run = self.calls[at].run;
-        let screen = self
+        let surface = if self
             .runs
             .iter()
-            .any(|ledger| ledger.run == run && ledger.canvas.is_some());
+            .any(|ledger| ledger.run == run && ledger.canvas.is_some())
+        {
+            RecordSurface::ScreenOffered
+        } else {
+            RecordSurface::OverlayOnly
+        };
         let call = &mut self.calls[at];
         call.records += 1;
         if call.refused {
@@ -527,24 +575,14 @@ impl Drawing {
             self.enqueue(job, out);
             return;
         }
-        let parsed = if screen {
-            parse_screen_draw_record(bytes)
-        } else {
-            parse_draw_record(bytes)
-        };
-        let job = match parsed {
+        let job = match record(surface) {
             Ok(record) => Job::Record {
                 run,
                 call: id,
                 record: Box::new(record),
             },
-            Err(mut error) => {
+            Err(error) => {
                 call.refused = true;
-                if error.step.is_none() {
-                    error.step = serde_json::from_slice::<Named>(bytes)
-                        .ok()
-                        .map(|named| named.step.id);
-                }
                 Job::Reject {
                     run,
                     call: id,
@@ -1157,6 +1195,21 @@ impl Drawing {
             });
         &mut self.runs[at]
     }
+}
+
+fn parse_intake(bytes: &[u8], surface: RecordSurface) -> Result<Record, StepError> {
+    let parsed = match surface {
+        RecordSurface::OverlayOnly => parse_draw_record(bytes),
+        RecordSurface::ScreenOffered => parse_screen_draw_record(bytes),
+    };
+    parsed.map_err(|mut error| {
+        if error.step.is_none() {
+            error.step = serde_json::from_slice::<Named>(bytes)
+                .ok()
+                .map(|named| named.step.id);
+        }
+        error
+    })
 }
 
 /// The closed records of one whole envelope and whether text followed them, or why it isn't one.

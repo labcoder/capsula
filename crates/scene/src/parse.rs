@@ -31,55 +31,78 @@ fn parse_draw(bytes: &[u8], extra: Option<Surface>) -> Result<Record, StepError>
         }
         record => record?,
     };
-    if let Record::Begin(begin) = &record {
-        let field = if begin.display.is_some() {
-            Some("display")
-        } else if begin.surface == Surface::Overlay || extra == Some(begin.surface) {
-            None
-        } else {
-            Some("surface")
-        };
-        if let Some(field) = field {
-            return Err(StepError {
-                step: None,
-                path: FieldPath::default().field(field),
-                code: ErrorCode::Unsupported,
-            });
-        }
+    if let Record::Begin(begin) = &record
+        && begin.display.is_some()
+    {
+        return Err(StepError {
+            step: None,
+            path: FieldPath::default().field("display"),
+            code: ErrorCode::Unsupported,
+        });
     }
     if let Record::Step(step) = &record {
         crate::refuse_three_dimensional(step)?;
-        let boxed = |op: &Op| match op {
-            Op::Highlight(mark) => matches!(mark.target, Target::Box(_)),
-            Op::Callout(label) => matches!(label.target, Target::Box(_)),
-            _ => false,
-        };
-        if let Some(index) = step.put.iter().position(boxed).filter(|_| extra.is_none()) {
+    }
+    check_draw_surface(&record, extra)?;
+    if let Record::Step(step) = &record
+        && !step.set.is_empty()
+    {
+        let raw: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| StepError::new(ErrorCode::Malformed))?;
+        if let Some(index) = raw["step"]["set"]
+            .as_array()
+            .and_then(|set| set.iter().position(|change| change.get("info").is_some()))
+        {
             return Err(StepError::in_step(
                 &step.id,
-                FieldPath::default()
-                    .field("put")
-                    .index(index)
-                    .field("target"),
+                FieldPath::default().field("set").index(index).field("info"),
                 ErrorCode::Unsupported,
             ));
         }
-        if !step.set.is_empty() {
-            let raw: serde_json::Value =
-                serde_json::from_slice(bytes).map_err(|_| StepError::new(ErrorCode::Malformed))?;
-            if let Some(index) = raw["step"]["set"]
-                .as_array()
-                .and_then(|set| set.iter().position(|change| change.get("info").is_some()))
-            {
+    }
+    Ok(record)
+}
+
+/// Applies the overlay-only restriction to a draw record already checked by
+/// [`parse_screen_draw_record`].
+///
+/// # Errors
+/// Returns `Unsupported` for a non-overlay surface or the first box target.
+pub fn check_overlay_draw_record(record: &Record) -> Result<(), StepError> {
+    check_draw_surface(record, None)
+}
+
+fn check_draw_surface(record: &Record, extra: Option<Surface>) -> Result<(), StepError> {
+    match record {
+        Record::Begin(begin)
+            if begin.surface != Surface::Overlay && extra != Some(begin.surface) =>
+        {
+            return Err(StepError {
+                step: None,
+                path: FieldPath::default().field("surface"),
+                code: ErrorCode::Unsupported,
+            });
+        }
+        Record::Step(step) if extra.is_none() => {
+            let boxed = |op: &Op| match op {
+                Op::Highlight(mark) => matches!(mark.target, Target::Box(_)),
+                Op::Callout(label) => matches!(label.target, Target::Box(_)),
+                _ => false,
+            };
+            if let Some(index) = step.put.iter().position(boxed) {
                 return Err(StepError::in_step(
                     &step.id,
-                    FieldPath::default().field("set").index(index).field("info"),
+                    FieldPath::default()
+                        .field("put")
+                        .index(index)
+                        .field("target"),
                     ErrorCode::Unsupported,
                 ));
             }
         }
+        _ => {}
     }
-    Ok(record)
+    Ok(())
 }
 
 /// The draw tool supplies its only version and surface when a model's begin omits them.

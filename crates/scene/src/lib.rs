@@ -26,7 +26,9 @@ pub use budget::GlobalBudget;
 pub use error::{Budget, ErrorCode, FieldPath, StepError};
 pub use id::{Handle, Ms, WireId};
 pub use motion::{Frame, FrameItem, PreparedActivation, SceneView, ViewFrame};
-pub use parse::{parse_draw_record, parse_record, parse_screen_draw_record};
+pub use parse::{
+    check_overlay_draw_record, parse_draw_record, parse_record, parse_screen_draw_record,
+};
 pub use record::{Begin, End, Op, Others, Record, Step};
 pub use schema::{draw_schema, screen_draw_schema};
 pub use state::{

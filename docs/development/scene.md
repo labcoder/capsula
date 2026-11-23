@@ -178,7 +178,8 @@ semantic admission still refuses them.
 
 - **Box targets.** A `highlight`'s or `callout`'s `target` may be `{"box":[x,y,w,h]}` in
   canvas units, with a positive width and height (`OutOfRange` otherwise). Only the screen
-  parser accepts one; the older overlay-only parser refuses it at `put[i].target`.
+  parser accepts one. The overlay-only parser and complete-call admission without a screen
+  canvas both use the same typed check to refuse it at `put[i].target`.
 - **The stamp.** `begin.display` (the display's physical origin and size and its DPI) is
   written only by the brain, after the parse: a model-written one is `Unsupported` in both
   parsers. `screen::stamp` sets `size` to the picture's and refuses a written size that
