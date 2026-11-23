@@ -433,10 +433,13 @@ fn stored_rows(state: &Threads, cx: &App) -> Rc<[Row]> {
             state,
             cx,
         );
-        line.text = cx
-            .global::<Strings>()
-            .with_model(note.text, note.model.as_str())
-            .into();
+        let strings = cx.global::<Strings>();
+        line.text = if note.text == Text::ScreenNoteCant {
+            strings.get(note.text)
+        } else {
+            strings.with_model(note.text, note.model.as_str())
+        }
+        .into();
         rows.insert(at, line);
     }
     rows.into()
@@ -905,21 +908,88 @@ mod tests {
             assert_eq!(ids(&rows), [("event", 5), ("note", 5), ("event", 7)]);
             assert_eq!(
                 rows[1].text.as_ref(),
-                "GPT-6 Sol doesn't support screenshots, so messages will go without one."
+                "Hold to talk can't include a screenshot right now."
             );
             assert_eq!(rows[1].label, None);
             // Said in an empty conversation, it stays above what came later.
             state.set_screen_note_for_tests(note(None, Text::ScreenNoteCan));
             let rows = stored_rows(&state, cx);
             assert_eq!(ids(&rows), [("note", 0), ("event", 5), ("event", 7)]);
-            assert_eq!(
-                rows[0].text.as_ref(),
-                "GPT-6 Sol supports screenshots, so holding to talk will send one along."
-            );
             // Another conversation is open: the line stays with its own.
             state.open = Some(ThreadId(4));
             assert_eq!(ids(&stored_rows(&state, cx)), [("event", 5), ("event", 7)]);
         });
+    }
+
+    #[gpui::test]
+    fn a_screen_note_names_the_model_without_promising_a_picture(cx: &mut TestAppContext) {
+        use crate::link::LinkEvent;
+        use crate::presence::screen_hold_tests::{luna, on, receive, screen_ready, sol};
+        use crate::runs::ScreenNotice;
+        use kumochi_protocol::message::{ConnectionKind, ScreenHolds, ScreenOff};
+
+        let ready = screen_ready(Some(ScreenHolds::Off(ScreenOff::ModelCantSee)), cx);
+        ready.owner.update(cx, |owner, cx| {
+            let thread = owner.runs.thread();
+            owner.chat.update(cx, |chat, _| {
+                chat.open = thread;
+                chat.loaded = true;
+            });
+        });
+        let offer = |state, cx: &mut TestAppContext| {
+            receive(
+                &ready.owner,
+                LinkEvent::ScreenHolds {
+                    generation: 1,
+                    state,
+                },
+                cx,
+            );
+        };
+        let note = |cx: &mut TestAppContext| {
+            ready.owner.read_with(cx, |owner, cx| {
+                stored_rows(owner.chat.read(cx), cx)
+                    .iter()
+                    .find(|row| row.id.0 == "note")
+                    .expect("a retained screen note")
+                    .text
+                    .clone()
+            })
+        };
+
+        offer(on(&luna()), cx);
+        let first = note(cx);
+        let sol = sol();
+        ready.owner.update(cx, |owner, cx| {
+            owner.save_default_model(ConnectionKind::ChatGpt, sol.slug.clone(), cx);
+        });
+        offer(on(&sol), cx);
+        ready.owner.read_with(cx, |owner, cx| {
+            assert_eq!(owner.screen_notice(cx), ScreenNotice::On(&sol.display_name));
+        });
+        let switched = note(cx);
+        assert!(
+            ready
+                .owner
+                .update(cx, |owner, cx| owner.save_show_screen(false, cx))
+        );
+        ready.owner.read_with(cx, |owner, cx| {
+            assert_eq!(owner.settings.read(cx).show_screen_choice(), Some(false));
+            assert!(owner.current_offer(cx).is_none());
+        });
+        let pending_off = note(cx);
+        offer(ScreenHolds::Off(ScreenOff::TurnedOff), cx);
+        let switched_off = note(cx);
+        let historical = "At this point, holding to talk could send a screenshot to GPT-6 Luna.";
+        assert_eq!(
+            [
+                first.as_ref(),
+                switched.as_ref(),
+                pending_off.as_ref(),
+                switched_off.as_ref(),
+            ],
+            [historical; 4]
+        );
     }
 
     #[gpui::test]
