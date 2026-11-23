@@ -16,7 +16,9 @@ use super::error::VaultError;
 use super::marker::{Disposition, MarkerUpdate, Phase, SignOutMarker};
 use super::records::{Account, MAX_RECORD_BYTES, Record, RevocationList};
 use crate::platform::SessionLock;
-use crate::platform::credential::{CredentialStore, SecretBytes, native_session_lock_path};
+use crate::platform::credential::{
+    CredentialStore, CredentialStoreError, SecretBytes, native_session_lock_path,
+};
 
 mod github;
 pub(crate) mod staging;
@@ -126,7 +128,10 @@ impl<S: CredentialStore> Vault<S> {
     /// # Errors
     /// Returns an unsupported-store error, typed Busy for contention, or a path/lock failure.
     pub(in crate::connections) fn open(store: S) -> Result<Self, VaultError> {
-        let path = native_session_lock_path()?.ok_or(VaultError::NoDataDir)?;
+        let path = native_session_lock_path().map_err(|error| match error {
+            CredentialStoreError::NoDataDir => VaultError::NoDataDir,
+            error => error.into(),
+        })?;
         Self::with_service(store, CREDENTIAL_SERVICE, &path)
     }
 
