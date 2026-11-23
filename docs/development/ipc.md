@@ -348,6 +348,7 @@ transport.
   one closes so another process can never take the name in between.
 - The brain only talks to the `kumochi.exe` beside its own executable, and the shell only to
   the `kumochid.exe` beside its own. Each side checks the other's image path through the pipe.
+  Rejection logs name the failed check, not the image path, DACL contents or peer build string.
 - The control and data clients must be the same process. Once both hellos pass, the brain
   checks the control client's image again and holds its process handle for the whole connection.
   It registers the shell's pid so the screen walk excludes the shell, and clears it on disconnect.

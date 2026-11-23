@@ -4597,7 +4597,13 @@ fn queued_reconnect_does_not_send_shutdown_to_unknown_or_partial_pairs() {
                 end,
                 queued_fixture_connector(shell_control, None, || {
                     drop(shell_data);
-                    Err(super::LinkError::NotOurBrain(PathBuf::from("foreign")))
+                    let refused = super::LinkError::NotOurBrain;
+                    assert_eq!(
+                        refused.to_string(),
+                        "the pipe isn't served by the brain beside the shell"
+                    );
+                    assert_eq!(format!("{refused:?}"), "NotOurBrain");
+                    Err(refused)
                 }),
             )
         });
