@@ -884,5 +884,6 @@ fn quarantine_refuses_without_creating_a_marker_on_an_unsupported_host() {
     assert_eq!(scratch.read_dir().unwrap().count(), 0);
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[cfg(windows)]
 pub(crate) mod tests;

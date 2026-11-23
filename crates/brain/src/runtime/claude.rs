@@ -1276,9 +1276,11 @@ impl Brain {
 mod mcp;
 #[cfg(test)]
 mod mcp_tests;
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[cfg(windows)]
 mod quarantine_tests;
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[cfg(windows)]
 mod question_tests;
 #[cfg(test)]
 pub(super) mod tests;
