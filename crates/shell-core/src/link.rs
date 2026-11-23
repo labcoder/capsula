@@ -1113,6 +1113,10 @@ impl LinkHandle {
     /// Queues a control message for `session`'s brain. False when the connection ended or the
     /// mailbox refused. Stop, drawing clears and queued scene refusals don't take the outbox lock.
     /// shortcut: control Debug prints physical points for assertions; use only redacted kinds if adding diagnostics here.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one dispatcher decides control admission"
+    )]
     pub fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
         if matches!(
             message,
@@ -1472,8 +1476,8 @@ impl LinkHandle {
         receiver
     }
 
-    #[cfg(test)]
-    pub(crate) fn record_typed_screen() -> (Self, Session, Receiver<DataToBrain>) {
+    /// A one-entry data outbox on a detached, registered typed-screen fixture.
+    pub fn record_typed_screen() -> (Self, Session, Receiver<DataToBrain>) {
         let (mut link, _) = Self::recording();
         let (recording, requests) = async_channel::bounded(1);
         link.recording = Some(recording);

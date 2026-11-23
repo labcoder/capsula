@@ -680,10 +680,6 @@ impl Coordinator {
     /// A granted send stopped: the picture it carried is settled, its lease retires, and each held
     /// delete no other lease carries goes to the store. A failed lease's late settlement settles
     /// only the picture.
-    #[expect(
-        clippy::fn_params_excessive_bools,
-        reason = "whether the transport proved no write was attempted"
-    )]
     pub(super) fn send_settled(
         &mut self,
         lease: LeaseId,

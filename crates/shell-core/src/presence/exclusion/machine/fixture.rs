@@ -27,7 +27,6 @@ pub struct Fake {
     pub set_failure: Option<usize>,
     pub restore_failure: u8,
     pub controls: Option<async_channel::Receiver<kumochi_protocol::message::ControlToBrain>>,
-    #[cfg(test)]
     pub(crate) proof_before_restore: bool,
 }
 
@@ -53,7 +52,6 @@ impl Fake {
             set_failure: None,
             restore_failure: 0,
             controls: None,
-            #[cfg(test)]
             proof_before_restore: false,
         }
     }
@@ -111,7 +109,6 @@ impl Surfaces for Fake {
         reason = "asserts the fixture restores the same retained surface"
     )]
     fn restore(&mut self, slot: Slot, prior: &Prior) -> Result<(), Error> {
-        #[cfg(test)]
         if self.proof_before_restore {
             assert_eq!(
                 self.controls.as_ref().unwrap().len(),

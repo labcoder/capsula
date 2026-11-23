@@ -128,6 +128,11 @@ impl fmt::Debug for Applied {
     }
 }
 
+enum Submit {
+    Plain(Content),
+    Picture,
+}
+
 /// A turn sent and not answered yet, then its named run's until that run's first terminal state.
 struct Submitted {
     /// The selection it was typed at.
@@ -593,7 +598,7 @@ impl Runs {
         if audio == AudioSession::QueuedRequired {
             self.forget_texts(|_| true);
         }
-        self.record_submit(turn, Some(text.into()), false);
+        self.record_submit(turn, Submit::Plain(text.into()));
         Ok(())
     }
 
@@ -620,7 +625,11 @@ impl Runs {
         self.turns_sent.checked_add(1).ok_or(Refused::Busy)
     }
 
-    fn record_submit(&mut self, turn: u32, text: Option<Content>, pictured: bool) {
+    fn record_submit(&mut self, turn: u32, submit: Submit) {
+        let (text, pictured) = match submit {
+            Submit::Plain(text) => (Some(text), false),
+            Submit::Picture => (None, true),
+        };
         self.submitted.push_back(Submitted {
             revision: self.revision,
             turn,

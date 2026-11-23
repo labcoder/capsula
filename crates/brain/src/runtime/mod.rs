@@ -274,6 +274,10 @@ impl Brain {
     ///
     /// # Errors
     /// Fails when the store's thread can't be started.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one constructor assembles the runtime owners"
+    )]
     pub(crate) fn new(
         store: Store,
         main_thread: ThreadId,
@@ -1082,9 +1086,9 @@ impl Brain {
                 Input::TypedTargetRead {
                     epoch,
                     offer,
-                    inherited,
+                    result,
                 } => {
-                    if let Err(ended) = self.typed_screen_read(epoch, offer, inherited, &mut link) {
+                    if let Err(ended) = self.typed_screen_read(epoch, offer, result, &mut link) {
                         return ended;
                     }
                     continue;
@@ -1494,9 +1498,13 @@ impl Brain {
                         };
                         self.claude.picture_granted(lease.key, kind, grant.clone());
                     }
-                    let granted = SendLease::new(lease, self.inputs_tx.clone())
-                        .with_picture(picture)
-                        .for_typed_picture(self.coordinator.typed_picture_lease(lease));
+                    let granted =
+                        SendLease::new(lease, self.inputs_tx.clone()).with_picture(picture);
+                    let granted = if self.coordinator.typed_picture_lease(lease) {
+                        granted.for_typed_picture()
+                    } else {
+                        granted
+                    };
                     engines::answer(&self.asks, lease.key, Answer::Grant(granted));
                 }
                 Effect::Rebuild(key) => {
@@ -1671,7 +1679,8 @@ fn take(turns: &mpsc::Sender<Turn>, turn: Turn) -> Option<Ended> {
 /// isn't taking yet.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the reader borrows per-connection ingress"
+    clippy::too_many_lines,
+    reason = "one reader routes every ordered data frame and borrows per-connection ingress"
 )]
 async fn read_data(
     pipe: &mut (impl AsyncRead + Unpin),

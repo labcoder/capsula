@@ -254,7 +254,7 @@ pub(super) fn spawn_reader(
                     },
                     StoreOp::ReadTypedTarget(read) => {
                         let inherited = open && context::read_typed_target(&side, &read);
-                        read.reply(inherited)
+                        read.reply(inherited.then_some(()).ok_or(()))
                     }
                     StoreOp::ReadCall(call) => Input::ReadFinished(context::read_call(
                         admitted.map(|()| &*side),

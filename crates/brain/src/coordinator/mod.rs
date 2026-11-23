@@ -159,8 +159,8 @@ pub enum Input {
         epoch: u64,
         /// The candidate's offer number.
         offer: kumochi_protocol::message::TypedScreenOffer,
-        /// The chat exists, is live and has no per-task choice.
-        inherited: bool,
+        /// Success only when the chat exists, is live and has no per-task choice.
+        result: Result<(), ()>,
     },
     /// A pictured typed attempt. Only the paired runtime can establish capture authority.
     PicturedTurn {
@@ -1027,10 +1027,10 @@ impl Coordinator {
             }
             Input::CardsRead { cards, reply } => return Ok(vec![Effect::Cards { cards, reply }]),
             Input::Turn { turn, thread, text } => {
-                self.typed(turn, thread, Some(text), &mut effects)
+                self.typed(turn, thread, Some(text), &mut effects);
             }
             Input::RefuseTurn { turn, thread } | Input::PicturedTurn { turn, thread, .. } => {
-                self.typed(turn, thread, None, &mut effects)
+                self.typed(turn, thread, None, &mut effects);
             }
             Input::Ask {
                 turn,
@@ -1102,13 +1102,13 @@ impl Coordinator {
             Input::SignedIn { generation } => self.signed_in(generation, &mut effects)?,
             Input::SignedOut { generation } => self.signed_out(generation, &mut effects)?,
             Input::SendFlushed { lease } => {
-                self.send_settled(lease, lease::Settlement::Flushed, &mut effects)?
+                self.send_settled(lease, lease::Settlement::Flushed, &mut effects)?;
             }
             Input::SendSettled { lease } => {
-                self.send_settled(lease, lease::Settlement::Unknown, &mut effects)?
+                self.send_settled(lease, lease::Settlement::Unknown, &mut effects)?;
             }
             Input::SendUnsent { lease } => {
-                self.send_settled(lease, lease::Settlement::Unsent, &mut effects)?
+                self.send_settled(lease, lease::Settlement::Unsent, &mut effects)?;
             }
             Input::SendDeadline { lease } => self.send_deadline(lease, &mut effects)?,
             Input::TurnStored { run } => self.turn_stored(run, &mut effects)?,

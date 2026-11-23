@@ -407,6 +407,10 @@ impl Coordinator {
         self.admit_built(key, made, effects)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "image consumption stays ordered with delete fences and engine admission"
+    )]
     fn admit_built(
         &mut self,
         key: BuildKey,

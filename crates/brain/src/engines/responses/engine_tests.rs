@@ -224,7 +224,7 @@ async fn typed_picture_reaches_the_responses_wire_and_settles_as_fully_flushed()
     };
     let grant = SendLease::new(lease, round.inputs_tx.clone())
         .with_picture(Some(crate::coordinator::PictureGrant::open_for_tests()))
-        .for_typed_picture(true);
+        .for_typed_picture();
     round.bearer(Ok(bearer())).await;
     round.answer(Answer::Grant(grant)).await;
     let mut server = round.servers.recv().await.unwrap();

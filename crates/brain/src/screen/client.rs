@@ -99,7 +99,7 @@ impl Drop for TypedDrop {
                 Ok((Reply::Revoked(revoked), _)) if revoked == key => {}
                 Ok((Reply::Refused(Refusal::Stale), _)) => {}
                 _ => {
-                    tracing::debug!("exact screen revocation unavailable; frame expires in worker")
+                    tracing::debug!("exact screen revocation unavailable; frame expires in worker");
                 }
             }
         }));

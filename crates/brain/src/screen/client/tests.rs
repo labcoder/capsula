@@ -92,9 +92,9 @@ async fn both_capture_paths_share_checked_ids_at_exhaustion() {
     });
     let (id, request) = rig.next().await;
     hold_frame(&rig, id, request).await;
-    let held = typed.await.unwrap().unwrap();
-    assert_eq!(held.capture_id(), CaptureId(u64::MAX));
-    drop(held);
+    let picture = typed.await.unwrap().unwrap();
+    assert_eq!(picture.capture_id(), CaptureId(u64::MAX));
+    drop(picture);
     let (id, request) = rig.next().await;
     let key = Key {
         owner: None,

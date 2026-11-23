@@ -11,7 +11,7 @@ use kumochi_protocol::message::{
 use crate::link::{LinkEvent, LinkHandle, Session};
 use crate::presence::exclusion::machine::{Error, Exclusion, Key, Surfaces};
 
-use super::{Refused, Runs};
+use super::{Refused, Runs, Submit};
 
 const TYPED_SUBMIT_OVERHEAD: usize = 160;
 
@@ -430,12 +430,9 @@ impl Runs {
             input.now,
             io.surfaces,
         );
-        let key = match lease {
-            Ok(key) => key,
-            Err(_) => {
-                capture.key = io.exclusion.key(capture.generation, CaptureFor::Turn(turn));
-                return Err(Refused::Busy);
-            }
+        let Ok(key) = lease else {
+            capture.key = io.exclusion.key(capture.generation, CaptureFor::Turn(turn));
+            return Err(Refused::Busy);
         };
         capture.key = Some(key);
         let excluded_qpc = stamp()
@@ -462,7 +459,7 @@ impl Runs {
             return Err(Refused::Offline);
         }
         self.forget_texts(|_| true);
-        self.record_submit(turn, None, true);
+        self.record_submit(turn, Submit::Picture);
         Ok(())
     }
 

@@ -36,12 +36,12 @@ struct Offer {
 }
 
 impl Offer {
-    fn answer(&self, offered: bool) -> ControlToShell {
+    fn answer(&self, offer: Option<TypedScreenOffer>) -> ControlToShell {
         ControlToShell::TypedScreenOffered {
             turn: self.key.turn,
             thread: self.thread,
             draft: self.draft,
-            offer: offered.then_some(self.key.offer),
+            offer,
         }
     }
 }
@@ -65,7 +65,7 @@ pub(super) struct State {
     serial: u64,
     global_revision: u64,
     offer: Option<Offer>,
-    pending: Option<Pending>,
+    pending: Option<Box<Pending>>,
 }
 
 pub(super) enum Progress {
@@ -143,7 +143,7 @@ impl Brain {
         if let Some(offer) = link.typed_screen.offer.take()
             && offer.reading.is_some()
         {
-            link.control(&offer.answer(false))
+            link.control(&offer.answer(None))
                 .map_err(|Full| Ended::Lost)?;
         }
         Ok(())
@@ -342,7 +342,7 @@ impl Brain {
                 return link.control(&refused).map_err(|Full| Ended::Lost);
             }
         } else {
-            link.control(&offer.answer(true))
+            link.control(&offer.answer(Some(offer.key.offer)))
                 .map_err(|Full| Ended::Lost)?;
         }
         link.typed_screen.offer = Some(offer);
@@ -353,17 +353,17 @@ impl Brain {
         &self,
         epoch: u64,
         key: TypedScreenOffer,
-        inherited: bool,
+        result: Result<(), ()>,
         link: &mut Link<'_, '_>,
     ) -> Result<(), Ended> {
         if let Some(mut offer) = link.typed_screen.offer.take_if(|offer| {
             offer.key.epoch == epoch && offer.key.offer == key && offer.reading.is_some()
         }) {
             drop(offer.reading.take());
-            let current = inherited
+            let current = result.is_ok()
                 && self.typed_screen_current(&offer, link.typed_screen.global_revision)
                 && self.coordinator.next_typed_turn() == Some(offer.key.turn);
-            link.control(&offer.answer(current))
+            link.control(&offer.answer(current.then_some(key)))
                 .map_err(|Full| Ended::Lost)?;
             if current {
                 link.typed_screen.offer = Some(offer);
@@ -429,13 +429,13 @@ impl Brain {
                 )
                 .await
         }));
-        link.typed_screen.pending = Some(Pending {
+        link.typed_screen.pending = Some(Box::new(Pending {
             offer,
             text,
             request,
             until,
             capture,
-        });
+        }));
         Ok(())
     }
 

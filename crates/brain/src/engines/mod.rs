@@ -248,8 +248,8 @@ impl SendLease {
         self
     }
 
-    pub(crate) fn for_typed_picture(mut self, typed_picture: bool) -> Self {
-        self.typed_picture = typed_picture;
+    pub(crate) fn for_typed_picture(mut self) -> Self {
+        self.typed_picture = true;
         self
     }
 

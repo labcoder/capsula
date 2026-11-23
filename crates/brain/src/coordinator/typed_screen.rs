@@ -26,11 +26,11 @@ impl PartialEq for ReadTarget {
 }
 
 impl ReadTarget {
-    pub(crate) fn reply(&self, inherited: bool) -> Input {
+    pub(crate) fn reply(&self, result: Result<(), ()>) -> Input {
         Input::TypedTargetRead {
             epoch: self.epoch,
             offer: self.offer,
-            inherited,
+            result,
         }
     }
 }

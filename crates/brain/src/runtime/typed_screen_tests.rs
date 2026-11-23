@@ -30,7 +30,7 @@ const DRAFT: TypedScreenDraft = TypedScreenDraft {
 const OFFER: TypedScreenOffer = TypedScreenOffer(NonZeroU64::MIN);
 const LEASE: LeaseGeneration = LeaseGeneration(3);
 
-fn desk(scratch: &Scratch, enabled: bool) -> (Brain, Rig<Holds>) {
+fn desk(scratch: &Scratch) -> (Brain, Rig<Holds>) {
     let mut brain = test_support::brain(scratch, "5000 text late");
     let rig = seeing(&mut brain);
     let slug = ModelSlug::new("gpt-6-sol").unwrap();
@@ -43,8 +43,6 @@ fn desk(scratch: &Scratch, enabled: bool) -> (Brain, Rig<Holds>) {
         images: vec![slug],
         ..crate::coordinator::Ready::fixture()
     });
-    brain.typed_screen_clock =
-        enabled.then_some(|stamp| (stamp < 10_000).then(|| Duration::from_millis(stamp)));
     (brain, rig)
 }
 
@@ -124,7 +122,7 @@ async fn paired(brain: &mut Brain, client: impl AsyncFnOnce(Shell<DuplexStream>)
 #[tokio::test]
 async fn dormant_typed_screen_refuses_in_order_without_touching_the_worker() {
     let scratch = Scratch::new("dormant-typed-screen");
-    let (mut brain, mut rig) = desk(&scratch, false);
+    let (mut brain, mut rig) = desk(&scratch);
     paired(&mut brain, async |mut shell| {
         offer(&mut shell, 1, None).await;
         submit(&mut shell, 1, screen(OFFER)).await;
@@ -166,7 +164,8 @@ async fn dormant_typed_screen_refuses_in_order_without_touching_the_worker() {
 #[tokio::test]
 async fn typed_screen_cancel_overtakes_data_without_starting_capture_or_retargeting() {
     let scratch = Scratch::new("cancel-first-typed-screen");
-    let (mut brain, mut rig) = desk(&scratch, true);
+    let (mut brain, mut rig) = desk(&scratch);
+    brain.typed_screen_clock = Some(|stamp| (stamp < 10_000).then(|| Duration::from_millis(stamp)));
     paired(&mut brain, async |mut shell| {
         offer(&mut shell, 1, Some(OFFER)).await;
         shell

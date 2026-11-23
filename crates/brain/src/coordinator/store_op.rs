@@ -382,7 +382,7 @@ impl StoreOp {
                 key: read.snapshot.key,
                 result: Err(()),
             },
-            Self::ReadTypedTarget(read) => read.reply(false),
+            Self::ReadTypedTarget(read) => read.reply(Err(())),
             Self::Issue { serial, .. } => Input::IssueWritten {
                 serial: *serial,
                 reply: Err(()),
