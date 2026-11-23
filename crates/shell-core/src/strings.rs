@@ -763,6 +763,15 @@ mod tests {
     }
 
     #[test]
+    fn each_text_has_a_distinct_catalog_id() {
+        let mut entries = std::collections::HashMap::new();
+        for text in Text::ALL {
+            let id = text.id();
+            assert_eq!(entries.insert(id, text), None, "{text:?} shares {id}");
+        }
+    }
+
+    #[test]
     fn every_text_is_in_the_catalog() {
         let strings = Strings::english();
         for text in Text::ALL {
