@@ -168,6 +168,7 @@ async fn the_product_registration_controls_device_flow_without_using_real_creden
         worker,
         net,
         crate::config::tuning::OAuthTuning::default(),
+        crate::config::tuning::TokenTuning::default(),
     )
     .unwrap();
     settle_owner(&mut accounts).await;

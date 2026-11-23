@@ -18,6 +18,7 @@ use super::{
     CallEnd, CallError, Drawing, Held, Input, Loss, MAX_QUEUED_JOBS, Output, Remaining, Reply,
     StoredScene, Target, Write,
 };
+use crate::config::tuning::DrawingTuning;
 use crate::coordinator::{Effect, Stale, StoreOp};
 use crate::engines::CallId;
 
@@ -2839,6 +2840,35 @@ fn a_step_stored_into_a_scene_cleared_meanwhile_spends_the_run_s_step_budget() {
     assert_eq!(store.scenes.len(), 1, "the run drew its whole budget");
 }
 
+#[test]
+fn a_lower_call_budget_refuses_only_once_after_the_last_allowed_call() {
+    let mut drawing = Drawing {
+        tuning: DrawingTuning {
+            calls: 2,
+            ..DrawingTuning::default()
+        },
+        ..Drawing::default()
+    };
+    let mut store = Store::default();
+    for (name, remaining) in [("a", Remaining::Steps), ("b", Remaining::Nothing)] {
+        let out = store.run(&mut drawing, call(1, name, args(name, &[text(name, "x")])));
+        let [end] = out.calls.as_slice() else {
+            panic!("one draw result");
+        };
+        assert_eq!(end.error, None);
+        assert_eq!(end.drawn, [wire(name)]);
+        assert_eq!(end.remaining, remaining);
+    }
+    let out = store.run(&mut drawing, call(1, "c", args("c", &[text("c", "x")])));
+    let [end] = out.calls.as_slice() else {
+        panic!("one refusal");
+    };
+    assert_eq!(end.error, Some(CallError::Exhausted));
+    assert!(out.effects.is_empty(), "the refused call writes nothing");
+    let later = call(1, "d", args("d", &[text("d", "x")]));
+    assert_eq!(drawing.handle(later).err(), Some(Stale));
+}
+
 /// A streamed record that doesn't parse, so it's a rejected record.
 const UNPARSED: &str = r#"{"step":{"id":"c","put":[],"colour":1}}"#;
 
@@ -2881,6 +2911,38 @@ fn rejections_in_calls_opened_before_any_failed_share_the_run_s_eight() {
     );
     assert_eq!(errors[8], Some(CallError::Exhausted));
     assert!(store.scenes.is_empty(), "the ninth call drew nothing");
+}
+
+#[test]
+fn a_lower_rejection_budget_stops_a_valid_record_in_an_already_open_call() {
+    let mut drawing = Drawing {
+        tuning: DrawingTuning {
+            rejected: 2,
+            ..DrawingTuning::default()
+        },
+        ..Drawing::default()
+    };
+    let mut store = Store::default();
+    let begins = [begin("a", ""), begin("b", ""), begin("c", "")];
+    let valid = step(&text("a", "x"));
+    let records = [
+        ("a", 0, begins[0].as_str()),
+        ("b", 0, begins[1].as_str()),
+        ("c", 0, begins[2].as_str()),
+        ("a", 1, UNPARSED),
+        ("b", 1, UNPARSED),
+        ("c", 1, valid.as_str()),
+    ];
+    let ends = ends(&mut store, &mut drawing, &records);
+    let [first, at_limit, refused] = ends.as_slice() else {
+        panic!("two rejected records and one exhausted call");
+    };
+    assert_eq!(error(first), ErrorCode::UnknownField);
+    assert_eq!(first.remaining, Remaining::Steps);
+    assert_eq!(error(at_limit), ErrorCode::UnknownField);
+    assert_eq!(at_limit.remaining, Remaining::Nothing);
+    assert_eq!(refused.error, Some(CallError::Exhausted));
+    assert!(store.scenes.is_empty(), "the refused record writes nothing");
 }
 
 #[test]

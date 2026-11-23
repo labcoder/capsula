@@ -291,22 +291,35 @@ impl Harness {
     }
 
     fn seeded(name: &str, seed: impl FnOnce(&mut Vault<FakeStore>)) -> Self {
+        Self::seeded_with_state(name, seed, AccountState::start())
+    }
+
+    fn seeded_with_state(
+        name: &str,
+        seed: impl FnOnce(&mut Vault<FakeStore>),
+        started: (AccountState, Vec<Effect>),
+    ) -> Self {
         let scratch = Scratch::new(name);
         let service = format!("test-account-{:016x}", getrandom::u64().expect("random"));
         let store = FakeStore::default();
         let seeding = scratch.db().with_file_name("seed.lock");
         seed(&mut Vault::with_service(store.clone(), &service, &seeding).expect("seed vault"));
-        Self::boot(Rc::new(scratch), service, store, Wall::new())
+        Self::boot(Rc::new(scratch), service, store, Wall::new(), started)
     }
 
-    fn boot(scratch: Rc<Scratch>, service: String, store: FakeStore, wall: Wall) -> Self {
+    fn boot(
+        scratch: Rc<Scratch>,
+        service: String,
+        store: FakeStore,
+        wall: Wall,
+        (state, effects): (AccountState, Vec<Effect>),
+    ) -> Self {
         let lock = scratch.db().with_file_name(SESSION_LOCK);
         let (opener, name) = (store.clone(), service.clone());
         let worker = Worker::new(
             Box::new(move || Vault::with_service(opener.clone(), &name, &lock)),
             Arc::new(wall.clone()),
         );
-        let (state, effects) = AccountState::start();
         let mut harness = Self {
             state,
             worker,
@@ -341,10 +354,17 @@ impl Harness {
             store,
             worker,
             wall,
+            state,
             ..
         } = self;
         drop(worker);
-        Self::boot(scratch, service, store, wall)
+        Self::boot(
+            scratch,
+            service,
+            store,
+            wall,
+            AccountState::start_with_refresh_lead(state.refresh_lead),
+        )
     }
 
     /// Time passes.
@@ -1324,6 +1344,7 @@ fn a_lasting_busy_lock_is_retried_on_each_op() {
         "test-account-busy".to_owned(),
         FakeStore::default(),
         Wall::new(),
+        AccountState::start(),
     );
     assert_eq!(h.views, [AccountView::Busy]);
     h.op(AccountOp::SignIn);

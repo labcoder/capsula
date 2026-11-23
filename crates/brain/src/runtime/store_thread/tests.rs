@@ -38,6 +38,7 @@ fn spawn_with_room(
     let (acks, _replies) = mpsc::unbounded_channel();
     let (heard, attempts) = std_mpsc::channel();
     let schedule = Schedule {
+        context: crate::config::tuning::ContextTuning::default(),
         quiet: Duration::from_millis(1),
         first_retry: Duration::from_millis(20),
         last_retry: Duration::from_millis(20),

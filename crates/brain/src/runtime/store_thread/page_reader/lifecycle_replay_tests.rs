@@ -1,6 +1,7 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use crate::config::tuning::ContextTuning;
 use crate::context::{ConnectionTag, Origin, RunSnapshot};
 use crate::coordinator::{
     BuildContext, BuildKey, CompactContext, JobKey, JobKind, ReadJob, Unbuilt,
@@ -90,7 +91,12 @@ fn lifecycle_replay_deadline_is_budget_not_store_failure_or_partial_request() {
     let store = replay_store(&scratch);
     let control = Control::new(Instant::now() + Duration::from_secs(60));
     let side = store.side();
-    let built = super::context::read(Some(&side), build(control.clone()), || exhausted(&control));
+    let built = super::context::read(
+        Some(&side),
+        build(control.clone()),
+        ContextTuning::default(),
+        || exhausted(&control),
+    );
     assert_eq!(built.result, Err(Unbuilt::TooLarge { room: None }));
     ordinary_read_after_cleanup(&store, &control);
 }
@@ -123,7 +129,9 @@ fn lifecycle_background_compaction_remains_text_only_with_an_inactive_handler() 
         snapshot: Some(snapshot()),
         compact_at: 0,
     };
-    let built = super::context::read_job(Some(&side), read, || exhausted(&control));
+    let built = super::context::read_job(Some(&side), read, ContextTuning::default(), || {
+        exhausted(&control);
+    });
     let ask = built.result.unwrap().unwrap();
     assert_eq!(ask.generation, Generation(0));
     assert_eq!(ask.covers, Some((EventId(2), EventId(5))));
@@ -184,9 +192,12 @@ fn lifecycle_inline_summary_sql_does_not_activate_the_recall_handler() {
 #[test]
 fn lifecycle_expired_barrier_answers_remain_budget_errors() {
     let control = Control::new(Instant::now().checked_sub(Duration::from_secs(1)).unwrap());
-    let built = super::context::read(None, build(control.clone()), || {
-        panic!("no snapshot admitted")
-    });
+    let built = super::context::read(
+        None,
+        build(control.clone()),
+        ContextTuning::default(),
+        || panic!("no snapshot admitted"),
+    );
     assert_eq!(built.result, Err(Unbuilt::TooLarge { room: None }));
     let compact = CompactContext {
         control: control.clone(),
@@ -208,7 +219,9 @@ fn lifecycle_expired_barrier_answers_remain_budget_errors() {
         snapshot: Some(snapshot()),
         compact_at: 0,
     };
-    let job = super::context::read_job(None, job, || panic!("no snapshot admitted"));
+    let job = super::context::read_job(None, job, ContextTuning::default(), || {
+        panic!("no snapshot admitted")
+    });
     assert_eq!(job.result, Err(Unbuilt::TooLarge { room: None }));
 }
 
@@ -223,7 +236,12 @@ fn lifecycle_hook_failures_refuse_the_whole_build() {
             .fault
             .store(point, std::sync::atomic::Ordering::SeqCst);
         let side = store.side();
-        let built = super::context::read(Some(&side), build(control.clone()), || ());
+        let built = super::context::read(
+            Some(&side),
+            build(control.clone()),
+            ContextTuning::default(),
+            || (),
+        );
         assert_eq!(built.result, Err(Unbuilt::Failed), "hook point {point}");
         ordinary_read_after_cleanup(&store, &control);
     }
@@ -235,7 +253,7 @@ fn lifecycle_replayed_content_is_redacted_at_the_outer_reply() {
     let store = replay_store(&scratch);
     let control = Control::new(Instant::now() + Duration::from_secs(60));
     let side = store.side();
-    let built = super::context::read(Some(&side), build(control), || ());
+    let built = super::context::read(Some(&side), build(control), ContextTuning::default(), || ());
     let request = &built.result.as_ref().unwrap().request;
     assert!(request.input.iter().any(|item| matches!(item, crate::context::InputItem::FunctionOutput { output, .. } if output.contains("private-replay-marker"))));
     let diagnostic = format!("{:?}", crate::coordinator::Input::ContextBuilt(built));

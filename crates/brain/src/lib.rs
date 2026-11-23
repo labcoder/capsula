@@ -249,7 +249,8 @@ async fn run_admitted(
     let claude_on = config.claude_code_enabled();
     tracing::info!(enabled = claude_on, "Claude Code setting");
     // Before the capability is stored, so its write never overlaps the vault's first reads.
-    let (account, vault_held) = accounts(config.oauth_tuning()).map_err(BrainError::Accounts)?;
+    let (account, vault_held) =
+        accounts(config.oauth_tuning(), config.token_tuning()).map_err(BrainError::Accounts)?;
     config.count_in_use(&account.view(), high_water.1);
     let mut brain = Brain::new(
         store,
@@ -353,7 +354,8 @@ fn start_screen(brain: &mut Brain, exe: PathBuf, jobs: &std::sync::Arc<Job>) {
 /// The account system on the real credential store, browser, clock and network, and the fact that
 /// its worker holds the session lock.
 fn accounts(
-    tuning: config::tuning::OAuthTuning,
+    oauth: config::tuning::OAuthTuning,
+    tokens: config::tuning::TokenTuning,
 ) -> io::Result<(
     runtime::account::Accounts,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -373,7 +375,7 @@ fn accounts(
     };
     let held = worker.held();
     Ok((
-        runtime::account::Accounts::spawn(worker, net, tuning)?,
+        runtime::account::Accounts::spawn(worker, net, oauth, tokens)?,
         held,
     ))
 }

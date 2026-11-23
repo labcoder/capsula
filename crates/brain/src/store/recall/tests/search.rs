@@ -124,7 +124,7 @@ fn or_search_matches_late_text_and_sql_independently_limits_reach_and_kind() {
     say(&store, 50, 4, "assistant_text", "needle");
     let direct = Snapshot::begin(&store.conn)
         .unwrap()
-        .recall_events(2, 1, 100, Origin::Task(ThreadId(3)))
+        .recall_events(2, 1, 100, Origin::Task(ThreadId(3)), READ_EVENTS)
         .unwrap();
     assert_eq!(
         direct.iter().map(|row| row.id).collect::<Vec<_>>(),

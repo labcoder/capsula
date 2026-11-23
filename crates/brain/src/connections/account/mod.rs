@@ -19,12 +19,15 @@ mod tests;
 
 use std::collections::VecDeque;
 use std::mem;
+use std::time::Duration;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
     AccountEmail, AccountOp, AccountRecovery, AccountView, Action, ErrorKey, PlanState, UserError,
 };
 use zeroize::Zeroizing;
+
+use crate::config::tuning::TokenTuning;
 
 pub use job::{Done, Job, Snapshot, Worker};
 use lane::{Deferred, Flight, Lane, Queued, Save, Waiting, listed};
@@ -260,6 +263,7 @@ pub struct AccountState {
     refused: Option<u64>,
     /// The wall time the latest timed input carried, for the expiry of a set saved since.
     now: Option<u64>,
+    refresh_lead: Duration,
     /// The generation a session ended in, and why: the registration and email stay, shown as
     /// `SignInAgain` until the account moves again.
     ended: Option<(u64, ErrorKey)>,
@@ -282,6 +286,10 @@ impl AccountState {
     /// A machine that knows nothing yet; its first effect is the patient startup load.
     #[must_use]
     pub fn start() -> (Self, Vec<Effect>) {
+        Self::start_with_refresh_lead(TokenTuning::default().chatgpt_refresh_lead)
+    }
+
+    pub(crate) fn start_with_refresh_lead(refresh_lead: Duration) -> (Self, Vec<Effect>) {
         let mut state = Self {
             busy: true,
             loading: false,
@@ -298,6 +306,7 @@ impl AccountState {
             renewed: false,
             refused: None,
             now: None,
+            refresh_lead,
             ended: None,
             jobs: VecDeque::new(),
             flight: None,

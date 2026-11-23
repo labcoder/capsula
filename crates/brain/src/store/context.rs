@@ -11,6 +11,7 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use super::choice::StoredChoice;
 use super::threads::kind_of;
 use super::{Generation, StoreError, rounds, row_id, sql_id};
+use crate::config::tuning::ContextTuning;
 use crate::context::{Body, Item, Summary};
 use crate::engines::CallId;
 
@@ -124,6 +125,7 @@ pub(crate) struct Uncovered {
 pub(crate) struct Snapshot<'a>(
     pub(super) Transaction<'a>,
     pub(super) Option<crate::recall::control::ReadScope>,
+    ContextTuning,
 );
 
 impl<'a> Snapshot<'a> {
@@ -135,12 +137,21 @@ impl<'a> Snapshot<'a> {
         let tx = conn.unchecked_transaction()?;
         // A deferred transaction's snapshot starts at its first read, so this read starts it.
         tx.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
-        Ok(Self(tx, None))
+        Ok(Self(tx, None, ContextTuning::default()))
     }
 
     pub(crate) fn controlled(mut self, control: crate::recall::control::ReadScope) -> Self {
         self.1 = Some(control);
         self
+    }
+
+    pub(crate) fn with_tuning(mut self, tuning: ContextTuning) -> Self {
+        self.2 = tuning;
+        self
+    }
+
+    pub(crate) fn tuning(&self) -> ContextTuning {
+        self.2
     }
 }
 

@@ -309,6 +309,7 @@ impl Brain {
         #[cfg(test)]
         let (gates, gates_heard) = std::sync::mpsc::channel();
         let schedule = store_thread::Schedule {
+            context: config.context_tuning(),
             #[cfg(test)]
             observed: Some(observer.clone()),
             #[cfg(test)]
@@ -318,6 +319,7 @@ impl Brain {
         let drawing_scenes = store.drawing_scenes();
         let mut coordinator = Coordinator::new(main_thread, last_thread, last_run, scenes);
         coordinator.tuning = config.run_tuning();
+        coordinator.configure_drawing(config.drawing_tuning());
         let recovery_clears = coordinator.restore_drawings(drawing_scenes);
         let store = StoreThread::spawn(store, inputs_tx.clone(), schedule)?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
@@ -336,7 +338,7 @@ impl Brain {
             key_round: None,
             key_allowance: engines::anthropic::live::Allowance::default(),
             job: None,
-            compact_at: crate::jobs::compact_at(),
+            compact_at: crate::jobs::compact_at(config.context_tuning().compact_at),
             asks: Asks::default(),
             access,
             send_deadlines: Vec::new(),
@@ -380,7 +382,8 @@ impl Brain {
     /// Gives Claude Code's connection its lane, or its off switch.
     /// Reported at once: lib.rs attaches before any shell connects, so no turn meets the
     /// coordinator's start placeholder (OSC-753).
-    pub(crate) fn attach_claude(&mut self, claude: claude::Claude) {
+    pub(crate) fn attach_claude(&mut self, mut claude: claude::Claude) {
+        claude.launch_lifetime = self.config.run_tuning().claude_launch;
         self.claude = claude;
         let reported = self.claude_reported(None);
         debug_assert!(reported.is_ok(), "reporting without a shell can't fail");
@@ -1441,7 +1444,7 @@ impl Brain {
                 }
                 Effect::CancelRetry => self.retry_at = None,
                 Effect::ArmReadyWait => {
-                    self.ready_at = Some(Instant::now() + crate::drawing::READY_WAIT);
+                    self.ready_at = Some(Instant::now() + self.config.drawing_tuning().ready_wait);
                 }
                 Effect::CancelReadyWait => self.ready_at = None,
                 Effect::ArmDeadline { run, after } => {

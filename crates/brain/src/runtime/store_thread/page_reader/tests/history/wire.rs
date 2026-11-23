@@ -1,5 +1,6 @@
 use super::super::super::context::{read as build_request, read_job};
 use super::*;
+use crate::config::tuning::ContextTuning;
 use crate::connections::model::sse::Reader;
 use crate::coordinator::{Arrived, JobKey, JobKind, ReadJob};
 use crate::engines::{claude_code::seed, responses};
@@ -252,6 +253,7 @@ fn next_request(store: &Store, run: RunId, kind: ConnectionKind) -> Built {
             picture_models: Vec::new(),
             key_results: Vec::new(),
         },
+        ContextTuning::default(),
         || {},
     )
     .result
@@ -308,6 +310,7 @@ fn compact_quoted_reply(store: &mut Store, quote: &str) {
             }),
             compact_at: 0,
         },
+        ContextTuning::default(),
         || {},
     )
     .result

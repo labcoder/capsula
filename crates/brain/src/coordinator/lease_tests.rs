@@ -412,8 +412,9 @@ fn a_held_delete_survives_a_shell_reconnect() {
 
 /// What a held ask arms for run 10's first send: `hold` up to [`MAX_HOLD`], or
 /// [`SEND_DEADLINE`] without one.
-fn armed_for_build(hold: Option<Duration>) -> Vec<Effect> {
+fn armed_for_build(hold: Option<Duration>, send_lease_s: u64) -> Vec<Effect> {
     let mut core = fresh();
+    core.tuning.send_lease = Duration::from_secs(send_lease_s);
     core.handle(Input::Turn {
         turn: 1,
         thread: None,
@@ -444,17 +445,18 @@ fn armed(lease: LeaseId, seconds: u64) -> Vec<Effect> {
 fn a_held_build_send_arms_its_hold_capped_at_165_seconds() {
     assert_eq!(MAX_HOLD, Duration::from_secs(165));
     let first = lease(R, 1, 1);
-    assert_eq!(armed_for_build(None), armed(first, 15));
+    assert_eq!(armed_for_build(None, 15), armed(first, 15));
+    assert_eq!(armed_for_build(None, 11), armed(first, 11));
     assert_eq!(
-        armed_for_build(Some(Duration::from_secs(20))),
+        armed_for_build(Some(Duration::from_secs(20)), 11),
         armed(first, 20)
     );
     assert_eq!(
-        armed_for_build(Some(Duration::from_secs(165))),
+        armed_for_build(Some(Duration::from_secs(165)), 11),
         armed(first, 165)
     );
     assert_eq!(
-        armed_for_build(Some(Duration::from_secs(166))),
+        armed_for_build(Some(Duration::from_secs(166)), 11),
         armed(first, 165)
     );
 }

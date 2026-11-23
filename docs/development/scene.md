@@ -890,6 +890,18 @@ replacement doesn't end the installed Speech binding or credit the successor's p
 
 ## Caps
 
+The brain reads `[tuning.drawing]` at startup. It can lower the per-run limits of
+16 draw calls and eight rejected records. The first call past the call limit reports
+exhaustion; later calls are stale. The record that spends the rejection budget still
+reports its own error; the budget blocks further records even in already-open calls. The single
+repair round, per-call record cap, and compile-time queue capacity are unchanged.
+
+A finished call awaiting the shell gets a ready-wait tick every second by default.
+A tick with no new answer releases the result; tuning can shorten the interval.
+Owed clears, kept selections, and cuts share one retry schedule. The first delay
+and the cap are tunable; by default the delay starts at 500 ms and doubles to
+30 s. Successful clears and kept selections reset it to the first delay.
+
 Admission enforces the logical caps below, independently of prepared residency.
 `SceneState::usage` and `GlobalBudget::usage` report the installed charges. A pending
 removal still counts until the shell activates it or the brain receives StepShown.

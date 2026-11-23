@@ -91,6 +91,7 @@ fn run_with(
     let (read_gates, read_gates_heard) = std_mpsc::channel();
     let (heard, attempts) = std_mpsc::channel();
     let schedule = Schedule {
+        context: crate::config::tuning::ContextTuning::default(),
         quiet: Duration::from_millis(1),
         first_retry: Duration::from_secs(600),
         last_retry: Duration::from_secs(600),

@@ -202,6 +202,7 @@ pub(super) fn spawn_reader(
     reads: mpsc::Receiver<Read>,
     exit: &Exit,
     acks: UnboundedSender<Input>,
+    tuning: crate::config::tuning::ContextTuning,
     #[cfg(test)] hooks: Hooks,
 ) -> io::Result<JoinHandle<()>> {
     let (side, barrier, checkpoints) = (
@@ -253,6 +254,7 @@ pub(super) fn spawn_reader(
                     StoreOp::ReadCall(call) => Input::ReadFinished(context::read_call(
                         admitted.map(|()| &*side),
                         call,
+                        tuning,
                         #[cfg(test)]
                         || wait_at(gate, hooks.observed.as_ref()),
                     )),
@@ -288,6 +290,7 @@ pub(super) fn spawn_reader(
                     StoreOp::BuildContext(build) => Input::ContextBuilt(context::read(
                         open.then_some(&*side),
                         build,
+                        tuning,
                         #[cfg(test)]
                         || wait_at(gate, hooks.observed.as_ref()),
                     )),
@@ -300,6 +303,7 @@ pub(super) fn spawn_reader(
                     StoreOp::ReadJob(read) => Input::JobBuilt(context::read_job(
                         open.then_some(&*side),
                         read,
+                        tuning,
                         #[cfg(test)]
                         || wait_at(gate, hooks.observed.as_ref()),
                     )),

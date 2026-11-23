@@ -18,7 +18,9 @@ use kumochi_protocol::voice::VoicePart;
 use toml::{Table, Value};
 
 use crate::connections::github::device::DefaultRepo;
-use tuning::{GitHubTuning, ModelTuning, OAuthTuning, RunTuning};
+use tuning::{
+    ContextTuning, DrawingTuning, GitHubTuning, ModelTuning, OAuthTuning, RunTuning, TokenTuning,
+};
 
 pub(crate) mod tuning;
 
@@ -85,6 +87,9 @@ pub(crate) struct Config {
     model_tuning: ModelTuning,
     run_tuning: RunTuning,
     oauth_tuning: OAuthTuning,
+    token_tuning: TokenTuning,
+    drawing_tuning: DrawingTuning,
+    context_tuning: ContextTuning,
     /// What an absent `onboarded` key reads as, fixed at start: true when the profile was
     /// already in use, or the file can't be written, so neither ever asks for onboarding.
     in_use: bool,
@@ -152,6 +157,9 @@ impl Config {
             model_tuning: ModelTuning::from_table(&table),
             run_tuning: RunTuning::from_table(&table),
             oauth_tuning: OAuthTuning::from_table(&table),
+            token_tuning: TokenTuning::from_table(&table),
+            drawing_tuning: DrawingTuning::from_table(&table),
+            context_tuning: ContextTuning::from_table(&table),
             table: Ok(table),
             view,
             in_use: false,
@@ -171,6 +179,9 @@ impl Config {
             model_tuning: ModelTuning::default(),
             run_tuning: RunTuning::default(),
             oauth_tuning: OAuthTuning::default(),
+            token_tuning: TokenTuning::default(),
+            drawing_tuning: DrawingTuning::default(),
+            context_tuning: ContextTuning::default(),
             in_use: true,
         }
     }
@@ -231,6 +242,18 @@ impl Config {
 
     pub(crate) fn oauth_tuning(&self) -> OAuthTuning {
         self.oauth_tuning
+    }
+
+    pub(crate) fn token_tuning(&self) -> TokenTuning {
+        self.token_tuning
+    }
+
+    pub(crate) fn drawing_tuning(&self) -> DrawingTuning {
+        self.drawing_tuning
+    }
+
+    pub(crate) fn context_tuning(&self) -> ContextTuning {
+        self.context_tuning
     }
 
     pub(crate) fn default_choice(&self) -> StoredChoice {
