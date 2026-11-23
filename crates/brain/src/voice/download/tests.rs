@@ -474,10 +474,13 @@ async fn linked_file_refused(location: LinkedFile, kind: LinkKind) {
 
 #[tokio::test]
 async fn model_paths_refuse_a_final_symlink() {
-    for location in [LinkedFile::Final, LinkedFile::Partial] {
-        for kind in [LinkKind::Symlink, LinkKind::Junction] {
-            linked_file_refused(location, kind).await;
-        }
+    for (location, kind) in [
+        (LinkedFile::Final, LinkKind::Symlink),
+        (LinkedFile::Final, LinkKind::Junction),
+        (LinkedFile::Partial, LinkKind::Symlink),
+        (LinkedFile::Partial, LinkKind::Junction),
+    ] {
+        linked_file_refused(location, kind).await;
     }
 }
 
