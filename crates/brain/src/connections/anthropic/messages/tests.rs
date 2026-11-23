@@ -882,6 +882,73 @@ async fn a_pictured_body_writes_only_under_its_open_picture_grant() {
     }
 }
 
+/// A body with no picture under a closed grant, as a send carrying only a protected digest is,
+/// writes no byte and settles unsent.
+#[tokio::test]
+async fn a_closed_grant_stops_a_body_without_a_picture_before_any_byte() {
+    use crate::coordinator::{Input, PictureGrant};
+    let harness = Harness::new(response(200, END));
+    let run = Budget::limited(None);
+    let live = Budget::limited(None);
+    let grant = PictureGrant::open_for_tests();
+    grant.close();
+    let (lease, mut received) = send_lease(Some(grant));
+    let refused = tokio::task::unconstrained(stream(
+        &harness.client,
+        &harness.body,
+        &harness.key,
+        ready(Some(lease)),
+        &run,
+        &live,
+        Capture::Nothing,
+        Sink(Arc::clone(&harness.state)),
+    ))
+    .await;
+    assert!(matches!(refused, Err(Failure::Rebuild)), "{refused:?}");
+    let seen = {
+        let state = harness.state.lock().expect("peer state");
+        (state.connects, state.written.clone())
+    };
+    assert_eq!(seen, (1, Vec::new()));
+    assert!(matches!(received.try_recv(), Ok(Input::SendUnsent { .. })));
+
+    {
+        let mut state = harness.state.lock().expect("peer state");
+        state.connects = 0;
+        state.read = 0;
+        state.flushed = false;
+    }
+    let (lease, mut received) = send_lease(Some(PictureGrant::open_for_tests()));
+    let sent = tokio::task::unconstrained(stream(
+        &harness.client,
+        &harness.body,
+        &harness.key,
+        ready(Some(lease)),
+        &run,
+        &live,
+        Capture::Nothing,
+        Sink(Arc::clone(&harness.state)),
+    ))
+    .await;
+    assert!(matches!(sent, Ok(StopReason::EndTurn)), "{sent:?}");
+    let seen = {
+        let state = harness.state.lock().expect("peer state");
+        (state.connects, state.written.clone())
+    };
+    assert_eq!(
+        seen,
+        (
+            1,
+            [
+                wire_head(&harness.key, harness.body.bytes().len()).as_bytes(),
+                harness.body.bytes()
+            ]
+            .concat()
+        )
+    );
+    assert!(matches!(received.try_recv(), Ok(Input::SendSettled { .. })));
+}
+
 /// A picture grant closed after the first admitted writer poll stops every later poll, whether
 /// that poll was pending, wrote part of the request, or was the flush: the send ends `Withheld`,
 /// writes nothing more, and settles as written, never unsent.
