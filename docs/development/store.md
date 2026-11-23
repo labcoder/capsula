@@ -13,6 +13,7 @@ rename and directory sync for purge swaps, and uses the OS's available-block cou
 purger's capacity check. Failure to sync a completed rename exits the test process, even when
 the swap ran on a worker. Windows sharing-mode tests stay Windows-only. No non-Windows
 production store startup, swap or capacity fallback is enabled.
+On Linux, direct file-logging startup returns `NativeRuntime` before resolving a data path.
 
 ## Settings
 

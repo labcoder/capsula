@@ -46,7 +46,7 @@ pub(crate) use connected_shell::connected_shell_pid;
 pub(super) use connected_shell::register_shell;
 #[cfg(not(target_os = "macos"))]
 pub(crate) const DATA_ROOT: &str = WINDOWS_DATA_ROOT;
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(not(target_os = "macos"))]
 const WINDOWS_DATA_ROOT: &str = "%LOCALAPPDATA%";
 #[cfg(not(any(windows, target_os = "macos")))]
 pub use fs::{config_dir, data_dir};
@@ -277,15 +277,10 @@ pub(crate) use windows::test_pair;
 #[cfg(test)]
 #[test]
 fn missing_data_root_diagnostics_keep_the_windows_form() {
-    const WINDOWS_MESSAGE: &str = "%LOCALAPPDATA% is not set to an absolute path";
-    assert_eq!(
-        format!("{WINDOWS_DATA_ROOT} is not set to an absolute path"),
-        WINDOWS_MESSAGE
-    );
     let expected = if cfg!(target_os = "macos") {
         "HOME is not set to an absolute path"
     } else {
-        WINDOWS_MESSAGE
+        "%LOCALAPPDATA% is not set to an absolute path"
     };
     assert_eq!(
         crate::store::StoreError::NoLocalAppData.to_string(),
