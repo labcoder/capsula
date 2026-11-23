@@ -24,7 +24,8 @@ use kumochi_protocol::message::{
     DataToShell, Deleted, ErrorKey, GestureId, GitHubView, Hello, HoldStatus, Incarnation,
     IssueSession, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor,
     SceneDescriptorV1, SettingsOp, SettingsView, TextMetricsV1, ThreadId, ThreadOp,
-    TypedScreenDraft, TypedScreenOffer, TypedScreenProof, UserError,
+    TypedScreenDraft, TypedScreenOffer, TypedScreenProof, TypedScreenRecipient,
+    TypedScreenRevision, UserError,
 };
 use kumochi_protocol::voice::VoicePart;
 
@@ -107,12 +108,24 @@ pub enum LinkEvent {
         turn: u32,
         thread: Option<ThreadId>,
         draft: TypedScreenDraft,
+        recipient: TypedScreenRevision,
         offer: Option<TypedScreenOffer>,
     },
     /// An exact held frame still needs proof of continuous exclusion.
     TypedScreenHeld {
         generation: u64,
         proof: TypedScreenProof,
+    },
+    /// The model to display and its paired pictured-send revision.
+    TypedScreenRecipient {
+        generation: u64,
+        recipient: Option<TypedScreenRecipient>,
+    },
+    /// The Brain fenced this pictured run before its first write reservation.
+    TypedScreenNotSent {
+        generation: u64,
+        run: RunId,
+        offer: TypedScreenOffer,
     },
     /// Whether a hold also shows the model a window, from the control pipe.
     ScreenHolds {
@@ -2169,6 +2182,8 @@ fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError> {
             | ControlToShell::CaptureFailed { .. }
             | ControlToShell::TypedScreenOffered { .. }
             | ControlToShell::TypedScreenHeld(_)
+            | ControlToShell::TypedScreenRecipient(_)
+            | ControlToShell::TypedScreenNotSent { .. }
             | ControlToShell::ThreadModelSet { .. }
             | ControlToShell::GitHub(_)
             | ControlToShell::GitHubError(_)
@@ -2615,6 +2630,7 @@ fn watch(
                 turn,
                 thread,
                 draft,
+                recipient,
                 offer,
             })) => {
                 if queued.is_none()
@@ -2624,6 +2640,7 @@ fn watch(
                             turn,
                             thread,
                             draft,
+                            recipient,
                             offer,
                         })
                         .is_err()
@@ -2635,6 +2652,31 @@ fn watch(
                 if queued.is_none()
                     || events
                         .send_blocking(LinkEvent::TypedScreenHeld { generation, proof })
+                        .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::TypedScreenRecipient(recipient))) => {
+                if queued.is_none()
+                    || events
+                        .send_blocking(LinkEvent::TypedScreenRecipient {
+                            generation,
+                            recipient,
+                        })
+                        .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::TypedScreenNotSent { run, offer })) => {
+                if queued.is_none()
+                    || events
+                        .send_blocking(LinkEvent::TypedScreenNotSent {
+                            generation,
+                            run,
+                            offer,
+                        })
                         .is_err()
                 {
                     return;

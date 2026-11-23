@@ -8,7 +8,8 @@ use std::time::Duration;
 use kumochi_protocol::geometry::TypedDisplay;
 use kumochi_protocol::message::{
     Content, ControlToBrain, ControlToShell, SettingsOp, ThreadId, ThreadOp, TypedScreenDraft,
-    TypedScreenOffer, TypedScreenProof, TypedScreenSubmit,
+    TypedScreenOffer, TypedScreenProof, TypedScreenRecipient, TypedScreenRevision,
+    TypedScreenSubmit,
 };
 use tokio::time::Instant;
 
@@ -29,7 +30,7 @@ struct Offer {
     thread: Option<ThreadId>,
     draft: TypedScreenDraft,
     display: TypedDisplay,
-    global_revision: u64,
+    recipient_revision: TypedScreenRevision,
     snapshot: RunSnapshot,
     recipient: PictureRecipient,
     reading: Option<CancelOnDrop>,
@@ -41,6 +42,7 @@ impl Offer {
             turn: self.key.turn,
             thread: self.thread,
             draft: self.draft,
+            recipient: self.recipient_revision,
             offer,
         }
     }
@@ -63,7 +65,9 @@ struct Pending {
 #[derive(Default)]
 pub(super) struct State {
     serial: u64,
-    global_revision: u64,
+    recipient_serial: u64,
+    recipient: Option<(TypedScreenRecipient, PictureRecipient)>,
+    lapsed_lease: u32,
     offer: Option<Offer>,
     pending: Option<Box<Pending>>,
 }
@@ -75,6 +79,10 @@ pub(super) enum Progress {
 }
 
 impl State {
+    fn recipient_revision(&self) -> Option<TypedScreenRevision> {
+        self.recipient.as_ref().map(|(view, _)| view.revision)
+    }
+
     pub(super) fn capturing(&self) -> bool {
         self.pending.is_some()
     }
@@ -103,9 +111,9 @@ fn refuse(link: &mut Link<'_, '_>, turn: u32, thread: Option<ThreadId>) -> Resul
 }
 
 impl Brain {
-    fn typed_screen_current(&self, offer: &Offer, revision: u64) -> bool {
+    fn typed_screen_current(&self, offer: &Offer, revision: Option<TypedScreenRevision>) -> bool {
         offer.key.epoch == self.epoch
-            && offer.global_revision == revision
+            && Some(offer.recipient_revision) == revision
             && self.show_screen_enabled()
             && !self.changing_model()
             && self.coordinator.typed_target(offer.thread)
@@ -121,7 +129,8 @@ impl Brain {
     }
 
     pub(super) fn typed_screen_sync(&self, link: &mut Link<'_, '_>) -> Result<(), Ended> {
-        let revision = link.typed_screen.global_revision;
+        self.typed_screen_advertise(link)?;
+        let revision = link.typed_screen.recipient_revision();
         if link.typed_screen.offer.as_ref().is_some_and(|offer| {
             !self.typed_screen_current(offer, revision)
                 || self.coordinator.next_typed_turn() != Some(offer.key.turn)
@@ -137,6 +146,58 @@ impl Brain {
             Self::refuse_typed_pending(link)?;
         }
         Ok(())
+    }
+
+    fn typed_screen_advertise(&self, link: &mut Link<'_, '_>) -> Result<(), Ended> {
+        let eligible = self.typed_screen_clock.is_some()
+            && self.holds.screen.is_some()
+            && link
+                .registration
+                .is_some_and(|registration| Registration::admits(Some(registration)))
+            && self.show_screen_enabled()
+            && !self.changing_model();
+        let state = &mut link.typed_screen;
+        if !eligible && state.recipient.is_none() {
+            return Ok(());
+        }
+        let candidate = eligible
+            .then(|| self.snapshot(Origin::Kumo).choice)
+            .flatten()
+            .and_then(|choice| {
+                self.coordinator
+                    .typed_recipient(&choice)
+                    .map(|account| (choice, account))
+            });
+        if state
+            .recipient
+            .as_ref()
+            .map(|(view, account)| (&view.choice, account))
+            == candidate
+                .as_ref()
+                .map(|(choice, account)| (choice, account))
+        {
+            return Ok(());
+        }
+        state.recipient = if let Some((choice, account)) = candidate {
+            let revision = state
+                .recipient_serial
+                .checked_add(1)
+                .and_then(NonZeroU64::new)
+                .ok_or(Ended::Broken("typed screen recipient revisions exhausted"))?;
+            state.recipient_serial = revision.get();
+            Some((
+                TypedScreenRecipient {
+                    revision: TypedScreenRevision(revision),
+                    choice,
+                },
+                account,
+            ))
+        } else {
+            None
+        };
+        let recipient = state.recipient.as_ref().map(|(view, _)| view.clone());
+        link.control(&ControlToShell::TypedScreenRecipient(recipient))
+            .map_err(|Full| Ended::Lost)
     }
 
     fn drop_typed_offer(link: &mut Link<'_, '_>) -> Result<(), Ended> {
@@ -165,10 +226,9 @@ impl Brain {
         let effects = self.coordinator.cancel_typed_picture(None, None);
         self.apply(effects, link.as_deref_mut()).map_err(|_| Full)?;
         if let Some(link) = link {
-            let Some(next) = link.typed_screen.global_revision.checked_add(1) else {
-                return Err(Full);
-            };
-            link.typed_screen.global_revision = next;
+            if link.typed_screen.recipient.take().is_some() {
+                link.control(&ControlToShell::TypedScreenRecipient(None))?;
+            }
             Self::drop_typed_offer(link).map_err(|_| Full)?;
             Self::refuse_typed_pending(link).map_err(|_| Full)?;
         }
@@ -185,9 +245,10 @@ impl Brain {
                 turn,
                 thread,
                 draft,
+                recipient,
                 ref display,
             } => {
-                self.typed_screen_offer(turn, thread, draft, **display, link)?;
+                self.typed_screen_offer(turn, thread, draft, recipient, **display, link)?;
             }
             ControlToBrain::CancelTypedScreen { turn, offer } => {
                 let key = TypedKey {
@@ -226,14 +287,16 @@ impl Brain {
                     active.capture = Capture::Sealing(Box::pin(held.seal()));
                 }
             }
-            ControlToBrain::ExclusionLapsed { lease }
-                if link
-                    .typed_screen
-                    .pending
-                    .as_ref()
-                    .is_some_and(|active| active.request.lease == lease) =>
-            {
-                Self::refuse_typed_pending(link)?;
+            ControlToBrain::ExclusionLapsed { lease } => {
+                if self.typed_screen_clock.is_some() {
+                    link.typed_screen.lapsed_lease = link.typed_screen.lapsed_lease.max(lease.0);
+                    if link.typed_screen.pending.as_ref().is_some_and(|active| {
+                        active.request.lease.0 <= link.typed_screen.lapsed_lease
+                    }) {
+                        Self::refuse_typed_pending(link)?;
+                    }
+                }
+                return Ok(false);
             }
             ControlToBrain::Settings(SettingsOp::SetShowScreen(false)) => {
                 self.typed_screen_settings_changed(Some(link))
@@ -274,6 +337,7 @@ impl Brain {
         turn: u32,
         thread: Option<ThreadId>,
         draft: TypedScreenDraft,
+        recipient_revision: TypedScreenRevision,
         display: TypedDisplay,
         link: &mut Link<'_, '_>,
     ) -> Result<(), Ended> {
@@ -281,6 +345,7 @@ impl Brain {
             turn,
             thread,
             draft,
+            recipient: recipient_revision,
             offer: None,
         };
         if self.typed_screen_clock.is_none()
@@ -290,6 +355,7 @@ impl Brain {
                 .is_some_and(|registration| Registration::admits(Some(registration)))
             || link.typed_screen.capturing()
             || self.coordinator.next_typed_turn() != Some(turn)
+            || link.typed_screen.recipient_revision() != Some(recipient_revision)
         {
             return link.control(&refused).map_err(|Full| Ended::Lost);
         }
@@ -320,12 +386,12 @@ impl Brain {
             thread,
             draft,
             display,
-            global_revision: link.typed_screen.global_revision,
+            recipient_revision,
             snapshot,
             recipient,
             reading: None,
         };
-        if !self.typed_screen_current(&offer, link.typed_screen.global_revision) {
+        if !self.typed_screen_current(&offer, link.typed_screen.recipient_revision()) {
             return link.control(&refused).map_err(|Full| Ended::Lost);
         }
         link.typed_screen.serial = serial.get();
@@ -361,7 +427,7 @@ impl Brain {
         }) {
             drop(offer.reading.take());
             let current = result.is_ok()
-                && self.typed_screen_current(&offer, link.typed_screen.global_revision)
+                && self.typed_screen_current(&offer, link.typed_screen.recipient_revision())
                 && self.coordinator.next_typed_turn() == Some(offer.key.turn);
             link.control(&offer.answer(current.then_some(key)))
                 .map_err(|Full| Ended::Lost)?;
@@ -397,7 +463,7 @@ impl Brain {
                 && offer.display == request.display
                 && offer.reading.is_none()
                 && !text.trim().is_empty()
-                && self.typed_screen_current(offer, link.typed_screen.global_revision)
+                && self.typed_screen_current(offer, link.typed_screen.recipient_revision())
         }) else {
             return refuse(link, turn, thread);
         };
@@ -405,7 +471,7 @@ impl Brain {
             return refuse(link, turn, thread);
         };
         let now = Instant::now();
-        if request.lease.0 == 0
+        if request.lease.0 <= link.typed_screen.lapsed_lease
             || !request.display.contains(request.point.0)
             || request.display.dpi == 0
             || request.submitted_qpc == 0
@@ -449,7 +515,7 @@ impl Brain {
         };
         let Offer { key, thread, .. } = &active.offer;
         if Instant::now() < active.until
-            && self.typed_screen_current(&active.offer, link.typed_screen.global_revision)
+            && self.typed_screen_current(&active.offer, link.typed_screen.recipient_revision())
         {
             match progress {
                 Progress::Held(held) => {

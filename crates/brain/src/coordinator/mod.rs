@@ -163,16 +163,7 @@ pub enum Input {
         result: Result<(), ()>,
     },
     /// A pictured typed attempt. Only the paired runtime can establish capture authority.
-    PicturedTurn {
-        /// The submit's paired turn.
-        turn: u32,
-        /// The original chat, or New.
-        thread: Option<ThreadId>,
-        /// The original words.
-        text: Content,
-        /// The bounded request; no pixels on the shell pipe.
-        screen: kumochi_protocol::message::TypedScreenSubmit,
-    },
+    PicturedTurn(typed_screen::PicturedTurn),
     /// The user clicked a labelled 3D part: a turn about it, in its drawing's thread.
     Ask {
         /// The ask's connection-local number, shared with typed turns.
@@ -1029,7 +1020,8 @@ impl Coordinator {
             Input::Turn { turn, thread, text } => {
                 self.typed(turn, thread, Some(text), &mut effects);
             }
-            Input::RefuseTurn { turn, thread } | Input::PicturedTurn { turn, thread, .. } => {
+            Input::RefuseTurn { turn, thread }
+            | Input::PicturedTurn(typed_screen::PicturedTurn { turn, thread, .. }) => {
                 self.typed(turn, thread, None, &mut effects);
             }
             Input::Ask {
@@ -1614,6 +1606,15 @@ impl Coordinator {
         run.control.0.cancel();
         if let Some(typed) = &mut run.typed_screen {
             self.close_grants(run.id);
+            if notify == Notify::Shell
+                && matches!(outcome, RunEnd::Failed(_))
+                && typed.close_before_write()
+            {
+                effects.push(Effect::Control(ControlToShell::TypedScreenNotSent {
+                    run: run.id,
+                    offer: typed.offer(),
+                }));
+            }
             typed.jpeg = None;
         }
         self.close_digest_grants(run.id);

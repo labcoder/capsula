@@ -1070,12 +1070,12 @@ impl Brain {
                 }
             };
             let input = match input {
-                Input::PicturedTurn {
+                Input::PicturedTurn(crate::coordinator::typed_screen::PicturedTurn {
                     turn,
                     thread,
                     text,
                     screen,
-                } => {
+                }) => {
                     if let Err(ended) =
                         self.typed_screen_submit(turn, thread, text, screen, &mut link)
                     {
@@ -1765,12 +1765,14 @@ async fn read_data(
                 let input = match screen {
                     ScreenChoice::None => Input::Turn { turn, thread, text },
                     ScreenChoice::Include { .. } => Input::RefuseTurn { turn, thread },
-                    ScreenChoice::Typed(screen) => Input::PicturedTurn {
-                        turn,
-                        thread,
-                        text,
-                        screen,
-                    },
+                    ScreenChoice::Typed(screen) => {
+                        Input::PicturedTurn(crate::coordinator::typed_screen::PicturedTurn {
+                            turn,
+                            thread,
+                            text,
+                            screen,
+                        })
+                    }
                 };
                 if let Some(ended) = take(turns, input) {
                     return ended;

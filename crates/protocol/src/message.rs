@@ -203,6 +203,27 @@ pub enum ScreenChoice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedScreenOffer(pub NonZeroU64);
 
+/// One displayed recipient on this pair, including the Brain's account generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedScreenRevision(pub NonZeroU64);
+
+/// Display this exact model choice before using its pictured-send revision.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedScreenRecipient {
+    /// The pair-local authority to refer to this selection, not an account identifier.
+    pub revision: TypedScreenRevision,
+    /// The model and route this revision describes.
+    pub choice: ModelChoice,
+}
+
+impl std::fmt::Debug for TypedScreenRecipient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TypedScreenRecipient")
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The shell's exact draft and selection lifetimes, including for a New chat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedScreenDraft {
@@ -620,6 +641,8 @@ pub enum ControlToBrain {
         thread: Option<ThreadId>,
         /// The current draft and selection.
         draft: TypedScreenDraft,
+        /// The recipient revision actually displayed when the user opted in.
+        recipient: TypedScreenRevision,
         /// The display where the draft is composed.
         display: Box<TypedDisplay>,
     },
@@ -893,11 +916,22 @@ pub enum ControlToShell {
         thread: Option<ThreadId>,
         /// The requested draft and selection.
         draft: TypedScreenDraft,
+        /// The requested displayed recipient, unchanged even on refusal.
+        recipient: TypedScreenRevision,
         /// The single-use offer, or no offer if unavailable.
         offer: Option<TypedScreenOffer>,
     },
     /// This exact frame is held, but cannot be sealed until exclusion is confirmed.
     TypedScreenHeld(TypedScreenProof),
+    /// This pair's eligible displayed recipient changed, or became unavailable.
+    TypedScreenRecipient(Option<TypedScreenRecipient>),
+    /// The pictured run is ending and its first transport write never had a reservation.
+    TypedScreenNotSent {
+        /// The named pictured run.
+        run: RunId,
+        /// The exact paired offer that authorized it.
+        offer: TypedScreenOffer,
+    },
 }
 
 /// What a screen hold carried into its turn. It never says the window was sent: a run can end

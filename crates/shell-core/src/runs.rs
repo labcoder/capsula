@@ -985,10 +985,7 @@ impl Runs {
         }
         if matches!(phase, Phase::Done | Phase::Interrupted | Phase::Failed) {
             self.end(run, |live| live.state_ended = true);
-            self.typed_screen.finished(
-                run,
-                error.filter(|_| phase == Phase::Failed).map(UserError::key),
-            );
+            self.typed_screen.finished(run, phase);
             // The first terminal state uses the submission up, so a duplicate finds nothing.
             if let Some((_, submitted)) = self.named.take_if(|(named, _)| *named == run)
                 && phase == Phase::Failed

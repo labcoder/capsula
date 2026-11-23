@@ -3,18 +3,22 @@ use std::time::Duration;
 
 use async_channel::{Receiver, TryRecvError};
 use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
-use kumochi_protocol::message::{Incarnation, Phase, RunOrigin, TypedScreenProof};
+use kumochi_protocol::message::{
+    ConnectionKind, Effort, ErrorKey, Incarnation, ModelChoice, ModelSlug, Phase, RunOrigin,
+    TypedScreenProof, TypedScreenRecipient, TypedScreenRevision,
+};
 
 use crate::presence::exclusion::machine::fixture::{EXCLUDED, Fake, PRIOR, Prior};
 
 use super::{
-    CaptureFor, ControlToBrain, DataToBrain, ErrorKey, Exclusion, Instant, LinkEvent, LinkHandle,
-    Refused, ReleasePointer, RunId, Runs, ScreenChoice, Session, ThreadId, TypedDisplay,
-    TypedScreenInput, TypedScreenIo, TypedScreenOffer, TypedScreenSubmit,
+    CaptureFor, ControlToBrain, DataToBrain, Exclusion, Instant, LinkEvent, LinkHandle, Refused,
+    ReleasePointer, RunId, Runs, ScreenChoice, Session, ThreadId, TypedDisplay, TypedScreenInput,
+    TypedScreenIo, TypedScreenOffer, TypedScreenSubmit,
 };
 
 const WORDS: &str = "typed-screen-sentinel-e35d";
 const OFFER: TypedScreenOffer = TypedScreenOffer(NonZeroU64::MIN);
+const REVISION: TypedScreenRevision = TypedScreenRevision(NonZeroU64::MIN);
 const MAIN: ThreadId = ThreadId(1);
 const DISPLAY: TypedDisplay = TypedDisplay {
     id: NonZeroU64::MIN,
@@ -46,6 +50,17 @@ impl Fixture {
         runs.settings(MAIN);
         assert!(runs.select_thread(thread), "fixture thread is available");
         runs.typed_draft_changed();
+        runs.typed_screen_recipient_displayed(&LinkEvent::TypedScreenRecipient {
+            generation: 1,
+            recipient: Some(TypedScreenRecipient {
+                revision: REVISION,
+                choice: ModelChoice {
+                    connection: ConnectionKind::ChatGpt,
+                    model: ModelSlug::new("fixture-model").unwrap(),
+                    effort: Effort::Low,
+                },
+            }),
+        });
         Self {
             runs,
             link,
@@ -72,6 +87,7 @@ impl Fixture {
                 turn,
                 thread,
                 draft,
+                recipient: REVISION,
                 display: Box::new(DISPLAY)
             })
         );
@@ -84,6 +100,7 @@ impl Fixture {
                     turn,
                     thread,
                     draft,
+                    recipient: REVISION,
                     offer: Some(OFFER),
                 }
             ),
@@ -196,6 +213,44 @@ fn proof(picture: TypedScreenSubmit) -> TypedScreenProof {
 }
 
 #[test]
+fn an_offer_reply_for_a_recipient_no_longer_displayed_cannot_arm() {
+    let mut f = Fixture::new(Some(MAIN));
+    assert!(f.runs.request_typed_screen(&f.link, &f.session, DISPLAY));
+    let request = f.control.try_recv().unwrap();
+    let ControlToBrain::RequestTypedScreenOffer {
+        turn,
+        thread,
+        draft,
+        recipient,
+        ..
+    } = request
+    else {
+        panic!("recipient-bound offer request");
+    };
+    assert_eq!(recipient, REVISION);
+    f.runs
+        .typed_screen_recipient_displayed(&LinkEvent::TypedScreenRecipient {
+            generation: 1,
+            recipient: None,
+        });
+    assert!(!f.runs.typed_screen_offered(
+        &f.link,
+        &f.session,
+        &LinkEvent::TypedScreenOffered {
+            generation: 1,
+            turn,
+            thread,
+            draft,
+            recipient,
+            offer: Some(OFFER),
+        },
+    ));
+    f.assert_cancel();
+    assert_eq!(f.send(DISPLAY), Err(Refused::Busy));
+    assert_eq!(f.exclusion.generation(), 0);
+}
+
+#[test]
 fn pre_run_refusal_keeps_new_draft_words_and_plain_retry_spends_only_on_enqueue() {
     let mut f = Fixture::new(None);
     f.arm(1);
@@ -272,7 +327,7 @@ fn changed_display_and_local_queue_failure_spend_offer_without_spending_turn() {
 }
 
 #[test]
-fn exact_held_proof_allows_one_new_promotion_and_named_screen_refusal_recovers_words() {
+fn exact_held_proof_and_named_no_write_receipt_keep_words_through_a_failed_retry_enqueue() {
     let mut f = Fixture::new(None);
     f.arm(1);
     assert_eq!(f.send(DISPLAY), Ok(()));
@@ -300,15 +355,28 @@ fn exact_held_proof_allows_one_new_promotion_and_named_screen_refusal_recovers_w
         Some(RunOrigin::Typed { turn: 1 }),
     );
     assert_eq!(f.runs.thread(), Some(promoted));
+    f.runs
+        .typed_screen_not_sent(&LinkEvent::TypedScreenNotSent {
+            generation: 1,
+            run: RunId(1),
+            offer: OFFER,
+        });
     f.runs.apply_run_state(
         RunId(1),
         promoted,
         Phase::Failed,
-        Some(ErrorKey::ScreenUnavailable.into()),
+        Some(ErrorKey::SignInNeeded.into()),
         None,
     );
+    assert!(
+        f.link
+            .send_data(&f.session, DataToBrain::Credit { bytes: 9 })
+    );
+    assert_eq!(f.retry(), Err(Refused::Offline));
+    assert_eq!(f.data.try_recv(), Ok(DataToBrain::Credit { bytes: 9 }));
     assert_eq!(f.retry(), Ok(()));
     f.assert_plain(2, Some(promoted));
+    assert_eq!(f.retry(), Err(Refused::Busy));
     f.runs.apply_state(
         RunId(2),
         ThreadId(10),
@@ -320,6 +388,49 @@ fn exact_held_proof_allows_one_new_promotion_and_named_screen_refusal_recovers_w
         Some(promoted),
         "replay cannot promote another New"
     );
+}
+
+#[test]
+fn a_named_picture_without_its_exact_no_write_receipt_is_not_retryable() {
+    let mut f = Fixture::new(Some(MAIN));
+    f.arm(1);
+    assert_eq!(f.send(DISPLAY), Ok(()));
+    let proof = proof(f.queued_picture());
+    assert!(f.held(1, proof, f.at));
+    f.runs.apply_state(
+        RunId(1),
+        MAIN,
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    f.runs
+        .typed_screen_not_sent(&LinkEvent::TypedScreenNotSent {
+            generation: 2,
+            run: RunId(1),
+            offer: OFFER,
+        });
+    f.runs
+        .typed_screen_not_sent(&LinkEvent::TypedScreenNotSent {
+            generation: 1,
+            run: RunId(1),
+            offer: TypedScreenOffer(NonZeroU64::new(2).unwrap()),
+        });
+    f.runs.revoke_typed_screen();
+    assert_eq!(
+        f.retry(),
+        Err(Refused::Busy),
+        "local revoke does not prove no write"
+    );
+    f.flush();
+    f.runs.apply_run_state(
+        RunId(1),
+        MAIN,
+        Phase::Failed,
+        Some(ErrorKey::SignInNeeded.into()),
+        None,
+    );
+    assert_eq!(f.retry(), Err(Refused::Busy));
+    assert_eq!(f.data.try_recv(), Err(TryRecvError::Empty));
 }
 
 #[test]

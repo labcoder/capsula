@@ -155,6 +155,8 @@ impl Tapped for ControlToShell {
             Self::QueuedAudioRegistered(..) => "QueuedAudioRegistered",
             Self::TypedScreenOffered { .. } => "TypedScreenOffered",
             Self::TypedScreenHeld(..) => "TypedScreenHeld",
+            Self::TypedScreenRecipient(..) => "TypedScreenRecipient",
+            Self::TypedScreenNotSent { .. } => "TypedScreenNotSent",
             Self::SpeechRevoked { .. } => "SpeechRevoked",
             Self::GitHub(_) => "GitHub",
             Self::ActionState { .. } => "ActionState",

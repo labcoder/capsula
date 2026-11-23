@@ -2,10 +2,10 @@
 
 use kumochi_protocol::message::{
     ConnectionKind, Content, ControlToShell, ErrorKey, ModelChoice, RunId, RunOrigin, ThreadId,
-    TypedScreenOffer,
+    TypedScreenOffer, TypedScreenSubmit,
 };
 
-use super::{Availability, BuildKey, Coordinator, Effect, Input, Run, Stale};
+use super::{Availability, BuildKey, Coordinator, Effect, Input, Run, Stale, lease::PictureGrant};
 use crate::context::{Jpeg, PictureRecipient, Route, RunSnapshot};
 use crate::recall::control::Control;
 use crate::store::Failure;
@@ -35,6 +35,25 @@ impl ReadTarget {
     }
 }
 
+/// A typed attempt whose capture authority can only be established by the paired runtime.
+#[derive(Clone, PartialEq)]
+pub struct PicturedTurn {
+    pub(crate) turn: u32,
+    pub(crate) thread: Option<ThreadId>,
+    pub(crate) text: Content,
+    pub(crate) screen: TypedScreenSubmit,
+}
+
+impl std::fmt::Debug for PicturedTurn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PicturedTurn")
+            .field("turn", &self.turn)
+            .field("thread", &self.thread)
+            .field("text_len", &self.text.len())
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TypedKey {
     pub(crate) epoch: u64,
@@ -48,6 +67,21 @@ pub(super) struct TypedRun {
     pub(super) jpeg: Option<Jpeg>,
     pub(super) attempt: Option<BuildKey>,
     pub(super) flushed: bool,
+    pub(super) grant: Option<PictureGrant>,
+}
+
+impl TypedRun {
+    pub(super) fn close_before_write(&self) -> bool {
+        !self.flushed
+            && self
+                .grant
+                .as_ref()
+                .is_none_or(PictureGrant::close_before_write)
+    }
+
+    pub(super) fn offer(&self) -> TypedScreenOffer {
+        self.key.offer
+    }
 }
 
 impl std::fmt::Debug for TypedRun {
@@ -142,6 +176,7 @@ impl Coordinator {
             jpeg: Some(jpeg),
             attempt: None,
             flushed: false,
+            grant: None,
         });
         effects
     }
@@ -176,26 +211,33 @@ impl Coordinator {
         run: RunId,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
-        self.fail_with(
-            run,
-            Failure::Engine,
-            ErrorKey::ScreenUnavailable.into(),
-            effects,
-        )
+        let unattempted = self
+            .current(run)?
+            .typed_screen
+            .as_ref()
+            .is_some_and(TypedRun::close_before_write);
+        let reason = if unattempted {
+            ErrorKey::ScreenUnavailable
+        } else {
+            ErrorKey::ScreenPictureStopped
+        };
+        self.fail_with(run, Failure::Engine, reason.into(), effects)
     }
 
     pub(super) fn typed_picture_current(&self, run: &Run) -> bool {
         let Some(typed) = run.typed_screen.as_ref() else {
             return false;
         };
-        run.route == Some(typed.recipient.route)
-            && run
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.choice.as_ref())
-                .and_then(|choice| self.typed_recipient(choice))
-                .as_ref()
-                == Some(&typed.recipient)
+        run.route == Some(typed.recipient.route) && self.typed_recipient_current(run, typed)
+    }
+
+    pub(super) fn typed_recipient_current(&self, run: &Run, typed: &TypedRun) -> bool {
+        run.snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.choice.as_ref())
+            .and_then(|choice| self.typed_recipient(choice))
+            .as_ref()
+            == Some(&typed.recipient)
     }
 }
 
@@ -372,5 +414,106 @@ mod tests {
                 .unwrap();
             assert!(grant.reserve_write().is_none());
         }
+    }
+
+    #[test]
+    fn a_sealed_picture_cannot_regain_capability_while_waiting_for_its_first_grant() {
+        let (mut core, _, built) = pictured_run();
+        serialized(&built, 1);
+        let lost = core.handle(Input::Engines(CHAT, pictured(7, &[]))).unwrap();
+        assert!(
+            lost.contains(&Effect::Control(ControlToShell::TypedScreenNotSent {
+                run: RUN,
+                offer: TypedScreenOffer(NonZeroU64::MIN),
+            }))
+        );
+        assert_eq!(core.current_run(), None);
+        core.handle(Input::Engines(CHAT, pictured(7, &["m"])))
+            .unwrap();
+        assert_eq!(
+            core.handle(Input::SendReady {
+                key: SendKey::Build(FIRST),
+                hold: None
+            })
+            .unwrap(),
+            [Effect::Rebuild(SendKey::Build(FIRST))]
+        );
+    }
+
+    #[test]
+    fn account_replacement_reports_no_write_only_if_the_first_reservation_never_started() {
+        use kumochi_protocol::message::Phase;
+
+        for attempted in [false, true] {
+            let (mut core, _, _) = pictured_run();
+            let lease = grant(&mut core);
+            let grant = core.picture_grant(lease).unwrap();
+            let permit = attempted.then(|| grant.reserve_write().expect("first poll admitted"));
+            let effects = core
+                .handle(Input::Engines(CHAT, pictured(8, &["m"])))
+                .unwrap();
+            let failed = effects
+                .iter()
+                .position(|effect| {
+                    matches!(
+                        effect, Effect::Control(ControlToShell::RunState {
+                            run: RUN, phase: Phase::Failed, error: Some(error), ..
+                        }) if error.key() == ErrorKey::SignInNeeded
+                    )
+                })
+                .expect("account replacement keeps its own notice");
+            let unsent = effects.iter().position(|effect| {
+                *effect
+                    == Effect::Control(ControlToShell::TypedScreenNotSent {
+                        run: RUN,
+                        offer: TypedScreenOffer(NonZeroU64::MIN),
+                    })
+            });
+            assert_eq!(unsent.is_some(), !attempted);
+            if let Some(at) = unsent {
+                assert!(at < failed);
+            }
+            assert!(!effects.contains(&Effect::Store(StoreOp::FlushedTypedScreen { run: RUN })));
+            drop(permit);
+            assert!(grant.reserve_write().is_none());
+        }
+    }
+
+    #[test]
+    fn the_outer_pictured_input_never_formats_its_words_or_bytes() {
+        use kumochi_protocol::geometry::{
+            PhysicalPoint, PhysicalRect, ReleasePointer, TypedDisplay,
+        };
+        use kumochi_protocol::message::{LeaseGeneration, TypedScreenDraft};
+
+        const WORDS: &str = "pictured-input-privacy-sentinel";
+        let input = Input::PicturedTurn(PicturedTurn {
+            turn: 1,
+            thread: None,
+            text: WORDS.into(),
+            screen: TypedScreenSubmit {
+                offer: TypedScreenOffer(NonZeroU64::MIN),
+                draft: TypedScreenDraft {
+                    revision: 1,
+                    selection: 1,
+                },
+                lease: LeaseGeneration(1),
+                display: TypedDisplay {
+                    id: NonZeroU64::MIN,
+                    bounds: PhysicalRect {
+                        origin: [0, 0],
+                        size: [1, 1],
+                    },
+                    dpi: 96,
+                },
+                point: ReleasePointer(PhysicalPoint([0, 0])),
+                submitted_qpc: 1,
+                excluded_qpc: 1,
+            },
+        });
+        let printed = format!("{input:?}");
+        assert!(!printed.contains(WORDS));
+        assert!(!printed.contains(&format!("{:?}", WORDS.as_bytes())));
+        assert!(printed.contains("text_len: 31"));
     }
 }

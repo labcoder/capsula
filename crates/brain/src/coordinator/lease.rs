@@ -33,9 +33,14 @@ pub(crate) struct PictureGrant(Arc<AtomicU8>);
 impl PictureGrant {
     const CLOSED: u8 = 1;
     const WRITING: u8 = 2;
+    const UNATTEMPTED: u8 = 4;
 
     fn new() -> Self {
         Self(Arc::new(AtomicU8::new(0)))
+    }
+
+    fn new_typed() -> Self {
+        Self(Arc::new(AtomicU8::new(Self::UNATTEMPTED)))
     }
 
     /// Whether the grant is still open, including during an admitted write.
@@ -45,10 +50,24 @@ impl PictureGrant {
 
     /// Admits at most one pipe write. If close wins the race, this can't admit it.
     pub(crate) fn reserve_write(&self) -> Option<PictureWrite> {
-        self.0
+        match self
+            .0
             .compare_exchange(0, Self::WRITING, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| PictureWrite(Arc::downgrade(&self.0)))
+        {
+            Ok(_) => {}
+            Err(Self::UNATTEMPTED) => {
+                self.0
+                    .compare_exchange(
+                        Self::UNATTEMPTED,
+                        Self::WRITING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .ok()?;
+            }
+            Err(_) => return None,
+        }
+        Some(PictureWrite(Arc::downgrade(&self.0)))
     }
 
     /// Whether a handle besides this one is left: once a send has settled, its lease's and
@@ -60,6 +79,10 @@ impl PictureGrant {
     /// Fences new writes. A write already admitted may still begin or finish.
     pub(crate) fn close(&self) {
         self.0.fetch_or(Self::CLOSED, Ordering::AcqRel);
+    }
+
+    pub(super) fn close_before_write(&self) -> bool {
+        self.0.fetch_or(Self::CLOSED, Ordering::AcqRel) & Self::UNATTEMPTED != 0
     }
 
     #[cfg(test)]
@@ -607,11 +630,13 @@ impl Coordinator {
             })
             .flatten();
         let typed_thread = typed_picture.then_some(run.thread);
+        let typed_grant = typed_picture.then(PictureGrant::new_typed);
         if let Some(run) = self.current.as_mut()
             && let Some(route) = run.route
         {
             if typed_picture && let Some(typed) = &mut run.typed_screen {
                 typed.attempt = None;
+                typed.grant.clone_from(&typed_grant);
             }
             if route.kind == ConnectionKind::AnthropicKey && !inline {
                 run.key_granted = true;
@@ -639,7 +664,7 @@ impl Coordinator {
             .and_then(super::Run::carried);
         self.grant(SendKey::Build(key), sources, hold, screen, effects);
         if revocable && let Some(lease) = self.leases.last_mut() {
-            lease.picture = Some(PictureGrant::new());
+            lease.picture = Some(typed_grant.unwrap_or_else(PictureGrant::new));
             lease.digest = gated;
             lease.typed_screen = typed_thread;
         }

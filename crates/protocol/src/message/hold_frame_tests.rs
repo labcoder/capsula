@@ -381,7 +381,10 @@ fn a_skipped_scene_appends_a_redacted_tag_after_the_screen_release() {
 fn typed_screen_proof_appends_only_bounded_redacted_authority() {
     use std::num::NonZeroU64;
 
-    use super::{TypedScreenDraft, TypedScreenOffer, TypedScreenProof, TypedScreenSubmit};
+    use super::{
+        TypedScreenDraft, TypedScreenOffer, TypedScreenProof, TypedScreenRevision,
+        TypedScreenSubmit,
+    };
     use crate::geometry::TypedDisplay;
 
     let offer = TypedScreenOffer(NonZeroU64::new(2).unwrap());
@@ -400,6 +403,17 @@ fn typed_screen_proof_appends_only_bounded_redacted_authority() {
     redacted(&confirm, Direction::ToBrain, "ConfirmTypedScreen", 5);
     redacted(&held, Direction::ToShell, "TypedScreenHeld", 5);
     assert!(postcard::from_bytes::<ControlToBrain>(&[40, 1, 2, 3, 0]).is_err());
+    let unavailable = ControlToShell::TypedScreenRecipient(None);
+    assert_eq!(postcard::to_allocvec(&unavailable).unwrap(), [39, 0]);
+    round_trip(&unavailable, Pipe::Control, 2);
+    redacted(&unavailable, Direction::ToShell, "TypedScreenRecipient", 2);
+    let unsent = ControlToShell::TypedScreenNotSent {
+        run: RunId(1),
+        offer,
+    };
+    assert_eq!(postcard::to_allocvec(&unsent).unwrap(), [40, 1, 2]);
+    round_trip(&unsent, Pipe::Control, 3);
+    redacted(&unsent, Direction::ToShell, "TypedScreenNotSent", 3);
 
     let request = ControlToBrain::RequestTypedScreenOffer {
         turn: 1,
@@ -408,6 +422,7 @@ fn typed_screen_proof_appends_only_bounded_redacted_authority() {
             revision: 5,
             selection: 6,
         },
+        recipient: TypedScreenRevision(NonZeroU64::new(7).unwrap()),
         display: Box::new(TypedDisplay {
             id: NonZeroU64::MIN,
             bounds: PhysicalRect {
@@ -419,10 +434,13 @@ fn typed_screen_proof_appends_only_bounded_redacted_authority() {
     };
     assert_eq!(
         postcard::to_allocvec(&request).unwrap(),
-        [38, 1, 0, 5, 6, 1, 1, 4, 3, 4, 96]
+        [38, 1, 0, 5, 6, 7, 1, 1, 4, 3, 4, 96]
     );
-    round_trip(&request, Pipe::Control, 11);
-    redacted(&request, Direction::ToBrain, "RequestTypedScreenOffer", 11);
+    round_trip(&request, Pipe::Control, 12);
+    redacted(&request, Direction::ToBrain, "RequestTypedScreenOffer", 12);
+    assert!(
+        postcard::from_bytes::<ControlToBrain>(&[38, 1, 0, 5, 6, 0, 1, 1, 4, 3, 4, 96]).is_err()
+    );
 
     let message = DataToBrain::TextSubmit {
         turn: 1,

@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use kumochi_protocol::geometry::{ReleasePointer, TypedDisplay};
 use kumochi_protocol::message::{
-    AudioSession, CaptureFor, Content, ControlToBrain, DataToBrain, ErrorKey, RunId, ScreenChoice,
-    ThreadId, TypedScreenDraft, TypedScreenOffer, TypedScreenSubmit,
+    AudioSession, CaptureFor, Content, ControlToBrain, DataToBrain, Phase, RunId, ScreenChoice,
+    ThreadId, TypedScreenDraft, TypedScreenOffer, TypedScreenRevision, TypedScreenSubmit,
 };
 
 use crate::link::{LinkEvent, LinkHandle, Session};
@@ -48,6 +48,7 @@ struct Request {
     turn: u32,
     thread: Option<ThreadId>,
     draft: TypedScreenDraft,
+    recipient: TypedScreenRevision,
     display: TypedDisplay,
 }
 
@@ -80,6 +81,7 @@ struct InFlight {
     words: Words,
     run: Option<RunId>,
     confirmed: bool,
+    not_sent: bool,
 }
 
 struct Retirement {
@@ -91,6 +93,7 @@ struct Retirement {
 pub(super) struct TypedScreen {
     generation: u64,
     revision: u64,
+    displayed: Option<TypedScreenRevision>,
     offer: Option<Offer>,
     in_flight: Option<InFlight>,
     recovery: Option<Words>,
@@ -107,7 +110,11 @@ impl TypedScreen {
 
     pub(super) fn disconnected(&mut self) {
         self.revoke();
+        if let Some(picture) = self.in_flight.take().filter(|picture| picture.not_sent) {
+            self.recovery = Some(picture.words);
+        }
         self.offer = None;
+        self.displayed = None;
         self.generation = 0;
     }
 
@@ -132,17 +139,23 @@ impl TypedScreen {
             }
             None => {}
         }
-        if let Some(picture) = self.in_flight.take() {
-            self.retiring = Some(Retirement {
-                capture: picture.capture,
+        if let Some(picture) = self.in_flight.as_mut() {
+            self.retiring.get_or_insert(Retirement {
+                capture: Capture {
+                    key: picture.capture.key.take(),
+                    ..picture.capture
+                },
                 cancel: true,
             });
+        }
+        if let Some(picture) = self.in_flight.take_if(|picture| !picture.confirmed) {
             self.recovery = Some(picture.words);
         }
     }
 
     pub(super) fn invalidate(&mut self) {
         self.revoke();
+        self.in_flight = None;
         self.recovery = None;
     }
 
@@ -163,6 +176,7 @@ impl TypedScreen {
             .is_some_and(|picture| picture.capture.turn == turn)
         {
             self.revoke();
+            self.in_flight = None;
         }
     }
 
@@ -210,7 +224,7 @@ impl TypedScreen {
         true
     }
 
-    pub(super) fn finished(&mut self, run: RunId, error: Option<ErrorKey>) {
+    pub(super) fn finished(&mut self, run: RunId, phase: Phase) {
         let Some(picture) = self.in_flight.take_if(|picture| picture.run == Some(run)) else {
             return;
         };
@@ -220,7 +234,7 @@ impl TypedScreen {
                 cancel: false,
             });
         }
-        if error == Some(ErrorKey::ScreenUnavailable) {
+        if phase == Phase::Failed && picture.not_sent {
             self.recovery = Some(picture.words);
         }
     }
@@ -253,6 +267,47 @@ impl Runs {
         self.typed_screen.revoke();
     }
 
+    /// Records this event only once its model choice is actually displayed in the composer.
+    pub fn typed_screen_recipient_displayed(&mut self, event: &LinkEvent) {
+        let LinkEvent::TypedScreenRecipient {
+            generation,
+            recipient,
+        } = event
+        else {
+            return;
+        };
+        let state = &mut self.typed_screen;
+        if !self.connected || *generation != state.generation {
+            return;
+        }
+        let displayed = recipient.as_ref().map(|recipient| recipient.revision);
+        if state.displayed != displayed {
+            if state.offer.is_some() {
+                state.revoke();
+            }
+            state.displayed = displayed;
+        }
+    }
+
+    /// Records the paired proof that this named image was refused before any write reservation.
+    pub fn typed_screen_not_sent(&mut self, event: &LinkEvent) {
+        let LinkEvent::TypedScreenNotSent {
+            generation,
+            run,
+            offer,
+        } = *event
+        else {
+            return;
+        };
+        if let Some(picture) = self.typed_screen.in_flight.as_mut().filter(|picture| {
+            picture.capture.generation == generation
+                && picture.run == Some(run)
+                && picture.capture.offer == offer
+        }) {
+            picture.not_sent = true;
+        }
+    }
+
     /// Requests one offer for the current draft, selection, next turn and exact display.
     pub fn request_typed_screen(
         &mut self,
@@ -262,6 +317,9 @@ impl Runs {
     ) -> bool {
         let thread = self.thread();
         let state = &self.typed_screen;
+        let Some(recipient) = state.displayed else {
+            return false;
+        };
         if !self.connected
             || self.main.is_none()
             || state.revision == u64::MAX
@@ -286,6 +344,7 @@ impl Runs {
                 turn,
                 thread,
                 draft,
+                recipient,
                 display: Box::new(display),
             },
         ) {
@@ -296,6 +355,7 @@ impl Runs {
                 turn,
                 thread,
                 draft,
+                recipient,
                 display,
             },
             withdrawn: false,
@@ -315,6 +375,7 @@ impl Runs {
             turn,
             thread,
             draft,
+            recipient,
             offer,
         } = *event
         else {
@@ -325,12 +386,19 @@ impl Runs {
             return false;
         }
         if let Some(Offer::Waiting { request, withdrawn }) = state.offer.as_ref()
-            && (request.turn, request.thread, request.draft) == (turn, thread, draft)
+            && (
+                request.turn,
+                request.thread,
+                request.draft,
+                request.recipient,
+            ) == (turn, thread, draft, recipient)
         {
-            let armed = offer.filter(|_| !*withdrawn).map(|offer| Offer::Armed {
-                request: *request,
-                offer,
-            });
+            let armed = offer
+                .filter(|_| !*withdrawn && state.displayed == Some(recipient))
+                .map(|offer| Offer::Armed {
+                    request: *request,
+                    offer,
+                });
             let accepted = armed.is_some();
             state.offer = armed;
             if accepted {
@@ -338,11 +406,11 @@ impl Runs {
             }
         } else if state.offer.as_ref().is_some_and(|state| {
             matches!(state, Offer::Armed { request, offer: armed } if
-                (request.turn, request.thread, request.draft, Some(*armed)) == (turn, thread, draft, offer))
+                (request.turn, request.thread, request.draft, request.recipient, Some(*armed))
+                    == (turn, thread, draft, recipient, offer))
         }) || state.in_flight.as_ref().is_some_and(|picture| {
             picture.capture.turn == turn && Some(picture.capture.offer) == offer
-        })
-        {
+        }) {
             return false;
         }
         if let Some(offer) = offer {
@@ -388,6 +456,7 @@ impl Runs {
                 words,
                 run: None,
                 confirmed: false,
+                not_sent: false,
             });
         } else {
             self.typed_screen.recovery = Some(words);
@@ -418,6 +487,7 @@ impl Runs {
             || request.turn != turn
             || request.thread != self.thread()
             || request.draft != self.typed_draft()
+            || Some(request.recipient) != self.typed_screen.displayed
             || request.display != input.display
             || !request.display.contains(input.point.0)
             || io.exclusion.deadline().is_some()
