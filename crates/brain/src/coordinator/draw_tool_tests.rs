@@ -1020,6 +1020,51 @@ fn semantic_admission_returns_only_the_durable_prefix_and_exact_error() {
 }
 
 #[test]
+fn a_complete_draw_without_a_canvas_refuses_a_box_after_its_durable_prefix() {
+    let scratch = Scratch::new("draw-tool-box-without-canvas");
+    let mut store = store(&scratch);
+    let mut core = offered(vec![T]);
+    core.screen_marks = crate::drawing::ScreenMarks::Off;
+    let boxed = args(Some(json!({
+        "id": "s3",
+        "put": [{"highlight":{"id":"c","target":{"box":[20,30,40,50]},"style":"box"}}]
+    })));
+    let (_, lookup) = call(&mut core, "boxed", &boxed);
+    let drawn = settle(&mut core, &mut store, lookup);
+    assert_eq!(
+        answer(&mut core, &mut store, &drawn),
+        ToolOutput::Text(format!(
+            "drawn: [s1, s2]; stopped: step s3: put[0].target: scene.Unsupported{DRAWN_RETRY}"
+        ))
+    );
+    assert_eq!(
+        store.drawing_scenes().expect("committed prefix").scenes[0]
+            .log
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn a_complete_draw_ignores_a_trailer_without_changing_its_retry_identity() {
+    let scratch = Scratch::new("draw-tool-trailer");
+    let mut store = store(&scratch);
+    let mut core = offered(vec![T]);
+    let closed = args(None);
+    let mut trailing = closed[..closed.len() - 1].to_vec();
+    trailing.extend_from_slice(br#", "records": null}"#);
+    let (_, lookup) = call(&mut core, "trailing", &trailing);
+    let drawn = settle(&mut core, &mut store, lookup);
+    let expected =
+        ToolOutput::Text("drawn: [s1, s2]; text after the records array was ignored".into());
+    assert_eq!(answer(&mut core, &mut store, &drawn), expected);
+    assert_eq!(
+        call(&mut core, "trailing", &closed),
+        (Dispatch::Answered(expected), Vec::new())
+    );
+}
+
+#[test]
 fn the_complete_draw_cap_is_sixteen_kib_and_one_over_stays_refused() {
     let mut core = offered(vec![T]);
     let mut exact = args(None);
