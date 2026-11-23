@@ -76,7 +76,7 @@ impl Scratch {
         if owner == 0 || !private_mode(&anchor, owner, libc::S_IFDIR | 0o700) {
             return Err(Fault::new(Stage::Parent, ErrorKind::PermissionDenied));
         }
-        check_volume(&parent)?;
+        volume(&parent, Stage::Parent)?;
         // SAFETY: The name is one component and the owned parent stays open.
         let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
         call(result).map_err(|error| Fault::io(Stage::Root, &error))?;
@@ -162,7 +162,7 @@ impl Scratch {
     }
 
     fn replace(&mut self, from: &CStr, to: &CStr) -> Publication {
-        self.replace_with(from, to, rename, sync_directory)
+        self.replace_with(from, to, rename, sync_directory, File::sync_all)
     }
 
     fn replace_with(
@@ -171,6 +171,7 @@ impl Scratch {
         to: &CStr,
         rename: impl FnOnce(&File, &CStr, &CStr) -> io::Result<()>,
         sync_directory: impl FnOnce(&File) -> io::Result<()>,
+        sync_file: impl FnOnce(&File) -> io::Result<()>,
     ) -> Publication {
         let (staged, source) = match self.prepare(from, to) {
             Ok(ready) => ready,
@@ -181,9 +182,7 @@ impl Scratch {
             matches_name(&self.directory, to, &source, Stage::PublishedIdentity)?;
             sync_directory(&self.directory)
                 .map_err(|error| Fault::io(Stage::DirectorySync, &error))?;
-            staged
-                .sync_all()
-                .map_err(|error| Fault::io(Stage::PublishedSync, &error))
+            sync_file(&staged).map_err(|error| Fault::io(Stage::PublishedSync, &error))
         })();
         match published {
             Ok(()) => Publication::Completed,
@@ -196,7 +195,7 @@ impl Scratch {
 
     fn free_space(&self) -> Result<u64, Fault> {
         self.active()?;
-        available_bytes(&capacity(&self.directory)?)
+        available_bytes(&volume(&self.directory, Stage::Capacity)?)
     }
 
     fn remove(&self, name: &CStr, held: &File) -> Result<(), Fault> {
@@ -235,11 +234,11 @@ fn sync_directory(directory: &File) -> io::Result<()> {
     call(unsafe { libc::fsync(directory.as_raw_fd()) })
 }
 
-fn check_volume(directory: &File) -> Result<(), Fault> {
+fn volume(directory: &File, stage: Stage) -> Result<libc::statfs, Fault> {
     let mut out = MaybeUninit::uninit();
     // SAFETY: The held directory is live and out can hold a complete statfs.
     call(unsafe { libc::fstatfs(directory.as_raw_fd(), out.as_mut_ptr()) })
-        .map_err(|error| Fault::io(Stage::Parent, &error))?;
+        .map_err(|error| Fault::io(stage, &error))?;
     // SAFETY: Successful fstatfs initialized the complete structure.
     let sample = unsafe { out.assume_init() };
     let flags = i64::from(sample.f_flags);
@@ -249,26 +248,18 @@ fn check_volume(directory: &File) -> Result<(), Fault> {
         || flags & i64::from(libc::MNT_LOCAL) == 0
         || flags & i64::from(libc::MNT_RDONLY | libc::MNT_IGNORE_OWNERSHIP) != 0
     {
-        return Err(Fault::new(Stage::Parent, ErrorKind::Unsupported));
+        return Err(Fault::new(stage, ErrorKind::Unsupported));
     }
-    Ok(())
+    Ok(sample)
 }
 
-fn capacity(directory: &File) -> Result<libc::statvfs, Fault> {
-    let mut out = MaybeUninit::uninit();
-    // SAFETY: The held directory is live and out can hold a complete statvfs.
-    call(unsafe { libc::fstatvfs(directory.as_raw_fd(), out.as_mut_ptr()) })
-        .map_err(|error| Fault::io(Stage::Capacity, &error))?;
-    // SAFETY: Successful fstatvfs initialized the complete structure.
-    Ok(unsafe { out.assume_init() })
-}
-
-fn available_bytes(sample: &libc::statvfs) -> Result<u64, Fault> {
-    if sample.f_frsize == 0 || sample.f_bavail > sample.f_blocks {
+fn available_bytes(sample: &libc::statfs) -> Result<u64, Fault> {
+    if sample.f_bsize == 0 || sample.f_bavail > sample.f_blocks {
         return Err(Fault::new(Stage::Capacity, ErrorKind::InvalidData));
     }
-    u64::from(sample.f_bavail)
-        .checked_mul(sample.f_frsize)
+    sample
+        .f_bavail
+        .checked_mul(u64::from(sample.f_bsize))
         .ok_or_else(|| Fault::new(Stage::Capacity, ErrorKind::InvalidData))
 }
 

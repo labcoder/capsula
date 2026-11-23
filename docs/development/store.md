@@ -11,9 +11,13 @@ the swap ran on a worker. Windows sharing-mode tests stay Windows-only. No non-W
 production data root, swap or capacity fallback is enabled.
 
 Separate macOS native tests exercise replacement and caller-available capacity in an owned
-APFS scratch directory with no ACL grants or entries. Capacity is a snapshot, not a reservation.
-The tests need a private, explicitly provided `MAC_SCRATCH_TEST_PARENT`; the adapter isn't
-selected by shared tests or runtime callers. An uncertain publication stops the scratch owner
+APFS scratch directory with confirmed ACL absence. Capacity is a snapshot, not a reservation:
+Darwin's `fstatfs` reports caller-available blocks in units of `f_bsize`, the fundamental block
+size, not the optimal transfer size. The fixture opens the trusted private `MAC_SCRATCH_TEST_PARENT`
+by absolute path; no-follow protects its final component only. Replacement reopens the staged name
+instead of taking the original staging descriptor. The pre-rename checks are snapshots and don't
+protect against a same-user destination swap between the final check and `renameat`. The adapter
+isn't selected by shared tests or runtime callers. An uncertain publication stops the scratch owner
 and leaves the files in place. Successful sync calls don't prove power-loss durability.
 
 ## Settings

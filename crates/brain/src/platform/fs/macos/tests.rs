@@ -7,8 +7,8 @@ use std::ptr::NonNull;
 
 use super::custody::acl_absent;
 use super::{
-    Fault, Publication, Scratch, Stage, available_bytes, capacity, check_volume, links_unsupported,
-    named_stat, open_at, rename, unlink,
+    Fault, Publication, Scratch, Stage, available_bytes, links_unsupported, named_stat, open_at,
+    rename, sync_directory, unlink, volume,
 };
 
 fn approved_parent() -> File {
@@ -255,7 +255,7 @@ fn refuses_parent_mode_and_even_deny_only_acl() {
 #[test]
 #[ignore = "requires a private owned APFS fixture parent"]
 fn indeterminate_rename_or_sync_retains_data_and_stops_the_owner() {
-    for stage in [Stage::Rename, Stage::DirectorySync] {
+    for stage in [Stage::Rename, Stage::DirectorySync, Stage::PublishedSync] {
         let mut scratch = fixture();
         let old = seed(&scratch, c"current", b"old bytes");
         let staged = seed(&scratch, c"next", b"new bytes");
@@ -269,7 +269,18 @@ fn indeterminate_rename_or_sync_retains_data_and_stops_the_owner() {
                 }
                 Ok(())
             },
-            |_| Err(io::Error::from_raw_os_error(libc::EIO)),
+            |directory| {
+                if stage == Stage::DirectorySync {
+                    return Err(io::Error::from_raw_os_error(libc::EIO));
+                }
+                sync_directory(directory)
+            },
+            |file| {
+                if stage == Stage::PublishedSync {
+                    return Err(io::Error::from_raw_os_error(libc::EIO));
+                }
+                file.sync_all()
+            },
         );
         assert_eq!(
             outcome,
@@ -292,24 +303,28 @@ fn indeterminate_rename_or_sync_retains_data_and_stops_the_owner() {
 #[ignore = "requires a private owned APFS fixture parent"]
 fn reports_available_capacity_with_checked_units() {
     let scratch = fixture();
-    check_volume(&scratch.directory).expect("local writable APFS with ownership");
-    let mut sample = capacity(&scratch.directory).expect("held directory capacity");
+    let mut sample = volume(&scratch.directory, Stage::Capacity).expect("held APFS capacity");
     assert!(
         u128::from(scratch.free_space().expect("caller-available bytes"))
-            <= u128::from(sample.f_blocks) * u128::from(sample.f_frsize),
+            <= u128::from(sample.f_blocks) * u128::from(sample.f_bsize),
         "available bytes can't exceed total space on the admitted volume"
     );
     sample.f_blocks = 10;
     sample.f_bfree = 7;
     sample.f_bavail = 3;
-    sample.f_frsize = 4096;
+    sample.f_bsize = 4096;
+    sample.f_iosize = 1_048_576;
     assert_eq!(available_bytes(&sample), Ok(12_288));
+    sample.f_blocks = (1 << 32) + 10;
+    sample.f_bfree = (1 << 32) + 7;
+    sample.f_bavail = (1 << 32) + 3;
+    assert_eq!(available_bytes(&sample), Ok((16 << 40) + 12_288));
     let invalid = Err(Fault::new(Stage::Capacity, ErrorKind::InvalidData));
-    sample.f_frsize = 0;
+    sample.f_bsize = 0;
     assert_eq!(available_bytes(&sample), invalid);
-    sample.f_frsize = u64::MAX;
-    sample.f_blocks = u32::MAX;
-    sample.f_bavail = u32::MAX;
+    sample.f_bsize = 4096;
+    sample.f_blocks = u64::MAX;
+    sample.f_bavail = u64::MAX;
     assert_eq!(available_bytes(&sample), invalid);
     scratch.finish().expect("remove empty owned root");
 }
