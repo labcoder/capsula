@@ -1971,6 +1971,15 @@ async fn a_screen_hold_shares_the_voice_admission_and_releases_its_lease_when_re
     brain.close().await;
 }
 
+pub(in crate::runtime) fn attach_capture_fixture(
+    brain: &mut Brain,
+) -> crate::supervise::fixture::Rig<crate::screen::Holds> {
+    let rig = crate::supervise::fixture::start::<crate::screen::Holds>();
+    brain.attach_screen(Arc::new(HoldClient::new(rig.handle.clone())));
+    brain.holds.window_capture = true;
+    rig
+}
+
 /// Sol takes images and is the default; Luna doesn't. A brain with a worker client and that catalog.
 pub(in crate::runtime) fn sees_on_sol(
     brain: &mut Brain,
@@ -2007,8 +2016,6 @@ pub(in crate::runtime) fn set(brain: &mut Brain, op: SettingsOp) {
     brain.config.commit(pending);
 }
 
-/// Requires native window capture; the fixture worker alone cannot open the screen gate.
-#[cfg(windows)]
 #[tokio::test]
 async fn the_threads_choice_rechecks_the_gate_and_a_closed_gate_closes_the_part_with_its_reason() {
     use crate::context::ScreenClass;
@@ -2022,6 +2029,7 @@ async fn the_threads_choice_rechecks_the_gate_and_a_closed_gate_closes_the_part_
     let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
     link.recovery = Some(crate::runtime::Recovery::new(&[], 1024));
     let (mut rig, sol, luna) = sees_on_sol(&mut brain);
+    brain.holds.window_capture = true;
     // The pin, the switch, and how the part ends: open (`None`), or closed with its line, if any.
     let cases = [
         (Some(luna), true, Some(Some(ScreenClass::ModelCantSee))),
@@ -2081,6 +2089,10 @@ async fn a_screen_worker_that_cant_start_leaves_screen_holds_unsupported() {
 async fn unavailable_containment_leaves_screen_holds_unsupported() {
     let scratch = Scratch::new("screen-worker-no-containment");
     let mut brain = test_support::brain(&scratch, "");
+    assert!(
+        !brain.holds.window_capture,
+        "native window capture is unavailable"
+    );
     brain.holds.window_capture = true;
     let job = crate::platform::Job::new().map(Arc::new);
     assert!(matches!(&job, Err(error) if error.kind() == std::io::ErrorKind::Unsupported));
@@ -2417,8 +2429,6 @@ async fn without_window_capture_the_gate_reads_unsupported_whatever_the_client()
     brain.close().await;
 }
 
-/// Requires native window capture; the fixture worker alone cannot open the screen gate.
-#[cfg(windows)]
 #[tokio::test]
 async fn the_gate_is_sent_once_per_connection_and_again_only_when_it_changes() {
     use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};
@@ -2431,6 +2441,7 @@ async fn the_gate_is_sent_once_per_connection_and_again_only_when_it_changes() {
     let mut tap = Tap::from_env();
     let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
     let (_rig, _sol, luna) = sees_on_sol(&mut brain);
+    brain.holds.window_capture = true;
     let off = |why| ControlToShell::ScreenHolds(ScreenHolds::Off(why));
     brain.screen_holds_changed(&mut link).unwrap();
     assert_eq!(
@@ -2530,8 +2541,6 @@ async fn a_new_sign_in_alone_revises_the_offer_once() {
 /// The revision counts up only when what the offer authorizes changes: a new name for the same
 /// model keeps it, a gate that closed and opened again takes a new one, and a new connection
 /// starts again from the first.
-/// Requires native window capture; the fixture worker alone cannot open the screen gate.
-#[cfg(windows)]
 #[tokio::test]
 async fn only_a_change_in_what_the_offer_authorizes_counts_its_revision_up() {
     use kumochi_protocol::message::{
@@ -2546,6 +2555,7 @@ async fn only_a_change_in_what_the_offer_authorizes_counts_its_revision_up() {
     let mut tap = Tap::from_env();
     let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
     let (_rig, sol, _luna) = sees_on_sol(&mut brain);
+    brain.holds.window_capture = true;
     let on = |name: &str, revision| {
         [ScreenHolds::On {
             model: ModelName::new(name).unwrap(),
