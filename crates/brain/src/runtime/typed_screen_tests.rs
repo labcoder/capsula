@@ -98,7 +98,11 @@ async fn paired(brain: &mut Brain, client: impl AsyncFnOnce(Shell<DuplexStream>)
         assert_eq!(shell.scenes().await, []);
         let output = OutputGeneration(7);
         shell
-            .send(&ControlToBrain::QueuedAudioOutput(24_000, output, Narration::Plain))
+            .send(&ControlToBrain::QueuedAudioOutput(
+                24_000,
+                output,
+                Narration::Plain,
+            ))
             .await;
         assert_eq!(
             shell.control().await,
