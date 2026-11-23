@@ -3,6 +3,13 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(all(test, target_os = "macos"))]
+#[expect(
+    unsafe_code,
+    reason = "Darwin filesystem calls stay in the platform module"
+)]
+mod macos;
+
 /// No per-user runtime data root is configured on this platform.
 #[must_use]
 pub fn data_dir() -> Option<PathBuf> {

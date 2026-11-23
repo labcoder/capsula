@@ -10,6 +10,12 @@ purger's capacity check. Failure to sync a completed rename exits the test proce
 the swap ran on a worker. Windows sharing-mode tests stay Windows-only. No non-Windows
 production data root, swap or capacity fallback is enabled.
 
+Separate macOS native tests exercise replacement and caller-available capacity in an owned
+APFS scratch directory with no ACL grants or entries. Capacity is a snapshot, not a reservation.
+The tests need a private, explicitly provided `MAC_SCRATCH_TEST_PARENT`; the adapter isn't
+selected by shared tests or runtime callers. An uncertain publication stops the scratch owner
+and leaves the files in place. Successful sync calls don't prove power-loss durability.
+
 ## Settings
 
 | Pragma | Why |
