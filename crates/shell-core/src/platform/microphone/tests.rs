@@ -1,7 +1,7 @@
 use super::pcm::{Format, Packetizer, Sample};
 use super::*;
 use async_channel::Sender;
-use kumochi_protocol::message::MAX_HOLD_CHUNKS;
+use kumochi_protocol::message::{HOLD_START_TIMEOUT_MS, MAX_HOLD_CHUNKS};
 
 #[test]
 fn dropping_an_owner_drains_its_committed_unforwarded_queue() {
@@ -323,7 +323,10 @@ fn prepared() -> (CollectionGate, MicOwner, Sender<MicPcm>, Instant) {
     let at = Instant::now();
     let generation = gate.arm_at(GestureId(7), at).unwrap();
     generation.advance(ARMED, OPENING).unwrap();
-    generation.startup.set(at).unwrap();
+    generation
+        .startup
+        .set(at + ShellTuning::default().start())
+        .unwrap();
     let (_, running) = async_channel::bounded(1);
     let (_, completion) = async_channel::bounded(1);
     let (output, pcm) = async_channel::bounded(1);
@@ -476,14 +479,14 @@ fn startup_expires_until_ui_acceptance_and_never_releases_device_ownership() {
         assert_eq!(
             owner.generation.mode(
                 &owner.session,
-                at + Duration::from_millis(u64::from(HOLD_START_TIMEOUT_MS - 1))
+                at + Duration::from_millis(HOLD_START_TIMEOUT_MS - 1)
             ),
             Ok(Mode::Preparing)
         );
         assert_eq!(
             owner.generation.mode(
                 &owner.session,
-                at + Duration::from_millis(u64::from(HOLD_START_TIMEOUT_MS))
+                at + Duration::from_millis(HOLD_START_TIMEOUT_MS)
             ),
             Err(MicError::Deadline)
         );
@@ -501,10 +504,32 @@ fn startup_expires_until_ui_acceptance_and_never_releases_device_ownership() {
     assert_eq!(
         owner.generation.mode(
             &owner.session,
-            at + Duration::from_millis(u64::from(HOLD_START_TIMEOUT_MS))
+            at + Duration::from_millis(HOLD_START_TIMEOUT_MS)
         ),
         Ok(Mode::Collecting)
     );
+}
+
+#[test]
+fn tuned_start_budget_begins_at_the_single_reservation_not_at_key_down() {
+    let gate = CollectionGate::default();
+    let chord = Instant::now() - Duration::from_secs(10);
+    let mic = gate.arm_at(GestureId(1), chord).unwrap();
+    let alive = AtomicBool::new(true);
+    let start = Instant::now();
+    let _reserved = mic
+        .reserve_with_tuning(ShellTuning::from_ms(2000, 500).unwrap())
+        .unwrap();
+    let reserved_by = Instant::now();
+    assert_eq!(
+        mic.mode(&alive, start + Duration::from_millis(1999)),
+        Ok(Mode::Preparing)
+    );
+    assert_eq!(
+        mic.mode(&alive, reserved_by + Duration::from_secs(2)),
+        Err(MicError::Deadline)
+    );
+    assert_eq!(gate.arm(GestureId(2)).unwrap_err(), MicError::Stale);
 }
 
 #[test]

@@ -244,12 +244,11 @@ pub(super) fn deliver(
         let mut state = gesture.get();
         let mut recovered = false;
         let session = link.link_generation();
-        let voice_paused = Cell::new(paused.get() || !link.can_start_voice_gesture(session));
         let delivery = fence.borrow_mut().reduce_with_keyboard_read(
             &mut state,
             event,
             at.instant,
-            &voice_paused,
+            || (!paused.get() && link.can_start_voice_gesture(session)).then_some(session),
             || {
                 let now = at.recovery_time()?;
                 recovered = true;
@@ -270,12 +269,7 @@ pub(super) fn deliver(
                     if recovered {
                         recovered_hold.set(Some(*warm));
                     }
-                    gates.warm(
-                        link.output(),
-                        *warm,
-                        link.link_generation(),
-                        link.choice_revision(),
-                    );
+                    gates.warm(link.output(), *warm, session, link.choice_revision());
                 }
                 Intent::Recognized {
                     gesture,

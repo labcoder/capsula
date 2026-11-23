@@ -6,11 +6,14 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, DataToBrain, DataToShell, Deleted, ErrorKey, Incarnation,
-    IssueSession, Narration, Phase, RunId, RunOrigin, ThreadId, UserError,
+    IssueSession, Narration, Phase, RunId, RunOrigin, ShellTuning, ThreadId, UserError,
 };
 
 use super::fixture::*;
-use super::{Attendance, Connection, Link, LinkEvent, LinkHandle, Session, Shared, start, welcome};
+use super::{
+    Attendance, Connection, Link, LinkError, LinkEvent, LinkHandle, Session, Shared,
+    read_shell_tuning, start, welcome,
+};
 use crate::platform::PipeClient;
 use crate::runs::{Refused, Runs, Shown};
 use crate::threads::Threads;
@@ -1027,16 +1030,22 @@ fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
             frame::read(&mut &peer_data, Pipe::Data).unwrap(),
             Some(DataToBrain::TextMetrics(profile))
         );
-        let connected = connect.join().unwrap().unwrap();
-        assert_eq!(
-            connected.issue_origin,
-            IssueSession {
-                incarnation: Incarnation(5),
-                epoch: 128
-            }
-        );
-        assert_eq!(connected.drawing_font_family, Some(family));
-        drop(connected);
+        let session = IssueSession {
+            incarnation: Incarnation(5),
+            epoch: 128,
+        };
+        let tuning = ShellTuning::from_ms(2000, 500).unwrap();
+        frame::write(
+            &mut &peer_control,
+            &ControlToShell::ShellTuning { session, tuning },
+            Pipe::Control,
+        )
+        .unwrap();
+        let accepted = connect.join().unwrap().unwrap();
+        assert_eq!(accepted.issue_origin, session);
+        assert_eq!(accepted.tuning, tuning);
+        assert_eq!(accepted.drawing_font_family, Some(family));
+        drop(accepted);
         assert_eq!(
             frame::read::<DataToBrain>(&mut &peer_data, Pipe::Data).unwrap(),
             None
@@ -1616,6 +1625,26 @@ fn a_malformed_data_frame_ends_the_connection() {
 }
 
 #[test]
+fn missing_stale_and_out_of_range_shell_tuning_do_not_install_defaults() {
+    let origin = IssueSession {
+        incarnation: Incarnation(1),
+        epoch: 2,
+    };
+    let stale = ControlToShell::ShellTuning {
+        session: IssueSession { epoch: 1, ..origin },
+        tuning: ShellTuning::default(),
+    };
+    let stale = frame::encode(&stale, Pipe::Control).unwrap();
+    let invalid = frame::encode(&(37_u8, origin, 1999_u64, 500_u64), Pipe::Control).unwrap();
+    for mut wire in [&[][..], stale.as_slice(), invalid.as_slice()] {
+        assert!(matches!(
+            read_shell_tuning(&mut wire, origin),
+            Err(LinkError::Tuning)
+        ));
+    }
+}
+
+#[test]
 fn a_repeated_handshake_ends_the_connection() {
     let link = attended("rehandshake");
     let events = patient(link.events);
@@ -1630,6 +1659,25 @@ fn a_repeated_handshake_ends_the_connection() {
         Ok(None)
     ));
     assert!(link.link.join().expect("joined"));
+}
+
+#[test]
+fn a_duplicate_shell_tuning_closes_the_link_instead_of_replacing_it() {
+    let link = attended("duplicate-shell-tuning");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let duplicate = ControlToShell::ShellTuning {
+        session: session.issue_session(),
+        tuning: ShellTuning::from_ms(2_000, 500).unwrap(),
+    };
+    frame::write(&mut &link.control, &duplicate, Pipe::Control).unwrap();
+    assert_eq!(
+        frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control).unwrap(),
+        None
+    );
+    assert!(link.link.join().unwrap());
+    assert!(!session.open());
+    assert_eq!(session.shell_tuning(), ShellTuning::default());
 }
 
 /// A connection's first frames in the order the brain sends them, which its tap test pins:
@@ -1661,10 +1709,19 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
         screen_holds: kumochi_protocol::message::DEFAULT_SCREEN_HOLDS,
         show_screen: kumochi_protocol::message::DEFAULT_SHOW_SCREEN,
     };
+    let origin = IssueSession {
+        incarnation: Incarnation(4),
+        epoch: 91,
+    };
+    let tuning = ShellTuning::from_ms(4000, 750).unwrap();
     for message in [
         ControlToShell::Welcome {
             incarnation: Incarnation(4),
             issue_epoch: 91,
+        },
+        ControlToShell::ShellTuning {
+            session: origin,
+            tuning,
         },
         ControlToShell::Settings {
             answer: false,
@@ -1688,11 +1745,13 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
     let (sender, events) = async_channel::unbounded();
     let link = bare_link();
     let (_handle, start) = start(link, sender);
+    let validated = read_shell_tuning(&mut &shell_control, issue_session).unwrap();
     let connection = Connection {
         control: Arc::new(shell_control),
         data: Arc::new(shell_data),
         issue_origin: issue_session,
         drawing_font_family: None,
+        tuning: validated,
     };
     let link =
         thread::spawn(move || start.link.attend(connection, &start.events) == Attendance::Lost);
@@ -1700,6 +1759,7 @@ fn the_brain_s_first_frames_with_the_account_view_keep_the_connection() {
     let session = connected(next(&events));
     assert_eq!(session.generation(), 1);
     assert_eq!(session.incarnation(), Incarnation(4));
+    assert_eq!(session.shell_tuning(), tuning);
     assert_eq!(
         session.issue_session(),
         IssueSession {
@@ -1787,6 +1847,7 @@ fn an_ended_connection_s_sends_and_credit_never_reach_the_next() {
                     epoch,
                 },
                 drawing_font_family: None,
+                tuning: ShellTuning::default(),
             };
             start.link.attend(connection, &start.events) == Attendance::Lost
         })
@@ -2105,6 +2166,7 @@ fn a_delete_answered_before_a_new_brain_never_fences_the_new_brain_s_runs() {
                     epoch: 1,
                 },
                 drawing_font_family: None,
+                tuning: ShellTuning::default(),
             };
             start.link.attend(connection, &start.events) == Attendance::Lost
         })
@@ -4748,6 +4810,18 @@ fn read_queued_fixture_hello(control: &PipeClient, data: &PipeClient) {
         Some(DataToBrain::TextMetrics(None)),
         "fixture shells explicitly select the built-in metrics after Hello"
     );
+    frame::write(
+        &mut &*control,
+        &ControlToShell::ShellTuning {
+            session: IssueSession {
+                incarnation: Incarnation(1),
+                epoch: 2,
+            },
+            tuning: ShellTuning::default(),
+        },
+        Pipe::Control,
+    )
+    .expect("tuning");
 }
 
 fn lost_quiet_mic() -> (
@@ -4795,6 +4869,7 @@ fn replacement_pair(label: &str) -> (PipeClient, PipeClient, Connection) {
                 epoch: 2,
             },
             drawing_font_family: None,
+            tuning: ShellTuning::default(),
         },
     )
 }
@@ -4823,6 +4898,7 @@ fn assert_refused_queued_replacement(handle: &LinkHandle) {
                     epoch: 93
                 },
                 drawing_font_family: None,
+                tuning: ShellTuning::default(),
             },
             &sender
         ),

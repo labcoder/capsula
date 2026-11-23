@@ -1364,7 +1364,7 @@ mod tests {
                         gesture,
                         event,
                         at.instant,
-                        &Cell::new(false),
+                        || Some(0),
                         || {
                             (!at.repeated_modifier
                                 && super::exact_chord(|key| match key {

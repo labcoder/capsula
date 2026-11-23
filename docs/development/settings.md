@@ -486,6 +486,11 @@ the fixed record and request limits. `summary_input_bytes` limits the background
 input estimate (JSON-escaped strings plus fixed overhead), not inline rewriting or exact
 provider request bytes. See [tuning](../user/tuning.md) for the examples the docs test checks.
 
+`[tuning.hold]` supplies the same startup and drain values to the brain and shell-core.
+Missing, mistyped and negative entries use the key's default; nonnegative out-of-range
+integers clamp. The shell doesn't parse this file. Its required [startup snapshot](ipc.md#the-handshake)
+must match the authenticated connection and its values must already be in range.
+
 ## Claude Code
 
 `[claude_code] enabled = false` in `config.toml` turns Claude Code's discovery off: the brain
