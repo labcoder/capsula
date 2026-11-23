@@ -44,9 +44,9 @@ fn attach(scratch: &Scratch, saved: &str, input_short: Option<u64>) -> Rig {
     )
     .expect("the fake output owner starts");
     let (fetch, fetched) = held_fetch();
-    brain.attach_voice(
-        models.clone(),
-        &[],
+    attach_policy_voice(
+        &mut brain,
+        [input_short == Some(0), true],
         (Some(stt), Some(tts)),
         [stt_heard, tts_heard],
         Arc::<HeldFetch>::clone(&fetch),

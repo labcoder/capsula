@@ -317,7 +317,7 @@ async fn first_speech_setup_loads_and_holds_without_restarting_the_brain() {
     use kumochi_protocol::message::{PartState, SettingsOp};
     use kumochi_protocol::voice::VoicePart;
 
-    let scratch = Scratch::trusted("hold-first-setup");
+    let scratch = Scratch::new("hold-first-setup");
     let mut brain = test_support::brain(&scratch, "0 text first setup answer");
     let (release, held) = std::sync::mpsc::channel();
     let (began, mut decoded) = mpsc::unbounded_channel();
@@ -330,9 +330,9 @@ async fn first_speech_setup_loads_and_holds_without_restarting_the_brain() {
     });
     let (_, tts) = Reports::new();
     let (fetch, fetched) = super::voice::held_fetch();
-    brain.attach_voice(
-        scratch.dir().join("models"),
-        &[],
+    super::voice::attach_policy_voice(
+        &mut brain,
+        [false; 2],
         (Some(stt), None),
         [heard, tts],
         Arc::<super::voice::HeldFetch>::clone(&fetch),
