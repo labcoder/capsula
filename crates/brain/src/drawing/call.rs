@@ -28,6 +28,11 @@ pub(super) enum CompleteArgs<'a> {
     Checked(DrawRecords),
 }
 
+enum RecordSurface {
+    OverlayOnly,
+    ScreenOffered,
+}
+
 /// Rejected records one run may make [guess, architecture v1 §4.5].
 const MAX_REJECTED: u8 = 8;
 /// Draw calls one run may make (guess).
@@ -365,7 +370,7 @@ impl Drawing {
                     }
                 };
                 for bytes in records {
-                    self.intake(at, |screen| parse_intake(&bytes, screen), out);
+                    self.intake(at, |surface| parse_intake(&bytes, surface), out);
                 }
                 after_records
             }
@@ -374,8 +379,8 @@ impl Drawing {
                 for record in records {
                     self.intake(
                         at,
-                        |screen| {
-                            if !screen {
+                        |surface| {
+                            if matches!(surface, RecordSurface::OverlayOnly) {
                                 check_overlay_draw_record(&record)?;
                             }
                             Ok(record)
@@ -416,7 +421,7 @@ impl Drawing {
             return Err(Stale);
         }
         if let Some(at) = self.call_at(thread, run, id, out)? {
-            self.intake(at, |screen| parse_intake(bytes, screen), out);
+            self.intake(at, |surface| parse_intake(bytes, surface), out);
         }
         Ok(())
     }
@@ -541,14 +546,19 @@ impl Drawing {
     fn intake(
         &mut self,
         at: usize,
-        record: impl FnOnce(bool) -> Result<Record, StepError>,
+        record: impl FnOnce(RecordSurface) -> Result<Record, StepError>,
         out: &mut Output,
     ) {
         let run = self.calls[at].run;
-        let screen = self
+        let surface = if self
             .runs
             .iter()
-            .any(|ledger| ledger.run == run && ledger.canvas.is_some());
+            .any(|ledger| ledger.run == run && ledger.canvas.is_some())
+        {
+            RecordSurface::ScreenOffered
+        } else {
+            RecordSurface::OverlayOnly
+        };
         let call = &mut self.calls[at];
         call.records += 1;
         if call.refused {
@@ -565,7 +575,7 @@ impl Drawing {
             self.enqueue(job, out);
             return;
         }
-        let job = match record(screen) {
+        let job = match record(surface) {
             Ok(record) => Job::Record {
                 run,
                 call: id,
@@ -1187,11 +1197,10 @@ impl Drawing {
     }
 }
 
-fn parse_intake(bytes: &[u8], screen: bool) -> Result<Record, StepError> {
-    let parsed = if screen {
-        parse_screen_draw_record(bytes)
-    } else {
-        parse_draw_record(bytes)
+fn parse_intake(bytes: &[u8], surface: RecordSurface) -> Result<Record, StepError> {
+    let parsed = match surface {
+        RecordSurface::OverlayOnly => parse_draw_record(bytes),
+        RecordSurface::ScreenOffered => parse_screen_draw_record(bytes),
     };
     parsed.map_err(|mut error| {
         if error.step.is_none() {

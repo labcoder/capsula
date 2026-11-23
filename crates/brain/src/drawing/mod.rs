@@ -578,19 +578,7 @@ impl Drawing {
                 call,
                 error,
             } => self.call_finished(thread, run, call, error, &mut out)?,
-            Input::StopScenes { run, cuts } => {
-                // shortcut: D1 has one run; OSC-56 needs per-run revocation for concurrency.
-                for cut in cuts.iter() {
-                    let job = Job::Cut {
-                        scene: cut.scene,
-                        cut: cut.cut.clone(),
-                        kind: CutKind::Stop,
-                    };
-                    self.enqueue(job, &mut out);
-                }
-                let named = cuts.iter().map(|cut| cut.scene).collect();
-                self.enqueue(Job::Unseen { run, named }, &mut out);
-            }
+            Input::StopScenes { run, cuts } => self.stop_scenes(run, &cuts, &mut out),
             Input::StepShown { run, scene, index } => {
                 if self.committed_by(run, scene, index, &mut out) {
                     if let Some(at) = self.live(scene) {

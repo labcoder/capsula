@@ -2,7 +2,7 @@
 //! fifth-scene eviction.
 
 use kumochi_protocol::message::{
-    DataToShell, MAX_VISIBLE_SCENES, RunId, SceneFailure, SceneHeader, SceneId, ThreadId,
+    DataToShell, MAX_VISIBLE_SCENES, RunId, SceneCuts, SceneFailure, SceneHeader, SceneId, ThreadId,
 };
 use kumochi_scene::layout::LayoutState;
 use kumochi_scene::record::Surface;
@@ -231,6 +231,20 @@ impl Drawing {
         if let Some(error) = interrupted {
             self.finish(run, &call, Some(error), out);
         }
+    }
+
+    pub(super) fn stop_scenes(&mut self, run: RunId, cuts: &SceneCuts, out: &mut Output) {
+        // shortcut: D1 has one run; OSC-56 needs per-run revocation for concurrency.
+        for cut in cuts.iter() {
+            let job = Job::Cut {
+                scene: cut.scene,
+                cut: cut.cut.clone(),
+                kind: CutKind::Stop,
+            };
+            self.enqueue(job, out);
+        }
+        let named = cuts.iter().map(|cut| cut.scene).collect();
+        self.enqueue(Job::Unseen { run, named }, out);
     }
 
     /// Applies a scene's cut, whichever runs committed what it drops. Every effective cut is
