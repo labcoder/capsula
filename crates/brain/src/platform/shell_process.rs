@@ -29,7 +29,6 @@ impl ShellProcess {
         }
     }
 
-    #[cfg(windows)]
     pub(crate) fn register(&self) -> super::connected_shell::Registration<'static> {
         super::register_shell(self.pid)
     }

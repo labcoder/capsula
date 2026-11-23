@@ -487,12 +487,8 @@ async fn a_forwarded_draw_returns_its_committed_prefix_under_the_original_id() {
         (gate.clone(), until)
     ));
     let tools = offer.schemas();
-    let job = crate::platform::Job::new().expect("job");
-    let exe = std::env::current_exe().expect("test binary");
     let (calls, mut mailbox) = mpsc::channel(1);
     let context = LaunchContext {
-        job: &job,
-        brain_exe: &exe,
         deadline: until.into(),
         tools,
         gate,
@@ -1051,6 +1047,7 @@ fn a_launch_that_loses_its_authority_with_its_build_current_issues_no_further_st
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
@@ -1080,8 +1077,6 @@ async fn losing_only_the_authenticated_client_revokes_a_draw_with_a_step_in_the_
     let tools = offer.schemas();
     let (calls, mut mailbox) = mpsc::channel(1);
     let context = LaunchContext {
-        job: &job,
-        brain_exe: &exe,
         deadline: until.into(),
         tools,
         gate: gate.clone(),
@@ -1094,7 +1089,7 @@ async fn losing_only_the_authenticated_client_revokes_a_draw_with_a_step_in_the_
         .expect("bound");
     let (ended, gone) = oneshot::channel();
     let serve = async {
-        ended.send(listener.serve(context).await).ok();
+        ended.send(listener.serve(&job, &exe, context).await).ok();
     };
     let drive = async {
         let arguments: Value = serde_json::from_slice(&args(None)).expect("args");

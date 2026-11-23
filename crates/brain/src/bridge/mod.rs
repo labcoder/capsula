@@ -28,7 +28,6 @@ use std::time::Duration;
 use kumochi_protocol::constants::{BRIDGE_LOG, BRIDGE_PIPE, OBJECT_PREFIX};
 use kumochi_protocol::frame::{self, Pipe};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
-use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -38,6 +37,7 @@ pub(crate) use self::wire::{CallKey, Method, ToBrain, ToBridge};
 use self::id::JsonRpcId;
 use self::stdio::{Body, Incoming, Line, LineReader, RpcError, classify, reply};
 use self::wire::{Reassembly, chunks};
+use crate::platform::{self, PipeClient};
 
 /// The longest stdin line, newline excluded [guess: call arguments].
 pub(crate) const MAX_INCOMING: usize = 512 * 1024;
@@ -93,7 +93,7 @@ pub fn serve(launch: &str) -> Result<(), BridgeError> {
     {
         return Err(BridgeError::Launch);
     }
-    let session = crate::platform::session_id().map_err(BridgeError::Connect)?;
+    let session = platform::session_id().map_err(BridgeError::Connect)?;
     let name = pipe_name(session, launch);
     let own = std::env::current_exe().map_err(BridgeError::Connect)?;
     run(|| connect(&name, &own), io::stdin(), io::stdout())
@@ -153,11 +153,9 @@ where
 
 /// Opens `name` and checks its server runs `expected`, so a process that took the name first
 /// gets nothing.
-fn connect(name: &str, expected: &std::path::Path) -> Result<NamedPipeClient, BridgeError> {
-    let pipe = ClientOptions::new()
-        .open(name)
-        .map_err(BridgeError::Connect)?;
-    let server = crate::platform::server_image(&pipe).map_err(BridgeError::Connect)?;
+fn connect(name: &str, expected: &std::path::Path) -> Result<PipeClient, BridgeError> {
+    let pipe = platform::open_pipe(name).map_err(BridgeError::Connect)?;
+    let server = platform::server_image(&pipe).map_err(BridgeError::Connect)?;
     if !server
         .as_os_str()
         .eq_ignore_ascii_case(expected.as_os_str())

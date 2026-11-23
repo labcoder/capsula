@@ -340,6 +340,11 @@ urgent messages and **data** for everything that can grow. Frames are a `u32` li
 length followed by a `postcard` payload from the closed enums in `crates/protocol`. The length
 is checked against the pipe's cap (64 KiB control, 256 KiB data) before anything is allocated.
 
+The brain's platform module owns native pipe creation and peer process queries. Without the
+Windows adapter, opening or creating a native pipe is unsupported. Shared frame and relay tests
+can use in-memory streams, but those streams don't authenticate clients or serve as a runtime
+transport.
+
 ## Who may connect
 
 - The brain creates both pipes with a protected DACL that grants only the user who made them,
