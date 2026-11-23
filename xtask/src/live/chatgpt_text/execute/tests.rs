@@ -10,6 +10,8 @@ use kumochi_protocol::message::{
     ModelSlug, Phase, RunId, RunOrigin, ThreadId,
 };
 
+use serde_json::{Value, json};
+
 use super::super::{
     startup,
     tests::{SAFE_PLAN, TEXT_ONLY, clean_metadata},
@@ -504,12 +506,18 @@ fn pipe_loss_leaves_restoration_unknown_instead_of_trying_another_setting() {
         exit: "unconfirmed",
         ..Outcomes::default()
     };
+    let mut selected = false;
+    let mut cleanup = false;
     let result = drive(
         Ok((main, Some(saved), [true, false])),
         19,
         Instant::now(),
         &mut outcomes,
         |_, _, choice, _, _| {
+            assert!(
+                !std::mem::replace(&mut selected, true),
+                "no further settings write"
+            );
             assert_eq!(
                 choice,
                 (0, Effort::Low),
@@ -518,12 +526,26 @@ fn pipe_loss_leaves_restoration_unknown_instead_of_trying_another_setting() {
             Ok(Some(choice))
         },
         |_, _, _, _| Err(anyhow!("fixture pipe ended")),
-        || Err(anyhow!("fixture forced exit")),
+        || {
+            cleanup = true;
+            Err(anyhow!("fixture forced exit"))
+        },
     );
     assert!(result.is_err());
+    assert!(
+        selected,
+        "the fixture selected a different choice before pipe loss"
+    );
+    assert!(
+        cleanup,
+        "the owned-child cleanup still runs after pipe loss"
+    );
     assert_eq!(
-        outcomes.invalid_receipt(19),
-        r#"{"status":"invalid","model_charge":19,"auxiliary":null,"work":"failed","restore":"unknown","exit":"unconfirmed"}"#
+        serde_json::from_str::<Value>(&outcomes.invalid_receipt(19)).expect("JSON receipt"),
+        json!({
+            "status": "invalid", "model_charge": 19, "auxiliary": null,
+            "work": "failed", "restore": "unknown", "exit": "unconfirmed"
+        })
     );
 }
 

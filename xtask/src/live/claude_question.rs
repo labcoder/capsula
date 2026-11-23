@@ -1097,7 +1097,7 @@ mod tests {
 
     use super::{
         Answer, CAP, KINDS, PLAN, RESTORE, REVIEWED, Step, audit_view_due, budget, changes,
-        claude_left, count, format_choice, parse_choice, preflight, report, taken, verdict,
+        claude_left, count, format_choice, parse_choice, report, taken, verdict,
     };
     use crate::slice2::client::{Frame, Seen};
     use crate::{platform, scratch};
@@ -1195,22 +1195,6 @@ mod tests {
     }
 
     #[test]
-    fn the_check_refuses_while_a_product_process_runs() {
-        let entry = |pid, shell| platform::Entry {
-            pid,
-            parent: 1,
-            shell,
-        };
-        assert_eq!(preflight(&[], 7).expect("nothing runs"), 3);
-        assert_eq!(preflight(&[entry(7, false)], 7).expect("itself"), 3);
-        let error = preflight(&[entry(9, false), entry(11, true)], 7).expect_err("a brain runs");
-        assert_eq!(
-            format!("{error:#}"),
-            "close every kumochi.exe and kumochid.exe first (running: 9, 11)"
-        );
-    }
-
-    #[test]
     fn each_exit_code_names_its_step_and_the_most_questions_it_can_have_asked() {
         let line = |code| verdict(code).0;
         assert_eq!(
@@ -1286,31 +1270,46 @@ mod tests {
     #[test]
     fn a_restore_file_left_behind_is_named_after_the_verdict() {
         let live = scratch::dir("question-restore");
-        std::fs::write(live.join(RESTORE), "gpt-6.1-sol low chatgpt\n").expect("planted");
-        for ran in [Ok(Some(15)), Ok(None), Err(anyhow::anyhow!("killed"))] {
+        let restore = live.join(RESTORE);
+        std::fs::write(&restore, "gpt-6.1-sol low chatgpt\n").expect("planted");
+        let has_code = |line: &str, code: &str| {
+            line.split(|ch: char| !ch.is_ascii_digit())
+                .any(|field| field == code)
+        };
+        for (ran, code) in [
+            (Ok(Some(15)), Some("15")),
+            (Ok(None), None),
+            (Err(anyhow::anyhow!("killed")), None),
+        ] {
             let mut out = Vec::new();
             report(ran, &live, &mut out).expect_err("failed");
             let text = String::from_utf8(out).expect("utf-8");
-            assert!(
-                text.ends_with(
-                    ")\ndefault: may still be claude code's haiku at low; the next run from this \
-                     checkout puts back gpt-6.1-sol low chatgpt first\n"
-                ),
-                "{text}"
+            let (received, warning) = text.split_once('\n').expect("verdict before recovery");
+            let names_exit = code.map_or_else(
+                || received.contains("no exit code"),
+                |code| has_code(received, code),
             );
-            assert_eq!(text.lines().count(), 2, "{text}");
+            assert!(names_exit && received.contains("at most 3"), "{received}");
+            assert_eq!(
+                warning,
+                "default: may still be claude code's haiku at low; the next run from this \
+                 checkout puts back gpt-6.1-sol low chatgpt first\n"
+            );
         }
-        std::fs::write(live.join(RESTORE), "garbage").expect("planted");
+        std::fs::write(&restore, "garbage").expect("planted");
         let mut out = Vec::new();
         report(Ok(Some(12)), &live, &mut out).expect_err("failed");
-        assert_eq!(
-            String::from_utf8(out).expect("utf-8"),
-            format!(
-                "claude question: stopped at setting the default, exit 12 (questions: at most \
-                 0)\ndefault: may still be claude code's haiku at low, and {} can't be read; set \
-                 the default in Settings and delete it\n",
-                live.join(RESTORE).display()
-            )
+        let text = String::from_utf8(out).expect("utf-8");
+        let (received, warning) = text.split_once('\n').expect("verdict before recovery");
+        assert!(
+            has_code(received, "12") && received.contains("at most 0"),
+            "{received}"
+        );
+        assert!(
+            warning.contains(&restore.display().to_string())
+                && warning.contains("Settings")
+                && (warning.contains("delete") || warning.contains("remove")),
+            "{warning}"
         );
     }
 

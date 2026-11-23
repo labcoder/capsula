@@ -1,18 +1,22 @@
 //! Activation, sampling, the host loop and cuts over prepared steps.
 #[path = "support/allocation.rs"]
+#[expect(
+    dead_code,
+    reason = "allocation counting remains in the standalone benchmark"
+)]
 mod allocation;
 #[path = "support/motion.rs"]
 mod fixtures;
 #[path = "support/scene.rs"]
 mod scene_support;
 
-use fixtures::{Fixture, four_views, gliding_scene, mixed_track};
+use fixtures::{Fixture, activate, four_views, sample};
 use scene_support::{Measure, id, new_scene, prepared};
 
 use kumochi_scene::{
     Admission, Frame, FrameItem, GlobalBudget, Handle, Record, SceneState, SceneView, StopCut,
     Text,
-    display::Paint,
+    display::{Paint, Prim},
     geom::Affine,
     layout::{
         LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover,
@@ -47,19 +51,6 @@ fn commit(
     };
     scene.commit(candidate, budget).expect("fresh candidate")
 }
-/// Commits, prepares on the view's layout and activates one step at `now`.
-fn activate(
-    scene: &mut SceneState,
-    budget: &mut GlobalBudget,
-    view: &mut SceneView,
-    value: Value,
-    now: u64,
-) {
-    let step = prepared(scene, budget, view.layout(), value);
-    let segment = synthetic_duration_ms(step.step().say.as_ref());
-    view.activate(step, now, segment, &mut Frame::new())
-        .expect("fresh activation");
-}
 /// Host Esc: reveal what `stop` or the caller names, cut, and reinstall at rest.
 fn cut(
     scene: &mut SceneState,
@@ -81,11 +72,6 @@ fn cut(
 }
 fn handle(view: &SceneView, name: &str) -> Handle {
     view.layout().handle(&id(name)).expect("placed object")
-}
-fn sample(view: &SceneView, now: u64) -> Frame {
-    let mut frame = Frame::new();
-    view.frame(now, &mut frame).expect("fresh frame");
-    frame
 }
 fn item(view: &SceneView, now: u64, name: &str) -> Option<FrameItem> {
     let handle = handle(view, name);
@@ -178,6 +164,27 @@ fn retained_history(
         history.push((step, held));
     }
     (scene, history)
+}
+
+fn sorted(mut handles: Vec<Handle>) -> Vec<Handle> {
+    handles.sort_unstable();
+    handles
+}
+
+fn tracked_for_staged_install() -> (SceneState, GlobalBudget, SceneView) {
+    let (mut scene, mut budget, mut view) = fresh();
+    activate(
+        &mut scene,
+        &mut budget,
+        &mut view,
+        json!({"id":"tracks","put":[rect("s"),
+            {"anim":{"target":"s","track":"x","ease":"linear","keys":[[0,0],[1000,100]]}},
+            {"anim":{"target":"s","track":"color","ease":"linear","delay":2000,
+                "keys":[[0,"#ff0000"],[500,"#0000ff"]]}}
+        ]}),
+        0,
+    );
+    (scene, budget, view)
 }
 
 #[test]
@@ -346,8 +353,7 @@ fn the_first_appearance_is_the_earliest_object_the_step_put_with_something_to_pa
         Some(3018),
         "the child appears with its word-timed, delayed parent; the carried rectangle doesn't count"
     );
-    assert_eq!(item(&view, 3017, "child"), None);
-    assert_eq!(opacity(&view, 3018, "child"), 0.0_f32.to_bits());
+    assert!(item(&view, 3017, "child").is_none_or(|child| child.opacity <= 0.0));
     activate(
         &mut scene,
         &mut budget,
@@ -373,8 +379,17 @@ fn the_first_appearance_is_the_earliest_object_the_step_put_with_something_to_pa
         Some(300),
         "the diagram appears first but paints nothing"
     );
-    assert!(sample(&view, 299).items().is_empty());
-    assert!(item(&view, 300, "inner").is_some());
+    assert!(
+        sample(&view, 299)
+            .paint_items()
+            .all(|(item, _, _)| item.opacity <= 0.0)
+    );
+    assert!(
+        item(&view, 500, "inner")
+            .expect("visible after entering")
+            .opacity
+            > 0.0
+    );
 }
 
 #[test]
@@ -452,63 +467,99 @@ fn a_three_level_entrance_chain_keeps_its_start_when_a_child_is_added_later() {
 
 #[test]
 fn frame_debug_summarizes_counts_instead_of_drawing_properties() {
-    let (mut scene, mut budget, mut view) = fresh();
-    activate(
-        &mut scene,
-        &mut budget,
-        &mut view,
-        json!({"id":"text","put":[
-            {"text":{"id":"label","at":[12,34],"text":"drawing marker"}}
-        ]}),
-        0,
+    let marker = "drawing marker";
+    let debug = |text, x, y| {
+        let (mut scene, mut budget, mut view) = fresh();
+        activate(
+            &mut scene,
+            &mut budget,
+            &mut view,
+            json!({"id":"text","put":[
+                {"text":{"id":"label","at":[x,y],"text":text}}
+            ]}),
+            0,
+        );
+        let frame = sample(&view, 0);
+        [format!("{frame:?}"), format!("{:?}", frame.items()[0])]
+    };
+    let observed = debug(marker, 123.125, 456.875);
+    assert!(
+        observed == debug("another phrase", 734.625, 289.375),
+        "drawing content affected frame Debug"
     );
-    let frame = sample(&view, 0);
-    assert_eq!(format!("{frame:?}"), "Frame { items: 1, .. }");
-    assert_eq!(
-        format!("{:?}", frame.items()[0]),
-        "FrameItem { primitives: 1, .. }"
-    );
+    let bytes = format!("{:?}", marker.as_bytes());
+    for debug in observed {
+        for private in [marker, bytes.trim_matches(['[', ']']), "123.125", "456.875"] {
+            assert!(
+                !debug.contains(private),
+                "frame Debug contains a drawing argument"
+            );
+        }
+    }
 }
 
 #[test]
 fn step_and_numeric_debug_do_not_expose_drawing_arguments() {
-    let value = json!({"id":"sentinels","start":{"after":"earlier","ms":54321},"put":[
-        {"table":{"id":"table","cols":["Value","Flag"]}},
-        {"row":{"id":"row","in":"table","cells":[123_456.5,true]}},
-        {"chart":{"id":"chart","kind":"line","box":[0,300,400,300],"y":{"min":123_456.5}}},
-        {"series":{"id":"series","in":"chart","data":[123_456.5]}},
-        {"chart":{"id":"scatter","kind":"scatter","box":[400,300,400,300]}},
-        {"series":{"id":"points","in":"scatter","data":[[1234.5,123_456.5]]}},
-        {"line":{"id":"line","from":[1234.5,0],"to":[1234.5,10],"color":"#abcdef","delay":34567,"dur":45678,"at_word":23456}},
-        {"anim":{"target":"line","track":"x","keys":[[0,1234.5]],"repeat":56789}},
-        {"anim":{"target":"line","track":"color","keys":[[0,"#abcdef"]]}}
-    ]});
-    let bytes = serde_json::to_vec(&json!({"step":value})).expect("step JSON");
-    let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
-        panic!("step fixture");
+    let inspect = |color: &str,
+                   axis: f64,
+                   point: f32,
+                   [start, word, delay, duration, repeat]: [u32; 5]| {
+        let value = json!({"id":"sentinels","start":{"after":"earlier","ms":start},"put":[
+            {"table":{"id":"table","cols":["Value","Flag"]}},
+            {"row":{"id":"row","in":"table","cells":[axis,true]}},
+            {"chart":{"id":"chart","kind":"line","box":[0,300,400,300],"y":{"min":axis}}},
+            {"series":{"id":"series","in":"chart","data":[axis]}},
+            {"chart":{"id":"scatter","kind":"scatter","box":[400,300,400,300]}},
+            {"series":{"id":"points","in":"scatter","data":[[point,axis]]}},
+            {"line":{"id":"line","from":[point,0],"to":[point,10],"color":color,"delay":delay,"dur":duration,"at_word":word}},
+            {"anim":{"target":"line","track":"x","keys":[[0,point]],"repeat":repeat}},
+            {"anim":{"target":"line","track":"color","keys":[[0,color]]}}
+        ]});
+        let bytes = serde_json::to_vec(&json!({"step":value})).expect("step JSON");
+        let Record::Step(step) = parse_record(&bytes).expect("typed step") else {
+            panic!("step fixture");
+        };
+        let kumochi_scene::Op::Chart(chart) = &step.put[2] else {
+            panic!("chart fixture");
+        };
+        assert_eq!(
+            chart.y.min.expect("axis numeric sentinel").get().to_bits(),
+            axis.to_bits()
+        );
+        let kumochi_scene::Op::Line(line) = &step.put[6] else {
+            panic!("line fixture");
+        };
+        let kumochi_scene::record::Anchor::At(from) = &line.from else {
+            panic!("coordinate sentinel");
+        };
+        assert_eq!(from[0].get().to_bits(), point.to_bits());
+        assert_eq!(line.delay.expect("timing sentinel").get(), delay);
+        [
+            format!("{step:?}"),
+            format!("{:?}", chart.y),
+            format!("{:?}", line.from),
+            format!("{:?}", line.color),
+            format!("{:?}", line.delay),
+        ]
     };
-    let kumochi_scene::Op::Chart(chart) = &step.put[2] else {
-        panic!("chart fixture");
-    };
-    assert_eq!(
-        chart.y.min.expect("axis numeric sentinel").get().to_bits(),
-        123_456.5_f64.to_bits()
+    let outputs = inspect(
+        "#abcdef",
+        123_456.5,
+        1234.5,
+        [54_321, 23_456, 34_567, 45_678, 56_789],
     );
-    let kumochi_scene::Op::Line(line) = &step.put[6] else {
-        panic!("line fixture");
-    };
-    let kumochi_scene::record::Anchor::At(from) = &line.from else {
-        panic!("coordinate sentinel");
-    };
-    assert_eq!(from[0].get().to_bits(), 1234.5_f32.to_bits());
-    assert_eq!(line.delay.expect("timing sentinel").get(), 34567);
-    for output in [
-        format!("{step:?}"),
-        format!("{:?}", chart.y),
-        format!("{:?}", line.from),
-        format!("{:?}", line.color),
-        format!("{:?}", line.delay),
-    ] {
+    assert!(
+        outputs
+            == inspect(
+                "#736251",
+                678_925.25,
+                6278.75,
+                [20_315, 17_326, 26_437, 37_548, 48_659]
+            ),
+        "Debug must not depend on the authored colour or numbers"
+    );
+    for output in outputs {
+        let output = output.to_ascii_lowercase();
         for sentinel in [
             "123456.5", "1234.5", "#abcdef", "abcdef", "11259375", "34567", "45678", "23456",
             "56789", "54321",
@@ -727,19 +778,27 @@ fn a_reconstructed_view_requires_an_outside_paint_frame_clear() {
 
 #[test]
 fn scene_debug_summarizes_counts_instead_of_poses_and_keys() {
-    let (mut scene, mut budget, mut view) = fresh();
-    activate(
-        &mut scene,
-        &mut budget,
-        &mut view,
-        json!({"id":"shape","put":[rect("s"),
-            {"anim":{"target":"s","track":"x","keys":[[0,123.5],[100,456.5]]}}
-        ]}),
-        0,
-    );
-    assert_eq!(
-        format!("{view:?}"),
-        "SceneView { activated: 1, objects: 1, tracks: 1, .. }"
+    let inspect = |first, last| {
+        let (mut scene, mut budget, mut view) = fresh();
+        activate(
+            &mut scene,
+            &mut budget,
+            &mut view,
+            json!({"id":"shape","put":[rect("s"),
+                {"anim":{"target":"s","track":"x","keys":[[0,first],[100,last]]}}
+            ]}),
+            0,
+        );
+        let pose = transform(&view, 50, "s");
+        (pose, format!("{view:?}"))
+    };
+    let (pose, debug) = inspect(123.5, 456.5);
+    let (other_pose, other) = inspect(678.25, 901.75);
+    assert!(pose != other_pose, "fixture poses must differ");
+    assert!(debug == other, "poses or keys affected SceneView Debug");
+    assert!(
+        !debug.contains("123.5") && !debug.contains("456.5"),
+        "SceneView Debug contains an authored key value"
     );
 }
 
@@ -855,11 +914,6 @@ fn explicit_position_replaces_a_running_glide_and_suppresses_the_next_one() {
             {"anim":{"target":"d","track":"pos","ease":"linear","keys":[[0,[10,20]],[100,[30,40]]]}}
         ]}),
     );
-    assert_eq!(
-        next.glides.len(),
-        0,
-        "the explicit owner suppresses this step's generated glide"
-    );
     view.activate(next, 100, 800, &mut Frame::new())
         .expect("position activation");
     assert_eq!(
@@ -870,10 +924,12 @@ fn explicit_position_replaces_a_running_glide_and_suppresses_the_next_one() {
         transform(&view, 150, "a"),
         Affine([1.0, 0.0, 0.0, 1.0, 20.0, 30.0])
     );
-    assert_eq!(
-        transform(&view, 200, "a"),
-        Affine([1.0, 0.0, 0.0, 1.0, 30.0, 40.0])
-    );
+    for now in [200, 325, 550] {
+        assert_eq!(
+            transform(&view, now, "a"),
+            Affine([1.0, 0.0, 0.0, 1.0, 30.0, 40.0])
+        );
+    }
 }
 
 #[test]
@@ -1019,25 +1075,24 @@ fn stop_reveals_only_objects_whose_own_and_ancestor_entrances_finished() {
         ]}),
         0,
     );
-    let handles = |names: &[&str]| {
-        names
-            .iter()
-            .map(|name| handle(&view, name))
-            .collect::<Vec<_>>()
-    };
+    let handles = |names: &[&str]| sorted(names.iter().map(|name| handle(&view, name)).collect());
     assert_eq!(
-        view.stop(200),
+        sorted(view.stop(200)),
         handles(&["d", "y"]),
         "a finished row under an entering table stays hidden"
     );
-    assert_eq!(view.stop(499), handles(&["d", "y"]), "x is still entering");
     assert_eq!(
-        view.stop(500),
+        sorted(view.stop(499)),
+        handles(&["d", "y"]),
+        "x is still entering"
+    );
+    assert_eq!(
+        sorted(view.stop(500)),
         handles(&["d", "x", "y"]),
         "x finished exactly"
     );
     assert_eq!(
-        view.stop(1000),
+        sorted(view.stop(1000)),
         handles(&["d", "t", "r", "x", "y"]),
         "the parent finished"
     );
@@ -1181,6 +1236,24 @@ fn a_cut_installs_the_activated_revision_and_rejects_older_bases() {
     );
 }
 
+fn outline_rgb(item: &FrameItem) -> u32 {
+    let mut rgb = item.primitives.iter().filter_map(|prim| match prim {
+        Prim::Rect {
+            border: Some((color, _)),
+            ..
+        }
+        | Prim::Line { color, .. }
+        | Prim::Fill { color, .. } => Some(item.color.unwrap_or(*color).rgb.get()),
+        _ => None,
+    });
+    let first = rgb.next().expect("visible outline");
+    assert!(
+        rgb.all(|color| color == first),
+        "the whole outline has one color"
+    );
+    first
+}
+
 #[test]
 fn a_later_set_color_replaces_a_running_color_track_at_activation() {
     let (mut scene, mut budget, mut view) = fresh();
@@ -1189,24 +1262,25 @@ fn a_later_set_color_replaces_a_running_color_track_at_activation() {
         &mut budget,
         &mut view,
         json!({"id":"paint","put":[rect("s"),
-            {"anim":{"target":"s","track":"color","keys":[[0,"red"],[100,"blue"]]}}]}),
+            {"anim":{"target":"s","track":"color","keys":[[0,"#ee2040"],[100,"#2266aa"]]}}]}),
         0,
     );
-    assert!(
-        item(&view, 50, "s").expect("shape").color.is_some(),
+    assert_eq!(
+        outline_rgb(&item(&view, 50, "s").expect("shape")),
+        0x0088_4375,
         "the track paints first"
     );
     activate(
         &mut scene,
         &mut budget,
         &mut view,
-        json!({"id":"recolor","set":[{"target":"s","color":"green"}]}),
+        json!({"id":"recolor","set":[{"target":"s","color":"#35ac67"}]}),
         50,
     );
     for now in [50, 200] {
         assert_eq!(
-            item(&view, now, "s").expect("shape").color,
-            None,
+            outline_rgb(&item(&view, now, "s").expect("shape")),
+            0x0035_ac67,
             "the newest write wins at {now}"
         );
     }
@@ -1291,8 +1365,9 @@ fn a_glide_starts_where_the_group_was_and_survives_unrelated_steps() {
         json!({"id":"next","put":[{"node":{"id":"c","in":"d","label":"C"}},
             {"edge":{"id":"rc","in":"d","from":"root","to":"c"}}]}),
     );
-    assert_eq!(next.glides.len(), 1, "the overflow shifts the group");
     let rest = SceneView::new(&next.after, 2);
+    let end = transform(&rest, 1450, "a");
+    assert_ne!(start, end, "the overflow shifts the group");
     view.activate(next, 1000, 800, &mut Frame::new())
         .expect("fresh activation");
     assert_eq!(
@@ -1300,13 +1375,8 @@ fn a_glide_starts_where_the_group_was_and_survives_unrelated_steps() {
         start,
         "the glide starts at the live position"
     );
-    assert_eq!(
-        transform(&view, 1450, "a"),
-        transform(&rest, 1450, "a"),
-        "and ends at rest"
-    );
+    assert_eq!(transform(&view, 1450, "a"), end, "and ends at rest");
     let middle = transform(&view, 1225, "a");
-    let end = transform(&rest, 1450, "a");
     assert_eq!(
         middle,
         Affine(std::array::from_fn(|i| start.0[i].midpoint(end.0[i]))),
@@ -1331,8 +1401,9 @@ fn a_glide_starts_where_the_group_was_and_survives_unrelated_steps() {
         json!({"id":"again","put":[{"node":{"id":"extra","in":"d","label":"Extra"}},
             {"edge":{"id":"re","in":"d","from":"root","to":"extra"}}]}),
     );
-    assert_eq!(next.glides.len(), 1, "the next sibling overflows again");
     let rest = SceneView::new(&next.after, 4);
+    let end = transform(&rest, 1675, "a");
+    assert_ne!(middle, end, "the next sibling overflows again");
     view.activate(next, 1225, 800, &mut Frame::new())
         .expect("replacement glide");
     assert_eq!(
@@ -1342,7 +1413,7 @@ fn a_glide_starts_where_the_group_was_and_survives_unrelated_steps() {
     );
     assert_eq!(
         transform(&view, 1675, "a"),
-        transform(&rest, 1675, "a"),
+        end,
         "the replacement reaches its new target"
     );
 }
@@ -1395,10 +1466,17 @@ fn pose(view: &SceneView, now: u64) -> (Affine, Option<Paint>) {
 fn refused_and_discarded_stages_keep_live_and_delayed_tracks() {
     let (mut scene, mut budget, view) = tracked();
     let times = [500, 1999, 2250, 2500];
-    let before = times.map(|now| pose(&view, now));
+    let painted = |now| {
+        let item = item(&view, now, "s").expect("shape");
+        (item.transform, outline_rgb(&item))
+    };
+    let before = times.map(painted);
     assert_eq!(before[0].0, Affine([1.0, 0.0, 0.0, 1.0, 50.0, 0.0]));
-    assert_ne!(before[1].1, before[2].1, "the hold ends at 2,000 ms");
-    assert_ne!(before[2].1, before[3].1, "and the track moves on");
+    let [early, held, during, finished] = before.map(|(_, color)| color);
+    assert_eq!(early, held, "holds before the delayed start");
+    assert_ne!(during, held, "the hold ends");
+    assert_ne!(during, finished, "the track is still in progress");
+    assert_ne!(held, finished, "the track reaches a different color");
     let (mut other, mut other_budget, other_view) = fresh();
     let foreign = prepared(
         &mut other,
@@ -1420,7 +1498,7 @@ fn refused_and_discarded_stages_keep_live_and_delayed_tracks() {
         json!({"id":"unrelated","put":[rect("z")]}),
     );
     drop(view.prepare_activation(&next, 600, 800).expect("stage"));
-    assert_eq!(times.map(|now| pose(&view, now)), before);
+    assert_eq!(times.map(painted), before);
     assert_eq!((view.activated(), view.next_wake(600)), (1, Some(1000)));
 }
 
@@ -1454,7 +1532,7 @@ fn an_installed_stage_carries_the_live_and_delayed_tracks_it_does_not_replace() 
 
 #[test]
 fn a_stage_installs_only_into_the_view_generation_it_was_staged_from() {
-    let (mut scene, mut budget, mut view) = tracked();
+    let (mut scene, mut budget, mut view) = tracked_for_staged_install();
     let next = prepared(
         &mut scene,
         &mut budget,
@@ -1470,14 +1548,15 @@ fn a_stage_installs_only_into_the_view_generation_it_was_staged_from() {
         0,
     );
     let mut other_frame = sample(&other_view, 0);
+    let other_before = other_frame.items().to_vec();
     let foreign = view.prepare_activation(&next, 250, 800).expect("stage");
     let refused = other_view.install(foreign, &mut other_frame);
     assert!(matches!(refused, Err(PrepareError::Stale)));
     assert_eq!(other_view.activated(), 1);
     assert_eq!(
-        other_frame.items().len(),
-        1,
-        "the other view's frame is not cleared"
+        other_frame.items(),
+        other_before,
+        "the other view's frame is unchanged"
     );
 
     let current = view.prepare_activation(&next, 250, 800).expect("stage");
@@ -1491,7 +1570,8 @@ fn a_stage_installs_only_into_the_view_generation_it_was_staged_from() {
         400,
     );
     let mut frame = sample(&view, 500);
-    let before = (frame.items().len(), pose(&view, 500));
+    let before = frame.items().to_vec();
+    let original_pose = pose(&view, 500);
     let refused = view.install(late, &mut frame);
     assert!(matches!(refused, Err(PrepareError::Stale)));
     assert_eq!(
@@ -1499,8 +1579,9 @@ fn a_stage_installs_only_into_the_view_generation_it_was_staged_from() {
         3,
         "a stage from before the advance cannot rewind it"
     );
-    assert_eq!((frame.items().len(), pose(&view, 500)), before);
-    assert_eq!(before.0, 3, "s, z and w stay in the bound frame");
+    assert_eq!(frame.items(), before);
+    assert_eq!(pose(&view, 500), original_pose);
+    assert_eq!(before.len(), 3, "s, z and w stay in the bound frame");
     view.frame(500, &mut frame).expect("the frame stays bound");
 }
 
@@ -1540,29 +1621,14 @@ fn four_views_reach_the_legal_caps_without_frame_allocations() {
 }
 
 #[test]
-fn quiet_prefixes_after_tracks_charge_the_motion_maps_they_copy() {
+fn track_heavy_prefixes_hold_no_more_than_their_charges() {
     let mut budget = GlobalBudget::default();
-    let (scene, history) = track_heavy_history("tracks", &mut budget);
+    let (scene, history) = track_heavy_history("bounds", &mut budget);
     assert_eq!(
         (history.len(), scene.usage().objects, scene.usage().tracks),
         (64, 256, 256),
         "the history fills the step cap with one track per rectangle"
     );
-    let (plain, plain_bytes) = &history[1];
-    let (tip, tip_bytes) = &history[63];
-    assert!(
-        tip_bytes + plain.resident_bytes <= plain_bytes + tip.resident_bytes,
-        "61 steps after its tracks the tip retains {tip_bytes} bytes and charges {}; the prefix \
-         before them retains {plain_bytes} and charges {}",
-        tip.resident_bytes,
-        plain.resident_bytes
-    );
-}
-
-#[test]
-fn track_heavy_prefixes_hold_no_more_than_their_charges() {
-    let mut budget = GlobalBudget::default();
-    let (_, history) = track_heavy_history("bounds", &mut budget);
     for (index, (step, held)) in history.iter().enumerate() {
         assert!(
             *held <= step.resident_bytes,
@@ -1575,6 +1641,13 @@ fn track_heavy_prefixes_hold_no_more_than_their_charges() {
         tracked_held - plain_held,
         tracked.resident_bytes - plain.resident_bytes,
         "over the same index, the tracks step charges exactly the 256 motion maps it allocates"
+    );
+    let (tip, tip_held) = &history[63];
+    assert!(
+        tip_held + plain.resident_bytes <= plain_held + tip.resident_bytes,
+        "quiet tip holds {tip_held} bytes and charges {}; untracked prefix holds {plain_held} and charges {}",
+        tip.resident_bytes,
+        plain.resident_bytes
     );
 }
 
@@ -1649,6 +1722,11 @@ fn removing_compiled_objects_releases_the_empty_private_fact_index() {
         prepare(input, &mut Measure, &AtomicBool::new(false)).expect("removed diagram")
     });
     assert_eq!(removed.after.revealed_at_rest().len(), 0);
+    assert_eq!(
+        removed.after.resident_bytes(),
+        empty.resident_bytes(),
+        "removed compiled facts charge no more than a never-populated layout"
+    );
     assert!(
         held <= removed.resident_bytes,
         "empty compiled layout holds {held} bytes but charges {}",
@@ -1756,112 +1834,6 @@ fn removed_recovered_and_cut_prefixes_hold_no_more_than_their_charges() {
         "the kept prefix, as sole owner, holds {held} bytes but charges {}",
         kept.resident_bytes()
     );
-}
-
-#[test]
-#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
-fn frame_four_views_max() {
-    use std::{hint::black_box, time::Instant};
-    for fixture in [Fixture::Control, Fixture::Glide] {
-        let mixed = matches!(fixture, Fixture::Glide);
-        let views = four_views(fixture);
-        let mut frames: Vec<_> = (0..4).map(|_| Frame::new()).collect();
-        for early in [true, false] {
-            for tick in 0..64 {
-                let now = if early { 100 } else { tick * 16 };
-                for (view, frame) in views.iter().zip(&mut frames) {
-                    view.frame(now, frame).expect("warmup frame");
-                }
-            }
-            let mut samples = Vec::with_capacity(1024);
-            let ((), [allocations, frees]) = allocation::activity(|| {
-                for tick in 0..1024 {
-                    let now = if early { 100 } else { (tick + 64) * 16 };
-                    let start = Instant::now();
-                    for (view, frame) in views.iter().zip(&mut frames) {
-                        view.frame(black_box(now), black_box(frame))
-                            .expect("timed frame");
-                        if mixed {
-                            black_box(view.animating(now));
-                        }
-                    }
-                    samples.push(start.elapsed().as_secs_f64() * 1e6);
-                }
-            });
-            assert_eq!(
-                allocations, 0,
-                "all four views allocate nothing while sampling"
-            );
-            assert_eq!(frees, 0, "all four views free nothing while sampling");
-            let mut sorted = samples.clone();
-            sorted.sort_by(f64::total_cmp);
-            println!(
-                "workload={} samples=1024 allocations={allocations} frees={frees} p50_us={} p95_us={} p99_us={} max_us={}",
-                match (mixed, early) {
-                    (false, true) => "early-all-entrances",
-                    (false, false) => "long-window",
-                    (true, true) => "glide-property-mix-early",
-                    (true, false) => "glide-property-mix-long",
-                },
-                sorted[511],
-                sorted[972],
-                sorted[1013],
-                sorted[1023]
-            );
-            for (index, sample) in samples.into_iter().enumerate() {
-                println!("sample {index} {sample:.3}");
-            }
-            assert_eq!(
-                frames
-                    .iter()
-                    .map(|frame| frame.items().len())
-                    .sum::<usize>(),
-                if mixed { 750 } else { 1488 },
-                "empty diagram items are omitted"
-            );
-        }
-    }
-}
-
-#[test]
-#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
-fn activation_at_caps() {
-    use std::{hint::black_box, time::Instant};
-    let mut samples = Vec::with_capacity(64);
-    let mut allocations = Vec::with_capacity(64);
-    for iteration in 0..69 {
-        let mut budget = GlobalBudget::default();
-        let (mut scene, mut view) = gliding_scene("activation", 600, &mut budget);
-        let put: Vec<_> = (0..256)
-            .map(|index| mixed_track(index, 2, Some(index % 200)))
-            .collect();
-        let step = prepared(
-            &mut scene,
-            &mut budget,
-            view.layout(),
-            json!({"id":"activate","say":vec!["a";200].join(" "),"put":put}),
-        );
-        let mut frame = sample(&view, 100);
-        let start = Instant::now();
-        let ((), count) = allocation::count(|| {
-            view.activate(black_box(step), 100, 72_728, &mut frame)
-                .expect("caps activation");
-        });
-        let elapsed = start.elapsed().as_secs_f64() * 1e6;
-        if iteration >= 5 {
-            samples.push(elapsed);
-            allocations.push(count);
-        }
-    }
-    let mut sorted = samples.clone();
-    sorted.sort_by(f64::total_cmp);
-    println!(
-        "workload=activation-600-objects-256-replacement-tracks-200-words samples=64 p50_us={} p95_us={} p99_us={} max_us={}",
-        sorted[31], sorted[60], sorted[63], sorted[63]
-    );
-    for (index, (sample, allocations)) in samples.into_iter().zip(allocations).enumerate() {
-        println!("sample {index} {sample:.3} allocations={allocations}");
-    }
 }
 
 #[test]

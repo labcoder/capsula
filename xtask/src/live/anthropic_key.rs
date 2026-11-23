@@ -665,6 +665,7 @@ mod tests {
     use std::ffi::OsStr;
     use std::fs;
 
+    use kumochi_protocol::constants::{CONFIG_FILE, ProductIdentity};
     use kumochi_protocol::message::{ClaudeCodeView, KeyRejection};
 
     use super::*;
@@ -692,31 +693,40 @@ mod tests {
     }
 
     #[test]
-    fn each_launch_gets_exactly_its_slice_a_new_tap_and_its_own_folders() {
+    fn the_brain_command_sets_the_approved_slice_and_supplied_tap_and_folders() {
         let dir = scratch::dir("anthropic-key-command");
         let folders = Folders::create(&dir).expect("folders");
-        for launch in &PLAN {
-            let tap = dir.join("tap.bin");
-            let command = brain_command(Path::new("kumochid.exe"), &folders, &tap, launch.slice);
+        let cases = [
+            ("1", "0", "tap-1.bin"),
+            ("2", "3", "tap-2.bin"),
+            ("0", "0", "tap-3.bin"),
+        ];
+        for (index, (catalog, messages, tap)) in cases.into_iter().enumerate() {
+            let tap = dir.join(tap);
+            let command =
+                brain_command(Path::new("kumochid.exe"), &folders, &tap, PLAN[index].slice);
             let set = |name: &str| {
                 command
                     .get_envs()
-                    .find(|(key, _)| *key == OsStr::new(name))
+                    .find(|(key, _)| key.eq_ignore_ascii_case(OsStr::new(name)))
                     .and_then(|(_, value)| value)
-                    .map(|value| value.to_string_lossy().into_owned())
             };
-            assert_eq!(
-                set(LIVE_KEY_CATALOG_BUDGET_ENV),
-                Some(launch.slice.catalog.to_string())
-            );
+            assert_eq!(set(LIVE_KEY_CATALOG_BUDGET_ENV), Some(OsStr::new(catalog)));
             assert_eq!(
                 set(LIVE_KEY_MESSAGES_BUDGET_ENV),
-                Some(launch.slice.messages.to_string())
+                Some(OsStr::new(messages))
             );
-            assert_eq!(set(PIPE_TAP_ENV), Some(tap.to_string_lossy().into_owned()));
-            assert_eq!(
-                set("LOCALAPPDATA"),
-                Some(folders.local.to_string_lossy().into_owned())
+            assert_eq!(set(PIPE_TAP_ENV), Some(tap.as_os_str()));
+            assert_eq!(set("LOCALAPPDATA"), Some(folders.local.as_os_str()));
+            let roaming = Path::new(set("APPDATA").expect("isolated settings directory"));
+            assert!(
+                roaming.starts_with(&*dir)
+                    && roaming != folders.local
+                    && roaming
+                        .join(ProductIdentity::GATE.data_dir)
+                        .join(CONFIG_FILE)
+                        .is_file(),
+                "{roaming:?}"
             );
         }
     }
@@ -886,14 +896,10 @@ mod tests {
     #[test]
     fn the_ledger_lives_beside_the_gate_run_lock() {
         let ledger = ledger_path().expect("ledger path");
+        let lock = hermetic::gate_file("run.lock").expect("run lock path");
         assert_eq!(
-            ledger.parent(),
-            Some(platform::local_app_data().expect("LocalAppData").as_path())
-        );
-        assert!(
-            ledger
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().ends_with("-anthropic-key.ledger"))
+            ledger,
+            lock.with_file_name("kumochi-gate-anthropic-key.ledger")
         );
     }
 
@@ -1115,19 +1121,25 @@ mod tests {
         for record in &records {
             tap::write(&mut bytes, record).expect("written");
         }
-        let whole = bytes.len();
+        let cut = bytes.len() + 3;
         tap::write(&mut bytes, &bare(Direction::ToShell, "Error")).expect("written");
-        bytes.truncate(whole + 3);
-        fs::write(&path, &bytes).expect("tap");
-        assert_eq!(
-            read(&path).expect("read"),
-            [
-                Seen::Key(KeyView::Checking),
-                Seen::Staged,
-                run(Phase::Done),
-                Seen::Refused,
-                Seen::Unexpected("CaptureDone".to_owned()),
-            ]
-        );
+        let (prefix, suffix) = bytes.split_at(cut);
+        fs::write(&path, prefix).expect("tap");
+        let mut expected = vec![
+            Seen::Key(KeyView::Checking),
+            Seen::Staged,
+            run(Phase::Done),
+            Seen::Refused,
+            Seen::Unexpected("CaptureDone".to_owned()),
+        ];
+        assert_eq!(read(&path).expect("read"), expected);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open tap for append")
+            .write_all(suffix)
+            .expect("finish the record");
+        expected.push(Seen::Unexpected("Error".to_owned()));
+        assert_eq!(read(&path).expect("read after append"), expected);
     }
 }

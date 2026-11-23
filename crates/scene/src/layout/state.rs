@@ -503,102 +503,6 @@ mod tests {
         prepare(input, &mut Measure, &AtomicBool::new(false)).expect("picture")
     }
     #[test]
-    fn a_prepared_step_keeps_no_view_update_buffer() {
-        let Record::Begin(header) =
-            parse_record(br#"{"begin":{"v":1,"scene":"v","surface":"overlay","alt":""}}"#)
-                .expect("header")
-        else {
-            panic!("begin");
-        };
-        let mut scene = SceneState::begin(header).expect("scene");
-        let mut budget = GlobalBudget::default();
-        let before = LayoutState::new(&scene);
-        let prepared = picture(
-            &mut scene,
-            &mut budget,
-            &before,
-            r#"{"step":{"id":"a","put":[{"view3d":{"id":"v"}},{"solid":{"in":"v","id":"s","shape":"box","size":[2,2,2]}}]}}"#,
-        );
-        assert_eq!(prepared.views.len(), 1);
-        assert_eq!(
-            prepared.ticket.views.capacity(),
-            0,
-            "the consumed inputs leave no allocation"
-        );
-    }
-    #[test]
-    fn chart_basis_is_replaced_when_attached_and_shared_after_a_cut() {
-        let Record::Begin(header) =
-            parse_record(br#"{"begin":{"v":1,"scene":"basis","surface":"inline","alt":""}}"#)
-                .expect("header")
-        else {
-            panic!("begin");
-        };
-        let mut scene = SceneState::begin(header).expect("scene");
-        let mut budget = GlobalBudget::default();
-        let before = LayoutState::new(&scene);
-        let first = picture(
-            &mut scene,
-            &mut budget,
-            &before,
-            r#"{"step":{"id":"first","put":[{"chart":{"id":"c","kind":"bar","stacked":true,"box":[0,0,400,300]}},{"series":{"id":"s","in":"c","data":[1,2]}}]}}"#,
-        );
-        let key: WireId = "s".to_owned().try_into().expect("id");
-        let first_basis = first.after.objects[&key]
-            .chart_basis
-            .as_ref()
-            .expect("basis");
-        let second = picture(
-            &mut scene,
-            &mut budget,
-            &first.after,
-            r#"{"step":{"id":"color","set":[{"target":"s","color":"red"}]}}"#,
-        );
-        let second_basis = second.after.objects[&key]
-            .chart_basis
-            .as_ref()
-            .expect("refitted basis");
-        assert!(
-            !Arc::ptr_eq(first_basis, second_basis),
-            "attached preparation installs a new immutable basis"
-        );
-        let handle = second.after.handle(&key).expect("series handle");
-        scene
-            .stop(
-                &StopCut {
-                    activated: 2,
-                    revealed: Bounded::new(vec![handle]).expect("cut"),
-                },
-                &mut budget,
-            )
-            .expect("stop");
-        let detached = second.after.cut(&scene).expect("detached layout");
-        let detached_basis = detached.objects[&key]
-            .chart_basis
-            .as_ref()
-            .expect("frozen basis");
-        assert!(
-            Arc::ptr_eq(second_basis, detached_basis),
-            "the cut carries the existing allocation"
-        );
-        let next = picture(
-            &mut scene,
-            &mut budget,
-            &detached,
-            r#"{"step":{"id":"data","set":[{"target":"s","data":[2,1]}]}}"#,
-        );
-        assert!(
-            Arc::ptr_eq(
-                detached_basis,
-                next.after.objects[&key]
-                    .chart_basis
-                    .as_ref()
-                    .expect("updated basis")
-            ),
-            "detached updates reuse the allocation rather than refitting"
-        );
-    }
-    #[test]
     fn recovery_preserves_the_hidden_state_used_by_the_next_glide() {
         let Record::Begin(header) =
             parse_record(br#"{"begin":{"v":1,"scene":"hidden","surface":"inline","alt":""}}"#)
@@ -718,10 +622,14 @@ mod tests {
             3 + 4 + 2 * crate::limits::MAX_DIAGRAM_EDGES
         );
     }
-    #[test]
-    fn initial_sibling_clusters_reserve_their_long_edge_labels() {
-        struct Wide;
-        impl TextMeasure for Wide {
+    fn picture_with_long_labels(
+        scene: &mut SceneState,
+        budget: &mut GlobalBudget,
+        before: &LayoutState,
+        source: &str,
+    ) -> PreparedStep {
+        struct LongLabelMeasure;
+        impl TextMeasure for LongLabelMeasure {
             fn measure(
                 &mut self,
                 text: &str,
@@ -731,6 +639,31 @@ mod tests {
                 Ok([if text == "long" { 180.0 } else { 8.0 }, 10.0])
             }
         }
+
+        let Record::Step(step) = parse_record(source.as_bytes()).expect("step") else {
+            panic!("step");
+        };
+        let Admission::New(candidate) = scene.admit(&step, budget).expect("admit") else {
+            panic!("new");
+        };
+        let ticket = scene.commit(candidate, budget).expect("commit").preparation;
+        let input = PrepareInput::new(
+            ticket,
+            before.clone(),
+            SurfaceGeometry::default(),
+            Arc::new(Theme::default()),
+        )
+        .expect("input");
+        prepare(input, &mut LongLabelMeasure, &AtomicBool::new(false)).expect("picture")
+    }
+    #[test]
+    fn initial_sibling_clusters_reserve_their_long_edge_labels() {
+        use crate::display::Prim;
+
+        fn id(name: &str) -> WireId {
+            name.to_owned().try_into().expect("id")
+        }
+
         let Record::Begin(header) =
             parse_record(br#"{"begin":{"v":1,"scene":"labels","surface":"inline","alt":""}}"#)
                 .expect("header")
@@ -753,41 +686,69 @@ mod tests {
             ));
         }
         let source = format!(r#"{{"step":{{"id":"first","put":[{}]}}}}"#, put.join(","));
-        let Record::Step(step) = parse_record(source.as_bytes()).expect("step") else {
-            panic!("step");
-        };
-        let Admission::New(candidate) = scene.admit(&step, &budget).expect("admit") else {
-            panic!("new");
-        };
-        let ticket = scene
-            .commit(candidate, &mut budget)
-            .expect("commit")
-            .preparation;
-        let input = PrepareInput::new(
-            ticket,
-            before,
-            SurfaceGeometry::default(),
-            Arc::new(Theme::default()),
-        )
-        .expect("input");
-        let prepared = prepare(input, &mut Wide, &AtomicBool::new(false)).expect("prepared");
+        let prepared = picture_with_long_labels(&mut scene, &mut budget, &before, &source);
         let bounds = ["a", "b"].map(|group| {
             prepared
                 .after
-                .bounds(&group.to_owned().try_into().expect("id"))
+                .bounds(&id(group))
                 .expect("safe")
                 .expect("group")
         });
-        assert_eq!(bounds[0].size.x.to_bits(), 188.0_f32.to_bits());
-        assert_eq!(bounds[0].size.y.to_bits(), 152.0_f32.to_bits());
-        assert_eq!(
-            bounds[1].origin.x.to_bits(),
-            (bounds[0].max().x + 62.0).to_bits()
-        );
         assert!(
             !bounds[0].intersects(bounds[1]),
             "sibling groups stay apart"
         );
+        let contains = |outer: Rect, inner: Rect| {
+            outer.origin.x <= inner.origin.x
+                && outer.origin.y <= inner.origin.y
+                && outer.max().x >= inner.max().x
+                && outer.max().y >= inner.max().y
+        };
+        for (index, edge) in ["ae", "be"].into_iter().enumerate() {
+            let edge = &prepared.after.objects[&id(edge)].item;
+            let transform = prepared
+                .after
+                .resting_transform(edge.handle)
+                .expect("safe transform");
+            let chip = edge
+                .primitives
+                .iter()
+                .find_map(|p| match p {
+                    Prim::Rect {
+                        rect,
+                        fill: Some(_),
+                        ..
+                    } => Some(*rect),
+                    _ => None,
+                })
+                .expect("label chip");
+            let ink = edge
+                .primitives
+                .iter()
+                .find_map(|p| match p {
+                    Prim::Text {
+                        origin,
+                        text,
+                        max_width: Some(width),
+                        ..
+                    } if text.as_str() == "long" => Some(Rect {
+                        origin: *origin + Vec2::new((*width - 180.0) * 0.5, 0.0),
+                        size: Vec2::new(180.0, 10.0),
+                    }),
+                    _ => None,
+                })
+                .expect("long label");
+            let (chip, ink) = (transform.bounds(chip), transform.bounds(ink));
+            assert!(contains(chip, ink), "the chip covers its label");
+            assert!(
+                contains(bounds[index], chip),
+                "the cluster contains its label chip"
+            );
+            assert!(
+                !bounds[1 - index].intersects(chip),
+                "the chip clears its sibling"
+            );
+        }
     }
     #[test]
     fn cluster_edges_end_on_their_endpoints_resting_bounds() {

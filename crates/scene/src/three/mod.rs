@@ -80,19 +80,11 @@ impl Transform {
         Self(result)
     }
 
-    /// Transforms a point in f64 without narrowing, as the frame stage does: the value
-    /// [`Self::point`] narrows, bit for bit.
+    /// Transforms a point in f64 without narrowing.
     #[must_use]
     pub fn apply(&self, point: [f64; 3]) -> [f64; 3] {
         self.0
             .map(|row| row[0] * point[0] + row[1] * point[1] + row[2] * point[2] + row[3])
-    }
-
-    /// Transforms a point and checks that narrowing to world-space f32 remains finite.
-    /// # Errors
-    /// Returns `Degenerate("pos")` if the result cannot be represented as finite f32.
-    pub fn point(&self, point: Vec3) -> Result<Vec3, size::MeshError> {
-        self.point64([f64::from(point.x), f64::from(point.y), f64::from(point.z)])
     }
 
     #[expect(
@@ -109,5 +101,65 @@ impl Transform {
             return Err(size::MeshError::Degenerate("pos"));
         }
         Ok(Vec3::new(x, y, z))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Transform, Vec3, size::MeshError};
+
+    #[test]
+    fn transform_rotation_order_and_child_then_parent_are_analytic() {
+        let quarter = Transform::local([0.0; 3], [90.0, 0.0, 0.0], 1.0);
+        let p = quarter.point64([0.0, 1.0, 0.0]).expect("finite rotation");
+        assert_eq!(p.x.to_bits(), 0.0_f32.to_bits());
+        assert!(
+            p.y.abs() < 1e-15,
+            "cosine of ninety degrees rounds near zero"
+        );
+        assert_eq!(p.z.to_bits(), 1.0_f32.to_bits());
+        let child = Transform::local([10.0, 20.0, 30.0], [90.0, 90.0, 90.0], 2.0);
+        assert_eq!(
+            child.point64([1.0, 2.0, 3.0]),
+            Ok(Vec3::new(16.0, 24.0, 28.0))
+        );
+        let parent = Transform::local([1.0, 2.0, 3.0], [0.0, 0.0, 90.0], 3.0);
+        assert_eq!(
+            child.then(&parent).point64([1.0, 2.0, 3.0]),
+            Ok(Vec3::new(-71.0, 50.0, 87.0))
+        );
+        assert_eq!(
+            Transform::local([0.0; 3], [0.0; 3], 1.0)
+                .then(&child)
+                .point64([1.0, 2.0, 3.0]),
+            Ok(Vec3::new(16.0, 24.0, 28.0))
+        );
+        let asymmetric = Transform::local([5.0, -7.0, 11.0], [30.0, 60.0, 45.0], 2.0);
+        let p = asymmetric
+            .point64([1.0, 2.0, 3.0])
+            .expect("finite asymmetric rotation");
+        let x = 5.0 + 2.0_f64.sqrt() * (17.0 / 4.0 - 3.0_f64.sqrt() / 2.0);
+        let y = -7.0 + 2.0_f64.sqrt() * (5.0 / 4.0 + 3.0 * 3.0_f64.sqrt() / 2.0);
+        let z = 12.0 + 3.0_f64.sqrt() / 2.0;
+        assert!((f64::from(p.x) - x).abs() < 1e-6, "analytic Rz Ry Rx x");
+        assert!((f64::from(p.y) - y).abs() < 1e-6, "analytic Rz Ry Rx y");
+        assert!((f64::from(p.z) - z).abs() < 1e-6, "analytic Rz Ry Rx z");
+    }
+
+    #[test]
+    fn transformed_point_finiteness_is_checked_after_narrowing() {
+        let identity = Transform::local([0.0; 3], [0.0; 3], 1.0);
+        let max = [f64::from(f32::MAX), 0.0, 0.0];
+        assert_eq!(identity.point64(max), Ok(Vec3::new(f32::MAX, 0.0, 0.0)));
+        let double = Transform::local([0.0; 3], [0.0; 3], 2.0);
+        assert_eq!(double.point64(max), Err(MeshError::Degenerate("pos")));
+        assert_eq!(
+            identity.point64([f64::NAN, 0.0, 0.0]),
+            Err(MeshError::Degenerate("pos"))
+        );
+        assert_eq!(
+            Transform::local([f32::INFINITY, 0.0, 0.0], [0.0; 3], 1.0).point64([0.0; 3]),
+            Err(MeshError::Degenerate("pos"))
+        );
     }
 }

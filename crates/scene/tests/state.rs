@@ -148,18 +148,20 @@ fn same_step_references_and_expanded_slots_are_deterministic() {
     ]}"#,
     );
     assert_eq!((committed.index, committed.revision), (0, 1));
-    assert_eq!(
-        committed
-            .handles
-            .iter()
-            .map(|(_, h)| h.get())
-            .collect::<Vec<_>>(),
-        [1024, 1026, 1027, 1028]
-    );
+    let expected = [("a", 1024), ("d", 1026), ("b", 1027), ("e", 1028)];
+    assert_eq!(committed.handles.len(), expected.len());
+    for (name, raw) in expected {
+        let found = committed.handles.iter().find(|(key, _)| *key == id(name));
+        assert_eq!(found.map(|(_, handle)| handle.get()), Some(raw), "{name}");
+    }
     for _ in 0..2 {
         let replay = SceneState::replay(header(), state.recovery_log()).expect("valid recovery");
-        for (id, handle) in &committed.handles {
-            assert_eq!(replay.handle(id), Some(*handle));
+        for (name, raw) in expected {
+            assert_eq!(
+                replay.handle(&id(name)).map(Handle::get),
+                Some(raw),
+                "{name}"
+            );
         }
     }
 }
@@ -242,12 +244,29 @@ fn duplicate_steps_compare_typed_values_even_after_being_dropped() {
             &mut global,
         )
         .expect("valid cut");
-    let generation = global.generation();
+    let equivalent = step(
+        r#"{"put":[{"text":{"text":"","at":[0,0],"id":"b"}}],"id":"second","start":"speech","set":[],"remove":[]}"#,
+    );
+    let before = (
+        state.revision(),
+        state.object_count(),
+        state.recovery_log().len(),
+        global.generation(),
+    );
     assert!(matches!(
-        state.admit(&original, &global),
+        state.admit(&equivalent, &global),
         Ok(Admission::Duplicate)
     ));
-    assert_eq!(global.generation(), generation);
+    assert_eq!(
+        (
+            state.revision(),
+            state.object_count(),
+            state.recovery_log().len(),
+            global.generation(),
+        ),
+        before
+    );
+    assert_eq!(state.handle(&id("b")), None);
     rejected(
         &state,
         &global,
@@ -428,6 +447,12 @@ fn stop_zero_and_invalid_cuts_are_atomic_and_revisions_never_decrease() {
         (state.revision(), state.object_count(), state.committed()),
         (1, 0, 0)
     );
+    assert_eq!(state.recovery_log().len(), 2);
+    let SceneEvent::Stop(stopped) = &state.recovery_log()[1] else {
+        panic!("the clear is logged as Stop");
+    };
+    assert_eq!(stopped.activated, 0);
+    assert!(stopped.revealed.is_empty());
     let generation = global.generation();
     state.clear(&mut global).expect("matching budget context");
     assert_eq!(global.generation(), generation);
@@ -440,7 +465,7 @@ fn stop_zero_and_invalid_cuts_are_atomic_and_revisions_never_decrease() {
     );
     let replay = SceneState::replay(header(), state.recovery_log()).expect("cleared recovery");
     assert!(replay.is_cleared());
-    assert_eq!(replay.revision(), 1);
+    assert_eq!((replay.revision(), replay.committed()), (1, 0));
 }
 
 #[test]
@@ -482,20 +507,6 @@ fn lifetime_steps_include_dropped_steps_and_duplicate_is_still_a_noop_at_cap() {
 }
 
 #[test]
-fn a_continuation_may_leave_out_size_and_restate_others() {
-    let Record::Begin(stored) = record(
-        r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":"","size":[600,400]}}"#,
-    ) else {
-        panic!("begin fixture");
-    };
-    let continuation =
-        record(r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":"","others":"keep"}}"#);
-    CallState::default()
-        .accept(&continuation, &stored)
-        .expect("the stored header keeps its canvas and others");
-}
-
-#[test]
 fn call_guards_allow_typed_equal_continuations_but_not_records_after_end() {
     let header = header();
     let mut call = CallState::default();
@@ -513,6 +524,21 @@ fn call_guards_allow_typed_equal_continuations_but_not_records_after_end() {
             .code,
         ErrorCode::HeaderMismatch
     );
+    let Record::Begin(sized) = different else {
+        panic!("sized header fixture");
+    };
+    let mut sized_call = CallState::default();
+    sized_call
+        .accept(
+            &record(
+                r#"{"begin":{"v":1,"scene":"scene","surface":"overlay","alt":"","others":"keep"}}"#,
+            ),
+            &sized,
+        )
+        .expect("the continuation may omit size and restate others");
+    sized_call
+        .accept(&item, &sized)
+        .expect("scene can continue");
     for (other, reason) in [
         (
             r#"{"begin":{"v":1,"scene":"scene","surface":"inline","alt":""}}"#,

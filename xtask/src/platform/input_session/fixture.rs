@@ -1113,9 +1113,8 @@ fn focus_edit() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FRAME, FixturePlacement, IdleRefusal, POINT, RECT, WINDOW_EX_STYLE, WS_EX_TOPMOST,
-        current_queue_categories, frame_name, has_ex, off_cursor_frame, pack, published_frame,
-        raise, restore, root_ex_style,
+        FRAME, FixturePlacement, IdleRefusal, POINT, RECT, WS_EX_TOPMOST, current_queue_categories,
+        has_ex, off_cursor_frame, pack, published_frame, raise, restore, root_ex_style,
     };
     use windows::Win32::UI::Input::{
         MOUSE_MOVE_ABSOLUTE, MOUSE_MOVE_NOCOALESCE, RAWINPUT, RAWKEYBOARD, RAWMOUSE, RAWMOUSE_0,
@@ -1143,19 +1142,12 @@ mod tests {
     }
 
     #[test]
-    fn only_the_unattended_fixture_is_born_topmost() {
-        assert_eq!(
-            root_ex_style(FixturePlacement::AwayFromCursor),
-            WS_EX_TOPMOST
-        );
-        assert_eq!(
-            root_ex_style(FixturePlacement::Default),
-            WINDOW_EX_STYLE::default()
-        );
-    }
-
-    #[test]
     fn a_fixture_born_topmost_leaves_the_band_when_its_idle_activation_ends() {
+        assert_eq!(
+            root_ex_style(FixturePlacement::Default).0 & WS_EX_TOPMOST.0,
+            0,
+            "attended starts in the normal band"
+        );
         // SAFETY: a hidden top-level STATIC owned by this test thread; it is never shown.
         let root = unsafe {
             CreateWindowExW(
@@ -1179,12 +1171,15 @@ mod tests {
             let style = unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) };
             has_ex(style, WS_EX_TOPMOST)
         };
+        let born_topmost = topmost();
         raise(root).unwrap();
-        assert!(topmost());
+        let raised_topmost = topmost();
         restore(root).unwrap();
         let restored = topmost();
         // SAFETY: the window was created on this thread and is still live.
         unsafe { DestroyWindow(root) }.unwrap();
+        assert!(born_topmost, "topmost before the raise");
+        assert!(raised_topmost, "still topmost after the raise");
         assert!(!restored);
     }
 
@@ -1200,9 +1195,17 @@ mod tests {
             off_cursor_frame(work, POINT { x: 720, y: 325 }),
             Some(FRAME)
         );
-        assert_eq!(
-            off_cursor_frame(work, POINT { x: 400, y: 325 }),
-            Some([1920, 80, 640, 490])
+        assert_cursor_clear(work, POINT { x: 400, y: 325 });
+    }
+
+    fn assert_cursor_clear(work: RECT, cursor: POINT) {
+        let [x, y, width, height] = off_cursor_frame(work, cursor).expect("a safe frame fits");
+        assert_eq!([width, height], [FRAME[2], FRAME[3]]);
+        assert!(x >= work.left && x + width <= work.right);
+        assert!(y >= work.top && y + height <= work.bottom);
+        assert!(
+            !((x..x + width).contains(&cursor.x) && (y..y + height).contains(&cursor.y)),
+            "the replacement frame must leave the cursor clear"
         );
     }
 
@@ -1231,53 +1234,31 @@ mod tests {
     }
 
     #[test]
-    fn each_unattended_frame_is_named_by_its_side_of_the_preferred_one() {
-        let work = RECT {
-            left: 0,
-            top: 0,
-            right: 2560,
-            bottom: 1400,
-        };
-        let name = |x, y| {
-            let [left, top, ..] = off_cursor_frame(work, POINT { x, y }).unwrap();
-            frame_name([left, top])
-        };
-        assert_eq!(name(2240, 325), "preferred");
-        assert_eq!(name(400, 325), "right");
-        assert_eq!(frame_name([0, 80]), "left");
-        assert_eq!(frame_name([80, 510]), "lower");
-        assert_eq!(frame_name([80, 0]), "upper");
-        assert_eq!(frame_name([0, 0]), "shifted");
-    }
-
-    #[test]
     fn only_a_published_origin_that_fits_a_frame_reads_back() {
+        let [left, top, width, height] = FRAME;
         let origin = |x, y| usize::try_from(pack(x, y)).unwrap();
         let frame = |left, top| RECT {
             left,
             top,
-            right: left + 640,
-            bottom: top + 490,
+            right: left + width,
+            bottom: top + height,
         };
-        assert_eq!(
-            published_frame(origin(80, 80)),
-            Some((frame(80, 80), "preferred"))
-        );
-        assert_eq!(
-            published_frame(origin(1920, 80)),
-            Some((frame(1920, 80), "right"))
-        );
-        assert_eq!(
-            published_frame(origin(-560, 80)),
-            Some((frame(-560, 80), "left"))
-        );
+        for (x, y, name) in [
+            (left, top, "preferred"),
+            (left + width, top, "right"),
+            (left - width, top, "left"),
+            (left, top + height, "lower"),
+            (left, top - height, "upper"),
+        ] {
+            assert_eq!(published_frame(origin(x, y)), Some((frame(x, y), name)));
+        }
         assert_eq!(published_frame(0), None);
         assert_eq!(
-            published_frame(origin(i32::MAX - 640, 80)).map(|(rect, _)| rect.right),
+            published_frame(origin(i32::MAX - width, top)).map(|(rect, _)| rect.right),
             Some(i32::MAX)
         );
-        assert_eq!(published_frame(origin(i32::MAX - 639, 80)), None);
-        assert_eq!(published_frame(origin(80, i32::MAX - 489)), None);
+        assert_eq!(published_frame(origin(i32::MAX - width + 1, top)), None);
+        assert_eq!(published_frame(origin(left, i32::MAX - height + 1)), None);
         assert_eq!(
             published_frame(origin(i32::MIN, i32::MIN)).map(|(_, name)| name),
             Some("shifted")

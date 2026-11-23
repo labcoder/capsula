@@ -294,13 +294,28 @@ mod tests {
         ];
         for args in [&inner[..], &[]] {
             let error = run(args.iter().map(|arg| (*arg).to_owned())).expect_err("refused");
+            let report = format!("{error:#}");
+            assert!(report.contains("gate identity"), "{report}");
+            let mut tokens = report.split_ascii_whitespace();
+            assert!(tokens.any(|token| token == "cargo"), "{report}");
+            for token in [
+                "run",
+                "--release",
+                "--package",
+                "xtask",
+                "--features",
+                "kumochi-protocol/gate-identity",
+                "--",
+                "<task>",
+            ] {
+                assert_eq!(tokens.next(), Some(token), "{report}");
+            }
             assert_eq!(
-                format!("{error:#}"),
-                "a gate tool runs only as the gate identity: cargo run --release --package xtask \
-                 --features kumochi-protocol/gate-identity -- <task>"
+                std::fs::read_dir(&folder).unwrap().count(),
+                0,
+                "refused before output"
             );
         }
-        assert!(!folder.join("report.md").exists());
     }
 
     #[test]
@@ -318,10 +333,14 @@ mod tests {
 
     #[test]
     fn percentiles_take_the_nearest_rank() {
-        let samples: Vec<_> = (1..=20).rev().map(Duration::from_millis).collect();
-        assert!((percentile(&samples, 50) - 10.0).abs() < 1e-9, "p50");
-        assert!((percentile(&samples, 95) - 19.0).abs() < 1e-9, "p95");
-        assert!((percentile(&samples, 100) - 20.0).abs() < 1e-9, "max");
+        let samples: Vec<_> = (1..=21).rev().map(Duration::from_millis).collect();
+        for (percent, milliseconds) in [(50, 11.0), (95, 20.0), (100, 21.0)] {
+            let measured = percentile(&samples, percent);
+            assert!(
+                (measured - milliseconds).abs() < 1e-9,
+                "p{percent}: {measured}"
+            );
+        }
         assert!(percentile(&[], 95).is_nan(), "no samples");
     }
 }

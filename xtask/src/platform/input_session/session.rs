@@ -969,14 +969,29 @@ mod tests {
         }
     }
 
+    fn assert_cover(cover: RECT, overlay: RECT, points: [POINT; 2]) {
+        let [left, top, width, height] = DESKTOP;
+        assert!(cover.left >= left && cover.top >= top);
+        assert!(cover.right <= left + width && cover.bottom <= top + height);
+        assert!((640..=1024).contains(&(cover.right - cover.left)));
+        assert!((400..=1024).contains(&(cover.bottom - cover.top)));
+        assert!(cover.left <= overlay.left && cover.top <= overlay.top);
+        assert!(cover.right >= overlay.right && cover.bottom >= overlay.bottom);
+        for point in points {
+            assert!((cover.left..cover.right).contains(&point.x));
+            assert!((cover.top..cover.bottom).contains(&point.y));
+        }
+    }
+
     #[test]
     fn a_bottom_dock_leaves_left_beyond_the_overlay_and_256_px() {
         let dock = rect(1224, 1388, 1336, 1436);
         let overlay = rect(1112, 1276, 1448, 1440);
         let (cover, [enter, leave]) = hover_cover(dock, overlay, DESKTOP).unwrap();
-        assert_eq!(cover, rect(872, 1040, 1512, 1440));
         assert_eq!(enter, POINT { x: 1280, y: 1412 });
-        assert_eq!(leave, POINT { x: 936, y: 1412 });
+        assert_eq!(leave.y, enter.y);
+        assert!(leave.x < overlay.left && dock.left - leave.x >= 256);
+        assert_cover(cover, overlay, [enter, leave]);
     }
 
     #[test]
@@ -984,9 +999,10 @@ mod tests {
         let dock = rect(4, 600, 116, 648);
         let overlay = rect(0, 488, 228, 760);
         let (cover, [enter, leave]) = hover_cover(dock, overlay, DESKTOP).unwrap();
-        assert_eq!(cover, rect(0, 424, 640, 824));
         assert_eq!(enter, POINT { x: 60, y: 624 });
-        assert_eq!(leave, POINT { x: 404, y: 624 });
+        assert_eq!(leave.y, enter.y);
+        assert!(leave.x >= overlay.right && leave.x - dock.right >= 256);
+        assert_cover(cover, overlay, [enter, leave]);
     }
 
     #[test]

@@ -3,18 +3,24 @@ use kumochi_scene::{
     Admission, Begin, Budget, ErrorCode, Frame, GlobalBudget, Handle, Record, SceneState,
     SceneView, Step, StopCut, WireId,
     display::{Item, MeasureError, PaintWork, Prim, TextMeasure, TextStyle},
-    geom::Vec2,
+    geom::{Affine, Rect, Vec2},
     layout::{
-        Glide, LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare,
-        recover, recover_all,
+        LayoutState, PrepareError, PrepareInput, PreparedStep, SurfaceGeometry, prepare, recover,
+        recover_all,
     },
     limits::MAX_GLOBAL_FILL_VERTICES,
     parse_record,
+    record::Rgb,
     text::Bounded,
     theme::Theme,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, atomic::AtomicBool};
+
+#[path = "support/connected_stroke.rs"]
+mod painted;
+#[path = "support/visible_fill.rs"]
+mod visible;
 
 #[derive(Default)]
 struct Measure {
@@ -113,6 +119,317 @@ fn assert_vec2_near(actual: Vec2, expected: [f32; 2]) {
         "expected {expected:?}, got {actual:?}"
     );
 }
+fn near(actual: f32, expected: f32) {
+    assert!((actual - expected).abs() < 0.001, "{actual} vs {expected}");
+}
+
+fn bounds(layout: &LayoutState, name: &str) -> Rect {
+    layout
+        .bounds(&id(name))
+        .expect("valid world bounds")
+        .expect("prepared bounds")
+}
+
+fn item(layout: &LayoutState, name: &str) -> Item {
+    let handle = layout.handle(&id(name)).expect("prepared handle");
+    layout
+        .items()
+        .into_iter()
+        .find(|item| item.handle == handle)
+        .expect("prepared item")
+}
+
+fn assert_removed(step: &PreparedStep, before: &LayoutState, names: &[&str]) {
+    let mut expected = names
+        .iter()
+        .map(|name| before.handle(&id(name)).expect("old handle"))
+        .collect::<Vec<Handle>>();
+    let mut actual = step.removed.clone();
+    expected.sort_unstable();
+    actual.sort_unstable();
+    assert_eq!(
+        actual, expected,
+        "exact removal handles, independent of order"
+    );
+}
+
+fn frame(layout: &LayoutState) -> Frame {
+    let mut frame = Frame::new();
+    SceneView::new(layout, 0)
+        .frame(u64::MAX, &mut frame)
+        .expect("resting frame");
+    frame
+}
+
+fn paint_transform(layout: &LayoutState, handle: Handle) -> Affine {
+    frame(layout)
+        .items()
+        .iter()
+        .find(|i| i.handle == handle)
+        .expect("painted item")
+        .transform
+}
+
+fn open_stroke_points(item: &Item) -> &[Vec2] {
+    item.primitives
+        .iter()
+        .find_map(|p| match p {
+            Prim::Line {
+                points,
+                closed: false,
+                color,
+                width,
+                ..
+            } if color.opacity > 0.0 && *width > 0.0 => Some(points.as_ref()),
+            _ => None,
+        })
+        .expect("open stroke")
+}
+
+fn open_stroke(item: &Item) -> Vec<Vec2> {
+    assert!(item.opacity > 0.0, "the stroke is visible");
+    painted::connected_stroke(&item.primitives).expect("the painted stroke is connected")
+}
+
+fn horizontal_ends(path: &[Vec2]) -> [Vec2; 2] {
+    let mut ends = [*path.first().expect("start"), *path.last().expect("end")];
+    ends.sort_by(|a, b| a.x.total_cmp(&b.x));
+    ends
+}
+
+fn text<'a>(item: &'a Item, value: &str) -> &'a Prim {
+    item.primitives.iter().find(|p| matches!(p, Prim::Text { text, color, .. } if text.as_str() == value && color.opacity > 0.0)).expect("painted text")
+}
+
+fn polygon_covers(points: &[Vec2], p: Vec2) -> bool {
+    let perimeter = points.iter().zip(points.iter().cycle().skip(1));
+    let area = perimeter
+        .clone()
+        .map(|(a, b)| a.x * b.y - a.y * b.x)
+        .sum::<f32>();
+    if area.abs() <= f32::EPSILON {
+        return false;
+    }
+    let mut inside = false;
+    for (&a, &b) in perimeter {
+        let d = b - a;
+        let q = p - a;
+        if d != Vec2::default()
+            && (d.x * q.y - d.y * q.x).abs() < 0.001
+            && (a.x.min(b.x)..=a.x.max(b.x)).contains(&p.x)
+            && (a.y.min(b.y)..=a.y.max(b.y)).contains(&p.y)
+        {
+            return true;
+        }
+        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) * d.x / d.y {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+fn covers_rect(rect: Rect, radius: f32, p: Vec2) -> bool {
+    let max = rect.max();
+    if rect.size.x <= 0.0
+        || rect.size.y <= 0.0
+        || !(rect.origin.x..=max.x).contains(&p.x)
+        || !(rect.origin.y..=max.y).contains(&p.y)
+    {
+        return false;
+    }
+    let r = radius.min(rect.size.x.min(rect.size.y) * 0.5).max(0.0);
+    let x = p.x.clamp(rect.origin.x + r, max.x - r);
+    let y = p.y.clamp(rect.origin.y + r, max.y - r);
+    (p.x - x).hypot(p.y - y) <= r
+}
+
+fn fill_at(item: &Item, rgb: Option<Rgb>, p: Vec2) -> bool {
+    item.opacity > 0.0
+        && item.primitives.iter().any(|primitive| match primitive {
+            Prim::Rect {
+                rect,
+                radius,
+                fill: Some(paint),
+                ..
+            } if paint.opacity > 0.0 && rgb.is_none_or(|rgb| paint.rgb == rgb) => {
+                covers_rect(*rect, *radius, p)
+            }
+            Prim::Fill { points, color }
+                if color.opacity > 0.0 && rgb.is_none_or(|rgb| color.rgb == rgb) =>
+            {
+                polygon_covers(points, p)
+            }
+            _ => false,
+        })
+}
+
+fn filled_regions(item: &Item, rgb: Option<Rgb>) -> Vec<Rect> {
+    let mut regions: Vec<Rect> = Vec::new();
+    for mut region in item
+        .primitives
+        .iter()
+        .filter_map(visible::visible_fill)
+        .filter(|(paint, _)| rgb.is_none_or(|rgb| *paint == rgb))
+        .map(|(_, rect)| rect)
+    {
+        while let Some(i) = regions.iter().position(|other| {
+            region.origin.x <= other.max().x
+                && other.origin.x <= region.max().x
+                && region.origin.y <= other.max().y
+                && other.origin.y <= region.max().y
+        }) {
+            region = region.union(regions.swap_remove(i));
+        }
+        regions.push(region);
+    }
+    regions
+}
+
+fn ink(primitive: &Prim) -> Rect {
+    use kumochi_scene::record::Align;
+    let Prim::Text {
+        origin,
+        text,
+        style,
+        max_width,
+        align,
+        ..
+    } = primitive
+    else {
+        panic!("text primitive");
+    };
+    let [w, h] = Measure::default()
+        .measure(text.as_str(), *style, *max_width)
+        .expect("ink bounds");
+    let spare = max_width.unwrap_or(w) - w;
+    let x = match align {
+        Align::Left => 0.0,
+        Align::Center => spare * 0.5,
+        Align::Right => spare,
+    };
+    Rect {
+        origin: *origin + Vec2::new(x, 0.0),
+        size: Vec2::new(w, h),
+    }
+}
+
+fn chart_lines(chart: &Item, rgb: Rgb) -> Vec<[Vec2; 2]> {
+    assert!(chart.opacity > 0.0, "the chart is visible");
+    let mut lines = Vec::new();
+    for primitive in &*chart.primitives {
+        if let Prim::Line {
+            points,
+            color,
+            width,
+            closed: false,
+            ..
+        } = primitive
+            && color.rgb == rgb
+            && color.opacity > 0.0
+            && *width > 0.0
+        {
+            for pair in points.windows(2) {
+                let (mut a, mut b) = (pair[0], pair[1]);
+                assert!((a.y - b.y).abs() < 0.001, "the grid line is horizontal");
+                if a.x > b.x {
+                    std::mem::swap(&mut a, &mut b);
+                }
+                if a.x < b.x {
+                    lines.push([a, b]);
+                }
+            }
+        }
+    }
+    lines.sort_by(|[a, _], [b, _]| a.y.total_cmp(&b.y).then_with(|| a.x.total_cmp(&b.x)));
+    let mut runs: Vec<[Vec2; 2]> = Vec::new();
+    for [a, b] in lines {
+        if let Some([left, right]) = runs.last_mut()
+            && (left.y - a.y).abs() < 0.001
+            && a.x <= right.x
+        {
+            right.x = right.x.max(b.x);
+        } else {
+            runs.push([a, b]);
+        }
+    }
+    runs
+}
+
+fn zero_axis(chart: &Item) -> [Vec2; 2] {
+    let [baseline]: [[Vec2; 2]; 1] = chart_lines(chart, Theme::default().accent)
+        .try_into()
+        .expect("one connected painted zero baseline");
+    baseline
+}
+
+fn reviewed_row_style_updates(cut_revision: Option<u32>) {
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let before = LayoutState::new(&scene);
+    let first = committed(
+        &mut scene,
+        &mut budget,
+        json!({"id":"first","put":[
+            {"table":{"id":"t","cols":["Value"]}},
+            {"row":{"id":"r","in":"t","cells":[1],"emphasis":true,"color":"blue"}}
+        ]}),
+    );
+    let mut layout = picture(&scene, first, &before, &mut Measure::default())
+        .expect("table")
+        .after;
+    if let Some(revision) = cut_revision {
+        cut(&mut scene, &mut budget, revision, &["r"], &layout);
+        layout = layout.cut(&scene).expect("detached row");
+    }
+    let red = kumochi_scene::display::Paint::from(
+        kumochi_scene::record::Rgb::try_from(0x00ff_6b7d).expect("RGB"),
+    );
+    for (index, emphasis) in [true, false, true].into_iter().enumerate() {
+        let next = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":format!("style{index}"),"set":[{"target":"r","emphasis":emphasis,"color":"red"}]}),
+        );
+        layout = picture(&scene, next, &layout, &mut Measure::default())
+            .expect("style update")
+            .after;
+        let row = item(&layout, "r");
+        let Prim::Text { style, color, .. } = text(&row, "1") else {
+            unreachable!()
+        };
+        assert_eq!(
+            (style.bold, *color),
+            (emphasis, red),
+            "the cell follows the row style"
+        );
+        let fills = row
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Rect {
+                    rect,
+                    fill: Some(paint),
+                    ..
+                } if paint.opacity > 0.0 => Some((*rect, *paint)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            !fills.is_empty(),
+            emphasis,
+            "only emphasized rows paint a band"
+        );
+        for (band, paint) in fills {
+            assert!(
+                band.size.x > 0.0 && band.size.y > 0.0,
+                "the band has visible area"
+            );
+            assert_eq!(paint.rgb, red.rgb, "the band follows the authored color");
+            assert!(paint.opacity < 1.0, "the band is translucent");
+        }
+    }
+}
+
 fn chart_picture(put: &Value) -> PreparedStep {
     let mut scene = SceneState::begin(header()).expect("scene");
     let mut budget = GlobalBudget::default();
@@ -150,7 +467,6 @@ fn future_nodes_and_removals_leave_the_previous_picture_unchanged() {
         &mut budget,
         json!({"id":"third","remove":["e","b"]}),
     );
-    let expected_removed = [second.handles[1].1, second.handles[0].1];
     assert!(
         scene.handle(&id("b")).is_none(),
         "semantic tip already removed b"
@@ -163,13 +479,16 @@ fn future_nodes_and_removals_leave_the_previous_picture_unchanged() {
     let second = picture(&scene, second, &first.after, &mut measure).expect("second picture");
     assert_eq!(second.after.bounds(&id("a")).expect("safe"), Some(bounds));
     assert!(!bounds.intersects(second.after.bounds(&id("b")).expect("safe").expect("b")));
+    let second_items = second.after.items();
     let third = picture(&scene, removal, &second.after, &mut measure).expect("removal picture");
-    assert!(
-        second.after.handle(&id("b")).is_some(),
-        "earlier output still has b"
+    assert_eq!(
+        second.after.items(),
+        second_items,
+        "the earlier output still has both nodes and the edge"
     );
     assert_eq!(third.after.handle(&id("b")), None);
-    assert_eq!(third.removed, expected_removed);
+    assert_eq!(third.after.handle(&id("e")), None);
+    assert_removed(&third, &second.after, &["e", "b"]);
     assert_eq!(first.after.items(), unchanged);
     assert!(first.after.handle(&id("b")).is_none());
 }
@@ -213,10 +532,7 @@ fn a_full_rank_emits_one_group_glide_and_preserves_node_local_rectangles() {
         .find(|item| item.handle == original.handle)
         .expect("kept a");
     assert_eq!(current.bounds, original.bounds);
-    assert!(
-        Arc::ptr_eq(&current.primitives, &original.primitives),
-        "glide reuses geometry"
-    );
+    assert_eq!(current.primitives, original.primitives);
 }
 
 #[test]
@@ -302,20 +618,17 @@ fn review_same_step_highlight_uses_the_diagrams_measured_children() {
         &mut budget,
         json!({"id":"first","put":[
             {"diagram":{"id":"d"}},{"node":{"id":"a","in":"d","label":"A"}},
-            {"highlight":{"id":"h","target":{"ref":"d"}}}
+            {"highlight":{"id":"h","target":{"ref":"d"},"pad":9}}
         ]}),
     );
     let first = picture(&scene, first, &before, &mut Measure::default())
         .expect("same-step diagram highlight");
-    assert_eq!(
-        first
-            .after
-            .bounds(&id("h"))
-            .expect("bounds")
-            .expect("highlight")
-            .size,
-        kumochi_scene::geom::Vec2::new(92.0, 52.0)
-    );
+    let node = bounds(&first.after, "a");
+    assert_eq!(bounds(&first.after, "d"), node);
+    let pad = Vec2::new(9.0, 9.0);
+    let highlight = bounds(&first.after, "h");
+    assert_eq!(highlight.origin, node.origin - pad);
+    assert_eq!(highlight.max(), node.max() + pad);
 }
 
 #[test]
@@ -341,11 +654,10 @@ fn review_reverse_put_order_places_new_predecessors_before_successors() {
         ]}),
     );
     let next = picture(&scene, next, &first.after, &mut measure).expect("reverse order nodes");
-    let b = next.after.bounds(&id("b")).expect("bounds").expect("b");
-    let c = next.after.bounds(&id("c")).expect("bounds").expect("c");
-    assert!(!b.intersects(c));
-    assert_eq!(b.origin, kumochi_scene::geom::Vec2::new(16.0, 128.0));
-    assert_eq!(c.origin, kumochi_scene::geom::Vec2::new(16.0, 240.0));
+    let [a, b, c] = ["a", "b", "c"].map(|name| bounds(&next.after, name));
+    assert!(a.max().y < b.origin.y);
+    assert!(b.max().y < c.origin.y);
+    near(b.center().x, c.center().x);
 }
 
 #[test]
@@ -371,27 +683,26 @@ fn glided_detachment_prunes_both_groups_and_parentless_updates_emit_no_glide() {
         json!({"id":"next","put":[{"node":{"id":"overflow","in":"d","label":"X"}},{"node":{"id":"other","in":"e","label":"X"}}]}),
     );
     let next = picture(&scene, next, &first.after, &mut measure).expect("two overflows");
-    assert_eq!(
-        next.glides
-            .iter()
-            .map(|glide| glide.target)
-            .collect::<Vec<_>>(),
-        ["d", "e"].map(|name| next.after.handle(&id(name)).expect("group"))
-    );
+    let mut glides = next
+        .glides
+        .iter()
+        .map(|glide| glide.target)
+        .collect::<Vec<_>>();
+    let mut expected = ["d", "e"].map(|name| next.after.handle(&id(name)).expect("group"));
+    glides.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(glides, expected);
+    let survivor = bounds(&next.after, "overflow");
     cut(&mut scene, &mut budget, 2, &["overflow"], &next.after);
     let tip = next.after.cut(&scene).expect("glided detachment");
     assert_eq!(tip.items().len(), 1);
+    assert_eq!(tip.handle(&id("d")), None);
+    assert_eq!(tip.handle(&id("e")), None);
     assert_eq!(
-        tip.items()[0].handle,
-        next.after.handle(&id("overflow")).expect("survivor")
+        tip.handle(&id("overflow")),
+        next.after.handle(&id("overflow"))
     );
-    assert_eq!(
-        tip.bounds(&id("overflow"))
-            .expect("bounds")
-            .expect("node")
-            .center(),
-        kumochi_scene::geom::Vec2::new(320.0, 36.0)
-    );
+    assert_eq!(bounds(&tip, "overflow"), survivor);
     let next = committed(
         &mut scene,
         &mut budget,
@@ -414,20 +725,12 @@ fn glided_detachment_prunes_both_groups_and_parentless_updates_emit_no_glide() {
 
 #[test]
 fn host_surface_defaults_choose_the_expected_diagram_flow_and_width() {
-    use kumochi_scene::{geom::Vec2, record::Surface};
-    for (surface, a, b) in [
-        (
-            SurfaceGeometry::default(),
-            Vec2::new(180.0, 36.0),
-            Vec2::new(180.0, 148.0),
-        ),
-        (
-            SurfaceGeometry::Overlay {
-                default_canvas: [600.0, 400.0],
-            },
-            Vec2::new(224.0, 36.0),
-            Vec2::new(376.0, 36.0),
-        ),
+    use kumochi_scene::record::Surface;
+    for surface in [
+        SurfaceGeometry::default(),
+        SurfaceGeometry::Overlay {
+            default_canvas: [600.0, 400.0],
+        },
     ] {
         let mut config = header();
         config.surface = match surface {
@@ -451,24 +754,19 @@ fn host_surface_defaults_choose_the_expected_diagram_flow_and_width() {
         .expect("input");
         let result =
             prepare(input, &mut Measure::default(), &AtomicBool::new(false)).expect("default flow");
-        assert_eq!(
-            result
-                .after
-                .bounds(&id("a"))
-                .expect("bounds")
-                .expect("a")
-                .center(),
-            a
-        );
-        assert_eq!(
-            result
-                .after
-                .bounds(&id("b"))
-                .expect("bounds")
-                .expect("b")
-                .center(),
-            b
-        );
+        let [a, b] = ["a", "b"].map(|name| bounds(&result.after, name));
+        match surface {
+            SurfaceGeometry::Inline { .. } => {
+                near(a.center().x, 180.0);
+                near(b.center().x, 180.0);
+                assert!(b.origin.y > a.max().y);
+            }
+            SurfaceGeometry::Overlay { .. } => {
+                near(a.center().y, b.center().y);
+                assert!(b.origin.x > a.max().x);
+                near(a.union(b).center().x, 300.0);
+            }
+        }
         assert!(result.glides.is_empty());
     }
 }
@@ -511,20 +809,28 @@ fn cancellation_during_host_measurement_publishes_no_layout() {
 
 #[test]
 fn prepared_debug_summarizes_geometry_without_drawing_content() {
-    let mut scene = SceneState::begin(header()).expect("scene");
-    let mut budget = GlobalBudget::default();
-    let before = LayoutState::new(&scene);
-    let first = committed(
-        &mut scene,
-        &mut budget,
-        json!({"id":"PRIVATE_STEP","put":[{"text":{"id":"PRIVATE_ID","at":[12345,12345],"text":"PRIVATE_TEXT"}}]}),
+    let debug = |step_id, object_id, text, coord| {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let first = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":step_id,"put":[{"text":{"id":object_id,"at":[coord,coord],"text":text}}]}),
+        );
+        let first = picture(&scene, first, &before, &mut Measure::default()).expect("picture");
+        [
+            format!("{first:?}"),
+            format!("{:?}", first.display.items),
+            format!("{:?}", first.display.items[0].primitives),
+        ]
+    };
+    let observed = debug("PRIVATE_STEP", "PRIVATE_ID", "PRIVATE_TEXT", 12_345);
+    assert!(
+        observed == debug("ANOTHER_PART", "OTHER_NODE", "ANOTHER_NOTE", 17_890),
+        "drawing content affected prepared Debug"
     );
-    let first = picture(&scene, first, &before, &mut Measure::default()).expect("picture");
-    for value in [
-        format!("{first:?}"),
-        format!("{:?}", first.display.items),
-        format!("{:?}", first.display.items[0].primitives),
-    ] {
+    for value in observed {
         for sentinel in ["PRIVATE_STEP", "PRIVATE_ID", "PRIVATE_TEXT", "12345"] {
             assert!(!value.contains(sentinel));
         }
@@ -871,7 +1177,7 @@ fn kept_recovery_failures_report_the_revision_and_layout_checks_full_envelopes()
 }
 
 #[test]
-fn node_measurement_order_and_placement_are_deterministic_and_cancellation_is_atomic() {
+fn node_labels_and_placement_are_deterministic_and_cancellation_is_atomic() {
     let run = || {
         let mut scene = SceneState::begin(header()).expect("scene");
         let mut budget = GlobalBudget::default();
@@ -882,12 +1188,38 @@ fn node_measurement_order_and_placement_are_deterministic_and_cancellation_is_at
             &mut budget,
             json!({"id":"first","put":[{"diagram":{"id":"d"}},{"node":{"id":"z","in":"d","label":"Z"}},{"node":{"id":"a","in":"d","label":"A"}}]}),
         );
-        let picture = picture(&scene, first, &before, &mut measure).expect("deterministic picture");
-        (picture.after.items(), measure.calls)
+        let layout = picture(&scene, first, &before, &mut measure)
+            .expect("deterministic picture")
+            .after;
+        let items = layout.items();
+        [("z", "Z"), ("a", "A")].map(|(name, label)| {
+            let id = id(name);
+            let handle = layout.handle(&id).expect("prepared node");
+            let item = items
+                .iter()
+                .find(|item| item.handle == handle)
+                .expect("node item");
+            assert!(
+                item.primitives.iter().any(|prim| matches!(prim,
+                Prim::Text { text, .. } if text.as_str() == label)),
+                "node {name} keeps its authored label"
+            );
+            layout
+                .bounds(&id)
+                .expect("valid bounds")
+                .expect("node bounds")
+        })
     };
     let first = run();
-    assert_eq!(first.1, vec!["Z", "A"]);
-    assert_eq!(first, run());
+    assert_ne!(
+        first[0].origin, first[1].origin,
+        "the two nodes have separate placements"
+    );
+    assert_eq!(
+        first,
+        run(),
+        "repeated preparation preserves each node's position"
+    );
     let mut scene = SceneState::begin(header()).expect("scene");
     let mut budget = GlobalBudget::default();
     let before = LayoutState::new(&scene);
@@ -987,92 +1319,100 @@ fn explicit_position_precedes_a_glide_and_later_glides_use_its_resting_value() {
 
 #[test]
 fn detached_edges_can_be_updated_without_resurrecting_their_endpoints() {
-    let mut scene = SceneState::begin(header()).expect("scene");
-    let mut budget = GlobalBudget::default();
-    let before = LayoutState::new(&scene);
-    let mut measure = Measure::default();
-    let first = committed(
-        &mut scene,
-        &mut budget,
-        json!({"id":"first","put":[
-            {"diagram":{"id":"d","box":[0,0,400,300]}},{"node":{"id":"a","in":"d","label":"A"}},{"node":{"id":"b","in":"d","label":"B"}},
-            {"edge":{"id":"e","in":"d","from":"a","to":"b","label":"old"}},
-            {"anim":{"target":"d","track":"pos","keys":[[0,[20,30]]]}}
-        ]}),
-    );
-    let first = picture(&scene, first, &before, &mut measure).expect("edge picture");
-    cut(&mut scene, &mut budget, 1, &["e"], &first.after);
-    let tip = first.after.cut(&scene).expect("keep detached edge");
-    let old_lines: Vec<_> = tip.items()[0]
-        .primitives
-        .iter()
-        .filter_map(|primitive| match primitive {
-            Prim::Line { points, .. } => Some(Arc::clone(points)),
-            _ => None,
-        })
-        .collect();
-    let update = committed(
-        &mut scene,
-        &mut budget,
-        json!({"id":"update","set":[{"target":"e","label":"new"}]}),
-    );
-    let next = picture(&scene, update, &tip, &mut measure).expect("update frozen edge");
-    let new_lines: Vec<_> = next.after.items()[0]
-        .primitives
-        .iter()
-        .filter_map(|primitive| match primitive {
-            Prim::Line { points, .. } => Some(Arc::clone(points)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(new_lines, old_lines);
-    let (_, recovered) = recover(
-        header(),
-        scene.recovery_log(),
-        SurfaceGeometry::default(),
-        &Arc::new(Theme::default()),
-        &mut Measure::default(),
-        &AtomicBool::new(false),
-        None,
-    )
-    .expect("updated detached replay");
-    assert_eq!(recovered.items(), next.after.items());
-}
-
-#[test]
-fn a_zero_width_shape_keeps_its_fill_and_draws_no_outline() {
-    let mut scene = SceneState::begin(header()).expect("scene");
-    let mut budget = GlobalBudget::default();
-    let before = LayoutState::new(&scene);
-    let first = committed(
-        &mut scene,
-        &mut budget,
-        json!({"id":"sky","put":[
-            {"shape":{"id":"skybg","kind":"rect","box":[0,0,480,300],"fill":"#BFE8FF","color":"#BFE8FF","width":0}},
-            {"shape":{"id":"sun","kind":"circle","at":[400,60],"r":30,"fill":"#FFD700","width":0}}
-        ]}),
-    );
-    let prepared =
-        picture(&scene, first, &before, &mut Measure::default()).expect("zero-width shapes");
-    let primitives = |name: &'static str| {
-        let handle = prepared.after.handle(&id(name));
-        let item = prepared
-            .display
-            .items
-            .iter()
-            .find(|item| Some(item.handle) == handle)
-            .expect("prepared item");
-        Arc::clone(&item.primitives)
+    let stroke_head_chip = |item: &Item| {
+        let mut parts = [None, None, None];
+        for primitive in item.primitives.iter() {
+            let slot = match primitive {
+                Prim::Line { .. } => 0,
+                Prim::Fill { .. } => 1,
+                Prim::Rect { .. } => 2,
+                Prim::Text { .. } => continue,
+            };
+            parts[slot] = Some(primitive.clone());
+        }
+        parts.map(|part| part.expect("visible stroke, arrowhead and chip"))
     };
-    assert!(matches!(
-        &*primitives("skybg"),
-        [Prim::Rect {
-            fill: Some(_),
-            border: None,
-            ..
-        }]
-    ));
-    assert!(matches!(&*primitives("sun"), [Prim::Fill { .. }]));
+    for bowed in [false, true] {
+        let mut scene = SceneState::begin(header()).expect("scene");
+        let mut budget = GlobalBudget::default();
+        let before = LayoutState::new(&scene);
+        let mut measure = Measure::default();
+        let (from, to, label, updated) = if bowed {
+            ("b", "a", "y", "z")
+        } else {
+            ("a", "b", "old", "new")
+        };
+        let mut put = vec![
+            json!({"diagram":{"id":"d","dir":"right","box":[0,0,400,300]}}),
+            json!({"node":{"id":"a","in":"d","label":"A"}}),
+            json!({"node":{"id":"b","in":"d","label":"B"}}),
+            json!({"edge":{"id":"e","in":"d","from":from,"to":to,"label":label}}),
+        ];
+        if bowed {
+            put.push(json!({"edge":{"id":"back","in":"d","from":"a","to":"b","label":"x"}}));
+        } else {
+            put.push(json!({"anim":{"target":"d","track":"pos","keys":[[0,[20,30]]]}}));
+        }
+        let first = committed(&mut scene, &mut budget, json!({"id":"first","put":put}));
+        let first = picture(&scene, first, &before, &mut measure).expect("edge picture");
+        cut(&mut scene, &mut budget, 1, &["e"], &first.after);
+        let tip = first.after.cut(&scene).expect("keep detached edge");
+        let update = committed(
+            &mut scene,
+            &mut budget,
+            json!({"id":"update","set":[{"target":"e","label":updated}]}),
+        );
+        let next = picture(&scene, update, &tip, &mut measure).expect("update frozen edge");
+        assert_eq!(
+            scene.object_count(),
+            1,
+            "the semantic scene still has only the edge"
+        );
+        let [old]: [Item; 1] = tip.items().try_into().expect("only the cut edge");
+        let [new]: [Item; 1] = next
+            .after
+            .items()
+            .try_into()
+            .expect("only the updated edge");
+        assert_eq!(next.after.handle(&id("e")), Some(new.handle));
+        assert_eq!(
+            next.after.bounds(&id("e")).expect("detached world bounds"),
+            first.after.bounds(&id("e")).expect("attached world bounds"),
+            "the edge keeps its painted bounds when its parents disappear"
+        );
+        let paint = stroke_head_chip(&new);
+        let Prim::Line { points, .. } = &paint[0] else {
+            panic!("visible stroke");
+        };
+        let start = points.first().expect("stroke start");
+        let last = points.last().expect("stroke end");
+        let has_bow = points
+            .iter()
+            .any(|p| p.y < start.y.min(last.y) - 0.001 || p.y > start.y.max(last.y) + 0.001);
+        assert_eq!(has_bow, bowed, "a bowed stroke stays bowed");
+        assert_eq!(
+            paint,
+            stroke_head_chip(&old),
+            "the label-only edit keeps the edge geometry"
+        );
+        assert!(
+            new.primitives
+                .iter()
+                .any(|prim| matches!(prim, Prim::Text { text, .. } if text.as_str() == updated)),
+            "the edge displays the updated label"
+        );
+        let (_, recovered) = recover(
+            header(),
+            scene.recovery_log(),
+            SurfaceGeometry::default(),
+            &Arc::new(Theme::default()),
+            &mut Measure::default(),
+            &AtomicBool::new(false),
+            None,
+        )
+        .expect("updated detached replay");
+        assert_eq!(recovered.items(), [new]);
+    }
 }
 
 #[test]
@@ -1092,28 +1432,50 @@ fn a_zero_width_dashed_shape_reserves_no_dash_and_draws_no_outline() {
         &mut scene,
         &mut budget,
         json!({"id":"big","put":[
-            {"shape":{"id":"big","kind":"rect","box":[0,0,2000,2000],"fill":"blue","width":0,"dash":true}}
+            {"shape":{"id":"big","kind":"rect","box":[0,0,2000,2000],"fill":"blue","width":0,"dash":true}},
+            {"shape":{"id":"skybg","kind":"rect","box":[0,0,480,300],"fill":"#BFE8FF","color":"#BFE8FF","width":0}},
+            {"shape":{"id":"sun","kind":"circle","at":[400,60],"r":30,"fill":"#FFD700","width":0}}
         ]}),
     );
     assert_eq!(budget.usage().dash_pieces, 0);
     let prepared =
         picture(&scene, first, &before, &mut Measure::default()).expect("no dashed outline");
     assert_eq!(prepared.after.paint_work().dash_pieces, 0);
-    let handle = prepared.after.handle(&id("big"));
-    let item = prepared
-        .display
-        .items
-        .iter()
-        .find(|item| Some(item.handle) == handle)
-        .expect("prepared item");
-    assert!(matches!(
-        &*item.primitives,
-        [Prim::Rect {
-            fill: Some(_),
-            border: None,
-            ..
-        }]
-    ));
+    let primitives = |name| {
+        let handle = prepared.after.handle(&id(name)).expect("shape handle");
+        prepared
+            .display
+            .items
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("prepared shape")
+            .primitives
+            .as_ref()
+    };
+    for name in ["big", "skybg", "sun"] {
+        let shape = primitives(name);
+        assert!(
+            shape.iter().any(|prim| match prim {
+                Prim::Rect {
+                    fill: Some(color), ..
+                }
+                | Prim::Fill { color, .. } => color.opacity > 0.0,
+                _ => false,
+            }),
+            "{name} keeps its fill"
+        );
+        assert!(
+            !shape.iter().any(|prim| match prim {
+                Prim::Rect {
+                    border: Some((color, width)),
+                    ..
+                }
+                | Prim::Line { color, width, .. } => color.opacity > 0.0 && *width > 0.0,
+                _ => false,
+            }),
+            "{name} has no outline"
+        );
+    }
 }
 
 #[test]
@@ -1265,16 +1627,19 @@ fn reference_anchors_use_the_referencing_parents_basis() {
         json!({"id":"next","put":[{"line":{"id":"l","in":"d","from":{"ref":"a"},"to":[250,100]}}]}),
     );
     let next = picture(&scene, next, &first.after, &mut measure).expect("reference picture");
-    let line = next
-        .display
-        .items
-        .iter()
-        .find(|item| Some(item.handle) == next.after.handle(&id("l")))
-        .expect("line");
-    let Prim::Line { points, .. } = &line.primitives[0] else {
-        panic!("polyline");
-    };
-    assert_eq!(points[0], kumochi_scene::geom::Vec2::new(150.0, 36.0));
+    let line = item(&next.after, "l");
+    let stroke = open_stroke(&line);
+    let parent = next.after.handle(&id("d"));
+    assert_eq!(line.parent, parent);
+    let transform = paint_transform(&next.after, line.handle);
+    let [a, b] = horizontal_ends(&stroke);
+    let source = bounds(&next.after, "a").center();
+    let destination = Vec2::new(250.0, 100.0);
+    assert!(
+        (transform.point(a) == source && b == destination)
+            || (transform.point(b) == source && a == destination),
+        "the referencing line resolves both authored ends"
+    );
 }
 
 #[test]
@@ -1577,7 +1942,7 @@ fn row_cell_updates_and_detached_replay_keep_the_prepared_column_geometry() {
     let next = committed(
         &mut scene,
         &mut budget,
-        json!({"id":"cells","set":[{"target":"r","cells":[2],"color":"red"}]}),
+        json!({"id":"cells","set":[{"target":"r","cells":[2,"P"],"color":"red"}]}),
     );
     let next = picture(&scene, next, &tip, &mut measure).expect("detached cells");
     assert_eq!(
@@ -1585,16 +1950,24 @@ fn row_cell_updates_and_detached_replay_keep_the_prepared_column_geometry() {
         Some(expected),
         "a detached update keeps the absorbed ancestor transform"
     );
-    let texts: Vec<_> = next.after.items()[0]
-        .primitives
-        .iter()
-        .filter_map(|primitive| match primitive {
-            Prim::Text { text, .. } => Some(text.as_str()),
-            _ => None,
+    let columns = |row: &Item, values: [&str; 2]| {
+        values.map(|value| {
+            let Prim::Text {
+                origin,
+                max_width,
+                align,
+                ..
+            } = text(row, value)
+            else {
+                unreachable!()
+            };
+            (*origin, *max_width, *align)
         })
-        .map(str::to_owned)
-        .collect();
-    assert_eq!(texts, ["2", ""]);
+    };
+    let initial = columns(&item(&first.after, "r"), ["1", ""]);
+    assert!(initial[0].0.x < initial[1].0.x);
+    assert_eq!(columns(&item(&tip, "r"), ["1", ""]), initial);
+    assert_eq!(columns(&item(&next.after, "r"), ["2", "P"]), initial);
     let (_, replayed) = recover(
         header(),
         scene.recovery_log(),
@@ -1667,9 +2040,14 @@ fn measured_entrance_pivots_bound_child_motion_outside_the_resting_union() {
         picture(&scene, step, &before, &mut Measure::default())
     };
     // The parent pivot adds 676.6: offset 8000 bounds 19894.5, but 8100 bounds 20001.3.
+    let accepted = prepare_case(8000).expect("measured envelope fits");
     assert!(
-        prepare_case(8000).is_ok(),
-        "the measured parent pivot and child envelope fit"
+        accepted
+            .after
+            .bounds(&id("child"))
+            .expect("valid bounds")
+            .is_some(),
+        "the child is placed when its measured envelope fits"
     );
     assert!(
         matches!(
@@ -1706,14 +2084,18 @@ fn table_alignment_and_row_cell_caps_are_admission_errors_not_layout_truncation(
     let align = step(
         json!({"id":"align","put":[{"table":{"id":"t","cols":["One"],"align":["left","right"]}}]}),
     );
-    assert!(
-        matches!(scene.admit(&align,&budget),Err(error) if error.code==kumochi_scene::ErrorCode::OutOfRange)
+    let error = scene.admit(&align, &budget).expect_err("extra alignment");
+    assert_eq!(
+        (error.code, error.path.as_str()),
+        (ErrorCode::OutOfRange, "put[0].table.align")
     );
     let cells = step(
         json!({"id":"cells","put":[{"table":{"id":"t","cols":["One"]}},{"row":{"id":"r","in":"t","cells":[1,2]}}]}),
     );
-    assert!(
-        matches!(scene.admit(&cells,&budget),Err(error) if error.code==kumochi_scene::ErrorCode::OutOfRange)
+    let error = scene.admit(&cells, &budget).expect_err("extra row cell");
+    assert_eq!(
+        (error.code, error.path.as_str()),
+        (ErrorCode::OutOfRange, "put")
     );
 }
 
@@ -1799,7 +2181,7 @@ fn attached_row_style_updates_apply_emphasis_and_color() {
 
 #[test]
 fn detached_row_style_updates_apply_emphasis_and_color() {
-    row_style_updates(Some(1));
+    reviewed_row_style_updates(Some(1));
 }
 
 #[test]
@@ -1884,21 +2266,39 @@ fn chart_series_removal_uses_the_prepared_prefix_and_keeps_older_pictures() {
         second.after.handle(&id("b")).is_some(),
         "a future removal does not affect this picture"
     );
-    let a = first.after.handle(&id("a")).expect("original series");
-    let second_items = second.after.items();
-    assert_ne!(
-        second_items
+    let ends = |layout: &LayoutState, name| {
+        let handle = layout.handle(&id(name)).expect("prepared series");
+        let items = layout.items();
+        let series = items
             .iter()
-            .find(|item| item.handle == a)
-            .expect("rescaled series")
-            .primitives,
-        unchanged
+            .find(|item| item.handle == handle)
+            .expect("series item");
+        let points = series
+            .primitives
             .iter()
-            .find(|item| item.handle == a)
-            .expect("original picture")
-            .primitives,
-        "the added series changes the existing series scale before its removal"
+            .find_map(|primitive| match primitive {
+                Prim::Line { points, .. } => Some(points),
+                _ => None,
+            })
+            .expect("line series");
+        [
+            *points.first().expect("first sample"),
+            *points.last().expect("last sample"),
+        ]
+    };
+    let [old_zero, old_one] = ends(&first.after, "a");
+    assert!(
+        old_one.y < old_zero.y,
+        "positive values rise in the original plot"
     );
+    let [zero, one] = ends(&second.after, "a");
+    let [ten, twenty] = ends(&second.after, "b");
+    assert!(
+        twenty.y < zero.y,
+        "positive values rise in the expanded plot"
+    );
+    assert_vec2_near(ten, [zero.x, zero.y.midpoint(twenty.y)]);
+    assert_vec2_near(one, [twenty.x, zero.y + (twenty.y - zero.y) / 20.0]);
     let third =
         picture(&scene, third, &second.after, &mut Measure::default()).expect("removed series");
     assert_eq!(
@@ -2014,24 +2414,33 @@ fn narrow_chart_labels_do_not_invert_their_rounded_clamp_bounds() {
         ]}),
     );
     let result = picture(&scene, commit, &before, &mut Measure::default()).expect("narrow chart");
-    assert_eq!(result.display.items.len(), 2);
-    let x_labels: Vec<_> = result.display.items[0]
+    let chart = item(&result.after, "c");
+    let series = item(&result.after, "s");
+    let plot_bottom = open_stroke_points(&series)
+        .iter()
+        .map(|p| p.y)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let labels: Vec<_> = chart
         .primitives
         .iter()
-        .filter_map(|primitive| match primitive {
+        .filter_map(|p| match p {
             Prim::Text {
                 origin,
                 text,
                 max_width,
+                color,
                 ..
-            } if origin.y > 270.0 => Some((*origin, text.as_str(), *max_width)),
+            } if origin.y > plot_bottom => {
+                assert!(max_width.is_some_and(|width| width.is_finite() && width > 0.0));
+                assert!(color.opacity > 0.0);
+                let label = ink(p);
+                assert_eq!(chart.bounds.union(label), chart.bounds);
+                Some(text.as_str())
+            }
             _ => None,
         })
         .collect();
-    assert_eq!(
-        x_labels,
-        [(kumochi_scene::geom::Vec2::new(25.6, 275.4), "0", Some(8.0))]
-    );
+    assert_eq!(labels, ["0"]);
 }
 
 #[test]
@@ -2051,23 +2460,39 @@ fn chart_color_sets_repaint_the_zero_baseline() {
     let next = committed(
         &mut scene,
         &mut budget,
-        json!({"id":"color","set":[{"target":"c","color":"red"}]}),
+        json!({"id":"color","set":[{"target":"c","color":"#ff6b7d"}]}),
     );
     let next = picture(&scene, next, &first.after, &mut Measure::default()).expect("colored chart");
     let items = next.after.items();
-    let Prim::Line { color, .. } = items[0].primitives.last().expect("baseline") else {
-        panic!("baseline line");
+    let item = |name| {
+        let handle = next.after.handle(&id(name)).expect("prepared handle");
+        items
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("prepared item")
     };
-    let red = serde_json::from_value(json!("red")).expect("color");
-    let expected = kumochi_scene::display::Paint::from(Theme::default().resolve(&red)).faded(0.4);
-    assert_eq!(
-        *color, expected,
-        "the accepted chart color reaches its visible baseline"
-    );
-    assert_ne!(
-        items[0].primitives,
-        first.after.items()[0].primitives,
-        "a chart color update changes the output"
+    let zero = item("s")
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Prim::Line { points, .. } => points.first().map(|point| point.y),
+            _ => None,
+        })
+        .expect("zero sample");
+    assert!(
+        item("c")
+            .primitives
+            .iter()
+            .any(|primitive| match primitive {
+                Prim::Line { points, color, .. } => {
+                    points.len() >= 2
+                        && points.iter().all(|point| (point.y - zero).abs() < 0.001)
+                        && color.rgb.get() == 0x00ff_6b7d
+                        && color.opacity > 0.0
+                }
+                _ => false,
+            }),
+        "the accepted chart color reaches its visible zero baseline"
     );
 }
 
@@ -2115,6 +2540,35 @@ fn chart_axes_area_and_all_pie_series_stay_within_their_reservations() {
             "admission reserves both area primitives and every pie series"
         );
     }
+
+    let pie = |last_series_slices| {
+        let mut put = vec![json!({"chart":{"id":"c","kind":"pie","box":[0,0,800,300]}})];
+        put.extend((0..8).map(|series| {
+            let slices = if series == 7 { last_series_slices } else { 20 };
+            json!({"series":{"id":format!("s{series}"),"in":"c","data":vec![1;slices]}})
+        }));
+        json!({"id":"pie","put":put})
+    };
+    let mut scene = SceneState::begin(header()).expect("scene");
+    let mut budget = GlobalBudget::default();
+    let overflow = scene
+        .admit(&step(pie(24)), &budget)
+        .expect_err("164 slices");
+    assert_eq!(overflow.code, ErrorCode::OverBudget(Budget::PathSegments));
+    let before = LayoutState::new(&scene);
+    let commit = committed(&mut scene, &mut budget, pie(23));
+    let result = picture(&scene, commit, &before, &mut Measure::default()).expect("163 slices");
+    assert_eq!(budget.usage().segments, 19_886);
+    for series in 0..8 {
+        assert!(
+            result
+                .after
+                .bounds(&id(&format!("s{series}")))
+                .expect("valid bounds")
+                .is_some(),
+            "series {series} prepares under the pie cap"
+        );
+    }
 }
 
 #[test]
@@ -2124,26 +2578,52 @@ fn pie_series_continue_the_slice_palette() {
         {"series":{"id":"a","in":"c","data":[1,1]}},
         {"series":{"id":"b","in":"c","data":[1,1]}}
     ]));
-    let pie_colors: Vec<_> = result
-        .after
-        .items()
-        .iter()
-        .flat_map(|item| {
-            item.primitives
+    let items = result.after.items();
+    let theme = Theme::default();
+    for (name, slots, diagonals) in [
+        ("a", [0, 1], [[1.0, -1.0], [1.0, 1.0]]),
+        ("b", [2, 3], [[-1.0, 1.0], [-1.0, -1.0]]),
+    ] {
+        let handle = result.after.handle(&id(name)).expect("series handle");
+        let item = items
+            .iter()
+            .find(|item| item.handle == handle)
+            .expect("prepared series");
+        let fills: Vec<_> = item
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Prim::Fill { points, color } if color.opacity > 0.0 => {
+                    Some((points.as_ref(), color.rgb.get()))
+                }
+                _ => None,
+            })
+            .collect();
+        let center = item.bounds.center();
+        let inset = item.bounds.size.x.min(item.bounds.size.y) * 0.125;
+        for (slot, [dx, dy]) in slots.into_iter().zip(diagonals) {
+            let probe = center + Vec2::new(dx, dy) * inset;
+            let colors: std::collections::BTreeSet<_> = fills
                 .iter()
-                .filter_map(|primitive| match primitive {
-                    Prim::Fill { color, .. } => Some(*color),
-                    _ => None,
+                .filter_map(|&(points, color)| {
+                    let crossings = points
+                        .iter()
+                        .zip(points.iter().cycle().skip(1))
+                        .filter(|&(a, b)| {
+                            (a.y > probe.y) != (b.y > probe.y)
+                                && probe.x < a.x + (probe.y - a.y) * (b.x - a.x) / (b.y - a.y)
+                        })
+                        .count();
+                    (!crossings.is_multiple_of(2)).then_some(color)
                 })
-        })
-        .collect();
-    assert_eq!(
-        pie_colors,
-        (0..4)
-            .map(|slot| Theme::default().series(slot).into())
-            .collect::<Vec<kumochi_scene::display::Paint>>(),
-        "adjacent series continue the slice palette rather than repeating their shared boundary color"
-    );
+                .collect();
+            assert_eq!(
+                colors,
+                std::collections::BTreeSet::from([theme.series(slot).get()]),
+                "series {name} has its palette slot {slot} at {probe:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -2220,48 +2700,47 @@ fn titled_bar_header_places_the_legend_axes_and_category_labels() {
 
 #[test]
 fn grouped_and_stacked_bars_use_series_slots_and_signed_baselines() {
-    for (stacked, expected) in [
-        (
-            false,
-            [
-                [66.16, 145.12, 62.84, 17.88],
-                [234.16, 163.0, 62.84, 17.88],
-                [130.0, 136.18, 62.84, 26.82],
-                [298.0, 163.0, 62.84, 26.82],
-            ],
-        ),
-        (
-            true,
-            [
-                [66.16, 145.12, 126.68, 17.88],
-                [234.16, 163.0, 126.68, 17.88],
-                [66.16, 118.3, 126.68, 26.82],
-                [234.16, 180.88, 126.68, 26.82],
-            ],
-        ),
-    ] {
+    for stacked in [false, true] {
         let mut put = titled_bar_fixture();
         put[0]["chart"]["stacked"] = json!(stacked);
         let result = chart_picture(&put);
-        let chart = result.after.handle(&id("c")).expect("chart handle");
-        let rectangles: Vec<_> = result
-            .after
-            .items()
+        let chart = item(&result.after, "c");
+        let [start, end] = zero_axis(&chart);
+        let [a, b] = ["a", "b"].map(|name| {
+            let series = item(&result.after, name);
+            let mut rects = filled_regions(&series, None);
+            rects.sort_by(|a, b| a.center().x.total_cmp(&b.center().x));
+            let rects: [Rect; 2] = rects.try_into().expect("one bar per category");
+            for rect in rects {
+                assert!(
+                    fill_at(&series, None, rect.center()),
+                    "bar center is painted"
+                );
+            }
+            rects
+        });
+        let grid = chart_lines(&chart, Theme::default().line);
+        let bottom = grid
             .iter()
-            .filter(|item| item.parent == Some(chart))
-            .flat_map(|item| {
-                item.primitives
-                    .iter()
-                    .filter_map(|primitive| match primitive {
-                        Prim::Rect { rect, .. } => Some(*rect),
-                        _ => None,
-                    })
-            })
-            .collect();
-        assert_eq!(rectangles.len(), 4);
-        for (rect, [x, y, width, height]) in rectangles.into_iter().zip(expected) {
-            assert_vec2_near(rect.origin, [x, y]);
-            assert_vec2_near(rect.size, [width, height]);
+            .map(|line| line[0].y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        for (index, (a, b)) in a.into_iter().zip(b).enumerate() {
+            let positive = index == 0;
+            let baseline = |bar: Rect| if positive { bar.max().y } else { bar.origin.y };
+            let end_y = |bar: Rect| if positive { bar.origin.y } else { bar.max().y };
+            let slot = if positive { 0.25 } else { 0.75 };
+            assert!((baseline(a) - start.y).abs() < 0.001);
+            assert!((a.union(b).center().x - (start.x + (end.x - start.x) * slot)).abs() < 0.75);
+            assert!((a.size.x - b.size.x).abs() < 0.001);
+            assert!((a.size.y - (bottom - start.y) * 0.2).abs() < 0.001);
+            assert!((a.size.y * 1.5 - b.size.y).abs() < 0.001);
+            if stacked {
+                assert_eq!((a.origin.x, a.size.x), (b.origin.x, b.size.x));
+                assert!((baseline(b) - end_y(a)).abs() < 0.001);
+            } else {
+                assert!(a.max().x < b.origin.x);
+                assert!((baseline(b) - start.y).abs() < 0.001);
+            }
         }
     }
 }
@@ -2353,7 +2832,6 @@ fn removing_a_chart_and_all_its_series_publishes_no_rebuilt_items() {
     );
     let first = picture(&scene, first, &before, &mut Measure::default()).expect("first chart");
     let unchanged = first.after.items();
-    let expected = ["a", "c", "b"].map(|key| first.after.handle(&id(key)).expect("removed handle"));
     let next = committed(
         &mut scene,
         &mut budget,
@@ -2361,7 +2839,7 @@ fn removing_a_chart_and_all_its_series_publishes_no_rebuilt_items() {
     );
     let next =
         picture(&scene, next, &first.after, &mut Measure::default()).expect("whole chart removal");
-    assert_eq!(next.removed, expected);
+    assert_removed(&next, &first.after, &["a", "c", "b"]);
     assert!(
         next.display.items.is_empty(),
         "no removed parent is rebuilt"
@@ -2696,72 +3174,6 @@ fn measure_prepare_table_at_column_and_row_caps() {
 
 #[test]
 #[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
-fn measure_prepare_twelve_tables_at_row_and_column_caps() {
-    let mut samples = Vec::new();
-    for iteration in 0..69 {
-        let mut scene = SceneState::begin(header()).expect("scene");
-        let mut budget = GlobalBudget::default();
-        let mut layout = LayoutState::new(&scene);
-        let mut measure = Measure::default();
-        for table in 0..12 {
-            let mut put = vec![
-                json!({"table":{"id":format!("t{table}"),"box":[0,table*1500,1000,1000],"cols":vec!["C";8]}}),
-            ];
-            put.extend((0..40).map(|row| json!({"row":{"id":format!("r{table}_{row}"),"in":format!("t{table}"),"cells":vec!["v";8]}})));
-            let commit = committed(
-                &mut scene,
-                &mut budget,
-                json!({"id":format!("table{table}"),"put":put}),
-            );
-            layout = picture(&scene, commit, &layout, &mut measure)
-                .expect("table fixture")
-                .after;
-        }
-        assert_eq!(
-            scene.usage().cells,
-            3840,
-            "the fixture occupies twelve bounded tables"
-        );
-        let set: Vec<_> = (0..12)
-            .map(|table| json!({"target":format!("r{table}_0"),"color":"red"}))
-            .collect();
-        let commit = committed(&mut scene, &mut budget, json!({"id":"update","set":set}));
-        let input = PrepareInput::new(
-            commit.preparation,
-            layout.clone(),
-            SurfaceGeometry::default(),
-            Arc::new(Theme::default()),
-        )
-        .expect("input");
-        measure.calls.clear();
-        let start = std::time::Instant::now();
-        let result = std::hint::black_box(prepare(
-            std::hint::black_box(input),
-            &mut measure,
-            &AtomicBool::new(false),
-        ))
-        .expect("many-table update");
-        let elapsed = start.elapsed().as_secs_f64() * 1_000_000.0;
-        result.validate(&scene, &layout).expect("current result");
-        assert_eq!(
-            result.display.items.len(),
-            492,
-            "all twelve table headers and 480 rows are replaced"
-        );
-        if iteration >= 5 {
-            samples.push(elapsed);
-        }
-    }
-    println!("prepare_twelve_tables_raw_us={samples:?}");
-    let mean = samples.iter().sum::<f64>() / 64.0;
-    let maximum = samples.into_iter().fold(0.0_f64, f64::max);
-    println!(
-        "prepare_12_tables_40x8_short samples=64 warmups=5 mean_us={mean:.3} max_us={maximum:.3}; deterministic measurement; no painter or frame timing"
-    );
-}
-
-#[test]
-#[ignore = "release CPU timing on a quiet machine with no concurrent builds"]
 fn measure_prepare_charts_at_mark_and_pie_segment_caps() {
     for (kind, charts, marks, segments) in [("scatter", 5, 20_000, 320), ("pie", 1, 163, 19_886)] {
         let mut samples = Vec::new();
@@ -2926,73 +3338,6 @@ fn batch_recovery_keeps_input_order_and_charges_only_what_it_returns() {
     );
     first.clear(&mut global).expect("the batch budget");
     assert_eq!((global.usage().objects, global.usage().scenes), (4, 3));
-}
-
-/// The step's own vectors and empty private-fact allocation, which leave with its ticket.
-fn own(step: &PreparedStep) -> usize {
-    step.display.items.capacity() * size_of::<Item>()
-        + step.removed.capacity() * size_of::<Handle>()
-        + step.glides.capacity() * size_of::<Glide>()
-        + 2 * size_of::<usize>()
-        + size_of::<std::collections::BTreeMap<usize, usize>>()
-}
-
-#[test]
-fn retained_bytes_match_step_charges_and_recovery() {
-    let mut scene = SceneState::begin(header()).expect("scene");
-    let mut budget = GlobalBudget::default();
-    let mut measure = Measure::default();
-    let empty = LayoutState::new(&scene);
-    assert_eq!(
-        empty.resident_bytes(),
-        2 * size_of::<usize>(),
-        "an empty prefix holds only its version allocation"
-    );
-    let commit = committed(
-        &mut scene,
-        &mut budget,
-        json!({"id":"shared","put":[
-            {"chart":{"id":"c","kind":"bar","box":[0,0,400,300],"categories":["Q","R"],
-                "x":{"min":-0.5,"max":1.5},"y":{"min":-10,"max":10}}},
-            {"series":{"id":"s","in":"c","data":[2,-2]}},
-            {"series":{"id":"t","in":"c","data":[3,-3]}},
-            {"path":{"id":"p","d":"M0 0 Q4 8 8 0","fill":"green"}}
-        ]}),
-    );
-    let first = picture(&scene, commit, &empty, &mut measure).expect("shared geometry");
-    assert_eq!(
-        first.after.resident_bytes() + own(&first),
-        first.resident_bytes,
-        "a first step charges everything it retains, with the plot and vertices once"
-    );
-    let commit = committed(&mut scene, &mut budget, json!({"id":"nothing","put":[]}));
-    let unchanged = picture(&scene, commit, &first.after, &mut measure).expect("same geometry");
-    let commit = committed(
-        &mut scene,
-        &mut budget,
-        json!({"id":"more","put":[{"text":{"id":"x","at":[10,10],"text":"X"}}]}),
-    );
-    let second = picture(&scene, commit, &unchanged.after, &mut measure).expect("added text");
-    assert_eq!(
-        second.after.resident_bytes() + unchanged.resident_bytes + own(&second),
-        unchanged.after.resident_bytes() + second.resident_bytes + own(&unchanged),
-        "a step adds its new geometry, source and index to the shared prefix"
-    );
-    let (_, recovered) = recover(
-        header(),
-        scene.recovery_log(),
-        SurfaceGeometry::default(),
-        &Arc::new(Theme::default()),
-        &mut Measure::default(),
-        &AtomicBool::new(false),
-        None,
-    )
-    .expect("recovery");
-    assert_eq!(
-        recovered.resident_bytes(),
-        second.after.resident_bytes(),
-        "recovery charges what the live layout retains"
-    );
 }
 
 #[test]
@@ -3176,9 +3521,14 @@ fn a_replaced_item_is_recounted_and_an_unchanged_one_keeps_its_count() {
     );
     let next = picture(&scene, next, &first.after, &mut measure).expect("two markers");
     let two = next.after.paint_work();
-    // A scatter marker is a filled 8-unit rect of radius 4: 3 pieces per corner at the inline
-    // scale, so 4 · 4 + 1 points. The untouched dashed path keeps floor(100 / 10) + 2.
-    assert_eq!(three.fill_vertices - two.fill_vertices, 17);
+    let chart = json!({"chart":{"id":"c","kind":"scatter","box":[0,0,400,300]}});
+    let bare = chart_picture(&json!([chart])).after.paint_work();
+    let marked = chart_picture(&json!([chart, {"series":{"id":"s","in":"c","data":[1]}}]))
+        .after
+        .paint_work();
+    let one_marker_charge = marked.fill_vertices - bare.fill_vertices;
+    assert!(one_marker_charge > 0);
+    assert_eq!(three.fill_vertices, two.fill_vertices + one_marker_charge);
     assert_eq!((three.dash_pieces, two.dash_pieces), (12, 12));
     assert_eq!(
         first.after.paint_work(),

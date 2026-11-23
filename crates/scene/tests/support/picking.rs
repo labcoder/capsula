@@ -1,31 +1,9 @@
+use super::frame_fixture::{handle, mapping, pointer, state};
 use super::*;
 use kumochi_scene::{
     Handle,
-    three::pick::{DisplayedFrame, FrameState, Mapping, Pick, PickError, pick},
+    three::pick::{DisplayedFrame, Mapping, Pick, PickError, pick},
 };
-
-fn handle(slot: usize) -> Handle {
-    Handle::new(3, slot).expect("fixture handle")
-}
-
-fn state(mapping: Mapping, parts: Vec<Option<Handle>>) -> FrameState {
-    FrameState {
-        revision: 7,
-        camera: camera(),
-        pose: vec![identity(); parts.len()],
-        mapping,
-        parts,
-    }
-}
-
-fn mapping(size: [u32; 2]) -> Mapping {
-    Mapping::new([10.0, -20.0], [231.0, 117.0], 1.5, size).expect("fixture mapping")
-}
-
-fn pointer(mapping: Mapping, texel: [f64; 2]) -> [f64; 2] {
-    let [origin, extent] = mapping.destination();
-    std::array::from_fn(|i| origin[i] + texel[i] * extent[i] / f64::from(mapping.texels()[i]))
-}
 
 fn display(
     solids: &[Solid<'_>],
@@ -565,38 +543,4 @@ fn oblique_120_degree_view_edge_and_near_plane_edge_match_the_ray_oracle() {
             "near-plane pointer {x}"
         );
     }
-}
-
-#[test]
-#[ignore = "run release under the Rez quiet lock, never during a crew build"]
-fn measure_pick() {
-    let map = mapping([3, 1]);
-    let frame =
-        DisplayedFrame::new(state(map, vec![Some(handle(0)), None]), vec![1, 2, 0]).expect("frame");
-    let pointers = [
-        pointer(map, [0.5; 2]),
-        pointer(map, [1.5, 0.5]),
-        pointer(map, [2.5, 0.5]),
-    ];
-    let mut times = Vec::new();
-    for sample in 0..103 {
-        let start = std::time::Instant::now();
-        for i in 0..100_000 {
-            std::hint::black_box(pick(
-                std::hint::black_box(&frame),
-                std::hint::black_box(pointers[i % 3]),
-            ));
-        }
-        if sample >= 3 {
-            times.push(start.elapsed().as_secs_f64() * 1e9 / 100_000.0);
-        }
-    }
-    times.sort_by(f64::total_cmp);
-    println!(
-        "pick: p50 {:.3} ns, p99 {:.3} ns, max {:.3} ns, n {} batches of 100,000",
-        times[49],
-        times[98],
-        times[99],
-        times.len()
-    );
 }

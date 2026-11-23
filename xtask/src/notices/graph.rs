@@ -125,6 +125,11 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(json!({"id":"another-source","name":"normal","version":"1.0.0"}));
-        assert!(select(&ambiguous, "normal v1.0.0\n").is_err());
+        let error = select(&ambiguous, "normal v1.0.0\n").expect_err("ambiguous origin");
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains("normal") && diagnostic.contains("1.0.0"),
+            "{diagnostic}"
+        );
     }
 }

@@ -530,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn triangle_loop_stops_at_exactly_1024_and_frame_clears_partial_output() {
+    fn triangle_loop_polls_within_1024_and_frame_clears_partial_output() {
         let vertices = [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]];
         let triangles = vec![[0, 1, 2]; 2049];
         let faces = [FaceRange {
@@ -550,27 +550,65 @@ mod tests {
         let light = Light::new([0.0, 0.0, -1.0], 0.0).unwrap();
         let mut out = FrameScratch::with_capacity(2049);
         let cancel = AtomicBool::new(true);
-        SKIP_POLLS.with(|n| n.set(12));
-        assert_eq!(
-            build(&solids, &camera, &light, [8, 8], &mut out, &cancel),
-            Err(FrameError::Cancelled)
+        let mut first_partial = None;
+        let mut previous = 0;
+        let mut completed = false;
+        let preamble_allowance = 16 + vertices.len() + 3 * triangles.len();
+        for skip in 0..=preamble_allowance + triangles.len() {
+            out.clear();
+            SKIP_POLLS.with(|n| n.set(skip));
+            let result = build(&solids, &camera, &light, [8, 8], &mut out, &cancel);
+            SKIP_POLLS.with(|n| n.set(0));
+            let emitted = out.len();
+            assert!(
+                (previous..=previous + 1024).contains(&emitted),
+                "triangle work advanced from {previous} to {emitted} without polling"
+            );
+            previous = emitted;
+            if result.is_ok() {
+                assert_eq!(
+                    emitted,
+                    triangles.len(),
+                    "every fixture triangle is visible"
+                );
+                completed = true;
+                break;
+            }
+            assert_eq!(
+                result,
+                Err(FrameError::Cancelled),
+                "cancellation must reach the triangle loop"
+            );
+            if emitted != 0 {
+                first_partial.get_or_insert(skip);
+            }
+        }
+        assert!(
+            completed,
+            "bypassing all frame polls must finish the fixture"
         );
-        assert_eq!(
-            out.len(),
-            1024,
-            "entry, preparation and the first triangle poll are bypassed, not the 1024 poll"
-        );
-        SKIP_POLLS.with(|n| n.set(12));
-        assert_eq!(
-            frame(&solids, &camera, &light, [8, 8], &mut out, &cancel),
-            Err(FrameError::Cancelled)
-        );
+        SKIP_POLLS.with(|n| n.set(first_partial.expect("cancellation after triangle work")));
+        let result = frame(&solids, &camera, &light, [8, 8], &mut out, &cancel);
+        SKIP_POLLS.with(|n| n.set(0));
+        assert_eq!(result, Err(FrameError::Cancelled));
         assert_eq!(
             out.len(),
             0,
             "a cancelled candidate cannot retain the first quantum"
         );
-        SKIP_POLLS.with(|n| n.set(0));
+    }
+
+    fn assert_winding(vertices: &[Vertex], expected: &[Point]) {
+        assert_eq!(vertices.len(), expected.len());
+        assert!(
+            (0..vertices.len()).any(|start| {
+                expected.iter().enumerate().all(|(i, point)| {
+                    vertices[(start + i) % vertices.len()].p.map(f64::to_bits)
+                        == point.map(f64::to_bits)
+                })
+            }),
+            "same vertices and winding, from any starting point"
+        );
     }
 
     #[test]
@@ -591,13 +629,9 @@ mod tests {
         ] {
             let mut poly = polygon(&source);
             assert_eq!(clip(&mut poly, source.len(), [0.0, 0.0, 1.0], 0.0), Ok(3));
-            assert_eq!(
-                poly[..3]
-                    .iter()
-                    .map(|v| v.p.map(f64::to_bits))
-                    .collect::<Vec<_>>(),
-                [[0.0_f64, 0.0, 1.0], [2.0, 0.0, 1.0], [0.0, 2.0, 1.0]]
-                    .map(|p| p.map(f64::to_bits))
+            assert_winding(
+                &poly[..3],
+                &[[0.0, 0.0, 1.0], [2.0, 0.0, 1.0], [0.0, 2.0, 1.0]],
             );
         }
     }
@@ -622,8 +656,21 @@ mod tests {
             ] {
                 counts[0] = clip(&mut forward, counts[0], plane, offset).unwrap();
                 counts[1] = clip(&mut reverse, counts[1], plane, offset).unwrap();
+                for poly in [&forward[..counts[0]], &reverse[..counts[1]]] {
+                    for vertex in poly {
+                        assert!(
+                            dot(vertex.p, plane) + offset >= -1e-10,
+                            "clipped endpoint is inside {plane:?}"
+                        );
+                    }
+                }
             }
             assert_eq!(counts, [2, 2]);
+            assert!(
+                forward[..2]
+                    .iter()
+                    .all(|vertex| vertex.p.map(f64::to_bits) != endpoints[0].map(f64::to_bits))
+            );
             let mut a = forward[..2]
                 .iter()
                 .map(|v| v.p.map(f64::to_bits))
@@ -639,6 +686,15 @@ mod tests {
                 "a one-ulp clipped endpoint mismatch must not be hidden by texel snapping"
             );
         }
+
+        let [start, mut end, ..] = polygon(&[[0.1, 0.2, 0.3], [22.345, 12.23, 1.2]]);
+        end.index = start.index;
+        for (normal, offset) in [([0.0, 0.0, 1.0], -0.5), ([1.0, 0.0, 4097.0], -2500.0)] {
+            assert_eq!(
+                intersection(start, end, normal, offset).p.map(f64::to_bits),
+                intersection(end, start, normal, offset).p.map(f64::to_bits)
+            );
+        }
     }
 
     fn polygon(points: &[Point]) -> [Vertex; 8] {
@@ -650,26 +706,6 @@ mod tests {
             };
         }
         out
-    }
-
-    #[test]
-    fn canonical_intersection_is_bit_identical_in_both_directions() {
-        for (a, b) in [(0, 7), (7, 0), (0, 0)] {
-            let start = Vertex {
-                p: [0.1, 0.2, 0.3],
-                index: a,
-            };
-            let end = Vertex {
-                p: [22.345, 12.23, 1.2],
-                index: b,
-            };
-            for (normal, offset) in [([0.0, 0.0, 1.0], -0.5), ([1.0, 0.0, 4097.0], -2500.0)] {
-                assert_eq!(
-                    intersection(start, end, normal, offset).p.map(f64::to_bits),
-                    intersection(end, start, normal, offset).p.map(f64::to_bits)
-                );
-            }
-        }
     }
 
     #[test]
@@ -741,14 +777,14 @@ mod tests {
     fn near_clip_has_exact_area_and_emits_on_plane_once() {
         let mut poly = polygon(&[[0.0, 0.0, 0.0], [4.0, 0.0, 2.0], [0.0, 4.0, 2.0]]);
         assert_eq!(clip(&mut poly, 3, [0.0, 0.0, 1.0], -1.0), Ok(4));
-        assert_eq!(
-            poly[..4].iter().map(|v| v.p).collect::<Vec<_>>(),
-            [
+        assert_winding(
+            &poly[..4],
+            &[
                 [2.0, 0.0, 1.0],
                 [4.0, 0.0, 2.0],
                 [0.0, 4.0, 2.0],
-                [0.0, 2.0, 1.0]
-            ]
+                [0.0, 2.0, 1.0],
+            ],
         );
         let twice_area: f64 = (0..4)
             .map(|i| poly[i].p[0] * poly[(i + 1) % 4].p[1] - poly[(i + 1) % 4].p[0] * poly[i].p[1])
@@ -756,9 +792,9 @@ mod tests {
         assert_eq!(twice_area.to_bits(), 12.0_f64.to_bits());
         let mut on = polygon(&[[0.0, 0.0, 1.0], [4.0, 0.0, 2.0], [0.0, 4.0, 0.0]]);
         assert_eq!(clip(&mut on, 3, [0.0, 0.0, 1.0], -1.0), Ok(3));
-        assert_eq!(
-            on[..3].iter().map(|v| v.p).collect::<Vec<_>>(),
-            [[0.0, 0.0, 1.0], [4.0, 0.0, 2.0], [2.0, 2.0, 1.0]]
+        assert_winding(
+            &on[..3],
+            &[[0.0, 0.0, 1.0], [4.0, 0.0, 2.0], [2.0, 2.0, 1.0]],
         );
         assert_eq!(clip(&mut on, 3, [0.0, 0.0, 1.0], -1.0), Ok(3));
         assert_eq!(clip(&mut on, 0, [0.0, 0.0, 1.0], -1.0), Ok(0));
