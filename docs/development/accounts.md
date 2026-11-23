@@ -805,6 +805,13 @@ it is dropped.
 `File::try_lock`; only contention returns typed `Busy`, and dropping the guard releases it.
 `platform::session_lock_path()` uses the Dev data folder in debug builds. Startup wiring is separate.
 
+On builds without a native credential adapter, exact-name reads, writes, and deletes return
+`Unsupported`. The production vault also refuses before opening the session lock or
+`credentials.db`; it never substitutes a file-backed or in-memory credential store. Native
+account startup stops at this refusal before loading other credentials or publishing account
+state. It neither reports damaged data nor offers Retry. Temporary Windows failures keep their
+existing recovery behavior.
+
 ## Vault records
 
 `connections::vault::Vault` keeps each record as an authority kind, whose current generation's
