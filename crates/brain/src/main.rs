@@ -4,9 +4,16 @@
 use std::process::ExitCode;
 
 use kumochi_brain::logging;
+use kumochi_brain::platform::require_native_runtime;
 use kumochi_protocol::constants;
 
+const UNAVAILABLE: u8 = 69;
+
 fn main() -> ExitCode {
+    if require_native_runtime().is_err() {
+        return ExitCode::from(UNAVAILABLE);
+    }
+
     let mut args = std::env::args();
     let worker = args.nth(1);
     if worker.as_deref() == Some(kumochi_brain::MCP_BRIDGE) {
@@ -30,14 +37,19 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if worker.as_deref() == Some(kumochi_brain::SPEECH_WORKER) {
-        if logging::init(constants::SPEECH_LOG).is_err() {
-            return ExitCode::FAILURE;
+        #[cfg(windows)]
+        {
+            if logging::init(constants::SPEECH_LOG).is_err() {
+                return ExitCode::FAILURE;
+            }
+            if kumochi_brain::speech::serve().is_err() {
+                tracing::error!(code = 1, "speech transport failed");
+                return ExitCode::FAILURE;
+            }
+            return ExitCode::SUCCESS;
         }
-        if kumochi_brain::speech::serve().is_err() {
-            tracing::error!(code = 1, "speech transport failed");
-            return ExitCode::FAILURE;
-        }
-        return ExitCode::SUCCESS;
+        #[cfg(not(windows))]
+        return ExitCode::from(UNAVAILABLE);
     }
     let diagnostic = worker.as_deref() == Some(constants::IMAGE_DIAGNOSTIC_ARG);
     if diagnostic || worker.as_deref() == Some(constants::IMAGE_CHECK_ARG) {
