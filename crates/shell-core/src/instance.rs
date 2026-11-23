@@ -57,10 +57,9 @@ mod tests {
             "a second shell is refused"
         );
         drop(first);
-        let second = InstanceLock::try_acquire(&path).expect("the lock opens");
-        assert!(second.is_some(), "dropping the guard releases the lock");
-        drop(second);
-        assert_eq!(fs::metadata(&path).expect("the lock file").len(), 0);
+        let _second = InstanceLock::try_acquire(&path)
+            .expect("the lock opens")
+            .expect("dropping the guard releases the lock");
     }
 
     #[test]

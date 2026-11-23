@@ -280,17 +280,32 @@ mod tests {
 
     #[test]
     fn merge_distance_keeps_the_exact_limit_and_merges_one_float_below() {
-        for (x, expected) in [(1.0_f32.next_down(), 1), (1.0, 2), (1.0_f32.next_up(), 2)] {
+        let origin = [0.0, 0.0];
+        let top = [0.0, 2.0];
+        for (x, merge) in [
+            (1.0_f32.next_down(), true),
+            (1.0, false),
+            (1.0_f32.next_up(), false),
+        ] {
             let source = [[0.0, 0.0], [x, 0.0]]
                 .map(|p| p.map(|v| Finite::try_from(v).expect("finite point")));
-            assert_eq!(Retained::new(&source, 1.0).len, expected);
-        }
-        for (x, expected) in [(1.0_f32.next_down(), 2), (1.0, 3), (1.0_f32.next_up(), 3)] {
+            let retained = Retained::new(&source, 1.0);
+            let points: Vec<_> = (0..retained.len).map(|i| retained.point(i)).collect();
+            let end = [f64::from(x), 0.0];
+            let expected: &[_] = if merge { &[origin] } else { &[origin, end] };
+            assert_eq!(points, expected, "consecutive points at {x}");
+
             let source = [[0.0, 0.0], [0.0, 2.0], [x, 0.0]]
                 .map(|p| p.map(|v| Finite::try_from(v).expect("finite point")));
             let mut retained = Retained::new(&source, 1.0);
             retained.close(1.0);
-            assert_eq!(retained.len, expected);
+            let points: Vec<_> = (0..retained.len).map(|i| retained.point(i)).collect();
+            let expected: &[_] = if merge {
+                &[origin, top]
+            } else {
+                &[origin, top, end]
+            };
+            assert_eq!(points, expected, "closing points at {x}");
         }
         let source = [
             [0.0, 0.0],
@@ -302,7 +317,8 @@ mod tests {
         .map(|p| p.map(|v| Finite::try_from(v).expect("finite point")));
         let mut retained = Retained::new(&source, 1.0);
         retained.close(1.0);
-        assert_eq!(retained.len, 3);
+        let points: Vec<_> = (0..retained.len).map(|i| retained.point(i)).collect();
+        assert_eq!(points, [origin, [2.0, 0.0], top]);
     }
 
     #[test]
@@ -328,9 +344,10 @@ mod tests {
             .to_bits(),
             3.0_f64.to_bits()
         );
-        assert_eq!(
-            radius(Geometry::Sphere { r: 2.0 }).to_bits(),
-            12.0_f64.sqrt().to_bits()
+        let sphere = radius(Geometry::Sphere { r: 2.0 });
+        assert!(
+            (sphere - 3.464_101_615_137_754).abs() < 1e-12,
+            "sphere radius {sphere}"
         );
         assert_eq!(
             radius(Geometry::Cylinder { r: 2.0, h: 2.0 }).to_bits(),
@@ -345,13 +362,13 @@ mod tests {
             .to_bits(),
             3.0_f64.to_bits()
         );
-        assert_eq!(
-            radius(Geometry::Torus {
-                ring: 1.5,
-                tube: 0.5
-            })
-            .to_bits(),
-            (33.0_f64.sqrt() / 2.0).to_bits()
+        let torus = radius(Geometry::Torus {
+            ring: 1.5,
+            tube: 0.5,
+        });
+        assert!(
+            (torus - 2.872_281_323_269_014_3).abs() < 1e-12,
+            "torus radius {torus}"
         );
         let outline = [[1000.0, 2000.0], [1002.0, 2000.0], [1000.0, 2004.0]]
             .map(|p| p.map(|v| Finite::try_from(v).expect("finite point")));

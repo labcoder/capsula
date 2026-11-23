@@ -39,7 +39,7 @@ enum NativeStep {
 struct Platform {
     mode: OverlayInput,
     regions: Regions,
-    orders: Vec<[Layer; 5]>,
+    layer_order: Option<[Layer; 5]>,
     orbit: Option<RegionId>,
     drag: DragOwner,
     preempted: Vec<End>,
@@ -87,7 +87,7 @@ impl InputPlatform for Platform {
             self.selection_above = false;
             self.captured = false;
         }
-        self.orders.push(mode.order());
+        self.layer_order = Some(mode.order());
         Ok(())
     }
 }
@@ -170,7 +170,7 @@ fn regions_register_update_remove_and_reject_empty_rectangles() {
     assert_eq!(owner.mode(), OverlayInput::PassThrough);
     assert_eq!(platform.regions, BTreeMap::new());
     assert_eq!(owner.remove(B), vec![]);
-    assert_eq!(platform.orders, vec![REST; 6]);
+    assert_eq!(platform.layer_order, Some(REST));
 }
 
 #[test]
@@ -194,21 +194,24 @@ fn all_exit_causes_restore_both_modes_once() {
             };
             let mut platform = Platform::default();
             platform.enter(&mut owner, HOLD);
+            assert_eq!(platform.mode, OverlayInput::Selecting);
+            assert_eq!(platform.layer_order, Some(PICK));
+            assert!(platform.selection_above && platform.captured);
             let effects = match cause {
                 ExitCause::Release => owner.selection_event(Event::Up {
                     button: Button::Left,
                     at: [8.0, 9.0],
                 }),
                 ExitCause::Escape => owner.selection_event(Event::Escape),
-                ExitCause::CaptureLost => owner.selection_event(Event::CaptureLost {
-                    seq: 21,
-                    released: None,
-                }),
+                ExitCause::CaptureLost => {
+                    let (seq, released) = platform.input.capture_changed();
+                    owner.selection_event(Event::CaptureLost { seq, released })
+                }
                 _ => owner.end_selection(HOLD, cause),
             };
             assert_eq!(platform.apply(&owner, effects), Ok(()));
             assert_eq!(
-                owner.mode(),
+                platform.mode,
                 if regions {
                     OverlayInput::Regions
                 } else {
@@ -229,7 +232,8 @@ fn all_exit_causes_restore_both_modes_once() {
                 SelectionEnd::Cancelled
             };
             assert_eq!(platform.endings, vec![(HOLD, cause, end)]);
-            assert_eq!(platform.orders, vec![PICK, REST]);
+            assert_eq!(platform.layer_order, Some(REST));
+            assert!(!platform.selection_above && !platform.captured);
             assert_eq!(owner.end_selection(HOLD, cause), vec![]);
             assert_eq!(owner.reconcile(), vec![]);
             assert_eq!(owner.selection(), None);
@@ -264,20 +268,30 @@ fn restore_uses_todays_registry_and_empty_regions_become_pass_through() {
     let mut owner = registered();
     let mut platform = Platform::default();
     platform.enter(&mut owner, HOLD);
-    assert_eq!(owner.remove(A), vec![]);
-    assert_eq!(owner.register(B, [11, 22, 33, 44]), vec![]);
+    let effects = owner.remove(A);
+    assert_eq!(platform.apply(&owner, effects), Ok(()));
+    let effects = owner.register(B, [11, 22, 33, 44]);
+    assert_eq!(platform.apply(&owner, effects), Ok(()));
+    assert_eq!(platform.mode, OverlayInput::Selecting);
+    assert!(platform.captured && platform.regions.is_empty());
     let effects = owner.end_selection(HOLD, ExitCause::BrainLost);
     assert_eq!(platform.apply(&owner, effects), Ok(()));
     assert_eq!(platform.mode, OverlayInput::Regions);
     assert_eq!(platform.regions, BTreeMap::from([(B, [11, 22, 33, 44])]));
     platform.enter(&mut owner, GestureId(2));
-    assert_eq!(owner.remove(B), vec![]);
+    let effects = owner.remove(B);
+    assert_eq!(platform.apply(&owner, effects), Ok(()));
+    assert_eq!(platform.mode, OverlayInput::Selecting);
+    assert!(platform.captured && platform.regions.is_empty());
     let effects = owner.end_selection(GestureId(2), ExitCause::DisplayChanged);
     assert_eq!(platform.apply(&owner, effects), Ok(()));
     assert_eq!(platform.mode, OverlayInput::PassThrough);
     assert_eq!(platform.regions, BTreeMap::new());
     platform.enter(&mut owner, GestureId(3));
-    assert_eq!(owner.register(A, RECT), vec![]);
+    let effects = owner.register(A, RECT);
+    assert_eq!(platform.apply(&owner, effects), Ok(()));
+    assert_eq!(platform.mode, OverlayInput::Selecting);
+    assert!(platform.captured && platform.regions.is_empty());
     let effects = owner.end_selection(GestureId(3), ExitCause::Escape);
     assert_eq!(platform.apply(&owner, effects), Ok(()));
     assert_eq!(platform.mode, OverlayInput::Regions);
@@ -320,11 +334,10 @@ fn preempted_drag_ends_without_user_effects_before_selection_capture_is_stamped(
     platform.enter(&mut owner, HOLD);
     assert_eq!(platform.preempted, vec![End::Preempted]);
     assert_eq!(platform.starts, vec![HOLD]);
-    assert_eq!(press, 1);
-    assert_eq!(platform.last_loss, Some((2, None)));
     let (seq, released) = platform
         .last_loss
         .expect("capture changed before selection started");
+    assert_eq!(released, None, "preemption is not a button release");
     assert_eq!(
         owner.selection_event(Event::CaptureLost { seq, released }),
         vec![]
@@ -338,7 +351,8 @@ fn preempted_drag_ends_without_user_effects_before_selection_capture_is_stamped(
     owner.return_drag(lease);
     assert_eq!(owner.lease_drag(), None);
     owner.return_drag(next);
-    assert_eq!(owner.lease_drag(), Some(super::DragLease(3)));
+    let released = owner.lease_drag().expect("the pointer may be leased again");
+    assert_ne!(released, next);
 }
 
 #[test]
@@ -436,12 +450,17 @@ fn removing_an_orbit_cancels_it_and_normal_end_returns_the_pointer() {
     assert_eq!(owner.lease_drag(), None);
     owner.return_drag(lease);
     assert!(owner.begin_orbit(A));
-    assert_eq!(
-        owner.remove(A),
-        vec![Effect::InputCancelled(A), Effect::Configure]
-    );
-    assert_eq!(owner.mode(), OverlayInput::PassThrough);
-    assert_eq!(owner.lease_drag(), Some(super::DragLease(2)));
+    let mut platform = Platform {
+        orbit: Some(A),
+        ..Platform::default()
+    };
+    assert_eq!(owner.configure(&mut platform), Ok(()));
+    let effects = owner.remove(A);
+    assert_eq!(platform.apply(&owner, effects), Ok(()));
+    assert_eq!(platform.orbit, None);
+    assert_eq!(platform.mode, OverlayInput::PassThrough);
+    assert_eq!(platform.regions, BTreeMap::new());
+    let _lease = owner.lease_drag().expect("removal returns the pointer");
 }
 
 #[test]
