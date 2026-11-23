@@ -208,8 +208,8 @@ impl TypedScreen {
         &mut self,
         turn: u32,
         draft: TypedScreenDraft,
-        thread: ThreadId,
         run: RunId,
+        promote_to: Option<ThreadId>,
     ) -> bool {
         let Some(picture) = self.in_flight.as_mut().filter(|picture| {
             picture.capture.turn == turn
@@ -220,7 +220,9 @@ impl TypedScreen {
             return false;
         };
         picture.run = Some(run);
-        picture.words.request.thread = Some(thread);
+        if let Some(thread) = promote_to {
+            picture.words.request.thread = Some(thread);
+        }
         true
     }
 

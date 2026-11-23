@@ -201,6 +201,39 @@ impl Fixture {
             })
         );
     }
+
+    fn esc_before_run_name(&mut self, named_thread: ThreadId) {
+        let original = self.runs.thread();
+        self.arm(1);
+        assert_eq!(self.send(DISPLAY), Ok(()));
+        let proof = proof(self.queued_picture());
+        assert!(self.held(1, proof, self.at));
+        assert_eq!(
+            self.control.try_recv(),
+            Ok(ControlToBrain::ConfirmTypedScreen(proof))
+        );
+        assert_eq!(self.runs.stop(), None, "Esc precedes the late RunId");
+        self.flush();
+        self.assert_cancel();
+        let applied = self.runs.apply_state(
+            RunId(1),
+            named_thread,
+            Phase::Thinking,
+            Some(RunOrigin::Typed { turn: 1 }),
+        );
+        assert_eq!(
+            applied.stop,
+            Some(ControlToBrain::Stop {
+                run: RunId(1),
+                revealed: Vec::new(),
+            })
+        );
+        assert_eq!(self.runs.stoppable(), None);
+        assert!(self.runs.view(RunId(1)).is_none());
+        assert_eq!(self.runs.thread(), original);
+        assert_eq!(self.retry(), Err(Refused::Busy));
+        assert_eq!(self.data.try_recv(), Err(TryRecvError::Empty));
+    }
 }
 
 fn proof(picture: TypedScreenSubmit) -> TypedScreenProof {
@@ -431,6 +464,78 @@ fn a_named_picture_without_its_exact_no_write_receipt_is_not_retryable() {
     );
     assert_eq!(f.retry(), Err(Refused::Busy));
     assert_eq!(f.data.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[test]
+fn esc_before_run_name_keeps_words_only_for_one_explicit_exact_no_write_retry() {
+    for (original, named) in [(Some(MAIN), MAIN), (None, ThreadId(9))] {
+        let mut f = Fixture::new(original);
+        f.esc_before_run_name(named);
+        f.runs
+            .typed_screen_not_sent(&LinkEvent::TypedScreenNotSent {
+                generation: 1,
+                run: RunId(1),
+                offer: OFFER,
+            });
+        assert_eq!(f.retry(), Err(Refused::Busy), "wait for settlement");
+        f.runs.apply_run_state(
+            RunId(1),
+            named,
+            Phase::Failed,
+            Some(ErrorKey::SignInNeeded.into()),
+            None,
+        );
+        assert_eq!(f.runs.thread(), original);
+        assert_eq!(f.data.try_recv(), Err(TryRecvError::Empty));
+        assert!(
+            f.link
+                .send_data(&f.session, DataToBrain::Credit { bytes: 9 })
+        );
+        assert_eq!(f.retry(), Err(Refused::Offline));
+        assert_eq!(f.data.try_recv(), Ok(DataToBrain::Credit { bytes: 9 }));
+        assert_eq!(f.retry(), Ok(()));
+        f.assert_plain(2, original);
+        assert_eq!(f.retry(), Err(Refused::Busy));
+        assert_eq!(f.data.try_recv(), Err(TryRecvError::Empty));
+    }
+}
+
+#[test]
+fn esc_before_run_name_never_retries_an_unknown_write() {
+    let wrong_offer = TypedScreenOffer(NonZeroU64::new(2).unwrap());
+    for wrong in [
+        None,
+        Some((2, RunId(1), OFFER)),
+        Some((1, RunId(2), OFFER)),
+        Some((1, RunId(1), wrong_offer)),
+    ] {
+        let mut f = Fixture::new(Some(MAIN));
+        f.esc_before_run_name(MAIN);
+        if let Some((generation, run, offer)) = wrong {
+            f.runs
+                .typed_screen_not_sent(&LinkEvent::TypedScreenNotSent {
+                    generation,
+                    run,
+                    offer,
+                });
+        }
+        f.runs.apply_run_state(
+            RunId(1),
+            MAIN,
+            Phase::Failed,
+            Some(ErrorKey::ScreenPictureStopped.into()),
+            None,
+        );
+        assert_eq!(f.retry(), Err(Refused::Busy));
+        f.runs
+            .typed_screen_not_sent(&LinkEvent::TypedScreenNotSent {
+                generation: 1,
+                run: RunId(1),
+                offer: OFFER,
+            });
+        assert_eq!(f.retry(), Err(Refused::Busy));
+        assert_eq!(f.data.try_recv(), Err(TryRecvError::Empty));
+    }
 }
 
 #[test]

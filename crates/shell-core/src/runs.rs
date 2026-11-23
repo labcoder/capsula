@@ -912,12 +912,15 @@ impl Runs {
             {
                 typed = Some((submitted.turn, submitted.revision));
                 let draft = self.typed_draft();
-                let pictured_current = !submitted.pictured
-                    || (!deleted
-                        && at >= self.cancelled
-                        && run > self.fence
-                        && submitted.revision == self.revision
-                        && self.typed_screen.name(turn, draft, thread, run));
+                let cancelled = at < self.cancelled;
+                let pictured_named = submitted.pictured
+                    && !deleted
+                    && run > self.fence
+                    && submitted.revision == self.revision
+                    && self
+                        .typed_screen
+                        .name(turn, draft, run, (!cancelled).then_some(thread));
+                let pictured_current = !submitted.pictured || (pictured_named && !cancelled);
                 if submitted.thread.is_none()
                     && submitted.revision == self.revision
                     && self.target == Target::New
@@ -930,12 +933,11 @@ impl Runs {
                         Target::Task(thread)
                     };
                 }
-                let cancelled = at < self.cancelled || !pictured_current;
-                if !pictured_current {
+                if submitted.pictured && !pictured_named {
                     self.typed_screen.revoke_turn(turn);
                 }
                 self.answered_one(at);
-                if cancelled {
+                if cancelled || !pictured_current {
                     self.fence = self.fence.max(run);
                     applied.stop = Some(ControlToBrain::Stop {
                         run,

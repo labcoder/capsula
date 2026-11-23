@@ -112,6 +112,8 @@ if capability returns later. To preserve words after a named refusal, the brain 
 the exact grant before its first write reservation. The shell then permits one explicit text-only
 retry for the original chat or draft, retaining the words if enqueue fails. An unknown or
 incomplete flush leaves no mark and does not imply that no bytes went out.
+If Esc overtakes the name of a confirmed pictured run, the shell binds its late run ID only
+to match that receipt; the cancelled run stays hidden and its original target does not change.
 
 Presence owns the exclusion transaction in `presence/exclusion.rs`; the lease and
 its cleanup rules are in `crates/shell-core/src/presence/exclusion/machine.rs`, with no GPUI.
