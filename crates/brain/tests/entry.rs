@@ -15,6 +15,17 @@ use kumochi_protocol::constants::{
     CATALOG_PROVENANCE_ARG, DRAW_CHECK_ARG, IMAGE_CHECK_ARG, IMAGE_DIAGNOSTIC_ARG, MARKS_CHECK_ARG,
 };
 
+#[cfg(target_os = "macos")]
+#[test]
+fn direct_logging_refuses_before_creating_an_appender() {
+    use kumochi_brain::logging::{LoggingError, init};
+
+    assert!(matches!(
+        init("refused-entry"),
+        Err(LoggingError::NoLocalAppData)
+    ));
+}
+
 #[test]
 fn native_executable_modes_refuse_without_touching_app_data() {
     let dir = scratch::dir("unsupported-entry");
