@@ -288,7 +288,7 @@ impl Presence {
         let previous = panel
             .previous
             .take()
-            .filter(|_| matches!(reason, Hide::Dismiss));
+            .filter(|_| reason.restores_foreground());
         let hidden = panel.window.update(cx, |_, window, _| {
             if let Some(previous) = previous {
                 platform::restore_foreground(window, previous);
