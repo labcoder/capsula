@@ -390,8 +390,7 @@ impl HoldClient {
             }
             // A later worker's answer means the holder's exit was seen, so nothing is held.
             Ok((_, from)) if holder.is_some_and(|holder| from > holder) => return Ok(()),
-            Ok((_, from)) if holder.is_none_or(|holder| from == holder) => from,
-            Ok(_) => return Err(Unreleased),
+            Ok((_, from)) => from,
             Err(_) => holder.ok_or(Unreleased)?,
         };
         {

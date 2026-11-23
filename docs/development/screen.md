@@ -50,8 +50,8 @@ A hostile worker can make the brain hold up to 16 × 12 MiB of streamed replies 
 Each request carries its caller's absolute deadline, including queue time; a hold's screen work
 stays within the 1.5 s screen budget (`MAX_TTL`) [guess], and fixtures pass their own.
 The client assigns the hold's capture id and ticket number from one checked counter under the
-enqueue lock. Retirement fences that hold and earlier holds, and fallback termination names the
-holder's worker generation rather than assuming the worker that answered is still its owner.
+enqueue lock. Retirement fences that hold and earlier holds. An answer from a later worker
+proves the original holder exited; if no worker answers, fallback names the known holder.
 A loss fails all pending operations and requests worker termination. The supervisor then waits
 off the async thread, up to 2 s [guess], for the process to exit, and broadcasts
 `Exit { generation, confirmed }` and then the loss's `Generation`: the first worker is 0 and each
