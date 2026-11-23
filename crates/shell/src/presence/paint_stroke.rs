@@ -8,7 +8,10 @@ use lyon::tessellation::{
     StrokeTessellator, StrokeVertex, VertexId,
 };
 
-use super::paint_paths::{BuildError, bound, length, narrow, pixel, vertex};
+use super::{
+    paint_geometry::{FILL_SCRATCH_BYTES, FillScratch},
+    paint_paths::{BuildError, bound, length, narrow, pixel, vertex},
+};
 
 pub(super) const RUN_POINTS: usize = (BUILD_VERTEX_LIMIT - 4) / 4;
 pub(super) const VERTICES: usize = 65_536;
@@ -16,6 +19,7 @@ pub(super) const VERTICES: usize = 65_536;
 pub(super) struct Scratch {
     verts: Vec<lyon::math::Point>,
     run: Vec<Point<Pixels>>,
+    pub(super) fill: FillScratch,
     pub(super) fonts: super::paint_cache::Fonts,
 }
 
@@ -24,6 +28,7 @@ impl Scratch {
         Self {
             verts: Vec::with_capacity(VERTICES),
             run: Vec::with_capacity(RUN_POINTS),
+            fill: FillScratch::new(),
             fonts: super::paint_cache::Fonts::new(),
         }
     }
@@ -31,6 +36,7 @@ impl Scratch {
     pub(super) fn bytes(&self) -> usize {
         self.verts.capacity() * size_of::<lyon::math::Point>()
             + self.run.capacity() * size_of::<Point<Pixels>>()
+            + FILL_SCRATCH_BYTES
             + super::paint_cache::FONT_FEATURE_BYTES
     }
 
