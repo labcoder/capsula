@@ -13,15 +13,17 @@ pub(crate) use super::windows::WindowsCredentialStore as NativeCredentialStore;
 #[cfg(windows)]
 pub use super::windows::{delete_instance, store_instance};
 
+/// Credential Manager refused an instance-capability operation.
+#[cfg(windows)]
+#[derive(Debug, thiserror::Error)]
+#[error("Credential Manager failed")]
+pub struct CredentialError(#[from] keyring::Error);
+
 /// The instance capability could not be stored or deleted.
+#[cfg(not(windows))]
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialError {
-    /// Credential Manager refused the operation.
-    #[cfg(windows)]
-    #[error("Credential Manager failed")]
-    Manager(#[from] keyring::Error),
     /// This build has no native credential store.
-    #[cfg(not(windows))]
     #[error("native credential storage is unsupported on this platform")]
     Unsupported,
 }
@@ -44,10 +46,10 @@ impl CredentialStore for NativeCredentialStore {
     }
 }
 
-pub(crate) fn native_session_lock_path() -> Result<Option<PathBuf>, CredentialStoreError> {
+pub(crate) fn native_session_lock_path() -> Result<PathBuf, CredentialStoreError> {
     #[cfg(windows)]
     {
-        Ok(super::session_lock_path())
+        super::session_lock_path().ok_or(CredentialStoreError::NoDataDir)
     }
     #[cfg(not(windows))]
     {
@@ -86,9 +88,11 @@ pub use kumochi_protocol::constants::CREDENTIAL_CHUNK_SIZE as CHUNK_SIZE;
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialStoreError {
     /// This build has no native credential store.
-    #[cfg(not(windows))]
     #[error("native credential storage is unsupported on this platform")]
     Unsupported,
+    /// The native account data folder could not be resolved.
+    #[error("account data directory is unavailable")]
+    NoDataDir,
     /// A target is empty, contains a null, or exceeds the platform limit.
     #[error("invalid credential target")]
     InvalidTarget,
