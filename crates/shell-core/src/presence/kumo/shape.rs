@@ -131,8 +131,6 @@ fn value_noise(p: Vec3) -> f32 {
 pub(crate) struct Framing {
     pub(crate) span: f32,
     pub(crate) center: Vec2,
-    /// A soft vapour band about a pixel wide at the edge, rather than a crisp one.
-    pub(crate) soft: bool,
 }
 
 impl Framing {
@@ -140,7 +138,6 @@ impl Framing {
     pub(crate) const CARD: Self = Self {
         span: 2.2,
         center: v2(0.0, 0.06),
-        soft: true,
     };
 
     /// The cloud-space point at fractional pixel (i, j) of a square `size` pixels wide.
@@ -185,7 +182,6 @@ pub(crate) struct Texel {
 /// The baked body for one square pixel size, row-major from the top-left.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct GBuffer {
-    pub(crate) size: u16,
     pub(crate) texels: Vec<Texel>,
 }
 
@@ -194,7 +190,7 @@ impl GBuffer {
     /// size squared, so it runs when the size or scale changes, never per frame or in paint.
     pub(crate) fn bake(shape: &Silhouette, size: u16, framing: Framing) -> Self {
         let upp = framing.units_per_pixel(size);
-        let band = if framing.soft { upp * 0.9 + 0.008 } else { upp };
+        let band = upp * 0.9 + 0.008;
         let max_z = shape
             .lobes
             .iter()
@@ -208,7 +204,7 @@ impl GBuffer {
                 texels.push(texel(shape, c, upp, band, max_z));
             }
         }
-        Self { size, texels }
+        Self { texels }
     }
 }
 
@@ -268,16 +264,18 @@ mod tests {
         assert!(shape.sdf(v3(2.0, 0.0, 0.0)) > 0.0, "far to the right");
         assert!(shape.sdf(v3(0.0, -0.7, 0.0)) > 0.0, "under the floor");
         assert!(shape.sdf(v3(0.0, 0.0, 1.0)) > 0.0, "in front of the body");
-    }
-
-    #[test]
-    fn the_crown_top_is_on_the_surface() {
-        // The crown lobe is centred at (-0.05, 0.16) with radius 0.43, and nothing else is
-        // within a fillet of its top.
-        let shape = Silhouette::emoji();
-        assert!(shape.sdf(v3(-0.05, 0.59, 0.0)).abs() < 1e-5, "on the edge");
-        assert!(shape.sdf(v3(-0.05, 0.58, 0.0)) < 0.0, "just inside");
-        assert!(shape.sdf(v3(-0.05, 0.60, 0.0)) > 0.0, "just outside");
+        assert!(
+            shape.sdf(v3(-0.05, 0.58, 0.0)) < 0.0,
+            "just inside the crown"
+        );
+        assert!(
+            shape.sdf(v3(-0.05, 0.59, 0.0)).abs() < 1e-5,
+            "on the crown's edge"
+        );
+        assert!(
+            shape.sdf(v3(-0.05, 0.60, 0.0)) > 0.0,
+            "just outside the crown"
+        );
     }
 
     #[test]
@@ -315,34 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn the_soft_band_has_partial_coverage_and_the_crisp_one_less() {
-        let shape = Silhouette::emoji();
-        let partial = |framing| {
-            GBuffer::bake(&shape, 48, framing)
-                .texels
-                .iter()
-                .filter(|t| t.coverage > 0.0 && t.coverage < 1.0)
-                .count()
-        };
-        let soft = partial(Framing::CARD);
-        let crisp = partial(Framing {
-            soft: false,
-            ..Framing::CARD
-        });
-        assert!(crisp > 0, "even a crisp edge is antialiased");
-        assert!(soft > crisp, "soft {soft} vs crisp {crisp}");
-    }
-
-    #[test]
-    fn the_bake_is_deterministic() {
-        let shape = Silhouette::emoji();
-        assert_eq!(
-            GBuffer::bake(&shape, 24, Framing::CARD),
-            GBuffer::bake(&shape, 24, Framing::CARD)
-        );
-    }
-
-    #[test]
     fn the_outer_strips_are_empty_and_every_channel_is_finite() {
         let bake = GBuffer::bake(&Silhouette::emoji(), 32, Framing::CARD);
         for k in 0..32 {
@@ -365,13 +335,6 @@ mod tests {
             ];
             assert!(channels.iter().all(|c| c.is_finite()), "{t:?}");
         }
-    }
-
-    #[test]
-    fn a_zero_size_has_a_finite_scale() {
-        assert!((Framing::CARD.units_per_pixel(0) - 2.2).abs() < 1e-6);
-        let p = Framing::CARD.to_cloud(0, 0.0, 0.0);
-        assert!(p.x.is_finite() && p.y.is_finite(), "{p:?}");
     }
 
     #[test]

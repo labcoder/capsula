@@ -40,19 +40,35 @@ fn grabs(seen: &RefCell<Vec<PullChanged>>) -> usize {
 fn a_press_on_stop_never_grabs_kumo_but_a_press_on_kumo_does_while_its_picture_shows(
     cx: &mut TestAppContext,
 ) {
-    press_under_kumo(cx, "presence-stop");
+    for side in [
+        Side::Left,
+        Side::Right,
+        Side::Top,
+        Side::Bottom,
+        Side::UpperBody,
+    ] {
+        press_under_kumo(&mut cx.new_app(), "presence-stop", side);
+    }
 }
 
 #[gpui::test]
 fn a_press_on_chat_never_grabs_kumo_but_a_press_on_kumo_does_while_its_picture_shows(
     cx: &mut TestAppContext,
 ) {
-    press_under_kumo(cx, "presence-chat");
+    press_under_kumo(cx, "presence-chat", Side::UpperBody);
 }
 
-/// Presses the button `selector` names, then Kumo's upper part. Stop shows only when it's the
-/// button pressed, so otherwise Chat leads the row under Kumo.
-fn press_under_kumo(cx: &mut TestAppContext, selector: &'static str) {
+#[derive(Clone, Copy)]
+enum Side {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    UpperBody,
+}
+
+/// Presses the named button, then checks the chosen part of Kumo's drawn hit region.
+fn press_under_kumo(cx: &mut TestAppContext, selector: &'static str, side: Side) {
     let _area = work_area_fixture::set([0, 0, 2560, 1392]);
     let presence = test_fixture::presence(cx);
     let (panel, kumo) = presence.update(cx, |this, cx| {
@@ -105,15 +121,34 @@ fn press_under_kumo(cx: &mut TestAppContext, selector: &'static str) {
     );
 
     click(&mut frame, button.center());
-    let on_button = grabs(&seen);
-    let upper = point(body.center().x, body.origin.y + px(8.0));
-    click(&mut frame, upper);
-    let square = kumo.read_with(&frame, |kumo, _| kumo.pressed_square);
-    assert_eq!(
-        (on_button, grabs(&seen) - on_button, square),
-        (0, 1, Some(body)),
-        "(grabs from {selector} at {:?}, grabs from Kumo's upper part at {upper:?}, the square \
-         presses were tested against) with Kumo drawn at {body:?}",
-        button.center()
-    );
+    assert_eq!(grabs(&seen), 0, "{selector} must not grab Kumo");
+
+    let far = body.bottom_right();
+    let center = body.center();
+    let pixel = px(1.0);
+    let (outside, inside) = match side {
+        Side::Left => (
+            Some(point(body.origin.x - pixel, center.y)),
+            point(body.origin.x + pixel, center.y),
+        ),
+        Side::Right => (
+            Some(point(far.x + pixel, center.y)),
+            point(far.x - pixel, center.y),
+        ),
+        Side::Top => (
+            Some(point(center.x, body.origin.y - pixel)),
+            point(center.x, body.origin.y + pixel),
+        ),
+        Side::Bottom => (
+            Some(point(center.x, far.y + pixel)),
+            point(center.x, far.y - pixel),
+        ),
+        Side::UpperBody => (None, point(center.x, body.origin.y + px(8.0))),
+    };
+    if let Some(outside) = outside {
+        click(&mut frame, outside);
+        assert_eq!(grabs(&seen), 0, "outside the drawn body at {outside:?}");
+    }
+    click(&mut frame, inside);
+    assert_eq!(grabs(&seen), 1, "inside the drawn body at {inside:?}");
 }

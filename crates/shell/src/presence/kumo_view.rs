@@ -64,9 +64,6 @@ pub(super) struct KumoView {
     /// The released body is home and still: the dock's next accepted mask is the line alone,
     /// and the pull wants no frame until then. Whichever window showed the body still does.
     resting: bool,
-    /// The square the last press was tested against.
-    #[cfg(test)]
-    pub(in crate::presence) pressed_square: Option<gpui_kit::Bounds<gpui_kit::Pixels>>,
 }
 
 /// Which window shows the body: the peek until the dock has drawn a pulled picture.
@@ -104,8 +101,6 @@ impl KumoView {
             next_rows: Rows::default(),
             pulled: Pulled::Peek,
             resting: false,
-            #[cfg(test)]
-            pressed_square: None,
         }
     }
 
@@ -483,14 +478,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn reduced_motion_shades_one_still_frame(cx: &mut TestAppContext) {
-        let (view, _) = baked(cx, 1.0);
-        view.update(cx, |view, cx| view.show(Motion::Reduced, cx));
-        settle(cx, &view);
-        assert_eq!(view.read_with(cx, |view, _| view.totals()).0, [1, 0]);
-    }
-
-    #[gpui::test]
     fn a_show_before_the_bake_blinks_when_its_wake_up_lands(cx: &mut TestAppContext) {
         let view = cx.new(|_| KumoView::new());
         let asked = Rc::new(Cell::new(0));
@@ -513,17 +500,26 @@ mod tests {
     }
 
     #[gpui::test]
-    fn only_the_bake_for_the_current_scale_is_kept(cx: &mut TestAppContext) {
+    fn a_scale_change_publishes_the_current_size(cx: &mut TestAppContext) {
         let view = cx.new(|_| KumoView::new());
         view.update(cx, |view, cx| {
             view.rebake(1.0, cx);
             view.rebake(2.0, cx);
         });
         cx.run_until_parked();
-        let len = view.read_with(cx, |view, _| {
-            view.renderer.as_ref().map(|renderer| renderer.image_len())
+        view.update(cx, |view, cx| view.show(Motion::Reduced, cx));
+        settle(cx, &view);
+        assert_eq!(view.read_with(cx, |view, _| view.totals().0), [1, 0]);
+        assert_eq!(
+            settle(cx, &view),
+            0,
+            "the still image needs no further frames"
+        );
+        let image_size = view.read_with(cx, |view, _| {
+            view.image.as_ref().expect("the visible Kumo image").size(0)
         });
-        assert_eq!(len, Some(128 * 128 * 4));
+        let pixels = gpui::DevicePixels(128);
+        assert_eq!(image_size, gpui::size(pixels, pixels));
     }
 
     #[gpui::test]

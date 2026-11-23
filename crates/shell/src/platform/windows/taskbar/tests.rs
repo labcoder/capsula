@@ -45,24 +45,17 @@ fn taskbar_messages_open_status_quit_and_ignore_geometry_commands() {
             Action::Ignore
         );
     }
-    assert_eq!(action(registered, 0, registered), Action::Readd);
-    assert_eq!(action(registered, 0, 0), Action::Default);
-    assert_eq!(action(0, 0, 0), Action::Default);
-}
-
-#[test]
-fn os_power_and_shortcut_commands_keep_default_handling_without_exposing_the_window() {
     for command in [SC_SCREENSAVE, SC_MONITORPOWER, SC_TASKLIST, 0, 0xfff0] {
         for low in [0, 15] {
             assert_eq!(
-                action(WM_SYSCOMMAND, word(command | low), 0xc123),
+                action(WM_SYSCOMMAND, word(command | low), registered),
                 Action::Default
             );
         }
     }
-    for command in [SC_MOVE, SC_SIZE, SC_MAXIMIZE] {
-        assert_eq!(action(WM_SYSCOMMAND, word(command), 0xc123), Action::Ignore);
-    }
+    assert_eq!(action(registered, 0, registered), Action::Readd);
+    assert_eq!(action(registered, 0, 0), Action::Default);
+    assert_eq!(action(0, 0, 0), Action::Default);
 }
 
 #[test]

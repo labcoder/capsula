@@ -31,6 +31,8 @@ fn native_taskbar_refusal_keeps_the_saved_choice_and_reports_its_failure() {
     let mut saved = view();
     saved.show_in_taskbar = true;
     state.set_view(saved, Update::Unsolicited);
+    let refusal = UserError::from(ErrorKey::SettingsRefused);
+    assert_eq!(state.error(refusal.clone()), None);
     state.apply_taskbar(|choice| {
         assert_eq!(choice, TaskbarChoice::Shown);
         false
@@ -41,8 +43,13 @@ fn native_taskbar_refusal_keeps_the_saved_choice_and_reports_its_failure() {
         state.native_taskbar_notice,
         Some(crate::strings::Text::TaskbarAddFailed)
     );
-    state.apply_taskbar(|_| true);
+    state.apply_taskbar(|choice| {
+        assert_eq!(choice, TaskbarChoice::Shown);
+        true
+    });
     assert_eq!(state.native_taskbar_notice, None);
+    assert_eq!(state.notice(), Some(&refusal));
+    assert!(state.view().expect("saved snapshot").show_in_taskbar);
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Shown));
 }
 

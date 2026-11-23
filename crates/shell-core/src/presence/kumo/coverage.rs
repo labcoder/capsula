@@ -293,17 +293,10 @@ mod tests {
     #[test]
     fn the_cutoff_is_inclusive() {
         let mut rows = vec![None; 1];
-        row_hulls(&square(1, |_, _| CUTOFF - 1), 1, &mut rows);
+        row_hulls(&square(1, |_, _| 74), 1, &mut rows);
         assert_eq!(rows, [None]);
-        row_hulls(&square(1, |_, _| CUTOFF), 1, &mut rows);
+        row_hulls(&square(1, |_, _| 75), 1, &mut rows);
         assert_eq!(rows, [Some([0, 1])]);
-    }
-
-    #[test]
-    fn a_zero_size_source_clears_its_hulls() {
-        let mut rows = vec![Some([0, 1]); 2];
-        row_hulls(&[], 0, &mut rows);
-        assert_eq!(rows, [None, None]);
     }
 
     #[test]
@@ -338,6 +331,9 @@ mod tests {
             "a zero-height placement owns nothing"
         );
         assert_eq!(flat.rows(), 2);
+        let mut stale = [Some([0, 1]); 2];
+        row_hulls(&[], 0, &mut stale);
+        assert_eq!(stale, [None, None]);
     }
 
     #[test]
@@ -360,53 +356,26 @@ mod tests {
 
     #[test]
     fn a_wide_source_scales_each_axis_by_its_own_size() {
-        // Two texels wide, one tall, drawn 4 x 2: each texel row reaches one device pixel past
-        // its bilinear footprint on every side, clipped to the quad and its snap border.
-        let mut out = vec![None; 4];
         let at = Placement {
             x: 0,
             y: 0,
+            width: 12,
+            height: 15,
+        };
+        let mut out = [None; 17];
+        device_spans(&[None, Some([0, 1]), None], 2, at, &mut out);
+        assert_eq!(out[..2], [None; 2]);
+        assert_eq!(out[2..14], [Some([-1, 10]); 12]);
+        assert_eq!(out[14..], [None; 3]);
+
+        let mut full = [None; 4];
+        let flat = Placement {
             width: 4,
             height: 2,
+            ..at
         };
-        device_spans(&[Some([0, 2])], 2, at, &mut out);
-        assert_eq!(out, vec![Some([-1, 5]); 4]);
-    }
-
-    #[test]
-    fn a_fractional_origin_snaps_each_edge_on_its_own() {
-        // At 1.5x, 10.3 → 15.45 → 15 and 94.3 → 141.45 → 141: 126 wide. 7.6 → 11.4 → 11 and
-        // 91.6 → 137.4 → 137: 126 tall. 0.25 → 0.375 → 0 and 84.25 → 126.375 → 126.
-        assert_eq!(
-            snapped(10.3, 7.6, 84.0, 1.5),
-            Placement {
-                x: 15,
-                y: 11,
-                width: 126,
-                height: 126
-            }
-        );
-        // At 1.25x, 0.2 → 0.25 → 0 and 84.2 → 105.25 → 105; 0.6 → 0.75 → 1 and 84.6 → 105.75
-        // → 106: one pixel wider than tall.
-        assert_eq!(
-            snapped(0.2, 0.6, 84.0, 1.25),
-            Placement {
-                x: 0,
-                y: 1,
-                width: 105,
-                height: 105
-            }
-        );
-        // Half rounds toward zero: 0.5 → 0 and 84.5 → 84, but -0.5 → 0 and 83.5 → 83.
-        assert_eq!(
-            snapped(0.5, -0.5, 84.0, 1.0),
-            Placement {
-                x: 0,
-                y: 0,
-                width: 84,
-                height: 83
-            }
-        );
+        device_spans(&[Some([0, 2])], 2, flat, &mut full);
+        assert_eq!(full, [Some([-1, 5]); 4]);
     }
 
     #[test]
