@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
 use kumochi_protocol::constants;
+use kumochi_protocol::message::MAX_TRANSCRIPT_BYTES;
 use kumochi_protocol::voice::{NATIVE_FILES, NativeFile};
 use sha2::{Digest as _, Sha256};
 
@@ -29,9 +30,7 @@ use super::windows::{
     modules, open_locked, owner_only_dir, system_dir,
 };
 
-/// The longest transcript accepted, in bytes.
-// shortcut: a local bound until PR 1's MAX_TRANSCRIPT_BYTES lands; use that one then.
-pub(crate) const MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
+pub(crate) use crate::speech::NativeError;
 
 /// Decoder threads [S5].
 const THREADS: i32 = 8;
@@ -63,58 +62,6 @@ pub(crate) const NATIVE_CLOSURE: [&str; 10] = [
     "setupapi.dll",
     "dxgi.dll",
 ];
-
-/// Why speech input's native side failed. It carries no native text and no paths.
-#[derive(
-    Debug, thiserror::Error, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
-)]
-pub enum NativeError {
-    /// A native library is missing.
-    #[error("a native library is missing")]
-    Missing,
-    /// A folder or native library on the load path is a reparse point or resolves elsewhere.
-    #[error("a folder or native library on the load path is a reparse point or resolves elsewhere")]
-    Reparse,
-    /// Someone other than this user or the system can change the load path.
-    #[error("someone other than this user or the system can change the load path")]
-    Unsafe,
-    /// A native library doesn't match its pin.
-    #[error("a native library doesn't match its pin")]
-    Pin,
-    /// A module the native libraries import is already loaded from another folder.
-    #[error("a module the native libraries import is already loaded from another folder")]
-    Conflict,
-    /// A system library the native libraries need is missing.
-    #[error("a system library the native libraries need is missing")]
-    Dependency,
-    /// Loading brought in a module from an unexpected folder.
-    #[error("loading brought in a module from an unexpected folder")]
-    Unexpected,
-    /// A native library failed to load.
-    #[error("a native library failed to load")]
-    Load,
-    /// A native library lacks an export.
-    #[error("a native library lacks an export")]
-    Symbol,
-    /// The native library isn't the pinned release.
-    #[error("the native library isn't the pinned release")]
-    Abi,
-    /// The recognizer or a stream couldn't be created.
-    #[error("the recognizer or a stream couldn't be created")]
-    Create,
-    /// The audio can't be handed to the recognizer.
-    #[error("the audio can't be handed to the recognizer")]
-    Input,
-    /// Decoding gave no result.
-    #[error("decoding gave no result")]
-    Decode,
-    /// The transcript is too long or isn't UTF-8.
-    #[error("the transcript is too long or isn't UTF-8")]
-    Text,
-    /// The model folder or a model file isn't an ordinary trusted local path.
-    #[error("the speech model path is unsafe")]
-    ModelPath,
-}
 
 type CreateRecognizer =
     unsafe extern "C-unwind" fn(*const RecognizerConfig) -> *const RawRecognizer;
