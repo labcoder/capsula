@@ -1,8 +1,31 @@
 //! Authoritative account snapshots and one-shot intents, independent of GPUI and transport.
 
 use kumochi_protocol::message::{
-    AccountOp, AccountRecovery, AccountView, Action, Cleanup, ErrorKey, PlanState, UserError,
+    AccountOp, AccountRecovery, AccountView, Action, Cleanup, ErrorKey, PlanState, SettingsView,
+    UserError,
 };
+
+use crate::strings::{Strings, Text};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum StatusLine<'a> {
+    Note(Text),
+    Local {
+        heading: Text,
+        error: Text,
+        help: Text,
+    },
+    Remote {
+        heading: Text,
+        note: Text,
+    },
+    Backlog {
+        lead: Text,
+        followups: [Text; 3],
+    },
+    Error(&'a UserError),
+    SendFailed(Text),
+}
 
 #[derive(Default)]
 pub struct Accounts {
@@ -108,6 +131,133 @@ impl Accounts {
         }
     }
 
+    /// The heading and complete copy for the account row, in display order.
+    pub fn status(&self, settings: Option<&SettingsView>) -> (Text, Vec<StatusLine<'_>>) {
+        use StatusLine::{Backlog, Local, Note, Remote, SendFailed};
+
+        let local = |error, help| Local {
+            heading: Text::AccountLocal,
+            error,
+            help,
+        };
+        let remote = |note| Remote {
+            heading: Text::AccountRemote,
+            note,
+        };
+        let mut lines = Vec::new();
+        let status = match &self.view {
+            None if settings.is_none() => Text::AccountOffline,
+            None => Text::AccountWaiting,
+            Some(AccountView::SignedOut {
+                revocation_unconfirmed,
+            }) => {
+                if *revocation_unconfirmed {
+                    lines.push(remote(Text::AccountRevocationUnconfirmed));
+                } else {
+                    lines.push(Note(Text::AccountUsePlan));
+                }
+                Text::AccountSignedOut
+            }
+            Some(AccountView::SigningIn) => {
+                lines.push(Note(Text::AccountReplaceHelp));
+                Text::AccountSigningIn
+            }
+            Some(AccountView::Busy) => {
+                lines.push(Note(Text::AccountBusyHelp));
+                Text::AccountBusy
+            }
+            Some(view @ AccountView::SigningOut { cleanup, .. }) => {
+                lines.push(match cleanup {
+                    Cleanup::Running => Note(Text::AccountStopped),
+                    Cleanup::Refused => {
+                        local(Text::AccountCleanupRefused, Text::AccountCleanupRefusedHelp)
+                    }
+                    Cleanup::NotDurable => {
+                        local(Text::AccountNotDurable, Text::AccountNotDurableHelp)
+                    }
+                });
+                lines.extend(cleanup_notice(view).map(remote));
+                if *cleanup == Cleanup::Running {
+                    Text::AccountSigningOut
+                } else {
+                    Text::AccountSignOutNeedsRetry
+                }
+            }
+            Some(AccountView::SignedIn { plan, recovery, .. }) => match recovery {
+                Some(AccountRecovery::SignInAgain) => Text::AccountSessionEnded,
+                Some(AccountRecovery::Retry) => {
+                    if self.error.is_none() {
+                        lines.push(Note(Text::AccountRetryHelp));
+                    }
+                    Text::AccountAttention
+                }
+                None => match plan {
+                    PlanState::Enabled => Text::AccountUsingPlan,
+                    PlanState::Declined => Text::AccountPlanOff,
+                    PlanState::Unavailable => Text::AccountUnavailable,
+                },
+            },
+        };
+        lines.extend(self.status_error().map(|error| {
+            if error.key() == ErrorKey::RevocationBacklog {
+                Backlog {
+                    lead: Text::AccountBacklogLead,
+                    followups: [
+                        Text::AccountBacklogRetry,
+                        Text::AccountBacklogExpiry,
+                        Text::AccountBacklogRecovery,
+                    ],
+                }
+            } else {
+                StatusLine::Error(error)
+            }
+        }));
+        lines.extend(
+            self.send_failed
+                .then_some(SendFailed(Text::AccountSendFailed)),
+        );
+        (status, lines)
+    }
+
+    pub fn status_identity(&self, strings: &Strings) -> Option<String> {
+        let Some(AccountView::SignedIn { email, .. }) = &self.view else {
+            return None;
+        };
+        Some(email.as_ref().map_or_else(
+            || strings.get(Text::AccountIdentity),
+            |email| email.as_str().to_owned(),
+        ))
+    }
+
+    /// The error to show in the account row, if the status doesn't already say it.
+    fn status_error(&self) -> Option<&UserError> {
+        self.error.as_ref().filter(|error| {
+            !matches!(
+                (error.key(), &self.view),
+                (
+                    ErrorKey::SignOutNotDurable,
+                    Some(AccountView::SigningOut {
+                        cleanup: Cleanup::NotDurable,
+                        ..
+                    })
+                ) | (
+                    ErrorKey::SessionEnded,
+                    Some(AccountView::SignedIn {
+                        recovery: Some(AccountRecovery::SignInAgain),
+                        ..
+                    })
+                ) | (
+                    ErrorKey::PlanUnavailable,
+                    Some(AccountView::SignedIn {
+                        plan: PlanState::Unavailable,
+                        recovery: None,
+                        ..
+                    })
+                )
+            )
+        })
+    }
+
     pub fn allows(&self, op: AccountOp) -> bool {
         if self.waiting.is_some() {
             return false;
@@ -199,6 +349,17 @@ impl Accounts {
         self.waiting = Some(AccountOp::CancelSignIn);
         true
     }
+}
+
+fn cleanup_notice(view: &AccountView) -> Option<Text> {
+    matches!(
+        view,
+        AccountView::SigningOut {
+            cleanup: Cleanup::Refused | Cleanup::NotDurable,
+            revocation_unconfirmed: true,
+        }
+    )
+    .then_some(Text::AccountRevocationPending)
 }
 
 #[cfg(test)]

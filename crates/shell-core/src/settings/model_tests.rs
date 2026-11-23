@@ -120,6 +120,10 @@ fn the_picker_offers_served_catalogs_and_a_refusal_returns_the_saved_default() {
             .collect::<Vec<_>>(),
         [ConnectionKind::ClaudeCode]
     );
+    let answer = choice("c-0", Effort::Low, ConnectionKind::ClaudeCode);
+    state.set_view(saved(answer.clone()), Update::Answer);
+    assert_eq!(state.default_model_choice(), Some(&answer));
+    assert!(!state.model_saving());
 }
 
 /// The name a notice shows is the newest default's, queued before saved, and a thread's own

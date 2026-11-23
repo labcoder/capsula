@@ -11,6 +11,9 @@ mod window;
 
 pub(super) use window::SettingsPanel;
 
+use super::{Presence, PresenceEvent, send};
+use crate::settings::{Field, Settings};
+use crate::strings::{Strings, Text};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, InputEvent, InputState};
 use gpui_kit::component::select::{SelectEvent, SelectState};
@@ -21,11 +24,6 @@ use gpui_kit::{
     KeyBinding, ParentElement as _, Render, Styled as _, Subscription, Task, WeakEntity, Window,
     div,
 };
-use kumochi_protocol::message::NameError;
-
-use super::{Presence, PresenceEvent, send};
-use crate::settings::{Error, Field, Settings};
-use crate::strings::{Strings, Text};
 
 gpui_kit::actions!(settings, [NextTab, PreviousTab]);
 
@@ -294,30 +292,6 @@ pub(in crate::presence) fn name_input_event(
         }
         InputEvent::PressEnter { .. } => {}
     }
-}
-
-/// The words under a name input: Saving… while its save is in flight, and its error, if any.
-pub(in crate::presence) fn field_status(
-    state: &Settings,
-    field: Field,
-    strings: &Strings,
-) -> (Option<String>, Option<String>) {
-    let error = state.field(field).error.as_ref().map(|error| match error {
-        Error::Validation(NameError::Empty) => strings.get(Text::RenameEmpty),
-        Error::Validation(NameError::TooLong) => strings.get(Text::RenameNameTooLong),
-        Error::Validation(NameError::NotOneLine) => strings.get(Text::RenameOneLine),
-        Error::Brain(error) => strings.error(error),
-        Error::Offline => strings.get(if state.view().is_none() {
-            Text::SettingsOffline
-        } else {
-            Text::SettingsUnavailable
-        }),
-    });
-    let saving = state
-        .field(field)
-        .saving
-        .then(|| strings.get(Text::SettingsSaving));
-    (saving, error)
 }
 
 impl SettingsView {
