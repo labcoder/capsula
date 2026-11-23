@@ -807,4 +807,24 @@ fn drain(mut pipe: impl Read + Send + 'static, cap: usize) -> std_mpsc::Receiver
 }
 
 #[cfg(test)]
+pub(crate) const TEST_VERSION: ClaudeVersion = ClaudeVersion {
+    major: 2,
+    minor: 1,
+    patch: 306,
+};
+
+#[cfg(test)]
+mod drain_tests;
+#[cfg(all(test, not(windows)))]
+#[test]
+fn quarantine_refuses_without_creating_a_marker_on_an_unsupported_host() {
+    let scratch = crate::scratch::dir("unsupported-quarantine");
+    assert_eq!(
+        mark_quarantined(scratch.path(), TEST_VERSION),
+        Err(Failure::Quarantine)
+    );
+    assert_eq!(scratch.read_dir().unwrap().count(), 0);
+}
+
+#[cfg(all(test, windows))]
 pub(crate) mod tests;

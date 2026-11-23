@@ -575,6 +575,7 @@ pub(crate) fn pictured_run(
     (core, effects)
 }
 
+#[cfg(windows)]
 pub(crate) fn pictured_claude_run(
     available: Availability,
     jpeg: crate::context::Jpeg,

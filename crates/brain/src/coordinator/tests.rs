@@ -19,6 +19,7 @@ mod asks;
 mod availability;
 #[path = "calls_tests.rs"]
 mod calls;
+#[cfg(windows)]
 #[path = "claude_hold_tests.rs"]
 mod claude_hold;
 #[path = "delete_tests.rs"]
