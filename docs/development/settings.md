@@ -11,7 +11,7 @@ directory.
 
 Linux unit tests can supply an explicit scratch directory. They atomically rename a synced
 sibling file and sync the directory. If the directory sync fails after the rename, the test
-fails as a broken test host instead of reporting an ordinary write failure. This is a fixture
+process exits rather than letting the worker report an ordinary write failure. This is a fixture
 path, not a Linux settings root or a production write adapter.
 
 ## Shell editor
