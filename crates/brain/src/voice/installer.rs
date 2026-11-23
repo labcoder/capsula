@@ -65,6 +65,8 @@ pub(crate) enum Effect {
 pub(crate) enum RemoveAnswer {
     /// Nothing is installed or on disk to remove.
     Refused,
+    /// Protected removal is unsupported on this host.
+    Unsupported,
     /// Accepted with no write: the removal was already accepted, or its cleanup is retried.
     Accepted,
     /// The removal intent with this token is staged in the op's place; its result is the answer,
@@ -72,11 +74,12 @@ pub(crate) enum RemoveAnswer {
     Intent { token: u64 },
 }
 
-/// Whether a part's folder is on disk.
+/// What is known about a part's folder after checking or deleting it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Folder {
     Missing,
     Present,
+    Refused(ErrorKey),
 }
 
 /// Where a cancelled install goes back to.
@@ -228,7 +231,7 @@ impl Installer {
         durable: [Durable; 2],
         whole: [Result<bool, ErrorKey>; 2],
         available: [bool; 2],
-        stuck: &[VoicePart],
+        stuck: &[(VoicePart, Folder)],
         input_enabled: bool,
     ) -> (Self, Vec<Effect>) {
         let mut installer = Self {
@@ -257,8 +260,13 @@ impl Installer {
             let entry = &mut installer.parts[index];
             entry.token = token;
             entry.phase = match (entry.durable, entry.available, whole[index]) {
-                (Durable::Removing, _, _) if stuck.contains(&part) => Phase::Cleanup,
-                (Durable::Removing, _, _) => Phase::Clearing,
+                (Durable::Removing, _, _) => match stuck.iter().find(|(stuck, _)| *stuck == part) {
+                    Some((_, Folder::Refused(ErrorKey::UnsupportedPlatform))) => {
+                        Phase::Failed(ErrorKey::UnsupportedPlatform)
+                    }
+                    Some(_) => Phase::Cleanup,
+                    None => Phase::Clearing,
+                },
                 (_, _, Err(key)) => Phase::Failed(key),
                 (Durable::Absent, true, _) => Phase::Idle,
                 (_, false, _) => Phase::Failed(ErrorKey::VoiceLoad),
@@ -468,6 +476,12 @@ impl Installer {
         folder: Folder,
     ) -> (RemoveAnswer, Vec<Effect>) {
         let entry = &self.parts[index(part)];
+        if folder == Folder::Refused(ErrorKey::UnsupportedPlatform)
+            || entry.durable == Durable::Removing
+                && entry.phase == Phase::Failed(ErrorKey::UnsupportedPlatform)
+        {
+            return (RemoveAnswer::Unsupported, self.take());
+        }
         if !entry.available && !entry.models.is_empty() {
             return (RemoveAnswer::Refused, self.take());
         }
@@ -772,12 +786,19 @@ impl Installer {
         if entry.token != token || entry.phase != Phase::Deleting {
             return self.take();
         }
-        if folder == Folder::Missing {
-            entry.phase = Phase::Clearing;
-            self.effects.push(Effect::Clear { part });
-        } else {
-            entry.phase = Phase::Cleanup;
-            entry.install_after = false;
+        match folder {
+            Folder::Missing => {
+                entry.phase = Phase::Clearing;
+                self.effects.push(Effect::Clear { part });
+            }
+            Folder::Refused(ErrorKey::UnsupportedPlatform) => {
+                entry.phase = Phase::Failed(ErrorKey::UnsupportedPlatform);
+                entry.install_after = false;
+            }
+            Folder::Present | Folder::Refused(_) => {
+                entry.phase = Phase::Cleanup;
+                entry.install_after = false;
+            }
         }
         self.take()
     }

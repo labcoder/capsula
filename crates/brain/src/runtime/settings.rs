@@ -375,6 +375,9 @@ impl Brain {
                         }
                         RemoveAnswer::Accepted => Outcome::Accepted,
                         RemoveAnswer::Refused => Outcome::Refused(ErrorKey::VoiceUnavailable),
+                        RemoveAnswer::Unsupported => {
+                            Outcome::Refused(ErrorKey::UnsupportedPlatform)
+                        }
                     };
                     let answered = self.settled(epoch, outcome, link.as_deref_mut());
                     let link = if answered.is_ok() {
@@ -522,13 +525,14 @@ impl Brain {
     /// down to `models` is held while the part's folder is deleted through handles that never
     /// follow a reparse point, so a junction on the way, or a folder someone else could change,
     /// deletes nothing. A folder that's already gone counts as deleted. A part whose folder can't
-    /// be deleted stays listed, so the next start tries again. Blocking is fine: it runs at
-    /// start-up, before anything is served. Returns the parts left listed.
-    pub(crate) fn finish_removals(&mut self, models: &Path) -> Vec<VoicePart> {
+    /// be deleted stays listed with the refusal, so only ordinary cleanup failures can retry.
+    /// Blocking is fine: it runs at start-up, before anything is served.
+    pub(crate) fn finish_removals(&mut self, models: &Path) -> Vec<(VoicePart, Folder)> {
         let mut stuck = Vec::new();
         for part in self.config.removing() {
-            if super::voice::delete(models, part) == Folder::Present {
-                stuck.push(part);
+            let folder = super::voice::delete(models, part);
+            if folder != Folder::Missing {
+                stuck.push((part, folder));
                 continue;
             }
             self.settings_ops.push_back(Queued {
