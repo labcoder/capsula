@@ -7,7 +7,7 @@ use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
     ClaudeCodeView, ConnectionKind, ConnectionOp, ConnectionsView, ControlToShell, DataToShell,
     ErrorKey, KeyRecoveryRead, KeyRemovalFailure, KeyStageFailure, KeyStageId, KeyStagePlan,
-    KeyView, RunId,
+    KeyView, RunId, UserError,
 };
 use tokio::task::JoinHandle;
 
@@ -248,11 +248,16 @@ impl Connections {
         }
     }
 
+    pub(super) fn native_refusal(&self) -> Option<UserError> {
+        self.transport_unsupported
+            .then(|| ErrorKey::UnsupportedPlatform.into())
+    }
+
     fn route_input(&self) -> Option<Input> {
-        if self.transport_unsupported {
+        if let Some(refusal) = self.native_refusal() {
             return Some(Input::Engines(
                 ConnectionKind::AnthropicKey,
-                Availability::Unavailable(ErrorKey::UnsupportedPlatform.into()),
+                Availability::Unavailable(refusal),
             ));
         }
         self.transport.as_ref()?;

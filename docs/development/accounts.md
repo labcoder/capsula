@@ -822,7 +822,10 @@ existing recovery behavior.
 
 Native account assembly also refuses when there's no native trust adapter. At the service
 boundary, a permanent trust refusal fences further requests rather than asking the user to
-repair a trust store. GitHub replays its scoped refusal before the local GitHub view on each
+repair a trust store. ChatGPT preserves unconfirmed revocation debt and uses the same refusal
+for bearer waiters and reconnecting shells, even if only the revocation pass failed. Anthropic
+uses its permanent refusal in both the connection view and an unserved run, without suggesting
+opening Settings. GitHub replays its scoped refusal before the local GitHub view on each
 connection and keeps local sign-out and cleanup separate from network actions.
 
 ## Vault records

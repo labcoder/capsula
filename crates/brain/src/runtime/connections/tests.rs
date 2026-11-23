@@ -16,11 +16,6 @@ mod staging;
 
 #[tokio::test]
 async fn production_composition_serves_the_key_route_and_refuses_unadmitted_sends_unasked() {
-    use crate::context::{ModelRequest, Origin};
-    use crate::coordinator::{BuildKey, SendKey};
-    use crate::engines::{Asks, EngineFailure, Finish, RunRequest, SendGate, TurnEvent};
-    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, RunId, ThreadId};
-
     let scratch = Scratch::new("dormant-key-transport");
     let mut brain = test_support::brain(&scratch, "");
     let unavailable = if cfg!(windows) {
@@ -35,6 +30,16 @@ async fn production_composition_serves_the_key_route_and_refuses_unadmitted_send
             Availability::Unavailable(refusal),
         )) if refusal == unavailable
     ));
+    assert_owned_key_refusal(&mut brain, unavailable).await;
+    brain.close().await;
+}
+
+async fn assert_owned_key_refusal(brain: &mut Brain, unavailable: UserError) {
+    use crate::context::{ModelRequest, Origin};
+    use crate::coordinator::{BuildKey, SendKey};
+    use crate::engines::{Asks, EngineFailure, Finish, RunRequest, SendGate, TurnEvent};
+    use kumochi_protocol::message::{Effort, ModelChoice, ModelSlug, RunId, ThreadId};
+
     let key = SendKey::Build(BuildKey {
         run: RunId(1),
         round: 1,
@@ -58,19 +63,22 @@ async fn production_composition_serves_the_key_route_and_refuses_unadmitted_send
     };
     let (events, mut seen) = tokio::sync::mpsc::channel(1);
     let (inputs, mut asks) = tokio::sync::mpsc::unbounded_channel();
-    brain
-        .owned_engine(&request)
-        .expect("owned refusal")
-        .start(request, events, SendGate::new(key, Asks::default(), inputs))
-        .await;
-    assert_eq!(
-        seen.recv().await,
-        Some(TurnEvent::Finished(Finish::Failed(EngineFailure::Access(
-            Some(unavailable)
-        ))))
-    );
-    assert_eq!(asks.recv().await, None);
-    brain.close().await;
+    timeout(Duration::from_secs(5), async {
+        brain
+            .owned_engine(&request)
+            .expect("owned refusal")
+            .start(request, events, SendGate::new(key, Asks::default(), inputs))
+            .await;
+        assert_eq!(
+            seen.recv().await,
+            Some(TurnEvent::Finished(Finish::Failed(EngineFailure::Access(
+                Some(unavailable)
+            ))))
+        );
+        assert_eq!(asks.recv().await, None);
+    })
+    .await
+    .expect("the unserved engine refuses without asking to send");
 }
 
 fn key() -> Secret<AnthropicKey> {
@@ -247,6 +255,7 @@ async fn a_saved_key_stays_unsupported_in_runtime_and_reconnect_snapshots() {
     );
     assert!(!brain.account.connections.loading);
     assert_eq!(brain.account.connections.connected(), expected);
+    assert_owned_key_refusal(&mut brain, ErrorKey::UnsupportedPlatform.into()).await;
     brain.close().await;
 }
 
