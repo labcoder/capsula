@@ -235,3 +235,23 @@ fn unsupported_link_keeps_old_generation_and_purge_debt() {
     assert!(!store.leftovers().exist());
     assert!(!sidecar(&scratch.db(), OLD).exists());
 }
+
+#[test]
+#[ignore = "requires supervision; a rename with an interrupted barrier must exit 78"]
+fn indeterminate_purge_exits_with_all_named_evidence() {
+    let (_scratch, mut store, copied) = staged("purge-indeterminate");
+    let copied_mac = copied.macos.as_ref().unwrap();
+    let result = promote_with(
+        &mut store,
+        copied.writes,
+        copied_mac,
+        |files| files.dir.link(files.db, &files.old),
+        |boundary| {
+            if boundary == Boundary::Rename {
+                return Err(interrupted());
+            }
+            Ok(())
+        },
+    );
+    panic!("rename followed by an interrupted barrier must exit 78, returned {result:?}");
+}

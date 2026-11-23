@@ -484,13 +484,32 @@ fn promote_with(
         stop_uncertain("before link", &error);
     }
     if let Err(error) = link(&files) {
+        let unsupported = matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EOPNOTSUPP));
         if !unchanged(&files, &old, &clean)
-            || !(matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EOPNOTSUPP))
-                || error.kind() == ErrorKind::AlreadyExists)
+            || !(unsupported || error.kind() == ErrorKind::AlreadyExists)
         {
             stop_uncertain("link", &error);
         }
-        reconcile(&path, None).map_err(StoreError::Purge)?;
+        let settled = if unsupported {
+            reconcile(&path, None).map(|_| ())
+        } else {
+            (|| {
+                let (intent, record) = files.load()?.ok_or_else(invalid)?;
+                if intent != copied.intent {
+                    return Err(invalid());
+                }
+                files.dir.remove(&files.intent, &record, 1)?;
+                files.dir.durable(&old)
+            })()
+        };
+        if let Err(settle) = settled {
+            stop_uncertain("abandon link", &settle);
+        }
+        store.mac_published = Some(ActiveSwap {
+            intent: copied.intent,
+            canonical: old.identity(),
+            role: Role::Old,
+        });
         store.reopen()?;
         fence.available();
         return Err(StoreError::Purge(error));

@@ -1093,15 +1093,29 @@ fn a_reopen_never_creates_a_missing_store_and_its_old_copy_stays() {
     let copied = clean_copy(&store);
     let old = beside(&scratch.db(), ".purge-old");
     // The store's name goes missing after the old store's second name is made.
-    let swapped = store.swap_with(&copied, |db, old| {
-        std::fs::hard_link(db, old)?;
-        std::fs::remove_file(db)?;
-        Err(std::io::Error::other("in the way"))
-    });
-    assert!(swapped.is_err());
-    assert!(store.reconnect().is_err());
+    #[cfg(target_os = "macos")]
+    {
+        store
+            .leave_purge_link_for_restart(&copied)
+            .expect("durable intent and link");
+        drop(store);
+        std::fs::remove_file(scratch.db()).expect("simulate the missing canonical name");
+        assert!(
+            matches!(Store::open(&scratch.db()), Err(StoreError::Purge(error)) if error.kind() == std::io::ErrorKind::NotFound)
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let swapped = store.swap_with(&copied, |db, old| {
+            std::fs::hard_link(db, old)?;
+            std::fs::remove_file(db)?;
+            Err(std::io::Error::other("in the way"))
+        });
+        assert!(swapped.is_err());
+        assert!(store.reconnect().is_err());
+        assert!(store.leftovers().remove().is_err());
+    }
     assert!(!scratch.db().exists(), "no empty store was made");
-    assert!(store.leftovers().remove().is_err());
     assert!(old.exists(), "the only copy stays");
 }
 
