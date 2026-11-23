@@ -31,7 +31,7 @@ impl Link {
             || self.quitting(),
             |control| self.quit_parked(control),
             handshake,
-            || panic!("a fixture connector must not launch the brain"),
+            || Err(std::io::Error::other("fixture connector cannot launch")),
         )
     }
 }

@@ -31,8 +31,8 @@ fn a_missing_pipe_only_launches_again_after_a_build_mismatch() {
         |_| panic!("not quitting"),
         |attempt| {
             assert_eq!(attempt, None);
-            let (launched, error) = outcomes.next().expect("unexpected retry after refusal");
-            assert_eq!(launches.get(), launched);
+            let (expected_count, error) = outcomes.next().expect("unexpected retry after refusal");
+            assert_eq!(launches.get(), expected_count);
             Err(error)
         },
         || {
