@@ -351,7 +351,7 @@ pub(super) fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliv
 
 pub(super) fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
     for key in [Key::LeftControl, Key::LeftAlt] {
-        let time = EventTime::new(at);
+        let time = EventTime::new(at).with_queued_press(u64::MAX);
         let time = if key == Key::LeftAlt && edge == Edge::Down {
             time.with_keyboard_read(Some)
         } else {
@@ -1880,7 +1880,7 @@ fn accepted(owner: &Entity<Presence>, gesture: u32, cx: &mut TestAppContext) {
 }
 
 pub(super) fn after(at: Instant, millis: u64) -> EventTime {
-    EventTime::new(at + Duration::from_millis(millis))
+    EventTime::new(at + Duration::from_millis(millis)).with_queued_press(u64::MAX)
 }
 
 pub(super) fn listen(
@@ -2317,6 +2317,53 @@ fn a_queued_modifier_from_before_readiness_cannot_arm_a_new_hold(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn a_reconstructed_modifier_cannot_arm_with_one_fresh_press(cx: &mut TestAppContext) {
+    assert_eq!(mic_generation_after_reset(cx, &[Key::LeftAlt]), 0);
+}
+
+#[gpui::test]
+fn two_fresh_modifier_presses_can_arm_after_a_reset(cx: &mut TestAppContext) {
+    assert_eq!(
+        mic_generation_after_reset(cx, &[Key::LeftControl, Key::LeftAlt]),
+        1
+    );
+}
+
+fn mic_generation_after_reset(cx: &mut TestAppContext, presses: &[Key]) -> u64 {
+    use crate::link::fixture;
+    use kumochi_shell_core::platform::keyboard_ticks;
+
+    let (owner, _data, _controls) = ready(cx);
+    let pipe = fixture::attended("hold-after-physical-reset");
+    let events = fixture::patient(pipe.events.clone());
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| {
+        this.link = pipe.handle.clone();
+        this.session = Some(session);
+    });
+    let tick = keyboard_ticks() + 1;
+    let send = native(&owner, cx);
+    let now = Instant::now();
+    send(Event::Reset, EventTime::new(now));
+    for &key in presses {
+        let at = EventTime::new(now).with_queued_press(tick);
+        send(
+            Event::Key {
+                key,
+                edge: Edge::Down,
+            },
+            if key == Key::LeftAlt {
+                at.with_keyboard_read(Some)
+            } else {
+                at
+            },
+        );
+    }
+    send(Event::Deadline, after(now, 301));
+    pipe.handle.microphone_gate().latest()
+}
+
+#[gpui::test]
 fn superseding_native_hold_returns_before_outbox_release_and_sends_cancel_first(
     cx: &mut TestAppContext,
 ) {
@@ -2477,7 +2524,7 @@ fn check_native_cancel(cx: &mut TestAppContext, at: CancelAt) {
                     key: Key::LeftControl,
                     edge: Edge::Down,
                 },
-                EventTime::new(now),
+                EventTime::new(now).with_queued_press(u64::MAX),
             );
         }
         let gesture = GestureId(10);

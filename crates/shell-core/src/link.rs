@@ -1403,6 +1403,7 @@ impl LinkHandle {
         let mut link = Self::detached();
         link.recording = Some(recording);
         link.shared.generations.store(1, Ordering::Release);
+        link.shared.voice_ready_at.store(1, Ordering::Release);
         link.shared.legacy_voice.store(1, Ordering::Release);
         // Session 1's output, as a normal launch has it: none, so a hold's claim can be granted.
         link.shared.output.begin_quiet(1);
