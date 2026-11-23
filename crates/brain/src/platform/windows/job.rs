@@ -30,6 +30,8 @@ use windows_sys::Win32::System::Threading::{
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
+use crate::platform::ChildPipes;
+
 /// Exit code given to processes a job terminates.
 const TERMINATED: u32 = 1;
 /// How long [`Job::terminate`] waits for the job to empty.
@@ -252,15 +254,6 @@ impl Job {
             pid: info.dwProcessId,
         })
     }
-}
-
-/// The parent's non-inheritable ends of a helper's stdin and stdout pipes.
-#[derive(Debug)]
-pub struct ChildPipes {
-    /// Writes to the child's stdin.
-    pub stdin: File,
-    /// Reads the child's stdout.
-    pub stdout: File,
 }
 
 fn anonymous_pipe() -> io::Result<(File, File)> {
