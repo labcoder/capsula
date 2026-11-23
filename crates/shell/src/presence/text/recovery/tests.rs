@@ -470,7 +470,7 @@ fn the_composer_renders_only_the_core_notice_and_a_sent_turn_clears_the_refusal(
             .expect("recovery notice");
         (
             owner.text.as_ref().expect("typing fixture").window,
-            retained.clone(),
+            std::rc::Rc::clone(retained),
         )
     });
     let drawn = |cx: &mut TestAppContext| {
