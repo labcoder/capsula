@@ -648,6 +648,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::CredentialsUnavailable => "error-credentials-unavailable",
         ErrorKey::RevocationBacklog => Text::AccountBacklogLead.id(),
         ErrorKey::TrustStoreUnavailable => "error-trust-store-unavailable",
+        ErrorKey::UnsupportedPlatform => "error-unsupported-platform",
         ErrorKey::PlanNotEnabled => "error-plan-not-enabled",
         ErrorKey::AccountMisconfigured => "error-account-misconfigured",
         ErrorKey::SignOutNotDurable => "error-sign-out-not-durable",

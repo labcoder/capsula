@@ -735,7 +735,7 @@ impl AccountState {
     fn end_attempt(&mut self, key: ErrorKey, effects: &mut Vec<Effect>) {
         self.live = None;
         let action = match key {
-            ErrorKey::AccountMisconfigured => None,
+            ErrorKey::AccountMisconfigured | ErrorKey::UnsupportedPlatform => None,
             // An attempt that ended has nothing for Retry to rerun, so a refused registration or
             // pending flag offers a new sign-in.
             ErrorKey::RevocationBacklog => Some(Action::Retry),
@@ -861,6 +861,9 @@ fn classify(failure: &ExchangeError) -> (bool, ErrorKey) {
         ExchangeError::Http(HttpError::TrustStoreUnavailable) => {
             (false, ErrorKey::TrustStoreUnavailable)
         }
+        ExchangeError::Http(HttpError::UnsupportedPlatform) => {
+            (false, ErrorKey::UnsupportedPlatform)
+        }
         ExchangeError::Http(HttpError::Timeout | HttpError::Transport) => {
             (true, ErrorKey::AccountOffline)
         }
@@ -874,6 +877,7 @@ fn classify(failure: &ExchangeError) -> (bool, ErrorKey) {
 
 fn identity_key(failure: IdentityError) -> ErrorKey {
     match failure {
+        IdentityError::Http(HttpError::UnsupportedPlatform) => ErrorKey::UnsupportedPlatform,
         IdentityError::Http(HttpError::Timeout | HttpError::Transport | HttpError::Connect) => {
             ErrorKey::AccountOffline
         }

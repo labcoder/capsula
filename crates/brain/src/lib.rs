@@ -112,6 +112,9 @@ pub enum BrainError {
     /// The account's credential thread couldn't be started.
     #[error("can't start the credential thread")]
     Accounts(#[source] io::Error),
+    /// The build has no native adapter for trust roots.
+    #[error(transparent)]
+    NativeTrust(#[from] platform::TrustRootsError),
     /// The model connection's TLS setup failed.
     #[error("can't set up the model connection")]
     Model(#[source] connections::http_client::HttpError),
@@ -249,7 +252,7 @@ async fn run_admitted(
     let claude_on = config.claude_code_enabled();
     tracing::info!(enabled = claude_on, "Claude Code setting");
     // Before the capability is stored, so its write never overlaps the vault's first reads.
-    let (account, vault_held) = accounts().map_err(BrainError::Accounts)?;
+    let (account, vault_held) = accounts()?;
     config.count_in_use(&account.view(), high_water.1);
     let mut brain = Brain::new(
         store,
@@ -352,10 +355,13 @@ fn start_screen(brain: &mut Brain, exe: PathBuf, jobs: &std::sync::Arc<Job>) {
 
 /// The account system on the real credential store, browser, clock and network, and the fact that
 /// its worker holds the session lock.
-fn accounts() -> io::Result<(
-    runtime::account::Accounts,
-    std::sync::Arc<std::sync::atomic::AtomicBool>,
-)> {
+fn accounts() -> Result<
+    (
+        runtime::account::Accounts,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ),
+    BrainError,
+> {
     use std::sync::Arc;
 
     use connections::account::Worker;
@@ -363,6 +369,9 @@ fn accounts() -> io::Result<(
     use connections::http_client::{self, SharedHttp};
     use connections::oauth::SystemBrowser;
 
+    if !platform::native_trust_supported() {
+        return Err(platform::TrustRootsError::Unsupported.into());
+    }
     let worker = Worker::system(Arc::new(SystemClock));
     let net = runtime::account::Net {
         http: Arc::new(|| http_client::build().map(SharedHttp::new)),
@@ -370,7 +379,10 @@ fn accounts() -> io::Result<(
         clock: Arc::new(SystemClock),
     };
     let held = worker.held();
-    Ok((runtime::account::Accounts::spawn(worker, net)?, held))
+    Ok((
+        runtime::account::Accounts::spawn(worker, net).map_err(BrainError::Accounts)?,
+        held,
+    ))
 }
 
 /// Claude Code's lane on the installed `claude.exe`; none when it can't start.

@@ -13,6 +13,7 @@ use super::messages::{self, MessagesBody};
 use super::models::{self, CatalogModel, CheckError};
 use super::sse_map::{Capture, StopReason};
 use super::tls::{AnthropicTls, RouteConnector};
+use crate::connections::http_client::HttpError;
 use crate::connections::model::Events;
 use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::ModelClient;
@@ -32,16 +33,21 @@ pub(crate) struct Transport {
 }
 
 impl Transport {
-    pub(crate) fn native() -> Option<Self> {
+    pub(crate) fn native() -> Result<Option<Self>, HttpError> {
         if !SERVE_ANTHROPIC_KEY {
-            return None;
+            return Ok(None);
         }
-        Some(Self {
-            connector: RouteConnector::Native(AnthropicTls::build().ok().map(Arc::new)),
+        let connector = match AnthropicTls::build() {
+            Ok(tls) => Some(Arc::new(tls)),
+            Err(HttpError::UnsupportedPlatform) => return Err(HttpError::UnsupportedPlatform),
+            Err(_) => None,
+        };
+        Ok(Some(Self {
+            connector: RouteConnector::Native(connector),
             catalog: Arc::new(Budget::from_var(LIVE_KEY_CATALOG_BUDGET_ENV)),
             messages: Arc::new(Budget::from_var(LIVE_KEY_MESSAGES_BUDGET_ENV)),
             refused: None,
-        })
+        }))
     }
 
     #[cfg(test)]

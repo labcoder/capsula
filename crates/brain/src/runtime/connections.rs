@@ -234,7 +234,10 @@ impl Connections {
 
     pub(super) fn configure_transport(&mut self) {
         if self.transport.is_none() {
-            self.transport = Transport::native();
+            match Transport::native() {
+                Ok(transport) => self.transport = transport,
+                Err(error) => tracing::debug!(%error, "the native Anthropic route is unavailable"),
+            }
         }
     }
 

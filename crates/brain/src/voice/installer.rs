@@ -394,6 +394,7 @@ impl Installer {
             }
             _ if !entry.available => None,
             Phase::Idle => Some(Rest::Idle),
+            Phase::Failed(ErrorKey::UnsupportedPlatform) => None,
             Phase::Failed(key) => Some(Rest::Failed(key)),
             _ => None,
         };
@@ -967,6 +968,7 @@ impl Entry {
 
 fn fetch_key(error: DownloadError) -> ErrorKey {
     match error {
+        DownloadError::UnsupportedPlatform => ErrorKey::UnsupportedPlatform,
         DownloadError::NoSpace { .. } => ErrorKey::VoiceNoSpace,
         DownloadError::Refused
         | DownloadError::Timeout

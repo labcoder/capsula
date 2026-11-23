@@ -48,6 +48,17 @@ const SIGNED_OUT: AccountView = AccountView::SignedOut {
 };
 
 #[cfg(not(windows))]
+#[test]
+fn native_account_subsystem_refuses_before_starting_without_a_trust_adapter() {
+    assert!(matches!(
+        crate::accounts(),
+        Err(crate::BrainError::NativeTrust(
+            crate::platform::TrustRootsError::Unsupported
+        ))
+    ));
+}
+
+#[cfg(not(windows))]
 #[tokio::test]
 async fn native_account_startup_refuses_unsupported_without_publishing_retry() {
     use crate::platform::credential::CredentialStoreError;

@@ -120,6 +120,8 @@ pub enum ErrorKey {
     /// Claude Code's connection changed after a screenshot may have reached it, so the answer
     /// was stopped.
     ScreenConnectionChanged,
+    /// The platform has no native adapter for the requested operation.
+    UnsupportedPlatform,
 }
 
 macro_rules! catalog {
@@ -194,6 +196,7 @@ impl ErrorKey {
         ScreenPictureStopped,
         ScreenConnectionChanged,
         ConnectionNeeded,
+        UnsupportedPlatform,
     }
 }
 

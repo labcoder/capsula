@@ -116,6 +116,7 @@ struct Catalog {
     listing: Option<Listing>,
     /// The shell hasn't heard the current list.
     unsent: bool,
+    unsupported: bool,
 }
 
 impl Catalog {
@@ -309,6 +310,7 @@ impl Accounts {
         let mut frames = self.apply(effects);
         let catalog = &self.catalog;
         if catalog.usable
+            && !catalog.unsupported
             && catalog.read.is_none()
             && catalog.listing.is_none()
             && (ask || !was_usable)
@@ -345,6 +347,7 @@ impl Accounts {
             }
             Err(None) => Vec::new(),
             Err(Some(error)) => {
+                self.catalog.unsupported |= error.key() == ErrorKey::UnsupportedPlatform;
                 let unavailable = error.key() == ErrorKey::PlanUnavailable;
                 let mut frames = vec![ControlToShell::Error(error)];
                 if unavailable {
