@@ -1,4 +1,4 @@
-//! The operating system behind small, safe functions. Windows only for now.
+//! Small, safe operating-system adapters. The native runtime is still Windows only.
 
 pub mod credential;
 
@@ -8,6 +8,8 @@ pub use windows::{WindowProbe, WindowSample, WindowSession};
 mod connected_shell;
 #[cfg(not(windows))]
 mod fs;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(any(test, windows))]
 mod model_files;
 mod pipe;
@@ -15,7 +17,7 @@ mod process;
 mod protected;
 mod runtime_admission;
 mod session_lock;
-mod shell_process;
+pub(crate) mod shell_process;
 mod trust_roots;
 
 #[cfg(any(test, windows))]

@@ -20,6 +20,15 @@ distinguish this by exit status 69. The shell's detached launcher doesn't observ
 this does not add a non-Windows shell launch path. The library's brain, bridge and screen entries
 return an unsupported error, while fixture tests still exercise shared policy.
 
+The dormant Darwin parent watch supplies exit evidence for a future parent-bound session. It
+registers just the original parent, verifies the kernel's receipt and checks lineage again
+before arming. Only that registration's `NOTE_EXIT` proves exit. If lineage changes without
+that note, the watcher polls once more and reports unconfirmed loss if no exit note arrives.
+It blocks in the kernel between one-second lineage checks, and a stop pipe lets an abandoned
+in-process attempt wake and join it. `ShellProcess::loss()` gives a receiver for the retained
+verdict on Mac and no receiver on Windows or Linux. Transport EOF doesn't change the verdict,
+and this watch doesn't enable Mac startup or shutdown.
+
 Each process starts its scene dropper before accepting scene data and fails startup if the
 thread cannot start. Retirement never joins that thread from the shell's UI.
 
