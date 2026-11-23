@@ -6,6 +6,7 @@ use std::{
 };
 
 use gpui_kit::{AppContext as _, Context, IntoElement, Render, Styled as _, Window, canvas};
+use kumochi_protocol::message::MaxFrameRate;
 use kumochi_scene::{
     display::{Paint, PaintWork, Prim},
     geom::{Affine, Rect, Vec2},
@@ -14,8 +15,8 @@ use kumochi_scene::{
 };
 
 use super::{
-    configure_surface, line::on_next_frame, options, paint_cache::PaintScene, paint_geometry,
-    paint_stroke::Scratch, scaled,
+    configure_surface, frame_rate::FrameLoop, line::on_next_frame, options,
+    paint_cache::PaintScene, paint_geometry, paint_stroke::Scratch, scaled,
 };
 use crate::platform::{self, PresenceSurface};
 
@@ -54,7 +55,7 @@ fn color() -> Paint {
     clippy::too_many_lines,
     reason = "manual probe counts and coordinates are bounded by 32768"
 )]
-fn case(kind: Kind, candidate: usize) -> Case {
+fn case_primitives(kind: Kind, candidate: usize) -> Vec<(Prim, Affine)> {
     let mut primitives = Vec::new();
     if matches!(kind, Kind::Overlap) {
         primitives.push((
@@ -157,6 +158,14 @@ fn case(kind: Kind, candidate: usize) -> Case {
             primitives.push((prim.clone(), Affine::pose(64.0, 0.01, Vec2::new(0.0, 0.0))));
         }
     }
+    primitives
+}
+
+fn case(kind: Kind, candidate: usize) -> Case {
+    stage_case(kind, candidate, case_primitives(kind, candidate))
+}
+
+fn stage_case(kind: Kind, candidate: usize, primitives: Vec<(Prim, Affine)>) -> Case {
     let work = primitives
         .iter()
         .fold(PaintWork::default(), |sum, (prim, _)| {
@@ -193,12 +202,21 @@ struct Probe {
     lifetime: Duration,
     rows: Rc<RefCell<Vec<Row>>>,
     scratch: Rc<RefCell<Scratch>>,
+    frames: FrameLoop,
+    rate: Option<MaxFrameRate>,
 }
 
 impl Probe {
     fn frame(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if self.epoch.elapsed() < self.lifetime {
-            cx.notify();
+        let now = Instant::now();
+        if now.duration_since(self.epoch) < self.lifetime {
+            if self.rate.is_none_or(|rate| {
+                self.frames
+                    .frame(now, rate, window.refresh_interval(cx))
+                    .is_some()
+            }) {
+                cx.notify();
+            }
             on_next_frame(window, cx.weak_entity(), Self::frame);
         }
     }
@@ -327,7 +345,7 @@ fn probe_candidates_are_bounded_and_exercise_all_three_charges() {
     clippy::too_many_lines,
     reason = "one bounded native probe setup and content-free output"
 )]
-fn run(cases: Vec<Case>, repeats: usize) {
+fn run(cases: Vec<Case>, repeats: usize, rate: Option<MaxFrameRate>) {
     let timeout = std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(480));
         std::process::exit(124);
@@ -361,6 +379,8 @@ fn run(cases: Vec<Case>, repeats: usize) {
                     lifetime,
                     rows,
                     scratch: Rc::new(RefCell::new(Scratch::new())),
+                    frames: FrameLoop::default(),
+                    rate,
                 })
             })
             .expect("diagnostic window");
@@ -428,14 +448,14 @@ fn run(cases: Vec<Case>, repeats: usize) {
         );
     }
     println!(
-        "diagnostic-only paint callback timing and allocation; no activation, StepShown, RSS or presentation-latency claim"
+        "diagnostic-only paint callback timing and allocation cap={rate:?}; no activation, StepShown, RSS or presentation-latency claim"
     );
 }
 
 #[test]
 #[ignore = "manual input-free five-second harness dry run; its numbers do not count"]
 fn smoke_primary_paint_work() {
-    run(vec![case(Kind::Mixed, 512)], 1);
+    run(vec![case(Kind::Mixed, 512)], 1, None);
 }
 
 #[expect(
@@ -443,11 +463,10 @@ fn smoke_primary_paint_work() {
     clippy::cast_precision_loss,
     reason = "bounded diagnostic coordinates"
 )]
-fn small_primitives(candidate: usize) -> Case {
-    let mut mixed = case(Kind::Dash, candidate);
-    mixed.kind = Kind::Mixed;
+fn small_primitives(candidate: usize, rect_placement: f32) -> Case {
+    let mut primitives = case_primitives(Kind::Dash, candidate);
     for index in 0..candidate / 3 {
-        mixed.primitives.push((
+        primitives.push((
             Prim::Fill {
                 points: Arc::from([
                     Vec2::new(0.0, 0.0),
@@ -464,7 +483,7 @@ fn small_primitives(candidate: usize) -> Case {
         ));
     }
     for index in 0..candidate / 5 {
-        mixed.primitives.push((
+        primitives.push((
             Prim::Rect {
                 rect: Rect {
                     origin: Vec2::new(0.0, 0.0),
@@ -475,7 +494,7 @@ fn small_primitives(candidate: usize) -> Case {
                 border: Some((color(), 1.0)),
             },
             Affine::pose(
-                1.0,
+                rect_placement,
                 0.01,
                 Vec2::new(
                     (index % 100) as f32 * 20.0,
@@ -484,27 +503,51 @@ fn small_primitives(candidate: usize) -> Case {
             ),
         ));
     }
-    mixed.work = mixed
-        .primitives
-        .iter()
-        .fold(PaintWork::default(), |sum, (prim, _)| {
-            sum + PaintWork::of(std::slice::from_ref(prim), MAX_COMPOSED_SCALE)
-        });
-    mixed
+    stage_case(Kind::Mixed, candidate, primitives)
 }
 
 #[test]
 fn the_small_primitive_control_spends_the_three_budgets_independently() {
-    let mixed = small_primitives(512);
-    assert_eq!(mixed.primitives.len(), 1 + 170 + 102);
-    assert_eq!(
-        (
-            mixed.work.dash_pieces,
-            mixed.work.fill_vertices,
-            mixed.work.outline_points
-        ),
-        (512, 510, 510)
-    );
+    for placement in [1.0_f32, 2.0] {
+        let mixed = small_primitives(512, placement);
+        assert_eq!(mixed.primitives.len(), 1 + 170 + 102);
+        let (index, (_, pose)) = mixed
+            .primitives
+            .iter()
+            .enumerate()
+            .find(|(_, (prim, _))| matches!(prim, Prim::Fill { .. }))
+            .expect("a diagnostic triangle");
+        let handle = kumochi_scene::Handle::new(1, 0).expect("a diagnostic handle");
+        let path = mixed
+            .cache
+            .fill(handle, index, *pose)
+            .expect("a staged diagnostic fill")
+            .expect("a nonempty diagnostic fill");
+        assert_eq!(path.vertices.len(), 3);
+        for (_, pose) in mixed
+            .primitives
+            .iter()
+            .filter(|(prim, _)| matches!(prim, Prim::Rect { .. }))
+        {
+            assert_eq!(
+                super::paint_paths::scale(*pose).to_bits(),
+                placement.to_bits()
+            );
+            assert_ne!(
+                pose.0[1].to_bits(),
+                0.0_f32.to_bits(),
+                "rects take the fallback"
+            );
+        }
+        assert_eq!(
+            (
+                mixed.work.dash_pieces,
+                mixed.work.fill_vertices,
+                mixed.work.outline_points
+            ),
+            (512, 510, 510)
+        );
+    }
 }
 
 #[expect(
@@ -587,9 +630,19 @@ fn measure_primary_paint_work_followup() {
     let mut cases = Vec::new();
     for count in [256, 1024, 512] {
         cases.push(case(Kind::Mixed, count));
-        cases.push(small_primitives(count));
+        cases.push(small_primitives(count, 1.0));
     }
-    run(cases, REPEATS);
+    run(cases, REPEATS, None);
+}
+
+#[test]
+#[ignore = "manual quiet-Rez placement-1 and placement-2 small-rect fallback at a 144 cap"]
+fn measure_primary_paint_work_small_rects_at_full_rate() {
+    run(
+        vec![small_primitives(512, 1.0), small_primitives(512, 2.0)],
+        REPEATS,
+        Some(MaxFrameRate::cap(144).expect("a 144-fps cap")),
+    );
 }
 
 #[test]
@@ -628,5 +681,5 @@ fn measure_primary_paint_work_candidates() {
         cases.push(mixed);
     }
     measure_preparation_work();
-    run(cases, REPEATS);
+    run(cases, REPEATS, None);
 }

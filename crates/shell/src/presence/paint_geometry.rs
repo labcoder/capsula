@@ -4,6 +4,7 @@ use gpui_kit::{FillOptions, FillRule, Path, Pixels};
 use kumochi_scene::{
     display::{Contour, Paint, Prim, fallback_corner_segments},
     geom::{Affine, Rect, Vec2},
+    limits::{MAX_GLOBAL_FILL_VERTICES, MAX_GLOBAL_OUTLINE_POINTS},
 };
 use lyon::{
     path::PathEvent,
@@ -18,6 +19,51 @@ use super::{
 
 /// A primitive's fill and stroke paths, each with its paint.
 pub(super) type PrimPaths = [Option<(Path<Pixels>, Paint)>; 2];
+
+const RECT_FILL_POINTS: usize = (MAX_GLOBAL_FILL_VERTICES - 1) / 4 * 4;
+const RECT_BORDER_POINTS: usize = (MAX_GLOBAL_OUTLINE_POINTS - 1) / 4 * 4 * 2 + 2;
+const RECT_EVENT_LIMIT: usize = {
+    let fill = RECT_FILL_POINTS + 1;
+    let border = RECT_BORDER_POINTS + 1;
+    if fill > border { fill } else { border }
+};
+
+const RECT_VERTEX_LIMIT: usize = 4_096;
+const RECT_INDEX_LIMIT: usize = 12_288;
+
+/// The accounting allowance checked on measured fixtures, not a Lyon capacity bound.
+pub(super) const FILL_SCRATCH_BYTES: usize = 2 * 1024 * 1024;
+
+pub(super) struct FillScratch {
+    tessellator: FillTessellator,
+    buffers: VertexBuffers<lyon::math::Point, u16>,
+}
+
+impl FillScratch {
+    pub(super) fn new() -> Self {
+        Self {
+            tessellator: FillTessellator::new(),
+            buffers: VertexBuffers::with_capacity(0, 0),
+        }
+    }
+
+    fn build(
+        &mut self,
+        events: impl Iterator<Item = PathEvent>,
+        options: FillOptions,
+    ) -> Result<(), BuildError> {
+        self.buffers.clear();
+        self.tessellator
+            .tessellate(
+                events,
+                &options,
+                &mut BuffersBuilder::new(&mut self.buffers, |vertex: FillVertex<'_>| {
+                    vertex.position()
+                }),
+            )
+            .map_err(|_| BuildError::Fill)
+    }
+}
 
 pub(super) fn paths(
     scratch: &mut Scratch,
@@ -67,8 +113,13 @@ pub(super) fn paths(
             let (radius, segments) = corners(*rect, *radius, scale(transform), charge)?;
             let outer = Rounded::new(*rect, radius, segments);
             if let Some(paint) = fill {
-                paths[0] =
-                    filled(outer.iter(), FillRule::NonZero, transform)?.map(|path| (path, *paint));
+                paths[0] = filled(
+                    &mut scratch.fill,
+                    outer.iter(),
+                    FillRule::NonZero,
+                    transform,
+                )?
+                .map(|path| (path, *paint));
             }
             if let Some((paint, width)) = border {
                 let half = rect.size.x.min(rect.size.y) / 2.0;
@@ -84,15 +135,21 @@ pub(super) fn paths(
                         segments,
                     );
                     let path = if draw < 1.0 {
-                        sector(outer, inner, draw, transform)?
+                        sector(&mut scratch.fill, outer, inner, draw, transform)?
                     } else if width < half {
                         tessellated(
+                            &mut scratch.fill,
                             events(outer.iter()).chain(events(inner.iter())),
                             FillRule::EvenOdd,
                             transform,
                         )?
                     } else {
-                        filled(outer.iter(), FillRule::NonZero, transform)?
+                        filled(
+                            &mut scratch.fill,
+                            outer.iter(),
+                            FillRule::NonZero,
+                            transform,
+                        )?
                     };
                     paths[1] = path.map(|path| (path, *paint));
                 }
@@ -150,6 +207,7 @@ impl Rounded {
     reason = "a and b bound the outer edge, c and d the inner edge, and t the revealed fraction"
 )]
 fn sector(
+    scratch: &mut FillScratch,
     outer: Rounded,
     inner: Rounded,
     draw: f32,
@@ -175,14 +233,14 @@ fn sector(
                 .take(index + 1)
                 .chain([a + (b - a) * t, c + (d - c) * t])
                 .chain(inner.iter().take(index + 1).rev());
-            return filled(contour, FillRule::NonZero, transform);
+            return filled(scratch, contour, FillRule::NonZero, transform);
         }
         left -= span;
     }
     Ok(None)
 }
 
-fn events(points: impl Iterator<Item = Vec2> + Clone) -> impl Iterator<Item = PathEvent> {
+fn events(points: impl Iterator<Item = Vec2> + Clone) -> impl Iterator<Item = PathEvent> + Clone {
     let points = points.map(|at| lyon::math::point(at.x, at.y));
     let first = points.clone().next();
     let last = points.clone().last();
@@ -204,39 +262,45 @@ fn events(points: impl Iterator<Item = Vec2> + Clone) -> impl Iterator<Item = Pa
 }
 
 fn filled(
+    scratch: &mut FillScratch,
     points: impl Iterator<Item = Vec2> + Clone,
     rule: FillRule,
     transform: Affine,
 ) -> Result<Option<Path<Pixels>>, BuildError> {
-    tessellated(events(points), rule, transform)
+    tessellated(scratch, events(points), rule, transform)
 }
 
 fn tessellated(
+    scratch: &mut FillScratch,
     events: impl Iterator<Item = PathEvent>,
     rule: FillRule,
     transform: Affine,
 ) -> Result<Option<Path<Pixels>>, BuildError> {
-    // shortcut: lyon fill allocates per build (OSC-249 exception, counted and reported); revisit after D1 (OSC-174)
-    let _fill = paint_phase::enter(Phase::LyonFill);
-    let buffers = {
-        let mut buffers = VertexBuffers::<lyon::math::Point, u16>::new();
-        FillTessellator::new()
-            .tessellate(
-                events,
-                &FillOptions::default().with_fill_rule(rule),
-                &mut BuffersBuilder::new(&mut buffers, |vertex: FillVertex<'_>| vertex.position()),
-            )
-            .map_err(|_| BuildError::Fill)?;
-        buffers
+    let fill = paint_phase::enter(Phase::LyonFill);
+    let options = FillOptions::default().with_fill_rule(rule);
+    let bounded = events
+        .size_hint()
+        .1
+        .is_some_and(|count| count <= RECT_EVENT_LIMIT);
+    if let Err(error) = scratch.build(events, options) {
+        *scratch = FillScratch::new();
+        return Err(error);
+    }
+    let keep = bounded
+        && scratch.buffers.vertices.len() <= RECT_VERTEX_LIMIT
+        && scratch.buffers.indices.len() <= RECT_INDEX_LIMIT;
+    let path = {
+        let _app = paint_phase::enter(Phase::App);
+        let triangles = scratch.buffers.indices.iter().map(|index| {
+            let at = scratch.buffers.vertices[usize::from(*index)];
+            Vec2::new(at.x, at.y)
+        });
+        super::paint_paths::placed(triangles, transform)
     };
-    let app = paint_phase::enter(Phase::App);
-    let triangles = buffers.indices.iter().map(|index| {
-        let at = buffers.vertices[usize::from(*index)];
-        Vec2::new(at.x, at.y)
-    });
-    let path = super::paint_paths::placed(triangles, transform);
-    drop(app);
-    drop(buffers);
+    if !keep {
+        *scratch = FillScratch::new();
+    }
+    drop(fill);
     Ok(path)
 }
 
