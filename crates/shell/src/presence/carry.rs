@@ -7,18 +7,11 @@ use gpui_kit::{Context, SharedString, Task};
 use kumochi_shell_core::presence::carry::{Candidates, Event as CarryEvent, Sample, decide};
 
 use super::drag::{End, Generation};
-use super::perch::{Extents, WindowTarget, drop_target};
+use super::perch::{WindowTarget, drop_target};
 use super::{Presence, diagnostics};
 use crate::platform::host::{Label, WatchGen};
 use crate::platform::{self, HostWatch, PresenceEvent};
 use crate::strings::{Strings, Text};
-
-/// The perched body's side and the task card, in logical pixels.
-// shortcut: the card is the peek's size; C2b-3 sizes it from the text panel it opens.
-const EXTENTS: Extents = Extents {
-    body: 56,
-    card: [380, 124],
-};
 
 /// What Presence holds of a carry. It has no `Debug`, since the label is screen text.
 #[derive(Default)]
@@ -124,7 +117,6 @@ impl Presence {
                 |this| &mut this.carry.candidates,
                 || query(at),
                 from,
-                EXTENTS,
                 |this| this.drain(cx),
             );
             // shortcut: C2b-3's perch takes a published placement; until then every drop
