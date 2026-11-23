@@ -6,9 +6,11 @@ use std::os::windows::ffi::OsStringExt as _;
 use std::os::windows::io::{
     AsHandle as _, AsRawHandle, BorrowedHandle, FromRawHandle as _, OwnedHandle,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::net::windows::named_pipe::{
+    ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
+};
 use windows_sys::Win32::Foundation::{
     ERROR_SUCCESS, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
@@ -29,12 +31,37 @@ use windows_sys::Win32::System::Threading::{
     QueryFullProcessImageNameW, WaitForSingleObject,
 };
 
+use crate::platform::{ClientRefused, Instance, Job};
+
 /// The brain's end of a pipe.
 pub type PipeServer = NamedPipeServer;
 
-/// A test's client end of a pipe.
-#[cfg(test)]
-pub(crate) type PipeClient = tokio::net::windows::named_pipe::NamedPipeClient;
+pub(crate) type PipeClient = NamedPipeClient;
+
+pub(crate) fn open_pipe(name: &str) -> io::Result<PipeClient> {
+    ClientOptions::new().open(name)
+}
+
+/// Holds the checked client process for the lifetime of its bridge session.
+pub(crate) fn bridge_peer(
+    server: &PipeServer,
+    job: &Job,
+    expected: &Path,
+) -> Result<OwnedHandle, ClientRefused> {
+    let query = |_| ClientRefused::Query;
+    let process = client_process(server).map_err(query)?;
+    if has_exited(process.as_handle()).map_err(query)? {
+        return Err(ClientRefused::Exited);
+    }
+    let image = process_image(process.as_handle()).map_err(query)?;
+    if !image.as_os_str().eq_ignore_ascii_case(expected.as_os_str()) {
+        return Err(ClientRefused::NotOurImage);
+    }
+    if !job.contains(process.as_handle()).map_err(query)? {
+        return Err(ClientRefused::NotInJob);
+    }
+    Ok(process)
+}
 
 /// A connected owner-only pipe and its client, under a name no running brain uses, for tests
 /// over a real pipe.
@@ -52,17 +79,6 @@ pub(crate) async fn test_pair(name: &str) -> io::Result<(NamedPipeServer, PipeCl
     let client = tokio::net::windows::named_pipe::ClientOptions::new().open(&name)?;
     server.connect().await?;
     Ok((server, client))
-}
-
-/// Whether a pipe instance is the first with its name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Instance {
-    /// Fails if any process already holds the name.
-    First,
-    /// Replaces an instance this process holds, so the name is never free in between.
-    Next,
-    /// The first and only instance: the OS refuses any later one, whatever its flags.
-    Only,
 }
 
 /// Creates an instance of `name`, refusing remote clients and every other user. At most two

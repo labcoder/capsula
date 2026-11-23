@@ -442,19 +442,27 @@ mod tests {
     use std::path::PathBuf;
 
     use kumochi_protocol::frame::{self, FrameError, Pipe};
+    #[cfg(windows)]
     use kumochi_protocol::message::{
-        AudioSession, CAPABILITY_LEN, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
-        Hello, Incarnation, IssueSession, Narration,
+        AudioSession, ControlToShell, DataToBrain, DataToShell, IssueSession, Narration,
     };
+    use kumochi_protocol::message::{CAPABILITY_LEN, ControlToBrain, Hello, Incarnation};
     use kumochi_protocol::{BUILD_ID, Secret};
 
     use tokio::io::AsyncWriteExt as _;
+    #[cfg(windows)]
     use tokio::net::windows::named_pipe::ClientOptions;
+    #[cfg(windows)]
     use tokio::sync::oneshot;
+    #[cfg(windows)]
     use tokio::time::timeout;
 
-    use super::{Identity, Pipes, Session, SessionError, Verdict, check_hello};
+    use super::{Identity, Verdict, check_hello};
+    #[cfg(windows)]
+    use super::{Pipes, Session, SessionError};
+    #[cfg(windows)]
     use crate::tap::Tap;
+    #[cfg(windows)]
     use crate::test_support::{self, Scratch};
 
     fn identity() -> Identity {
@@ -472,6 +480,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     async fn request_audio(
         control: &mut crate::platform::PipeClient,
         mode: AudioSession,
@@ -498,41 +507,42 @@ mod tests {
         }
     }
 
-    async fn register_queued_output(
-        control: &mut crate::platform::PipeClient,
-        session: IssueSession,
-    ) {
-        use kumochi_protocol::message::{DraftId, IssueOp, OutputGeneration};
-        let output = OutputGeneration(1);
-        for message in [
-            ControlToBrain::Issue {
-                session,
-                request: 2,
-                op: Box::new(IssueOp::CancelReview {
-                    draft: DraftId(1),
-                    review: 1,
-                }),
-            },
-            ControlToBrain::QueuedAudioOutput(24_000, output, Narration::Plain),
-        ] {
-            control
-                .write_all(&frame::encode(&message, Pipe::Control).unwrap())
-                .await
-                .unwrap();
-        }
-        loop {
-            let message = super::read::<ControlToShell>(control, Pipe::Control)
-                .await
-                .unwrap()
-                .expect("the reserved issue session was accepted");
-            if message == ControlToShell::QueuedAudioRegistered(output) {
-                return;
-            }
-        }
-    }
-
+    #[cfg(windows)]
     #[tokio::test]
     async fn paired_handshake_accepts_only_matching_authenticated_legs() {
+        async fn register_queued_output(
+            control: &mut crate::platform::PipeClient,
+            session: IssueSession,
+        ) {
+            use kumochi_protocol::message::{DraftId, IssueOp, OutputGeneration};
+            let output = OutputGeneration(1);
+            for message in [
+                ControlToBrain::Issue {
+                    session,
+                    request: 2,
+                    op: Box::new(IssueOp::CancelReview {
+                        draft: DraftId(1),
+                        review: 1,
+                    }),
+                },
+                ControlToBrain::QueuedAudioOutput(24_000, output, Narration::Plain),
+            ] {
+                control
+                    .write_all(&frame::encode(&message, Pipe::Control).unwrap())
+                    .await
+                    .unwrap();
+            }
+            loop {
+                let message = super::read::<ControlToShell>(control, Pipe::Control)
+                    .await
+                    .unwrap()
+                    .expect("the reserved issue session was accepted");
+                if message == ControlToShell::QueuedAudioRegistered(output) {
+                    return;
+                }
+            }
+        }
+
         let mut id = identity();
         id.shell_image = std::env::current_exe().unwrap();
         let scratch = Scratch::new("queued-hello-pair");
@@ -618,6 +628,7 @@ mod tests {
         brain.close().await;
     }
 
+    #[cfg(windows)]
     #[tokio::test]
     async fn reconnect_cannot_replay_a_data_leg_and_refusal_closes_both_pipes() {
         async fn connect(
@@ -719,6 +730,7 @@ mod tests {
         brain.close().await;
     }
 
+    #[cfg(windows)]
     #[tokio::test]
     async fn queued_data_hello_rejects_malformed_frames_and_times_out_partial_ones() {
         let mut id = identity();
@@ -788,6 +800,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reads_one_complete_frame_and_distinguishes_between_frames_from_truncation() {
+        let packet = frame::encode(&ControlToBrain::Quitting, Pipe::Control).unwrap();
+        for end in [0, 1, super::HEADER_LEN, packet.len()] {
+            let (mut tx, mut rx) = tokio::io::duplex(packet.len());
+            tx.write_all(&packet[..end]).await.unwrap();
+            drop(tx);
+            let read = super::read_sized::<ControlToBrain>(&mut rx, Pipe::Control).await;
+            match end {
+                0 => assert!(matches!(read, Ok(None))),
+                cut if cut == packet.len() => {
+                    let (message, len) = read.unwrap().expect("one frame");
+                    assert!(matches!(message, ControlToBrain::Quitting));
+                    assert_eq!(len, packet.len() - super::HEADER_LEN);
+                    assert!(matches!(
+                        super::read::<ControlToBrain>(&mut rx, Pipe::Control).await,
+                        Ok(None)
+                    ));
+                }
+                _ => assert!(matches!(read, Err(FrameError::Truncated))),
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn creating_paired_native_pipes_refuses_without_transport() {
+        assert!(matches!(
+            super::Pipes::create(u32::MAX),
+            Err(super::IpcError::Create { pipe: Pipe::Control, source })
+                if source.kind() == std::io::ErrorKind::Unsupported
+        ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
     async fn a_mixed_build_is_refused_before_queued_staging_frames_are_decoded() {
         use kumochi_protocol::frame::{self, Pipe};
         use kumochi_protocol::message::{ConnectionOp, ControlToBrain, ControlToShell, KeyStageId};
@@ -847,6 +894,7 @@ mod tests {
         brain.close().await;
     }
 
+    #[cfg(windows)]
     #[tokio::test]
     async fn a_relaunched_shell_that_ends_before_connecting_counts_as_lost() {
         // A session id no real logon has, so the test never meets a running brain's pipes.
@@ -865,6 +913,7 @@ mod tests {
         assert!(launched.is_none(), "the ended shell isn't waited on again");
     }
 
+    #[cfg(windows)]
     #[tokio::test]
     async fn a_relaunch_that_never_started_a_shell_counts_as_lost() {
         let mut pipes =
@@ -885,6 +934,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[tokio::test(start_paused = true)]
     async fn a_brain_no_shell_reaches_gives_up() {
         let mut pipes =
@@ -898,6 +948,7 @@ mod tests {
         assert_eq!(session, Session::NoShell);
     }
 
+    #[cfg(windows)]
     #[tokio::test(start_paused = true)]
     async fn a_brain_waits_for_the_shell_it_relaunched() {
         let mut pipes =

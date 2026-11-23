@@ -5,14 +5,18 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::frame::{self, Pipe};
 use serde_json::{Value, json};
 use tokio::io::{AsyncWrite, AsyncWriteExt as _, DuplexStream};
+#[cfg(windows)]
 use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+#[cfg(windows)]
+use super::connect;
 use super::id::{JsonRpcId, MAX_STRING_ID};
 use super::stdio::{Body, Incoming, Line, LineReader, RpcError, classify, reply};
-use super::wire::{CHUNK, CallKey, Method, Reassembly, ToBrain, ToBridge, chunks};
-use super::{BridgeError, Input, MAX_INCOMING, MAX_REPLY, connect, relay, run};
+use super::wire::{CHUNK, CallKey, Method, ToBrain, ToBridge, chunks};
+use super::{BridgeError, Input, MAX_INCOMING, MAX_REPLY, relay, run};
+#[cfg(windows)]
 use crate::platform::{Instance, PipeServer, create_owner_only, test_pair};
 
 #[test]
@@ -163,19 +167,28 @@ fn a_line_of_exactly_the_cap_passes_and_one_over_is_refused_then_dropped() {
     assert_eq!(last, None);
 }
 
-/// The bridge's relay on one end of a real pipe, and the brain's end for the test to drive.
+/// The bridge's relay on a pipe pair (Windows) or an in-memory stream.
 struct Bridge {
     stdin: mpsc::Sender<Input>,
     /// Stdin's end as its reader would report it; kept open.
     _stdin_end: watch::Sender<bool>,
     stdout: mpsc::Receiver<Vec<u8>>,
+    #[cfg(windows)]
     brain: PipeServer,
+    #[cfg(not(windows))]
+    brain: DuplexStream,
     relay: JoinHandle<Result<(), BridgeError>>,
 }
 
 /// A bridge whose brain has said `Hello` with `remaining_ms` left.
 async fn bridge(name: &str, remaining_ms: u64) -> Bridge {
+    #[cfg(windows)]
     let (mut brain, client) = test_pair(name).await.expect("pipe pair");
+    #[cfg(not(windows))]
+    let (mut brain, client) = {
+        let _ = name;
+        tokio::io::duplex(64 * 1024)
+    };
     hello(&mut brain, remaining_ms).await;
     let (stdin, input) = mpsc::channel(16);
     let (stdin_end, ended) = watch::channel(false);
@@ -378,6 +391,7 @@ async fn the_deadline_fails_the_call_in_flight_and_ends_the_bridge() {
     ));
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_pipe_served_by_another_executable_is_refused() {
     let name = format!(
@@ -742,8 +756,10 @@ fn request_params_must_be_an_object_or_an_array() {
 }
 
 /// Stdout lines, sent to the test as they're written.
+#[cfg(windows)]
 struct Lines(std_mpsc::Sender<Vec<u8>>);
 
+#[cfg(windows)]
 impl Write for Lines {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.send(buf.to_vec()).unwrap_or_default();
@@ -755,44 +771,47 @@ impl Write for Lines {
     }
 }
 
-async fn read_capped_request(brain: &mut PipeServer, mut expected: Vec<u8>) -> CallKey {
-    let expected_key = CallKey(format!("m:s:{}", "61".repeat(MAX_STRING_ID)));
-    let mut params = Vec::new();
-    let mut exact = Reassembly::new(MAX_INCOMING);
-    let tail = expected.len() - 2 * CHUNK;
-    for (size, terminal) in [(CHUNK, false), (CHUNK, false), (tail, true)] {
-        let Some((
-            ToBrain::Request {
-                key,
-                method,
-                chunk,
-                last,
-            },
-            payload_len,
-        )) = crate::ipc::read_sized(brain, Pipe::Data)
-            .await
-            .expect("frame")
-        else {
-            panic!("a request");
-        };
-        assert!(payload_len <= Pipe::Data.max_payload());
-        assert_eq!(key, expected_key);
-        assert_eq!(method, Method::ToolsCall);
-        assert_eq!((chunk.len(), last), (size, terminal));
-        exact.push(&chunk);
-        params.extend(chunk);
-    }
-    assert_eq!(params, expected);
-    assert_eq!(chunks(&[]).collect::<Vec<_>>(), [(&[][..], true)]);
-    let padding = vec![b' '; MAX_INCOMING - expected.len()];
-    exact.push(&padding);
-    expected.extend(padding);
-    assert_eq!(exact.finish(), Ok(expected));
-    expected_key
-}
-
+#[cfg(windows)]
 #[test]
 fn lines_near_and_over_the_cap_go_through_the_real_reader_relay_and_pipe() {
+    use super::wire::Reassembly;
+
+    async fn read_capped_request(brain: &mut PipeServer, mut expected: Vec<u8>) -> CallKey {
+        let expected_key = CallKey(format!("m:s:{}", "61".repeat(MAX_STRING_ID)));
+        let mut params = Vec::new();
+        let mut exact = Reassembly::new(MAX_INCOMING);
+        let tail = expected.len() - 2 * CHUNK;
+        for (size, terminal) in [(CHUNK, false), (CHUNK, false), (tail, true)] {
+            let Some((
+                ToBrain::Request {
+                    key,
+                    method,
+                    chunk,
+                    last,
+                },
+                payload_len,
+            )) = crate::ipc::read_sized(brain, Pipe::Data)
+                .await
+                .expect("frame")
+            else {
+                panic!("a request");
+            };
+            assert!(payload_len <= Pipe::Data.max_payload());
+            assert_eq!(key, expected_key);
+            assert_eq!(method, Method::ToolsCall);
+            assert_eq!((chunk.len(), last), (size, terminal));
+            exact.push(&chunk);
+            params.extend(chunk);
+        }
+        assert_eq!(params, expected);
+        assert_eq!(chunks(&[]).collect::<Vec<_>>(), [(&[][..], true)]);
+        let padding = vec![b' '; MAX_INCOMING - expected.len()];
+        exact.push(&padding);
+        expected.extend(padding);
+        assert_eq!(exact.finish(), Ok(expected));
+        expected_key
+    }
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

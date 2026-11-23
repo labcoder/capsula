@@ -448,8 +448,6 @@ async fn a_reply_queued_before_a_core_only_revocation_never_leaves_the_listener(
     let id = launch.id();
     let until = Instant::now() + Duration::from_secs(60);
     assert!(bind_until(&mut brain, build, id, until));
-    let job = crate::platform::Job::new().expect("job");
-    let exe = std::env::current_exe().expect("test executable");
     let tools = [ToolSchema {
         name: "probe",
         description: "Echoes a word.",
@@ -457,8 +455,6 @@ async fn a_reply_queued_before_a_core_only_revocation_never_leaves_the_listener(
     }];
     let (calls, mut mailbox) = tokio::sync::mpsc::channel(1);
     let context = LaunchContext {
-        job: &job,
-        brain_exe: &exe,
         deadline: until.into(),
         tools: &tools,
         gate: launch.gate().clone(),
