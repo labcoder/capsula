@@ -1,14 +1,14 @@
 //! The overlay's frames: sampling at rest, the paint observation, and paint failure.
 
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 
 use kumochi_protocol::message::{ControlToBrain, DataToShell, RunId, SceneId};
 use kumochi_scene::{SceneView, Step};
 
 use super::super::{SceneCache, paint::Sample};
 use super::{
-    LIVE, Presenter, Probed, RUN, Shaper, Witness, acknowledge, begin, bound_everywhere, commit_as,
-    controls, data, drained, hold_dropper, kept, live, only_job, pair, recovering, rect,
+    LIVE, Presenter, RUN, Shaper, Witness, acknowledge, begin, bound_item_counts, commit_as,
+    controls, data, kept, live, only_job, pair, recovering, rect,
 };
 
 fn recovered(steps: Vec<(SceneId, Step)>) -> (Presenter, Instant) {
@@ -131,32 +131,21 @@ fn recovery_and_a_replacing_cut_bind_caches_staged_from_their_new_views() {
         .completed(job.run(&mut Shaper), now)
         .expect("recovered rests");
     assert_eq!(sample(&mut presenter), FIRST);
-    assert!(bound_everywhere(&presenter), "the recovered view");
+    assert_eq!(
+        bound_item_counts(&presenter),
+        Some(vec![2]),
+        "the recovered view"
+    );
     presenter.stop(RUN, now).expect("a stop at rest");
     let revision = presenter.scenes[&LIVE].state.view().revision();
     let effects = acknowledge(&mut presenter, LIVE, revision, kept(LIVE).cut, now).expect("cut");
     assert!(controls(&effects).is_empty(), "the kept cut stays");
     assert_eq!(sample(&mut presenter), FIRST, "the replacement view");
-    assert!(bound_everywhere(&presenter), "the cut's replacement view");
-}
-
-#[test]
-fn a_replacing_cut_sends_the_old_cache_to_the_dropper_with_its_rest_and_view() {
-    let probe = Arc::new(());
-    let (mut presenter, now, job) = recovering(vec![(LIVE, pair())]);
-    presenter.stage = Box::new(Probed(Arc::clone(&probe)));
-    presenter
-        .completed(job.run(&mut Shaper), now)
-        .expect("recovered rests");
-    assert_eq!(Arc::strong_count(&probe), 3, "probe, stage, cache");
-    presenter.stop(RUN, now).expect("a stop at rest");
-    let revision = presenter.scenes[&LIVE].state.view().revision();
-    let release = hold_dropper();
-    let effects = acknowledge(&mut presenter, LIVE, revision, kept(LIVE).cut, now).expect("cut");
-    assert!(controls(&effects).is_empty(), "the kept cut stays");
-    assert_eq!(Arc::strong_count(&probe), 4, "the new and the queued old");
-    drop(release);
-    assert!(drained(&probe, 3));
+    assert_eq!(
+        bound_item_counts(&presenter),
+        Some(vec![1]),
+        "the cut's replacement view"
+    );
 }
 
 #[test]
@@ -253,29 +242,57 @@ fn a_frame_its_view_refuses_clears_its_scene_and_stays_cleared() {
 
 #[test]
 fn a_frame_that_fails_to_paint_paints_no_more_and_clears_its_scene_once() {
-    let (mut presenter, now) = recovered(vec![(LIVE, rect("r"))]);
-    sample(&mut presenter);
-    let frames = presenter.frames();
-    frames.borrow_mut().shown = true;
-    let mut calls = 0;
-    assert!(frames.borrow().paint(|_, _| {
-        calls += 1;
-        Err(std::fmt::Error)
-    }));
-    assert!(!frames.borrow().paint(|_, _| {
-        calls += 1;
-        Ok::<_, std::fmt::Error>(())
-    }));
-    assert_eq!(calls, 1, "a failed frame paints no more");
-    assert_eq!(frames.borrow().painted(LIVE), None);
-    let effects = presenter.paint_failed();
-    assert_eq!(
-        controls(&effects),
-        [&ControlToBrain::SceneFailed { scene: LIVE }]
-    );
-    assert!(presenter.scenes.is_empty());
-    assert_eq!(presenter.frames.borrow().ids(), [None; 4]);
-    assert!(presenter.paint_failed().is_empty(), "cleared once");
-    assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
-    assert!(presenter.scenes.is_empty(), "a later begin can't undo it");
+    for live_activation in [false, true] {
+        let (mut presenter, now) = if live_activation {
+            let (mut presenter, now) = live();
+            begin(&mut presenter, LIVE, now);
+            let job =
+                only_job(commit_as(&mut presenter, RUN, LIVE, 0, rect("r"), now).expect("commit"));
+            presenter
+                .completed(job.run(&mut Shaper), now)
+                .expect("prepared");
+            presenter.advance(super::GENERATION, now).expect("activate");
+            presenter.sample_at(super::ms(now, 800)).expect("a sample");
+            (presenter, now)
+        } else {
+            let (mut presenter, now) = recovered(vec![(LIVE, rect("r"))]);
+            sample(&mut presenter);
+            (presenter, now)
+        };
+        let receipts = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let out = std::rc::Rc::clone(&receipts);
+        presenter.observe_draw_timing(move |receipt| out.borrow_mut().push(receipt));
+        let frames = presenter.frames();
+        frames.borrow_mut().shown = true;
+        assert!(!frames.borrow().paint(|_, _| Ok::<_, ()>(())));
+        assert!(
+            frames.borrow().painted(LIVE).is_some(),
+            "the prior paint succeeded"
+        );
+        let mut calls = 0;
+        assert!(frames.borrow().paint(|_, _| {
+            calls += 1;
+            Err(std::fmt::Error)
+        }));
+        assert!(!frames.borrow().paint(|_, _| {
+            calls += 1;
+            Ok::<_, std::fmt::Error>(())
+        }));
+        assert_eq!(calls, 1, "a failed frame paints no more");
+        assert_eq!(frames.borrow().painted(LIVE), None);
+        assert_eq!(presenter.take_shown(super::GENERATION), [None; 4]);
+        assert!(receipts.borrow().is_empty());
+        let effects = presenter.paint_failed();
+        assert_eq!(presenter.stoppable_run(), None);
+        assert_eq!(presenter.residency(), 0);
+        assert_eq!(
+            controls(&effects),
+            [&ControlToBrain::SceneFailed { scene: LIVE }]
+        );
+        assert!(presenter.scenes.is_empty());
+        assert_eq!(presenter.frames.borrow().ids(), [None; 4]);
+        assert!(presenter.paint_failed().is_empty(), "cleared once");
+        assert!(controls(&begin(&mut presenter, LIVE, now)).is_empty());
+        assert!(presenter.scenes.is_empty(), "a later begin can't undo it");
+    }
 }

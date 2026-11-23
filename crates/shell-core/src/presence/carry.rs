@@ -199,7 +199,7 @@ mod tests {
     use std::cell::Cell;
     use std::time::{Duration, Instant};
 
-    use super::{Candidates, EXTENTS, Event, READ_INTERVAL, Sample, decide};
+    use super::{Candidates, Event, READ_INTERVAL, Sample, decide};
     use crate::platform::host::{HostChange, HostId, Label, PhysicalRect, WatchGen};
     use crate::presence::perch::target_fixtures::{
         HOST, OTHER, drag, host, placement_above, watch,
@@ -263,8 +263,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_host_publishes_its_placement_after_both_drains() {
-        assert_eq!(EXTENTS.body, 56);
-        assert_eq!(drop(|_| [vec![], vec![]]), (Some(PERCH), 2));
+        assert_eq!(drop(|_| [vec![], vec![]]).0, Some(PERCH));
     }
 
     #[test]

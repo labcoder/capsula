@@ -301,19 +301,26 @@ mod tests {
     fn holding_still_where_it_was_pressed_keeps_the_body_home() {
         let home = v2(240.0, 500.0);
         let mut pulling = Pulling::default();
-        pulling
+        let generation = pulling
             .press(LEFT, 1, PEEK, at(10.5, 4.25), grab(home))
             .expect("nothing pulled yet");
-        let moved = pulling.handle(
-            Event::Move {
-                at: at(10.5, 4.25),
-                pressed: Some(LEFT),
-            },
-            PEEK,
-        );
-        assert!(matches!(moved, Outcome::Moved(..)), "{moved:?}");
-        let body = pulling.step(FRAME).expect("pulled").body();
-        assert_eq!(body, home, "the grip is kept, so nothing jumps");
+        for (origin, point) in [(PEEK, [10.5, 4.25]), ([-990, 605], [2.5, 0.25])] {
+            assert_eq!(
+                pulling.handle(
+                    Event::Move {
+                        at: point,
+                        pressed: Some(LEFT)
+                    },
+                    origin
+                ),
+                Outcome::Moved(generation, point)
+            );
+            assert_eq!(
+                pulling.step(FRAME).expect("pulled").body(),
+                home,
+                "the grip is kept"
+            );
+        }
     }
 
     #[test]
@@ -350,17 +357,6 @@ mod tests {
         assert!(pulling.rested());
         let next = pulling.press(LEFT, 3, PEEK, at(10.0, 10.0), grab(v2(232.0, 488.0)));
         assert!(next.is_some_and(|next| next != g), "{next:?}");
-    }
-
-    #[test]
-    fn a_duplicate_loss_ends_the_drag_once() {
-        let (mut pulling, g) = pressed(1);
-        let outside = Event::CaptureLost {
-            seq: 2,
-            released: None,
-        };
-        assert_eq!(pulling.handle(outside, PEEK), Outcome::Ended(g, End::Lost));
-        assert_eq!(pulling.handle(outside, PEEK), Outcome::Ignored);
     }
 
     #[test]

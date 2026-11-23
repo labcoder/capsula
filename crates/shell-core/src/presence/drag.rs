@@ -217,6 +217,8 @@ mod tests {
     #[test]
     fn the_voluntary_capture_change_leaves_the_release_to_end_it() {
         let (mut owner, g) = dragging(10);
+        assert_eq!(owner.reconcile(), Outcome::Ignored);
+        assert_eq!(owner.live(), Some(g));
         assert_eq!(owner.handle(lost(20, Some(LEFT))), Outcome::Ignored);
         assert_eq!(owner.live(), Some(g));
         assert_eq!(
@@ -242,25 +244,6 @@ mod tests {
     }
 
     #[test]
-    fn reconciling_a_drag_with_no_pending_loss_does_nothing() {
-        let (mut owner, g) = dragging(10);
-        assert_eq!(owner.reconcile(), Outcome::Ignored);
-        assert_eq!(owner.live(), Some(g));
-    }
-
-    #[test]
-    fn capture_stolen_from_outside_or_by_another_button_is_lost() {
-        let (mut owner, g) = dragging(10);
-        assert_eq!(owner.handle(lost(11, None)), Outcome::Ended(g, End::Lost));
-        let mut owner = DragOwner::default();
-        let g = owner.press(LEFT, 10).expect("no drag yet");
-        assert_eq!(
-            owner.handle(lost(11, Some(RIGHT))),
-            Outcome::Ended(g, End::Lost)
-        );
-    }
-
-    #[test]
     fn a_loss_ends_only_the_drag_it_was_emitted_during() {
         let (mut owner, first) = dragging(10);
         assert_eq!(
@@ -268,6 +251,7 @@ mod tests {
             Outcome::Ended(first, End::Lost),
             "emitted during the current drag"
         );
+        assert_eq!(owner.handle(lost(11, None)), Outcome::Ignored);
         let second = owner.press(LEFT, 13).expect("the first ended");
         assert_ne!(first, second);
         assert_eq!(
@@ -287,6 +271,10 @@ mod tests {
             "emitted during the second drag, drained during the third"
         );
         assert_eq!(owner.live(), Some(third));
+        assert_eq!(
+            owner.handle(lost(21, Some(RIGHT))),
+            Outcome::Ended(third, End::Lost)
+        );
     }
 
     #[test]
@@ -321,11 +309,14 @@ mod tests {
             },
             up(LEFT, 0.0),
             Event::Escape,
+            Event::Preempt,
             lost(5, None),
             Event::SourceClosed,
         ] {
             assert_eq!(owner.handle(event), Outcome::Ignored, "{event:?}");
         }
-        assert_eq!(owner.press(LEFT, 1), Some(Generation(1)));
+        assert_eq!(owner.reconcile(), Outcome::Ignored);
+        let (_, first) = dragging(1);
+        assert_eq!(owner.press(LEFT, 1), Some(first));
     }
 }
