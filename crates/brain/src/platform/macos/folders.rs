@@ -5,10 +5,12 @@ use std::path::PathBuf;
 
 use kumochi_protocol::constants;
 
+pub(crate) const DATA_ROOT: &str = "HOME";
+
 /// The per-user data candidate under `$HOME/Library/Application Support`, if HOME is absolute.
 #[must_use]
 pub fn data_dir() -> Option<PathBuf> {
-    data_dir_under(std::env::var_os("HOME"), constants::DATA_DIR)
+    data_dir_under(std::env::var_os(DATA_ROOT), constants::DATA_DIR)
 }
 
 /// Configuration and data share the same per-user Application Support candidate.
