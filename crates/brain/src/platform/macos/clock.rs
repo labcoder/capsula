@@ -143,7 +143,7 @@ mod tests {
                 .env(DEADLINE, stamp.to_string())
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
                 .spawn()
                 .expect("start the headless clock child")
         };
