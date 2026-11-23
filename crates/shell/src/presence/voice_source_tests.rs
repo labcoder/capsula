@@ -2268,6 +2268,55 @@ fn the_native_callback_reads_the_pointer_at_recognition_and_when_the_keys_come_u
 }
 
 #[gpui::test]
+fn a_queued_modifier_from_before_readiness_cannot_arm_a_new_hold(cx: &mut TestAppContext) {
+    use crate::link::fixture;
+    use kumochi_shell_core::platform::keyboard_ticks;
+
+    let (owner, _data, _controls) = ready(cx);
+    let stale = keyboard_ticks();
+    let pipe = fixture::attended("queued-before-ready");
+    let events = fixture::patient(pipe.events.clone());
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| {
+        this.link = pipe.handle.clone();
+        this.session = Some(session);
+    });
+    let fresh = keyboard_ticks() + 1;
+    let send = crate::platform::with_raw_modifiers(native(&owner, cx));
+    let now = Instant::now();
+    let press = |key, tick, at| {
+        send(
+            Event::Key {
+                key,
+                edge: Edge::Down,
+            },
+            EventTime::new(at).with_queued_press(tick),
+        );
+    };
+    for (index, ctrl, alt) in [(1, stale, stale), (2, stale, fresh), (3, fresh, fresh)] {
+        let at = now + Duration::from_secs(u64::from(index));
+        press(Key::LeftControl, ctrl, at);
+        press(Key::LeftAlt, alt, at);
+        press(Key::LeftControl, fresh, at);
+        send(Event::Deadline, after(at, 301));
+        if index == 3 {
+            assert!(
+                pipe.handle.input_is(GestureId(index)),
+                "the fresh chord can arm"
+            );
+        } else {
+            assert_eq!(
+                pipe.handle.microphone_gate().latest(),
+                0,
+                "a stale make or its repeat cannot arm"
+            );
+        }
+        chord(&send, Edge::Up, after(at, 400).instant);
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
 fn superseding_native_hold_returns_before_outbox_release_and_sends_cancel_first(
     cx: &mut TestAppContext,
 ) {

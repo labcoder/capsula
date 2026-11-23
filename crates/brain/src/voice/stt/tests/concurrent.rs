@@ -43,7 +43,7 @@ fn production_admission_refuses_live_replies_and_preserves_the_physical_slot_lim
     assert_eq!(harness.event(), Event::Decoding(2));
     drop(second);
     assert_eq!(decode(0, 3).err(), Some(HoldFailure::NotLoaded));
-    assert_eq!(harness.handle.admit_use(), Ok(1));
+    assert_eq!(harness.handle.admit_use().map(|(ask, _)| ask), Ok(1));
     let third = decode(1, 3).expect("one waiter while two stale calls still occupy slots");
     assert_eq!(harness.handle.admit_use(), Err(HoldFailure::Busy));
     assert_eq!(decode(1, 4).err(), Some(HoldFailure::Busy));

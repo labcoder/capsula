@@ -36,7 +36,7 @@ fn admitted_use_is_current_ready_not_busy_and_refreshes_the_existing_idle_clock(
             .unwrap();
     });
     let admitted_at = Instant::now();
-    assert_eq!(harness.handle.admit_use(), Ok(1));
+    assert_eq!(harness.handle.admit_use().map(|(ask, _)| ask), Ok(1));
     assert!(harness.handle.control.lock().idle_since >= admitted_at);
     assert!(harness.handle.current_use(1));
     assert!(!harness.handle.current_use(2));

@@ -11,7 +11,7 @@ use std::fmt;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
@@ -331,6 +331,11 @@ impl Session {
     /// Refuses every later send on this connection at once, without waiting, while its end runs
     /// elsewhere.
     pub fn close(&self) {
+        if !self.io.queued
+            && let Some(shared) = self.io.link.upgrade()
+        {
+            shared.close_legacy_voice(self.generation);
+        }
         self.closing.store(true, Ordering::Release);
     }
 
@@ -429,6 +434,7 @@ impl SessionIo {
 /// One connection's send endpoints, weak so a session the UI holds keeps no writer alive.
 #[derive(Debug)]
 struct SessionIo {
+    link: Weak<Shared>,
     tuning: ShellTuning,
     queued: bool,
     narrated: Option<Arc<narrated::Narrated>>,
@@ -637,6 +643,8 @@ struct Shared {
     generations: AtomicU64,
     /// The live Legacy pair whose tuning was accepted, or zero.
     legacy_voice: AtomicU64,
+    /// Native clock at the accepted tuning (Legacy) or registration acknowledgement (Queued).
+    voice_ready_at: AtomicU64,
     output: output::OutputOwner,
     narrated: bool,
     #[cfg(any(test, feature = "test-support"))]
@@ -662,6 +670,11 @@ impl Shared {
         let _previous =
             self.legacy_voice
                 .compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    fn abort_connection(&self, generation: u64, control: &PipeClient) {
+        self.close_legacy_voice(generation);
+        control.abort();
     }
 
     /// Ends a session's permit; the output owner sees it before any later acceptance.
@@ -842,7 +855,7 @@ impl Shared {
                 .try_send(ControlToBrain::GestureCancel { gesture })
                 .is_err()
         {
-            outbox.pipe.abort();
+            self.abort_connection(outbox.generation, &outbox.pipe);
             return false;
         }
         if !queue_deletes(outbox, &mut self.deletes())
@@ -908,6 +921,9 @@ impl LinkHandle {
     }
 
     pub fn can_start_voice_gesture(&self, generation: u64) -> bool {
+        if self.is_quitting() {
+            return false;
+        }
         if self.audio_session() == AudioSession::Legacy {
             return generation != 0
                 && self.shared.legacy_voice.load(Ordering::Acquire) == generation;
@@ -921,6 +937,12 @@ impl LinkHandle {
                     && self.shared.output.try_queued_hold_ready(generation)
             })
         })
+    }
+
+    /// A queued key-down needs a strictly older readiness stamp; equal ticks are ambiguous.
+    pub fn voice_ready_before(&self, press: u64) -> bool {
+        let ready = self.shared.voice_ready_at.load(Ordering::Acquire);
+        ready != 0 && press > ready
     }
 
     /// Checks the exact pair before presence changes voice panels or attempts the offer.
@@ -1031,8 +1053,8 @@ impl LinkHandle {
         if outbox.control.try_send(cancel).is_ok() {
             true
         } else {
-            self.shared.close_legacy_voice(outbox.generation);
-            outbox.pipe.abort();
+            self.shared
+                .abort_connection(outbox.generation, &outbox.pipe);
             false
         }
     }
@@ -1219,7 +1241,7 @@ impl LinkHandle {
                 let queued = send(&outbox.control, &mut outbox.queued_input);
                 if !queued && mutation {
                     shared.lose(session.generation, &session.alive);
-                    outbox.pipe.abort();
+                    shared.abort_connection(session.generation, &outbox.pipe);
                 }
                 queued
             })
@@ -1272,12 +1294,14 @@ impl LinkHandle {
         {
             recording.close();
         }
+        session.close();
         if session.io.queued {
-            session.close();
             session.alive.store(false, Ordering::Release);
         } else {
-            self.shared
-                .connection(session, |outbox| outbox.pipe.abort());
+            self.shared.connection(session, |outbox| {
+                self.shared
+                    .abort_connection(session.generation, &outbox.pipe);
+            });
             self.shared.lose(session.generation, &session.alive);
         }
         self.shared.output.end(session.generation);
@@ -1330,7 +1354,8 @@ impl LinkHandle {
                 );
                 if turn && outbox.submits.load(Ordering::SeqCst) == u32::MAX {
                     self.shared.lose(session.generation, &session.alive);
-                    outbox.pipe.abort();
+                    self.shared
+                        .abort_connection(session.generation, &outbox.pipe);
                     return false;
                 }
                 let enqueue = || outbox.data.try_send(out).is_ok();
@@ -1418,6 +1443,7 @@ impl Session {
             closing: Arc::default(),
             generation,
             io: Arc::new(SessionIo {
+                link: Weak::new(),
                 tuning: ShellTuning::default(),
                 queued: false,
                 narrated: None,
@@ -1684,6 +1710,7 @@ impl Link {
         }
         let (control_out, control_queue) = async_channel::bounded(CONTROL_QUEUE);
         let (data_out, data_queue) = async_channel::bounded(DATA_QUEUE);
+        self.shared.voice_ready_at.store(0, Ordering::Release);
         let Ok(previous) =
             self.shared
                 .generations
@@ -1704,6 +1731,7 @@ impl Link {
         let narrated =
             (queued && self.shared.narrated).then(|| Arc::new(narrated::Narrated::new()));
         let credit = Arc::new(SessionIo {
+            link: Arc::downgrade(&self.shared),
             tuning,
             queued,
             narrated,
@@ -1817,10 +1845,19 @@ impl Link {
             control.set_timeout(Some(QUIT_TIMEOUT));
             let _told = self.shared.tell_quit();
         } else if !queued {
-            // Publish before the workers can revoke it.
-            self.shared
-                .legacy_voice
-                .store(generation, Ordering::Release);
+            let _outbox = self
+                .shared
+                .outbox
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if !control.is_aborted() {
+                self.shared
+                    .voice_ready_at
+                    .store(platform::keyboard_ticks(), Ordering::Release);
+                self.shared
+                    .legacy_voice
+                    .store(generation, Ordering::Release);
+            }
         }
         let spawned = (|| {
             if let Some((started, deadline)) = registration {
@@ -1875,7 +1912,7 @@ impl Link {
                         &data,
                         || {
                             if !queued {
-                                control.abort();
+                                ended.shared.abort_connection(generation, &control);
                             }
                         },
                         &events,
@@ -1900,6 +1937,7 @@ impl Link {
             Ok(()) => {}
             Err(error) => tracing::error!(%error, "can't start the link's threads"),
         }
+        self.shared.close_legacy_voice(generation);
         self.shared.output.end(generation);
         drop(ended);
         *self
@@ -2214,6 +2252,9 @@ fn watch(
                 if queued.is_none() || !shared.output.acknowledge_queued(generation, output) {
                     return;
                 }
+                shared
+                    .voice_ready_at
+                    .store(platform::keyboard_ticks(), Ordering::Release);
             }
             Ok(Some(ControlToShell::Ping)) => {
                 if queued.is_some() && shared.output.run_end_overdue(generation, Instant::now()) {

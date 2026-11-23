@@ -204,6 +204,7 @@ fn run(method: Method, label: &str) {
         let (brain_control, shell_control) = pair(&format!("{label}-{workload}-control"));
         let (events, received) = async_channel::unbounded();
         let credit = super::SessionIo {
+            link: std::sync::Weak::new(),
             tuning: ShellTuning::default(),
             queued: false,
             narrated: None,
