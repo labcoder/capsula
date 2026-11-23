@@ -1034,9 +1034,11 @@ fn onset_installs_once_and_only_accepted_paint_reports_shown() {
     );
     assert_eq!(acks.into_iter().flatten().count(), 1);
     assert_eq!(p.conductor_view(onset).expect("shown").view, View::Shown);
+    let painted = p.frames.borrow().painted(LIVE).expect("accepted paint");
     owned(&mut p, binding, RouteStamp::Live(7), Picture::At(at), onset);
     p.advance(GENERATION, onset).expect("duplicate level");
     assert_eq!(bound(&p, LIVE), 1);
+    assert_eq!(p.frames.borrow().painted(LIVE), Some(painted));
     assert_eq!(
         p.conductor_view(onset).expect("still shown").view,
         View::Shown

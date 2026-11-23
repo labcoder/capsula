@@ -887,11 +887,8 @@ mod tests {
             "Screen not included: the display changed"
         );
         assert_eq!(
-            strings
-                .show_screen("Nuage {青}")
-                .matches("Nuage {青}")
-                .count(),
-            1
+            strings.show_screen("Nuage {青}"),
+            "Nuage {青} can see what you see"
         );
         // A held turn's history says one thing: why no picture was included, as a line, or
         // which picture was taken, on its icon.

@@ -387,29 +387,20 @@ fn skipped_bow(
 
 #[cfg(test)]
 mod tests {
-    use super::repaint_curve;
+    use super::{curve, heads, repaint_curve};
     use crate::{
         display::Prim,
         geom::{Rect, Vec2},
+        record::{Direction, Head},
         theme::Theme,
     };
     use std::sync::Arc;
 
     #[test]
     fn repaint_replaces_any_old_head_count_and_preserves_other_geometry() {
-        let points: Arc<[Vec2]> = Arc::from([Vec2::new(0.0, 0.0), Vec2::new(16.0, 0.0)]);
-        let heads = [
-            [
-                Vec2::new(16.0, 0.0),
-                Vec2::new(7.0, 2.0),
-                Vec2::new(7.0, -2.0),
-            ],
-            [
-                Vec2::new(0.0, 0.0),
-                Vec2::new(5.0, -3.0),
-                Vec2::new(5.0, 3.0),
-            ],
-        ];
+        let start = Vec2::new(0.0, 0.0);
+        let end = Vec2::new(16.0, 0.0);
+        let points = curve([start, end], Direction::Right, 0.0);
         let color = Theme::default().line.into();
         let line = Prim::Line {
             points: Arc::clone(&points),
@@ -431,23 +422,34 @@ mod tests {
                 color,
             }));
             old.push(chip.clone());
-            let new = repaint_curve(&old, &points, heads.to_vec()).expect("repaint wrong heads");
+            let new = repaint_curve(&old, &points, heads(&points, Head::Both))
+                .expect("repaint wrong heads");
             assert_eq!(new.len(), 4);
             assert!(new.contains(&line), "the stroke is unchanged");
             assert!(new.contains(&chip), "the chip is unchanged");
-            for head in heads {
-                assert!(
-                    new.iter().any(|primitive| matches!(
-                        primitive,
-                        Prim::Fill { points, color: actual }
-                            if *actual == color && points.len() == 3
-                                && head.iter().all(|point| points.contains(point))
-                    )),
-                    "repaint replaces the head at {:?}",
-                    head[0]
-                );
+            for (anchor, direction) in [(start, 1.0), (end, -1.0)] {
+                let wings: Vec<_> = new
+                    .iter()
+                    .filter_map(|primitive| match primitive {
+                        Prim::Fill {
+                            points,
+                            color: actual,
+                        } if *actual == color && points.len() == 3 && points.contains(&anchor) => {
+                            Some(points.iter().copied().filter(|point| *point != anchor))
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
+                assert_eq!(wings.len(), 2, "one filled head at {anchor:?}");
+                assert!(wings.iter().all(|p| direction * (p.x - anchor.x) > 0.0));
+                assert!(wings.iter().any(|p| p.y > anchor.y));
+                assert!(wings.iter().any(|p| p.y < anchor.y));
             }
-            assert_eq!(repaint_curve(&new, &points, heads.to_vec()), None);
+            assert_eq!(
+                repaint_curve(&new, &points, heads(&points, Head::Both)),
+                None
+            );
         }
     }
 }

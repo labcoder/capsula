@@ -1,7 +1,7 @@
 //! Placement follows the presenter's real install, cut, recovery and resample paths.
 use super::{
-    GENERATION, LIVE, Presenter, RUN, Shaper, acknowledge, begin, commit, kept, live, ms, only_job,
-    recovering, rect, step,
+    GENERATION, LIVE, Presenter, RUN, Shaper, Witness, acknowledge, begin, bound_everywhere,
+    commit, kept, live, ms, only_job, recovering, rect, step,
 };
 use kumochi_scene::{
     Frame,
@@ -64,6 +64,7 @@ fn placement_is_installed_for_live_steps_and_kept_after_stop() {
 #[test]
 fn recovery_uses_the_latest_stage_and_a_stage_change_repaints_without_preparing() {
     let (mut presenter, now, job) = recovering(vec![(LIVE, rect("r"))]);
+    presenter.stage = Box::new(Witness);
     assert!(presenter.set_stage(stage()));
     presenter
         .completed(job.run(&mut Shaper), now)
@@ -74,6 +75,8 @@ fn recovery_uses_the_latest_stage_and_a_stage_change_repaints_without_preparing(
     );
     assert!(presenter.sample(0).0.changed);
     assert!(!presenter.sample(0).0.changed);
+    assert!(bound_everywhere(&presenter));
+    let primitives = presenter.scenes[&LIVE].rest.items()[0].primitives.to_vec();
     let revision = presenter.scenes[&LIVE].rest.revision();
     assert!(presenter.set_stage(Rect {
         origin: Vec2::new(20.0, 30.0),
@@ -85,6 +88,18 @@ fn recovery_uses_the_latest_stage_and_a_stage_change_repaints_without_preparing(
     );
     assert!(presenter.sample(0).0.changed);
     assert!(!presenter.sample(0).0.changed);
+    let frames = presenter.frames();
+    assert!(!frames.borrow().paint(|frame, _| {
+        let [item] = frame.items() else {
+            panic!("placement preserves the one visible item")
+        };
+        assert_eq!(&*item.primitives, primitives);
+        Ok::<_, ()>(())
+    }));
+    assert!(
+        bound_everywhere(&presenter),
+        "the new sample still has a matching paint cache"
+    );
     let scene = &presenter.scenes[&LIVE];
     assert_eq!(scene.rest.revision(), revision);
     assert_eq!(presenter.workers(), 0);

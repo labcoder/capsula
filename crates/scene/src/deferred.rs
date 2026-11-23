@@ -291,6 +291,14 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         let before = dropper.pending();
+        assert_eq!(
+            before,
+            Pending {
+                values: 1,
+                bytes: 7
+            },
+            "the failed destructor's charge is still outstanding"
+        );
         let (threads, reports) = mpsc::channel();
         dropper.send(Box::new(Sentinel(threads)), 40);
         assert_eq!(

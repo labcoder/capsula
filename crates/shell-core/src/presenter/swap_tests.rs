@@ -156,6 +156,11 @@ fn a_zero_alpha_first_sample_hands_off_and_its_paint_starts_the_entrance_clock()
     );
     presenter.advance(GENERATION, now).expect("activation");
     assert!(presenter.sample_at(now).expect("a sample").0.visible);
+    assert_eq!(
+        presenter.frames.borrow().retirement_bytes(),
+        0,
+        "the outgoing picture stops charging before the first paint"
+    );
     let picture_at_start = picture(&presenter);
     let [items] = picture_at_start.as_slice() else {
         panic!("only the successor paints")
@@ -203,8 +208,10 @@ fn a_survivor_does_not_trigger_handoff_and_an_empty_prefix_can_advance() {
         .expect("empty activation");
     assert!(presenter.sample_at(now).expect("a sample").0.visible);
     assert_eq!(picture(&presenter), old);
+    assert!(presenter.frames.borrow().retirement_bytes() > 0);
     presenter.advance(GENERATION, now).expect("next prefix");
     assert!(presenter.sample_at(now).expect("a sample").0.visible);
+    assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
     let current = picture(&presenter);
     let [survivor, successor] = current.as_slice() else {
         panic!("only the survivor and successor paint");
@@ -251,6 +258,11 @@ fn the_selected_epoch_waits_only_for_its_first_paint_or_the_original_expiry() {
         .advance(GENERATION, ms(now, 250))
         .expect("expired guard");
     assert_eq!(presenter.scenes[&NEXT].view.activated(), 2);
+    assert_eq!(
+        presenter.deadline(),
+        None,
+        "the original guard no longer needs a wake"
+    );
 }
 
 #[test]
@@ -347,6 +359,7 @@ fn stop_before_successor_begin_names_only_the_successor_and_drains_its_late_comm
     assert!(!presenter.sample_at(now).expect("a sample").0.visible);
     assert!(picture(&presenter).is_empty());
     assert!(presenter.take_shown(GENERATION).iter().all(Option::is_none));
+    assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
 }
 
 #[test]
@@ -653,6 +666,7 @@ fn stop_or_clear_after_handoff_cannot_deliver_a_deferred_paint_acknowledgement()
             );
         }
         assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
+        assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
     }
 }
 
@@ -697,6 +711,10 @@ fn an_incoming_success_prepared_before_a_second_marker_or_reconnect_stays_stale(
             .expect("late incoming answer");
         assert!(effects.is_empty());
         assert_eq!(picture(&presenter), before);
+        assert!(
+            bound_everywhere(&presenter),
+            "the paint accepts the current frame/cache pair"
+        );
         assert_eq!(
             presenter.take_shown(if reconnect {
                 GENERATION + 1
@@ -710,6 +728,12 @@ fn an_incoming_success_prepared_before_a_second_marker_or_reconnect_stays_stale(
             assert_eq!(presenter.residency(), 0);
         } else {
             assert_eq!(presenter.scenes[&after].view.activated(), 1);
+            let stale = commit_as(&mut presenter, RUN, NEXT, 1, rect("stale-suffix"), now)
+                .expect("the removed owner's suffix is drained");
+            assert!(matches!(
+                stale.as_slice(),
+                [super::Effect::Credit(super::FRAME)]
+            ));
         }
     }
 }

@@ -447,15 +447,15 @@ fn credit_window_and_frame_sizes_include_the_header() {
                 assembler.chunk(1, chunk(3, 1, 0, vec![event(1)], true), 5),
                 Err(Broken::Window)
             );
-        } else {
-            assert_eq!(
-                assembler.clear(),
-                Effect {
-                    credit: DATA_WINDOW,
-                    ..Effect::default()
-                }
-            );
         }
+        assert_eq!(
+            assembler.clear(),
+            Effect {
+                credit: DATA_WINDOW,
+                ..Effect::default()
+            },
+            "clearing refunds only the accepted bytes (overflow: {overflow})"
+        );
     }
 }
 
@@ -649,6 +649,22 @@ fn removing_held_chunks_returns_only_their_credit_and_remembers_a_bounded_tombst
             ..Effect::default()
         })
     );
+    for (offset, ids) in (38..100).collect::<Vec<_>>().chunks(4).enumerate() {
+        let generation = 3 + u64::try_from(offset).expect("a few reconnects");
+        assembler.connected(generation);
+        assert_eq!(
+            assembler.describe(
+                generation,
+                &Bounded::new(ids.iter().map(|id| descriptor(*id, 1, 1)).collect())
+                    .expect("bounded descriptors")
+            ),
+            Ok(Effect {
+                clear: ids.iter().copied().map(SceneId).collect(),
+                batch: Some(Deferred::new(Vec::new(), 0)),
+                credit: 0,
+            })
+        );
+    }
 }
 
 #[test]
@@ -832,9 +848,11 @@ fn rejected_staged_and_undelivered_snapshot_owners_retire_off_thread() {
             }
         }
         drop(assembler);
-        assert!(
-            Arc::strong_count(&probe) > 1,
-            "the blocked dropper still owns the payload in case {case}"
+        let deferred_owners = if case == 1 || case == 3 { 2 } else { 1 };
+        assert_eq!(
+            Arc::strong_count(&probe),
+            1 + deferred_owners,
+            "the chunk and any separately staged log or batch are still with the blocked dropper in case {case}"
         );
         drop(release);
         assert!(drained(&probe, 1));
