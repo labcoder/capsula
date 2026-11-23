@@ -18,7 +18,7 @@ use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
     Action, AudioSession, Content, ControlToBrain, DataToBrain, DataToShell, Deleted, ErrorKey,
     GestureId, Incarnation, MAX_PENDING_DELETES, MAX_PENDING_TURNS, Phase, RunId, RunOrigin,
-    SceneDescriptor, SceneId, ThreadId, ThreadKind, ThreadRow, UserError,
+    SceneDescriptor, SceneId, ScreenChoice, ThreadId, ThreadKind, ThreadRow, UserError,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -344,31 +344,6 @@ impl Runs {
         }
     }
 
-    fn capture(&self, text: &str) -> Result<(DataToBrain, u32, u64), Refused> {
-        if !self.connected || self.main.is_none() {
-            return Err(Refused::Offline);
-        }
-        if self.target == Target::New
-            && self
-                .submitted
-                .iter()
-                .any(|submitted| submitted.revision == self.revision)
-        {
-            return Err(Refused::Busy);
-        }
-        let turn = self.turns_sent.checked_add(1).ok_or(Refused::Busy)?;
-        Ok((
-            DataToBrain::TextSubmit {
-                turn,
-                screen: kumochi_protocol::message::ScreenChoice::None,
-                thread: self.thread(),
-                text: text.into(),
-            },
-            turn,
-            self.revision,
-        ))
-    }
-
     /// The highest run any `RunState` has named so far on this brain.
     pub fn newest_run(&self) -> RunId {
         self.answered
@@ -590,27 +565,20 @@ impl Runs {
         if audio == AudioSession::Legacy {
             self.forget_texts(|_| true);
         }
-        if text.trim().is_empty() {
-            return Err(Refused::Blank);
-        }
-        if text.len() > Pipe::Data.max_payload() - SUBMIT_OVERHEAD {
-            return Err(Refused::TooLong);
-        }
-        let (message, turn, revision) = self.capture(text)?;
-        if self.submitted.len() + 1 >= MAX_PENDING_TURNS {
-            return Err(Refused::Busy);
-        }
-        if self.hold_cancel.is_some() {
-            return Err(Refused::Busy);
-        }
-        if !send(message) {
+        let turn = self.prepare_submit(text, SUBMIT_OVERHEAD)?;
+        if !send(DataToBrain::TextSubmit {
+            turn,
+            screen: ScreenChoice::None,
+            thread: self.thread(),
+            text: text.into(),
+        }) {
             return Err(Refused::Offline);
         }
         if audio == AudioSession::QueuedRequired {
             self.forget_texts(|_| true);
         }
         self.submitted.push_back(Submitted {
-            revision,
+            revision: self.revision,
             turn,
             thread: self.thread(),
             text: Some(text.into()),
@@ -618,6 +586,29 @@ impl Runs {
         });
         self.turns_sent = turn;
         Ok(())
+    }
+
+    fn prepare_submit(&mut self, text: &str, overhead: usize) -> Result<u32, Refused> {
+        if text.trim().is_empty() {
+            return Err(Refused::Blank);
+        }
+        if text.len() > Pipe::Data.max_payload() - overhead {
+            return Err(Refused::TooLong);
+        }
+        if !self.connected || self.main.is_none() {
+            return Err(Refused::Offline);
+        }
+        if self.submitted.len() + 1 >= MAX_PENDING_TURNS
+            || self.hold_cancel.is_some()
+            || (self.target == Target::New
+                && self
+                    .submitted
+                    .iter()
+                    .any(|submitted| submitted.revision == self.revision))
+        {
+            return Err(Refused::Busy);
+        }
+        self.turns_sent.checked_add(1).ok_or(Refused::Busy)
     }
 
     /// A run's `Focus`. It moves the target, as an explicit switch does, only while `run` is

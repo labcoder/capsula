@@ -83,6 +83,8 @@ it remains unimplemented and unverified.
 
 The paired wire shapes for a one-shot screenshot do not enable capture. A pictured request
 gets no offer; both the old Include flag and a typed screenshot submit are refused in turn order.
+The exclusion owner checks only the exact current lease and continuous surface receipts.
+An adapter without continuous evidence returns a negative receipt.
 
 Presence owns the exclusion transaction in `presence/exclusion.rs`; the lease and
 its cleanup rules are in `crates/shell-core/src/presence/exclusion/machine.rs`, with no GPUI.
