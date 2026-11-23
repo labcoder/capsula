@@ -174,6 +174,8 @@ version: its launch policy and the facts its audit expects. Any other version is
   or reads them. Only "file not found" or "path not found" is absent; anything else counts as
   present. Server-managed policy from a Team or Enterprise organization can't be seen, so it's
   disclosed instead (`ServerManaged::Disclosed`).
+  Without a native managed-policy probe, every source is indeterminate. The Linux test host
+  does not look for alternate locations or treat an unavailable probe as permission to launch.
 
 ## Discovery and the lane
 
