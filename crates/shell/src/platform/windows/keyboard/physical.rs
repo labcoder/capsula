@@ -36,6 +36,31 @@ impl Device {
 #[derive(Default)]
 pub(super) struct Physical {
     devices: [Device; 2],
+    excess: [Excess; 2],
+}
+
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
+enum Excess {
+    #[default]
+    None,
+    Held(HANDLE),
+    Saturated,
+}
+
+impl Excess {
+    fn hold(&mut self, handle: HANDLE) {
+        match *self {
+            Self::None => *self = Self::Held(handle),
+            Self::Held(owner) if owner != handle => *self = Self::Saturated,
+            Self::Held(_) | Self::Saturated => {}
+        }
+    }
+
+    fn release(&mut self, handle: HANDLE) {
+        if *self == Self::Held(handle) {
+            *self = Self::None;
+        }
+    }
 }
 
 impl Physical {
@@ -57,10 +82,13 @@ impl Physical {
     }
 
     pub(super) fn device_changed(&mut self, removed: Option<HANDLE>) -> Event {
-        if let Some(removed) = removed
-            && let Some(device) = self.devices.iter_mut().find(|d| d.handle == Some(removed))
-        {
-            *device = Device::default();
+        if let Some(removed) = removed {
+            for excess in &mut self.excess {
+                excess.release(removed);
+            }
+            if let Some(device) = self.devices.iter_mut().find(|d| d.handle == Some(removed)) {
+                *device = Device::default();
+            }
         }
         self.reset()
     }
@@ -85,6 +113,9 @@ impl Physical {
             Key::LeftAlt => Some(1),
             _ => None,
         };
+        if let (Some(index), Edge::Up) = (modifier, edge) {
+            self.excess[index].release(handle);
+        }
         let handle = Some(handle);
         let known = self.devices.iter().position(|d| d.handle == handle);
         let free = self
@@ -98,7 +129,19 @@ impl Physical {
             .or(free)
             .or_else(|| self.devices.iter().position(Device::neutral))
         else {
-            return reset(self);
+            let reset = self.lose();
+            if let (Some(index), Edge::Down, Some(owner)) = (modifier, edge, handle) {
+                if let Some(device) = self.devices.iter_mut().find(|device| device.neutral()) {
+                    *device = Device {
+                        handle,
+                        ..Device::default()
+                    };
+                    device.needs_break[index] = true;
+                } else {
+                    self.excess[index].hold(owner);
+                }
+            }
+            return Some((reset, None, false));
         };
         let other_held = self.devices[1 - bank].held(slot);
         let device = &mut self.devices[bank];
@@ -109,21 +152,22 @@ impl Physical {
             };
         }
         let repeated = device.apply(slot, edge);
+        if let (Some(index), Edge::Up) = (modifier, edge) {
+            device.needs_break[index] = false;
+        }
         if modifier.is_some() && other_held && (edge == Edge::Down || !repeated) {
             return reset(self);
         }
         if let Some(index) = modifier {
             if edge == Edge::Down
-                && covered_after
-                    .is_some_and(|boundary| queued_press.is_none_or(|at| at <= boundary))
+                && (self.excess[index] != Excess::None
+                    || covered_after
+                        .is_some_and(|boundary| queued_press.is_none_or(|at| at <= boundary)))
             {
                 device.needs_break[index] = true;
             }
             if edge == Edge::Down && device.needs_break[index] {
                 return Some((event, None, true));
-            }
-            if edge == Edge::Up {
-                device.needs_break[index] = false;
             }
         }
         let id = identity(bank, slot);
