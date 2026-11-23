@@ -12,6 +12,7 @@ use std::sync::atomic::AtomicBool;
 
 use kumochi_protocol::frame::Pipe;
 use snow::{Builder, HandshakeState};
+use zeroize::Zeroize;
 
 use crate::record::{self, Opener, Sealer};
 use crate::{
@@ -85,6 +86,17 @@ impl Keys {
             #[cfg(test)]
             ephemerals: None,
         }
+    }
+
+    fn record_len(
+        &mut self,
+        attempt: &Attempt,
+        envelope: [u8; ENVELOPE_LEN],
+        allowed: usize,
+    ) -> Result<usize, SessionError> {
+        attempt
+            .exact(envelope, allowed)
+            .inspect_err(|_| self.secret[..].zeroize())
     }
 
     /// The leg's handshake state. The only builder in the crate: it gets the PSK and the
@@ -196,9 +208,9 @@ impl ShellAwaitsReply {
     /// The reply's length from its envelope.
     ///
     /// # Errors
-    /// Any length but the reply's, which retires the attempt.
-    pub fn record_len(&self, envelope: [u8; ENVELOPE_LEN]) -> Result<usize, SessionError> {
-        self.attempt.exact(envelope, HANDSHAKE_LEN)
+    /// Any length but the reply's, which retires the attempt and wipes its secret copy.
+    pub fn record_len(&mut self, envelope: [u8; ENVELOPE_LEN]) -> Result<usize, SessionError> {
+        self.keys.record_len(&self.attempt, envelope, HANDSHAKE_LEN)
     }
 
     /// Takes the control reply. Returns control Finished, then data init, in that order.
@@ -344,9 +356,9 @@ impl BrainAwaitsInit {
     /// Init's length from its envelope.
     ///
     /// # Errors
-    /// Any length but init's, which retires the attempt.
-    pub fn record_len(&self, envelope: [u8; ENVELOPE_LEN]) -> Result<usize, SessionError> {
-        self.attempt.exact(envelope, HANDSHAKE_LEN)
+    /// Any length but init's, which retires the attempt and wipes its secret copy.
+    pub fn record_len(&mut self, envelope: [u8; ENVELOPE_LEN]) -> Result<usize, SessionError> {
+        self.keys.record_len(&self.attempt, envelope, HANDSHAKE_LEN)
     }
 
     /// Takes control init and returns the reply, the only thing sent before Finished.
@@ -385,9 +397,9 @@ impl BrainAwaitsFinished {
     /// Finished's length from its envelope.
     ///
     /// # Errors
-    /// Any length but Finished's, which retires the attempt.
-    pub fn record_len(&self, envelope: [u8; ENVELOPE_LEN]) -> Result<usize, SessionError> {
-        self.attempt.exact(envelope, CONFIRM_LEN)
+    /// Any length but Finished's, which retires the attempt and wipes its secret copy.
+    pub fn record_len(&mut self, envelope: [u8; ENVELOPE_LEN]) -> Result<usize, SessionError> {
+        self.keys.record_len(&self.attempt, envelope, CONFIRM_LEN)
     }
 
     /// Verifies control Finished; the data leg's handshake starts only after it.
@@ -620,20 +632,24 @@ pub(crate) mod tests {
         pub(crate) brain: Session,
         pub(crate) proof: BoundPair,
         pub(crate) transcript: Vec<Outgoing>,
+        control_hash: [u8; 32],
+        data_hash: [u8; 32],
     }
 
     /// The honest exchange, each message's envelope read through its state's `record_len`.
     fn run(shell: Keys, brain: Keys, limit: u64) -> Result<Run, SessionError> {
-        let (s, init) = ShellAwaitsReply::begin(shell, limit)?;
-        let b = BrainAwaitsInit::begin(brain, limit)?;
+        let (mut s, init) = ShellAwaitsReply::begin(shell, limit)?;
+        let mut b = BrainAwaitsInit::begin(brain, limit)?;
         b.record_len(envelope(body(&init).len()))?;
-        let (b, reply) = b.receive(body(&init))?;
+        let (mut b, reply) = b.receive(body(&init))?;
+        let control_hash = b.control_hash;
         s.record_len(envelope(body(&reply).len()))?;
         let (s, [finished, data_init]) = s.receive(body(&reply))?;
         b.record_len(envelope(body(&finished).len()))?;
         let b = b.receive(body(&finished))?;
         b.record_len(envelope(body(&data_init).len()))?;
         let (b, data_reply) = b.receive(body(&data_init))?;
+        let data_hash = b.data_hash;
         s.record_len(envelope(body(&data_reply).len()))?;
         let (s, [data_finished, bind]) = s.receive(body(&data_reply))?;
         b.record_len(envelope(body(&data_finished).len()))?;
@@ -657,6 +673,8 @@ pub(crate) mod tests {
             brain,
             proof,
             transcript,
+            control_hash,
+            data_hash,
         })
     }
 
@@ -723,8 +741,8 @@ pub(crate) mod tests {
 
     fn deliver(sealer: &mut Sealer, opener: &mut Opener, frame: &[u8]) -> Result<(), SessionError> {
         sealer.seal(frame)?;
-        let record = sealer.unwritten()[ENVELOPE_LEN..].to_vec();
-        sealer.advance(ENVELOPE_LEN + record.len());
+        let record = sealer.unwritten()?[ENVELOPE_LEN..].to_vec();
+        sealer.advance(ENVELOPE_LEN + record.len())?;
         opener.record_len(envelope(record.len()))?;
         opener.open(&record).map(drop)
     }
@@ -779,13 +797,12 @@ pub(crate) mod tests {
         for (sealer, opener, marker, record) in cases {
             let frame = [1, 0, 0, 0, marker];
             sealer.seal(&frame).expect("seals");
-            assert_eq!(hex(sealer.unwritten()), record, "record {marker:#x}");
+            let sealed = sealer.unwritten().expect("sealed bytes");
+            assert_eq!(hex(sealed), record, "record {marker:#x}");
             opener
                 .record_len(envelope(frame.len() + 16))
                 .expect("length");
-            let delivery = opener
-                .open(&sealer.unwritten()[ENVELOPE_LEN..])
-                .expect("opens");
+            let delivery = opener.open(&sealed[ENVELOPE_LEN..]).expect("opens");
             assert_eq!(
                 (delivery.bytes(), delivery.frame_done()),
                 (&frame[..], true),
@@ -842,26 +859,19 @@ pub(crate) mod tests {
 
     #[test]
     fn two_pairs_have_fresh_ephemerals_and_handshake_hashes() {
-        let (one, two) = (fresh().transcript, fresh().transcript);
+        let (one, two) = (fresh(), fresh());
         for i in [0, 1, 3, 4] {
             assert_ne!(
-                one[i].bytes[2..34],
-                two[i].bytes[2..34],
+                one.transcript[i].bytes[2..34],
+                two.transcript[i].bytes[2..34],
                 "ephemeral in message {i}"
             );
         }
-        let hashes = |transcript: &[Outgoing]| {
-            let brain = BrainAwaitsInit::new(&secret(), Channel::Release).expect("starts");
-            let (brain, _) = brain.receive(body(&transcript[0])).expect("init");
-            brain.control_hash
-        };
-        assert_ne!(hashes(&one), hashes(&two), "control handshake hashes");
-        let bind = |run: Run| run.transcript[6].bytes.clone();
         assert_ne!(
-            bind(fresh()),
-            bind(fresh()),
-            "bind records, which carry the data hash"
+            one.control_hash, two.control_hash,
+            "control handshake hashes"
         );
+        assert_ne!(one.data_hash, two.data_hash, "data handshake hashes");
     }
 
     #[test]
@@ -927,10 +937,10 @@ pub(crate) mod tests {
     }
 
     macro_rules! check_lengths {
-        ($state:expr, $allowed:expr, $valid:expr) => {{
+        ($state:expr, $allowed:expr, $valid:expr $(, $mutability:ident)?) => {{
             let allowed: usize = $allowed;
             for wrong in [0, 15, allowed - 1, allowed + 1, 65_535] {
-                let state = $state;
+                let $($mutability)? state = $state;
                 assert_eq!(
                     state.record_len(envelope(wrong)),
                     Err(SessionError::Length { len: wrong })
@@ -953,29 +963,80 @@ pub(crate) mod tests {
     #[test]
     fn every_other_length_in_every_handshake_phase_is_refused_and_retires_the_attempt() {
         let t = honest();
-        check_lengths!(shell_reply(), 48, body(&t[1]));
+        check_lengths!(shell_reply(), 48, body(&t[1]), mut);
         check_lengths!(shell_data_reply(), 48, body(&t[4]));
         check_lengths!(shell_bind_ack(), 16, body(&t[7]));
-        check_lengths!(brain_init(), 48, body(&t[0]));
-        check_lengths!(brain_finished(), 16, body(&t[2]));
+        check_lengths!(brain_init(), 48, body(&t[0]), mut);
+        check_lengths!(brain_finished(), 16, body(&t[2]), mut);
         check_lengths!(brain_data_init(), 48, body(&t[3]));
         check_lengths!(brain_data_finished(), 16, body(&t[5]));
         check_lengths!(brain_bind(), 48, body(&t[6]));
     }
 
     #[test]
-    fn a_replayed_init_gets_the_reply_and_nothing_else() {
-        let t = honest();
-        let (brain, reply) = brain_init()
-            .receive(body(&t[0]))
-            .expect("a replay still decrypts");
-        assert_eq!(reply, t[1], "the same reply");
-        let refused = brain.receive(body(&t[0])).err();
+    fn a_replayed_init_gets_a_fresh_reply_but_cannot_reuse_finished() {
+        let (shell, init) = ShellAwaitsReply::start(&secret(), Channel::Release).expect("starts");
+        let reply = || {
+            BrainAwaitsInit::new(&secret(), Channel::Release)
+                .expect("starts")
+                .receive(body(&init))
+                .expect("both an original and a replay get message 2")
+        };
+        let (original, first) = reply();
+        let (replayed, second) = reply();
+        assert_eq!(second.leg, Pipe::Control);
+        assert_eq!(&second.bytes[..2], &[0, 48], "a message 2 envelope");
+        assert_ne!(
+            body(&first)[..32],
+            body(&second)[..32],
+            "fresh responder ephemeral"
+        );
+        let (_, [finished, _]) = shell
+            .receive(body(&first))
+            .expect("first reply authenticates");
+        let refused = replayed.receive(body(&finished)).err();
+        assert_eq!(
+            refused,
+            Some(SessionError::Authentication),
+            "stale Finished on a fresh attempt"
+        );
+        let refused = original.receive(body(&init)).err();
         assert_eq!(
             refused,
             Some(SessionError::Length { len: 48 }),
             "a second init on the pair"
         );
+    }
+
+    #[test]
+    fn a_refused_envelope_wipes_the_live_secret_in_all_three_states() {
+        macro_rules! check {
+            ($state:expr, $allowed:expr) => {{
+                let mut state = $state;
+                assert_eq!(state.record_len(envelope($allowed)), Ok($allowed));
+                assert_eq!(
+                    &state.keys.secret[..],
+                    &secret(),
+                    "valid envelope keeps the key"
+                );
+                assert_eq!(
+                    state.record_len(envelope(15)),
+                    Err(SessionError::Length { len: 15 })
+                );
+                assert_eq!(
+                    &state.keys.secret[..],
+                    &[0; 32],
+                    "wiped before state is dropped"
+                );
+                assert_eq!(
+                    state.record_len(envelope($allowed)),
+                    Err(SessionError::Retired)
+                );
+            }};
+        }
+        check!(shell_reply(), 48);
+        check!(brain_init(), 48);
+        check!(brain_finished(), 16);
     }
 
     #[test]

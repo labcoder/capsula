@@ -115,7 +115,7 @@ pub const BRIDGE_LOG: &str = "kumochi-bridge";
 /// See [`BRAIN_LOG`].
 pub const SHELL_LOG: &str = "kumochi-shell";
 
-/// The label at the start of every session prologue (`kumochi-session`). Release and Dev share
+/// The label at the start of every session prologue (`Kumochi session`). Release and Dev share
 /// it: the prologue's channel byte keeps their sessions apart.
 pub const SESSION_LABEL: &str = "Kumochi session";
 
