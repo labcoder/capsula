@@ -31,7 +31,6 @@ mod runtime;
 #[path = "../../../tests/support/scratch.rs"]
 mod scratch;
 pub mod screen;
-#[cfg(windows)]
 pub mod speech;
 pub mod store;
 mod supervise;
