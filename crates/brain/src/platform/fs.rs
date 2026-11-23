@@ -20,9 +20,7 @@ pub fn config_dir() -> Option<PathBuf> {
 /// # Errors
 /// Fails for non-sibling paths, or when opening, syncing the source or renaming fails.
 ///
-/// # Panics
-/// A directory sync failure after a successful rename means the test host can't provide
-/// the durability the fixture requires. It isn't an ordinary replacement failure.
+/// The test process exits unsuccessfully if directory sync fails after the rename.
 #[cfg(all(test, target_os = "linux"))]
 pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
     let parent = to
@@ -32,9 +30,14 @@ pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
     let directory = std::fs::File::open(parent)?;
     std::fs::File::open(from)?.sync_all()?;
     std::fs::rename(from, to)?;
-    directory
-        .sync_all()
-        .expect("broken Linux test host: could not sync the directory after replacement");
+    if directory.sync_all().is_err() {
+        use std::io::Write as _;
+
+        std::io::stderr()
+            .write_all(b"broken Linux test host: could not sync the directory after replacement\n")
+            .ok();
+        std::process::exit(1);
+    }
     Ok(())
 }
 

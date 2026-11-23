@@ -6,8 +6,8 @@ brain opens it. The code is `crates/brain/src/store/`.
 
 Linux unit tests open the store at an explicit scratch path. The test adapter uses same-directory
 rename and directory sync for purge swaps, and uses the OS's available-block count for the
-purger's capacity check. Failure to sync a completed rename fails the test, not the swap's
-ordinary error path. Windows sharing-mode tests stay Windows-only. No non-Windows
+purger's capacity check. Failure to sync a completed rename exits the test process, even when
+the swap ran on a worker. Windows sharing-mode tests stay Windows-only. No non-Windows
 production data root, swap or capacity fallback is enabled.
 
 ## Settings
