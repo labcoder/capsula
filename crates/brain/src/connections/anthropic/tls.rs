@@ -86,7 +86,7 @@ impl Connect for RouteConnector {
                 Ok(Box::new(tls.connect().await?))
             }
             #[cfg(test)]
-            Self::Offline(script) => Ok(Box::new(script.connect().await?)),
+            Self::Offline(script) => script.connect().await,
         }
     }
 }
@@ -111,6 +111,7 @@ pub(crate) struct Script {
     pub(crate) starts: usize,
     pub(crate) drops: usize,
     pub(crate) reader: Option<ScriptReader>,
+    pub(crate) stream: Option<tokio::io::DuplexStream>,
     pub(crate) entered: Option<Arc<tokio::sync::Notify>>,
     pub(crate) connect_gate: Option<Arc<tokio::sync::Notify>>,
 }
@@ -154,7 +155,7 @@ impl tokio::io::AsyncWrite for Sent {
 
 #[cfg(test)]
 impl Connect for Scripted {
-    type Io = tokio::io::Join<ScriptReader, Sent>;
+    type Io = Box<dyn RouteIo>;
 
     fn connect(&self) -> impl Future<Output = io::Result<Self::Io>> + Send {
         let mut script = self.0.lock().expect("script");
@@ -163,17 +164,21 @@ impl Connect for Scripted {
             entered.notify_one();
         }
         let connect_gate = script.connect_gate.clone();
-        let index = script.requests.len();
-        let reader = script.reader.take().or_else(|| {
-            script
-                .responses
-                .pop_front()
-                .map(|response| -> ScriptReader { Box::new(io::Cursor::new(response)) })
-        });
-        let io = reader.map(|reader| tokio::io::join(reader, Sent(Arc::clone(&self.0), index)));
-        if io.is_some() {
-            script.requests.push(Vec::new());
-        }
+        let io: Option<Self::Io> = if let Some(stream) = script.stream.take() {
+            Some(Box::new(stream))
+        } else {
+            let reader = script.reader.take().or_else(|| {
+                script
+                    .responses
+                    .pop_front()
+                    .map(|response| -> ScriptReader { Box::new(io::Cursor::new(response)) })
+            });
+            reader.map(|reader| -> Self::Io {
+                let index = script.requests.len();
+                script.requests.push(Vec::new());
+                Box::new(tokio::io::join(reader, Sent(Arc::clone(&self.0), index)))
+            })
+        };
         async move {
             if let Some(gate) = connect_gate {
                 gate.notified().await;
