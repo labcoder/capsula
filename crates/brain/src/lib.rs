@@ -339,7 +339,7 @@ async fn run_admitted(
 fn start_voice(
     brain: &mut Brain,
     models: PathBuf,
-    stuck: &[kumochi_protocol::voice::VoicePart],
+    stuck: &[(kumochi_protocol::voice::VoicePart, voice::installer::Folder)],
     exe: &std::path::Path,
     jobs: &std::sync::Arc<Job>,
 ) {
