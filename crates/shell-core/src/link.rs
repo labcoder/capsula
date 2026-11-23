@@ -1282,6 +1282,15 @@ impl LinkHandle {
         queued
     }
 
+    pub(crate) fn cancel_typed_screen(
+        &self,
+        session: &Session,
+        turn: u32,
+        offer: TypedScreenOffer,
+    ) {
+        self.send_typed_screen_control(session, ControlToBrain::CancelTypedScreen { turn, offer });
+    }
+
     /// Offers the preference without interrupting a queued pair's work.
     ///
     /// # Errors

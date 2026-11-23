@@ -11,8 +11,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
 mod hold;
+mod typed_screen;
 use hold::Hold;
 pub use hold::{HoldRelease, ScreenHold, ScreenLine, ScreenNotice};
+use typed_screen::TypedScreen;
+pub use typed_screen::TypedScreenIo;
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
@@ -198,6 +201,7 @@ pub struct Runs {
     /// The newest named run's submission, until that run's first terminal `RunState`.
     named: Option<(RunId, Submitted)>,
     recovery: Option<(RunId, Submitted)>,
+    typed_screen: TypedScreen,
     /// How many of the oldest submitted turns Esc cancelled.
     cancelled: usize,
     /// Data frames, with their size, for runs not named yet. Their credit is withheld, so the
@@ -266,6 +270,7 @@ impl Runs {
             return false;
         }
         self.cancel_hold();
+        self.typed_screen.invalidate();
         self.target = match thread {
             Some(thread) if Some(thread) == self.main => Target::Kumo,
             Some(thread) => Target::Task(thread),
@@ -301,11 +306,13 @@ impl Runs {
         self.main = Some(main);
         if self.thread() != previous {
             self.dismiss_retry();
+            self.typed_screen.invalidate();
         }
     }
 
     pub fn back_to_kumo(&mut self) {
         self.cancel_hold();
+        self.typed_screen.invalidate();
         self.target = Target::Kumo;
         self.durable = true;
         self.revision = self.revision.wrapping_add(1);
@@ -505,6 +512,7 @@ impl Runs {
     pub fn stop(&mut self) -> Option<ControlToBrain> {
         let run = self.stoppable();
         self.cancel_hold();
+        self.revoke_typed_screen();
         self.forget_texts(|_| true);
         self.cancelled = self.submitted.len();
         let run = run?;
@@ -519,6 +527,7 @@ impl Runs {
     /// returns the `ClearDrawing` to send after. The text stays.
     pub fn clear(&mut self) -> Effect {
         self.cancel_hold();
+        self.revoke_typed_screen();
         self.forget_texts(|_| true);
         self.drawing.clear()
     }
@@ -564,6 +573,9 @@ impl Runs {
         self.cancel_hold();
         if audio == AudioSession::Legacy {
             self.forget_texts(|_| true);
+        }
+        if self.typed_screen.blocks_plain() {
+            return Err(Refused::Busy);
         }
         let turn = self.prepare_submit(text, SUBMIT_OVERHEAD)?;
         if !send(DataToBrain::TextSubmit {
@@ -633,6 +645,7 @@ impl Runs {
         }
         self.cancel_hold();
         self.hold_cancel = None;
+        self.typed_screen.invalidate();
         self.answered = RunId(0);
         self.fence = RunId(0);
         self.pending_stops.clear();
@@ -684,6 +697,9 @@ impl Runs {
             self.cancel_hold();
         }
         self.forget_texts(|owner| owner == Some(thread));
+        if self.thread() == Some(thread) {
+            self.typed_screen.invalidate();
+        }
         if self.target == Target::Task(thread) {
             self.back_to_kumo();
         }
@@ -776,6 +792,7 @@ impl Runs {
     /// The link connected, as connection `generation`.
     pub fn connected(&mut self, generation: u64) {
         self.connected = true;
+        self.typed_screen.connected(generation);
         self.screen_holds = None;
         self.turns_sent = 0;
         self.drawing.connected(generation);
@@ -786,6 +803,7 @@ impl Runs {
     pub fn disconnected(&mut self) {
         self.cancel_hold();
         self.hold_cancel = None;
+        self.typed_screen.disconnected();
         self.connected = false;
         self.screen_holds = None;
         if let Some(shown) = &mut self.shown {
