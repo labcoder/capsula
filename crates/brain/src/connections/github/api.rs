@@ -50,6 +50,7 @@ impl ApiError {
     /// The definite not-created reason, absent whenever sending cannot be ruled out.
     pub fn definite_reason(self) -> Option<FailReason> {
         match self {
+            Self::Http(HttpError::UnsupportedPlatform) => Some(FailReason::PreflightFailed),
             Self::Http(
                 HttpError::Connect
                 | HttpError::TrustStoreUnavailable

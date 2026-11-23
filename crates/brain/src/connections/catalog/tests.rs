@@ -482,6 +482,10 @@ async fn refusals_keep_only_status_and_code_and_say_what_to_do() {
         CatalogError::Http(HttpError::TrustStoreUnavailable).failure(),
         error(ErrorKey::TrustStoreUnavailable, &retry)
     );
+    assert_eq!(
+        CatalogError::Http(HttpError::UnsupportedPlatform).failure(),
+        error(ErrorKey::UnsupportedPlatform, &[])
+    );
 }
 
 fn info(slug: &str) -> ModelInfo {

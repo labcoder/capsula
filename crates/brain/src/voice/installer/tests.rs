@@ -141,6 +141,23 @@ fn stale_load_does_not_start_install_or_retry() {
 }
 
 #[test]
+fn an_unsupported_platform_never_restarts_downloads() {
+    for part in VoicePart::ALL {
+        let mut installer = fresh();
+        assert_eq!(installer.install(part), [fetch(part, 3)]);
+        assert_eq!(
+            installer.fetched(part, 3, Err(DownloadError::UnsupportedPlatform)),
+            []
+        );
+        assert_eq!(
+            installer.parts[super::index(part)].state(),
+            failed_absent(ErrorKey::UnsupportedPlatform)
+        );
+        assert_eq!(installer.install(part), []);
+    }
+}
+
+#[test]
 fn model_paths_have_one_actionable_failure_after_fetch_startup_and_load() {
     for part in VoicePart::ALL {
         let mut installer = fresh();
