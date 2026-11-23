@@ -16,7 +16,10 @@ fn model_review_h3_refused_removal_preserves_all_original_names_and_bytes() {
     std::fs::create_dir(&link).unwrap();
     crate::platform::sherpa::tests::set_junction(&link, &outside).unwrap();
     let target = std::fs::read_link(&link).unwrap();
-    assert_eq!(delete(&models, VoicePart::SpeechInput), Folder::Present);
+    assert_eq!(
+        delete(&models, VoicePart::SpeechInput),
+        Folder::Refused(ErrorKey::VoiceStorage)
+    );
     let mut names = std::fs::read_dir(&part)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())

@@ -3,7 +3,7 @@
 use kumochi_protocol::message::{ErrorKey, PartState, VoiceView};
 use kumochi_protocol::voice::VoicePart::{self, SpeechInput, SpokenReplies};
 
-use super::{Durable, Effect, Installer};
+use super::{Durable, Effect, Folder, Installer};
 use crate::voice::download::{DownloadError, FetchPhase, Progress};
 use crate::voice::{LoadEvent, LoadReport};
 
@@ -741,7 +741,7 @@ fn a_removal_whose_delete_failed_shows_a_storage_failure_and_never_loads() {
         [Durable::Removing, Durable::Absent],
         [true, true].map(Ok),
         [true, true],
-        &[SpeechInput],
+        &[(SpeechInput, Folder::Present)],
         true,
     );
     assert_eq!(loads, []);
