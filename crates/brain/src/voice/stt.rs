@@ -616,7 +616,7 @@ fn run(
         let event = match (result, ended) {
             (Ok(()), Some(event)) => event,
             (Err(SpeechError::WorkerLost), _) | (_, Some(LoadEvent::Lost)) => LoadEvent::Lost,
-            (Err(SpeechError::Native(crate::platform::sherpa::NativeError::ModelPath)), None) => {
+            (Err(SpeechError::Native(crate::speech::NativeError::ModelPath)), None) => {
                 LoadEvent::ModelPath
             }
             (Err(error), None) => {

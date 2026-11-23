@@ -6,6 +6,7 @@ use kumochi_protocol::voice::VoicePart::{SpeechInput, SpokenReplies};
 
 struct Rig {
     brain: Brain,
+    #[cfg(windows)]
     models: PathBuf,
     release: std_mpsc::Sender<()>,
     wanted: Box<dyn Fn() -> Option<u64>>,
@@ -14,7 +15,9 @@ struct Rig {
 }
 
 fn attach(scratch: &Scratch, saved: &str, input_short: Option<u64>) -> Rig {
+    #[cfg(windows)]
     let models = seeded(scratch, saved, 0);
+    #[cfg(windows)]
     if let Some(short) = input_short {
         let input = models.join(SpeechInput.dir());
         std::fs::create_dir_all(&input).unwrap();
@@ -31,6 +34,8 @@ fn attach(scratch: &Scratch, saved: &str, input_short: Option<u64>) -> Rig {
                 .unwrap();
         }
     }
+    #[cfg(not(windows))]
+    seed_voice_settings(scratch, saved);
     let mut brain = test_support::brain(scratch, "");
     let (release, held) = std_mpsc::channel();
     let (stt_reports, stt_heard) = Reports::new();
@@ -44,6 +49,7 @@ fn attach(scratch: &Scratch, saved: &str, input_short: Option<u64>) -> Rig {
     )
     .expect("the fake output owner starts");
     let (fetch, fetched) = held_fetch();
+    #[cfg(windows)]
     brain.attach_voice(
         models.clone(),
         &[],
@@ -51,8 +57,17 @@ fn attach(scratch: &Scratch, saved: &str, input_short: Option<u64>) -> Rig {
         [stt_heard, tts_heard],
         Arc::<HeldFetch>::clone(&fetch),
     );
+    #[cfg(not(windows))]
+    attach_policy_voice(
+        &mut brain,
+        [input_short == Some(0), true],
+        (Some(stt), Some(tts)),
+        [stt_heard, tts_heard],
+        Arc::<HeldFetch>::clone(&fetch),
+    );
     Rig {
         brain,
+        #[cfg(windows)]
         models,
         release,
         wanted,
@@ -85,6 +100,7 @@ async fn answer(shell: &mut Shell<tokio::io::DuplexStream>, expected_enabled: bo
             if view.hold_to_talk == expected_enabled));
 }
 
+#[cfg(windows)]
 fn input_files_remain(models: &Path) {
     for file in SpeechInput.files() {
         assert_eq!(
@@ -104,6 +120,7 @@ async fn persisted_off_boot_and_manual_load_leave_input_unloaded_but_not_output(
     let scratch = Scratch::trusted("voice-input-off-startup");
     let Rig {
         mut brain,
+        #[cfg(windows)]
         models,
         release,
         wanted,
@@ -172,8 +189,10 @@ async fn persisted_off_boot_and_manual_load_leave_input_unloaded_but_not_output(
     assert!(brain.config.view().talk_back);
     assert_eq!(brain.config.installed(), [SpeechInput, SpokenReplies]);
     assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
-    input_files_remain(&models);
+    assert!(!brain.voice_deleting(SpeechInput));
     brain.close().await;
+    #[cfg(windows)]
+    input_files_remain(&models);
 }
 
 #[tokio::test]
@@ -181,6 +200,7 @@ async fn only_committed_off_releases_input_even_when_the_reply_queue_is_full() {
     let scratch = Scratch::trusted("voice-input-off-full-queue");
     let Rig {
         mut brain,
+        #[cfg(windows)]
         models,
         release,
         wanted,
@@ -244,12 +264,18 @@ async fn only_committed_off_releases_input_even_when_the_reply_queue_is_full() {
         assert_eq!(opening(&mut shell).await.speech_input, PartState::Unloaded);
         drop(shell);
     };
-    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    let (ended, ()) = tokio::time::timeout(crate::runtime::tests::PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("the shell sees unloaded input and disconnects");
     assert_eq!(ended, Ended::Lost);
     assert_eq!(brain.config.installed(), [SpeechInput]);
     assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
-    input_files_remain(&models);
+    assert!(!brain.voice_deleting(SpeechInput));
     brain.close().await;
+    #[cfg(windows)]
+    input_files_remain(&models);
 }
 
 #[tokio::test]

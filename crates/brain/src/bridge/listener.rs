@@ -6,11 +6,11 @@
 //! number can name another process once the opener exits.
 
 use std::future::{pending, poll_fn};
-use std::io;
-use std::path::Path;
 use std::pin::{Pin, pin};
 use std::sync::{Arc, OnceLock};
 use std::task::{Poll, ready};
+#[cfg(windows)]
+use std::{io, path::Path};
 
 use kumochi_protocol::constants::MCP_SERVER_NAME;
 use kumochi_protocol::frame::{self, Pipe};
@@ -29,6 +29,7 @@ use crate::context::ToolSchema;
 use crate::coordinator::BuildKey;
 use crate::engines::ToolName;
 use crate::engines::claude_code::audit::AuditGate;
+#[cfg(windows)]
 use crate::platform::{self, ClientRefused, Instance, Job, PipeServer};
 
 /// The MCP versions this server speaks; a client asking for another gets the first.
@@ -41,12 +42,14 @@ const UNAVAILABLE: &str = "This tool isn't available over MCP yet.";
 const ENDED: &str = "This call ended before it finished.";
 
 /// The launch's one pipe instance, created before its name is published.
+#[cfg(windows)]
 pub(crate) struct Listener {
     launch: LaunchId,
     name: String,
     server: PipeServer,
 }
 
+#[cfg(windows)]
 impl Listener {
     /// Creates the pipe as the only instance of its name, owner-only and local.
     ///
@@ -199,6 +202,7 @@ impl std::fmt::Debug for McpReply {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionEnd {
     /// The client failed a check: no `Hello` was sent and nothing was read.
+    #[cfg(windows)]
     Refused(ClientRefused),
     /// No client, or no `Hello` written, before the deadline.
     NoClient,

@@ -793,6 +793,10 @@ native exception, abort, access violation or hang costs that process. The brain 
 content-free `WorkerLost` and keeps running. The model goes with the worker: a respawned worker has
 nothing loaded until the next load.
 
+The Linux test host builds the shared protocol and parent-side supervisor, but has no native
+speech worker, recognizer or voice runtime. Its native entry refuses before dispatching
+`--speech`.
+
 ```mermaid
 flowchart LR
   Client["SpeechHandle"] -->|"Load / Decode / Unload, absolute deadline"| Sup["supervisor task"]

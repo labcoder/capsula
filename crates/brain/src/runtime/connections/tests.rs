@@ -251,7 +251,7 @@ async fn a_saved_key_stays_unsupported_in_runtime_and_reconnect_snapshots() {
         brain
             .account
             .connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey)),
-        [expected.clone()]
+        std::slice::from_ref(&expected)
     );
     assert!(!brain.account.connections.loading);
     assert_eq!(brain.account.connections.connected(), expected);

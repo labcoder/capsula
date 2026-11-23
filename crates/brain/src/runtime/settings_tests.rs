@@ -82,6 +82,7 @@ impl<S: AsyncRead + tokio::io::AsyncWrite> Shell<S> {
 }
 
 /// The next settings, screen gate or scenes frame, as a label.
+#[cfg(windows)]
 async fn gate_or_settings<S: AsyncRead + tokio::io::AsyncWrite>(shell: &mut Shell<S>) -> String {
     loop {
         let next = tokio::time::timeout(super::PATIENCE, shell.next_control());
@@ -99,6 +100,8 @@ async fn gate_or_settings<S: AsyncRead + tokio::io::AsyncWrite>(shell: &mut Shel
     }
 }
 
+/// Requires native window capture; the fixture worker alone cannot open the screen gate.
+#[cfg(windows)]
 #[tokio::test]
 async fn the_screen_gate_is_sent_at_connect_and_after_a_change_that_moves_it() {
     let scratch = Scratch::new("settings-screen-gate");
@@ -350,7 +353,12 @@ async fn names_never_reach_the_tap_in_either_direction() {
     let lines: Vec<_> = dumped.lines().collect();
     assert!(lines[0].contains("brain -> shell  Settings ("), "{dumped}");
     assert!(lines[1].contains("brain -> shell  Account ("), "{dumped}");
-    assert!(lines[2].contains("brain -> shell  Connections(ConnectionsView { anthropic: Missing, anthropic_revision: None, claude_code: NotFound })"), "{dumped}");
+    let anthropic = if cfg!(windows) {
+        "Missing"
+    } else {
+        "UnsupportedPlatform"
+    };
+    assert!(lines[2].contains(&format!("brain -> shell  Connections(ConnectionsView {{ anthropic: {anthropic}, anthropic_revision: None, claude_code: NotFound }})")), "{dumped}");
     assert!(
         lines[3].contains("brain -> shell  ScreenHolds ("),
         "{dumped}"
