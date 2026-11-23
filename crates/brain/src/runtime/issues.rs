@@ -268,6 +268,7 @@ impl Filing {
 }
 
 impl Brain {
+    #[cfg(test)]
     pub(crate) fn prepare_issue_session(&mut self, incarnation: Incarnation) -> IssueSession {
         let session = self.reserve_issue_session(incarnation);
         self.install_issue_session(session);

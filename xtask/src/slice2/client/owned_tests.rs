@@ -6,7 +6,7 @@ use std::{sync::mpsc, thread};
 use kumochi_protocol::frame::{self, HEADER_LEN, Pipe};
 use kumochi_protocol::message::{
     CAPABILITY_LEN, Capability, ControlToBrain, ControlToShell, DataToBrain, DataToShell,
-    Incarnation, RunId,
+    Incarnation, IssueSession, RunId, ShellTuning,
 };
 
 use super::{Frame, PipeClient, credited_data, hello, owned_connect, read, welcome};
@@ -30,6 +30,16 @@ fn welcome_frame() -> ControlToShell {
     }
 }
 
+fn tuning_frame(epoch: u64) -> ControlToShell {
+    ControlToShell::ShellTuning {
+        session: IssueSession {
+            incarnation: Incarnation(42),
+            epoch,
+        },
+        tuning: ShellTuning::from_ms(2500, 750).expect("valid tuning"),
+    }
+}
+
 #[test]
 fn the_owned_server_opens_before_its_capability_is_published() {
     let ctl = name("startup-control");
@@ -48,6 +58,7 @@ fn the_owned_server_opens_before_its_capability_is_published() {
                 return Ok(None);
             }
             frame::write(&mut control_server, &welcome_frame(), Pipe::Control)?;
+            frame::write(&mut control_server, &tuning_frame(7), Pipe::Control)?;
             Ok(Some(capability()))
         },
     )
@@ -71,6 +82,31 @@ fn the_owned_server_opens_before_its_capability_is_published() {
     assert_eq!(
         shared.control.server_pid().expect("control owner"),
         std::process::id()
+    );
+}
+
+#[test]
+fn the_owned_pair_refuses_tuning_from_another_epoch() {
+    let ctl = name("stale-tuning-control");
+    let data = name("stale-tuning-data");
+    let mut control_server = fixture_server(&ctl);
+    let _data_server = fixture_server(&data);
+    let result = owned_connect(
+        &ctl,
+        &data,
+        std::process::id(),
+        Instant::now() + Duration::from_secs(2),
+        || {
+            frame::write(&mut control_server, &welcome_frame(), Pipe::Control)?;
+            frame::write(&mut control_server, &tuning_frame(6), Pipe::Control)?;
+            Ok(Some(capability()))
+        },
+    );
+    assert_eq!(
+        result
+            .expect_err("stale tuning cannot start readers")
+            .to_string(),
+        "missing or invalid shell tuning"
     );
 }
 
@@ -133,6 +169,7 @@ fn an_early_refusal_reconnects_only_after_the_capability_changes() {
                 }
                 if let Ok(mut second) = ready.try_recv() {
                     frame::write(&mut second, &welcome_frame(), Pipe::Control)?;
+                    frame::write(&mut second, &tuning_frame(7), Pipe::Control)?;
                     // Keep the second server alive until the data half has accepted its Hello.
                     live_second = Some(second);
                     return Ok(Some(Capability::new([4; CAPABILITY_LEN])));

@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use kumochi_protocol::constants::{INSTANCE_SERVICE, instance_entry};
 use kumochi_protocol::frame::{self, HEADER_LEN, Pipe};
 use kumochi_protocol::message::{
-    Capability, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Hello,
+    Capability, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Hello, IssueSession,
 };
 use kumochi_protocol::{BUILD_ID, Secret};
 use serde::de::DeserializeOwned;
@@ -23,8 +23,8 @@ use crate::platform::gate_pipe::{self, PipeClient};
 
 /// How long a brain that's starting gets to accept the client.
 const CONNECT: Duration = Duration::from_secs(15);
-/// How long the brain gets to answer `Hello`.
-const WELCOME: Duration = Duration::from_secs(5);
+/// How long the brain gets to complete the handshake.
+const HANDSHAKE: Duration = Duration::from_secs(5);
 
 /// A frame the brain sent, or the end of one of its pipes.
 #[derive(Debug)]
@@ -298,13 +298,14 @@ impl<F> Drop for Client<F> {
 }
 
 fn attempt(session: u32, allowed: Option<usize>) -> Result<Client> {
-    let control = PipeClient::open(&Pipe::Control.name(session))?;
-    control.set_read_timeout(Some(WELCOME));
+    let deadline = Instant::now() + HANDSHAKE;
+    let control = PipeClient::open(&Pipe::Control.name(session))?.until(deadline);
     let hello = hello(capability(session)?.context("instance capability is not yet published")?);
-    ensure!(welcome(&control, &hello)?, "no welcome");
-    control.set_read_timeout(None);
-    let data = PipeClient::open(&Pipe::Data.name(session))?;
-    let shared = paired(control, data, hello, allowed)?;
+    let origin = welcome(&control, &hello)?.context("no welcome")?;
+    let data = PipeClient::open(&Pipe::Data.name(session))?.until(deadline);
+    let mut shared = paired(control, data, hello, origin, allowed)?;
+    shared.control.clear_deadline();
+    shared.data.clear_deadline();
     let (sender, frames) = mpsc::channel();
     let send = move |seen: Option<Seen>, _| {
         seen.is_none_or(|mut seen| {
@@ -314,7 +315,7 @@ fn attempt(session: u32, allowed: Option<usize>) -> Result<Client> {
             sender.send(seen).is_ok()
         })
     };
-    Client::readers(shared, frames, send.clone(), send)
+    Client::readers(Arc::new(shared), frames, send.clone(), send)
 }
 
 fn hello(capability: Capability) -> Hello {
@@ -324,18 +325,27 @@ fn hello(capability: Capability) -> Hello {
     }
 }
 
-fn welcome(control: &PipeClient, hello: &Hello) -> Result<bool> {
+fn welcome(control: &PipeClient, hello: &Hello) -> Result<Option<IssueSession>> {
     frame::write(
         &mut &*control,
         &ControlToBrain::Hello(hello.clone()),
         Pipe::Control,
     )?;
     match read::<ControlToShell>(control, Pipe::Control)? {
-        Some((ControlToShell::Welcome { .. }, _)) => Ok(true),
+        Some((
+            ControlToShell::Welcome {
+                incarnation,
+                issue_epoch,
+            },
+            _,
+        )) => Ok(Some(IssueSession {
+            incarnation,
+            epoch: issue_epoch,
+        })),
         Some((ControlToShell::BuildMismatch { .. }, _)) => {
             bail!("the brain is from another build; rebuild both")
         }
-        None => Ok(false),
+        None => Ok(None),
         _ => bail!("no welcome"),
     }
 }
@@ -344,11 +354,20 @@ fn paired(
     control: PipeClient,
     data: PipeClient,
     hello: Hello,
+    origin: IssueSession,
     allowed: Option<usize>,
-) -> Result<Arc<Shared>> {
+) -> Result<Shared> {
     frame::write(&mut &data, &DataToBrain::Hello(hello), Pipe::Data)?;
     frame::write(&mut &data, &DataToBrain::TextMetrics(None), Pipe::Data)?;
-    Ok(Arc::new(Shared {
+    ensure!(
+        matches!(
+            frame::read(&mut &control, Pipe::Control)?,
+            Some(ControlToShell::ShellTuning { session, tuning })
+                if session == origin && tuning.valid()
+        ),
+        "missing or invalid shell tuning"
+    );
+    Ok(Shared {
         control,
         data,
         control_writer: Mutex::new(()),
@@ -358,7 +377,7 @@ fn paired(
             ..Flow::default()
         }),
         flow_changed: Condvar::new(),
-    }))
+    })
 }
 
 fn owned_connect(
@@ -400,10 +419,16 @@ fn owned_connect(
             }
             startup_pause(deadline);
         };
-        if welcome(&control, &hello)? {
+        if let Some(origin) = welcome(&control, &hello)? {
             let data = PipeClient::open(data_name)?;
             data.require_server(pid)?;
-            return paired(control, data.until(deadline), hello, None);
+            return Ok(Arc::new(paired(
+                control,
+                data.until(deadline),
+                hello,
+                origin,
+                None,
+            )?));
         }
         ensure!(
             refused.is_none(),
