@@ -36,11 +36,11 @@ impl Tap {
         });
         match opened {
             Ok(file) => {
-                tracing::info!(path = %path.to_string_lossy(), "recording pipe frames");
+                tracing::info!("recording pipe frames");
                 Self(Some(file))
             }
             Err(error) => {
-                tracing::warn!(%error, "can't start the pipe tap; it needs a new file");
+                tracing::warn!(kind = ?error.kind(), "can't start the pipe tap; it needs a new file");
                 Self(None)
             }
         }

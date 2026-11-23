@@ -454,8 +454,8 @@ enum LinkError {
     Busy,
     #[error("can't start the brain")]
     Launch(#[source] std::io::Error),
-    #[error("the pipe is served by {0:?}, not the brain beside the shell")]
-    NotOurBrain(PathBuf),
+    #[error("the pipe isn't served by the brain beside the shell")]
+    NotOurBrain,
     #[error("no capability yet")]
     Capability(#[from] CredentialError),
     #[error("the brain closed the connection during the handshake")]
@@ -1901,7 +1901,7 @@ impl Link {
                     launched = false;
                     LinkError::BuildMismatch
                 }
-                Err(error @ LinkError::NotOurBrain(_)) => {
+                Err(error @ LinkError::NotOurBrain) => {
                     return Err(error);
                 }
                 Err(error) => error,
@@ -2095,7 +2095,7 @@ fn open(name: &str, brain: &Path, attempt: Option<Instant>) -> Result<PipeClient
     check_attempt(attempt)?;
     let server = pipe.server_image().map_err(LinkError::Io)?;
     if !server.as_os_str().eq_ignore_ascii_case(brain.as_os_str()) {
-        return Err(LinkError::NotOurBrain(server));
+        return Err(LinkError::NotOurBrain);
     }
     check_attempt(attempt)?;
     Ok(pipe)
