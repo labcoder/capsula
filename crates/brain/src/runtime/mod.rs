@@ -1629,7 +1629,8 @@ fn take(turns: &mpsc::Sender<Turn>, turn: Turn) -> Option<Ended> {
 /// isn't taking yet.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the reader borrows per-connection ingress"
+    clippy::too_many_lines,
+    reason = "one reader routes every ordered data frame and borrows per-connection ingress"
 )]
 async fn read_data(
     pipe: &mut (impl AsyncRead + Unpin),
@@ -1702,17 +1703,23 @@ async fn read_data(
             {
                 return Ended::Broken("turn before queued audio registration");
             }
-            Ok(Some(
-                DataToBrain::AskAbout { .. }
-                | DataToBrain::TextSubmit {
-                    screen: kumochi_protocol::message::ScreenChoice::Include { .. },
-                    ..
-                },
-            )) if registration.is_some() => return Ended::Broken("non-Plain queued turn"),
+            Ok(Some(DataToBrain::AskAbout { .. })) if registration.is_some() => {
+                return Ended::Broken("non-Plain queued turn");
+            }
             Ok(Some(DataToBrain::TextSubmit {
-                turn, thread, text, ..
+                turn,
+                thread,
+                text,
+                screen,
             })) => {
-                if let Some(ended) = take(turns, Input::Turn { turn, thread, text }) {
+                use kumochi_protocol::message::ScreenChoice;
+                let input = match screen {
+                    ScreenChoice::None => Input::Turn { turn, thread, text },
+                    ScreenChoice::Include { .. } | ScreenChoice::Typed(_) => {
+                        Input::RefuseTurn { turn, thread }
+                    }
+                };
+                if let Some(ended) = take(turns, input) {
                     return ended;
                 }
             }

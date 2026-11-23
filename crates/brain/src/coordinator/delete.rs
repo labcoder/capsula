@@ -91,13 +91,15 @@ impl Coordinator {
         &mut self,
         turn: u32,
         thread: Option<ThreadId>,
-        text: Content,
+        text: Option<Content>,
         effects: &mut Vec<Effect>,
     ) {
         if !self.count(effects) {
             return;
         }
-        if self.admits(thread) && !text.trim().is_empty() {
+        if self.admits(thread)
+            && let Some(text) = text.filter(|text| !text.trim().is_empty())
+        {
             self.turn(turn, thread, text, effects);
         } else {
             let refused = ControlToShell::TurnRefused { turn, thread };

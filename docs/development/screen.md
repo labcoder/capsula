@@ -81,6 +81,9 @@ it remains unimplemented and unverified.
 
 ## Local shell exclusion
 
+The paired wire shapes for a one-shot screenshot do not enable capture. A pictured request
+gets no offer; both the old Include flag and a typed screenshot submit are refused in turn order.
+
 Presence owns the exclusion transaction in `presence/exclusion.rs`; the lease and
 its cleanup rules are in `crates/shell-core/src/presence/exclusion/machine.rs`, with no GPUI.
 Its one production caller is a screen hold's release (`Presence::release_screen` in

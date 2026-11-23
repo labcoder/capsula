@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
+use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, TypedDisplay};
 
 use super::context::ScreenContext;
 use super::elements::{
@@ -108,6 +108,18 @@ pub(crate) trait Capturer {
     ) -> Result<(Acquired, PhysicalRect), Failure> {
         Err(Failure::Fault(NO_WINDOW_CAPTURE))
     }
+
+    /// Captures only the expected display instance, with no nearest-display fallback.
+    fn capture_typed_display(
+        &mut self,
+        _point: PhysicalPoint,
+        _expected: TypedDisplay,
+        _excluded: u64,
+        _until: Instant,
+        _frame: &mut RawFrame,
+    ) -> Result<Acquired, Failure> {
+        Err(Refusal::Unsupported.into())
+    }
 }
 
 /// Generations spent by this worker. A respawn starts empty: the hold client's rising ticket
@@ -144,6 +156,10 @@ pub(super) enum Shown {
     Window(Target),
     /// The monitor's physical bounds and effective DPI when it was captured.
     Display { bounds: PhysicalRect, dpi: u32 },
+    TypedDisplay {
+        point: PhysicalPoint,
+        expected: TypedDisplay,
+    },
 }
 
 impl std::fmt::Debug for Shown {
@@ -154,6 +170,7 @@ impl std::fmt::Debug for Shown {
                 .debug_struct("Display")
                 .field("dpi", dpi)
                 .finish_non_exhaustive(),
+            Self::TypedDisplay { .. } => f.write_str("TypedDisplay { .. }"),
         }
     }
 }
@@ -182,6 +199,7 @@ pub(super) struct Screen {
     /// The bounds and DPI of the monitor at a display's bounds now: the platform's read, a fake
     /// in tests.
     pub(super) display_at: fn(PhysicalRect) -> Option<(PhysicalRect, u32)>,
+    pub(super) typed_display_at: fn(PhysicalPoint) -> Option<TypedDisplay>,
     /// How long until a ticket's deadline stamp: the platform's counter, a fake in tests.
     pub(super) left_until: fn(u64) -> Option<Duration>,
 }
@@ -196,12 +214,17 @@ impl Default for Screen {
             reader: None,
             unchanged: crate::platform::window_unchanged,
             display_at: crate::platform::display_at,
+            typed_display_at: crate::platform::typed_display_at,
             left_until: crate::platform::qpc_left,
         }
     }
 }
 
 impl Screen {
+    pub(super) fn spend(&mut self, ticket: &TicketWire) -> Result<(), Refusal> {
+        self.book.spend(ticket.generation())
+    }
+
     pub(super) fn admit(
         &mut self,
         ticket: &TicketWire,
@@ -211,7 +234,7 @@ impl Screen {
         self.frame.invalidate();
         self.held = None;
         self.masks = Arc::new(Mutex::new(MaskSet::new(ticket.capture())));
-        self.book.spend(ticket.generation())?;
+        self.spend(ticket)?;
         let expires = received + Duration::from_millis(ticket.ttl_ms().into());
         // Now is read before the counter, so the brain's deadline can only come sooner here.
         let at = now();
@@ -294,7 +317,8 @@ impl Screen {
     }
 
     fn sealed(&mut self, capture: CaptureId, cap: usize) -> Result<ScreenContext, Failure> {
-        let (unchanged, display_at) = (self.unchanged, self.display_at);
+        let (unchanged, display_at, typed_display_at) =
+            (self.unchanged, self.display_at, self.typed_display_at);
         let held = self
             .held
             .as_mut()
@@ -304,7 +328,11 @@ impl Screen {
             Some(Shown::Window(target)) if unchanged(target) => {}
             Some(Shown::Display { bounds, dpi })
                 if display_at(*bounds) == Some((*bounds, *dpi)) => {}
-            Some(Shown::Display { .. }) => return Err(Refusal::DisplayChanged.into()),
+            Some(Shown::TypedDisplay { point, expected })
+                if typed_display_at(*point) == Some(*expected) => {}
+            Some(Shown::Display { .. } | Shown::TypedDisplay { .. }) => {
+                return Err(Refusal::DisplayChanged.into());
+            }
             _ => return Err(Refusal::WindowChanged.into()),
         }
         let ink = std::mem::take(&mut held.ink);

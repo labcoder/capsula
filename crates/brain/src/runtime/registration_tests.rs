@@ -5,6 +5,7 @@ use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
     AudioSession, ControlToBrain, ControlToShell, DataToBrain, GestureId, LeaseGeneration,
     MAX_RATE, MIN_RATE, Narration, NoticeRevision, OutputGeneration, SceneId, ScreenChoice,
+    ThreadId,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
 use tokio::sync::{Notify, mpsc};
@@ -75,6 +76,125 @@ async fn early_turns_close_both_pipes_without_replaying_after_a_late_register() 
             assert_ne!(event, Seen::ControlApplied);
         }
     }
+    brain.close().await;
+    assert_eq!(outcomes(&scratch), []);
+}
+
+#[tokio::test]
+async fn a_registered_pair_refuses_legacy_include_without_closing() {
+    let scratch = Scratch::new("queued-legacy-screen");
+    let mut brain = test_support::brain(&scratch, "");
+    let ended = queued(&mut brain, async |mut shell| {
+        assert_eq!(shell.scenes().await, []);
+        shell.send(&REGISTER).await;
+        assert_eq!(shell.control().await, Some(RECEIPT));
+        for turn in 1..=2 {
+            let message = DataToBrain::TextSubmit {
+                turn,
+                thread: Some(ThreadId(1)),
+                screen: ScreenChoice::Include {
+                    lease: LeaseGeneration(1),
+                },
+                text: "never plain".into(),
+            };
+            shell
+                .data_out
+                .write_all(&frame::encode(&message, Pipe::Data).unwrap())
+                .await
+                .unwrap();
+        }
+        for turn in 1..=2 {
+            assert_eq!(
+                shell.control().await,
+                Some(ControlToShell::TurnRefused {
+                    turn,
+                    thread: Some(ThreadId(1)),
+                })
+            );
+        }
+    })
+    .await;
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    assert_eq!(outcomes(&scratch), []);
+}
+
+#[tokio::test]
+async fn the_registered_wire_refuses_typed_offers_and_turns_before_capture_exists() {
+    use std::num::NonZeroU64;
+
+    use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, ReleasePointer, TypedDisplay};
+    use kumochi_protocol::message::{
+        TypedScreenDraft, TypedScreenOffer, TypedScreenRevision, TypedScreenSubmit,
+    };
+
+    let scratch = Scratch::new("registered-dormant-typed-wire");
+    let mut brain = test_support::brain(&scratch, "");
+    let draft = TypedScreenDraft {
+        revision: 1,
+        selection: 1,
+    };
+    let recipient = TypedScreenRevision(NonZeroU64::MIN);
+    let display = TypedDisplay {
+        id: NonZeroU64::MIN,
+        bounds: PhysicalRect {
+            origin: [0, 0],
+            size: [2, 2],
+        },
+        dpi: 96,
+    };
+    let ended = queued(&mut brain, async |mut shell| {
+        assert_eq!(shell.scenes().await, []);
+        shell.send(&REGISTER).await;
+        assert_eq!(shell.control().await, Some(RECEIPT));
+        shell
+            .send(&ControlToBrain::RequestTypedScreenOffer {
+                turn: 1,
+                thread: None,
+                draft,
+                recipient,
+                display: Box::new(display),
+            })
+            .await;
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::TypedScreenOffered {
+                turn: 1,
+                thread: None,
+                draft,
+                recipient,
+                offer: None,
+            })
+        );
+        let message = DataToBrain::TextSubmit {
+            turn: 1,
+            thread: None,
+            text: "never plain".into(),
+            screen: ScreenChoice::Typed(TypedScreenSubmit {
+                offer: TypedScreenOffer(NonZeroU64::MIN),
+                draft,
+                lease: LeaseGeneration(1),
+                display,
+                point: ReleasePointer(PhysicalPoint([1, 1])),
+                submitted_qpc: 1,
+                excluded_qpc: 2,
+            }),
+        };
+        shell
+            .data_out
+            .write_all(&frame::encode(&message, Pipe::Data).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::TurnRefused {
+                turn: 1,
+                thread: None
+            })
+        );
+    })
+    .await;
+    assert_eq!(ended, Ended::Lost);
     brain.close().await;
     assert_eq!(outcomes(&scratch), []);
 }

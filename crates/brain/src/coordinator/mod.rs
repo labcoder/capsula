@@ -145,6 +145,13 @@ pub enum Input {
         /// What the user typed.
         text: Content,
     },
+    /// A typed submit that must settle in turn order without admitting a run.
+    RefuseTurn {
+        /// The submit's connection-local number.
+        turn: u32,
+        /// The original target, or `None` for a new thread.
+        thread: Option<ThreadId>,
+    },
     /// The user clicked a labelled 3D part: a turn about it, in its drawing's thread.
     Ask {
         /// The ask's connection-local number, shared with typed turns.
@@ -990,7 +997,12 @@ impl Coordinator {
                 return Ok(vec![Effect::Store(StoreOp::ReadCards { cards })]);
             }
             Input::CardsRead { cards, reply } => return Ok(vec![Effect::Cards { cards, reply }]),
-            Input::Turn { turn, thread, text } => self.typed(turn, thread, text, &mut effects),
+            Input::Turn { turn, thread, text } => {
+                self.typed(turn, thread, Some(text), &mut effects);
+            }
+            Input::RefuseTurn { turn, thread } => {
+                self.typed(turn, thread, None, &mut effects);
+            }
             Input::Ask {
                 turn,
                 scene,

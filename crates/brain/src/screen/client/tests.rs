@@ -33,7 +33,7 @@ fn meta(capture: CaptureId) -> FrameMeta {
 
 fn held(capture: u64) -> Held {
     let key = Key {
-        owner: owner(7),
+        owner: Some(owner(7)),
         capture: CaptureId(capture),
     };
     Held {
@@ -82,7 +82,7 @@ async fn each_capture_gets_a_fresh_key_and_a_higher_ticket_and_names_its_worker(
         };
         assert_eq!(
             (key.owner, ticket.capture(), point),
-            (owner(gesture), key.capture, PhysicalPoint([5, 6]))
+            (Some(owner(gesture)), key.capture, PhysicalPoint([5, 6]))
         );
         assert_eq!(
             ticket.ttl_ms(),
@@ -159,7 +159,7 @@ async fn a_retired_hold_never_reaches_the_worker_again_and_a_later_one_does() {
     });
     let (_, request) = rig.next().await;
     assert!(
-        matches!(request, Request::Context { key, .. } if key.owner == owner(8)),
+        matches!(request, Request::Context { key, .. } if key.owner == Some(owner(8))),
         "{request:?}"
     );
 }

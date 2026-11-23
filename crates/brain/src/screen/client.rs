@@ -199,7 +199,7 @@ impl HoldClient {
                 .checked_add(1)
                 .ok_or(Closed::Lost(WorkerLost::Lost))?;
             let key = Key {
-                owner,
+                owner: Some(owner),
                 capture: CaptureId(admission.last_capture),
             };
             let ticket = TicketWire::new(key.capture, key.capture.0, nonce, ttl_ms, deadline_qpc)

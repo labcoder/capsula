@@ -23,7 +23,9 @@ use kumochi_protocol::message::{
     AccountView, AudioSession, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
     DataToShell, Deleted, ErrorKey, GestureId, GitHubView, Hello, HoldStatus, Incarnation,
     IssueSession, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor,
-    SceneDescriptorV1, SettingsOp, SettingsView, TextMetricsV1, ThreadId, ThreadOp, UserError,
+    SceneDescriptorV1, SettingsOp, SettingsView, TextMetricsV1, ThreadId, ThreadOp,
+    TypedScreenDraft, TypedScreenOffer, TypedScreenProof, TypedScreenRecipient,
+    TypedScreenRevision, UserError,
 };
 use kumochi_protocol::voice::VoicePart;
 
@@ -99,6 +101,31 @@ pub enum LinkEvent {
         generation: u64,
         capture_for: kumochi_protocol::message::CaptureFor,
         reason: kumochi_protocol::message::CaptureFailure,
+    },
+    /// A reply to an exact, connection-local typed screenshot offer request.
+    TypedScreenOffered {
+        generation: u64,
+        turn: u32,
+        thread: Option<ThreadId>,
+        draft: TypedScreenDraft,
+        recipient: TypedScreenRevision,
+        offer: Option<TypedScreenOffer>,
+    },
+    /// An exact held frame still needs proof of continuous exclusion.
+    TypedScreenHeld {
+        generation: u64,
+        proof: TypedScreenProof,
+    },
+    /// The model to display and its paired pictured-send revision.
+    TypedScreenRecipient {
+        generation: u64,
+        recipient: Option<TypedScreenRecipient>,
+    },
+    /// The Brain fenced this pictured run before its first write reservation.
+    TypedScreenNotSent {
+        generation: u64,
+        run: RunId,
+        offer: TypedScreenOffer,
     },
     /// Whether a hold also shows the model a window, from the control pipe.
     ScreenHolds {
@@ -1099,7 +1126,19 @@ impl LinkHandle {
     /// Queues a control message for `session`'s brain. False when the connection ended or the
     /// mailbox refused. Stop, drawing clears and queued scene refusals don't take the outbox lock.
     /// shortcut: control Debug prints physical points for assertions; use only redacted kinds if adding diagnostics here.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one dispatcher decides control admission"
+    )]
     pub fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
+        if matches!(
+            message,
+            ControlToBrain::RequestTypedScreenOffer { .. }
+                | ControlToBrain::CancelTypedScreen { .. }
+                | ControlToBrain::ConfirmTypedScreen(_)
+        ) {
+            return self.send_typed_screen_control(session, message);
+        }
         if session.io.queued
             && matches!(
                 &message,
@@ -1201,6 +1240,48 @@ impl LinkHandle {
             .unwrap_or(false)
     }
 
+    fn send_typed_screen_control(&self, session: &Session, message: ControlToBrain) -> bool {
+        if !session.io.queued || !session.open() {
+            return false;
+        }
+        let request = if let ControlToBrain::RequestTypedScreenOffer { turn, .. } = &message {
+            Some(*turn)
+        } else {
+            None
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(recording) = &self.control_recording {
+            if session.generation != self.link_generation() {
+                session.close();
+                return false;
+            }
+            let queued = recording.try_send(message).is_ok();
+            if !queued && request.is_none() {
+                self.end(session);
+            }
+            return queued;
+        }
+        let queued = self
+            .shared
+            .outbox(session, |outbox| {
+                session.open()
+                    && request.is_none_or(|turn| {
+                        !self.is_quitting()
+                            && outbox.submits.load(Ordering::SeqCst).checked_add(1) == Some(turn)
+                            && self
+                                .shared
+                                .output
+                                .queued_turn(session.generation, None, || true)
+                    })
+                    && outbox.control.try_send(message).is_ok()
+            })
+            .unwrap_or(false);
+        if !queued && request.is_none() {
+            self.end(session);
+        }
+        queued
+    }
+
     /// Offers the preference without interrupting a queued pair's work.
     ///
     /// # Errors
@@ -1268,19 +1349,35 @@ impl LinkHandle {
         } else {
             None
         };
-        let plain_turn = match &message {
+        let registered_turn = match &message {
             DataToBrain::TextSubmit {
                 turn,
                 screen: ScreenChoice::None,
                 ..
             } => Some(*turn),
+            DataToBrain::TextSubmit {
+                turn,
+                screen: ScreenChoice::Typed(_),
+                ..
+            } if session.io.queued => Some(*turn),
+            DataToBrain::TextSubmit {
+                screen: ScreenChoice::Typed(_),
+                ..
+            } => return false,
             DataToBrain::TextSubmit { .. } | DataToBrain::AskAbout { .. } if session.io.queued => {
                 return false;
             }
             _ => None,
         };
+        let typed = matches!(
+            &message,
+            DataToBrain::TextSubmit {
+                screen: ScreenChoice::Typed(_),
+                ..
+            }
+        );
         let out = DataOut::Submit(message);
-        if !session.open() || (mic.is_some() && self.is_quitting()) {
+        if !session.open() || ((typed || mic.is_some()) && self.is_quitting()) {
             return false;
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -1308,15 +1405,20 @@ impl LinkHandle {
                     outbox.pipe.abort();
                     return false;
                 }
-                let enqueue = || outbox.data.try_send(out).is_ok();
-                let queued = if session.io.queued && plain_turn.is_some() {
+                let enqueue = || {
+                    (!typed
+                        || (!self.is_quitting()
+                            && outbox.submits.load(Ordering::SeqCst).checked_add(1)
+                                == registered_turn))
+                        && outbox.data.try_send(out).is_ok()
+                };
+                let queued = if session.io.queued && registered_turn.is_some() {
                     outbox.queued_input.hold.is_none()
-                        && self
-                            .shared
-                            .output
-                            .queued_turn(session.generation, plain_turn, || {
-                                session.open() && enqueue()
-                            })
+                        && self.shared.output.queued_turn(
+                            session.generation,
+                            registered_turn,
+                            || session.open() && enqueue(),
+                        )
                 } else if let Some(gesture) = mic.filter(|_| session.io.queued) {
                     outbox.queued_input.hold == Some(QueuedHold::Listening(gesture))
                         && self.input_is(gesture)
@@ -1376,6 +1478,18 @@ impl LinkHandle {
         let (sender, receiver) = async_channel::bounded(CONTROL_QUEUE);
         self.control_recording = Some(sender);
         receiver
+    }
+
+    /// A one-entry data outbox on a detached, registered typed-screen fixture.
+    pub fn record_typed_screen() -> (Self, Session, Receiver<DataToBrain>) {
+        let (mut link, _) = Self::recording();
+        let (recording, requests) = async_channel::bounded(1);
+        link.recording = Some(recording);
+        let mut session = Session::detached(1, Incarnation(1));
+        Arc::get_mut(&mut session.io)
+            .expect("a new session owns its I/O")
+            .queued = true;
+        (link, session, requests)
     }
 }
 
@@ -2057,6 +2171,10 @@ fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError> {
             | ControlToShell::Focus { .. }
             | ControlToShell::CaptureDone { .. }
             | ControlToShell::CaptureFailed { .. }
+            | ControlToShell::TypedScreenOffered { .. }
+            | ControlToShell::TypedScreenHeld(_)
+            | ControlToShell::TypedScreenRecipient(_)
+            | ControlToShell::TypedScreenNotSent { .. }
             | ControlToShell::ThreadModelSet { .. }
             | ControlToShell::GitHub(_)
             | ControlToShell::GitHubError(_)
@@ -2495,6 +2613,62 @@ fn watch(
                         reason,
                     })
                     .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::TypedScreenOffered {
+                turn,
+                thread,
+                draft,
+                recipient,
+                offer,
+            })) => {
+                if queued.is_none()
+                    || events
+                        .send_blocking(LinkEvent::TypedScreenOffered {
+                            generation,
+                            turn,
+                            thread,
+                            draft,
+                            recipient,
+                            offer,
+                        })
+                        .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::TypedScreenHeld(proof))) => {
+                if queued.is_none()
+                    || events
+                        .send_blocking(LinkEvent::TypedScreenHeld { generation, proof })
+                        .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::TypedScreenRecipient(recipient))) => {
+                if queued.is_none()
+                    || events
+                        .send_blocking(LinkEvent::TypedScreenRecipient {
+                            generation,
+                            recipient,
+                        })
+                        .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(ControlToShell::TypedScreenNotSent { run, offer })) => {
+                if queued.is_none()
+                    || events
+                        .send_blocking(LinkEvent::TypedScreenNotSent {
+                            generation,
+                            run,
+                            offer,
+                        })
+                        .is_err()
                 {
                     return;
                 }

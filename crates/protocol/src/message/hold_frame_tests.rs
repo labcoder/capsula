@@ -378,6 +378,102 @@ fn a_skipped_scene_appends_a_redacted_tag_after_the_screen_release() {
 }
 
 #[test]
+fn typed_screen_proof_appends_only_bounded_redacted_authority() {
+    use std::num::NonZeroU64;
+
+    use super::{
+        TypedScreenDraft, TypedScreenOffer, TypedScreenProof, TypedScreenRevision,
+        TypedScreenSubmit,
+    };
+    use crate::geometry::TypedDisplay;
+
+    let offer = TypedScreenOffer(NonZeroU64::new(2).unwrap());
+    let proof = TypedScreenProof {
+        turn: 1,
+        offer,
+        lease: LeaseGeneration(3),
+        capture: NonZeroU64::new(4).unwrap(),
+    };
+    let confirm = ControlToBrain::ConfirmTypedScreen(proof);
+    let held = ControlToShell::TypedScreenHeld(proof);
+    assert_eq!(postcard::to_allocvec(&confirm).unwrap(), [40, 1, 2, 3, 4]);
+    assert_eq!(postcard::to_allocvec(&held).unwrap(), [38, 1, 2, 3, 4]);
+    round_trip(&confirm, Pipe::Control, 5);
+    round_trip(&held, Pipe::Control, 5);
+    redacted(&confirm, Direction::ToBrain, "ConfirmTypedScreen", 5);
+    redacted(&held, Direction::ToShell, "TypedScreenHeld", 5);
+    assert!(postcard::from_bytes::<ControlToBrain>(&[40, 1, 2, 3, 0]).is_err());
+    let unavailable = ControlToShell::TypedScreenRecipient(None);
+    assert_eq!(postcard::to_allocvec(&unavailable).unwrap(), [39, 0]);
+    round_trip(&unavailable, Pipe::Control, 2);
+    redacted(&unavailable, Direction::ToShell, "TypedScreenRecipient", 2);
+    let unsent = ControlToShell::TypedScreenNotSent {
+        run: RunId(1),
+        offer,
+    };
+    assert_eq!(postcard::to_allocvec(&unsent).unwrap(), [40, 1, 2]);
+    round_trip(&unsent, Pipe::Control, 3);
+    redacted(&unsent, Direction::ToShell, "TypedScreenNotSent", 3);
+
+    let request = ControlToBrain::RequestTypedScreenOffer {
+        turn: 1,
+        thread: None,
+        draft: TypedScreenDraft {
+            revision: 5,
+            selection: 6,
+        },
+        recipient: TypedScreenRevision(NonZeroU64::new(7).unwrap()),
+        display: Box::new(TypedDisplay {
+            id: NonZeroU64::MIN,
+            bounds: PhysicalRect {
+                origin: [-1, 2],
+                size: [3, 4],
+            },
+            dpi: 96,
+        }),
+    };
+    assert_eq!(
+        postcard::to_allocvec(&request).unwrap(),
+        [38, 1, 0, 5, 6, 7, 1, 1, 4, 3, 4, 96]
+    );
+    round_trip(&request, Pipe::Control, 12);
+    redacted(&request, Direction::ToBrain, "RequestTypedScreenOffer", 12);
+    assert!(
+        postcard::from_bytes::<ControlToBrain>(&[38, 1, 0, 5, 6, 0, 1, 1, 4, 3, 4, 96]).is_err()
+    );
+
+    let message = DataToBrain::TextSubmit {
+        turn: 1,
+        thread: None,
+        text: "typed screen sentinel".into(),
+        screen: ScreenChoice::Typed(TypedScreenSubmit {
+            offer,
+            draft: TypedScreenDraft {
+                revision: 5,
+                selection: 6,
+            },
+            lease: LeaseGeneration(3),
+            display: TypedDisplay {
+                id: NonZeroU64::MIN,
+                bounds: RECT,
+                dpi: 96,
+            },
+            point: ReleasePointer(PhysicalPoint([i32::MIN, i32::MAX])),
+            submitted_qpc: 7,
+            excluded_qpc: 8,
+        }),
+    };
+    let printed = format!("{message:?}");
+    assert!(!printed.contains("typed screen sentinel"));
+    assert!(!printed.contains(&format!("{:?}", b"typed screen sentinel")));
+    let encoded = frame::encode(&message, Pipe::Data).unwrap();
+    assert_eq!(
+        frame::read(&mut encoded.as_slice(), Pipe::Data).unwrap(),
+        Some(message)
+    );
+}
+
+#[test]
 fn a_ready_step_appends_a_redacted_tag_after_the_skipped_scene() {
     let ready = ControlToBrain::StepReady {
         run: RunId(u64::MAX),

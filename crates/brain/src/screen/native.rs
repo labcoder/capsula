@@ -3,12 +3,13 @@
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::time::Instant;
 
-use kumochi_protocol::geometry::PhysicalPoint;
+use kumochi_protocol::geometry::{PhysicalPoint, TypedDisplay};
 
 use super::actor::Key;
 use super::capture::{Acquired, Capturer, Failure, Shown};
 use super::elements::Wake;
 use super::frame::RawFrame;
+use super::wire::Refusal;
 
 /// What a job captures at its point.
 pub(super) enum Aim {
@@ -17,6 +18,10 @@ pub(super) enum Aim {
     Window { shell: u32 },
     /// One frame of the monitor nearest it, drawn after `excluded`, the shell's exclusion stamp.
     Display { excluded: u64 },
+    TypedDisplay {
+        expected: TypedDisplay,
+        excluded: u64,
+    },
 }
 
 /// One hold's capture.
@@ -68,6 +73,28 @@ impl CaptureThread {
                                         let dpi = acquired.dpi;
                                         (acquired, Shown::Display { bounds, dpi })
                                     }),
+                                Aim::TypedDisplay { expected, excluded } => {
+                                    if expected.dpi == 0 || !expected.contains(job.point) {
+                                        return Err(Refusal::DisplayChanged.into());
+                                    }
+                                    let acquired = capturer.capture_typed_display(
+                                        job.point,
+                                        expected,
+                                        excluded,
+                                        job.until,
+                                        &mut job.frame,
+                                    )?;
+                                    if acquired.dpi != expected.dpi {
+                                        return Err(Refusal::DisplayChanged.into());
+                                    }
+                                    Ok((
+                                        acquired,
+                                        Shown::TypedDisplay {
+                                            point: job.point,
+                                            expected,
+                                        },
+                                    ))
+                                }
                             }
                         })();
                         if answers.try_send((job.key, job.frame, result)).is_err() || !wake() {
