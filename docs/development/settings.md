@@ -23,11 +23,14 @@ before libtest can start a worker or launch a child, even if admission is reject
 keeps its own close-on-exec copy only when the descriptor matches the named root. A malformed
 descriptor handoff or a failure to seal a live descriptor stops startup with status 77.
 Without a descriptor to advertise, the runner passes neither the descriptor nor its number.
+Sealing the reserved slot changes only its close-on-exec flag; the owner PID is checked
+before the process duplicates a descriptor or attempts to verify the root.
 The descriptor binds the root to the trusted launch; it doesn't prove how the runner created it.
-The PID is checked on every write to refuse accidental inheritance, including a fork with
-cached admission; it isn't proof of delegation. The runner retains exclusive custody of the root
-and trusts its absolute ancestors. Below it, the writer checks each child relative to a held
-directory without following links.
+The PID is checked on every write to refuse accidental inheritance; it isn't proof of
+delegation. A raw fork without exec still inherits descriptors. The PID check blocks the
+forked process from using cached writer admission, not from using the raw descriptors.
+The runner retains exclusive custody of the root and trusts its absolute ancestors. Below
+it, the writer checks each child relative to a held directory without following links.
 
 The writer refuses an occupied sibling temp name and keeps the original staging descriptor
 through both syncs and the published-name identity check. First save uses an atomic

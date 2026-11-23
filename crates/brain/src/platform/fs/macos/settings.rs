@@ -76,7 +76,7 @@ impl SettingsRoot {
             stop_startup();
         };
 
-        // Seal the passed fd before any admission check can return control to libtest.
+        // Even a rejected launch must seal the runner's reserved slot before libtest can exec.
         // SAFETY: fcntl validates the integer fd; no Rust ownership is taken by setting this flag.
         if let Err(error) = call(unsafe { libc::fcntl(inherited, libc::F_SETFD, libc::FD_CLOEXEC) })
         {
