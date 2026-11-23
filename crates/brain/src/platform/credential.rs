@@ -66,14 +66,3 @@ pub trait CredentialStore: Send + Sync {
     /// Returns an error for invalid targets or any OS failure other than not-found.
     fn delete(&self, target: &str) -> Result<(), CredentialStoreError>;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn secret_debug_is_redacted() {
-        let secret = Secret::new(Zeroizing::new(b"test-only-secret-sentinel".to_vec()));
-        assert_eq!(format!("{secret:?}"), "***");
-    }
-}

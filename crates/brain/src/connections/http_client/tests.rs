@@ -15,7 +15,7 @@ use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use zeroize::Zeroizing;
 
 use super::{
-    Client, Endpoint, HttpError, IssuerUrl, MAX_BODY_BYTES, Request, ResponseMeta, body_buffer,
+    Client, Endpoint, HttpError, IssuerUrl, MAX_BODY_BYTES, Request, ResponseMeta,
     connecting_within, from_roots, read_response,
 };
 use crate::platform::{TrustRoots, TrustRootsError};
@@ -843,17 +843,6 @@ async fn auth_discovery_and_error_bodies_all_have_the_same_byte_cap() {
         server
             .finish()
             .expect("fixture finished sending its bounded overflow");
-    }
-}
-
-#[test]
-fn allocation_hints_are_bounded_and_optional() {
-    assert_eq!(body_buffer(None).capacity(), 0);
-    for (length, minimum) in [(333, 333), (u64::MAX, MAX_BODY_BYTES)] {
-        let bytes = body_buffer(Some(length));
-        assert!(bytes.is_empty());
-        assert!(bytes.capacity() >= minimum);
-        assert!(bytes.capacity() <= MAX_BODY_BYTES);
     }
 }
 

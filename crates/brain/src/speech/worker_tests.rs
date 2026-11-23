@@ -89,24 +89,24 @@ fn failed_load_releases_before_receipt(failure: Failure, expected: &[&str]) {
 
 #[test]
 fn failed_warmup_destroys_the_recognizer_and_resources_before_failed_and_next_read() {
-    failed_load_releases_before_receipt(
-        Failure::Warmup,
-        &[
-            "recognizer released",
-            "resources retiring",
-            "resources released",
-            "reply",
-            "read",
-        ],
-    );
-}
-
-#[test]
-fn failed_recognizer_creation_releases_resources_before_failed_and_next_read() {
-    failed_load_releases_before_receipt(
-        Failure::Recognizer,
-        &["resources retiring", "resources released", "reply", "read"],
-    );
+    for (failure, expected) in [
+        (
+            Failure::Warmup,
+            &[
+                "recognizer released",
+                "resources retiring",
+                "resources released",
+                "reply",
+                "read",
+            ][..],
+        ),
+        (
+            Failure::Recognizer,
+            &["resources retiring", "resources released", "reply", "read"][..],
+        ),
+    ] {
+        failed_load_releases_before_receipt(failure, expected);
+    }
 }
 
 const WAIT: Duration = Duration::from_secs(5);

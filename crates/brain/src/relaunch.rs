@@ -134,20 +134,24 @@ mod tests {
 
     #[test]
     fn deaths_without_a_typed_membership_never_request_a_clear() {
-        let now = Instant::now();
-        let mut crashes = Crashes::default();
-        for delay in [
-            Duration::from_millis(200),
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-        ] {
-            let plan = crashes.plan(now);
-            assert_eq!(plan.clear, []);
-            assert_eq!(plan.delay, Some(delay));
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        for times in [[0, 0, 0, 0, 59, 60, 120], [0, 10, 20, 30, 59, 90, 150]] {
+            let mut crashes = Crashes::default();
+            for (seconds, delay) in times.into_iter().zip([
+                Some(Duration::from_millis(200)),
+                Some(Duration::from_secs(1)),
+                Some(Duration::from_secs(5)),
+                None,
+                None,
+                Some(Duration::from_secs(1)),
+                Some(Duration::from_millis(200)),
+            ]) {
+                let plan = crashes.plan(at(seconds));
+                assert_eq!(plan.clear, [], "death at {seconds}s");
+                assert_eq!(plan.delay, delay, "death at {seconds}s");
+            }
         }
-        let plan = crashes.plan(now);
-        assert_eq!(plan.clear, []);
-        assert_eq!(plan.delay, None);
     }
 
     #[test]
@@ -184,34 +188,5 @@ mod tests {
         let plan = crashes.plan(at(60));
         assert_eq!(plan.delay, None);
         assert_eq!(plan.clear, [SceneId(1)]);
-    }
-
-    #[test]
-    fn backs_off_then_gives_up_within_a_minute() {
-        let start = Instant::now();
-        let mut crashes = Crashes::default();
-        let at = |s: u64| start + Duration::from_secs(s);
-        assert_eq!(crashes.record(at(0)), Some(Duration::from_millis(200)));
-        assert_eq!(crashes.record(at(10)), Some(Duration::from_secs(1)));
-        assert_eq!(crashes.record(at(20)), Some(Duration::from_secs(5)));
-        assert_eq!(
-            crashes.record(at(30)),
-            None,
-            "a fourth crash within a minute"
-        );
-    }
-
-    #[test]
-    fn crashes_older_than_a_minute_are_forgotten() {
-        let start = Instant::now();
-        let mut crashes = Crashes::default();
-        for s in [0, 1, 2] {
-            crashes.record(start + Duration::from_secs(s));
-        }
-        assert_eq!(
-            crashes.record(start + Duration::from_secs(62)),
-            Some(Duration::from_millis(200)),
-            "the three earlier crashes left the window",
-        );
     }
 }

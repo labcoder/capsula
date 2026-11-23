@@ -264,31 +264,34 @@ fn an_old_store_held_with_delete_sharing_is_finished_only_once_its_name_is_gone(
     const FILE_SHARE_READ_WRITE_DELETE: u32 = 1 | 2 | 4;
     let scratch = Scratch::new("old-shared");
     let store = swapped_with_old_left(&scratch);
-    let mut holder = Some(
-        OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ_WRITE_DELETE)
-            .open(beside(&scratch.db(), ".purge-old"))
-            .expect("held"),
-    );
+    let old = beside(&scratch.db(), ".purge-old");
+    let holder = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+        .open(&old)
+        .expect("held");
     let (thread, attempts) = spawn(store);
-    match next(&attempts) {
-        // NTFS with POSIX deletion drops the name at once, while the file is still open.
-        Attempt::Done => eprintln!("the old store's name went while it was held"),
-        attempt => {
-            eprintln!("the old store's name stayed while it was held");
-            assert_eq!(attempt, Attempt::Failed);
-            assert_eq!(
-                purge_files(&scratch),
-                vec![beside(&scratch.db(), ".purge-old")]
-            );
-            drop(holder.take());
-            done_after(&attempts, &[Attempt::Failed]);
-        }
+    let first = next(&attempts);
+    let files = purge_files(&scratch);
+    // Some Windows volumes drop the name at once; others retain it until the handle closes.
+    let unlinked = files.is_empty();
+    if !unlinked {
+        assert_eq!(files, [old]);
     }
-    assert_eq!(purge_files(&scratch), Vec::<PathBuf>::new());
+    assert_eq!(
+        first,
+        if unlinked {
+            Attempt::Done
+        } else {
+            Attempt::Failed
+        }
+    );
     drop(holder);
+    if !unlinked {
+        done_after(&attempts, &[Attempt::Failed]);
+    }
     thread.close().blocking_recv().expect("closed");
+    assert!(purge_files(&scratch).is_empty(), "the old name is gone");
 }
 
 async fn reply(replies: &mut mpsc::UnboundedReceiver<Input>) -> Input {
@@ -628,40 +631,57 @@ fn a_copy_waits_until_the_volume_has_room_for_it_and_the_foreground() {
 }
 
 #[test]
-fn a_purge_found_finished_resets_the_backoff() {
-    let scratch = Scratch::new("found-done");
-    let mut store = Store::open(&scratch.db()).expect("store");
-    let schedule = Schedule {
-        first_retry: Duration::from_secs(60),
-        last_retry: Duration::from_secs(240),
-        ..Schedule::default()
-    };
-    let mut purger = Purger::new(schedule, &store);
-    purger.retry = Duration::from_secs(240);
-    purger.start(&mut store);
-    assert_eq!(purger.retry, Duration::from_secs(60));
-    assert!(purger.next.is_none());
-}
-
-#[test]
 fn copies_made_stale_back_off_until_one_finishes() {
     let scratch = Scratch::new("stale-backoff");
-    let store = owing(&scratch);
+    let mut store = owing(&scratch);
+    let (heard, attempts) = std_mpsc::channel();
     let schedule = Schedule {
         first_retry: Duration::from_secs(60),
         last_retry: Duration::from_secs(240),
+        free_space: |_| Ok(u64::MAX),
+        attempts: Some(heard),
         ..Schedule::default()
     };
     let mut purger = Purger::new(schedule, &store);
-    for wait in [60, 120, 240, 240] {
+    for seconds in [60, 120, 240, 240] {
         let before = Instant::now();
         purger.settle(Attempt::Stale, &store);
-        let at = purger.next.expect("a retry");
-        let wait = Duration::from_secs(wait);
-        assert!(at >= before + wait && at <= Instant::now() + wait);
+        assert_eq!(next(&attempts), Attempt::Stale);
+        let wait = Duration::from_secs(seconds);
+        let timeout = purger.timeout().expect("stale copies schedule a retry");
+        assert!((wait.saturating_sub(before.elapsed())..=wait).contains(&timeout));
+        purger.tick(&mut store);
+        assert_eq!(attempts.try_recv(), Err(std_mpsc::TryRecvError::Empty));
     }
-    purger.settle(Attempt::Done, &store);
-    assert_eq!(purger.retry, Duration::from_secs(60));
+
+    purger.next = Some(Instant::now());
+    let end = Instant::now() + PATIENCE;
+    let result = loop {
+        purger.tick(&mut store);
+        match attempts.try_recv() {
+            Ok(attempt) => break attempt,
+            Err(std_mpsc::TryRecvError::Empty) => {
+                assert!(Instant::now() < end, "the due retry finishes");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(std_mpsc::TryRecvError::Disconnected) => panic!("no purge receipts"),
+        }
+    };
+    assert_eq!(result, Attempt::Done);
+    assert!(!store.purge_pending());
+    assert!(purge_files(&scratch).is_empty());
+    assert_eq!(
+        purger.timeout(),
+        None,
+        "a completed cleanup leaves no retry"
+    );
+
+    let before = Instant::now();
+    purger.settle(Attempt::Stale, &store);
+    assert_eq!(next(&attempts), Attempt::Stale);
+    let first = Duration::from_secs(60);
+    let timeout = purger.timeout().expect("fresh retry after completion");
+    assert!((first.saturating_sub(before.elapsed())..=first).contains(&timeout));
 }
 
 #[test]
@@ -996,198 +1016,6 @@ fn a_page_read_neither_stops_a_copy_nor_waits_for_it() {
         "the read didn't stop it"
     );
     paused.thread.close().blocking_recv().expect("closed");
-}
-
-/// Rez measurement for the pull request, not a check: how long a page read takes, and a write
-/// sent right behind it, on the large measured stores with a purge owed. The events page reads a
-/// thread's 51 newest events, 25 turns just under the 256 KiB cap and 26 short answers, about
-/// 6.5 MB, and the search is for a phrase every event holds. The
-/// writes go to a thread the pages don't read, and each one's run is ended (untimed), so no run
-/// stays active to hold off the owed purge. Each reply is timed as it arrives, in either order.
-/// The write alone, with no read ahead of it, is the before. Run it with
-/// `cargo test --release -p kumochi-brain -- --ignored --nocapture measure_page_reads`; set
-/// `MEASURE_ONLY` to one store's name to run just that one.
-#[test]
-#[ignore = "a measurement, run by hand on Rez"]
-#[expect(clippy::too_many_lines, reason = "one measurement, read top to bottom")]
-fn measure_page_reads() {
-    use crate::store::tests::{MEASURED_STORES, measured_store};
-    use crate::store::{EventKind, NewEvent};
-    const ROUNDS: u64 = 30;
-    let only = std::env::var("MEASURE_ONLY").ok();
-    let summary = |mut took: Vec<Duration>| {
-        took.sort_unstable();
-        format!(
-            "median {:.1?}, worst {:.1?}",
-            took[took.len() / 2],
-            took[took.len() - 1]
-        )
-    };
-    for (name, shape) in MEASURED_STORES {
-        if only.as_deref().is_some_and(|only| only != name) {
-            continue;
-        }
-        let scratch = Scratch::new("measure-pages");
-        let mut store = measured_store(&scratch, shape);
-        let size = std::fs::metadata(scratch.db()).expect("size").len() >> 20;
-        let history = ThreadId(1_000_000);
-        // Just under a turn's 256 KiB cap.
-        let long = "near the frame budget ".repeat(11_900);
-        for turn in 0..50_u64 {
-            let run = RunId(1_000_000 + turn);
-            let title = (turn == 0).then_some("t");
-            store.begin_turn(history, title, run, &long).expect("turn");
-            store
-                .append(
-                    history,
-                    run,
-                    &[NewEvent {
-                        kind: EventKind::AssistantText,
-                        text: Some("a short answer"),
-                        body: None,
-                    }],
-                )
-                .expect("answer");
-            store
-                .end_run(history, run, &[], RunEnd::Done)
-                .expect("ended");
-        }
-        let writes = ThreadId(2_000_000);
-        store
-            .begin_turn(writes, Some("w"), RunId(2_000_000), "the writes' thread")
-            .expect("turn");
-        store
-            .end_run(writes, RunId(2_000_000), &[], RunEnd::Done)
-            .expect("ended");
-        store.begin_delete(ThreadId(2)).expect("begin");
-        store.finish_delete(ThreadId(2)).expect("finish");
-        let (acks, mut replies) = mpsc::unbounded_channel();
-        let thread = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
-        let begin = |thread: &StoreThread, at: u64| {
-            assert!(thread.send(StoreOp::BeginTurn {
-                thread: writes,
-                title: None,
-                run: RunId(2_000_001 + at),
-                text: "a measured turn".into(),
-                screen: None,
-            }));
-        };
-        let settle = |thread: &StoreThread, replies: &mut mpsc::UnboundedReceiver<Input>, at| {
-            let run = RunId(2_000_001 + at);
-            assert!(thread.send(StoreOp::EndRun {
-                thread: writes,
-                run,
-                text: None,
-                revealed: None,
-                clear: None,
-                end: RunEnd::Done,
-            }));
-            assert_eq!(replies.blocking_recv(), Some(Input::RunStored { run }));
-        };
-        let mut alone = Vec::new();
-        for at in 0..ROUNDS {
-            let started = Instant::now();
-            begin(&thread, at);
-            assert_eq!(
-                replies.blocking_recv(),
-                Some(Input::TurnStored {
-                    run: RunId(2_000_001 + at)
-                })
-            );
-            alone.push(started.elapsed());
-            settle(&thread, &mut replies, at);
-        }
-        let common = |after| PageOf::Threads {
-            search: Some("lorem".to_owned()),
-            after,
-        };
-        assert!(thread.send(StoreOp::ReadPage {
-            key: crate::coordinator::PageKey::for_tests(1, 0),
-            page: common(None),
-        }));
-        let Some(Input::PageRead {
-            reply: DataToShell::ThreadList { threads, next, .. },
-            ..
-        }) = replies.blocking_recv()
-        else {
-            panic!("a search page")
-        };
-        assert_eq!(threads.len(), 50, "every thread matches");
-        let pages = [
-            (
-                "events page, 51 rows read, 25 near 256 KiB",
-                PageOf::Events {
-                    thread: history,
-                    before: None,
-                },
-            ),
-            ("search for a common word", common(None)),
-            (
-                "its continuation",
-                common(Some(next.expect("more matches"))),
-            ),
-        ];
-        let mut lines = vec![format!(
-            "{name} ({size} MiB): a BeginTurn alone {}",
-            summary(alone)
-        )];
-        for (round, (what, page)) in (1..).zip(pages) {
-            let (mut reads, mut behind) = (Vec::new(), Vec::new());
-            for at in 0..ROUNDS {
-                let at = round * ROUNDS + at;
-                let request = u32::try_from(at).expect("small");
-                let started = Instant::now();
-                assert!(thread.send(StoreOp::ReadPage {
-                    key: crate::coordinator::PageKey::for_tests(1, request),
-                    page: page.clone(),
-                }));
-                begin(&thread, at);
-                let (mut read, mut stored) = (None, None);
-                while read.is_none() || stored.is_none() {
-                    match replies.blocking_recv().expect("the store answers") {
-                        Input::PageRead {
-                            key:
-                                crate::coordinator::PageKey {
-                                    request: answered, ..
-                                },
-                            reply,
-                            ..
-                        } if answered == request => {
-                            read = Some(started.elapsed());
-                            match reply {
-                                DataToShell::ThreadList { threads, .. } => {
-                                    assert_eq!(threads.len(), 50);
-                                }
-                                DataToShell::Page { events, .. } => {
-                                    let shape: Vec<(usize, bool)> = events
-                                        .iter()
-                                        .map(|event| (event.text.len(), event.cut))
-                                        .collect();
-                                    // The newest answer; the near-cap turn behind it doesn't fit.
-                                    assert_eq!(shape, [("a short answer".len(), false)]);
-                                }
-                                other => panic!("unexpected {other:?}"),
-                            }
-                        }
-                        Input::TurnStored { run } if run == RunId(2_000_001 + at) => {
-                            stored = Some(started.elapsed());
-                        }
-                        other => panic!("unexpected {other:?}"),
-                    }
-                }
-                reads.extend(read);
-                behind.extend(stored);
-                settle(&thread, &mut replies, at);
-            }
-            lines.push(format!(
-                "{what}: read {}; the BeginTurn sent behind it {}",
-                summary(reads),
-                summary(behind)
-            ));
-        }
-        thread.close().blocking_recv().expect("closed");
-        eprintln!("{}", lines.join("\n  "));
-    }
 }
 
 #[test]

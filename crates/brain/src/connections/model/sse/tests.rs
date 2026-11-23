@@ -1,11 +1,8 @@
-use std::time::Instant;
-
 use kumochi_protocol::message::{Action, ErrorKey, UserError};
 use serde_json::{Value, json};
 
-use super::{
-    MAX_EVENT_BYTES, MAX_LINE_BYTES, MAX_STREAM_BYTES, MAX_TEXT_BYTES, Progress, Reader, SseEvent,
-};
+use super::super::framer::{MAX_EVENT_BYTES, MAX_LINE_BYTES};
+use super::{MAX_STREAM_BYTES, MAX_TEXT_BYTES, Progress, Reader, SseEvent};
 use crate::connections::model::error::{Code, Failure, ProviderError};
 
 const TEXT: &[u8] = include_bytes!("../../../../fixtures/responses/text.sse");
@@ -316,94 +313,4 @@ fn debug_shows_only_a_known_event_kind() {
         None,
     );
     assert_eq!(format!("{unknown:?}"), "SseEvent { kind: \"other\" }");
-}
-
-/// The spike's framer (spikes/connections-spike/src/inference.rs), the "before" for PR 11's
-/// measurement: it joins data lines and parses each event the same way.
-fn spike_feed(line: &mut Vec<u8>, data: &mut Vec<u8>, bytes: &[u8], events: &mut usize) {
-    for &b in bytes {
-        if b != b'\n' {
-            line.push(b);
-            continue;
-        }
-        if line.last() == Some(&b'\r') {
-            line.pop();
-        }
-        if line.is_empty() {
-            if !data.is_empty() {
-                data.pop();
-                if data.as_slice() != b"[DONE]" {
-                    let value: Value = serde_json::from_slice(data).expect("spike event");
-                    *events += usize::from(value["type"].is_string());
-                }
-                data.clear();
-            }
-        } else if let Some(value) = line.strip_prefix(b"data:") {
-            let value = value.strip_prefix(b" ").unwrap_or(value);
-            data.extend_from_slice(value);
-            data.push(b'\n');
-        }
-        line.clear();
-    }
-}
-
-/// About 1 MiB of text deltas, as the provider sends them, then the completed event.
-fn megabyte_of_deltas() -> Vec<u8> {
-    let mut stream = Vec::new();
-    let mut sequence = 0;
-    while stream.len() < 1024 * 1024 - 512 {
-        sequence += 1;
-        let event = json!({
-            "type": "response.output_text.delta",
-            "sequence_number": sequence,
-            "item_id": "msg_measure",
-            "output_index": 0,
-            "content_index": 0,
-            "delta": " a word or two",
-        });
-        stream.extend(format!("event: response.output_text.delta\ndata: {event}\n\n").into_bytes());
-    }
-    stream.extend_from_slice(COMPLETED);
-    stream
-}
-
-#[test]
-#[ignore = "a measurement for a quiet Rez: cargo test -p kumochi-brain --release measure_ -- --ignored --nocapture"]
-fn measure_feed_against_the_spike() {
-    let stream = megabyte_of_deltas();
-    let events = stream.windows(2).filter(|pair| pair == b"\n\n").count();
-    let rounds = 50;
-    let started = Instant::now();
-    for _ in 0..rounds {
-        let mut reader = Reader::default();
-        let mut seen = 0;
-        let mut count = |_: &SseEvent| seen += 1;
-        for chunk in stream.chunks(16 * 1024) {
-            if reader.feed(chunk, &mut count) == Ok(Progress::Completed) {
-                break;
-            }
-        }
-        assert_eq!(seen, events, "every event read");
-    }
-    let ours = started.elapsed();
-    let started = Instant::now();
-    for _ in 0..rounds {
-        let (mut line, mut data, mut seen) = (Vec::new(), Vec::new(), 0);
-        for chunk in stream.chunks(16 * 1024) {
-            spike_feed(&mut line, &mut data, chunk, &mut seen);
-        }
-        assert_eq!(seen, events, "every event read");
-    }
-    let spike = started.elapsed();
-    let bytes = f64::from(u32::try_from(stream.len()).expect("about 1 MiB"));
-    let count = f64::from(u32::try_from(events).expect("tens of thousands"));
-    let mib = f64::from(rounds) * bytes / (1024.0 * 1024.0);
-    for (name, took) in [("reader", ours), ("spike", spike)] {
-        let per_event = took.as_secs_f64() * 1e9 / (f64::from(rounds) * count);
-        eprintln!(
-            "{name}: {:.0} MiB/s, {per_event:.0} ns per event ({events} events, {} bytes)",
-            mib / took.as_secs_f64(),
-            stream.len()
-        );
-    }
 }

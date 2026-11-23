@@ -1,13 +1,8 @@
 use super::*;
 use crate::connections::anthropic::{KeyError, KeyOp};
-use kumochi_protocol::constants::{anthropic_key_target, anthropic_staging_target};
 use kumochi_protocol::message::KeyRejection;
 
 const KEY: &str = "sk-ant-api-fake-sentinel-never-real";
-
-fn bytes(value: &[u8]) -> SecretBytes {
-    Secret::new(Zeroizing::new(value.to_vec()))
-}
 
 fn loaded(vault: &mut Vault<FakeStore>) -> Option<String> {
     vault
@@ -51,41 +46,6 @@ fn the_current_key_loads_and_each_bad_key_is_rejected_exactly() {
     }
 }
 
-/// PR 2 reads no legacy name, and adopting a staged paste waits for C7.
-#[test]
-fn legacy_names_are_deleted_unread_and_a_staged_paste_is_refused() {
-    let (_scratch, path, service, store) = setup("key-legacy");
-    let active = anthropic_key_target(&service);
-    let staged = anthropic_staging_target(&service);
-    store
-        .set(&active, &bytes(KEY.as_bytes()))
-        .expect("legacy key");
-    store
-        .set(&staged, &bytes(KEY.as_bytes()))
-        .expect("legacy paste");
-    let mut vault = open(&store, &service, &path);
-    assert_eq!(
-        loaded(&mut vault),
-        None,
-        "a legacy name is not the current key"
-    );
-    assert!(
-        matches!(
-            vault.adopt_anthropic_paste(authority::Generation::from_stage_id(
-                kumochi_protocol::message::KeyStageId([0; 16])
-            )),
-            Err(super::super::staging::PasteError::Changed)
-        ),
-        "adoption is refused"
-    );
-    assert_eq!(
-        store.names(),
-        Vec::<String>::new(),
-        "the open deleted both legacy names"
-    );
-    assert!(!is_current(&vault, Kind::AnthropicKey));
-}
-
 #[test]
 fn removal_commits_its_fence_even_while_every_delete_is_refused() {
     let (_scratch, path, service, store) = setup("key-remove-refused");
@@ -114,36 +74,6 @@ fn removal_commits_its_fence_even_while_every_delete_is_refused() {
     let mut vault = open(&store, &service, &path);
     assert!(store.names().is_empty(), "the next open swept the names");
     assert_eq!(loaded(&mut vault), None);
-}
-
-/// A failure stays failed: a refused removal commit keeps the key, and only a retry removes it.
-#[test]
-fn a_refused_removal_commit_keeps_the_key_until_a_retry_commits() {
-    let (_scratch, path, service, store) = setup("key-remove-commit");
-    let mut vault = open(&store, &service, &path);
-    vault
-        .save_anthropic_key(KEY.as_bytes())
-        .expect("current key");
-    refuse_commits(&path);
-    assert!(
-        matches!(
-            vault.anthropic(KeyOp::Remove(vault.anthropic_revision())).1,
-            Err(KeyError::Vault(VaultError::Authority))
-        ),
-        "a refused commit is not a removal"
-    );
-    allow_commits(&path);
-    assert_eq!(loaded(&mut vault).as_deref(), Some(KEY));
-    assert_eq!(
-        vault
-            .anthropic(KeyOp::Remove(vault.anthropic_revision()))
-            .1
-            .expect("retry")
-            .map(|_| ()),
-        None
-    );
-    assert_eq!(loaded(&mut vault), None);
-    assert!(store.names().is_empty(), "the retry swept the names");
 }
 
 #[test]

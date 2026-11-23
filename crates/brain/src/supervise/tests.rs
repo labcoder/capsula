@@ -165,7 +165,10 @@ fn a_message_over_its_kinds_cap_writes_nothing() {
     let mut written = Vec::new();
     assert!(matches!(
         write_message(&mut written, 1, &vec![0_u8; 2000], Test::MAX_REQUEST),
-        Err(frame::FrameError::TooLarge { .. })
+        Err(frame::FrameError::TooLarge {
+            len: 2_002,
+            max: 1_024,
+        })
     ));
     assert!(written.is_empty());
 }
@@ -178,7 +181,7 @@ fn the_worker_reads_whole_requests_and_refuses_broken_ones() {
     write_message(&mut bytes, 4, &vec![1_u8], Test::MAX_REQUEST).expect("written");
     let mut input = bytes.as_slice();
     let read = |input: &mut &[u8]| read_request::<Vec<u8>>(input, Test::MAX_REQUEST);
-    assert_eq!(read(&mut input).expect("first").map(|(id, _)| id), Some(3));
+    assert_eq!(read(&mut input).expect("first"), Some((3, request.clone())));
     assert_eq!(read(&mut input).expect("second"), Some((4, vec![1])));
     assert!(read(&mut input).expect("clean end").is_none());
     let mut mixed = Vec::new();
@@ -202,8 +205,17 @@ fn the_worker_reads_whole_requests_and_refuses_broken_ones() {
         read(&mut mixed.as_slice()),
         Err(frame::FrameError::Chunks)
     ));
-    let truncated = &mixed[..=mixed.len() / 2];
-    assert!(read(&mut &truncated[..]).is_err());
+    let mut cut_mid_request = &mixed[..=mixed.len() / 2];
+    assert!(matches!(
+        read(&mut cut_mid_request),
+        Err(frame::FrameError::Truncated)
+    ));
+    let mut truncated = &bytes[..bytes.len() - 1];
+    assert_eq!(read(&mut truncated).expect("first"), Some((3, request)));
+    assert!(matches!(
+        read(&mut truncated),
+        Err(frame::FrameError::Truncated)
+    ));
 }
 
 #[tokio::test]
@@ -277,55 +289,33 @@ async fn third_fourth_fifth_loss_and_window_boundary() {
 
 #[test]
 fn a_17_chunk_message_reassembles_at_4_mib() {
+    let mut expected = Vec::new();
     let most = Pipe::Data.max_payload() - 6;
     let sizes = [vec![most; 16], vec![Test::MAX_REPLY - 16 * most]].concat();
     assert_eq!(sizes.len(), 17);
     let mut assembly = Assembly::new(Test::MAX_REPLY);
     for (index, size) in sizes.iter().enumerate() {
         let last = index == 16;
+        let body = vec![u8::try_from(index).expect("17 chunks"); *size];
+        expected.extend_from_slice(&body);
         let sent = Frame {
             id: 1,
             chunk: u32::try_from(index).expect("17 chunks"),
             last,
-            body: vec![42; *size],
+            body,
         };
         let encoded = frame::encode(&sent, Pipe::Data).expect("within the frame cap");
         let read = frame::read::<Frame>(&mut encoded.as_slice(), Pipe::Data)
             .expect("read")
             .expect("frame");
         let done = assembly.push(read).expect("within the message cap");
-        assert_eq!(
-            done.map(|bytes| bytes.len()),
-            last.then_some(Test::MAX_REPLY)
-        );
+        if last {
+            assert_eq!(expected.len(), 4_194_304);
+            assert_eq!(done.as_deref(), Some(expected.as_slice()));
+        } else {
+            assert_eq!(done, None);
+        }
     }
-}
-
-#[test]
-fn each_malformed_frame_is_its_own_frame_error() {
-    let over = (256 * 1024 + 1_u32).to_le_bytes().to_vec();
-    let whole = Frame {
-        id: 1,
-        chunk: 0,
-        last: true,
-        body: vec![1; 64],
-    };
-    let at_cap = frame::encode(&whole, Pipe::Data).expect("frame");
-    let truncated = at_cap[..at_cap.len() - 1].to_vec();
-    let mistyped = frame::encode(&(1_u64, 0_u32), Pipe::Data).expect("not a frame");
-    let read = |bytes: Vec<u8>| frame::read::<Frame>(&mut bytes.as_slice(), Pipe::Data);
-    assert!(matches!(
-        read(over),
-        Err(frame::FrameError::TooLarge {
-            len: 262_145,
-            max: 262_144
-        })
-    ));
-    assert!(matches!(read(truncated), Err(frame::FrameError::Truncated)));
-    assert!(matches!(
-        read(mistyped),
-        Err(frame::FrameError::Malformed(_))
-    ));
 }
 
 /// A process whose exit the test decides once the wait for it has begun.

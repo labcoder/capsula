@@ -21,29 +21,6 @@ fn refused(value: &Value) {
 }
 
 #[test]
-fn preserves_structured_input_and_all_supported_efforts() {
-    let mut value = request();
-    value["tools"] = json!([{"name":"example","input_schema":{"type":"object","properties":{
-        "cache_control":{"type":"string"}}}}]);
-    value["messages"][0]["content"] = json!([{"type":"tool_use","id":"one","name":"example",
-        "input":{"cache_control":{"type":"persistent"},"content":[{"cache_control":false}]}}]);
-    let structured = value["messages"][0]["content"].clone();
-    value["messages"] = json!([
-        {"role":"user","content":"first"},
-        {"role":"assistant","content":structured},
-        {"role":"user","content":"next"}
-    ]);
-    for effort in ["low", "medium", "high", "xhigh", "max"] {
-        value["output_config"] = json!({"effort":effort});
-        let body = MessagesBody::new(&value).expect("supported envelope");
-        assert_eq!(
-            serde_json::from_slice::<Value>(body.bytes()).unwrap(),
-            value
-        );
-    }
-}
-
-#[test]
 fn rejects_missing_mistyped_and_unsupported_fields() {
     for key in ["model", "messages", "stream", "max_tokens"] {
         let mut value = request();
@@ -219,6 +196,31 @@ fn json_is_checked_then_sent_as_written_up_to_the_bound() {
         MessagesBody::from_json(Zeroizing::new(padded)),
         Err(Failure::Request)
     ));
+    let mut value = request();
+    let marker = "PRIVATE_REQUEST_MARKER";
+    value["tools"] = json!([{"name":"example","input_schema":{"type":"object","properties":{
+        "cache_control":{"type":"string"}}}}]);
+    value["messages"] = json!([
+        {"role":"user","content":marker},
+        {"role":"assistant","content":[{"type":"tool_use","id":"one","name":"example",
+            "input":{"cache_control":{"type":"persistent"},"content":[{"cache_control":false}]}}]},
+        {"role":"user","content":"next"}
+    ]);
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
+        value["output_config"] = json!({"effort":effort});
+        let written = serde_json::to_vec(&value).expect("fixture JSON");
+        let body =
+            MessagesBody::from_json(Zeroizing::new(written.clone())).expect("supported envelope");
+        assert_eq!(body.bytes(), written.as_slice());
+        let formatted = format!("{body:?}");
+        assert!(!formatted.contains(marker), "request text is redacted");
+        let bytes = format!("{:?}", marker.as_bytes());
+        assert!(
+            !formatted.contains(bytes.trim_matches(['[', ']'])),
+            "request bytes are redacted"
+        );
+    }
+
     let uncapped = String::from_utf8_lossy(written).replace("2048", "2049");
     for refused in [uncapped.as_bytes(), &written[..written.len() - 1]] {
         assert!(matches!(

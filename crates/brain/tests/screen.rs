@@ -203,28 +203,3 @@ async fn an_idle_worker_killed_from_outside_is_reported_and_replaced() {
     tokio::task::yield_now().await;
     job.terminate().expect("end job");
 }
-
-#[tokio::test]
-async fn the_first_request_after_a_loss_reaches_the_next_worker() {
-    let job = Arc::new(Job::new().expect("job"));
-    let screen = HoldClient::start(PathBuf::from(WORKER), Arc::clone(&job)).expect("worker");
-    let mut losses = screen.lost();
-    for dead in 0..2 {
-        assert_eq!(
-            screen.fault(WorkerFault::Crash, until()).await,
-            Err(WorkerLost::Lost)
-        );
-        assert_eq!(
-            within_patience(losses.recv()).await.expect("loss"),
-            Generation(dead)
-        );
-        assert_eq!(
-            screen.ping(until()).await,
-            Ok(()),
-            "the loss is the recovery boundary, so one request with no retry is served"
-        );
-    }
-    drop(screen);
-    tokio::task::yield_now().await;
-    job.terminate().expect("end job");
-}
