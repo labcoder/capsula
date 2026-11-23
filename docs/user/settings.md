@@ -11,6 +11,8 @@ or discard your message draft. If the background process is disconnected, reconn
 editing. **Accounts** manages your [model accounts](accounts.md) and
 [GitHub connection](github.md).
 
+**Advanced tuning.** To change a built-in limit in `config.toml`, see [Tuning](tuning.md).
+
 In Settings, Ctrl+Tab goes to the next tab and Ctrl+Shift+Tab to the previous one, wrapping
 at either end. Focus returns to the Settings frame; use Tab or Shift+Tab to reach its controls
 and Space to choose a focused radio.
@@ -82,5 +84,4 @@ close Settings to reach Retry. Retry and Quit are also in the dock's native menu
 If the dock says **Check settings**, open Settings for the full explanation. A successful retry
 of the field that failed clears that notice. If the settings file can't be read, repair or
 delete `config.toml` in `%APPDATA%\Kumochi` and restart the app. Debug builds use
-`%APPDATA%\Kumochi Dev`, separate from an installed copy. Some built-in limits can be
-changed in the same file; see [tuning](tuning.md).
+`%APPDATA%\Kumochi Dev`, separate from an installed copy.

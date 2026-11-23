@@ -18,6 +18,8 @@ The first time you start Kumochi, a window opens under the dock.
 
 Both names can change later in [Settings](settings.md), and they follow the same rules there.
 
+**Advanced tuning.** To change a built-in limit in `config.toml`, see [Tuning](tuning.md).
+
 **Finish later**, Esc or closing the window hides onboarding until you next start Kumochi, which
 opens it at the first step you haven't finished. Once you've signed in or chatted, it doesn't
 come back by itself. A valid name you were editing is saved first;
