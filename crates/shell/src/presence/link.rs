@@ -281,11 +281,9 @@ impl Presence {
                     run,
                     thread,
                 } => self.focus(generation, run, thread, cx),
-                LinkEvent::Account { generation, view } => {
-                    self.account_changed(generation, view, false, cx);
-                }
-                LinkEvent::AccountUnsupported { generation, view } => {
-                    self.account_changed(generation, view, true, cx);
+                snapshot @ (LinkEvent::Account { generation, .. }
+                | LinkEvent::AccountUnsupported { generation, .. }) => {
+                    self.account_changed(generation, snapshot, cx);
                 }
                 LinkEvent::GitHub { generation, view } => {
                     let current = self.session.as_ref().map(crate::link::Session::generation);
@@ -449,17 +447,13 @@ impl Presence {
     fn account_changed(
         &mut self,
         generation: u64,
-        view: AccountView,
-        unsupported: bool,
+        snapshot: LinkEvent,
         cx: &mut Context<'_, Self>,
     ) {
         let current = self.session.as_ref().map(crate::link::Session::generation);
         let previous = self.settings.read(cx).accounts.generation;
         let (accepted, recovered) = self.settings.update(cx, |state, cx| {
-            if state
-                .accounts
-                .receive_snapshot(current, generation, view, unsupported)
-            {
+            if state.accounts.receive_snapshot(current, snapshot) {
                 cx.notify();
                 return (
                     true,
