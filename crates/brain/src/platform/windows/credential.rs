@@ -5,7 +5,10 @@ use std::io;
 use std::ptr::{self, NonNull};
 use std::slice;
 
+use keyring::Entry;
 use kumochi_protocol::Secret;
+use kumochi_protocol::constants::{INSTANCE_SERVICE, instance_entry};
+use kumochi_protocol::message::Capability;
 use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
 use windows_sys::Win32::Security::Credentials::{
     CRED_MAX_CREDENTIAL_BLOB_SIZE, CRED_MAX_GENERIC_TARGET_NAME_LENGTH, CRED_PERSIST_LOCAL_MACHINE,
@@ -13,7 +16,33 @@ use windows_sys::Win32::Security::Credentials::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
+use crate::platform::credential::{
+    CredentialError, CredentialStore, CredentialStoreError, SecretBytes,
+};
+
+/// Stores the capability for Windows session `session`, replacing the previous brain's there.
+///
+/// # Errors
+/// Fails when Credential Manager refuses the write.
+pub fn store_instance(session: u32, capability: &Capability) -> Result<(), CredentialError> {
+    Ok(entry(session)?.set_secret(capability.expose())?)
+}
+
+/// Deletes the capability. Deleting one that isn't there succeeds.
+///
+/// # Errors
+/// Fails when Credential Manager refuses the delete.
+pub fn delete_instance(session: u32) -> Result<(), CredentialError> {
+    match entry(session)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// One entry per session, because each session runs its own brain.
+fn entry(session: u32) -> keyring::Result<Entry> {
+    Entry::new(INSTANCE_SERVICE, &instance_entry(session))
+}
 
 /// Windows Credential Manager with local-machine persistence, never profile roaming.
 #[derive(Debug, Clone, Copy, Default)]

@@ -15,8 +15,8 @@ use super::authority::{self, Authority, Kind, io as generation};
 use super::error::VaultError;
 use super::marker::{Disposition, MarkerUpdate, Phase, SignOutMarker};
 use super::records::{Account, MAX_RECORD_BYTES, Record, RevocationList};
-use crate::platform::credential::{CredentialStore, SecretBytes};
-use crate::platform::{self, SessionLock};
+use crate::platform::SessionLock;
+use crate::platform::credential::{CredentialStore, SecretBytes, native_session_lock_path};
 
 mod github;
 pub(crate) mod staging;
@@ -124,9 +124,9 @@ impl<S: CredentialStore> Vault<S> {
     /// Takes account-session ownership without reading any credential yet.
     ///
     /// # Errors
-    /// Returns typed Busy for contention, or a path/lock failure otherwise.
+    /// Returns an unsupported-store error, typed Busy for contention, or a path/lock failure.
     pub(in crate::connections) fn open(store: S) -> Result<Self, VaultError> {
-        let path = platform::session_lock_path().ok_or(VaultError::NoDataDir)?;
+        let path = native_session_lock_path()?.ok_or(VaultError::NoDataDir)?;
         Self::with_service(store, CREDENTIAL_SERVICE, &path)
     }
 

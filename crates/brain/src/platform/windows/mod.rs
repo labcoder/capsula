@@ -29,6 +29,7 @@ pub(crate) use capture::{WINDOW_CAPTURE, display_at, screen_capturer};
 pub(crate) use clock::qpc_now;
 pub(crate) use clock::{qpc_age, qpc_at, qpc_left};
 pub(crate) use credential::WindowsCredentialStore;
+pub use credential::{delete_instance, store_instance};
 pub(crate) use dump::DumpExclusion;
 pub(crate) use elements::screen_elements;
 #[cfg(debug_assertions)]

@@ -348,7 +348,8 @@ is checked against the pipe's cap (64 KiB control, 256 KiB data) before anything
   It registers the shell's pid so the screen walk excludes the shell, and clears it on disconnect.
 - On every start the brain writes a fresh random 32-byte **instance capability** to Windows
   Credential Manager. A shell proves it runs as the same user by reading it back. It's never on
-  a command line, in a file, or in the environment.
+  a command line, in a file, or in the environment. Builds without a native credential adapter
+  refuse to store or delete the capability; they don't use a fallback backend.
 
 ## The handshake
 
