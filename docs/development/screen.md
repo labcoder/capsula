@@ -85,8 +85,10 @@ The paired wire shapes for a one-shot screenshot do not enable capture. A pictur
 gets no offer; both the old Include flag and a typed screenshot submit are refused in turn order.
 The exclusion owner checks only the exact current lease and continuous surface receipts.
 An adapter without continuous evidence returns a negative receipt.
-Shell-core pairs an opt-in offer with the displayed recipient and current draft, but cannot
-submit a pictured turn yet. Presence does not consume the offer events.
+Shell-core binds one opt-in to the displayed recipient, draft revision and selection. It requires
+an exact continuous exclusion receipt before sending proof. Presence does not expose the opt-in
+or consume the replies, and the brain continues to refuse pictured submissions. The one-shot plain
+retry keeps the words on a failed enqueue and never rearms capture.
 
 Presence owns the exclusion transaction in `presence/exclusion.rs`; the lease and
 its cleanup rules are in `crates/shell-core/src/presence/exclusion/machine.rs`, with no GPUI.

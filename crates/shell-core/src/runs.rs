@@ -15,7 +15,7 @@ mod typed_screen;
 use hold::Hold;
 pub use hold::{HoldRelease, ScreenHold, ScreenLine, ScreenNotice};
 use typed_screen::TypedScreen;
-pub use typed_screen::TypedScreenIo;
+pub use typed_screen::{TypedScreenInput, TypedScreenIo};
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
@@ -128,6 +128,11 @@ impl fmt::Debug for Applied {
     }
 }
 
+enum Submit {
+    Plain(Content),
+    Picture,
+}
+
 /// A turn sent and not answered yet, then its named run's until that run's first terminal state.
 struct Submitted {
     /// The selection it was typed at.
@@ -139,6 +144,7 @@ struct Submitted {
     /// What was typed, until nothing may put it back.
     text: Option<Content>,
     answering: bool,
+    pictured: bool,
 }
 
 impl fmt::Debug for Submitted {
@@ -149,6 +155,7 @@ impl fmt::Debug for Submitted {
             .field("thread", &self.thread)
             .field("text_len", &self.text.as_ref().map(|text| text.len()))
             .field("answering", &self.answering)
+            .field("pictured", &self.pictured)
             .finish()
     }
 }
@@ -298,15 +305,17 @@ impl Runs {
             .chain(self.named.as_ref().map(|(_, submitted)| submitted))
             .chain(self.recovery.as_ref().map(|(_, submitted)| submitted))
             .filter_map(|submitted| submitted.text.as_ref().map(|text| text.len()))
+            .chain(self.typed_screen.kept())
             .collect()
     }
 
     pub fn settings(&mut self, main: ThreadId) {
         let previous = self.thread();
         self.main = Some(main);
-        if self.thread() != previous {
+        let current = self.thread();
+        if current != previous {
             self.dismiss_retry();
-            self.typed_screen.invalidate();
+            self.typed_screen.target_changed(current);
         }
     }
 
@@ -589,14 +598,7 @@ impl Runs {
         if audio == AudioSession::QueuedRequired {
             self.forget_texts(|_| true);
         }
-        self.submitted.push_back(Submitted {
-            revision: self.revision,
-            turn,
-            thread: self.thread(),
-            text: Some(text.into()),
-            answering: false,
-        });
-        self.turns_sent = turn;
+        self.record_submit(turn, Submit::Plain(text.into()));
         Ok(())
     }
 
@@ -621,6 +623,22 @@ impl Runs {
             return Err(Refused::Busy);
         }
         self.turns_sent.checked_add(1).ok_or(Refused::Busy)
+    }
+
+    fn record_submit(&mut self, turn: u32, submit: Submit) {
+        let (text, pictured) = match submit {
+            Submit::Plain(text) => (Some(text), false),
+            Submit::Picture => (None, true),
+        };
+        self.submitted.push_back(Submitted {
+            revision: self.revision,
+            turn,
+            thread: self.thread(),
+            text,
+            answering: false,
+            pictured,
+        });
+        self.turns_sent = turn;
     }
 
     /// A run's `Focus`. It moves the target, as an explicit switch does, only while `run` is
@@ -762,6 +780,7 @@ impl Runs {
             return;
         };
         if self.submitted.remove(at).is_some() {
+            self.typed_screen.refused(turn, thread);
             self.answered_one(at);
         }
     }
@@ -892,10 +911,21 @@ impl Runs {
                 && let Some(mut submitted) = self.submitted.remove(at)
             {
                 typed = Some((submitted.turn, submitted.revision));
+                let draft = self.typed_draft();
+                let cancelled = at < self.cancelled;
+                let pictured_named = submitted.pictured
+                    && !deleted
+                    && run > self.fence
+                    && submitted.revision == self.revision
+                    && self
+                        .typed_screen
+                        .name(turn, draft, run, (!cancelled).then_some(thread));
+                let pictured_current = !submitted.pictured || (pictured_named && !cancelled);
                 if submitted.thread.is_none()
                     && submitted.revision == self.revision
                     && self.target == Target::New
                     && !deleted
+                    && pictured_current
                 {
                     self.target = if Some(thread) == self.main {
                         Target::Kumo
@@ -903,9 +933,11 @@ impl Runs {
                         Target::Task(thread)
                     };
                 }
-                let cancelled = at < self.cancelled;
+                if submitted.pictured && !pictured_named {
+                    self.typed_screen.revoke_turn(turn);
+                }
                 self.answered_one(at);
-                if cancelled {
+                if cancelled || !pictured_current {
                     self.fence = self.fence.max(run);
                     applied.stop = Some(ControlToBrain::Stop {
                         run,
@@ -955,6 +987,7 @@ impl Runs {
         }
         if matches!(phase, Phase::Done | Phase::Interrupted | Phase::Failed) {
             self.end(run, |live| live.state_ended = true);
+            self.typed_screen.finished(run, phase);
             // The first terminal state uses the submission up, so a duplicate finds nothing.
             if let Some((_, submitted)) = self.named.take_if(|(named, _)| *named == run)
                 && phase == Phase::Failed

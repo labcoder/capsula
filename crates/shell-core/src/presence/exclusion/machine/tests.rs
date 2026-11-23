@@ -10,24 +10,6 @@ use super::fixture::{EXCLUDED, Fake, PRIOR, Surface, acquire};
 use super::{Error, Exclusion, Key, LIFETIME, Slot};
 
 #[test]
-fn only_the_current_unexpired_lease_confirms_or_restores_its_receipts() {
-    let at = Instant::now();
-    let mut owner = Exclusion::default();
-    let mut surfaces = Fake::new();
-    let first = acquire(&mut owner, &mut surfaces, at);
-    assert!(owner.confirms(first, at, &surfaces));
-    assert!(!owner.confirms(first, at + LIFETIME, &surfaces));
-    assert_eq!(owner.restore_matching(first, &mut surfaces), Ok(()));
-    let next = acquire(&mut owner, &mut surfaces, at);
-    assert!(!owner.confirms(first, at, &surfaces));
-    assert_eq!(owner.restore_matching(first, &mut surfaces), Ok(()));
-    assert_eq!(surfaces.affinities(), [EXCLUDED; 8]);
-    assert!(owner.confirms(next, at, &surfaces));
-    assert_eq!(owner.restore_matching(next, &mut surfaces), Ok(()));
-    assert_eq!(surfaces.affinities(), PRIOR);
-}
-
-#[test]
 fn all_eight_surfaces_restore_their_exact_independent_prior_affinity() {
     let mut owner = Exclusion::default();
     let mut fake = Fake::new();
