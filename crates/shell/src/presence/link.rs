@@ -642,16 +642,10 @@ impl Presence {
         update: Update,
         cx: &mut Context<'_, Self>,
     ) {
-        let current = self.session.as_ref().map(crate::link::Session::generation);
-        let (link, session) = (&self.link, &self.session);
+        let pair = self.session.as_ref().map(|session| (&self.link, session));
         let applied = self.settings.update(cx, |state, cx| {
-            let applied = state.receive(current, generation, view.clone(), update);
+            let applied = state.receive_and_replay_dock(pair, generation, view.clone(), update);
             if applied {
-                state.flush_offline_position(|op| {
-                    session.as_ref().is_some_and(|session| {
-                        link.send_control(session, ControlToBrain::Settings(op))
-                    })
-                });
                 cx.notify();
             }
             applied

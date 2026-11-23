@@ -1,8 +1,11 @@
 //! Authoritative account snapshots and one-shot intents, independent of GPUI and transport.
 
 use kumochi_protocol::message::{
-    AccountOp, AccountRecovery, AccountView, Action, Cleanup, ErrorKey, PlanState, UserError,
+    AccountOp, AccountRecovery, AccountView, Action, Cleanup, ErrorKey, PlanState, SettingsView,
+    UserError,
 };
+
+use crate::strings::Text;
 
 #[derive(Default)]
 pub struct Accounts {
@@ -108,6 +111,90 @@ impl Accounts {
         }
     }
 
+    /// The heading and notices for the account row, in display order.
+    pub fn status(&self, settings: Option<&SettingsView>) -> (Text, Vec<Text>) {
+        let mut lines = Vec::new();
+        let status = match &self.view {
+            None if settings.is_none() => Text::AccountOffline,
+            None => Text::AccountWaiting,
+            Some(AccountView::SignedOut {
+                revocation_unconfirmed,
+            }) => {
+                if *revocation_unconfirmed {
+                    lines.push(Text::AccountRevocationUnconfirmed);
+                } else {
+                    lines.push(Text::AccountUsePlan);
+                }
+                Text::AccountSignedOut
+            }
+            Some(AccountView::SigningIn) => {
+                lines.push(Text::AccountReplaceHelp);
+                Text::AccountSigningIn
+            }
+            Some(AccountView::Busy) => {
+                lines.push(Text::AccountBusyHelp);
+                Text::AccountBusy
+            }
+            Some(view @ AccountView::SigningOut { cleanup, .. }) => {
+                lines.push(match cleanup {
+                    Cleanup::Running => Text::AccountStopped,
+                    Cleanup::Refused => Text::AccountCleanupRefused,
+                    Cleanup::NotDurable => Text::AccountNotDurable,
+                });
+                lines.extend(cleanup_notice(view));
+                if *cleanup == Cleanup::Running {
+                    Text::AccountSigningOut
+                } else {
+                    Text::AccountSignOutNeedsRetry
+                }
+            }
+            Some(AccountView::SignedIn { plan, recovery, .. }) => match recovery {
+                Some(AccountRecovery::SignInAgain) => Text::AccountSessionEnded,
+                Some(AccountRecovery::Retry) => {
+                    if self.error.is_none() {
+                        lines.push(Text::AccountRetryHelp);
+                    }
+                    Text::AccountAttention
+                }
+                None => match plan {
+                    PlanState::Enabled => Text::AccountUsingPlan,
+                    PlanState::Declined => Text::AccountPlanOff,
+                    PlanState::Unavailable => Text::AccountUnavailable,
+                },
+            },
+        };
+        (status, lines)
+    }
+
+    /// The error to show in the account row, if the status doesn't already say it.
+    pub fn status_error(&self) -> Option<&UserError> {
+        self.error.as_ref().filter(|error| {
+            !matches!(
+                (error.key(), &self.view),
+                (
+                    ErrorKey::SignOutNotDurable,
+                    Some(AccountView::SigningOut {
+                        cleanup: Cleanup::NotDurable,
+                        ..
+                    })
+                ) | (
+                    ErrorKey::SessionEnded,
+                    Some(AccountView::SignedIn {
+                        recovery: Some(AccountRecovery::SignInAgain),
+                        ..
+                    })
+                ) | (
+                    ErrorKey::PlanUnavailable,
+                    Some(AccountView::SignedIn {
+                        plan: PlanState::Unavailable,
+                        recovery: None,
+                        ..
+                    })
+                )
+            )
+        })
+    }
+
     pub fn allows(&self, op: AccountOp) -> bool {
         if self.waiting.is_some() {
             return false;
@@ -199,6 +286,17 @@ impl Accounts {
         self.waiting = Some(AccountOp::CancelSignIn);
         true
     }
+}
+
+fn cleanup_notice(view: &AccountView) -> Option<Text> {
+    matches!(
+        view,
+        AccountView::SigningOut {
+            cleanup: Cleanup::Refused | Cleanup::NotDurable,
+            revocation_unconfirmed: true,
+        }
+    )
+    .then_some(Text::AccountRevocationPending)
 }
 
 #[cfg(test)]

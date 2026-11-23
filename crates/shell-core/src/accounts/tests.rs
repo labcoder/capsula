@@ -2,8 +2,9 @@ use kumochi_protocol::message::AccountEmail;
 
 use super::{
     AccountOp, AccountRecovery, AccountView, Accounts, Action, Cleanup, ErrorKey, PlanState,
-    UserError,
+    UserError, cleanup_notice,
 };
+use crate::strings::Text;
 
 const OPS: [AccountOp; 5] = [
     AccountOp::SignIn,
@@ -593,5 +594,99 @@ fn sign_in_actions_never_bypass_waiting_or_revocation_backlog() {
             "account is busy or signing out"
         )));
         assert_eq!(accounts.waiting, None);
+    }
+}
+
+#[test]
+fn account_status_prefers_recovery_to_each_plan_state() {
+    for plan in [
+        PlanState::Enabled,
+        PlanState::Declined,
+        PlanState::Unavailable,
+    ] {
+        for (recovery, expected) in [
+            (
+                AccountRecovery::SignInAgain,
+                (Text::AccountSessionEnded, vec![]),
+            ),
+            (
+                AccountRecovery::Retry,
+                (Text::AccountAttention, vec![Text::AccountRetryHelp]),
+            ),
+        ] {
+            let mut state = Accounts::default();
+            assert!(state.receive(
+                Some(7),
+                7,
+                AccountView::SignedIn {
+                    email: None,
+                    plan,
+                    recovery: Some(recovery),
+                },
+            ));
+            assert_eq!(state.status(None), expected, "{plan:?}, {recovery:?}");
+        }
+    }
+}
+
+#[test]
+fn remote_sign_out_copy_follows_the_cleanup_phase() {
+    for (cleanup, remote, notice, lines) in [
+        (Cleanup::Running, false, None, vec![Text::AccountStopped]),
+        (Cleanup::Running, true, None, vec![Text::AccountStopped]),
+        (
+            Cleanup::Refused,
+            false,
+            None,
+            vec![Text::AccountCleanupRefused],
+        ),
+        (
+            Cleanup::Refused,
+            true,
+            Some(Text::AccountRevocationPending),
+            vec![Text::AccountCleanupRefused, Text::AccountRevocationPending],
+        ),
+        (
+            Cleanup::NotDurable,
+            false,
+            None,
+            vec![Text::AccountNotDurable],
+        ),
+        (
+            Cleanup::NotDurable,
+            true,
+            Some(Text::AccountRevocationPending),
+            vec![Text::AccountNotDurable, Text::AccountRevocationPending],
+        ),
+    ] {
+        let view = AccountView::SigningOut {
+            cleanup,
+            revocation_unconfirmed: remote,
+        };
+        assert_eq!(cleanup_notice(&view), notice, "{view:?}");
+        let mut state = Accounts::default();
+        assert!(state.receive(Some(7), 7, view));
+        assert_eq!(
+            state.status(None),
+            (
+                if cleanup == Cleanup::Running {
+                    Text::AccountSigningOut
+                } else {
+                    Text::AccountSignOutNeedsRetry
+                },
+                lines
+            )
+        );
+    }
+    for (revocation_unconfirmed, line) in [
+        (false, Text::AccountUsePlan),
+        (true, Text::AccountRevocationUnconfirmed),
+    ] {
+        let view = AccountView::SignedOut {
+            revocation_unconfirmed,
+        };
+        let mut state = Accounts::default();
+        assert!(state.receive(Some(7), 7, view));
+        assert_eq!(state.status(None), (Text::AccountSignedOut, vec![line]));
     }
 }

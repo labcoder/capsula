@@ -30,14 +30,17 @@ fn native_taskbar_refusal_keeps_the_saved_choice_and_reports_its_failure() {
     let mut saved = view();
     saved.show_in_taskbar = true;
     state.set_view(saved, Update::Unsolicited);
-    state.apply_taskbar(|_| Some(crate::strings::Text::TaskbarAddFailed));
+    state.apply_taskbar(|choice| {
+        assert_eq!(choice, TaskbarChoice::Shown);
+        false
+    });
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Shown));
     assert!(state.view().expect("saved snapshot").show_in_taskbar);
     assert_eq!(
         state.native_taskbar_notice,
         Some(crate::strings::Text::TaskbarAddFailed)
     );
-    state.apply_taskbar(|_| None);
+    state.apply_taskbar(|_| true);
     assert_eq!(state.native_taskbar_notice, None);
     assert_eq!(state.taskbar_choice(), Some(TaskbarChoice::Shown));
 }
@@ -159,7 +162,9 @@ fn taskbar_success_preserves_dock_frame_rate_and_name_refusals() {
         let mut state = Settings::default();
         state.set_view(view(), Update::Unsolicited);
         match setting {
-            SettingsOp::SetDockPosition(position) => state.send_dock_position(position, |_| true),
+            SettingsOp::SetDockPosition(position) => {
+                assert!(state.send_dock_position(position, |_| true));
+            }
             SettingsOp::SetMaxFrameRate(rate) => {
                 assert!(state.send_max_frame_rate(rate, |_| true));
             }

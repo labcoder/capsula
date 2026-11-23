@@ -20,9 +20,9 @@ impl Settings {
         &mut self,
         position: DockPosition,
         send: impl FnOnce(SettingsOp) -> bool,
-    ) {
+    ) -> bool {
         self.offline_position = Some(DockIntent::Unsent(position));
-        self.flush_offline_position(send);
+        self.flush_offline_position(send)
     }
 
     pub fn flush_offline_position(&mut self, send: impl FnOnce(SettingsOp) -> bool) -> bool {

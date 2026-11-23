@@ -1,7 +1,14 @@
 use kumochi_protocol::message::{PartState, SttUnload, UserError};
 
 use super::{Pending, Settings, SettingsOp, Slot};
+use crate::link::output::Denied;
 use crate::strings::Text;
+
+pub const STT_UNLOAD_OPTIONS: [(SttUnload, Text); 3] = [
+    (SttUnload::Kept, Text::VoiceKept),
+    (SttUnload::After15Min, Text::Voice15Minutes),
+    (SttUnload::After1Hour, Text::Voice1Hour),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpeechInputAction {
@@ -127,18 +134,23 @@ impl Settings {
         clippy::fn_params_excessive_bools,
         reason = "the checkbox and wire setter carry this boolean unchanged"
     )]
-    pub fn send_talk_back(&mut self, on: bool, send: impl FnOnce() -> Result<(), Text>) {
+    pub fn send_talk_back(&mut self, on: bool, send: impl FnOnce() -> Result<(), Denied>) -> bool {
         if self.talk_back_pending() || self.talk_back_choice().is_none_or(|old| old == on) {
-            return;
+            return false;
         }
-        self.talk_back_send_error = send().err();
-        if self.talk_back_send_error.is_none() {
-            self.pending.push_back(Pending {
-                slot: Slot::TalkBack(on),
-                failed: false,
-                reset_draft: false,
-            });
+        self.talk_back_send_error = send().err().map(|denied| match denied {
+            Denied::Busy => Text::TalkBackBusy,
+            _ => Text::SettingsUnavailable,
+        });
+        if self.talk_back_send_error.is_some() {
+            return false;
         }
+        self.pending.push_back(Pending {
+            slot: Slot::TalkBack(on),
+            failed: false,
+            reset_draft: false,
+        });
+        true
     }
 
     /// Whether a hold also sends the model the screen: the choice in flight, else the saved one.
@@ -297,6 +309,13 @@ impl Settings {
                 _ => None,
             })
             .or(Some(saved))
+    }
+
+    pub fn stt_unload_index(&self) -> Option<usize> {
+        let choice = self.stt_unload_choice()?;
+        STT_UNLOAD_OPTIONS
+            .iter()
+            .position(|(policy, _)| *policy == choice)
     }
 
     pub fn stt_unload_pending(&self) -> bool {

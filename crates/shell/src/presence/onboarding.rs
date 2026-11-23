@@ -24,7 +24,7 @@ use kumochi_protocol::constants;
 use kumochi_protocol::message::ControlToBrain;
 
 use super::kumo_view::{SIZE, still};
-use super::settings::{field_status, name_input_event};
+use super::settings::name_input_event;
 use super::{
     Foreground, LinkState, OpenError, PanelVisibility, Presence, PresenceEvent, PresenceSurface,
     configure_surface, options, platform, send, status_text,
@@ -382,7 +382,7 @@ impl Render for OnboardingView {
         let online = state.view().is_some();
         let (saving, error) = step
             .field()
-            .map_or((None, None), |field| field_status(state, field, strings));
+            .map_or((None, None), |field| state.field_status(field, strings));
         let unsent = self.state.unsent();
         let failed = error.is_some() || state.finish_refusal().is_some() || unsent;
         let status = saving
