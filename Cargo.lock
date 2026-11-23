@@ -3922,6 +3922,7 @@ dependencies = [
  "kumochi-audio",
  "kumochi-protocol",
  "kumochi-scene",
+ "libc",
  "postcard",
  "ptts",
  "rcgen",
