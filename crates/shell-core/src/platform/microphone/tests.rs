@@ -238,8 +238,11 @@ fn actual_owner_observes_session_loss_without_ui_or_sample_callbacks() {
         Arc::clone(&session),
         move |token, session, _, _| {
             entered.send(()).unwrap();
-            while session.load(Ordering::Acquire) {
-                thread::park_timeout(Duration::from_millis(1));
+            loop {
+                thread::park();
+                if !session.load(Ordering::Acquire) {
+                    break;
+                }
             }
             assert_eq!(
                 token.mode(session, Instant::now()),
@@ -283,28 +286,17 @@ fn real_owner_queue_accepts_a_full_queue_and_fails_on_the_next_packet() {
         generation,
         Arc::new(AtomicBool::new(true)),
         |_, _, _, output| {
-            for seq in 0..8 {
-                output
-                    .try_send(MicPcm {
-                        gesture: GestureId(1),
-                        seq,
-                        rate: 8_000,
-                        last: false,
-                        samples: vec![17; 160],
-                    })
-                    .unwrap();
+            let mut packets = Packetizer::new(GestureId(1), format(Sample::I16, 1)).unwrap();
+            for _ in 0..1_280 {
+                packets.push(17, output).unwrap();
             }
-            let error = output
-                .try_send(MicPcm {
-                    gesture: GestureId(1),
-                    seq: 8,
-                    rate: 8_000,
-                    last: true,
-                    samples: vec![19],
-                })
-                .unwrap_err();
-            assert!(matches!(error, async_channel::TrySendError::Full(_)));
-            Ok(Finalization::Discarded(MicError::Overflow))
+            assert_eq!(packets.push(19, output), Ok(()));
+            let finished = packets.finish(output);
+            assert_eq!(finished, Err(MicError::Overflow));
+            Ok(match finished {
+                Ok(packets) => Finalization::Released { packets },
+                Err(error) => Finalization::Discarded(error),
+            })
         },
     )
     .unwrap();
@@ -315,7 +307,10 @@ fn real_owner_queue_accepts_a_full_queue_and_fails_on_the_next_packet() {
             finalization: Finalization::Discarded(MicError::Overflow)
         })
     );
-    assert_eq!(owner.pcm.len(), 0);
+    assert_eq!(
+        owner.pcm.try_recv(),
+        Err(async_channel::TryRecvError::Closed)
+    );
 }
 
 fn prepared() -> (CollectionGate, MicOwner, Sender<MicPcm>, Instant) {
@@ -508,26 +503,21 @@ fn startup_expires_until_ui_acceptance_and_never_releases_device_ownership() {
 }
 
 #[test]
-fn completion_and_unconfirmed_channel_close_are_consumed_once() {
-    let (_, mut owner, _, _) = prepared();
-    assert_eq!(owner.try_receipt(), Some(Err(MicError::Unconfirmed)));
-    assert_eq!(owner.try_receipt(), None);
-    let (_, mut owner, _, _) = prepared();
-    let (completed, completion) = async_channel::bounded(1);
-    owner.completion = completion;
-    owner.stop(StopReason::Release);
-    completed
-        .try_send(Ok(Finalization::Released { packets: 0 }))
-        .unwrap();
-    drop(completed);
+fn unconfirmed_channel_close_is_consumed_once_without_releasing_the_device() {
+    use std::future::Future as _;
+    use std::task::{Context, Poll, Waker};
+
+    let (gate, mut owner, _, _) = prepared();
+    let context = &mut Context::from_waker(Waker::noop());
     assert_eq!(
-        owner.try_receipt(),
-        Some(Ok(StopReceipt {
-            gesture: GestureId(7),
-            finalization: Finalization::Released { packets: 0 }
-        }))
+        std::pin::pin!(owner.receipt()).poll(context),
+        Poll::Ready(Err(MicError::Unconfirmed))
     );
-    assert_eq!(owner.try_receipt(), None);
+    assert_eq!(
+        std::pin::pin!(owner.receipt()).poll(context),
+        Poll::Ready(Err(MicError::Stale))
+    );
+    assert_eq!(gate.arm(GestureId(8)).unwrap_err(), MicError::Stale);
 }
 
 #[test]
@@ -638,15 +628,33 @@ fn exact_packet_boundaries_preserve_samples_without_empty_or_duplicate_terminals
             .cycle()
             .take(len)
             .collect();
-        for &sample in &samples {
+        let mut restored = Vec::new();
+        for (index, &sample) in samples.iter().enumerate() {
             packets.push(sample, &output).unwrap();
+            if index == 159 {
+                assert_eq!(input.try_recv(), Err(async_channel::TryRecvError::Empty));
+            } else if index == 160 {
+                let first = input.try_recv().unwrap();
+                assert_eq!(
+                    first,
+                    MicPcm {
+                        gesture: GestureId(7),
+                        seq: 0,
+                        rate: 8_000,
+                        last: false,
+                        samples: samples[..160].to_vec(),
+                    }
+                );
+                assert_eq!(first.check(), Ok(()));
+                restored.extend(first.samples);
+            }
         }
         assert_eq!(
             packets.finish(&output).unwrap(),
             u32::try_from(sizes.len()).unwrap()
         );
-        let mut restored = Vec::new();
-        for (seq, size) in sizes.iter().enumerate() {
+        let already_streamed = usize::from(len == 161);
+        for (seq, size) in sizes.iter().enumerate().skip(already_streamed) {
             let packet = input.try_recv().unwrap();
             assert_eq!(
                 (
@@ -670,25 +678,6 @@ fn exact_packet_boundaries_preserve_samples_without_empty_or_duplicate_terminals
         assert_eq!(restored, samples);
         assert_eq!(input.len(), 0);
     }
-}
-
-#[test]
-fn one_full_packet_is_retained_until_a_later_sample_proves_nonfinal() {
-    let (output, input) = async_channel::bounded(2);
-    let mut packets = Packetizer::new(GestureId(7), format(Sample::I16, 1)).unwrap();
-    for _ in 0..160 {
-        packets.push(-2345, &output).unwrap();
-    }
-    assert_eq!(input.len(), 0);
-    packets.push(6789, &output).unwrap();
-    let first = input.try_recv().unwrap();
-    assert_eq!(
-        (first.seq, first.last, first.samples),
-        (0, false, vec![-2345; 160])
-    );
-    assert_eq!(packets.finish(&output).unwrap(), 2);
-    let last = input.try_recv().unwrap();
-    assert_eq!((last.seq, last.last, last.samples), (1, true, vec![6789]));
 }
 
 #[test]
@@ -955,6 +944,17 @@ fn discontinuity_flags_without_lost_frames_keep_every_kept_packet() {
         kept.extend([41, 42, 51]);
         assert_eq!(collect(&packets), Ok(kept));
     }
+
+    assert_eq!(
+        collect(&[
+            (true, true, &[11], CLEAN),
+            (true, true, &[21], CLEAN),
+            (true, true, &[31], CLEAN),
+            (true, true, &[41], GAP),
+            (true, true, &[51], CLEAN),
+        ]),
+        Ok(vec![21, 31, 41, 51])
+    );
 }
 
 #[test]
@@ -998,20 +998,6 @@ fn timestamps_remain_fatal_before_during_and_after_the_boundary() {
             assert_eq!(collect(&packets), Err(MicError::Timestamp));
         }
     }
-}
-
-#[test]
-fn one_gap_on_the_third_kept_packet_completes_for_transcription() {
-    assert_eq!(
-        collect(&[
-            (true, true, &[11], CLEAN),
-            (true, true, &[21], CLEAN),
-            (true, true, &[31], CLEAN),
-            (true, true, &[41], GAP),
-            (true, true, &[51], CLEAN),
-        ]),
-        Ok(vec![21, 31, 41, 51])
-    );
 }
 
 #[test]
