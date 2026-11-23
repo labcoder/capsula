@@ -164,6 +164,9 @@ fn authenticated_with_output(
     mut shared: Shared,
 ) -> Authenticated {
     use kumochi_protocol::frame::Pipe;
+
+    use crate::platform::{handshake_pair, open};
+
     let (sender, events) = async_channel::unbounded();
     let (output, playback) = mpsc::sync_channel(1);
     shared.fake_playback = Some(output);
@@ -177,10 +180,10 @@ fn authenticated_with_output(
     let link = thread::spawn(move || {
         let end = Instant::now() + super::CONNECT_TIMEOUT;
         let attempt = (mode == AudioSession::QueuedRequired).then_some(end);
-        let open = |pipe: Pipe| super::open(&pipe.name(id), &start.link.brain, attempt);
+        let open = |pipe: Pipe| open(&pipe.name(id), &start.link.brain, attempt);
         let control = open(Pipe::Control).expect("the fixture control pipe");
         control.set_timeout(Some(PATIENCE));
-        let connection = super::handshake_pair(control, hello, mode, attempt, || open(Pipe::Data))
+        let connection = handshake_pair(control, hello, mode, attempt, || open(Pipe::Data))
             .expect("authenticate both fixture legs");
         start.link.attend_until(connection, &start.events, end) == Attendance::Lost
     });
