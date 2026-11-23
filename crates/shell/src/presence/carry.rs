@@ -204,7 +204,8 @@ fn carry_signal(event: PresenceEvent) -> Option<CarryEvent> {
 #[cfg(test)]
 mod tests {
     use super::{CarryEvent, Label, PresenceEvent, Strings, carry_signal, label};
-    use crate::platform::host::{HostChange, WatchGen};
+    use crate::platform::host::HostChange;
+    use kumochi_shell_core::presence::perch::target_fixtures::watch;
 
     #[test]
     fn escape_and_quit_cancel_the_drop_but_repaint_does_not() {
@@ -214,7 +215,7 @@ mod tests {
         );
         assert_eq!(carry_signal(PresenceEvent::Quit), Some(CarryEvent::Cancel));
         assert_eq!(carry_signal(PresenceEvent::Repaint), None);
-        let watch = WatchGen(2);
+        let watch = watch(2);
         let change = HostChange::Gone;
         assert_eq!(
             carry_signal(PresenceEvent::HostChanged { w: watch, change }),
