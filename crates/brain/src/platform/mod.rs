@@ -9,6 +9,7 @@ mod connected_shell;
 #[cfg(not(windows))]
 mod fs;
 mod model_files;
+mod process;
 mod session_lock;
 mod shell_process;
 mod trust_roots;
@@ -41,6 +42,10 @@ pub(crate) use connected_shell::connected_shell_pid;
 pub(super) use connected_shell::register_shell;
 #[cfg(not(windows))]
 pub use fs::{config_dir, data_dir, free_space, links_unsupported, replace_file};
+pub(crate) use process::spawn_if;
+pub use process::{
+    ChildPipes, Helper, Job, Launch, Spawned, Stdio, launch_detached, spawn, system_env,
+};
 pub use session_lock::{SessionLock, SessionLockError};
 pub(crate) use trust_roots::native_trust_supported;
 #[cfg(not(windows))]
@@ -112,26 +117,23 @@ pub(crate) use windows::call_throwing_export;
 #[cfg(all(test, windows))]
 pub(crate) use windows::fake_claude::FAKE_CLAUDE;
 #[cfg(windows)]
+pub use windows::managed_presence;
+#[cfg(windows)]
 pub(crate) use windows::ocr::open as open_ocr;
 #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
 pub(crate) use windows::qpc_now;
 #[cfg(all(windows, debug_assertions))]
 pub use windows::raise_access_violation;
-#[cfg(windows)]
-pub(crate) use windows::spawn_if;
-#[cfg(windows)]
-pub use windows::{
-    ChildPipes, Helper, Instance, Job, PipeServer, client_image, client_process, config_dir,
-    create_owner_only, data_dir, detached_command, free_space, has_exited, launch_detached,
-    links_unsupported, process_image, quiet_failures, replace_file, server_image, session_id,
-    session_lock_path, trust_roots,
-};
 #[cfg(all(test, windows))]
 pub(crate) use windows::{
     DaclEntry, dacl_entries, dacl_sddl, pause_after_check, paused, set_dacl, this_user,
 };
 #[cfg(windows)]
-pub use windows::{Launch, Spawned, Stdio, spawn};
+pub use windows::{
+    Instance, PipeServer, client_image, client_process, config_dir, create_owner_only, data_dir,
+    detached_command, free_space, has_exited, links_unsupported, process_image, quiet_failures,
+    replace_file, server_image, session_id, session_lock_path, trust_roots,
+};
 #[cfg(all(test, windows))]
 pub(crate) use windows::{SpawnEdge, observe_next_spawn};
 #[cfg(windows)]
@@ -146,8 +148,6 @@ pub(crate) use windows::{
     WINDOW_CAPTURE, display_at, qpc_age, qpc_at, qpc_left, screen_capturer, screen_elements,
     window_unchanged,
 };
-#[cfg(windows)]
-pub use windows::{managed_presence, system_env};
 
 /// Whether this platform captures one window alone. No platform but Windows does yet.
 // shortcut: macOS will capture with ScreenCaptureKit; true once that adapter lands.

@@ -6,7 +6,6 @@
 //! (unverified).
 
 use std::ffi::{OsStr, OsString, c_void};
-use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, PipeReader, PipeWriter};
 use std::iter;
@@ -25,6 +24,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::job::{AttributeList, Helper, Job, size_u32};
+use crate::platform::{Launch, Spawned, Stdio};
 
 /// The longest command line `CreateProcessW` takes, in UTF-16 units including the NUL.
 pub(crate) const MAX_COMMAND_LINE: usize = 32_767;
@@ -35,70 +35,6 @@ const BACKSLASH: u16 = 0x5C;
 const SPACE: u16 = 0x20;
 const TAB: u16 = 0x09;
 const EQUALS: u16 = 0x3D;
-
-/// What to start and how.
-pub struct Launch<'a> {
-    /// The absolute path of the executable; it's also `argv[0]`.
-    pub exe: &'a Path,
-    /// The arguments after `argv[0]`, quoted so `CommandLineToArgvW` gives them back exactly.
-    pub args: &'a [OsString],
-    /// The child's working folder.
-    pub cwd: &'a Path,
-    /// The child's whole environment; nothing is inherited.
-    pub env: &'a [(OsString, OsString)],
-    /// Its standard handles.
-    pub stdio: Stdio,
-    /// The jobs it starts in; later jobs nest in earlier ones.
-    pub jobs: &'a [&'a Job],
-}
-
-impl fmt::Debug for Launch<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Counts only: argument and environment values stay out of logs.
-        f.debug_struct("Launch")
-            .field("exe", &self.exe)
-            .field("args", &self.args.len())
-            .field("env", &self.env.len())
-            .field("stdio", &self.stdio)
-            .field("jobs", &self.jobs.len())
-            .finish_non_exhaustive()
-    }
-}
-
-/// A child's standard handles.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Stdio {
-    /// Three anonymous pipes to the brain; no window.
-    Piped,
-    /// The `NUL` device for all three; no window.
-    Null,
-    /// A new visible console with its own handles, for `claude auth login` only, so a prompt or
-    /// a fallback URL is answerable. The brain sees none of it.
-    Console,
-}
-
-/// A started child and the brain's ends of its pipes, for [`Stdio::Piped`].
-pub struct Spawned {
-    /// The process.
-    pub process: Helper,
-    /// Writes to its stdin.
-    pub stdin: Option<PipeWriter>,
-    /// Reads its stdout.
-    pub stdout: Option<PipeReader>,
-    /// Reads its stderr.
-    pub stderr: Option<PipeReader>,
-}
-
-impl fmt::Debug for Spawned {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Spawned")
-            .field("pid", &self.process.pid())
-            .field("stdin", &self.stdin.is_some())
-            .field("stdout", &self.stdout.is_some())
-            .field("stderr", &self.stderr.is_some())
-            .finish()
-    }
-}
 
 /// The child's ends of its standard handles: each distinct handle once, and which one is which.
 struct ChildEnds {

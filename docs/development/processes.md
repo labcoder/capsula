@@ -3,6 +3,11 @@
 Kumochi runs as two processes, and the brain runs its helpers inside Windows Job Objects so that
 nothing it started can outlive it.
 
+Without a native process adapter, containment and every native launch request return
+`Unsupported` before creating a process or its pipes. The supervisor's injected tests still
+exercise its request and retirement policy without a native child. No unmanaged child or
+inherited environment is a fallback.
+
 Each process starts its scene dropper before accepting scene data and fails startup if the
 thread cannot start. Retirement never joins that thread from the shell's UI.
 
