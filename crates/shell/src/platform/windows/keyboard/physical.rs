@@ -9,6 +9,7 @@ const ALT: u16 = 0x38;
 struct Device {
     handle: Option<HANDLE>,
     down: [u64; 8],
+    needs_break: [bool; 2],
 }
 
 impl Device {
@@ -35,59 +36,24 @@ impl Device {
 #[derive(Default)]
 pub(super) struct Physical {
     devices: [Device; 2],
-    uncertain: [Uncertain; 2],
-}
-
-#[derive(Clone, Copy, Default)]
-enum Uncertain {
-    #[default]
-    No,
-    Device(HANDLE),
-    Pair(HANDLE, HANDLE),
-    Unknown,
-    Overflow,
-}
-
-impl Uncertain {
-    fn down(self, handle: HANDLE) -> Self {
-        match self {
-            Self::Device(first) if first != handle => Self::Pair(first, handle),
-            Self::Pair(first, second) if first != handle && second != handle => Self::Overflow,
-            Self::No | Self::Unknown => Self::Device(handle),
-            _ => self,
-        }
-    }
-
-    fn release(self, handle: HANDLE) -> Option<Self> {
-        match self {
-            Self::No | Self::Unknown => Some(Self::No),
-            Self::Device(owner) if owner == handle => Some(Self::No),
-            Self::Pair(first, second) if first == handle => Some(Self::Device(second)),
-            Self::Pair(first, second) if second == handle => Some(Self::Device(first)),
-            _ => None,
-        }
-    }
+    untracked_needs_break: bool,
 }
 
 impl Physical {
     pub(super) fn lose(&mut self) -> Event {
-        for (slot, uncertain) in [CONTROL, ALT].into_iter().zip(&mut self.uncertain) {
-            for device in self.devices.iter().filter(|device| device.held(slot)) {
-                if let Some(handle) = device.handle {
-                    *uncertain = uncertain.down(handle);
-                }
-            }
-        }
         self.devices = <[Device; 2]>::default();
+        self.untracked_needs_break = true;
         Event::Reset
     }
 
-    pub(super) fn observe_held_on_loss(&mut self, down: [bool; 2]) {
-        for (down, uncertain) in down.into_iter().zip(&mut self.uncertain) {
-            if down && matches!(uncertain, Uncertain::No) {
-                *uncertain = Uncertain::Unknown;
-            }
+    pub(super) fn device_changed(&mut self, removed: Option<HANDLE>) -> Event {
+        self.untracked_needs_break = true;
+        if let Some(removed) = removed
+            && let Some(device) = self.devices.iter_mut().find(|d| d.handle == Some(removed))
+        {
+            *device = Device::default();
         }
+        Event::Reset
     }
 
     pub(super) fn key(
@@ -95,8 +61,8 @@ impl Physical {
         handle: HANDLE,
         slot: u16,
         event: Event,
-    ) -> (Event, Option<PhysicalKey>, bool) {
-        let reset = |this: &mut Self| (this.lose(), None, false);
+    ) -> Option<(Event, Option<PhysicalKey>, bool)> {
+        let reset = |this: &mut Self| Some((this.lose(), None, false));
         let Event::Key { key, edge } = event else {
             return reset(self);
         };
@@ -108,37 +74,41 @@ impl Physical {
             Key::LeftAlt => Some(1),
             _ => None,
         };
-        if let Some(index) = modifier {
-            let uncertain = self.uncertain[index];
-            match edge {
-                Edge::Down if !matches!(uncertain, Uncertain::No) => {
-                    self.uncertain[index] = uncertain.down(handle);
-                    return (event, None, true);
-                }
-                Edge::Up => {
-                    let Some(remaining) = uncertain.release(handle) else {
-                        return reset(self);
-                    };
-                    self.uncertain[index] = remaining;
-                }
-                Edge::Down => {}
-            }
-        }
         let handle = Some(handle);
-        let Some(bank) = self
+        let known = self.devices.iter().position(|d| d.handle == handle);
+        let free = self
             .devices
             .iter()
-            .position(|d| d.handle == handle)
+            .position(|device| device.handle.is_none());
+        if known.or(free).is_none() && modifier.is_none() && edge == Edge::Up {
+            return None;
+        }
+        let Some(bank) = known
+            .or(free)
             .or_else(|| self.devices.iter().position(Device::neutral))
         else {
             return reset(self);
         };
         let other_held = self.devices[1 - bank].held(slot);
         let device = &mut self.devices[bank];
-        device.handle = handle;
+        if device.handle != handle {
+            *device = Device {
+                handle,
+                needs_break: [self.untracked_needs_break; 2],
+                ..Device::default()
+            };
+        }
         let repeated = device.apply(slot, edge);
         if modifier.is_some() && other_held && (edge == Edge::Down || !repeated) {
             return reset(self);
+        }
+        if let Some(index) = modifier {
+            if edge == Edge::Down && device.needs_break[index] {
+                return Some((event, None, true));
+            }
+            if edge == Edge::Up {
+                device.needs_break[index] = false;
+            }
         }
         let id = identity(bank, slot);
         let key = match key {
@@ -146,18 +116,20 @@ impl Physical {
             Key::Other(_) => Key::Other(id),
             _ => key,
         };
-        (
+        Some((
             Event::Key { key, edge },
             modifier.map(|_| id),
             modifier.is_some() && repeated && edge == Edge::Down,
-        )
+        ))
     }
 
     pub(super) fn held(&self) -> TalkHeld {
         let down = |slot| {
             self.devices
                 .iter()
-                .position(|device| device.held(slot))
+                .position(|device| {
+                    device.held(slot) && !device.needs_break[usize::from(slot == ALT)]
+                })
                 .map(|bank| identity(bank, slot))
         };
         TalkHeld([down(CONTROL), down(ALT)])

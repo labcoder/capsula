@@ -25,7 +25,7 @@ use windows::Win32::UI::Input::{
     RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEKEYBOARD, RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EVENT_SYSTEM_DESKTOPSWITCH, GetForegroundWindow, GetMessageTime, GetQueueStatus,
+    EVENT_SYSTEM_DESKTOPSWITCH, GIDC_REMOVAL, GetForegroundWindow, GetMessageTime, GetQueueStatus,
     GetWindowThreadProcessId, KillTimer, PBT_APMSUSPEND, PostMessageW, QS_ALLINPUT, RI_KEY_BREAK,
     RI_KEY_E0, RI_KEY_E1, SetTimer, WINEVENT_OUTOFCONTEXT, WM_APP, WM_HOTKEY, WM_INPUT,
     WM_INPUT_DEVICE_CHANGE, WM_INPUTLANGCHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER,
@@ -142,7 +142,6 @@ pub(crate) fn with_raw_modifiers(deliver: Deliver) -> Deliver {
                     },
                 )))
             }
-            Event::Reset => Err(()),
             _ => return deliver(event, at),
         };
         let (event, _) = keys.input(raw, &mut at, || {
@@ -211,13 +210,8 @@ impl Keys {
         let mut at = EventTime::new(Instant::now());
         let mut id = None;
         let event = match message {
-            _ if self.plain_escape(message, wparam) => {
-                self.physical.borrow_mut().lose();
-                Event::Escape
-            }
-            _ if hotkey(message, wparam, self.escapes.talk.get()) => {
-                self.physical.borrow_mut().lose()
-            }
+            _ if self.plain_escape(message, wparam) => Event::Escape,
+            _ if hotkey(message, wparam, self.escapes.talk.get()) => Event::Reset,
             WM_INPUT => {
                 at.read_chord = Some(read_chord);
                 let Some((event, physical)) =
@@ -250,8 +244,19 @@ impl Keys {
                 self.disarm(hwnd);
                 Event::Deadline
             }
-            WM_INPUT_DEVICE_CHANGE => self.physical.borrow_mut().lose(),
-            WM_INPUTLANGCHANGE | WM_WTSSESSION_CHANGE | DESKTOP_SWITCHED | WM_NCDESTROY => {
+            WM_INPUT_DEVICE_CHANGE => {
+                let removed = (u32::try_from(wparam.0) == Ok(GIDC_REMOVAL)).then(|| {
+                    HANDLE(std::ptr::with_exposed_provenance_mut(
+                        lparam.0.cast_unsigned(),
+                    ))
+                });
+                self.physical.borrow_mut().device_changed(removed)
+            }
+            WM_INPUTLANGCHANGE => {
+                self.layout.set(None);
+                Event::Reset
+            }
+            WM_WTSSESSION_CHANGE | DESKTOP_SWITCHED | WM_NCDESTROY => {
                 self.layout.set(None);
                 self.physical.borrow_mut().lose()
             }
@@ -260,11 +265,6 @@ impl Keys {
             }
             _ => return false,
         };
-        if !hwnd.is_invalid() && matches!(event, Event::Reset | Event::Escape) {
-            self.physical
-                .borrow_mut()
-                .observe_held_on_loss(read_held_modifiers());
-        }
         self.forward(hwnd, event, id, at);
         message == WM_TIMER
             || message == DESKTOP_SWITCHED
@@ -319,9 +319,6 @@ impl Keys {
             self.escapes.release_native(hwnd, retiring);
             if !self.escape_trusted() && !matches!(event, Event::Reset | Event::Escape) {
                 let reset = self.physical.borrow_mut().lose();
-                self.physical
-                    .borrow_mut()
-                    .observe_held_on_loss(read_held_modifiers());
                 super::screen_watch::heard(reset, None);
                 deadline = deliver.and_then(|deliver| deliver(reset, at));
             }
@@ -345,7 +342,7 @@ impl Keys {
         }
         let event = key_event(raw.MakeCode, raw.Flags);
         let slot = raw.MakeCode | (u16::from(u32::from(raw.Flags) & RI_KEY_E0 != 0) << 8);
-        if matches!(
+        let layout_changed = if matches!(
             event,
             Event::Key {
                 key: Key::LeftControl | Key::LeftAlt,
@@ -354,12 +351,18 @@ impl Keys {
         ) {
             let layout = layout();
             let previous = self.layout.replace(layout);
-            if layout.is_none() || previous.is_some_and(|old| Some(old) != layout) {
+            if layout.is_none() {
                 return Some((physical.lose(), None));
             }
             at.layout = layout;
+            previous.is_some_and(|old| Some(old) != layout)
+        } else {
+            false
+        };
+        let (event, id, repeated) = physical.key(device, slot, event)?;
+        if layout_changed {
+            return Some((Event::Reset, None));
         }
-        let (event, id, repeated) = physical.key(device, slot, event);
         if id.is_some() && matches!(event, Event::Key { edge: Edge::Up, .. }) {
             at.held = physical.held();
         }
@@ -440,6 +443,7 @@ pub(super) fn arm(hwnd: HWND, keys: &Keys, deliver: Deliver) -> Result<(), Prese
         disarm(hwnd, keys);
         return Err(error);
     }
+    keys.physical.borrow_mut().lose();
     let armed = keys
         .deliver
         .set(deliver)
@@ -766,24 +770,6 @@ fn read_chord(_: Instant) -> Option<Instant> {
     });
     // SAFETY: rechecks the foreground without touching it.
     (exact && foreground == unsafe { GetForegroundWindow() }).then(Instant::now)
-}
-
-fn read_held_modifiers() -> [bool; 2] {
-    // SAFETY: reads only the current foreground window and two virtual keys.
-    let foreground = unsafe { GetForegroundWindow() };
-    if foreground.is_invalid() {
-        return [true; 2];
-    }
-    let held = [VK_LCONTROL, VK_LMENU].map(|key| {
-        // SAFETY: reads a fixed virtual-key code without modifying input.
-        unsafe { GetAsyncKeyState(i32::from(key.0)) < 0 }
-    });
-    // SAFETY: rechecks the foreground without touching it.
-    if foreground == unsafe { GetForegroundWindow() } {
-        held
-    } else {
-        [true; 2]
-    }
 }
 
 fn exact_chord(mut down: impl FnMut(u16) -> bool) -> bool {
@@ -1135,6 +1121,114 @@ mod tests {
     }
 
     #[test]
+    fn reset_boundary_unknown_hold_is_not_transferred_to_another_device() {
+        let keys = super::Keys::default();
+        unreadable_reset(&keys);
+        assert!(raw(&keys, 2, 0x1D, 0).unwrap().1.repeated_modifier);
+        assert!(raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).is_some());
+        assert!(
+            raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier,
+            "a different device's break cannot prove this make is fresh"
+        );
+        assert!(raw(&keys, 1, 0x1D, super::RI_KEY_BREAK).is_some());
+        assert!(!raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
+    }
+
+    #[test]
+    fn reset_boundary_a_zero_key_state_read_never_proves_neutral() {
+        let keys = super::Keys::default();
+        unreadable_reset(&keys);
+        assert!(
+            raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier,
+            "a zero key-state result may be a failed read"
+        );
+        assert!(raw(&keys, 1, 0x1D, super::RI_KEY_BREAK).is_some());
+        assert!(!raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
+    }
+
+    #[test]
+    fn reset_boundary_a_removed_device_cannot_strand_its_replacement() {
+        let keys = super::Keys::default();
+        assert!(raw(&keys, 1, 0x1D, 0).is_some());
+        keys.on_message(
+            HWND::default(),
+            super::WM_INPUT_DEVICE_CHANGE,
+            WPARAM(usize::try_from(super::GIDC_REMOVAL).unwrap()),
+            LPARAM(1),
+        );
+        assert_eq!(
+            raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).unwrap().0,
+            Event::Key {
+                key: super::Key::LeftControl,
+                edge: super::Edge::Up,
+            }
+        );
+        assert!(!raw(&keys, 2, 0x1D, 0).unwrap().1.repeated_modifier);
+    }
+
+    #[test]
+    fn reset_boundary_an_already_queued_clean_pair_is_not_a_pair_of_repeats() {
+        use std::time::{Duration, Instant};
+
+        use crate::input::Gesture;
+        use crate::input::hold::{Fence, Intent};
+        use crate::platform::microphone::CollectionGate;
+        use kumochi_protocol::message::GestureId;
+
+        let keys = super::Keys::default();
+        for slot in [0x1D, 0x38] {
+            assert!(raw(&keys, 1, slot, super::RI_KEY_BREAK).is_some());
+        }
+        keys.on_message(
+            HWND::default(),
+            super::WM_INPUTLANGCHANGE,
+            WPARAM(0),
+            LPARAM(0),
+        );
+        let mut gesture = Gesture::default();
+        let mut fence = Fence::new(CollectionGate::default());
+        let now = Instant::now();
+        fence.reduce_with_keyboard_read(&mut gesture, Event::Reset, now, None, || Some(1), || None);
+        for (index, slot) in [0x1D, 0x38].into_iter().enumerate() {
+            let (event, time) = raw(&keys, 1, slot, 0).unwrap();
+            let out = fence.reduce_with_keyboard_read(
+                &mut gesture,
+                event,
+                now,
+                (!time.repeated_modifier).then_some(1),
+                || Some(1),
+                || Some(now),
+            );
+            if index == 0 {
+                assert!(out.intents.iter().all(Option::is_none));
+            }
+        }
+        let out = fence.reduce_with_keyboard_read(
+            &mut gesture,
+            Event::Deadline,
+            now + Duration::from_millis(300),
+            None,
+            || Some(1),
+            || None,
+        );
+        assert!(matches!(
+            out.intents[0],
+            Some(Intent::Recognized {
+                gesture: GestureId(1),
+                generation: Ok(_)
+            })
+        ));
+    }
+
+    fn unreadable_reset(keys: &super::Keys) {
+        let mut time = super::EventTime::new(std::time::Instant::now());
+        assert_eq!(
+            keys.input(Err(()), &mut time, || unreachable!()),
+            Some((Event::Reset, None))
+        );
+    }
+
+    #[test]
     fn lost_raw_input_preserves_uncertainty_until_the_owning_key_releases() {
         let keys = super::Keys::default();
         let mut time = super::EventTime::new(std::time::Instant::now());
@@ -1150,10 +1244,7 @@ mod tests {
         );
 
         assert!(raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
-        assert_eq!(
-            raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).unwrap().0,
-            Event::Reset
-        );
+        assert!(raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).is_some());
         assert!(raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
         assert!(raw(&keys, 1, 0x1D, super::RI_KEY_BREAK).is_some());
         assert!(!raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
@@ -1186,8 +1277,8 @@ mod tests {
             assert!(raw(&keys, 1, 0x1D, super::RI_KEY_BREAK).is_some());
             if flags == 0 {
                 assert!(raw(&keys, 2, 0x1D, 0).unwrap().1.repeated_modifier);
-                assert!(raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).is_some());
             }
+            assert!(raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).is_some());
             assert!(!raw(&keys, 2, 0x1D, 0).unwrap().1.repeated_modifier);
         }
     }

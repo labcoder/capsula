@@ -123,10 +123,13 @@ sequenceDiagram
   foreground thread, if it can identify one. The deferred release checks sample again,
   so a layout change that changes back between samples can escape detection. The decoded
   tracker uses fixed storage; that doesn't bound the cost of the native queries. After coverage loss,
-  overflow or registered Escape, shell-core cancels the chord and blocks recognition. The
-  adapter retains uncertainty for modifiers that may still be down; repeats don't furnish new
-  timestamps, and each known owner must send its break before a make can count again. If more
-  than two sources press the same uncertain modifier, the shell must restart after release.
+  overflow or registered Escape, shell-core cancels the chord. A logical reset such as Escape
+  or an observed layout change retains the ordered Raw Input ledger, so a fresh make already in
+  the queue is distinct from a repeat. A coverage gap or initial registration requires a decoded
+  break for each modifier from each source before its next make can count. A device removal
+  drops only that device's ledger, and an untracked source must prove its own breaks. After a
+  gap, one press and release of each modifier on a single keyboard primes the next chord.
+  A zero from `GetAsyncKeyState` doesn't prove neutral: it also means the read failed.
   The reducer waits for both new raw modifier makes before it can try once. Windows reads
   left Ctrl and left Alt before and
   after a bounded `GetAsyncKeyState` sweep, using only the down bit; another down keyboard VK

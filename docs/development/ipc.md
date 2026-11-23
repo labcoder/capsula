@@ -408,8 +408,8 @@ It rejects missing, invalid or wrong-session tuning, and tears down the connecti
 on a later duplicate. A reconnect must authenticate its own values. Both physical modifier
 presses must be newer than the current connection's readiness stamp, even if Windows delivers
 an older key message late. Keyboard recovery waits for both trustworthy raw makes; a
-current-state read validates the pair but cannot substitute for either press. A modifier
-that may still be held at reset must release before it can contribute a new make. Closing
+current-state read validates the pair but cannot substitute for either press. After losing
+coverage, only that source's raw break makes its next press eligible. Closing
 or locally aborting the pair revokes native hold eligibility
 without waiting for the outbox. This doesn't block local Quit or cancellation.
 
