@@ -752,7 +752,7 @@ fn off_display_and_excluded_images_are_unavailable() {
         assert_eq!(masks.generation(), 1);
         assert_eq!(masks.completeness(), Completeness::Unknown(why));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     let images = [
         ("C:\\app\\KUMOCHI.EXE", true),
         ("/app/Kumochid.exe", true),
@@ -762,7 +762,7 @@ fn off_display_and_excluded_images_are_unavailable() {
         ("/app/kumochid", false),
         ("another.exe", false),
     ];
-    #[cfg(target_os = "macos")]
+    #[cfg(not(windows))]
     let images = [
         ("/app/KUMOCHI", true),
         ("/app/Kumochid", true),

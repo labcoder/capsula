@@ -479,18 +479,18 @@ async fn the_scrubbed_body_admits_the_same_models_at_the_same_positions() {
 
 #[test]
 fn the_file_goes_only_beside_a_copied_brain_in_a_numbered_run() {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     let (exe, output) = (
         "C:/repo/target/live/1762460000/bin/kumochid.exe",
         "C:/repo/target/live/1762460000/catalog-provenance.json",
     );
-    #[cfg(target_os = "macos")]
+    #[cfg(not(windows))]
     let (exe, output) = (
         "/repo/target/live/1762460000/bin/kumochid",
         "/repo/target/live/1762460000/catalog-provenance.json",
     );
     assert_eq!(output_path(Path::new(exe)), Some(PathBuf::from(output)));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     let rejected = [
         "C:/repo/target/debug/kumochid.exe",
         "C:/repo/target/live/abc/bin/kumochid.exe",
@@ -501,7 +501,7 @@ fn the_file_goes_only_beside_a_copied_brain_in_a_numbered_run() {
         "C:/repo/target/live/1/bin/kumochid",
         "C:/repo/target/live/1/bin/kumochid.exe.old",
     ];
-    #[cfg(target_os = "macos")]
+    #[cfg(not(windows))]
     let rejected = [
         "/repo/target/debug/kumochid",
         "/repo/target/live/abc/bin/kumochid",

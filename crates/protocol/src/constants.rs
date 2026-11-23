@@ -20,17 +20,17 @@ pub const GITHUB_CLIENT_ID: Option<&str> = if cfg!(debug_assertions) {
 pub const DEFAULT_ASSISTANT_NAME: &str = "Kumo";
 
 /// The shell's target-native executable. Cargo's `[[bin]]` names must match.
-pub const SHELL_EXE: &str = if cfg!(target_os = "macos") {
-    "kumochi"
-} else {
+pub const SHELL_EXE: &str = if cfg!(windows) {
     "kumochi.exe"
+} else {
+    "kumochi"
 };
 
 /// The brain's target-native executable.
-pub const BRAIN_EXE: &str = if cfg!(target_os = "macos") {
-    "kumochid"
-} else {
+pub const BRAIN_EXE: &str = if cfg!(windows) {
     "kumochid.exe"
+} else {
+    "kumochid"
 };
 
 /// The folder under `%LOCALAPPDATA%` (logs, store, models) and `%APPDATA%` (config).

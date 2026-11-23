@@ -4,10 +4,10 @@ use std::path::Path;
 
 #[test]
 fn executable_names_resolve_only_the_native_sibling() {
-    #[cfg(target_os = "macos")]
+    #[cfg(not(windows))]
     let (shell, brain, shell_path, brain_path) =
         ("kumochi", "kumochid", "/app/kumochi", "/app/kumochid");
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     let (shell, brain, shell_path, brain_path) = (
         "kumochi.exe",
         "kumochid.exe",
