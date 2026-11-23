@@ -16,7 +16,7 @@ use kumochi_protocol::BUILD_ID;
 
 use super::super::{PresenceEvent, frame_rate, send};
 use super::SettingsView;
-use crate::settings::{Field, Settings, TaskbarChoice};
+use crate::settings::{Field, Save, Settings, TaskbarChoice};
 use crate::strings::{Strings, Text};
 
 impl SettingsView {
@@ -167,14 +167,20 @@ impl SettingsView {
                 } else {
                     TaskbarChoice::Hidden
                 };
-                if view.model.read(cx).taskbar_choice() == Some(choice) {
+                let result = view
+                    .owner
+                    .update(cx, |owner, cx| {
+                        owner.request_save(Save::Taskbar(choice), cx).result
+                    })
+                    .unwrap_or_else(|_| {
+                        view.model.update(cx, |state, _| {
+                            state.apply_save(Save::Taskbar(choice), None).result
+                        })
+                    });
+                if result == Ok(false) {
                     return;
                 }
-                let sent = view
-                    .owner
-                    .update(cx, |owner, cx| owner.save_taskbar(choice, cx))
-                    .unwrap_or(false);
-                view.taskbar_notice = (!sent).then_some(Text::SettingsUnavailable);
+                view.taskbar_notice = result.err();
                 cx.notify();
             }))
             .map(|checkbox| {

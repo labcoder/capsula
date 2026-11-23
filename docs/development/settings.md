@@ -34,6 +34,10 @@ subscriptions. `general.rs` and `accounts.rs` compose their tabs from Core's cho
 status lines without another settings entity. The shell's UI thread never waits for a save.
 The plain model also retains the brain notice across reconnects and fences incoming settings
 by connection generation before changing any draft, save slot or saved view.
+Taskbar reselects return a no-op, distinct from a refused send, so the host doesn't show a
+failure or clear an existing notice when no change was requested.
+A current link refusal also returns a dock rollback as soon as the optimistic choice changes,
+so native placement doesn't wait for a settings snapshot that can be lost on disconnect.
 
 **Model** (`shell-core/settings/model.rs`): Presence hands each `DataToShell::Models` catalog to
 the settings model, which keeps one per connection that has an engine (ChatGPT, and Claude Code

@@ -38,7 +38,7 @@ pub enum AfterSave {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SaveOutcome {
-    /// Whether the setting was queued, or why a rename couldn't be accepted.
+    /// Whether the setting was queued, or the immediate refusal the caller should show.
     pub result: Result<bool, Text>,
     pub notify: bool,
     pub after: Option<AfterSave>,
@@ -67,10 +67,7 @@ impl Settings {
 
         let send = |op| send(pair, op);
         let rename = matches!(save, Save::RenameAssistant(_));
-        let always_notify = !matches!(
-            save,
-            Save::DefaultModel(..) | Save::FrameRate(_) | Save::Taskbar(_)
-        );
+        let always_notify = !matches!(save, Save::DefaultModel(..) | Save::FrameRate(_));
         let mut after = None;
         let queued = match save {
             Save::Name(field) => self.save(field, send),
@@ -81,9 +78,13 @@ impl Settings {
             Save::FrameRate(rate) => self.send_max_frame_rate(rate, send),
             Save::DockPosition(position) => self.send_dock_position(position, send),
             Save::Taskbar(choice) => {
-                let queued = self.send_taskbar(choice, send);
-                after = queued.then_some(SyncTaskbar);
-                queued
+                let result = self.send_taskbar(choice, send);
+                let queued = result == Ok(true);
+                return SaveOutcome {
+                    result,
+                    notify: queued,
+                    after: queued.then_some(SyncTaskbar),
+                };
             }
             Save::HoldToTalk(on) => {
                 let queued = self.send_hold_to_talk(on, send);

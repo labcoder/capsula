@@ -8,10 +8,10 @@ use gpui_kit::{
     AnyElement, App, Context, Div, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, Styled as _, Window, div,
 };
-use kumochi_protocol::message::{AccountOp, AccountView, ErrorKey, MANAGE_USAGE_URL, PlanState};
+use kumochi_protocol::message::{AccountOp, AccountView, MANAGE_USAGE_URL, PlanState};
 
 use super::SettingsView;
-use crate::accounts::Accounts;
+use crate::accounts::{Accounts, StatusLine};
 use crate::settings::Settings;
 use crate::strings::{Strings, Text};
 
@@ -146,16 +146,7 @@ pub(in crate::presence) fn account_section(
         .font_weight(FontWeight::MEDIUM)
         .child(strings.get(status));
     let actions = account_actions(state, route, fixture, cx);
-    let details = lines
-        .into_iter()
-        .map(|text| account_notice(text, cx))
-        .chain(state.status_error().map(|error| account_error(error, cx)))
-        .chain(state.send_failed.then(|| {
-            div()
-                .text_sm()
-                .text_color(cx.theme().danger)
-                .child(strings.get(Text::AccountSendFailed))
-        }));
+    let details = lines.iter().map(|line| account_notice(line, cx));
     match layout {
         ProviderLayout::Onboarding(below) => {
             below.extend(details);
@@ -291,13 +282,7 @@ fn account_actions(
 
 fn account_header(state: &Accounts, cx: &App) -> Div {
     let strings = cx.global::<Strings>();
-    let identity = match &state.view {
-        Some(AccountView::SignedIn { email, .. }) => Some(email.as_ref().map_or_else(
-            || strings.get(Text::AccountIdentity),
-            |email| email.as_str().to_owned(),
-        )),
-        _ => None,
-    };
+    let identity = state.status_identity(strings);
     div()
         .debug_selector(|| "account-provider".into())
         .min_w_0()
@@ -333,10 +318,11 @@ fn account_header(state: &Accounts, cx: &App) -> Div {
         )
 }
 
-fn account_error(error: &kumochi_protocol::message::UserError, cx: &App) -> Div {
+fn account_notice(line: &StatusLine<'_>, cx: &App) -> Div {
     let strings = cx.global::<Strings>();
-    if error.key() == ErrorKey::RevocationBacklog {
-        div()
+    let notice = || div().flex().flex_col().gap_2().text_sm();
+    match *line {
+        StatusLine::Backlog { lead, followups } => div()
             .flex()
             .flex_col()
             .gap_3()
@@ -346,72 +332,57 @@ fn account_error(error: &kumochi_protocol::message::UserError, cx: &App) -> Div 
                 div()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(cx.theme().danger)
-                    .child(strings.get(Text::AccountBacklogLead)),
+                    .child(strings.get(lead)),
             )
-            .children(
-                [
-                    Text::AccountBacklogRetry,
-                    Text::AccountBacklogExpiry,
-                    Text::AccountBacklogRecovery,
-                ]
-                .map(|text| {
-                    div()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(strings.get(text))
-                }),
-            )
-    } else {
-        let row = div().text_sm().text_color(cx.theme().danger);
-        #[cfg(test)]
-        let row = row.debug_selector(|| "chatgpt-account-error".into());
-        row.child(strings.error(error))
-    }
-}
-
-fn account_notice(text: Text, cx: &App) -> Div {
-    let strings = cx.global::<Strings>();
-    let mut notice = div().flex().flex_col().gap_2().text_sm();
-    if matches!(text, Text::AccountCleanupRefused | Text::AccountNotDurable) {
-        notice = notice
+            .children(followups.map(|text| {
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(strings.get(text))
+            })),
+        StatusLine::Error(error) => {
+            let row = div().text_sm().text_color(cx.theme().danger);
+            #[cfg(test)]
+            let row = row.debug_selector(|| "chatgpt-account-error".into());
+            row.child(strings.error(error))
+        }
+        StatusLine::SendFailed(text) => div()
+            .text_sm()
+            .text_color(cx.theme().danger)
+            .child(strings.get(text)),
+        StatusLine::Local {
+            heading,
+            error,
+            help,
+        } => notice()
             .child(
                 div()
                     .font_weight(FontWeight::MEDIUM)
-                    .child(strings.get(Text::AccountLocal)),
+                    .child(strings.get(heading)),
             )
             .child(
                 div()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(cx.theme().danger)
-                    .child(strings.get(text)),
+                    .child(strings.get(error)),
             )
             .child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child(strings.get(if text == Text::AccountCleanupRefused {
-                        Text::AccountCleanupRefusedHelp
-                    } else {
-                        Text::AccountNotDurableHelp
-                    })),
-            );
-    } else if matches!(
-        text,
-        Text::AccountRevocationPending | Text::AccountRevocationUnconfirmed
-    ) {
-        notice = notice
+                    .child(strings.get(help)),
+            ),
+        StatusLine::Remote { heading, note } => notice()
             .child(
                 div()
                     .font_weight(FontWeight::MEDIUM)
-                    .child(strings.get(Text::AccountRemote)),
+                    .child(strings.get(heading)),
             )
             .child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child(strings.get(text)),
-            );
-    } else {
-        notice = notice
+                    .child(strings.get(note)),
+            ),
+        StatusLine::Note(text) => notice()
             .text_color(cx.theme().muted_foreground)
-            .child(strings.get(text));
+            .child(strings.get(text)),
     }
-    notice
 }

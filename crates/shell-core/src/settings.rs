@@ -514,18 +514,22 @@ impl Settings {
         &mut self,
         choice: TaskbarChoice,
         send: impl FnOnce(SettingsOp) -> bool,
-    ) -> bool {
-        if self.taskbar_choice().is_none_or(|newest| newest == choice)
-            || !send(SettingsOp::SetTaskbar(choice == TaskbarChoice::Shown))
-        {
-            return false;
+    ) -> Result<bool, Text> {
+        let Some(newest) = self.taskbar_choice() else {
+            return Err(Text::SettingsUnavailable);
+        };
+        if newest == choice {
+            return Ok(false);
+        }
+        if !send(SettingsOp::SetTaskbar(choice == TaskbarChoice::Shown)) {
+            return Err(Text::SettingsUnavailable);
         }
         self.pending.push_back(Pending {
             slot: Slot::Taskbar(choice),
             failed: false,
             reset_draft: false,
         });
-        true
+        Ok(true)
     }
 
     /// Queues `FinishOnboarding` in the ordered answer queue, so the brain's one answer to it

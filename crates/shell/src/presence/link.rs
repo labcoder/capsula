@@ -1,6 +1,8 @@
 //! Applying session-fenced link events to browsed and focused histories and runs.
 
 #[cfg(test)]
+mod dock_tests;
+#[cfg(test)]
 mod github_tests;
 
 use super::{Context, OpenError, Presence, Session, diagnostics};
@@ -684,11 +686,7 @@ impl Presence {
             cx.notify();
         });
         self.sync_taskbar(cx);
-        if let Err(error) =
-            self.restore_dock_position(self.settings.read(cx).dock_position_choice(), cx)
-        {
-            tracing::warn!(%error, "can't restore the saved dock position");
-        }
+        self.restore_dock_position(self.settings.read(cx).dock_position_choice(), cx);
         if let Err(error) = self.onboarding_changed(cx) {
             tracing::error!(%error, "can't show onboarding");
         }
@@ -697,11 +695,15 @@ impl Presence {
     /// Shows the brain's error in both panels and on the connected dock.
     fn show_error(&mut self, error: &UserError, source: Source, cx: &mut Context<'_, Self>) {
         self.chatgpt_sign_in_failed(error);
-        let field = self.settings.update(cx, |state, cx| {
+        let (field, dock_restore) = self.settings.update(cx, |state, cx| {
             state.accounts.error(error);
-            let field = state.error(error.clone());
+            let outcome = if source == Source::Account {
+                state.error_and_restore_dock(error.clone())
+            } else {
+                (state.error(error.clone()), None)
+            };
             cx.notify();
-            field
+            outcome
         });
         let source = if matches!(
             error.key(),
@@ -716,6 +718,7 @@ impl Presence {
         self.chat_notice.present(error.clone(), source);
         self.sync_settings_notice(cx);
         self.sync_taskbar(cx);
+        self.restore_dock_position(dock_restore, cx);
     }
 
     /// Queues a stop or scene control for the brain. A run's `Stop` or `StopScenes` then stops its

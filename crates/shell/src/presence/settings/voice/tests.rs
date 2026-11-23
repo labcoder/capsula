@@ -40,6 +40,45 @@ fn open(
     (window, view)
 }
 
+#[gpui::test]
+fn a_fourth_idle_policy_row_is_visible(cx: &mut TestAppContext) {
+    use gpui_kit::{AppContext as _, Context, IntoElement, Render, Window};
+
+    struct Options;
+
+    impl Render for Options {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+            let rows = super::STT_UNLOAD_OPTIONS
+                .into_iter()
+                .map(|(policy, text)| (super::stt_unload_id(policy), text))
+                .chain([("fixture-fourth-idle-policy", Text::VoiceKept)]);
+            super::speech_idle_group(rows, cx.global::<crate::strings::Strings>())
+        }
+    }
+
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.set_global(crate::strings::Strings::english());
+    });
+    let (_, frame) = cx.add_window_view(|window, cx| {
+        let options = cx.new(|_| Options);
+        gpui_kit::component::Root::new(options, window, cx)
+    });
+    frame.run_until_parked();
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    let mut previous = None;
+    for id in [
+        "speech-idle-kept",
+        "speech-idle-15m",
+        "speech-idle-1h",
+        "fixture-fourth-idle-policy",
+    ] {
+        let y = frame.debug_bounds(id).expect(id).center().y;
+        assert!(previous.is_none_or(|above| y > above));
+        previous = Some(y);
+    }
+}
+
 #[cfg(all(windows, debug_assertions))]
 #[gpui::test]
 #[expect(

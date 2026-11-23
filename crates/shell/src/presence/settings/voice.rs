@@ -10,6 +10,27 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, div};
+use kumochi_protocol::message::SttUnload;
+
+fn stt_unload_id(policy: SttUnload) -> &'static str {
+    match policy {
+        SttUnload::Kept => "speech-idle-kept",
+        SttUnload::After15Min => "speech-idle-15m",
+        SttUnload::After1Hour => "speech-idle-1h",
+    }
+}
+
+fn speech_idle_group(
+    rows: impl IntoIterator<Item = (&'static str, Text)>,
+    strings: &Strings,
+) -> RadioGroup {
+    RadioGroup::vertical("speech-idle-policy").children(rows.into_iter().map(|(id, text)| {
+        let radio = Radio::new(id).label(strings.get(text));
+        #[cfg(test)]
+        let radio = radio.debug_selector(move || id.into());
+        radio
+    }))
+}
 
 impl SettingsView {
     pub(super) fn voice(&self, cx: &Context<'_, Self>) -> impl IntoElement {
@@ -35,38 +56,32 @@ impl SettingsView {
             .child(self.speech_input_model(cx))
             .child(div().text_sm().child(strings.get(Text::VoiceIdlePolicy)))
             .child(
-                RadioGroup::vertical("speech-idle-policy")
-                    .selected_index(state.stt_unload_index())
-                    .disabled(state.view().is_none() || state.stt_unload_pending())
-                    .children(
-                        STT_UNLOAD_OPTIONS
-                            .into_iter()
-                            .zip(["speech-idle-kept", "speech-idle-15m", "speech-idle-1h"])
-                            .map(|((_, text), id)| {
-                                Radio::new(id).label(strings.get(text)).map(|radio| {
-                                    #[cfg(test)]
-                                    let radio = radio.debug_selector(move || id.into());
-                                    radio
-                                })
-                            }),
-                    )
-                    .on_change(cx.listener(|view, index, _, cx| {
-                        let Some(&(policy, _)) = STT_UNLOAD_OPTIONS.get(*index) else {
-                            return;
-                        };
-                        if view
-                            .owner
-                            .update(cx, |owner, cx| {
-                                owner.request_save(Save::SttUnload(policy), cx)
-                            })
-                            .is_err()
-                        {
-                            view.model.update(cx, |state, cx| {
-                                state.apply_save(Save::SttUnload(policy), None);
+                speech_idle_group(
+                    STT_UNLOAD_OPTIONS
+                        .into_iter()
+                        .map(|(policy, text)| (stt_unload_id(policy), text)),
+                    strings,
+                )
+                .selected_index(state.stt_unload_index())
+                .disabled(state.view().is_none() || state.stt_unload_pending())
+                .on_change(cx.listener(|view, index, _, cx| {
+                    let Some(&(policy, _)) = STT_UNLOAD_OPTIONS.get(*index) else {
+                        return;
+                    };
+                    if view
+                        .owner
+                        .update(cx, |owner, cx| {
+                            owner.request_save(Save::SttUnload(policy), cx)
+                        })
+                        .is_err()
+                    {
+                        view.model.update(cx, |state, cx| {
+                            if state.apply_save(Save::SttUnload(policy), None).notify {
                                 cx.notify();
-                            });
-                        }
-                    })),
+                            }
+                        });
+                    }
+                })),
             )
             .children(state.stt_unload_pending().then(|| {
                 div()
@@ -132,8 +147,9 @@ impl SettingsView {
                             .is_err()
                         {
                             view.model.update(cx, |state, cx| {
-                                state.apply_save(Save::TalkBack(*on), None);
-                                cx.notify();
+                                if state.apply_save(Save::TalkBack(*on), None).notify {
+                                    cx.notify();
+                                }
                             });
                         }
                     }))
@@ -233,8 +249,9 @@ impl SettingsView {
                             .is_err()
                         {
                             view.model.update(cx, |state, cx| {
-                                state.apply_save(Save::SpeechInput(intent), None);
-                                cx.notify();
+                                if state.apply_save(Save::SpeechInput(intent), None).notify {
+                                    cx.notify();
+                                }
                             });
                         }
                         window.focus(&view.focus, cx);

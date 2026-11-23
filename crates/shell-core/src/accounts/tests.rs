@@ -2,7 +2,7 @@ use kumochi_protocol::message::AccountEmail;
 
 use super::{
     AccountOp, AccountRecovery, AccountView, Accounts, Action, Cleanup, ErrorKey, PlanState,
-    UserError, cleanup_notice,
+    StatusLine, UserError, cleanup_notice,
 };
 use crate::strings::Text;
 
@@ -611,7 +611,10 @@ fn account_status_prefers_recovery_to_each_plan_state() {
             ),
             (
                 AccountRecovery::Retry,
-                (Text::AccountAttention, vec![Text::AccountRetryHelp]),
+                (
+                    Text::AccountAttention,
+                    vec![StatusLine::Note(Text::AccountRetryHelp)],
+                ),
             ),
         ] {
             let mut state = Accounts::default();
@@ -631,32 +634,47 @@ fn account_status_prefers_recovery_to_each_plan_state() {
 
 #[test]
 fn remote_sign_out_copy_follows_the_cleanup_phase() {
+    use StatusLine::{Local, Note, Remote};
+    let refused = || Local {
+        heading: Text::AccountLocal,
+        error: Text::AccountCleanupRefused,
+        help: Text::AccountCleanupRefusedHelp,
+    };
+    let not_durable = || Local {
+        heading: Text::AccountLocal,
+        error: Text::AccountNotDurable,
+        help: Text::AccountNotDurableHelp,
+    };
+    let remote_line = || Remote {
+        heading: Text::AccountRemote,
+        note: Text::AccountRevocationPending,
+    };
     for (cleanup, remote, notice, lines) in [
-        (Cleanup::Running, false, None, vec![Text::AccountStopped]),
-        (Cleanup::Running, true, None, vec![Text::AccountStopped]),
         (
-            Cleanup::Refused,
+            Cleanup::Running,
             false,
             None,
-            vec![Text::AccountCleanupRefused],
+            vec![Note(Text::AccountStopped)],
         ),
+        (
+            Cleanup::Running,
+            true,
+            None,
+            vec![Note(Text::AccountStopped)],
+        ),
+        (Cleanup::Refused, false, None, vec![refused()]),
         (
             Cleanup::Refused,
             true,
             Some(Text::AccountRevocationPending),
-            vec![Text::AccountCleanupRefused, Text::AccountRevocationPending],
+            vec![refused(), remote_line()],
         ),
-        (
-            Cleanup::NotDurable,
-            false,
-            None,
-            vec![Text::AccountNotDurable],
-        ),
+        (Cleanup::NotDurable, false, None, vec![not_durable()]),
         (
             Cleanup::NotDurable,
             true,
             Some(Text::AccountRevocationPending),
-            vec![Text::AccountNotDurable, Text::AccountRevocationPending],
+            vec![not_durable(), remote_line()],
         ),
     ] {
         let view = AccountView::SigningOut {
@@ -679,8 +697,14 @@ fn remote_sign_out_copy_follows_the_cleanup_phase() {
         );
     }
     for (revocation_unconfirmed, line) in [
-        (false, Text::AccountUsePlan),
-        (true, Text::AccountRevocationUnconfirmed),
+        (false, Note(Text::AccountUsePlan)),
+        (
+            true,
+            Remote {
+                heading: Text::AccountRemote,
+                note: Text::AccountRevocationUnconfirmed,
+            },
+        ),
     ] {
         let view = AccountView::SignedOut {
             revocation_unconfirmed,
@@ -689,4 +713,38 @@ fn remote_sign_out_copy_follows_the_cleanup_phase() {
         assert!(state.receive(Some(7), 7, view));
         assert_eq!(state.status(None), (Text::AccountSignedOut, vec![line]));
     }
+}
+
+#[test]
+fn status_passes_complete_notice_copy_to_the_view_in_display_order() {
+    let mut state = Accounts::default();
+    receive(
+        &mut state,
+        AccountView::SignedOut {
+            revocation_unconfirmed: true,
+        },
+    );
+    state.error(&UserError::from(ErrorKey::RevocationBacklog));
+    state.send_failed = true;
+    assert_eq!(
+        state.status(None),
+        (
+            Text::AccountSignedOut,
+            vec![
+                StatusLine::Remote {
+                    heading: Text::AccountRemote,
+                    note: Text::AccountRevocationUnconfirmed,
+                },
+                StatusLine::Backlog {
+                    lead: Text::AccountBacklogLead,
+                    followups: [
+                        Text::AccountBacklogRetry,
+                        Text::AccountBacklogExpiry,
+                        Text::AccountBacklogRecovery
+                    ],
+                },
+                StatusLine::SendFailed(Text::AccountSendFailed),
+            ]
+        )
+    );
 }

@@ -11,7 +11,7 @@ use super::super::{
     Foreground, OpenError, Presence, PresenceSurface, configure_surface, options, platform,
 };
 use super::{SettingsTab, SettingsView};
-use crate::settings::{AfterSave, BeforeSave, Field, Save, SaveOutcome, TaskbarChoice};
+use crate::settings::{AfterSave, BeforeSave, Field, Save, SaveOutcome};
 use crate::strings::{Strings, Text};
 
 pub(in crate::presence) struct SettingsPanel {
@@ -154,16 +154,6 @@ impl Presence {
             sent
         })
     }
-    pub(in crate::presence) fn save_taskbar(
-        &mut self,
-        choice: TaskbarChoice,
-        cx: &mut Context<'_, Self>,
-    ) -> bool {
-        self.request_save(Save::Taskbar(choice), cx)
-            .result
-            .unwrap_or(false)
-    }
-
     pub(in crate::presence) fn sync_taskbar(&mut self, cx: &mut Context<'_, Self>) {
         let native = &mut self.native;
         self.settings.update(cx, |state, cx| {

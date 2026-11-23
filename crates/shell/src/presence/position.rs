@@ -30,16 +30,17 @@ impl Presence {
         &mut self,
         position: Option<DockPosition>,
         cx: &mut Context<'_, Self>,
-    ) -> Result<(), OpenError> {
+    ) {
         let mode = if cx.has_global::<Observer>() {
             RestoreMode::ObserverSeed
         } else {
             RestoreMode::Saved
         };
-        let Some(position) = restored_position(position, self.line.position_index(), mode) else {
-            return Ok(());
-        };
-        self.place_position(position, cx)
+        if let Some(position) = restored_position(position, self.line.position_index(), mode)
+            && let Err(error) = self.place_position(position, cx)
+        {
+            tracing::warn!(%error, "can't restore the saved dock position");
+        }
     }
 
     pub(super) fn position(

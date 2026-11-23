@@ -1,6 +1,18 @@
-use super::{DockIntent, DockPosition, Pending, Settings, SettingsOp, Slot};
+use super::{DockIntent, DockPosition, Field, Pending, Settings, SettingsOp, Slot, UserError};
 
 impl Settings {
+    pub fn error_and_restore_dock(
+        &mut self,
+        error: UserError,
+    ) -> (Option<Field>, Option<DockPosition>) {
+        let before = self.dock_position_choice();
+        let field = self.error(error);
+        let restore = self
+            .dock_position_choice()
+            .filter(|position| Some(*position) != before);
+        (field, restore)
+    }
+
     pub fn dock_position_choice(&self) -> Option<DockPosition> {
         self.offline_position
             .map(DockIntent::position)
