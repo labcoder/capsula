@@ -3,7 +3,9 @@
 //! Content (prompts, transcripts, screen text, images, tool arguments) is never logged, so nothing
 //! needs redacting after the fact. Secrets are [`kumochi_protocol::Secret`]s and print as `***`.
 
-use tracing::Level;
+use std::path::Path;
+
+use tracing::{Level, Subscriber};
 use tracing_appender::rolling::{InitError, RollingFileAppender, Rotation};
 
 /// Daily files kept before the oldest is deleted.
@@ -35,6 +37,18 @@ pub enum LoggingError {
 /// Fails when the log folder can't be found or created, or logging already started.
 pub fn init(prefix: &str) -> Result<(), LoggingError> {
     let dir = crate::platform::logging_data_dir()?.join("logs");
+    tracing::subscriber::set_global_default(file_subscriber(&dir, prefix)?)?;
+    // The payload can hold any value an assertion printed, so only the location is logged.
+    std::panic::set_hook(Box::new(|info| {
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()));
+        tracing::error!(location = at.as_deref().unwrap_or("unknown"), "panic");
+    }));
+    Ok(())
+}
+
+pub(crate) fn file_subscriber(dir: &Path, prefix: &str) -> Result<impl Subscriber, InitError> {
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix(prefix)
@@ -46,17 +60,8 @@ pub fn init(prefix: &str) -> Result<(), LoggingError> {
     } else {
         Level::INFO
     };
-    let subscriber = tracing_subscriber::fmt()
+    Ok(tracing_subscriber::fmt()
         .with_writer(appender)
         .with_max_level(level)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
-    // The payload can hold any value an assertion printed, so only the location is logged.
-    std::panic::set_hook(Box::new(|info| {
-        let at = info
-            .location()
-            .map(|l| format!("{}:{}", l.file(), l.line()));
-        tracing::error!(location = at.as_deref().unwrap_or("unknown"), "panic");
-    }));
-    Ok(())
+        .finish())
 }

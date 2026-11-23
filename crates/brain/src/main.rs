@@ -3,8 +3,8 @@
 
 use std::process::ExitCode;
 
-use kumochi_brain::logging;
 use kumochi_brain::platform::require_native_runtime;
+use kumochi_brain::{BrainError, logging};
 use kumochi_protocol::constants;
 
 const UNAVAILABLE: u8 = 69;
@@ -117,8 +117,17 @@ fn main() -> ExitCode {
     match ran {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            tracing::error!(error = %error, source = ?std::error::Error::source(&error), "brain stopped");
+            log_brain_stopped(&error);
             ExitCode::FAILURE
         }
     }
 }
+
+fn log_brain_stopped(error: &BrainError) {
+    let (kind, os_code) = error.diagnostic();
+    tracing::error!(kind, os_code, "brain stopped");
+}
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;
