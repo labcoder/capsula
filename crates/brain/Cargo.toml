@@ -111,6 +111,9 @@ test-support = []
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["test-util"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [target.'cfg(windows)'.dev-dependencies]
 # Lets tests read the access a handle was granted.
 windows-sys = { version = "0.61", features = ["Wdk_Foundation"] }
