@@ -490,18 +490,7 @@ fn promote_with(
         {
             stop_uncertain("link", &error);
         }
-        let settled = if unsupported {
-            reconcile(&path, None).map(|_| ())
-        } else {
-            (|| {
-                let (intent, record) = files.load()?.ok_or_else(invalid)?;
-                if intent != copied.intent {
-                    return Err(invalid());
-                }
-                files.dir.remove(&files.intent, &record, 1)?;
-                files.dir.durable(&old)
-            })()
-        };
+        let settled = abandon_link(&files, &old, copied.intent, error.kind());
         if let Err(settle) = settled {
             stop_uncertain("abandon link", &settle);
         }
@@ -532,6 +521,23 @@ fn unchanged(files: &Files<'_>, old: &PurgeInode, clean: &PurgeInode) -> bool {
     matches!(files.dir.absent(&files.old), Ok(true))
         && files.dir.verify(files.db, old, 1).is_ok()
         && files.dir.verify(&files.clean, clean, 1).is_ok()
+}
+
+fn abandon_link(
+    files: &Files<'_>,
+    old: &PurgeInode,
+    expected: Intent,
+    kind: ErrorKind,
+) -> io::Result<()> {
+    if kind != ErrorKind::AlreadyExists {
+        return reconcile(files.db, None).map(|_| ());
+    }
+    let (intent, record) = files.load()?.ok_or_else(invalid)?;
+    if intent != expected {
+        return Err(invalid());
+    }
+    files.dir.remove(&files.intent, &record, 1)?;
+    files.dir.durable(old)
 }
 
 fn stop_uncertain(stage: &str, error: &io::Error) -> ! {
