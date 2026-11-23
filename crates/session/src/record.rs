@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use kumochi_protocol::frame::{self, HEADER_LEN, Pipe};
 use snow::{HandshakeState, StatelessTransportState};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{Attempt, ENVELOPE_LEN, MAX_PLAINTEXT, MAX_RECORD, SessionError, TAG_LEN, Wiped};
 
@@ -36,7 +36,7 @@ pub(crate) fn split(
         scratch: Wiped::zeroed(MAX_PLAINTEXT),
         pipe,
         announced: None,
-        header: [0; HEADER_LEN],
+        header: Zeroizing::new([0; HEADER_LEN]),
         have: 0,
         remaining: 0,
     };
@@ -72,13 +72,22 @@ impl Sealer {
     }
 
     /// The envelope and ciphertext not yet written; empty when the last record is out.
-    pub fn unwritten(&self) -> &[u8] {
-        &self.record[self.written..self.len]
+    ///
+    /// # Errors
+    /// The attempt has been retired.
+    pub fn unwritten(&self) -> Result<&[u8], SessionError> {
+        self.attempt.check()?;
+        Ok(&self.record[self.written..self.len])
     }
 
     /// Marks `n` more bytes of [`Sealer::unwritten`] as accepted by the transport.
-    pub fn advance(&mut self, n: usize) {
+    ///
+    /// # Errors
+    /// The attempt has been retired. The write offset is unchanged.
+    pub fn advance(&mut self, n: usize) -> Result<(), SessionError> {
+        self.attempt.check()?;
         self.written = self.written.saturating_add(n).min(self.len);
+        Ok(())
     }
 
     /// Seals a record of any allowed length, confirmation and binding records included.
@@ -105,8 +114,8 @@ impl Sealer {
     /// Seals a handshake-phase record and hands its bytes to the caller to write whole.
     pub(crate) fn seal_out(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, SessionError> {
         self.seal_any(plaintext)?;
-        let bytes = self.unwritten().to_vec();
-        self.written = self.len;
+        let bytes = self.unwritten()?.to_vec();
+        self.advance(bytes.len())?;
         Ok(bytes)
     }
 
@@ -139,7 +148,7 @@ pub struct Opener {
     scratch: Wiped,
     pipe: Pipe,
     announced: Option<usize>,
-    header: [u8; HEADER_LEN],
+    header: Zeroizing<[u8; HEADER_LEN]>,
     have: usize,
     remaining: usize,
 }
@@ -148,12 +157,16 @@ impl Opener {
     /// The record body length an envelope announces: 17 to [`MAX_RECORD`] bytes.
     ///
     /// # Errors
-    /// An empty or shorter record, or an earlier failure of the attempt. A refusal retires it.
+    /// An empty or shorter record, a previous envelope still awaiting its body, or an earlier
+    /// failure of the attempt. A refusal retires it.
     pub fn record_len(&mut self, envelope: [u8; ENVELOPE_LEN]) -> Result<usize, SessionError> {
-        self.attempt.check()?;
+        self.check()?;
+        if self.announced.is_some() {
+            return self.fail(SessionError::EnvelopePending);
+        }
         let len = usize::from(u16::from_be_bytes(envelope));
         if len <= TAG_LEN {
-            return self.attempt.fail(SessionError::Length { len });
+            return self.fail(SessionError::Length { len });
         }
         self.announced = Some(len);
         Ok(len)
@@ -167,11 +180,9 @@ impl Opener {
     /// leg's cap, a record that crosses its frame's end, the record limit, or an earlier failure.
     /// Every error retires the attempt.
     pub fn open(&mut self, record: &[u8]) -> Result<Delivery<'_>, SessionError> {
-        self.attempt.check()?;
+        self.check()?;
         if self.announced.take() != Some(record.len()) {
-            return self
-                .attempt
-                .fail(SessionError::Length { len: record.len() });
+            return self.fail(SessionError::Length { len: record.len() });
         }
         let n = self.decrypt(record)?;
         match self.walk(n) {
@@ -181,7 +192,7 @@ impl Opener {
             }),
             Err(error) => {
                 self.scratch[..n].zeroize();
-                self.attempt.fail(error)
+                self.fail(error)
             }
         }
     }
@@ -223,16 +234,25 @@ impl Opener {
         Arc::ptr_eq(&self.attempt, attempt)
     }
 
+    fn check(&mut self) -> Result<(), SessionError> {
+        self.attempt.check().inspect_err(|_| self.header.zeroize())
+    }
+
+    fn fail<T>(&mut self, error: SessionError) -> Result<T, SessionError> {
+        self.header.zeroize();
+        self.attempt.fail(error)
+    }
+
     fn decrypt(&mut self, record: &[u8]) -> Result<usize, SessionError> {
         if self.next >= self.attempt.limit {
-            return self.attempt.fail(SessionError::Exhausted);
+            return self.fail(SessionError::Exhausted);
         }
         let Ok(n) = self
             .state
             .read_message(self.next, record, &mut self.scratch)
         else {
             self.scratch.zeroize();
-            return self.attempt.fail(SessionError::Authentication);
+            return self.fail(SessionError::Authentication);
         };
         self.next += 1;
         Ok(n)
@@ -249,8 +269,9 @@ impl Opener {
             if self.have < HEADER_LEN {
                 return Ok(false);
             }
-            self.remaining = frame::payload_len(self.header, self.pipe)
-                .map_err(|_| SessionError::FrameTooLarge)?;
+            let payload_len = frame::payload_len(*self.header, self.pipe);
+            self.header.zeroize();
+            self.remaining = payload_len.map_err(|_| SessionError::FrameTooLarge)?;
         }
         if rest.len() > self.remaining {
             return Err(SessionError::CrossesFrame);
@@ -336,8 +357,8 @@ mod tests {
         plaintext: &[u8],
     ) -> Result<(Vec<u8>, bool), SessionError> {
         sealer.seal(plaintext)?;
-        let record = sealer.unwritten().to_vec();
-        sealer.advance(record.len());
+        let record = sealer.unwritten()?.to_vec();
+        sealer.advance(record.len())?;
         let len = opener.record_len([record[0], record[1]])?;
         let delivery = opener.open(&record[ENVELOPE_LEN..ENVELOPE_LEN + len])?;
         Ok((delivery.bytes().to_vec(), delivery.frame_done()))
@@ -550,16 +571,16 @@ mod tests {
         } = established();
         let sealer = &mut shell.control.sealer;
         sealer.seal(&frame(4)).expect("seals");
-        let record = sealer.unwritten().to_vec();
-        sealer.advance(3);
+        let record = sealer.unwritten().expect("sealed bytes").to_vec();
+        sealer.advance(3).expect("short write");
         assert_eq!(
             sealer.unwritten(),
-            &record[3..],
+            Ok(&record[3..]),
             "a short write resumes the same bytes"
         );
         assert_eq!(sealer.next(), 3, "no second nonce for the resumed record");
-        sealer.advance(record.len());
-        assert!(sealer.unwritten().is_empty(), "written");
+        sealer.advance(record.len() - 3).expect("final write");
+        assert_eq!(sealer.unwritten(), Ok(&[][..]), "written");
         brain
             .control
             .opener
@@ -574,7 +595,7 @@ mod tests {
 
         let Run { mut shell, .. } = established();
         shell.control.sealer.seal(&frame(1)).expect("seals");
-        shell.control.sealer.advance(1);
+        shell.control.sealer.advance(1).expect("short write");
         assert_eq!(
             shell.control.sealer.seal(&frame(1)),
             Err(SessionError::Pending)
@@ -582,10 +603,91 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_on_the_other_leg_blocks_pending_write_resumption() {
+        let Run { mut shell, .. } = established();
+        let sender = &mut shell.control.sealer;
+        sender.seal(&frame(1)).expect("seals");
+        sender.advance(3).expect("short write");
+        assert_eq!(sender.unwritten().expect("pending suffix").len(), 20);
+        assert_eq!(
+            shell.data.opener.record_len(envelope(16)),
+            Err(SessionError::Length { len: 16 })
+        );
+        assert_eq!(sender.unwritten(), Err(SessionError::Retired));
+        assert_eq!(sender.advance(20), Err(SessionError::Retired));
+        assert_eq!(sender.written, 3, "no progress after retirement");
+    }
+
+    #[test]
+    fn a_second_envelope_before_the_body_retires_the_attempt() {
+        let Run {
+            mut shell,
+            mut brain,
+            ..
+        } = established();
+        shell.control.sealer.seal(&frame(0)).expect("valid record");
+        let record = shell.control.sealer.unwritten().expect("sealed bytes");
+        let opener = &mut brain.control.opener;
+        assert_eq!(opener.record_len([record[0], record[1]]), Ok(20));
+        assert_eq!(
+            opener.record_len(envelope(21)),
+            Err(SessionError::EnvelopePending)
+        );
+        assert_eq!(
+            opener.open(&record[ENVELOPE_LEN..]).err(),
+            Some(SessionError::Retired)
+        );
+        assert_eq!(
+            brain.data.sealer.seal(&frame(0)),
+            Err(SessionError::Retired)
+        );
+    }
+
+    #[test]
+    fn the_partial_frame_header_is_wiped_after_parsing_or_refusal() {
+        let Run {
+            mut shell,
+            mut brain,
+            ..
+        } = established();
+        let (sender, receiver) = (&mut shell.data.sealer, &mut brain.data.opener);
+        let bytes = frame(5);
+        deliver(sender, receiver, &bytes[..1]).expect("partial header");
+        assert_eq!(*receiver.header, [5, 0, 0, 0]);
+        deliver(sender, receiver, &bytes[1..]).expect("complete frame");
+        assert_eq!(*receiver.header, [0; 4], "parsed header");
+
+        for bad_length in [true, false] {
+            let Run {
+                mut shell,
+                mut brain,
+                ..
+            } = established();
+            let (sender, receiver) = (&mut shell.data.sealer, &mut brain.data.opener);
+            deliver(sender, receiver, &[5]).expect("partial header");
+            assert_eq!(*receiver.header, [5, 0, 0, 0]);
+            if bad_length {
+                assert_eq!(
+                    receiver.record_len(envelope(16)),
+                    Err(SessionError::Length { len: 16 })
+                );
+            } else {
+                assert_eq!(receiver.record_len(envelope(17)), Ok(17));
+                assert_eq!(
+                    receiver.open(&[0; 17]).err(),
+                    Some(SessionError::Authentication)
+                );
+            }
+            assert_eq!(*receiver.header, [0; 4], "refused with partial header");
+        }
+    }
+
+    #[test]
     fn a_reflected_record_fails_to_authenticate() {
         let Run { mut shell, .. } = established();
         shell.control.sealer.seal(&frame(1)).expect("seals");
-        let record = shell.control.sealer.unwritten()[ENVELOPE_LEN..].to_vec();
+        let record =
+            shell.control.sealer.unwritten().expect("sealed bytes")[ENVELOPE_LEN..].to_vec();
         shell
             .control
             .opener
@@ -622,7 +724,7 @@ mod tests {
             .sealer
             .seal(&frame(1))
             .expect("the honest shell still seals");
-        let valid = shell.control.sealer.unwritten().to_vec();
+        let valid = shell.control.sealer.unwritten().expect("sealed bytes");
         let refused = brain.control.opener.record_len([valid[0], valid[1]]);
         assert_eq!(
             refused,
@@ -680,7 +782,7 @@ mod tests {
         } = established();
         let marker = b"\x05\x00\x00\x00SENTI";
         shell.data.sealer.seal(marker).expect("seals");
-        let record = shell.data.sealer.unwritten().to_vec();
+        let record = shell.data.sealer.unwritten().expect("sealed bytes");
         brain
             .data
             .opener

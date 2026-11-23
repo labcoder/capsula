@@ -46,8 +46,7 @@ const _: () = assert!(
     "the prologue holds the label's length in a u8"
 );
 
-/// Which build the two processes are. There is deliberately no gate value: a gate build can't
-/// form a prologue.
+/// Which build the two processes are. The adapter must refuse Gate identity: it has no wire value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
     /// Installed builds.
@@ -89,6 +88,9 @@ pub enum SessionError {
     /// A seal while the previous record is still being written.
     #[error("a record is still being written")]
     Pending,
+    /// An application envelope arrived before the previous record body was opened.
+    #[error("a record body is still expected")]
+    EnvelopePending,
     /// The cipher refused a record.
     #[error("the cipher refused a record")]
     Cipher,
