@@ -240,16 +240,16 @@ mod tests {
             check(ROOT, f64::NAN, 1.0, 0.0).map(|_| ()),
             Err(ErrorCode::TransformOverflow)
         );
-        let child = check(
-            Placement {
-                origin: 100.0,
-                scale: 2.0,
-            },
-            10.0,
-            3.0,
-            1.0,
-        )
-        .expect("small chain");
-        assert_eq!((child.origin, child.scale), (120.0, 6.0));
+        let parent = Placement {
+            origin: 100.0,
+            scale: 2.0,
+        };
+        let offset = 9_947.0_f64;
+        let child = check(parent, offset, 3.0, 1.0).expect("scaled child reaches exactly 20,000");
+        assert_eq!((child.origin, child.scale), (19_994.0, 6.0));
+        assert_eq!(
+            check(parent, offset.next_up(), 3.0, 1.0).map(|_| ()),
+            Err(ErrorCode::OutOfRange)
+        );
     }
 }

@@ -12,8 +12,13 @@ const NEXT: SceneId = SceneId(30);
 
 #[test]
 fn owned_stop_preserves_unbound_and_unrelated_retirement_but_discards_its_bound_successor() {
-    for owner in [None, Some(RUN), Some(kumochi_protocol::message::RunId(9))] {
+    for (owner, keep) in [
+        (None, true),
+        (Some(RUN), false),
+        (Some(kumochi_protocol::message::RunId(9)), true),
+    ] {
         let (mut presenter, now) = fixture(&[LIVE]);
+        let old = picture(&presenter);
         replace(&mut presenter, &[LIVE], NEXT, now);
         begin(&mut presenter, NEXT, now);
         if let Some(run) = owner {
@@ -26,10 +31,8 @@ fn owned_stop_preserves_unbound_and_unrelated_retirement_but_discards_its_bound_
                 .expect("prepared successor");
         }
         presenter.stop_owned(RUN, now).expect("owned stop");
-        assert_eq!(
-            presenter.frames.borrow().retirement.is_some(),
-            owner != Some(RUN)
-        );
+        let expected = if keep { old } else { Vec::new() };
+        assert_eq!(picture(&presenter), expected, "owner {owner:?}");
         if owner.is_none() {
             let effects = presenter
                 .data_with_disposition(
@@ -43,7 +46,7 @@ fn owned_stop_preserves_unbound_and_unrelated_retirement_but_discards_its_bound_
                     now,
                 )
                 .expect("first tagged commit");
-            assert!(presenter.frames.borrow().retirement.is_none());
+            assert!(picture(&presenter).is_empty());
             let effects = presenter
                 .completed(super::only_admission(effects).run(), now)
                 .expect("mirrored tagged successor");
@@ -153,8 +156,19 @@ fn a_zero_alpha_first_sample_hands_off_and_its_paint_starts_the_entrance_clock()
     );
     presenter.advance(GENERATION, now).expect("activation");
     assert!(presenter.sample_at(now).expect("a sample").0.visible);
-    assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
-    assert_eq!(picture(&presenter)[0][0].opacity, 0.0);
+    assert_eq!(
+        presenter.frames.borrow().retirement_bytes(),
+        0,
+        "the outgoing picture stops charging before the first paint"
+    );
+    let picture_at_start = picture(&presenter);
+    let [items] = picture_at_start.as_slice() else {
+        panic!("only the successor paints")
+    };
+    let [first] = items.as_slice() else {
+        panic!("one successor shape")
+    };
+    assert_eq!(first.opacity, 0.0);
     paint_shown(&mut presenter, now);
     assert!(
         presenter
@@ -163,7 +177,14 @@ fn a_zero_alpha_first_sample_hands_off_and_its_paint_starts_the_entrance_clock()
             .0
             .visible
     );
-    assert_eq!(picture(&presenter)[0][0].opacity, 1.0);
+    let picture_at_end = picture(&presenter);
+    let [items] = picture_at_end.as_slice() else {
+        panic!("only the successor paints")
+    };
+    let [last] = items.as_slice() else {
+        panic!("one successor shape")
+    };
+    assert_eq!(last.opacity, 1.0);
 }
 
 #[test]
@@ -178,8 +199,9 @@ fn a_survivor_does_not_trigger_handoff_and_an_empty_prefix_can_advance() {
         step(r#"{"step":{"id":"empty","start":"now"}}"#),
         now,
     );
-    let mut second = rect("new");
-    second.start = Start::Now;
+    let second = step(
+        r#"{"step":{"id":"new","start":"now","put":[{"shape":{"id":"new","kind":"rect","box":[40,0,30,20],"enter":"none"}}]}}"#,
+    );
     prepare(&mut presenter, 1, second, now);
     presenter
         .advance(GENERATION, now)
@@ -190,7 +212,19 @@ fn a_survivor_does_not_trigger_handoff_and_an_empty_prefix_can_advance() {
     presenter.advance(GENERATION, now).expect("next prefix");
     assert!(presenter.sample_at(now).expect("a sample").0.visible);
     assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
-    assert_eq!(picture(&presenter).len(), 2);
+    let current = picture(&presenter);
+    let [survivor, successor] = current.as_slice() else {
+        panic!("only the survivor and successor paint");
+    };
+    assert_eq!(survivor, &old[0]);
+    assert_ne!(successor, &old[1], "the frozen picture no longer paints");
+    let shown: Vec<_> = presenter
+        .take_shown(GENERATION)
+        .into_iter()
+        .flatten()
+        .map(|ack| (ack.generation, ack.run, ack.scene, ack.index))
+        .collect();
+    assert_eq!(shown, [(GENERATION, RUN, NEXT, 1)]);
     assert_eq!(presenter.scenes[&NEXT].view.activated(), 2);
 }
 
@@ -224,7 +258,11 @@ fn the_selected_epoch_waits_only_for_its_first_paint_or_the_original_expiry() {
         .advance(GENERATION, ms(now, 250))
         .expect("expired guard");
     assert_eq!(presenter.scenes[&NEXT].view.activated(), 2);
-    assert!(presenter.frames.borrow().retirement.is_none());
+    assert_eq!(
+        presenter.deadline(),
+        None,
+        "the original guard no longer needs a wake"
+    );
 }
 
 #[test]
@@ -319,8 +357,9 @@ fn stop_before_successor_begin_names_only_the_successor_and_drains_its_late_comm
         commit_as(&mut presenter, RUN, NEXT, 0, rect("late"), now).expect("fenced commit");
     assert!(super::jobs(effects).is_empty());
     assert!(!presenter.sample_at(now).expect("a sample").0.visible);
-    assert!(presenter.frames.borrow().retirement.is_none());
-    assert!(!presenter.scenes.contains_key(&LIVE));
+    assert!(picture(&presenter).is_empty());
+    assert!(presenter.take_shown(GENERATION).iter().all(Option::is_none));
+    assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
 }
 
 #[test]
@@ -374,11 +413,14 @@ fn retained_and_incoming_objects_share_the_cap_without_refusing_the_new_scene() 
             .completed(job.run(&mut Shaper), now)
             .expect("900 outgoing objects");
         assert!(presenter.sample_at(now).expect("a sample").0.visible);
+        let old = picture(&presenter);
+        assert_eq!(old.len(), 2);
         replace(&mut presenter, &[SceneId(10), LIVE], NEXT, now);
         begin(&mut presenter, NEXT, now);
         prepare(&mut presenter, 0, labels(600), now);
         assert_eq!(presenter.global.usage().objects, 600);
-        assert_eq!(presenter.frames.borrow().retirement.is_some(), extra == 0);
+        let expected = if extra == 0 { old } else { Vec::new() };
+        assert_eq!(picture(&presenter), expected, "extra objects: {extra}");
         presenter
             .advance(GENERATION, now)
             .expect("new scene fits after retirement");
@@ -411,8 +453,9 @@ fn stop_clear_disconnect_removal_and_a_second_marker_dispose_the_first_attempt()
             _ => replace(&mut presenter, &[NEXT], SceneId(40), now),
         }
         assert!(!presenter.sample_at(now).expect("a sample").0.visible);
-        assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
-        assert_eq!(presenter.frames.borrow().observations(), [None; 4]);
+        assert_eq!(presenter.residency(), 0, "terminal case {terminal}");
+        assert!(picture(&presenter).is_empty());
+        assert!(presenter.take_shown(GENERATION).iter().all(Option::is_none));
     }
 }
 
@@ -425,6 +468,7 @@ fn malformed_and_stale_markers_cannot_take_current_owners() {
         (1..=5).map(SceneId).collect(),
     ] {
         let (mut presenter, now) = fixture(&[LIVE]);
+        let old = picture(&presenter);
         assert_eq!(
             data(
                 &mut presenter,
@@ -437,9 +481,15 @@ fn malformed_and_stale_markers_cannot_take_current_owners() {
             .err(),
             Some(Broken::Scenes)
         );
-        assert!(presenter.scenes.contains_key(&LIVE));
+        assert_eq!(picture(&presenter), old);
+        assert_eq!(
+            presenter.global.usage().scenes,
+            1,
+            "the current scene keeps its slot"
+        );
     }
     let (mut presenter, now) = fixture(&[LIVE]);
+    let old = picture(&presenter);
     let effects = presenter
         .data(
             GENERATION + 1,
@@ -455,8 +505,10 @@ fn malformed_and_stale_markers_cannot_take_current_owners() {
         )
         .expect("stale frame");
     assert!(controls(&effects).is_empty());
-    assert!(presenter.scenes.contains_key(&LIVE));
-    assert!(presenter.frames.borrow().retirement.is_none());
+    assert_eq!(picture(&presenter), old);
+    let effects = commit_as(&mut presenter, RUN, LIVE, 1, rect("still-current"), now)
+        .expect("the current scene is still writable");
+    assert_eq!(only_job(effects).scene(), LIVE);
 }
 
 #[test]
@@ -466,14 +518,28 @@ fn residency_at_the_limit_keeps_retirement_and_one_over_falls_back_without_refus
     let incoming = empty.residency();
     for extra in [0, 1] {
         let (mut presenter, now) = fixture(&[LIVE]);
+        let old = picture(&presenter);
         let outgoing = presenter.residency() - super::super::Activation::BYTES;
         replace(&mut presenter, &[LIVE], NEXT, now);
         presenter.stage = Box::new(Charged(MAX_RESIDENT_BYTES - incoming - outgoing + extra));
         let effects = begin(&mut presenter, NEXT, now);
         assert!(controls(&effects).is_empty());
-        assert!(presenter.scenes.contains_key(&NEXT));
-        assert_eq!(presenter.frames.borrow().retirement.is_some(), extra == 0);
+        let expected = if extra == 0 { old } else { Vec::new() };
+        assert_eq!(picture(&presenter), expected, "extra bytes: {extra}");
         assert!(presenter.residency() <= MAX_RESIDENT_BYTES);
+        assert_eq!(
+            data(
+                &mut presenter,
+                DataToShell::SceneBegin {
+                    scene: NEXT,
+                    header: super::header()
+                },
+                now,
+            )
+            .err(),
+            Some(Broken::Order),
+            "a duplicate header is refused because the successor was admitted"
+        );
     }
 }
 
@@ -488,9 +554,17 @@ fn a_refused_successor_header_reports_failure_without_guessing_a_run() {
         controls(&effects),
         [&ControlToBrain::SceneFailed { scene: NEXT }]
     );
-    assert!(!presenter.scenes.contains_key(&NEXT));
+    assert!(!presenter.holds_scenes());
+    presenter.stage = Box::new(Witness);
+    let late = begin(&mut presenter, NEXT, now);
+    assert!(controls(&late).is_empty());
+    assert!(
+        !presenter.holds_scenes(),
+        "a later valid header cannot revive the refusal"
+    );
     assert!(!presenter.sample_at(now).expect("a sample").0.visible);
-    assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
+    assert!(picture(&presenter).is_empty());
+    assert!(presenter.take_shown(GENERATION).iter().all(Option::is_none));
 }
 
 #[test]
@@ -524,7 +598,6 @@ fn frozen_text_is_redacted_by_its_outer_owners_and_reconnect_cannot_recover_it()
     assert!(!debug.contains(marker));
     assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
     presenter.connected(GENERATION + 1);
-    assert!(presenter.frames.borrow().retirement.is_none());
     assert_eq!(presenter.residency(), 0);
     assert!(!presenter.sample_at(now).expect("a sample").0.visible);
 }
@@ -542,8 +615,7 @@ fn a_cancelled_old_worker_cannot_replace_the_frozen_sample_or_acknowledge_it() {
     assert!(controls(&effects).is_empty());
     assert!(presenter.sample_at(now).expect("a sample").0.visible);
     assert_eq!(picture(&presenter), old);
-    assert_eq!(presenter.frames.borrow().observations(), [None; 4]);
-    assert!(!presenter.scenes.contains_key(&LIVE));
+    assert!(presenter.take_shown(GENERATION).iter().all(Option::is_none));
 }
 
 #[test]
@@ -594,8 +666,7 @@ fn stop_or_clear_after_handoff_cannot_deliver_a_deferred_paint_acknowledgement()
             );
         }
         assert_eq!(presenter.take_shown(GENERATION), [None; 4]);
-        assert!(presenter.frames.borrow().retirement.is_none());
-        assert!(!presenter.scenes.contains_key(&LIVE));
+        assert_eq!(presenter.frames.borrow().retirement_bytes(), 0);
     }
 }
 
@@ -640,8 +711,10 @@ fn an_incoming_success_prepared_before_a_second_marker_or_reconnect_stays_stale(
             .expect("late incoming answer");
         assert!(effects.is_empty());
         assert_eq!(picture(&presenter), before);
-        assert!(!presenter.scenes.contains_key(&NEXT));
-        assert!(bound_everywhere(&presenter));
+        assert!(
+            bound_everywhere(&presenter),
+            "the paint accepts the current frame/cache pair"
+        );
         assert_eq!(
             presenter.take_shown(if reconnect {
                 GENERATION + 1
@@ -654,11 +727,13 @@ fn an_incoming_success_prepared_before_a_second_marker_or_reconnect_stays_stale(
             assert!(!presenter.sample_at(now).expect("a sample").0.visible);
             assert_eq!(presenter.residency(), 0);
         } else {
-            assert_eq!(
-                presenter.scenes.keys().copied().collect::<Vec<_>>(),
-                [after]
-            );
             assert_eq!(presenter.scenes[&after].view.activated(), 1);
+            let stale = commit_as(&mut presenter, RUN, NEXT, 1, rect("stale-suffix"), now)
+                .expect("the removed owner's suffix is drained");
+            assert!(matches!(
+                stale.as_slice(),
+                [super::Effect::Credit(super::FRAME)]
+            ));
         }
     }
 }

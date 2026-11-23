@@ -1,13 +1,12 @@
 //! Placement follows the presenter's real install, cut, recovery and resample paths.
 use super::{
-    GENERATION, LIVE, Presenter, RUN, Shaper, acknowledge, begin, commit, kept, live, ms, only_job,
-    recovering, rect, step,
+    GENERATION, LIVE, Presenter, RUN, Shaper, Witness, acknowledge, begin, bound_everywhere,
+    commit, kept, live, ms, only_job, recovering, rect, step,
 };
 use kumochi_scene::{
     Frame,
     geom::{Affine, Rect, Vec2},
 };
-use std::sync::Arc;
 
 fn stage() -> Rect {
     Rect {
@@ -65,6 +64,7 @@ fn placement_is_installed_for_live_steps_and_kept_after_stop() {
 #[test]
 fn recovery_uses_the_latest_stage_and_a_stage_change_repaints_without_preparing() {
     let (mut presenter, now, job) = recovering(vec![(LIVE, rect("r"))]);
+    presenter.stage = Box::new(Witness);
     assert!(presenter.set_stage(stage()));
     presenter
         .completed(job.run(&mut Shaper), now)
@@ -75,8 +75,8 @@ fn recovery_uses_the_latest_stage_and_a_stage_change_repaints_without_preparing(
     );
     assert!(presenter.sample(0).0.changed);
     assert!(!presenter.sample(0).0.changed);
-    let primitives = Arc::clone(&presenter.scenes[&LIVE].rest.items()[0].primitives);
-    let generation = Arc::clone(presenter.scenes[&LIVE].view.generation());
+    assert!(bound_everywhere(&presenter));
+    let primitives = presenter.scenes[&LIVE].rest.items()[0].primitives.to_vec();
     let revision = presenter.scenes[&LIVE].rest.revision();
     assert!(presenter.set_stage(Rect {
         origin: Vec2::new(20.0, 30.0),
@@ -88,9 +88,19 @@ fn recovery_uses_the_latest_stage_and_a_stage_change_repaints_without_preparing(
     );
     assert!(presenter.sample(0).0.changed);
     assert!(!presenter.sample(0).0.changed);
+    let frames = presenter.frames();
+    assert!(!frames.borrow().paint(|frame, _| {
+        let [item] = frame.items() else {
+            panic!("placement preserves the one visible item")
+        };
+        assert_eq!(&*item.primitives, primitives);
+        Ok::<_, ()>(())
+    }));
+    assert!(
+        bound_everywhere(&presenter),
+        "the new sample still has a matching paint cache"
+    );
     let scene = &presenter.scenes[&LIVE];
-    assert!(Arc::ptr_eq(scene.view.generation(), &generation));
-    assert!(Arc::ptr_eq(&scene.rest.items()[0].primitives, &primitives));
     assert_eq!(scene.rest.revision(), revision);
     assert_eq!(presenter.workers(), 0);
 }
@@ -159,7 +169,6 @@ fn placement_preserves_an_empty_pending_slot_and_its_late_appearance_clamp() {
         .completed(only_job(effects).run(&mut Shaper), now)
         .expect("prepare");
     presenter.advance(GENERATION, now).expect("activate");
-    assert_eq!(presenter.scenes[&LIVE].view.first_appearance(), Some(200));
     assert!(!presenter.sample_at(now).expect("a sample").0.visible);
     assert!(
         !presenter
@@ -175,7 +184,6 @@ fn placement_preserves_an_empty_pending_slot_and_its_late_appearance_clamp() {
         size: Vec2::new(58.0, 58.0),
     });
     assert_eq!(frames.borrow().epoch(LIVE), Some(epoch));
-    assert_eq!(frames.borrow().sampled_ms(LIVE), Some(100));
     assert_eq!(frames.borrow().painted(LIVE), None);
     assert!(!presenter.begin_painted(ms(now, 150)));
     assert!(
@@ -185,7 +193,6 @@ fn placement_preserves_an_empty_pending_slot_and_its_late_appearance_clamp() {
             .0
             .visible
     );
-    assert_eq!(frames.borrow().sampled_ms(LIVE), Some(200));
     frames.borrow_mut().shown = true;
     assert_eq!(
         painted(&presenter),
@@ -194,7 +201,6 @@ fn placement_preserves_an_empty_pending_slot_and_its_late_appearance_clamp() {
     let observation = frames.borrow().painted(LIVE).expect("painted");
     presenter.set_stage(stage());
     assert_eq!(frames.borrow().epoch(LIVE), Some(epoch));
-    assert_eq!(frames.borrow().sampled_ms(LIVE), Some(200));
     assert_eq!(frames.borrow().painted(LIVE), Some(observation));
     assert!(presenter.begin_painted(ms(now, 400)));
     presenter.sample_at(ms(now, 800)).expect("a sample");

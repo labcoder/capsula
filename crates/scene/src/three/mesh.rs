@@ -715,10 +715,10 @@ mod tests {
     #[test]
     fn source_area_cutoff_is_inclusive_and_cancellation_stops_the_next_triangle() {
         let world = Transform::local([0.0; 3], [0.0; 3], 1.0);
-        for (height, expected) in [
-            (0.25_f32.next_down(), Err(MeshError::Degenerate("r"))),
-            (0.25, Ok(())),
-            (0.25_f32.next_up(), Ok(())),
+        for (height, expected, emitted) in [
+            (0.25_f32.next_down(), Err(MeshError::Degenerate("r")), 0),
+            (0.25, Ok(()), 1),
+            (0.25_f32.next_up(), Ok(()), 1),
         ] {
             let cancel = AtomicBool::new(false);
             let mut out = Vec::with_capacity(2);
@@ -736,7 +736,24 @@ mod tests {
                 [1.0, 0.0, 0.0],
                 [0.0, f64::from(height), 0.0],
             ];
-            assert_eq!(emit.triangle(face, Face::Surface), expected);
+            assert_eq!(
+                emit.triangle(face, Face::Surface),
+                expected,
+                "height {height}"
+            );
+            assert_eq!(out.len(), emitted, "height {height}");
+            for triangle in out {
+                assert_eq!(triangle.part, 1);
+                let [a, b, c] = [
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(1.0, 0.0, 0.0),
+                    Vec3::new(0.0, height, 0.0),
+                ];
+                assert!(
+                    [[a, b, c], [b, c, a], [c, a, b]].contains(&triangle.v),
+                    "height {height}: wrong vertices or winding, {triangle:?}"
+                );
+            }
         }
         let cancel = AtomicBool::new(false);
         let mut out = Vec::with_capacity(2);

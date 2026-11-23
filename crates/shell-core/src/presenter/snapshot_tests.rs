@@ -270,20 +270,20 @@ fn stale_generations_and_offline_chunks_never_receive_credit() {
 
 #[test]
 fn descriptors_are_unique_and_locally_checked_even_if_constructed_directly() {
-    let mut assembler = connected();
     assert_eq!(
         describe(
-            &mut assembler,
+            &mut connected(),
             vec![descriptor(1, 1, 1), descriptor(1, 1, 1)]
         ),
         Err(Broken::Membership)
     );
     let mut bad = descriptor(1, 1, 1);
     bad.committed = 0;
-    assert_eq!(describe(&mut assembler, vec![bad]), Err(Broken::Counts));
+    assert_eq!(describe(&mut connected(), vec![bad]), Err(Broken::Counts));
     bad = descriptor(1, 1, 1);
     bad.log_entries = 129;
-    assert_eq!(describe(&mut assembler, vec![bad]), Err(Broken::Counts));
+    assert_eq!(describe(&mut connected(), vec![bad]), Err(Broken::Counts));
+    let mut assembler = connected();
     assert_eq!(
         describe(&mut assembler, vec![descriptor(1, 1, 1)]),
         Ok(Effect::default())
@@ -302,20 +302,25 @@ fn ordinals_are_consecutive_and_finished_scenes_cannot_append() {
         assembler.chunk(1, chunk(1, 2, 1, vec![event(1)], false), 100),
         Err(Broken::Sequence)
     );
+    for out_of_order in [
+        chunk(1, 2, 0, vec![event(1)], false),
+        chunk(1, 2, 2, vec![event(2)], true),
+    ] {
+        let mut assembler = connected();
+        describe(&mut assembler, vec![descriptor(1, 2, 2)]).expect("describe");
+        assembler
+            .chunk(1, chunk(1, 2, 0, vec![event(1)], false), 100)
+            .expect("first");
+        assert_eq!(assembler.chunk(1, out_of_order, 100), Err(Broken::Sequence));
+    }
+    let mut assembler = connected();
+    describe(&mut assembler, vec![descriptor(1, 2, 2)]).expect("describe");
     assert_eq!(
         assembler.chunk(1, chunk(1, 2, 0, vec![event(1)], false), 100),
         Ok(Effect {
             credit: 100,
             ..Effect::default()
         })
-    );
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 2, 0, vec![event(1)], false), 100),
-        Err(Broken::Sequence)
-    );
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 2, 2, vec![event(2)], true), 100),
-        Err(Broken::Sequence)
     );
     assert_eq!(
         assembler.chunk(1, chunk(1, 2, 1, vec![event(2)], true), 100),
@@ -336,46 +341,42 @@ fn ordinals_are_consecutive_and_finished_scenes_cannot_append() {
 
 #[test]
 fn headers_only_appear_in_chunk_zero_and_revision_matches_membership() {
-    let mut assembler = connected();
-    describe(&mut assembler, vec![descriptor(1, 2, 2)]).expect("describe");
     let mut missing = chunk(1, 2, 0, vec![event(1)], false);
     missing.header = None;
-    assert_eq!(assembler.chunk(1, missing, 100), Err(Broken::Sequence));
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 1, 0, vec![event(1)], true), 100),
-        Err(Broken::Sequence)
-    );
-    assembler
-        .chunk(1, chunk(1, 2, 0, vec![event(1)], false), 100)
-        .expect("first");
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 3, 1, vec![event(2)], true), 100),
-        Err(Broken::Sequence)
-    );
+    for first in [missing, chunk(1, 1, 0, vec![event(1)], true)] {
+        let mut assembler = connected();
+        describe(&mut assembler, vec![descriptor(1, 2, 2)]).expect("describe");
+        assert_eq!(assembler.chunk(1, first, 100), Err(Broken::Sequence));
+    }
     let mut extra = chunk(1, 2, 1, vec![event(2)], true);
     extra.header = Some(header());
-    assert_eq!(assembler.chunk(1, extra, 100), Err(Broken::Sequence));
+    for second in [chunk(1, 3, 1, vec![event(2)], true), extra] {
+        let mut assembler = connected();
+        describe(&mut assembler, vec![descriptor(1, 2, 2)]).expect("describe");
+        assembler
+            .chunk(1, chunk(1, 2, 0, vec![event(1)], false), 100)
+            .expect("first");
+        assert_eq!(assembler.chunk(1, second, 100), Err(Broken::Sequence));
+    }
 }
 
 #[test]
 fn revision_boundaries_are_checked_across_chunks_and_cuts() {
-    let mut assembler = connected();
-    describe(&mut assembler, vec![descriptor(1, 3, 3)]).expect("describe");
-    assembler
-        .chunk(1, chunk(1, 3, 0, vec![event(1)], false), 100)
-        .expect("first");
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 3, 1, vec![event(3)], false), 100),
-        Err(Broken::Sequence)
-    );
     let future_cut = SceneEvent::Stop(StopCut {
         activated: 2,
         revealed: Bounded::default(),
     });
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 3, 1, vec![future_cut], false), 100),
-        Err(Broken::Sequence)
-    );
+    for wrong in [event(3), future_cut] {
+        let mut assembler = connected();
+        describe(&mut assembler, vec![descriptor(1, 3, 3)]).expect("describe");
+        assembler
+            .chunk(1, chunk(1, 3, 0, vec![event(1)], false), 100)
+            .expect("first");
+        assert_eq!(
+            assembler.chunk(1, chunk(1, 3, 1, vec![wrong], false), 100),
+            Err(Broken::Sequence)
+        );
+    }
     let mut other = connected();
     describe(&mut other, vec![descriptor(1, 1, 2)]).expect("describe");
     assert_eq!(
@@ -399,95 +400,86 @@ fn revision_boundaries_are_checked_across_chunks_and_cuts() {
 
 #[test]
 fn last_flag_requires_the_exact_advertised_entry_and_revision_count() {
-    let mut assembler = connected();
-    describe(&mut assembler, vec![descriptor(1, 2, 2)]).expect("describe");
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 2, 0, vec![event(1)], true), 100),
-        Err(Broken::Counts)
-    );
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 2, 0, vec![event(1), event(2)], false), 100),
-        Err(Broken::Counts)
-    );
-    assert_eq!(
-        assembler.chunk(
-            1,
-            chunk(1, 2, 0, vec![event(1), event(2), event(2)], true),
-            100
-        ),
-        Err(Broken::Counts)
-    );
     let stop = SceneEvent::Stop(StopCut {
         activated: 1,
         revealed: Bounded::default(),
     });
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 2, 0, vec![event(1), stop], true), 100),
-        Err(Broken::Counts)
-    );
-    assert_eq!(
-        assembler.chunk(1, chunk(99, 1, 0, vec![event(1)], true), 100),
-        Err(Broken::Membership)
-    );
+    for (frame, error) in [
+        (chunk(1, 2, 0, vec![event(1)], true), Broken::Counts),
+        (
+            chunk(1, 2, 0, vec![event(1), event(2)], false),
+            Broken::Counts,
+        ),
+        (
+            chunk(1, 2, 0, vec![event(1), event(2), event(2)], true),
+            Broken::Counts,
+        ),
+        (chunk(1, 2, 0, vec![event(1), stop], true), Broken::Counts),
+        (chunk(99, 1, 0, vec![event(1)], true), Broken::Membership),
+    ] {
+        let mut assembler = connected();
+        describe(&mut assembler, vec![descriptor(1, 2, 2)]).expect("describe");
+        assert_eq!(assembler.chunk(1, frame, 100), Err(error));
+    }
 }
 
 #[test]
 fn credit_window_and_frame_sizes_include_the_header() {
-    let mut assembler = connected();
     let max = u32::try_from(MAX_FRAME_BYTES).expect("frame fits u32");
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 1, 0, vec![event(1)], true), max + 1),
-        Err(Broken::Frame)
-    );
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 1, 0, vec![event(1)], true), 4),
-        Err(Broken::Frame)
-    );
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 1, 0, vec![event(1)], true), max),
-        Ok(Effect::default())
-    );
-    assert_eq!(
-        assembler.chunk(1, chunk(2, 1, 0, vec![event(1)], true), DATA_WINDOW - max),
-        Ok(Effect::default())
-    );
-    assert_eq!(
-        assembler.chunk(1, chunk(3, 1, 0, vec![event(1)], true), 5),
-        Err(Broken::Window)
-    );
-    assert_eq!(
-        assembler.clear(),
-        Effect {
-            credit: DATA_WINDOW,
-            ..Effect::default()
+    for bytes in [max + 1, 4] {
+        assert_eq!(
+            connected().chunk(1, chunk(1, 1, 0, vec![event(1)], true), bytes),
+            Err(Broken::Frame)
+        );
+    }
+    for overflow in [false, true] {
+        let mut assembler = connected();
+        assert_eq!(
+            assembler.chunk(1, chunk(1, 1, 0, vec![event(1)], true), max),
+            Ok(Effect::default())
+        );
+        assert_eq!(
+            assembler.chunk(1, chunk(2, 1, 0, vec![event(1)], true), DATA_WINDOW - max),
+            Ok(Effect::default())
+        );
+        if overflow {
+            assert_eq!(
+                assembler.chunk(1, chunk(3, 1, 0, vec![event(1)], true), 5),
+                Err(Broken::Window)
+            );
         }
-    );
+        assert_eq!(
+            assembler.clear(),
+            Effect {
+                credit: DATA_WINDOW,
+                ..Effect::default()
+            },
+            "clearing refunds only the accepted bytes (overflow: {overflow})"
+        );
+    }
 }
 
 #[test]
 fn staging_counters_enforce_scene_and_aggregate_caps_without_large_allocations() {
+    for (scene_bytes, bytes) in [
+        (MAX_SCENE_SNAPSHOT_BYTES - 99, MAX_SCENE_SNAPSHOT_BYTES - 99),
+        (0, MAX_SCENE_STAGING_BYTES - 99),
+    ] {
+        let mut assembler = connected();
+        describe(&mut assembler, vec![descriptor(1, 1, 1)]).expect("describe");
+        assembler
+            .scenes
+            .get_mut(&SceneId(1))
+            .expect("pending")
+            .bytes = scene_bytes;
+        assembler.bytes = bytes;
+        assert_eq!(
+            assembler.chunk(1, chunk(1, 1, 0, vec![event(1)], true), 100),
+            Err(Broken::Bytes)
+        );
+    }
     let mut assembler = connected();
     describe(&mut assembler, vec![descriptor(1, 1, 1)]).expect("describe");
-    assembler
-        .scenes
-        .get_mut(&SceneId(1))
-        .expect("pending")
-        .bytes = MAX_SCENE_SNAPSHOT_BYTES - 99;
-    assembler.bytes = MAX_SCENE_SNAPSHOT_BYTES - 99;
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 1, 0, vec![event(1)], true), 100),
-        Err(Broken::Bytes)
-    );
-    assembler
-        .scenes
-        .get_mut(&SceneId(1))
-        .expect("pending")
-        .bytes = 0;
-    assembler.bytes = MAX_SCENE_STAGING_BYTES - 99;
-    assert_eq!(
-        assembler.chunk(1, chunk(1, 1, 0, vec![event(1)], true), 100),
-        Err(Broken::Bytes)
-    );
     assembler
         .scenes
         .get_mut(&SceneId(1))
@@ -632,8 +624,47 @@ fn removing_held_chunks_returns_only_their_credit_and_remembers_a_bounded_tombst
     for id in 3..=100 {
         assembler.remove(&[SceneId(id)]);
     }
-    assert_eq!(assembler.cleared.len(), 64);
-    assert_eq!(assembler.cleared.front(), Some(&SceneId(37)));
+    assembler.connected(2);
+    assert_eq!(
+        assembler.describe(
+            2,
+            &Bounded::new(
+                [36, 37, 100]
+                    .into_iter()
+                    .map(|id| descriptor(id, 1, 1))
+                    .collect()
+            )
+            .expect("three descriptors")
+        ),
+        Ok(Effect {
+            clear: vec![SceneId(37), SceneId(100)],
+            ..Effect::default()
+        })
+    );
+    assert_eq!(
+        assembler.chunk(2, chunk(36, 1, 0, vec![event(1)], true), 100),
+        Ok(Effect {
+            credit: 100,
+            batch: Some(Deferred::new(vec![source(36, 1, vec![event(1)])], 0)),
+            ..Effect::default()
+        })
+    );
+    for (offset, ids) in (38..100).collect::<Vec<_>>().chunks(4).enumerate() {
+        let generation = 3 + u64::try_from(offset).expect("a few reconnects");
+        assembler.connected(generation);
+        assert_eq!(
+            assembler.describe(
+                generation,
+                &Bounded::new(ids.iter().map(|id| descriptor(*id, 1, 1)).collect())
+                    .expect("bounded descriptors")
+            ),
+            Ok(Effect {
+                clear: ids.iter().copied().map(SceneId).collect(),
+                batch: Some(Deferred::new(Vec::new(), 0)),
+                credit: 0,
+            })
+        );
+    }
 }
 
 #[test]
@@ -667,13 +698,15 @@ fn four_scenes_install_together_once_and_debug_omits_all_content() {
             ))
         }
     );
-    let debug = format!("{effect:?} {assembler:?}");
+    let debug = format!("{effect:?} {assembler:?} {}", Broken::Bytes);
     assert!(!debug.contains("private"));
     assert!(!debug.contains("13337.25"));
-    assert_eq!(
-        Broken::Bytes.to_string(),
-        "snapshot staging budget exceeded"
-    );
+    let private_bytes = b"private"
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(!debug.contains(&private_bytes));
     assert!(!assembler.pending());
 }
 
@@ -815,11 +848,11 @@ fn rejected_staged_and_undelivered_snapshot_owners_retire_off_thread() {
             }
         }
         drop(assembler);
-        let expected = if case == 1 || case == 3 { 3 } else { 2 };
+        let deferred_owners = if case == 1 || case == 3 { 2 } else { 1 };
         assert_eq!(
             Arc::strong_count(&probe),
-            expected,
-            "all payload owners stay protected"
+            1 + deferred_owners,
+            "the chunk and any separately staged log or batch are still with the blocked dropper in case {case}"
         );
         drop(release);
         assert!(drained(&probe, 1));

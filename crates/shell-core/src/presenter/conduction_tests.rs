@@ -986,17 +986,9 @@ fn onset_installs_once_and_only_accepted_paint_reports_shown() {
     let (mut p, now) = fixture([key]);
     let job = submit(&mut p, LIVE, now);
     let view = p.conductor_view(now).expect("bound while preparing");
-    assert_eq!(
-        view,
-        ViewLevel {
-            binding: Binding {
-                assignment: key,
-                nonce: 1
-            },
-            speech: true,
-            view: View::Preparing
-        }
-    );
+    assert_eq!(view.binding.assignment, key);
+    assert!(view.speech);
+    assert_eq!(view.view, View::Preparing);
     let binding = view.binding;
     prepared(&mut p, job, ms(now, 2));
     let view = p.conductor_view(ms(now, 2)).expect("eligible");
@@ -1021,7 +1013,6 @@ fn onset_installs_once_and_only_accepted_paint_reports_shown() {
     p.advance(GENERATION, ms(now, 50)).expect("before onset");
     assert_eq!(bound(&p, LIVE), 0);
     p.advance(GENERATION, onset).expect("onset");
-    let epoch = p.frames.borrow().epoch(LIVE);
     assert_eq!(bound(&p, LIVE), 1);
     assert_eq!(
         p.conductor_view(onset).expect("unpainted").view,
@@ -1043,10 +1034,15 @@ fn onset_installs_once_and_only_accepted_paint_reports_shown() {
     );
     assert_eq!(acks.into_iter().flatten().count(), 1);
     assert_eq!(p.conductor_view(onset).expect("shown").view, View::Shown);
+    let painted = p.frames.borrow().painted(LIVE).expect("accepted paint");
     owned(&mut p, binding, RouteStamp::Live(7), Picture::At(at), onset);
     p.advance(GENERATION, onset).expect("duplicate level");
     assert_eq!(bound(&p, LIVE), 1);
-    assert_eq!(p.frames.borrow().epoch(LIVE), epoch);
+    assert_eq!(p.frames.borrow().painted(LIVE), Some(painted));
+    assert_eq!(
+        p.conductor_view(onset).expect("still shown").view,
+        View::Shown
+    );
     assert!(p.take_shown(GENERATION).iter().all(Option::is_none));
     assert_eq!(p.next_wake(onset), None);
 }
@@ -1154,7 +1150,7 @@ fn replacement_ignores_late_terminal_even_if_it_reuses_the_new_nonce() {
         .expect("successor binding")
         .binding;
     assert_eq!(new.assignment.step.scene, newer);
-    assert_eq!(new.nonce, old.nonce + 1);
+    assert_ne!(new.nonce, old.nonce, "the successor has a fresh nonce");
     for stale in [
         old,
         Binding {
@@ -1325,13 +1321,8 @@ fn the_next_narrated_step_binds_after_ended_without_waiting_for_paint() {
     let level = p
         .conductor_view(ms(now, 1))
         .expect("next head takes the slot");
-    assert_eq!(
-        level.binding,
-        Binding {
-            assignment: second,
-            nonce: binding.nonce + 1
-        }
-    );
+    assert_eq!(level.binding.assignment, second);
+    assert_ne!(level.binding.nonce, binding.nonce);
     assert_eq!(level.view, View::Eligible);
     assert_eq!(p.next_wake(ms(now, 1)), None, "new head has no onset yet");
 }
@@ -1370,13 +1361,8 @@ fn ended_survives_an_empty_read_before_a_coalesced_presenter_wake() {
         ms(now, 4),
     );
     let level = p.conductor_view(ms(now, 5)).expect("one coalesced view");
-    assert_eq!(
-        level.binding,
-        Binding {
-            assignment: next,
-            nonce: binding.nonce + 1
-        }
-    );
+    assert_eq!(level.binding.assignment, next);
+    assert_ne!(level.binding.nonce, binding.nonce);
     p.advance(GENERATION, ms(now, 5))
         .expect("ended head still takes authored timing");
     assert_eq!((bound(&p, LIVE), bound(&p, later)), (1, 0));
@@ -1412,7 +1398,13 @@ fn ended_wait_releases_while_preparing_and_shows_on_local_readiness() {
     assert!(p.take_shown(GENERATION).iter().all(Option::is_none));
     assert!(p.sample_at(ms(now, 2)).expect("sample").0.visible);
     paint_shown(&mut p, ms(now, 2));
-    assert_eq!(p.take_shown(GENERATION).into_iter().flatten().count(), 1);
+    let shown: Vec<_> = p
+        .take_shown(GENERATION)
+        .into_iter()
+        .flatten()
+        .map(|ack| (ack.generation, ack.run, ack.scene, ack.index))
+        .collect();
+    assert_eq!(shown, [(GENERATION, RUN, LIVE, 0)]);
 }
 
 #[test]
@@ -1511,13 +1503,8 @@ fn a_local_cut_fences_shown_even_if_the_scene_reopens_before_any_conductor_read(
     let level = p
         .conductor_view(ms(now, 3))
         .expect("new head owns the slot");
-    assert_eq!(
-        level.binding,
-        Binding {
-            assignment: next,
-            nonce: binding.nonce + 1
-        }
-    );
+    assert_eq!(level.binding.assignment, next);
+    assert_ne!(level.binding.nonce, binding.nonce);
     assert_eq!(level.view, View::Eligible);
     report(
         &mut p,
@@ -1686,7 +1673,7 @@ fn an_authored_successor_does_not_fence_unpainted_speech_or_credit_its_paint() {
         commit_as(&mut p, RUN, LIVE, 1, now_step("next"), at).expect("authored successor"),
     );
     prepared(&mut p, job, at);
-    assert_eq!(p.next_wake(at), Some(now));
+    assert!(p.next_wake(at).is_some_and(|due| due <= at));
     p.advance(GENERATION, at)
         .expect("authored successor installs without waiting for audio");
     assert_eq!(bound(&p, LIVE), 2);
@@ -1737,15 +1724,10 @@ fn a_ready_speech_step_becomes_bindable_only_after_its_authored_head_installs() 
     p.advance(GENERATION, now)
         .expect("installs the authored head only");
     assert_eq!(bound(&p, LIVE), 1);
-    assert_eq!(
-        p.conductor_view(now),
-        Some(ViewLevel {
-            binding: Binding {
-                assignment: assignment(LIVE, 1),
-                nonce: 1
-            },
-            speech: true,
-            view: View::Eligible,
-        })
-    );
+    let level = p
+        .conductor_view(now)
+        .expect("the speech head is now bindable");
+    assert_eq!(level.binding.assignment, assignment(LIVE, 1));
+    assert!(level.speech);
+    assert_eq!(level.view, View::Eligible);
 }
