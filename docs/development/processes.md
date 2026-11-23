@@ -9,6 +9,11 @@ other beside its own executable, never through PATH. Only the executable names d
 stored DEV/release namespaces are unchanged. This naming does not implement macOS process,
 desktop or authenticated transport support; the lifecycle below describes Windows.
 
+Without a native process adapter, containment and every native launch request return
+`Unsupported` before creating a process or its pipes. The supervisor's injected tests still
+exercise its request and retirement policy without a native child. No unmanaged child or
+inherited environment is a fallback.
+
 Each process starts its scene dropper before accepting scene data and fails startup if the
 thread cannot start. Retirement never joins that thread from the shell's UI.
 
