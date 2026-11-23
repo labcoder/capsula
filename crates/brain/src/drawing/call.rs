@@ -28,6 +28,7 @@ pub(super) enum CompleteArgs<'a> {
     Checked(DrawRecords),
 }
 
+#[derive(Clone, Copy)]
 enum RecordSurface {
     OverlayOnly,
     ScreenOffered,
