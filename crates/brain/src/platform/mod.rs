@@ -11,6 +11,7 @@ mod fs;
 mod model_files;
 mod pipe;
 mod process;
+mod runtime_admission;
 mod session_lock;
 mod shell_process;
 mod trust_roots;
@@ -54,6 +55,7 @@ pub(crate) use process::spawn_if;
 pub use process::{
     ChildPipes, Helper, Job, Launch, Spawned, Stdio, launch_detached, spawn, system_env,
 };
+pub use runtime_admission::require_native_runtime;
 pub use session_lock::{SessionLock, SessionLockError};
 pub(crate) use trust_roots::native_trust_supported;
 #[cfg(not(windows))]
