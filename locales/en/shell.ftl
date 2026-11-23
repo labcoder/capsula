@@ -256,8 +256,9 @@ show-screen-help-claude-code = { $app } passes the picture to Claude Code on sta
 show-screen-changed = Screen not included: the display changed
 screen-not-included-picture-too-large = Screen not included: the screenshot was too large
 screen-history-changed = Screen not included: it changed while the screenshot was being taken
-screen-note-cant = { $model } doesn't support screenshots, so messages will go without one.
-screen-note-can = { $model } supports screenshots, so holding to talk will send one along.
+# An unavailable offer doesn't identify a model.
+screen-note-cant = Hold to talk can't include a screenshot right now.
+screen-note-can = At this point, holding to talk could send a screenshot to { $model }.
 marks-skipped = Marks skipped: your screen changed
 show-screen-history = A screenshot of your screen may have been sent with this message. { $app } does not save the image in chat history.
 voice-restart-required = Speech input unavailable. Restart the app.

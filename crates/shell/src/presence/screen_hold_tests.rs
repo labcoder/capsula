@@ -53,7 +53,7 @@ fn model(slug: &str, name: &str) -> ModelInfo {
 pub(super) fn luna() -> ModelInfo {
     model("gpt-6-luna", "GPT-6 Luna")
 }
-fn sol() -> ModelInfo {
+pub(super) fn sol() -> ModelInfo {
     model("gpt-6-sol", "GPT-6 Sol")
 }
 fn choice(model: &ModelInfo, effort: Effort) -> ModelChoice {
@@ -940,6 +940,19 @@ fn a_lease_that_stops_protecting_a_sent_release_tells_the_brain_once(cx: &mut Te
         assert!(owner.exclusion.lease().unwrap().revoked());
     });
     assert_eq!(sent(&ready), lapsed);
+    finish(&ready, 1, cx);
+    held(&ready, 2, cx);
+    release(&ready.owner, 2, Some(DOWN), cx);
+    assert_eq!(sent(&ready), []);
+    assert_eq!(
+        line(&ready, cx),
+        Some((Text::ScreenNotIncludedNotReady, None))
+    );
+    assert_eq!(
+        lease(&ready, cx),
+        (1, true),
+        "no replacement while restoration is owed"
+    );
     ready.fixture.borrow_mut().restore_failure = 0;
     ready.owner.update(cx, Presence::revoke_exclusion);
     assert_eq!(lease(&ready, cx), (1, false));
