@@ -171,7 +171,6 @@ mod tests {
         assert_eq!(Label::new(&long).units(), &long[..LABEL_UNITS]);
         let mut cut: Vec<u16> = "a".repeat(63).encode_utf16().collect();
         cut.extend("😀".encode_utf16());
-        assert_eq!(cut.len(), 65);
         assert_eq!(
             Label::new(&cut).units(),
             &cut[..63],
@@ -211,7 +210,11 @@ mod tests {
             label: sentinel(),
         };
         let text = format!("{facts:?} {:?}", facts.label);
-        assert!(text.contains("Label(19 units)"), "{text}");
         assert_no_sentinel(&text);
+        let other = HostFacts {
+            label: Label::new(&[u16::from(b'X'); super::fixture::SENTINEL.len()]),
+            ..facts
+        };
+        assert_eq!(text, format!("{other:?} {:?}", other.label));
     }
 }

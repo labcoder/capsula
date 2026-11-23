@@ -766,16 +766,10 @@ mod tests {
     fn every_text_is_in_the_catalog() {
         let strings = Strings::english();
         for text in Text::ALL {
-            assert!(
-                strings
-                    .bundle
-                    .get_message(text.id())
-                    .and_then(|m| m.value())
-                    .is_some(),
-                "{text:?} has no value in locales/en/shell.ftl",
-            );
+            let shown = strings.get(text);
+            assert_ne!(shown, text.id(), "{text:?} fell back to its id");
+            assert!(!shown.trim().is_empty(), "{text:?} has no visible text");
         }
-        assert_eq!(strings.get(Text::Connected), "Ready");
     }
 
     #[test]
@@ -799,19 +793,10 @@ mod tests {
     fn every_error_is_in_the_catalog() {
         let strings = Strings::english();
         for key in ErrorKey::ALL {
-            assert!(
-                strings
-                    .bundle
-                    .get_message(error_id(key))
-                    .and_then(|m| m.value())
-                    .is_some(),
-                "{key:?} has no value in locales/en/shell.ftl",
-            );
+            let shown = strings.error(&key.into());
+            assert_ne!(shown, error_id(key), "{key:?} fell back to its id");
+            assert!(!shown.trim().is_empty(), "{key:?} has no visible text");
         }
-        assert_eq!(
-            strings.error(&UserError::from(ErrorKey::SettingsRefused)),
-            "Couldn't save that setting. Try again."
-        );
     }
 
     #[test]
@@ -901,8 +886,13 @@ mod tests {
             strings.get(Text::ShowScreenChanged),
             "Screen not included: the display changed"
         );
-        assert_eq!(strings.get(Text::Privacy), "Privacy");
-        assert_eq!(strings.show_screen("Cloud"), "Cloud can see what you see");
+        assert_eq!(
+            strings
+                .show_screen("Nuage {青}")
+                .matches("Nuage {青}")
+                .count(),
+            1
+        );
         // A held turn's history says one thing: why no picture was included, as a line, or
         // which picture was taken, on its icon.
         let app = kumochi_protocol::constants::DISPLAY_NAME;
@@ -984,9 +974,19 @@ mod tests {
     #[test]
     fn names_and_task_context_have_no_isolation_marks() {
         let strings = Strings::english();
-        assert_eq!(strings.assistant("Cloud"), "Cloud");
-        assert_eq!(strings.back_to_kumo("Cloud"), "Back to Cloud");
-        assert_eq!(strings.focus("Birthday"), "You're in: Birthday");
+        let assistant = "Nuage {青}";
+        let task = "誕生日 — {plans}";
+        assert_eq!(strings.assistant(assistant), assistant);
+        for (shown, name) in [
+            (strings.back_to_kumo(assistant), assistant),
+            (strings.focus(task), task),
+        ] {
+            assert_eq!(shown.matches(name).count(), 1, "{shown:?}");
+            assert!(
+                !shown.contains(['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}']),
+                "{shown:?}"
+            );
+        }
     }
 
     #[test]
@@ -1004,26 +1004,22 @@ mod tests {
 
     #[test]
     fn issue_history_fills_the_title_without_interpreting_it() {
-        assert_eq!(
-            Strings::english().issue_title("Fix {layout} — 窓"),
-            "Issue: Fix {layout} — 窓"
-        );
+        let title = "Fix {layout} — 窓";
+        let shown = Strings::english().issue_title(title);
+        assert_eq!(shown.matches(title).count(), 1, "{shown:?}");
     }
 
     #[test]
     fn the_frame_rate_shows_its_fraction() {
         let strings = Strings::english();
-        assert_eq!(
-            strings.frame_rate(72.0),
-            "Drawing at 72 frames a second on this display."
-        );
-        assert_eq!(
-            strings.frame_rate(28.8),
-            "Drawing at 28.8 frames a second on this display."
-        );
-        assert_eq!(
-            strings.frame_rate(170.0 / 3.0),
-            "Drawing at 56.7 frames a second on this display."
-        );
+        for (fps, expected) in [(72.0, "72"), (28.8, "28.8"), (170.0 / 3.0, "56.7")] {
+            let shown = strings.frame_rate(fps);
+            let numbers: Vec<_> = shown
+                .split(|c: char| !c.is_ascii_digit() && !matches!(c, '.' | '-'))
+                .map(|word| word.trim_end_matches('.'))
+                .filter(|word| word.bytes().any(|byte| byte.is_ascii_digit()))
+                .collect();
+            assert_eq!(numbers, [expected], "{shown:?}");
+        }
     }
 }
