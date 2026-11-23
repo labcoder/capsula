@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use super::*;
 use crate::coordinator::{Availability, StoreOp};
 use crate::runtime::data::DataQueue;
-use crate::screen::MAX_TTL;
+use crate::screen::{CaptureDeadline, MAX_TTL};
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 use kumochi_protocol::message::GestureId;
@@ -1873,13 +1873,17 @@ async fn a_part_closed_during_its_capture_retires_the_frame_without_a_walk() {
         KEY,
         point,
         LEASE,
-        Instant::now() + MAX_TTL,
+        CaptureDeadline::after(MAX_TTL),
         recipient.clone()
     ));
     assert!(
-        !brain
-            .holds
-            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL, recipient),
+        !brain.holds.start_screen(
+            KEY,
+            point,
+            LEASE,
+            CaptureDeadline::after(MAX_TTL),
+            recipient
+        ),
         "one part per hold"
     );
     let (id, capture) = rig.next().await;
@@ -2262,11 +2266,13 @@ async fn a_capture_the_system_refuses_comes_back_from_the_task_as_unsupported() 
     let recipient = (sol.connection, sol.model);
     screen_hold(&mut brain, KEY, ScreenPart::None);
     let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
-    assert!(
-        brain
-            .holds
-            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL, recipient)
-    );
+    assert!(brain.holds.start_screen(
+        KEY,
+        point,
+        LEASE,
+        CaptureDeadline::after(MAX_TTL),
+        recipient
+    ));
     let (id, _capture) = rig.next().await;
     rig.reply(id, &Reply::Refused(Refusal::Unsupported)).await;
     let Event::Screen(answer) = super::next(&mut brain.holds).await else {
@@ -2289,11 +2295,13 @@ async fn a_hold_asks_for_its_picture_without_a_walk_that_could_be_cut_short() {
     let recipient = (sol.connection, sol.model);
     screen_hold(&mut brain, KEY, ScreenPart::None);
     let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
-    assert!(
-        brain
-            .holds
-            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL, recipient)
-    );
+    assert!(brain.holds.start_screen(
+        KEY,
+        point,
+        LEASE,
+        CaptureDeadline::after(MAX_TTL),
+        recipient
+    ));
     let (id, capture) = rig.next().await;
     crate::screen::hold_frame(&rig, id, capture).await;
     let Event::Screen(held) = super::next(&mut brain.holds).await else {

@@ -1,5 +1,6 @@
 use std::io::{self, Cursor, Read, Write};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -285,7 +286,10 @@ struct Rig {
 enum Clock {
     Manual,
     Realtime,
+    StampOnly,
 }
+
+static STAMP_ELAPSED_MS: AtomicU64 = AtomicU64::new(0);
 
 impl Rig {
     fn start(foreground: Option<Gate>, capture: Option<Gate>, walk: Option<Gate>) -> Self {
@@ -352,7 +356,14 @@ impl Rig {
                     let mut screen = Screen::default();
                     screen.unchanged = unchanged;
                     screen.display_at = |bounds| (bounds == DISPLAY).then_some((DISPLAY, 120));
-                    screen.left_until = MILLIS_LEFT;
+                    screen.left_until = match clock_mode {
+                        Clock::StampOnly => |stamp| {
+                            let left =
+                                stamp.checked_sub(STAMP_ELAPSED_MS.load(Ordering::SeqCst))?;
+                            (left > 0).then(|| Duration::from_millis(left))
+                        },
+                        Clock::Manual | Clock::Realtime => MILLIS_LEFT,
+                    };
                     screen
                 },
             )
@@ -403,6 +414,33 @@ impl Rig {
     fn finish(self) {
         drop(self.requests);
         self.done.join().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn stamp_expiry_without_local_time_passing_refuses_start_and_discards_a_late_frame() {
+    for during_capture in [false, true] {
+        STAMP_ELAPSED_MS.store(0, Ordering::SeqCst);
+        let (gate, entered, release) = gate();
+        let (foreground, capture) = if during_capture {
+            (None, Some(gate))
+        } else {
+            (Some(gate), None)
+        };
+        let rig = Rig::create(foreground, capture, None, Clock::StampOnly, None);
+        rig.send(1, &context(1));
+        entered.recv_timeout(PATIENCE).unwrap();
+        STAMP_ELAPSED_MS.store(FAR, Ordering::SeqCst);
+        release.send(()).unwrap();
+        assert_eq!(rig.reply(), (1, Reply::Refused(Refusal::Stale)));
+        if during_capture {
+            rig.scrubbed();
+        } else {
+            assert_eq!(rig.scrubbed.try_recv(), Err(mpsc::TryRecvError::Empty));
+        }
+        rig.send(2, &Request::Seal(key(1)));
+        assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Stale)));
+        rig.finish();
     }
 }
 

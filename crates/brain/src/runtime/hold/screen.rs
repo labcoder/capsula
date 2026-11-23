@@ -17,7 +17,9 @@ use super::{Kind, NoScreen};
 use crate::context::{Screen, ScreenClass};
 use crate::coordinator::HoldKey;
 use crate::runtime::{Full, Link};
-use crate::screen::{Closed, Generation, HoldClient, MAX_TTL, Refusal, ScreenContext};
+use crate::screen::{
+    CaptureDeadline, Closed, Generation, HoldClient, MAX_TTL, Refusal, ScreenContext,
+};
 
 /// How long the shell's exclusion lease keeps Kumochi's windows out of a capture.
 // shortcut: a copy of shell-core's `exclusion::machine::LIFETIME`; move both to the protocol when
@@ -145,10 +147,10 @@ impl super::Holds {
         key: HoldKey,
         point: PhysicalPoint,
         lease: LeaseGeneration,
-        until: Instant,
+        deadline: CaptureDeadline,
         recipient: (ConnectionKind, ModelSlug),
     ) -> bool {
-        if !self.start(key, Aim::Window(point), lease, until) {
+        if !self.start(key, Aim::Window(point), lease, deadline) {
             return false;
         }
         self.pending
@@ -166,7 +168,7 @@ impl super::Holds {
         key: HoldKey,
         aim: Aim,
         lease: LeaseGeneration,
-        until: Instant,
+        deadline: CaptureDeadline,
     ) -> bool {
         let (Some(client), Some(hold)) = (&self.screen, &mut self.pending) else {
             return false;
@@ -189,14 +191,14 @@ impl super::Holds {
                 generation: None,
                 lease,
                 stop: Arc::clone(&stop),
-                until,
+                until: deadline.until,
             },
         };
         drop(tokio::spawn(work(
             Arc::clone(client),
             key,
             aim,
-            until,
+            deadline,
             stop,
             self.screen_events.clone(),
         )));
@@ -485,7 +487,7 @@ impl crate::runtime::Brain {
             return Err(NoScreen::NotArmed);
         }
         // Read before the age, so the ticket can only end sooner than the check allows.
-        let until = Instant::now() + MAX_TTL;
+        let deadline = CaptureDeadline::after(MAX_TTL);
         if (self.holds.stamp_age)(t_qpc).is_none_or(|age| age > LATEST_START) {
             return Err(NoScreen::TooLate);
         }
@@ -501,7 +503,7 @@ impl crate::runtime::Brain {
             excluded,
             ink,
         };
-        if !self.holds.start(key, aim, lease, until) {
+        if !self.holds.start(key, aim, lease, deadline) {
             return Err(NoScreen::NotStarted);
         }
         Ok(())
@@ -522,13 +524,13 @@ pub(super) fn capturing(part: &ScreenPart) -> bool {
     )
 }
 
-/// The hold's screen work by `until`: capture, then seal. Each answer goes
+/// The hold's screen work by its deadline: capture, then seal. Each answer goes
 /// back as an event, and a frame the task can't hand on is retired with the worker that holds it.
 async fn work(
     client: Arc<HoldClient>,
     key: HoldKey,
     aim: Aim,
-    until: Instant,
+    deadline: CaptureDeadline,
     stop: Arc<AtomicBool>,
     events: mpsc::Sender<ScreenEvent>,
 ) {
@@ -540,14 +542,14 @@ async fn work(
         })
     };
     let captured = match aim {
-        Aim::Window(point) => client.context(key.into(), point, until).await,
+        Aim::Window(point) => client.context(key.into(), point, deadline).await,
         Aim::Display {
             point,
             excluded,
             ink,
         } => {
             client
-                .display(key.into(), point, excluded, ink, until)
+                .display(key.into(), point, excluded, ink, deadline)
                 .await
         }
     };
@@ -566,7 +568,7 @@ async fn work(
         release(&client, key, generation).await;
         None
     } else {
-        Some(match client.seal(held, until).await {
+        Some(match client.seal(held, deadline.until).await {
             Ok(context) => Outcome::Sealed(context),
             Err(closed) => {
                 release(&client, key, generation).await;

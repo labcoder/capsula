@@ -8,7 +8,7 @@ use kumochi_protocol::frame;
 use kumochi_protocol::geometry::{PhysicalPoint, PointerPath};
 use serde::{Deserialize, Serialize};
 
-use super::capture::{Capturer, Failure, Screen, Shown};
+use super::capture::{Capturer, Deadline, Failure, Screen, Shown};
 use super::client::Holds as Kind;
 use super::context::ScreenContext;
 use super::elements::{ElementTree, OpenElements, Wake};
@@ -125,7 +125,6 @@ struct Capture {
     key: Key,
     ticket: TicketWire,
     received: Instant,
-    expires: Instant,
     ink: Vec<PhysicalPoint>,
 }
 
@@ -207,12 +206,13 @@ fn run(
     let mut fence: Option<Owner> = None;
     let mut current = None;
     let mut live = false;
-    let mut expires = None;
+    let mut expires: Option<Deadline> = None;
     let mut capturing: Option<Capture> = None;
     let mut walking: Option<(u64, Key, Instant)> = None;
     let mut releasing = Vec::new();
     loop {
         let deadline = expires
+            .map(|deadline| deadline.until)
             .into_iter()
             .chain(walking.map(|(_, _, until)| until))
             .min();
@@ -222,10 +222,12 @@ fn run(
                 .ok(),
             None => events.recv().ok(),
         };
-        if expires.is_some_and(|until| now() >= until) {
-            live = false;
-            expires = None;
-            screen.clear();
+        if let Some(deadline) = expires {
+            expires = deadline.tighten(now());
+            if expires.is_none() {
+                live = false;
+                screen.clear();
+            }
         }
         #[cfg(debug_assertions)]
         let event = match event {
@@ -279,7 +281,7 @@ fn run(
                                 admitted
                             };
                         match result {
-                            Ok(until) => {
+                            Ok(deadline) => {
                                 if let Some(Ok(reader)) = &mut screen.reader {
                                     reader.set_shell_pid(ticket.shell_pid());
                                 }
@@ -288,18 +290,17 @@ fn run(
                                     frame: std::mem::take(&mut screen.frame),
                                     point,
                                     aim,
-                                    until,
+                                    deadline,
                                 };
                                 match native.begin(job) {
                                     None => {
                                         live = true;
-                                        expires = Some(until);
+                                        expires = Some(deadline);
                                         capturing = Some(Capture {
                                             id,
                                             key,
                                             ticket,
                                             received,
-                                            expires: until,
                                             ink: ink.map(|ink| ink.0).unwrap_or_default(),
                                         });
                                     }
@@ -325,8 +326,11 @@ fn run(
                             send(id, Reply::Refused(Refusal::Stale))?;
                         } else {
                             live = false;
-                            expires = None;
-                            match screen.seal(key.capture, JPEG_CAP) {
+                            let deadline = expires.take().expect("a live capture has a deadline");
+                            match screen.seal(key.capture, JPEG_CAP).and_then(|context| {
+                                deadline.tighten(now()).ok_or(Refusal::Expired)?;
+                                Ok(context)
+                            }) {
                                 Ok(context) => send(id, Reply::Sealed(key, context))?,
                                 Err(error) => send(id, failed(error))?,
                             }
@@ -405,7 +409,7 @@ fn run(
             }
             Some(Event::Wake) | None => {}
         }
-        if expires.is_some_and(|until| now() >= until) {
+        if expires.is_some_and(|deadline| now() >= deadline.until) {
             live = false;
             expires = None;
             screen.clear();
@@ -430,7 +434,7 @@ fn run(
                             &pending.ticket,
                             surface,
                             pending.received,
-                            pending.expires,
+                            expires.expect("a live capture has a deadline"),
                             now(),
                             (acquired, foreground),
                         )?;
@@ -444,6 +448,7 @@ fn run(
                         }
                         Err(error) => {
                             live = false;
+                            expires = None;
                             screen.clear();
                             send(pending.id, failed(error))?;
                         }

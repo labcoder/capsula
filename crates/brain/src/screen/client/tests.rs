@@ -72,7 +72,11 @@ async fn each_capture_gets_a_fresh_key_and_a_higher_ticket_and_names_its_worker(
             let client = Arc::clone(&client);
             async move {
                 client
-                    .context(owner(gesture), PhysicalPoint([5, 6]), until())
+                    .context(
+                        owner(gesture),
+                        PhysicalPoint([5, 6]),
+                        CaptureDeadline::after(Duration::from_secs(5)),
+                    )
                     .await
             }
         });
@@ -113,7 +117,11 @@ async fn a_retired_hold_never_reaches_the_worker_again_and_a_later_one_does() {
     assert_eq!(retiring.await.expect("joins"), Ok(()));
     for gesture in [6, 7] {
         let refused = client
-            .context(owner(gesture), PhysicalPoint([1, 1]), until())
+            .context(
+                owner(gesture),
+                PhysicalPoint([1, 1]),
+                CaptureDeadline::after(Duration::from_secs(5)),
+            )
             .await;
         assert_eq!(
             refused.map(|held| held.key),
@@ -124,7 +132,11 @@ async fn a_retired_hold_never_reaches_the_worker_again_and_a_later_one_does() {
         let client = Arc::clone(&client);
         async move {
             client
-                .context(owner(8), PhysicalPoint([1, 1]), until())
+                .context(
+                    owner(8),
+                    PhysicalPoint([1, 1]),
+                    CaptureDeadline::after(Duration::from_secs(5)),
+                )
                 .await
         }
     });
@@ -221,15 +233,12 @@ async fn a_retire_the_full_queue_refuses_ends_the_holder_and_its_exit_releases_t
 async fn a_ticket_runs_out_at_a_sooner_deadline() {
     let mut rig = fixture::start::<Holds>();
     let client = client(&rig);
+    let deadline = CaptureDeadline::after(Duration::from_secs(1));
     let _asking = tokio::spawn({
         let client = Arc::clone(&client);
         async move {
             client
-                .context(
-                    owner(7),
-                    PhysicalPoint([1, 1]),
-                    Instant::now() + Duration::from_secs(1),
-                )
+                .context(owner(7), PhysicalPoint([1, 1]), deadline)
                 .await
         }
     });
@@ -242,6 +251,7 @@ async fn a_ticket_runs_out_at_a_sooner_deadline() {
         "{}",
         ticket.ttl_ms()
     );
+    assert_eq!(ticket.deadline_qpc(), deadline.stamp);
     #[cfg(any(windows, target_os = "macos"))]
     assert!(
         crate::platform::qpc_left(ticket.deadline_qpc())

@@ -22,6 +22,24 @@ mod tests;
 /// (a panic, an aborted task, a dropped `context`), the worker's own expiry clears the frame by then.
 pub(crate) const MAX_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
 
+/// The worker's authoritative stamp and the brain's local wake deadline, minted together.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CaptureDeadline {
+    pub(crate) until: Instant,
+    stamp: u64,
+}
+
+impl CaptureDeadline {
+    pub(crate) fn after(budget: std::time::Duration) -> Self {
+        // Start the authoritative clock first, so a suspend between samples cannot extend it.
+        let stamp = crate::platform::qpc_at(budget).unwrap_or(0);
+        Self {
+            until: Instant::now() + budget,
+            stamp,
+        }
+    }
+}
+
 /// The hold protocol: the screen worker's argument and caps, the actor's messages.
 pub(crate) struct Holds;
 
@@ -130,19 +148,19 @@ impl HoldClient {
         self.inner.lost()
     }
 
-    /// Captures the window under `point` for `owner`, under a ticket that runs out at `until`
+    /// Captures the window under `point` for `owner`, under a ticket that runs out at `deadline`
     /// or [`MAX_TTL`] after the worker receives it, whichever is sooner.
     ///
     /// # Errors
     /// `Refused(Stale)` for a retired hold, without asking the worker; otherwise the worker's
-    /// answer, or `Lost` when no answer that belongs to this capture came by `until`.
+    /// answer, or `Lost` when no answer that belongs to this capture came by the deadline.
     pub(crate) async fn context(
         &self,
         owner: Owner,
         point: PhysicalPoint,
-        until: Instant,
+        deadline: CaptureDeadline,
     ) -> Result<Held, Closed> {
-        self.capture(owner, until, |key, ticket| Request::Context {
+        self.capture(owner, deadline, |key, ticket| Request::Context {
             key,
             ticket,
             point,
@@ -163,9 +181,9 @@ impl HoldClient {
         point: PhysicalPoint,
         excluded: u64,
         ink: PointerPath,
-        until: Instant,
+        deadline: CaptureDeadline,
     ) -> Result<Held, Closed> {
-        self.capture(owner, until, |key, ticket| Request::Display {
+        self.capture(owner, deadline, |key, ticket| Request::Display {
             key,
             ticket,
             point,
@@ -178,7 +196,7 @@ impl HoldClient {
     async fn capture(
         &self,
         owner: Owner,
-        until: Instant,
+        CaptureDeadline { until, stamp }: CaptureDeadline,
         request: impl FnOnce(Key, TicketWire) -> Request,
     ) -> Result<Held, Closed> {
         let key = Key {
@@ -190,8 +208,6 @@ impl HoldClient {
             .map_err(|error| Closed::Fault(error.raw_os_error().unwrap_or(-1)))?;
         let ttl = until.saturating_duration_since(Instant::now()).min(MAX_TTL);
         let ttl_ms = u32::try_from(ttl.as_millis()).unwrap_or(u32::MAX);
-        // 0, which no worker reads as later than now, when the counter can't be read.
-        let deadline_qpc = crate::platform::qpc_at(until.into_std()).unwrap_or(0);
         let mut stream = {
             let fence = self
                 .fence
@@ -206,7 +222,7 @@ impl HoldClient {
                 self.tickets.fetch_add(1, Ordering::Relaxed),
                 nonce,
                 ttl_ms,
-                deadline_qpc,
+                stamp,
             )
             .for_shell(crate::platform::connected_shell_pid());
             self.inner

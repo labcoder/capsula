@@ -1,4 +1,4 @@
-//! The operating system behind small, safe functions. Windows only for now.
+//! The operating system behind small, safe functions.
 
 pub mod credential;
 
@@ -164,7 +164,7 @@ pub use windows::{
 pub(crate) use windows::{SpawnEdge, observe_next_spawn};
 #[cfg(windows)]
 pub(crate) use windows::{
-    WINDOW_CAPTURE, display_at, qpc_age, qpc_at, qpc_left, screen_capturer, screen_elements,
+    WINDOW_CAPTURE, display_at, qpc_age, qpc_left, screen_capturer, screen_elements,
     window_unchanged,
 };
 #[cfg(windows)]
@@ -189,9 +189,15 @@ pub(crate) fn qpc_age(_t_qpc: u64) -> Option<std::time::Duration> {
     None
 }
 
+/// The Windows deadline stamp for a budget that starts now, keeping the existing QPC encoding.
+#[cfg(windows)]
+pub(crate) fn qpc_at(budget: std::time::Duration) -> Option<u64> {
+    windows::qpc_at(std::time::Instant::now().checked_add(budget)?)
+}
+
 /// No system-wide deadline clock is implemented here.
 #[cfg(not(any(windows, target_os = "macos")))]
-pub(crate) fn qpc_at(_until: std::time::Instant) -> Option<u64> {
+pub(crate) fn qpc_at(_budget: std::time::Duration) -> Option<u64> {
     None
 }
 
