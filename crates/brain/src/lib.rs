@@ -85,6 +85,9 @@ pub const MCP_BRIDGE: &str = "--mcp-bridge";
 /// Why the brain stopped with an error.
 #[derive(Debug, thiserror::Error)]
 pub enum BrainError {
+    /// This build has no native runtime adapter.
+    #[error("native brain startup is unsupported")]
+    NativeRuntime(#[source] io::Error),
     /// The session id or the executable's path couldn't be read.
     #[error("can't read this process's own details")]
     Process(#[from] io::Error),
@@ -148,13 +151,19 @@ fn end_runtime(
 ///
 /// # Errors
 /// Fails when the pipes can't be created (another brain holds them), the capability can't be
-/// made or stored, the helpers can't start, or a pipe fails outright.
+/// made or stored, the helpers can't start, a pipe fails outright, or this build has no native
+/// runtime adapter.
 pub fn run() -> impl Future<Output = Result<(), BrainError>> {
     use kumochi_protocol::constants::{LIVE_CHATGPT_TEXT_ENV, ProductIdentity};
 
-    let mode = std::env::var(LIVE_CHATGPT_TEXT_ENV).ok();
+    let admission = platform::require_native_runtime()
+        .map_err(BrainError::NativeRuntime)
+        .and_then(|()| {
+            let mode = std::env::var(LIVE_CHATGPT_TEXT_ENV).ok();
+            draw_admission(mode.as_deref(), ProductIdentity::ACTIVE)
+        });
     run_admitted(
-        draw_admission(mode.as_deref(), ProductIdentity::ACTIVE),
+        admission,
         #[cfg(test)]
         || {},
     )
@@ -249,7 +258,9 @@ async fn run_admitted(
     let mut config = config::Config::load(platform::config_dir(), main_thread);
     #[cfg(all(windows, feature = "gate-draw-replay", not(debug_assertions)))]
     require_draw_model(&config)?;
+    #[cfg(windows)]
     let claude_on = config.claude_code_enabled();
+    #[cfg(windows)]
     tracing::info!(enabled = claude_on, "Claude Code setting");
     // Before the capability is stored, so its write never overlaps the vault's first reads.
     let (account, vault_held) = accounts(config.oauth_tuning(), config.token_tuning())?;
@@ -267,21 +278,30 @@ async fn run_admitted(
         account,
     )
     .map_err(BrainError::StoreThread)?;
+    #[cfg(windows)]
     let models = platform::data_dir().map(|data| data.join(kumochi_protocol::voice::MODELS_DIR));
+    #[cfg(windows)]
     let stuck = models
         .as_deref()
         .map(|models| brain.finish_removals(models))
         .unwrap_or_default();
     let jobs = std::sync::Arc::new(Job::new().map_err(BrainError::Helpers)?);
-    if let Some(models) = models {
-        start_voice(&mut brain, models, &stuck, &exe, &jobs);
+    #[cfg(windows)]
+    {
+        if let Some(models) = models {
+            start_voice(&mut brain, models, &stuck, &exe, &jobs);
+        }
+        let lane = claude_lane(vault_held, &jobs, &exe);
+        brain.attach_claude(match lane {
+            Some(lane) if claude_on => {
+                runtime::claude::Claude::start(lane, runtime::claude::SIGN_IN)
+            }
+            None if claude_on => runtime::claude::Claude::default(),
+            lane => runtime::claude::Claude::turned_off(lane),
+        });
     }
-    let lane = claude_lane(vault_held, &jobs, &exe);
-    brain.attach_claude(match lane {
-        Some(lane) if claude_on => runtime::claude::Claude::start(lane, runtime::claude::SIGN_IN),
-        None if claude_on => runtime::claude::Claude::default(),
-        lane => runtime::claude::Claude::turned_off(lane),
-    });
+    #[cfg(not(windows))]
+    drop(vault_held);
     start_screen(&mut brain, exe.clone(), Ok(std::sync::Arc::clone(&jobs)));
     let mut bytes = [0; CAPABILITY_LEN];
     getrandom::fill(&mut bytes)?;
@@ -315,6 +335,7 @@ async fn run_admitted(
 
 /// Starts speech input's worker and spoken replies' thread, then voice. A handle that can't start
 /// leaves its part unavailable for the session.
+#[cfg(windows)]
 fn start_voice(
     brain: &mut Brain,
     models: PathBuf,
@@ -390,6 +411,7 @@ fn accounts(
 }
 
 /// Claude Code's lane on the installed `claude.exe`; none when it can't start.
+#[cfg(windows)]
 fn claude_lane(
     vault_held: std::sync::Arc<std::sync::atomic::AtomicBool>,
     jobs: &std::sync::Arc<Job>,
@@ -512,6 +534,24 @@ async fn direct_dev_draw_refuses_before_store_or_vault_startup() {
     assert!(matches!(
         draw_admission(Some("1"), ProductIdentity::DEV),
         Ok(StartMode::Normal)
+    ));
+}
+
+#[cfg(all(test, not(windows)))]
+#[tokio::test]
+async fn native_library_entries_return_unsupported() {
+    assert!(matches!(
+        run().await,
+        Err(BrainError::NativeRuntime(error)) if error.kind() == io::ErrorKind::Unsupported
+    ));
+    assert!(matches!(
+        bridge::serve("not a launch id"),
+        Err(bridge::BridgeError::NativeRuntime(error)) if error.kind() == io::ErrorKind::Unsupported
+    ));
+    assert!(matches!(
+        screen::serve(),
+        Err(kumochi_protocol::frame::FrameError::Io(error))
+            if error.kind() == io::ErrorKind::Unsupported
     ));
 }
 
