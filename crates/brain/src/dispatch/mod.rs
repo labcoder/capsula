@@ -26,6 +26,7 @@ use crate::bridge::{CallKey, LaunchId};
 use crate::context::{HistoryRef, Origin, ToolSchema};
 use crate::engines::{CallId, ToolName};
 
+pub use draw::DrawRecords;
 pub(crate) use draw::{record as validate_draw_record, validate as validate_draw};
 pub use history::{ReadCall, ReadFinished};
 pub(crate) use ledger::{DrawEnd, Drawn, Ledger};

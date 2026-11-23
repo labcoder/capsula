@@ -152,8 +152,9 @@ and rejects unsupported `begin` surfaces, 3D views, solids, 3D tracks, three-com
 path and step id, and admits no scene record. The drawing reducer charges its repair budget
 on a rejected record. MCP's overlay-only refusals for a screen surface or box target are
 answered before that reducer and spend only the MCP call allowance. A refusal stays final
-for the caller's key. Semantic admission still runs once in the drawing reducer; a semantic
-failure can retain earlier committed steps.
+for the caller's key. The reducer takes the typed records from complete preflight without
+decoding them again. It checks its current canvas policy in record order, then admits each
+record semantically; either check can stop a call after earlier steps have committed.
 
 A stopped result can end with a fixed phrase saying what follows, judged from the drawing's own
 run state. After a record or envelope error, while a corrected call can still draw, it adds

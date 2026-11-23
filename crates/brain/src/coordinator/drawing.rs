@@ -78,11 +78,11 @@ impl Coordinator {
             call
         };
         let input = match draw {
-            dispatch::DrawAction::Complete(Ok(draw)) => crate::drawing::Input::Call {
+            dispatch::DrawAction::Complete(Ok(draw)) => crate::drawing::Input::CheckedCall {
                 thread,
                 run: key.run,
                 call,
-                args: draw.args,
+                records: draw.records,
             },
             dispatch::DrawAction::Complete(Err(error)) => crate::drawing::Input::Rejected {
                 thread,
@@ -238,6 +238,7 @@ impl Coordinator {
     ) -> Result<(), Stale> {
         match &input {
             Input::Call { thread, run, .. }
+            | Input::CheckedCall { thread, run, .. }
             | Input::Rejected { thread, run, .. }
             | Input::Record { thread, run, .. }
             | Input::CallFinished { thread, run, .. } => {
