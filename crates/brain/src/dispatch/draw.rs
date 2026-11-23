@@ -122,9 +122,6 @@ pub(super) fn complete(
     draw: Result<DrawArgs, CallError>,
 ) -> Step {
     ledger.reserve(&key, caller);
-    if let Ok(draw) = &draw {
-        ledger.bind_draw(&key, draw.hash);
-    }
     Step::Screen {
         key,
         draw: DrawAction::Complete(draw),

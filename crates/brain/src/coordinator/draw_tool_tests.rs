@@ -329,6 +329,69 @@ async fn replaced_build_events_cannot_change_or_finish_the_current_round() {
 }
 
 #[test]
+fn the_default_draw_owner_cap_refuses_a_seventeenth_call_without_a_durable_result() {
+    assert_draw_owner_boundary(offered(vec![T]), 16);
+}
+
+#[test]
+fn a_lowered_draw_owner_cap_refuses_a_fourth_call_without_a_durable_result() {
+    let mut core = offered(vec![T]);
+    core.tuning.calls = 3;
+    assert_draw_owner_boundary(core, 3);
+}
+
+fn assert_draw_owner_boundary(mut core: Coordinator, allowed: u32) {
+    use crate::dispatch::{CallInput, DrawAction};
+    use crate::engines::ToolName;
+
+    let scratch = Scratch::new("draw-owner-cap");
+    let mut store = store(&scratch);
+    let start = |core: &mut Coordinator, name: &str| {
+        let caller = Caller::Model {
+            run: R,
+            call: id(name),
+        };
+        let mut effects = Vec::new();
+        let status = core.tool_input(
+            caller,
+            ToolName::Draw,
+            CallInput::Draw(DrawAction::Start),
+            &mut effects,
+        );
+        assert_eq!(effects, []);
+        status
+    };
+    for index in 1..allowed {
+        assert_eq!(
+            start(&mut core, &format!("stream-{index}")),
+            Dispatch::Committing
+        );
+    }
+    let valid = args(None);
+    let (dispatch, drawing) = call(&mut core, "last-allowed", &valid);
+    assert_eq!(dispatch, Dispatch::Committing);
+    let drawn = settle(&mut core, &mut store, drawing);
+    assert_eq!(
+        answer(&mut core, &mut store, &drawn),
+        ToolOutput::Text("drawn: [s1, s2]".into())
+    );
+
+    let (dispatch, drawing) = call(&mut core, "over-cap", &valid);
+    assert_eq!(dispatch, Dispatch::Committing);
+    assert_eq!(drawing, []);
+    let refused = Dispatch::Answered(ToolOutput::Error(ToolError::TooLarge));
+    assert_eq!(
+        call(&mut core, "over-cap", b""),
+        (refused.clone(), Vec::new())
+    );
+    assert_eq!(start(&mut core, "over-cap-stream"), refused);
+    assert_eq!(
+        call(&mut core, "over-cap-stream", &valid),
+        (refused, Vec::new())
+    );
+}
+
+#[test]
 fn unavailable_drawing_returns_a_fixed_durable_refusal_without_failing_the_run() {
     let scratch = Scratch::new("draw-unavailable");
     let mut store = store(&scratch);
