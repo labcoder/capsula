@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     CaptureFor, ConnectionKind, ControlToBrain, ControlToShell, DataToBrain, DataToShell, Effort,
-    GestureId, HoldFailure, HoldStatus, MicPcm, ModelChoice, ModelSlug, PageOf, Phase, RunId,
-    RunOrigin, ThreadId, ThreadOp,
+    GestureId, HoldFailure, HoldStatus, MicPcm, ModelChoice, ModelSlug, Narration, PageOf, Phase,
+    RunId, RunOrigin, ThreadId, ThreadOp,
 };
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
@@ -412,7 +412,11 @@ async fn queued_hold_refuses_pending_show_screen_and_ends_on_its_change() {
         assert!(!view.show_screen && !view.talk_back);
         let output = OutputGeneration(7);
         shell
-            .send(&ControlToBrain::QueuedAudioOutput(24_000, output))
+            .send(&ControlToBrain::QueuedAudioOutput(
+                24_000,
+                output,
+                Narration::Plain,
+            ))
             .await;
         assert_eq!(
             shell.control().await,
@@ -479,7 +483,11 @@ async fn a_talk_back_flip_and_flip_back_keeps_the_queued_pair_refusing_holds() {
             assert_eq!(shell.views.last().unwrap().talk_back, opening);
             let output = OutputGeneration(7);
             shell
-                .send(&ControlToBrain::QueuedAudioOutput(24_000, output))
+                .send(&ControlToBrain::QueuedAudioOutput(
+                    24_000,
+                    output,
+                    Narration::Plain,
+                ))
                 .await;
             assert_eq!(
                 shell.control().await,
@@ -860,7 +868,11 @@ async fn recognize_screen_recipient(
     if audio == kumochi_protocol::message::AudioSession::QueuedRequired {
         let output = kumochi_protocol::message::OutputGeneration(7);
         shell
-            .send(&ControlToBrain::QueuedAudioOutput(24_000, output))
+            .send(&ControlToBrain::QueuedAudioOutput(
+                24_000,
+                output,
+                Narration::Plain,
+            ))
             .await;
         assert_eq!(
             shell.control().await,

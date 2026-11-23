@@ -173,6 +173,15 @@ pub enum SpeechDecision {
     Discard,
 }
 
+/// Whether a queued pair's shell times drawing steps to their narration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Narration {
+    /// No conductor: a speech-start step's line arrives as an ordinary Plain segment.
+    Plain,
+    /// The shell conducts: speech-start steps carry promises and wait for decisions.
+    Conducted,
+}
+
 /// Each voice part's state, as the brain's installer reports it. Nothing sends it until the
 /// installer lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

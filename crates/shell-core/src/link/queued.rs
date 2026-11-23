@@ -91,13 +91,11 @@ impl Reader {
                 speech: Some(_), ..
             } => return Err(()),
             DataToShell::RunEnd { run } => {
+                let ended = owner.end_queued_run(session, run);
                 if let Some(bridge) = narrated {
                     bridge.run_end(run);
                 }
-                return owner
-                    .end_queued_run(session, run)
-                    .then_some(Some(message))
-                    .ok_or(());
+                return ended.then_some(Some(message)).ok_or(());
             }
             _ => {
                 if let Some(bridge) = narrated {

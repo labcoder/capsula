@@ -70,10 +70,10 @@ impl std::fmt::Debug for Pump {
 }
 
 impl Pump {
-    pub(crate) fn new(tts: TtsHandle, output: OutputMode) -> Self {
+    pub(crate) fn new(tts: TtsHandle) -> Self {
         Self {
             tts,
-            output,
+            output: OutputMode::Legacy,
             run: None,
             credit: 0,
             active: None,
@@ -81,8 +81,8 @@ impl Pump {
         }
     }
 
-    pub(crate) fn output(&self) -> OutputMode {
-        self.output
+    pub(crate) fn set_output(&mut self, output: OutputMode) {
+        self.output = output;
     }
 
     /// The TTS handle the pump reads, for loads and unloads.
