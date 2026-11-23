@@ -67,8 +67,8 @@ pub use threads::TitleSource;
 /// Why the store failed.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// `%LOCALAPPDATA%` isn't set to an absolute path, so the store has no home.
-    #[error("%LOCALAPPDATA% is not set to an absolute path")]
+    /// No absolute data root: `%LOCALAPPDATA%` on Windows, `HOME` on macOS.
+    #[error("{} is not set to an absolute path", crate::platform::DATA_ROOT)]
     NoLocalAppData,
     /// The store's folder couldn't be created.
     #[error("can't create the store's folder")]
@@ -315,7 +315,8 @@ pub struct Store {
 /// The store's file, in the data folder.
 ///
 /// # Errors
-/// Fails when `%LOCALAPPDATA%` isn't an absolute path.
+/// Fails without an absolute `%LOCALAPPDATA%` on Windows or `HOME` on macOS.
+/// Other builds without a data folder also fail.
 pub fn default_path() -> Result<PathBuf, StoreError> {
     Ok(crate::platform::data_dir()
         .ok_or(StoreError::NoLocalAppData)?
