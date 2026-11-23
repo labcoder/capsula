@@ -235,10 +235,7 @@ impl Pipes {
             }
             Verdict::Welcome => {}
         }
-        let session = match audio {
-            AudioSession::Legacy => brain.prepare_issue_session(identity.incarnation),
-            AudioSession::QueuedRequired => brain.reserve_issue_session(identity.incarnation),
-        };
+        let session = brain.reserve_issue_session(identity.incarnation);
         let welcome = ControlToShell::Welcome {
             incarnation: identity.incarnation,
             issue_epoch: session.epoch,
@@ -276,9 +273,7 @@ impl Pipes {
         if Instant::now() >= deadline {
             return Err(SessionError::Timeout);
         }
-        if audio == AudioSession::QueuedRequired {
-            brain.install_issue_session(session);
-        }
+        brain.install_issue_session(session);
         let _shell_identity = process.register();
         brain.connected_shell(process);
         tracing::info!("shell connected");
@@ -622,9 +617,7 @@ mod tests {
                     return;
                 }
                 peer_data
-                    .write_all(
-                        &frame::encode(&DataToBrain::TextMetrics(None), Pipe::Data).unwrap(),
-                    )
+                    .write_all(&frame::encode(&DataToBrain::TextMetrics(None), Pipe::Data).unwrap())
                     .await
                     .unwrap();
                 expect_startup(&mut peer_control, welcomed, tuning).await;
@@ -862,12 +855,19 @@ mod tests {
                         DataToBrain::QueuedHello(hello(1, BUILD_ID), session)
                     }
                 };
-                peer_data
-                    .write_all(&frame::encode(&greeting, Pipe::Data).unwrap())
+                for message in [greeting, DataToBrain::TextMetrics(None)] {
+                    peer_data
+                        .write_all(&frame::encode(&message, Pipe::Data).unwrap())
+                        .await
+                        .unwrap();
+                }
+                peer_control
+                    .write_all(&frame::encode(&ControlToBrain::Quitting, Pipe::Control).unwrap())
                     .await
                     .unwrap();
+                (peer_control, peer_data)
             };
-            let (result, ()) = timeout(HANDSHAKE_TIMEOUT, async {
+            let (result, _peer) = timeout(HANDSHAKE_TIMEOUT, async {
                 tokio::join!(pipes.session(&id, &mut brain, &mut tap, deadline), peer)
             })
             .await

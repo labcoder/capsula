@@ -3,7 +3,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
@@ -30,8 +30,6 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) struct PipeClient {
     handle: OwnedHandle,
     aborted: AtomicBool,
-    /// Milliseconds each read may take; `INFINITE` by default.
-    read_timeout_ms: AtomicU32,
     deadline: Option<Instant>,
 }
 
@@ -73,7 +71,6 @@ impl PipeClient {
         Ok(Self {
             handle,
             aborted: AtomicBool::new(false),
-            read_timeout_ms: AtomicU32::new(INFINITE),
             deadline: None,
         })
     }
@@ -87,10 +84,8 @@ impl PipeClient {
         self.deadline.map(|_| Instant::now())
     }
 
-    /// Bounds each later read; `None` waits until the pipe ends or is aborted.
-    pub(crate) fn set_read_timeout(&self, timeout: Option<Duration>) {
-        self.read_timeout_ms
-            .store(timeout.map_or(INFINITE, millis), Ordering::Relaxed);
+    pub(crate) fn clear_deadline(&mut self) {
+        self.deadline = None;
     }
 
     /// Fails the transfers under way and every later one, so threads blocked on the pipe return.
@@ -169,9 +164,8 @@ impl PipeClient {
 impl Read for &PipeClient {
     /// A closed server reads as end of stream.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let timeout = self.read_timeout_ms.load(Ordering::Relaxed);
         // SAFETY: `buf` outlives the operation (see `transfer`); `overlapped` is valid.
-        match self.transfer(timeout, |handle, overlapped| unsafe {
+        match self.transfer(INFINITE, |handle, overlapped| unsafe {
             ReadFile(handle, Some(buf), None, Some(overlapped))
         }) {
             Err(error) if error.code() == ERROR_BROKEN_PIPE.to_hresult() => Ok(0),
