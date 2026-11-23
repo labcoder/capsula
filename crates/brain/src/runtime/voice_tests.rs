@@ -658,11 +658,11 @@ fn attached_at(
 
 /// Writes `voice` as the `[voice]` table and spoken replies' files, the last one `short` bytes
 /// short; returns the models folder.
+#[cfg(windows)]
 fn seeded(scratch: &Scratch, voice: &str, short: u64) -> PathBuf {
     seeded_at(scratch, scratch.dir().join("models"), voice, short)
 }
 
-/// As [`seeded`], with the files under `models`.
 fn seed_voice_settings(scratch: &Scratch, voice: &str) {
     std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
     std::fs::write(
@@ -672,6 +672,8 @@ fn seed_voice_settings(scratch: &Scratch, voice: &str) {
     .expect("seeded");
 }
 
+/// As [`seeded`], with the files under `models`.
+#[cfg(windows)]
 fn seeded_at(scratch: &Scratch, models: PathBuf, voice: &str, short: u64) -> PathBuf {
     seed_voice_settings(scratch, voice);
     let dir = models.join(VoicePart::SpokenReplies.dir());
@@ -1284,7 +1286,11 @@ async fn a_report_that_came_before_a_connection_is_in_its_opening_view() {
         assert!(spoke(&mut shell).await, "the buffered load is applied");
         drop(shell);
     };
-    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    let (ended, ()) = tokio::time::timeout(super::PATIENCE, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("the buffered report is published and the shell disconnects");
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
     drop(forward);
@@ -1296,8 +1302,10 @@ fn install() -> ControlToBrain {
 
 #[tokio::test]
 async fn finishing_onboarding_without_voice_consent_does_not_fetch_even_after_restart() {
-    let scratch = Scratch::new("voice-onboarding-skip");
+    let scratch = Scratch::trusted("voice-onboarding-skip");
+    #[cfg(windows)]
     let models = scratch.dir().join("models");
+    #[cfg(windows)]
     let partials = VoicePart::ALL.map(|part| {
         let folder = models.join(part.dir());
         std::fs::create_dir_all(&folder).expect("part folder");
@@ -1306,6 +1314,8 @@ async fn finishing_onboarding_without_voice_consent_does_not_fetch_even_after_re
         std::fs::write(&partial, b"partial model").expect("partial cache");
         partial
     });
+    #[cfg(not(windows))]
+    std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
     std::fs::write(
         scratch.dir().join(CONFIG_FILE),
         "onboarded = false\nonboarding_from = \"shortcut\"\n",
@@ -1326,6 +1336,18 @@ async fn finishing_onboarding_without_voice_consent_does_not_fetch_even_after_re
             |_: &Path| Ok(Silence),
         )
         .expect("the fake output owner starts");
+        #[cfg(windows)]
+        {
+            let stuck = brain.finish_removals(&models);
+            brain.attach_voice(
+                models.clone(),
+                &stuck,
+                (Some(stt), Some(tts)),
+                [stt_heard, tts_heard],
+                Arc::<HeldFetch>::clone(&fetch),
+            );
+        }
+        #[cfg(not(windows))]
         attach_policy_voice(
             &mut brain,
             [false; 2],
@@ -1362,9 +1384,15 @@ async fn finishing_onboarding_without_voice_consent_does_not_fetch_even_after_re
         assert_eq!(ended, Ended::Lost);
         assert_eq!(brain.config.installed(), []);
         assert_eq!(brain.config.removing(), []);
+        assert!(
+            !VoicePart::ALL
+                .into_iter()
+                .any(|part| brain.voice_deleting(part))
+        );
         brain.close().await;
         assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
     }
+    #[cfg(windows)]
     for partial in partials {
         assert_eq!(
             std::fs::read(partial).expect("partial cache remains"),
