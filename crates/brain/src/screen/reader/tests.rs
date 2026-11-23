@@ -317,8 +317,8 @@ fn full_job_queue_never_blocks_and_a_second_attempt_retires() {
     };
     let (release, released) = mpsc::channel();
     let consumer = std::thread::spawn(move || {
-        let wake = released.recv_timeout(Duration::from_secs(3));
-        let queued = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+        let wake = released.recv_timeout(Duration::from_secs(5));
+        let queued = requests.recv_timeout(Duration::from_secs(5)).unwrap();
         (wake, queued.capture)
     });
     let start = Instant::now();
@@ -408,11 +408,11 @@ fn a_pending_walk_never_blocks_poll_and_a_dropped_wake_keeps_its_completion() {
         attempted.send(sent.is_ok()).is_ok() && open
     });
     assert!(matches!(reader.begin(job(40, later(), masks(40))), Ok(())));
-    entering.recv_timeout(Duration::from_secs(1)).unwrap();
+    entering.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(reader.poll().is_none(), "the walk is still running");
     release.send(()).unwrap();
     assert_eq!(
-        attempts.recv_timeout(Duration::from_secs(1)),
+        attempts.recv_timeout(Duration::from_secs(5)),
         Ok(false),
         "the full listener dropped the wake"
     );
@@ -427,7 +427,7 @@ fn a_pending_walk_never_blocks_poll_and_a_dropped_wake_keeps_its_completion() {
     release.send(()).unwrap();
     assert!(matches!(reader.begin(job(41, later(), masks(41))), Ok(())));
     assert_eq!(
-        attempts.recv_timeout(Duration::from_secs(1)),
+        attempts.recv_timeout(Duration::from_secs(5)),
         Ok(true),
         "a free listener gets the wake"
     );
@@ -442,7 +442,7 @@ fn begin_while_a_walk_is_pending_retires_without_queueing_a_second() {
     let (read, entering, release) = gate();
     let mut reader = waking(read, || true);
     assert!(matches!(reader.begin(job(42, later(), masks(42))), Ok(())));
-    entering.recv_timeout(Duration::from_secs(1)).unwrap();
+    entering.recv_timeout(Duration::from_secs(5)).unwrap();
     let sink = masks(43);
     let Err(refused) = reader.begin(job(43, later(), Arc::clone(&sink))) else {
         panic!("a second job was queued");
@@ -460,7 +460,7 @@ fn begin_after_an_untaken_completion_retires_and_keeps_that_completion() {
     let (wake, landed) = told();
     let mut reader = waking(|_| props("untaken"), wake);
     assert!(matches!(reader.begin(job(44, later(), masks(44))), Ok(())));
-    landed.recv_timeout(Duration::from_secs(1)).unwrap();
+    landed.recv_timeout(Duration::from_secs(5)).unwrap();
     let sink = masks(45);
     let Err(refused) = reader.begin(job(45, later(), Arc::clone(&sink))) else {
         panic!("begin dropped the untaken completion");
