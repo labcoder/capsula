@@ -353,10 +353,10 @@ mod tests {
             Check::Proceed
         );
         moved(&mut targeting);
-        assert!(matches!(
+        assert_eq!(
             targeting.second_check(Some(&host(HOST, 50)), [418, 144], KUMO),
-            Drop::Ready(..)
-        ));
+            Drop::Ready(MOVED, w)
+        );
         moved(&mut targeting);
         assert_eq!(
             targeting.second_check(Some(&host(HOST, 100)), [418, 144], KUMO),

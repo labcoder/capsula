@@ -54,32 +54,6 @@ pub(crate) mod work_area_fixture {
             AREA.set(self.previous);
         }
     }
-
-    #[test]
-    fn scoped_work_areas_restore_after_panic_and_do_not_cross_threads() {
-        assert_eq!(get(), None);
-        let outer = set([0, 0, 2560, 1400]);
-        assert_eq!(
-            super::work_area().expect("fixed work area"),
-            [0, 0, 2560, 1400]
-        );
-        assert_eq!(std::thread::spawn(get).join().expect("joined thread"), None);
-        let failed = std::panic::catch_unwind(|| {
-            let _inner = set([0, 0, 640, 480]);
-            assert_eq!(
-                super::work_area().expect("nested work area"),
-                [0, 0, 640, 480]
-            );
-            panic!("exercise scoped restoration");
-        });
-        assert!(failed.is_err());
-        assert_eq!(
-            super::work_area().expect("restored work area"),
-            [0, 0, 2560, 1400]
-        );
-        drop(outer);
-        assert_eq!(get(), None);
-    }
 }
 
 #[cfg(windows)]

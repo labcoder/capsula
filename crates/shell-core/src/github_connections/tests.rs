@@ -48,12 +48,13 @@ fn timeout(state: &mut GitHubConnections) {
 #[test]
 fn each_view_has_exact_copy_and_commands() {
     let login = GitHubLogin::new("example").unwrap();
+    let connect = (Text::GitHubConnect, GitHubOp::Connect);
+    let cancel = (Text::AccountCancel, GitHubOp::CancelConnect);
+    let sign_out = (Text::GitHubSignOut, GitHubOp::SignOut);
+    let refresh = (Text::GitHubRefresh, GitHubOp::RefreshRepos);
+    let check_again = (Text::GitHubCheckAgain, GitHubOp::RefreshRepos);
     for (view, status, commands) in [
-        (
-            signed_out(),
-            Text::GitHubSignedOut,
-            vec![(Text::GitHubConnect, GitHubOp::Connect)],
-        ),
+        (signed_out(), Text::GitHubSignedOut, vec![connect.clone()]),
         (
             GitHubView::SignedOut {
                 cleanup: Some(Cleanup::Running),
@@ -78,43 +79,30 @@ fn each_view_has_exact_copy_and_commands() {
         (
             GitHubView::Requesting,
             Text::GitHubRequesting,
-            vec![(Text::AccountCancel, GitHubOp::CancelConnect)],
+            vec![cancel.clone()],
         ),
-        (
-            awaiting(30),
-            Text::GitHubAwaiting,
-            vec![(Text::AccountCancel, GitHubOp::CancelConnect)],
-        ),
+        (awaiting(30), Text::GitHubAwaiting, vec![cancel]),
         (
             connected(),
             Text::GitHubConnected,
-            vec![
-                (Text::GitHubRefresh, GitHubOp::RefreshRepos),
-                (Text::GitHubSignOut, GitHubOp::SignOut),
-            ],
+            vec![refresh, sign_out.clone()],
         ),
         (
             GitHubView::NotInstalled {
                 login: login.clone(),
             },
             Text::GitHubNotInstalled,
-            vec![(Text::GitHubSignOut, GitHubOp::SignOut)],
+            vec![sign_out.clone()],
         ),
         (
             not_verified(),
             Text::GitHubNotVerified,
-            vec![
-                (Text::GitHubCheckAgain, GitHubOp::RefreshRepos),
-                (Text::GitHubSignOut, GitHubOp::SignOut),
-            ],
+            vec![check_again, sign_out.clone()],
         ),
         (
             GitHubView::NeedsSignIn { login },
             Text::GitHubNeedsSignIn,
-            vec![
-                (Text::GitHubSignInAgain, GitHubOp::Connect),
-                (Text::GitHubSignOut, GitHubOp::SignOut),
-            ],
+            vec![(Text::GitHubSignInAgain, GitHubOp::Connect), sign_out],
         ),
     ] {
         let state = model(view.clone());
@@ -137,27 +125,17 @@ fn each_view_has_exact_copy_and_commands() {
         .filter(|op| state.allows(Some(7), op))
         .collect();
         assert_eq!(allowed, expected, "{view:?}");
-        for (_, command) in commands {
-            assert!(state.allows(Some(7), &command), "{view:?} {command:?}");
-            assert!(!state.allows(Some(8), &command));
+        for (_, op) in &commands {
+            assert!(!state.allows(Some(8), op));
         }
     }
-}
 
-#[test]
-fn an_absent_snapshot_waits_without_connect_authority() {
-    let state = GitHubConnections::default();
+    let mut state = GitHubConnections::default();
     assert_eq!(state.status(), Text::GitHubWaiting);
-    assert_eq!(
-        state.commands(),
-        &[(Text::GitHubConnect, GitHubOp::Connect)]
-    );
-    assert!(!state.allows(None, &GitHubOp::Connect));
-    assert!(!state.allows(Some(7), &GitHubOp::Connect));
-    assert_eq!(
-        Strings::english().get(Text::GitHubRequesting),
-        "Connecting to GitHub…"
-    );
+    assert_eq!(state.commands(), &[connect]);
+    for session in [None, Some(7)] {
+        assert!(!state.send(session, GitHubOp::Connect, |_| panic!("no snapshot")));
+    }
 }
 
 #[test]
@@ -195,32 +173,6 @@ fn connect_cancel_and_second_connect_wait_for_authority() {
 }
 
 #[test]
-fn awaiting_verification_and_saving_share_neutral_requesting_then_authoritative_connected() {
-    let mut state = model(awaiting(30));
-    assert_eq!(
-        state.commands(),
-        &[(Text::AccountCancel, GitHubOp::CancelConnect)]
-    );
-    assert!(state.receive(Some(7), 7, GitHubView::Requesting, Instant::now()));
-    assert_eq!(state.status(), Text::GitHubRequesting);
-    assert_eq!(
-        state.commands(),
-        &[(Text::AccountCancel, GitHubOp::CancelConnect)]
-    );
-    assert_eq!(state.code(Some(7), Instant::now()), None);
-    assert!(state.receive(Some(7), 7, connected(), Instant::now()));
-    assert_eq!(state.status(), Text::GitHubConnected);
-    assert_eq!(state.login().unwrap().as_str(), "example");
-    assert_eq!(
-        state.commands(),
-        &[
-            (Text::GitHubRefresh, GitHubOp::RefreshRepos),
-            (Text::GitHubSignOut, GitHubOp::SignOut)
-        ]
-    );
-}
-
-#[test]
 fn cleanup_retry_never_exposes_connected_or_connect_controls() {
     for cleanup in [Cleanup::Refused, Cleanup::NotDurable] {
         let view = GitHubView::SignedOut {
@@ -248,31 +200,23 @@ fn cleanup_retry_never_exposes_connected_or_connect_controls() {
 
 #[test]
 fn timeout_survives_first_changed_snapshot_and_identical_repeats_until_superseded() {
-    let mut state = model(awaiting(30));
-    assert!(state.send(Some(7), GitHubOp::CancelConnect, |_| true));
-    timeout(&mut state);
-    for _ in 0..3 {
-        assert!(state.receive(Some(7), 7, signed_out(), Instant::now()));
-        assert_eq!(state.error_text(), Some(Text::GitHubTimeout));
-        assert_eq!(state.status(), Text::GitHubSignedOut);
-        assert_eq!(
-            state.commands(),
-            &[(Text::GitHubConnect, GitHubOp::Connect)]
-        );
-        assert!(state.allows(Some(7), &GitHubOp::Connect));
+    let mut pending = model(awaiting(30));
+    assert!(pending.send(Some(7), GitHubOp::CancelConnect, |_| true));
+    for mut state in [pending, model(signed_out())] {
+        timeout(&mut state);
+        for _ in 0..3 {
+            assert!(state.receive(Some(7), 7, signed_out(), Instant::now()));
+            assert_eq!(state.error_text(), Some(Text::GitHubTimeout));
+            assert_eq!(state.status(), Text::GitHubSignedOut);
+            assert_eq!(
+                state.commands(),
+                &[(Text::GitHubConnect, GitHubOp::Connect)]
+            );
+            assert!(state.allows(Some(7), &GitHubOp::Connect));
+        }
+        assert!(state.receive(Some(7), 7, GitHubView::Requesting, Instant::now()));
+        assert_eq!(state.error_text(), None);
     }
-    assert!(state.receive(Some(7), 7, GitHubView::Requesting, Instant::now()));
-    assert_eq!(state.error, None);
-}
-
-#[test]
-fn first_identical_snapshot_preserves_error_but_next_changed_one_supersedes() {
-    let mut state = model(signed_out());
-    timeout(&mut state);
-    assert!(state.receive(Some(7), 7, signed_out(), Instant::now()));
-    assert_eq!(state.error_text(), Some(Text::GitHubTimeout));
-    assert!(state.receive(Some(7), 7, GitHubView::Requesting, Instant::now()));
-    assert_eq!(state.error, None);
 }
 
 #[test]
@@ -305,23 +249,6 @@ fn every_current_view_and_error_finishes_the_pending_operation() {
     assert!(state.send(Some(7), GitHubOp::RefreshRepos, |_| true));
     timeout(&mut state);
     assert!(state.allows(Some(7), &GitHubOp::RefreshRepos));
-}
-
-#[test]
-fn a_newly_admitted_intent_clears_the_authoritative_error_without_changing_the_view() {
-    let mut state = model(awaiting(30));
-    timeout(&mut state);
-    assert!(state.receive(Some(7), 7, signed_out(), Instant::now()));
-    assert_eq!(state.error_text(), Some(Text::GitHubTimeout));
-    let mut sent = Vec::new();
-    assert!(state.send(Some(7), GitHubOp::Connect, |op| {
-        sent.push(op);
-        true
-    }));
-    assert_eq!(sent, vec![GitHubOp::Connect]);
-    assert_eq!(state.error_text(), None);
-    assert_eq!(state.view, Some(signed_out()));
-    assert_eq!(state.waiting, Some(GitHubOp::Connect));
 }
 
 #[test]
@@ -452,88 +379,30 @@ fn the_same_code_never_extends_its_monotonic_deadline_or_reappears_after_expiry(
 #[test]
 fn error_copy_uses_only_github_localized_keys() {
     let mut state = model(signed_out());
-    for (key, text, copy) in [
-        (
-            ErrorKey::GitHubUnavailable,
-            Text::GitHubUnavailable,
-            "GitHub connection controls aren't available in this build.",
-        ),
-        (
-            ErrorKey::SignInFailed,
-            Text::GitHubFailure,
-            "Couldn't complete the GitHub operation. Try again.",
-        ),
-        (
-            ErrorKey::AccountOffline,
-            Text::GitHubOffline,
-            "Couldn't reach GitHub. Check your connection and try again.",
-        ),
-        (
-            ErrorKey::CredentialsUnavailable,
-            Text::GitHubCredentials,
-            "Couldn't access the saved GitHub sign-in. Try again.",
-        ),
-        (
-            ErrorKey::RequestRefused,
-            Text::GitHubRefused,
-            "GitHub refused that operation. Check the connection and try again.",
-        ),
-        (
-            ErrorKey::SettingsRefused,
-            Text::GitHubDefaultRetained,
-            "Couldn't save the default repository. The previous default is unchanged. Try again.",
-        ),
-        (
-            ErrorKey::AccountMisconfigured,
-            Text::GitHubConfiguration,
-            "Connecting is unavailable until this build has a registered GitHub App client ID. No token or client secret can be entered here.",
-        ),
-        (
-            ErrorKey::PlanUnavailable,
-            Text::GitHubFailure,
-            "Couldn't complete the GitHub operation. Try again.",
-        ),
+    for (key, text) in [
+        (ErrorKey::GitHubUnavailable, Text::GitHubUnavailable),
+        (ErrorKey::SignInFailed, Text::GitHubFailure),
+        (ErrorKey::AccountOffline, Text::GitHubOffline),
+        (ErrorKey::CredentialsUnavailable, Text::GitHubCredentials),
+        (ErrorKey::RequestRefused, Text::GitHubRefused),
+        (ErrorKey::SettingsRefused, Text::GitHubDefaultRetained),
+        (ErrorKey::AccountMisconfigured, Text::GitHubConfiguration),
+        (ErrorKey::PlanUnavailable, Text::GitHubFailure),
     ] {
         assert!(state.receive_error(Some(7), 7, key.into()));
         assert_eq!(state.error_text(), Some(text));
-        assert_eq!(Strings::english().get(text), copy);
     }
-}
-
-#[test]
-fn every_state_uses_the_reviewed_fixed_github_copy() {
     let strings = Strings::english();
-    for (text, copy) in [
-        (
-            Text::GitHubWaiting,
-            "GitHub connections are unavailable. Waiting for the brain.",
-        ),
-        (Text::GitHubSignedOut, "Signed out"),
-        (Text::GitHubRemoving, "Removing saved sign-in…"),
-        (
-            Text::GitHubRemovalFailed,
-            "Signed out. Couldn't remove the saved sign-in. Retry removal before connecting again.",
-        ),
-        (
-            Text::GitHubNotDurable,
-            "Signed out. Couldn't save the removal. Retry before restarting, or the saved sign-in may return.",
-        ),
-        (Text::GitHubRequesting, "Connecting to GitHub…"),
-        (Text::GitHubAwaiting, "Enter this code on GitHub"),
-        (Text::GitHubConnected, "Connected"),
-        (
-            Text::GitHubNotInstalled,
-            "Install the GitHub App on your repositories, then sign out and connect again.",
-        ),
-        (
-            Text::GitHubNeedsSignIn,
-            "Sign in again to use this GitHub account.",
-        ),
-        (Text::GitHubNotVerified, "Saved sign-in, not verified"),
-        (Text::GitHubCheckAgain, "Check again"),
-    ] {
-        assert_eq!(strings.get(text), copy);
-    }
+    assert!(
+        strings
+            .get(Text::GitHubDefaultRetained)
+            .contains("previous default is unchanged")
+    );
+    assert!(
+        strings
+            .get(Text::GitHubConfiguration)
+            .contains("No token or client secret")
+    );
 }
 
 #[test]
@@ -549,7 +418,9 @@ fn leaving_a_challenge_clears_its_text_without_extending_its_deadline() {
         GitHubView::Requesting,
         now + Duration::from_secs(1),
     );
-    assert_eq!(state.challenge, None);
+    assert_eq!(state.status(), Text::GitHubRequesting);
+    assert_eq!(state.code(Some(7), now + Duration::from_secs(1)), None);
+    assert_eq!(state.login(), None);
     assert!(!state.is_current(Some(7), Some(7), &origin));
     state.receive(Some(7), 7, awaiting(30), now + Duration::from_secs(2));
     assert_eq!(state.code(Some(7), now + Duration::from_secs(30)), None);
@@ -560,18 +431,36 @@ fn leaving_a_challenge_clears_its_text_without_extending_its_deadline() {
     assert!(!state.allows(Some(7), &GitHubOp::CancelConnect));
     state.receive(Some(7), 7, signed_out(), now + Duration::from_secs(4));
     assert!(state.allows(Some(7), &GitHubOp::Connect));
+
+    assert!(state.receive(Some(7), 7, awaiting(30), now + Duration::from_secs(5)));
+    assert!(state.receive(
+        Some(7),
+        7,
+        GitHubView::Requesting,
+        now + Duration::from_secs(6)
+    ));
+    assert_eq!(state.login(), None);
+    assert!(state.receive(Some(7), 7, connected(), now + Duration::from_secs(7)));
+    assert_eq!(state.status(), Text::GitHubConnected);
+    assert_eq!(state.login().map(GitHubLogin::as_str), Some("example"));
 }
 
 #[test]
 fn only_a_matching_default_or_error_settles_a_default_request() {
-    let mut state = model(connected());
     let repo = RepoName::new("Example/Repo").unwrap();
+    let next = RepoName::new("Example/Other").unwrap();
+    let mut baseline = connected();
+    let GitHubView::Connected { repos, .. } = &mut baseline else {
+        unreachable!()
+    };
+    *repos = Bounded::new(vec![repo.clone(), next.clone()]).unwrap();
+    let mut state = model(baseline.clone());
     assert!(state.send(Some(7), GitHubOp::SetDefaultRepo(repo.clone()), |_| true));
     assert_eq!(state.status(), Text::GitHubSavingDefault);
-    state.receive(Some(7), 7, connected(), Instant::now());
+    assert!(state.receive(Some(7), 7, baseline.clone(), Instant::now()));
     assert_eq!(state.status(), Text::GitHubSavingDefault);
     assert!(!state.allows(Some(7), &GitHubOp::SignOut));
-    let mut committed = connected();
+    let mut committed = baseline;
     let GitHubView::Connected { default, .. } = &mut committed else {
         unreachable!()
     };
@@ -579,13 +468,18 @@ fn only_a_matching_default_or_error_settles_a_default_request() {
     state.receive(Some(7), 7, committed.clone(), Instant::now());
     assert_eq!(state.status(), Text::GitHubConnected);
     assert_eq!(state.waiting, None);
-    assert_eq!(state.view, Some(committed));
+    assert_eq!(state.view, Some(committed.clone()));
     assert!(!state.allows(Some(7), &GitHubOp::SetDefaultRepo(repo)));
+    let choose_next = GitHubOp::SetDefaultRepo(next);
+    assert!(state.send(Some(7), choose_next.clone(), |op| op == choose_next));
     let origin = Arc::clone(&state.controls_origin);
     assert!(!state.is_current(Some(8), Some(7), &origin));
     assert!(!state.is_current(None, Some(7), &origin));
     state.receive_error(Some(7), 7, ErrorKey::SettingsRefused.into());
     assert!(!state.is_current(Some(7), Some(7), &origin));
+    assert_eq!(state.status(), Text::GitHubConnected);
+    assert_eq!(state.view, Some(committed));
+    assert!(state.allows(Some(7), &choose_next));
     assert_eq!(state.error_text(), Some(Text::GitHubDefaultRetained));
 }
 

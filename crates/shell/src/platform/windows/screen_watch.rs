@@ -205,14 +205,8 @@ mod tests {
             assert_eq!(seen(&bit, &wakes), (1, true));
             disarm();
         }
-    }
 
-    #[test]
-    fn a_talk_key_that_comes_up_over_kumochi_leaves_no_stale_bit() {
-        let (bit, wakes) = watch(TalkHeld([
-            crate::input::PhysicalKey::new(0x1D),
-            crate::input::PhysicalKey::new(0x38),
-        ]));
+        let (bit, wakes) = watch(TalkHeld([PhysicalKey::new(0x1D), PhysicalKey::new(0x38)]));
         // Kumochi is in front for both key-ups, which is never asked.
         UI.with_borrow_mut(|ui| {
             for key in [Key::LeftAlt, Key::LeftControl] {
@@ -225,7 +219,8 @@ mod tests {
                 });
             }
         });
-        assert_eq!(wakes.len(), 0);
+        assert_eq!(seen(&bit, &wakes), (0, false));
+        bit.clear();
         key(Key::LeftControl, Edge::Down);
         assert_eq!(seen(&bit, &wakes), (1, true));
         disarm();
@@ -250,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_and_a_display_change_count_whatever_is_in_front() {
+    fn lifecycle_changes_wake_but_the_deadline_does_not() {
         let (bit, wakes) = watch(TalkHeld([crate::input::PhysicalKey::new(0x1D), None]));
         UI.with_borrow_mut(|ui| ui.key(Event::Reset, None, || panic!("a reset asks nothing")));
         assert_eq!(seen(&bit, &wakes), (1, true));
@@ -262,12 +257,23 @@ mod tests {
         key(Key::LeftControl, Edge::Down);
         assert_eq!(seen(&bit, &wakes), (1, true));
 
+        let lifecycle = |event| {
+            UI.with_borrow_mut(|ui| {
+                ui.key(event, None, || panic!("foreground is irrelevant"));
+            });
+        };
         let (bit, wakes) = watch(TalkHeld::default());
         changed();
         assert_eq!(seen(&bit, &wakes), (1, true));
-        UI.with_borrow_mut(|ui| ui.key(Event::Deadline, None, || panic!("not a key")));
-        UI.with_borrow_mut(|ui| ui.key(Event::Escape, None, || panic!("not a key")));
-        assert_eq!(wakes.len(), 0);
+        lifecycle(Event::Deadline);
+        lifecycle(Event::Escape);
+        assert_eq!(seen(&bit, &wakes), (0, true), "no second wake");
+
+        for (event, expected) in [(Event::Escape, (1, true)), (Event::Deadline, (0, false))] {
+            let (bit, wakes) = watch(TalkHeld::default());
+            lifecycle(event);
+            assert_eq!(seen(&bit, &wakes), expected, "{event:?}");
+        }
         disarm();
     }
 

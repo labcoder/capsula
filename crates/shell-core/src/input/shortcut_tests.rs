@@ -30,31 +30,6 @@ fn at(t: Instant, ms: u64) -> Instant {
 }
 
 #[test]
-fn legacy_release_at_299_is_a_tap_but_300_starts_and_ends_the_hold() {
-    let t = Instant::now();
-    for (ms, released) in RELEASE_BOUNDARY {
-        let make = |key| Event::Key {
-            key,
-            edge: Edge::Down,
-        };
-        let mut legacy = Gesture::default();
-        assert_eq!(legacy.handle(make(Key::LeftControl), t), NONE);
-        assert_eq!(legacy.handle(make(Key::LeftAlt), t), LISTENING);
-        assert_eq!(legacy.deadline(), Some(at(t, 300)));
-        assert_eq!(
-            legacy.handle(
-                Event::Key {
-                    key: Key::LeftAlt,
-                    edge: Edge::Up
-                },
-                at(t, ms)
-            ),
-            released
-        );
-    }
-}
-
-#[test]
 fn custom_release_at_299_is_a_tap_but_300_starts_and_ends_the_hold() {
     let t = Instant::now();
     for (ms, released) in RELEASE_BOUNDARY {
@@ -119,16 +94,31 @@ fn fixture_chord_shape_and_input_diagnostics_are_redacted() {
     assert_eq!(Chord::new(&[], NAMED), None);
     assert_eq!(Chord::new(&[Modifier::Shift], NAMED), None);
     assert_eq!(Chord::new(&[], NamedKey::Function(25)), None);
-    assert!(Chord::new(&[], NamedKey::Function(1)).is_some());
+    let function = NamedKey::Function(1);
+    let mut function_only = Shortcut::new(Chord::new(&[], function).expect("valid function key"));
+    let now = Instant::now();
     assert_eq!(
-        format!("{:?}", Chord::new(&[Modifier::Super], NAMED).unwrap()),
-        "Chord(..)"
+        function_only.key(id(1), Role::Named(function), Edge::Down, now),
+        LISTENING
     );
+    let chord = Chord::new(&[Modifier::Super], NAMED).expect("valid chord");
     let event = Event::Key {
         key: Key::Other(id(973)),
         edge: Edge::Down,
     };
-    assert_eq!(format!("{event:?}"), "Key { key: Key(..), edge: Edge(..) }");
-    assert_eq!(format!("{:?}", id(973)), "PhysicalKey(..)");
-    assert_eq!(format!("{:?}", Gesture::default()), "Gesture(..)");
+    let mut gesture = Gesture::default();
+    assert_eq!(gesture.handle(event, now), NONE);
+    let chord_debug = format!("{chord:?}");
+    for sentinel in ["Letter", "75", "Super"] {
+        assert!(!chord_debug.contains(sentinel), "{chord_debug}");
+    }
+    for debug in [
+        format!("{event:?}"),
+        format!("{:?}", id(973)),
+        format!("{gesture:?}"),
+    ] {
+        for sentinel in ["973", "Other", "8192"] {
+            assert!(!debug.contains(sentinel), "{debug}");
+        }
+    }
 }

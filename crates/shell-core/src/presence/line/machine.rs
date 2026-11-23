@@ -359,10 +359,7 @@ mod tests {
         assert_eq!(frame.row_spans(11), [Some([100, 170]), None, None, None]);
         assert_eq!(frame.row_spans(10), [None; ROW_SPANS]);
         assert_eq!(frame.row_spans(34), [None; ROW_SPANS]);
-    }
 
-    #[test]
-    fn at_150_percent_from_a_fractional_origin_the_band_owns_exactly_its_pixels() {
         // 200.5 and 284.5 round half toward zero, as GPUI snaps the bounds it draws.
         let frame = LineFrame::at([200.5, 7.25], 1.5);
         assert_eq!(frame.paint, [200, 7, 84, 5]);
@@ -566,28 +563,22 @@ mod tests {
     #[test]
     fn a_proxy_that_wont_hide_is_emptied_and_the_next_choice_places_it() {
         let c = placement(800, 5);
-        let (mut line, mut fake) = at_a();
-        fake.refuse_proxy_hides = true;
-        assert!(failed([false, true])(&run_out(&mut line, &mut fake)));
-        assert_eq!(
-            (fake.shown, fake.mask),
-            (Some(0), None),
-            "shown with no band"
-        );
-        assert!(!fake.takes_clicks());
-        fake.refuse_proxy_hides = false;
-        line.request(c);
-        assert_eq!(line.attempt(&mut fake), Attempt::Placed(c));
-        assert!(fake.holds(c) && line.contains([801, 1]));
-    }
-
-    #[test]
-    fn neither_surface_hiding_still_leaves_no_band_taking_clicks() {
-        let (mut line, mut fake) = at_a();
-        (fake.refuse_overlay_hides, fake.refuse_proxy_hides) = (true, true);
-        assert!(failed([false, true])(&run_out(&mut line, &mut fake)));
-        assert!(!fake.takes_clicks());
-        assert!(fake.overlay.is_some());
+        for (refuse_overlay, overlay) in [
+            (false, None),
+            (true, Some(placement(400, 2).layout.overlay)),
+        ] {
+            let (mut line, mut fake) = at_a();
+            fake.refuse_proxy_hides = true;
+            fake.refuse_overlay_hides = refuse_overlay;
+            assert!(failed([false, true])(&run_out(&mut line, &mut fake)));
+            assert_eq!(fake.overlay, overlay);
+            assert!(!fake.takes_clicks());
+            assert!(!line.contains([1, 1]) && !line.contains([401, 1]));
+            fake.refuse_proxy_hides = false;
+            line.request(c);
+            assert_eq!(line.attempt(&mut fake), Attempt::Placed(c));
+            assert!(fake.holds(c) && line.contains([801, 1]));
+        }
     }
 
     #[test]

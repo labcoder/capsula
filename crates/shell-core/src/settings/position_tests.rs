@@ -160,33 +160,27 @@ fn an_explicit_default_pick_still_sends_but_a_refused_pick_never_replays() {
         state.notice().map(UserError::key),
         Some(ErrorKey::SettingsRefused)
     );
-}
 
-#[test]
-fn a_successful_different_value_clears_only_its_own_settings_refusal() {
-    let mut state = Settings::default();
-    state.set_view(view(DockPosition::TopCenter), Update::Unsolicited);
-    assert!(state.send_max_frame_rate(MaxFrameRate::cap(30).expect("cap"), |_| true));
+    state.send_dock_position(DockPosition::MiddleLeft, |op| {
+        assert_eq!(op, SettingsOp::SetDockPosition(DockPosition::MiddleLeft));
+        true
+    });
     state.error(ErrorKey::SettingsRefused.into());
-    state.set_view(view(DockPosition::TopCenter), Update::Answer);
+    state.set_view(view(DockPosition::TopLeft), Update::Answer);
+    assert_eq!(state.dock_position_choice(), Some(DockPosition::TopLeft));
     assert_eq!(
         state.notice().map(UserError::key),
         Some(ErrorKey::SettingsRefused)
     );
-    assert!(state.send_max_frame_rate(MaxFrameRate::cap(60).expect("cap"), |_| true));
-    let mut saved = view(DockPosition::TopCenter);
-    saved.max_frame_rate = MaxFrameRate::cap(60).expect("cap");
-    state.set_view(saved, Update::Answer);
-    assert_eq!(state.notice(), None);
-    state.send_dock_position(DockPosition::MiddleLeft, |_| true);
-    state.error(ErrorKey::SettingsRefused.into());
-    state.set_view(view(DockPosition::TopCenter), Update::Answer);
-    assert_eq!(
-        state.notice().map(UserError::key),
-        Some(ErrorKey::SettingsRefused)
-    );
-    state.send_dock_position(DockPosition::BottomRight, |_| true);
+    state.send_dock_position(DockPosition::BottomRight, |op| {
+        assert_eq!(op, SettingsOp::SetDockPosition(DockPosition::BottomRight));
+        true
+    });
     state.set_view(view(DockPosition::BottomRight), Update::Answer);
+    assert_eq!(
+        state.dock_position_choice(),
+        Some(DockPosition::BottomRight)
+    );
     assert_eq!(state.notice(), None);
 }
 

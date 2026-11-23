@@ -124,15 +124,6 @@ struct Timing {
 }
 
 impl Gesture {
-    #[cfg(any(test, feature = "test-support"))]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only this crate's tests read it")
-    )]
-    pub(crate) fn holding(&self) -> bool {
-        matches!(self.timing.phase, Phase::Active { holding: true, .. })
-    }
-
     pub fn deadline(&self) -> Option<Instant> {
         self.timing.deadline()
     }
@@ -353,61 +344,10 @@ mod tests {
     }
 
     #[test]
-    fn the_other_modifier_stays_down_until_its_own_break() {
-        let now = Instant::now();
-        for (released, other, held) in [
-            (Key::LeftControl, Key::LeftAlt, [false, true]),
-            (Key::LeftAlt, Key::LeftControl, [true, false]),
-        ] {
-            let mut gesture = Gesture::default();
-            assert_eq!(gesture.down, [false; 2]);
-            chord(&mut gesture, now);
-            assert_eq!(
-                gesture.handle(Event::Deadline, now + WINDOW),
-                [Some(Effect::HoldStarted), None, None]
-            );
-            assert_eq!(
-                key(&mut gesture, released, Edge::Up, now + WINDOW),
-                [None, Some(Effect::HoldEnded), Some(Effect::Resting)]
-            );
-            assert_eq!(gesture.down, held);
-            // The held key repeats, then comes up.
-            key(&mut gesture, other, Edge::Down, now + WINDOW);
-            assert_eq!(gesture.down, held);
-            key(&mut gesture, other, Edge::Up, now + WINDOW);
-            assert_eq!(gesture.down, [false; 2]);
-        }
-        let mut gesture = Gesture::default();
-        chord(&mut gesture, now);
-        assert_eq!(gesture.down, [true; 2]);
-        gesture.handle(Event::Reset, now);
-        assert_eq!(gesture.down, [false; 2]);
-    }
-
-    #[test]
     fn held_physical_modifiers_are_redacted() {
         let both = TalkHeld([PhysicalKey::new(7), PhysicalKey::new(511)]);
         assert_eq!(format!("{both:?}"), "TalkHeld { .. }");
         assert_eq!(format!("{:?}", TalkHeld::default()), "TalkHeld { .. }");
-    }
-
-    #[test]
-    fn new_panels_can_inherit_capture_exclusion_only_during_a_recognized_hold() {
-        let now = Instant::now();
-        let mut gesture = Gesture::default();
-        assert!(!gesture.holding());
-        chord(&mut gesture, now);
-        assert!(
-            !gesture.holding(),
-            "a short tap doesn't exclude a new panel"
-        );
-        assert_eq!(
-            gesture.handle(Event::Deadline, now + WINDOW),
-            [Some(Effect::HoldStarted), None, None]
-        );
-        assert!(gesture.holding());
-        key(&mut gesture, Key::LeftAlt, Edge::Up, now + WINDOW);
-        assert!(!gesture.holding(), "release restores future panels too");
     }
 
     fn tap(gesture: &mut Gesture, now: Instant) {
@@ -480,7 +420,6 @@ mod tests {
             [Some(Effect::HoldStarted), None, None],
             "a repeat at the threshold"
         );
-        assert!(gesture.holding());
         assert_eq!(
             key(&mut gesture, Key::LeftControl, Edge::Down, at(330)),
             [None; 3],
@@ -490,6 +429,10 @@ mod tests {
             gesture.handle(Event::Deadline, at(340)),
             [None; 3],
             "the late timer once holding"
+        );
+        assert_eq!(
+            key(&mut gesture, Key::LeftAlt, Edge::Up, at(350)),
+            [None, Some(Effect::HoldEnded), Some(Effect::Resting)]
         );
         let mut ready = Gesture::default();
         assert_eq!(key(&mut ready, Key::LeftAlt, Edge::Down, start), [None; 3]);
@@ -525,7 +468,7 @@ mod tests {
             chord(&mut gesture, start);
             assert_eq!(
                 gesture.deadline(),
-                Some(start + WINDOW),
+                Some(start + Duration::from_millis(300)),
                 "one-shot hold deadline"
             );
             let released = key(
@@ -556,18 +499,23 @@ mod tests {
             "hold does not start before 300ms"
         );
         assert_eq!(
-            gesture.handle(Event::Deadline, start + WINDOW),
+            gesture.handle(Event::Deadline, start + Duration::from_millis(300)),
             [Some(Effect::HoldStarted), None, None],
             "hold starts once"
         );
         assert_eq!(gesture.deadline(), None, "held chord needs no polling");
         assert_eq!(
-            gesture.handle(Event::Deadline, start + WINDOW),
+            gesture.handle(Event::Deadline, start + Duration::from_millis(300)),
             [None; 3],
             "duplicate timer"
         );
         assert_eq!(
-            key(&mut gesture, Key::LeftControl, Edge::Up, start + WINDOW),
+            key(
+                &mut gesture,
+                Key::LeftControl,
+                Edge::Up,
+                start + Duration::from_millis(300)
+            ),
             [None, Some(Effect::HoldEnded), Some(Effect::Resting)],
             "delivered hold ends"
         );
@@ -748,6 +696,38 @@ mod tests {
                 [Some(Effect::Resting), Some(Effect::OpenInput), None],
                 "completed second tap opens input"
             );
+
+            let mut gesture = Gesture::default();
+            chord(&mut gesture, now);
+            let deadline = now + Duration::from_millis(300);
+            assert_eq!(
+                gesture.handle(Event::Deadline, deadline),
+                [Some(Effect::HoldStarted), None, None]
+            );
+            assert_eq!(
+                key(&mut gesture, tapped, Edge::Up, deadline),
+                [None, Some(Effect::HoldEnded), Some(Effect::Resting)]
+            );
+            assert_eq!(key(&mut gesture, held, Edge::Down, deadline), [None; 3]);
+            assert_eq!(
+                key(&mut gesture, tapped, Edge::Down, deadline),
+                [Some(Effect::Listening), None, None]
+            );
+            assert_eq!(
+                key(&mut gesture, tapped, Edge::Up, deadline),
+                [Some(Effect::Resting), None, None]
+            );
+            assert_eq!(key(&mut gesture, held, Edge::Up, deadline), [None; 3]);
+            assert_eq!(key(&mut gesture, tapped, Edge::Down, deadline), [None; 3]);
+            assert_eq!(
+                key(&mut gesture, held, Edge::Down, deadline),
+                [Some(Effect::Listening), None, None]
+            );
+            assert_eq!(
+                gesture.handle(Event::Reset, deadline),
+                [Some(Effect::Resting), None, None]
+            );
+            assert_eq!(key(&mut gesture, tapped, Edge::Down, deadline), [None; 3]);
         }
     }
 

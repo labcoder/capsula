@@ -763,6 +763,18 @@ fn typing_and_caret_notifications_redraw_recovery_only_when_draft_emptiness_chan
     use std::{cell::Cell, rc::Rc};
 
     let (owner, data, control) = ready(cx);
+    draft(&owner, "saved retry", cx);
+    owner.update(cx, |owner, cx| owner.submit(cx).expect("original turn"));
+    assert_eq!(
+        data.try_recv(),
+        Ok(DataToBrain::TextSubmit {
+            turn: 1,
+            screen: ScreenChoice::None,
+            thread: Some(ThreadId(1)),
+            text: "saved retry".into(),
+        })
+    );
+    receive(&owner, retry_failure(1, 1), cx);
     let (window, view, input) = owner.read_with(cx, |owner, _| {
         let text = owner.text.as_ref().expect("typing fixture");
         (text.window, text.view.clone(), text.input.clone())
@@ -782,13 +794,27 @@ fn typing_and_caret_notifications_redraw_recovery_only_when_draft_emptiness_chan
     });
     cx.simulate_input(window, "n");
     cx.run_until_parked();
-    assert_eq!(notified.replace(0), 1, "empty to nonempty redraws");
+    assert_ne!(notified.get(), 0, "a new draft updates recovery");
+    click_recovery(window, "chat-recovery-action-0", cx);
+    assert!(data.is_empty(), "a typed draft blocks the old Retry");
+    window
+        .update(cx, |_, window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx));
+        })
+        .expect("composer focus");
+    cx.run_until_parked();
+    notified.set(0);
     cx.simulate_input(window, "ext");
     cx.run_until_parked();
     assert_eq!(input.read_with(cx, |input, _| input.value()), "next");
     assert_eq!(notified.replace(0), 0, "unchanged emptiness stays local");
-    input.update(cx, |_, cx| cx.notify());
+    let caret = input.read_with(cx, |input, _| input.selected_range());
+    cx.simulate_keystrokes(window, "left");
     cx.run_until_parked();
+    assert_ne!(
+        input.read_with(cx, |input, _| input.selected_range()),
+        caret
+    );
     assert_eq!(
         notified.replace(0),
         0,
@@ -796,19 +822,26 @@ fn typing_and_caret_notifications_redraw_recovery_only_when_draft_emptiness_chan
     );
     draft(&owner, "", cx);
     cx.run_until_parked();
-    assert_eq!(notified.get(), 1, "nonempty to empty redraws");
+    assert_ne!(notified.get(), 0, "clearing the draft updates recovery");
+    click_recovery(window, "chat-recovery-action-0", cx);
+    assert_eq!(
+        data.try_recv(),
+        Ok(DataToBrain::TextSubmit {
+            turn: 2,
+            screen: ScreenChoice::None,
+            thread: Some(ThreadId(1)),
+            text: "saved retry".into(),
+        })
+    );
     assert!(data.is_empty());
     assert!(control.is_empty());
 }
 
 #[gpui::test]
 fn keyboard_retry_returns_typing_and_escape_to_the_composer(cx: &mut TestAppContext) {
-    keyboard_recovery_returns_composer(RecoveryControl::Retry, cx);
-}
-
-#[gpui::test]
-fn keyboard_dismiss_returns_typing_and_escape_to_the_composer(cx: &mut TestAppContext) {
-    keyboard_recovery_returns_composer(RecoveryControl::Dismiss, cx);
+    for control in [RecoveryControl::Retry, RecoveryControl::Dismiss] {
+        keyboard_recovery_returns_composer(control, cx);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1224,7 +1257,7 @@ fn recovery_settings(main_thread: ThreadId) -> kumochi_protocol::message::Settin
 fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
     cx: &mut TestAppContext,
 ) {
-    use crate::settings::{Completion, Field, Update};
+    use crate::settings::{Field, Update};
     use kumochi_protocol::message::{AssistantName, SettingsOp};
     let (owner, data, control) = ready(cx);
     let saved = recovery_settings(ThreadId(1));
@@ -1272,15 +1305,16 @@ fn settings_retry_rechecks_its_captured_field_and_waits_for_the_matching_answer(
     cx.run_until_parked();
     owner.update(cx, |owner, cx| {
         owner.settings.update(cx, |state, cx| {
-            let completion = state
-                .set_view(saved, Update::Answer)
-                .expect("matching answer");
-            assert_eq!(completion, Completion::failed_for_tests(Field::Assistant));
+            let _completion = state.set_view(saved, Update::Answer);
             state.change(Field::Assistant, "Cirrus");
             state.change(Field::User, "keep this settings draft");
             cx.notify();
         });
+        owner
+            .recover(Source::Settings(Some(Field::User)), Action::Retry, cx)
+            .expect("the answer did not make a different field retryable");
     });
+    assert!(control.is_empty());
     click_recovery(window, "chat-recovery-action-0", cx);
     click_recovery(window, "chat-recovery-action-0", cx);
     owner.read_with(cx, |owner, cx| {

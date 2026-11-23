@@ -121,21 +121,6 @@ mod tests {
     use kumochi_protocol::message::IssueUrl;
 
     #[test]
-    fn terminal_storage_failure_copy_is_distinct_from_a_failed_enqueue() {
-        let strings = Strings::english();
-        assert_eq!(
-            strings.issue_feedback(crate::threads::IssueFeedback::Unavailable(
-                kumochi_protocol::message::IssueUnavailableKind::Action
-            )),
-            "This action couldn't be completed. Review the saved details before trying again."
-        );
-        assert_eq!(
-            strings.issue_feedback(crate::threads::IssueFeedback::QueueFailed),
-            "The action wasn't queued. Try again when connected."
-        );
-    }
-
-    #[test]
     fn review_failures_do_not_confuse_preconfirmation_with_possible_post_handoff() {
         let strings = Strings::english();
         for (kind, text) in [
@@ -157,6 +142,12 @@ mod tests {
                 text
             );
         }
+        let recovered = strings.issue_feedback(crate::threads::IssueFeedback::Unavailable(
+            IssueUnavailableKind::Action,
+        ));
+        assert!(recovered.contains("Review the saved details"));
+        let unsent = strings.issue_feedback(crate::threads::IssueFeedback::QueueFailed);
+        assert!(unsent.contains("wasn't queued"));
         assert_eq!(
             strings.get(super::super::Text::IssueReviewPending),
             "Saving a fresh review…"

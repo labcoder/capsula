@@ -56,19 +56,12 @@ fn with_two_turns_pending_only_the_run_answering_the_last_moves_the_input() {
 }
 
 #[test]
-fn a_turn_sent_after_the_run_was_named_makes_its_focus_stale() {
-    let mut runs = typed(1);
-    named(&mut runs, 1, Some(RunOrigin::Typed { turn: 1 }));
-    submit(&mut runs, "never mind");
-    assert!(!runs.focus(RunId(1), TASK));
-    assert_eq!(runs.target(), Target::Kumo);
-}
-
-#[test]
 fn a_newer_turn_the_brain_refused_still_makes_the_old_focus_stale() {
     let mut runs = typed(1);
     named(&mut runs, 1, Some(RunOrigin::Typed { turn: 1 }));
     submit(&mut runs, "a newer turn");
+    assert!(!runs.focus(RunId(1), TASK));
+    assert_eq!(runs.target(), Target::Kumo);
     runs.refused(2, Some(KUMO));
     let revision = runs.revision();
     assert!(!runs.focus(RunId(1), TASK));

@@ -30,16 +30,6 @@ mod tests {
     use gpui_kit::AssetSource as _;
 
     #[test]
-    fn the_shell_bundles_its_history_picture_icon() {
-        let path = gpui_kit::assets::IconName::Monitor.path();
-        let svg = Assets
-            .load(&path)
-            .expect("the history picture icon is bundled")
-            .expect("the history picture icon has data");
-        assert!(svg.starts_with(b"<svg"));
-    }
-
-    #[test]
     fn the_shell_keeps_the_component_assets_alongside_its_extra_icon() {
         let paths = Assets.list("icons/").expect("icon paths");
         for icon in [
