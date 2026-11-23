@@ -276,11 +276,9 @@ pub(super) fn deliver(
             || {
                 (!paused.get()
                     && link.can_start_voice_gesture(session)
-                    && presses
-                        .iter()
-                        .flatten()
-                        .min()
-                        .is_none_or(|&at| link.voice_ready_before(at)))
+                    && presses[0]
+                        .zip(presses[1])
+                        .is_some_and(|(control, alt)| link.voice_ready_before(control.min(alt))))
                 .then_some(session)
             },
             || {
