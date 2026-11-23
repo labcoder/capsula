@@ -446,6 +446,87 @@ fn stale_retry_without_a_route_is_not_rendered(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_composer_renders_only_the_core_notice_and_a_sent_turn_clears_the_refusal(
+    cx: &mut TestAppContext,
+) {
+    let (owner, data, control) = ready(cx);
+    receive(
+        &owner,
+        vec![LinkEvent::Error {
+            generation: 1,
+            error: UserError::new(
+                ErrorKey::SettingsRefused,
+                vec![],
+                vec![Action::OpenSettings],
+            )
+            .expect("settings refusal"),
+        }],
+        cx,
+    );
+    let (window, retained) = owner.read_with(cx, |owner, _| {
+        let retained = owner
+            .chat_notice
+            .for_thread(owner.runs.thread())
+            .expect("recovery notice");
+        (
+            owner.text.as_ref().expect("typing fixture").window,
+            retained.clone(),
+        )
+    });
+    let drawn = |cx: &mut TestAppContext| {
+        let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+        frame.update(|window, cx| window.draw(cx).clear(cx));
+        [
+            "typing-notice Not sent: the background process isn't connected.",
+            "chat-recovery",
+            "chat-recovery-action-0",
+            "chat-recovery-dismiss",
+        ]
+        .map(|selector| frame.debug_bounds(selector).is_some())
+    };
+    assert_eq!(drawn(cx), [false, true, true, true]);
+
+    draft(&owner, "keep this draft", cx);
+    let link = owner.update(cx, |owner, cx| {
+        let link = std::mem::replace(&mut owner.link, LinkHandle::detached());
+        owner.submit(cx).expect("refused submit");
+        assert!(!owner.is_current_recovery(&retained));
+        assert_eq!(owner.chat_notice.shown(), Some(retained.as_ref()));
+        assert!(owner.error.is_some());
+        link
+    });
+    assert_eq!(drawn(cx), [true, false, false, false]);
+    assert!(data.is_empty());
+
+    owner.update(cx, |owner, cx| {
+        owner.clear_refusal(cx);
+        assert!(owner.is_current_recovery(&retained));
+    });
+    assert_eq!(drawn(cx), [false, true, true, true]);
+
+    owner.update(cx, |owner, cx| {
+        owner.submit(cx).expect("second refused submit");
+        assert_eq!(owner.refusal, Some(crate::strings::Text::TurnOffline));
+        owner.link = link;
+        owner.submit(cx).expect("accepted submit");
+        assert_eq!(owner.refusal, None);
+        assert_eq!(owner.chat_notice.shown(), None);
+    });
+    assert_eq!(
+        data.try_recv(),
+        Ok(DataToBrain::TextSubmit {
+            turn: 1,
+            screen: ScreenChoice::None,
+            thread: Some(ThreadId(1)),
+            text: "keep this draft".into(),
+        })
+    );
+    assert_eq!(drawn(cx), [false, false, false, false]);
+    assert!(data.is_empty());
+    assert!(control.is_empty());
+}
+
+#[gpui::test]
 fn stale_retry_is_not_rendered_after_escape_clear(cx: &mut TestAppContext) {
     use kumochi_protocol::message::{DataToShell, SceneDescriptor, SceneId};
 

@@ -95,8 +95,10 @@ leave an unactivated box clickable, and hiding clears the latch before Esc resto
 GPUI's activation state is queued, not a current native foreground query: rapid away/back
 within one queued activation can still hide a now-active box. Revisit that limit if reproduced.
 Esc and explicit dismiss keep their existing conditional foreground restoration.
-Only a sent turn clears the draft. A local submission refusal takes precedence in the typing
-panel without replacing an error shown on the dock or in Tasks. Notice strings stay in the catalog.
+On submit, only a sent turn clears the draft and its local refusal. Shell-core chooses the notice:
+a local refusal hides the retained error and its recovery controls without replacing the error
+shown on the dock or in Tasks. The composer renders that choice; a queued recovery action must
+also recheck that its notice still wins. Notice strings stay in the catalog.
 Neither surface uses GPUI's normal title bar. Native creation, styles, placement and lifetime
 live under `platform/windows`; Rust view code handles no raw window pointers.
 

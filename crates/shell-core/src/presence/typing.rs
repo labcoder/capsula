@@ -4,7 +4,7 @@ use kumochi_protocol::message::Content;
 
 use crate::link::{LinkHandle, Session};
 use crate::runs::{Refused, Runs};
-use crate::strings::{Strings, Text};
+use crate::strings::Text;
 
 /// Why a typing surface was asked to hide.
 #[derive(Clone, Copy, Debug)]
@@ -132,15 +132,23 @@ pub fn submit(
     .into()
 }
 
+/// The one notice the composer may show.
+pub enum Notice<R> {
+    /// A local submission refusal, without the retained error's controls.
+    Refusal(Text),
+    /// A retained error for this composer, including its recovery controls.
+    Recovery(R),
+    /// No refusal or retained error; the shell can show its ordinary status.
+    Fallback,
+}
+
 /// A local refusal takes precedence over the retained error for this surface only.
-pub fn notice<T: Clone + From<String>>(
-    error: Option<&T>,
-    refusal: Option<Text>,
-    strings: &Strings,
-) -> Option<T> {
-    refusal
-        .map(|text| strings.get(text).into())
-        .or_else(|| error.cloned())
+pub fn notice<R>(refusal: Option<Text>, recovery: Option<R>) -> Notice<R> {
+    if let Some(refusal) = refusal {
+        Notice::Refusal(refusal)
+    } else {
+        recovery.map_or(Notice::Fallback, Notice::Recovery)
+    }
 }
 
 /// Recovery may fill an empty draft, never replace one, even one containing only spaces.

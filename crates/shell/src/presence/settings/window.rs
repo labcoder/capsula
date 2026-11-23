@@ -281,13 +281,13 @@ impl Presence {
         })
     }
     pub(in crate::presence) fn sync_settings_notice(&mut self, cx: &mut Context<'_, Self>) {
-        let previous = (self.error.clone(), self.refusal);
+        let previous_error = self.error.clone();
         self.error = self
             .settings
             .read(cx)
             .notice()
             .map(|error| cx.global::<Strings>().error(error).into());
-        self.notices_changed(&previous, cx);
+        self.notices_changed(previous_error.as_ref(), cx);
     }
 
     pub(in crate::presence) fn settings_open(&self) -> bool {

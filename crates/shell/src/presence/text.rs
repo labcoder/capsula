@@ -166,13 +166,6 @@ impl Presence {
         let events = self.events.clone();
         let close_events = self.events.clone();
         let owner = cx.weak_entity();
-        let notice = typing::notice(
-            self.chat_notice
-                .for_thread(self.runs.thread())
-                .and(self.error.as_ref()),
-            self.refusal,
-            cx.global::<Strings>(),
-        );
         let model = self.chat.clone();
         let settings = self.settings.clone();
         let (window, view) = gpui_kit::open_window(options(), cx, |window, cx| {
@@ -183,7 +176,7 @@ impl Presence {
             });
             cx.new(|cx| {
                 let mut view = TextView::new(model, settings, owner, events, window, cx);
-                view.notice = notice;
+                self.update_typing_notice(&mut view, cx);
                 view.stop = stop;
                 view
             })
@@ -302,9 +295,9 @@ impl Presence {
         match typing::admit(&self.link, self.session.as_ref()) {
             Admission::Ignore => return Ok(()),
             Admission::Refused(text) => {
-                let previous = (self.error.clone(), self.refusal);
+                let previous_error = self.error.clone();
                 Submission::Refused(text).update_notice(&mut self.error, &mut self.refusal);
-                self.notices_changed(&previous, cx);
+                self.notices_changed(previous_error.as_ref(), cx);
                 return Ok(());
             }
             Admission::Proceed => {}
@@ -318,13 +311,13 @@ impl Presence {
         let result = typing::submit(&mut self.runs, &self.link, self.session.as_ref(), &draft);
         let sent = result == Submission::Sent;
         diagnostics::record(cx, format_args!("submit sent={sent}"));
-        let previous = (self.error.clone(), self.refusal);
+        let previous_error = self.error.clone();
         result.update_notice(&mut self.error, &mut self.refusal);
         if sent {
             self.chat_notice.clear();
             self.settings.update(cx, |state, _| state.clear_notice());
         }
-        self.notices_changed(&previous, cx);
+        self.notices_changed(previous_error.as_ref(), cx);
         if sent {
             let input = text.input.clone();
             text.window
@@ -338,27 +331,17 @@ impl Presence {
 
     pub(super) fn notices_changed(
         &self,
-        previous: &(Option<SharedString>, Option<Text>),
+        previous_error: Option<&SharedString>,
         cx: &mut Context<'_, Self>,
     ) {
-        let strings = cx.global::<Strings>();
-        let notice = typing::notice(
-            self.chat_notice
-                .for_thread(self.runs.thread())
-                .and(self.error.as_ref()),
-            self.refusal,
-            strings,
-        );
-        if typing::notice(previous.0.as_ref(), previous.1, strings) != notice
-            && let Some(text) = &self.text
-        {
+        if let Some(text) = &self.text {
             text.view.update(cx, |view, cx| {
-                view.notice = notice;
-                view.refusal = self.refusal;
-                cx.notify();
+                if self.update_typing_notice(view, cx) {
+                    cx.notify();
+                }
             });
         }
-        if previous.0 != self.error {
+        if previous_error != self.error.as_ref() {
             if let Some(panel) = &self.thread_panel {
                 let error = self.error.clone();
                 panel.view.update(cx, |view, cx| {
@@ -371,8 +354,8 @@ impl Presence {
     }
 
     pub(super) fn clear_refusal(&mut self, cx: &mut Context<'_, Self>) {
-        let previous = (self.error.clone(), self.refusal.take());
-        self.notices_changed(&previous, cx);
+        self.refusal = None;
+        self.notices_changed(self.error.as_ref(), cx);
     }
 
     /// Follows the input target and pushes its bounded live answer into the retained chat.
@@ -409,50 +392,55 @@ impl Presence {
         };
         let answer = self.runs.shown();
         let target = self.runs.target();
-        let recovery = self.chat_notice.for_thread(self.runs.thread());
-        let notice = typing::notice(
-            recovery.and(self.error.as_ref()),
-            self.refusal,
-            cx.global::<Strings>(),
-        )
-        .or_else(|| {
-            self.voice
-                .lost
-                .or(self.voice.status)
-                .map(|status| cx.global::<Strings>().get(status).into())
-        })
-        // A hold's screen line outlives its voice status: the reason arrives with the run.
-        .or_else(|| {
-            let (text, model) = self.panel.read(cx).screen_line.as_ref()?;
-            Some(super::voice::screen_text(cx.global::<Strings>(), *text, model.as_ref()).into())
-        });
-        let retry = recovery.is_some_and(
-            |notice| matches!(notice.source, Source::Run(run) if self.runs.retry_ready(run)),
-        );
-        let refusal = self.refusal;
         text.view.update(cx, |view, cx| {
             view.messages
                 .update(cx, |messages, cx| messages.live(answer, cx));
-            let recovery_changed =
-                view.recovery.as_ref().map(Rc::as_ptr) != recovery.map(Rc::as_ptr);
-            if view.target != target
-                || recovery_changed
-                || view.retry != retry
-                || view.refusal != refusal
-                || view.notice != notice
-            {
+            let notice_changed = self.update_typing_notice(view, cx);
+            if view.target != target || notice_changed {
                 view.target = target;
-                if recovery_changed {
-                    view.recovery_text =
-                        recovery.map(|notice| cx.global::<Strings>().error(&notice.error).into());
-                    view.recovery = recovery.cloned();
-                }
-                view.retry = retry;
-                view.refusal = refusal;
-                view.notice = notice;
                 cx.notify();
             }
         });
+    }
+
+    fn typing_notice(&self) -> typing::Notice<&Rc<Notice>> {
+        typing::notice(
+            self.refusal,
+            self.chat_notice.for_thread(self.runs.thread()),
+        )
+    }
+
+    fn update_typing_notice(&self, view: &mut TextView, cx: &Context<'_, TextView>) -> bool {
+        let strings = cx.global::<Strings>();
+        let (notice, recovery) = match self.typing_notice() {
+            typing::Notice::Refusal(text) => (Some(strings.get(text).into()), None),
+            typing::Notice::Recovery(recovery) => (None, Some(recovery)),
+            typing::Notice::Fallback => {
+                let status = self
+                    .voice
+                    .lost
+                    .or(self.voice.status)
+                    .map(|status| strings.get(status).into())
+                    // A hold's screen line outlives its voice status: the reason arrives with the run.
+                    .or_else(|| {
+                        let (text, model) = self.panel.read(cx).screen_line.as_ref()?;
+                        Some(super::voice::screen_text(strings, *text, model.as_ref()).into())
+                    });
+                (status, None)
+            }
+        };
+        let retry = recovery.is_some_and(
+            |notice| matches!(notice.source, Source::Run(run) if self.runs.retry_ready(run)),
+        );
+        let recovery_changed = view.recovery.as_ref().map(Rc::as_ptr) != recovery.map(Rc::as_ptr);
+        if recovery_changed {
+            view.recovery_text = recovery.map(|notice| strings.error(&notice.error).into());
+            view.recovery = recovery.cloned();
+        }
+        let changed = recovery_changed || view.retry != retry || view.notice != notice;
+        view.retry = retry;
+        view.notice = notice;
+        changed
     }
 }
 
@@ -467,7 +455,6 @@ pub(super) struct TextView {
     recovery_text: Option<SharedString>,
     retry: bool,
     draft_empty: bool,
-    refusal: Option<Text>,
     messages: Entity<Messages>,
     target: Target,
     _watch: Vec<gpui_kit::Subscription>,
@@ -511,7 +498,6 @@ impl TextView {
             recovery_text: None,
             retry: false,
             draft_empty: true,
-            refusal: None,
             messages,
             target: Target::Kumo,
             stop: false,
@@ -670,11 +656,7 @@ impl TextView {
 impl Render for TextView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let events = self.events.clone();
-        let notice = if self.refusal.is_some() || self.recovery.is_none() {
-            self.notice.clone()
-        } else {
-            None
-        };
+        let notice = self.notice.clone();
         let recovery = self.recovery(cx);
         let stop = self.stop.then(|| {
             let events = self.events.clone();

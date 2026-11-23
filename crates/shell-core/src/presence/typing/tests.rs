@@ -1,6 +1,6 @@
 use kumochi_protocol::message::{DataToBrain, Incarnation, ThreadId};
 
-use super::{Admission, Hide, Submission, Typing, admit, notice, restore, submit};
+use super::{Admission, Hide, Notice, Submission, Typing, admit, notice, restore, submit};
 use crate::link::{LinkHandle, Session};
 use crate::runs::{Refused, Runs};
 use crate::strings::{Strings, Text};
@@ -47,7 +47,6 @@ fn blank_enter_preserves_the_retained_notice_until_a_turn_is_sent() {
     runs.connected(1);
     runs.settings(ThreadId(3));
     assert_eq!(admit(&link, Some(&session)), Admission::Proceed);
-    let strings = Strings::english();
     let mut error = Some("Couldn't save that setting. Try again.".to_owned());
     let mut refusal = None;
 
@@ -55,12 +54,17 @@ fn blank_enter_preserves_the_retained_notice_until_a_turn_is_sent() {
     assert_eq!(blank, Submission::Blank);
     assert_eq!(sent.try_recv(), Err(async_channel::TryRecvError::Empty));
     blank.update_notice(&mut error, &mut refusal);
-    assert_eq!(
-        notice(error.as_ref(), refusal, &strings).as_deref(),
-        Some("Couldn't save that setting. Try again.")
-    );
+    assert!(matches!(
+        notice(refusal, error.as_deref()),
+        Notice::Recovery("Couldn't save that setting. Try again.")
+    ));
     assert_eq!(refusal, None);
 
+    Submission::Refused(Text::TurnBusy).update_notice(&mut error, &mut refusal);
+    assert!(matches!(
+        notice(refusal, error.as_deref()),
+        Notice::Refusal(Text::TurnBusy)
+    ));
     let submitted = submit(&mut runs, &link, Some(&session), "a new draft");
     assert_eq!(submitted, Submission::Sent);
     let DataToBrain::TextSubmit { text, .. } = sent.try_recv().expect("the typed turn") else {
@@ -68,7 +72,8 @@ fn blank_enter_preserves_the_retained_notice_until_a_turn_is_sent() {
     };
     assert_eq!(text.as_str(), "a new draft");
     submitted.update_notice(&mut error, &mut refusal);
-    assert_eq!(notice(error.as_ref(), refusal, &strings), None);
+    assert_eq!((error, refusal), (None, None));
+    assert!(matches!(notice(refusal, None::<&str>), Notice::Fallback));
 }
 
 #[test]
@@ -94,15 +99,15 @@ fn a_local_refusal_preserves_the_dock_facing_brain_error() {
     ] {
         result.update_notice(&mut error, &mut refusal);
         assert_eq!(error.as_deref(), Some(saved));
-        assert_eq!(
-            notice(error.as_ref(), refusal, &strings).as_deref(),
-            Some(expected)
-        );
+        let Notice::Refusal(text) = notice(refusal, error.as_deref()) else {
+            panic!("the local refusal should win over recovery");
+        };
+        assert_eq!(strings.get(text), expected);
     }
-    assert_eq!(
-        notice(error.as_ref(), None, &strings).as_deref(),
-        Some(saved)
-    );
+    assert!(matches!(
+        notice(None, error.as_deref()),
+        Notice::Recovery(text) if text == saved
+    ));
 }
 
 #[test]
@@ -120,9 +125,12 @@ fn a_pre_settings_refusal_never_becomes_a_dock_or_tasks_error() {
     result.update_notice(&mut error, &mut refusal);
     assert_eq!(error, None);
     assert_eq!(refusal, Some(Text::TurnOffline));
+    let Notice::Refusal(text) = notice(refusal, error.as_deref()) else {
+        panic!("the local refusal should be visible");
+    };
     assert_eq!(
-        notice(error.as_ref(), refusal, &strings).as_deref(),
-        Some("Not sent: the background process isn't connected.")
+        strings.get(text),
+        "Not sent: the background process isn't connected."
     );
 }
 
