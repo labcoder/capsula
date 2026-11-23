@@ -923,25 +923,73 @@ mod tests {
 
     #[gpui::test]
     fn a_screen_note_names_the_model_without_promising_a_picture(cx: &mut TestAppContext) {
-        use crate::threads::ScreenNote;
-        use kumochi_protocol::message::ModelName;
-        cx.update(|cx| {
-            cx.set_global(Strings::english());
-            let mut state = Threads::chat_for_tests();
-            let thread = ThreadId(3);
-            state.open = Some(thread);
-            state.set_screen_note_for_tests(ScreenNote {
-                thread,
-                after: None,
-                text: Text::ScreenNoteCan,
-                model: ModelName::new("GPT-6 Sol").unwrap(),
+        use crate::link::LinkEvent;
+        use crate::presence::screen_hold_tests::{luna, on, receive, screen_ready, sol};
+        use crate::runs::ScreenNotice;
+        use kumochi_protocol::message::{ConnectionKind, ScreenHolds, ScreenOff};
+
+        let ready = screen_ready(Some(ScreenHolds::Off(ScreenOff::ModelCantSee)), cx);
+        ready.owner.update(cx, |owner, cx| {
+            let thread = owner.runs.thread();
+            owner.chat.update(cx, |chat, _| {
+                chat.open = thread;
+                chat.loaded = true;
             });
-            let rows = stored_rows(&state, cx);
-            assert_eq!(
-                rows[0].text.as_ref(),
-                "Holding to talk can send a screenshot to GPT-6 Sol."
-            );
         });
+        let offer = |state, cx: &mut TestAppContext| {
+            receive(
+                &ready.owner,
+                LinkEvent::ScreenHolds {
+                    generation: 1,
+                    state,
+                },
+                cx,
+            );
+        };
+        let note = |cx: &mut TestAppContext| {
+            ready.owner.read_with(cx, |owner, cx| {
+                stored_rows(owner.chat.read(cx), cx)
+                    .iter()
+                    .find(|row| row.id.0 == "note")
+                    .expect("a retained screen note")
+                    .text
+                    .clone()
+            })
+        };
+
+        offer(on(&luna()), cx);
+        let first = note(cx);
+        let sol = sol();
+        ready.owner.update(cx, |owner, cx| {
+            owner.save_default_model(ConnectionKind::ChatGpt, sol.slug.clone(), cx);
+        });
+        offer(on(&sol), cx);
+        ready.owner.read_with(cx, |owner, cx| {
+            assert_eq!(owner.screen_notice(cx), ScreenNotice::On(&sol.display_name));
+        });
+        let switched = note(cx);
+        assert!(
+            ready
+                .owner
+                .update(cx, |owner, cx| owner.save_show_screen(false, cx))
+        );
+        ready.owner.read_with(cx, |owner, cx| {
+            assert_eq!(owner.settings.read(cx).show_screen_choice(), Some(false));
+            assert!(owner.current_offer(cx).is_none());
+        });
+        let pending_off = note(cx);
+        offer(ScreenHolds::Off(ScreenOff::TurnedOff), cx);
+        let switched_off = note(cx);
+        let historical = "At this point, holding to talk could send a screenshot to GPT-6 Luna.";
+        assert_eq!(
+            [
+                first.as_ref(),
+                switched.as_ref(),
+                pending_off.as_ref(),
+                switched_off.as_ref(),
+            ],
+            [historical; 4]
+        );
     }
 
     #[gpui::test]

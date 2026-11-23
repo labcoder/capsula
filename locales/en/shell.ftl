@@ -258,7 +258,7 @@ screen-not-included-picture-too-large = Screen not included: the screenshot was 
 screen-history-changed = Screen not included: it changed while the screenshot was being taken
 # An unavailable offer doesn't identify a model.
 screen-note-cant = Hold to talk can't include a screenshot right now.
-screen-note-can = Holding to talk can send a screenshot to { $model }.
+screen-note-can = At this point, holding to talk could send a screenshot to { $model }.
 marks-skipped = Marks skipped: your screen changed
 show-screen-history = A screenshot of your screen may have been sent with this message. { $app } does not save the image in chat history.
 voice-restart-required = Speech input unavailable. Restart the app.

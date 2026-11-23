@@ -889,7 +889,7 @@ mod tests {
         for (text, line) in [
             (
                 Text::ScreenNoteCan,
-                "Holding to talk can send a screenshot to GPT-5.5.",
+                "At this point, holding to talk could send a screenshot to GPT-5.5.",
             ),
             (Text::ScreenHoldWillSee, "GPT-5.5 will see this window"),
         ] {

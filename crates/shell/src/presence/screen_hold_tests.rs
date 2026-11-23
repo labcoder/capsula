@@ -53,7 +53,7 @@ fn model(slug: &str, name: &str) -> ModelInfo {
 pub(super) fn luna() -> ModelInfo {
     model("gpt-6-luna", "GPT-6 Luna")
 }
-fn sol() -> ModelInfo {
+pub(super) fn sol() -> ModelInfo {
     model("gpt-6-sol", "GPT-6 Sol")
 }
 fn choice(model: &ModelInfo, effort: Effort) -> ModelChoice {
