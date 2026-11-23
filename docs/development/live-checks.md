@@ -57,11 +57,15 @@ flowchart LR
 
 ## `account`
 
-`cargo xtask live account` reads only the first non-secret account view, prints its
-state words and sends `Quitting`. It never sends an account operation, opens a sign-in
-window or sends an inference request. Signed-out, busy and recovery states are reported
-without changing them. It uses the same ten-second view deadline and cleanup as `signin`;
-only Kumochi Dev's own connections and authenticated pipes are involved.
+`cargo xtask live account` waits up to ten seconds for the first non-secret account
+view, prints only its state words and sends `Quitting`. The harness sends no account
+operation or inference request and does not open a sign-in window.
+
+The dev brain it starts runs normal account maintenance. If signed in, it may refresh
+the ChatGPT token and fetch the model catalog. Even when signed out, it may retry owed
+token revocations. If a sign-out was interrupted, it may resume cleanup from its saved
+checkpoint. Starting the check can therefore contact the account service and change
+stored account state before the brain quits.
 
 ## `signin`
 
