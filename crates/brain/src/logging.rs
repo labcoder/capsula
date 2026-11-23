@@ -29,7 +29,7 @@ pub enum LoggingError {
     #[error("native file logging is unavailable on this platform")]
     NativeRuntime(#[source] std::io::Error),
     /// The per-user data folder isn't known.
-    #[error("%LOCALAPPDATA% is not set to an absolute path")]
+    #[error("{} is not set to an absolute path", crate::platform::DATA_ROOT)]
     NoLocalAppData,
     /// The log folder or file couldn't be created.
     #[error("can't open the log file")]
