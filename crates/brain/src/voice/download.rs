@@ -241,11 +241,11 @@ impl Downloader {
         let dir = self.models.join(first.part.dir());
         let mut held = create_model_dir(&self.models).map_err(path_error)?;
         let root_creation = hold_model_creation(&self.models).map_err(path_error)?;
-        #[cfg(test)]
+        #[cfg(all(test, windows))]
         crate::platform::paused(&self.models);
         held.extend(create_model_dir(&dir).map_err(path_error)?);
         let part_creation = hold_model_creation(&dir).map_err(path_error)?;
-        #[cfg(test)]
+        #[cfg(all(test, windows))]
         crate::platform::paused(&dir);
         let mut checked = Vec::new();
         for &model in files {
@@ -268,7 +268,7 @@ impl Downloader {
                     done += model.bytes;
                     continue;
                 }
-                #[cfg(test)]
+                #[cfg(all(test, windows))]
                 crate::platform::paused(&partial);
                 check_model_final(&file, &path).map_err(path_error)?;
                 final_file = Some(file);
@@ -296,7 +296,7 @@ impl Downloader {
         report.sender.send_replace(report.value);
         for (model, path, final_file, mut file) in ready {
             if let Some(file) = final_file {
-                #[cfg(test)]
+                #[cfg(all(test, windows))]
                 crate::platform::paused(&path);
                 discard_model(file).map_err(|_| DownloadError::Io)?;
             }
@@ -453,6 +453,8 @@ fn path_error(error: Untrusted) -> DownloadError {
     match error {
         Untrusted::Reparse | Untrusted::Unsafe => DownloadError::ModelPath,
         Untrusted::Missing | Untrusted::Io => DownloadError::Io,
+        #[cfg(not(windows))]
+        Untrusted::Unsupported => DownloadError::UnsupportedPlatform,
     }
 }
 

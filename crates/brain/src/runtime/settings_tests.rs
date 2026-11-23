@@ -2,6 +2,7 @@
 //! and a held write that never holds up Stop.
 
 use std::fs::File;
+#[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt as _;
 
 use tokio::time::Instant;
@@ -20,8 +21,11 @@ use super::{Ended, Shell, duplex};
 use crate::context::{Origin, RunSnapshot};
 use crate::coordinator::{BuildContext, BuildKey};
 use crate::ipc;
-use crate::platform::set_dacl;
-use crate::platform::sherpa::tests::{set_junction, stage_root};
+#[cfg(windows)]
+use crate::platform::{
+    set_dacl,
+    sherpa::tests::{set_junction, stage_root},
+};
 use crate::runtime::CLOSE_WAIT;
 use crate::runtime::Seen;
 use crate::runtime::settings::Gate;
@@ -698,6 +702,7 @@ async fn a_rename_reaches_the_next_run_and_never_a_running_ones_rebuild() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_junction_on_the_way_to_a_part_deletes_nothing_outside_it() {
     let scratch = Scratch::new("voice-removal-junction");
@@ -721,6 +726,7 @@ async fn a_junction_on_the_way_to_a_part_deletes_nothing_outside_it() {
     assert_eq!(brain.config.removing(), [VoicePart::SpeechInput]);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_models_folder_others_can_change_deletes_nothing() {
     let scratch = Scratch::new("voice-removal-unsafe");
@@ -747,6 +753,7 @@ async fn a_models_folder_others_can_change_deletes_nothing() {
     assert_eq!(brain.config.removing(), [VoicePart::SpeechInput]);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_missing_models_folder_counts_as_deleted() {
     let scratch = Scratch::new("voice-removal-no-models");
@@ -760,6 +767,7 @@ async fn a_missing_models_folder_counts_as_deleted() {
 }
 
 /// Start-up recovery's config writes, read back from the file.
+#[cfg(windows)]
 fn removing_on_disk(path: &std::path::Path) -> toml::Value {
     let saved: toml::Table = std::fs::read_to_string(path)
         .expect("readable")
@@ -768,6 +776,7 @@ fn removing_on_disk(path: &std::path::Path) -> toml::Value {
     saved["voice"]["removing"].clone()
 }
 
+#[cfg(windows)]
 fn seeded(scratch: &Scratch, removing: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
     let path = scratch.dir().join(CONFIG_FILE);
@@ -779,6 +788,7 @@ fn seeded(scratch: &Scratch, removing: &str) -> std::path::PathBuf {
     path
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn start_up_deletes_each_removed_part_then_finishes_its_removal() {
     let scratch = Scratch::new("voice-removals");
@@ -804,6 +814,7 @@ async fn start_up_deletes_each_removed_part_then_finishes_its_removal() {
     assert!(models.exists(), "only the parts' folders go");
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_part_that_cant_be_deleted_stays_listed_for_the_next_start() {
     let scratch = Scratch::new("voice-removal-stuck");

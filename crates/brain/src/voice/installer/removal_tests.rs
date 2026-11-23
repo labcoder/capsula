@@ -9,6 +9,37 @@ use crate::voice::download::{DownloadError, FetchPhase, Progress};
 use crate::voice::{LoadEvent, LoadReport};
 
 #[test]
+fn an_unsupported_delete_keeps_its_debt_without_retry_or_remove_done() {
+    let (mut installer, _) =
+        Installer::start([Durable::Absent; 2], [Ok(false); 2], [true; 2], &[], true);
+    let part = SpeechInput;
+    assert_eq!(
+        installer.remove(part, Folder::Present),
+        (RemoveAnswer::Intent { token: 3 }, vec![])
+    );
+    assert_eq!(
+        installer.intended(part, 3, Ok(())),
+        [Effect::Delete { part, token: 3 }]
+    );
+    assert_eq!(
+        installer.deleted(part, 3, Folder::Refused(ErrorKey::UnsupportedPlatform)),
+        []
+    );
+    assert_eq!(
+        installer.view().speech_input,
+        PartState::Failed {
+            key: ErrorKey::UnsupportedPlatform,
+            installed: false
+        }
+    );
+    assert_eq!(installer.install(part), []);
+    assert_eq!(
+        installer.remove(part, Folder::Present),
+        (RemoveAnswer::Unsupported, vec![])
+    );
+}
+
+#[test]
 fn a_refused_removal_releases_the_restored_input_if_off_without_claiming_unknown_exit() {
     let mut installer = ready();
     intent(&mut installer, 3);
@@ -357,7 +388,7 @@ fn an_install_after_a_failed_start_up_delete_retries_it_first() {
         [Durable::Removing, Durable::Absent],
         [true, true].map(Ok),
         [true, true],
-        &[SpeechInput],
+        &[(SpeechInput, Folder::Present)],
         true,
     );
     assert_eq!(effects, []);

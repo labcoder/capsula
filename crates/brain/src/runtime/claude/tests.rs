@@ -1,7 +1,14 @@
-use std::io;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
+#[cfg(windows)]
+use std::{
+    io,
+    sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Instant,
+};
 
 use kumochi_protocol::message::KeyView;
 use tokio::time::timeout;
@@ -10,10 +17,14 @@ use super::*;
 use crate::connections::account::Worker;
 use crate::connections::clock::FixedClock;
 use crate::connections::vault::{Vault, fake::FakeStore};
+#[cfg(windows)]
 use crate::engines::claude_code::lane::LANE_QUEUE;
+use crate::engines::claude_code::lane::TEST_VERSION as V;
+#[cfg(windows)]
 use crate::engines::claude_code::lane::tests::{
-    Base, V, host, host_finding, locked, marked, soon, started,
+    Base, host, host_finding, locked, marked, soon, started,
 };
+#[cfg(windows)]
 use crate::platform::Job;
 use crate::runtime::account::Accounts;
 use crate::runtime::connections::{ConnectionEvent, with_empty_catalog};
@@ -25,6 +36,7 @@ pub(in crate::runtime) const READY: ClaudeCodeView = ClaudeCodeView::Ready {
 };
 
 /// Runs the lane's results through the connection until no job is out.
+#[cfg(windows)]
 async fn settle(claude: &mut Claude) {
     timeout(Duration::from_secs(30), async {
         while claude.out.is_some() {
@@ -37,6 +49,7 @@ async fn settle(claude: &mut Claude) {
 }
 
 /// What discovery shows for the fake in `mode` under `sign_in`.
+#[cfg(windows)]
 async fn found(name: &str, mode: &str, sign_in: SignInStore) -> ClaudeCodeView {
     let base = Base::new(name);
     let (host, _switches) = host(&base, mode);
@@ -46,6 +59,7 @@ async fn found(name: &str, mode: &str, sign_in: SignInStore) -> ClaudeCodeView {
     claude.view()
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_found_install_shows_by_its_sign_in_and_the_store() {
     assert_eq!(
@@ -66,6 +80,7 @@ fn finding_without_a_lane_keeps_not_found() {
     assert_eq!(claude.view(), ClaudeCodeView::NotFound);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn finding_preserves_ready_and_blocks_connect_until_discovery_settles() {
     let base = Base::new("finding-view");
@@ -94,6 +109,7 @@ async fn finding_preserves_ready_and_blocks_connect_until_discovery_settles() {
     assert!(base.calls().iter().all(|call| call != "auth login"));
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn finds_asked_for_while_one_runs_coalesce_into_one_more() {
     let base = Base::new("coalesce");
@@ -114,6 +130,7 @@ async fn finds_asked_for_while_one_runs_coalesce_into_one_more() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn under_the_undecided_gate_connect_has_no_effect() {
     let scratch = Scratch::new("claude-connect");
@@ -263,6 +280,7 @@ async fn the_keys_frame_carries_claude_codes_view() {
 }
 
 /// A connection that may sign in, on the fake in `mode`, found signed out.
+#[cfg(windows)]
 async fn signed_out(base: &Base, mode: &str) -> Claude {
     let (host, _switches) = host(base, mode);
     let mut claude = Claude::start(Lane::start(host).expect("lane"), SignInStore::FileWithDacl);
@@ -271,8 +289,10 @@ async fn signed_out(base: &Base, mode: &str) -> Claude {
     claude
 }
 
+#[cfg(windows)]
 const FOUND: [&str; 2] = ["--version", "auth status --json"];
 
+#[cfg(windows)]
 #[tokio::test]
 async fn connect_signs_in_once_however_often_it_is_asked() {
     let base = Base::new("connect-once");
@@ -286,6 +306,7 @@ async fn connect_signs_in_once_however_often_it_is_asked() {
     assert_eq!(base.calls(), [FOUND[0], FOUND[1], "auth login", FOUND[1]]);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn cancel_ends_the_sign_in_and_shows_it_signed_out() {
     let base = Base::new("cancel");
@@ -316,6 +337,7 @@ async fn cancel_ends_the_sign_in_and_shows_it_signed_out() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn disconnect_while_signing_in_drops_the_sign_in_and_cleans_up_once() {
     let base = Base::new("disconnect-signing-in");
@@ -342,6 +364,7 @@ async fn disconnect_while_signing_in_drops_the_sign_in_and_cleans_up_once() {
     assert!(!base.marker().exists());
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_status_from_before_a_disconnect_cant_show_it_ready() {
     let base = Base::new("stale-after-disconnect");
@@ -368,6 +391,7 @@ async fn a_status_from_before_a_disconnect_cant_show_it_ready() {
     assert!(claude.close(soon()).await);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn while_cleanup_is_pending_find_and_connect_start_nothing() {
     let base = Base::new("cleanup-pending");
@@ -412,6 +436,7 @@ async fn while_cleanup_is_pending_find_and_connect_start_nothing() {
     assert!(!base.marker().exists());
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn with_the_off_switch_only_a_marked_deletion_runs() {
     let base = Base::new("off-cleans");
@@ -430,6 +455,7 @@ async fn with_the_off_switch_only_a_marked_deletion_runs() {
     assert_eq!(base.calls(), Vec::<String>::new());
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn another_kumochi_holding_claude_code_shows_it_in_use() {
     let base = Base::new("in-use");
@@ -443,13 +469,16 @@ async fn another_kumochi_holding_claude_code_shows_it_in_use() {
 }
 
 /// Held by a test while its lane's worker must wait to end a call's processes.
+#[cfg(windows)]
 static ENDING: Mutex<()> = Mutex::new(());
 
+#[cfg(windows)]
 fn end_once_let_go(job: &Job) -> io::Result<()> {
     drop(ENDING.lock().unwrap_or_else(PoisonError::into_inner));
     Job::terminate(job)
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn cancel_pressed_past_the_queue_then_disconnect_still_signs_out_and_cleans_up() {
     let base = Base::new("cancel-burst");
@@ -485,6 +514,7 @@ async fn cancel_pressed_past_the_queue_then_disconnect_still_signs_out_and_clean
     assert!(!base.marker().exists());
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_disconnect_the_lane_cant_take_marks_nothing_and_can_be_asked_again() {
     let base = Base::new("disconnect-refused");
@@ -544,8 +574,10 @@ async fn a_disconnect_the_lane_cant_take_marks_nothing_and_can_be_asked_again() 
 }
 
 /// Leaves every teardown unconfirmed once set; only the test below sets it.
+#[cfg(windows)]
 static STUCK_AFTER_FULL: AtomicBool = AtomicBool::new(false);
 
+#[cfg(windows)]
 fn end_once_let_go_unless_stuck(job: &Job) -> io::Result<()> {
     drop(ENDING.lock().unwrap_or_else(PoisonError::into_inner));
     if STUCK_AFTER_FULL.load(Ordering::SeqCst) {
@@ -556,6 +588,7 @@ fn end_once_let_go_unless_stuck(job: &Job) -> io::Result<()> {
 
 /// L3: a full queue reads Busy only until the lane takes a job, so a lane that's stuck after it
 /// says to restart.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_full_queue_reads_busy_only_until_the_lane_takes_a_job() {
     let base = Base::new("full-then-stuck");
@@ -609,6 +642,7 @@ async fn a_full_queue_reads_busy_only_until_the_lane_takes_a_job() {
 
 /// L2: an op the drained queue takes that isn't a Version find reads `Finding` until it settles,
 /// never the stuck lane's `Unavailable`.
+#[cfg(windows)]
 #[tokio::test]
 async fn an_op_the_drained_queue_takes_reads_finding_not_unavailable() {
     let base = Base::new("drained-cleanup");
@@ -643,8 +677,10 @@ async fn an_op_the_drained_queue_takes_reads_finding_not_unavailable() {
 }
 
 /// Makes every call's processes unconfirmed once set; only the test below sets it.
+#[cfg(windows)]
 static UNCONFIRMED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(windows)]
 fn end_unless_unconfirmed(job: &Job) -> io::Result<()> {
     if UNCONFIRMED.load(Ordering::SeqCst) {
         return Err(io::ErrorKind::Other.into());
@@ -654,6 +690,7 @@ fn end_unless_unconfirmed(job: &Job) -> io::Result<()> {
 
 /// A lane on the fake in `mode`, found and settled, whose later calls can't be confirmed ended
 /// once [`UNCONFIRMED`] is set.
+#[cfg(windows)]
 async fn unconfirmable(base: &Base, mode: &str) -> Claude {
     let (mut host, _switches) = host(base, mode);
     host.terminate = end_unless_unconfirmed;
@@ -662,6 +699,7 @@ async fn unconfirmable(base: &Base, mode: &str) -> Claude {
     claude
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_stuck_lane_shows_unavailable_never_signing_in_or_ready() {
     let signing = Base::new("stuck-signing-in");
@@ -697,6 +735,7 @@ async fn a_stuck_lane_shows_unavailable_never_signing_in_or_ready() {
 }
 
 /// Question launches through the core: who may launch, the core's bounds, and the revocations.
+#[cfg(windows)]
 mod launches {
     use std::time::Duration;
 
@@ -880,12 +919,14 @@ mod launches {
 }
 
 /// A file Claude Code may leave in its config folder when it's ended part way through a save.
+#[cfg(windows)]
 fn partial(base: &Base) -> std::path::PathBuf {
     base.owned().join("config").join("partial")
 }
 
 /// A cancel that doesn't end signed in removes Kumochi's Claude Code folder, without a logout,
 /// so no sign-in file outlives a view that says signed out.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_cancel_that_ends_signed_out_removes_claude_codes_folder() {
     let base = Base::new("cancel-removes");
@@ -913,6 +954,7 @@ async fn a_cancel_that_ends_signed_out_removes_claude_codes_folder() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_cancel_whose_status_fails_removes_claude_codes_folder() {
     let base = Base::new("cancel-status-fails");
@@ -948,6 +990,7 @@ async fn a_cancel_whose_status_fails_removes_claude_codes_folder() {
 }
 
 /// Claude Code finished saving before the cancel landed: the sign-in stands, as Cancel says.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_cancel_that_ends_signed_in_keeps_the_sign_in() {
     let base = Base::new("cancel-keeps");
@@ -968,6 +1011,7 @@ async fn a_cancel_that_ends_signed_in_keeps_the_sign_in() {
 }
 
 /// The cleanup belongs to the cancel's own Status: a later job starts clear of it.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_job_after_a_cancel_starts_without_its_cleanup() {
     let base = Base::new("cancel-then-find");
@@ -980,6 +1024,7 @@ async fn a_job_after_a_cancel_starts_without_its_cleanup() {
     assert_eq!(base.calls(), [FOUND[0], FOUND[1], FOUND[0], FOUND[1]]);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_cancel_whose_version_fails_removes_claude_codes_folder() {
     let base = Base::new("cancel-version-fails");
@@ -1016,6 +1061,7 @@ async fn a_cancel_whose_version_fails_removes_claude_codes_folder() {
 }
 
 /// The pipe a test shell reads: control frames go unread, data frames wait in the queue.
+#[cfg(windows)]
 pub(super) struct Pipe {
     out: tokio::sync::mpsc::Sender<Vec<u8>>,
     pub(super) control: tokio::sync::mpsc::Receiver<Vec<u8>>,
@@ -1024,6 +1070,7 @@ pub(super) struct Pipe {
     tap: crate::tap::Tap,
 }
 
+#[cfg(windows)]
 impl Pipe {
     pub(super) fn new() -> Self {
         let (out, control) = tokio::sync::mpsc::channel(256);
@@ -1063,6 +1110,7 @@ impl Pipe {
 }
 
 /// The reviewed row's models, in its order, as the picker shows them.
+#[cfg(windows)]
 pub(super) fn row() -> Vec<ModelInfo> {
     [
         ("sonnet", "Sonnet"),
@@ -1085,9 +1133,11 @@ pub(super) fn row() -> Vec<ModelInfo> {
     .collect()
 }
 
+#[cfg(windows)]
 const NOTHING: [Vec<ModelInfo>; 0] = [];
 
 /// A brain whose Claude Code is finding the lane's fake, signed in; nothing is reported yet.
+#[cfg(windows)]
 fn finding(scratch: &Scratch, base: &Base) -> Brain {
     let mut brain = test_support::brain(scratch, "");
     let (host, _switches) = host(base, "in");
@@ -1099,6 +1149,7 @@ fn finding(scratch: &Scratch, base: &Base) -> Brain {
 }
 
 /// Runs the lane's results through the brain with a shell connected, as the runtime does.
+#[cfg(windows)]
 async fn reported(brain: &mut Brain, pipe: &mut Pipe) {
     timeout(Duration::from_secs(30), async {
         while brain.claude.out.is_some() {
@@ -1114,6 +1165,7 @@ async fn reported(brain: &mut Brain, pipe: &mut Pipe) {
 
 /// The picker's catalog: the reviewed row's models go out, in its order, once Claude Code can
 /// answer, and not while it's still being found.
+#[cfg(windows)]
 #[tokio::test]
 async fn claude_codes_models_go_out_in_the_reviewed_rows_order_once_it_can_answer() {
     let scratch = Scratch::new("claude-models-ready");
@@ -1127,6 +1179,7 @@ async fn claude_codes_models_go_out_in_the_reviewed_rows_order_once_it_can_answe
 }
 
 /// A report that leaves the list as it was sends nothing.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_report_that_changes_nothing_sends_claude_codes_models_no_more() {
     let scratch = Scratch::new("claude-models-repeat");
@@ -1147,6 +1200,7 @@ async fn a_report_that_changes_nothing_sends_claude_codes_models_no_more() {
 
 /// Once a launch wouldn't be admitted, the shell hears an empty list, which takes Claude Code off
 /// the picker.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_disconnect_sends_claude_codes_models_empty() {
     let scratch = Scratch::new("claude-models-disconnect");
@@ -1164,6 +1218,7 @@ async fn a_disconnect_sends_claude_codes_models_empty() {
 }
 
 /// A shell that connects hears the models on offer, whatever an earlier shell heard.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_new_shell_hears_claude_codes_models_again() {
     let scratch = Scratch::new("claude-models-reconnect");
@@ -1180,6 +1235,7 @@ async fn a_new_shell_hears_claude_codes_models_again() {
 
 /// Changes while no shell is linked: a shell that connects hears only the list on offer then, and
 /// nothing once a launch wouldn't be admitted.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_shell_that_connects_hears_only_the_models_on_offer_now() {
     let scratch = Scratch::new("claude-models-unlinked");
@@ -1209,6 +1265,7 @@ async fn a_shell_that_connects_hears_only_the_models_on_offer_now() {
 
 /// A shell that connects before Claude Code's first report hears nothing of its models until
 /// that report.
+#[cfg(windows)]
 #[tokio::test]
 async fn a_shell_hears_nothing_of_claude_codes_models_before_its_first_report() {
     let scratch = Scratch::new("claude-models-early");
