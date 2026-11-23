@@ -69,8 +69,11 @@ impl TypedHeld {
         if Instant::now() >= self.until {
             return Err(Closed::Refused(Refusal::Expired));
         }
-        let context = seal_held(&self.cleanup.inner, &self.held, self.until).await?;
-        self.cleanup.armed = false;
+        let sealed = seal_held(&self.cleanup.client.inner, &self.held, self.until).await;
+        if matches!(sealed, Ok(_) | Err(Closed::Refused(_) | Closed::Fault(_))) {
+            self.cleanup.release();
+        }
+        let context = sealed?;
         if Instant::now() >= self.until {
             return Err(Closed::Refused(Refusal::Expired));
         }
@@ -80,10 +83,17 @@ impl TypedHeld {
 
 #[derive(Debug)]
 struct TypedDrop {
-    inner: Handle<Holds>,
+    client: Arc<HoldClient>,
     key: Key,
     runtime: tokio::runtime::Handle,
     armed: bool,
+}
+
+impl TypedDrop {
+    fn release(&mut self) {
+        self.client.release_typed(self.key.capture);
+        self.armed = false;
+    }
 }
 
 impl Drop for TypedDrop {
@@ -91,13 +101,15 @@ impl Drop for TypedDrop {
         if !self.armed {
             return;
         }
-        let inner = self.inner.clone();
+        let client = Arc::clone(&self.client);
         let key = self.key;
         drop(self.runtime.spawn(async move {
             let until = Instant::now() + MAX_TTL;
-            match inner.request(Request::Drop(key), until).await {
-                Ok((Reply::Revoked(revoked), _)) if revoked == key => {}
-                Ok((Reply::Refused(Refusal::Stale), _)) => {}
+            match client.inner.request(Request::Drop(key), until).await {
+                Ok((Reply::Revoked(revoked), _)) if revoked == key => {
+                    client.release_typed(key.capture);
+                }
+                Ok((Reply::Refused(Refusal::Stale), _)) => client.release_typed(key.capture),
                 _ => {
                     tracing::debug!("exact screen revocation unavailable; frame expires in worker");
                 }
@@ -140,7 +152,7 @@ struct Admission {
     last_capture: u64,
     /// Keeps retired holds from reaching replacement workers, which start with no fence.
     hold_fence: Option<Owner>,
-    typed_until: Option<Instant>,
+    typed: Vec<(CaptureId, Instant)>,
 }
 
 impl HoldClient {
@@ -239,7 +251,7 @@ impl HoldClient {
     /// # Errors
     /// A changed or unknown display, deadline, busy slot or worker loss refuses the capture.
     pub(crate) async fn typed_display(
-        &self,
+        self: &Arc<Self>,
         point: PhysicalPoint,
         expected: TypedDisplay,
         excluded: u64,
@@ -258,13 +270,13 @@ impl HoldClient {
             expected,
             excluded,
         })?;
-        let cleanup = TypedDrop {
-            inner: self.inner.clone(),
+        let mut cleanup = TypedDrop {
+            client: Arc::clone(self),
             key,
             runtime,
             armed: true,
         };
-        let held = receive_capture(key, stream, Some(expected)).await?;
+        let held = receive_capture(key, stream, Some((expected, &mut cleanup))).await?;
         if Instant::now() >= until {
             return Err(Closed::Refused(Refusal::Expired));
         }
@@ -308,6 +320,13 @@ impl HoldClient {
         {
             return Err(Closed::Refused(Refusal::Stale));
         }
+        if owner.is_none() {
+            let now = Instant::now();
+            admission.typed.retain(|&(_, until)| now < until);
+            if admission.typed.len() == crate::supervise::QUEUE {
+                return Err(Closed::Busy);
+            }
+        }
         admission.last_capture = admission
             .last_capture
             .checked_add(1)
@@ -324,9 +343,15 @@ impl HoldClient {
             .request_stream(request(key, ticket), until)
             .map_err(Closed::Lost)?;
         if owner.is_none() {
-            admission.typed_until = Some(until);
+            admission.typed.push((key.capture, until));
         }
         Ok((key, stream))
+    }
+
+    fn release_typed(&self, capture: CaptureId) {
+        if let Ok(mut admission) = self.admission.lock() {
+            admission.typed.retain(|&(id, _)| id != capture);
+        }
     }
 
     /// The held frame's one image, as captured. The worker releases the frame whatever it answers.
@@ -365,15 +390,14 @@ impl HoldClient {
             }
             // A later worker's answer means the holder's exit was seen, so nothing is held.
             Ok((_, from)) if holder.is_some_and(|holder| from > holder) => return Ok(()),
-            Ok((_, from)) => from,
+            Ok((_, from)) if holder.is_none_or(|holder| from == holder) => from,
+            Ok(_) => return Err(Unreleased),
             Err(_) => holder.ok_or(Unreleased)?,
         };
         {
             let admission = self.admission.lock().map_err(|_| Unreleased)?;
-            if admission
-                .typed_until
-                .is_some_and(|until| Instant::now() < until)
-            {
+            let now = Instant::now();
+            if admission.typed.iter().any(|&(_, until)| now < until) {
                 return Err(Unreleased);
             }
             self.inner
@@ -415,20 +439,28 @@ async fn seal_held(
 async fn receive_capture(
     key: Key,
     mut stream: ReplyStream<Holds>,
-    expected: Option<TypedDisplay>,
+    typed: Option<(TypedDisplay, &mut TypedDrop)>,
 ) -> Result<Held, Closed> {
     let generation = match stream.next().await {
         Some(Ok((Reply::Acquired(acquired, meta), generation)))
             if acquired == key && meta.capture == key.capture =>
         {
-            if expected
-                .is_some_and(|wanted| wanted.bounds != meta.display || wanted.dpi != meta.dpi)
+            if typed
+                .as_ref()
+                .is_some_and(|(wanted, _)| wanted.bounds != meta.display || wanted.dpi != meta.dpi)
             {
                 return Err(Closed::Refused(Refusal::DisplayChanged));
             }
             generation
         }
-        Some(Ok((reply, _))) => return Err(closed(&reply)),
+        Some(Ok((reply, _))) => {
+            if matches!(reply, Reply::Busy | Reply::Refused(_) | Reply::Fault(_))
+                && let Some((_, cleanup)) = typed
+            {
+                cleanup.release();
+            }
+            return Err(closed(&reply));
+        }
         Some(Err(lost)) => return Err(Closed::Lost(lost)),
         None => return Err(Closed::Lost(WorkerLost::Lost)),
     };
