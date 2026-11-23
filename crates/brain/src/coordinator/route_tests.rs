@@ -613,7 +613,7 @@ impl Coordinator {
 fn a_claude_routes_picture_goes_only_with_its_own_switch_on() {
     use crate::coordinator::PictureRoutes;
     for (routes, sent) in [
-        (PictureRoutes::SHIPPED, false),
+        (PictureRoutes::new(false, false), false),
         (PictureRoutes::new(false, true), false),
         (PictureRoutes::new(true, false), true),
     ] {
@@ -1366,7 +1366,7 @@ fn a_key_run_that_may_have_written_its_picture_starts_no_inline_rewrite() {
         .expect("an availability is never stale");
     assert_eq!(count(&lost, sends), 0);
 
-    let (mut core, _) = pictured_run(KEY, PictureRoutes::SHIPPED);
+    let (mut core, _) = pictured_run(KEY, PictureRoutes::new(false, false));
     written(&mut core);
     assert_eq!(count(&hungry(&mut core), rewrites), 1, "no picture went");
 

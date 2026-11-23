@@ -198,10 +198,14 @@ it carries no authority, and a user who types it is still the user. Nothing is b
   document block among them, since stored items never carry thinking);
 - a call that isn't answered exactly once by the results that open the next user message, a
   result anywhere else, or an id called twice. Nothing is moved to make a pair;
-- an image while the key's picture switch is off, which it is in every build; an image that isn't
+- an image while the key's picture switch is off; an image that isn't
   one sealed capture of at most 2 MiB; a second image; or an image a result would follow in its
   message, since results lead it;
 - a serialised body over the 512 KiB bound, counted without its picture.
+
+The key's picture switch ships on. A screen hold can only build a pictured request when the
+current verified key's fresh catalog explicitly reports image input support for the exact
+offered model. An unavailable picture doesn't prevent a text-only request.
 
 The picture never sits in a `Value` or a plain string. The bound and the envelope check see the
 body without it. Then its block, fixed JSON and base64 that need no escaping, is written into one
