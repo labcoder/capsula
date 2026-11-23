@@ -1,5 +1,6 @@
 //! Authoritative account snapshots and one-shot intents, independent of GPUI and transport.
 
+use crate::link::LinkEvent;
 use kumochi_protocol::message::{
     AccountOp, AccountRecovery, AccountView, Action, Cleanup, ErrorKey, PlanState, UserError,
 };
@@ -17,16 +18,15 @@ pub struct Accounts {
 
 impl Accounts {
     pub fn receive(&mut self, current: Option<u64>, generation: u64, view: AccountView) -> bool {
-        self.receive_snapshot(current, generation, view, false)
+        self.receive_snapshot(current, LinkEvent::Account { generation, view })
     }
 
-    pub fn receive_snapshot(
-        &mut self,
-        current: Option<u64>,
-        generation: u64,
-        view: AccountView,
-        unsupported: bool,
-    ) -> bool {
+    pub fn receive_snapshot(&mut self, current: Option<u64>, snapshot: LinkEvent) -> bool {
+        let (generation, view, unsupported) = match snapshot {
+            LinkEvent::Account { generation, view } => (generation, view, false),
+            LinkEvent::AccountUnsupported { generation, view } => (generation, view, true),
+            _ => return false,
+        };
         if current != Some(generation) {
             return false;
         }
