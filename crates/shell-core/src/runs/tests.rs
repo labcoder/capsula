@@ -1,14 +1,18 @@
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
     ControlToBrain, DataToBrain, DataToShell, ErrorKey, Incarnation, MAX_PENDING_TURNS, Phase,
-    RunId, RunOrigin, SceneDescriptor, SceneId, Step, ThreadId, UserError,
+    RunId, RunOrigin, SceneDescriptor, SceneId, ScreenChoice, Step, ThreadId, UserError,
 };
 
+#[cfg(windows)]
 use kumochi_brain::coordinator::{
     ContextBuilt, Coordinator, Effect as BrainEffect, Input, StoreOp,
 };
+#[cfg(windows)]
 use kumochi_brain::engines::TurnEvent;
+#[cfg(windows)]
 use kumochi_brain::store::Store;
+#[cfg(windows)]
 use kumochi_protocol::message::ControlToShell;
 
 use super::{Applied, Refused, Runs, TEXT_KEPT, Target};
@@ -223,7 +227,8 @@ fn switching_a_cached_main_row_before_settings_keeps_kumo_symbolic() {
     runs.settings(ThreadId(99));
     assert_eq!(
         typed(&mut runs, "home"),
-        Input::Turn {
+        DataToBrain::TextSubmit {
+            screen: ScreenChoice::None,
             turn: 1,
             thread: Some(ThreadId(99)),
             text: "home".into()
@@ -243,7 +248,8 @@ fn kumo_is_the_default_and_each_connection_needs_its_own_settings() {
     runs.settings(ThreadId(7));
     assert_eq!(
         typed(&mut runs, "first"),
-        Input::Turn {
+        DataToBrain::TextSubmit {
+            screen: ScreenChoice::None,
             turn: 1,
             thread: Some(ThreadId(7)),
             text: "first".into()
@@ -258,7 +264,8 @@ fn kumo_is_the_default_and_each_connection_needs_its_own_settings() {
     runs.settings(ThreadId(99));
     assert_eq!(
         typed(&mut runs, "next"),
-        Input::Turn {
+        DataToBrain::TextSubmit {
+            screen: ScreenChoice::None,
             turn: 1,
             thread: Some(ThreadId(99)),
             text: "next".into()
@@ -295,7 +302,8 @@ fn a_non_durable_task_and_a_deleted_focus_fall_back_to_kumo() {
     assert_eq!(runs.revision(), revision + 1);
     assert_eq!(
         typed(&mut runs, "home"),
-        Input::Turn {
+        DataToBrain::TextSubmit {
+            screen: ScreenChoice::None,
             turn: 1,
             thread: Some(ThreadId(2)),
             text: "home".into()
@@ -557,6 +565,7 @@ fn a_new_brain_reusing_a_run_id_is_shown_afresh_and_the_same_brain_keeps_its_fen
 
 /// Routes a brain's effects the way the runtime would, storing a `BeginTurn` only when
 /// there's a `store`.
+#[cfg(windows)]
 fn deliver(runs: &mut Runs, mut store: Option<&mut Store>, effects: Vec<BrainEffect>) {
     for effect in effects {
         match effect {
@@ -590,27 +599,18 @@ fn deliver(runs: &mut Runs, mut store: Option<&mut Store>, effects: Vec<BrainEff
     }
 }
 
-/// The turn `runs` sends for `typed`, as the brain takes it.
-fn typed(runs: &mut Runs, typed: &str) -> Input {
+fn typed(runs: &mut Runs, typed: &str) -> DataToBrain {
     let mut sent = None;
     runs.submit(typed, |turn| {
         sent = Some(turn);
         true
     })
     .expect("sent");
-    let Some(DataToBrain::TextSubmit {
-        turn,
-        screen: kumochi_protocol::message::ScreenChoice::None,
-        thread,
-        text,
-    }) = sent
-    else {
-        panic!("a turn was sent")
-    };
-    Input::Turn { turn, thread, text }
+    sent.expect("a turn was sent")
 }
 
 /// A brain started on `store`, as after a restart.
+#[cfg(windows)]
 fn restarted(store: &Store) -> Coordinator {
     let (thread, run) = store.high_water().expect("ids");
     let main = store.main_thread().expect("recovered");
@@ -618,7 +618,20 @@ fn restarted(store: &Store) -> Coordinator {
 }
 
 #[test]
+#[cfg(windows)]
 fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() {
+    let turn_input = |runs: &mut Runs, text| {
+        let DataToBrain::TextSubmit {
+            turn,
+            screen: ScreenChoice::None,
+            thread,
+            text,
+        } = typed(runs, text)
+        else {
+            panic!("a turn was sent")
+        };
+        Input::Turn { turn, thread, text }
+    };
     let dir = crate::scratch::dir("shell-runs");
     let mut store = Store::open(&dir.join("store.db")).expect("store");
     store.recover().expect("recovered");
@@ -629,7 +642,7 @@ fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() 
     runs.apply_scenes(&[]).expect("valid");
     let mut brain = restarted(&store);
     runs.select_thread(None);
-    let turn = typed(&mut runs, "a new thread");
+    let turn = turn_input(&mut runs, "a new thread");
     let effects = brain.handle(turn).expect("turn");
     deliver(&mut runs, None, effects);
 
@@ -639,7 +652,7 @@ fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() 
     runs.settings(ThreadId(1));
     runs.apply_scenes(&[]).expect("valid");
     let mut brain = restarted(&store);
-    let turn = typed(&mut runs, "again");
+    let turn = turn_input(&mut runs, "again");
     assert_eq!(
         turn,
         Input::Turn {
@@ -680,7 +693,7 @@ fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() 
     runs.connected(3);
     runs.settings(ThreadId(1));
     let mut brain = restarted(&store);
-    let turn = typed(&mut runs, "continue");
+    let turn = turn_input(&mut runs, "continue");
     assert!(
         matches!(
             turn,
@@ -1601,7 +1614,8 @@ fn submit_numbers_advance_only_on_enqueue_and_reset_per_connection_without_wrapp
     runs.settings(ThreadId(1));
     assert_eq!(
         typed(&mut runs, "reset"),
-        Input::Turn {
+        DataToBrain::TextSubmit {
+            screen: ScreenChoice::None,
             turn: 1,
             thread: Some(ThreadId(1)),
             text: "reset".into()

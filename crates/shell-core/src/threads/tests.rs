@@ -1,6 +1,7 @@
 use super::*;
 use kumochi_protocol::message::{PageEventKind, RunId, ThreadKind};
 
+#[cfg(windows)]
 mod history_window;
 
 fn issue_page(request: u32, thread: u64) -> DataToShell {
