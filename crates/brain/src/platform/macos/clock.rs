@@ -134,22 +134,29 @@ mod tests {
         let stamp = qpc_at(now + budget).expect("stamp the future deadline");
         let before = qpc_left(stamp).expect("read before spawning the child");
         assert!(before > Duration::ZERO && before <= budget, "{before:?}");
+        #[expect(clippy::disallowed_methods, reason = "spawns while holding spawn_lock")]
         let child = {
             let _spawning = crate::platform::spawn_lock();
             std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", TEST_NAME, "--nocapture"])
                 .env_clear()
                 .env(DEADLINE, stamp.to_string())
-                .output()
-                .expect("run the headless clock child")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("start the headless clock child")
         };
+        let result = child
+            .wait_with_output()
+            .expect("read the headless clock child");
         let after = qpc_left(stamp).unwrap_or_default();
         assert!(
-            child.status.success(),
+            result.status.success(),
             "clock child exited with {}",
-            child.status
+            result.status
         );
-        let stdout = std::str::from_utf8(&child.stdout).unwrap();
+        let stdout = std::str::from_utf8(&result.stdout).unwrap();
         let sampled: u128 = stdout
             .lines()
             .find_map(|line| line.strip_prefix(READING))
