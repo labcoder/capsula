@@ -44,8 +44,21 @@ pub(crate) fn test_is_link(metadata: &std::fs::Metadata) -> bool {
 
 pub(crate) use connected_shell::connected_shell_pid;
 pub(super) use connected_shell::register_shell;
+#[cfg(not(target_os = "macos"))]
+pub(crate) const DATA_ROOT: &str = WINDOWS_DATA_ROOT;
+#[cfg(not(target_os = "macos"))]
+const WINDOWS_DATA_ROOT: &str = "%LOCALAPPDATA%";
+#[cfg(not(any(windows, target_os = "macos")))]
+pub use fs::{config_dir, data_dir};
 #[cfg(not(windows))]
-pub use fs::{config_dir, data_dir, free_space, links_unsupported, replace_file};
+pub use fs::{free_space, links_unsupported, replace_file};
+#[cfg(target_os = "macos")]
+#[path = "macos/folders.rs"]
+mod folders;
+#[cfg(target_os = "macos")]
+pub(crate) use folders::DATA_ROOT;
+#[cfg(target_os = "macos")]
+pub use folders::{config_dir, data_dir};
 #[cfg(windows)]
 pub(crate) use pipe::ClientRefused;
 pub use pipe::Instance;
@@ -260,3 +273,21 @@ pub fn managed_presence() -> ManagedPresence {
 
 #[cfg(all(test, windows))]
 pub(crate) use windows::test_pair;
+
+#[cfg(test)]
+#[test]
+fn missing_data_root_diagnostics_keep_the_windows_form() {
+    let expected = if cfg!(target_os = "macos") {
+        "HOME is not set to an absolute path"
+    } else {
+        "%LOCALAPPDATA% is not set to an absolute path"
+    };
+    assert_eq!(
+        crate::store::StoreError::NoLocalAppData.to_string(),
+        expected
+    );
+    assert_eq!(
+        crate::logging::LoggingError::NoLocalAppData.to_string(),
+        expected
+    );
+}
