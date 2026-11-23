@@ -1,5 +1,18 @@
 # The pipes and the handshake
 
+## Greeting authorization
+
+The existing pipe transport checks the capability in constant time before comparing the build,
+on both control and data. A correct capability with a wrong control build still gets
+`BuildMismatch`; any data greeting that fails either check is refused as a wrong capability.
+
+`Hello::session` keeps the same field and tag layout but fills the capability field with 32
+zero bytes. The local transport selects the authorization method; a session-bound greeting must
+come from the authenticated pair's own reader, match the build, and carry only that zero
+placeholder on either leg. A nonzero placeholder is refused without capability fallback.
+The bound greeting type cannot be constructed on any platform yet, so neither shell startup
+nor brain admission selects session authorization.
+
 ## Queued-required session mode (internal)
 
 The shipped shell selects Legacy: control Hello, Welcome, then data Hello, with their

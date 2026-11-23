@@ -2,6 +2,15 @@
 
 pub mod credential;
 
+/// A greeting read by its own authenticated pair. No platform can produce one yet.
+pub(crate) enum BoundHello {}
+
+impl BoundHello {
+    pub(crate) fn into_greeting(self) -> kumochi_protocol::message::Hello {
+        match self {}
+    }
+}
+
 #[cfg(all(windows, feature = "test-support"))]
 pub use windows::{WindowProbe, WindowSample, WindowSession};
 

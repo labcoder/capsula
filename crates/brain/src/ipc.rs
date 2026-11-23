@@ -10,7 +10,8 @@ use std::time::Duration;
 use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::frame::{self, FrameError, HEADER_LEN, Pipe};
 use kumochi_protocol::message::{
-    AudioSession, Capability, ControlToBrain, ControlToShell, DataToBrain, Hello, Incarnation,
+    AudioSession, CAPABILITY_LEN, Capability, ControlToBrain, ControlToShell, DataToBrain, Hello,
+    Incarnation,
 };
 use kumochi_protocol::tap::Direction;
 use serde::de::DeserializeOwned;
@@ -109,28 +110,53 @@ enum SessionError {
     Io(#[from] io::Error),
 }
 
-/// What to do with a `Hello`.
+/// Authorization selected by the local transport, not by the greeting's contents.
+pub(crate) enum PeerAuth<'a> {
+    Capability {
+        hello: &'a Hello,
+        expected: &'a Capability,
+    },
+    #[expect(
+        dead_code,
+        reason = "only an authenticated pair reader can produce this greeting"
+    )]
+    SessionBound(platform::BoundHello),
+}
+
+/// Why a greeting was refused.
 #[derive(Debug, PartialEq, Eq)]
-enum Verdict {
-    Welcome,
+pub(crate) enum Refusal {
     WrongCapability,
     BuildMismatch,
 }
 
-/// Checks the capability first, in constant time, so nothing else is answered to a client that
-/// can't prove it's the same user.
-fn check_hello(hello: &Hello, identity: &Identity) -> Verdict {
-    let same = hello
-        .capability
-        .expose()
-        .ct_eq(identity.capability.expose());
-    if !bool::from(same) {
-        Verdict::WrongCapability
-    } else if hello.build_id == BUILD_ID {
-        Verdict::Welcome
-    } else {
-        Verdict::BuildMismatch
+/// Checks authorization before disclosing a build mismatch. Mode and epoch are checked separately.
+pub(crate) fn check_hello(auth: PeerAuth<'_>) -> Result<(), Refusal> {
+    let bound_greeting;
+    let hello = match auth {
+        PeerAuth::Capability { hello, expected } => {
+            if !bool::from(hello.capability.expose().ct_eq(expected.expose())) {
+                return Err(Refusal::WrongCapability);
+            }
+            hello
+        }
+        PeerAuth::SessionBound(bound) => {
+            bound_greeting = bound.into_greeting();
+            require_session_placeholder(&bound_greeting.capability)?;
+            &bound_greeting
+        }
+    };
+    if hello.build_id != BUILD_ID {
+        return Err(Refusal::BuildMismatch);
     }
+    Ok(())
+}
+
+fn require_session_placeholder(field: &Capability) -> Result<(), Refusal> {
+    if field.expose() != &[0; CAPABILITY_LEN] {
+        return Err(Refusal::WrongCapability);
+    }
+    Ok(())
 }
 
 /// The control and data pipes.
@@ -216,9 +242,12 @@ impl Pipes {
             ControlToBrain::QueuedHello(hello) => (hello, AudioSession::QueuedRequired),
             _ => return Err(SessionError::NotHello),
         };
-        match check_hello(&hello, identity) {
-            Verdict::WrongCapability => return Err(SessionError::WrongCapability),
-            Verdict::BuildMismatch => {
+        match check_hello(PeerAuth::Capability {
+            hello: &hello,
+            expected: &identity.capability,
+        }) {
+            Err(Refusal::WrongCapability) => return Err(SessionError::WrongCapability),
+            Err(Refusal::BuildMismatch) => {
                 tracing::warn!("build mismatch");
                 let reply = ControlToShell::BuildMismatch {
                     brain_build: BUILD_ID.to_owned(),
@@ -226,7 +255,7 @@ impl Pipes {
                 send(&mut self.control, &reply, tap).await?;
                 return Ok(Session::BuildMismatch);
             }
-            Verdict::Welcome => {}
+            Ok(()) => {}
         }
         let session = match audio {
             AudioSession::Legacy => brain.prepare_issue_session(identity.incarnation),
@@ -261,7 +290,12 @@ impl Pipes {
             DataToBrain::QueuedHello(hello, session) => (hello, Some(session)),
             _ => return Err(SessionError::ClosedEarly),
         };
-        if check_hello(&hello, identity) != Verdict::Welcome {
+        if check_hello(PeerAuth::Capability {
+            hello: &hello,
+            expected: &identity.capability,
+        })
+        .is_err()
+        {
             return Err(SessionError::WrongCapability);
         }
         let expected = (audio == AudioSession::QueuedRequired).then_some(session);
@@ -401,7 +435,7 @@ mod tests {
     #[cfg(windows)]
     use tokio::time::timeout;
 
-    use super::{Identity, Verdict, check_hello};
+    use super::{Identity, PeerAuth, Refusal, check_hello, require_session_placeholder};
     #[cfg(windows)]
     use super::{Pipes, Session, SessionError};
     #[cfg(windows)]
@@ -698,18 +732,18 @@ mod tests {
     #[test]
     fn hello_needs_the_capability_before_anything_else() {
         let id = identity();
-        assert_eq!(check_hello(&hello(1, BUILD_ID), &id), Verdict::Welcome);
+        let check = |hello: &Hello| {
+            check_hello(PeerAuth::Capability {
+                hello,
+                expected: &id.capability,
+            })
+        };
+        assert_eq!(check(&hello(1, BUILD_ID)), Ok(()));
+        assert_eq!(check(&hello(2, BUILD_ID)), Err(Refusal::WrongCapability));
+        assert_eq!(check(&hello(1, "0.0.0+other")), Err(Refusal::BuildMismatch));
         assert_eq!(
-            check_hello(&hello(2, BUILD_ID), &id),
-            Verdict::WrongCapability
-        );
-        assert_eq!(
-            check_hello(&hello(1, "0.0.0+other"), &id),
-            Verdict::BuildMismatch
-        );
-        assert_eq!(
-            check_hello(&hello(2, "0.0.0+other"), &id),
-            Verdict::WrongCapability,
+            check(&hello(2, "0.0.0+other")),
+            Err(Refusal::WrongCapability),
             "a client without the capability doesn't learn it has the wrong build",
         );
         let mut one_byte_off = [1; CAPABILITY_LEN];
@@ -718,7 +752,20 @@ mod tests {
             build_id: BUILD_ID.to_owned(),
             capability: Secret::new(one_byte_off),
         };
-        assert_eq!(check_hello(&near, &id), Verdict::WrongCapability);
+        assert_eq!(check(&near), Err(Refusal::WrongCapability));
+    }
+
+    #[test]
+    fn session_greeting_requires_every_placeholder_byte_to_be_zero() {
+        let mut greeting = Hello::session(BUILD_ID.to_owned());
+        assert_eq!(require_session_placeholder(&greeting.capability), Ok(()));
+        let mut nonzero = [0; CAPABILITY_LEN];
+        nonzero[CAPABILITY_LEN - 1] = 1;
+        greeting.capability = Secret::new(nonzero);
+        assert_eq!(
+            require_session_placeholder(&greeting.capability),
+            Err(Refusal::WrongCapability)
+        );
     }
 
     #[test]

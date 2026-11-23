@@ -197,8 +197,19 @@ pub enum ScreenChoice {
 pub struct Hello {
     /// The shell's [`crate::BUILD_ID`].
     pub build_id: String,
-    /// The capability the shell read from Credential Manager.
+    /// The capability from Credential Manager, or zero on a session-bound transport.
     pub capability: Capability,
+}
+
+impl Hello {
+    /// Constructs a greeting for a session-bound transport, without taking a capability.
+    #[must_use]
+    pub fn session(build_id: String) -> Self {
+        Self {
+            build_id,
+            capability: Capability::new([0; CAPABILITY_LEN]),
+        }
+    }
 }
 
 /// Audio mode selected at paired-session establishment, before output registration.

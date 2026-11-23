@@ -1942,23 +1942,15 @@ fn handshake_pair(
     attempt: Option<Instant>,
     open_data: impl FnOnce() -> Result<PipeClient, LinkError>,
 ) -> Result<Connection, LinkError> {
-    let greeting = match audio {
-        AudioSession::Legacy => ControlToBrain::Hello(hello.clone()),
-        AudioSession::QueuedRequired => ControlToBrain::QueuedHello(hello.clone()),
-    };
     let mut handshake = HandshakeIo(&control, attempt);
-    frame::write(&mut handshake, &greeting, Pipe::Control)?;
+    write_control_hello(&mut handshake, hello.clone(), audio)?;
     let issue_origin = welcome(&mut handshake)?;
     check_attempt(attempt)?;
     let data = open_data()?;
-    let greeting = match audio {
-        AudioSession::Legacy => DataToBrain::Hello(hello),
-        AudioSession::QueuedRequired => {
-            data.set_timeout(Some(HANDSHAKE_TIMEOUT));
-            DataToBrain::QueuedHello(hello, issue_origin)
-        }
-    };
-    frame::write(&mut HandshakeIo(&data, attempt), &greeting, Pipe::Data)?;
+    if audio == AudioSession::QueuedRequired {
+        data.set_timeout(Some(HANDSHAKE_TIMEOUT));
+    }
+    write_data_hello(&mut HandshakeIo(&data, attempt), hello, audio, issue_origin)?;
     if audio == AudioSession::QueuedRequired {
         data.set_timeout(None);
     }
@@ -1968,6 +1960,31 @@ fn handshake_pair(
         data: Arc::new(data),
         issue_origin,
     })
+}
+
+fn write_control_hello(
+    writer: &mut impl Write,
+    hello: Hello,
+    audio: AudioSession,
+) -> Result<(), FrameError> {
+    let greeting = match audio {
+        AudioSession::Legacy => ControlToBrain::Hello(hello),
+        AudioSession::QueuedRequired => ControlToBrain::QueuedHello(hello),
+    };
+    frame::write(writer, &greeting, Pipe::Control)
+}
+
+fn write_data_hello(
+    writer: &mut impl Write,
+    hello: Hello,
+    audio: AudioSession,
+    issue_origin: IssueSession,
+) -> Result<(), FrameError> {
+    let greeting = match audio {
+        AudioSession::Legacy => DataToBrain::Hello(hello),
+        AudioSession::QueuedRequired => DataToBrain::QueuedHello(hello, issue_origin),
+    };
+    frame::write(writer, &greeting, Pipe::Data)
 }
 
 fn check_attempt(attempt: Option<Instant>) -> Result<(), LinkError> {
@@ -2766,6 +2783,10 @@ mod delete_tests;
 #[cfg(test)]
 #[path = "link_diagnostics_tests.rs"]
 mod diagnostics_tests;
+
+#[cfg(test)]
+#[path = "link_greeting_tests.rs"]
+mod greeting_tests;
 
 #[cfg(all(test, windows))]
 #[path = "link_measure_tests.rs"]
