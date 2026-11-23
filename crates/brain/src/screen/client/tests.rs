@@ -116,6 +116,39 @@ async fn both_capture_paths_share_checked_ids_at_exhaustion() {
 }
 
 #[tokio::test]
+async fn a_missing_hold_release_receipt_does_not_retire_a_live_typed_capture() {
+    let mut rig = fixture::start::<Holds>();
+    let client = client(&rig);
+    let old = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.context(owner(7), POINT, until()).await }
+    });
+    let (id, request) = rig.next().await;
+    hold_frame(&rig, id, request).await;
+    let generation = old.await.unwrap().unwrap().generation;
+    let releasing = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.retire(owner(7), Some(generation), until()).await }
+    });
+    let (retire, request) = rig.next().await;
+    assert!(matches!(request, Request::Retire(held) if held == owner(7)));
+    let typed = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.typed_display(POINT, EXPECTED, 5, until()).await }
+    });
+    let (id, request) = rig.next().await;
+    rig.reply(retire, &Reply::Busy).await;
+    assert_eq!(releasing.await.unwrap(), Err(Unreleased));
+    assert_eq!(
+        rig.terminations.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    hold_frame(&rig, id, request).await;
+    let picture = typed.await.unwrap().unwrap();
+    assert_eq!(picture.capture_id(), CaptureId(2));
+}
+
+#[tokio::test]
 async fn aborting_typed_acquisition_queues_exact_revocation() {
     let mut rig = fixture::start::<Holds>();
     let client = client(&rig);

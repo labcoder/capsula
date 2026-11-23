@@ -140,6 +140,7 @@ struct Admission {
     last_capture: u64,
     /// Keeps retired holds from reaching replacement workers, which start with no fence.
     hold_fence: Option<Owner>,
+    typed_until: Option<Instant>,
 }
 
 impl HoldClient {
@@ -322,6 +323,9 @@ impl HoldClient {
             .inner
             .request_stream(request(key, ticket), until)
             .map_err(Closed::Lost)?;
+        if owner.is_none() {
+            admission.typed_until = Some(until);
+        }
         Ok((key, stream))
     }
 
@@ -336,7 +340,8 @@ impl HoldClient {
     /// Retires `owner` and every earlier hold, here and in the worker, and waits until their
     /// frames are released. `holder` is the worker that captured for `owner`, when one answered.
     /// A worker that answers anything but the release, or can't be reached, may still hold a
-    /// frame, so it's ended instead and its exit is the release.
+    /// frame, so it's ended instead and its exit is the release, unless that could stop a
+    /// separate typed capture before its deadline.
     ///
     /// # Errors
     /// `Unreleased` when neither the release nor that exit was shown by `until`.
@@ -363,10 +368,19 @@ impl HoldClient {
             Ok((_, from)) => from,
             Err(_) => holder.ok_or(Unreleased)?,
         };
-        self.inner
-            .retirement()
-            .request(worker)
-            .map_err(|_| Unreleased)?;
+        {
+            let admission = self.admission.lock().map_err(|_| Unreleased)?;
+            if admission
+                .typed_until
+                .is_some_and(|until| Instant::now() < until)
+            {
+                return Err(Unreleased);
+            }
+            self.inner
+                .retirement()
+                .request(worker)
+                .map_err(|_| Unreleased)?;
+        }
         loop {
             match tokio::time::timeout_at(until, exits.recv()).await {
                 Ok(Ok(exit)) if exit.generation == worker => {

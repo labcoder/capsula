@@ -93,7 +93,9 @@ in turn order; credit and other control frames do not wait for capture.
 Holds and typed requests share a checked capture ID sequence. A typed request selects
 the exact display and waits for the shell to confirm continuous exclusion for the
 matching lease and held frame before sealing. Dropping the pending request releases
-only its frame; it cannot retire another hold or a newer capture. Shell-core can
+only its frame; it cannot retire another hold or a newer capture. A hold that can't
+confirm release relies on its frame's expiry while any typed capture might still own
+the worker. Shell-core can
 retry the retained words only as a new, explicit text-only submission for the original
 chat or draft.
 
