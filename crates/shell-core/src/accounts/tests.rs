@@ -55,6 +55,21 @@ fn error(key: ErrorKey, actions: Vec<Action>) -> UserError {
 }
 
 #[test]
+fn a_platform_refusal_cannot_retry_or_sign_in_again() {
+    let mut accounts = Accounts::default();
+    receive(&mut accounts, signed_out());
+    accounts.error(&error(ErrorKey::UnsupportedPlatform, vec![]));
+    assert_eq!(allowed(&accounts), []);
+
+    receive(
+        &mut accounts,
+        signed_in(PlanState::Enabled, Some(AccountRecovery::Retry)),
+    );
+    accounts.error(&error(ErrorKey::UnsupportedPlatform, vec![]));
+    assert_eq!(allowed(&accounts), [AccountOp::SignOut]);
+}
+
+#[test]
 fn enabling_plan_and_signing_in_again_preserve_the_previous_account_until_answered() {
     for (start, op) in [
         (signed_out(), AccountOp::SignIn),

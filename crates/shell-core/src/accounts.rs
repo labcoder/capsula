@@ -117,6 +117,7 @@ impl Accounts {
             | ErrorKey::CredentialsUnavailable
             | ErrorKey::RevocationBacklog
             | ErrorKey::TrustStoreUnavailable
+            | ErrorKey::UnsupportedPlatform
             | ErrorKey::PlanNotEnabled
             | ErrorKey::AccountMisconfigured
             | ErrorKey::SignOutNotDurable
@@ -260,6 +261,15 @@ impl Accounts {
 
     pub fn allows(&self, op: AccountOp) -> bool {
         if self.waiting.is_some() {
+            return false;
+        }
+        if self
+            .error
+            .as_ref()
+            .is_some_and(|error| error.key() == ErrorKey::UnsupportedPlatform)
+            && !matches!(self.view, Some(AccountView::SigningOut { .. }))
+            && matches!(op, AccountOp::SignIn | AccountOp::Retry)
+        {
             return false;
         }
         if op == AccountOp::SignIn
