@@ -59,7 +59,15 @@ jobs:
             Write-Output "::notice::cargo deny skipped: no dependency or CI configuration changes since $base"
           }
       - name: Install the pinned toolchain
-        run: rustup toolchain install
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          rustup toolchain install
+          $pinned = ((rustup show active-toolchain) -split '\s+')[0]
+          foreach ($toolchain in (rustup toolchain list --quiet)) {
+            if ($toolchain -ne $pinned) {
+              rustup toolchain uninstall $toolchain
+            }
+          }
       - uses: Swatinem/rust-cache@v2
         with:
           # rust-cache doesn't hash a virtual workspace's root manifest, where the profiles live.
