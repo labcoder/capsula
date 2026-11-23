@@ -40,7 +40,7 @@ fn shortcut_storage_is_optional_checked_and_downgrade_safe() {
     let mut config = load();
     assert_eq!(config.view().shortcut, ShortcutView::Default);
 
-    for (mask, key) in [(18, None), (64, Some(24))] {
+    for (mask, key) in [(20, None), (64, Some(24))] {
         let chord = ShortcutChord::new(mask, key).expect("checked shortcut");
         apply(&mut config, SettingsOp::SetShortcut(Some(chord)));
         let table = saved(&path);
@@ -104,6 +104,29 @@ fn an_invalid_shortcut_falls_back_without_erasing_it_or_relaxing_privacy() {
         Err(ConfigError::Unreadable)
     ));
     assert_eq!(std::fs::read_to_string(&path).expect("readable"), corrupt);
+}
+
+#[test]
+fn shortcut_with_reserved_escape_projection_survives_other_saves_and_can_be_reset() {
+    let scratch = Scratch::new("config-shortcut-projected-escape");
+    let dir = dir(&scratch);
+    let path = dir.join(CONFIG_FILE);
+    let projected = b"[shortcut]\nfunction = 6\nmodifiers = 17\n";
+    std::fs::write(&path, projected).expect("seeded Ctrl+Shift+F6");
+    let load = || Config::load(Some(dir.clone()), ThreadId(1));
+    let mut config = load();
+    assert_eq!(config.view().shortcut, ShortcutView::Invalid);
+    assert_eq!(config.view().shortcut.effective(), ShortcutChord::DEFAULT);
+    assert_eq!(std::fs::read(&path).expect("readable"), projected);
+
+    apply(&mut config, SettingsOp::SetTaskbar(true));
+    assert!(load().view().show_in_taskbar);
+    assert_eq!(load().view().shortcut, ShortcutView::Invalid);
+    assert!(std::fs::read(&path).expect("readable").ends_with(projected));
+
+    apply(&mut config, SettingsOp::SetShortcut(None));
+    assert_eq!(load().view().shortcut, ShortcutView::Default);
+    assert!(!saved(&path).contains_key("shortcut"));
 }
 
 fn github_default(config: &Config) -> Option<(u64, RepoName)> {

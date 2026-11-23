@@ -17,11 +17,13 @@ Shift and left/right Win; the right Alt bit is refused, including for AltGr. No 
 input history are stored. The chord is two to four distinct sided keys: at least two
 modifier families, or one function key and one to three modifiers including Ctrl, left Alt
 or Win. The set counts each modifier family once. It rules out printable keys, Escape,
-ambiguous keys and multiple trigger keys by representation. The validator also refuses
-Ctrl+left Alt+Shift+Win, Shift+Win+F23, left Alt+F4 and Win+Ctrl+F4, including their sided
-variants and supersets.
+ambiguous keys and multiple trigger keys by representation. The validator refuses Ctrl+Shift
+in any sided form or superset, with or without a function key: projecting it onto Escape would
+conflict with Task Manager. This also rules out the Ctrl+left Alt+Shift+Win alias. It separately
+refuses Shift+Win+F23, left Alt+F4 and Win+Ctrl+F4, including their sided variants and supersets.
 
-The settings snapshot distinguishes a valid override, a missing override and an invalid field.
+The settings snapshot distinguishes an override that passed storage validation, a missing
+override and an invalid field. A stored custom chord does not authorize recognition.
 Missing or reset means left Ctrl+left Alt. An invalid field falls back to that default without
 rewriting the field; unrelated saves preserve it and other unknown settings. A wholly unreadable
 file keeps the existing read-only defaults. A paired `SetShortcut` save or reset uses the
