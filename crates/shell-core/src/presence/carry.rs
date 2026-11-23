@@ -8,6 +8,13 @@ use super::drag::Generation;
 use super::perch::{Check, Drop, Extents, Placement, Targeting, WindowTarget};
 use crate::platform::host::{HostChange, HostId, Label, WatchGen};
 
+/// The perched body's side and the task card, in logical pixels.
+// shortcut: the card is the peek's size; C2b-3 sizes it from the text panel it opens.
+const EXTENTS: Extents = Extents {
+    body: 56,
+    card: [380, 124],
+};
+
 /// The least time between two candidate reads under a moving pointer. A pointer that comes
 /// to rest inside it gets one trailing read at its end.
 const READ_INTERVAL: Duration = Duration::from_millis(50);
@@ -166,7 +173,6 @@ pub fn decide<S>(
     candidates: fn(&mut S) -> &mut Candidates,
     query: impl Fn() -> Option<WindowTarget>,
     from: [i32; 2],
-    extents: Extents,
     mut drain: impl FnMut(&mut S),
 ) -> Option<Placement> {
     if candidates(owner)
@@ -180,7 +186,7 @@ pub fn decide<S>(
     let Drop::Ready(_, w) =
         candidates(owner)
             .targeting
-            .second_check(query().as_ref(), from, extents)
+            .second_check(query().as_ref(), from, EXTENTS)
     else {
         return None;
     };
@@ -193,17 +199,12 @@ mod tests {
     use std::cell::Cell;
     use std::time::{Duration, Instant};
 
-    use super::{Candidates, Event, READ_INTERVAL, Sample, decide};
+    use super::{Candidates, EXTENTS, Event, READ_INTERVAL, Sample, decide};
     use crate::platform::host::{HostChange, HostId, Label, PhysicalRect, WatchGen};
     use crate::presence::perch::target_fixtures::{
         HOST, OTHER, drag, host, placement_above, watch,
     };
-    use crate::presence::perch::{Extents, Placement, WindowTarget};
-
-    const EXTENTS: Extents = Extents {
-        body: 56,
-        card: [380, 124],
-    };
+    use crate::presence::perch::{Placement, WindowTarget};
 
     /// The perch on `host(HOST, 0)` at `EXTENTS`: centred above the caption, with the card on
     /// the left, since on the right it would cover the caption buttons.
@@ -243,7 +244,6 @@ mod tests {
             |owner| &mut owner.candidates,
             || Some(host(HOST, 0)),
             [418, 144],
-            EXTENTS,
             |owner| {
                 for event in std::mem::take(&mut owner.queued[owner.drains]) {
                     owner.candidates.event(event);
