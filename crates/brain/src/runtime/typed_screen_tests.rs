@@ -52,7 +52,7 @@ async fn offer(shell: &mut Shell<DuplexStream>, turn: u32, expected: Option<Type
             turn,
             thread: None,
             draft: DRAFT,
-            display: DISPLAY,
+            display: Box::new(DISPLAY),
         })
         .await;
     assert_eq!(

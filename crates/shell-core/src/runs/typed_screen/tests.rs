@@ -72,7 +72,7 @@ impl Fixture {
                 turn,
                 thread,
                 draft,
-                display: DISPLAY
+                display: Box::new(DISPLAY)
             })
         );
         assert!(

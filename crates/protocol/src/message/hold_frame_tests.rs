@@ -395,11 +395,34 @@ fn typed_screen_proof_appends_only_bounded_redacted_authority() {
     let held = ControlToShell::TypedScreenHeld(proof);
     assert_eq!(postcard::to_allocvec(&confirm).unwrap(), [40, 1, 2, 3, 4]);
     assert_eq!(postcard::to_allocvec(&held).unwrap(), [38, 1, 2, 3, 4]);
-    round_trip(&confirm, Pipe::Control, 9);
-    round_trip(&held, Pipe::Control, 9);
-    redacted(&confirm, Direction::ToBrain, "ConfirmTypedScreen", 9);
-    redacted(&held, Direction::ToShell, "TypedScreenHeld", 9);
+    round_trip(&confirm, Pipe::Control, 5);
+    round_trip(&held, Pipe::Control, 5);
+    redacted(&confirm, Direction::ToBrain, "ConfirmTypedScreen", 5);
+    redacted(&held, Direction::ToShell, "TypedScreenHeld", 5);
     assert!(postcard::from_bytes::<ControlToBrain>(&[40, 1, 2, 3, 0]).is_err());
+
+    let request = ControlToBrain::RequestTypedScreenOffer {
+        turn: 1,
+        thread: None,
+        draft: TypedScreenDraft {
+            revision: 5,
+            selection: 6,
+        },
+        display: Box::new(TypedDisplay {
+            id: NonZeroU64::MIN,
+            bounds: PhysicalRect {
+                origin: [-1, 2],
+                size: [3, 4],
+            },
+            dpi: 96,
+        }),
+    };
+    assert_eq!(
+        postcard::to_allocvec(&request).unwrap(),
+        [38, 1, 0, 5, 6, 1, 1, 4, 3, 4, 96]
+    );
+    round_trip(&request, Pipe::Control, 11);
+    redacted(&request, Direction::ToBrain, "RequestTypedScreenOffer", 11);
 
     let message = DataToBrain::TextSubmit {
         turn: 1,

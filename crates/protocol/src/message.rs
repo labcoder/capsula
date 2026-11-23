@@ -621,7 +621,7 @@ pub enum ControlToBrain {
         /// The current draft and selection.
         draft: TypedScreenDraft,
         /// The display where the draft is composed.
-        display: TypedDisplay,
+        display: Box<TypedDisplay>,
     },
     /// Revoke a pictured submission even before the data pipe has delivered its turn.
     CancelTypedScreen {

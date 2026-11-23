@@ -286,7 +286,7 @@ impl Runs {
                 turn,
                 thread,
                 draft,
-                display,
+                display: Box::new(display),
             },
         ) {
             return false;

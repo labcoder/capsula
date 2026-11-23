@@ -185,9 +185,9 @@ impl Brain {
                 turn,
                 thread,
                 draft,
-                display,
+                ref display,
             } => {
-                self.typed_screen_offer(turn, thread, draft, display, link)?;
+                self.typed_screen_offer(turn, thread, draft, **display, link)?;
             }
             ControlToBrain::CancelTypedScreen { turn, offer } => {
                 let key = TypedKey {
