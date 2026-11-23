@@ -316,13 +316,12 @@ pub struct Session {
     io: Arc<SessionIo>,
     /// The brain and authenticated connection it reached.
     issue_origin: IssueSession,
-    tuning: ShellTuning,
 }
 
 impl Session {
     /// The snapshot authenticated for this connection, never a later connection's values.
     pub fn shell_tuning(&self) -> ShellTuning {
-        self.tuning
+        self.io.tuning
     }
 
     pub fn alive(&self) -> Arc<AtomicBool> {
@@ -430,6 +429,7 @@ impl SessionIo {
 /// One connection's send endpoints, weak so a session the UI holds keeps no writer alive.
 #[derive(Debug)]
 struct SessionIo {
+    tuning: ShellTuning,
     queued: bool,
     narrated: Option<Arc<narrated::Narrated>>,
     control: Option<WeakSender<ControlToBrain>>,
@@ -1418,6 +1418,7 @@ impl Session {
             closing: Arc::default(),
             generation,
             io: Arc::new(SessionIo {
+                tuning: ShellTuning::default(),
                 queued: false,
                 narrated: None,
                 control: None,
@@ -1429,7 +1430,6 @@ impl Session {
                 incarnation,
                 epoch: generation,
             },
-            tuning: ShellTuning::default(),
         }
     }
 
@@ -1704,6 +1704,7 @@ impl Link {
         let narrated =
             (queued && self.shared.narrated).then(|| Arc::new(narrated::Narrated::new()));
         let credit = Arc::new(SessionIo {
+            tuning,
             queued,
             narrated,
             control: Some(control_out.downgrade()),
@@ -1769,7 +1770,6 @@ impl Link {
             generation,
             io: Arc::clone(&credit),
             issue_origin,
-            tuning,
         });
         let mut control_slot = self
             .shared

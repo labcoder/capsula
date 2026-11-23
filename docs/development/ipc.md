@@ -402,8 +402,9 @@ late frames are protocol failures. The Hello and mismatch bytes are unchanged; e
 checking happens before either peer uses the new frame. No font name or text is sent.
 
 The brain sends `ShellTuning` only after the authenticated startup data is complete, before
-Settings and before queued registration. The shell-core link reads it before publishing
-Connected. It rejects missing, invalid or wrong-session tuning, and tears down the connection
+Settings and before queued registration. Before publishing Connected, the shell-core link
+stores the pair in the session's existing shared allocation, so session clones don't grow.
+It rejects missing, invalid or wrong-session tuning, and tears down the connection
 on a later duplicate. A reconnect must authenticate its own values. A hold chord that starts
 before a connection is ready, or under its predecessor, can't arm capture later; release it
 and start a fresh chord. This doesn't block local Quit or cancellation.
