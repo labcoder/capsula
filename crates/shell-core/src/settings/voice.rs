@@ -217,13 +217,14 @@ impl Settings {
             PartState::Failed {
                 key: ErrorKey::UnsupportedPlatform,
                 ..
-            } => return None,
+            }
+            | PartState::Ready
+            | PartState::Unavailable => return None,
             PartState::Failed { .. } => SpeechInputAction::Retry,
             PartState::Unloaded => SpeechInputAction::Reload,
             PartState::Verifying | PartState::Downloading { .. } | PartState::Loading => {
                 SpeechInputAction::Cancel
             }
-            PartState::Ready | PartState::Unavailable => return None,
         };
         Some(SpeechInputIntent {
             generation: self.speech_generation?,
