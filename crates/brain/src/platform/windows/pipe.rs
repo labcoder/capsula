@@ -140,8 +140,7 @@ pub fn create_owner_only(name: &str, instance: Instance) -> io::Result<NamedPipe
         .next()
         .and_then(|sid| sid.strip_suffix(')'))
         .unwrap_or(&user);
-    check_user_only(&dacl_sddl(&server)?, user)
-        .map_err(|reason| io::Error::new(io::ErrorKind::PermissionDenied, reason))?;
+    check_user_only(&dacl_sddl(&server)?, user)?;
     Ok(server)
 }
 
@@ -262,10 +261,10 @@ pub(super) fn user_sid() -> io::Result<String> {
 }
 
 /// Accepts a protected DACL with exactly one allow entry, for `user`.
-fn check_user_only(sddl: &str, user: &str) -> Result<(), String> {
+fn check_user_only(sddl: &str, user: &str) -> io::Result<()> {
     let dacl = sddl
         .strip_prefix("D:")
-        .ok_or_else(|| format!("no DACL in {sddl}"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "pipe has no DACL"))?;
     let (flags, aces) = dacl.split_at(dacl.find('(').unwrap_or(dacl.len()));
     let fields: Vec<&str> = aces
         .strip_prefix('(')
@@ -276,7 +275,10 @@ fn check_user_only(sddl: &str, user: &str) -> Result<(), String> {
     if flags.contains('P') && only_user && aces.get(1..).is_some_and(|rest| !rest.contains('(')) {
         Ok(())
     } else {
-        Err(format!("pipe DACL is not user-only: {sddl}"))
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "pipe DACL is not user-only",
+        ))
     }
 }
 
@@ -442,7 +444,23 @@ mod tests {
     #[test]
     fn the_user_sid_is_a_string_sid() {
         let sid = user_sid().expect("this process has a user");
-        assert!(sid.starts_with("S-1-5-"), "{sid}");
+        assert!(sid.starts_with("S-1-5-"));
+    }
+
+    #[test]
+    fn dacl_refusal_retains_the_kind_but_not_the_descriptor() {
+        for (sddl, message) in [
+            ("O:S-1-5-21-1-2-3-1001", "pipe has no DACL"),
+            (
+                "D:(A;;FA;;;S-1-5-21-1-2-3-1001)",
+                "pipe DACL is not user-only",
+            ),
+        ] {
+            let error = check_user_only(sddl, ME).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(error.to_string(), message);
+            assert!(!format!("{error:?}").contains(ME));
+        }
     }
     #[tokio::test]
     async fn created_pipe_is_owner_only_and_unique() {
