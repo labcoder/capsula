@@ -288,6 +288,7 @@ fn every_entry_point_gets_the_same_exact_environment() {
 
 #[cfg(windows)]
 #[test]
+#[cfg(windows)]
 fn the_system_values_come_from_the_os_and_no_parent_path_entry_reaches_the_child() {
     let system = crate::platform::system_env().expect("system folders");
     let names: Vec<&str> = system

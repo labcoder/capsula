@@ -39,7 +39,7 @@ pub use fault::quiet_failures;
 pub use fault::raise_access_violation;
 pub use folders::{config_dir, data_dir, session_lock_path};
 pub use fs::{free_space, links_unsupported, replace_file};
-pub use job::{ChildPipes, Helper, Job};
+pub use job::{Helper, Job};
 pub(super) use library::{
     Library, RawExport, missing_dependency, modules, open_locked, system_dir,
 };
@@ -65,8 +65,8 @@ pub(crate) use protected::{
     remove_tree, unmark, validate_model_path,
 };
 pub use root_store::trust_roots;
+pub use spawn::spawn;
 pub(crate) use spawn::spawn_if;
-pub use spawn::{Launch, Spawned, Stdio, spawn};
 #[cfg(test)]
 pub(crate) use spawn::{SpawnEdge, observe_next_spawn};
 pub(crate) use window::unchanged as window_unchanged;
