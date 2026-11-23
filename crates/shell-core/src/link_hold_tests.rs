@@ -275,7 +275,8 @@ fn any_session_owner_ending_revokes_only_its_own_live_flag() {
     let old = Session::detached(1, Incarnation(1));
     let current = Session::detached(2, Incarnation(1));
     let writer = EndSession {
-        queued: None,
+        queued: false,
+        generation: old.generation(),
         alive: old.alive(),
         shared: Arc::default(),
     };
@@ -297,6 +298,7 @@ fn control_and_data_eof_revoke_without_dispatching_ui_events() {
         });
         let session = connected(link.events.recv_blocking().expect("connected"));
         assert_eq!(link.handle.link_generation(), session.generation());
+        assert!(link.handle.can_start_voice_gesture(session.generation()));
         if data_loss {
             drop(link.data);
         } else {
@@ -307,6 +309,7 @@ fn control_and_data_eof_revoke_without_dispatching_ui_events() {
             thread::sleep(Duration::from_millis(1));
         }
         assert!(!session.alive().load(Ordering::Acquire));
+        assert!(!link.handle.can_start_voice_gesture(session.generation()));
         assert!(link.link.join().expect("joined"));
     }
 }
