@@ -387,22 +387,29 @@ fn skipped_bow(
 
 #[cfg(test)]
 mod tests {
-    use super::{curve, heads, repaint_curve};
+    use super::repaint_curve;
     use crate::{
         display::Prim,
         geom::{Rect, Vec2},
-        record::{Direction, Head},
         theme::Theme,
     };
     use std::sync::Arc;
 
     #[test]
     fn repaint_replaces_any_old_head_count_and_preserves_other_geometry() {
-        let points = curve(
-            [Vec2::new(0.0, 0.0), Vec2::new(16.0, 0.0)],
-            Direction::Right,
-            0.0,
-        );
+        let points: Arc<[Vec2]> = Arc::from([Vec2::new(0.0, 0.0), Vec2::new(16.0, 0.0)]);
+        let heads = [
+            [
+                Vec2::new(16.0, 0.0),
+                Vec2::new(7.0, 2.0),
+                Vec2::new(7.0, -2.0),
+            ],
+            [
+                Vec2::new(0.0, 0.0),
+                Vec2::new(5.0, -3.0),
+                Vec2::new(5.0, 3.0),
+            ],
+        ];
         let color = Theme::default().line.into();
         let line = Prim::Line {
             points: Arc::clone(&points),
@@ -424,37 +431,23 @@ mod tests {
                 color,
             }));
             old.push(chip.clone());
-            let new = repaint_curve(&old, &points, heads(&points, Head::Both))
-                .expect("repaint wrong heads");
+            let new = repaint_curve(&old, &points, heads.to_vec()).expect("repaint wrong heads");
             assert_eq!(new.len(), 4);
-            assert_eq!(new[0], line);
-            assert_eq!(
-                new[1],
-                Prim::Fill {
-                    points: Arc::from([
-                        Vec2::new(16.0, 0.0),
-                        Vec2::new(7.0, 4.0),
-                        Vec2::new(7.0, -4.0)
-                    ]),
-                    color
-                }
-            );
-            assert_eq!(
-                new[2],
-                Prim::Fill {
-                    points: Arc::from([
-                        Vec2::new(0.0, 0.0),
-                        Vec2::new(9.0, -4.0),
-                        Vec2::new(9.0, 4.0)
-                    ]),
-                    color
-                }
-            );
-            assert_eq!(new[3], chip);
-            assert_eq!(
-                repaint_curve(&new, &points, heads(&points, Head::Both)),
-                None
-            );
+            assert!(new.contains(&line), "the stroke is unchanged");
+            assert!(new.contains(&chip), "the chip is unchanged");
+            for head in heads {
+                assert!(
+                    new.iter().any(|primitive| matches!(
+                        primitive,
+                        Prim::Fill { points, color: actual }
+                            if *actual == color && points.len() == 3
+                                && head.iter().all(|point| points.contains(point))
+                    )),
+                    "repaint replaces the head at {:?}",
+                    head[0]
+                );
+            }
+            assert_eq!(repaint_curve(&new, &points, heads.to_vec()), None);
         }
     }
 }
