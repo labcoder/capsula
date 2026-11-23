@@ -739,6 +739,10 @@ mod tests {
             })
         };
         assert_eq!(check(&hello(1, BUILD_ID)), Ok(()));
+        assert_eq!(
+            check(&Hello::session(BUILD_ID.to_owned())),
+            Err(Refusal::WrongCapability)
+        );
         assert_eq!(check(&hello(2, BUILD_ID)), Err(Refusal::WrongCapability));
         assert_eq!(check(&hello(1, "0.0.0+other")), Err(Refusal::BuildMismatch));
         assert_eq!(
@@ -757,15 +761,17 @@ mod tests {
 
     #[test]
     fn session_greeting_requires_every_placeholder_byte_to_be_zero() {
-        let mut greeting = Hello::session(BUILD_ID.to_owned());
+        let greeting = Hello::session(BUILD_ID.to_owned());
         assert_eq!(require_session_placeholder(&greeting.capability), Ok(()));
-        let mut nonzero = [0; CAPABILITY_LEN];
-        nonzero[CAPABILITY_LEN - 1] = 1;
-        greeting.capability = Secret::new(nonzero);
-        assert_eq!(
-            require_session_placeholder(&greeting.capability),
-            Err(Refusal::WrongCapability)
-        );
+        for index in 0..CAPABILITY_LEN {
+            let mut nonzero = [0; CAPABILITY_LEN];
+            nonzero[index] = 1;
+            assert_eq!(
+                require_session_placeholder(&Secret::new(nonzero)),
+                Err(Refusal::WrongCapability),
+                "nonzero byte at index {index}"
+            );
+        }
     }
 
     #[test]
