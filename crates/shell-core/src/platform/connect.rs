@@ -59,7 +59,8 @@ pub(crate) struct Connection {
     pub(crate) issue_origin: IssueSession,
 }
 
-/// Connects, starting the brain once if none answers, until the link deadline.
+/// Connects, starting the brain once if none answers. Legacy uses the deadline for retries;
+/// `QueuedRequired` uses it as a hard deadline for the whole attempt.
 pub(crate) fn connect_brain(
     brain: &Path,
     session: u32,

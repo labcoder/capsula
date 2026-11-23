@@ -16,9 +16,9 @@ fn a_missing_pipe_only_launches_again_after_a_build_mismatch() {
 
     let launches = std::cell::Cell::new(0);
     let mut outcomes = [
+        (0, LinkError::Busy),
         (0, LinkError::NoBrain),
         (1, LinkError::NoBrain),
-        (1, LinkError::Busy),
         (1, LinkError::BuildMismatch),
         (1, LinkError::NoBrain),
         (2, LinkError::NotOurBrain),

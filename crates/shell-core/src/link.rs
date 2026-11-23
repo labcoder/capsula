@@ -4,7 +4,8 @@
 //! thread, so no read waits behind a write and the UI never waits on the brain. Everything the
 //! brain sends reaches the UI thread as [`LinkEvent`]s on one channel.
 //!
-//! The platform finds or starts the brain and authenticates both legs before attendance.
+//! The shell's platform connector finds or starts the brain, then checks each pipe's server
+//! image before sending that leg's greeting. The link starts attendance after both sends.
 
 use std::fmt;
 use std::io::{BufReader, Read, Write};
