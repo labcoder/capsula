@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use super::custody::acl_absent;
 use super::settings::{write_scratch_settings, write_scratch_settings_with};
 use super::{
-    Destination, Fault, Publication, Scratch, Stage, available_bytes, links_unsupported,
-    named_stat, open_at, rename, sync_directory, unlink, volume,
+    Destination, Fault, Publication, RenameMode, Scratch, Stage, available_bytes,
+    links_unsupported, named_stat, open_at, rename, sync_directory, unlink, volume,
 };
 
 fn approved_parent() -> File {
@@ -265,8 +265,8 @@ fn indeterminate_rename_or_sync_retains_data_and_stops_the_owner() {
             c"next",
             (c"current", Destination::Existing),
             &staged,
-            |directory, from, to, first_save| {
-                rename(directory, from, to, first_save)?;
+            |directory, from, to, mode| {
+                rename(directory, from, to, mode)?;
                 if stage == Stage::Rename {
                     return Err(io::Error::from_raw_os_error(libc::EIO));
                 }
@@ -439,7 +439,13 @@ fn staged_name_substitution_refuses_the_wrong_inode() {
     let mut scratch = fixture();
     let old = seed(&scratch, c"current", b"old bytes");
     let staged = seed(&scratch, c"next", b"intended bytes");
-    rename(&scratch.directory, c"next", c"displaced", false).expect("move the staged name");
+    rename(
+        &scratch.directory,
+        c"next",
+        c"displaced",
+        RenameMode::Replace,
+    )
+    .expect("move the staged name");
     let substitute = seed(&scratch, c"next", b"substitute bytes");
     assert_eq!(
         scratch.replace_with(
@@ -475,7 +481,7 @@ fn first_save_does_not_replace_a_late_destination() {
             c"next",
             (c"current", Destination::MayBeAbsent),
             &staged,
-            |directory, from, to, first_save| {
+            |directory, from, to, mode| {
                 let mut late = open_at(
                     directory,
                     to,
@@ -484,7 +490,7 @@ fn first_save_does_not_replace_a_late_destination() {
                 )
                 .expect("destination arrives after the absence sample");
                 late.write_all(b"late bytes").expect("write late fixture");
-                rename(directory, from, to, first_save)
+                rename(directory, from, to, mode)
             },
             sync_directory,
             File::sync_all,
@@ -510,14 +516,19 @@ fn settings_refusal(kind: ErrorKind) {
     let path = std::env::temp_dir().join("admission/settings");
     let error = write_scratch_settings(&path, b"unadmitted")
         .expect_err("subprocess must not be able to replace settings");
-    assert_eq!(error.kind(), kind);
+    assert_eq!(error.kind(), kind, "exact refusal at the settings boundary");
     assert_eq!(
         error
             .get_ref()
             .and_then(|error| error.downcast_ref::<Fault>()),
-        Some(&Fault::new(Stage::Root, kind))
+        Some(&Fault::new(Stage::Root, kind)),
+        "the writer must refuse at root admission, not later"
     );
-    assert_eq!(std::fs::read(path).expect("read old payload"), b"old bytes");
+    assert_eq!(
+        std::fs::read(path).expect("read old payload"),
+        b"old bytes",
+        "a refused process must not change the named payload"
+    );
 }
 
 #[test]
@@ -534,10 +545,15 @@ fn settings_refuses_mismatched_root() {
 
 #[test]
 #[ignore = "requires a supervised private APFS fixture and must exit 78"]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "spawns under the shared spawn lock"
+)]
 fn settings_uncertainty_exits_owner() {
     let path = std::env::temp_dir().join("admission/settings");
     write_scratch_settings(&path, b"old bytes").expect("admit owner and seed settings");
-    let mut child =
+    let mut child = {
+        let _spawning = crate::platform::spawn_lock();
         std::process::Command::new(std::env::current_exe().expect("fixture executable"))
             .args([
                 "--exact",
@@ -545,7 +561,8 @@ fn settings_uncertainty_exits_owner() {
                 "--ignored",
             ])
             .spawn()
-            .expect("spawn an inherited non-owner in the owner's group");
+            .expect("spawn an inherited non-owner in the owner's group")
+    };
     let ready = std::env::temp_dir().join("quarantine-ready");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !ready.is_file() && Instant::now() < deadline {
