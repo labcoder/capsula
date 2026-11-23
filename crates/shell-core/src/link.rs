@@ -23,7 +23,8 @@ use kumochi_protocol::message::{
     AccountView, AudioSession, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
     DataToShell, Deleted, ErrorKey, GestureId, GitHubView, Hello, HoldStatus, Incarnation,
     IssueSession, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor,
-    SceneDescriptorV1, SettingsOp, SettingsView, TextMetricsV1, ThreadId, ThreadOp, UserError,
+    SceneDescriptorV1, SettingsOp, SettingsView, ShellTuning, TextMetricsV1, ThreadId, ThreadOp,
+    UserError,
 };
 use kumochi_protocol::voice::VoicePart;
 
@@ -315,9 +316,15 @@ pub struct Session {
     io: Arc<SessionIo>,
     /// The brain and authenticated connection it reached.
     issue_origin: IssueSession,
+    tuning: ShellTuning,
 }
 
 impl Session {
+    /// The snapshot authenticated for this connection, never a later connection's values.
+    pub fn shell_tuning(&self) -> ShellTuning {
+        self.tuning
+    }
+
     pub fn alive(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.alive)
     }
@@ -462,6 +469,8 @@ enum LinkError {
     Capability(#[from] CredentialError),
     #[error("the brain closed the connection during the handshake")]
     Rejected,
+    #[error("missing or invalid shell tuning for this connection")]
+    Tuning,
     #[error("the queued connection attempt expired")]
     ConnectExpired,
     #[error("the brain is from another build")]
@@ -481,6 +490,7 @@ struct Connection {
     data: Arc<PipeClient>,
     issue_origin: IssueSession,
     drawing_font_family: Option<Arc<str>>,
+    tuning: ShellTuning,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -881,14 +891,21 @@ impl LinkHandle {
 
     // shortcut: A contended first edge refuses the press; if it shows in use, publish eligibility as one atomic word.
     pub fn can_start_voice_gesture(&self, generation: u64) -> bool {
-        self.audio_session() == AudioSession::Legacy
-            || self.shared.outbox.try_lock().is_ok_and(|outbox| {
-                outbox.as_ref().is_some_and(|outbox| {
-                    outbox.generation == generation
-                        && outbox.queued_input.consent_answers == 0
-                        && self.shared.output.try_queued_hold_ready(generation)
-                })
+        let legacy = self.audio_session() == AudioSession::Legacy;
+        #[cfg(any(test, feature = "test-support"))]
+        if legacy && self.control_recording.is_some() {
+            return generation == self.link_generation();
+        }
+        self.shared.outbox.try_lock().is_ok_and(|outbox| {
+            outbox.as_ref().is_some_and(|outbox| {
+                outbox.generation == generation
+                    && !outbox.closing.load(Ordering::Acquire)
+                    && !outbox.pipe.is_aborted()
+                    && (legacy
+                        || (outbox.queued_input.consent_answers == 0
+                            && self.shared.output.try_queued_hold_ready(generation)))
             })
+        })
     }
 
     /// Checks the exact pair before presence changes voice panels or attempts the offer.
@@ -1391,6 +1408,7 @@ impl Session {
                 incarnation,
                 epoch: generation,
             },
+            tuning: ShellTuning::default(),
         }
     }
 
@@ -1637,6 +1655,7 @@ impl Link {
             data,
             issue_origin,
             drawing_font_family,
+            tuning,
         } = connection;
         let queued = self.audio == AudioSession::QueuedRequired;
         if queued && let Some(refused) = self.queued_start_refusal(&control, events, reconnect_by) {
@@ -1728,6 +1747,7 @@ impl Link {
             generation,
             io: Arc::clone(&credit),
             issue_origin,
+            tuning,
         });
         let mut control_slot = self
             .shared
@@ -1887,7 +1907,7 @@ impl Link {
         deadline: Instant,
         mut handshake: impl FnMut(Option<Instant>) -> Result<Connection, LinkError>,
     ) -> Result<Connection, LinkError> {
-        let attempt = (self.audio == AudioSession::QueuedRequired).then_some(deadline);
+        let attempt = Some(deadline);
         let mut launched = false;
         loop {
             check_attempt(attempt)?;
@@ -1958,29 +1978,31 @@ fn handshake_pair(
     drawing: DrawingText,
     open_data: impl FnOnce() -> Result<PipeClient, LinkError>,
 ) -> Result<Connection, LinkError> {
+    let limit = Instant::now() + HANDSHAKE_TIMEOUT;
+    let deadline = Some(attempt.map_or(limit, |end| end.min(limit)));
     let greeting = match audio {
         AudioSession::Legacy => ControlToBrain::Hello(hello.clone()),
         AudioSession::QueuedRequired => ControlToBrain::QueuedHello(hello.clone()),
     };
-    let mut handshake = HandshakeIo(&control, attempt);
+    let mut handshake = HandshakeIo(&control, deadline);
     frame::write(&mut handshake, &greeting, Pipe::Control)?;
     let issue_origin = welcome(&mut handshake)?;
-    check_attempt(attempt)?;
-    let data_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    let data_deadline = attempt.map_or(data_deadline, |deadline| deadline.min(data_deadline));
+    check_attempt(deadline)?;
     let data = open_data()?;
     let greeting = match audio {
         AudioSession::Legacy => DataToBrain::Hello(hello),
         AudioSession::QueuedRequired => DataToBrain::QueuedHello(hello, issue_origin),
     };
-    let mut handshake = HandshakeIo(&data, Some(data_deadline));
-    frame::write(&mut handshake, &greeting, Pipe::Data)?;
+    let mut data_handshake = HandshakeIo(&data, deadline);
+    frame::write(&mut data_handshake, &greeting, Pipe::Data)?;
     let profile = drawing.profile.filter(TextMetricsV1::valid);
     frame::write(
-        &mut handshake,
+        &mut data_handshake,
         &DataToBrain::TextMetrics(profile),
         Pipe::Data,
     )?;
+    let tuning = read_shell_tuning(&mut handshake, issue_origin)?;
+    check_attempt(deadline)?;
     data.set_timeout(None);
     control.set_timeout(None);
     Ok(Connection {
@@ -1988,7 +2010,22 @@ fn handshake_pair(
         data: Arc::new(data),
         issue_origin,
         drawing_font_family: drawing.font_family,
+        tuning,
     })
+}
+
+fn read_shell_tuning(
+    control: &mut impl Read,
+    origin: IssueSession,
+) -> Result<ShellTuning, LinkError> {
+    match frame::read(control, Pipe::Control)? {
+        Some(ControlToShell::ShellTuning { session, tuning })
+            if session == origin && tuning.valid() =>
+        {
+            Ok(tuning)
+        }
+        _ => Err(LinkError::Tuning),
+    }
 }
 
 fn check_attempt(attempt: Option<Instant>) -> Result<(), LinkError> {
@@ -2064,6 +2101,7 @@ fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError> {
             | ControlToShell::SpeechRevoked { .. }
             | ControlToShell::SpeechDecisionTaken(..)
             | ControlToShell::QueuedAudioRegistered(..)
+            | ControlToShell::ShellTuning { .. }
             | ControlToShell::VoiceHoldStatus { .. }
             | ControlToShell::VoiceHoldStopAccepted { .. }
             | ControlToShell::ScreenHolds(_)
@@ -2542,7 +2580,11 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::ThreadModelSet { .. } | ControlToShell::NoVisual { .. })) => {}
-            Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
+            Ok(Some(
+                ControlToShell::Welcome { .. }
+                | ControlToShell::BuildMismatch { .. }
+                | ControlToShell::ShellTuning { .. },
+            )) => {
                 tracing::warn!("the brain repeated its handshake; ending the connection");
                 return;
             }

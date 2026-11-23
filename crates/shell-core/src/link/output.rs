@@ -10,7 +10,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Instant;
 
 use async_channel::{Receiver, Sender};
-use kumochi_protocol::message::{GestureId, OutputGeneration, RunId};
+use kumochi_protocol::message::{GestureId, OutputGeneration, RunId, ShellTuning};
 
 use crate::platform::microphone::{Generation, MicOwner, Reserved, Running};
 #[cfg(any(test, feature = "test-support"))]
@@ -629,7 +629,11 @@ impl OutputOwner {
     ///
     /// # Errors
     /// `Busy`, what the check refuses, or `Stale` when the generation can't start.
-    pub fn start_mic(&self, claim: &Claim) -> Result<Reserved, Denied> {
+    pub fn start_mic_with_tuning(
+        &self,
+        claim: &Claim,
+        tuning: ShellTuning,
+    ) -> Result<Reserved, Denied> {
         let state = self.try_lock()?;
         state.check(claim)?;
         state
@@ -637,8 +641,13 @@ impl OutputOwner {
             .as_ref()
             .and_then(|inhibit| inhibit.mic.as_ref())
             .ok_or(Denied::Inhibited)?
-            .reserve()
+            .reserve_with_tuning(tuning)
             .map_err(|_| Denied::Stale)
+    }
+
+    #[cfg(test)]
+    pub(super) fn start_mic(&self, claim: &Claim) -> Result<Reserved, Denied> {
+        self.start_mic_with_tuning(claim, ShellTuning::default())
     }
 
     /// Accepts `mic`'s running receipt under `claim`, with its copies still closed: the caller

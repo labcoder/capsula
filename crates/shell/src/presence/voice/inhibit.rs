@@ -684,7 +684,7 @@ impl Presence {
             Err(Denied::Busy) if gate.recheck(gates, executor) => return Ok(()),
             Err(_) => return Err(Text::TurnBusy),
         };
-        match output.start_mic(&claimed) {
+        match output.start_mic_with_tuning(&claimed, hold.session.shell_tuning()) {
             Ok(reserved) => {
                 gate.stage = Stage::Admitted {
                     deadline: None,

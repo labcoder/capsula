@@ -13,9 +13,8 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{
     CaptureFailure, CaptureFor, ConnectionKind, ControlToBrain, ControlToShell, DataToShell,
-    HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus, MAX_HOLD_CHUNKS,
-    MAX_TRANSCRIPT_BYTES, MicPcm, ModelChoice, ModelSlug, NoticeRevision, PartState, ScreenClass,
-    ScreenHolds, ScreenOff, SettingsOp, ThreadId, ThreadOp,
+    HoldFailure, HoldStatus, MAX_HOLD_CHUNKS, MAX_TRANSCRIPT_BYTES, MicPcm, ModelChoice, ModelSlug,
+    NoticeRevision, PartState, ScreenClass, ScreenHolds, ScreenOff, SettingsOp, ThreadId, ThreadOp,
 };
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::Instant;
@@ -553,8 +552,7 @@ impl Brain {
                     self.hold_end(HoldStatus::Failed(failure), link)?;
                 } else {
                     if hold.released && self.holds.debt.is_none() {
-                        hold.deadline = Instant::now()
-                            + Duration::from_millis(u64::from(HOLD_DRAIN_TIMEOUT_MS));
+                        hold.deadline = Instant::now() + self.config.shell_tuning().drain();
                     }
                     self.hold_decode(link)?;
                 }
@@ -771,7 +769,8 @@ impl Brain {
         hold.ask = Some(ask);
         hold.audio = Some(audio::Audio::new());
         hold.deadline = Instant::now()
-            + Duration::from_millis(u64::from(HOLD_START_TIMEOUT_MS + MAX_HOLD_CHUNKS * 20));
+            + self.config.shell_tuning().start()
+            + Duration::from_millis(u64::from(MAX_HOLD_CHUNKS) * 20);
         self.holds.debt = Some(hold.key);
         self.holds.debt_peer = self.holds.peer.clone();
         self.holds.gate.overflow.store(0, Ordering::SeqCst);

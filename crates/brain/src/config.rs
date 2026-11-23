@@ -12,7 +12,7 @@ use crate::store::choice::StoredChoice;
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
     AccountView, AssistantName, DockPosition, ErrorKey, MaxFrameRate, OnboardingStep, RepoName,
-    RunId, SettingsOp, SettingsView, SttUnload, ThreadId, UserName,
+    RunId, SettingsOp, SettingsView, ShellTuning, SttUnload, ThreadId, UserName,
 };
 use kumochi_protocol::voice::VoicePart;
 use toml::{Table, Value};
@@ -90,6 +90,7 @@ pub(crate) struct Config {
     token_tuning: TokenTuning,
     drawing_tuning: DrawingTuning,
     context_tuning: ContextTuning,
+    shell_tuning: ShellTuning,
     /// What an absent `onboarded` key reads as, fixed at start: true when the profile was
     /// already in use, or the file can't be written, so neither ever asks for onboarding.
     in_use: bool,
@@ -160,6 +161,7 @@ impl Config {
             token_tuning: TokenTuning::from_table(&table),
             drawing_tuning: DrawingTuning::from_table(&table),
             context_tuning: ContextTuning::from_table(&table),
+            shell_tuning: tuning::shell_tuning(&table),
             table: Ok(table),
             view,
             in_use: false,
@@ -182,6 +184,7 @@ impl Config {
             token_tuning: TokenTuning::default(),
             drawing_tuning: DrawingTuning::default(),
             context_tuning: ContextTuning::default(),
+            shell_tuning: ShellTuning::default(),
             in_use: true,
         }
     }
@@ -254,6 +257,10 @@ impl Config {
 
     pub(crate) fn context_tuning(&self) -> ContextTuning {
         self.context_tuning
+    }
+
+    pub(crate) fn shell_tuning(&self) -> ShellTuning {
+        self.shell_tuning
     }
 
     pub(crate) fn default_choice(&self) -> StoredChoice {

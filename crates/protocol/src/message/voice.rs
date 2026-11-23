@@ -15,10 +15,6 @@ pub const MIN_RATE: u32 = 8_000;
 pub const MAX_RATE: u32 = 192_000;
 /// The most chunks one hold sends: 60 s of 20 ms chunks [guess].
 pub const MAX_HOLD_CHUNKS: u32 = 3_000;
-/// Unmeasured open/start upper bound, generous for Bluetooth; revisit after native review.
-pub const HOLD_START_TIMEOUT_MS: u32 = 10_000;
-/// Unmeasured final-audio drain upper bound; revisit after native review, never a stop receipt.
-pub const HOLD_DRAIN_TIMEOUT_MS: u32 = 2_000;
 /// The longest single segment [guess].
 pub const MAX_SEGMENT_SECONDS: u32 = 30;
 /// Queued but unplayed audio across a run, on both sides [guess].

@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use kumochi_protocol::message::{ControlToBrain, DataToBrain, HOLD_DRAIN_TIMEOUT_MS};
+use kumochi_protocol::message::{ControlToBrain, DataToBrain};
 use kumochi_shell_core::link::output::Denied;
 use zeroize::Zeroize as _;
 
@@ -37,6 +37,7 @@ impl Presence {
         self.voice.pending.as_mut().expect("admitted hold").source = Source::Recording;
         let (link, gates) = (self.link.clone(), self.voice.gates.clone());
         let (watch, alive) = (token.clone(), session.alive());
+        let drain = session.shell_tuning().drain();
         let warning = cx.spawn({
             let (watch, alive) = (watch.clone(), session.alive());
             async move |this, cx| {
@@ -68,9 +69,7 @@ impl Presence {
                     watch.mode(&alive, cx.background_executor().now()),
                     Ok(Mode::Preparing | Mode::Collecting)
                 ) {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(u64::from(HOLD_DRAIN_TIMEOUT_MS)))
-                        .await;
+                    cx.background_executor().timer(drain).await;
                     let _applied = this.update(cx, |this, cx| {
                         if !watch.retired()
                             && this.voice.pending.as_ref().is_some_and(|hold| {

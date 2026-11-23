@@ -71,8 +71,8 @@ pub struct Fence {
     gate: CollectionGate,
     last: u32,
     current: Option<GestureId>,
-    /// The current gesture began while paused, so it stays dropped to its end.
-    dropped: bool,
+    /// The accepted connection on which the current chord began, if any.
+    origin: Option<u64>,
 }
 
 impl Fence {
@@ -81,7 +81,7 @@ impl Fence {
             gate,
             last: 0,
             current: None,
-            dropped: false,
+            origin: None,
         }
     }
 
@@ -94,7 +94,7 @@ impl Fence {
         now: Instant,
         paused: &Cell<bool>,
     ) -> Delivery {
-        self.reduce_with_keyboard_read(state, event, now, paused, || None)
+        self.reduce_with_keyboard_read(state, event, now, || (!paused.get()).then_some(0), || None)
     }
 
     pub fn reduce_with_keyboard_read(
@@ -102,11 +102,10 @@ impl Fence {
         state: &mut Gesture,
         event: Event,
         now: Instant,
-        paused: &Cell<bool>,
+        session: impl Fn() -> Option<u64>,
         read: impl FnOnce() -> Option<Instant>,
     ) -> Delivery {
         let now = state.recover(event, read).unwrap_or(now);
-        let paused = paused.get();
         let reduced = state.recognize(event, now, |reason| {
             tracing::debug!(stage = ?InputStage::Gesture, ?reason, "held speech input boundary");
         });
@@ -130,8 +129,9 @@ impl Fence {
                     if self.current.is_none() {
                         self.gate.cancel_current();
                     }
-                    self.dropped = paused;
-                    (!paused).then(|| self.current.map_or(Intent::Unavailable, Intent::Warm))
+                    self.origin = session();
+                    self.origin
+                        .map(|_| self.current.map_or(Intent::Unavailable, Intent::Warm))
                 }
                 Some(Effect::HoldStarted) => {
                     let by = match event {
@@ -142,7 +142,7 @@ impl Fence {
                         Event::Scheduled => Recognition::Scheduled,
                         _ => Recognition::Deadline,
                     };
-                    if paused || self.dropped {
+                    if self.origin.is_none() || self.origin != session() {
                         self.current = None;
                         tracing::debug!(stage = ?InputStage::Gesture, reason = ?InputReason::Paused, ?by, "held speech input boundary");
                         continue;
@@ -445,6 +445,55 @@ mod tests {
         );
         assert!(matches!(intents(&paused)[..], [Intent::Warm(GestureId(2))]));
         assert_eq!(gate.latest(), 0);
+    }
+
+    #[test]
+    fn only_a_chord_started_on_the_current_connection_can_arm_capture() {
+        let gate = CollectionGate::default();
+        let mut fence = Fence::new(gate.clone());
+        let mut state = Gesture::default();
+        let at = Instant::now();
+        for (index, origin) in [None, Some(7), Some(8)].into_iter().enumerate() {
+            let start = at + Duration::from_secs(u64::try_from(index).unwrap() * 2);
+            let mut trigger = |event, when, session| {
+                fence.reduce_with_keyboard_read(&mut state, event, when, || session, || None)
+            };
+            for key in [Key::LeftControl, Key::LeftAlt] {
+                trigger(
+                    Event::Key {
+                        key,
+                        edge: Edge::Down,
+                    },
+                    start,
+                    origin,
+                );
+            }
+            let recognised = trigger(Event::Deadline, start + Duration::from_millis(300), Some(8));
+            if origin == Some(8) {
+                let Some(Intent::Recognized {
+                    generation: Ok(token),
+                    ..
+                }) = &recognised.intents[0]
+                else {
+                    panic!("a new chord arms capture");
+                };
+                assert_eq!(token.gesture(), GestureId(3));
+                token.discard_unstarted().unwrap();
+            } else {
+                assert!(recognised.intents.iter().all(Option::is_none));
+                assert_eq!(gate.latest(), 0);
+            }
+            for key in [Key::LeftAlt, Key::LeftControl] {
+                trigger(
+                    Event::Key {
+                        key,
+                        edge: Edge::Up,
+                    },
+                    start + Duration::from_millis(400),
+                    Some(8),
+                );
+            }
+        }
     }
 
     #[test]

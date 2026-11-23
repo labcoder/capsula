@@ -14,8 +14,8 @@ never writes a `[tuning]` table itself, and it keeps yours when it saves a setti
 2. Edit `config.toml` and save it.
 3. Start Kumochi. Values are read once, at start.
 
-Each value has a range. A value outside it is moved to the nearer end, and a value that isn't
-a whole number is ignored. Values in one group that don't fit together are all ignored, and that
+Each value has a range. A nonnegative integer outside it is moved to the nearer end. Other
+values use their defaults. Values in one group that don't fit together are all ignored, and that
 group uses its defaults. Kumochi still starts, and its log names the key it didn't take, never
 its value. Don't put secrets or anything personal in this table. If the file isn't valid TOML,
 for example because a key appears twice, Kumochi runs on its defaults and refuses to save
@@ -161,4 +161,18 @@ notes_count = 32
 reread_bytes = 32768
 # 10–20: text events a new history.read result may show, still subject to its byte limit.
 read_events_count = 20
+```
+
+## Hold to talk
+
+These timings can only shorten waits. The microphone's 60-second recording ceiling and checks
+that confirm it has stopped don't change. Negative numbers use the default; nonnegative values
+outside the range are clamped.
+
+```toml
+[tuning.hold]
+# 2000–10000 milliseconds: microphone startup time after its start is reserved.
+start_ms = 10000
+# 500–2000 milliseconds: time to finish draining the last audio.
+drain_ms = 2000
 ```

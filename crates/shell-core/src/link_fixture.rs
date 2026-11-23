@@ -9,7 +9,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use async_channel::Receiver;
-use kumochi_protocol::message::{AudioSession, Incarnation, IssueSession};
+use kumochi_protocol::message::{AudioSession, Incarnation, IssueSession, ShellTuning};
 
 use super::{Attendance, Connection, Link, LinkEvent, LinkHandle, Session, Shared, start};
 use crate::platform::{PipeClient, test_pair};
@@ -326,6 +326,7 @@ fn attended_with(
             epoch: 91,
         },
         drawing_font_family: None,
+        tuning: ShellTuning::default(),
     };
     let link = thread::spawn(move || {
         let result = start.link.attend(connection, &start.events);
