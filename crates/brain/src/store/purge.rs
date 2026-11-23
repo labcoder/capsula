@@ -444,7 +444,7 @@ pub(super) fn drain(
 }
 
 /// Takes the snapshot through a read-only connection, which never holds the store's writer.
-pub(super) fn snapshot(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
+fn snapshot(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
     // Checked before each step too: a short statement may never call the progress handler.
     if cancel.stopped() {
         return Ok(false);
@@ -481,7 +481,7 @@ fn held_inside(
 
 /// Clears the owed row in the snapshot and rebuilds its FTS index from the live events, which
 /// drops the deleted rows' index keys.
-pub(super) fn clean(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
+fn clean(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
     #[cfg(test)]
     cancel.pauses.reach(Point::Clean);
     // Checked before each step too: a short statement may never call the progress handler.
@@ -502,7 +502,7 @@ pub(super) fn clean(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreError>
 
 /// Writes the snapshot into fresh pages, so no gap the rebuild left survives, removes the
 /// snapshot and syncs the result.
-pub(super) fn compact(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
+fn compact(db: &Path, cancel: &Arc<Cancel>) -> Result<bool, StoreError> {
     // Checked before each step too: a short statement may never call the progress handler.
     if cancel.stopped() {
         return Ok(false);

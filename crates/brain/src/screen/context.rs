@@ -156,11 +156,6 @@ impl ScreenContext {
     pub(super) fn jpeg(&self) -> &[u8] {
         &self.jpeg
     }
-
-    #[cfg(test)]
-    pub(super) fn transform(&self) -> CaptureTransform {
-        self.transform
-    }
 }
 
 impl Drop for ScreenContext {

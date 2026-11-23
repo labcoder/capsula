@@ -290,25 +290,25 @@ fn local_and_reused_transport_failures_remain_closed() {
         Recovery::FixRequest,
     );
     for (source, expected) in [
-        (model::error::Failure::Request, "Request"),
-        (model::error::Failure::Credential, "Credential"),
-        (model::error::Failure::Spent, "Spent"),
-        (model::error::Failure::Rebuild, "Rebuild"),
-        (model::error::Failure::Transport, "Transport"),
-        (model::error::Failure::Withheld, "Withheld"),
-        (model::error::Failure::Incomplete, "Truncated"),
-        (model::error::Failure::Truncated, "Truncated"),
-        (model::error::Failure::Protocol, "Protocol"),
+        (model::error::Failure::Request, Failure::Request),
+        (model::error::Failure::Credential, Failure::Credential),
+        (model::error::Failure::Spent, Failure::Spent),
+        (model::error::Failure::Rebuild, Failure::Rebuild),
+        (model::error::Failure::Transport, Failure::Transport),
+        (model::error::Failure::Withheld, Failure::Withheld),
+        (model::error::Failure::Incomplete, Failure::Truncated),
+        (model::error::Failure::Truncated, Failure::Truncated),
+        (model::error::Failure::Protocol, Failure::Protocol),
         (
             model::error::Failure::Provider(model::error::ProviderError {
                 status: 401,
                 code: None,
                 param: None,
             }),
-            "Protocol",
+            Failure::Protocol,
         ),
     ] {
-        assert_eq!(format!("{:?}", Failure::from(source)), expected);
+        assert_eq!(Failure::from(source), expected);
     }
 }
 

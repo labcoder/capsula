@@ -197,17 +197,4 @@ mod tests {
             "a bad hive"
         );
     }
-
-    #[test]
-    #[ignore = "observes Rez's real managed sources; run by hand: cargo test -p kumochi-brain host_managed -- --ignored --nocapture"]
-    fn host_managed_presence() {
-        let presence = managed_presence();
-        assert!(
-            presence
-                .all()
-                .iter()
-                .all(|source| *source != Presence::Indeterminate),
-            "{presence:?}"
-        );
-    }
 }

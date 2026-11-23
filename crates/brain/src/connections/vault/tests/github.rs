@@ -13,21 +13,6 @@ fn bytes(value: &[u8]) -> SecretBytes {
 const VALID: &[u8] = br#"{"token":"ghu_fake_test_only_token","refresh":"ghr_fake_test_only_token","expires_at_s":1700028800,"refresh_expires_at_s":1715897600,"refresh_sent":false,"login":"octocat","id":7}"#;
 
 #[test]
-fn a_fresh_vault_loads_no_github_account() {
-    let (_scratch, path, service, store) = setup("github-empty");
-    let mut vault = open(&store, &service, &path);
-    assert!(matches!(
-        vault.github(Job::Load {
-            stamp: Stamp { generation: 1 }
-        }),
-        Reply::Loaded {
-            stamp: Stamp { generation: 1 },
-            result: Ok(None)
-        }
-    ));
-}
-
-#[test]
 fn a_refused_github_removal_stays_visible_after_restart_until_cleanup_succeeds() {
     let (_scratch, path, service, store) = setup("github-restart-refused");
     let mut vault = open(&store, &service, &path);
@@ -199,6 +184,15 @@ fn a_stale_save_cannot_write_and_a_current_save_precedes_removal() {
     };
     let (_scratch, path, service, store) = setup("github-save-fence");
     let mut vault = open(&store, &service, &path);
+    assert!(matches!(
+        vault.github(Job::Load {
+            stamp: Stamp { generation: 1 }
+        }),
+        Reply::Loaded {
+            stamp: Stamp { generation: 1 },
+            result: Ok(None)
+        }
+    ));
     let fence = Arc::new(AtomicU64::new(2));
     for (generation, expected) in [(1, false), (2, true)] {
         let reply = vault.github(Job::Save {

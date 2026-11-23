@@ -111,50 +111,65 @@ impl DrawReceipt {
 
 #[cfg(test)]
 mod tests {
-    use super::{DrawReceipt, DrawStage, REPLAY_STEPS};
+    use std::sync::{Arc, Mutex};
+
     use kumochi_protocol::message::{RunId, SceneId};
+
+    use super::{DrawReceipt, DrawStage, REPLAY_STEPS};
 
     #[test]
     fn receipt_contains_only_key_size_and_ordered_clocks() {
         let (run, scene) = (RunId(9), SceneId(11));
-        let mut draw = DrawReceipt::default();
-        assert!(draw.mark(run, 100, DrawStage::Call));
-        for (index, step) in REPLAY_STEPS.into_iter().enumerate() {
-            assert!(draw.mark(run, 120, DrawStage::First(index)));
-            assert!(draw.mark(
-                run,
-                130,
-                DrawStage::Close {
-                    record: index,
-                    bytes: 15
+        let pid = std::process::id();
+        for pipe_missing in [false, true] {
+            let out = Arc::new(Mutex::new(Vec::new()));
+            let capture = Arc::clone(&out);
+            let observation =
+                super::super::fixture_mode(1, Some(DrawReceipt::default()), move |line| {
+                    capture.lock().unwrap().push(line.to_owned());
+                });
+            observation.mark_draw(run, Some(100), DrawStage::Call);
+            for (index, step) in REPLAY_STEPS.into_iter().enumerate() {
+                observation.mark_draw(run, Some(120), DrawStage::First(index));
+                observation.mark_draw(
+                    run,
+                    Some(130),
+                    DrawStage::Close {
+                        record: index,
+                        bytes: 15,
+                    },
+                );
+                observation.mark_draw(run, Some(140), DrawStage::Durable { scene, step });
+                if !pipe_missing || index != 2 {
+                    observation.mark_draw(
+                        run,
+                        Some(155),
+                        DrawStage::Pipe {
+                            scene,
+                            index: u32::try_from(index).unwrap(),
+                            step,
+                        },
+                    );
                 }
-            ));
-            assert!(draw.mark(run, 140, DrawStage::Durable { scene, step }));
-            assert!(draw.mark(
-                run,
-                155,
-                DrawStage::Pipe {
-                    scene,
-                    index: u32::try_from(index).unwrap(),
-                    step
-                }
-            ));
+            }
+            observation.finish();
+            let rows = out.lock().unwrap();
+            assert!(rows[0].starts_with(&format!("ready {pid} 1 ")));
+            if pipe_missing {
+                assert!(!rows.iter().any(|line| line.starts_with("final ")));
+            } else {
+                assert_eq!(rows.len(), 6);
+                assert!(rows[5].starts_with(&format!("final {pid} 0 0 ")));
+                assert_eq!(
+                    rows[1..5],
+                    [
+                        format!("draw {pid} 9 11 0 15 100 120 130 140 155"),
+                        format!("draw {pid} 9 11 1 15 100 120 130 140 155"),
+                        format!("draw {pid} 9 11 2 15 100 120 130 140 155"),
+                        format!("draw {pid} 9 11 3 15 100 120 130 140 155"),
+                    ]
+                );
+            }
         }
-        let mut rows = Vec::new();
-        draw.write(17, &mut rows).unwrap();
-        assert_eq!(
-            String::from_utf8(rows).unwrap(),
-            concat!(
-                "draw 17 9 11 0 15 100 120 130 140 155\n",
-                "draw 17 9 11 1 15 100 120 130 140 155\n",
-                "draw 17 9 11 2 15 100 120 130 140 155\n",
-                "draw 17 9 11 3 15 100 120 130 140 155\n",
-            )
-        );
-        draw.steps[2].pipe = None;
-        assert_eq!(
-            draw.write(17, &mut Vec::new()).unwrap_err().to_string(),
-            "incomplete drawing timing receipt"
-        );
     }
 }

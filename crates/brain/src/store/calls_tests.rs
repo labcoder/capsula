@@ -148,22 +148,6 @@ fn the_ledger_caps_a_result_in_bytes_and_rolls_its_write_back_when_over() {
 }
 
 #[test]
-fn a_call_in_a_thread_being_deleted_writes_nothing() {
-    let scratch = Scratch::new("calls-deleting");
-    let mut store = opened(&scratch);
-    let (thread, run) = task(&mut store);
-    store.begin_delete(thread).expect("hidden");
-    assert_eq!(
-        store
-            .commit_call(&renaming(thread, run, "c1"))
-            .expect("no error"),
-        Committed::Failed
-    );
-    assert_eq!(title(&store.conn, thread), "Before");
-    assert_eq!(rows(&store.conn), []);
-}
-
-#[test]
 fn deleting_a_thread_removes_its_calls() {
     let scratch = Scratch::new("calls-purge");
     let mut store = opened(&scratch);
@@ -310,6 +294,8 @@ fn a_reservation_whose_task_never_commits_stays_issued() {
         Committed::Failed
     );
     assert_eq!(task_row(&store.conn, reserved), None);
+    assert_eq!(title(&store.conn, thread), "Before");
+    assert_eq!(rows(&store.conn), []);
     drop(store);
     let (mut store, high) = reopened(&scratch);
     assert_eq!(high, reserved);
@@ -668,17 +654,31 @@ fn a_non_draft_call_keeps_its_existing_ended_run_behavior() {
     let mut store = opened(&scratch);
     let (thread, run) = task(&mut store);
     store.end_run(thread, run, &[], RunEnd::Done).unwrap();
+    let created = ThreadId(thread.0 + 1);
+    let call = CommitCall {
+        tool: "create_task",
+        output: ToolOutput::Text(format!("Created task {}.", created.0)),
+        ..creating(thread, run, "legacy", created)
+    };
+    assert_eq!(store.commit_call(&call).unwrap(), Committed::Done);
+    drop(store);
+    let (store, high) = reopened(&scratch);
+    assert_eq!(high, created);
     assert_eq!(
-        store.commit_call(&renaming(thread, run, "legacy")).unwrap(),
-        Committed::Done
+        task_row(&store.conn, created),
+        Some((
+            "Trip plan".to_owned(),
+            "model".to_owned(),
+            "thread".to_owned(),
+            "live".to_owned(),
+        ))
     );
-    assert_eq!(title(&store.conn, thread), "After");
     assert_eq!(
         rows(&store.conn),
         [(
             "model".to_owned(),
             "legacy".to_owned(),
-            r#"{"text":"probed"}"#.to_owned(),
+            format!(r#"{{"text":"Created task {}."}}"#, created.0),
         )]
     );
 }

@@ -134,7 +134,16 @@ fn debug_shows_an_images_length_and_never_its_bytes() {
 
 #[test]
 fn a_screen_scene_is_drawn_only_on_the_picture_the_request_attaches() {
-    let picture = Screen::Picture(jpeg(&SOI), None, Geometry::FIXTURE);
+    let image = jpeg(&SOI);
+    let picture = Screen::Picture(image.clone(), None, Geometry::FIXTURE);
+    let input = vec![
+        message(Role::User, "look"),
+        message(Role::Assistant, "earlier reply"),
+        message(Role::User, "look again"),
+        message(Role::Developer, "later note"),
+    ];
+    let screen = "The image is a picture of the user's screen, 1280 by 720 pixels, taken when they \
+                  let go of the talk keys, with their mouse pointer where it was then.";
     for connection in [
         None,
         Some(ConnectionKind::ChatGpt),
@@ -142,19 +151,34 @@ fn a_screen_scene_is_drawn_only_on_the_picture_the_request_attaches() {
         Some(ConnectionKind::ClaudeCode),
     ] {
         for pictured in [false, true] {
-            let mut request = request(connection, vec![message(Role::User, "look")]);
-            let sent = request.add_screen(&picture, pictured).is_ok();
-            assert_eq!(
-                sent,
-                pictured && connection.is_some(),
-                "{connection:?} {pictured}"
-            );
-            let expected = if pictured {
+            let mut request = request(connection, input.clone());
+            let before = request.clone();
+            let attached = request.add_screen(&picture, pictured);
+            let sent = pictured && connection.is_some();
+            if sent {
+                assert_eq!(attached, Ok(()), "{connection:?}");
+                assert_eq!(
+                    request.input,
+                    [
+                        message(Role::User, "look"),
+                        message(Role::Assistant, "earlier reply"),
+                        message(Role::User, "look again"),
+                        InputItem::Image(image.clone()),
+                        message(Role::Developer, screen),
+                        message(Role::Developer, "later note"),
+                    ],
+                    "{connection:?}"
+                );
+            } else {
+                assert_eq!(attached, Err(ImageRefused::Route), "{connection:?}");
+                assert_eq!(request, before);
+            }
+            let canvas = if sent {
                 Ok(Geometry::FIXTURE)
             } else {
                 Err(NoCanvas::NoPicture)
             };
-            assert_eq!(Screen::canvas(Some(&picture), pictured), expected);
+            assert_eq!(Screen::canvas(Some(&picture), attached.is_ok()), canvas);
         }
     }
 }
