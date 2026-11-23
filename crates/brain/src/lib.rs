@@ -282,7 +282,7 @@ async fn run_admitted(
         None if claude_on => runtime::claude::Claude::default(),
         lane => runtime::claude::Claude::turned_off(lane),
     });
-    start_screen(&mut brain, exe.clone(), &jobs);
+    start_screen(&mut brain, exe.clone(), Ok(std::sync::Arc::clone(&jobs)));
     let mut bytes = [0; CAPABILITY_LEN];
     getrandom::fill(&mut bytes)?;
     let identity = Identity {
@@ -346,8 +346,8 @@ fn start_voice(
 
 /// Gives screen holds the brain's one screen worker. One that can't start leaves screen holds
 /// `Unsupported` for the session, the way a voice part that can't start is unavailable.
-fn start_screen(brain: &mut Brain, exe: PathBuf, jobs: &std::sync::Arc<Job>) {
-    match screen::HoldClient::start(exe, std::sync::Arc::clone(jobs)) {
+fn start_screen(brain: &mut Brain, exe: PathBuf, jobs: io::Result<std::sync::Arc<Job>>) {
+    match jobs.and_then(|jobs| screen::HoldClient::start(exe, jobs)) {
         Ok(client) => brain.attach_screen(std::sync::Arc::new(client)),
         Err(error) => tracing::warn!(kind = ?error.kind(), "the screen worker can't start"),
     }

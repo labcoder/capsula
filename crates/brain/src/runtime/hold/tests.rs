@@ -2062,15 +2062,35 @@ async fn the_threads_choice_rechecks_the_gate_and_a_closed_gate_closes_the_part_
     brain.close().await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn a_screen_worker_that_cant_start_leaves_screen_holds_unsupported() {
-    use kumochi_protocol::frame;
-    use kumochi_protocol::message::{ControlToShell, ScreenHolds, ScreenOff};
     let scratch = Scratch::new("screen-worker-missing");
     let mut brain = test_support::brain(&scratch, "");
     brain.holds.window_capture = true;
     let jobs = Arc::new(crate::platform::Job::new().expect("job"));
-    crate::start_screen(&mut brain, scratch.dir().join("missing.exe"), &jobs);
+    crate::start_screen(&mut brain, scratch.dir().join("missing.exe"), Ok(jobs));
+    assert_screen_holds_unsupported(&mut brain);
+    brain.close().await;
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn unavailable_containment_leaves_screen_holds_unsupported() {
+    let scratch = Scratch::new("screen-worker-no-containment");
+    let mut brain = test_support::brain(&scratch, "");
+    brain.holds.window_capture = true;
+    let job = crate::platform::Job::new().map(Arc::new);
+    assert!(matches!(&job, Err(error) if error.kind() == std::io::ErrorKind::Unsupported));
+    crate::start_screen(&mut brain, scratch.dir().join("missing-worker"), job);
+    assert_screen_holds_unsupported(&mut brain);
+    brain.close().await;
+}
+
+fn assert_screen_holds_unsupported(brain: &mut Brain) {
+    use kumochi_protocol::frame;
+    use kumochi_protocol::message::{ControlToShell, ScreenHolds, ScreenOff};
+
     let (out, mut output) = mpsc::channel(16);
     let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
     let ready = Notify::new();
@@ -2082,7 +2102,6 @@ async fn a_screen_worker_that_cant_start_leaves_screen_holds_unsupported() {
         frame::decode::<ControlToShell>(&bytes[frame::HEADER_LEN..]).expect("decodes"),
         ControlToShell::ScreenHolds(ScreenHolds::Off(ScreenOff::Unsupported))
     );
-    brain.close().await;
 }
 
 /// Every control message the shell was sent since the last call.
