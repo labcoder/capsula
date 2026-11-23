@@ -782,8 +782,16 @@ fn a_device_change_stops_the_run_s_speech_and_its_text_stays() {
 #[test]
 fn the_stall_timer_counts_only_its_latest_arm_and_only_while_draining() {
     let mut reply = reply();
-    run(&mut reply, |r, out| r.text("A. B", out));
     let mut out = Vec::new();
+    reply.text("A. ", &mut out);
+    reply.say(step(4, 0), "Drop.", &mut out);
+    reply.step_failed(SceneId(4), &mut out);
+    reply.pcm(seg(0), vec![5; 10], &mut out);
+    assert!(
+        !out.iter()
+            .any(|effect| matches!(effect, Speech::Arm { .. }))
+    );
+    out.clear();
     reply.close(&mut out);
     let Some(Speech::Arm { epoch: first }) = out
         .iter()
@@ -808,19 +816,15 @@ fn the_stall_timer_counts_only_its_latest_arm_and_only_while_draining() {
     let mut out = Vec::new();
     reply.progress(seg(0), 0, &mut out).expect("no progress");
     assert_eq!(out, [], "a report that doesn't advance doesn't re-arm");
+    for scene in [9, 4] {
+        reply.step_failed(SceneId(scene), &mut out);
+        assert_eq!(out, []);
+        assert!(reply.stalled(second));
+    }
     reply.revoke(Revoker::Brain, &mut Vec::new());
     assert!(
         !reply.stalled(second),
         "a revoked run waits on quiet, not the stall timer"
-    );
-
-    let mut open = self::reply();
-    let mut out = Vec::new();
-    open.text("A. ", &mut out);
-    open.pcm(seg(0), vec![5; 10], &mut out);
-    assert!(
-        !out.iter()
-            .any(|speech| matches!(speech, Speech::Arm { .. }))
     );
 }
 
