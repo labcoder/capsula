@@ -273,13 +273,9 @@ async fn mcp_draft_raw_stdio_uses_only_the_bound_inventory_and_waits_for_ack() {
             .begin_turn(thread, Some("MCP"), build.run, "ask")
             .unwrap();
         *brain.coordinator = core;
-        let job = crate::platform::Job::new().unwrap();
-        let exe = std::env::current_exe().unwrap();
         let (calls, mut mailbox) = mpsc::channel(1);
         let until = tokio::time::Instant::now() + PATIENCE;
         let context = LaunchContext {
-            job: &job,
-            brain_exe: &exe,
             deadline: until,
             tools: offer.schemas(),
             gate,

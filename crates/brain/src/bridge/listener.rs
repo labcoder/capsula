@@ -7,7 +7,6 @@
 
 use std::future::{pending, poll_fn};
 use std::io;
-use std::os::windows::io::{AsHandle as _, OwnedHandle};
 use std::path::Path;
 use std::pin::{Pin, pin};
 use std::sync::{Arc, OnceLock};
@@ -30,7 +29,7 @@ use crate::context::ToolSchema;
 use crate::coordinator::BuildKey;
 use crate::engines::ToolName;
 use crate::engines::claude_code::audit::AuditGate;
-use crate::platform::{self, Instance, Job, PipeServer};
+use crate::platform::{self, ClientRefused, Instance, Job, PipeServer};
 
 /// The MCP versions this server speaks; a client asking for another gets the first.
 const PROTOCOL_VERSIONS: [&str; 4] = ["2025-06-18", "2025-11-25", "2025-03-26", "2024-11-05"];
@@ -70,14 +69,19 @@ impl Listener {
 
     /// Accepts the first client, checks it, sends `Hello`, then serves until the session ends.
     /// The listener is used up: there's never a second accept, refusals included.
-    pub(crate) async fn serve(mut self, launch: LaunchContext<'_>) -> SessionEnd {
+    pub(crate) async fn serve(
+        mut self,
+        job: &Job,
+        brain_exe: &Path,
+        launch: LaunchContext<'_>,
+    ) -> SessionEnd {
         if !matches!(
             tokio::time::timeout_at(launch.deadline, self.server.connect()).await,
             Ok(Ok(()))
         ) {
             return SessionEnd::NoClient;
         }
-        let end = match check_client(&self.server, &launch) {
+        let end = match platform::bridge_peer(&self.server, job, brain_exe) {
             Ok(_client) => session(&mut self.server, self.launch, &launch).await,
             Err(refused) => SessionEnd::Refused(refused),
         };
@@ -90,10 +94,6 @@ impl Listener {
 
 /// What the listener needs from the launch.
 pub(crate) struct LaunchContext<'a> {
-    /// This launch's own run job, never the brain's.
-    pub(crate) job: &'a Job,
-    /// The brain's executable, which the bridge runs.
-    pub(crate) brain_exe: &'a Path,
     /// The launch's deadline.
     pub(crate) deadline: Instant,
     /// The tools frozen with the launch.
@@ -210,42 +210,6 @@ pub(crate) enum SessionEnd {
     Broken,
     /// A tool's reply could no longer leave before all of it was written, so none of the rest is.
     Withheld,
-}
-
-/// The check a client failed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ClientRefused {
-    /// Its process had exited.
-    Exited,
-    /// It doesn't run the brain's executable.
-    NotOurImage,
-    /// It isn't in this launch's job.
-    NotInJob,
-    /// Its process couldn't be opened or queried.
-    Query,
-}
-
-/// Checks the connected client on one held process handle, before any byte is written.
-fn check_client(
-    server: &PipeServer,
-    launch: &LaunchContext<'_>,
-) -> Result<OwnedHandle, ClientRefused> {
-    let query = |_| ClientRefused::Query;
-    let process = platform::client_process(server).map_err(query)?;
-    if platform::has_exited(process.as_handle()).map_err(query)? {
-        return Err(ClientRefused::Exited);
-    }
-    let image = platform::process_image(process.as_handle()).map_err(query)?;
-    if !image
-        .as_os_str()
-        .eq_ignore_ascii_case(launch.brain_exe.as_os_str())
-    {
-        return Err(ClientRefused::NotOurImage);
-    }
-    if !launch.job.contains(process.as_handle()).map_err(query)? {
-        return Err(ClientRefused::NotInJob);
-    }
-    Ok(process)
 }
 
 /// The one request being reassembled; its first chunk fixes its key and method.
