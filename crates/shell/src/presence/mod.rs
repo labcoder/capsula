@@ -64,7 +64,6 @@ mod voice;
 #[cfg(test)]
 mod voice_wiring_tests;
 
-use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -84,7 +83,7 @@ use kumochi_protocol::constants;
 use kumochi_shell_core::presence::{frame_rate, geometry, kumo, perch, pulling, thread_selection};
 
 use crate::escape::{Activity, Escape, EscapeHold, Panel as EscapePanel, TalkEscape};
-use crate::input::{Effect, Gesture};
+use crate::input::Effect;
 use crate::link::{LinkEvent, LinkHandle, LinkState, Session};
 use crate::platform::input::{Input, input};
 use crate::platform::{
@@ -990,7 +989,6 @@ pub(crate) fn open(
     input_windows.proxy(native.input_proxy());
     let kumo = cx.new(|_| KumoView::new());
     let (panel_window, panel) = status_window(&events, kumo.clone(), &mut input_windows, cx)?;
-    let gesture = Rc::new(Cell::new(Gesture::default()));
     let default_canvas = kumochi_scene::layout::DEFAULT_CANVAS;
     kumochi_scene::deferred::start().map_err(OpenError::Dropper)?;
     let paint_scratch = Rc::new(std::cell::RefCell::new(paint_stroke::Scratch::new()));
@@ -1098,7 +1096,6 @@ pub(crate) fn open(
     };
     owner.update(cx, Presence::dispatcher);
     let deliver = gesture::deliver(
-        gesture,
         dock_window,
         owner.downgrade(),
         link,
