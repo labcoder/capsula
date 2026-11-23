@@ -1989,6 +1989,81 @@ async fn removal_diagnostics_exclude_paths_and_report_owner_counts() {
     brain.close().await;
 }
 
+#[cfg(not(windows))]
+#[tokio::test]
+async fn unsupported_removal_preserves_the_pending_intent_and_refuses_new_work() {
+    use crate::voice::installer::Folder;
+
+    let scratch = Scratch::new("voice-removal-unsupported");
+    let models = scratch.dir().join("models");
+    let folder = models.join(VoicePart::SpokenReplies.dir());
+    std::fs::create_dir_all(&folder).expect("owned fixture folder");
+    let kept = folder.join("keep");
+    std::fs::write(&kept, b"fixture").expect("fixture bytes");
+    let path = scratch.dir().join(CONFIG_FILE);
+    let config = "[voice]\ninstalled = [\"speech-input\"]\nremoving = [\"spoken-replies\"]\n";
+    std::fs::write(&path, config).expect("pending removal");
+    let mut brain = test_support::brain(&scratch, "");
+    let stuck = brain.finish_removals(&models);
+    assert_eq!(
+        stuck,
+        [(
+            VoicePart::SpokenReplies,
+            Folder::Refused(ErrorKey::UnsupportedPlatform)
+        )]
+    );
+    assert!(brain.settings_ops.is_empty() && brain.config_write.is_none());
+    let (fetch, _) = held_fetch();
+    let (_, stt) = Reports::new();
+    let (_, tts) = Reports::new();
+    brain.attach_voice(models, &stuck, (None, None), [stt, tts], fetch.clone());
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    tokio::time::timeout(super::PATIENCE, async {
+        let client = async {
+            assert_eq!(
+                opening(&mut shell).await.spoken_replies,
+                PartState::Failed {
+                    key: ErrorKey::UnsupportedPlatform,
+                    installed: false
+                }
+            );
+            for part in [
+                VoicePart::SpokenReplies,
+                VoicePart::SpeechInput,
+                VoicePart::SpokenReplies,
+            ] {
+                shell
+                    .send(&ControlToBrain::Settings(SettingsOp::RemoveVoice(part)))
+                    .await;
+                assert_eq!(
+                    shell.next_control().await.expect("control readable"),
+                    Some(ControlToShell::Error(ErrorKey::UnsupportedPlatform.into()))
+                );
+                assert!(matches!(
+                    shell.next_control().await.expect("settings readable"),
+                    Some(ControlToShell::Settings { answer: true, .. })
+                ));
+            }
+            drop(shell);
+        };
+        assert_eq!(
+            tokio::join!(brain.serve(control, data, &mut tap), client).0,
+            Ended::Lost
+        );
+    })
+    .await
+    .expect("the removal refusals settle");
+    assert!(brain.settings_ops.is_empty() && brain.config_write.is_none());
+    assert!(!brain.voice_deleting(VoicePart::SpokenReplies));
+    assert!(!brain.voice_deleting(VoicePart::SpeechInput));
+    assert_eq!(brain.config.removing(), [VoicePart::SpokenReplies]);
+    assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
+    brain.close().await;
+    assert_eq!(std::fs::read_to_string(path).unwrap(), config);
+    assert_eq!(std::fs::read(kept).unwrap(), b"fixture");
+}
+
 /// How long a test lets the brain run before it looks again.
 const TICK: std::time::Duration = std::time::Duration::from_millis(10);
 

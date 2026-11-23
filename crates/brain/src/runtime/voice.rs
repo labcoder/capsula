@@ -191,7 +191,11 @@ pub(super) fn delete(models: &Path, part: VoicePart) -> Folder {
         Ok(()) => Folder::Missing,
         Err(error) => {
             tracing::warn!(?part, ?error, "a removed voice part wasn't deleted");
-            Folder::Present
+            Folder::Refused(match error {
+                #[cfg(not(windows))]
+                Untrusted::Unsupported => ErrorKey::UnsupportedPlatform,
+                _ => ErrorKey::VoiceStorage,
+            })
         }
     }
 }
@@ -241,7 +245,7 @@ impl Brain {
     pub(crate) fn attach_voice(
         &mut self,
         models: PathBuf,
-        stuck: &[VoicePart],
+        stuck: &[(VoicePart, Folder)],
         (stt, tts): (Option<SttHandle>, Option<TtsHandle>),
         reports: [UnboundedReceiver<LoadReport>; 2],
         fetcher: Arc<dyn Fetch>,
@@ -468,6 +472,8 @@ impl Brain {
             .and_then(|()| platform::hold_chain(&voice.models.join(part.dir())))
         {
             Err(Untrusted::Missing) => Folder::Missing,
+            #[cfg(not(windows))]
+            Err(Untrusted::Unsupported) => Folder::Refused(ErrorKey::UnsupportedPlatform),
             Ok(_) | Err(_) => Folder::Present,
         };
         let (answer, effects) = voice.installer.remove(part, folder);
