@@ -5,8 +5,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::thread;
+use std::time::Duration;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
@@ -18,6 +20,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
+use crate::config::tuning::OAuthTuning;
 use crate::connections::account::{
     AccountState, Denied, Effect, Input, Job, Listened, Received, Worker,
 };
@@ -27,8 +30,8 @@ use crate::connections::http_client::{HttpError, SharedHttp};
 use crate::connections::oauth::exchange::{ExchangeError, exchange};
 use crate::connections::oauth::id_token::{IdentityError, verify, verify_refreshed};
 use crate::connections::oauth::refresh::refresh;
-use crate::connections::oauth::revoke::{BUDGET, revoke};
-use crate::connections::oauth::{Authorization, Intent, LaunchError, Launcher, SignIn};
+use crate::connections::oauth::revoke::revoke;
+use crate::connections::oauth::{Authorization, Intent, Launcher, SignIn};
 use crate::connections::records::{Account, Revocable};
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, Ready};
@@ -42,6 +45,9 @@ use crate::coordinator::{Input as CoreInput, RefusedKey};
 pub(super) mod github;
 #[cfg(test)]
 pub(super) mod github_tests;
+#[cfg(test)]
+#[path = "account_task_tests.rs"]
+mod task_tests;
 
 #[derive(Debug)]
 pub(super) enum Work {
@@ -143,18 +149,32 @@ impl Catalog {
     }
 }
 
+#[derive(Debug)]
+struct Listening {
+    cancelled: Arc<AtomicBool>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.task.abort();
+    }
+}
+
 /// The account machine, the credential thread and the tasks it started.
 #[derive(Debug)]
 pub(crate) struct Accounts {
     pub(super) github: github::GitHub,
+    oauth: OAuthTuning,
     state: AccountState,
     pub(super) jobs: Option<std_mpsc::Sender<Work>>,
     /// Fires once the credential thread has dropped the vault and its session lock.
     released: Option<oneshot::Receiver<()>>,
     events_tx: mpsc::UnboundedSender<Input>,
     events: mpsc::UnboundedReceiver<Input>,
-    /// The live attempt's listener; aborting it closes the loopback.
-    listener: Option<JoinHandle<()>>,
+    /// The live attempt; dropping it fences the opener and aborts the listener.
+    listener: Option<Listening>,
     pub(super) net: Net,
     /// Callers waiting for the bearer, by ticket.
     tickets: HashMap<u64, oneshot::Sender<Access>>,
@@ -177,8 +197,9 @@ impl Accounts {
     pub(crate) fn spawn<S: CredentialStore + 'static>(
         worker: Worker<S>,
         net: Net,
+        oauth: OAuthTuning,
     ) -> std::io::Result<Self> {
-        Self::spawn_with_github(worker, net, github::GitHub::new())
+        Self::spawn_with_github(worker, net, github::GitHub::new(), oauth)
     }
 
     #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
@@ -186,13 +207,19 @@ impl Accounts {
         worker: Worker<S>,
         net: Net,
     ) -> std::io::Result<Self> {
-        Self::spawn_with_github(worker, net, github::GitHub::with_client(None))
+        Self::spawn_with_github(
+            worker,
+            net,
+            github::GitHub::with_client(None),
+            OAuthTuning::default(),
+        )
     }
 
     fn spawn_with_github<S: CredentialStore + 'static>(
         worker: Worker<S>,
         net: Net,
         github: github::GitHub,
+        oauth: OAuthTuning,
     ) -> std::io::Result<Self> {
         let (state, started) = AccountState::start();
         let (events_tx, events) = mpsc::unbounded_channel();
@@ -202,6 +229,7 @@ impl Accounts {
         let salt = getrandom::u64().map_err(std::io::Error::other)?;
         let mut accounts = Self {
             github,
+            oauth,
             state,
             jobs: Some(jobs),
             released: Some(released),
@@ -509,23 +537,20 @@ impl Accounts {
                     saved,
                     intent,
                 } => {
-                    if let Some(listener) = self.listener.take() {
-                        listener.abort();
-                    }
-                    self.listener = Some(tokio::spawn(listen(
+                    drop(self.listener.take());
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    let task = tokio::spawn(listen(
                         attempt,
                         host,
                         saved,
                         intent,
+                        (self.oauth.sign_in, Arc::clone(&cancelled)),
                         Arc::clone(&self.net.launcher),
                         self.events_tx.clone(),
-                    )));
+                    ));
+                    self.listener = Some(Listening { cancelled, task });
                 }
-                Effect::Close => {
-                    if let Some(listener) = self.listener.take() {
-                        listener.abort();
-                    }
-                }
+                Effect::Close => drop(self.listener.take()),
                 // Never aborted: a sent token request may already have issued tokens.
                 Effect::Exchange {
                     attempt,
@@ -540,6 +565,8 @@ impl Accounts {
                 ))),
                 Effect::Revoke(entries) => drop(tokio::spawn(revoke_task(
                     entries,
+                    Instant::now() + self.oauth.revoke,
+                    self.oauth.backoff,
                     Arc::clone(&self.net.http),
                     self.events_tx.clone(),
                 ))),
@@ -552,6 +579,7 @@ impl Accounts {
                     generation,
                     client,
                     refresh_token,
+                    Instant::now() + self.oauth.refresh,
                     self.net.clone(),
                     self.events_tx.clone(),
                 ))),
@@ -591,11 +619,9 @@ impl Accounts {
     /// dispatched are dropped: a pending flag they would have cleared stays set, and the next
     /// start counts it as uncertainty.
     pub(crate) async fn close(&mut self, deadline: Instant, refresh_by: Instant) {
+        drop(self.listener.take());
         self.github
             .stop(self.jobs.as_ref(), &self.reads_tx, &self.net.http);
-        if let Some(listener) = self.listener.take() {
-            listener.abort();
-        }
         self.catalog.cancel();
         self.connections.close();
         let settled = tokio::time::timeout_at(refresh_by, async {
@@ -818,21 +844,23 @@ async fn listen(
     host: Secret<Zeroizing<String>>,
     saved: Option<Secret<Account>>,
     intent: Intent,
+    (limit, cancelled): (Duration, Arc<AtomicBool>),
     launcher: Arc<dyn Launcher + Send + Sync>,
     events: mpsc::UnboundedSender<Input>,
 ) {
     let result = async {
-        let sign_in = SignIn::bind(host.expose(), saved.as_ref().map(Secret::expose), intent)
-            .await
-            .map_err(Listened::Bind)?;
-        // Opening the browser is OS work that can block, so it runs off the core loop.
-        let (sign_in, opened) = tokio::task::spawn_blocking(move || {
-            let opened = sign_in.open_browser(launcher.as_ref());
-            (sign_in, opened)
-        })
+        let sign_in = SignIn::bind(
+            host.expose(),
+            saved.as_ref().map(Secret::expose),
+            intent,
+            limit,
+        )
         .await
-        .map_err(|_| Listened::Launch(LaunchError::Launch))?;
-        opened.map_err(Listened::Launch)?;
+        .map_err(Listened::Bind)?;
+        sign_in
+            .open_browser(launcher, &cancelled)
+            .await
+            .map_err(Listened::Launch)?;
         sign_in
             .receive()
             .await
@@ -845,15 +873,31 @@ async fn listen(
     events.send(Input::Listened { attempt, result }).ok();
 }
 
+async fn account_http(http: HttpFactory, deadline: Instant) -> Result<SharedHttp, ExchangeError> {
+    if Instant::now() >= deadline {
+        return Err(ExchangeError::PreDispatchTimeout);
+    }
+    let built = tokio::time::timeout_at(deadline, tokio::task::spawn_blocking(move || http()))
+        .await
+        .map_err(|_| ExchangeError::PreDispatchTimeout)?;
+    if Instant::now() >= deadline {
+        return Err(ExchangeError::PreDispatchTimeout);
+    }
+    built
+        .map_err(|_| HttpError::Configuration)?
+        .map_err(ExchangeError::Http)
+}
+
 async fn revoke_task(
     entries: Vec<Secret<Revocable>>,
+    deadline: Instant,
+    backoff: [Duration; 2],
     http: HttpFactory,
     events: mpsc::UnboundedSender<Input>,
 ) {
-    let deadline = Instant::now() + BUDGET;
-    let confirmed = match tokio::task::spawn_blocking(move || http()).await {
-        Ok(Ok(http)) => revoke(&http, entries, deadline).await,
-        _ => Vec::new(),
+    let confirmed = match account_http(http, deadline).await {
+        Ok(http) => revoke(&http, entries, deadline, backoff).await,
+        Err(_) => Vec::new(),
     };
     events.send(Input::Revoked(confirmed)).ok();
 }
@@ -907,17 +951,15 @@ async fn refresh_task(
     generation: u64,
     client: Secret<Zeroizing<String>>,
     refresh_token: Secret<Zeroizing<String>>,
+    deadline: Instant,
     net: Net,
     events: mpsc::UnboundedSender<Input>,
 ) {
     let build = Arc::clone(&net.http);
     // Its own task, so one that panics still ends the flight; the payload isn't logged.
     let result = tokio::spawn(async move {
-        let http = tokio::task::spawn_blocking(move || build())
-            .await
-            .map_err(|_| ExchangeError::Http(HttpError::Configuration))?
-            .map_err(ExchangeError::Http)?;
-        refresh(&http, client.expose(), refresh_token.expose()).await
+        let http = account_http(build, deadline).await?;
+        refresh(&http, client.expose(), refresh_token.expose(), deadline).await
     })
     .await
     .unwrap_or_else(|_| {

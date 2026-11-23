@@ -449,8 +449,23 @@ settlement (`runtime/issues.rs`) may finish after the deadline, so a terminal wr
 whether a create went out. A filing makes its listing's requests plus four (the user, two match
 pages and the create), so the group
 needs `filing_requests_count >= listing_requests_count + 4` and `listing_s <= filing_s`.
-`repositories::fetch` takes the listing pair; review rearms use `filing_s` too. The user
-reference, with the example the docs-match test checks, is [tuning](../user/tuning.md).
+`repositories::fetch` takes the listing pair; review rearms use `filing_s` too.
+
+`[tuning.model]` rides on `ModelClient` (`with_tuning`), so the ChatGPT engine and each Anthropic
+Messages post use it; image and marks checks and API-key checks keep the built-in waits.
+`send_s` can only shorten the existing upload timeout so it stays below the coordinator's fixed
+send-grant deadline. A group with `content_idle_s` below `idle_s` takes its defaults.
+`[tuning.runs]` sits on the
+`Coordinator`: the round and call counts only lower the compile-time ceilings `MAX_ROUNDS` and
+`MAX_CALLS` (the engine's attempt budget is sized from `MAX_ROUNDS`), and `wall_clock_s` and
+`finding_wait_s` replace `WALL_CLOCK` and `FINDING_WAIT`, which stay the defaults.
+
+`[tuning.oauth]` is copied into the ChatGPT account lane at startup. The local sign-in window
+and refresh request cannot outlast their built-in limits. Refresh and revocation both bound
+HTTP setup and network work under one absolute deadline. The nondecreasing backoffs must sum to less
+than that budget, or all OAuth keys use their defaults. Token validation, shutdown settlement
+and the number of retry attempts are unchanged. The user
+reference, with the examples the docs-match test checks, is [tuning](../user/tuning.md).
 
 ## Claude Code
 

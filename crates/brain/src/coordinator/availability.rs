@@ -34,7 +34,7 @@ pub(super) enum Finding {
     /// Before its first build: `Finding` reports keep it, and Ready records the newest sign-in.
     Due,
     /// Its first build found no sign-in for its Claude Code choice; the next report releases it.
-    Waiting,
+    Waiting { until: tokio::time::Instant },
 }
 
 /// A usable connection and its catalog.
@@ -428,22 +428,25 @@ impl Coordinator {
                 }
             }
         }
-        if current.finding == Some(Finding::Waiting)
+        if let Some(Finding::Waiting { until }) = current.finding
             && !matches!(self.claude_code, Availability::Finding)
         {
+            let now = tokio::time::Instant::now();
+            if now >= until {
+                return true;
+            }
             current.finding = None;
             let run = current.id;
-            effects.push(Effect::ArmDeadline {
-                run,
-                after: super::WALL_CLOCK,
-            });
+            let at = now + self.tuning.wall_clock;
+            current.control.0.end = at.into_std();
+            effects.push(Effect::ArmDeadlineAt { run, at });
             self.build(run, 1, effects);
         }
         true
     }
 
     /// A typed turn on Claude Code that arrived while it was being found and has no sign-in for it
-    /// waits up to [`super::FINDING_WAIT`] for the next report, with no build or snapshot, so its
+    /// waits up to `[tuning.runs] finding_wait_s` for the next report, with no build or snapshot, so its
     /// release is a first build that reads the choice again.
     pub(super) fn waits_for_claude_code(
         &mut self,
@@ -452,19 +455,19 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) -> bool {
         let claude = choice.is_some_and(|choice| choice.connection == ConnectionKind::ClaudeCode);
+        let wait = self.tuning.finding_wait;
         let Ok(current) = self.current(run) else {
             return false;
         };
         if !claude || current.finding != Some(Finding::Due) {
             return false;
         }
-        current.finding = Some(Finding::Waiting);
+        current.finding = Some(Finding::Waiting {
+            until: tokio::time::Instant::now() + wait,
+        });
         current.build = None;
         current.snapshot = None;
-        effects.push(Effect::ArmDeadline {
-            run,
-            after: super::FINDING_WAIT,
-        });
+        effects.push(Effect::ArmDeadline { run, after: wait });
         true
     }
 

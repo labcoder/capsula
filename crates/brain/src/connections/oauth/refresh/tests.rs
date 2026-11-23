@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use kumochi_protocol::Secret;
 use serde_json::{Value, json};
+use tokio::time::Instant;
 use zeroize::Zeroizing;
 
 use super::{DEADLINE, refresh};
@@ -10,6 +11,10 @@ use crate::connections::error::Recovery;
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response};
 use crate::connections::oauth::exchange::{ExchangeError, OAuthCode};
 use crate::connections::records::{MAX_ID_BYTES, MAX_REFRESH_BYTES};
+
+fn deadline() -> Instant {
+    Instant::now() + DEADLINE
+}
 
 struct Scripted {
     reply: Mutex<Option<Response>>,
@@ -73,7 +78,7 @@ fn text(secret: Option<&Secret<Zeroizing<String>>>) -> Option<&str> {
 #[tokio::test]
 async fn a_refresh_sends_the_documented_form_to_the_token_endpoint() {
     let http = Scripted::new(200, bytes(&rotated()));
-    let set = refresh(&http, "client-1", "refresh-old")
+    let set = refresh(&http, "client-1", "refresh-old", deadline())
         .await
         .expect("rotated");
     let requests = http.requests.lock().expect("requests");
@@ -105,9 +110,14 @@ async fn a_refresh_may_leave_out_its_identity_and_refresh_tokens() {
     let fields = body.as_object_mut().expect("object");
     fields.remove("id_token");
     fields.remove("refresh_token");
-    let set = refresh(&Scripted::new(200, bytes(&body)), "client-1", "refresh-old")
-        .await
-        .expect("rotated");
+    let set = refresh(
+        &Scripted::new(200, bytes(&body)),
+        "client-1",
+        "refresh-old",
+        deadline(),
+    )
+    .await
+    .expect("rotated");
     assert_eq!(text(set.id_token.as_ref()), None);
     assert_eq!(text(set.refresh_token.as_ref()), None);
 }
@@ -116,7 +126,7 @@ async fn a_refresh_may_leave_out_its_identity_and_refresh_tokens() {
 async fn inputs_are_bounded_before_anything_is_sent() {
     let (client, token) = ("c".repeat(MAX_ID_BYTES), "r".repeat(MAX_REFRESH_BYTES));
     let http = Scripted::new(200, bytes(&rotated()));
-    refresh(&http, &client, &token)
+    refresh(&http, &client, &token, deadline())
         .await
         .expect("at the limits");
     let over = |n: usize, c: &str| c.repeat(n + 1);
@@ -128,7 +138,9 @@ async fn inputs_are_bounded_before_anything_is_sent() {
     ] {
         let http = Scripted::new(200, bytes(&rotated()));
         assert_eq!(
-            refresh(&http, &client, &token).await.unwrap_err(),
+            refresh(&http, &client, &token, deadline())
+                .await
+                .unwrap_err(),
             ExchangeError::Request
         );
         assert_eq!(http.sent(), 0, "{} {}", client.len(), token.len());
@@ -139,13 +151,38 @@ async fn inputs_are_bounded_before_anything_is_sent() {
 async fn the_token_request_gives_up_at_its_deadline() {
     let started = tokio::time::Instant::now();
     assert_eq!(
-        refresh(&Silent, "client-1", "refresh-old")
+        refresh(&Silent, "client-1", "refresh-old", deadline())
             .await
             .unwrap_err(),
         ExchangeError::Http(HttpError::Timeout)
     );
     assert_eq!(started.elapsed(), DEADLINE);
     assert_eq!(DEADLINE.as_secs(), 30);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_shorter_refresh_wait_still_reports_the_sent_request_as_timed_out() {
+    let started = tokio::time::Instant::now();
+    let limit = std::time::Duration::from_secs(8);
+    assert_eq!(
+        refresh(&Silent, "client-1", "refresh-old", started + limit)
+            .await
+            .unwrap_err(),
+        ExchangeError::Http(HttpError::Timeout)
+    );
+    assert_eq!(started.elapsed(), std::time::Duration::from_secs(8));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_expired_refresh_never_dispatches() {
+    let http = Scripted::new(500, Vec::new());
+    assert_eq!(
+        refresh(&http, "client-1", "refresh-old", Instant::now())
+            .await
+            .unwrap_err(),
+        ExchangeError::PreDispatchTimeout
+    );
+    assert_eq!(http.sent(), 0);
 }
 
 #[tokio::test]
@@ -168,7 +205,13 @@ async fn a_malformed_answer_is_never_a_rotated_set() {
         (bytes(&mistyped), unusable()),
         (duplicate.into_bytes(), unusable()),
     ] {
-        let result = refresh(&Scripted::new(200, body), "client-1", "refresh-old").await;
+        let result = refresh(
+            &Scripted::new(200, body),
+            "client-1",
+            "refresh-old",
+            deadline(),
+        )
+        .await;
         assert_eq!(result.unwrap_err(), expected);
     }
 }
@@ -216,7 +259,13 @@ async fn each_ledger_code_maps_to_its_recovery() {
     ];
     for (code, status, expected) in cases {
         let body = bytes(&json!({ "error": code }));
-        let result = refresh(&Scripted::new(status, body), "client-1", "refresh-old").await;
+        let result = refresh(
+            &Scripted::new(status, body),
+            "client-1",
+            "refresh-old",
+            deadline(),
+        )
+        .await;
         let recovery = match result {
             Err(ExchangeError::OAuth { status, code }) => code.recovery(status),
             other => panic!("{code}: {other:?}"),
@@ -225,7 +274,13 @@ async fn each_ledger_code_maps_to_its_recovery() {
     }
     // An empty code isn't a typed refusal, so issuance stays unknown.
     let body = bytes(&json!({ "error": "" }));
-    let result = refresh(&Scripted::new(400, body), "client-1", "refresh-old").await;
+    let result = refresh(
+        &Scripted::new(400, body),
+        "client-1",
+        "refresh-old",
+        deadline(),
+    )
+    .await;
     assert_eq!(result.unwrap_err(), ExchangeError::Response { status: 400 });
     // The plan endpoints share this map, and send their codes with a 5xx.
     for status in [500, 503] {

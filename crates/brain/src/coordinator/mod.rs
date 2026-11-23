@@ -35,7 +35,7 @@ mod thread_op;
 mod tools;
 
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{
     ConnectionKind, Content, ControlToShell, Cursor, DataToShell, Deleted, ModelChoice,
@@ -44,6 +44,7 @@ use kumochi_protocol::message::{
 };
 
 use crate::engines::{RunRequest, TurnEvent};
+use crate::recall::control::Control as ReadControl;
 use crate::store::{Failure, Interruption, RunEnd, SceneState};
 use crate::voice::reply::ReportMode;
 
@@ -64,11 +65,11 @@ pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};
 mod page;
 pub use page::PageKey;
 
-/// A run's whole wall-clock budget [S3's total cap].
+/// A run's whole wall-clock budget [S3's total cap]; `[tuning.runs]` may change it.
 pub const WALL_CLOCK: Duration = Duration::from_secs(120);
 /// How long a typed turn's first build waits for Claude Code's next report while it's being found
-/// (OSC-753) [guess].
-const FINDING_WAIT: Duration = Duration::from_secs(30);
+/// (OSC-753) [guess]; `[tuning.runs]` may change it.
+pub(crate) const FINDING_WAIT: Duration = Duration::from_secs(30);
 /// The most visible text one run may stream [S3].
 pub const MAX_TEXT: usize = 1024 * 1024;
 /// The largest piece of text one `AssistantText` frame carries, well under the data pipe's cap.
@@ -535,6 +536,13 @@ pub enum Effect {
         /// How long from now.
         after: Duration,
     },
+    /// Resume a run with the same absolute deadline as its store-read control.
+    ArmDeadlineAt {
+        /// The run.
+        run: RunId,
+        /// The end of its resumed run budget.
+        at: tokio::time::Instant,
+    },
     /// The shell broke the protocol: end its connection.
     Broken(&'static str),
     /// Hand TTS `run`'s segment, to be resampled to `rate`; the pump forwards its events as
@@ -771,6 +779,8 @@ pub struct Coordinator {
     drawing_held: Vec<(ThreadId, DataToShell, Option<RunId>)>,
     /// Whether `draw` may mark the user's screen: [`crate::drawing::SCREEN_MARKS`].
     screen_marks: crate::drawing::ScreenMarks,
+    /// `[tuning.runs]`, set once at start.
+    pub(crate) tuning: crate::config::tuning::RunTuning,
     /// Never deleted or renamed.
     main_thread: ThreadId,
     last_thread: ThreadId,
@@ -866,6 +876,7 @@ impl Coordinator {
             drawing_held: Vec::new(),
             drawing_reply: None,
             screen_marks: crate::drawing::SCREEN_MARKS,
+            tuning: crate::config::tuning::RunTuning::default(),
             main_thread,
             last_thread,
             last_run,
@@ -1097,7 +1108,7 @@ impl Coordinator {
                 if current.finishing && !current.tools.calling() {
                     return Err(Stale);
                 }
-                if current.finding == Some(availability::Finding::Waiting) {
+                if matches!(current.finding, Some(availability::Finding::Waiting { .. })) {
                     let reason = model_unavailable();
                     self.fail_with(run, Failure::Engine, reason, &mut effects)?;
                 } else if current
@@ -1375,8 +1386,7 @@ impl Coordinator {
         if let Some(hold) = &mut hold {
             hold.defaults.origin = admission::origin(thread, self.main_thread);
         }
-        let mut control =
-            crate::recall::control::Control::new(std::time::Instant::now() + WALL_CLOCK);
+        let mut control = ReadControl::new(Instant::now() + self.tuning.wall_clock);
         if let Some(hold) = &hold {
             control = control.observe(std::sync::Arc::clone(&hold.cancel));
         }
@@ -1449,7 +1459,7 @@ impl Coordinator {
         }));
         effects.push(Effect::ArmDeadline {
             run,
-            after: WALL_CLOCK,
+            after: self.tuning.wall_clock,
         });
         run
     }

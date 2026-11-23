@@ -47,7 +47,8 @@ fn mint_failure_cannot_produce_a_verified_authority_and_native_is_served() {
     let tag = Verified::from_entropy(7, key(), Some(801)).expect("nonzero");
     assert_eq!(tag.tag, ConnectionTag(801));
     assert_eq!(tag.revision, 7);
-    let native = Transport::native().expect("production serves the key route");
+    let native =
+        Transport::native(ModelTuning::default()).expect("production serves the key route");
     assert!(matches!(native.connector, RouteConnector::Native(Some(_))));
 }
 

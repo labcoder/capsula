@@ -11,6 +11,8 @@ mod tests;
 
 use std::fmt;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kumochi_protocol::{Secret, constants};
@@ -30,7 +32,7 @@ const RESOURCE: &str = "https://api.openai.com/v1";
 const SCOPES: &str =
     "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
 /// Local policy: pending authorization lives no longer than five minutes, including replies.
-const ATTEMPT_LIMIT: Duration = Duration::from_secs(300);
+pub(crate) const ATTEMPT_LIMIT: Duration = Duration::from_secs(300);
 
 /// Whether the user explicitly requested another consent screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +49,7 @@ pub enum SignInError {
     /// The local listener failed.
     #[error("sign-in loopback failed")]
     Io,
-    /// The five-minute attempt deadline elapsed.
+    /// The attempt's deadline elapsed.
     #[error("sign-in expired")]
     Expired,
     /// A state-matching callback couldn't complete this registration.
@@ -110,10 +112,9 @@ pub struct SystemBrowser;
 impl Launcher for SystemBrowser {
     #[expect(
         clippy::disallowed_methods,
-        reason = "webbrowser spawns with std Command; held under spawn_lock"
+        reason = "the attempt's launch admission holds spawn_lock"
     )]
     fn launch(&self, target: &LaunchTarget) -> Result<(), LaunchError> {
-        let _spawning = crate::platform::spawn_lock();
         webbrowser::open(target.url()).map_err(|_| LaunchError::Launch)
     }
 }
@@ -166,8 +167,9 @@ impl SignIn {
         host: &str,
         saved: Option<&Account>,
         intent: Intent,
+        limit: Duration,
     ) -> Result<Self, BindError> {
-        let deadline = Instant::now() + ATTEMPT_LIMIT;
+        let deadline = Instant::now() + limit;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|_| BindError::Io)?;
@@ -220,11 +222,42 @@ impl SignIn {
     ///
     /// # Errors
     /// Fails if the attempt expired or the launcher refuses the target.
-    pub fn open_browser(&self, launcher: &(impl Launcher + ?Sized)) -> Result<(), LaunchError> {
-        if Instant::now() >= self.deadline {
+    pub async fn open_browser(
+        &self,
+        launcher: Arc<dyn Launcher + Send + Sync>,
+        cancelled: &Arc<AtomicBool>,
+    ) -> Result<(), LaunchError> {
+        let deadline = self.deadline;
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
             return Err(LaunchError::Expired);
         }
-        launcher.launch(&self.target)
+        let alive = Arc::new(());
+        let pending = Arc::downgrade(&alive);
+        let target = LaunchTarget(self.target.0.clone());
+        let cancelled = Arc::clone(cancelled);
+        let launch = tokio::task::spawn_blocking(move || {
+            let remaining = || {
+                pending.upgrade()?;
+                if cancelled.load(Ordering::Acquire) {
+                    return None;
+                }
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|left| !left.is_zero())
+            };
+            let _spawning =
+                crate::platform::spawn_lock_until(&remaining).map_err(|_| LaunchError::Expired)?;
+            remaining().ok_or(LaunchError::Expired)?;
+            launcher.launch(&target)
+        });
+        let opened = tokio::time::timeout_at(deadline, launch).await;
+        drop(alive);
+        if Instant::now() >= deadline {
+            return Err(LaunchError::Expired);
+        }
+        opened
+            .map_err(|_| LaunchError::Expired)?
+            .map_err(|_| LaunchError::Launch)?
     }
 
     /// Wait for one matching callback. Invalid or stale requests don't consume the attempt.

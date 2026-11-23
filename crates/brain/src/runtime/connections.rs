@@ -10,6 +10,7 @@ use kumochi_protocol::message::{
 };
 use tokio::task::JoinHandle;
 
+use crate::config::tuning::ModelTuning;
 use crate::connections::anthropic::{
     KeyError, KeyOp, KeyResult,
     fence::Fence,
@@ -232,9 +233,9 @@ impl Connections {
         self.transport = Some(transport);
     }
 
-    pub(super) fn configure_transport(&mut self) {
+    pub(super) fn configure_transport(&mut self, model: ModelTuning) {
         if self.transport.is_none() {
-            self.transport = Transport::native();
+            self.transport = Transport::native(model);
         }
     }
 

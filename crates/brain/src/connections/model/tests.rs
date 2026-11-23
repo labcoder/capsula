@@ -1046,29 +1046,35 @@ async fn a_round_dropped_while_its_flush_waits_settles_as_written() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_early_head_near_the_deadline_with_a_stalled_body_still_settles_at_it() {
-    let harness = Harness::new(4096);
-    let body = body(&"p".repeat(64 * 1024));
-    let mut call = harness.call(&body, 1);
-    assert!(poll(&mut call).is_pending());
-    harness.grant(1);
-    assert!(poll(&mut call).is_pending());
-    let mut server = harness.accept();
-    received(&mut server);
-    tokio::time::advance(Duration::from_secs(9)).await;
-    reply(
-        &mut server,
-        b"HTTP/1.1 429 Slow\r\nContent-Length: 50\r\n\r\n{\"error\":",
-    );
-    assert!(poll(&mut call).is_pending());
-    assert_eq!(harness.settled(), []);
-    tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(matches!(
-        poll(&mut call),
-        Poll::Ready((Err(Failure::Transport), _))
-    ));
-    assert_eq!(harness.seen(), (vec![], vec![0]));
-    assert_eq!(harness.settled().len(), 1);
+async fn a_trickled_early_refusal_settles_at_the_earlier_budget() {
+    for (head_at_s, body_ms) in [(9, 1000), (1, 3000)] {
+        let mut harness = Harness::new(4096);
+        harness.client.tuning.error_body = Duration::from_secs(3);
+        let payload = body(&"p".repeat(64 * 1024));
+        let mut call = harness.call(&payload, 1);
+        assert!(poll(&mut call).is_pending());
+        harness.grant(1);
+        assert!(poll(&mut call).is_pending());
+        let mut server = harness.accept();
+        received(&mut server);
+        tokio::time::advance(Duration::from_secs(head_at_s)).await;
+        reply(
+            &mut server,
+            b"HTTP/1.1 429 Slow\r\nContent-Length: 50\r\n\r\n{\"error\":",
+        );
+        assert!(poll(&mut call).is_pending());
+        tokio::time::advance(Duration::from_millis(body_ms - 1)).await;
+        reply(&mut server, b" {");
+        assert!(poll(&mut call).is_pending());
+        assert_eq!(harness.settled(), []);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            poll(&mut call),
+            Poll::Ready((Err(Failure::Transport), _))
+        ));
+        assert_eq!(harness.seen(), (vec![], vec![0]));
+        assert_eq!(harness.settled(), settled_once(false));
+    }
 }
 
 #[tokio::test]
@@ -1294,6 +1300,29 @@ async fn a_completed_stream_whose_framing_stalls_is_closed_not_pooled() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_tuned_drain_deadline_closes_only_the_unfinished_framing() {
+    let mut harness = Harness::new(1 << 20);
+    harness.client.tuning.drain = Duration::from_millis(250);
+    let payload = body("hello");
+    let mut call = harness.call(&payload, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    let mut server = harness.accept();
+    received(&mut server);
+    let mut response = sse(TEXT);
+    response.truncate(response.len() - 5);
+    reply(&mut server, &response);
+    assert!(poll(&mut call).is_pending());
+    tokio::time::advance(Duration::from_millis(249)).await;
+    reply(&mut server, b"1\r\nx\r\n");
+    assert!(poll(&mut call).is_pending());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(matches!(poll(&mut call), Poll::Ready((Ok(()), _))));
+    assert_eq!(harness.seen().1, [1]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_idle_stream_ends_after_its_idle_limit() {
     let harness = Harness::new(1 << 20);
     let body = body("hello");
@@ -1320,6 +1349,54 @@ async fn an_idle_stream_ends_after_its_idle_limit() {
         poll(&mut call),
         Poll::Ready((Err(Failure::Transport), _))
     ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn tuned_waits_end_an_idle_stream_and_retire_a_pooled_connection_sooner() {
+    let tuning = crate::config::tuning::ModelTuning {
+        idle: Duration::from_secs(15),
+        pool_idle: Duration::from_secs(10),
+        ..crate::config::tuning::ModelTuning::default()
+    };
+    let mut harness = Harness::new(1 << 20);
+    harness.client.tuning = tuning;
+    let payload = body("hello");
+    let mut call = harness.call(&payload, 1);
+    assert!(poll(&mut call).is_pending());
+    harness.grant(1);
+    assert!(poll(&mut call).is_pending());
+    let mut server = harness.accept();
+    received(&mut server);
+    reply(
+        &mut server,
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+    );
+    assert!(poll(&mut call).is_pending());
+    tokio::time::advance(Duration::from_millis(14_999)).await;
+    assert!(poll(&mut call).is_pending());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(matches!(
+        poll(&mut call),
+        Poll::Ready((Err(Failure::Transport), _))
+    ));
+
+    for (idle, reused) in [
+        (Duration::from_millis(9_999), true),
+        (Duration::from_secs(10), false),
+    ] {
+        let mut harness = Harness::budgeted(1 << 20, Some(2));
+        harness.client.tuning = tuning;
+        let body = body("hello");
+        let first = complete(&harness, &body, 1, None);
+        tokio::time::advance(idle).await;
+        if reused {
+            complete(&harness, &body, 2, Some(first));
+            assert_eq!(harness.accepts(), 0);
+        } else {
+            complete(&harness, &body, 2, None);
+            drop(first);
+        }
+    }
 }
 
 /// The result of one request answered with `response` once it's sent.

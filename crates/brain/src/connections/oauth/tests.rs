@@ -1,8 +1,8 @@
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ use crate::connections::records::{Account, Tokens};
 use crate::test_support::{Captured, SENTINEL};
 
 #[derive(Default)]
-struct RecordingLauncher(RefCell<Option<String>>);
+struct RecordingLauncher(Mutex<Option<String>>);
 
 impl Launcher for RecordingLauncher {
     fn launch(&self, target: &LaunchTarget) -> Result<(), LaunchError> {
@@ -36,15 +36,20 @@ impl Launcher for RecordingLauncher {
             .expect("numeric address");
         let _connected =
             std::net::TcpStream::connect(address).expect("listener bound before launch");
-        self.0.replace(Some(target.url().to_owned()));
+        *self.0.lock().unwrap() = Some(target.url().to_owned());
         Ok(())
     }
 }
 
 async fn attempt() -> (SignIn, SocketAddr, mpsc::UnboundedReceiver<Event>) {
-    let mut attempt = SignIn::bind("urn:uuid:synthetic-host", None, Intent::SignIn)
-        .await
-        .expect("bind");
+    let mut attempt = SignIn::bind(
+        "urn:uuid:synthetic-host",
+        None,
+        Intent::SignIn,
+        super::ATTEMPT_LIMIT,
+    )
+    .await
+    .expect("bind");
     let address = attempt.listener.local_addr().expect("bound address");
     let (events, seen) = mpsc::unbounded_channel();
     attempt.events = Some(events);
@@ -495,13 +500,83 @@ async fn idle_preconnect_then_valid_callback_completes_inside_attempt_deadline()
 async fn expired_attempt_neither_launches_nor_receives() {
     let (attempt, _address, _seen) = attempt().await;
     tokio::time::advance(Duration::from_secs(300)).await;
-    let launcher = RecordingLauncher::default();
-    assert_eq!(attempt.open_browser(&launcher), Err(LaunchError::Expired));
+    let launcher = Arc::new(RecordingLauncher::default());
+    assert_eq!(
+        attempt
+            .open_browser(Arc::<RecordingLauncher>::clone(&launcher), &Arc::default())
+            .await,
+        Err(LaunchError::Expired)
+    );
     assert!(
-        launcher.0.borrow().is_none(),
+        launcher.0.lock().unwrap().is_none(),
         "expired attempt never launched"
     );
     assert_eq!(attempt.receive().await.unwrap_err(), SignInError::Expired);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_launch_held_at_spawn_never_opens_after_expiry_or_cancellation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::oneshot;
+
+    struct Probe {
+        opened: Arc<AtomicBool>,
+        done: Option<oneshot::Sender<()>>,
+    }
+    impl Launcher for Probe {
+        fn launch(&self, _: &LaunchTarget) -> Result<(), LaunchError> {
+            self.opened.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            if let Some(done) = self.done.take() {
+                done.send(()).ok();
+            }
+        }
+    }
+
+    for expire in [true, false] {
+        let (locking, locked) = oneshot::channel();
+        let (release, holding) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _spawn = crate::platform::spawn_lock();
+            locking.send(()).unwrap();
+            holding.recv_timeout(Duration::from_secs(10)).unwrap();
+        });
+        locked.await.unwrap();
+        let (attempt, address, _seen) = attempt().await;
+        let (done, exited) = oneshot::channel();
+        let opened = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::default();
+        let mut launch = Box::pin(attempt.open_browser(
+            Arc::new(Probe {
+                opened: Arc::clone(&opened),
+                done: Some(done),
+            }),
+            &cancelled,
+        ));
+        pending(launch.as_mut()).await;
+        if expire {
+            tokio::time::advance(super::ATTEMPT_LIMIT).await;
+            assert_eq!(launch.as_mut().await, Err(LaunchError::Expired));
+        }
+        drop(launch);
+        drop(attempt);
+        assert_eq!(
+            TcpStream::connect(address).await.unwrap_err().kind(),
+            std::io::ErrorKind::ConnectionRefused,
+            "the held worker cannot own the listener"
+        );
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        exited.await.unwrap();
+        assert!(
+            !opened.load(Ordering::SeqCst),
+            "no stale launch reached the opener"
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -511,6 +586,22 @@ async fn pending_attempt_expires_after_five_minutes() {
     pending(receive.as_mut()).await;
     tokio::time::advance(Duration::from_secs(300)).await;
     assert_eq!(receive.await.unwrap_err(), SignInError::Expired);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_tuned_sign_in_attempt_expires_at_its_own_deadline() {
+    let started = tokio::time::Instant::now();
+    let limit = Duration::from_secs(75);
+    let attempt = SignIn::bind("urn:uuid:synthetic-host", None, Intent::SignIn, limit)
+        .await
+        .expect("loopback binds");
+    let mut receive = Box::pin(attempt.receive());
+    pending(receive.as_mut()).await;
+    tokio::time::advance(Duration::from_secs(74)).await;
+    pending(receive.as_mut()).await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(receive.await.unwrap_err(), SignInError::Expired);
+    assert_eq!(started.elapsed(), Duration::from_secs(75));
 }
 
 #[tokio::test]
@@ -531,12 +622,20 @@ async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
             connection: 0,
         }),
     };
-    let attempt = SignIn::bind("urn:uuid:synthetic-host", Some(&saved), Intent::SignIn)
+    let attempt = SignIn::bind(
+        "urn:uuid:synthetic-host",
+        Some(&saved),
+        Intent::SignIn,
+        super::ATTEMPT_LIMIT,
+    )
+    .await
+    .expect("bind");
+    let launcher = Arc::new(RecordingLauncher::default());
+    attempt
+        .open_browser(Arc::<RecordingLauncher>::clone(&launcher), &Arc::default())
         .await
-        .expect("bind");
-    let launcher = RecordingLauncher::default();
-    attempt.open_browser(&launcher).expect("injected launch");
-    let url = launcher.0.into_inner().expect("launch recorded");
+        .expect("injected launch");
+    let url = launcher.0.lock().unwrap().take().expect("launch recorded");
     for value in [
         "synthetic-access-token-B1",
         "synthetic-refresh-token-B1",
@@ -574,10 +673,15 @@ async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
 
 #[tokio::test]
 async fn new_attempts_have_independent_secrets_and_explicit_consent_only_when_requested() {
-    let first = SignIn::bind("urn:uuid:host", None, Intent::EnablePlan)
-        .await
-        .expect("bind");
-    let second = SignIn::bind("urn:uuid:host", None, Intent::SignIn)
+    let first = SignIn::bind(
+        "urn:uuid:host",
+        None,
+        Intent::EnablePlan,
+        super::ATTEMPT_LIMIT,
+    )
+    .await
+    .expect("bind");
+    let second = SignIn::bind("urn:uuid:host", None, Intent::SignIn, super::ATTEMPT_LIMIT)
         .await
         .expect("bind");
     let values = [

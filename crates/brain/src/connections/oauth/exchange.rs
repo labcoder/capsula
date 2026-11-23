@@ -82,6 +82,9 @@ pub enum ExchangeError {
     /// Local inputs were invalid; no request was dispatched.
     #[error("invalid code-exchange request")]
     Request,
+    /// The deadline elapsed before any request could be dispatched.
+    #[error("account request expired before dispatch")]
+    PreDispatchTimeout,
     /// The transport failed; the caller must account for an unknown issuance outcome.
     #[error(transparent)]
     Http(#[from] HttpError),

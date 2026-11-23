@@ -8,12 +8,13 @@ use kumochi_protocol::message::ANTHROPIC_KEY_BYTES;
 use tokio::time::{Instant, timeout, timeout_at};
 use zeroize::Zeroizing;
 
+use crate::config::tuning::ModelTuning;
 use crate::connections::http_client::MAX_BODY_BYTES;
 use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::{ModelClient, ModelConn, Upload};
 use crate::connections::model::sse::Progress;
 use crate::connections::model::wire::{Body, Head, Media};
-use crate::connections::model::{ERROR_BODY_DEADLINE, Events, IDLE, Lease, SEND_DEADLINE};
+use crate::connections::model::{Events, Lease};
 
 use super::error::{Failure, ProviderFailure};
 use super::key::AnthropicKey;
@@ -24,7 +25,7 @@ use super::tls::{AnthropicConnect, HOST};
 /// A consumer must take each read's events within this time.
 pub const BACKPRESSURE: Duration = Duration::from_secs(60);
 // shortcut: ten minutes without content, replace after approved live gap measurements
-const CONTENT_IDLE: Duration = Duration::from_secs(600);
+pub(crate) const CONTENT_IDLE: Duration = Duration::from_secs(600);
 
 /// One send's state. Fields drop in declaration order, so the connection closes before the lease
 /// settles.
@@ -87,7 +88,8 @@ pub async fn stream<C: AnthropicConnect, L: Lease>(
         conn: None,
         lease: Some(lease),
     };
-    timeout(SEND_DEADLINE, async {
+    let tuning = client.tuning;
+    timeout(tuning.send, async {
         let io = client
             .connect
             .connect()
@@ -100,7 +102,7 @@ pub async fn stream<C: AnthropicConnect, L: Lease>(
             .await?
         {
             Upload::Flushed => Ok(()),
-            Upload::Refused(head) => Err(Failure::Provider(refusal(conn, head).await?)),
+            Upload::Refused(head) => Err(Failure::Provider(refusal(conn, head, tuning).await?)),
         }
     })
     .await
@@ -112,12 +114,12 @@ pub async fn stream<C: AnthropicConnect, L: Lease>(
         .conn
         .as_mut()
         .expect("a flushed upload owns its connection");
-    let mut content_by = Instant::now() + CONTENT_IDLE;
-    let head = timeout_at(content_by, conn.head(IDLE))
+    let mut content_by = Instant::now() + tuning.content_idle;
+    let head = timeout_at(content_by, conn.head(tuning.idle))
         .await
         .map_err(|_| Failure::Transport)??;
     if head.status != 200 {
-        return Err(Failure::Provider(refusal(conn, head).await?));
+        return Err(Failure::Provider(refusal(conn, head, tuning).await?));
     }
     if head.media != Media::EventStream {
         return Err(Failure::Protocol);
@@ -125,7 +127,7 @@ pub async fn stream<C: AnthropicConnect, L: Lease>(
     let mut body = Body::new(head.framing);
     let mut reader = Reader::new(capture);
     loop {
-        let length = timeout_at(content_by, conn.next(&mut body, IDLE))
+        let length = timeout_at(content_by, conn.next(&mut body, tuning.idle))
             .await
             .map_err(|_| Failure::Transport)??;
         let Some(length) = length else {
@@ -138,9 +140,9 @@ pub async fn stream<C: AnthropicConnect, L: Lease>(
         });
         conn.buf.drain(..length);
         if content {
-            content_by = Instant::now() + CONTENT_IDLE;
+            content_by = Instant::now() + tuning.content_idle;
         }
-        let capacity_by = Instant::now() + BACKPRESSURE;
+        let capacity_by = Instant::now() + tuning.backpressure;
         // shortcut: a stalled delivery can replace Exhausted/Refused with BackpressureTimeout; revisit in A3b.
         let taken = timeout_at(content_by.min(capacity_by), out.taken())
             .await
@@ -187,7 +189,11 @@ fn request(key: &str, body: &[u8]) -> Result<Secret<Zeroizing<Vec<u8>>>, Failure
     Ok(Secret::new(bytes))
 }
 
-async fn refusal<Io>(conn: &mut ModelConn<Io>, head: Head) -> Result<ProviderFailure, Failure>
+async fn refusal<Io>(
+    conn: &mut ModelConn<Io>,
+    head: Head,
+    tuning: ModelTuning,
+) -> Result<ProviderFailure, Failure>
 where
     Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -198,10 +204,10 @@ where
     if head.status == 401 {
         return ProviderFailure::answered(401, Secret::new(Zeroizing::new(Vec::new())));
     }
-    timeout(ERROR_BODY_DEADLINE, async {
+    timeout(tuning.error_body, async {
         let mut body = Body::new(head.framing);
         let mut bytes = Zeroizing::new(Vec::new());
-        while let Some(length) = conn.next(&mut body, IDLE).await? {
+        while let Some(length) = conn.next(&mut body, tuning.idle).await? {
             if length > MAX_BODY_BYTES - bytes.len() {
                 return Err(Failure::Protocol);
             }
