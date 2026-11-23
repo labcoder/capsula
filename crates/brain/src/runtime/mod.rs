@@ -20,6 +20,7 @@ mod settings;
 mod store_thread;
 #[cfg(test)]
 mod tests;
+mod typed_screen;
 mod voice;
 
 use std::cell::{Cell, RefCell};
@@ -220,6 +221,7 @@ pub(crate) struct Brain {
     /// Holds the next settings write until it sends or drops.
     #[cfg(test)]
     config_gate: Option<std::sync::mpsc::Receiver<settings::Gate>>,
+    typed_screen_clock: Option<typed_screen::Clock>,
     /// Hears what tests wait on instead of sleeping.
     #[cfg(test)]
     observer: mpsc::UnboundedSender<Seen>,
@@ -272,6 +274,10 @@ impl Brain {
     ///
     /// # Errors
     /// Fails when the store's thread can't be started.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one constructor assembles the runtime owners"
+    )]
     pub(crate) fn new(
         store: Store,
         main_thread: ThreadId,
@@ -364,6 +370,7 @@ impl Brain {
             claude: claude::Claude::default(),
             #[cfg(test)]
             config_gate: None,
+            typed_screen_clock: None,
             #[cfg(test)]
             observer,
             #[cfg(test)]
@@ -891,6 +898,9 @@ impl Brain {
             return ended;
         }
         loop {
+            if let Err(ended) = self.typed_screen_sync(&mut link) {
+                return ended;
+            }
             if !turns.is_empty() {
                 self.holds
                     .invalidate(kumochi_protocol::message::HoldStatus::Cancelled);
@@ -1050,6 +1060,17 @@ impl Brain {
                     }
                 }
             };
+            if let Input::TypedTargetRead {
+                epoch,
+                offer,
+                result,
+            } = input
+            {
+                if let Err(ended) = self.typed_screen_read(epoch, offer, result, &mut link) {
+                    return ended;
+                }
+                continue;
+            }
             if let Input::HoldPrepared { key, result } = input {
                 if self.hold_prepared(key, result, &mut link).is_err() {
                     return Ended::Lost;
@@ -1864,6 +1885,7 @@ struct Link<'a, 't> {
     recovery: Option<Recovery>,
     /// Page replies waiting for room in the data queue.
     held_pages: VecDeque<Input>,
+    typed_screen: typed_screen::State,
 }
 
 impl<'a, 't> Link<'a, 't> {
@@ -1883,6 +1905,7 @@ impl<'a, 't> Link<'a, 't> {
             text_metrics: None,
             recovery: None,
             held_pages: VecDeque::new(),
+            typed_screen: typed_screen::State::default(),
         }
     }
 

@@ -304,22 +304,7 @@ impl Brain {
             registration.set(Registration::Applied(output));
             return Ok(None);
         }
-        if let ControlToBrain::RequestTypedScreenOffer {
-            turn,
-            thread,
-            draft,
-            recipient,
-            ..
-        } = &message
-        {
-            link.control(&ControlToShell::TypedScreenOffered {
-                turn: *turn,
-                thread: *thread,
-                draft: *draft,
-                recipient: *recipient,
-                offer: None,
-            })
-            .map_err(|Full| Ended::Lost)?;
+        if self.typed_screen_control(&message, link)? {
             return Ok(None);
         }
         let hold = self.hold_control(&message, link);

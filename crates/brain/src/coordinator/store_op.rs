@@ -183,6 +183,8 @@ pub enum StoreOp {
     ReadCall(crate::dispatch::ReadCall),
     /// Capture a hold's target choice and live deletion identity on the stamped reader.
     ReadHold(super::HoldRead),
+    /// Read whether a live chat actually inherits the global model.
+    ReadTypedTarget(super::typed_screen::ReadTarget),
     /// Read an inline compaction's request on the page reader, in one read transaction.
     CompactContext(super::CompactContext),
     /// The turn, its run, and the thread when `title` names a new one.
@@ -351,6 +353,7 @@ impl StoreOp {
             | Self::ReadJob(_)
             | Self::ReadCall(_)
             | Self::ReadHold(_)
+            | Self::ReadTypedTarget(_)
             | Self::CompactContext(_)
             | Self::ClearScenes { .. }
             | Self::KeepScene { .. }
@@ -373,6 +376,7 @@ impl StoreOp {
                 key: read.snapshot.key,
                 result: Err(()),
             },
+            Self::ReadTypedTarget(read) => read.reply(Err(())),
             Self::Issue { serial, .. } => Input::IssueWritten {
                 serial: *serial,
                 reply: Err(()),

@@ -509,6 +509,7 @@ impl StoreThread {
             StoreOp::ReadPage { .. }
                 | StoreOp::ReadCall(_)
                 | StoreOp::ReadHold(_)
+                | StoreOp::ReadTypedTarget(_)
                 | StoreOp::ReadCards { .. }
                 | StoreOp::BuildContext(_)
                 | StoreOp::ReadJob(_)
@@ -584,6 +585,7 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
         StoreOp::ReadPage { .. }
         | StoreOp::ReadCall(_)
         | StoreOp::ReadHold(_)
+        | StoreOp::ReadTypedTarget(_)
         | StoreOp::ReadCards { .. }
         | StoreOp::BuildContext(_)
         | StoreOp::ReadJob(_)

@@ -232,6 +232,7 @@ pub(super) fn spawn_reader(
                 let control = match &op {
                     StoreOp::ReadCall(call) => &call.control,
                     StoreOp::ReadHold(read) => &read.control,
+                    StoreOp::ReadTypedTarget(read) => &read.control,
                     StoreOp::BuildContext(read) => &read.control,
                     StoreOp::CompactContext(read) => &read.control,
                     StoreOp::ReadJob(read) => &read.control,
@@ -251,6 +252,10 @@ pub(super) fn spawn_reader(
                             || wait_at(gate, hooks.observed.as_ref()),
                         ),
                     },
+                    StoreOp::ReadTypedTarget(read) => {
+                        let inherited = open && context::read_typed_target(&side, &read);
+                        read.reply(inherited.then_some(()).ok_or(()))
+                    }
                     StoreOp::ReadCall(call) => Input::ReadFinished(context::read_call(
                         admitted.map(|()| &*side),
                         call,

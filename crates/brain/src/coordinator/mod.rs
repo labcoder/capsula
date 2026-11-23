@@ -33,6 +33,7 @@ pub(crate) use tests::mcp::draft::draft_launch;
 pub(crate) use tests::routes::{built_for, pictured_claude_run, pictured_run};
 mod thread_op;
 mod tools;
+pub mod typed_screen;
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -151,6 +152,15 @@ pub enum Input {
         turn: u32,
         /// The original target, or `None` for a new thread.
         thread: Option<ThreadId>,
+    },
+    /// The store checked that an existing chat can inherit the advertised global model.
+    TypedTargetRead {
+        /// The paired connection, separate from the offer's local number.
+        epoch: u64,
+        /// The candidate's offer number.
+        offer: kumochi_protocol::message::TypedScreenOffer,
+        /// Success only when the chat exists, is live and has no per-task choice.
+        result: Result<(), ()>,
     },
     /// The user clicked a labelled 3D part: a turn about it, in its drawing's thread.
     Ask {
@@ -979,7 +989,9 @@ impl Coordinator {
     fn route(&mut self, input: Input) -> Result<Vec<Effect>, Stale> {
         let mut effects = Vec::new();
         match input {
-            Input::HoldPrepared { .. } | Input::IssueWritten { .. } => return Err(Stale),
+            Input::HoldPrepared { .. }
+            | Input::IssueWritten { .. }
+            | Input::TypedTargetRead { .. } => return Err(Stale),
             Input::StopScenes { run, .. } if run < self.session_start || run > self.last_run => {
                 return Err(Stale);
             }

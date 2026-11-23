@@ -61,6 +61,8 @@ mod speech;
 mod stop_scenes;
 #[path = "thread_op_tests.rs"]
 mod thread_ops;
+#[path = "typed_screen_tests.rs"]
+mod typed_screen;
 #[path = "voice_tests.rs"]
 mod voice;
 

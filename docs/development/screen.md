@@ -90,6 +90,11 @@ an exact continuous exclusion receipt before sending proof. Presence does not ex
 or consume the replies, and the brain continues to refuse pictured submissions. The one-shot plain
 retry keeps the words on a failed enqueue and never rearms capture.
 
+The brain binds dormant offers to the displayed recipient revision, the paired connection and
+the current global model's account. It can verify that an existing chat inherits that model.
+Even a valid opt-in is still refused in turn order on submit; no display is stored or worker
+request possible until the exact display check and capture caller land together.
+
 Presence owns the exclusion transaction in `presence/exclusion.rs`; the lease and
 its cleanup rules are in `crates/shell-core/src/presence/exclusion/machine.rs`, with no GPUI.
 Its one production caller is a screen hold's release (`Presence::release_screen` in

@@ -312,6 +312,7 @@ impl Brain {
                 _ => None,
             };
             if model {
+                Self::typed_screen_settings_changed(link.as_deref_mut())?;
                 self.holds
                     .invalidate(kumochi_protocol::message::HoldStatus::Failed(
                         kumochi_protocol::message::HoldFailure::ChoiceChanged,
