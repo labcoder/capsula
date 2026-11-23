@@ -20,6 +20,8 @@ use tokio::time::{Instant, timeout};
 use zeroize::Zeroizing;
 
 use super::{Ended, PATIENCE, Shell, duplex};
+#[cfg(not(windows))]
+use crate::config::tuning::{OAuthTuning, TokenTuning};
 use crate::connections::account::{Denied, Input, Listened, Worker};
 use crate::connections::catalog::Listing;
 use crate::connections::clock::{Clock, FixedClock};
@@ -46,6 +48,36 @@ mod typed_replay;
 const SIGNED_OUT: AccountView = AccountView::SignedOut {
     revocation_unconfirmed: false,
 };
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn native_account_startup_refuses_unsupported_without_publishing_retry() {
+    use crate::platform::credential::CredentialStoreError;
+
+    let captured = Captured::default();
+    let _logs = captured.install();
+    let net = test_support::net();
+    let worker = Worker::system(Arc::clone(&net.clock));
+    let held = worker.held();
+
+    let refusal = Accounts::spawn(worker, net, OAuthTuning::default(), TokenTuning::default())
+        .expect_err("no account to offer or retry");
+    assert_eq!(refusal.kind(), std::io::ErrorKind::Unsupported);
+    assert!(matches!(
+        refusal
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<CredentialStoreError>()),
+        Some(CredentialStoreError::Unsupported)
+    ));
+    assert!(
+        !held.load(Ordering::Acquire),
+        "no session lock was acquired"
+    );
+    assert!(
+        !captured.text().contains("session lock failed"),
+        "an unsupported adapter is not a lock failure"
+    );
+}
 
 impl<S: AsyncRead + AsyncWrite> Shell<S> {
     async fn submit_on(&mut self, thread: kumochi_protocol::message::ThreadId) {

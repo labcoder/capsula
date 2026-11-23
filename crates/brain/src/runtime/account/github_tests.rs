@@ -138,7 +138,8 @@ async fn a_closed_save_receiver_cannot_drop_the_queued_removal() {
     ready_tx.send(()).unwrap();
     let (loaded, key) = loaded_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("startup finished");
+        .expect("startup finished")
+        .expect("startup admitted");
     assert!(matches!(
         loaded,
         Input::Vault(crate::connections::account::Done::Loaded(Ok(_)))

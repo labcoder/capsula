@@ -1,11 +1,79 @@
 //! Exact-name credential operations, without vault commit policy.
 
+use std::path::PathBuf;
+
 use kumochi_protocol::Secret;
+#[cfg(not(windows))]
+use kumochi_protocol::message::Capability;
 use zeroize::Zeroizing;
 
 /// This platform's store; code outside `platform` names only this one.
 #[cfg(windows)]
 pub(crate) use super::windows::WindowsCredentialStore as NativeCredentialStore;
+#[cfg(windows)]
+pub use super::windows::{delete_instance, store_instance};
+
+/// Credential Manager refused an instance-capability operation.
+#[cfg(windows)]
+#[derive(Debug, thiserror::Error)]
+#[error("Credential Manager failed")]
+pub struct CredentialError(#[from] keyring::Error);
+
+/// The instance capability could not be stored or deleted.
+#[cfg(not(windows))]
+#[derive(Debug, thiserror::Error)]
+pub enum CredentialError {
+    /// This build has no native credential store.
+    #[error("native credential storage is unsupported on this platform")]
+    Unsupported,
+}
+
+#[cfg(not(windows))]
+pub(crate) struct NativeCredentialStore;
+
+#[cfg(not(windows))]
+impl CredentialStore for NativeCredentialStore {
+    fn get(&self, _: &str) -> Result<Option<SecretBytes>, CredentialStoreError> {
+        Err(CredentialStoreError::Unsupported)
+    }
+
+    fn set(&self, _: &str, _: &SecretBytes) -> Result<(), CredentialStoreError> {
+        Err(CredentialStoreError::Unsupported)
+    }
+
+    fn delete(&self, _: &str) -> Result<(), CredentialStoreError> {
+        Err(CredentialStoreError::Unsupported)
+    }
+}
+
+pub(crate) fn native_session_lock_path() -> Result<PathBuf, CredentialStoreError> {
+    #[cfg(windows)]
+    {
+        super::session_lock_path().ok_or(CredentialStoreError::NoDataDir)
+    }
+    #[cfg(not(windows))]
+    {
+        Err(CredentialStoreError::Unsupported)
+    }
+}
+
+/// Replaces the instance capability for the given session.
+///
+/// # Errors
+/// Returns Unsupported because this build has no native credential store.
+#[cfg(not(windows))]
+pub fn store_instance(_: u32, _: &Capability) -> Result<(), CredentialError> {
+    Err(CredentialError::Unsupported)
+}
+
+/// Deletes the instance capability for the given session.
+///
+/// # Errors
+/// Returns Unsupported because this build has no native credential store.
+#[cfg(not(windows))]
+pub fn delete_instance(_: u32) -> Result<(), CredentialError> {
+    Err(CredentialError::Unsupported)
+}
 
 #[cfg(all(test, windows))]
 pub(crate) mod fixture;
@@ -19,6 +87,12 @@ pub use kumochi_protocol::constants::CREDENTIAL_CHUNK_SIZE as CHUNK_SIZE;
 /// A credential operation failed; no target name or secret is carried in an error.
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialStoreError {
+    /// This build has no native credential store.
+    #[error("native credential storage is unsupported on this platform")]
+    Unsupported,
+    /// The native account data folder could not be resolved.
+    #[error("account data directory is unavailable")]
+    NoDataDir,
     /// A target is empty, contains a null, or exceeds the platform limit.
     #[error("invalid credential target")]
     InvalidTarget,
@@ -65,4 +139,40 @@ pub trait CredentialStore: Send + Sync {
     /// # Errors
     /// Returns an error for invalid targets or any OS failure other than not-found.
     fn delete(&self, target: &str) -> Result<(), CredentialStoreError>;
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_credentials_are_unsupported() {
+        let name = "test-only-credential";
+        let secret = Secret::new(Zeroizing::new(vec![1]));
+        let capability = Capability::new([1; kumochi_protocol::message::CAPABILITY_LEN]);
+        assert!(matches!(
+            native_session_lock_path(),
+            Err(CredentialStoreError::Unsupported)
+        ));
+        assert!(matches!(
+            NativeCredentialStore.get(name),
+            Err(CredentialStoreError::Unsupported)
+        ));
+        assert!(matches!(
+            NativeCredentialStore.set(name, &secret),
+            Err(CredentialStoreError::Unsupported)
+        ));
+        assert!(matches!(
+            NativeCredentialStore.delete(name),
+            Err(CredentialStoreError::Unsupported)
+        ));
+        assert!(matches!(
+            crate::credential::store(0, &capability),
+            Err(CredentialError::Unsupported)
+        ));
+        assert!(matches!(
+            crate::credential::delete(0),
+            Err(CredentialError::Unsupported)
+        ));
+    }
 }
