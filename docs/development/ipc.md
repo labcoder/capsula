@@ -1128,6 +1128,12 @@ these shutdown frames. Stock selection remains Legacy.
 
 ## Debugging
 
+Two Windows diagnostics changed in shared code. The shell's `brain from another build`
+warning keeps only its own `shell_build`; it no longer logs the peer's `brain_build`.
+The brain's `brain stopped` error records a fixed `kind` and a numeric `os_code` when
+available, without formatting the error or its source. The handshake, wire bytes and errors
+reported to the shell are unchanged.
+
 A debug brain records the control frames it sends and receives, and both handshakes, when
 `KUMOCHI_PIPE_TAP` names a file that doesn't exist yet; an existing file is left alone and
 nothing is recorded. The tap fails closed. Each record holds the frame's op name and length, and
