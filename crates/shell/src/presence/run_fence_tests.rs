@@ -1001,16 +1001,14 @@ fn queued_speech_holds_esc_only_while_presented_and_never_from_a_focused_box(
             }
             _ => {
                 assert!(held(cx));
-                // The device stops calling back, as an unplugged one can without an error.
-                wait("the stalled route is retired", cx, &mut |_| {
-                    device.stopped()
-                });
+                device.lose();
+                wait("the lost route is retired", cx, &mut |_| device.stopped());
                 assert_eq!(
                     std::iter::repeat_with(lease).find(Result::is_ok),
                     Some(Ok(None)),
                     "retiring the route ended the lease at once"
                 );
-                wait("a stalled route gives Esc back", cx, &mut |cx| !held(cx));
+                wait("a lost route gives Esc back", cx, &mut |cx| !held(cx));
             }
         }
         drop(device);
