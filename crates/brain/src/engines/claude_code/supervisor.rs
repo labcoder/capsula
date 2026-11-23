@@ -951,15 +951,17 @@ fn serve(
     let task = runtime.spawn(async move {
         let _served = served;
         listener
-            .serve(LaunchContext {
-                job: &context.job,
-                brain_exe: &context.brain_exe,
-                deadline: context.deadline.into(),
-                tools: &context.tools,
-                gate: context.gate,
-                binding: context.binding,
-                calls: context.calls,
-            })
+            .serve(
+                &context.job,
+                &context.brain_exe,
+                LaunchContext {
+                    deadline: context.deadline.into(),
+                    tools: &context.tools,
+                    gate: context.gate,
+                    binding: context.binding,
+                    calls: context.calls,
+                },
+            )
             .await;
     });
     (task.abort_handle(), gone)
