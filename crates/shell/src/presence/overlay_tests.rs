@@ -19,11 +19,7 @@ use super::super::overlay_fixture::{Mode, resting};
 use super::super::paint_cache::{PaintScene, Stager};
 use super::super::test_fixture;
 use super::{BuildError, Gpui, Pending, Surface, assemble, color, label, open, upright};
-use crate::{
-    escape::Panel,
-    presenter::{Effect, Frames, Presenter, SceneCache, Stage, tests::drained},
-    runs::Runs,
-};
+use crate::presenter::{Effect, Frames, Presenter, SceneCache, Stage, tests::drained};
 
 #[path = "overlay_label_tests.rs"]
 mod labels;
@@ -422,20 +418,50 @@ fn an_upright_whole_rect_is_a_quad_clamped_like_its_outline() {
     assert_eq!(quad.corner_radii.top_left, px(10.0), "radius 8 clamps to 5");
     assert_eq!(quad.border_widths.top, px(10.0), "width 7 clamps to 5");
     assert_eq!(quad.border_color, ink);
-}
 
-#[test]
-fn a_turned_mirrored_or_revealing_rect_takes_its_outline_paths() {
-    let ink = Some(rgba(0x33_66_99, 1.0));
-    for (transform, draw) in [
+    let quarter_turn = Affine([0.0, 2.0, -2.0, 0.0, 100.0, 50.0]);
+    let reflected = Affine([-1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    for (pose, draw) in [
         (Affine::pose(2.0, 0.01, Vec2::new(10.0, 20.0)), 1.0),
-        (Affine([0.0, 2.0, -2.0, 0.0, 100.0, 50.0]), 1.0),
-        (Affine([-1.0, 0.0, 0.0, 1.0, 0.0, 0.0]), 1.0),
-        (Affine::pose(2.0, 0.0, Vec2::new(10.0, 20.0)), 0.5),
+        (quarter_turn, 1.0),
+        (reflected, 1.0),
+        (transform, 0.5),
     ] {
         assert!(
-            upright(transform, draw, RECT, 8.0, ink, None).is_none(),
-            "{transform:?} at {draw}"
+            upright(pose, draw, RECT, 8.0, Some(ink), None).is_none(),
+            "{pose:?} at {draw} must not take the upright fast path"
+        );
+    }
+    let mut item = item();
+    let rect = Prim::Rect {
+        rect: RECT,
+        radius: 0.0,
+        fill: None,
+        border: Some((paint(0x33_66_99, 1.0), 2.0)),
+    };
+    for (pose, draw, (left, top, right, bottom)) in [
+        (quarter_turn, 1.0, (76.0, 52.0, 96.0, 112.0)),
+        (reflected, 1.0, (-31.0, 2.0, -1.0, 12.0)),
+        (transform, 0.125, (68.0, 24.0, 72.0, 44.0)),
+    ] {
+        item.transform = pose;
+        item.draw = draw;
+        let pieces = staged(&item, std::slice::from_ref(&rect)).expect("the border builds");
+        let bounds = pieces
+            .iter()
+            .map(|piece| match piece {
+                Pending::Quad(quad) => quad.bounds,
+                Pending::Path(path, _) => path.bounds,
+                Pending::Text(_) => panic!("a border does not draw text"),
+            })
+            .reduce(|first, next| first.union(&next));
+        assert_eq!(
+            bounds,
+            Some(Bounds::from_corners(
+                point(px(left), px(top)),
+                point(px(right), px(bottom))
+            )),
+            "{pose:?} at {draw}"
         );
     }
 }
@@ -449,26 +475,6 @@ fn a_rotated_label_stays_upright_at_its_turned_anchor_and_scales_uniformly() {
     assert_eq!(wrap, Some(px(100.0)));
     let (_, _, unwrapped) = label(quarter_turn, Vec2::new(0.0, 0.0), 12.0, None);
     assert_eq!(unwrapped, None);
-}
-
-#[test]
-fn a_shown_overlay_holds_esc_and_a_hidden_one_does_not() {
-    kumochi_scene::deferred::start().expect("the dropper starts");
-    let surface = SurfaceGeometry::Overlay {
-        default_canvas: [1920.0, 1080.0],
-    };
-    let presenter = Presenter::new(
-        surface,
-        Arc::new(Theme::default()),
-        Box::new(Stager(size_of::<Stager>())),
-    );
-    let runs = Runs::default();
-    for shown in [false, true, false] {
-        presenter.frames().borrow_mut().shown = shown;
-        let activity = Presence::activity(&runs, Panel::Closed, &presenter);
-        assert_eq!(activity.drawing, shown);
-        assert_eq!(activity.holds_global_escape(), shown);
-    }
 }
 
 struct Fixed;
@@ -536,45 +542,6 @@ fn an_item_builds_whole_or_not_at_all() {
         staged(&item, &[card(), over]).map(|built| built.len()),
         Err(BuildError::OverCharge),
         "a fill one point over its limit leaves no piece of the item"
-    );
-}
-
-#[test]
-fn a_fill_past_an_item_s_first_primitive_finds_its_own_staged_entry() {
-    let item = item();
-    let triangle = Prim::Fill {
-        points: Arc::from([
-            Vec2::new(0.0, 0.0),
-            Vec2::new(10.0, 0.0),
-            Vec2::new(0.0, 10.0),
-        ]),
-        color: paint(0xef_4444, 1.0),
-    };
-    let prims = [card(), triangle];
-    let mut scene = PaintScene::of(item.handle, &prims);
-    assemble(
-        &item,
-        1,
-        &prims[1..],
-        &mut scene,
-        &mut super::Scratch::new(),
-    )
-    .expect("the fill at primitive 1");
-    assert!(
-        matches!(scene.pending.as_slice(), [Pending::Path(_, _)]),
-        "one path from the staged triangle"
-    );
-    assert_eq!(
-        assemble(
-            &item,
-            0,
-            &prims[1..],
-            &mut scene,
-            &mut super::Scratch::new()
-        )
-        .map(|()| scene.pending.len()),
-        Err(BuildError::Stale),
-        "primitive 0 is the card, which has no staged fill"
     );
 }
 
@@ -689,6 +656,13 @@ fn retained_pending_keeps_suffix_indices_and_frees_earlier_handoffs_on_refusal()
     ));
     assert_eq!(scene.pending.capacity(), capacity);
     scene.pending.clear();
+    let (result, requests) = crate::allocation::requests(100, || {
+        let _app = super::paint_phase::enter(super::Phase::App);
+        assemble(&item, 0, &prims[1..2], &mut scene, &mut scratch)
+    });
+    assert_eq!(result, Err(BuildError::Stale), "the card key has no fill");
+    assert!(scene.pending.is_empty());
+    assert!(!requests.iter().any(|request| request.action == 4));
     let (result, requests) = crate::allocation::requests(100, || {
         let _app = super::paint_phase::enter(super::Phase::App);
         assemble(

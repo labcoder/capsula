@@ -150,16 +150,16 @@ fn prebind_end_is_reported_and_completed_receipts_allocate_no_pending_stop() {
     let applied = state(&mut runs, 7, 1, 1, Phase::Done);
     assert_eq!(applied.credit, 4);
     assert!(applied.input_ended);
-    assert_eq!(
+    let (stop, counts, bytes) = crate::allocation::usage(|| {
         runs.stop_owned(RunTail {
             run: RunId(7),
             thread: ThreadId(1),
             control_closed: true,
-            data_ended: true
-        }),
-        None
-    );
-    assert!(runs.pending_stops.is_empty());
+            data_ended: true,
+        })
+    });
+    assert_eq!((stop, counts, bytes), (None, [0, 0], [0, 0]));
+    assert_eq!(runs.owned_disposition(RunId(7)), RunDisposition::Live);
     assert!(!state(&mut runs, 8, 1, 2, Phase::Thinking).input_ended);
 }
 
@@ -705,28 +705,40 @@ fn a_screen_hold_told_nothing_keeps_its_prediction_until_its_run_ends() {
 
 #[test]
 fn the_screen_holds_state_lasts_one_connection() {
-    use kumochi_protocol::message::{ModelName, ScreenHolds, ScreenOff};
+    use kumochi_protocol::message::{
+        ConnectionKind, ModelName, ModelSlug, NoticeRevision, ScreenHolds, ScreenOff,
+    };
+    let model = ModelName::new("GPT-5.5").expect("valid");
+    let revision = NoticeRevision::FIRST.next();
     let on = ScreenHolds::On {
-        model: ModelName::new("GPT-5.5").expect("valid"),
-        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
-        slug: kumochi_protocol::message::ModelSlug::new("fixture").expect("valid"),
-        revision: kumochi_protocol::message::NoticeRevision::FIRST.next(),
+        model: model.clone(),
+        connection: ConnectionKind::ChatGpt,
+        slug: ModelSlug::new("fixture").expect("valid"),
+        revision,
     };
     let mut runs = ready();
-    assert_eq!(runs.screen_holds(), None);
+    let default = Some(&model);
+    assert_eq!(runs.screen_notice(false, default), ScreenNotice::NotReady);
     runs.set_screen_holds(on.clone());
-    assert_eq!(runs.screen_holds(), Some(&on));
+    assert_eq!(runs.screen_notice(false, default), ScreenNotice::On(&model));
     runs.set_screen_holds(ScreenHolds::Off(ScreenOff::TurnedOff));
-    assert_eq!(
-        runs.screen_holds(),
-        Some(&ScreenHolds::Off(ScreenOff::TurnedOff))
-    );
+    assert_eq!(runs.screen_notice(false, default), ScreenNotice::TurnedOff);
     runs.set_screen_holds(on.clone());
     runs.disconnected();
-    assert_eq!(runs.screen_holds(), None);
+    assert_eq!(runs.screen_notice(false, default), ScreenNotice::NotReady);
     runs.set_screen_holds(on);
     runs.connected(2);
-    assert_eq!(runs.screen_holds(), None);
+    runs.settings(ThreadId(1));
+    assert_eq!(runs.screen_notice(false, default), ScreenNotice::NotReady);
+    let selection = runs.revision();
+    assert_eq!(
+        runs.begin_screen_hold(GestureId(1), 8, false, default, Some(revision)),
+        Ok(ControlToBrain::VoiceHoldRecognized {
+            gesture: GestureId(1),
+            thread: Some(ThreadId(1)),
+            selection,
+        })
+    );
 }
 
 #[test]

@@ -72,18 +72,6 @@ pub struct Completion {
     pub(crate) field: Field,
 }
 
-impl Completion {
-    /// The completion `Settings::set_view` returns for a refused save of `field`, for the
-    /// shell's tests to compare with.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn failed_for_tests(field: Field) -> Self {
-        Self {
-            failed: true,
-            field,
-        }
-    }
-}
-
 /// What a queued settings operation changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Slot {
@@ -536,12 +524,6 @@ impl Settings {
         self.pending
             .iter()
             .any(|pending| pending.slot == Slot::Onboarding)
-    }
-
-    /// `finishing`, for the shell's tests.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn finishing_for_tests(&self) -> bool {
-        self.finishing()
     }
 
     /// The brain's refusal of the last `FinishOnboarding`, until another change clears it.

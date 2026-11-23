@@ -98,10 +98,7 @@ mod tests {
         let replacement = chain(&[(LIVE_KEY_MESSAGES_BUDGET_ENV, "3")]);
         assert_eq!(value(&replacement, LIVE_KEY_CATALOG_BUDGET_ENV), Some("0"));
         assert_eq!(value(&replacement, LIVE_KEY_MESSAGES_BUDGET_ENV), Some("0"));
-    }
 
-    #[test]
-    fn a_brain_with_no_key_slice_hands_on_only_its_own_environment() {
         let replacement = chain(&[(LIVE_BUDGET_ENV, "4")]);
         assert_eq!(
             replacement,

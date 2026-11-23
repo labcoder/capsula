@@ -287,6 +287,25 @@ fn stale_staging_replies_neither_consume_nor_revive_an_attempt() {
     assert!(!state.saved());
     assert!(!state.can_paste());
     assert!(state.check_available());
+
+    let mut state = model(KeyView::Missing);
+    let old = begin(&mut state, KEY);
+    assert!(state.expire(old, old.deadline));
+    assert_eq!(state.failure(), Some(PasteFailure::Unsaved));
+    assert!(
+        state
+            .planned(SESSION, &plan(old.request, len), Instant::now())
+            .is_none()
+    );
+    let waiting = begin(&mut state, KEY);
+    state.disconnected();
+    assert_eq!(state.view(), None);
+    assert!(!state.saving());
+    assert!(
+        state
+            .planned(SESSION, &plan(waiting.request, len), Instant::now())
+            .is_none()
+    );
 }
 
 #[test]
@@ -570,26 +589,4 @@ fn a_local_recovery_read_only_unlocks_its_revision_during_catalog_checking() {
     state.receive(KeyView::Checking, Some(3));
     assert!(!state.can_paste());
     assert_eq!(state.removal_confirmation(), None);
-}
-
-#[test]
-fn expiry_and_disconnect_drop_the_waiting_plan_admission() {
-    let mut state = model(KeyView::Missing);
-    let old = begin(&mut state, KEY);
-    assert!(state.expire(old, old.deadline));
-    assert_eq!(state.failure(), Some(PasteFailure::Unsaved));
-    assert!(
-        state
-            .planned(SESSION, &plan(old.request, 32), Instant::now())
-            .is_none()
-    );
-    let waiting = begin(&mut state, KEY);
-    state.disconnected();
-    assert_eq!(state.view(), None);
-    assert!(!state.saving());
-    assert!(
-        state
-            .planned(SESSION, &plan(waiting.request, 32), Instant::now())
-            .is_none()
-    );
 }

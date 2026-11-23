@@ -117,20 +117,6 @@ fn only_a_point_in_the_caption_and_outside_its_buttons_is_a_drop() {
 }
 
 #[test]
-fn system_aware_host_at_100_percent_keeps_its_own_metrics() {
-    let facts = fallback(
-        [96, 96],
-        rect(-1800, 100, -600, 1000),
-        rect(-1789, 100, -611, 989),
-        rect(-2560, 0, 0, 1392),
-        [31, 36],
-    );
-    let geometry = geometry(&facts).expect("a captioned host gets the standard estimate");
-    assert_eq!(geometry.caption.rect, rect(-1789, 100, -719, 131));
-    assert_exclusions(&geometry, &[(rect(-719, 100, -611, 131), Source::Inferred)]);
-}
-
-#[test]
 fn maximized_per_monitor_host_cuts_the_band_at_the_work_area() {
     let screen = rect(0, 0, 2560, 1392);
     let facts = fallback(
@@ -148,10 +134,26 @@ fn maximized_per_monitor_host_cuts_the_band_at_the_work_area() {
 #[test]
 fn fixed_window_at_100_percent_uses_its_own_inset() {
     let window = rect(100, 100, 700, 500);
-    let facts = fallback([96, 96], window, window, rect(0, 0, 1920, 1040), [26, 36]);
-    let geometry = geometry(&facts).expect("a captioned host gets the standard estimate");
-    assert_eq!(geometry.caption.rect, rect(100, 100, 592, 126));
-    assert_exclusions(&geometry, &[(rect(592, 100, 700, 126), Source::Inferred)]);
+    let fixed = fallback([96, 96], window, window, rect(0, 0, 1920, 1040), [26, 36]);
+    let framed = fallback(
+        [96, 96],
+        rect(-1800, 100, -600, 1000),
+        rect(-1789, 100, -611, 989),
+        rect(-2560, 0, 0, 1392),
+        [31, 36],
+    );
+    for (facts, caption, buttons) in [
+        (fixed, rect(100, 100, 592, 126), rect(592, 100, 700, 126)),
+        (
+            framed,
+            rect(-1789, 100, -719, 131),
+            rect(-719, 100, -611, 131),
+        ),
+    ] {
+        let geometry = geometry(&facts).expect("a captioned host gets the standard estimate");
+        assert_eq!(geometry.caption.rect, caption);
+        assert_exclusions(&geometry, &[(buttons, Source::Inferred)]);
+    }
 }
 
 #[test]

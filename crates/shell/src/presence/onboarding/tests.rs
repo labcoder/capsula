@@ -528,12 +528,13 @@ fn the_finish_lands_on_the_peek_only_when_the_brain_says_so(cx: &mut TestAppCont
                     cx,
                 )
                 .expect("a step's answer");
+            assert!(owner.onboarding.is_some());
+            assert_ne!(owner.panel_visibility, PanelVisibility::Visible);
         }
-        assert!(owner.onboarding.is_some());
-        assert!(
-            owner.settings.read(cx).finishing_for_tests(),
-            "still the finish's"
-        );
+    });
+    press_continue(&owner, cx);
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    owner.update(cx, |owner, cx| {
         owner
             .link_events(
                 Batch::Plain(vec![LinkEvent::Settings {

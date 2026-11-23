@@ -225,6 +225,11 @@ mod tests {
                 notices.shown().map(|notice| notice.route(Action::Retry)),
                 Some(Some(Route::RunRetry(RunId(7))))
             );
+            notices.present(ErrorKey::RenewalUnconfirmed.into(), Source::Run(RunId(8)));
+            assert_eq!(
+                notices.shown().map(|notice| notice.route(Action::Retry)),
+                Some(Some(Route::RunRetry(RunId(7))))
+            );
         }
     }
 
@@ -233,6 +238,7 @@ mod tests {
         for sources in [
             [Source::Account, Source::Run(RunId(7))],
             [Source::Run(RunId(7)), Source::Account],
+            [Source::Run(RunId(7)), Source::Run(RunId(7))],
         ] {
             let mut notices = ChatNotice::default();
             notices.present(ErrorKey::RenewalUnconfirmed.into(), sources[0]);
@@ -240,20 +246,6 @@ mod tests {
             notices.present(ErrorKey::RenewalUnconfirmed.into(), sources[1]);
             assert_eq!(notices.shown(), None);
         }
-    }
-
-    #[test]
-    fn duplicate_terminals_do_not_replace_the_first_run_or_resurrect_it() {
-        let mut notices = ChatNotice::default();
-        notices.present(ErrorKey::RenewalUnconfirmed.into(), Source::Run(RunId(7)));
-        notices.present(ErrorKey::RenewalUnconfirmed.into(), Source::Run(RunId(8)));
-        assert_eq!(
-            notices.shown().map(|notice| notice.route(Action::Retry)),
-            Some(Some(Route::RunRetry(RunId(7))))
-        );
-        notices.dismiss();
-        notices.present(ErrorKey::RenewalUnconfirmed.into(), Source::Run(RunId(7)));
-        assert_eq!(notices.shown(), None);
     }
 
     #[test]

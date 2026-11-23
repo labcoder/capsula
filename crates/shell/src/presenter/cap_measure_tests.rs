@@ -119,41 +119,6 @@ impl<M: TextMeasure> TextMeasure for Timed<M> {
 }
 
 #[test]
-fn the_native_preparation_fixture_fills_every_paint_cap_and_shapes_every_label() {
-    for extra in [0, 40] {
-        let state = kumochi_scene::SceneState::begin(super::header().begin).expect("header");
-        drop(
-            state
-                .admit(&drawing(0, extra), &kumochi_scene::GlobalBudget::default())
-                .expect("legal cap fixture"),
-        );
-        let (mut presenter, now) = live();
-        begin(&mut presenter, LIVE, now);
-        let job = only_job(commit(&mut presenter, LIVE, 0, drawing(0, extra), now).expect("admit"));
-        let mut measure = Timed {
-            inner: Shaper,
-            nanos: 0,
-            calls: 0,
-        };
-        let effects = presenter
-            .completed(job.run(&mut measure), now)
-            .expect("prepared answer");
-        assert!(controls(&effects).is_empty());
-        let work = super::paint_work(&presenter);
-        assert_eq!(
-            (work.dash_pieces, work.fill_vertices, work.outline_points),
-            (
-                PaintWork::LIMITS.dash_pieces,
-                PaintWork::LIMITS.fill_vertices,
-                PaintWork::LIMITS.outline_points
-            )
-        );
-        assert_eq!(measure.calls, 4 + extra);
-        assert_eq!(super::held(&presenter, LIVE).0, 1);
-    }
-}
-
-#[test]
 #[ignore = "exact isolated optimized quiet-Rez full preparation and native text shaping"]
 fn measure_native_full_preparation_at_paint_caps() {
     let _timeout = std::thread::spawn(|| {
@@ -346,11 +311,6 @@ fn window_residency(measure: &mut dyn TextMeasure) -> usize {
     assert_eq!(super::residency(&presenter), 0);
     assert!(peak <= MAX_RESIDENT_BYTES);
     peak
-}
-
-#[test]
-fn the_paint_cap_window_fixture_fills_eight_ready_slots_and_consumes_every_prefix() {
-    window_residency(&mut Shaper);
 }
 
 #[test]

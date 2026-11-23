@@ -6,12 +6,16 @@ use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
 use kumochi_shell_core::platform::screen_watch::{Changed, Sources};
-use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+use windows::Win32::UI::WindowsAndMessaging::{
+    IsWindow, RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, RI_MOUSE_BUTTON_5_DOWN,
+    RI_MOUSE_BUTTON_5_UP, RI_MOUSE_HWHEEL, RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP,
+    RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP,
+};
 use windows::core::HSTRING;
 
 use super::{
-    Armed, Ending, MOUSE_WATCH, Mouse, Native, PRESSES, PresenceEvent, Registration, ScreenSources,
-    Shared, Win32, window,
+    Armed, Ending, MOUSE_WATCH, Mouse, Native, PresenceEvent, Registration, ScreenSources, Shared,
+    Win32, window,
 };
 use crate::input::{Edge, Event, Key, TalkHeld};
 
@@ -23,6 +27,8 @@ struct Fake {
     fail: Rc<RefCell<Vec<&'static str>>>,
     registration: Rc<Cell<Option<Registration>>>,
     armed: Rc<RefCell<Option<Changed>>>,
+    hook: Rc<Cell<Option<u32>>>,
+    installations: Rc<Cell<u32>>,
 }
 
 impl Fake {
@@ -80,11 +86,22 @@ impl Native for Fake {
     }
 
     fn hook(&mut self) -> bool {
-        self.call("hook")
+        let installed = self.call("hook");
+        if installed {
+            assert_eq!(self.hook.get(), None, "the previous hook is gone");
+            let id = self.installations.get() + 1;
+            self.installations.set(id);
+            self.hook.set(Some(id));
+        }
+        installed
     }
 
     fn unhook(&mut self) -> bool {
-        self.call("unhook")
+        let removed = self.call("unhook");
+        if removed {
+            self.hook.set(None);
+        }
+        removed
     }
 }
 
@@ -110,46 +127,85 @@ fn start_arms_before_it_registers_and_stop_gives_everything_back_once() {
     let (mut sources, fake, wakes) = sources();
     let bit = Changed::default();
     assert!(sources.start(bit.clone(), TalkHeld::default()));
-    assert_eq!(fake.calls(), START);
-    assert!(
-        fake.armed.borrow().is_some(),
-        "the mouse thread has the bit"
-    );
+    let acquire: Vec<_> = fake
+        .calls()
+        .into_iter()
+        .filter(|call| *call != "registration")
+        .collect();
+    assert_eq!(acquire, ["arm", "register", "hook"]);
+    assert_eq!(fake.registration.get(), Some(Registration::Ours));
+    assert!(fake.hook.get().is_some(), "the foreground hook is owned");
     assert!(hears(&bit));
     assert_eq!(wakes.try_recv(), Ok(PresenceEvent::ScreenWoke));
+    assert!(!fake.armed.borrow().as_ref().expect("the mouse arm").set());
 
     sources.stop();
-    assert_eq!(fake.calls(), ["disarm", "registration", "remove", "unhook"]);
+    assert!(fake.armed.borrow().is_none());
     assert_eq!(fake.registration.get(), None);
-    sources.stop();
-    assert_eq!(fake.calls(), [""; 0], "a second stop does nothing");
+    assert_eq!(fake.hook.get(), None);
+    bit.clear();
+    assert!(
+        !hears(&bit),
+        "input after stop leaves the original bit clear"
+    );
     assert!(wakes.is_empty());
+
+    let cleanup = fake.calls();
+    assert_eq!(
+        cleanup.iter().copied().find(|call| *call != "registration"),
+        Some("disarm"),
+        "queue disarm before releasing either source"
+    );
+    assert!(
+        cleanup
+            .iter()
+            .position(|call| *call == "registration")
+            .zip(cleanup.iter().position(|call| *call == "remove"))
+            .is_some_and(|(read, remove)| read < remove),
+        "verify the registration before removing it"
+    );
+    sources.stop();
+    assert!(
+        !fake
+            .calls()
+            .iter()
+            .any(|call| matches!(*call, "disarm" | "remove" | "unhook")),
+        "a second stop releases nothing again"
+    );
 }
 
 #[test]
 fn start_refuses_over_another_component_s_mouse_registration_and_takes_nothing() {
-    let (mut sources, fake, _wakes) = sources();
-    fake.registration.set(Some(Registration::Other));
-    let bit = Changed::default();
-    assert!(!sources.start(bit.clone(), TalkHeld::default()));
-    assert_eq!(fake.calls(), ["registration"]);
-    assert_eq!(fake.registration.get(), Some(Registration::Other));
-    assert!(!hears(&bit));
-    sources.stop();
-    assert_eq!(fake.calls(), [""; 0]);
-}
+    for registration in [Registration::Other, Registration::Unreadable] {
+        let (mut sources, fake, wakes) = sources();
+        fake.registration.set(Some(registration));
+        let bit = Changed::default();
+        assert!(!sources.start(bit.clone(), TalkHeld::default()));
+        assert!(
+            fake.calls().iter().all(|call| *call == "registration"),
+            "a refusal takes no ownership, even temporarily"
+        );
+        assert_eq!(fake.registration.get(), Some(registration));
+        assert!(fake.armed.borrow().is_none());
+        assert_eq!(fake.hook.get(), None);
+        assert!(!hears(&bit));
+        assert!(wakes.is_empty());
+        if registration == Registration::Other {
+            sources.stop();
+            assert!(
+                fake.calls().iter().all(|call| *call == "registration"),
+                "a refused watch owes no cleanup"
+            );
+        }
 
-#[test]
-fn start_refuses_a_registration_it_can_t_read_and_takes_nothing() {
-    // It may be another component's.
-    let (mut sources, fake, _wakes) = sources();
-    fake.fail.borrow_mut().push("registration");
-    let bit = Changed::default();
-    assert!(!sources.start(bit.clone(), TalkHeld::default()));
-    assert_eq!(fake.calls(), ["registration"]);
-    assert!(!hears(&bit));
-    assert!(sources.start(Changed::default(), TalkHeld::default()));
-    assert_eq!(fake.calls(), START, "nothing was owed");
+        fake.registration.set(None);
+        let bit = Changed::default();
+        assert!(sources.start(bit.clone(), TalkHeld::default()));
+        assert_eq!(fake.registration.get(), Some(Registration::Ours));
+        assert!(hears(&bit));
+        assert_eq!(wakes.try_recv(), Ok(PresenceEvent::ScreenWoke));
+        assert!(wakes.is_empty());
+    }
 }
 
 #[test]
@@ -250,39 +306,104 @@ fn a_removal_that_fails_twice_keeps_the_next_start_from_arming() {
 
 #[test]
 fn a_registration_another_component_replaced_is_forgotten_not_removed() {
-    let (mut sources, fake, _wakes) = sources();
+    let (mut sources, fake, wakes) = sources();
     assert!(sources.start(Changed::default(), TalkHeld::default()));
     fake.fail.borrow_mut().push("remove");
     sources.stop();
+    assert_eq!(fake.registration.get(), Some(Registration::Ours));
     fake.calls();
+
     fake.registration.set(Some(Registration::Other));
-    assert!(!sources.start(Changed::default(), TalkHeld::default()));
-    assert_eq!(
-        fake.calls(),
-        ["registration", "registration"],
-        "theirs is neither removed nor replaced"
+    let bit = Changed::default();
+    assert!(!sources.start(bit.clone(), TalkHeld::default()));
+    assert_eq!(fake.registration.get(), Some(Registration::Other));
+    assert!(fake.armed.borrow().is_none());
+    assert_eq!(fake.hook.get(), None);
+    assert!(!hears(&bit));
+    assert!(wakes.is_empty());
+    assert!(
+        fake.calls().iter().all(|call| *call == "registration"),
+        "the refusal never acquires or removes a source"
     );
+
     fake.registration.set(None);
-    assert!(sources.start(Changed::default(), TalkHeld::default()));
-    assert_eq!(fake.calls(), START, "nothing of ours was left to retry");
+    let bit = Changed::default();
+    assert!(sources.start(bit.clone(), TalkHeld::default()));
+    assert!(
+        !fake.calls().contains(&"remove"),
+        "nothing of ours was left to remove"
+    );
+    assert_eq!(fake.registration.get(), Some(Registration::Ours));
+    assert!(hears(&bit));
+    assert_eq!(wakes.try_recv(), Ok(PresenceEvent::ScreenWoke));
+    assert!(wakes.is_empty());
 }
 
 #[test]
 fn a_hook_that_cannot_be_removed_keeps_the_next_start_from_arming() {
-    let (mut sources, fake, _wakes) = sources();
-    assert!(sources.start(Changed::default(), TalkHeld::default()));
-    fake.calls();
+    let (mut sources, fake, wakes) = sources();
+    let original = Changed::default();
+    assert!(sources.start(original.clone(), TalkHeld::default()));
+    let original_hook = fake.hook.get().expect("the first foreground hook");
     fake.fail.borrow_mut().extend(["unhook", "unhook"]);
     sources.stop();
-    assert!(!sources.start(Changed::default(), TalkHeld::default()));
-    assert_eq!(
-        fake.calls(),
-        ["disarm", "registration", "remove", "unhook", "unhook"]
+    assert_eq!(fake.hook.get(), Some(original_hook));
+    assert!(fake.armed.borrow().is_none());
+    assert_eq!(fake.registration.get(), None);
+    assert!(!hears(&original));
+    original.clear();
+    assert!(wakes.is_empty());
+    assert!(fake.calls().contains(&"unhook"));
+
+    let refused = Changed::default();
+    assert!(!sources.start(refused.clone(), TalkHeld::default()));
+    assert_eq!(fake.hook.get(), Some(original_hook));
+    assert!(fake.armed.borrow().is_none());
+    assert_eq!(fake.registration.get(), None);
+    assert!(!hears(&refused));
+    refused.clear();
+    assert!(wakes.is_empty());
+    let retry = fake.calls();
+    assert!(retry.contains(&"unhook"));
+    assert!(
+        retry
+            .iter()
+            .all(|call| matches!(*call, "unhook" | "registration"))
     );
-    assert!(sources.start(Changed::default(), TalkHeld::default()));
-    let mut calls = vec!["unhook"];
-    calls.extend(START);
-    assert_eq!(fake.calls(), calls);
+
+    let next = Changed::default();
+    assert!(sources.start(next.clone(), TalkHeld::default()));
+    assert_ne!(
+        fake.hook.get().expect("the new foreground hook"),
+        original_hook
+    );
+    assert_eq!(fake.registration.get(), Some(Registration::Ours));
+    let retry = fake.calls();
+    let unhook = retry
+        .iter()
+        .position(|call| *call == "unhook")
+        .expect("retry the old hook");
+    let acquire = retry
+        .iter()
+        .position(|call| matches!(*call, "arm" | "register" | "hook"))
+        .expect("acquire the next watch");
+    assert!(
+        unhook < acquire,
+        "settle hook ownership before acquiring again"
+    );
+    assert!(hears(&next));
+    assert!(
+        !fake
+            .armed
+            .borrow()
+            .as_ref()
+            .expect("the new mouse arm")
+            .set()
+    );
+    assert_eq!(wakes.try_recv(), Ok(PresenceEvent::ScreenWoke));
+    assert!(wakes.is_empty());
+    assert!(original.set(), "the original watch stays clear");
+    assert!(refused.set(), "the refused watch stays clear");
 }
 
 #[test]
@@ -326,20 +447,47 @@ fn a_record_before_the_arm_sets_nothing() {
 
 #[test]
 fn a_move_ends_at_the_mask_and_a_press_counts_only_over_another_process() {
-    let (mut mouse, bit) = armed(100);
-    for flags in [0, LEFT_UP, !PRESSES] {
-        assert!(!mouse.record(100, flags, || panic!("a move reads no pointer")));
+    const RELEASE_AND_RESERVED: u32 = 0xFFFF_F2AA;
+    for flags in [
+        0,
+        LEFT_UP,
+        RI_MOUSE_RIGHT_BUTTON_UP,
+        RI_MOUSE_MIDDLE_BUTTON_UP,
+        RI_MOUSE_BUTTON_4_UP,
+        RI_MOUSE_BUTTON_5_UP,
+        0x1000,
+        RELEASE_AND_RESERVED,
+    ] {
+        let (mut mouse, bit) = armed(100);
+        assert!(!mouse.record(100, flags, || panic!(
+            "non-press {flags:#x} reads no pointer"
+        )));
+        assert!(bit.set(), "{flags:#x} leaves the bit clear");
     }
-    assert!(!mouse.record(100, LEFT_DOWN, || false), "over Kumochi");
-    assert!(mouse.record(100, LEFT_DOWN, || true));
-    assert!(
-        !mouse.record(101, LEFT_DOWN, || true),
-        "one wake for an arm"
-    );
-    assert!(!bit.set());
-    for flags in [4, 16, 64, 256, WHEEL, 0x800] {
-        let (mut mouse, _bit) = armed(100);
-        assert!(mouse.record(100, flags, || true), "{flags:#x}");
+    for flags in [
+        LEFT_DOWN,
+        RI_MOUSE_RIGHT_BUTTON_DOWN,
+        RI_MOUSE_MIDDLE_BUTTON_DOWN,
+        RI_MOUSE_BUTTON_4_DOWN,
+        RI_MOUSE_BUTTON_5_DOWN,
+        WHEEL,
+        RI_MOUSE_HWHEEL,
+    ] {
+        let (mut mouse, bit) = armed(100);
+        let own_wake = mouse.record(100, flags, || false);
+        assert_eq!(
+            (own_wake, !bit.set()),
+            (false, false),
+            "{flags:#x} over Kumochi"
+        );
+        bit.clear();
+        let foreign_wake = mouse.record(100, flags, || true);
+        assert_eq!(
+            (foreign_wake, !bit.set()),
+            (true, true),
+            "{flags:#x} over another process"
+        );
+        assert!(!mouse.record(101, flags, || true), "{flags:#x} wakes once");
     }
 }
 
@@ -426,13 +574,10 @@ fn mouse_thread(shared: &Arc<Shared>) -> Receiver<PresenceEvent> {
 }
 
 #[test]
-fn quit_before_and_during_publication_ends_the_thread_with_nothing_published() {
+fn quit_before_and_after_publication_ends_the_thread_with_nothing_published() {
     let shared = Shared::default();
     assert_eq!(shared.quit(), None, "nothing to close yet");
-    assert!(
-        !shared.publish(7),
-        "the thread destroys its window and ends"
-    );
+    assert!(!shared.publish(7), "a worker asked to quit cannot publish");
     assert_eq!(shared.window(), None);
     end(&shared);
     assert!(shared.exited.load(Ordering::SeqCst));
@@ -444,7 +589,7 @@ fn quit_before_and_during_publication_ends_the_thread_with_nothing_published() {
     assert_eq!(shared.window(), Some(7));
     let bit = Changed::default();
     shared.pending().push_back(bit.clone());
-    assert_eq!(shared.quit(), Some(7), "a published window is closed");
+    assert_eq!(shared.quit(), Some(7), "quit returns the owned window");
     end(&shared);
     assert_eq!(shared.window(), None);
     assert!(shared.exited.load(Ordering::SeqCst));
@@ -530,8 +675,9 @@ fn the_real_sources_register_the_mouse_to_their_own_window_and_leave_nothing() {
     };
     let (events, _wakes) = async_channel::unbounded();
     let mut sources = ScreenSources::new(events);
-    let shared = std::sync::Arc::clone(&sources.native.shared);
+    let shared = Arc::clone(&sources.native.shared);
     assert!(wait(&|| shared.window().is_some()), "the mouse window");
+    let target = window(shared.window().expect("published"));
     assert_eq!(
         sources.native.registration(),
         Registration::None,
@@ -553,6 +699,11 @@ fn the_real_sources_register_the_mouse_to_their_own_window_and_leave_nothing() {
         "the thread ended"
     );
     assert_eq!(shared.window(), None);
+    // SAFETY: IsWindow only checks the handle; it never dereferences or changes the window.
+    let gone = || !unsafe { IsWindow(Some(target)) }.as_bool();
+    assert!(wait(&gone), "the worker's window was destroyed");
+    let probe = Win32 { shared, hook: None };
+    assert_eq!(probe.registration(), Registration::None);
 }
 
 /// What Windows does with a mouse registration whose target window is destroyed: the worker
