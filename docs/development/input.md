@@ -276,10 +276,12 @@ the overlay is showing scene frames (`Presenter::drawn`), or run steps show in t
 panel. Mirrored, preparing and recovering scenes that aren't painted yet don't hold it, and an
 open status panel alone never does.
 
-Speech holds it too, from positive evidence only. The queued speaker's worker extends a
-`Speech` lease each time the native route reports presented PCM for the run, to 500 ms past
-that frame's presentation time. Evidence already past that is ignored, and an older frame never
-shortens the lease. It clears the lease when it recovers or retires the route, and when it stops.
+Speech holds it too, from positive evidence only. The device callback reports the first and last
+nonzero device frames copied from speech each callback, separately from progress receipts. The worker waits
+until those timestamps are due on the current route and holds Esc to 500 ms past the latest due
+nonzero evidence. A silent block neither arms nor extends the lease. Late evidence cannot shorten
+it, and Stop or route retirement discards the lease and any scheduled evidence. This checks PCM
+on the output route, not OS mute or acoustic audibility.
 Admission, an owed quiet receipt, a virtual route or a heard prefix never arm it, and
 `LOCAL_QUIET` and `RECEIPT_QUEUED` still gate the microphone and typed turns alone. Onset
 and clearing wake the output owner's change channel. Presence reads the lease there through

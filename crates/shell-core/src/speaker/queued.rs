@@ -97,21 +97,21 @@ impl Speech {
         }
     }
 
-    /// Holds to a grace past the frame presented at `presented`, on a clock now at `now`.
-    fn hold(&self, presented: Duration, now: Duration) {
-        let Some(left) = presented
-            .saturating_add(SPEECH_GRACE)
-            .checked_sub(now)
-            .filter(|left| !left.is_zero())
+    /// Holds to a grace past the frame's absolute presentation time.
+    fn hold(&self, presented: Instant) {
+        let now = Instant::now();
+        let Some(until) = presented
+            .checked_add(SPEECH_GRACE)
+            .filter(|&until| presented <= now && until > now)
         else {
             return;
         };
-        let until = Instant::now() + left;
         let nanos = u64::try_from(until.saturating_duration_since(self.base).as_nanos())
             .unwrap_or(u64::MAX)
             .max(1);
         let before = self.at(self.until.fetch_max(nanos, Ordering::AcqRel));
-        if before.is_none_or(|at| at <= Instant::now()) {
+        let now = Instant::now();
+        if until > now && before.is_none_or(|at| at <= now) {
             let _woken = self.changed.try_send(());
         }
     }
@@ -124,8 +124,12 @@ impl Speech {
 
     /// When the evidence runs out, while it still holds.
     pub(crate) fn until(&self) -> Option<Instant> {
+        self.until_at(Instant::now())
+    }
+
+    fn until_at(&self, now: Instant) -> Option<Instant> {
         self.at(self.until.load(Ordering::Acquire))
-            .filter(|at| *at > Instant::now())
+            .filter(|at| *at > now)
     }
 
     fn at(&self, nanos: u64) -> Option<Instant> {

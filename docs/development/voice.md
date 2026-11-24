@@ -234,7 +234,9 @@ stateDiagram-v2
   ring or the worker's presentation timeline backs up, output is silent until there is room, and
   the next callback resumes at the same device frame. Stop retains its existing cutoff and
   conservative heard cursor. It fences copying immediately and the callback's fade and physical
-  quiet acknowledgement do not depend on presentation-ring space.
+  quiet acknowledgement do not depend on presentation-ring space. A separate bounded callback
+  report carries only nonzero device timestamps for Esc; saturation drops that optional evidence
+  instead of delaying PCM, receipts, or Stop.
 - **Speech-start admission (dormant).** The producer holds the next queued Speech-start segment
   until a keyed Allow or Discard joins it at the normal synthesis window. An early decision sticks
   to its announced segment; a duplicate cannot dispatch it again. Discard still owes the ordered

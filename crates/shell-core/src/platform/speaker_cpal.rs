@@ -297,6 +297,10 @@ impl Transport {
         self.0.submit_mut().observed.pop()
     }
 
+    pub(crate) fn nonzero_output(&mut self) -> Option<(Duration, Duration)> {
+        self.0.submit_mut().sound.pop()
+    }
+
     pub(crate) fn take_event(&self) -> Option<OutputEvent> {
         OutputEvent::take(&self.0.submit().shared.pending)
     }
@@ -312,6 +316,7 @@ struct Submit {
     free: Consumer<usize>,
     ready: Producer<ReadyBlock>,
     observed: Consumer<Presented>,
+    sound: Consumer<(Duration, Duration)>,
     conversion: Option<Conversion>,
     blocks: [Arc<Block>; BLOCKS],
     spare: Option<usize>,
@@ -328,6 +333,7 @@ struct Playback {
     free: Producer<usize>,
     ready: Consumer<ReadyBlock>,
     observed: Producer<Presented>,
+    sound: Producer<(Duration, Duration)>,
     current: Option<ReadyBlock>,
     recycle: Option<usize>,
     offset: usize,
@@ -346,6 +352,7 @@ fn pair(rate: u32, channels: usize, control: Arc<Control>) -> (Submit, Playback)
     let (mut recycle, free) = handoff::pair();
     let (ready, render) = handoff::pair();
     let (record, observed) = handoff::pair();
+    let (sound, heard) = handoff::pair();
     let blocks = std::array::from_fn(|index| {
         assert!(recycle.push(index).is_ok(), "one allocation per slot");
         Arc::new(Block {
@@ -356,6 +363,7 @@ fn pair(rate: u32, channels: usize, control: Arc<Control>) -> (Submit, Playback)
         free,
         ready,
         observed,
+        sound: heard,
         conversion: None,
         blocks,
         spare: None,
@@ -370,6 +378,7 @@ fn pair(rate: u32, channels: usize, control: Arc<Control>) -> (Submit, Playback)
         free: recycle,
         ready: render,
         observed: record,
+        sound,
         current: None,
         recycle: None,
         offset: 0,
@@ -491,6 +500,7 @@ impl Playback {
     ) {
         let total = out.len();
         let mut report: Option<Presented> = None;
+        let mut sound = None;
         let mut worked = false;
         let limit = usize::try_from(self.rate / 400).expect("bounded output rate") * self.channels;
         let interruption = loop {
@@ -551,7 +561,11 @@ impl Playback {
                 .chunks_exact(self.channels)
                 .last()
                 .map_or(0.0, |frame| frame[0]);
-            self.remember(head, frame_time(start, at, self.rate));
+            if let Some(last) = self.remember(head, frame_time(start, at, self.rate))
+                && copied.is_some()
+            {
+                self.note_sound(&mut sound, head, start, at, last);
+            }
             if let Some((handed, span)) = copied {
                 self.control.handed_through(handed);
                 if let Some(span) = span {
@@ -579,6 +593,9 @@ impl Playback {
             self.last = 0.0;
         }
         if worked {
+            if let Some(sound) = sound {
+                let _optional_evidence = self.sound.push(sound);
+            }
             self.control.wake();
         }
     }
@@ -634,7 +651,7 @@ impl Playback {
             let sample = self.last * gain as f32;
             frame[..self.channels.min(2)].fill(sample);
         }
-        self.remember(out, start);
+        let _ = self.remember(out, start);
         if self.ramp == 0 {
             self.last = 0.0;
             self.control.latch(if self.uncertain {
@@ -645,14 +662,36 @@ impl Playback {
         }
     }
 
-    fn remember(&mut self, out: &[f32], start: Option<Duration>) {
-        if let Some(last) = out
+    fn remember(&mut self, out: &[f32], start: Option<Duration>) -> Option<usize> {
+        let last = out
             .chunks_exact(self.channels)
-            .rposition(|frame| frame[0].abs() > 0.0)
+            .rposition(|frame| frame[0].abs() > 0.0)?;
+        let at = frame_time(start, last, self.rate);
+        self.uncertain |= at.is_none();
+        self.last_sound = self.last_sound.max(at);
+        Some(last)
+    }
+
+    fn note_sound(
+        &self,
+        sound: &mut Option<(Duration, Duration)>,
+        out: &[f32],
+        start: Option<Duration>,
+        offset: usize,
+        last: usize,
+    ) {
+        let Some(end) = frame_time(start, offset + last, self.rate) else {
+            return;
+        };
+        if let Some((_, last)) = sound {
+            *last = end;
+        } else if let Some(first) = out
+            .chunks_exact(self.channels)
+            .take(last + 1)
+            .position(|frame| frame[0].abs() > 0.0)
+            .and_then(|first| frame_time(start, offset + first, self.rate))
         {
-            let at = frame_time(start, last, self.rate);
-            self.uncertain |= at.is_none();
-            self.last_sound = self.last_sound.max(at);
+            *sound = Some((first, end));
         }
     }
 }

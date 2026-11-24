@@ -540,6 +540,7 @@ fn physical(worker: &mut Worker, generation: u64, occupied: &'static AtomicBool)
         power: Power::Playing,
         retire_deadline: None,
         watchdog: None,
+        pending_sound: Vec::new(),
     });
     playback
 }
@@ -781,9 +782,9 @@ fn refused_ordered_delivery_closes_ingress_and_preserves_only_the_accepted_prefi
         }
         let (send, received) = mpsc::sync_channel(capacity);
         let mut attempts = 0;
+        worker.origin = Instant::now().checked_sub(ms(60)).unwrap();
         worker.serve(
             &port,
-            Instant::now().checked_sub(ms(60)).unwrap(),
             |_| panic!("no ingress credit is owed"),
             |report| {
                 assert!(attempts <= capacity, "report attempted after refusal");
