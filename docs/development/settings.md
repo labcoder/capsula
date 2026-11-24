@@ -164,8 +164,6 @@ before Settings sees the updated snapshot, so the warning does not depend on the
 The Voice tab reveals the focused group within its scroll viewport, including when tabbing
 back from Stop. The Spoken Replies action keeps focus while its request is pending; if the
 next snapshot removes the button, the group's focus context survives.
-The stock Legacy session has no playback output. The Voice tab discloses that limit
-separately from model status; replace that disclosure when queued playback ships.
 
 Settings stays visible when deactivated. With Settings focused, Esc stops work, then clears a
 drawing, then cancels the active field edit; another Esc dismisses. The close button also

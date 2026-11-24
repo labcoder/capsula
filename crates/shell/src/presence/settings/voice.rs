@@ -309,13 +309,6 @@ impl SettingsView {
             .child(div().text_sm().child(strings.get(heading)))
             .child(div().text_sm().child(strings.get(state.voice_status(part))))
             .child(div().text_sm().child(strings.get(model)))
-            .children((part == SpokenReplies).then(|| {
-                div()
-                    .w_full()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(strings.get(Text::SpokenPlaybackUnavailable))
-            }))
             .children(
                 (part == SpokenReplies
                     && intent.is_some_and(|intent| {

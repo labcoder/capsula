@@ -33,6 +33,13 @@ use kumochi_shell_core::{
 };
 use strings::Strings;
 
+/// Prepares the link every launch uses, in the audio session it asks the brain for.
+fn prepare_link(
+    events: async_channel::Sender<link::LinkEvent>,
+) -> std::io::Result<(link::LinkHandle, link::LinkStart)> {
+    link::prepare(events, AudioSession::QueuedRequired)
+}
+
 fn main() -> ExitCode {
     let launch = presence::Launch::parse(std::env::args().skip(1));
     #[cfg(debug_assertions)]
@@ -77,7 +84,7 @@ fn main() -> ExitCode {
         "shell started"
     );
     let (events, link_events) = async_channel::unbounded();
-    let (link, start) = match link::prepare(events, AudioSession::Legacy) {
+    let (link, start) = match prepare_link(events) {
         Ok(prepared) => prepared,
         Err(error) => {
             tracing::error!(%error, "can't prepare the link to the brain");

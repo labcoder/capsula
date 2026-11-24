@@ -183,7 +183,6 @@ texts! {
     SpokenRepliesModel => "voice-spoken-replies-model",
     SpokenRepliesInstall => "voice-spoken-replies-install",
     SpokenRepliesInstallHelp => "voice-spoken-replies-install-help",
-    SpokenPlaybackUnavailable => "voice-spoken-playback-unavailable",
     SpokenRepliesInstallAccessible => "voice-spoken-replies-install-accessible",
     SpokenRepliesRetry => "voice-spoken-replies-retry",
     SpokenRepliesRetryAccessible => "voice-spoken-replies-retry-accessible",

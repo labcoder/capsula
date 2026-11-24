@@ -21,8 +21,8 @@ idle-unloaded speech input without another download. There is no model picker.
 
 The tab shows each part's installation and load status separately. **Speak answers aloud** saves
 a preference and never downloads a model. The first spoken replies install turns the preference
-on only if you haven't already set it. This version can install the model, but can't play
-spoken replies. **Installed · ready** describes the model, not audio playback.
+on only if you haven't already set it. **Installed · ready** describes the model, not audio
+playback. An installed voice still needs available playback.
 If Voice settings asks you to restart, replies stay silent on the current connection.
 Let the current answer finish before restarting Kumochi, or let the preference take effect
 on the next normal reconnection.

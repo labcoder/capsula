@@ -3213,3 +3213,186 @@ fn persistent_stop_configuration_refusal_retires_motion_with_an_actionable_notic
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
     close_callback_scene(&owner, cx);
 }
+
+#[cfg(all(windows, debug_assertions))]
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "two spoken drawings share one real stock pair"
+)]
+fn a_stock_pair_speaks_a_drawing_steps_line_and_takes_the_next_turn(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use crate::link::{Batch, LinkEvent, fixture};
+    use crate::presence::{run_fence_tests::submit_draft, test_fixture};
+    use kumochi_protocol::message::{DataToBrain, DataToShell, Phase, RunId, ScreenChoice};
+    use std::time::{Duration, Instant};
+
+    const TONE: f32 = 15_430.0 / 32_768.0;
+    let _device = fixture::serialize_playback();
+    let (id, hello, probe, brain) = kumochi_brain::ipc::offline_narrated_peer(16);
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+    let (stock, _not_started) = crate::prepare_link(async_channel::unbounded().0).unwrap();
+    let pipe = fixture::authenticated(id, hello, stock.audio_session());
+    let events = fixture::patient(pipe.events);
+    let owner = test_fixture::presence(cx);
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| this.link = pipe.handle.clone());
+    let apply = |event, cx: &mut gpui_kit::TestAppContext| {
+        owner.update(cx, |this, cx| {
+            this.link_events(Batch::Plain(vec![event]), cx).unwrap();
+        });
+        cx.run_until_parked();
+    };
+    apply(LinkEvent::Connected(session.clone()), cx);
+    let paint = |cx: &mut gpui_kit::TestAppContext| {
+        owner.update(cx, |this, cx| this.draw_changed_at(Instant::now(), cx));
+        let window = owner.read_with(cx, |this, _| this.overlay.window().unwrap().window);
+        let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !owner.read_with(cx, |this, _| this.presenter.membership_ready())
+        || !pipe.handle.admits_text(Some(&session))
+    {
+        assert!(Instant::now() < deadline, "the stock pair becomes ready");
+        if let Ok(event) = events.recv_timeout(Duration::from_millis(5)) {
+            apply(event, cx);
+        }
+    }
+    let host = HostGuard::install(&[
+        Step(Operation::Configure, Outcome::Success),
+        Step(Operation::Show, Outcome::Success),
+    ]);
+    let mut prior = RunId(0);
+    for (turn, draft) in ["first spoken drawing", "second spoken drawing"]
+        .into_iter()
+        .enumerate()
+    {
+        if turn == 1 {
+            owner.update(cx, |this, _| assert!(this.runs.select_thread(None)));
+        }
+        fixture::prime_next_playback(&pipe.handle);
+        submit_draft(&owner, draft, cx);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut step, mut ended, mut done, mut playback, mut heard) = (None, None, None, None, 0);
+        while step.is_none_or(|(run, scene)| {
+            ended != Some(run) || done != Some(run) || !probe.shown().contains(&(run, scene, 1))
+        }) || heard == 0
+            || !pipe.handle.admits_text(Some(&session))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "turn {turn}: step={step:?}, ended={ended:?}, done={done:?}, heard={heard}, shown={:?}, playback={}, open={}",
+                probe.shown(),
+                playback.is_some(),
+                session.open()
+            );
+            for event in events.try_iter() {
+                match &event {
+                    LinkEvent::SceneData { frame, .. } => {
+                        if let DataToShell::SceneStepCommit {
+                            run,
+                            scene,
+                            index: 1,
+                            speech,
+                            ..
+                        } = &**frame
+                        {
+                            assert_eq!(*speech, None, "a Plain pair gets no speech promise");
+                            step = Some((*run, *scene));
+                        }
+                    }
+                    LinkEvent::Data {
+                        message: DataToShell::RunEnd { run },
+                        ..
+                    } => assert_eq!(ended.replace(*run), None, "one data fence per run"),
+                    LinkEvent::RunState { run, phase, .. } => {
+                        assert!(!matches!(phase, Phase::Failed | Phase::Interrupted));
+                        if *phase == Phase::Done {
+                            done = Some(*run);
+                        }
+                    }
+                    _ => {}
+                }
+                apply(event, cx);
+            }
+            if step.is_some() {
+                paint(cx);
+            }
+            playback = playback.or_else(|| pipe.playback.try_recv().ok());
+            if let Some(device) = playback
+                .as_mut()
+                .filter(|device| device.ready() || device.stopped())
+            {
+                let mut samples = [0.0; 48];
+                device.render(&mut samples);
+                heard += samples.iter().filter(|sample| **sample == TONE).count();
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let (run, _) = step.unwrap();
+        let playback = playback.unwrap();
+        assert_eq!(
+            (heard, playback.presented_prefix()),
+            (3_840, 3_840),
+            "the step's whole line reached the callback"
+        );
+        assert!(run > prior, "each turn is a new run on the same pair");
+        prior = run;
+        drop(playback);
+        fixture::await_fake_disposal();
+    }
+    assert_eq!(probe.stop(), RunId(0), "both replies ended without Stop");
+    host.finish();
+    let script = HostGuard::install(&[Step(Operation::Hide, Outcome::Success)]);
+    apply(LinkEvent::State(crate::link::LinkState::Connecting), cx);
+    script.finish();
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().unwrap());
+    assert!(brain.join().unwrap());
+    let (id, hello, probe, brain) =
+        kumochi_brain::ipc::offline_text_peer("0 text A quiet stock reply.".into());
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+    let pipe = fixture::authenticated(id, hello, stock.audio_session());
+    let events = fixture::patient(pipe.events);
+    let session = fixture::connected(fixture::next(&events));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !pipe.handle.admits_text(Some(&session)) {
+        assert!(
+            Instant::now() < deadline,
+            "the silent stock pair becomes ready"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    fixture::prime_next_playback(&pipe.handle);
+    assert!(pipe.handle.send_data(
+        &session,
+        DataToBrain::TextSubmit {
+            turn: 1,
+            thread: None,
+            screen: ScreenChoice::None,
+            text: "quiet".into(),
+        }
+    ));
+    while !matches!(
+        events.recv_timeout(Duration::from_secs(3)),
+        Ok(LinkEvent::Data {
+            message: DataToShell::RunEnd { .. },
+            ..
+        })
+    ) {
+        assert!(Instant::now() < deadline, "the silent reply ends");
+    }
+    assert!(
+        pipe.playback.try_recv().is_err(),
+        "Talk-back off opens no playback device"
+    );
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().unwrap());
+    assert!(brain.join().unwrap());
+}
