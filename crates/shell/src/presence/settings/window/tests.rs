@@ -69,7 +69,8 @@ fn cancelling_a_loading_speech_model_ends_the_waiting_hold_and_keeps_settings_fo
 ) {
     use crate::presence::voice_wiring_tests::{hold, ready};
     use crate::strings::Text;
-    use kumochi_protocol::message::{GestureId, PartState, SettingsOp};
+    use kumochi_protocol::message::{GestureId, PartState, SettingsOp, VoiceView};
+    use kumochi_protocol::voice::VoicePart::SpeechInput;
 
     test_fixture::without_desktop(cx);
     let (owner, data, controls) = ready(cx);
@@ -77,7 +78,10 @@ fn cancelling_a_loading_speech_model_ends_the_waiting_hold_and_keeps_settings_fo
         &owner,
         vec![LinkEvent::Voice {
             generation: 1,
-            speech_input: PartState::Loading,
+            view: VoiceView {
+                speech_input: PartState::Loading,
+                spoken_replies: PartState::Ready,
+            },
         }],
         cx,
     );
@@ -102,7 +106,7 @@ fn cancelling_a_loading_speech_model_ends_the_waiting_hold_and_keeps_settings_fo
         assert!(!owner.activity.working);
         assert!(owner.voice.pending.is_none());
         assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
-        assert!(owner.settings.read(cx).speech_input_pending());
+        assert!(owner.settings.read(cx).voice_setup_pending(SpeechInput));
     });
     let messages = drain(&controls);
     assert_eq!(
@@ -716,7 +720,14 @@ fn rejected_speech_input_keeps_the_settings_panel_open(cx: &mut TestAppContext) 
             activation: None,
         });
         owner.settings.update(cx, |settings, _| {
-            settings.receive_speech_input(Some(1), 1, PartState::NotInstalled);
+            settings.receive_voice(
+                Some(1),
+                1,
+                kumochi_protocol::message::VoiceView {
+                    speech_input: PartState::NotInstalled,
+                    spoken_replies: PartState::Ready,
+                },
+            );
         });
         assert!(owner.settings_open());
         crate::presence::voice_wiring_tests::gate(owner, 1, cx);
@@ -742,6 +753,50 @@ fn rejected_speech_input_keeps_the_settings_panel_open(cx: &mut TestAppContext) 
         assert!(owner.settings_focused());
         assert_eq!(owner.voice.status, Some(Text::VoiceNotInstalled));
         assert!(owner.voice.pending.is_none());
+    });
+}
+
+#[gpui::test]
+fn a_stale_or_output_only_setup_cancel_does_not_revoke_the_current_hold(cx: &mut TestAppContext) {
+    use crate::presence::voice_wiring_tests::{hold, ready};
+    use kumochi_protocol::message::{GestureId, PartState, SettingsOp, VoiceView};
+    use kumochi_protocol::voice::VoicePart::SpokenReplies;
+
+    test_fixture::without_desktop(cx);
+    let (owner, _data, controls) = ready(cx);
+    hold(&owner, 1, cx);
+    while controls.try_recv().is_ok() {}
+    owner.update(cx, |owner, cx| {
+        let view = |spoken_replies| VoiceView {
+            speech_input: PartState::Ready,
+            spoken_replies,
+        };
+        let downloading = view(PartState::Downloading { done: 1, total: 2 });
+        let cancel = owner.settings.update(cx, |settings, _| {
+            assert!(settings.receive_voice(Some(1), 1, downloading));
+            let cancel = settings.voice_setup_intent(SpokenReplies).expect("cancel");
+            assert!(settings.receive_voice(Some(1), 1, view(PartState::Ready)));
+            cancel
+        });
+        owner.voice_setup_action(cancel, cx);
+        assert!(controls.is_empty());
+        assert!(owner.link.input_is(GestureId(1)));
+        assert!(owner.voice.pending.is_some());
+
+        let cancel = owner.settings.update(cx, |settings, _| {
+            assert!(settings.receive_voice(Some(1), 1, downloading));
+            settings
+                .voice_setup_intent(SpokenReplies)
+                .expect("current cancel")
+        });
+        owner.voice_setup_action(cancel, cx);
+        assert_eq!(
+            controls.try_recv(),
+            Ok(ControlToBrain::Settings(SettingsOp::CancelVoiceInstall))
+        );
+        assert!(controls.is_empty());
+        assert!(owner.link.input_is(GestureId(1)));
+        assert!(owner.voice.pending.is_some());
     });
 }
 

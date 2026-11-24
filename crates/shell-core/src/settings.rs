@@ -5,8 +5,9 @@ use std::fmt;
 
 use kumochi_protocol::message::{
     AssistantName, ConnectionKind, DockPosition, ErrorKey, MaxFrameRate, ModelChoice, ModelInfo,
-    NameError, OnboardingStep, PartState, SettingsOp, SettingsView, SttUnload, UserError, UserName,
+    NameError, OnboardingStep, SettingsOp, SettingsView, SttUnload, UserError, UserName, VoiceView,
 };
+use kumochi_protocol::voice::VoicePart;
 
 use crate::strings::{Strings, Text};
 
@@ -16,7 +17,8 @@ mod options;
 mod saves;
 mod voice;
 pub use saves::{AfterSave, BeforeSave, Save, SaveOutcome};
-pub use voice::{STT_UNLOAD_OPTIONS, SpeechInputAction, SpeechInputIntent};
+use voice::VoiceFeedback;
+pub use voice::{STT_UNLOAD_OPTIONS, VoiceAction, VoiceIntent};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
@@ -87,7 +89,7 @@ enum Slot {
     HoldToTalk(bool),
     TalkBack(bool),
     ShowScreen(bool),
-    SpeechInput(SpeechInputAction),
+    Voice(VoicePart, VoiceAction),
     /// The default model; the choice itself is `Settings::model_queued`.
     Model,
     /// `FinishOnboarding`: no field and no draft.
@@ -99,6 +101,7 @@ enum Slot {
 impl Slot {
     fn same_setting(self, other: Self) -> bool {
         match (self, other) {
+            (Self::Voice(left, _), Self::Voice(right, _)) => left == right,
             (Self::Name(one), Self::Name(other)) => one == other,
             (Self::FrameRate(_), Self::FrameRate(_))
             | (Self::Dock(_), Self::Dock(_))
@@ -107,7 +110,6 @@ impl Slot {
             | (Self::HoldToTalk(_), Self::HoldToTalk(_))
             | (Self::TalkBack(_), Self::TalkBack(_))
             | (Self::ShowScreen(_), Self::ShowScreen(_))
-            | (Self::SpeechInput(_), Self::SpeechInput(_))
             | (Self::Model, Self::Model)
             | (Self::Onboarding, Self::Onboarding)
             | (Self::OnboardingStep, Self::OnboardingStep) => true,
@@ -125,7 +127,7 @@ impl Slot {
             | Self::HoldToTalk(_)
             | Self::TalkBack(_)
             | Self::ShowScreen(_)
-            | Self::SpeechInput(_)
+            | Self::Voice(..)
             | Self::Model
             | Self::Onboarding
             | Self::OnboardingStep => None,
@@ -169,10 +171,8 @@ pub struct Settings {
     user: FieldState,
     pending: VecDeque<Pending>,
     offline_position: Option<DockIntent>,
-    speech_input: Option<PartState>,
-    speech_generation: Option<u64>,
-    speech_error: Option<UserError>,
-    speech_send_failed: bool,
+    voice: Option<(u64, VoiceView)>,
+    voice_feedback: [VoiceFeedback; 2],
     stt_error: Option<UserError>,
     stt_send_failed: bool,
     talk_back_send_error: Option<Text>,
@@ -234,10 +234,11 @@ impl Settings {
             self.user.value.clone_from(&self.user.authoritative);
         }
         if view.hold_to_talk {
-            if self.speech_error.as_ref().map(UserError::key) == Some(ErrorKey::HoldToTalkOff) {
-                self.speech_error = None;
+            let feedback = &mut self.voice_feedback[voice::part_index(VoicePart::SpeechInput)];
+            if feedback.error.as_ref().map(UserError::key) == Some(ErrorKey::HoldToTalkOff) {
+                feedback.error = None;
             }
-            if self.notice_slot == Some(Slot::SpeechInput(SpeechInputAction::Reload))
+            if self.notice_slot == Some(Slot::Voice(VoicePart::SpeechInput, VoiceAction::Reload))
                 && self.notice.as_ref().map(UserError::key) == Some(ErrorKey::HoldToTalkOff)
             {
                 self.clear_notice();
@@ -251,8 +252,10 @@ impl Settings {
         if !pending.failed && matches!(pending.slot, Slot::SttUnload(_)) {
             self.stt_error = None;
         }
-        if !pending.failed && matches!(pending.slot, Slot::SpeechInput(_)) {
-            self.speech_error = None;
+        if !pending.failed
+            && let Slot::Voice(part, _) = pending.slot
+        {
+            self.voice_feedback[voice::part_index(part)].error = None;
         }
         if pending.slot == Slot::Model && !self.pending.iter().any(|left| left.slot == Slot::Model)
         {
@@ -450,7 +453,7 @@ impl Settings {
                 | Slot::HoldToTalk(_)
                 | Slot::TalkBack(_)
                 | Slot::ShowScreen(_)
-                | Slot::SpeechInput(_)
+                | Slot::Voice(..)
                 | Slot::Model
                 | Slot::Onboarding
                 | Slot::OnboardingStep => None,
@@ -629,8 +632,8 @@ impl Settings {
         if matches!(pending.slot, Slot::SttUnload(_)) {
             self.stt_error = Some(error.clone());
         }
-        if matches!(pending.slot, Slot::SpeechInput(_)) {
-            self.speech_error = Some(error.clone());
+        if let Slot::Voice(part, _) = pending.slot {
+            self.voice_feedback[voice::part_index(part)].error = Some(error.clone());
         }
         let field = pending.slot.field()?;
         self.field_mut(field).error = Some(Error::Brain(error));
@@ -648,10 +651,8 @@ impl Settings {
         }
         self.view = None;
         self.view_generation = None;
-        self.speech_input = None;
-        self.speech_generation = None;
-        self.speech_error = None;
-        self.speech_send_failed = false;
+        self.voice = None;
+        self.voice_feedback = Default::default();
         self.stt_send_failed = false;
         self.talk_back_send_error = None;
         self.pending.clear();

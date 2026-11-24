@@ -1,16 +1,20 @@
 use super::SettingsView;
-use crate::settings::{STT_UNLOAD_OPTIONS, Save, SpeechInputAction};
+use crate::settings::{STT_UNLOAD_OPTIONS, Save, VoiceAction, VoiceIntent};
 use crate::strings::{Strings, Text};
-#[cfg(test)]
-use gpui_kit::InteractiveElement as _;
+use gpui_kit::base::InteractiveElementExt as _;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::radio::{Radio, RadioGroup};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, div};
+use gpui_kit::{
+    Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, Window, accesskit::Role, div,
+};
 use kumochi_protocol::message::SttUnload;
+use kumochi_protocol::voice::VoicePart::{self, SpeechInput, SpokenReplies};
 
 fn stt_unload_id(policy: SttUnload) -> &'static str {
     match policy {
@@ -33,27 +37,68 @@ fn speech_idle_group(
 }
 
 impl SettingsView {
-    pub(super) fn voice(&self, cx: &Context<'_, Self>) -> impl IntoElement {
+    pub(super) fn voice(&self, window: &Window, cx: &Context<'_, Self>) -> impl IntoElement {
+        let state = self.model.read(cx);
+        let strings = cx.global::<Strings>();
+        let [hold, _, idle, talk_back, replies] = &self.voice_focus;
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .id("settings-voice-content")
+                    .debug_selector(|| "settings-voice-content".into())
+                    .size_full()
+                    .overflow_y_scroll()
+                    .lock_scroll_axis()
+                    .track_scroll(&self.voice_scroll)
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .child(
+                        div()
+                            .flex_none()
+                            .track_focus(hold)
+                            .child(self.hold_to_talk(cx))
+                            .children(state.view().is_none().then(|| {
+                                div().text_sm().child(strings.get(Text::SettingsOffline))
+                            })),
+                    )
+                    .child(self.voice_model(SpeechInput, cx).flex_none())
+                    .child(self.speech_idle(cx).flex_none().track_focus(idle))
+                    .child(
+                        div()
+                            .flex_none()
+                            .track_focus(talk_back)
+                            .child(self.talk_back(cx)),
+                    )
+                    .child(
+                        self.voice_model(SpokenReplies, cx)
+                            .id("spoken-replies-model")
+                            .flex_none()
+                            .track_focus(replies)
+                            .role(Role::Group)
+                            .aria_label(strings.get(Text::SpokenReplies))
+                            .border_1()
+                            .border_color(if replies.is_focused(window) {
+                                cx.theme().ring
+                            } else {
+                                cx.theme().popover
+                            }),
+                    ),
+            )
+            .vertical_scrollbar(&self.voice_scroll)
+    }
+
+    fn speech_idle(&self, cx: &Context<'_, Self>) -> Div {
         let state = self.model.read(cx);
         let strings = cx.global::<Strings>();
         div()
             .flex()
             .flex_col()
             .gap_3()
-            .child(self.hold_to_talk(cx))
-            .child(div().text_sm().child(strings.get(Text::SpeechInput)))
-            .child(
-                div()
-                    .text_sm()
-                    .child(strings.get(state.speech_input_status())),
-            )
-            .children(
-                state
-                    .view()
-                    .is_none()
-                    .then(|| div().text_sm().child(strings.get(Text::SettingsOffline))),
-            )
-            .child(self.speech_input_model(cx))
             .child(div().text_sm().child(strings.get(Text::VoiceIdlePolicy)))
             .child(
                 speech_idle_group(
@@ -121,7 +166,6 @@ impl SettingsView {
                     .text_color(cx.theme().muted_foreground)
                     .child(strings.get(Text::VoiceIdleHelp)),
             )
-            .child(self.talk_back(cx))
     }
 
     fn talk_back(&self, cx: &Context<'_, Self>) -> impl IntoElement {
@@ -229,12 +273,27 @@ impl SettingsView {
             }))
     }
 
-    fn speech_input_model(&self, cx: &Context<'_, Self>) -> impl IntoElement {
+    fn voice_model(&self, part: VoicePart, cx: &Context<'_, Self>) -> Div {
         let state = self.model.read(cx);
         let strings = cx.global::<Strings>();
-        let intent = state.speech_input_intent();
-        let owner = self.owner.clone();
-        let settings = cx.weak_entity();
+        let (id, heading, model) = match part {
+            SpeechInput => ("speech-model", Text::SpeechInput, Text::VoiceDefaultModel),
+            SpokenReplies => (
+                "spoken-replies-model",
+                Text::SpokenReplies,
+                Text::SpokenRepliesModel,
+            ),
+        };
+        let pending = state.voice_setup_pending(part);
+        let intent = state.voice_setup_intent(part).filter(|intent| {
+            part != SpokenReplies
+                || intent.action != VoiceAction::Cancel
+                || state.voice_setup_pending(SpeechInput)
+                || !state
+                    .voice_setup_intent(SpeechInput)
+                    .is_some_and(|input| input.action == VoiceAction::Cancel)
+        });
+        let cancel = intent.is_some_and(|intent| intent.action == VoiceAction::Cancel);
         div()
             .w_full()
             .min_w_0()
@@ -242,92 +301,123 @@ impl SettingsView {
             .flex_col()
             .items_start()
             .gap_2()
-            .child(div().text_sm().child(strings.get(Text::VoiceDefaultModel)))
-            .children(intent.map(|intent| {
-                Button::new("speech-model-action")
-                    .label(strings.get(intent.action.label()))
-                    .disabled(state.speech_input_pending())
-                    .when(intent.action == SpeechInputAction::Cancel, |button| {
-                        button.accessibility_label(strings.get(Text::VoiceCancelAccessible))
-                    })
-                    .on_click(move |_, window, cx| {
-                        let Some(settings) = settings.upgrade() else {
-                            return;
-                        };
-                        let gone = owner
-                            .update(cx, |owner, cx| owner.speech_input_action(intent, cx))
-                            .is_err();
-                        settings.update(cx, |view, cx| {
-                            if gone {
-                                view.model.update(cx, |state, cx| {
-                                    if state.apply_save(Save::SpeechInput(intent), None).notify {
-                                        cx.notify();
-                                    }
-                                });
-                            }
-                            window.focus(&view.focus, cx);
-                        });
-                    })
-                    .map(|button| {
-                        #[cfg(test)]
-                        let button = button.debug_selector(|| "speech-model-action".into());
-                        button
-                    })
+            .child(div().text_sm().child(strings.get(heading)))
+            .child(div().text_sm().child(strings.get(state.voice_status(part))))
+            .child(div().text_sm().child(strings.get(model)))
+            .children((part == SpokenReplies).then(|| {
+                div()
+                    .w_full()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(strings.get(Text::SpokenPlaybackUnavailable))
             }))
             .children(
-                intent
-                    .filter(|intent| intent.action == SpeechInputAction::Cancel)
-                    .map(|_| {
-                        div()
-                            .w_full()
-                            .text_xs()
-                            .child(strings.get(Text::VoiceCancelHelp))
-                            .map(|element| {
-                                #[cfg(test)]
-                                let element =
-                                    element.debug_selector(|| "speech-model-cancel-help".into());
-                                element
-                            })
-                    }),
+                (part == SpokenReplies
+                    && intent.is_some_and(|intent| {
+                        matches!(intent.action, VoiceAction::Install | VoiceAction::Retry)
+                    }))
+                .then(|| {
+                    div()
+                        .w_full()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(strings.get(Text::SpokenRepliesInstallHelp))
+                }),
             )
-            .children(state.speech_input_pending().then(|| {
-                div()
+            .children(intent.map(|intent| self.voice_setup_button(part, id, intent, cx)))
+            .children(cancel.then(|| {
+                let help = div()
+                    .w_full()
                     .text_xs()
-                    .child(strings.get(Text::VoiceRequestPending))
-                    .map(|element| {
-                        #[cfg(test)]
-                        let element = element.debug_selector(|| "speech-model-pending".into());
-                        element
-                    })
+                    .child(strings.get(Text::VoiceCancelHelp));
+                #[cfg(test)]
+                let help = help.debug_selector(move || format!("{id}-cancel-help"));
+                help
             }))
-            .children(state.speech_input_error().map(|error| {
-                div()
+            .children(pending.then(|| {
+                let message = div()
+                    .text_xs()
+                    .child(strings.get(Text::VoiceRequestPending));
+                #[cfg(test)]
+                let message = message.debug_selector(move || format!("{id}-pending"));
+                message
+            }))
+            .children(state.voice_setup_error(part).map(|error| {
+                let message = div()
                     .text_sm()
                     .text_color(cx.theme().danger)
-                    .child(strings.error(error))
-                    .map(|element| {
-                        #[cfg(test)]
-                        let element = element.debug_selector(|| "speech-model-refused".into());
-                        element
-                    })
+                    .child(strings.error(error));
+                #[cfg(test)]
+                let message = message.debug_selector(move || format!("{id}-refused"));
+                message
             }))
-            .children(state.speech_input_failure().map(|error| {
+            .children(state.voice_setup_failure(part).map(|error| {
                 div()
                     .text_sm()
                     .text_color(cx.theme().danger)
                     .child(strings.error(&error))
             }))
-            .children(state.speech_input_send_failed().then(|| {
-                div()
+            .children(state.voice_setup_send_failed(part).then(|| {
+                let message = div()
                     .text_sm()
                     .text_color(cx.theme().danger)
-                    .child(strings.get(Text::SettingsUnavailable))
-                    .map(|element| {
-                        #[cfg(test)]
-                        let element = element.debug_selector(|| "speech-model-send-failed".into());
-                        element
-                    })
+                    .child(strings.get(Text::SettingsUnavailable));
+                #[cfg(test)]
+                let message = message.debug_selector(move || format!("{id}-send-failed"));
+                message
             }))
+    }
+
+    fn voice_setup_button(
+        &self,
+        part: VoicePart,
+        id: &'static str,
+        intent: VoiceIntent,
+        cx: &Context<'_, Self>,
+    ) -> Button {
+        let strings = cx.global::<Strings>();
+        let owner = self.owner.clone();
+        let settings = cx.weak_entity();
+        let accessible = match (part, intent.action) {
+            (_, VoiceAction::Cancel) => Some(Text::VoiceCancelAccessible),
+            (SpokenReplies, VoiceAction::Install) => Some(Text::SpokenRepliesInstallAccessible),
+            (SpokenReplies, VoiceAction::Retry) => Some(Text::SpokenRepliesRetryAccessible),
+            _ => None,
+        };
+        let button = Button::new(format!("{id}-action"))
+            .label(strings.get(intent.label()))
+            .disabled(self.model.read(cx).voice_setup_pending(part))
+            .when_some(accessible, |button, text| {
+                button.accessibility_label(strings.get(text))
+            })
+            .when(part == SpeechInput, |button| {
+                button.track_focus(&self.voice_focus[1])
+            })
+            .on_click(move |_, window, cx| {
+                let Some(settings) = settings.upgrade() else {
+                    return;
+                };
+                let gone = owner
+                    .update(cx, |owner, cx| owner.voice_setup_action(intent, cx))
+                    .is_err();
+                if gone || part == SpeechInput {
+                    settings.update(cx, |view, cx| {
+                        if gone {
+                            view.model.update(cx, |state, cx| {
+                                if state.apply_save(Save::Voice(intent), None).notify {
+                                    cx.notify();
+                                }
+                            });
+                        }
+                        if part == SpeechInput {
+                            window.focus(&view.focus, cx);
+                        }
+                    });
+                }
+            });
+        #[cfg(test)]
+        let button = button.debug_selector(move || format!("{id}-action"));
+        button
     }
 }
 

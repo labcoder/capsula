@@ -106,31 +106,36 @@ reconnects without counting as a connection loss; Settings reads the next pair's
 Hiding or removing the exact active reply's thread ends its control side, but the pair still
 waits for the reply's data end and any speaking quiet receipt before allowing a change.
 
-The control reader forwards `Voice.speech_input` to the settings model with its connection
-generation instead of dropping the whole Voice view. Status comes only from that snapshot,
-not the selected policy. SpokenReplies installation status is not shown. The existing backend
-owns all idle timing and physical-release ordering; this UI adds no timer, microphone or hold
-behavior.
+The control reader forwards the whole `VoiceView` to the settings model with its connection
+generation. Each part's status comes only from that snapshot, not its saved preference. The
+backend still owns idle timing and physical-release ordering; this UI adds no timer,
+microphone or hold behavior.
 
-The speech-input model row exposes only the default Parakeet setup operations. NotInstalled
-offers Install, either Failed state offers Retry (which can fetch again), and Unloaded offers
-Load using the backend's installed-file reload path. All three send `InstallVoice(SpeechInput)`.
-Verifying, Downloading and Loading offer the existing global `CancelVoiceInstall`. Adjacent
-Fluent help and the button's accessible name explain that cancellation covers all pending voice
-setup, keeps installed files and cannot stop some loading/finishing work, including startup.
-There are no SpokenReplies setup controls, model selection, removal or automatic hold actions.
+The two rows use the same setup control. NotInstalled offers Install and recoverable Failed
+states offer Retry; both send `InstallVoice` for that row's part, which can verify or fetch files.
+Only unloaded SpeechInput offers Load, which sends `LoadSpeechInput` and cannot fetch.
+Verifying, Downloading and Loading offer the existing global `CancelVoiceInstall`.
+Fluent help and the button's accessible name explain that it covers all pending voice setup,
+keeps installed files and cannot stop some loading or finishing work, including startup.
+There is no model selection, removal or automatic setup on this page.
+If a model owner could not start for this process, the row calls for a restart instead of
+offering a retry that cannot run. A load failure with a working owner remains retryable.
 
-The row captures the accepted Voice generation with the specific action. Immediately before
-enqueue, the Settings-window owner checks the current Session against that generation, and
-the model requires an authoritative Settings view, unchanged action eligibility and no pending
-speech request. An old Load cannot become a download-capable Retry, and an old same-action
-callback cannot target a replacement connection. Disconnect clears speech state/generation and
-pending requests; none is replayed. The shared settings FIFO keeps refusal/send feedback
-separate from authoritative model failure keys. Unsolicited or stale settings cannot settle a
-request, and unrelated successes cannot clear its refusal. Pending disables only model requests,
-not idle-policy writes. Its ordered answer settles just that request slot, never changes model
-state and never proves cancellation or physical release; an accepted cancel can remain Loading
-or become Ready. Only generation-fenced Voice snapshots update the displayed model state.
+The row captures the accepted Voice generation with the specific part and action. Before
+enqueue, the model checks the current Session against that generation and requires an
+authoritative Settings view, unchanged action eligibility and no pending
+request for that part or global Cancel. An old Load cannot become a download-capable Retry, and
+an old same-action callback cannot target a replacement connection. Disconnect clears voice
+status and pending requests; none is replayed. The shared settings FIFO keeps refusal/send
+feedback on the initiating row, separate from authoritative model failure keys. Unsolicited
+or stale settings cannot settle a request, and unrelated successes cannot clear its refusal.
+A pending Cancel disables setup for both parts, not preference writes. An ordered answer
+settles only its request slot and never changes model state or proves release. After an
+accepted cancel, the part can remain Loading or become Ready. Only generation-fenced Voice
+snapshots update the displayed model state.
+Global setup Cancel touches the local hold only if the current input snapshot also shows
+setup in progress and the request was queued. A stale or output-only Cancel doesn't
+interrupt an unrelated hold.
 
 Settings keeps a named tab selection for recovery openers, keyboard navigation, and the selected
 content. Only the Kit tab bar takes a numeric selection and reports a clicked index.
@@ -148,6 +153,12 @@ Neither action holds the Settings view during cancellation, so Presence can refr
 The confirmation always warns that sign-out may remove the local app registration and that
 signing in again registers it anew if removed. The brain can learn that the plan is unavailable
 before Settings sees the updated snapshot, so the warning does not depend on the displayed plan.
+
+The Voice tab reveals the focused group within its scroll viewport, including when tabbing
+back from Stop. The Spoken Replies action keeps focus while its request is pending; if the
+next snapshot removes the button, the group's focus context survives.
+The stock Legacy session has no playback output. The Voice tab discloses that limit
+separately from model status; replace that disclosure when queued playback ships.
 
 Settings stays visible when deactivated. With Settings focused, Esc stops work, then clears a
 drawing, then cancels the active field edit; another Esc dismisses. The close button also

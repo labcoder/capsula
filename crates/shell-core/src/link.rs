@@ -136,7 +136,7 @@ pub enum LinkEvent {
     },
     Voice {
         generation: u64,
-        speech_input: kumochi_protocol::message::PartState,
+        view: kumochi_protocol::message::VoiceView,
     },
     Connections {
         generation: u64,
@@ -2201,10 +2201,7 @@ fn watch(
             }
             Ok(Some(ControlToShell::Voice(view))) => {
                 if events
-                    .send_blocking(LinkEvent::Voice {
-                        generation,
-                        speech_input: view.speech_input,
-                    })
+                    .send_blocking(LinkEvent::Voice { generation, view })
                     .is_err()
                 {
                     return;

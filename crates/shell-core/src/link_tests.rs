@@ -107,29 +107,35 @@ fn voice_status_crosses_the_real_control_pipe_with_its_connection_generation() {
     let link = attended("voice-status");
     let events = patient(link.events);
     let session = connected(next(&events));
-    for speech_input in [
-        PartState::Ready,
-        PartState::Unloaded,
-        PartState::NotInstalled,
+    for view in [
+        VoiceView {
+            speech_input: PartState::Ready,
+            spoken_replies: PartState::NotInstalled,
+        },
+        VoiceView {
+            speech_input: PartState::Unloaded,
+            spoken_replies: PartState::Downloading { done: 1, total: 2 },
+        },
+        VoiceView {
+            speech_input: PartState::NotInstalled,
+            spoken_replies: PartState::Ready,
+        },
     ] {
         frame::write(
             &mut &link.control,
-            &ControlToShell::Voice(VoiceView {
-                speech_input,
-                spoken_replies: PartState::NotInstalled,
-            }),
+            &ControlToShell::Voice(view),
             Pipe::Control,
         )
         .expect("voice written");
         let LinkEvent::Voice {
             generation,
-            speech_input: received,
+            view: received,
         } = next(&events)
         else {
             panic!("voice status");
         };
         assert_eq!(generation, session.generation());
-        assert_eq!(received, speech_input);
+        assert_eq!(received, view);
     }
     drop(link.control);
     assert!(link.link.join().expect("joined"));

@@ -14,13 +14,18 @@ repeat SHA-256 verification. The native runtime ships with the app, not as a dow
 
 Downloads need space for the remaining bytes plus 10%. Cancelled or interrupted downloads
 keep their partial files for a later explicit attempt; they never resume just because the app
-starts. **Settings → Voice → Install model** explicitly downloads, verifies and loads the default
-Parakeet speech-input model. **Retry setup** retries a failed setup and may verify or fetch files
-again, even when the status says installed. **Load model** reloads an installed, idle-unloaded
-model without another download. There is no model picker.
+starts. In **Settings → Voice**, use **Install model** for speech input or **Install spoken replies**
+for the Juniper voice. Either button explicitly starts setup for that part. A retry may verify or
+fetch files again, even when the status says installed. **Load model** reloads installed,
+idle-unloaded speech input without another download. There is no model picker.
 
-**Settings → Voice** shows speech input's installed/loaded status and lets you keep its model
-warm or unload it after 15 idle minutes or an idle hour. The policy takes effect only after
+The tab shows each part's installation and load status separately. **Speak answers aloud** saves
+a preference and never downloads a model. The first spoken replies install turns the preference
+on only if you haven't already set it. This version can install the model, but can't play
+spoken replies. **Installed · ready** describes the model, not audio playback.
+
+For speech input, the tab lets you keep its model warm or unload it after 15 idle minutes or
+an idle hour. The policy takes effect only after
 its setting is saved and speech input is ready. Active decoding finishes before idle unloading;
 the status changes to unloaded only after the background owner reports release. This does not
 certify how much native memory returned to Windows.
@@ -35,7 +40,7 @@ Only that status establishes whether a model is ready or unloaded.
 
 Tab and Shift+Tab reach the labeled controls; Enter or Space activates a focused model button.
 These are explicit Settings actions; opening the tab or reconnecting does not start setup.
-The tab does not remove models, open the microphone or control spoken replies.
+The tab does not remove models or open the microphone.
 
 A newly saved drawing step's narration goes to Chat if it isn't queued for speech.
 

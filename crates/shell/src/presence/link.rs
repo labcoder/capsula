@@ -111,13 +111,10 @@ impl Presence {
                     gesture,
                     status,
                 } => self.voice_status(generation, gesture, status, cx),
-                LinkEvent::Voice {
-                    generation,
-                    speech_input,
-                } => {
+                LinkEvent::Voice { generation, view } => {
                     let current = self.session.as_ref().map(crate::link::Session::generation);
                     self.settings.update(cx, |state, cx| {
-                        if state.receive_speech_input(current, generation, speech_input) {
+                        if state.receive_voice(current, generation, view) {
                             cx.notify();
                         }
                     });

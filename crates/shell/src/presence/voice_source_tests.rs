@@ -675,7 +675,14 @@ fn rejected_speech_states_preserve_typing_recovery_and_local_notices(cx: &mut Te
                 settings.disconnected();
                 settings.set_view(saved, crate::settings::Update::Unsolicited);
                 if let Some(state) = state {
-                    settings.receive_speech_input(Some(1), 1, state);
+                    settings.receive_voice(
+                        Some(1),
+                        1,
+                        kumochi_protocol::message::VoiceView {
+                            speech_input: state,
+                            spoken_replies: PartState::Ready,
+                        },
+                    );
                 }
             });
             owner.error = Some("existing error".into());
@@ -1206,7 +1213,10 @@ fn queued_presence_claims_silent_output_and_cancels_the_fake_microphone(cx: &mut
         let voice_ready = matches!(
             &event,
             LinkEvent::Voice {
-                speech_input: PartState::Ready,
+                view: kumochi_protocol::message::VoiceView {
+                    speech_input: PartState::Ready,
+                    ..
+                },
                 ..
             }
         );
@@ -1383,7 +1393,10 @@ fn a_speaking_hold_releases_only_after_its_own_inhibit_retires(cx: &mut TestAppC
         let voice_ready = matches!(
             &event,
             LinkEvent::Voice {
-                speech_input: PartState::Ready,
+                view: kumochi_protocol::message::VoiceView {
+                    speech_input: PartState::Ready,
+                    ..
+                },
                 ..
             }
         );

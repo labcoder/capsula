@@ -1,4 +1,5 @@
 use kumochi_protocol::message::{ErrorKey, MaxFrameRate, ThreadId};
+use kumochi_protocol::voice::VoicePart::SpeechInput;
 
 use crate::strings::Text;
 
@@ -60,8 +61,17 @@ fn controller_saves_keep_their_wire_operations_and_only_the_dock_move_replays_af
         initial.clone(),
         Update::Unsolicited
     ));
-    assert!(state.receive_speech_input(Some(7), 7, PartState::Unloaded));
-    let reload = state.speech_input_intent().expect("speech can load");
+    assert!(state.receive_voice(
+        Some(7),
+        7,
+        kumochi_protocol::message::VoiceView {
+            speech_input: PartState::Unloaded,
+            spoken_replies: PartState::Ready
+        }
+    ));
+    let reload = state
+        .voice_setup_intent(SpeechInput)
+        .expect("speech can load");
     state.change(Field::User, "Alex");
     let model = ModelChoice {
         connection: ConnectionKind::ChatGpt,
@@ -117,7 +127,11 @@ fn controller_saves_keep_their_wire_operations_and_only_the_dock_move_replays_af
             SettingsOp::SetSttUnload(SttUnload::After15Min),
             None,
         ),
-        (Save::SpeechInput(reload), SettingsOp::LoadSpeechInput, None),
+        (
+            Save::Voice(reload),
+            SettingsOp::LoadSpeechInput,
+            Some(AfterSave::CancelVoice),
+        ),
     ] {
         assert_eq!(
             state.apply_save(save, Some((&link, &first))),
@@ -134,7 +148,9 @@ fn controller_saves_keep_their_wire_operations_and_only_the_dock_move_replays_af
     assert_eq!(state.max_frame_rate_choice(), Some(rate));
     assert!(state.model_saving() && state.hold_to_talk_pending() && state.talk_back_pending());
     assert!(
-        state.show_screen_pending() && state.stt_unload_pending() && state.speech_input_pending()
+        state.show_screen_pending()
+            && state.stt_unload_pending()
+            && state.voice_setup_pending(SpeechInput)
     );
 
     state.disconnected();
@@ -172,7 +188,7 @@ fn controller_saves_keep_their_wire_operations_and_only_the_dock_move_replays_af
     assert_eq!(state.talk_back_choice(), Some(false));
     assert_eq!(state.show_screen_choice(), Some(true));
     assert_eq!(state.stt_unload_choice(), Some(SttUnload::Kept));
-    assert_eq!(state.speech_input_intent(), None);
+    assert_eq!(state.voice_setup_intent(SpeechInput), None);
 }
 
 #[test]
