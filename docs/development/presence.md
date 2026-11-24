@@ -39,16 +39,20 @@ the same source startup installs, not just its layout and tooltip.
 `presence::stage` unions the accepted dock layout, the status peek's minimum reservation
 and the accepted bounds of the visible typing, Threads or Settings panel. It chooses the
 largest-area usable band below, above, left or right, in that tie order, with a
-32-logical-pixel inset and at least 240×160 logical pixels left after the inset. If no band
-is usable, it retries with only the dock and peek reserved, then uses the inset work area
-as a last resort. On a display too small for both, an open panel can cover a drawing and
-its entrance can play unseen. Opening or closing a panel updates placement before the next paint;
+32-logical-pixel inset and at least 240×160 logical pixels left after the inset. While a drawing
+is held, keep its current band if it remains usable and its raw area is within 1% of the largest
+usable band. A resize can refit the drawing within that same band rather than jump across the
+panel, even if the dock re-anchors after the resize arrives. A change to the work-area origin or
+scale starts with a fresh choice. If no band is usable, retry with only the dock and peek reserved,
+then use the inset work area as a last resort. On a display too small for both, an open panel
+can cover a drawing and its entrance can play unseen. Opening or closing a panel updates
+placement before the next paint;
 when the dock lands, panels re-anchor before the stage is recomputed. While a drawing is on
 screen it keeps its stage as long as that stage still fits inside the newly chosen one for the
 same work area, dock layout and scale: a drawing that stays put is easier to follow than one
 that re-centres every time space frees up. So closing a panel, including the typing panel a
-held voice request hides while it runs, leaves the drawing where it is. A panel opening over
-it, a dock move or a display change re-places it, and a drawing that starts on a cleared
+held voice request hides while it runs, leaves the drawing where it is. Losing usable space
+to a panel, a dock move or a display change can re-place it, and a drawing that starts on a cleared
 screen takes the best stage at that moment. "On screen" means any scene the presenter holds,
 including one that hasn't painted yet. A reconnect counts as a cleared screen, so recovered
 drawings take the best stage. A drawing that replaces one still held takes the kept stage,

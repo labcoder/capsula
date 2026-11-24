@@ -8,6 +8,8 @@ pub mod fixture;
 const MARGIN: f32 = 32.0;
 /// Smallest usable drawing band after clearance, in logical pixels.
 const MIN_STAGE_SIZE: Vec2 = Vec2::new(240.0, 160.0);
+/// Retain a usable band within 1% of the largest raw area.
+const NEAR_TIE_RATIO: f32 = 0.99;
 
 /// The stage drawings were given and the physical geometry it was chosen from.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -16,37 +18,37 @@ pub struct Placed {
     layout: Layout,
     scale: f32,
     stage: Rect,
+    band: Option<usize>,
 }
 
 impl Placed {
-    pub fn new(area: [i32; 4], layout: Layout, scale: f32, panel: Option<[i32; 4]>) -> Self {
-        Self {
-            area,
-            layout,
-            scale,
-            stage: stage(area, layout, scale, panel),
-        }
-    }
-
     pub fn stage(&self) -> Rect {
         self.stage
     }
 }
 
-/// Drawings on screen keep their stage while it still fits inside the best one for the same
-/// work area, dock and scale, so a panel closing never moves them; anything else re-places them.
-pub fn settle(shown: Option<Placed>, next: Placed) -> Placed {
-    let Some(kept) = shown else {
-        return next;
-    };
-    let same_geometry = Placed {
-        stage: next.stage,
-        ..kept
-    } == next;
-    if same_geometry && contains(next.stage, kept.stage) {
-        kept
-    } else {
-        next
+/// Keep a usable side through near-ties. At unchanged display and dock geometry, also keep an
+/// already placed stage that still fits, so a panel closing needn't move the drawing.
+pub fn settle(
+    shown: Option<Placed>,
+    area: [i32; 4],
+    layout: Layout,
+    scale: f32,
+    panel: Option<[i32; 4]>,
+) -> Placed {
+    let shown =
+        shown.filter(|kept| kept.scale.to_bits() == scale.to_bits() && kept.area[..2] == area[..2]);
+    let (stage, band) = pick_stage(area, layout, scale, panel, shown.and_then(|kept| kept.band));
+    Placed {
+        area,
+        layout,
+        scale,
+        stage: shown
+            .filter(|kept| {
+                kept.area == area && kept.layout == layout && contains(stage, kept.stage)
+            })
+            .map_or(stage, |kept| kept.stage),
+        band,
     }
 }
 
@@ -70,35 +72,50 @@ pub fn logical([x, y, w, h]: [i32; 4], scale: f32) -> Rect {
 }
 
 // shortcut: work-area-only changes wait for the next placement; add a work-area notification through the presence adapter.
-fn stage(area: [i32; 4], layout: Layout, scale: f32, panel: Option<[i32; 4]>) -> Rect {
+fn pick_stage(
+    area: [i32; 4],
+    layout: Layout,
+    scale: f32,
+    panel: Option<[i32; 4]>,
+    preferred: Option<usize>,
+) -> (Rect, Option<usize>) {
     let area = logical(area, scale);
     let peek = logical(layout.dock, scale).union(logical(layout.panel, scale));
     let occupied = panel.map_or(peek, |panel| peek.union(logical(panel, scale)));
-    if let Some(stage) = free_stage(area, occupied) {
-        return stage;
+    if let Some((stage, band)) = free_stage(area, occupied, preferred) {
+        return (stage, Some(band));
     }
     // shortcut: on a display too small for both, an open panel can cover a drawing and its entrance can play unseen; hold the entrance until a usable stage exists.
     if panel.is_some()
-        && let Some(stage) = free_stage(area, peek)
+        && let Some((stage, band)) = free_stage(area, peek, preferred)
     {
-        return stage;
+        return (stage, Some(band));
     }
-    inset(area)
+    (inset(area), None)
 }
 
-fn free_stage(area: Rect, occupied: Rect) -> Option<Rect> {
-    let mut best: Option<(f32, Rect)> = None;
-    for band in free_bands(area, occupied) {
+fn free_stage(area: Rect, occupied: Rect, preferred: Option<usize>) -> Option<(Rect, usize)> {
+    let mut best: Option<(f32, Rect, usize)> = None;
+    let mut kept = None;
+    for (index, band) in free_bands(area, occupied).into_iter().enumerate() {
         let stage = inset(band);
+        if !(stage.size.x >= MIN_STAGE_SIZE.x && stage.size.y >= MIN_STAGE_SIZE.y) {
+            continue;
+        }
         let band_area = band.size.x * band.size.y;
-        if stage.size.x >= MIN_STAGE_SIZE.x
-            && stage.size.y >= MIN_STAGE_SIZE.y
-            && best.is_none_or(|(best_area, _)| band_area > best_area)
-        {
-            best = Some((band_area, stage));
+        let candidate = (band_area, stage, index);
+        if preferred == Some(index) {
+            kept = Some(candidate);
+        }
+        if best.is_none_or(|(best_area, _, _)| band_area > best_area) {
+            best = Some(candidate);
         }
     }
-    best.map(|(_, stage)| stage)
+    let best = best?;
+    let (_, stage, band) = kept
+        .filter(|(area, _, _)| *area >= NEAR_TIE_RATIO * best.0)
+        .unwrap_or(best);
+    Some((stage, band))
 }
 
 pub(crate) fn free_bands(area: Rect, occupied: Rect) -> [Rect; 4] {
@@ -144,6 +161,10 @@ mod tests {
     use super::fixture::{AREA, PEEK_STAGE, TYPING_STAGE, rect, top_center};
     use super::*;
     use crate::presence::geometry::Position;
+
+    fn stage(area: [i32; 4], layout: Layout, scale: f32, panel: Option<[i32; 4]>) -> Rect {
+        settle(None, area, layout, scale, panel).stage()
+    }
 
     #[test]
     fn open_panels_fit_the_canvas_below_or_beside_the_occupied_footprint() {
@@ -316,7 +337,7 @@ mod tests {
         let area = [0, 0, 20, 10];
         let layout = Position::Center.layout(area, [100, 24], [380, 124], 0);
         let occupied = logical(layout.dock, 1.0).union(logical(layout.panel, 1.0));
-        assert_eq!(free_stage(logical(area, 1.0), occupied), None);
+        assert_eq!(free_stage(logical(area, 1.0), occupied, None), None);
         assert_eq!(
             stage(area, layout, 1.0, None),
             Rect {
@@ -326,46 +347,108 @@ mod tests {
         );
     }
 
+    fn right_of_work_area(shown: Option<Placed>, height: i32, panel_size: [i32; 2]) -> Placed {
+        let area = [0, 0, 1536, height];
+        let layout = Position::TopRight.layout(area, [58, 21], [380, 124], 0);
+        let panel = layout.anchored_panel(area, panel_size);
+        settle(shown, area, layout, 1.0, Some(panel))
+    }
+
+    #[test]
+    fn a_one_pixel_work_area_change_keeps_the_current_band_on_either_side_of_a_tie() {
+        let place = |shown, height| right_of_work_area(shown, height, [768, 544]);
+        let mut below = place(None, 1130);
+        assert_eq!(below.stage(), rect(32.0, 597.0, 1472.0, 501.0));
+        let mut left = place(None, 1129);
+        assert_eq!(left.stage(), rect(32.0, 32.0, 704.0, 1065.0));
+        assert_eq!(place(None, 1131).stage(), rect(32.0, 597.0, 1472.0, 502.0));
+
+        for (offset, height) in [(-1.0, 1129), (0.0, 1130), (1.0, 1131)] {
+            below = place(Some(below), height);
+            left = place(Some(left), height);
+            assert_eq!(below.stage(), rect(32.0, 597.0, 1472.0, 501.0 + offset),);
+            assert_eq!(left.stage(), rect(32.0, 32.0, 704.0, 1066.0 + offset),);
+        }
+    }
+
+    #[test]
+    fn a_later_dock_reanchor_keeps_the_side_chosen_during_the_resize() {
+        let original = [0, 0, 1536, 1130];
+        let resized = [0, 0, 1536, 1129];
+        let layout = |area| Position::BottomRight.layout(area, [58, 21], [380, 124], 0);
+        let panel = |area, layout: Layout| Some(layout.anchored_panel(area, [768, 544]));
+        let old = layout(original);
+        let shown = settle(None, original, old, 1.0, panel(original, old));
+        let above = rect(32.0, 32.0, 1472.0, 501.0);
+        assert_eq!(shown.stage(), above);
+        let waiting = settle(Some(shown), resized, old, 1.0, panel(original, old));
+        assert_eq!(waiting.stage(), above);
+
+        let accepted = layout(resized);
+        assert_eq!(
+            settle(
+                Some(waiting),
+                resized,
+                accepted,
+                1.0,
+                panel(resized, accepted)
+            )
+            .stage(),
+            rect(32.0, 32.0, 1472.0, 500.0)
+        );
+    }
+
+    #[test]
+    fn a_meaningfully_larger_band_or_an_unusable_current_band_switches_immediately() {
+        let place = |shown, height| right_of_work_area(shown, height, [768, 544]);
+        let below = place(None, 1130);
+        let below = place(Some(below), 1119);
+        assert_eq!(below.stage(), rect(32.0, 597.0, 1472.0, 490.0));
+        let left = place(Some(below), 1118);
+        assert_eq!(left.stage(), rect(32.0, 32.0, 704.0, 1054.0));
+        assert_eq!(
+            place(Some(left), 1160).stage(),
+            rect(32.0, 597.0, 1472.0, 531.0)
+        );
+
+        let place = |shown, height| right_of_work_area(shown, height, [1232, 887]);
+        let below = place(None, 1133);
+        assert_eq!(below.stage(), rect(32.0, 940.0, 1472.0, 161.0));
+        assert_eq!(
+            place(Some(below), 1131).stage(),
+            rect(32.0, 32.0, 240.0, 1067.0)
+        );
+    }
+
     #[test]
     fn only_a_panel_closing_keeps_the_stage_of_a_shown_drawing() {
-        let kept = Placed {
-            area: AREA,
-            layout: top_center(AREA),
-            scale: 1.0,
-            stage: TYPING_STAGE,
-        };
-        let closed = Placed {
-            stage: PEEK_STAGE,
-            ..kept
-        };
-        assert_eq!(settle(Some(kept), closed), kept);
-        assert_eq!(settle(None, closed), closed);
-        let reopened = Placed {
-            stage: PEEK_STAGE,
-            ..kept
-        };
-        assert_eq!(settle(Some(reopened), kept), kept);
+        let layout = top_center(AREA);
+        let panel = Some(layout.anchored_panel(AREA, [480, 544]));
+        let open = settle(None, AREA, layout, 1.0, panel);
+        assert_eq!(open.stage(), TYPING_STAGE);
+        assert_eq!(
+            settle(Some(open), AREA, layout, 1.0, None).stage(),
+            TYPING_STAGE
+        );
+        let closed = settle(None, AREA, layout, 1.0, None);
+        assert_eq!(closed.stage(), PEEK_STAGE);
+        assert_eq!(
+            settle(Some(closed), AREA, layout, 1.0, panel).stage(),
+            TYPING_STAGE
+        );
         let right = Position::TopRight.layout(AREA, [58, 21], [380, 124], 0);
-        let moved = Placed {
-            layout: right,
-            stage: stage(AREA, right, 1.0, None),
-            ..kept
-        };
-        assert_eq!(moved.stage, rect(32.0, 177.0, 2496.0, 1191.0));
-        assert_eq!(settle(Some(kept), moved), moved);
-        let scaled = Placed {
-            scale: 1.25,
-            stage: PEEK_STAGE,
-            ..kept
-        };
-        assert_eq!(settle(Some(kept), scaled), scaled);
+        assert_eq!(
+            settle(Some(open), AREA, right, 1.0, None).stage(),
+            PEEK_STAGE
+        );
+        assert_eq!(
+            settle(Some(open), AREA, layout, 1.25, None),
+            settle(None, AREA, layout, 1.25, None)
+        );
         let wider = [0, 0, 3840, 1400];
-        let resized = Placed {
-            area: wider,
-            layout: top_center(wider),
-            stage: rect(32.0, 177.0, 3776.0, 1191.0),
-            ..kept
-        };
-        assert_eq!(settle(Some(kept), resized), resized);
+        assert_eq!(
+            settle(Some(open), wider, top_center(wider), 1.0, None).stage(),
+            rect(32.0, 177.0, 3776.0, 1191.0)
+        );
     }
 }

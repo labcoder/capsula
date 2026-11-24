@@ -65,11 +65,10 @@ impl Presence {
                     .filter(|panel| panel.typing.visible)
                     .map(|panel| panel.bounds)
             });
-        let next = Placed::new(area, self.layout, self.scale, panel);
         let shown = self
             .drawing_placement
             .filter(|_| self.presenter.holds_scenes());
-        let placed = settle(shown, next);
+        let placed = settle(shown, area, self.layout, self.scale, panel);
         self.drawing_placement = Some(placed);
         if self.presenter.set_stage(placed.stage()) {
             cx.defer(move |cx| {
