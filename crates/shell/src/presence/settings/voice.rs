@@ -233,6 +233,8 @@ impl SettingsView {
         let state = self.model.read(cx);
         let strings = cx.global::<Strings>();
         let intent = state.speech_input_intent();
+        let owner = self.owner.clone();
+        let settings = cx.weak_entity();
         div()
             .w_full()
             .min_w_0()
@@ -248,20 +250,24 @@ impl SettingsView {
                     .when(intent.action == SpeechInputAction::Cancel, |button| {
                         button.accessibility_label(strings.get(Text::VoiceCancelAccessible))
                     })
-                    .on_click(cx.listener(move |view, _, window, cx| {
-                        if view
-                            .owner
+                    .on_click(move |_, window, cx| {
+                        let Some(settings) = settings.upgrade() else {
+                            return;
+                        };
+                        let gone = owner
                             .update(cx, |owner, cx| owner.speech_input_action(intent, cx))
-                            .is_err()
-                        {
-                            view.model.update(cx, |state, cx| {
-                                if state.apply_save(Save::SpeechInput(intent), None).notify {
-                                    cx.notify();
-                                }
-                            });
-                        }
-                        window.focus(&view.focus, cx);
-                    }))
+                            .is_err();
+                        settings.update(cx, |view, cx| {
+                            if gone {
+                                view.model.update(cx, |state, cx| {
+                                    if state.apply_save(Save::SpeechInput(intent), None).notify {
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                            window.focus(&view.focus, cx);
+                        });
+                    })
                     .map(|button| {
                         #[cfg(test)]
                         let button = button.debug_selector(|| "speech-model-action".into());
