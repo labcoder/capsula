@@ -64,6 +64,8 @@ fn check_saved_sign_in_classifies_and_recovers_only_the_current_record() {
         revocation_unconfirmed: false,
     };
     assert_eq!(h.view(), &view(SavedSignInFailure::Missing, false));
+    h.refuse_commits();
+    h.store.0.lock().unwrap().mutations.clear();
     h.op(AccountOp::SignIn);
     assert!(h.listening.is_empty());
     h.hold = true;
@@ -73,9 +75,16 @@ fn check_saved_sign_in_classifies_and_recovers_only_the_current_record() {
     assert_eq!(h.view(), &view(SavedSignInFailure::Missing, true));
     h.release();
     assert_eq!(h.view(), &view(SavedSignInFailure::Missing, false));
+    h.op(AccountOp::SignIn);
+    let refusal = user_error(ErrorKey::CredentialsUnavailable, &[Action::Retry]);
+    assert_eq!(h.errors, [refusal.clone(), refusal]);
+    h.feed(Input::Access {
+        ticket: 1,
+        now: Some(NOW),
+    });
+    assert_eq!(h.answers, [(1, Err(Denied::Unusable))]);
+    assert_eq!(h.view(), &view(SavedSignInFailure::Missing, false));
     h.store.0.lock().unwrap().denied_read = Some(chunk.clone());
-    h.refuse_commits();
-    h.store.0.lock().unwrap().mutations.clear();
     h.op(AccountOp::CheckSavedSignIn);
     assert_eq!(h.view(), &view(SavedSignInFailure::Unavailable, false));
     h.store.0.lock().unwrap().denied_read = None;

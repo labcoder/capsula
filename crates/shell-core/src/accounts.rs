@@ -218,17 +218,15 @@ impl Accounts {
                 let status = if *checking || self.waiting == Some(AccountOp::CheckSavedSignIn) {
                     Text::AccountCheckingSavedSignIn
                 } else {
-                    lines.push(Note(if *checkable {
-                        Text::AccountSavedSignInCheckHelp
-                    } else {
-                        Text::AccountSavedSignInChangedHelp
+                    lines.push(Note(match (reason, checkable) {
+                        (SavedSignInFailure::Missing, true) => Text::AccountSavedSignInMissingHelp,
+                        (SavedSignInFailure::Missing, false) => {
+                            Text::AccountSavedSignInMissingRestartHelp
+                        }
+                        (_, true) => Text::AccountSavedSignInCheckHelp,
+                        (_, false) => Text::AccountSavedSignInChangedHelp,
                     }));
-                    match reason {
-                        SavedSignInFailure::Missing => Text::AccountSavedSignInMissing,
-                        SavedSignInFailure::Malformed => Text::AccountSavedSignInMalformed,
-                        SavedSignInFailure::Unavailable => Text::AccountSavedSignInUnreadable,
-                        SavedSignInFailure::Changed => Text::AccountSavedSignInChanged,
-                    }
+                    saved_sign_in_status(*reason)
                 };
                 if *revocation_unconfirmed {
                     lines.push(remote(Text::AccountEarlierRevocationUnconfirmed));
@@ -436,6 +434,15 @@ impl Accounts {
         }
         self.waiting = Some(AccountOp::CancelSignIn);
         true
+    }
+}
+
+fn saved_sign_in_status(reason: SavedSignInFailure) -> Text {
+    match reason {
+        SavedSignInFailure::Missing => Text::AccountSavedSignInMissing,
+        SavedSignInFailure::Malformed => Text::AccountSavedSignInMalformed,
+        SavedSignInFailure::Unavailable => Text::AccountSavedSignInUnreadable,
+        SavedSignInFailure::Changed => Text::AccountSavedSignInChanged,
     }
 }
 

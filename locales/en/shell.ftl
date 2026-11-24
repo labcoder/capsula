@@ -339,6 +339,15 @@ accounts-load-models = Load models
 accounts-load-models-help = Load models contacts ChatGPT to get the models your plan can use.
 accounts-checking-saved-sign-in = Checking the saved sign-in on this computer
 accounts-saved-sign-in-missing = Part of the saved sign-in wasn't found
+-accounts-missing-next-step =
+    You can't reconnect ChatGPT by signing in while this part is missing.
+    If another account you've already connected has an available model, choose it in { settings-title } → { settings-general } to keep working.
+accounts-saved-sign-in-missing-help =
+    { accounts-saved-sign-in-check-help }
+    { -accounts-missing-next-step }
+accounts-saved-sign-in-missing-restart-help =
+    { accounts-saved-sign-in-changed-help }
+    { -accounts-missing-next-step }
 accounts-saved-sign-in-malformed = The saved sign-in has an unrecognized format
 accounts-saved-sign-in-unreadable = Couldn't read the saved sign-in
 accounts-saved-sign-in-changed = The saved sign-in changed

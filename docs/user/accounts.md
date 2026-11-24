@@ -41,6 +41,10 @@ using your plan. If the app couldn't verify which saved sign-in to check or it c
 panel doesn't offer **Check again**. Restarting checks the current sign-in as part of normal
 startup, which may also run account maintenance.
 
+While part of the saved sign-in is missing, signing in again won't reconnect ChatGPT, even
+if **Check again** isn't available. If another account you've already connected has an
+available model, choose it in **Settings → General** to keep working.
+
 ## Sign out
 
 **Sign out…** asks first. **Cancel** or Escape leaves the account alone. Confirming stops
