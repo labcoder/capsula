@@ -104,6 +104,12 @@ impl SignInMark {
         true
     }
 
+    /// Owes cancellation now, but admits an immediate send only on the mark's connection.
+    pub fn take_on(&mut self, current: Option<u64>) -> bool {
+        self.take()
+            && matches!(*self, Self::CancelOwed { generation } if current == Some(generation))
+    }
+
     pub fn cancel_sent(&mut self) {
         if matches!(self, Self::CancelOwed { .. }) {
             *self = Self::Settled;
