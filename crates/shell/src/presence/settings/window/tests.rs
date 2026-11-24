@@ -1591,3 +1591,91 @@ fn a_hold_that_closes_settings_cancels_its_sign_in(cx: &mut TestAppContext) {
         [ControlToBrain::AccountOp(AccountOp::CancelSignIn)]
     );
 }
+
+#[gpui::test]
+fn disabling_hold_to_talk_in_settings_stops_live_recording_without_moving_focus(
+    cx: &mut TestAppContext,
+) {
+    use crate::presence::PanelVisibility;
+    use crate::presence::voice::tests::{source, until};
+    use crate::presence::voice_wiring_tests::{hold, ready, status};
+    use crate::strings::Text;
+    use kumochi_protocol::message::{GestureId, HoldStatus, SettingsOp};
+    use std::time::Duration;
+
+    test_fixture::without_desktop(cx);
+    let (owner, data, controls) = ready(cx);
+    owner.update(cx, |owner, _| {
+        owner.panel_visibility = PanelVisibility::Visible;
+    });
+    let (open, finish, started, samples) = source(&owner, cx, None);
+    let (token, _) = hold(&owner, 1, cx);
+    let gesture = GestureId(1);
+    assert!(matches!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::VoiceHoldRecognized { gesture: id, .. } if id == gesture
+    ));
+    status(&owner, 1, 1, HoldStatus::Admitted, cx);
+    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    open.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| {
+            owner.voice.status == Some(Text::HoldListening)
+        })
+    });
+    samples.recv_timeout(Duration::from_secs(3)).unwrap();
+
+    let (window, view) = owner.update(cx, |owner, cx| {
+        assert!(owner.activity.working && owner.voice_working());
+        let (window, view) = detached_settings(owner, cx);
+        let panel = owner.settings_panel.as_mut().unwrap();
+        panel.visible = true;
+        panel.focused = true;
+        owner.panel_visibility = PanelVisibility::Hidden;
+        view.update(cx, |view, _| {
+            view.tab = SettingsTab::Voice;
+            view.stop = owner.escape_hold.shows_stop();
+        });
+        (window, view)
+    });
+    let mut frame = VisualTestContext::from_window(window, cx);
+    frame.simulate_resize(size(px(768.), px(1600.)));
+    let focused = frame.update(|window, cx| {
+        assert!(view.read(cx).stop);
+        view.update(cx, |view, cx| view.focus(window, cx));
+        window.draw(cx).clear(cx);
+        window.focused(cx).expect("Settings frame has focus")
+    });
+    let checkbox = frame.debug_bounds("hold-to-talk").expect("Hold to talk");
+    frame.simulate_click(checkbox.center(), gpui_kit::Modifiers::default());
+    frame.run_until_parked();
+    assert_eq!(
+        drain(&controls)
+            .into_iter()
+            .filter(|message| message != &ControlToBrain::GestureCancel { gesture })
+            .collect::<Vec<_>>(),
+        [ControlToBrain::Settings(SettingsOp::SetHoldToTalk(false))]
+    );
+    assert!(!view.read_with(cx, |view, _| view.stop));
+    owner.read_with(cx, |owner, cx| {
+        assert!(!owner.activity.working);
+        assert_eq!(owner.voice.status, Some(Text::HoldStopping));
+        assert_eq!(
+            owner.settings.read(cx).hold_to_talk_notice(),
+            Some(Text::HoldDisabled)
+        );
+    });
+    assert!(!token.retired());
+
+    finish.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+    });
+    assert!(token.retired());
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::VoiceHoldStopped { gesture }]
+    );
+    assert!(data.is_empty());
+    frame.update(|window, cx| assert_eq!(window.focused(cx), Some(focused)));
+}
