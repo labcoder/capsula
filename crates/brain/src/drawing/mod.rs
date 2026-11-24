@@ -388,8 +388,8 @@ struct StepWait {
     /// Its thread was deleted: suppress the newcomer but settle committed replacement victims.
     fenced: bool,
     clear_requested: bool,
-    /// The user ended its run first, so a replacement it begins reports no loss.
-    loss_dropped: bool,
+    /// Its run already reported a loss or the user ended it.
+    loss_suppressed: bool,
     interrupted: Option<CallError>,
     /// The step's wide layout and its resident bytes, which the scene keeps once the write
     /// commits; `None` writes it uncounted.

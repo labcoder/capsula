@@ -55,16 +55,22 @@ impl Drawing {
     /// Ends `run`'s loss, telling the shell unless it's dropped; none of its scenes reports one
     /// again.
     pub(super) fn end_loss(&mut self, run: RunId, loss: super::Loss, out: &mut Output) {
-        if let Some(thread) = self
-            .runs
-            .iter_mut()
-            .find(|ledger| ledger.run == run)
-            .and_then(|ledger| ledger.loss.take())
+        if let Some(ledger) = self.runs.iter_mut().find(|ledger| ledger.run == run)
+            && let Some(thread) = ledger.loss.take()
             && loss == super::Loss::Tell
         {
+            ledger.loss_told = true;
             out.effects.push(Effect::Control(
                 kumochi_protocol::message::ControlToShell::DrawingReplacementFailed { thread, run },
             ));
+        }
+        if let Some(Pending {
+            wait: Wait::Step(write) | Wait::Prepare { step: write, .. },
+            ..
+        }) = &mut self.pending
+            && write.run == run
+        {
+            write.loss_suppressed = true;
         }
         for held in &mut self.scenes {
             if held.committers.first() == Some(&Some(run)) {
@@ -111,7 +117,7 @@ impl Drawing {
             step,
             fenced,
             clear_requested,
-            loss_dropped,
+            loss_suppressed,
             interrupted,
             laid,
             author,
@@ -144,7 +150,7 @@ impl Drawing {
                 (scene, committed.index)
             }
             Pend::New { admission, victims } => {
-                let replaced = !victims.is_empty() && !loss_dropped;
+                let replaced = !victims.is_empty() && !loss_suppressed;
                 let mut states: Vec<_> = self
                     .scenes
                     .iter_mut()
