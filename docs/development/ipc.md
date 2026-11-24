@@ -1019,8 +1019,8 @@ closed kind to diagnostics. Neither changes the first-step commit as the replace
 History does not reconstruct typed visuals. A stored step with usable bounded scene metadata
 is returned in its ordinary `Page` as `PageEventKind::NoVisual { scene }`, with its original
 event/run identity, text and cursor. Missing or unusable visual metadata stays an ungrouped
-legacy `SceneStep`; either kind is explained as unavailable **in history**, not as a failure
-of a currently visible scene. The body-size guard runs before JSON inspection; no geometry
+legacy `SceneStep`; either kind gets a **Drawing step** label, not a claim that the step
+appeared on screen. The body-size guard runs before JSON inspection; no geometry
 or scene log is loaded. Only actual query/read failures and unknown event kinds fail the page.
 Raw 50-row/32 KiB page limits, continuation and credit accounting are unchanged.
 

@@ -56,7 +56,7 @@ thread-older = Older messages
 threads-close = Close
 thread-user = You
 thread-assistant = { $assistant }
-thread-no-visual = Drawing unavailable in history
+thread-no-visual = Drawing step
 thread-issue-title = Issue: { $title }
 
 # Saved issue states never authorize a send without explicit confirmation.
