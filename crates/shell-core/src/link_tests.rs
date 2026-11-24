@@ -2975,7 +2975,7 @@ fn a_queued_screen_release_goes_only_while_its_hold_listens_unrevoked() {
             notice: Some(NoticeRevision::FIRST),
         };
         link.handle.track_input(gesture);
-        link.handle.watch_revoke(gesture);
+        link.handle.watch_revoke(gesture, session.generation());
         assert!(link.handle.send_control(&session, recognized.clone()));
         assert_eq!(receive(), Some(recognized));
         assert!(

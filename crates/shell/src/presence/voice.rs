@@ -247,6 +247,17 @@ impl Presence {
                 slot.run = Some(run);
             }
         }
+        if let Some(gesture) = applied.refused_hold
+            && let Some(hold) = self
+                .voice
+                .pending
+                .as_ref()
+                .filter(|hold| hold.token.gesture() == gesture && hold.terminal.is_none())
+        {
+            let deferred = self.link.deferred_input_cancel(gesture, hold.stamp.session);
+            self.end_voice_after_cancel(Text::HoldFailed, deferred.as_ref(), cx);
+            return;
+        }
         if !applied.visible {
             return;
         }
@@ -352,8 +363,8 @@ impl Presence {
             .follow(self.settings.read(cx).hold_to_talk_notice().is_none());
     }
 
-    fn drain_voice_cancel(&mut self, queued: Option<&InputCancel>) -> bool {
-        let sent = drain_hold_cancel(&self.link, self.session.as_ref(), &mut self.runs, queued);
+    fn drain_voice_cancel(&mut self, covered: Option<&InputCancel>) -> bool {
+        let sent = drain_hold_cancel(&self.link, self.session.as_ref(), &mut self.runs, covered);
         if !sent && let Some(session) = &self.session {
             tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::CancelDrain, "held speech input failed");
             self.link.end(session);
@@ -368,7 +379,7 @@ impl Presence {
     fn end_voice_after_cancel(
         &mut self,
         text: Text,
-        queued: Option<&InputCancel>,
+        covered: Option<&InputCancel>,
         cx: &mut Context<'_, Self>,
     ) {
         if let Some(hold) = &self.voice.pending {
@@ -396,7 +407,7 @@ impl Presence {
             }
         }
         self.runs.cancel_hold();
-        self.drain_voice_cancel(queued);
+        self.drain_voice_cancel(covered);
         self.voice_notice(notice, cx);
     }
 
@@ -1095,7 +1106,7 @@ impl Presence {
         } else {
             Text::HoldFailed
         };
-        self.link.watch_revoke(gesture);
+        self.link.watch_revoke(gesture, stamp.session);
         let prepared = request.is_ok();
         let sent = match request {
             Err(reason) => {

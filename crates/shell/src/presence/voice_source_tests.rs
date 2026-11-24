@@ -2639,3 +2639,73 @@ fn native_review_full_control_queue_discards_the_unpublished_hold_locally(cx: &m
     ));
     assert!(controls.is_empty());
 }
+
+#[gpui::test]
+fn a_fenced_first_state_ends_transcribing_and_releases_escape(cx: &mut TestAppContext) {
+    super::super::test_fixture::without_desktop(cx);
+    let (owner, _data, controls) = ready(cx);
+    let _hold = hold(&owner, 1, cx);
+    owner.update(cx, |owner, _| {
+        owner.runs.apply_scenes(&[]).unwrap();
+        let hold = owner.voice.pending.as_mut().unwrap();
+        hold.source = Source::Joined(1);
+        hold.released = Some(1);
+        owner.finish_voice();
+    });
+    status(&owner, 1, 1, HoldStatus::Transcribing, cx);
+    let state = |run, gesture, cx: &mut TestAppContext| {
+        owner.update(cx, |owner, cx| {
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::RunState {
+                        generation: 1,
+                        run: RunId(run),
+                        thread: ThreadId(1),
+                        phase: Phase::Thinking,
+                        error: None,
+                        origin: Some(RunOrigin::Hold {
+                            gesture: GestureId(gesture),
+                        }),
+                    }]),
+                    cx,
+                )
+                .unwrap();
+        });
+    };
+    let take_stops_and_cancels = || {
+        std::iter::from_fn(|| controls.try_recv().ok())
+            .filter(|control| {
+                matches!(
+                    control,
+                    ControlToBrain::Stop { .. } | ControlToBrain::GestureCancel { .. }
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    state(5, 9, cx);
+    assert_eq!(
+        take_stops_and_cancels(),
+        [ControlToBrain::Stop {
+            run: RunId(5),
+            revealed: Vec::new(),
+        }]
+    );
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.voice.status, Some(Text::HoldTranscribing));
+        assert!(owner.escape_hold.shows_stop());
+    });
+
+    state(4, 1, cx);
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.voice.status, Some(Text::HoldFailed));
+        assert!(!owner.escape_hold.shows_stop());
+    });
+    assert_eq!(
+        take_stops_and_cancels(),
+        [ControlToBrain::GestureCancel {
+            gesture: GestureId(1),
+        }]
+    );
+}

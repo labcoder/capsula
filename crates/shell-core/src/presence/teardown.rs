@@ -5,21 +5,21 @@ use crate::runs::Runs;
 
 /// Revokes tracked input and returns its cancel only if the original outbox accepted it.
 pub fn cancel_tracked_input(link: &LinkHandle) -> Option<InputCancel> {
-    link.revoke_input_for_dispatch()
+    link.revoke_input_cancel()
         .filter(|cancel| link.dispatch_input_cancel(cancel))
 }
 
-/// Consumes the Runs cancel, sending it unless the same cancel was already queued.
+/// Consumes the Runs cancel, sending it unless the same cancel is covered by another owner.
 pub fn drain_hold_cancel(
     link: &LinkHandle,
     session: Option<&Session>,
     runs: &mut Runs,
-    queued: Option<&InputCancel>,
+    covered: Option<&InputCancel>,
 ) -> bool {
     runs.take_hold_cancel().is_none_or(|message| {
         session.is_some_and(|session| {
             matches!(message, ControlToBrain::GestureCancel { gesture }
-                if queued.is_some_and(|cancel| cancel.target() == (gesture, session.generation())))
+                if covered.is_some_and(|cancel| cancel.target() == (gesture, session.generation())))
                 || link.send_control(session, message)
         })
     })
@@ -88,6 +88,51 @@ mod tests {
         assert_eq!(controls.try_recv(), Err(TryRecvError::Empty));
         assert_eq!(runs.take_hold_cancel(), None);
         assert!(session.open());
+    }
+
+    #[test]
+    fn a_deferred_cancel_owns_the_wire_before_and_after_dispatch() {
+        for dispatch_first in [false, true] {
+            let (link, session, mut runs, controls) = recognized_hold();
+            let generation = session.generation();
+            link.track_input(HOLD);
+            link.watch_revoke(HOLD, generation);
+
+            let raw = link.revoke_input_for_dispatch().unwrap();
+            if dispatch_first {
+                assert!(link.dispatch_input_cancel(&raw));
+            }
+            runs.cancel_hold();
+            let deferred = link.deferred_input_cancel(HOLD, generation);
+            assert!(drain_hold_cancel(
+                &link,
+                Some(&session),
+                &mut runs,
+                deferred.as_ref()
+            ));
+            if !dispatch_first {
+                assert!(link.dispatch_input_cancel(&raw));
+            }
+
+            assert_eq!(
+                controls.try_recv(),
+                Ok(ControlToBrain::GestureCancel { gesture: HOLD })
+            );
+            assert_eq!(controls.try_recv(), Err(TryRecvError::Empty));
+            assert_eq!(runs.take_hold_cancel(), None);
+            assert!(session.open());
+            assert!(link.was_revoked(HOLD));
+            assert_eq!(
+                link.deferred_input_cancel(HOLD, generation + 1)
+                    .map(|cancel| cancel.target()),
+                None
+            );
+            assert_eq!(
+                link.deferred_input_cancel(GestureId(8), generation)
+                    .map(|cancel| cancel.target()),
+                None
+            );
+        }
     }
 
     #[test]

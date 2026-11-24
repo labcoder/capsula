@@ -189,6 +189,7 @@ fn newer_keyed_answers_never_borrow_older_cancelled_or_deleted_prefixes() {
             ),
             Applied {
                 input_ended: false,
+                refused_hold: None,
                 stop: Some(stop(21)),
                 credit: BYTES,
                 visible: false,
@@ -467,6 +468,7 @@ fn three_queued_turns_a_switch_and_esc_never_move_focus_on_late_states() {
             ),
             Applied {
                 input_ended: false,
+                refused_hold: None,
                 stop: Some(stop(run)),
                 credit: 0,
                 visible: false,
@@ -867,6 +869,7 @@ fn a_failure_applied_after_esc_is_not_shown() {
         (
             Applied {
                 input_ended: false,
+                refused_hold: None,
                 stop: Some(stop(1)),
                 credit: 0,
                 visible: false,
@@ -1008,6 +1011,7 @@ fn data_before_its_run_state_is_held_until_the_state_names_it() {
         applied,
         Applied {
             input_ended: false,
+            refused_hold: None,
             stop: None,
             credit: BYTES,
             visible: true,
@@ -1040,6 +1044,7 @@ fn esc_cancels_a_turn_whose_run_isnt_named_yet() {
         applied,
         Applied {
             input_ended: false,
+            refused_hold: None,
             stop: Some(stop(1)),
             credit: BYTES,
             visible: false,
@@ -1064,6 +1069,7 @@ fn esc_cancels_a_turn_whose_run_isnt_named_yet() {
         ),
         Applied {
             input_ended: false,
+            refused_hold: None,
             stop: None,
             credit: 0,
             visible: true,
@@ -1102,6 +1108,7 @@ fn esc_stops_the_known_run_and_cancels_the_turn_queued_behind_it() {
         ),
         Applied {
             input_ended: false,
+            refused_hold: None,
             stop: Some(stop(5)),
             credit: BYTES,
             visible: false,
@@ -1331,6 +1338,7 @@ fn a_reconnect_forgets_turns_esc_cancelled_and_their_held_data() {
         ),
         Applied {
             input_ended: false,
+            refused_hold: None,
             stop: None,
             credit: 0,
             visible: true,
@@ -1388,6 +1396,7 @@ fn esc_stops_then_clears_then_dismisses_with_a_cancelled_turn_pending() {
         ),
         Applied {
             input_ended: false,
+            refused_hold: None,
             stop: Some(stop(5)),
             credit: 0,
             visible: false,

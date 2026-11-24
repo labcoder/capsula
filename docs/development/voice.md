@@ -1168,8 +1168,12 @@ opens the ordinary answer panel without activation or injected focus input, and 
 resting drawing clear of it before the next paint. Answering hands off to ordinary Runs. Only a
 run's first state carries its origin, so the hold remembers the run that state named and matches
 later states by run; Answering, Done, Failed or Interrupted then end it without a speech notice,
-since the run's own error or stop already shows, and Esc returns to the ordinary order. A
-recognised hold refused at admission always shows a notice, busy, disabled, unavailable or failed
+since the run's own error or stop already shows, and Esc returns to the ordinary order. If
+Runs refuses the matching first state, the hold leaves Transcribing, shows the existing failure
+notice and returns Esc to the ordinary order even when the run is already fenced. If native
+input already owns the matching gesture and session's deferred cancel, it alone dispatches it;
+a refused send on that connection still aborts the pipe. A recognised hold refused at admission
+always shows a notice, busy, disabled, unavailable or failed
 by cause, including one first recognised at its release, whose gate has already closed. While
 the onboarding window shows, the native fence drops a hold before recognition, so it is never
 refused and shows nothing. One already recognised when the window opens ends through

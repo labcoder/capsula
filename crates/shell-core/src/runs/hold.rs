@@ -407,11 +407,12 @@ impl Runs {
         if self.live.is_some_and(|live| live.run == run) {
             return;
         }
+        let above_fence = run > self.fence;
         let matches = self.hold.is_some_and(|hold| {
             hold.gesture == gesture
                 && hold.run.is_none()
                 && run > self.answered
-                && run > self.fence
+                && above_fence
                 && hold.revision == self.revision
                 && hold.thread == self.thread()
                 && hold.thread.is_none_or(|id| id == thread)
@@ -427,15 +428,21 @@ impl Runs {
             if let Some(hold) = &mut self.hold {
                 hold.run = Some(run);
             }
-        } else if run > self.fence {
+            return;
+        }
+        if above_fence {
             self.fence = run;
             applied.stop = Some(ControlToBrain::Stop {
                 run,
                 revealed: Vec::new(),
             });
-            if self.hold.is_some_and(|hold| hold.gesture == gesture) {
-                self.cancel_hold();
-            }
+        }
+        if self
+            .hold
+            .is_some_and(|hold| hold.gesture == gesture && (above_fence || hold.run.is_none()))
+        {
+            self.cancel_hold();
+            applied.refused_hold = Some(gesture);
         }
     }
 }
