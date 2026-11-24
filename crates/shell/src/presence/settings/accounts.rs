@@ -58,17 +58,11 @@ impl SettingsView {
             return;
         };
         let strings = cx.global::<Strings>();
-        let mut body = strings.get(Text::AccountSignOutBody);
-        if matches!(
-            state.view,
-            Some(AccountView::SignedIn {
-                plan: PlanState::Unavailable,
-                ..
-            })
-        ) {
-            body.push_str("\n\n");
-            body.push_str(&strings.get(Text::AccountSignOutRegistration));
-        }
+        let body = format!(
+            "{}\n\n{}",
+            strings.get(Text::AccountSignOutBody),
+            strings.get(Text::AccountSignOutRegistration),
+        );
         let view = cx.weak_entity();
         let title = strings.get(Text::AccountSignOutTitle).into();
         let cancel = strings.get(Text::AccountDialogCancel).into();

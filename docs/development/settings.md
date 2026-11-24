@@ -145,6 +145,9 @@ and Voice updates do not request focus; asynchronous removal preserves the Setti
 Speech model actions run through Presence before returning focus to the Settings frame.
 ChatGPT Sign Out consumes the originating confirmation before asking Presence to act.
 Neither action holds the Settings view during cancellation, so Presence can refresh Stop.
+The confirmation always warns that sign-out may remove the local app registration and that
+signing in again registers it anew if removed. The brain can learn that the plan is unavailable
+before Settings sees the updated snapshot, so the warning does not depend on the displayed plan.
 
 Settings stays visible when deactivated. With Settings focused, Esc stops work, then clears a
 drawing, then cancels the active field edit; another Esc dismisses. The close button also

@@ -161,7 +161,15 @@ pub(crate) fn open_during_exit(
         window,
         cx,
         title,
-        move |alert, _, _| alert.description(body.clone()),
+        move |alert, _, _| {
+            #[cfg(test)]
+            let description = gpui_kit::div()
+                .debug_selector(|| body.to_string())
+                .child(body.clone());
+            #[cfg(not(test))]
+            let description = body.clone();
+            alert.description(description)
+        },
         (cancel, confirm),
         DuringExit::Allow,
         on_decision,
