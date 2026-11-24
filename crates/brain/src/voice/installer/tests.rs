@@ -396,7 +396,12 @@ fn ineligible_key_down_never_queues_an_install_or_replays_after_removal() {
             true,
             failed(ErrorKey::VoiceCorrupt),
         ),
-        (Durable::Installed, true, false, failed(ErrorKey::VoiceLoad)),
+        (
+            Durable::Installed,
+            true,
+            false,
+            failed(ErrorKey::VoiceUnavailable),
+        ),
         (Durable::Installed, true, true, PartState::Loading),
     ] {
         let (mut installer, _) = Installer::start(
@@ -713,7 +718,7 @@ fn a_part_with_a_short_file_is_corrupt_and_never_loads() {
 }
 
 #[test]
-fn a_handle_that_didnt_start_is_a_load_failure_for_the_session() {
+fn a_handle_that_didnt_start_cannot_be_retried_in_the_same_session() {
     let (mut installer, loads) = Installer::start(
         [Durable::Installed, Durable::Absent],
         [true, true].map(Ok),
@@ -723,16 +728,35 @@ fn a_handle_that_didnt_start_is_a_load_failure_for_the_session() {
     );
     assert_eq!(loads, []);
     let fixed = view(
-        failed(ErrorKey::VoiceLoad),
-        failed_absent(ErrorKey::VoiceLoad),
+        failed(ErrorKey::VoiceUnavailable),
+        failed_absent(ErrorKey::VoiceUnavailable),
     );
     assert_eq!(installer.view(), fixed);
     for part in [SpeechInput, SpokenReplies] {
+        assert_eq!(installer.install(part), []);
         for ask in 1..=2 {
             assert_eq!(installer.reported(part, report(ask, LoadEvent::Loaded)), []);
         }
     }
     assert_eq!(installer.view(), fixed, "never Loading or Ready");
+}
+
+#[test]
+fn removal_cleanup_does_not_make_an_absent_owner_retryable() {
+    for result in [Ok(()), Err(ErrorKey::VoiceStorage)] {
+        let (mut installer, _) = Installer::start(
+            [Durable::Absent, Durable::Removing],
+            [true; 2].map(Ok),
+            [true, false],
+            &[],
+            true,
+        );
+        let unavailable = failed_absent(ErrorKey::VoiceUnavailable);
+        assert_eq!(installer.view().spoken_replies, unavailable);
+        assert_eq!(installer.cleared(SpokenReplies, result), []);
+        assert_eq!(installer.view().spoken_replies, unavailable);
+        assert_eq!(installer.install(SpokenReplies), []);
+    }
 }
 
 #[test]

@@ -163,7 +163,7 @@ struct Entry {
     token: u64,
     /// Automatic reloads left after a loss: one per install or session.
     retry_left: u8,
-    /// The part's handle started; without it the part is a fixed load failure.
+    /// The part's handle started; without it the part can't load until restart.
     available: bool,
     /// An install waiting for a removal to finish.
     install_after: bool,
@@ -925,10 +925,16 @@ impl Entry {
     }
 
     fn state(&self) -> PartState {
-        if !self.available && !self.models.is_empty() {
-            return PartState::Unavailable;
+        let phase = self.shown();
+        if !self.available {
+            if !self.models.is_empty() {
+                return PartState::Unavailable;
+            }
+            if phase != Phase::Failed(ErrorKey::UnsupportedPlatform) {
+                return self.failed(ErrorKey::VoiceUnavailable);
+            }
         }
-        match self.shown() {
+        match phase {
             Phase::Idle | Phase::Intent | Phase::Draining | Phase::Deleting | Phase::Clearing => {
                 PartState::NotInstalled
             }

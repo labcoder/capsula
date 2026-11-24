@@ -495,8 +495,8 @@ stateDiagram-v2
 
 The brain sends `ControlToShell::Voice` with both parts' `PartState` once per connection, after
 `Account` and before `Scenes`, and again on each change. Reports that came while no shell was
-connected are applied first, so the view is current. Settings → Voice shows speech input's
-state; spoken replies do not yet have their own settings controls.
+connected are applied first, so the view is current. Settings → Voice shows both parts' states
+and routes explicit Install or Retry requests to this installer.
 
 ## Provenance
 

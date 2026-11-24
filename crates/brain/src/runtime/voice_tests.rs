@@ -178,7 +178,7 @@ async fn connected_key_down_reloads_input_without_a_turn_or_settings_work() {
     let loading = VoiceView {
         speech_input: PartState::Loading,
         spoken_replies: PartState::Failed {
-            key: ErrorKey::VoiceLoad,
+            key: ErrorKey::VoiceUnavailable,
             installed: false,
         },
     };
@@ -265,7 +265,7 @@ async fn offline_and_early_key_downs_are_dropped_not_replayed_on_reconnect() {
     let idle = VoiceView {
         speech_input: PartState::Unloaded,
         spoken_replies: PartState::Failed {
-            key: ErrorKey::VoiceLoad,
+            key: ErrorKey::VoiceUnavailable,
             installed: false,
         },
     };
@@ -355,7 +355,7 @@ async fn a_lost_reload_notification_keeps_the_started_load_without_retry() {
             ControlToShell::Voice(VoiceView {
                 speech_input: PartState::Ready,
                 spoken_replies: PartState::Failed {
-                    key: ErrorKey::VoiceLoad,
+                    key: ErrorKey::VoiceUnavailable,
                     installed: false
                 }
             })
@@ -379,9 +379,9 @@ impl Engine for Silence {
     }
 }
 
-/// Speech input has no handle, so it's a load failure of a part that isn't installed.
+/// Speech input has no handle and cannot start before restart.
 const NO_SPEECH_INPUT: PartState = PartState::Failed {
-    key: ErrorKey::VoiceLoad,
+    key: ErrorKey::VoiceUnavailable,
     installed: false,
 };
 
@@ -1173,7 +1173,7 @@ async fn a_cancelled_install_goes_back_and_the_next_fetches_once_the_first_ends(
 
 #[cfg(windows)]
 #[tokio::test]
-async fn a_removal_whose_last_write_fails_shows_a_storage_failure_and_fetches_nothing() {
+async fn a_refused_removal_clear_keeps_the_unavailable_owner_and_fetches_nothing() {
     let scratch = Scratch::trusted("voice-cleared-refused");
     let root = stage_root("voice-cleared-refused");
     std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
@@ -1195,10 +1195,11 @@ async fn a_removal_whose_last_write_fails_shows_a_storage_failure_and_fetches_no
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
-        assert_eq!(
-            opening(&mut shell).await.spoken_replies,
-            PartState::NotInstalled
-        );
+        let unavailable = PartState::Failed {
+            key: ErrorKey::VoiceUnavailable,
+            installed: false,
+        };
+        assert_eq!(opening(&mut shell).await.spoken_replies, unavailable);
         shell
             .send(&ControlToBrain::Settings(SettingsOp::InstallVoice(
                 VoicePart::SpokenReplies,
@@ -1207,13 +1208,6 @@ async fn a_removal_whose_last_write_fails_shows_a_storage_failure_and_fetches_no
         release
             .send(Gate::Panic)
             .expect("the write waits on the gate");
-        assert_eq!(
-            shell.unaccounted().await.expect("readable"),
-            Some(voice(PartState::Failed {
-                key: ErrorKey::VoiceStorage,
-                installed: false,
-            }))
-        );
         assert!(matches!(
             shell.unaccounted().await.expect("readable"),
             Some(ControlToShell::Settings { answer: true, .. })

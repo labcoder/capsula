@@ -1,4 +1,5 @@
-use kumochi_protocol::message::{ErrorKey, PartState, SttUnload, UserError};
+use kumochi_protocol::message::{ErrorKey, PartState, SttUnload, UserError, VoiceView};
+use kumochi_protocol::voice::VoicePart::{self, SpeechInput, SpokenReplies};
 
 use super::{Pending, Settings, SettingsOp, Slot};
 use crate::link::output::Denied;
@@ -11,28 +12,44 @@ pub const STT_UNLOAD_OPTIONS: [(SttUnload, Text); 3] = [
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpeechInputAction {
+pub enum VoiceAction {
     Install,
     Retry,
     Reload,
     Cancel,
 }
 
-impl SpeechInputAction {
+impl VoiceIntent {
     pub fn label(self) -> Text {
-        match self {
-            Self::Install => Text::VoiceInstallModel,
-            Self::Retry => Text::VoiceRetryModel,
-            Self::Reload => Text::VoiceLoadModel,
-            Self::Cancel => Text::VoiceCancelSetup,
+        match (self.part, self.action) {
+            (SpokenReplies, VoiceAction::Install) => Text::SpokenRepliesInstall,
+            (SpokenReplies, VoiceAction::Retry) => Text::SpokenRepliesRetry,
+            (SpeechInput, VoiceAction::Install) => Text::VoiceInstallModel,
+            (SpeechInput, VoiceAction::Retry) => Text::VoiceRetryModel,
+            (_, VoiceAction::Reload) => Text::VoiceLoadModel,
+            (_, VoiceAction::Cancel) => Text::VoiceCancelSetup,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SpeechInputIntent {
+pub struct VoiceIntent {
     generation: u64,
-    pub action: SpeechInputAction,
+    pub(super) part: VoicePart,
+    pub action: VoiceAction,
+}
+
+#[derive(Default)]
+pub(super) struct VoiceFeedback {
+    pub(super) error: Option<UserError>,
+    send_failed: bool,
+}
+
+pub(super) const fn part_index(part: VoicePart) -> usize {
+    match part {
+        SpeechInput => 0,
+        SpokenReplies => 1,
+    }
 }
 
 impl Settings {
@@ -44,7 +61,7 @@ impl Settings {
                 Text::VoiceStatusUnknown
             });
         }
-        match self.speech_input {
+        match self.voice_part_state(SpeechInput) {
             Some(PartState::Ready | PartState::Loading | PartState::Unloaded) => None,
             _ => Some(self.speech_input_status()),
         }
@@ -196,90 +213,104 @@ impl Settings {
         true
     }
 
-    pub fn receive_speech_input(
+    pub fn receive_voice(
         &mut self,
         current: Option<u64>,
         generation: u64,
-        state: PartState,
+        view: VoiceView,
     ) -> bool {
         if current != Some(generation) {
             return false;
         }
-        self.speech_input = Some(state);
-        self.speech_generation = Some(generation);
+        self.voice = Some((generation, view));
         true
     }
 
-    pub fn speech_input_intent(&self) -> Option<SpeechInputIntent> {
+    fn voice_part_state(&self, part: VoicePart) -> Option<PartState> {
+        let (_, view) = self.voice?;
+        Some(match part {
+            SpeechInput => view.speech_input,
+            SpokenReplies => view.spoken_replies,
+        })
+    }
+
+    pub fn voice_setup_intent(&self, part: VoicePart) -> Option<VoiceIntent> {
         self.view.as_ref()?;
-        let action = match self.speech_input? {
-            PartState::NotInstalled => SpeechInputAction::Install,
+        let action = match self.voice_part_state(part)? {
+            PartState::NotInstalled => VoiceAction::Install,
+            PartState::Unloaded if part == SpeechInput => VoiceAction::Reload,
             PartState::Failed {
-                key: ErrorKey::UnsupportedPlatform,
+                key: ErrorKey::UnsupportedPlatform | ErrorKey::VoiceUnavailable,
                 ..
             }
             | PartState::Ready
+            | PartState::Unloaded
             | PartState::Unavailable => return None,
-            PartState::Failed { .. } => SpeechInputAction::Retry,
-            PartState::Unloaded => SpeechInputAction::Reload,
+            PartState::Failed { .. } => VoiceAction::Retry,
             PartState::Verifying | PartState::Downloading { .. } | PartState::Loading => {
-                SpeechInputAction::Cancel
+                VoiceAction::Cancel
             }
         };
-        Some(SpeechInputIntent {
-            generation: self.speech_generation?,
+        Some(VoiceIntent {
+            generation: self.voice?.0,
+            part,
             action,
         })
     }
 
-    pub fn speech_input_pending(&self) -> bool {
-        self.pending
-            .iter()
-            .any(|pending| matches!(pending.slot, Slot::SpeechInput(_)))
+    pub fn voice_setup_pending(&self, part: VoicePart) -> bool {
+        self.pending.iter().any(|pending| {
+            matches!(pending.slot, Slot::Voice(queued, action)
+                if queued == part || action == VoiceAction::Cancel)
+        })
     }
 
-    pub fn speech_input_error(&self) -> Option<&UserError> {
-        self.speech_error.as_ref()
+    pub fn voice_setup_error(&self, part: VoicePart) -> Option<&UserError> {
+        self.voice_feedback[part_index(part)].error.as_ref()
     }
 
-    pub fn speech_input_send_failed(&self) -> bool {
-        self.speech_send_failed
+    pub fn voice_setup_send_failed(&self, part: VoicePart) -> bool {
+        self.voice_feedback[part_index(part)].send_failed
     }
 
-    pub fn speech_input_failure(&self) -> Option<UserError> {
-        match self.speech_input? {
+    pub fn voice_setup_failure(&self, part: VoicePart) -> Option<UserError> {
+        match self.voice_part_state(part)? {
+            PartState::Failed {
+                key: ErrorKey::VoiceUnavailable,
+                ..
+            } => None,
             PartState::Failed { key, .. } => Some(key.into()),
             _ => None,
         }
     }
 
-    pub fn send_speech_input(
+    pub fn send_voice_setup(
         &mut self,
-        intent: SpeechInputIntent,
+        intent: VoiceIntent,
         current: Option<u64>,
         send: impl FnOnce(SettingsOp) -> bool,
     ) -> bool {
-        if self.speech_input_intent() != Some(intent) || self.speech_input_pending() {
+        if self.voice_setup_intent(intent.part) != Some(intent)
+            || self.voice_setup_pending(intent.part)
+        {
             return false;
         }
+        let feedback = &mut self.voice_feedback[part_index(intent.part)];
         if current != Some(intent.generation) {
-            self.speech_send_failed |= current.is_none();
+            feedback.send_failed |= current.is_none();
             return false;
         }
         let op = match intent.action {
-            SpeechInputAction::Install | SpeechInputAction::Retry => {
-                SettingsOp::InstallVoice(kumochi_protocol::voice::VoicePart::SpeechInput)
-            }
-            SpeechInputAction::Reload => SettingsOp::LoadSpeechInput,
-            SpeechInputAction::Cancel => SettingsOp::CancelVoiceInstall,
+            VoiceAction::Install | VoiceAction::Retry => SettingsOp::InstallVoice(intent.part),
+            VoiceAction::Reload => SettingsOp::LoadSpeechInput,
+            VoiceAction::Cancel => SettingsOp::CancelVoiceInstall,
         };
-        if !send(op) {
-            self.speech_send_failed = true;
+        feedback.send_failed = !send(op);
+        if feedback.send_failed {
             return false;
         }
-        self.speech_send_failed = false;
         self.pending.push_back(Pending {
-            slot: Slot::SpeechInput(intent.action),
+            slot: Slot::Voice(intent.part, intent.action),
             failed: false,
             reset_draft: false,
         });
@@ -287,21 +318,66 @@ impl Settings {
     }
 
     pub fn speech_input_status(&self) -> Text {
-        match self.speech_input {
-            None => Text::VoiceStatusUnknown,
-            Some(PartState::NotInstalled) => Text::VoiceNotInstalled,
-            Some(PartState::Verifying) => Text::VoiceVerifying,
-            Some(PartState::Downloading { .. }) => Text::VoiceDownloading,
-            Some(PartState::Loading) => Text::VoiceLoading,
-            Some(PartState::Ready) => Text::VoiceReady,
-            Some(PartState::Unloaded) => Text::VoiceUnloaded,
-            Some(PartState::Unavailable) => Text::VoiceRestartRequired,
-            Some(PartState::Failed {
-                installed: true, ..
-            }) => Text::VoiceInstalledFailed,
-            Some(PartState::Failed {
-                installed: false, ..
-            }) => Text::VoiceNotInstalledFailed,
+        self.voice_status(SpeechInput)
+    }
+
+    pub fn voice_status(&self, part: VoicePart) -> Text {
+        match (part, self.voice_part_state(part)) {
+            (_, Some(PartState::NotInstalled)) => Text::VoiceNotInstalled,
+            (_, Some(PartState::Ready)) => Text::VoiceReady,
+            (_, Some(PartState::Unloaded)) => Text::VoiceUnloaded,
+            (SpeechInput, None) => Text::VoiceStatusUnknown,
+            (SpeechInput, Some(PartState::Verifying)) => Text::VoiceVerifying,
+            (SpeechInput, Some(PartState::Downloading { .. })) => Text::VoiceDownloading,
+            (SpeechInput, Some(PartState::Loading)) => Text::VoiceLoading,
+            (
+                SpeechInput,
+                Some(
+                    PartState::Unavailable
+                    | PartState::Failed {
+                        key: ErrorKey::VoiceUnavailable,
+                        ..
+                    },
+                ),
+            ) => Text::VoiceRestartRequired,
+            (
+                SpeechInput,
+                Some(PartState::Failed {
+                    installed: true, ..
+                }),
+            ) => Text::VoiceInstalledFailed,
+            (
+                SpeechInput,
+                Some(PartState::Failed {
+                    installed: false, ..
+                }),
+            ) => Text::VoiceNotInstalledFailed,
+            (SpokenReplies, None) => Text::SpokenRepliesUnknown,
+            (SpokenReplies, Some(PartState::Verifying)) => Text::SpokenRepliesVerifying,
+            (SpokenReplies, Some(PartState::Downloading { .. })) => Text::SpokenRepliesDownloading,
+            (SpokenReplies, Some(PartState::Loading)) => Text::SpokenRepliesLoading,
+            (
+                SpokenReplies,
+                Some(
+                    PartState::Unavailable
+                    | PartState::Failed {
+                        key: ErrorKey::VoiceUnavailable,
+                        ..
+                    },
+                ),
+            ) => Text::SpokenRepliesRestartRequired,
+            (
+                SpokenReplies,
+                Some(PartState::Failed {
+                    installed: true, ..
+                }),
+            ) => Text::SpokenRepliesInstalledFailed,
+            (
+                SpokenReplies,
+                Some(PartState::Failed {
+                    installed: false, ..
+                }),
+            ) => Text::SpokenRepliesNotInstalledFailed,
         }
     }
 

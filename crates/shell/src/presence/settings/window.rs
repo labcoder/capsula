@@ -30,12 +30,8 @@ impl Presence {
         save: Save,
         cx: &mut Context<'_, Self>,
     ) -> SaveOutcome {
-        match save.before() {
-            Some(BeforeSave::CancelVoice) => self.cancel_voice(cx),
-            Some(BeforeSave::RevokeScreenOffer) => {
-                self.voice.gates.publish(None);
-            }
-            None => {}
+        if save.before() == Some(BeforeSave::RevokeScreenOffer) {
+            self.voice.gates.publish(None);
         }
         let pair = self.session.as_ref().map(|session| (&self.link, session));
         let outcome = self.settings.update(cx, |state, cx| {
@@ -46,6 +42,7 @@ impl Presence {
             outcome
         });
         match outcome.after {
+            Some(AfterSave::CancelVoice) => self.cancel_voice(cx),
             Some(AfterSave::FollowAndCancelVoice) => {
                 // The next press reads the mirror before any link batch refreshes it.
                 self.follow_voice_input(cx);
@@ -63,12 +60,12 @@ impl Presence {
         outcome
     }
 
-    pub(in crate::presence) fn speech_input_action(
+    pub(in crate::presence) fn voice_setup_action(
         &mut self,
-        intent: crate::settings::SpeechInputIntent,
+        intent: crate::settings::VoiceIntent,
         cx: &mut Context<'_, Self>,
     ) {
-        self.request_save(Save::SpeechInput(intent), cx);
+        self.request_save(Save::Voice(intent), cx);
     }
 
     #[expect(

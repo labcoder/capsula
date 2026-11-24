@@ -418,7 +418,10 @@ fn actual_presence_keeps_hold_and_listening_off_even_after_ready_and_deferred_ef
                     this.link_events(
                         Batch::Plain(vec![LinkEvent::Voice {
                             generation: 9,
-                            speech_input: PartState::Ready,
+                            view: kumochi_protocol::message::VoiceView {
+                                speech_input: PartState::Ready,
+                                spoken_replies: PartState::Ready,
+                            },
                         }]),
                         cx,
                     )

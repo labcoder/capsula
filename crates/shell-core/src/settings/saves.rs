@@ -3,8 +3,11 @@
 use kumochi_protocol::message::{
     AssistantName, ConnectionKind, ControlToBrain, DockPosition, MaxFrameRate, ModelSlug, SttUnload,
 };
+use kumochi_protocol::voice::VoicePart;
 
-use super::{Field, Settings, SettingsOp, SettingsView, SpeechInputIntent, TaskbarChoice, Update};
+use super::{
+    Field, Settings, SettingsOp, SettingsView, TaskbarChoice, Update, VoiceAction, VoiceIntent,
+};
 use crate::link::{LinkHandle, Session, output::Denied};
 use crate::strings::Text;
 
@@ -20,17 +23,17 @@ pub enum Save {
     TalkBack(bool),
     ShowScreen(bool),
     SttUnload(SttUnload),
-    SpeechInput(SpeechInputIntent),
+    Voice(VoiceIntent),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BeforeSave {
-    CancelVoice,
     RevokeScreenOffer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AfterSave {
+    CancelVoice,
     FollowAndCancelVoice,
     RefreshScreenOffer { clear_marks: bool },
     SyncTaskbar,
@@ -48,7 +51,6 @@ impl Save {
     /// Work the host does before offering the save to the current session.
     pub fn before(&self) -> Option<BeforeSave> {
         match self {
-            Self::SpeechInput(_) => Some(BeforeSave::CancelVoice),
             Self::ShowScreen(false) => Some(BeforeSave::RevokeScreenOffer),
             _ => None,
         }
@@ -63,7 +65,7 @@ fn send(pair: Pair<'_>, op: SettingsOp) -> bool {
 
 impl Settings {
     pub fn apply_save(&mut self, save: Save, pair: Pair<'_>) -> SaveOutcome {
-        use AfterSave::{FollowAndCancelVoice, RefreshScreenOffer, SyncTaskbar};
+        use AfterSave::{CancelVoice, FollowAndCancelVoice, RefreshScreenOffer, SyncTaskbar};
 
         let send = |op| send(pair, op);
         let rename = matches!(save, Save::RenameAssistant(_));
@@ -101,8 +103,20 @@ impl Settings {
                 self.send_show_screen(on, send)
             }
             Save::SttUnload(policy) => self.send_stt_unload(policy, send),
-            Save::SpeechInput(intent) => {
-                self.send_speech_input(intent, pair.map(|(_, session)| session.generation()), send)
+            Save::Voice(intent) => {
+                let queued = self.send_voice_setup(
+                    intent,
+                    pair.map(|(_, session)| session.generation()),
+                    send,
+                );
+                let changes_input = if intent.action == VoiceAction::Cancel {
+                    self.voice_setup_intent(VoicePart::SpeechInput)
+                        .is_some_and(|input| input.action == VoiceAction::Cancel)
+                } else {
+                    intent.part == VoicePart::SpeechInput
+                };
+                after = (queued && changes_input).then_some(CancelVoice);
+                queued
             }
         };
         SaveOutcome {

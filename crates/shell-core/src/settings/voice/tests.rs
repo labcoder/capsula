@@ -1,9 +1,18 @@
 use kumochi_protocol::message::{
     AssistantName, ErrorKey, MaxFrameRate, PartState, SettingsView, SttUnload, ThreadId, UserError,
+    VoiceView,
 };
+use kumochi_protocol::voice::VoicePart::SpeechInput;
 
 use super::super::{Settings, SettingsOp, Update};
 use crate::strings::Text;
+
+fn input_view(speech_input: PartState) -> VoiceView {
+    VoiceView {
+        speech_input,
+        spoken_replies: PartState::Ready,
+    }
+}
 
 fn saved(policy: SttUnload) -> SettingsView {
     SettingsView {
@@ -34,7 +43,7 @@ fn connected() -> Settings {
 fn ready_loading_and_unloaded_input_permit_a_deliberate_hold() {
     let mut state = connected();
     for input in [PartState::Ready, PartState::Loading, PartState::Unloaded] {
-        assert!(state.receive_speech_input(Some(7), 7, input));
+        assert!(state.receive_voice(Some(7), 7, input_view(input)));
         assert_eq!(state.hold_to_talk_notice(), None);
     }
     state.disconnected();
@@ -114,18 +123,18 @@ fn the_load_off_refusal_clears_only_when_enable_is_saved() {
         let mut off = saved(SttUnload::Kept);
         off.hold_to_talk = false;
         state.set_view(off.clone(), Update::Unsolicited);
-        assert!(state.receive_speech_input(Some(7), 7, PartState::Unloaded));
-        let load = state.speech_input_intent().expect("load");
-        assert!(state.send_speech_input(load, Some(7), |op| op == SettingsOp::LoadSpeechInput));
+        assert!(state.receive_voice(Some(7), 7, input_view(PartState::Unloaded)));
+        let load = state.voice_setup_intent(SpeechInput).expect("load");
+        assert!(state.send_voice_setup(load, Some(7), |op| op == SettingsOp::LoadSpeechInput));
         let refusal = UserError::from(ErrorKey::HoldToTalkOff);
         state.error(refusal.clone());
         state.set_view(off.clone(), Update::Answer);
-        assert_eq!(state.speech_input_error(), Some(&refusal));
+        assert_eq!(state.voice_setup_error(SpeechInput), Some(&refusal));
         assert_eq!(state.notice(), Some(&refusal));
 
         assert!(state.send_hold_to_talk(true, |op| op == SettingsOp::SetHoldToTalk(true)));
         state.set_view(off.clone(), Update::Unsolicited);
-        assert_eq!(state.speech_input_error(), Some(&refusal));
+        assert_eq!(state.voice_setup_error(SpeechInput), Some(&refusal));
         assert_eq!(state.notice(), Some(&refusal));
 
         let unrelated = UserError::from(ErrorKey::UsageLimit);
@@ -134,32 +143,34 @@ fn the_load_off_refusal_clears_only_when_enable_is_saved() {
             let refused_write = UserError::from(ErrorKey::SettingsRefused);
             state.error(refused_write.clone());
             state.set_view(off, Update::Answer);
-            assert_eq!(state.speech_input_error(), Some(&refusal));
+            assert_eq!(state.voice_setup_error(SpeechInput), Some(&refusal));
             assert_eq!(state.hold_to_talk_error(), Some(&refused_write));
             state.error(unrelated.clone());
             assert!(state.send_hold_to_talk(true, |_| true));
             state.set_view(on.clone(), Update::Unsolicited);
-            assert_eq!(state.speech_input_error(), None);
+            assert_eq!(state.voice_setup_error(SpeechInput), None);
             assert_eq!(state.notice(), Some(&unrelated));
             assert!(state.hold_to_talk_pending());
         }
         state.set_view(on, Update::Answer);
-        assert_eq!(state.speech_input_error(), None);
+        assert_eq!(state.voice_setup_error(SpeechInput), None);
         assert_eq!(state.notice(), first_enable_fails.then_some(&unrelated));
-        assert!(state.receive_speech_input(Some(7), 7, PartState::Ready));
-        assert_eq!(state.speech_input_error(), None);
+        assert!(state.receive_voice(Some(7), 7, input_view(PartState::Ready)));
+        assert_eq!(state.voice_setup_error(SpeechInput), None);
     }
 }
 
 #[test]
 fn an_unavailable_owner_shows_restart_and_revokes_the_previous_setup_action() {
     let mut state = connected();
-    assert!(state.receive_speech_input(Some(7), 7, PartState::Loading));
-    let pending = state.speech_input_intent().expect("cancel while loading");
-    assert!(state.receive_speech_input(Some(7), 7, PartState::Unavailable));
+    assert!(state.receive_voice(Some(7), 7, input_view(PartState::Loading)));
+    let pending = state
+        .voice_setup_intent(SpeechInput)
+        .expect("cancel while loading");
+    assert!(state.receive_voice(Some(7), 7, input_view(PartState::Unavailable)));
     assert_eq!(state.speech_input_status(), Text::VoiceRestartRequired);
-    assert_eq!(state.speech_input_intent(), None);
-    assert!(!state.send_speech_input(pending, Some(7), |_| panic!(
+    assert_eq!(state.voice_setup_intent(SpeechInput), None);
+    assert!(!state.send_voice_setup(pending, Some(7), |_| panic!(
         "dead owner must not receive setup"
     )));
     assert_eq!(
@@ -281,10 +292,10 @@ fn speech_status_requires_the_current_session_and_does_not_survive_disconnect() 
             Text::VoiceNotInstalledFailed,
         ),
     ] {
-        assert!(state.receive_speech_input(Some(7), 7, part));
+        assert!(state.receive_voice(Some(7), 7, input_view(part)));
         assert_eq!(state.speech_input_status(), expected);
-        assert!(!state.receive_speech_input(Some(7), 6, PartState::Ready));
-        assert!(!state.receive_speech_input(None, 7, PartState::Ready));
+        assert!(!state.receive_voice(Some(7), 6, input_view(PartState::Ready)));
+        assert!(!state.receive_voice(None, 7, input_view(PartState::Ready)));
         assert_eq!(state.speech_input_status(), expected);
     }
     state.disconnected();
@@ -293,8 +304,7 @@ fn speech_status_requires_the_current_session_and_does_not_survive_disconnect() 
 
 #[test]
 fn model_actions_keep_load_distinct_from_install_or_retry_and_never_invent_progress() {
-    use super::SpeechInputAction::{Cancel, Install, Reload, Retry};
-    use kumochi_protocol::voice::VoicePart::SpeechInput;
+    use super::VoiceAction::{Cancel, Install, Reload, Retry};
 
     for (part, action, op) in [
         (
@@ -344,46 +354,48 @@ fn model_actions_keep_load_distinct_from_install_or_retry_and_never_invent_progr
         (PartState::Loading, Cancel, SettingsOp::CancelVoiceInstall),
     ] {
         let mut state = connected();
-        assert!(state.receive_speech_input(Some(7), 7, part));
-        let intent = state.speech_input_intent().expect("eligible");
+        assert!(state.receive_voice(Some(7), 7, input_view(part)));
+        let intent = state.voice_setup_intent(SpeechInput).expect("eligible");
         assert_eq!(intent.action, action);
         assert_eq!(
-            state.speech_input_failure().map(|error| error.key()),
+            state
+                .voice_setup_failure(SpeechInput)
+                .map(|error| error.key()),
             match part {
                 PartState::Failed { key, .. } => Some(key),
                 _ => None,
             }
         );
         let mut sent = Vec::new();
-        assert!(state.send_speech_input(intent, Some(7), |message| {
+        assert!(state.send_voice_setup(intent, Some(7), |message| {
             sent.push(message);
             true
         }));
         assert_eq!(sent, [op]);
-        assert!(state.speech_input_pending());
-        assert!(!state.send_speech_input(intent, Some(7), |_| panic!("duplicate")));
+        assert!(state.voice_setup_pending(SpeechInput));
+        assert!(!state.send_voice_setup(intent, Some(7), |_| panic!("duplicate")));
         state.set_view(saved(SttUnload::Kept), Update::Answer);
-        assert!(!state.speech_input_pending());
-        assert_eq!(state.speech_input, Some(part));
-        assert!(!state.send_speech_input(intent, Some(7), |_| false));
-        assert!(state.speech_input_send_failed());
-        assert!(!state.speech_input_pending());
-        assert_eq!(state.speech_input, Some(part));
+        assert!(!state.voice_setup_pending(SpeechInput));
+        assert_eq!(state.voice_part_state(SpeechInput), Some(part));
+        assert!(!state.send_voice_setup(intent, Some(7), |_| false));
+        assert!(state.voice_setup_send_failed(SpeechInput));
+        assert!(!state.voice_setup_pending(SpeechInput));
+        assert_eq!(state.voice_part_state(SpeechInput), Some(part));
     }
     let mut state = Settings::default();
-    assert_eq!(state.speech_input_intent(), None);
-    assert!(state.receive_speech_input(Some(7), 7, PartState::NotInstalled));
+    assert_eq!(state.voice_setup_intent(SpeechInput), None);
+    assert!(state.receive_voice(Some(7), 7, input_view(PartState::NotInstalled)));
     assert_eq!(
-        state.speech_input_intent(),
+        state.voice_setup_intent(SpeechInput),
         None,
         "no authoritative Settings"
     );
     state.set_view(saved(SttUnload::Kept), Update::Unsolicited);
-    assert!(state.receive_speech_input(Some(7), 7, PartState::Ready));
-    assert_eq!(state.speech_input_intent(), None);
+    assert!(state.receive_voice(Some(7), 7, input_view(PartState::Ready)));
+    assert_eq!(state.voice_setup_intent(SpeechInput), None);
     state.disconnected();
-    assert_eq!(state.speech_input_intent(), None);
-    assert_eq!(state.speech_generation, None);
+    assert_eq!(state.voice_setup_intent(SpeechInput), None);
+    assert_eq!(state.voice, None);
 }
 
 #[test]
@@ -400,58 +412,62 @@ fn captured_model_intents_cannot_change_meaning_or_cross_connections() {
         (PartState::NotInstalled, PartState::Ready),
     ] {
         let mut state = connected();
-        assert!(state.receive_speech_input(Some(7), 7, before));
-        let old = state.speech_input_intent().expect("old intent");
-        assert!(state.receive_speech_input(Some(7), 7, after));
-        assert!(!state.send_speech_input(old, Some(7), |_| panic!("stale action")));
-        assert_eq!(state.speech_input, Some(after));
-        assert!(!state.speech_input_pending());
+        assert!(state.receive_voice(Some(7), 7, input_view(before)));
+        let old = state.voice_setup_intent(SpeechInput).expect("old intent");
+        assert!(state.receive_voice(Some(7), 7, input_view(after)));
+        assert!(!state.send_voice_setup(old, Some(7), |_| panic!("stale action")));
+        assert_eq!(state.voice_part_state(SpeechInput), Some(after));
+        assert!(!state.voice_setup_pending(SpeechInput));
     }
     for part in [PartState::NotInstalled, PartState::Loading] {
         let mut state = connected();
-        assert!(state.receive_speech_input(Some(7), 7, part));
-        let old = state.speech_input_intent().expect("old intent");
-        assert!(!state.send_speech_input(old, Some(8), |_| panic!("new Session, old Voice")));
-        assert!(!state.send_speech_input(old, None, |_| panic!("missing Session")));
-        assert!(state.speech_input_send_failed());
+        assert!(state.receive_voice(Some(7), 7, input_view(part)));
+        let old = state.voice_setup_intent(SpeechInput).expect("old intent");
+        assert!(!state.send_voice_setup(old, Some(8), |_| panic!("new Session, old Voice")));
+        assert!(!state.send_voice_setup(old, None, |_| panic!("missing Session")));
+        assert!(state.voice_setup_send_failed(SpeechInput));
         state.disconnected();
-        assert!(!state.speech_input_send_failed());
-        assert_eq!(state.speech_input, None);
+        assert!(!state.voice_setup_send_failed(SpeechInput));
+        assert_eq!(state.voice_part_state(SpeechInput), None);
         assert!(state.receive(Some(8), 8, saved(SttUnload::Kept), Update::Unsolicited));
-        assert!(!state.receive_speech_input(Some(8), 7, part));
-        assert!(state.receive_speech_input(Some(8), 8, part));
-        assert!(!state.send_speech_input(old, Some(8), |_| panic!("old same action")));
-        assert!(!state.send_speech_input(old, Some(7), |_| panic!("old Session")));
-        let fresh = state.speech_input_intent().expect("fresh intent");
+        assert!(!state.receive_voice(Some(8), 7, input_view(part)));
+        assert!(state.receive_voice(Some(8), 8, input_view(part)));
+        assert!(!state.send_voice_setup(old, Some(8), |_| panic!("old same action")));
+        assert!(!state.send_voice_setup(old, Some(7), |_| panic!("old Session")));
+        let fresh = state.voice_setup_intent(SpeechInput).expect("fresh intent");
         assert_ne!(old, fresh);
-        assert!(state.send_speech_input(fresh, Some(8), |_| true));
+        assert!(state.send_voice_setup(fresh, Some(8), |_| true));
     }
     let mut state = connected();
-    assert!(state.receive_speech_input(Some(7), 7, PartState::Verifying));
-    let cancel = state.speech_input_intent().expect("cancel");
-    assert!(state.receive_speech_input(Some(7), 7, PartState::Downloading { done: 2, total: 3 }));
-    assert_eq!(state.speech_input_intent(), Some(cancel));
-    assert!(state.send_speech_input(cancel, Some(7), |_| true));
+    assert!(state.receive_voice(Some(7), 7, input_view(PartState::Verifying)));
+    let cancel = state.voice_setup_intent(SpeechInput).expect("cancel");
+    assert!(state.receive_voice(
+        Some(7),
+        7,
+        input_view(PartState::Downloading { done: 2, total: 3 })
+    ));
+    assert_eq!(state.voice_setup_intent(SpeechInput), Some(cancel));
+    assert!(state.send_voice_setup(cancel, Some(7), |_| true));
 }
 
 #[test]
 fn model_refusals_follow_the_shared_fifo_and_survive_unrelated_answers() {
     for model_first in [true, false] {
         let mut state = connected();
-        assert!(state.receive_speech_input(Some(7), 7, PartState::Unloaded));
-        let intent = state.speech_input_intent().expect("load");
+        assert!(state.receive_voice(Some(7), 7, input_view(PartState::Unloaded)));
+        let intent = state.voice_setup_intent(SpeechInput).expect("load");
         if model_first {
-            assert!(state.send_speech_input(intent, Some(7), |_| true));
+            assert!(state.send_voice_setup(intent, Some(7), |_| true));
         }
         assert!(state.send_stt_unload(SttUnload::After15Min, |_| true));
         if !model_first {
-            assert!(state.send_speech_input(intent, Some(7), |_| true));
+            assert!(state.send_voice_setup(intent, Some(7), |_| true));
         }
-        assert!(state.speech_input_pending());
+        assert!(state.voice_setup_pending(SpeechInput));
         assert!(state.stt_unload_pending());
         assert_eq!(state.error(ErrorKey::VoiceUnavailable.into()), None);
         assert_eq!(
-            state.speech_input_error().map(UserError::key),
+            state.voice_setup_error(SpeechInput).map(UserError::key),
             model_first.then_some(ErrorKey::VoiceUnavailable)
         );
         assert_eq!(
@@ -460,35 +476,172 @@ fn model_refusals_follow_the_shared_fifo_and_survive_unrelated_answers() {
         );
         assert!(state.receive(Some(7), 7, saved(SttUnload::Kept), Update::Unsolicited));
         assert!(!state.receive(Some(7), 6, saved(SttUnload::Kept), Update::Answer));
-        assert!(state.speech_input_pending());
+        assert!(state.voice_setup_pending(SpeechInput));
         assert!(state.stt_unload_pending());
         assert!(state.receive(Some(7), 7, saved(SttUnload::Kept), Update::Answer));
-        assert_eq!(state.speech_input_pending(), !model_first);
+        assert_eq!(state.voice_setup_pending(SpeechInput), !model_first);
         assert_eq!(state.stt_unload_pending(), model_first);
         assert!(state.receive(Some(7), 7, saved(SttUnload::Kept), Update::Answer));
-        assert!(!state.speech_input_pending());
+        assert!(!state.voice_setup_pending(SpeechInput));
         assert!(!state.stt_unload_pending());
-        assert_eq!(state.speech_input, Some(PartState::Unloaded));
         assert_eq!(
-            state.speech_input_error().map(UserError::key),
+            state.voice_part_state(SpeechInput),
+            Some(PartState::Unloaded)
+        );
+        assert_eq!(
+            state.voice_setup_error(SpeechInput).map(UserError::key),
             model_first.then_some(ErrorKey::VoiceUnavailable)
         );
         assert_eq!(
             state.stt_unload_error().map(UserError::key),
             (!model_first).then_some(ErrorKey::VoiceUnavailable)
         );
-        assert!(state.send_speech_input(intent, Some(7), |_| true));
+        assert!(state.send_voice_setup(intent, Some(7), |_| true));
         state.set_view(saved(SttUnload::Kept), Update::Unsolicited);
         assert_eq!(
-            state.speech_input_error().map(UserError::key),
+            state.voice_setup_error(SpeechInput).map(UserError::key),
             model_first.then_some(ErrorKey::VoiceUnavailable)
         );
         state.set_view(saved(SttUnload::Kept), Update::Answer);
-        assert_eq!(state.speech_input_error(), None);
+        assert_eq!(state.voice_setup_error(SpeechInput), None);
         assert_eq!(
             state.stt_unload_error().map(UserError::key),
             (!model_first).then_some(ErrorKey::VoiceUnavailable)
         );
+    }
+}
+
+#[test]
+fn spoken_replies_setup_tracks_its_own_status_and_needs_an_explicit_request() {
+    use super::VoiceAction::{Cancel, Install, Retry};
+    use crate::link::{LinkHandle, Session};
+    use crate::settings::Save;
+    use kumochi_protocol::message::{ControlToBrain, Incarnation};
+    use kumochi_protocol::voice::VoicePart::SpokenReplies;
+
+    let mut state = connected();
+    let mut link = LinkHandle::detached();
+    let controls = link.record_controls();
+    let session = Session::detached(7, Incarnation(1));
+    let pair = Some((&link, &session));
+    let view = |spoken_replies| VoiceView {
+        speech_input: PartState::Ready,
+        spoken_replies,
+    };
+    assert!(state.receive_voice(Some(7), 7, view(PartState::NotInstalled)));
+    assert_eq!(
+        state.apply_save(Save::TalkBack(true), pair).result,
+        Ok(true)
+    );
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Settings(SettingsOp::SetTalkBack(true)))
+    );
+    let mut answer = saved(SttUnload::Kept);
+    answer.talk_back = true;
+    state.set_view(answer.clone(), Update::Answer);
+    assert!(
+        controls.is_empty(),
+        "enabling the preference must not install a model"
+    );
+
+    for (status, text, action, op) in [
+        (
+            PartState::NotInstalled,
+            Text::VoiceNotInstalled,
+            Install,
+            SettingsOp::InstallVoice(SpokenReplies),
+        ),
+        (
+            PartState::Failed {
+                key: ErrorKey::VoiceLoad,
+                installed: true,
+            },
+            Text::SpokenRepliesInstalledFailed,
+            Retry,
+            SettingsOp::InstallVoice(SpokenReplies),
+        ),
+        (
+            PartState::Downloading { done: 1, total: 2 },
+            Text::SpokenRepliesDownloading,
+            Cancel,
+            SettingsOp::CancelVoiceInstall,
+        ),
+    ] {
+        assert!(state.receive_voice(Some(7), 7, view(status)));
+        assert_eq!(state.speech_input_status(), Text::VoiceReady);
+        assert_eq!(state.voice_setup_intent(SpeechInput), None);
+        assert_eq!(state.voice_status(SpokenReplies), text);
+        let intent = state
+            .voice_setup_intent(SpokenReplies)
+            .expect("spoken replies action");
+        assert_eq!(intent.action, action);
+        assert_eq!(state.apply_save(Save::Voice(intent), pair).result, Ok(true));
+        assert_eq!(controls.try_recv(), Ok(ControlToBrain::Settings(op)));
+        state.set_view(answer.clone(), Update::Answer);
+        assert_eq!(
+            state.voice_status(SpokenReplies),
+            text,
+            "acks do not complete setup"
+        );
+    }
+    assert!(state.receive_voice(Some(7), 7, view(PartState::Ready)));
+    assert_eq!(state.voice_status(SpokenReplies), Text::VoiceReady);
+    assert_eq!(state.voice_setup_intent(SpokenReplies), None);
+    assert!(state.receive_voice(
+        Some(7),
+        7,
+        view(PartState::Failed {
+            key: ErrorKey::VoiceUnavailable,
+            installed: true,
+        })
+    ));
+    assert_eq!(
+        state.voice_status(SpokenReplies),
+        Text::SpokenRepliesRestartRequired
+    );
+    assert_eq!(state.voice_setup_intent(SpokenReplies), None);
+}
+
+#[test]
+fn only_current_queued_cancel_that_affects_input_requests_local_input_revocation() {
+    use crate::link::{LinkHandle, Session};
+    use crate::settings::{AfterSave, Save};
+    use kumochi_protocol::message::{ControlToBrain, Incarnation};
+    use kumochi_protocol::voice::VoicePart::SpokenReplies;
+
+    let mut link = LinkHandle::detached();
+    let controls = link.record_controls();
+    let old_session = Session::detached(6, Incarnation(1));
+    let session = Session::detached(7, Incarnation(1));
+    for (input, current, expected) in [
+        (PartState::Ready, &session, None),
+        (PartState::Loading, &old_session, None),
+        (PartState::Loading, &session, Some(AfterSave::CancelVoice)),
+    ] {
+        let mut state = connected();
+        assert!(state.receive_voice(
+            Some(7),
+            7,
+            VoiceView {
+                speech_input: input,
+                spoken_replies: PartState::Downloading { done: 1, total: 2 },
+            }
+        ));
+        let save = Save::Voice(state.voice_setup_intent(SpokenReplies).expect("cancel"));
+        assert_eq!(save.before(), None);
+        let result = state.apply_save(save, Some((&link, current)));
+        let queued = current.generation() == 7;
+        assert_eq!(result.result, Ok(queued));
+        assert_eq!(result.after, expected);
+        if queued {
+            assert_eq!(
+                controls.try_recv(),
+                Ok(ControlToBrain::Settings(SettingsOp::CancelVoiceInstall))
+            );
+        } else {
+            assert!(controls.is_empty(), "stale callback must not send");
+        }
     }
 }
 

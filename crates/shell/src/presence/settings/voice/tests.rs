@@ -1,9 +1,17 @@
 use gpui_kit::TestAppContext;
-use kumochi_protocol::message::{ErrorKey, PartState, SttUnload};
+use kumochi_protocol::message::{ErrorKey, PartState, SttUnload, VoiceView};
+use kumochi_protocol::voice::VoicePart::SpeechInput;
 
-use super::super::SettingsTab;
+use super::super::{SettingsTab, SettingsView};
 use crate::settings::Update;
 use crate::strings::Text;
+
+fn input_view(speech_input: PartState) -> VoiceView {
+    VoiceView {
+        speech_input,
+        spoken_replies: PartState::Ready,
+    }
+}
 
 fn press(frame: &mut gpui_kit::VisualTestContext, keys: &str) {
     let os = frame.update(|_, cx| cx.platform_info().os);
@@ -20,12 +28,7 @@ fn press(frame: &mut gpui_kit::VisualTestContext, keys: &str) {
     frame.run_until_parked();
 }
 
-fn open(
-    cx: &mut TestAppContext,
-) -> (
-    gpui_kit::AnyWindowHandle,
-    gpui_kit::Entity<super::super::SettingsView>,
-) {
+fn open(cx: &mut TestAppContext) -> (gpui_kit::AnyWindowHandle, gpui_kit::Entity<SettingsView>) {
     let (window, view) = super::super::general::tests::open(cx);
     let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
     frame.run_until_parked();
@@ -38,6 +41,133 @@ fn open(
     frame.run_until_parked();
     frame.update(|_, cx| assert_eq!(view.read(cx).tab, SettingsTab::Voice));
     (window, view)
+}
+
+#[gpui::test]
+fn spoken_replies_install_is_visible_and_works_from_both_tab_directions(cx: &mut TestAppContext) {
+    use crate::link::Session;
+    use kumochi_protocol::message::{ControlToBrain, Incarnation, SettingsOp};
+    use kumochi_protocol::voice::VoicePart::SpokenReplies;
+
+    crate::presence::test_fixture::without_desktop(cx);
+    let owner = crate::presence::test_fixture::presence(cx);
+    let (window, view) = open(cx);
+    let controls = view.update(cx, |view, cx| {
+        view.owner = owner.downgrade();
+        view.stop = true;
+        owner.update(cx, |owner, cx| {
+            owner.settings = view.model.clone();
+            owner.session = Some(Session::detached(1, Incarnation(1)));
+            owner.settings.update(cx, |settings, cx| {
+                let failed = PartState::Failed {
+                    key: ErrorKey::VoiceModelPath,
+                    installed: true,
+                };
+                assert!(settings.receive_voice(
+                    Some(1),
+                    1,
+                    VoiceView {
+                        speech_input: failed,
+                        spoken_replies: PartState::NotInstalled
+                    },
+                ));
+                cx.notify();
+            });
+            owner.link.record_controls()
+        })
+    });
+    let mut frame = gpui_kit::VisualTestContext::from_window(window, cx);
+    focus_voice_in_narrow_viewport(&mut frame, &view);
+    press(&mut frame, "tab tab tab tab tab tab tab tab");
+    assert_spoken_action_visible(&mut frame, &view);
+    press(&mut frame, "tab");
+    frame.update(|window, cx| {
+        assert!(!view.read(cx).voice_focus[4].contains_focused(window, cx));
+        assert!(
+            !view.read(cx).focus.is_focused(window),
+            "Stop follows the output action"
+        );
+    });
+    press(&mut frame, "shift-tab");
+    assert_spoken_action_visible(&mut frame, &view);
+    let action = frame.update(|window, cx| window.focused(cx).expect("focused action"));
+    for speech_input in [PartState::Ready, PartState::Unloaded] {
+        deliver(
+            &owner,
+            vec![crate::link::LinkEvent::Voice {
+                generation: 1,
+                view: VoiceView {
+                    speech_input,
+                    spoken_replies: PartState::NotInstalled,
+                },
+            }],
+            cx,
+        );
+        frame.run_until_parked();
+        assert_spoken_action_visible(&mut frame, &view);
+        frame.update(|window, _| assert!(action.is_focused(window)));
+    }
+    assert!(controls.is_empty(), "focusing setup did not install");
+    press(&mut frame, "space");
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::Settings(SettingsOp::InstallVoice(
+            SpokenReplies
+        )))
+    );
+    assert_spoken_action_visible(&mut frame, &view);
+    frame.update(|window, _| assert!(action.is_focused(window)));
+    deliver(
+        &owner,
+        vec![crate::link::LinkEvent::Voice {
+            generation: 1,
+            view: VoiceView {
+                speech_input: PartState::Unloaded,
+                spoken_replies: PartState::Ready,
+            },
+        }],
+        cx,
+    );
+    frame.run_until_parked();
+    frame.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(
+            view.read(cx).voice_focus[4].is_focused(window),
+            "the labelled group retains focus"
+        );
+    });
+    assert!(frame.debug_bounds("spoken-replies-model-action").is_none());
+}
+
+fn focus_voice_in_narrow_viewport(
+    frame: &mut gpui_kit::VisualTestContext,
+    view: &gpui_kit::Entity<SettingsView>,
+) {
+    let rem = frame.update(|window, _| window.rem_size());
+    frame.simulate_resize(gpui_kit::size(rem * 48.0, rem * 34.0));
+    frame.update(|window, _| window.activate_window());
+    frame.run_until_parked();
+    frame.update(|window, cx| {
+        assert!(window.is_window_active());
+        view.update(cx, |view, cx| view.focus(window, cx));
+        assert!(view.read(cx).focus.is_focused(window));
+        window.draw(cx).clear(cx);
+    });
+}
+
+fn assert_spoken_action_visible(
+    frame: &mut gpui_kit::VisualTestContext,
+    view: &gpui_kit::Entity<SettingsView>,
+) {
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    let button = frame
+        .debug_bounds("spoken-replies-model-action")
+        .expect("install button");
+    let viewport = frame
+        .debug_bounds("settings-voice-content")
+        .expect("voice viewport");
+    assert!(button.top() >= viewport.top() && button.bottom() <= viewport.bottom());
+    frame.update(|window, cx| assert!(view.read(cx).voice_focus[4].contains_focused(window, cx)));
 }
 
 #[gpui::test]
@@ -540,7 +670,7 @@ fn pending_refused_and_offline_voice_controls_keep_the_saved_contract(cx: &mut T
     let (window, view) = open(cx);
     view.update(cx, |view, cx| {
         view.model.update(cx, |state, cx| {
-            assert!(state.receive_speech_input(Some(1), 1, PartState::Unloaded));
+            assert!(state.receive_voice(Some(1), 1, input_view(PartState::Unloaded)));
             assert!(state.send_stt_unload(SttUnload::After15Min, |_| true));
             cx.notify();
         });
@@ -611,7 +741,7 @@ fn current_voice_link_events_reach_the_model_but_old_or_missing_sessions_do_not(
             .link_events(
                 Batch::Plain(vec![LinkEvent::Voice {
                     generation: 7,
-                    speech_input: PartState::Unloaded,
+                    view: input_view(PartState::Unloaded),
                 }]),
                 cx,
             )
@@ -624,7 +754,7 @@ fn current_voice_link_events_reach_the_model_but_old_or_missing_sessions_do_not(
             .link_events(
                 Batch::Plain(vec![LinkEvent::Voice {
                     generation: 6,
-                    speech_input: PartState::Ready,
+                    view: input_view(PartState::Ready),
                 }]),
                 cx,
             )
@@ -638,7 +768,7 @@ fn current_voice_link_events_reach_the_model_but_old_or_missing_sessions_do_not(
             .link_events(
                 Batch::Plain(vec![LinkEvent::Voice {
                     generation: 7,
-                    speech_input: PartState::Ready,
+                    view: input_view(PartState::Ready),
                 }]),
                 cx,
             )
@@ -673,7 +803,6 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
     use crate::link::{LinkEvent, LinkState, Session};
     use crate::presence::PresenceEvent;
     use kumochi_protocol::message::{ControlToBrain, Incarnation, SettingsOp};
-    use kumochi_protocol::voice::VoicePart::SpeechInput;
 
     for (last, status, action_present) in [
         (PartState::Ready, Text::VoiceReady, false),
@@ -704,7 +833,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
             &owner,
             vec![LinkEvent::Voice {
                 generation: 7,
-                speech_input: PartState::NotInstalled,
+                view: input_view(PartState::NotInstalled),
             }],
             cx,
         );
@@ -749,7 +878,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
                 },
                 LinkEvent::Voice {
                     generation: 6,
-                    speech_input: PartState::Ready,
+                    view: input_view(PartState::Ready),
                 },
                 LinkEvent::Settings {
                     generation: 7,
@@ -761,8 +890,8 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
         );
         frame.update(|_, cx| {
             let model = view.read(cx).model.read(cx);
-            assert!(model.speech_input_pending());
-            assert_eq!(model.speech_input_error(), None);
+            assert!(model.voice_setup_pending(SpeechInput));
+            assert_eq!(model.voice_setup_error(SpeechInput), None);
             assert_eq!(model.speech_input_status(), Text::VoiceNotInstalled);
         });
         deliver(
@@ -775,7 +904,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
                 },
                 LinkEvent::Voice {
                     generation: 7,
-                    speech_input: PartState::Loading,
+                    view: input_view(PartState::Loading),
                 },
             ],
             cx,
@@ -804,7 +933,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
         );
         frame.update(|window, cx| {
             let model = view.read(cx).model.read(cx);
-            assert!(!model.speech_input_pending());
+            assert!(!model.voice_setup_pending(SpeechInput));
             assert_eq!(model.speech_input_status(), Text::VoiceLoading);
             assert!(view.read(cx).focus.is_focused(window));
         });
@@ -815,7 +944,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
             &owner,
             vec![LinkEvent::Voice {
                 generation: 7,
-                speech_input: PartState::Loading,
+                view: input_view(PartState::Loading),
             }],
             cx,
         );
@@ -838,7 +967,7 @@ fn model_buttons_use_pointer_and_space_but_cancel_acceptance_does_not_mean_cance
             &owner,
             vec![LinkEvent::Voice {
                 generation: 7,
-                speech_input: last,
+                view: input_view(last),
             }],
             cx,
         );
@@ -902,7 +1031,6 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
 ) {
     use crate::link::{LinkEvent, LinkState, Session};
     use kumochi_protocol::message::{ControlToBrain, Incarnation, SettingsOp};
-    use kumochi_protocol::voice::VoicePart::SpeechInput;
 
     let (window, view) = open(cx);
     let owner = crate::presence::test_fixture::presence(cx);
@@ -927,7 +1055,7 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
         &owner,
         vec![LinkEvent::Voice {
             generation: 7,
-            speech_input: PartState::Unloaded,
+            view: input_view(PartState::Unloaded),
         }],
         cx,
     );
@@ -940,7 +1068,7 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
         view.read(cx)
             .model
             .read(cx)
-            .speech_input_intent()
+            .voice_setup_intent(SpeechInput)
             .expect("reload")
     });
     press(&mut frame, "tab tab tab enter");
@@ -957,7 +1085,14 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
         }],
         cx,
     );
-    frame.update(|_, cx| assert!(view.read(cx).model.read(cx).speech_input_pending()));
+    frame.update(|_, cx| {
+        assert!(
+            view.read(cx)
+                .model
+                .read(cx)
+                .voice_setup_pending(SpeechInput)
+        );
+    });
     let mut off = saved.clone();
     off.hold_to_talk = false;
     deliver(
@@ -976,8 +1111,11 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
     frame.update(|_, cx| {
         let model = view.read(cx).model.read(cx);
         assert_eq!(
-            cx.global::<crate::strings::Strings>()
-                .error(model.speech_input_error().expect("load was refused")),
+            cx.global::<crate::strings::Strings>().error(
+                model
+                    .voice_setup_error(SpeechInput)
+                    .expect("load was refused")
+            ),
             "Hold to talk is off. Turn it on in Settings → Voice."
         );
     });
@@ -1001,10 +1139,10 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
             &owner,
             vec![LinkEvent::Voice {
                 generation: 7,
-                speech_input: PartState::Failed {
+                view: input_view(PartState::Failed {
                     key: ErrorKey::VoiceLoad,
                     installed,
-                },
+                }),
             }],
             cx,
         );
@@ -1014,23 +1152,26 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
             let model = view.read(cx).model.read(cx);
             assert_eq!(model.speech_input_status(), status);
             assert_eq!(
-                cx.global::<crate::strings::Strings>()
-                    .error(&model.speech_input_failure().expect("load failure")),
+                cx.global::<crate::strings::Strings>().error(
+                    &model
+                        .voice_setup_failure(SpeechInput)
+                        .expect("load failure")
+                ),
                 "Voice couldn't start."
             );
         });
     }
-    owner.update(cx, |owner, cx| owner.speech_input_action(reload, cx));
+    owner.update(cx, |owner, cx| owner.voice_setup_action(reload, cx));
     let retry = frame.update(|_, cx| {
         view.read(cx)
             .model
             .read(cx)
-            .speech_input_intent()
+            .voice_setup_intent(SpeechInput)
             .expect("retry")
     });
     owner.update(cx, |owner, cx| {
         owner.session = Some(Session::detached(8, Incarnation(1)));
-        owner.speech_input_action(retry, cx);
+        owner.voice_setup_action(retry, cx);
     });
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
     deliver(
@@ -1045,43 +1186,43 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
             },
             LinkEvent::Voice {
                 generation: 8,
-                speech_input: PartState::Failed {
+                view: input_view(PartState::Failed {
                     key: ErrorKey::VoiceLoad,
                     installed: true,
-                },
+                }),
             },
         ],
         cx,
     );
-    owner.update(cx, |owner, cx| owner.speech_input_action(retry, cx));
+    owner.update(cx, |owner, cx| owner.voice_setup_action(retry, cx));
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
     let fresh = frame.update(|_, cx| {
         view.read(cx)
             .model
             .read(cx)
-            .speech_input_intent()
+            .voice_setup_intent(SpeechInput)
             .expect("fresh retry")
     });
     owner.update(cx, |owner, cx| {
         owner.session = None;
-        owner.speech_input_action(fresh, cx);
+        owner.voice_setup_action(fresh, cx);
     });
     frame.update(|_, cx| {
         let model = view.read(cx).model.read(cx);
-        assert!(model.speech_input_send_failed());
-        assert!(!model.speech_input_pending());
+        assert!(model.voice_setup_send_failed(SpeechInput));
+        assert!(!model.voice_setup_pending(SpeechInput));
     });
     drop(controls);
     owner.update(cx, |owner, cx| {
         owner.session = Some(Session::detached(8, Incarnation(1)));
-        owner.speech_input_action(fresh, cx);
+        owner.voice_setup_action(fresh, cx);
     });
     frame.run_until_parked();
     frame.update(|window, cx| window.draw(cx).clear(cx));
     assert!(frame.debug_bounds("speech-model-send-failed").is_some());
     let sent = owner.update(cx, |owner, cx| {
         let sent = owner.link.record_controls();
-        owner.speech_input_action(fresh, cx);
+        owner.voice_setup_action(fresh, cx);
         sent
     });
     assert_eq!(
@@ -1091,7 +1232,14 @@ fn reload_enter_refusal_and_captured_intents_stay_fenced_before_the_recording_se
         )))
     );
     assert_eq!(sent.try_recv(), Err(async_channel::TryRecvError::Empty));
-    frame.update(|_, cx| assert!(view.read(cx).model.read(cx).speech_input_pending()));
+    frame.update(|_, cx| {
+        assert!(
+            view.read(cx)
+                .model
+                .read(cx)
+                .voice_setup_pending(SpeechInput)
+        );
+    });
 }
 
 #[gpui::test]

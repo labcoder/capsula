@@ -114,7 +114,14 @@ fn voice_input_off_takes_no_inhibit(cx: &mut TestAppContext) {
         owner.update(cx, |owner, cx| {
             if !on {
                 owner.settings.update(cx, |settings, _| {
-                    settings.receive_speech_input(Some(1), 1, PartState::NotInstalled);
+                    settings.receive_voice(
+                        Some(1),
+                        1,
+                        kumochi_protocol::message::VoiceView {
+                            speech_input: PartState::NotInstalled,
+                            spoken_replies: PartState::Ready,
+                        },
+                    );
                 });
             }
             key_down(owner, 1, cx);

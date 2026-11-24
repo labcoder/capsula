@@ -21,8 +21,8 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, scroll::ScrollableElement as _};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyBinding, ParentElement as _, Render, Styled as _, Subscription, Task, WeakEntity, Window,
-    div,
+    KeyBinding, ParentElement as _, Render, ScrollHandle, Styled as _, Subscription, Task,
+    WeakEntity, Window, div,
 };
 
 gpui_kit::actions!(settings, [NextTab, PreviousTab]);
@@ -72,6 +72,8 @@ pub(super) struct SettingsView {
     github_expiry: Option<Task<()>>,
     github_interactive: Option<u64>,
     focus: FocusHandle,
+    voice_scroll: ScrollHandle,
+    voice_focus: [FocusHandle; 5],
     editing: Option<Field>,
     tab: SettingsTab,
     dock_notice: Option<Text>,
@@ -149,6 +151,9 @@ impl SettingsView {
                 }
             }
             let _gone = view.owner.update(cx, |owner, cx| owner.refresh_dock(cx));
+            if view.tab == SettingsTab::Voice && view.voice_focus[4].contains_focused(window, cx) {
+                view.voice_scroll.scroll_to_item(4);
+            }
             cx.notify();
         });
         let view = cx.entity_id();
@@ -157,6 +162,7 @@ impl SettingsView {
             restore_lost_focus(&view.focus, window, cx);
             cx.notify();
         });
+        let voice_focus = Self::observe_voice_focus(window, cx, &mut subscriptions);
         let mut view = Self {
             model,
             owner,
@@ -171,6 +177,8 @@ impl SettingsView {
             github_expiry: None,
             github_interactive: None,
             focus: cx.focus_handle().tab_stop(true),
+            voice_scroll: ScrollHandle::new(),
+            voice_focus,
             editing: None,
             tab: SettingsTab::General,
             dock_notice: None,
@@ -184,6 +192,21 @@ impl SettingsView {
         };
         view.sync_github(window, cx);
         view
+    }
+
+    fn observe_voice_focus(
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+        subscriptions: &mut Vec<Subscription>,
+    ) -> [FocusHandle; 5] {
+        let voice_focus = std::array::from_fn(|_| cx.focus_handle());
+        for (row, focus) in voice_focus.iter().enumerate() {
+            subscriptions.push(cx.on_focus_in(focus, window, move |view, _, cx| {
+                view.voice_scroll.scroll_to_item(row);
+                cx.notify();
+            }));
+        }
+        voice_focus
     }
 
     pub(super) fn editing(&self) -> Option<Field> {
@@ -403,7 +426,9 @@ impl Render for SettingsView {
                     ),
             )
             .child(div().px_4().child(self.tabs(cx)))
-            .child(
+            .child(if self.tab == SettingsTab::Voice {
+                self.voice(window, cx).into_any_element()
+            } else {
                 div()
                     .id("settings-content")
                     .flex_1()
@@ -428,10 +453,10 @@ impl Render for SettingsView {
                                     .then(|| self.anthropic(cx)),
                             )
                             .children((self.tab == SettingsTab::Accounts).then(|| self.github(cx)))
-                            .children((self.tab == SettingsTab::Voice).then(|| self.voice(cx)))
                             .children((self.tab == SettingsTab::Privacy).then(|| self.privacy(cx))),
-                    ),
-            )
+                    )
+                    .into_any_element()
+            })
             .children(self.stop.then(|| {
                 div().p_4().child(
                     Button::new("stop")

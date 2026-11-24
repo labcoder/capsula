@@ -98,7 +98,14 @@ pub(super) fn ready(
                 },
                 crate::settings::Update::Unsolicited,
             );
-            settings.receive_speech_input(Some(1), 1, PartState::Ready);
+            settings.receive_voice(
+                Some(1),
+                1,
+                kumochi_protocol::message::VoiceView {
+                    speech_input: PartState::Ready,
+                    spoken_replies: PartState::Ready,
+                },
+            );
         });
         owner.runs.met(Incarnation(1));
         owner.runs.connected(1);
@@ -233,7 +240,14 @@ fn not_loaded_distinguishes_missing_and_unloaded_without_opening_microphone(
                 Err(crate::platform::microphone::MicError::Unavailable)
             }));
             owner.settings.update(cx, |settings, _| {
-                assert!(settings.receive_speech_input(Some(1), 1, state));
+                assert!(settings.receive_voice(
+                    Some(1),
+                    1,
+                    kumochi_protocol::message::VoiceView {
+                        speech_input: state,
+                        spoken_replies: PartState::Ready
+                    }
+                ));
             });
         });
         status(&owner, 1, 1, HoldStatus::Failed(HoldFailure::NotLoaded), cx);
