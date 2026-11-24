@@ -1231,6 +1231,58 @@ const SIGNED_IN: AccountView = AccountView::SignedIn {
 };
 
 #[gpui::test]
+fn sign_out_discloses_possible_registration_removal_before_the_plan_changes(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::component::WindowExt as _;
+
+    const DESCRIPTION: &str = concat!(
+        "This stops using your account now, tries to end its session at OpenAI, and removes ",
+        "its saved sign-in from Windows Credential Manager. It doesn't delete your tasks.\n\n",
+        "Signing out may also remove the app registration saved on this computer. ",
+        "If it does, signing in again registers the app anew.",
+    );
+
+    test_fixture::without_desktop(cx);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (window, owner, controls) = accounts_panel(cx);
+    account_views(&owner, vec![chatgpt(SIGNED_IN)], cx);
+    click_github(window, "account-sign-out", cx);
+    let assert_warning = |cx: &mut TestAppContext| {
+        let mut frame = VisualTestContext::from_window(window, cx);
+        frame.update(|window, cx| {
+            assert!(window.has_active_dialog(cx));
+            window.draw(cx).clear(cx);
+        });
+        assert!(
+            frame.debug_bounds(DESCRIPTION).is_some(),
+            "the dialog must disclose possible app registration removal before confirmation"
+        );
+        assert!(controls.is_empty());
+    };
+    assert_warning(cx);
+
+    account_views(
+        &owner,
+        vec![chatgpt(AccountView::SignedIn {
+            email: None,
+            plan: PlanState::Unavailable,
+            recovery: None,
+        })],
+        cx,
+    );
+    assert_warning(cx);
+    click_github(window, "confirmation-danger", cx);
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::SignOut)]
+    );
+    VisualTestContext::from_window(window, cx).update(|window, cx| {
+        assert!(!window.has_active_dialog(cx));
+    });
+}
+
+#[gpui::test]
 fn confirming_sign_out_during_a_recording_stops_only_that_hold(cx: &mut TestAppContext) {
     use crate::presence::voice::tests::{source, until};
     use crate::presence::voice_wiring_tests::{hold, ready, status};
