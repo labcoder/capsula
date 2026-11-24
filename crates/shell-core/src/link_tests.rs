@@ -954,7 +954,6 @@ fn bare_link() -> Link {
 
 #[test]
 fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
-    use std::io::Read as _;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use kumochi_protocol::Secret;
@@ -1008,20 +1007,11 @@ fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
                 )
             })
         };
-        let greeting = |tag, echo: &[u8]| {
-            let mut payload = vec![tag, 1, b'b'];
-            payload.extend([7; CAPABILITY_LEN]);
-            payload.extend(echo);
-            let len = u32::try_from(payload.len()).unwrap().to_le_bytes();
-            [len.as_slice(), &payload].concat()
-        };
-        let control_bytes = greeting(
+        assert_handshake_hello(
+            &peer_control,
             control_tag,
             if repair_of.is_some() { &[5, 127] } else { &[] },
         );
-        let mut got = vec![0; control_bytes.len()];
-        (&peer_control).read_exact(&mut got).unwrap();
-        assert_eq!(got, control_bytes);
         allowed.store(true, Ordering::Release);
         frame::write(
             &mut &peer_control,
@@ -1032,7 +1022,8 @@ fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
             Pipe::Control,
         )
         .unwrap();
-        let data_bytes = greeting(
+        assert_handshake_hello(
+            &peer_data,
             data_tag,
             if mode == AudioSession::QueuedRequired {
                 &[5, 128, 1]
@@ -1040,9 +1031,6 @@ fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
                 &[]
             },
         );
-        got.resize(data_bytes.len(), 0);
-        (&peer_data).read_exact(&mut got).unwrap();
-        assert_eq!(got, data_bytes);
         assert_eq!(
             frame::read(&mut &peer_data, Pipe::Data).unwrap(),
             Some(DataToBrain::TextMetrics(profile))
@@ -1062,6 +1050,27 @@ fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
             None
         );
     }
+}
+
+fn assert_handshake_hello(mut peer: &PipeClient, tag: u8, echo: &[u8]) {
+    use std::io::Read as _;
+
+    use kumochi_protocol::message::CAPABILITY_LEN;
+
+    let mut payload = vec![tag, 1, b'b'];
+    payload.extend([7; CAPABILITY_LEN]);
+    payload.extend(echo);
+    let len = u32::try_from(payload.len())
+        .expect("the fixed handshake fixture fits in a frame")
+        .to_le_bytes();
+    let expected = [len.as_slice(), &payload].concat();
+    let mut actual = vec![0; expected.len()];
+    peer.read_exact(&mut actual)
+        .expect("the peer writes a complete handshake frame");
+    assert_eq!(
+        actual, expected,
+        "the handshake frame matches byte for byte"
+    );
 }
 
 fn text(run: u64, delta: &str) -> DataToShell {
