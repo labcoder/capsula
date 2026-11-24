@@ -97,6 +97,27 @@ pub fn bound_to_connection(card: &IssueCard, connection: Option<(&Session, &Sett
                 && card.repo.as_ref().is_some_and(|repo| repos.contains(repo)))
 }
 
+pub fn repository_listing_hint(
+    card: &IssueCard,
+    connection: Option<(&Session, &Settings)>,
+) -> Option<crate::strings::Text> {
+    use crate::strings::Text;
+
+    let (session, settings) = connection?;
+    let github = &settings.github;
+    let GitHubView::ConnectedUnlisted { login, listing } = github.view.as_ref()? else {
+        return None;
+    };
+    (github.generation == Some(session.generation())
+        && card.account.as_ref() == Some(login)
+        && card.repo.is_some())
+    .then_some(if *listing {
+        Text::GitHubRefreshing
+    } else {
+        Text::IssueListRepositories
+    })
+}
+
 /// Discard and check again apply only to a current card in a state that offers them.
 pub fn action_allowed(op: &IssueOp, window: &Window, model: &Threads) -> bool {
     if !window.active || !window.visible {

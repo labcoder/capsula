@@ -69,7 +69,7 @@ impl Presence {
                     self.cancel_voice(cx);
                     self.retire_issue_review(cx);
                     self.settings.update(cx, |state, cx| {
-                        state.github.disconnected();
+                        state.github.connected(session.generation());
                         state.key_paste.disconnected();
                         cx.notify();
                     });
@@ -909,12 +909,16 @@ impl Presence {
             self.voice.ended = None;
             self.scene_timer = None;
             self.scene_deadline = None;
-            self.settings.update(cx, |state, cx| {
-                state.accounts.disconnected();
-                state.claude.disconnected();
-                state.github.disconnected();
-                state.key_paste.disconnected();
-                state.disconnected();
+            self.settings.update(cx, |model, cx| {
+                model.accounts.disconnected();
+                model.claude.disconnected();
+                if state == LinkState::Connecting {
+                    model.github.connecting();
+                } else {
+                    model.github.disconnected();
+                }
+                model.key_paste.disconnected();
+                model.disconnected();
                 cx.notify();
             });
             self.sync_settings_notice(cx);

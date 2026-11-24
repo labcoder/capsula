@@ -120,7 +120,7 @@ fn connected(m: &mut Machine) {
     m.on(Input::Saved { stamp, saved: true }, Instant::now());
     assert!(matches!(
         m.view(Instant::now()),
-        GitHubView::Connected { .. }
+        GitHubView::ConnectedUnlisted { listing: true, .. }
     ));
 }
 fn polls(effects: &[Effect]) -> usize {
@@ -880,7 +880,7 @@ async fn account_machine_removed_and_stamp_formats_do_not_expose_markers() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn startup_success_refreshes_without_saving_the_already_durable_account() {
+async fn startup_verifies_without_listing_or_saving_the_already_durable_account() {
     let mut m = new_machine(None);
     let stamp = m.stamp();
     m.on(
@@ -898,18 +898,15 @@ async fn startup_success_refreshes_without_saving_the_already_durable_account() 
         Instant::now(),
     );
     assert!(matches!(effects.as_slice(), [
-        Effect::RefreshRepos { generation },
         Effect::Wake(at),
-        Effect::View(GitHubView::Connected { .. })
-    ] if *generation == stamp.generation + 1
-        && *at == Instant::now() + Duration::from_mins(59)));
+        Effect::View(GitHubView::ConnectedUnlisted { listing: false, .. })
+    ] if *at == Instant::now() + Duration::from_mins(59)));
+    assert_eq!(m.stamp().generation, stamp.generation + 1);
     assert_eq!(
         m.view(Instant::now()),
-        GitHubView::Connected {
+        GitHubView::ConnectedUnlisted {
             login: user().login,
-            repos: Bounded::default(),
-            truncated: false,
-            default: None
+            listing: false,
         }
     );
 }

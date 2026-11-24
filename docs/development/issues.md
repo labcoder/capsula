@@ -176,8 +176,10 @@ and a definite failure means this attempt created no issue, not that nothing was
 sent. Filed confirmation and duplicate warnings remain independent. Saved URLs
 are plain text and do not open a browser. Saved content remains read-only. Draft and Failed
 offer the confirmation above; Unknown offers only GET-only Check again. Dismiss is available
-for all three states and preserves uncertainty. Unusable bindings offer replacement guidance,
-never retargeting. File anyway, candidate confirmation and IssueEdit are refused at ingress.
+for all three states and preserves uncertainty. A saved destination that matches the current
+verified account but lacks a complete listing points to Accounts or shows listing progress.
+That hint grants no filing authority. Unusable bindings offer replacement guidance, never
+retargeting. File anyway, candidate confirmation and IssueEdit are refused at ingress.
 
 Card data and matching terminals notify both histories, while only the request
 owner applies the frame and returns credit. Retained row text is derived on model

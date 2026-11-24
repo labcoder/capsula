@@ -62,7 +62,7 @@ fn an_unresolved_draft_refusal_appends_tag_seven_and_round_trips_its_identity() 
 }
 
 #[test]
-fn an_unchecked_saved_account_appends_tag_six_and_unknown_tag_seven_is_refused() {
+fn an_unchecked_saved_account_appends_tag_six() {
     use crate::frame::{FrameError, read};
     let login = GitHubLogin::new("saved").unwrap();
     assert_eq!(
@@ -90,12 +90,28 @@ fn an_unchecked_saved_account_appends_tag_six_and_unknown_tag_seven_is_refused()
             Err(FrameError::Truncated)
         ));
     }
-    let mut unknown = wire;
-    unknown[5] = 7;
-    assert!(matches!(
-        read::<ControlToShell>(&mut unknown.as_slice(), Pipe::Control),
-        Err(FrameError::Malformed(_))
-    ));
+}
+
+#[test]
+fn unknown_github_view_tag_eight_is_refused_with_a_complete_payload() {
+    use crate::frame::{FrameError, read};
+    let mut wire = [9, 0, 0, 0, 17, 8, 5, b's', b'a', b'v', b'e', b'd', 0];
+    let refused = read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            FrameError::Malformed(postcard::Error::SerdeDeCustom)
+        ),
+        "{refused:?}"
+    );
+    wire[5] = 7;
+    assert_eq!(
+        read::<ControlToShell>(&mut wire.as_slice(), Pipe::Control).unwrap(),
+        Some(ControlToShell::GitHub(GitHubView::ConnectedUnlisted {
+            login: GitHubLogin::new("saved").unwrap(),
+            listing: false,
+        }))
+    );
 }
 
 #[test]
@@ -1395,6 +1411,33 @@ fn unavailable_kinds_are_closed_and_keep_distinct_wire_and_json_tags() {
     }
     assert!(postcard::from_bytes::<IssueUnavailableKind>(&[4]).is_err());
     assert!(postcard::from_bytes::<IssueUnavailableKind>(&[]).is_err());
+}
+
+#[test]
+fn github_unlisted_status_appends_a_wire_variant_and_redacts_the_login() {
+    assert_eq!(
+        postcard::to_stdvec(&GitHubOp::ListReposIfUnlisted).unwrap(),
+        [6]
+    );
+    assert_eq!(
+        postcard::from_bytes::<GitHubOp>(&[6]).unwrap(),
+        GitHubOp::ListReposIfUnlisted
+    );
+    let login = GitHubLogin::new("private-login").unwrap();
+    for listing in [false, true] {
+        let view = GitHubView::ConnectedUnlisted {
+            login: login.clone(),
+            listing,
+        };
+        let mut bytes = vec![7, 13];
+        bytes.extend_from_slice(b"private-login");
+        bytes.push(u8::from(listing));
+        assert_eq!(postcard::to_stdvec(&view).unwrap(), bytes);
+        assert_eq!(postcard::from_bytes::<GitHubView>(&bytes).unwrap(), view);
+        let debug = format!("{:?}", ControlToShell::GitHub(view));
+        assert!(!debug.contains("private-login"));
+        assert!(!debug.contains(&format!("{:?}", b"private-login")));
+    }
 }
 
 #[test]

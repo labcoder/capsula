@@ -6,6 +6,16 @@ use std::time::{Duration, Instant};
 use crate::strings::Text;
 use kumochi_protocol::message::{Cleanup, ErrorKey, GitHubOp, GitHubView, UserCode, UserError};
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum AccountsVisit {
+    #[default]
+    BeforeFirstConnection,
+    OpenedBeforeFirstConnection,
+    Closed,
+    Waiting,
+    Requested,
+}
+
 #[derive(Default)]
 pub struct GitHubConnections {
     pub generation: Option<u64>,
@@ -15,6 +25,7 @@ pub struct GitHubConnections {
     pub origin: Arc<()>,
     pub controls_origin: Arc<()>,
     waiting: Option<GitHubOp>,
+    accounts_visit: AccountsVisit,
     unexplained: bool,
     unsupported: bool,
     challenge: Option<UserCode>,
@@ -26,7 +37,9 @@ impl GitHubConnections {
         match self.waiting {
             Some(GitHubOp::Connect) => return Text::GitHubRequesting,
             Some(GitHubOp::CancelConnect) => return Text::GitHubCanceling,
-            Some(GitHubOp::RefreshRepos) => return Text::GitHubRefreshing,
+            Some(GitHubOp::RefreshRepos | GitHubOp::ListReposIfUnlisted) => {
+                return Text::GitHubRefreshing;
+            }
             Some(GitHubOp::SetDefaultRepo(_)) => return Text::GitHubSavingDefault,
             _ => {}
         }
@@ -44,7 +57,10 @@ impl GitHubConnections {
             }) => Text::GitHubNotDurable,
             Some(GitHubView::Requesting) => Text::GitHubRequesting,
             Some(GitHubView::AwaitingUser { .. }) => Text::GitHubAwaiting,
-            Some(GitHubView::Connected { .. }) => Text::GitHubConnected,
+            Some(GitHubView::ConnectedUnlisted { listing: true, .. }) => Text::GitHubRefreshing,
+            Some(GitHubView::Connected { .. } | GitHubView::ConnectedUnlisted { .. }) => {
+                Text::GitHubConnected
+            }
             Some(GitHubView::NotInstalled { .. }) => Text::GitHubNotInstalled,
             Some(GitHubView::NeedsSignIn { .. }) => Text::GitHubNeedsSignIn,
             Some(GitHubView::NotVerified { .. }) => Text::GitHubNotVerified,
@@ -56,6 +72,7 @@ impl GitHubConnections {
             return match self.view {
                 Some(
                     GitHubView::Connected { .. }
+                    | GitHubView::ConnectedUnlisted { .. }
                     | GitHubView::NotVerified { .. }
                     | GitHubView::NotInstalled { .. }
                     | GitHubView::NeedsSignIn { .. },
@@ -80,7 +97,7 @@ impl GitHubConnections {
             Some(GitHubView::Requesting | GitHubView::AwaitingUser { .. }) => {
                 &[(Text::AccountCancel, GitHubOp::CancelConnect)]
             }
-            Some(GitHubView::Connected { .. }) => &[
+            Some(GitHubView::Connected { .. } | GitHubView::ConnectedUnlisted { .. }) => &[
                 (Text::GitHubRefresh, GitHubOp::RefreshRepos),
                 (Text::GitHubSignOut, GitHubOp::SignOut),
             ],
@@ -118,6 +135,7 @@ impl GitHubConnections {
         match &self.view {
             Some(
                 GitHubView::Connected { login, .. }
+                | GitHubView::ConnectedUnlisted { login, .. }
                 | GitHubView::NotInstalled { login }
                 | GitHubView::NeedsSignIn { login }
                 | GitHubView::NotVerified { login },
@@ -131,8 +149,63 @@ impl GitHubConnections {
         }
     }
 
+    pub fn connecting(&mut self) {
+        if self.accounts_visit != AccountsVisit::OpenedBeforeFirstConnection {
+            self.disconnected();
+        }
+    }
+
+    pub fn connected(&mut self, generation: u64) {
+        let opened_early = self.accounts_visit == AccountsVisit::OpenedBeforeFirstConnection;
+        *self = Self {
+            accounts_visit: AccountsVisit::Closed,
+            ..Self::default()
+        };
+        if opened_early {
+            self.generation = Some(generation);
+            self.accounts_visit = AccountsVisit::Waiting;
+        }
+    }
+
     pub fn disconnected(&mut self) {
-        *self = Self::default();
+        self.close_accounts_visit();
+        *self = Self {
+            accounts_visit: self.accounts_visit,
+            ..Self::default()
+        };
+    }
+
+    pub fn close_accounts_visit(&mut self) {
+        self.accounts_visit = match self.accounts_visit {
+            AccountsVisit::BeforeFirstConnection | AccountsVisit::OpenedBeforeFirstConnection => {
+                AccountsVisit::BeforeFirstConnection
+            }
+            _ => AccountsVisit::Closed,
+        };
+    }
+
+    pub fn open_accounts_visit(&mut self, current: Option<u64>) {
+        self.close_accounts_visit();
+        if let Some(generation) = current {
+            self.accept(current, generation);
+            if matches!(
+                self.view,
+                None | Some(
+                    GitHubView::Requesting
+                        | GitHubView::AwaitingUser { .. }
+                        | GitHubView::ConnectedUnlisted { listing: false, .. }
+                )
+            ) {
+                self.accounts_visit = AccountsVisit::Waiting;
+            }
+        } else if self.accounts_visit == AccountsVisit::BeforeFirstConnection {
+            self.accounts_visit = AccountsVisit::OpenedBeforeFirstConnection;
+        }
+    }
+
+    pub fn list_on_accounts_visit(&self, current: Option<u64>) -> bool {
+        self.accounts_visit == AccountsVisit::Waiting
+            && self.allows(current, &GitHubOp::ListReposIfUnlisted)
     }
 
     fn accept(&mut self, current: Option<u64>, generation: u64) -> bool {
@@ -140,7 +213,7 @@ impl GitHubConnections {
             return false;
         }
         if self.generation != Some(generation) {
-            self.disconnected();
+            self.connected(generation);
             self.generation = Some(generation);
         }
         true
@@ -162,6 +235,7 @@ impl GitHubConnections {
                 GitHubView::Requesting
                     | GitHubView::AwaitingUser { .. }
                     | GitHubView::Connected { .. }
+                    | GitHubView::ConnectedUnlisted { .. }
             ),
             Some(GitHubOp::SetDefaultRepo(repo)) => !matches!(
                 &view,
@@ -171,7 +245,17 @@ impl GitHubConnections {
                 view,
                 GitHubView::Requesting | GitHubView::AwaitingUser { .. }
             ),
+            Some(GitHubOp::SignOut) => matches!(view, GitHubView::SignedOut { .. }),
             _ => true,
+        };
+        self.accounts_visit = match (self.accounts_visit, &view) {
+            (AccountsVisit::Waiting | AccountsVisit::Requested, GitHubView::Requesting)
+            | (
+                AccountsVisit::Waiting,
+                GitHubView::AwaitingUser { .. }
+                | GitHubView::ConnectedUnlisted { listing: false, .. },
+            ) => AccountsVisit::Waiting,
+            _ => AccountsVisit::Closed,
         };
         if self.view.as_ref() != Some(&view) {
             self.controls_origin = Arc::default();
@@ -198,6 +282,7 @@ impl GitHubConnections {
                     GitHubView::SignedOut { .. }
                     | GitHubView::Requesting
                     | GitHubView::AwaitingUser { .. }
+                    | GitHubView::ConnectedUnlisted { .. }
                     | GitHubView::NotInstalled { .. }
                     | GitHubView::NeedsSignIn { .. }
                     | GitHubView::NotVerified { .. } => true,
@@ -206,6 +291,7 @@ impl GitHubConnections {
                     GitHubView::SignedOut { .. }
                     | GitHubView::Requesting
                     | GitHubView::AwaitingUser { .. }
+                    | GitHubView::ConnectedUnlisted { .. }
                     | GitHubView::NotInstalled { .. }
                     | GitHubView::NeedsSignIn { .. }
                     | GitHubView::NotVerified { .. },
@@ -257,6 +343,7 @@ impl GitHubConnections {
         self.challenge = None;
         self.unexplained = true;
         self.waiting = None;
+        self.accounts_visit = AccountsVisit::Closed;
         true
     }
 
@@ -298,8 +385,16 @@ impl GitHubConnections {
                 GitHubOp::SetDefaultRepo(repo) => {
                     !truncated && repos.contains(repo) && default.as_ref() != Some(repo)
                 }
-                GitHubOp::Connect | GitHubOp::CancelConnect | GitHubOp::RetryCleanup => false,
+                GitHubOp::Connect
+                | GitHubOp::CancelConnect
+                | GitHubOp::RetryCleanup
+                | GitHubOp::ListReposIfUnlisted => false,
             },
+            Some(GitHubView::ConnectedUnlisted { listing, .. }) => {
+                *op == GitHubOp::SignOut
+                    || (!listing
+                        && matches!(op, GitHubOp::RefreshRepos | GitHubOp::ListReposIfUnlisted))
+            }
             Some(GitHubView::NotInstalled { .. }) => matches!(op, GitHubOp::SignOut),
             Some(GitHubView::NeedsSignIn { .. }) => {
                 matches!(op, GitHubOp::Connect | GitHubOp::SignOut)
@@ -320,8 +415,20 @@ impl GitHubConnections {
             return false;
         }
         if !send(op.clone()) {
+            if op == GitHubOp::ListReposIfUnlisted {
+                self.accounts_visit = AccountsVisit::Closed;
+            }
             self.send_failed = true;
             return false;
+        }
+        match op {
+            GitHubOp::ListReposIfUnlisted if self.accounts_visit == AccountsVisit::Waiting => {
+                self.accounts_visit = AccountsVisit::Requested;
+            }
+            GitHubOp::SignOut | GitHubOp::CancelConnect => {
+                self.accounts_visit = AccountsVisit::Closed;
+            }
+            _ => {}
         }
         if op == GitHubOp::Connect {
             self.challenge = None;

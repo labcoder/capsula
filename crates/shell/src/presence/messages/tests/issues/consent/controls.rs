@@ -561,6 +561,36 @@ fn unusable_bound_drafts_offer_replacement_guidance_and_dismiss_without_retarget
     cx: &mut TestAppContext,
 ) {
     let f = fixture(cx, ActionState::Draft, "saved body");
+    deliver(
+        &f,
+        vec![LinkEvent::GitHub {
+            generation: 1,
+            view: GitHubView::ConnectedUnlisted {
+                login: GitHubLogin::new("octo").unwrap(),
+                listing: false,
+            },
+        }],
+        cx,
+    );
+    {
+        let mut frame = gpui_kit::VisualTestContext::from_window(f.views[0].1, cx);
+        assert!(frame.debug_bounds("issue-file-9").is_none());
+        assert!(frame.debug_bounds("issue-replacement").is_none());
+        assert!(frame.debug_bounds("issue-repository-listing").is_some());
+    }
+    deliver(
+        &f,
+        vec![LinkEvent::GitHub {
+            generation: 1,
+            view: connected(),
+        }],
+        cx,
+    );
+    {
+        let mut frame = gpui_kit::VisualTestContext::from_window(f.views[0].1, cx);
+        assert!(frame.debug_bounds("issue-file-9").is_some());
+        assert!(frame.debug_bounds("issue-repository-listing").is_none());
+    }
     let mut view = connected();
     if let GitHubView::Connected { login, .. } = &mut view {
         *login = GitHubLogin::new("another").unwrap();

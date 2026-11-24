@@ -288,6 +288,7 @@ enum State {
         credentials: Tokens,
         loaded_user: Option<GitHubUser>,
         rotated: bool,
+        listing: OnConnect,
     },
     Saving {
         account: Account,
@@ -305,6 +306,19 @@ enum AfterSave {
     Rotated,
 }
 
+#[derive(Clone, Copy)]
+enum OnConnect {
+    Defer,
+    List,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    Unlisted,
+    Fetching,
+    Listed,
+}
+
 /// Owns the one attempt, bearer and authoritative connection generation.
 pub struct Machine {
     state: State,
@@ -317,7 +331,7 @@ pub struct Machine {
     default: Option<DefaultRepo>,
     pending_default: Option<RepoName>,
     verified: bool,
-    listed: bool,
+    listing: Listing,
     token_end: Option<Instant>,
     refresh_lead: Duration,
     refresh_due: Option<Instant>,
@@ -347,7 +361,7 @@ impl Machine {
             default,
             pending_default: None,
             verified: false,
-            listed: false,
+            listing: Listing::Unlisted,
             token_end: None,
             refresh_lead,
             refresh_due: None,
@@ -429,7 +443,11 @@ impl Machine {
     /// Complete repository authority for consumers in this generation.
     pub(crate) fn repositories(&self) -> Option<&[RepoName]> {
         self.user()?;
-        self.listed.then_some(self.repos.as_ref())
+        (self.listing == Listing::Listed).then_some(self.repos.as_ref())
+    }
+
+    pub(crate) fn can_list_repositories(&self) -> bool {
+        self.listing == Listing::Unlisted && self.user().is_some()
     }
 
     /// GitHub's id for each of [`Self::repositories`], in the same order.
@@ -472,6 +490,12 @@ impl Machine {
             State::Connected(account) if !self.verified => GitHubView::NotVerified {
                 login: account.user.login.clone(),
             },
+            State::Connected(account) if self.listing != Listing::Listed => {
+                GitHubView::ConnectedUnlisted {
+                    login: account.user.login.clone(),
+                    listing: self.listing == Listing::Fetching,
+                }
+            }
             State::Connected(account) => GitHubView::Connected {
                 login: account.user.login.clone(),
                 repos: self.repos.clone(),
@@ -502,7 +526,7 @@ impl Machine {
         self.repo_ids.clear();
         self.truncated = false;
         self.verified = false;
-        self.listed = false;
+        self.listing = Listing::Unlisted;
         self.pending_default = None;
         self.token_end = None;
         self.refresh_due = None;
@@ -564,7 +588,13 @@ impl Machine {
         effects.push(Effect::CancelAll);
     }
 
-    fn connected(&mut self, account: Account, now: Instant, effects: &mut Vec<Effect>) {
+    fn connected(
+        &mut self,
+        account: Account,
+        now: Instant,
+        listing: OnConnect,
+        effects: &mut Vec<Effect>,
+    ) {
         let Some(remaining) =
             self.remaining(account.credentials.expires_at_s, MAX_ACCESS_LIFETIME_S)
         else {
@@ -577,10 +607,19 @@ impl Machine {
         self.refresh_due = Some(now + remaining.saturating_sub(lead));
         self.verified = true;
         self.state = State::Connected(account);
+        if matches!(listing, OnConnect::List) {
+            self.list_repositories(effects);
+        }
+        effects.extend(self.refresh_due.map(Effect::Wake));
+    }
+
+    fn list_repositories(&mut self, effects: &mut Vec<Effect>) {
+        self.repos = Bounded::default();
+        self.repo_ids.clear();
+        self.listing = Listing::Fetching;
         effects.push(Effect::RefreshRepos {
             generation: self.stamp.generation,
         });
-        effects.extend(self.refresh_due.map(Effect::Wake));
     }
 
     fn not_verified(&mut self, account: Account, effects: &mut Vec<Effect>) {
@@ -706,6 +745,7 @@ impl Machine {
                                 credentials: account.credentials,
                                 loaded_user: Some(account.user),
                                 rotated: false,
+                                listing: OnConnect::Defer,
                             };
                         }
                     }
@@ -760,6 +800,7 @@ impl Machine {
                             credentials,
                             loaded_user: None,
                             rotated: false,
+                            listing: OnConnect::Defer,
                         };
                         effects.push(Effect::ReadUser { stamp, token });
                     }
@@ -804,6 +845,7 @@ impl Machine {
                             credentials,
                             loaded_user: Some(account.user),
                             rotated: true,
+                            listing: OnConnect::Defer,
                         };
                     }
                     Err(error) => {
@@ -819,6 +861,7 @@ impl Machine {
                     credentials,
                     loaded_user,
                     rotated,
+                    listing,
                 } = std::mem::replace(&mut self.state, State::SignedOut(None))
                 else {
                     unreachable!()
@@ -842,7 +885,7 @@ impl Machine {
                             refresh_sent: false,
                         };
                         if loaded_user.is_some() && !rotated {
-                            self.connected(account, now, &mut effects);
+                            self.connected(account, now, listing, &mut effects);
                         } else {
                             effects.push(Effect::Save {
                                 stamp,
@@ -894,7 +937,12 @@ impl Machine {
                 if saved {
                     match next {
                         AfterSave::Connect | AfterSave::Rotated => {
-                            self.connected(account, now, &mut effects);
+                            let listing = if matches!(next, AfterSave::Connect) {
+                                OnConnect::List
+                            } else {
+                                OnConnect::Defer
+                            };
+                            self.connected(account, now, listing, &mut effects);
                         }
                         AfterSave::Refresh => {
                             effects.push(Effect::RefreshToken {
@@ -943,12 +991,12 @@ impl Machine {
             {
                 self.repos = Bounded::default();
                 self.repo_ids.clear();
-                self.listed = false;
+                self.listing = Listing::Unlisted;
                 match result {
                     Ok(repositories) if self.verified => {
                         self.repos = repositories.names;
                         self.repo_ids = repositories.ids;
-                        self.listed = true;
+                        self.listing = Listing::Listed;
                     }
                     Ok(_) => {}
                     Err(ApiError::Refused { status: 401, .. }) => {
@@ -961,14 +1009,14 @@ impl Machine {
                     Err(error) => effects.push(Effect::Error(api_key(error).into())),
                 }
             }
+            Input::Op(GitHubOp::ListReposIfUnlisted) if self.can_list_repositories() => {
+                self.list_repositories(&mut effects);
+            }
             Input::Op(GitHubOp::RefreshRepos) if matches!(self.state, State::Connected(_)) => {
-                self.repos = Bounded::default();
-                self.repo_ids.clear();
-                self.listed = false;
                 if self.verified {
-                    effects.push(Effect::RefreshRepos {
-                        generation: self.stamp.generation,
-                    });
+                    if self.listing != Listing::Fetching {
+                        self.list_repositories(&mut effects);
+                    }
                 } else if let State::Connected(account) =
                     std::mem::replace(&mut self.state, State::SignedOut(None))
                 {
@@ -980,6 +1028,7 @@ impl Machine {
                         credentials: account.credentials,
                         loaded_user: Some(account.user),
                         rotated: false,
+                        listing: OnConnect::List,
                     };
                 }
             }

@@ -100,6 +100,13 @@ fn identity_and_repositories() -> Vec<(RequestKind, Value)> {
     ]
 }
 
+fn unlisted() -> GitHubView {
+    GitHubView::ConnectedUnlisted {
+        login: kumochi_protocol::message::GitHubLogin::new("offline-user").unwrap(),
+        listing: false,
+    }
+}
+
 fn configured_accounts(
     scratch: &Scratch,
     store: ObservedStore,
@@ -125,7 +132,9 @@ async fn github_view(shell: &mut Shell<DuplexStream>) -> GitHubView {
 async fn repositories_visible(shell: &mut Shell<DuplexStream>) {
     loop {
         match github_view(shell).await {
-            GitHubView::Requesting | GitHubView::AwaitingUser { .. } => {}
+            GitHubView::Requesting
+            | GitHubView::AwaitingUser { .. }
+            | GitHubView::ConnectedUnlisted { listing: true, .. } => {}
             GitHubView::Connected {
                 login,
                 repos,
@@ -384,7 +393,7 @@ async fn an_expired_saved_account_rotates_once_and_commits_the_pair_before_becom
         ));
     }
     let mut replies = vec![(RequestKind::Refresh, token_reply())];
-    replies.extend(identity_and_repositories());
+    replies.push((RequestKind::User, json!({"id":41,"login":"offline-user"})));
     let http = AccountHttp::new(replies);
     let mut accounts = configured_accounts(&scratch, store.clone(), &http);
     settle_owner(&mut accounts).await;
@@ -394,7 +403,13 @@ async fn an_expired_saved_account_rotates_once_and_commits_the_pair_before_becom
     let client = async {
         assert_eq!(github_view(&mut shell).await, GitHubView::Requesting);
         assert!(shell.scenes().await.is_empty());
-        repositories_visible(&mut shell).await;
+        loop {
+            let view = github_view(&mut shell).await;
+            if view != GitHubView::Requesting {
+                assert_eq!(view, unlisted());
+                break;
+            }
+        }
         shell.control_out.shutdown().await.unwrap();
         assert_eq!(shell.control().await, None);
     };
@@ -405,15 +420,7 @@ async fn an_expired_saved_account_rotates_once_and_commits_the_pair_before_becom
     .unwrap();
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
-    assert_eq!(
-        http.seen(),
-        [
-            RequestKind::Refresh,
-            RequestKind::User,
-            RequestKind::Installations,
-            RequestKind::Repositories
-        ]
-    );
+    assert_eq!(http.seen(), [RequestKind::Refresh, RequestKind::User]);
     assert!(http.replies.lock().unwrap().is_empty());
     let mut vault =
         Vault::with_service(store.store, "github-owner-test", &owner_lock(&scratch)).unwrap();
@@ -487,6 +494,95 @@ async fn settle_default_account(accounts: &mut crate::runtime::account::Accounts
     .unwrap();
 }
 
+#[tokio::test]
+async fn saved_account_lists_only_on_refresh_and_never_publishes_a_signed_out_result() {
+    use crate::runtime::account::{Event, github_tests::verification_event};
+    use kumochi_protocol::message::GitHubLogin;
+    use kumochi_scene::text::Bounded;
+
+    let scratch = Scratch::new("github-deferred-repositories");
+    let store = ObservedStore::default();
+    save_default_account(&scratch, &store, 41);
+    let mut replies = identity_and_repositories();
+    replies.insert(
+        1,
+        (
+            RequestKind::Installations,
+            json!({"total_count":0,"installations":[]}),
+        ),
+    );
+    let http = AccountHttp::new(replies);
+    let accounts = configured_accounts(&scratch, store, &http);
+    let mut brain = brain_with_github_owner(&scratch, accounts);
+    brain.account.github_session(Some(1));
+    settle_default_account(&mut brain.account).await;
+    assert_eq!(http.seen(), [RequestKind::User]);
+    assert_eq!(
+        brain.account.github_opened(),
+        vec![ControlToShell::GitHub(unlisted())]
+    );
+    assert_eq!(brain.account.github.machine().repositories(), None);
+
+    brain
+        .github_op(GitHubOp::ListReposIfUnlisted, None)
+        .unwrap();
+    brain
+        .github_op(GitHubOp::ListReposIfUnlisted, None)
+        .unwrap();
+    assert_eq!(
+        brain.account.github_opened(),
+        vec![ControlToShell::GitHub(GitHubView::ConnectedUnlisted {
+            login: GitHubLogin::new("offline-user").unwrap(),
+            listing: true,
+        })]
+    );
+    settle_default_account(&mut brain.account).await;
+    assert_eq!(http.seen(), [RequestKind::User, RequestKind::Installations]);
+    assert_eq!(
+        brain.account.github.machine().repositories(),
+        Some([].as_slice())
+    );
+    assert_eq!(
+        brain.account.github_opened(),
+        vec![ControlToShell::GitHub(GitHubView::Connected {
+            login: GitHubLogin::new("offline-user").unwrap(),
+            repos: Bounded::default(),
+            truncated: false,
+            default: None,
+        })]
+    );
+    brain
+        .github_op(GitHubOp::ListReposIfUnlisted, None)
+        .unwrap();
+    assert!(!brain.account.github.verifying());
+
+    brain.github_op(GitHubOp::RefreshRepos, None).unwrap();
+    let built = verification_event(&mut brain.account).await;
+    brain.account.handle(Event::Verification(built));
+    let completed = verification_event(&mut brain.account).await;
+    assert_eq!(
+        http.seen(),
+        [
+            RequestKind::User,
+            RequestKind::Installations,
+            RequestKind::Installations,
+            RequestKind::Repositories,
+        ]
+    );
+    assert!(http.replies.lock().unwrap().is_empty());
+    brain.github_op(GitHubOp::SignOut, None).unwrap();
+    settle_default_account(&mut brain.account).await;
+    assert_eq!(brain.account.handle(Event::Verification(completed)), []);
+    assert_eq!(brain.account.github.machine().repositories(), None);
+    assert_eq!(
+        brain.account.github_opened(),
+        vec![ControlToShell::GitHub(GitHubView::SignedOut {
+            cleanup: None
+        })]
+    );
+    brain.close().await;
+}
+
 fn displayed_default(brain: &Brain) -> Option<RepoName> {
     let GitHubView::Connected { default, .. } = brain.account.github.machine().view(Instant::now())
     else {
@@ -523,6 +619,8 @@ async fn a_committed_default_survives_renewal_or_expiry_before_its_acknowledgmen
         let http = AccountHttp::new(replies);
         let accounts = configured_accounts(&scratch, store.clone(), &http);
         let mut brain = brain_with_github_owner(&scratch, accounts);
+        settle_default_account(&mut brain.account).await;
+        brain.github_op(GitHubOp::RefreshRepos, None).unwrap();
         settle_default_account(&mut brain.account).await;
         assert_eq!(displayed_default(&brain), Some(old));
         let selecting = brain.account.github.machine().stamp();
@@ -572,6 +670,22 @@ async fn a_committed_default_survives_renewal_or_expiry_before_its_acknowledgmen
             brain.account.handle(event);
         }
         settle_default_account(&mut brain.account).await;
+        assert_eq!(
+            http.seen(),
+            [
+                RequestKind::User,
+                RequestKind::Installations,
+                RequestKind::Repositories,
+                RequestKind::Refresh,
+                RequestKind::User,
+            ]
+        );
+        assert_eq!(
+            brain.account.github.machine().view(Instant::now()),
+            unlisted()
+        );
+        brain.github_op(GitHubOp::RefreshRepos, None).unwrap();
+        settle_default_account(&mut brain.account).await;
         let displayed = displayed_default(&brain);
         let in_memory = brain.config.github_default().unwrap();
         let on_disk = crate::config::Config::load(Some(scratch.dir().to_owned()), ThreadId(1))
@@ -600,6 +714,8 @@ async fn a_committed_default_survives_renewal_or_expiry_before_its_acknowledgmen
         let other_http = AccountHttp::new(default_replies(42));
         let other = configured_accounts(&scratch, store.clone(), &other_http);
         let mut other_brain = brain_with_github_owner(&scratch, other);
+        settle_default_account(&mut other_brain.account).await;
+        other_brain.github_op(GitHubOp::RefreshRepos, None).unwrap();
         settle_default_account(&mut other_brain.account).await;
         let inherited = displayed_default(&other_brain);
         assert_eq!(other_brain.account.github.machine().user().unwrap().id, 42);

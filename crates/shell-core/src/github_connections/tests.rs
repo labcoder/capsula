@@ -61,6 +61,186 @@ fn model(view: GitHubView) -> GitHubConnections {
     state
 }
 
+#[test]
+fn missing_repositories_allow_loading_once_but_an_empty_result_is_complete() {
+    let login = GitHubLogin::new("example").unwrap();
+    let unlisted = |listing| GitHubView::ConnectedUnlisted {
+        login: login.clone(),
+        listing,
+    };
+    let mut state = model(unlisted(false));
+    assert_eq!(state.status(), Text::GitHubConnected);
+    assert!(!state.allows(Some(8), &GitHubOp::ListReposIfUnlisted));
+    assert!(!state.allows(
+        Some(7),
+        &GitHubOp::SetDefaultRepo(RepoName::new("Example/Repo").unwrap())
+    ));
+    assert!(state.send(Some(7), GitHubOp::ListReposIfUnlisted, |op| {
+        assert_eq!(op, GitHubOp::ListReposIfUnlisted);
+        true
+    }));
+    let now = Instant::now();
+    assert!(state.receive(Some(7), 7, unlisted(true), now));
+    assert_eq!(state.status(), Text::GitHubRefreshing);
+    assert!(!state.allows(Some(7), &GitHubOp::RefreshRepos));
+    assert!(state.receive(
+        Some(7),
+        7,
+        GitHubView::Connected {
+            login,
+            repos: Bounded::default(),
+            truncated: false,
+            default: None,
+        },
+        now
+    ));
+    assert_eq!(state.status(), Text::GitHubConnected);
+    assert!(!state.allows(Some(7), &GitHubOp::ListReposIfUnlisted));
+    assert!(state.allows(Some(7), &GitHubOp::RefreshRepos));
+    assert!(!model(not_verified()).allows(Some(7), &GitHubOp::ListReposIfUnlisted));
+}
+
+#[test]
+fn accounts_entry_retries_after_renewal_only_if_the_listing_was_not_acknowledged() {
+    let unlisted = |listing| GitHubView::ConnectedUnlisted {
+        login: GitHubLogin::new("example").unwrap(),
+        listing,
+    };
+    let current = Some(7);
+    let now = Instant::now();
+    let mut state = GitHubConnections::default();
+    state.open_accounts_visit(current);
+    assert!(!state.list_on_accounts_visit(current));
+    assert!(state.receive(current, 7, unlisted(false), now));
+    assert!(state.list_on_accounts_visit(current));
+    assert!(state.send(current, GitHubOp::ListReposIfUnlisted, |_| true));
+    assert!(!state.list_on_accounts_visit(current));
+    assert!(state.receive(current, 7, GitHubView::Requesting, now));
+    assert!(!state.list_on_accounts_visit(current));
+    assert!(state.receive(current, 7, unlisted(false), now));
+    assert!(state.list_on_accounts_visit(current));
+    assert!(state.send(current, GitHubOp::ListReposIfUnlisted, |_| true));
+    assert!(state.receive(current, 7, unlisted(true), now));
+    assert!(!state.allows(current, &GitHubOp::RefreshRepos));
+    assert!(state.allows(current, &GitHubOp::SignOut));
+    assert!(state.receive(current, 7, GitHubView::Requesting, now));
+    assert!(state.receive(current, 7, unlisted(false), now));
+    assert!(!state.list_on_accounts_visit(current));
+}
+
+#[test]
+fn accounts_opened_before_the_first_handshake_lists_only_after_verification() {
+    let mut state = GitHubConnections::default();
+    state.open_accounts_visit(None);
+    state.connecting();
+    assert!(!state.list_on_accounts_visit(None));
+    state.connected(7);
+    let current = Some(7);
+    assert!(!state.list_on_accounts_visit(current));
+    let view = GitHubView::ConnectedUnlisted {
+        login: GitHubLogin::new("example").unwrap(),
+        listing: false,
+    };
+    let now = Instant::now();
+    assert!(state.receive(current, 7, GitHubView::Requesting, now));
+    assert!(!state.list_on_accounts_visit(current));
+    assert!(state.receive(current, 7, view, now));
+    assert!(state.list_on_accounts_visit(current));
+    assert!(state.send(current, GitHubOp::ListReposIfUnlisted, |_| true));
+    assert!(!state.list_on_accounts_visit(current));
+}
+
+#[test]
+fn closing_accounts_before_the_first_handshake_consumes_the_visit() {
+    let mut state = GitHubConnections::default();
+    state.open_accounts_visit(None);
+    state.close_accounts_visit();
+    state.connecting();
+    state.connected(7);
+    assert!(state.receive(
+        Some(7),
+        7,
+        GitHubView::ConnectedUnlisted {
+            login: GitHubLogin::new("example").unwrap(),
+            listing: false,
+        },
+        Instant::now(),
+    ));
+    assert!(!state.list_on_accounts_visit(Some(7)));
+}
+
+#[test]
+fn a_startup_visit_cannot_move_to_a_replacement_even_without_a_first_snapshot() {
+    let login = GitHubLogin::new("example").unwrap();
+    for reconnecting in [false, true] {
+        let mut state = GitHubConnections::default();
+        state.open_accounts_visit(None);
+        state.connecting();
+        state.connected(7);
+        if reconnecting {
+            state.disconnected();
+            state.connecting();
+            state.open_accounts_visit(None);
+        }
+        state.connected(8);
+        assert!(state.receive(
+            Some(8),
+            8,
+            GitHubView::ConnectedUnlisted {
+                login: login.clone(),
+                listing: false,
+            },
+            Instant::now(),
+        ));
+        assert!(!state.list_on_accounts_visit(Some(8)));
+    }
+}
+
+#[test]
+fn a_new_session_never_inherits_an_unsent_accounts_listing() {
+    let now = Instant::now();
+    for disconnected in [false, true] {
+        let mut state = model(GitHubView::Requesting);
+        state.open_accounts_visit(Some(7));
+        if disconnected {
+            state.disconnected();
+        }
+        assert!(state.receive(
+            Some(8),
+            8,
+            GitHubView::ConnectedUnlisted {
+                login: GitHubLogin::new("example").unwrap(),
+                listing: false,
+            },
+            now,
+        ));
+        assert!(!state.list_on_accounts_visit(Some(8)));
+        state.open_accounts_visit(Some(8));
+        assert!(state.list_on_accounts_visit(Some(8)));
+    }
+}
+
+#[test]
+fn sign_out_supersedes_an_acknowledged_listing_without_accepting_duplicate_refreshes() {
+    let view = |listing| GitHubView::ConnectedUnlisted {
+        login: GitHubLogin::new("example").unwrap(),
+        listing,
+    };
+    let mut state = model(view(false));
+    let now = Instant::now();
+    for op in [GitHubOp::ListReposIfUnlisted, GitHubOp::RefreshRepos] {
+        assert!(state.send(Some(7), op, |_| true));
+        assert!(state.receive(Some(7), 7, view(true), now));
+        assert!(!state.allows(Some(7), &GitHubOp::RefreshRepos));
+        assert!(state.send(Some(7), GitHubOp::SignOut, |_| true));
+        assert!(state.receive(Some(7), 7, view(false), now));
+        assert!(!state.allows(Some(7), &GitHubOp::RefreshRepos));
+        assert!(state.receive(Some(7), 7, signed_out(), now));
+        assert!(state.allows(Some(7), &GitHubOp::Connect));
+        assert!(state.receive(Some(7), 7, view(false), now));
+    }
+}
+
 fn timeout(state: &mut GitHubConnections) {
     assert!(state.receive_error(Some(7), 7, ErrorKey::SignInTimedOut.into()));
     assert_eq!(state.waiting, None);

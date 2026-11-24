@@ -35,10 +35,13 @@ system credential store. Kumochi renews them before access expires. If renewal
 cannot be completed safely, or GitHub refuses the account, **Sign in again**
 starts a new device flow; an uncertain refresh is never sent twice.
 
-A saved account is checked and its repositories refreshed at startup and after
-renewal. The identity check allows 15 seconds; the complete repository refresh
-allows 60 seconds and at most 12 requests, with at most 200 repositories. Closing
-Settings does not cancel these background checks or renewal.
+Kumochi checks the saved sign-in at startup and after renewal. It lists the saved
+account's repositories when you open **Settings → Accounts** if they haven't
+been checked for the current sign-in, not in those
+background checks. **Refresh** checks again without leaving the tab. A repository
+list that hasn't been checked is different from a checked list with no available
+repositories. After a restart or renewal, check the list before asking for a
+draft you intend to file or reviewing an already bound draft.
 
 **Sign out** stops local account use before removing the saved sign-in. If
 credential cleanup fails, the section explains the problem and offers a retry.

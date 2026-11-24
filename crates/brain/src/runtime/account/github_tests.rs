@@ -866,11 +866,9 @@ pub(crate) fn user_response(status: u16, body: &[u8], meta: ResponseMeta) -> Res
 }
 
 fn connected_view(login: &str) -> GitHubView {
-    GitHubView::Connected {
+    GitHubView::ConnectedUnlisted {
         login: GitHubLogin::new(login).unwrap(),
-        repos: kumochi_scene::text::Bounded::default(),
-        truncated: false,
-        default: None,
+        listing: false,
     }
 }
 
@@ -1132,13 +1130,7 @@ async fn loaded_verification_preserves_actual_user_api_results_and_never_resaves
         if user == Some(7) {
             assert!(matches!(
                 accounts.github.suspended(),
-                [
-                    (
-                        Stamp { generation: 1 },
-                        GitHubEffect::RefreshRepos { generation: 1 }
-                    ),
-                    (Stamp { generation: 1 }, GitHubEffect::Wake(_))
-                ]
+                [(Stamp { generation: 1 }, GitHubEffect::Wake(_))]
             ));
         } else {
             assert_eq!(accounts.github.suspended().len(), 0);

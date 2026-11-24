@@ -9,6 +9,11 @@ title and body; the card binds only to your verified default repository, if one
 is available. Filing is still your action on the card. Anthropic key models
 can't draft an issue yet.
 
+After startup or renewal, open **Settings → Accounts** and check the repository
+list before asking for a draft you intend to file. A draft saved without a bound
+account or repository won't be retargeted when the list arrives. Ask for a
+replacement after checking the list.
+
 When a saved issue appears in a task or chat history, its card shows the saved
 title, body, repository and bound account. The bound account is part of the
 saved record, not proof that the account is still signed in.
@@ -28,6 +33,8 @@ For a draft or definite failure with a usable bound account and repository,
 opens a literal preview of the saved destination, title and body. **Cancel** is
 focused first. **File issue** answers that single-use review while the same history
 window is active and visible. GitHub will interpret mentions, links and Markdown in the saved text.
+If a bound draft is waiting for the repository list, open **Settings → Accounts**
+or use **Refresh** there, then return to the same draft.
 A queued action is not proof that GitHub created an issue. A definite
 failure requires a fresh review and confirmation before another filing attempt.
 Closing or cancelling the preview retires it. Reopening a saved card, reconnecting
