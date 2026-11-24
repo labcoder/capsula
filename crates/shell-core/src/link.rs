@@ -61,6 +61,7 @@ const CONTROL_QUEUE: usize = 64;
 const QUIT_INPUT: u64 = 1 << 32;
 /// Marks the watched recovery gesture as revoked.
 const REVOKED: u64 = 1 << 32;
+const DEFERRED_CANCEL: u64 = 1 << 33;
 /// Data messages waiting for the brain to read them: the turns the shell may leave unanswered,
 /// and room for credit.
 const DATA_QUEUE: usize = MAX_PENDING_TURNS + 8;
@@ -625,6 +626,7 @@ struct Shared {
     input_generation: AtomicU64,
     /// The gesture whose held words the UI keeps, with `REVOKED` once its input was revoked.
     recovery: AtomicU64,
+    recovery_generation: AtomicU64,
     choice: AtomicU64,
     quit_sent: AtomicBool,
     /// The control pipe while connected, so Quit can bound its writes.
@@ -961,14 +963,18 @@ impl LinkHandle {
         self.shared.clear_input(gesture);
     }
     /// Watches `gesture`, whose held words the UI keeps, for a revoke of its input.
-    pub fn watch_revoke(&self, gesture: GestureId) {
+    pub fn watch_revoke(&self, gesture: GestureId, generation: u64) {
+        self.shared
+            .recovery_generation
+            .store(generation, Ordering::Relaxed);
         self.shared
             .recovery
             .store(u64::from(gesture.0), Ordering::Release);
     }
     /// Whether the watched `gesture`'s input was revoked since it was watched.
     pub fn was_revoked(&self, gesture: GestureId) -> bool {
-        self.shared.recovery.load(Ordering::Acquire) == u64::from(gesture.0) | REVOKED
+        self.shared.recovery.load(Ordering::Acquire) & !DEFERRED_CANCEL
+            == u64::from(gesture.0) | REVOKED
     }
     pub fn cancel_input(&self) -> bool {
         self.cancel_input_gesture().is_some()
@@ -979,8 +985,38 @@ impl LinkHandle {
         Some(gesture)
     }
 
-    /// Revokes local input and microphone authority without touching the control outbox.
+    /// Revokes local input without touching the outbox. The caller owns dispatch even if the
+    /// UI ends the same hold first.
     pub fn revoke_input_for_dispatch(&self) -> Option<InputCancel> {
+        let cancel = self.revoke_input_cancel()?;
+        if self.shared.recovery_generation.load(Ordering::Relaxed) == cancel.generation {
+            let revoked = u64::from(cancel.gesture.0) | REVOKED;
+            let _marked = self.shared.recovery.compare_exchange(
+                revoked,
+                revoked | DEFERRED_CANCEL,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+        Some(cancel)
+    }
+
+    /// The matching cancel is owned by deferred dispatch, even before its outbox send.
+    pub fn deferred_input_cancel(
+        &self,
+        gesture: GestureId,
+        generation: u64,
+    ) -> Option<InputCancel> {
+        let watched = self.shared.recovery.load(Ordering::Acquire);
+        (watched == u64::from(gesture.0) | REVOKED | DEFERRED_CANCEL
+            && self.shared.recovery_generation.load(Ordering::Relaxed) == generation)
+            .then_some(InputCancel {
+                generation,
+                gesture,
+            })
+    }
+
+    pub(crate) fn revoke_input_cancel(&self) -> Option<InputCancel> {
         let generation = self.shared.input_generation.load(Ordering::Relaxed);
         let gesture = self.shared.revoke_input()?;
         Some(InputCancel {

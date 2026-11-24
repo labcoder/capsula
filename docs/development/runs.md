@@ -99,8 +99,10 @@ revision. Settings updates replace names and the main id without changing the in
 keyboard focus, viewed history, target or revision. Voice uses a separate metadata-only
 pending hold keyed by gesture, captured target/revision and current session, not the typed
 queue or its watermark. Only its matching visible Hold-origin first state can bind New;
-Thinking stays cancellable and Answering returns to ordinary Runs. Source admission and
-transcription remain in the [voice owner](voice.md#voice-only-held-turns).
+Thinking stays cancellable and Answering returns to ordinary Runs. A refused first state
+ends its matching pending hold and owes one gesture cancel, even if the run is already
+fenced and needs no further Stop. Source admission and transcription remain in the
+[voice owner](voice.md#voice-only-held-turns).
 
 ## Typed drawing admission
 

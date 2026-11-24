@@ -102,6 +102,8 @@ impl fmt::Debug for Shown {
 #[derive(Default, PartialEq, Eq)]
 pub struct Applied {
     pub input_ended: bool,
+    /// The gesture whose Hold ended because its first state was refused.
+    pub refused_hold: Option<GestureId>,
     /// A `Stop` for a run Esc cancelled before it was named.
     pub stop: Option<ControlToBrain>,
     /// Credit for held data frames this state classified.
@@ -119,6 +121,7 @@ impl fmt::Debug for Applied {
             .field("stop", &self.stop)
             .field("credit", &self.credit)
             .field("input_ended", &self.input_ended)
+            .field("refused_hold", &self.refused_hold)
             .field("visible", &self.visible)
             .field("restore_len", &self.restore.as_ref().map(|text| text.len()))
             .finish()
