@@ -1,6 +1,6 @@
 use super::super::*;
 use super::connection;
-use super::machine::{bound_to_connection, fileable, repository_listing_hint};
+use super::machine::{ReviewControl, review_control};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::{ScrollHandle, StatefulInteractiveElement as _};
@@ -152,19 +152,18 @@ pub(in crate::presence::messages) fn controls(
         card.state,
         ActionState::Draft | ActionState::Failed(_) | ActionState::Unknown { .. }
     );
-    let connection = connection(owner, cx);
-    let file = fileable(card, connection) && !entry.review_blocked();
-    let pending = entry.pending();
     let mut controls = div().flex().flex_col().gap_2();
     if actionable {
+        let review = review_control(&entry, connection(owner, cx));
+        let pending = entry.pending();
         let mut buttons = div().flex().gap_2();
-        if file {
+        if let ReviewControl::Open { disabled } = review {
             let view = view.clone();
             buttons = buttons.child(
                 Button::new(("issue-file", draft.0))
                     .debug_selector(move || format!("issue-file-{}", draft.0))
                     .label(labels.open.clone())
-                    .disabled(entry.pending_action())
+                    .disabled(disabled)
                     .on_click(move |_, window, cx| {
                         let _gone = view.update(cx, |view, cx| {
                             view.open_issue_confirmation(draft, window, cx)
@@ -216,13 +215,8 @@ pub(in crate::presence::messages) fn controls(
                 }),
         );
         controls = controls.child(buttons);
-        if !pending
-            && !entry.review_blocked()
-            && ((!file && !matches!(card.state, ActionState::Unknown { .. }))
-                || !bound_to_connection(card, connection))
-        {
-            controls =
-                controls.child(labels.unavailable(repository_listing_hint(card, connection), cx));
+        if let ReviewControl::Unavailable { listing_hint } = review {
+            controls = controls.child(labels.unavailable(listing_hint, cx));
         }
     }
     controls.into_any_element()

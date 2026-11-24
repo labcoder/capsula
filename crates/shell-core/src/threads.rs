@@ -15,7 +15,7 @@ use kumochi_scene::text::Bounded;
 use crate::strings::Text;
 
 mod cards;
-pub use cards::Feedback as IssueFeedback;
+pub use cards::{Entry as IssueEntry, Feedback as IssueFeedback};
 #[cfg(test)]
 mod tests;
 
@@ -294,7 +294,7 @@ impl Threads {
         self.reads.borrow().cards.broken
     }
 
-    pub fn issue(&self, draft: DraftId) -> Option<std::cell::Ref<'_, cards::Entry>> {
+    pub fn issue(&self, draft: DraftId) -> Option<std::cell::Ref<'_, IssueEntry>> {
         if !self.connected || !self.shown || self.cards_broken() {
             return None;
         }

@@ -1,6 +1,7 @@
 use crate::link::Session;
 use crate::settings::Settings;
-use crate::threads::Threads;
+use crate::strings::Text;
+use crate::threads::{IssueEntry, Threads};
 use kumochi_protocol::message::{
     ActionState, ApprovalRev, ContentHash, Decision, DraftId, GitHubOp, GitHubView, IssueCard,
     IssueOp, IssueSession, StateVersion, ThreadId,
@@ -78,12 +79,50 @@ fn eligible<'a>(facts: &Facts<'a>, draft: DraftId) -> Option<Ref<'a, IssueCard>>
     fileable(&card, facts.connection).then_some(card)
 }
 
-pub fn fileable(card: &IssueCard, connection: Option<(&Session, &Settings)>) -> bool {
+/// The review button or guidance for an issue card, without authority to open or file it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewControl {
+    Hidden,
+    Open { disabled: bool },
+    Unavailable { listing_hint: Option<Text> },
+}
+
+/// Projects review controls for the card displayed by a history surface.
+pub fn review_control(
+    entry: &IssueEntry,
+    connection: Option<(&Session, &Settings)>,
+) -> ReviewControl {
+    let Some(card) = entry.card() else {
+        return ReviewControl::Hidden;
+    };
+    if entry.loading() || entry.review_blocked() {
+        return ReviewControl::Hidden;
+    }
+    if fileable(card, connection) {
+        return ReviewControl::Open {
+            disabled: entry.pending_action(),
+        };
+    }
+    let needs_guidance = match card.state {
+        ActionState::Draft | ActionState::Failed(_) => true,
+        ActionState::Unknown { .. } => !bound_to_connection(card, connection),
+        _ => false,
+    };
+    if needs_guidance && !entry.pending() {
+        ReviewControl::Unavailable {
+            listing_hint: repository_listing_hint(card, connection),
+        }
+    } else {
+        ReviewControl::Hidden
+    }
+}
+
+fn fileable(card: &IssueCard, connection: Option<(&Session, &Settings)>) -> bool {
     matches!(card.state, ActionState::Draft | ActionState::Failed(_))
         && bound_to_connection(card, connection)
 }
 
-pub fn bound_to_connection(card: &IssueCard, connection: Option<(&Session, &Settings)>) -> bool {
+fn bound_to_connection(card: &IssueCard, connection: Option<(&Session, &Settings)>) -> bool {
     let Some((session, settings)) = connection else {
         return false;
     };
@@ -97,12 +136,10 @@ pub fn bound_to_connection(card: &IssueCard, connection: Option<(&Session, &Sett
                 && card.repo.as_ref().is_some_and(|repo| repos.contains(repo)))
 }
 
-pub fn repository_listing_hint(
+fn repository_listing_hint(
     card: &IssueCard,
     connection: Option<(&Session, &Settings)>,
-) -> Option<crate::strings::Text> {
-    use crate::strings::Text;
-
+) -> Option<Text> {
     let (session, settings) = connection?;
     let github = &settings.github;
     let GitHubView::ConnectedUnlisted { login, listing } = github.view.as_ref()? else {

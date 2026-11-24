@@ -1,5 +1,6 @@
 use super::*;
 use crate::link::{Batch, LinkEvent, LinkHandle, Session};
+use crate::presence::test_fixture;
 use gpui_kit::component::WindowExt;
 use kumochi_protocol::message::{
     ApprovalRev, ContentHash, ControlToBrain, DataToBrain, DataToShell, Decision, Deleted, DraftId,
@@ -719,6 +720,7 @@ fn queue_refusal_is_not_replayed_by_later_valid_input(cx: &mut TestAppContext) {
 fn hydrated_maximum_preview_keeps_exact_semantics_keyboard_scroll_and_private_debug(
     cx: &mut TestAppContext,
 ) {
+    test_fixture::without_desktop(cx);
     let body = "PRIVATE\n".repeat(4096);
     assert_eq!(body.len(), kumochi_protocol::message::MAX_ISSUE_BODY_BYTES);
     let f = fixture(cx, ActionState::Draft, &body);
@@ -880,6 +882,7 @@ fn a_rejected_open_leaves_no_pending_intent_and_does_not_close_a_different_dialo
 
 #[gpui::test]
 fn the_ordinary_history_rearms_before_opening_the_real_confirmation(cx: &mut TestAppContext) {
+    test_fixture::without_desktop(cx);
     let f = fixture(cx, ActionState::Draft, "saved body");
     let window = cx.update(|cx| {
         let (window, _) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {

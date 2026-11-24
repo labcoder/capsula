@@ -46,7 +46,11 @@ request.
 
 ## Confirmation handoff
 
-Draft and Failed cards with a usable bound connection offer Review to file. The opener sends
+Shell Core decides whether a displayed card shows Review to file, repository-listing or
+replacement guidance, or neither. A Draft or Failed card with a usable bound connection
+offers review; a pending action disables it, and an unresolved save after possible filing
+suppresses it. An Unknown card never offers review. This projection does not grant consent:
+the view renders the control and the opener checks eligibility again before it sends
 `Rearm { draft, version, hash }`, not File. Ordered SQL checks the live editable row and
 atomically advances its version and durable approval without changing content, stage,
 consumed revision or uncertainty. The first rearm that finds the bound name listed also stores
