@@ -123,13 +123,26 @@ pub(crate) fn read(
     service: &str,
     active: &ActiveRef,
 ) -> Result<SecretBytes, AuthorityError> {
+    read_active(store, service, active).map_err(|error| match error {
+        AuthorityError::MissingChunk | AuthorityError::WrongChunkLength => {
+            AuthorityError::Unsettled
+        }
+        error => error,
+    })
+}
+
+pub(crate) fn read_active(
+    store: &dyn CredentialStore,
+    service: &str,
+    active: &ActiveRef,
+) -> Result<SecretBytes, AuthorityError> {
     let mut bytes = Zeroizing::new(Vec::with_capacity(active.layout.bytes()));
     for index in 0..active.layout.chunks() {
         let found = store
             .get(&target(service, active.kind, active.generation, index))?
-            .ok_or(AuthorityError::Unsettled)?;
+            .ok_or(AuthorityError::MissingChunk)?;
         if found.expose().len() != active.layout.chunk_len(index) {
-            return Err(AuthorityError::Unsettled);
+            return Err(AuthorityError::WrongChunkLength);
         }
         bytes.extend_from_slice(found.expose());
     }

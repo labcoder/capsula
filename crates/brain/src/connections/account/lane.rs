@@ -66,6 +66,7 @@ pub(super) enum Queued {
     Load {
         patient: bool,
     },
+    CheckSavedSignIn(u64),
     Register {
         attempt: u64,
         account: Secret<Account>,
@@ -92,6 +93,7 @@ pub(super) enum Queued {
 #[derive(Debug)]
 pub(super) enum Flight {
     Load,
+    CheckSavedSignIn,
     Register {
         attempt: u64,
         account: Secret<Account>,
@@ -140,6 +142,9 @@ impl AccountState {
             (Some(Flight::Load), Done::Loaded(result)) => {
                 self.loading = false;
                 self.loaded(result, effects);
+            }
+            (Some(Flight::CheckSavedSignIn), Done::CheckedSavedSignIn(result)) => {
+                self.checked_saved_sign_in(result);
             }
             (Some(Flight::Register { attempt, account }), Done::Registered(result)) => {
                 let registering = attempt == self.attempt
@@ -398,6 +403,9 @@ impl AccountState {
             };
             let (flight, job) = match queued {
                 Queued::Load { patient } => (Flight::Load, Job::Load { patient }),
+                Queued::CheckSavedSignIn(revision) => {
+                    (Flight::CheckSavedSignIn, Job::CheckSavedSignIn(revision))
+                }
                 // A replaced attempt's registration isn't saved.
                 Queued::Register { attempt, .. } if attempt != self.attempt => continue,
                 Queued::Register { attempt, account } => (

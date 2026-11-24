@@ -109,6 +109,13 @@ impl From<Input> for Event {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+enum Discovery {
+    #[default]
+    Automatic,
+    Explicit,
+}
+
 /// The account's model catalog, in memory only (design §3 rule 6): one read at a time, cleared
 /// when the account stops being usable, so another account never shows this one's models.
 #[derive(Debug, Default)]
@@ -122,12 +129,17 @@ struct Catalog {
     listing: Option<Listing>,
     /// The shell hasn't heard the current list.
     unsent: bool,
+    /// A local saved-account check recovered; model discovery needs an explicit user action.
+    discovery: Discovery,
     /// Permanent network service refusal, independent of the local account state.
     unsupported: bool,
 }
 
 impl Catalog {
     fn viewed(&mut self, view: &AccountView) {
+        if !matches!(view, AccountView::SignedIn { .. }) {
+            self.discovery = Discovery::Automatic;
+        }
         self.set_usable(
             !self.unsupported
                 && matches!(
@@ -157,6 +169,7 @@ impl Catalog {
             self.epoch += 1;
             self.cancel();
             self.unsent |= self.listing.take().is_some();
+            self.discovery = Discovery::Automatic;
         }
         self.usable = usable;
     }
@@ -373,14 +386,25 @@ impl Accounts {
         {
             return vec![self.account_frame(self.state.view())];
         }
-        let ask = matches!(input, Input::Op(AccountOp::Retry) | Input::Connected);
+        let retry = matches!(input, Input::Op(AccountOp::Retry));
+        let load_models = matches!(input, Input::Op(AccountOp::LoadModels));
+        let ask = if self.catalog.discovery == Discovery::Explicit {
+            load_models
+        } else {
+            retry || matches!(input, Input::Connected)
+        };
+        let local_check = matches!(input, Input::Vault(Done::CheckedSavedSignIn(_)));
         // A new shell hears the list there is.
         self.catalog.unsent |= matches!(input, Input::Connected) && self.catalog.listing.is_some();
         let was_usable = self.catalog.usable;
         let effects = self.state.handle(input);
+        if local_check && matches!(self.state.view(), AccountView::SignedIn { .. }) {
+            self.catalog.discovery = Discovery::Explicit;
+        }
         let mut frames = self.apply(effects);
         let catalog = &self.catalog;
-        if catalog.usable
+        if !local_check
+            && catalog.usable
             && catalog.read.is_none()
             && catalog.listing.is_none()
             && (ask || !was_usable)
@@ -413,7 +437,11 @@ impl Accounts {
             Ok(listing) => {
                 self.catalog.listing = Some(listing);
                 self.catalog.unsent = true;
-                Vec::new()
+                if std::mem::take(&mut self.catalog.discovery) == Discovery::Explicit {
+                    vec![self.account_frame(self.state.view())]
+                } else {
+                    Vec::new()
+                }
             }
             Err(None) => Vec::new(),
             Err(Some(error)) if error.key() == ErrorKey::UnsupportedPlatform => {
@@ -437,13 +465,16 @@ impl Accounts {
         if self.catalog.unsupported {
             return Availability::Unavailable(ErrorKey::UnsupportedPlatform.into());
         }
+        if self.catalog.discovery == Discovery::Explicit {
+            return Availability::Unavailable(ErrorKey::CredentialsUnavailable.into());
+        }
         let error = |key, action| {
             UserError::new(key, Vec::new(), vec![action]).expect("one action is within the limit")
         };
         let reason = match self.state.view() {
             AccountView::SignedIn {
                 plan: PlanState::Enabled,
-                recovery: None | Some(AccountRecovery::Retry),
+                recovery: None | Some(AccountRecovery::Retry | AccountRecovery::LoadModels),
                 ..
             } => match self.state.connection() {
                 Some(connection) => {
@@ -478,6 +509,9 @@ impl Accounts {
                 ..
             } => UserError::from(ErrorKey::PlanUnavailable),
             AccountView::Busy => error(ErrorKey::CredentialsUnavailable, Action::Retry),
+            AccountView::SavedSignInUnavailable { .. } => {
+                UserError::from(ErrorKey::CredentialsUnavailable)
+            }
             AccountView::SignedOut { .. }
             | AccountView::SigningIn
             | AccountView::SigningOut { .. } => error(ErrorKey::SignInNeeded, Action::SignIn),
@@ -490,7 +524,16 @@ impl Accounts {
         self.state.view()
     }
 
-    fn account_frame(&self, view: AccountView) -> ControlToShell {
+    fn account_frame(&self, mut view: AccountView) -> ControlToShell {
+        if self.catalog.discovery == Discovery::Explicit
+            && let AccountView::SignedIn {
+                plan: PlanState::Enabled,
+                recovery: recovery @ None,
+                ..
+            } = &mut view
+        {
+            *recovery = Some(AccountRecovery::LoadModels);
+        }
         if self.catalog.unsupported {
             ControlToShell::AccountUnsupported(view)
         } else {
@@ -500,7 +543,8 @@ impl Accounts {
 
     /// The account's catalog epoch while it can send model requests: its generation for jobs.
     pub(super) fn sendable(&self) -> Option<u64> {
-        self.catalog.usable.then_some(self.catalog.epoch)
+        (self.catalog.usable && self.catalog.discovery == Discovery::Automatic)
+            .then_some(self.catalog.epoch)
     }
 
     /// The last catalog read in this epoch, if one succeeded.
@@ -825,6 +869,19 @@ impl Brain {
     ) -> Result<(), Full> {
         let event = input.into();
         let read = matches!(event, Event::Read { .. });
+        if matches!(
+            event,
+            Event::Machine(
+                Input::Op(AccountOp::CheckSavedSignIn) | Input::Vault(Done::CheckedSavedSignIn(_))
+            )
+        ) {
+            let frames = self.account.handle(event);
+            return link.map_or(Ok(()), |link| {
+                frames
+                    .iter()
+                    .try_for_each(|frame| link.control(&self.composed(frame)))
+            });
+        }
         let sendable = self.account.sendable();
         let frames = self.account.handle(event);
         // The coordinator hears it before anything else, so a job's write is fenced at once.

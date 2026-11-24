@@ -88,6 +88,12 @@ pub(crate) enum AuthorityError {
     /// The current generation's names didn't all read back whole.
     #[error("credential is not settled")]
     Unsettled,
+    /// An expected active chunk was absent on this read.
+    #[error("an active credential chunk is missing")]
+    MissingChunk,
+    /// An active chunk did not match the committed layout.
+    #[error("an active credential chunk has the wrong size")]
+    WrongChunkLength,
     /// A value exceeds its bound.
     #[error("credential exceeds its bounds")]
     Bounds,
@@ -375,6 +381,13 @@ impl Authority {
         current(&self.conn, kind)
     }
 
+    pub(super) fn observe(
+        &self,
+        kind: Kind,
+    ) -> Result<(u64, Result<Option<ActiveRef>, AuthorityError>), AuthorityError> {
+        observe(&self.conn, kind)
+    }
+
     /// Commits a fresh Pending generation for a value of `len` bytes, retiring any older
     /// candidate of the kind. The committed head is unchanged until [`Self::activate`].
     ///
@@ -652,29 +665,45 @@ impl Authority {
 }
 
 fn current(conn: &Connection, kind: Kind) -> Result<Current, AuthorityError> {
-    let revision = head_revision(conn, kind)?;
-    let active = conn
+    let (revision, active) = observe(conn, kind)?;
+    Ok(Current {
+        revision,
+        active: active?,
+    })
+}
+
+fn observe(
+    conn: &Connection,
+    kind: Kind,
+) -> Result<(u64, Result<Option<ActiveRef>, AuthorityError>), AuthorityError> {
+    let (revision, generation, chunks, bytes) = conn
         .query_row(
-            "SELECT generation, chunks, bytes FROM generations WHERE kind = ?1 AND state = 'active'",
+            "SELECT heads.revision, g.generation, g.chunks, g.bytes
+             FROM heads LEFT JOIN generations g ON g.kind = heads.kind AND g.state = 'active'
+             WHERE heads.kind = ?1",
             [kind.label()],
             |row| {
                 Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
                     row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
                 ))
             },
         )
         .optional()?
-        .map(|(generation, chunks, bytes)| {
+        .ok_or(AuthorityError::Corrupt)?;
+    let revision = u64::try_from(revision).map_err(|_| AuthorityError::Corrupt)?;
+    let active = generation
+        .map(|generation| {
             Ok::<_, AuthorityError>(ActiveRef {
                 kind,
                 generation: Generation::from_sql(&generation)?,
                 layout: Layout::from_sql(chunks, bytes)?,
             })
         })
-        .transpose()?;
-    Ok(Current { revision, active })
+        .transpose();
+    Ok((revision, active))
 }
 
 fn head_revision(conn: &Connection, kind: Kind) -> Result<u64, AuthorityError> {

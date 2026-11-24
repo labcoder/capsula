@@ -1152,10 +1152,10 @@ impl LinkHandle {
                         | SettingsOp::SetHoldToTalk(false)
                         | SettingsOp::RemoveVoice(VoicePart::SpeechInput)
                 )
-                | ControlToBrain::AccountOp(_)
                 | ControlToBrain::Connection(_)
-        ) || session.io.queued
-            && matches!(&message, ControlToBrain::Settings(op) if changes_hold_consent(op));
+        ) || matches!(&message, ControlToBrain::AccountOp(op) if op.changes_hold_route())
+            || session.io.queued
+                && matches!(&message, ControlToBrain::Settings(op) if changes_hold_consent(op));
         if session.io.queued
             && session.generation == self.link_generation()
             && let ControlToBrain::GestureCancel { gesture } = &message

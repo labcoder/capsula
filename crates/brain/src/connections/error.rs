@@ -46,7 +46,9 @@ impl From<AuthorityError> for VaultError {
     fn from(error: AuthorityError) -> Self {
         match error {
             AuthorityError::Store(error) => Self::Store(error),
-            AuthorityError::Unsettled => Self::Store(CredentialStoreError::Unsettled),
+            AuthorityError::Unsettled
+            | AuthorityError::MissingChunk
+            | AuthorityError::WrongChunkLength => Self::Store(CredentialStoreError::Unsettled),
             AuthorityError::Bounds => Self::Bounds,
             AuthorityError::Corrupt => Self::Unreadable,
             AuthorityError::Random(error) => Self::Random(error),

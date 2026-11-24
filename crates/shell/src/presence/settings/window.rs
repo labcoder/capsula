@@ -184,16 +184,18 @@ impl Presence {
                 .unwrap_or(false)
         })
     }
-    /// An account op from any surface: the attempt is the user's to steer there now, so an owed
-    /// cancel is dropped.
+    /// An account op from any surface. A route change takes over the sign-in attempt and
+    /// cancels the hold; a saved sign-in check leaves both alone.
     pub(in crate::presence) fn account_op(
         &mut self,
         op: AccountOp,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        self.onboarding_chatgpt.superseded();
-        self.settings_chatgpt.superseded();
-        self.cancel_voice(cx);
+        if op.changes_hold_route() {
+            self.onboarding_chatgpt.superseded();
+            self.settings_chatgpt.superseded();
+            self.cancel_voice(cx);
+        }
         let (link, session) = (&self.link, &self.session);
         self.settings.update(cx, |state, cx| {
             let sent = state.accounts.send(op, |op| {

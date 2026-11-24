@@ -25,6 +25,26 @@ pub enum AccountOp {
     EnablePlan,
     /// Try again whatever the view shows as stuck.
     Retry,
+    /// Reread the saved `ChatGPT` sign-in without signing in or running maintenance.
+    CheckSavedSignIn,
+    /// Contact the provider to load models after a local saved sign-in recovered.
+    LoadModels,
+}
+
+impl AccountOp {
+    /// Whether dispatch must fence held input and any sign-in owned by the shell.
+    #[must_use]
+    pub const fn changes_hold_route(self) -> bool {
+        match self {
+            Self::CheckSavedSignIn => false,
+            Self::SignIn
+            | Self::CancelSignIn
+            | Self::SignOut
+            | Self::EnablePlan
+            | Self::Retry
+            | Self::LoadModels => true,
+        }
+    }
 }
 
 /// Where the account stands. It's authoritative: the shell never moves on its own.
@@ -55,6 +75,30 @@ pub enum AccountView {
         /// What's stuck, if anything.
         recovery: Option<AccountRecovery>,
     },
+    /// The saved sign-in could not be read safely. Neither sign-in nor sign-out is offered.
+    SavedSignInUnavailable {
+        /// The result of the most recent read.
+        reason: SavedSignInFailure,
+        /// Whether there is a current revision that this session can safely check.
+        checkable: bool,
+        /// A local reread is outstanding.
+        checking: bool,
+        /// An older remote revocation is still unconfirmed.
+        revocation_unconfirmed: bool,
+    },
+}
+
+/// Why a saved `ChatGPT` sign-in could not be used; no details cross the pipe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SavedSignInFailure {
+    /// An expected part of the saved sign-in was not visible.
+    Missing,
+    /// The saved sign-in did not have a supported form.
+    Malformed,
+    /// Storage refused the read, or its control state did not permit it.
+    Unavailable,
+    /// The checked sign-in is no longer the current one.
+    Changed,
 }
 
 /// A sign-out's local cleanup.
@@ -86,6 +130,8 @@ pub enum AccountRecovery {
     Retry,
     /// The session ended; signing in again keeps the registration.
     SignInAgain,
+    /// The local sign-in recovered without a provider check. Models must be loaded separately.
+    LoadModels,
 }
 
 /// A display email: at most [`MAX_EMAIL_BYTES`] bytes on one line, checked on decode too. Its
@@ -144,7 +190,34 @@ impl fmt::Debug for AccountEmail {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountEmail, EmailError};
+    use super::{AccountEmail, AccountOp, AccountView, EmailError, SavedSignInFailure};
+
+    #[test]
+    fn saved_sign_in_check_appends_closed_wire_variants() {
+        assert_eq!(postcard::to_allocvec(&AccountOp::Retry).unwrap(), [4]);
+        assert_eq!(
+            postcard::to_allocvec(&AccountOp::CheckSavedSignIn).unwrap(),
+            [5]
+        );
+        assert_eq!(postcard::to_allocvec(&AccountOp::LoadModels).unwrap(), [6]);
+        for (tag, reason) in [
+            (0, SavedSignInFailure::Missing),
+            (1, SavedSignInFailure::Malformed),
+            (2, SavedSignInFailure::Unavailable),
+            (3, SavedSignInFailure::Changed),
+        ] {
+            let view = AccountView::SavedSignInUnavailable {
+                reason,
+                checkable: true,
+                checking: true,
+                revocation_unconfirmed: false,
+            };
+            let wire = [5, tag, 1, 1, 0];
+            assert_eq!(postcard::to_allocvec(&view).unwrap(), wire);
+            assert_eq!(postcard::from_bytes::<AccountView>(&wire), Ok(view));
+        }
+        assert!(postcard::from_bytes::<AccountView>(&[5, 4, 1, 1, 0]).is_err());
+    }
 
     #[test]
     fn an_email_is_one_bounded_line_on_decode_too() {

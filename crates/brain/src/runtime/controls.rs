@@ -345,8 +345,10 @@ impl Brain {
         if let ControlToBrain::AccountOp(op) = message {
             self.account_input(AccountInput::Op(op), Some(link))
                 .map_err(|Full| Ended::Lost)?;
-            self.screen_holds_changed(link)
-                .map_err(|Full| Ended::Lost)?;
+            if op.changes_hold_route() {
+                self.screen_holds_changed(link)
+                    .map_err(|Full| Ended::Lost)?;
+            }
             return Ok(None);
         }
         if let ControlToBrain::Connection(op) = message {

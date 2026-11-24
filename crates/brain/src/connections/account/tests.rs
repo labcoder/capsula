@@ -2,6 +2,7 @@
 //! synchronously, so every durable write's marker is observed, and faults land on exact
 //! mutations. Exchange results are fed in as data: nothing touches a network.
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -44,6 +45,127 @@ const REFUSED: [(&str, &str); 4] = [
     ("generations", "UPDATE"),
     ("generations", "INSERT"),
 ];
+
+#[test]
+fn check_saved_sign_in_classifies_and_recovers_only_the_current_record() {
+    let mut h = Harness::seeded("check-saved-sign-in", |vault| {
+        vault.host_id().expect("saved host");
+        committed(&vault.save_account(&saved_account("subject-1", "refresh-old")));
+    });
+    let chunk = h.current_chunk("chatgpt");
+    let good = h.store.snapshot();
+    h.store
+        .rollback(&BTreeMap::new(), std::slice::from_ref(&chunk));
+    h = h.restart();
+    let view = |reason, checking| AccountView::SavedSignInUnavailable {
+        reason,
+        checkable: true,
+        checking,
+        revocation_unconfirmed: false,
+    };
+    assert_eq!(h.view(), &view(SavedSignInFailure::Missing, false));
+    h.op(AccountOp::SignIn);
+    assert!(h.listening.is_empty());
+    h.hold = true;
+    h.op(AccountOp::CheckSavedSignIn);
+    assert_eq!(h.view(), &view(SavedSignInFailure::Missing, true));
+    h.op(AccountOp::CheckSavedSignIn);
+    assert_eq!(h.view(), &view(SavedSignInFailure::Missing, true));
+    h.release();
+    assert_eq!(h.view(), &view(SavedSignInFailure::Missing, false));
+    h.store.0.lock().unwrap().denied_read = Some(chunk.clone());
+    h.refuse_commits();
+    h.store.0.lock().unwrap().mutations.clear();
+    h.op(AccountOp::CheckSavedSignIn);
+    assert_eq!(h.view(), &view(SavedSignInFailure::Unavailable, false));
+    h.store.0.lock().unwrap().denied_read = None;
+    let malformed = [(chunk.clone(), Secret::new(Zeroizing::new(vec![0])))].into();
+    h.store.rollback(&malformed, std::slice::from_ref(&chunk));
+    h.op(AccountOp::CheckSavedSignIn);
+    assert_eq!(h.view(), &view(SavedSignInFailure::Malformed, false));
+    h.store.rollback(&good, &[chunk]);
+    h.op(AccountOp::CheckSavedSignIn);
+    assert_eq!(h.view(), &signed_in(PlanState::Enabled, None));
+    assert!(h.store.0.lock().unwrap().mutations.is_empty());
+    assert!(h.listening.is_empty());
+    assert!(h.refreshes.is_empty());
+    assert!(h.revoking.is_empty());
+}
+
+#[test]
+fn check_saved_sign_in_does_not_adopt_a_changed_revision() {
+    let mut h = Harness::seeded("check-saved-sign-in-changed", |vault| {
+        vault.host_id().expect("saved host");
+        committed(&vault.save_account(&saved_account("subject-1", "refresh-old")));
+    });
+    let chunk = h.current_chunk("chatgpt");
+    h.store.rollback(&BTreeMap::new(), &[chunk]);
+    h = h.restart();
+    h.authority()
+        .execute(
+            "UPDATE heads SET revision = revision + 1 WHERE kind = 'chatgpt'",
+            [],
+        )
+        .expect("simulate head change");
+    h.op(AccountOp::CheckSavedSignIn);
+    assert_eq!(
+        h.view(),
+        &AccountView::SavedSignInUnavailable {
+            reason: SavedSignInFailure::Changed,
+            checkable: false,
+            checking: false,
+            revocation_unconfirmed: false,
+        }
+    );
+}
+
+#[test]
+fn a_malformed_layout_keeps_its_pin_but_an_unknown_revision_cannot_be_checked() {
+    for known_revision in [true, false] {
+        let mut h = Harness::seeded("check-malformed-head", |vault| {
+            committed(&vault.save_account(&saved_account("subject-1", "refresh-old")));
+        });
+        h.authority()
+            .execute_batch(if known_revision {
+                "UPDATE generations SET chunks = chunks + 1 WHERE kind = 'chatgpt'"
+            } else {
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE heads SET revision = -1 WHERE kind = 'chatgpt';"
+            })
+            .unwrap();
+        h = h.restart();
+        let unavailable = |reason, checkable| AccountView::SavedSignInUnavailable {
+            reason,
+            checkable,
+            checking: false,
+            revocation_unconfirmed: false,
+        };
+        assert_eq!(
+            h.view(),
+            &unavailable(SavedSignInFailure::Malformed, known_revision)
+        );
+        h.authority()
+            .execute_batch(if known_revision {
+                "UPDATE generations SET chunks = chunks - 1 WHERE kind = 'chatgpt';
+                 UPDATE heads SET revision = revision + 1 WHERE kind = 'chatgpt';"
+            } else {
+                "UPDATE heads SET revision = 2 WHERE kind = 'chatgpt';"
+            })
+            .unwrap();
+        h.op(AccountOp::CheckSavedSignIn);
+        assert_eq!(
+            h.view(),
+            &unavailable(
+                if known_revision {
+                    SavedSignInFailure::Changed
+                } else {
+                    SavedSignInFailure::Malformed
+                },
+                false,
+            )
+        );
+    }
+}
 
 /// The authority at `path` refuses these writes at once, as a failing disk would.
 fn refuse(path: &std::path::Path, writes: &[(&str, &str)]) {

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 
@@ -13,6 +14,146 @@ impl Http for Counted {
         self.0.store(true, Ordering::SeqCst);
         std::future::ready(Err(HttpError::Transport))
     }
+}
+
+struct Models;
+
+impl Http for Models {
+    fn execute(
+        &self,
+        request: Request,
+    ) -> impl Future<Output = Result<Response, HttpError>> + Send {
+        assert!(matches!(
+            request.endpoint,
+            crate::connections::http_client::Endpoint::Models(_)
+        ));
+        std::future::ready(Ok(Response {
+            status: 200,
+            request_id: None,
+            meta: crate::connections::http_client::ResponseMeta::default(),
+            body: Secret::new(Zeroizing::new(br#"{"models":[{"slug":"fake-model","display_name":"Fake model","visibility":"list","supported_reasoning_levels":[{"effort":"low"}]}]}"#.to_vec())),
+        }))
+    }
+}
+
+fn save_checkable_sign_in(
+    vault: &mut crate::connections::vault::Vault<crate::connections::vault::fake::FakeStore>,
+) {
+    use crate::connections::vault::SaveResult;
+
+    vault.host_id().unwrap();
+    assert!(matches!(
+        vault.save_account(&Secret::new(Account {
+            client_id: Zeroizing::new("fake-client".into()),
+            subject: Some(Zeroizing::new("fake-subject".into())),
+            email: None,
+            plan_enabled: true,
+            tokens: Some(crate::connections::records::Tokens {
+                access_token: Zeroizing::new("fake-access".into()),
+                refresh_token: Zeroizing::new("fake-refresh".into()),
+                id_token: None,
+                scope: Zeroizing::new("chatgpt.tokens.use.direct".into()),
+                expires_at: 1_800_003_600,
+                pending_identity_validation: false,
+                refresh_sent: false,
+                connection: 42,
+            }),
+        })),
+        SaveResult::Committed
+    ));
+}
+
+#[tokio::test]
+async fn a_recovered_saved_sign_in_loads_models_only_on_explicit_request() {
+    use crate::connections::vault::{Vault, fake::FakeStore};
+    use kumochi_protocol::message::SavedSignInFailure;
+
+    let scratch = crate::test_support::Scratch::new("account-local-check");
+    let store = FakeStore::default();
+    let lock = scratch
+        .dir()
+        .join(kumochi_protocol::constants::SESSION_LOCK);
+    let service = "account-local-check";
+    {
+        let mut vault = Vault::with_service(store.clone(), service, &lock).unwrap();
+        save_checkable_sign_in(&mut vault);
+    }
+    let names: Vec<_> = store
+        .names()
+        .into_iter()
+        .filter(|name| name.starts_with("account-local-check/gen/chatgpt/"))
+        .collect();
+    assert_eq!(names.len(), 1);
+    let snapshot = store.snapshot();
+    store.rollback(&BTreeMap::new(), &names);
+    let net = Net {
+        http: Arc::new(|| Ok(SharedHttp::new(Models))),
+        ..crate::test_support::net()
+    };
+    let opening = store.clone();
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(opening.clone(), service, &lock)),
+        Arc::clone(&net.clock),
+    );
+    let mut accounts = Accounts::spawn_unconfigured(worker, net).unwrap();
+    let before = accounts.availability();
+    assert_eq!(
+        accounts.view(),
+        AccountView::SavedSignInUnavailable {
+            reason: SavedSignInFailure::Missing,
+            checkable: true,
+            checking: false,
+            revocation_unconfirmed: false,
+        },
+    );
+    store.rollback(&snapshot, &names);
+    accounts.handle(Input::Op(AccountOp::CheckSavedSignIn));
+    let checked = tokio::time::timeout(Duration::from_secs(5), accounts.next())
+        .await
+        .unwrap();
+    assert!(matches!(
+        checked,
+        Event::Machine(Input::Vault(Done::CheckedSavedSignIn(_)))
+    ));
+    assert!(matches!(
+        accounts.handle(checked).as_slice(),
+        [ControlToShell::Account(AccountView::SignedIn {
+            recovery: Some(kumochi_protocol::message::AccountRecovery::LoadModels),
+            ..
+        })],
+    ));
+    accounts.handle(Input::Connected);
+    assert!(
+        accounts.catalog.read.is_none(),
+        "neither Check nor a connected shell requested a catalog or bearer"
+    );
+    assert!(accounts.tickets.is_empty());
+    assert_eq!(
+        accounts.availability(),
+        before,
+        "a local Check cannot change the route"
+    );
+    assert_eq!(accounts.sendable(), None);
+    accounts.handle(Input::Op(AccountOp::LoadModels));
+    let read = tokio::time::timeout(Duration::from_secs(5), accounts.next())
+        .await
+        .unwrap();
+    assert!(matches!(
+        accounts.handle(read).as_slice(),
+        [ControlToShell::Account(AccountView::SignedIn {
+            recovery: None,
+            ..
+        })],
+    ));
+    let [model] = accounts
+        .models()
+        .expect("catalog available on the same link")
+    else {
+        panic!("one model");
+    };
+    assert_eq!(model.slug.as_str(), "fake-model");
+    assert!(matches!(accounts.availability(), Availability::Ready(_)));
+    accounts.close(Instant::now(), Instant::now()).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

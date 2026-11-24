@@ -495,7 +495,16 @@ recorded unknown instead, so the next sign-out's notice is unconfirmed.
 - A 4xx without an OAuth error object (a proxy page, say) leaves issuance unknown.
 - Sign-in is refused with `RevocationBacklog` when the list's four exchange slots, counting one
   reserved for the request in flight, are full. Nothing is dropped to make room.
-- An unreadable `host` or record refuses sign-in (`CredentialsUnavailable`); Retry reads again.
+- A failed read of the saved ChatGPT record is distinct from no active record. The view
+  distinguishes absent chunks, malformed records, and refused reads. **Check again** queues
+  one local read of the marker and current ChatGPT record under the existing session lock. It
+  does not open the vault, create a host, maintain the revocation list, or start provider work.
+  The head and active layout are observed in one SQLite statement. Without a valid pinned
+  revision, or if the revision changed, the shell cannot check again in this session. A
+  readable current sign-in recovers locally; **Load models** is a separate provider action.
+  Check and its reply do not fence held input or change model routing. Account operations
+  that can affect a route, including **Load models**, keep their existing hold fences.
+  Host, vault-open and revocation prerequisites still block sign-in on their own paths.
 - A refused registration or pending-flag write ends the attempt and offers a new sign-in, since
   Retry would have nothing to rerun.
 - A Busy session lock at startup is retried 5 times, 250 ms apart [guess]; after that, on each
@@ -952,8 +961,9 @@ stateDiagram-v2
   hold those bytes or nothing. Different bytes fail at once as `Unsettled`. Only a full read-back yields `Verified`. `activate` takes that, checks that
   the candidate is still Pending and that the head hasn't moved, and then, in one transaction,
   makes it Active, retires its predecessor, bumps the revision and, optionally, sets the marker.
-- **Read.** `io::read` reads the Active generation's names once, each at its exact length. A
-  missing chunk is `Unsettled`. There's no retry and no fallback to another generation, and
+- **Read.** The Active generation's names are read once, each at its exact length. Other
+  consumers still treat absent and wrong-length chunks alike as `Unsettled`; the saved ChatGPT
+  sign-in distinguishes them. There's no retry and no fallback to another generation, and
   nothing the store returns changes the authority. A stale or resurrected name can hide a
   credential, but it can never make one current.
 - **Remove.** `remove` retires every Active and Pending generation of the given kinds and bumps

@@ -73,7 +73,8 @@ It reads the account's first view. Signed in with nothing to recover, it stops t
 never opens the browser. Signed out, or signed in but needing to sign in again, it sends
 `AccountOp::SignIn`, the brain opens the browser, and it waits for the view to leave `SigningIn`.
 It never sends `EnablePlan`: plan consent is Settings' job. Any other first view (busy, signing out,
-needing Retry) is printed and refused.
+needing Retry, saved sign-in unavailable, or locally recovered with no models loaded) is printed
+and refused. The diagnostic never sends `CheckSavedSignIn` or `LoadModels`.
 
 It succeeds only when the account ends `SignedIn` with no recovery; a declined or unavailable plan
 still counts as signed in. Every path then sends `Quitting`.

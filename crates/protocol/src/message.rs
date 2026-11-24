@@ -25,7 +25,7 @@ mod threads;
 mod voice;
 pub use account::{
     AccountEmail, AccountOp, AccountRecovery, AccountView, Cleanup, EmailError, MANAGE_USAGE_URL,
-    MAX_EMAIL_BYTES, PlanState,
+    MAX_EMAIL_BYTES, PlanState, SavedSignInFailure,
 };
 pub use connections::{
     ANTHROPIC_KEY_BYTES, AuditFailed, ClaudeCodeView, ClaudeVersion, ConnectionKind, ConnectionOp,

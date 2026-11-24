@@ -190,6 +190,13 @@ fn state(view: &AccountView) -> String {
             )
         }
         AccountView::Busy => "busy: another Windows session holds the account".to_owned(),
+        AccountView::SavedSignInUnavailable {
+            revocation_unconfirmed,
+            ..
+        } => format!(
+            "saved sign-in unavailable{}",
+            unconfirmed(*revocation_unconfirmed)
+        ),
         AccountView::SignedIn {
             email: _,
             plan,
@@ -204,6 +211,9 @@ fn state(view: &AccountView) -> String {
                 None => "",
                 Some(AccountRecovery::Retry) => ", needs retry",
                 Some(AccountRecovery::SignInAgain) => ", needs sign-in again",
+                Some(AccountRecovery::LoadModels) => {
+                    return "saved sign-in recovered, models not loaded".to_owned();
+                }
             };
             format!("signed in, plan {plan}{recovery}")
         }
@@ -244,8 +254,8 @@ mod tests {
     use anyhow::{Result, anyhow, bail};
     use kumochi_protocol::message::{
         AccountEmail, AccountOp, AccountRecovery, AccountView, AssistantName, Cleanup,
-        ControlToBrain, ControlToShell, DataToShell, MaxFrameRate, PlanState, RunId, SettingsView,
-        ThreadId, ThreadKind, ThreadRow, UserName,
+        ControlToBrain, ControlToShell, DataToShell, MaxFrameRate, PlanState, RunId,
+        SavedSignInFailure, SettingsView, ThreadId, ThreadKind, ThreadRow, UserName,
     };
 
     use super::{Wire, assert_one_deadline, drive, inspect, session, state};
@@ -639,6 +649,45 @@ mod tests {
                 Some(format!("not signing in while the account is {words}").as_str())
             );
             assert_eq!(ops(&brain), [QUIT]);
+            assert!(quit_sent);
+        }
+    }
+
+    #[test]
+    fn saved_sign_in_recovery_states_never_trigger_an_automatic_action() {
+        for (view, words) in [
+            (
+                AccountView::SavedSignInUnavailable {
+                    reason: SavedSignInFailure::Missing,
+                    checkable: true,
+                    checking: false,
+                    revocation_unconfirmed: true,
+                },
+                "saved sign-in unavailable, revocation unconfirmed",
+            ),
+            (
+                signed_in(Some(AccountRecovery::LoadModels)),
+                "saved sign-in recovered, models not loaded",
+            ),
+        ] {
+            let mut brain = fixture(vec![Step::View(view.clone())]);
+            let (out, error, quit_sent) = run(&mut brain);
+            assert_eq!(out, format!("account: {words}\n"));
+            assert_eq!(
+                error,
+                Some(format!("not signing in while the account is {words}"))
+            );
+            assert_eq!(ops(&brain), [QUIT]);
+            assert!(quit_sent);
+
+            let mut brain = fixture(vec![Step::View(signed_out()), Step::View(view)]);
+            let (out, error, quit_sent) = run(&mut brain);
+            assert_eq!(out, format!("account: signed out\naccount: {words}\n"));
+            assert_eq!(
+                error,
+                Some(format!("sign-in ended with the account {words}"))
+            );
+            assert_eq!(ops(&brain), [SIGN_IN, QUIT]);
             assert!(quit_sent);
         }
     }

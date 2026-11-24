@@ -2,8 +2,8 @@
 
 use crate::link::LinkEvent;
 use kumochi_protocol::message::{
-    AccountOp, AccountRecovery, AccountView, Action, Cleanup, ErrorKey, PlanState, SettingsView,
-    UserError,
+    AccountOp, AccountRecovery, AccountView, Action, Cleanup, ErrorKey, PlanState,
+    SavedSignInFailure, SettingsView, UserError,
 };
 
 use crate::strings::{Strings, Text};
@@ -148,79 +148,10 @@ impl Accounts {
 
     /// The heading and complete copy for the account row, in display order.
     pub fn status(&self, settings: Option<&SettingsView>) -> (Text, Vec<StatusLine<'_>>) {
-        use StatusLine::{Backlog, Local, Note, Remote, SendFailed};
+        use StatusLine::{Backlog, SendFailed};
 
-        let local = |error, help| Local {
-            heading: Text::AccountLocal,
-            error,
-            help,
-        };
-        let remote = |note| Remote {
-            heading: Text::AccountRemote,
-            note,
-        };
         let mut lines = Vec::new();
-        let status = match &self.view {
-            None if settings.is_none() => Text::AccountOffline,
-            None => Text::AccountWaiting,
-            Some(AccountView::SignedOut {
-                revocation_unconfirmed,
-            }) => {
-                if *revocation_unconfirmed {
-                    lines.push(remote(Text::AccountRevocationUnconfirmed));
-                } else if !self.unsupported {
-                    lines.push(Note(Text::AccountUsePlan));
-                }
-                Text::AccountSignedOut
-            }
-            Some(AccountView::SigningIn) => {
-                lines.extend((!self.unsupported).then_some(Note(Text::AccountReplaceHelp)));
-                Text::AccountSigningIn
-            }
-            Some(AccountView::Busy) => {
-                lines.extend((!self.unsupported).then_some(Note(Text::AccountBusyHelp)));
-                Text::AccountBusy
-            }
-            Some(view @ AccountView::SigningOut { cleanup, .. }) => {
-                lines.push(match cleanup {
-                    Cleanup::Running => Note(Text::AccountStopped),
-                    Cleanup::Refused => {
-                        local(Text::AccountCleanupRefused, Text::AccountCleanupRefusedHelp)
-                    }
-                    Cleanup::NotDurable => {
-                        local(Text::AccountNotDurable, Text::AccountNotDurableHelp)
-                    }
-                });
-                lines.extend(cleanup_notice(view).map(remote));
-                if *cleanup == Cleanup::Running {
-                    Text::AccountSigningOut
-                } else {
-                    Text::AccountSignOutNeedsRetry
-                }
-            }
-            Some(AccountView::SignedIn { plan, recovery, .. }) => match recovery {
-                Some(AccountRecovery::SignInAgain) => Text::AccountSessionEnded,
-                Some(AccountRecovery::Retry) => {
-                    if !self.unsupported && self.error.is_none() {
-                        lines.push(Note(Text::AccountRetryHelp));
-                    }
-                    Text::AccountAttention
-                }
-                None => match plan {
-                    PlanState::Enabled => Text::AccountUsingPlan,
-                    PlanState::Declined => Text::AccountPlanOff,
-                    PlanState::Unavailable => Text::AccountUnavailable,
-                },
-            },
-        };
-        let status = if !self.unsupported {
-            status
-        } else if matches!(self.view, Some(AccountView::SigningOut { .. })) {
-            lines.push(Note(Text::UnsupportedPlatform));
-            status
-        } else {
-            Text::UnsupportedPlatform
-        };
+        let status = self.view_status(settings, &mut lines);
         lines.extend(self.status_error().map(|error| {
             if error.key() == ErrorKey::RevocationBacklog {
                 Backlog {
@@ -240,6 +171,114 @@ impl Accounts {
                 .then_some(SendFailed(Text::AccountSendFailed)),
         );
         (status, lines)
+    }
+
+    fn view_status(
+        &self,
+        settings: Option<&SettingsView>,
+        lines: &mut Vec<StatusLine<'_>>,
+    ) -> Text {
+        use StatusLine::{Local, Note, Remote};
+
+        let local = |error, help| Local {
+            heading: Text::AccountLocal,
+            error,
+            help,
+        };
+        let remote = |note| Remote {
+            heading: Text::AccountRemote,
+            note,
+        };
+        let status = match &self.view {
+            None => settings.map_or(Text::AccountOffline, |_| Text::AccountWaiting),
+            Some(AccountView::SignedOut {
+                revocation_unconfirmed,
+            }) => {
+                if *revocation_unconfirmed {
+                    lines.push(remote(Text::AccountRevocationUnconfirmed));
+                } else if !self.unsupported {
+                    lines.push(Note(Text::AccountUsePlan));
+                }
+                Text::AccountSignedOut
+            }
+            Some(AccountView::SigningIn) => {
+                lines.extend((!self.unsupported).then_some(Note(Text::AccountReplaceHelp)));
+                Text::AccountSigningIn
+            }
+            Some(AccountView::Busy) => {
+                lines.extend((!self.unsupported).then_some(Note(Text::AccountBusyHelp)));
+                Text::AccountBusy
+            }
+            Some(AccountView::SavedSignInUnavailable {
+                reason,
+                checkable,
+                checking,
+                revocation_unconfirmed,
+            }) => {
+                let status = if *checking || self.waiting == Some(AccountOp::CheckSavedSignIn) {
+                    Text::AccountCheckingSavedSignIn
+                } else {
+                    lines.push(Note(if *checkable {
+                        Text::AccountSavedSignInCheckHelp
+                    } else {
+                        Text::AccountSavedSignInChangedHelp
+                    }));
+                    match reason {
+                        SavedSignInFailure::Missing => Text::AccountSavedSignInMissing,
+                        SavedSignInFailure::Malformed => Text::AccountSavedSignInMalformed,
+                        SavedSignInFailure::Unavailable => Text::AccountSavedSignInUnreadable,
+                        SavedSignInFailure::Changed => Text::AccountSavedSignInChanged,
+                    }
+                };
+                if *revocation_unconfirmed {
+                    lines.push(remote(Text::AccountEarlierRevocationUnconfirmed));
+                }
+                return status;
+            }
+            Some(view @ AccountView::SigningOut { cleanup, .. }) => {
+                lines.push(match cleanup {
+                    Cleanup::Running => Note(Text::AccountStopped),
+                    Cleanup::Refused => {
+                        local(Text::AccountCleanupRefused, Text::AccountCleanupRefusedHelp)
+                    }
+                    Cleanup::NotDurable => {
+                        local(Text::AccountNotDurable, Text::AccountNotDurableHelp)
+                    }
+                });
+                lines.extend(cleanup_notice(view).map(remote));
+                if *cleanup == Cleanup::Running {
+                    Text::AccountSigningOut
+                } else {
+                    Text::AccountSignOutNeedsRetry
+                }
+            }
+            Some(AccountView::SignedIn { plan, recovery, .. }) => match recovery {
+                Some(AccountRecovery::LoadModels) => {
+                    lines.push(Note(Text::AccountLoadModelsHelp));
+                    Text::AccountSavedSignInRecovered
+                }
+                Some(AccountRecovery::SignInAgain) => Text::AccountSessionEnded,
+                Some(AccountRecovery::Retry) => {
+                    if !self.unsupported && self.error.is_none() {
+                        lines.push(Note(Text::AccountRetryHelp));
+                    }
+                    Text::AccountAttention
+                }
+                None => match plan {
+                    PlanState::Enabled => Text::AccountUsingPlan,
+                    PlanState::Declined => Text::AccountPlanOff,
+                    PlanState::Unavailable => Text::AccountUnavailable,
+                },
+            },
+        };
+        if !self.unsupported {
+            status
+        } else if matches!(self.view, Some(AccountView::SigningOut { .. })) {
+            lines.push(Note(Text::UnsupportedPlatform));
+            status
+        } else {
+            Text::UnsupportedPlatform
+        }
     }
 
     pub fn status_identity(&self, strings: &Strings) -> Option<String> {
@@ -276,6 +315,9 @@ impl Accounts {
                         recovery: None,
                         ..
                     })
+                ) | (
+                    ErrorKey::CredentialsUnavailable,
+                    Some(AccountView::SavedSignInUnavailable { .. })
                 )
             )
         })
@@ -286,9 +328,11 @@ impl Accounts {
             return false;
         }
         if self.unsupported
-            && (matches!(op, AccountOp::SignIn | AccountOp::EnablePlan)
-                || op == AccountOp::Retry
-                    && !matches!(self.view, Some(AccountView::SigningOut { .. })))
+            && (matches!(
+                op,
+                AccountOp::SignIn | AccountOp::EnablePlan | AccountOp::LoadModels
+            ) || op == AccountOp::Retry
+                && !matches!(self.view, Some(AccountView::SigningOut { .. })))
         {
             return false;
         }
@@ -305,6 +349,14 @@ impl Accounts {
             | (Some(AccountView::SigningIn), AccountOp::CancelSignIn)
             | (Some(AccountView::SignedIn { .. }), AccountOp::SignOut)
             | (
+                Some(AccountView::SavedSignInUnavailable {
+                    checkable: true,
+                    checking: false,
+                    ..
+                }),
+                AccountOp::CheckSavedSignIn,
+            )
+            | (
                 Some(
                     AccountView::Busy
                     | AccountView::SigningOut {
@@ -317,8 +369,11 @@ impl Accounts {
             (Some(AccountView::SignedIn { plan, recovery, .. }), op) => match op {
                 AccountOp::SignIn => self.sign_in_again(),
                 AccountOp::EnablePlan => recovery.is_none() && *plan == PlanState::Declined,
+                AccountOp::LoadModels => *recovery == Some(AccountRecovery::LoadModels),
                 AccountOp::Retry => {
-                    *recovery == Some(AccountRecovery::Retry) || self.error_action(Action::Retry)
+                    *recovery != Some(AccountRecovery::LoadModels)
+                        && (*recovery == Some(AccountRecovery::Retry)
+                            || self.error_action(Action::Retry))
                 }
                 _ => false,
             },

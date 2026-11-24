@@ -250,7 +250,7 @@ fn account_actions(
         }
         _ => {}
     }
-    actions = actions.children(account_retry_button(state, button));
+    actions = actions.children(account_recovery_button(state, button));
     if !state.unsupported
         && matches!(
             state.view,
@@ -279,10 +279,33 @@ fn account_actions(
     actions
 }
 
-fn account_retry_button(
+fn account_recovery_button(
     state: &Accounts,
     button: impl FnOnce(&'static str, Text, AccountOp) -> Button,
 ) -> Option<Button> {
+    if matches!(
+        state.view,
+        Some(AccountView::SavedSignInUnavailable {
+            checkable: true,
+            ..
+        })
+    ) {
+        return Some(
+            button(
+                "account-check-again",
+                Text::AccountCheckAgain,
+                AccountOp::CheckSavedSignIn,
+            )
+            .outline(),
+        );
+    }
+    if state.allows(AccountOp::LoadModels) || state.waiting == Some(AccountOp::LoadModels) {
+        return Some(button(
+            "account-load-models",
+            Text::AccountLoadModels,
+            AccountOp::LoadModels,
+        ));
+    }
     if !state.allows(AccountOp::Retry) && state.waiting != Some(AccountOp::Retry) {
         return None;
     }
