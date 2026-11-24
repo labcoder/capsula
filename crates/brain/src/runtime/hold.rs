@@ -239,7 +239,7 @@ impl Default for Holds {
             #[cfg(not(test))]
             screen_time_left: crate::platform::qpc_left,
             #[cfg(test)]
-            screen_time_left: |_| Some(screen::MAX_TTL),
+            screen_time_left: |_| Some(crate::screen::MAX_TTL),
             screen_events,
             screen_answers,
         }

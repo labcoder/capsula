@@ -118,7 +118,7 @@ impl std::fmt::Debug for ScreenEvent {
             .field("key", &self.key)
             .field("generation", &self.generation)
             .field("outcome", &outcome)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
