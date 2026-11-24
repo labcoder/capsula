@@ -265,12 +265,7 @@ impl Presence {
                         .as_ref()
                         .is_some_and(|session| session.generation() == generation)
                     {
-                        self.threads.update(cx, |model, cx| {
-                            model.issue_unavailable(request, draft, kind);
-                            cx.notify();
-                        });
-                        self.chat.update(cx, |_, cx| cx.notify());
-                        self.fail_issue_review(request, draft, cx);
+                        self.issue_unavailable(request, draft, kind, cx);
                     }
                 }
                 LinkEvent::Focus {

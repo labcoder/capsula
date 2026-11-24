@@ -1,6 +1,6 @@
 use super::{Presence, messages::Messages};
 use gpui_kit::{AnyWindowHandle, Context, WeakEntity};
-use kumochi_protocol::message::{DraftId, IssueCard, IssueOp};
+use kumochi_protocol::message::{DraftId, IssueCard, IssueOp, IssueUnavailableKind};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -72,6 +72,16 @@ impl Presence {
         cx: &mut Context<'_, Self>,
     ) {
         self.review(cx, |reviews| reviews.fail(request, draft));
+    }
+
+    pub(in crate::presence) fn issue_unavailable(
+        &mut self,
+        request: u64,
+        draft: DraftId,
+        kind: IssueUnavailableKind,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.review(cx, |reviews| reviews.unavailable(request, draft, kind));
     }
 
     pub(super) fn confirm_issue_review(
