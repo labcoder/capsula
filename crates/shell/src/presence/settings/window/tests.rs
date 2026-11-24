@@ -98,7 +98,7 @@ fn a_failed_settings_hide_preserves_the_edit_and_defers_close_effects(cx: &mut T
     assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
 
     owner.update(cx, |owner, cx| {
-        owner.dismiss_settings(cx).expect("retry close")
+        owner.dismiss_settings(cx).expect("retry close");
     });
     assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
     view.read_with(cx, |view, _| {
@@ -186,7 +186,10 @@ fn settings_close_after_reconnect_waits_for_each_sign_in_snapshot(cx: &mut TestA
         ],
         cx,
     );
-    assert_eq!(drain(&controls), [CANCELS[1].clone()]);
+    assert_eq!(
+        drain(&controls).as_slice(),
+        std::slice::from_ref(&CANCELS[1])
+    );
     owner.read_with(cx, |owner, _| {
         assert_eq!(
             [owner.settings_chatgpt, owner.settings_claude],
