@@ -38,6 +38,10 @@ impl CaptureDeadline {
             stamp,
         }
     }
+
+    pub(crate) fn is_live(self, left_until: fn(u64) -> Option<std::time::Duration>) -> bool {
+        Instant::now() < self.until && left_until(self.stamp).is_some_and(|left| !left.is_zero())
+    }
 }
 
 /// The hold protocol: the screen worker's argument and caps, the actor's messages.

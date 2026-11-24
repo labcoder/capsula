@@ -8,6 +8,12 @@ const DEADLINE: &str = "TEST_SCREEN_CLOCK_DEADLINE";
 const READING: &str = "remaining_ns=";
 
 #[test]
+fn a_zero_clock_sample_is_unreadable() {
+    assert_eq!(read_sample(0), None);
+    assert_eq!(read_sample(1), Some(1));
+}
+
+#[test]
 fn deadline_stamps_are_nanoseconds_and_refuse_overflow() {
     assert_eq!(stamp(10, Duration::ZERO), Some(10));
     assert_eq!(stamp(10, Duration::from_nanos(1)), Some(11));

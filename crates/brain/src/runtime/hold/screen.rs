@@ -84,6 +84,7 @@ impl std::fmt::Debug for ScreenPart {
 pub(in crate::runtime) struct ScreenEvent {
     pub(super) key: HoldKey,
     pub(super) generation: Option<Generation>,
+    pub(super) deadline: CaptureDeadline,
     pub(super) outcome: Outcome,
 }
 
@@ -96,6 +97,13 @@ pub(super) enum Outcome {
     /// The worker's system can't capture a window; the part closes `NotReady` and the brain
     /// remembers it until it restarts, across shell reconnects.
     Unsupported,
+}
+
+#[derive(PartialEq, Eq)]
+pub(super) enum ScreenAcceptance {
+    None,
+    ExpiredHeld,
+    Sealed,
 }
 
 impl std::fmt::Debug for ScreenEvent {
@@ -199,6 +207,7 @@ impl super::Holds {
             key,
             aim,
             deadline,
+            self.screen_time_left,
             stop,
             self.screen_events.clone(),
         )));
@@ -238,10 +247,11 @@ impl super::Holds {
 
     /// Takes a task's answer into the capturing part it belongs to and drops any other: a dropped
     /// image zeroes, and a dropped `Held` retires its frame.
-    pub(super) fn screen_event(&mut self, event: ScreenEvent) {
+    pub(super) fn screen_event(&mut self, event: ScreenEvent) -> ScreenAcceptance {
         let ScreenEvent {
             key,
             generation,
+            deadline,
             outcome,
         } = event;
         let waiting = self.pending.as_mut().filter(|hold| hold.key == key);
@@ -249,24 +259,45 @@ impl super::Holds {
             if matches!(outcome, Outcome::Held) {
                 retire(self.screen.as_ref(), key, generation);
             }
-            return;
+            return ScreenAcceptance::None;
         };
         let (ScreenPart::Waiting {
-            generation: holder, ..
+            generation: holder,
+            stop,
+            ..
         }
         | ScreenPart::Capturing {
-            generation: holder, ..
+            generation: holder,
+            stop,
+            ..
         }) = &mut hold.screen
         else {
-            return;
+            return ScreenAcceptance::None;
         };
+        let expired = Closed::Refused(Refusal::Expired);
         match outcome {
-            Outcome::Held if holder.is_none() => *holder = generation,
-            Outcome::Held => retire(self.screen.as_ref(), key, generation),
+            Outcome::Held if holder.is_none() && deadline.is_live(self.screen_time_left) => {
+                *holder = generation;
+            }
+            Outcome::Held if holder.is_none() => {
+                stop.store(true, Ordering::SeqCst);
+                hold.screen = ScreenPart::Closed(class(expired));
+                retire(self.screen.as_ref(), key, generation);
+                return ScreenAcceptance::ExpiredHeld;
+            }
+            Outcome::Held => {}
             _ if *holder != generation => {}
-            Outcome::Sealed(context) => {
+            Outcome::Sealed(context) if deadline.is_live(self.screen_time_left) => {
                 tracing::info!("hold screen part sealed");
                 hold.screen = ScreenPart::Ready(context);
+                return ScreenAcceptance::Sealed;
+            }
+            Outcome::Sealed(_) | Outcome::Closed(Closed::Refused(Refusal::Expired)) => {
+                tracing::info!(closed = ?expired, "hold screen part closed");
+                hold.screen = ScreenPart::Closed(class(expired));
+                if generation.is_some() {
+                    retire(self.screen.as_ref(), key, generation);
+                }
             }
             Outcome::Closed(closed) => {
                 tracing::info!(?closed, "hold screen part closed");
@@ -278,6 +309,7 @@ impl super::Holds {
                 hold.screen = ScreenPart::Closed(ScreenClass::NotReady);
             }
         }
+        ScreenAcceptance::None
     }
 
     /// Closes the pending hold's screen part for a hold that ends without a run.
@@ -531,6 +563,7 @@ async fn work(
     key: HoldKey,
     aim: Aim,
     deadline: CaptureDeadline,
+    left_until: fn(u64) -> Option<Duration>,
     stop: Arc<AtomicBool>,
     events: mpsc::Sender<ScreenEvent>,
 ) {
@@ -538,6 +571,7 @@ async fn work(
         events.send(ScreenEvent {
             key,
             generation,
+            deadline,
             outcome,
         })
     };
@@ -563,23 +597,30 @@ async fn work(
         }
     };
     let generation = Some(held.generation);
-    let ended = report(generation, Outcome::Held).await.is_err() || stop.load(Ordering::SeqCst);
-    let outcome = if ended {
+    if report(generation, Outcome::Held).await.is_err() || stop.load(Ordering::SeqCst) {
         release(&client, key, generation).await;
-        None
-    } else {
-        Some(match client.seal(held, deadline.until).await {
+        return;
+    }
+    let expired = Closed::Refused(Refusal::Expired);
+    let outcome = if deadline.is_live(left_until) {
+        match client.seal(held, deadline.until).await {
             Ok(context) => Outcome::Sealed(context),
             Err(closed) => {
-                release(&client, key, generation).await;
+                if closed != expired {
+                    release(&client, key, generation).await;
+                }
                 ending(closed)
             }
-        })
+        }
+    } else {
+        Outcome::Closed(expired)
     };
-    if let Some(outcome) = outcome
-        && report(generation, outcome).await.is_err()
-    {
+    let needs_release = matches!(outcome, Outcome::Closed(closed) if closed == expired);
+    if report(generation, outcome).await.is_err() {
         tracing::debug!("a held screen answer came after its brain");
+        if needs_release {
+            release(&client, key, generation).await;
+        }
     }
 }
 

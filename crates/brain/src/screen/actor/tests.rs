@@ -287,9 +287,13 @@ enum Clock {
     Manual,
     Realtime,
     StampOnly,
+    ExpireOnSeal,
 }
 
 static STAMP_ELAPSED_MS: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static SEAL_EXPIRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 impl Rig {
     fn start(foreground: Option<Gate>, capture: Option<Gate>, walk: Option<Gate>) -> Self {
@@ -354,13 +358,27 @@ impl Rig {
                 },
                 {
                     let mut screen = Screen::default();
-                    screen.unchanged = unchanged;
+                    screen.unchanged = if matches!(clock_mode, Clock::ExpireOnSeal) {
+                        |target| {
+                            SEAL_EXPIRED.set(true);
+                            unchanged(target)
+                        }
+                    } else {
+                        unchanged
+                    };
                     screen.display_at = |bounds| (bounds == DISPLAY).then_some((DISPLAY, 120));
                     screen.left_until = match clock_mode {
                         Clock::StampOnly => |stamp| {
                             let left =
                                 stamp.checked_sub(STAMP_ELAPSED_MS.load(Ordering::SeqCst))?;
                             (left > 0).then(|| Duration::from_millis(left))
+                        },
+                        Clock::ExpireOnSeal => |stamp| {
+                            if SEAL_EXPIRED.get() {
+                                None
+                            } else {
+                                MILLIS_LEFT(stamp)
+                            }
                         },
                         Clock::Manual | Clock::Realtime => MILLIS_LEFT,
                     };
@@ -432,7 +450,7 @@ fn stamp_expiry_without_local_time_passing_refuses_start_and_discards_a_late_fra
         entered.recv_timeout(PATIENCE).unwrap();
         STAMP_ELAPSED_MS.store(FAR, Ordering::SeqCst);
         release.send(()).unwrap();
-        assert_eq!(rig.reply(), (1, Reply::Refused(Refusal::Stale)));
+        assert_eq!(rig.reply(), (1, Reply::Refused(Refusal::Expired)));
         if during_capture {
             rig.scrubbed();
         } else {
@@ -442,6 +460,19 @@ fn stamp_expiry_without_local_time_passing_refuses_start_and_discards_a_late_fra
         assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Stale)));
         rig.finish();
     }
+}
+
+#[test]
+fn a_stamp_that_expires_inside_seal_never_publishes_the_encoded_image() {
+    let rig = Rig::create(None, None, None, Clock::ExpireOnSeal, None);
+    rig.send(1, &context(1));
+    rig.acquired(1);
+    rig.send(2, &Request::Seal(key(1)));
+    assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Expired)));
+    rig.scrubbed();
+    rig.send(3, &Request::Seal(key(1)));
+    assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Stale)));
+    rig.finish();
 }
 
 #[test]
@@ -691,7 +722,7 @@ fn actor_clock_expiry_scrubs_a_returning_capture_without_a_new_request() {
     entered.recv_timeout(PATIENCE).unwrap();
     *rig.clock.lock().unwrap() += Duration::from_secs(31);
     release.send(()).unwrap();
-    assert_eq!(rig.reply(), (1, Reply::Refused(Refusal::Stale)));
+    assert_eq!(rig.reply(), (1, Reply::Refused(Refusal::Expired)));
     rig.scrubbed();
     rig.finish();
 }

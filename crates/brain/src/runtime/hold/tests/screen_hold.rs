@@ -152,6 +152,7 @@ fn answer(generation: Option<Generation>, outcome: Outcome) -> Event {
     Event::Screen(ScreenEvent {
         key: KEY,
         generation,
+        deadline: screen_deadline(),
         outcome,
     })
 }

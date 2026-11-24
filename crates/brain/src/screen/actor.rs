@@ -126,6 +126,7 @@ struct Capture {
     ticket: TicketWire,
     received: Instant,
     ink: Vec<PhysicalPoint>,
+    expired: bool,
 }
 
 /// Serves stdin/stdout after the caller initializes content-free logging. Replies go to an
@@ -205,7 +206,6 @@ fn run(
 ) -> Result<(), frame::FrameError> {
     let mut fence: Option<Owner> = None;
     let mut current = None;
-    let mut live = false;
     let mut expires: Option<Deadline> = None;
     let mut capturing: Option<Capture> = None;
     let mut walking: Option<(u64, Key, Instant)> = None;
@@ -225,7 +225,9 @@ fn run(
         if let Some(deadline) = expires {
             expires = deadline.tighten(now());
             if expires.is_none() {
-                live = false;
+                if let Some(pending) = &mut capturing {
+                    pending.expired = true;
+                }
                 screen.clear();
             }
         }
@@ -267,8 +269,10 @@ fn run(
                         if current.is_some_and(|held: Key| held.owner != key.owner) {
                             screen.clear();
                         }
-                        live = false;
                         expires = None;
+                        if let Some(pending) = &mut capturing {
+                            pending.expired = false;
+                        }
                         let admitted = screen.admit(&ticket, received, now);
                         current = Some(key);
                         let retired = fence.is_some_and(|fence| key.owner <= fence);
@@ -294,7 +298,6 @@ fn run(
                                 };
                                 match native.begin(job) {
                                     None => {
-                                        live = true;
                                         expires = Some(deadline);
                                         capturing = Some(Capture {
                                             id,
@@ -302,6 +305,7 @@ fn run(
                                             ticket,
                                             received,
                                             ink: ink.map(|ink| ink.0).unwrap_or_default(),
+                                            expired: false,
                                         });
                                     }
                                     Some(mut job) => {
@@ -321,11 +325,13 @@ fn run(
                     #[cfg(debug_assertions)]
                     Request::Fault(_) => None,
                     Request::Seal(key) => {
-                        if !live || current != Some(key) || capturing.is_some() || walking.is_some()
+                        if expires.is_none()
+                            || current != Some(key)
+                            || capturing.is_some()
+                            || walking.is_some()
                         {
                             send(id, Reply::Refused(Refusal::Stale))?;
                         } else {
-                            live = false;
                             let deadline = expires.take().expect("a live capture has a deadline");
                             match screen.seal(key.capture, JPEG_CAP).and_then(|context| {
                                 deadline.tighten(now()).ok_or(Refusal::Expired)?;
@@ -354,8 +360,10 @@ fn run(
                             send(id, Reply::Refused(Refusal::Stale))?;
                         } else {
                             if matches {
-                                live = false;
                                 expires = None;
+                                if let Some(pending) = &mut capturing {
+                                    pending.expired = false;
+                                }
                                 screen.clear();
                             }
                             if releasing.len() == QUEUE {
@@ -368,10 +376,14 @@ fn run(
                     }
                 };
                 if let Some((key, target)) = walk {
-                    if !live || current != Some(key) || capturing.is_some() || walking.is_some() {
+                    if expires.is_none()
+                        || current != Some(key)
+                        || capturing.is_some()
+                        || walking.is_some()
+                    {
                         send(id, Reply::Refused(Refusal::Stale))?;
                     } else {
-                        match screen.walk_job(key.capture, target, now) {
+                        let immediate = match screen.walk_job(key.capture, target, now) {
                             Ok(Ok(job)) => {
                                 let until = job.until + CONNECTION_TIMEOUT + TRANSACTION_TIMEOUT;
                                 match screen
@@ -382,23 +394,28 @@ fn run(
                                     .expect("validated reader")
                                     .begin(job)
                                 {
-                                    Ok(()) => walking = Some((id, key, until)),
-                                    Err(walked) => {
-                                        send(id, Reply::Elements(key, walked.tree))?;
-                                        if walked.retire {
-                                            return Ok(());
-                                        }
+                                    Ok(()) => {
+                                        walking = Some((id, key, until));
+                                        None
                                     }
+                                    Err(walked) => Some(walked),
                                 }
                             }
-                            Ok(Err(walked)) => {
-                                send(id, Reply::Elements(key, walked.tree))?;
-                                if walked.retire {
-                                    return Ok(());
-                                }
-                            }
+                            Ok(Err(walked)) => Some(walked),
                             Err(Failure::Retire(_)) => return Ok(()),
-                            Err(error) => send(id, failed(error))?,
+                            Err(error) => {
+                                send(id, failed(error))?;
+                                None
+                            }
+                        };
+                        if let Some(walked) = immediate {
+                            send(
+                                id,
+                                walk_reply(key, walked.tree, &mut expires, &mut screen, now()),
+                            )?;
+                            if walked.retire {
+                                return Ok(());
+                            }
                         }
                     }
                 }
@@ -410,8 +427,10 @@ fn run(
             Some(Event::Wake) | None => {}
         }
         if expires.is_some_and(|deadline| now() >= deadline.until) {
-            live = false;
             expires = None;
+            if let Some(pending) = &mut capturing {
+                pending.expired = true;
+            }
             screen.clear();
         }
         match native.poll() {
@@ -421,9 +440,15 @@ fn run(
                 if matches!(result, Err(Failure::Retire(_))) {
                     return Ok(());
                 }
-                if !live || current != Some(key) || key != pending.key {
+                if expires.is_none() || current != Some(key) || key != pending.key {
                     screen.clear();
-                    send(pending.id, Reply::Refused(Refusal::Stale))?;
+                    let why =
+                        if pending.expired && current == Some(pending.key) && key == pending.key {
+                            Refusal::Expired
+                        } else {
+                            Refusal::Stale
+                        };
+                    send(pending.id, Reply::Refused(why))?;
                 } else {
                     let result = result.and_then(|(acquired, shown)| {
                         let (surface, foreground) = match &shown {
@@ -447,7 +472,6 @@ fn run(
                             send(pending.id, Reply::Complete(key))?;
                         }
                         Err(error) => {
-                            live = false;
                             expires = None;
                             screen.clear();
                             send(pending.id, failed(error))?;
@@ -469,8 +493,11 @@ fn run(
                 match result {
                     Err(Failure::Retire(_)) => return Ok(()),
                     Ok(walked) if walked.retire => return Ok(()),
-                    Ok(walked) if live && current == Some(key) => {
-                        send(id, Reply::Elements(key, walked.tree))?;
+                    Ok(walked) if expires.is_some() && current == Some(key) => {
+                        send(
+                            id,
+                            walk_reply(key, walked.tree, &mut expires, &mut screen, now()),
+                        )?;
                     }
                     _ => send(id, Reply::Refused(Refusal::Stale))?,
                 }
@@ -483,6 +510,22 @@ fn run(
                 send(id, Reply::Released(owner, capture))?;
             }
         }
+    }
+}
+
+fn walk_reply(
+    key: Key,
+    tree: ElementTree,
+    expires: &mut Option<Deadline>,
+    screen: &mut Screen,
+    now: Instant,
+) -> Reply {
+    *expires = expires.and_then(|deadline| deadline.tighten(now));
+    if expires.is_none() {
+        screen.clear();
+        Reply::Refused(Refusal::Expired)
+    } else {
+        Reply::Elements(key, tree)
     }
 }
 

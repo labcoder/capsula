@@ -26,7 +26,7 @@ use crate::coordinator::{HoldKey, HoldSnapshot};
 use crate::platform::ShellProcess;
 use crate::screen::HoldClient;
 use crate::voice::stt::{Decode, SttHandle, SttResult};
-use screen::{Outcome, ScreenEvent, ScreenPart, capturing};
+use screen::{Outcome, ScreenAcceptance, ScreenEvent, ScreenPart, capturing};
 
 #[derive(Debug)]
 enum FailureStage {
@@ -151,6 +151,8 @@ pub(super) struct Holds {
     notice: Option<NoticeRevision>,
     /// How long ago a shell's input stamp was taken; tests replace the clock.
     stamp_age: fn(u64) -> Option<Duration>,
+    /// The worker grant's remaining budget, independently of the brain's wake timer.
+    screen_time_left: fn(u64) -> Option<Duration>,
     /// Where each hold's screen task sends its answers.
     screen_events: mpsc::Sender<ScreenEvent>,
     screen_answers: mpsc::Receiver<ScreenEvent>,
@@ -234,6 +236,10 @@ impl Default for Holds {
             screen_sent: None,
             notice: None,
             stamp_age: crate::platform::qpc_age,
+            #[cfg(not(test))]
+            screen_time_left: crate::platform::qpc_left,
+            #[cfg(test)]
+            screen_time_left: |_| Some(screen::MAX_TTL),
             screen_events,
             screen_answers,
         }
@@ -1106,7 +1112,7 @@ impl Brain {
         if unsupported {
             self.holds.window_capture = false;
         }
-        let lease = match event.outcome {
+        let mut lease = match event.outcome {
             _ if event.key.epoch != self.epoch => None,
             Outcome::Held => Some(ControlToShell::CaptureDone { capture_for }),
             Outcome::Closed(_) | Outcome::Unsupported if event.generation.is_none() => {
@@ -1117,11 +1123,15 @@ impl Brain {
             }
             Outcome::Sealed(_) | Outcome::Closed(_) | Outcome::Unsupported => None,
         };
+        let accepted = self.holds.screen_event(event);
+        if accepted == ScreenAcceptance::ExpiredHeld && lease.is_some() {
+            lease = Some(ControlToShell::CaptureFailed {
+                capture_for,
+                reason: CaptureFailure::Unavailable,
+            });
+        }
         #[cfg(test)]
-        let sealed = matches!(event.outcome, Outcome::Sealed(_));
-        self.holds.screen_event(event);
-        #[cfg(test)]
-        if sealed {
+        if accepted == ScreenAcceptance::Sealed {
             self.observer.send(super::Seen::PictureSealed).ok();
         }
         if let Some(message) = lease {
