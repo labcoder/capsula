@@ -49,9 +49,13 @@ A current link refusal also returns a dock rollback as soon as the optimistic ch
 so native placement doesn't wait for a settings snapshot that can be lost on disconnect.
 
 **Model** (`shell-core/settings/model.rs`): Presence hands each `DataToShell::Models` catalog to
-the settings model, which keeps one per connection that has an engine (ChatGPT, and Claude Code
-once it lists models) and drops them on disconnect. Core builds the choices, selection and Fluent
-labels; General draws one radio per choice and asks Core to send
+the settings model, which keeps one per connection and drops them on disconnect. Core presents
+the offered catalogs in a fixed order (ChatGPT, Anthropic API key, Claude Code) and preserves each
+catalog's model ranking. It checks the newest queued or saved choice by connection and slug, so
+moving rows or showing the same slug on two connections doesn't change what's checked. General
+also keeps keyboard focus on the same connection and slug as rows move within a link generation.
+If that radio disappears or the link reconnects, focus returns to the Settings frame instead
+of the row that took its place. General draws one radio per choice and asks Core to send
 `SetDefaultModel` with the newest choice's wanted effort on the same connection, else `Low`.
 The brain resolves ChatGPT's actual request effort at admission; this layer doesn't rewrite
 the saved choice to match the catalog.

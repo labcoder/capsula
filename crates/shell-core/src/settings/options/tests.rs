@@ -71,6 +71,51 @@ fn a_key_row_always_names_the_key_and_another_only_on_a_shared_name() {
 }
 
 #[test]
+fn catalog_arrival_does_not_order_providers_or_change_the_checked_model() {
+    let row = |slug| ModelInfo {
+        slug: ModelSlug::new(slug).expect("slug"),
+        display_name: ModelName::new(slug).expect("name"),
+        supported_efforts: None,
+    };
+    let strings = Strings::english();
+    let mut model = Settings::default();
+    let mut snapshot = saved();
+    snapshot.default_model = Some(ModelChoice {
+        model: row("shared").slug,
+        effort: Effort::Low,
+        connection: ChatGpt,
+    });
+    model.set_view(snapshot, Update::Unsolicited);
+    model.set_models(ClaudeCode, vec![row("shared")]);
+    model.set_models(ChatGpt, vec![row("z-first"), row("shared")]);
+    model.set_models(AnthropicKey, vec![row("key")]);
+
+    let (mut rows, checked) = model.default_model_options(&strings);
+    assert_eq!(
+        rows.iter()
+            .map(|(connection, slug, _)| (*connection, slug.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (ChatGpt, "z-first"),
+            (ChatGpt, "shared"),
+            (AnthropicKey, "key"),
+            (ClaudeCode, "shared"),
+        ]
+    );
+    assert_eq!(checked, Some(1));
+
+    model.set_models(ChatGpt, vec![row("z-first"), row("shared")]);
+    assert_eq!(
+        model.default_model_options(&strings),
+        (rows.clone(), Some(1))
+    );
+
+    model.set_models(ChatGpt, vec![row("shared"), row("z-first")]);
+    rows.swap(0, 1);
+    assert_eq!(model.default_model_options(&strings), (rows, Some(0)));
+}
+
+#[test]
 fn the_checked_dock_cell_follows_saved_pending_and_refused_choices() {
     for (position, index) in [
         (DockPosition::TopLeft, 0),

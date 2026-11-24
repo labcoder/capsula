@@ -1,11 +1,13 @@
 use kumochi_protocol::message::{
-    ConnectionKind, Effort, ModelChoice, ModelInfo, ModelName, ModelSlug, ThreadId,
+    ConnectionKind::{self, AnthropicKey, ChatGpt, ClaudeCode},
+    Effort, ModelChoice, ModelInfo, ModelName, ModelSlug, ThreadId,
 };
 
 use super::{
     AssistantName, DockPosition, ErrorKey, MaxFrameRate, Settings, SettingsOp, SettingsView,
     Update, UserError,
 };
+use crate::strings::Strings;
 
 fn info(slug: &str) -> ModelInfo {
     ModelInfo {
@@ -124,6 +126,91 @@ fn the_picker_offers_served_catalogs_and_a_refusal_returns_the_saved_default() {
     state.set_view(saved(answer.clone()), Update::Answer);
     assert_eq!(state.default_model_choice(), Some(&answer));
     assert!(!state.model_saving());
+}
+
+#[test]
+fn quick_picks_keep_their_connection_until_refusal_or_disconnect() {
+    let strings = Strings::english();
+    let selected = |state: &Settings| {
+        let (rows, checked) = state.default_model_options(&strings);
+        checked.map(|index| (rows[index].0, rows[index].1.clone()))
+    };
+    let mut state = Settings::default();
+    let gpt = choice("shared", Effort::Low, ChatGpt);
+    let claude = choice("shared", Effort::Low, ClaudeCode);
+    let key = choice("key", Effort::Low, AnthropicKey);
+    state.set_view(saved(gpt.clone()), Update::Unsolicited);
+    state.set_models(ChatGpt, vec![info("shared")]);
+    state.set_models(ClaudeCode, vec![info("shared")]);
+    state.set_models(AnthropicKey, vec![info("key")]);
+
+    for picked in [&claude, &gpt] {
+        let mut offered = None;
+        assert!(
+            state.send_default_model(picked.connection, picked.model.clone(), |op| {
+                offered = Some(op);
+                true
+            })
+        );
+        assert_eq!(offered, Some(SettingsOp::SetDefaultModel(picked.clone())));
+        assert_eq!(
+            selected(&state),
+            Some((picked.connection, picked.model.clone()))
+        );
+    }
+    state.set_models(ChatGpt, vec![info("another"), info("shared")]);
+    state.set_view(saved(claude.clone()), Update::Unsolicited);
+    assert_eq!(selected(&state), Some((ChatGpt, gpt.model.clone())));
+
+    let mut refused = None;
+    assert!(
+        !state.send_default_model(key.connection, key.model.clone(), |op| {
+            refused = Some(op);
+            false
+        })
+    );
+    assert_eq!(refused, Some(SettingsOp::SetDefaultModel(key)));
+    assert_eq!(selected(&state), Some((ChatGpt, gpt.model.clone())));
+
+    state.set_view(saved(claude.clone()), Update::Answer);
+    assert_eq!(selected(&state), Some((ChatGpt, gpt.model.clone())));
+    assert!(state.model_saving());
+    state.error(UserError::from(ErrorKey::SettingsRefused));
+    state.set_view(saved(claude.clone()), Update::Answer);
+    assert_eq!(selected(&state), Some((ClaudeCode, claude.model.clone())));
+    assert!(!state.model_saving());
+
+    assert!(state.send_default_model(ChatGpt, gpt.model.clone(), |_| true));
+    state.disconnected();
+    assert_eq!(state.default_model_options(&strings), (Vec::new(), None));
+    assert!(!state.model_saving());
+    assert!(!state.receive(Some(8), 7, saved(gpt.clone()), Update::Answer));
+    state.set_models(ClaudeCode, vec![info("shared")]);
+    assert!(state.receive(Some(8), 8, saved(claude.clone()), Update::Unsolicited));
+    assert_eq!(selected(&state), Some((ClaudeCode, claude.model)));
+    assert!(!state.model_saving());
+
+    state.set_models(ChatGpt, vec![info("shared")]);
+    assert!(state.send_default_model(ChatGpt, gpt.model.clone(), |_| true));
+    assert!(state.receive(Some(8), 8, saved(gpt.clone()), Update::Answer));
+    assert_eq!(selected(&state), Some((ChatGpt, gpt.model)));
+    assert!(!state.model_saving());
+}
+
+#[test]
+fn only_a_current_settings_view_supplies_the_picker_generation() {
+    let mut state = Settings::default();
+    let view = saved(choice("m-0", Effort::Low, ChatGpt));
+    assert_eq!(state.view_generation(), None);
+    assert!(state.receive(Some(7), 7, view.clone(), Update::Unsolicited));
+    assert!(!state.receive(Some(7), 6, view.clone(), Update::Unsolicited));
+    assert_eq!(state.view_generation(), Some(7));
+    state.disconnected();
+    assert_eq!(state.view_generation(), None);
+    assert!(!state.receive(Some(8), 7, view.clone(), Update::Answer));
+    assert_eq!(state.view_generation(), None);
+    assert!(state.receive(Some(8), 8, view, Update::Unsolicited));
+    assert_eq!(state.view_generation(), Some(8));
 }
 
 /// The name a notice shows is the newest default's, queued before saved, and a thread's own

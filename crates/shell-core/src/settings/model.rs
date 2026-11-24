@@ -12,10 +12,15 @@ impl Settings {
         self.models.retain(|(kind, _)| *kind != connection);
         if !models.is_empty() {
             self.models.push((connection, models));
+            self.models.sort_unstable_by_key(|(kind, _)| match kind {
+                ConnectionKind::ChatGpt => 0,
+                ConnectionKind::AnthropicKey => 1,
+                ConnectionKind::ClaudeCode => 2,
+            });
         }
     }
 
-    /// Every model on offer, catalog by catalog.
+    /// Every model on offer, in fixed connection order and each catalog's own model order.
     pub fn model_choices(&self) -> impl Iterator<Item = (ConnectionKind, &ModelInfo)> {
         self.models
             .iter()
