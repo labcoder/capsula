@@ -649,17 +649,11 @@ impl Presence {
 
 impl Drop for Presence {
     fn drop(&mut self) {
-        self.link.cancel_input();
-        self.runs.cancel_hold();
-        if let Some(message) = self.runs.take_hold_cancel()
-            && let Some(session) = &self.session
-            && !self.link.send_control(session, message)
-        {
-            self.link.end(session);
-        }
-        if let Some(session) = &self.session {
-            self.link.end(session);
-        }
+        kumochi_shell_core::presence::teardown::end_link(
+            &self.link,
+            self.session.as_ref(),
+            &mut self.runs,
+        );
     }
 }
 

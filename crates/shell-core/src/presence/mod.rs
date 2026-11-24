@@ -41,5 +41,6 @@ pub mod pulling;
 pub mod stage {
     pub mod machine;
 }
+pub mod teardown;
 pub mod thread_selection;
 pub mod typing;
