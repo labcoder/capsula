@@ -119,6 +119,8 @@ pub enum GitHubOp {
     SetDefaultRepo(RepoName),
     /// Recheck a saved identity or refetch its repositories using GET requests.
     RefreshRepos,
+    /// Load an unlisted verified account's repositories when Accounts opens.
+    ListReposIfUnlisted,
 }
 
 /// Connection presentation, without any bearer or device credential.
@@ -164,6 +166,13 @@ pub enum GitHubView {
         /// The previously saved account, not current authority.
         login: GitHubLogin,
     },
+    /// A verified account without a complete repository list for this generation.
+    ConnectedUnlisted {
+        /// The connected account.
+        login: GitHubLogin,
+        /// A repository refresh is in flight.
+        listing: bool,
+    },
 }
 
 impl fmt::Debug for GitHubView {
@@ -188,6 +197,10 @@ impl fmt::Debug for GitHubView {
             Self::NotInstalled { .. } => f.write_str("NotInstalled(..)"),
             Self::NeedsSignIn { .. } => f.write_str("NeedsSignIn(..)"),
             Self::NotVerified { .. } => f.write_str("NotVerified(..)"),
+            Self::ConnectedUnlisted { listing, .. } => f
+                .debug_struct("ConnectedUnlisted")
+                .field("listing", listing)
+                .finish_non_exhaustive(),
         }
     }
 }

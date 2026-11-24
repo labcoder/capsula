@@ -201,6 +201,187 @@ fn dismissal_never_cancels_background_verification_or_renewal(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn only_a_still_visible_accounts_visit_lists_on_the_first_handshake(cx: &mut TestAppContext) {
+    #[derive(Debug)]
+    enum Visit {
+        Never,
+        Open,
+        LeftTab,
+        ClosedSettings,
+    }
+
+    let _area = crate::platform::work_area_fixture::set([0, 0, 2560, 1400]);
+    let _cursor = crate::platform::cursor_fixture::scoped([100, 100]);
+    for (visit, expected) in [
+        (Visit::Never, None),
+        (Visit::Open, Some(GitHubOp::ListReposIfUnlisted)),
+        (Visit::LeftTab, None),
+        (Visit::ClosedSettings, None),
+    ] {
+        let owner = test_fixture::presence(cx);
+        let (window, controls) = owner.update(cx, |owner, cx| {
+            let (window, view) = detached_settings(owner, cx);
+            view.update(cx, |view, _| view.github_configured = Some(true));
+            owner.settings_panel.as_mut().unwrap().visible = true;
+            let controls = owner.link.record_controls();
+            if !matches!(visit, Visit::Never) {
+                owner.open_accounts(cx).unwrap();
+            }
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::State(LinkState::Connecting)]),
+                    cx,
+                )
+                .unwrap();
+            match visit {
+                Visit::LeftTab => owner.open_general(cx).unwrap(),
+                Visit::ClosedSettings => owner.dismiss_settings(cx).unwrap(),
+                Visit::Never | Visit::Open => {}
+            }
+            owner
+                .link_events(
+                    Batch::Plain(vec![LinkEvent::Connected(Session::detached(
+                        7,
+                        Incarnation(1),
+                    ))]),
+                    cx,
+                )
+                .unwrap();
+            (window, controls)
+        });
+        let github_ops = || {
+            std::iter::from_fn(|| controls.try_recv().ok())
+                .take(controls.len())
+                .filter_map(|control| match control {
+                    ControlToBrain::GitHub(op) => Some(op),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        receive_github(&owner, GitHubView::Requesting, cx);
+        assert!(github_ops().is_empty(), "{visit:?}");
+        receive_github(
+            &owner,
+            GitHubView::ConnectedUnlisted {
+                login: kumochi_protocol::message::GitHubLogin::new("saved-owner").unwrap(),
+                listing: false,
+            },
+            cx,
+        );
+        assert_eq!(github_ops(), expected.as_slice(), "{visit:?}");
+        drop(owner);
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn repository_refresh_follows_accounts_entry_not_snapshots_or_ordinary_renewal(
+    cx: &mut TestAppContext,
+) {
+    let (_, owner, controls) = github_panel(cx);
+    let login = kumochi_protocol::message::GitHubLogin::new("saved-owner").unwrap();
+    let unlisted = || GitHubView::ConnectedUnlisted {
+        login: login.clone(),
+        listing: false,
+    };
+    owner.update(cx, Presence::open_general).unwrap();
+    receive_github(&owner, unlisted(), cx);
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+
+    receive_github(&owner, GitHubView::Requesting, cx);
+    owner.update(cx, Presence::open_accounts).unwrap();
+    cx.run_until_parked();
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    receive_github(&owner, unlisted(), cx);
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::GitHub(GitHubOp::ListReposIfUnlisted))
+    );
+    receive_github(
+        &owner,
+        GitHubView::ConnectedUnlisted {
+            login: login.clone(),
+            listing: true,
+        },
+        cx,
+    );
+    receive_github(
+        &owner,
+        GitHubView::Connected {
+            login: login.clone(),
+            repos: Bounded::default(),
+            default: None,
+            truncated: false,
+        },
+        cx,
+    );
+    owner.update(cx, Presence::open_accounts).unwrap();
+    receive_github(&owner, GitHubView::Requesting, cx);
+    receive_github(&owner, unlisted(), cx);
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+
+    owner.update(cx, Presence::open_general).unwrap();
+    receive_github(&owner, GitHubView::Requesting, cx);
+    owner.update(cx, Presence::open_accounts).unwrap();
+    owner.update(cx, Presence::open_general).unwrap();
+    receive_github(&owner, unlisted(), cx);
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    owner.update(cx, Presence::open_accounts).unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::GitHub(GitHubOp::ListReposIfUnlisted))
+    );
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+}
+
+#[gpui::test]
+fn a_renewal_before_repository_listing_acknowledgment_still_serves_the_open_visit(
+    cx: &mut TestAppContext,
+) {
+    let (window, owner, controls) = github_panel(cx);
+    let unlisted = |listing| GitHubView::ConnectedUnlisted {
+        login: kumochi_protocol::message::GitHubLogin::new("saved-owner").unwrap(),
+        listing,
+    };
+    let list = Ok(ControlToBrain::GitHub(GitHubOp::ListReposIfUnlisted));
+    owner.update(cx, Presence::open_general).unwrap();
+    receive_github(&owner, unlisted(false), cx);
+    owner.update(cx, Presence::open_accounts).unwrap();
+    cx.run_until_parked();
+    assert_eq!(controls.try_recv(), list);
+    owner.update(cx, |owner, cx| {
+        owner
+            .link_events(
+                Batch::Plain(vec![
+                    LinkEvent::GitHub {
+                        generation: 7,
+                        view: GitHubView::Requesting,
+                    },
+                    LinkEvent::GitHub {
+                        generation: 7,
+                        view: unlisted(false),
+                    },
+                ]),
+                cx,
+            )
+            .unwrap();
+    });
+    cx.run_until_parked();
+    assert_eq!(controls.try_recv(), list);
+    receive_github(&owner, unlisted(true), cx);
+    click_github(window, "github-sign-out", cx);
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::GitHub(GitHubOp::SignOut))
+    );
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+}
+
+#[gpui::test]
 fn dismissal_preserves_an_interactive_sign_in_that_has_completed(cx: &mut TestAppContext) {
     let (window, owner, controls) = github_panel(cx);
     start_github(window, &controls, cx);
@@ -1116,12 +1297,12 @@ fn sign_out_confirmation_ownership_ends_on_refusal_tab_change_and_dismissal(
     frame.update(|window, cx| {
         assert!(window.has_active_dialog(cx));
         view.update(cx, |view, cx| {
-            view.select_tab(SettingsTab::General, window, cx);
+            view.select_tab(SettingsTab::General, None, window, cx);
         });
         assert!(!window.has_active_dialog(cx));
         assert!(view.read(cx).confirmation.is_none());
         view.update(cx, |view, cx| {
-            view.select_tab(SettingsTab::Accounts, window, cx);
+            view.select_tab(SettingsTab::Accounts, None, window, cx);
         });
     });
     click_github(window, "account-sign-out", cx);

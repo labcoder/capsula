@@ -6,10 +6,30 @@ pub(crate) use kumochi_shell_core::platform::{host, input, microphone};
 /// wherever the person at the desk left it.
 #[cfg(test)]
 pub(crate) mod cursor_fixture {
-    use std::cell::Cell;
+    use std::{cell::Cell, marker::PhantomData, rc::Rc};
 
     thread_local! {
         static AT: Cell<Option<Result<[i32; 2], ()>>> = const { Cell::new(None) };
+    }
+
+    #[derive(Debug)]
+    #[must_use]
+    pub(crate) struct Guard {
+        previous: Option<Result<[i32; 2], ()>>,
+        same_thread: PhantomData<Rc<()>>,
+    }
+
+    pub(crate) fn scoped(at: [i32; 2]) -> Guard {
+        Guard {
+            previous: AT.replace(Some(Ok(at))),
+            same_thread: PhantomData,
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            AT.set(self.previous);
+        }
     }
 
     /// Puts this test thread's pointer at `at`; none makes the read fail.

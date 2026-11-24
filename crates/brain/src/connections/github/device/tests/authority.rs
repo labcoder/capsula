@@ -39,7 +39,7 @@ async fn repository_authority_requires_a_complete_current_listing_and_is_revoked
     let effects = m.on(Input::Op(GitHubOp::RefreshRepos), Instant::now());
     assert!(matches!(effects.as_slice(), [
         Effect::RefreshRepos { generation: requested },
-        Effect::View(GitHubView::Connected { .. }),
+        Effect::View(GitHubView::ConnectedUnlisted { listing: true, .. }),
     ] if *requested == generation));
     assert_eq!(m.repositories(), None);
     stale(

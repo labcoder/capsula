@@ -323,18 +323,10 @@ async fn eof_and_close_preserve_an_already_connected_credential_and_only_publish
     settle_owner(&mut accounts).await;
     assert_eq!(accounts.github.machine().user().unwrap().id, 7);
     let snapshot = accounts.github.machine().view(Instant::now());
-    let GitHubView::Connected {
-        ref repos,
-        truncated,
-        default: ref selected,
-        ..
-    } = snapshot
-    else {
-        panic!("connected after the real fake-vault save")
-    };
-    assert_eq!(repos.len(), 0);
-    assert!(!truncated);
-    assert_eq!(*selected, None);
+    assert!(matches!(
+        snapshot,
+        GitHubView::ConnectedUnlisted { listing: true, .. }
+    ));
     let stamp = accounts.github.machine().stamp();
     assert!(matches!(accounts.github.suspended(), [
             (owner, GitHubEffect::RefreshRepos { generation }),
@@ -537,11 +529,9 @@ async fn a_loaded_user_request_survives_eof_and_settles_through_idle_before_repl
     let client = async {
         assert_eq!(
             replacement.control().await,
-            Some(ControlToShell::GitHub(GitHubView::Connected {
+            Some(ControlToShell::GitHub(GitHubView::ConnectedUnlisted {
                 login: kumochi_protocol::message::GitHubLogin::new("fresh").unwrap(),
-                repos: kumochi_scene::text::Bounded::default(),
-                truncated: false,
-                default: None,
+                listing: false,
             }))
         );
         assert!(replacement.scenes().await.is_empty());
