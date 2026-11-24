@@ -902,6 +902,12 @@ fn first_save_and_replacement_ignore_an_abandoned_temp() {
     let mut config = Config::load(Some(dir.clone()), ThreadId(1));
     for name_after_save in ["Nimbus", "Cirrus"] {
         std::fs::write(&temp, b"assistant_name = \"Abandoned\"\n").expect("stale temp");
+        assert_eq!(
+            Config::load(Some(dir.clone()), ThreadId(1))
+                .view()
+                .assistant_name,
+            config.view().assistant_name
+        );
         apply(
             &mut config,
             SettingsOp::SetAssistantName(name(name_after_save)),
@@ -914,7 +920,6 @@ fn first_save_and_replacement_ignore_an_abandoned_temp() {
             name_after_save
         );
     }
-    assert_eq!(saved(&path)["assistant_name"].as_str(), Some("Cirrus"));
 }
 
 #[test]

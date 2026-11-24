@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 use std::fs::{self, File};
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+use std::io::Write as _;
 
 /// No per-user runtime data root is configured on this platform.
 #[must_use]
@@ -23,7 +25,7 @@ pub fn config_dir() -> Option<PathBuf> {
 /// # Errors
 /// Fails for non-sibling paths, or when opening, syncing the source or renaming fails.
 ///
-/// The test process exits without cleanup if publication is uncertain.
+/// If publication is uncertain, exit status 78 tells the scratch runner to retain the root.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
     replace_with(from, to, |from, to| fs::rename(from, to), sync_publication)
@@ -51,8 +53,6 @@ fn replace_with(
         _ => {}
     }
 
-    use std::io::Write as _;
-
     std::io::stderr()
         .write_all(b"scratch file publication is uncertain; stopping without cleanup\n")
         .ok();
@@ -79,7 +79,7 @@ pub fn replace_file(_: &Path, _: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-/// The bytes available to unprivileged writes on the filesystem containing a Linux test path.
+/// The bytes available to the caller on the filesystem containing a Unix test path.
 ///
 /// # Errors
 /// Fails when the path's filesystem can't be queried or the byte count overflows.
@@ -154,6 +154,11 @@ mod tests {
         assert_eq!(fs::read(&to).expect("old file"), b"old");
 
         fs::write(&from, b"new").expect("replacement");
+        let error =
+            replace_file(&from, &scratch.join("other")).expect_err("destination is a directory");
+        assert_eq!(error.kind(), io::ErrorKind::IsADirectory);
+        assert_eq!(fs::read(&unrelated).expect("unrelated file"), b"unrelated");
+        assert_eq!(fs::read(&from).expect("staged file"), b"new");
         replace_file(&from, &to).expect("rename and sync");
         assert_eq!(fs::read(&to).expect("new file"), b"new");
         assert!(!from.exists(), "the source name was moved");
