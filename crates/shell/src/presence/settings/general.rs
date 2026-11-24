@@ -1,6 +1,6 @@
 #[cfg(test)]
 use gpui_kit::InteractiveElement as _;
-use gpui_kit::base::RadioGroup as PositionGroup;
+use gpui_kit::base::{RadioGroup as BaseRadioGroup, v_flex};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::clipboard::Clipboard;
@@ -118,7 +118,7 @@ impl SettingsView {
             .gap_2()
             .child(div().text_sm().child(label.clone()))
             .child(
-                PositionGroup::new("settings-dock-position")
+                BaseRadioGroup::new("settings-dock-position")
                     .aria_label(label)
                     .grid()
                     .grid_cols(3)
@@ -225,42 +225,45 @@ impl SettingsView {
         let strings = cx.global::<Strings>();
         let state = self.model.read(cx);
         let (choices, selected) = state.default_model_options(strings);
-        let (picks, radios): (Vec<_>, Vec<_>) = choices
+        let count = choices.len();
+        let generation = state.view_generation();
+        let radios = choices
             .into_iter()
             .enumerate()
             .map(|(ix, (connection, slug, label))| {
-                let radio = Radio::new(("default-model", ix)).label(label);
+                let owner = self.owner.clone();
+                let radio = Radio::new(format!("{connection:?}:{}", slug.as_str()))
+                    .label(label)
+                    .checked(selected == Some(ix))
+                    .disabled(state.view().is_none())
+                    .aria_position_in_set(ix + 1)
+                    .aria_size_of_set(count)
+                    .on_change(move |_, _, cx| {
+                        let _gone = owner.update(cx, |owner, cx| {
+                            owner.save_default_model(connection, slug.clone(), cx);
+                        });
+                    });
                 #[cfg(test)]
                 let radio = radio.debug_selector(move || format!("default-model-{ix}"));
-                ((connection, slug), radio)
-            })
-            .unzip();
-        let owner = self.owner.clone();
+                radio
+            });
         div()
             .flex()
             .flex_col()
             .gap_1()
             .child(div().text_sm().child(strings.get(Text::DefaultModel)))
-            .children(radios.is_empty().then(|| {
+            .children((count == 0).then(|| {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(strings.get(Text::ModelsNotListed))
             }))
-            .when(!radios.is_empty(), |row| {
-                row.child(
-                    RadioGroup::vertical("default-model")
-                        .children(radios)
-                        .selected_index(selected)
-                        .disabled(state.view().is_none())
-                        .on_click(move |&ix, _, cx| {
-                            if let Some((connection, slug)) = picks.get(ix).cloned() {
-                                let _gone = owner.update(cx, |owner, cx| {
-                                    owner.save_default_model(connection, slug, cx);
-                                });
-                            }
-                        }),
-                )
+            .when(count != 0, |row| {
+                let group = generation.map_or_else(
+                    || BaseRadioGroup::new("default-model"),
+                    |generation| BaseRadioGroup::new(("default-model", generation)),
+                );
+                row.child(group.flex_1().child(v_flex().gap_3().children(radios)))
             })
             .children(
                 state
@@ -309,6 +312,9 @@ impl SettingsView {
             )
     }
 }
+
+#[cfg(test)]
+mod model_picker_tests;
 
 #[cfg(test)]
 pub(super) mod tests {

@@ -162,6 +162,7 @@ pub struct Settings {
     pub key_paste: crate::key_paste::KeyPaste,
     pub native_taskbar_notice: Option<Text>,
     view: Option<SettingsView>,
+    view_generation: Option<u64>,
     notice: Option<UserError>,
     notice_slot: Option<Slot>,
     assistant: FieldState,
@@ -175,7 +176,7 @@ pub struct Settings {
     stt_error: Option<UserError>,
     stt_send_failed: bool,
     talk_back_send_error: Option<Text>,
-    /// Each catalog on offer, in arrival order.
+    /// Each catalog on offer, in picker order.
     models: Vec<(ConnectionKind, Vec<ModelInfo>)>,
     /// The newest default model sent and not yet answered.
     model_queued: Option<ModelChoice>,
@@ -209,6 +210,7 @@ impl Settings {
                 state.error = None;
             }
         }
+        self.view_generation = Some(generation);
         let _completion = self.set_view(view, update);
         true
     }
@@ -281,6 +283,11 @@ impl Settings {
 
     pub fn view(&self) -> Option<&SettingsView> {
         self.view.as_ref()
+    }
+
+    /// The link generation that supplied the current settings view.
+    pub fn view_generation(&self) -> Option<u64> {
+        self.view_generation
     }
 
     pub fn notice(&self) -> Option<&UserError> {
@@ -640,6 +647,7 @@ impl Settings {
             });
         }
         self.view = None;
+        self.view_generation = None;
         self.speech_input = None;
         self.speech_generation = None;
         self.speech_error = None;
