@@ -221,6 +221,177 @@ fn speech_lease_starts_at_due_nonzero_pcm_and_silence_does_not_extend_it() {
     );
 }
 
+fn long_callback(nonzero: &[usize], prefilled: usize, occupied: &'static AtomicBool) -> Physical {
+    use crate::platform::speaker_cpal::Presented;
+
+    let (mut transport, mut playback) = FakePlayback::open(Arc::default(), occupied);
+    let source = Source {
+        run: RUN,
+        generation: 1,
+        segment: SegmentId(0),
+        at: 0,
+    };
+    for at in 0..prefilled {
+        transport
+            .submit(
+                &[16_384],
+                PacketKind::More,
+                Source {
+                    at: u64::try_from(at).unwrap(),
+                    ..source
+                },
+            )
+            .unwrap();
+        playback.fill(&mut [0.0], INSTANT);
+        assert_eq!(
+            transport.presentation().unwrap().through,
+            u64::try_from(at + 1).unwrap()
+        );
+    }
+    let source = Source {
+        at: u64::try_from(prefilled).unwrap(),
+        ..source
+    };
+    let mut input = vec![0; 17_280];
+    for &frame in nonzero {
+        input[frame] = 16_384;
+    }
+    let (packets, tail) = input.as_chunks::<480>();
+    assert!(tail.is_empty());
+    let mut packets = packets.iter().enumerate().peekable();
+    let mut refill = || {
+        while let Some(&(index, samples)) = packets.peek() {
+            match transport.submit(
+                samples,
+                PacketKind::More,
+                Source {
+                    at: source.at + u64::try_from(index * 480).unwrap(),
+                    ..source
+                },
+            ) {
+                Ok(()) => {
+                    packets.next();
+                }
+                Err(OutputError::Full) => break,
+                Err(error) => panic!("staging failed: {error}"),
+            }
+        }
+    };
+    refill();
+    let mut pcm = vec![99.0; input.len()];
+    let ((), activity) =
+        crate::allocation::activity(|| playback.fill_with_refill(&mut pcm, INSTANT, refill));
+    assert_eq!(activity, [0, 0]);
+    assert!(packets.next().is_none());
+    let copied = pcm
+        .iter()
+        .enumerate()
+        .filter(|(_, sample)| sample.to_bits() != 0)
+        .map(|(frame, sample)| (frame, sample.to_bits()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        copied,
+        nonzero
+            .iter()
+            .map(|&frame| (frame, 0.5_f32.to_bits()))
+            .collect::<Vec<_>>()
+    );
+    let through = source.at + 17_280;
+    assert_eq!(playback.handed(), through);
+    assert_eq!(
+        transport.presentation(),
+        Some(Presented {
+            source,
+            first: source.at,
+            through,
+            at: Some(Duration::from_nanos(719_958_333)),
+        })
+    );
+    assert_eq!(transport.presentation(), None);
+
+    Physical {
+        generation: source.generation,
+        transport,
+        flushed: None,
+        power: Power::Playing,
+        retire_deadline: None,
+        watchdog: None,
+        pending_sound: Vec::with_capacity(PRESENTATION_SLOTS * 2),
+    }
+}
+
+#[test]
+fn intermediate_nonzero_pcm_keeps_esc_during_one_long_callback() {
+    static OCCUPIED: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
+    let ms = Duration::from_millis;
+    let ns = Duration::from_nanos;
+
+    for (occupied, (frame, checkpoint, last, expiry)) in OCCUPIED.iter().zip([
+        (16_800, ms(600), ms(700), ms(1200)),
+        (12_000, ns(499_999_999), ms(500), ms(1000)),
+    ]) {
+        let mut route = long_callback(&[0, 11_760, frame], 0, occupied);
+        let speech = Speech::new(async_channel::bounded(1).0);
+        let origin = Instant::now().checked_sub(ms(720)).unwrap();
+
+        route.observe_sound(&speech, origin, checkpoint);
+        assert_eq!(
+            speech.until_at(origin + checkpoint),
+            Some(origin + ms(990)),
+            "the due 490 ms frame keeps Esc, not the future frame"
+        );
+        route.observe_sound(&speech, origin, last);
+        let expiry = origin + expiry;
+        assert_eq!(
+            speech.until_at(expiry.checked_sub(ns(1)).unwrap()),
+            Some(expiry)
+        );
+        assert_eq!(speech.until_at(expiry), None);
+    }
+}
+
+#[test]
+fn a_real_long_silent_gap_releases_esc_until_the_next_nonzero_frame() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let mut route = long_callback(&[0, 16_801], 0, &OCCUPIED);
+    let speech = Speech::new(async_channel::bounded(1).0);
+    let ms = Duration::from_millis;
+    let origin = Instant::now().checked_sub(ms(720)).unwrap();
+    let onset = Duration::from_nanos(700_041_666);
+
+    route.observe_sound(&speech, origin, ms(600));
+    assert_eq!(speech.until_at(origin + ms(600)), None);
+    let before_onset = onset.checked_sub(Duration::from_nanos(1)).unwrap();
+    route.observe_sound(&speech, origin, before_onset);
+    assert_eq!(speech.until_at(origin + ms(700)), None);
+    route.observe_sound(&speech, origin, onset);
+    let expiry = origin + onset + ms(500);
+    assert_eq!(
+        speech.until_at(expiry.checked_sub(Duration::from_nanos(1)).unwrap()),
+        Some(expiry)
+    );
+    assert_eq!(speech.until_at(expiry), None);
+}
+
+#[test]
+fn a_full_optional_ring_can_drop_long_callback_evidence_without_extending_esc() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let mut route = long_callback(&[0, 11_760, 16_800], PRESENTATION_SLOTS - 1, &OCCUPIED);
+    let speech = Speech::new(async_channel::bounded(1).0);
+    let ms = Duration::from_millis;
+    let origin = Instant::now().checked_sub(ms(720)).unwrap();
+
+    let ((), activity) =
+        crate::allocation::activity(|| route.observe_sound(&speech, origin, ms(720)));
+    assert_eq!(activity, [0, 0]);
+    assert_eq!(speech.until_at(origin + ms(989)), Some(origin + ms(990)));
+    assert_eq!(
+        speech.until_at(origin + ms(990)),
+        None,
+        "dropping the 700 ms frame can miss Esc, not extend ownership"
+    );
+}
+
 #[test]
 fn late_worker_publication_does_not_revive_expired_speech() {
     static OCCUPIED: AtomicBool = AtomicBool::new(false);

@@ -170,6 +170,10 @@ retirement. See [the capture inhibit](voice.md#the-capture-inhibit) for the inpu
 
 The worker also publishes a `Speech` lease for Esc: positive presentation evidence that
 expires on its own. [Esc](input.md#esc) describes it. It never stands in for a quiet receipt.
+The callback normally sends one first/last nonzero pair to a separate, optional ring.
+If extending a pair would reach 500 ms, it keeps that pair and starts another from
+the current copy's actual timestamps. It sends at most eight pairs after copying;
+capacity loss drops some Esc evidence without delaying PCM, receipts or Stop.
 
 Once the brain's Stop has been queued, a queued stop closes admission immediately. If the
 owner is busy, Presence can offer the same stop again; an undeliverable stop ends the pair.

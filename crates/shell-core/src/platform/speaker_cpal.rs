@@ -12,6 +12,8 @@ use kumochi_protocol::message::{MAX_RATE, MIN_RATE};
 use thiserror::Error;
 use zeroize::{Zeroize as _, Zeroizing};
 
+use crate::speaker::SPEECH_GRACE;
+
 mod control;
 #[expect(
     unsafe_code,
@@ -312,11 +314,33 @@ struct ReadyBlock {
     stamp: Option<Stamp>,
 }
 
+type SoundSpan = (Duration, Duration);
+
+#[derive(Default)]
+struct SoundSpans {
+    current: Option<SoundSpan>,
+    cutoff: Duration,
+    earlier: Option<([SoundSpan; BLOCKS - 1], usize)>,
+}
+
+impl SoundSpans {
+    fn publish(&self, output: &mut Producer<SoundSpan>) {
+        if let Some((earlier, count)) = &self.earlier {
+            for &span in earlier.iter().take(*count) {
+                let _optional_evidence = output.push(span);
+            }
+        }
+        if let Some(span) = self.current {
+            let _optional_evidence = output.push(span);
+        }
+    }
+}
+
 struct Submit {
     free: Consumer<usize>,
     ready: Producer<ReadyBlock>,
     observed: Consumer<Presented>,
-    sound: Consumer<(Duration, Duration)>,
+    sound: Consumer<SoundSpan>,
     conversion: Option<Conversion>,
     blocks: [Arc<Block>; BLOCKS],
     spare: Option<usize>,
@@ -333,7 +357,7 @@ struct Playback {
     free: Producer<usize>,
     ready: Consumer<ReadyBlock>,
     observed: Producer<Presented>,
-    sound: Producer<(Duration, Duration)>,
+    sound: Producer<SoundSpan>,
     current: Option<ReadyBlock>,
     recycle: Option<usize>,
     offset: usize,
@@ -500,7 +524,7 @@ impl Playback {
     ) {
         let total = out.len();
         let mut report: Option<Presented> = None;
-        let mut sound = None;
+        let mut sound = SoundSpans::default();
         let mut worked = false;
         let limit = usize::try_from(self.rate / 400).expect("bounded output rate") * self.channels;
         let interruption = loop {
@@ -593,9 +617,7 @@ impl Playback {
             self.last = 0.0;
         }
         if worked {
-            if let Some(sound) = sound {
-                let _optional_evidence = self.sound.push(sound);
-            }
+            sound.publish(&mut self.sound);
             self.control.wake();
         }
     }
@@ -674,7 +696,7 @@ impl Playback {
 
     fn note_sound(
         &self,
-        sound: &mut Option<(Duration, Duration)>,
+        sound: &mut SoundSpans,
         out: &[f32],
         start: Option<Duration>,
         offset: usize,
@@ -683,15 +705,29 @@ impl Playback {
         let Some(end) = frame_time(start, offset + last, self.rate) else {
             return;
         };
-        if let Some((_, last)) = sound {
-            *last = end;
-        } else if let Some(first) = out
+        if let Some((first, last)) = &mut sound.current {
+            if end < sound.cutoff {
+                *last = end;
+                return;
+            }
+            let (earlier, count) = sound
+                .earlier
+                .get_or_insert(([(Duration::ZERO, Duration::ZERO); BLOCKS - 1], 0));
+            let Some(slot) = earlier.get_mut(*count) else {
+                return;
+            };
+            *slot = (*first, *last);
+            *count += 1;
+            sound.current = None;
+        }
+        if let Some(first) = out
             .chunks_exact(self.channels)
             .take(last + 1)
             .position(|frame| frame[0].abs() > 0.0)
             .and_then(|first| frame_time(start, offset + first, self.rate))
         {
-            *sound = Some((first, end));
+            sound.current = Some((first, end));
+            sound.cutoff = first.saturating_add(SPEECH_GRACE);
         }
     }
 }

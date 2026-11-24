@@ -20,6 +20,7 @@ pub use tail::{FAULT, RELEASED, Snapshot, Tail, UNKNOWN};
 
 pub(crate) const DRAIN: Duration = Duration::from_millis(500);
 pub(crate) const STALL: Duration = Duration::from_millis(200);
+pub(crate) const SPEECH_GRACE: Duration = Duration::from_millis(500);
 
 /// Commands observed by the capture-inhibit fixtures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

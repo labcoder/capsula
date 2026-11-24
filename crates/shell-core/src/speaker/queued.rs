@@ -12,6 +12,8 @@ use kumochi_protocol::message::{
 };
 use zeroize::Zeroize as _;
 
+use super::SPEECH_GRACE;
+
 mod backend;
 mod receipts;
 mod timeline;
@@ -76,9 +78,6 @@ impl Drop for Packet {
         self.pcm.samples.zeroize();
     }
 }
-
-/// How long a presented frame keeps speech evidence.
-const SPEECH_GRACE: Duration = Duration::from_millis(500);
 
 /// Expiring evidence that a run's audio is presenting: it holds Esc, never admits a microphone.
 #[derive(Clone)]

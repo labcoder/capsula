@@ -276,8 +276,8 @@ the overlay is showing scene frames (`Presenter::drawn`), or run steps show in t
 panel. Mirrored, preparing and recovering scenes that aren't painted yet don't hold it, and an
 open status panel alone never does.
 
-Speech holds it too, from positive evidence only. The device callback reports the first and last
-nonzero device frames copied from speech each callback, separately from progress receipts. The worker waits
+Speech holds it too, from positive evidence only. The device callback reports first and last
+nonzero frames in groups spanning less than 500 ms, separately from progress receipts. The worker waits
 until those timestamps are due on the current route and holds Esc to 500 ms past the latest due
 nonzero evidence. A silent block neither arms nor extends the lease. Late evidence cannot shorten
 it, and Stop or route retirement discards the lease and any scheduled evidence. This checks PCM
