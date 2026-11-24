@@ -292,6 +292,7 @@ pub(super) struct RunLedger {
     /// A replacement it drew failed before anything of it was shown, so this thread's earlier
     /// drawings are gone; told once the run can't repair it, and dropped when the user ended it.
     pub(super) loss: Option<ThreadId>,
+    pub(super) loss_told: bool,
     /// What its screen scenes may be drawn on; `None` while `draw` can't mark the screen.
     pub(super) canvas: Option<Result<crate::context::Geometry, crate::context::NoCanvas>>,
     pub(super) author: super::Author,
@@ -739,7 +740,9 @@ impl Drawing {
             Bound::Held(scene) => Some(*scene),
             Bound::None | Bound::New(_) => None,
         };
-        let full = self.ledger(run).steps >= MAX_DRAW_STEPS_PER_RUN;
+        let ledger = self.ledger(run);
+        let full = ledger.steps >= MAX_DRAW_STEPS_PER_RUN;
+        let loss_suppressed = ledger.loss_told;
         if existing.is_none() {
             if full {
                 return Err(in_step(&step, ErrorCode::OverBudget(Budget::Steps)));
@@ -829,7 +832,7 @@ impl Drawing {
             step,
             fenced: false,
             clear_requested: false,
-            loss_dropped: false,
+            loss_suppressed,
             interrupted: None,
             laid: None,
             author,
@@ -1106,7 +1109,7 @@ impl Drawing {
             }) = &mut self.pending
             && write.run <= closed
         {
-            write.loss_dropped = true;
+            write.loss_suppressed = true;
         }
         self.release_closed(closed, out);
         let calls: Vec<_> = self
@@ -1188,6 +1191,7 @@ impl Drawing {
                     failed: false,
                     exhausted: false,
                     loss: None,
+                    loss_told: false,
                     canvas: None,
                     author: super::Author::Public,
                 });
