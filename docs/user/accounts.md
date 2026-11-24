@@ -26,6 +26,21 @@ wait until it reconnects and reports the current state.
 If earlier sessions still need to end, new sign-in stays unavailable. Choose **Retry**;
 the panel separates the immediate recovery from the expiry and ChatGPT settings help.
 
+## Check a saved sign-in
+
+If the app can't read your saved ChatGPT sign-in, Settings → Accounts and the onboarding
+account step say why: part of it wasn't found, its format wasn't recognized, it couldn't be
+read, or it changed. The app doesn't use the account while the saved sign-in is unavailable.
+This doesn't mean it was permanently lost.
+
+Choose **Check again** to reread the saved sign-in on this computer. The panel shows when
+the check is running and reports the result. This check doesn't open a browser, contact
+OpenAI, or delete or replace the saved sign-in. It's separate from **Retry** and **Sign out…**.
+After a successful local check, choose **Load models** if shown to contact ChatGPT and resume
+using your plan. If the app couldn't verify which saved sign-in to check or it changed, the
+panel doesn't offer **Check again**. Restarting checks the current sign-in as part of normal
+startup, which may also run account maintenance.
+
 ## Sign out
 
 **Sign out…** asks first. **Cancel** or Escape leaves the account alone. Confirming stops

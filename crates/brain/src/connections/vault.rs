@@ -7,6 +7,7 @@ use std::path::Path;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::constants::{CREDENTIAL_SERVICE, account_targets, anthropic_staging_target};
+use kumochi_protocol::message::SavedSignInFailure;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use zeroize::Zeroizing;
@@ -25,6 +26,14 @@ pub(crate) mod staging;
 
 /// Removed generations one sweep pass visits [guess]; the rest wait for the next pass.
 const SWEEP: usize = 16;
+
+/// The observed `ChatGPT` head and its local read result.
+#[derive(Debug)]
+pub struct SavedSignIn {
+    pub(super) revision: u64,
+    pub(super) notice: bool,
+    pub(super) account: Result<Option<Secret<Account>>, SavedSignInFailure>,
+}
 
 /// A save's durable outcome.
 #[derive(Debug)]
@@ -191,6 +200,53 @@ impl<S: CredentialStore> Vault<S> {
             return Ok(None);
         }
         self.read(Kind::Account)
+    }
+
+    pub(super) fn saved_sign_in(
+        &self,
+        expected: Option<u64>,
+    ) -> Result<SavedSignIn, SavedSignInFailure> {
+        use SavedSignInFailure::{Changed, Malformed, Missing, Unavailable};
+
+        let marker = self.marker().map_err(|_| Unavailable)?;
+        if marker.sign_out.is_some() {
+            return Err(Unavailable);
+        }
+        let (revision, active) = self.authority.observe(Kind::Account).map_err(|error| {
+            if matches!(error, authority::AuthorityError::Corrupt) {
+                Malformed
+            } else {
+                Unavailable
+            }
+        })?;
+        if expected.is_some_and(|expected| expected != revision) {
+            return Err(Changed);
+        }
+        let account =
+            active.map_err(|_| Malformed).and_then(|active| {
+                active
+                    .map(|active| {
+                        let bytes = generation::read_active(&self.store, &self.service, &active)
+                            .map_err(|error| match error {
+                                authority::AuthorityError::MissingChunk => Missing,
+                                authority::AuthorityError::WrongChunkLength
+                                | authority::AuthorityError::Store(
+                                    CredentialStoreError::InvalidBlob,
+                                ) => Malformed,
+                                _ => Unavailable,
+                            })?;
+                        let account: Account =
+                            decode(&bytes, MAX_RECORD_BYTES).map_err(|_| Malformed)?;
+                        account.validate().map_err(|_| Malformed)?;
+                        Ok(Secret::new(account))
+                    })
+                    .transpose()
+            });
+        Ok(SavedSignIn {
+            revision,
+            notice: marker.notice,
+            account,
+        })
     }
 
     /// Reads the fenced account only for sign-out preparation and registration-only deletion.

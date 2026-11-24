@@ -566,6 +566,7 @@ impl Brain {
                 self.hold_end(HoldStatus::Failed(HoldFailure::ChoiceChanged), link)?;
                 return Ok(false);
             }
+            ControlToBrain::AccountOp(op) if !op.changes_hold_route() => return Ok(false),
             ControlToBrain::Settings(SettingsOp::SetDefaultModel(_))
             | ControlToBrain::AccountOp(_)
             | ControlToBrain::Connection(_) => {

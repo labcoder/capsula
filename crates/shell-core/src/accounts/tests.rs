@@ -2,17 +2,19 @@ use kumochi_protocol::message::AccountEmail;
 
 use super::{
     AccountOp, AccountRecovery, AccountView, Accounts, Action, Cleanup, ErrorKey, PlanState,
-    StatusLine, UserError, cleanup_notice,
+    SavedSignInFailure, StatusLine, UserError, cleanup_notice,
 };
 use crate::link::LinkEvent;
 use crate::strings::Text;
 
-const OPS: [AccountOp; 5] = [
+const OPS: [AccountOp; 7] = [
     AccountOp::SignIn,
     AccountOp::CancelSignIn,
     AccountOp::SignOut,
     AccountOp::EnablePlan,
     AccountOp::Retry,
+    AccountOp::CheckSavedSignIn,
+    AccountOp::LoadModels,
 ];
 
 fn signed_out() -> AccountView {
@@ -84,6 +86,134 @@ fn a_platform_refusal_cannot_retry_or_sign_in_again() {
     ));
     assert!(!accounts.receive(Some(8), 7, signed_out()));
     assert_eq!(allowed(&accounts), [AccountOp::SignOut]);
+}
+
+#[test]
+fn unavailable_saved_sign_in_explains_each_reason_and_only_offers_the_local_check() {
+    for (reason, status, help) in [
+        (
+            SavedSignInFailure::Missing,
+            Text::AccountSavedSignInMissing,
+            Text::AccountSavedSignInCheckHelp,
+        ),
+        (
+            SavedSignInFailure::Malformed,
+            Text::AccountSavedSignInMalformed,
+            Text::AccountSavedSignInCheckHelp,
+        ),
+        (
+            SavedSignInFailure::Unavailable,
+            Text::AccountSavedSignInUnreadable,
+            Text::AccountSavedSignInCheckHelp,
+        ),
+        (
+            SavedSignInFailure::Changed,
+            Text::AccountSavedSignInChanged,
+            Text::AccountSavedSignInChangedHelp,
+        ),
+    ] {
+        let mut accounts = Accounts::default();
+        assert!(accounts.receive_snapshot(
+            Some(7),
+            LinkEvent::AccountUnsupported {
+                generation: 7,
+                view: AccountView::SavedSignInUnavailable {
+                    reason,
+                    checkable: reason != SavedSignInFailure::Changed,
+                    checking: false,
+                    revocation_unconfirmed: true,
+                },
+            },
+        ));
+        if reason == SavedSignInFailure::Changed {
+            assert!(allowed(&accounts).is_empty());
+        } else {
+            assert_eq!(allowed(&accounts), [AccountOp::CheckSavedSignIn]);
+        }
+        assert_eq!(
+            accounts.status(None),
+            (
+                status,
+                vec![
+                    StatusLine::Note(help),
+                    StatusLine::Remote {
+                        heading: Text::AccountRemote,
+                        note: Text::AccountEarlierRevocationUnconfirmed,
+                    },
+                ],
+            )
+        );
+    }
+}
+
+#[test]
+fn saved_sign_in_check_stays_pending_until_an_authoritative_result() {
+    let view = |checking| AccountView::SavedSignInUnavailable {
+        reason: SavedSignInFailure::Missing,
+        checkable: true,
+        checking,
+        revocation_unconfirmed: false,
+    };
+    let op = AccountOp::CheckSavedSignIn;
+    let mut accounts = Accounts::default();
+    let mut sent = Vec::new();
+    receive(&mut accounts, view(false));
+    accounts.error(&error(
+        ErrorKey::CredentialsUnavailable,
+        vec![Action::Retry, Action::SignIn],
+    ));
+    assert_eq!(allowed(&accounts), [op]);
+    assert!(!accounts.send(op, |_| false));
+    assert_eq!(allowed(&accounts), [op]);
+    assert_eq!(
+        accounts.status(None),
+        (
+            Text::AccountSavedSignInMissing,
+            vec![
+                StatusLine::Note(Text::AccountSavedSignInCheckHelp),
+                StatusLine::SendFailed(Text::AccountSendFailed),
+            ],
+        )
+    );
+    press(&mut accounts, op, &mut sent);
+    receive(&mut accounts, view(false));
+    assert_eq!(allowed(&accounts), [op]);
+    press(&mut accounts, op, &mut sent);
+    assert!(!accounts.receive(Some(7), 6, view(false)));
+    assert_eq!(accounts.waiting, Some(op));
+    assert_eq!(
+        accounts.status(None),
+        (Text::AccountCheckingSavedSignIn, vec![])
+    );
+    receive(&mut accounts, view(true));
+    assert_eq!(allowed(&accounts), []);
+    assert_eq!(
+        accounts.status(None),
+        (Text::AccountCheckingSavedSignIn, vec![])
+    );
+    receive(&mut accounts, view(false));
+    assert_eq!(allowed(&accounts), [op]);
+    assert_eq!(
+        accounts.status(None),
+        (
+            Text::AccountSavedSignInMissing,
+            vec![StatusLine::Note(Text::AccountSavedSignInCheckHelp)],
+        )
+    );
+    press(&mut accounts, op, &mut sent);
+    receive(&mut accounts, view(true));
+    receive(
+        &mut accounts,
+        signed_in(PlanState::Enabled, Some(AccountRecovery::LoadModels)),
+    );
+    assert_eq!(
+        allowed(&accounts),
+        [AccountOp::SignOut, AccountOp::LoadModels]
+    );
+    receive(&mut accounts, signed_in(PlanState::Enabled, None));
+    assert_eq!(allowed(&accounts), [AccountOp::SignOut]);
+    assert_eq!(accounts.status(None), (Text::AccountUsingPlan, vec![]));
+    assert_eq!(sent, [op, op, op]);
 }
 
 #[test]

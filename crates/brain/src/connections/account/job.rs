@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::Secret;
+use kumochi_protocol::message::SavedSignInFailure;
 use zeroize::Zeroizing;
 
 use crate::connections::clock::Clock;
@@ -15,7 +16,7 @@ use crate::connections::marker::{MarkerUpdate, SignOutMarker};
 use crate::connections::records::{
     Account, MAX_EXCHANGES, Origin, Revocable, RevocationList, entry_fits,
 };
-use crate::connections::vault::{DeleteResult, SaveResult, Vault};
+use crate::connections::vault::{DeleteResult, SaveResult, SavedSignIn, Vault};
 use crate::platform::credential::{CredentialStore, NativeCredentialStore};
 
 /// How often a patient load tries the session lock [guess]: Windows releases a dead brain's
@@ -39,6 +40,8 @@ pub enum Job {
         /// Retry Busy a few times first, as at startup.
         patient: bool,
     },
+    /// Read only the saved `ChatGPT` sign-in under the already-held lock.
+    CheckSavedSignIn(u64),
     /// Save a new registration before its exchange, so the issued client survives a failure.
     Register(Secret<Account>),
     /// Merge one lane fact into the marker.
@@ -83,6 +86,7 @@ impl fmt::Debug for Job {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Load { .. } => "Load",
+            Self::CheckSavedSignIn(_) => "CheckSavedSignIn",
             Self::Register(_) => "Register",
             Self::Marker(_) => "Marker",
             Self::Commit(_) => "Commit",
@@ -101,6 +105,8 @@ impl fmt::Debug for Job {
 pub enum Done {
     /// The account's state, or why it couldn't be read: Busy, or the lock failed.
     Loaded(Result<Box<Snapshot>, VaultError>),
+    /// The local saved sign-in reread.
+    CheckedSavedSignIn(Result<SavedSignIn, SavedSignInFailure>),
     /// The registration's save.
     Registered(SaveResult),
     /// The marker write.
@@ -143,7 +149,7 @@ pub struct Snapshot {
     /// This machine's host id, created on first use.
     pub host: Result<Secret<Zeroizing<String>>, VaultError>,
     /// The account, never usable while a sign-out is pending.
-    pub account: Result<Option<Secret<Account>>, VaultError>,
+    pub account: Result<SavedSignIn, SavedSignInFailure>,
     /// The revocation list's entries, after age-out unless a sign-out is pending.
     pub revocable: Result<Vec<Secret<Revocable>>, VaultError>,
 }
@@ -259,6 +265,14 @@ impl<S: CredentialStore> Worker<S> {
             let tries = if patient { BUSY_TRIES } else { 1 };
             return Done::Loaded(self.load(tries).map(Box::new));
         }
+        if let Job::CheckSavedSignIn(expected) = job {
+            return Done::CheckedSavedSignIn(
+                self.vault
+                    .as_ref()
+                    .ok_or(SavedSignInFailure::Unavailable)
+                    .and_then(|vault| vault.saved_sign_in(Some(expected))),
+            );
+        }
         let aged = matches!(job, Job::Relist { age_out: true, .. })
             .then(|| self.now_for_age_out())
             .flatten();
@@ -272,7 +286,7 @@ impl<S: CredentialStore> Worker<S> {
         let Some(vault) = self.vault.as_mut() else {
             let refused = || SaveResult::NotCommitted(VaultError::Busy);
             return match job {
-                Job::Load { .. } => unreachable!("handled above"),
+                Job::Load { .. } | Job::CheckSavedSignIn(_) => unreachable!("handled above"),
                 Job::Register(_) => Done::Registered(refused()),
                 Job::Marker(_) => Done::Marked(Err(VaultError::Busy)),
                 Job::Commit(_) => Done::Committed {
@@ -292,7 +306,7 @@ impl<S: CredentialStore> Worker<S> {
             };
         };
         match job {
-            Job::Load { .. } => unreachable!("handled above"),
+            Job::Load { .. } | Job::CheckSavedSignIn(_) => unreachable!("handled above"),
             Job::Register(account) => Done::Registered(vault.save_account(&account)),
             Job::Marker(update) => Done::Marked(vault.update_marker(update).map(drop)),
             Job::Commit(account) => commit(vault, &account, added_at),
@@ -393,7 +407,7 @@ impl<S: CredentialStore> Worker<S> {
                 return Ok(Snapshot {
                     marker: Err(error),
                     host: Err(VaultError::Fenced),
-                    account: Err(VaultError::Fenced),
+                    account: Err(SavedSignInFailure::Unavailable),
                     revocable: Err(VaultError::Fenced),
                 });
             }
@@ -430,7 +444,7 @@ impl<S: CredentialStore> Worker<S> {
         Ok(Snapshot {
             marker: Ok(marker),
             host: vault.host_id(),
-            account: vault.load_account(),
+            account: vault.saved_sign_in(None),
             revocable,
         })
     }

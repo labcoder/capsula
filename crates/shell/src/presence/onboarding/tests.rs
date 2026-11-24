@@ -10,7 +10,7 @@ use kumochi_protocol::message::{
     AccountEmail, AccountOp, AccountRecovery, AccountView, Action, AssistantName, ClaudeCodeView,
     ClaudeVersion, ConnectionOp, ConnectionsView, ControlToBrain, DockPosition, ErrorKey,
     GestureId, Incarnation, KeyView, MaxFrameRate, NameError, OnboardingStep, PlanState,
-    SettingsOp, SettingsView, SttUnload, ThreadId, UserError, UserName,
+    SavedSignInFailure, SettingsOp, SettingsView, SttUnload, ThreadId, UserError, UserName,
 };
 
 use super::{OnboardingPanel, OnboardingView, Select};
@@ -843,6 +843,116 @@ const CLAUDE_OUT: ClaudeCodeView = ClaudeCodeView::SignedOut {
 
 fn drain(controls: &async_channel::Receiver<ControlToBrain>) -> Vec<ControlToBrain> {
     std::iter::from_fn(|| controls.try_recv().ok()).collect()
+}
+
+#[gpui::test]
+fn saved_sign_in_dispatch_from_settings_preserves_hold(cx: &mut TestAppContext) {
+    saved_sign_in_dispatch(cx, Presence::settings_account_op);
+}
+
+#[gpui::test]
+fn saved_sign_in_dispatch_from_onboarding_preserves_hold(cx: &mut TestAppContext) {
+    saved_sign_in_dispatch(cx, Presence::onboarding_account_op);
+}
+
+fn saved_sign_in_dispatch(
+    cx: &mut TestAppContext,
+    dispatch: impl Fn(&mut Presence, AccountOp, &mut gpui_kit::Context<'_, Presence>),
+) {
+    const CHECKABLE: AccountView = AccountView::SavedSignInUnavailable {
+        reason: SavedSignInFailure::Missing,
+        checkable: true,
+        checking: false,
+        revocation_unconfirmed: false,
+    };
+    test_fixture::without_desktop(cx);
+    let (owner, _data, _controls) = ready(cx);
+    let controls = owner.update(cx, |owner, _| owner.link.record_controls_bounded());
+    let (_, stamp) = crate::presence::voice_wiring_tests::hold(&owner, 1, cx);
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::VoiceHoldRecognized {
+            gesture: GestureId(1),
+            thread: Some(ThreadId(1)),
+            selection: 1,
+        }]
+    );
+    account(&owner, 1, CHECKABLE, cx);
+    let owed = SignInMark::CancelOwed { generation: 1 };
+    owner.update(cx, |owner, _| {
+        owner.settings_chatgpt = owed;
+        owner.onboarding_chatgpt = owed;
+    });
+    let check = AccountOp::CheckSavedSignIn;
+    let send = |op, cx: &mut TestAppContext| owner.update(cx, |owner, cx| dispatch(owner, op, cx));
+    let assert_preserved = |cx: &mut TestAppContext, waiting, send_failed| {
+        owner.read_with(cx, |owner, cx| {
+            let accounts = &owner.settings.read(cx).accounts;
+            assert_eq!(
+                (accounts.waiting, accounts.send_failed),
+                (waiting, send_failed)
+            );
+            assert_eq!(
+                [owner.settings_chatgpt, owner.onboarding_chatgpt],
+                [owed; 2]
+            );
+            assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
+            assert!(owner.voice.pending.is_some());
+            assert!(owner.link.input_is(GestureId(1)));
+            assert_eq!(owner.link.choice_revision(), stamp.choice);
+            assert!(owner.session.as_ref().unwrap().open());
+        });
+    };
+
+    send(check, cx);
+    assert_preserved(cx, Some(check), false);
+    assert_eq!(drain(&controls), [ControlToBrain::AccountOp(check)]);
+
+    send(check, cx);
+    assert_preserved(cx, Some(check), false);
+    assert_eq!(
+        drain(&controls),
+        [],
+        "a stale callback while the check is pending"
+    );
+
+    account(&owner, 1, CHECKABLE, cx);
+    let capacity = controls.capacity().unwrap();
+    owner.update(cx, |owner, _| {
+        let session = owner.session.as_ref().unwrap();
+        for _ in 0..capacity {
+            assert!(owner.link.send_control(session, ControlToBrain::Pong));
+        }
+    });
+    send(check, cx);
+    assert_preserved(cx, None, true);
+    assert_eq!(drain(&controls), vec![ControlToBrain::Pong; capacity]);
+
+    account(
+        &owner,
+        1,
+        AccountView::SignedIn {
+            email: None,
+            plan: PlanState::Enabled,
+            recovery: Some(AccountRecovery::LoadModels),
+        },
+        cx,
+    );
+    send(AccountOp::LoadModels, cx);
+    owner.read_with(cx, |owner, cx| {
+        assert_eq!(
+            owner.settings.read(cx).accounts.waiting,
+            Some(AccountOp::LoadModels)
+        );
+        assert_eq!(
+            [owner.settings_chatgpt, owner.onboarding_chatgpt],
+            [SignInMark::Settled; 2]
+        );
+        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+        assert!(owner.voice.pending.is_none());
+        assert!(!owner.link.input_is(GestureId(1)));
+        assert_eq!(owner.link.choice_revision(), stamp.choice + 1);
+    });
 }
 
 /// The window at the account step on connection 7, signed out of both connections, with the two

@@ -23,7 +23,8 @@ use std::time::Duration;
 
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
-    AccountEmail, AccountOp, AccountRecovery, AccountView, Action, ErrorKey, PlanState, UserError,
+    AccountEmail, AccountOp, AccountRecovery, AccountView, Action, ErrorKey, PlanState,
+    SavedSignInFailure, UserError,
 };
 use zeroize::Zeroizing;
 
@@ -39,6 +40,7 @@ use super::oauth::exchange::{ExchangeError, OAuthCode, TokenSet};
 use super::oauth::id_token::{IdentityError, VerifiedIdentity, check_subject, permits_plan};
 use super::oauth::{Authorization, BindError, Intent, LaunchError, SignInError};
 use super::records::{Account, MAX_EXCHANGES, Origin, Record as _, Revocable, Tokens, entry_fits};
+use super::vault::SavedSignIn;
 
 /// What the account machine reacts to.
 #[derive(Debug)]
@@ -209,8 +211,9 @@ struct Loaded {
     account: Option<Secret<Account>>,
     /// Exchange entries in the revocation list.
     exchanges: usize,
-    /// A record couldn't be read, so no sign-in may write over it.
+    /// Another vault prerequisite couldn't be read, so no sign-in may write over it.
     damaged: bool,
+    saved_failure: Option<(Option<u64>, SavedSignInFailure)>,
 }
 
 #[derive(Debug)]
@@ -244,6 +247,7 @@ type Verified = (Zeroizing<String>, Option<Zeroizing<String>>, u64);
 pub struct AccountState {
     busy: bool,
     loading: bool,
+    checking_saved_sign_in: bool,
     loaded: Loaded,
     /// Names the account's token set; it moves when that set is replaced or removed.
     generation: u64,
@@ -295,6 +299,7 @@ impl AccountState {
         let mut state = Self {
             busy: true,
             loading: false,
+            checking_saved_sign_in: false,
             loaded: Loaded::default(),
             generation: 0,
             attempt: 0,
@@ -342,6 +347,14 @@ impl AccountState {
         if let Some(cleanup) = self.cleanup() {
             return AccountView::SigningOut {
                 cleanup,
+                revocation_unconfirmed: self.loaded.notice,
+            };
+        }
+        if let Some((revision, reason)) = self.loaded.saved_failure {
+            return AccountView::SavedSignInUnavailable {
+                reason,
+                checkable: revision.is_some() && reason != SavedSignInFailure::Changed,
+                checking: self.checking_saved_sign_in,
                 revocation_unconfirmed: self.loaded.notice,
             };
         }
@@ -437,6 +450,24 @@ impl AccountState {
     }
 
     fn op(&mut self, op: AccountOp, effects: &mut Vec<Effect>) {
+        if op == AccountOp::LoadModels {
+            return;
+        }
+        if op == AccountOp::CheckSavedSignIn {
+            if let Some((Some(revision), reason)) = self.loaded.saved_failure
+                && reason != SavedSignInFailure::Changed
+                && !self.busy
+                && !self.loading
+                && !self.checking_saved_sign_in
+                && self.leaving.is_none()
+                && self.live.is_none()
+                && matches!(self.lane, Lane::Free)
+            {
+                self.checking_saved_sign_in = true;
+                self.jobs.push_back(Queued::CheckSavedSignIn(revision));
+            }
+            return;
+        }
         if self.busy {
             self.reload();
             return;
@@ -452,7 +483,8 @@ impl AccountState {
             AccountOp::EnablePlan => self.sign_in(Intent::EnablePlan, effects),
             AccountOp::CancelSignIn => self.cancel(effects),
             AccountOp::SignOut => self.sign_out(effects),
-            AccountOp::Retry => self.retry(),
+            AccountOp::Retry if self.loaded.saved_failure.is_none() => self.retry(),
+            AccountOp::Retry | AccountOp::CheckSavedSignIn | AccountOp::LoadModels => {}
         }
     }
 
@@ -463,7 +495,9 @@ impl AccountState {
             return;
         }
         let host = match &self.loaded.host {
-            Some(host) if !self.loaded.damaged => host.clone(),
+            Some(host) if !self.loaded.damaged && self.loaded.saved_failure.is_none() => {
+                host.clone()
+            }
             _ => return effects.push(error(ErrorKey::CredentialsUnavailable, Action::Retry)),
         };
         // The lane's reservation counts: the request it holds may still need a list slot.
@@ -805,11 +839,6 @@ impl AccountState {
             .host
             .inspect_err(|failure| readable("host", failure))
             .ok();
-        let account = snapshot
-            .account
-            .inspect_err(|failure| readable("chatgpt", failure))
-            .ok()
-            .flatten();
         let revocable = snapshot
             .revocable
             .inspect_err(|failure| readable("revoke", failure))
@@ -817,6 +846,48 @@ impl AccountState {
         if let Some(sign_out) = marker.sign_out {
             self.resume(sign_out);
         }
+        self.loaded = Loaded {
+            notice: marker.notice,
+            host,
+            exchanges: exchanges(&revocable),
+            damaged,
+            ..Loaded::default()
+        };
+        if marker.sign_out.is_none() {
+            self.read_saved_sign_in(snapshot.account);
+        }
+        self.revoke(revocable, effects);
+    }
+
+    pub(super) fn checked_saved_sign_in(
+        &mut self,
+        result: Result<SavedSignIn, SavedSignInFailure>,
+    ) {
+        self.checking_saved_sign_in = false;
+        if self.leaving.is_none() && self.loaded.saved_failure.is_some() {
+            self.read_saved_sign_in(result);
+        }
+    }
+
+    fn read_saved_sign_in(&mut self, result: Result<SavedSignIn, SavedSignInFailure>) {
+        let mut revision = self.loaded.saved_failure.and_then(|(revision, _)| revision);
+        let account = match result {
+            Ok(saved) => {
+                revision = Some(saved.revision);
+                self.loaded.notice = saved.notice;
+                saved.account
+            }
+            Err(failure) => Err(failure),
+        };
+        let account = match account {
+            Ok(account) => account,
+            Err(reason) => {
+                tracing::warn!(?reason, "the saved ChatGPT sign-in could not be read");
+                self.loaded.saved_failure = Some((revision, reason));
+                self.loaded.account = None;
+                return;
+            }
+        };
         // A refresh whose answer was never saved may have consumed its token: the token stays
         // for sign-out to revoke and is never sent again, so the session needs a new sign-in.
         if account
@@ -827,14 +898,8 @@ impl AccountState {
             tracing::warn!("a refresh's answer was never saved; the session needs a new sign-in");
             self.ended = Some((self.generation, ErrorKey::RenewalUnconfirmed));
         }
-        self.loaded = Loaded {
-            notice: marker.notice,
-            host,
-            account,
-            exchanges: exchanges(&revocable),
-            damaged,
-        };
-        self.revoke(revocable, effects);
+        self.loaded.saved_failure = None;
+        self.loaded.account = account;
     }
 }
 

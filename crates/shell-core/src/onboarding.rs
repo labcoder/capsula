@@ -64,7 +64,7 @@ pub fn account_complete(view: Option<&AccountView>) -> bool {
             plan: PlanState::Enabled,
             recovery,
             ..
-        }) if *recovery != Some(AccountRecovery::SignInAgain)
+        }) if matches!(recovery, None | Some(AccountRecovery::Retry))
     )
 }
 

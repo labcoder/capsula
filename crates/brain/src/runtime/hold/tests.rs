@@ -630,6 +630,184 @@ fn recording(brain: &mut Brain) {
         .store(KEY.gesture.0, Ordering::SeqCst);
 }
 
+#[tokio::test]
+async fn saved_sign_in_check_frames_leave_foreign_voice_holds_alone() {
+    use kumochi_protocol::message::{AccountOp, AccountView, SavedSignInFailure};
+
+    for (admission, fence) in [
+        (CheckAdmission::Allowed, AccountOp::SignOut),
+        (CheckAdmission::Refused, AccountOp::LoadModels),
+    ] {
+        for stage in 0..3 {
+            let checkable = matches!(admission, CheckAdmission::Allowed);
+            let scratch = Scratch::new("hold-account-check");
+            let mut brain = foreign_voice_brain(&scratch, admission);
+            let (out, mut output) = mpsc::channel(16);
+            let queue = RefCell::new(DataQueue::new(super::super::window()));
+            let ready = Notify::new();
+            let mut tap = Tap::from_env();
+            let mut link = Link::new(&out, &queue, &ready, &mut tap);
+            recording(&mut brain);
+            let hold = brain.holds.pending.as_mut().unwrap();
+            let cancel = Arc::clone(&hold.cancel);
+            if stage == 0 {
+                hold.snapshot = None;
+                hold.ask = None;
+                hold.audio = None;
+                brain.holds.debt = None;
+                brain.holds.gate.active.store(0, Ordering::SeqCst);
+            } else if stage == 2 {
+                link.recovery = Some(crate::runtime::Recovery::new(&[], 1024));
+                brain.holds.stopped(KEY);
+                brain
+                    .hold_event(
+                        Event::Decoded(KEY, SttResult::Text("fixture words".into())),
+                        &mut link,
+                    )
+                    .unwrap();
+                assert!(brain.holds.pending.is_none());
+                assert!(brain.coordinator.current_run().is_some());
+            }
+            let current = brain.coordinator.current_run();
+            while output.try_recv().is_ok() {}
+            for _ in 0..2 {
+                brain
+                    .control_frame(
+                        ControlToBrain::AccountOp(AccountOp::CheckSavedSignIn),
+                        0,
+                        &mut link,
+                        &mut None,
+                    )
+                    .unwrap();
+                assert!(
+                    !cancel.load(Ordering::SeqCst),
+                    "Check cancelled stage {stage}"
+                );
+                assert_eq!(brain.holds.pending.is_some(), stage != 2);
+                assert_eq!(brain.coordinator.current_run(), current);
+                let expected = if checkable {
+                    AccountView::SavedSignInUnavailable {
+                        reason: SavedSignInFailure::Missing,
+                        checkable: true,
+                        checking: true,
+                        revocation_unconfirmed: false,
+                    }
+                } else {
+                    AccountView::SignedOut {
+                        revocation_unconfirmed: false,
+                    }
+                };
+                assert_eq!(control(&mut output), ControlToShell::Account(expected));
+                assert!(
+                    !std::iter::from_fn(|| (!output.is_empty()).then(|| control(&mut output)))
+                        .any(|frame| matches!(frame, ControlToShell::VoiceHoldStatus { .. }))
+                );
+            }
+            if checkable {
+                let completed = tokio::time::timeout(Duration::from_secs(5), brain.account.next())
+                    .await
+                    .unwrap();
+                brain.account_input(completed, Some(&mut link)).unwrap();
+                assert!(
+                    !cancel.load(Ordering::SeqCst),
+                    "Check completion cancelled stage {stage}"
+                );
+            }
+            brain
+                .control_frame(ControlToBrain::AccountOp(fence), 0, &mut link, &mut None)
+                .unwrap();
+            assert!(
+                cancel.load(Ordering::SeqCst),
+                "{fence:?} failed to fence stage {stage}"
+            );
+            assert!(brain.holds.pending.is_none());
+            brain.close().await;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CheckAdmission {
+    Allowed,
+    Refused,
+}
+
+fn foreign_voice_brain(scratch: &Scratch, admission: CheckAdmission) -> Brain {
+    use crate::connections::account::Worker;
+    use crate::connections::records::Account;
+    use crate::connections::vault::{SaveResult, Vault, fake::FakeStore};
+    use crate::coordinator::Ready;
+    use crate::platform::credential::CredentialStore as _;
+    use kumochi_protocol::Secret;
+    use kumochi_protocol::message::{Effort, ModelChoice, ModelInfo, ModelName, ModelSlug};
+    use zeroize::Zeroizing;
+
+    let mut brain = if matches!(admission, CheckAdmission::Allowed) {
+        let lock = scratch
+            .dir()
+            .join(kumochi_protocol::constants::SESSION_LOCK);
+        let store = FakeStore::default();
+        let service = "hold-account-check";
+        {
+            let mut vault = Vault::with_service(store.clone(), service, &lock).unwrap();
+            vault.host_id().unwrap();
+            assert!(matches!(
+                vault.save_account(&Secret::new(Account {
+                    client_id: Zeroizing::new("fake registration".into()),
+                    subject: None,
+                    email: None,
+                    tokens: None,
+                    plan_enabled: false,
+                })),
+                SaveResult::Committed
+            ));
+        }
+        let name = store
+            .names()
+            .into_iter()
+            .find(|name| name.starts_with("hold-account-check/gen/chatgpt/"))
+            .unwrap();
+        store.delete(&name).unwrap();
+        let net = test_support::net();
+        let worker = Worker::new(
+            Box::new(move || Vault::with_service(store.clone(), service, &lock)),
+            Arc::clone(&net.clock),
+        );
+        test_support::brain_with(
+            scratch,
+            "",
+            crate::runtime::account::Accounts::spawn_unconfigured(worker, net).unwrap(),
+        )
+    } else {
+        test_support::brain(scratch, "")
+    };
+    let model = ModelSlug::new("fake-foreign-model").unwrap();
+    let kind = ConnectionKind::ClaudeCode;
+    brain
+        .coordinator
+        .handle(Input::Engines(
+            kind,
+            Availability::Ready(Ready {
+                models: vec![ModelInfo {
+                    slug: model.clone(),
+                    display_name: ModelName::new("Fake foreign model").unwrap(),
+                    supported_efforts: None,
+                }],
+                ..Ready::fixture()
+            }),
+        ))
+        .unwrap();
+    set(
+        &mut brain,
+        SettingsOp::SetDefaultModel(ModelChoice {
+            model,
+            effort: Effort::Low,
+            connection: kind,
+        }),
+    );
+    brain
+}
+
 #[expect(
     clippy::fn_params_excessive_bools,
     reason = "the fixture supplies the protocol's last bit"

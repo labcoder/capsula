@@ -111,6 +111,8 @@ impl Tapped for ControlToBrain {
                         | AccountOp::SignOut
                         | AccountOp::EnablePlan
                         | AccountOp::Retry
+                        | AccountOp::CheckSavedSignIn
+                        | AccountOp::LoadModels
                 )
                 | Self::Connection(
                     ConnectionOp::CheckAnthropicKey
