@@ -1,5 +1,5 @@
 //! Presentation state survives activation independently of the animation clock.
-use super::SceneView;
+use super::{PreparedActivation, SceneView};
 use crate::{
     Begin,
     geom::{Affine, Rect},
@@ -40,6 +40,21 @@ impl Placement {
 }
 
 impl SceneView {
+    /// The host box this view fits into, if it isn't free or screen-positioned.
+    pub fn stage(&self) -> Option<Rect> {
+        match self.placement.fit {
+            Fit::Stage(stage) => Some(stage),
+            Fit::Free | Fit::Screen { .. } => None,
+        }
+    }
+
+    /// The fitted extent reserved by a nonempty 2D drawing on the host's stage.
+    pub fn staged_2d_bounds(&self) -> Option<Rect> {
+        self.stage()?;
+        (!self.paint.is_empty() && self.view.is_none())
+            .then(|| self.placement.transform.bounds(self.layout.fit_extent()))
+    }
+
     /// Snaps the drawing into a host-selected box without preparing it again.
     pub fn set_stage(&mut self, stage: Rect) -> bool {
         if matches!(self.placement.fit, Fit::Screen { .. })
@@ -79,5 +94,13 @@ impl SceneView {
     /// Whether the view paints: not while its screen scene can't be placed.
     pub(super) fn placed(&self) -> bool {
         self.placement.fit != Fit::Screen { placed: false }
+    }
+}
+
+impl PreparedActivation {
+    /// Places the candidate before installation, without changing its source view.
+    pub fn set_stage(&mut self, stage: Rect) {
+        let (view, ..) = &mut *self.0;
+        view.set_stage(stage);
     }
 }

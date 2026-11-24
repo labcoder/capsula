@@ -105,7 +105,7 @@ impl Presenter {
     ) -> Result<Consumed, ConsumeError> {
         let busy = self.lane.as_ref().is_some_and(|lane| lane.scene == id);
         let total = self.residency();
-        let scene = self.scenes.get_mut(&id).ok_or(ConsumeError::UnknownScene)?;
+        let scene = self.scenes.get(&id).ok_or(ConsumeError::UnknownScene)?;
         if expected_index < scene.state.view().activated() {
             return Err(ConsumeError::AlreadyConsumed);
         }
@@ -117,16 +117,23 @@ impl Presenter {
             return Err(ConsumeError::OutOfOrder);
         }
         if busy {
-            scene.pending_consumption = Some(expected_index);
+            self.scenes
+                .get_mut(&id)
+                .expect("the scene was just read")
+                .pending_consumption = Some(expected_index);
             return Err(ConsumeError::Busy);
         }
         head.step
             .validate(scene.state.view(), &scene.rest)
             .map_err(|_| ConsumeError::Stale)?;
-        let activation = scene
+        let before = scene.view.staged_2d_bounds();
+        let mut activation = scene
             .view
             .prepare_activation(&head.step, scene_time, segment_ms)
             .map_err(|_| ConsumeError::Stale)?;
+        if let Some(stage) = self.stage_for(id, scene.state.view().header(), activation.view()) {
+            activation.set_stage(stage);
+        }
         let entrance_ms = activation
             .view()
             .entrance_end()
@@ -155,6 +162,7 @@ impl Presenter {
             drop(Deferred::new(cache, cache_bytes));
             return Err(ConsumeError::Residency);
         }
+        let scene = self.scenes.get_mut(&id).expect("the scene was just read");
         scene
             .state
             .retire(expected_index, &mut self.global)
@@ -209,6 +217,8 @@ impl Presenter {
                 sum.max(ready.step.after.paint_work())
             });
         scene.pending_consumption = None;
+        let after = scene.view.staged_2d_bounds();
+        self.refresh_kept_after(id, before, after);
         self.returned.fetch_add(bytes, Ordering::Relaxed);
         let step = ConsumedStep {
             step,

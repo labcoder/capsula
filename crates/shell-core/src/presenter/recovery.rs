@@ -176,13 +176,16 @@ impl Presenter {
         drop(rejected);
         for (scene, state, rest, retained) in adopted {
             let activation = super::Activation::new(&state, now);
-            let view = super::placement::resting_view(
+            let mut view = super::placement::resting_view(
                 &rest,
                 state.activated(),
                 self.drawing_stage,
                 state.header(),
                 self.display,
             );
+            if let Some(stage) = self.stage_for(scene, state.header(), &view) {
+                view.set_stage(stage);
+            }
             let frame = Frame::new();
             let cache = self.stage.stage(&view);
             let bytes = state.attributed_bytes();

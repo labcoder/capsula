@@ -1018,10 +1018,11 @@ impl Presenter {
             StopOutcome::Cleared => None,
         };
         if let Some(rest) = rest {
+            let before = scene.view.staged_2d_bounds();
             let mut view = placement::resting_view(
                 &rest,
                 scene.state.view().activated(),
-                self.drawing_stage,
+                scene.view.stage().or(self.drawing_stage),
                 scene.state.view().header(),
                 self.display,
             );
@@ -1046,6 +1047,9 @@ impl Presenter {
             if self.residency() > MAX_RESIDENT_BYTES || !self.paint_work().within_limits() {
                 self.release(id);
                 self.forget(id, out);
+            } else {
+                let after = self.scenes[&id].view.staged_2d_bounds();
+                self.refresh_kept_after(id, before, after);
             }
         } else {
             self.release(id);

@@ -87,13 +87,28 @@ fn stage(area: [i32; 4], layout: Layout, scale: f32, panel: Option<[i32; 4]>) ->
 }
 
 fn free_stage(area: Rect, occupied: Rect) -> Option<Rect> {
+    let mut best: Option<(f32, Rect)> = None;
+    for band in free_bands(area, occupied) {
+        let stage = inset(band);
+        let band_area = band.size.x * band.size.y;
+        if stage.size.x >= MIN_STAGE_SIZE.x
+            && stage.size.y >= MIN_STAGE_SIZE.y
+            && best.is_none_or(|(best_area, _)| band_area > best_area)
+        {
+            best = Some((band_area, stage));
+        }
+    }
+    best.map(|(_, stage)| stage)
+}
+
+pub(crate) fn free_bands(area: Rect, occupied: Rect) -> [Rect; 4] {
     let a = area.origin;
     let b = area.max();
     let left = occupied.origin.x.clamp(a.x, b.x);
     let top = occupied.origin.y.clamp(a.y, b.y);
     let right = occupied.max().x.clamp(a.x, b.x);
     let bottom = occupied.max().y.clamp(a.y, b.y);
-    let bands = [
+    [
         Rect {
             origin: Vec2::new(a.x, bottom),
             size: Vec2::new(area.size.x, b.y - bottom),
@@ -110,19 +125,7 @@ fn free_stage(area: Rect, occupied: Rect) -> Option<Rect> {
             origin: Vec2::new(right, a.y),
             size: Vec2::new(b.x - right, area.size.y),
         },
-    ];
-    let mut best: Option<(f32, Rect)> = None;
-    for band in bands {
-        let stage = inset(band);
-        let band_area = band.size.x * band.size.y;
-        if stage.size.x >= MIN_STAGE_SIZE.x
-            && stage.size.y >= MIN_STAGE_SIZE.y
-            && best.is_none_or(|(best_area, _)| band_area > best_area)
-        {
-            best = Some((band_area, stage));
-        }
-    }
-    best.map(|(_, stage)| stage)
+    ]
 }
 
 fn inset(band: Rect) -> Rect {
