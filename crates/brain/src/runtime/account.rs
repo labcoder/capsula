@@ -96,6 +96,7 @@ pub(crate) enum Event {
     },
     Connection(ConnectionEvent),
     Machine(Input),
+    AudioRepaired,
     /// The read started under `epoch` ended: the models, or what to tell the user, if anything.
     Read {
         epoch: u64,
@@ -127,6 +128,8 @@ struct Catalog {
     read: Option<AbortHandle>,
     /// The last successful read, cleared as a unit when the account stops being usable.
     listing: Option<Listing>,
+    /// The settled failure a replacement audio pair should hear without retrying.
+    failure: Option<UserError>,
     /// The shell hasn't heard the current list.
     unsent: bool,
     /// A local saved-account check recovered; model discovery needs an explicit user action.
@@ -177,6 +180,7 @@ impl Catalog {
     /// Stops the read out, so it sends nothing more; a refresh its bearer wait started still
     /// runs to its end and is saved.
     fn cancel(&mut self) {
+        self.failure = None;
         if let Some(read) = self.read.take() {
             read.abort();
         }
@@ -355,7 +359,7 @@ impl Accounts {
     }
 
     /// Applies an input; what the shell should hear, in order. The catalog is read when the
-    /// account becomes usable, and again on Retry or a connection while no read succeeded.
+    /// account becomes usable, and again on Retry or an ordinary connection while no read succeeded.
     pub(crate) fn handle(&mut self, event: impl Into<Event>) -> Vec<ControlToShell> {
         let input = match event.into() {
             Event::Verification(verified) => {
@@ -377,6 +381,14 @@ impl Accounts {
             }
             Event::Connection(event) => return self.connection_event(event),
             Event::Machine(input) => input,
+            Event::AudioRepaired => {
+                self.catalog.unsent |= self.catalog.listing.is_some();
+                let mut frames = vec![self.account_frame(self.state.view())];
+                if let Some(error) = &self.catalog.failure {
+                    frames.push(ControlToShell::Error(error.clone()));
+                }
+                return frames;
+            }
             Event::Read { epoch, result } => return self.read_ended(epoch, result),
         };
         if self.catalog.unsupported
@@ -409,6 +421,7 @@ impl Accounts {
             && catalog.listing.is_none()
             && (ask || !was_usable)
         {
+            self.catalog.failure = None;
             let (wait, access) = self.access();
             frames.extend(access);
             let http = Arc::clone(&self.net.http);
@@ -450,6 +463,7 @@ impl Accounts {
             }
             Err(Some(error)) => {
                 let unavailable = error.key() == ErrorKey::PlanUnavailable;
+                self.catalog.failure = Some(error.clone());
                 let mut frames = vec![ControlToShell::Error(error)];
                 if unavailable {
                     frames.extend(self.handle(Input::PlanUnavailable));
@@ -553,6 +567,16 @@ impl Accounts {
             .listing
             .as_ref()
             .map(|listing| listing.models.as_slice())
+    }
+
+    #[cfg(test)]
+    pub(super) fn catalog_read_pending(&self) -> bool {
+        self.catalog.read.is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn vault_load_pending(&self) -> bool {
+        self.state.vault_load_pending()
     }
 
     /// A read catalog of `models`, of which `images` take image input.

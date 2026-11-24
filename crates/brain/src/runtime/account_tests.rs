@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use kumochi_protocol::Secret;
 use kumochi_protocol::constants::SESSION_LOCK;
 use kumochi_protocol::message::{
-    AccountOp, AccountRecovery, AccountView, Action, ConnectionKind, ControlToBrain,
-    ControlToShell, DataToShell, Effort, ErrorKey, ModelChoice, ModelInfo, ModelSlug, Phase,
-    PlanState, UserError,
+    AccountOp, AccountRecovery, AccountView, Action, AudioSession, ConnectionKind, ControlToBrain,
+    ControlToShell, DataToShell, Effort, ErrorKey, ModelChoice, ModelInfo, ModelSlug, Narration,
+    OutputGeneration, PartState, Phase, PlanState, SettingsOp, UserError,
 };
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -22,9 +22,10 @@ use zeroize::Zeroizing;
 use super::{Ended, PATIENCE, Shell, duplex};
 #[cfg(not(windows))]
 use crate::config::tuning::{OAuthTuning, TokenTuning};
-use crate::connections::account::{Denied, Input, Listened, Worker};
+use crate::connections::account::{Denied, Done, Input, Listened, Worker};
 use crate::connections::catalog::Listing;
 use crate::connections::clock::{Clock, FixedClock};
+use crate::connections::error::VaultError;
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
 use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::{Connect, ModelClient};
@@ -37,8 +38,8 @@ use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, JobKind, ReadJob, Ready, StoreOp};
 use crate::engines::responses::{AccessHandle, Bearer, Responses};
 use crate::platform::{SessionLock, SessionLockError};
-use crate::runtime::Seen;
 use crate::runtime::account::{Access, Accounts, Event, HttpFactory, Net, exchange_task};
+use crate::runtime::{PairStart, Seen};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, Scratch};
 
@@ -201,6 +202,99 @@ async fn a_lock_busy_at_startup_is_retried_when_a_shell_connects() {
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
+}
+
+#[tokio::test]
+async fn audio_repair_replays_busy_without_reloading_the_saved_account() {
+    let scratch = Scratch::new("audio-repair-busy-vault");
+    let store = FakeStore::default();
+    save_seeded_account(&scratch, &store, LATER);
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let held = SessionLock::try_acquire(&lock).expect("scratch lock");
+    let opens = Arc::new(AtomicU64::new(0));
+    let opening = Arc::clone(&opens);
+    let models = Arc::new(AtomicU64::new(0));
+    let http = SharedHttp::new(Probe {
+        models: Arc::clone(&models),
+        dropped: None,
+    });
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock(1_800_000_000));
+    let worker = Worker::new(
+        Box::new(move || {
+            opening.fetch_add(1, Ordering::SeqCst);
+            Vault::with_service(store.clone(), SHUTDOWN_SERVICE, &lock)
+        }),
+        Arc::clone(&clock),
+    );
+    let net = Net {
+        http: Arc::new(move || Ok(http.clone())),
+        clock,
+        ..test_support::net()
+    };
+    let mut accounts = Accounts::spawn_unconfigured(worker, net).expect("accounts");
+    let busy = ControlToShell::Account(AccountView::Busy);
+    assert_eq!(
+        accounts.handle(Input::Connected),
+        std::slice::from_ref(&busy)
+    );
+    let still_busy = timeout(PATIENCE, accounts.next())
+        .await
+        .expect("ordinary load ends");
+    assert!(matches!(
+        still_busy,
+        Event::Machine(Input::Vault(Done::Loaded(Err(VaultError::Busy))))
+    ));
+    assert!(accounts.handle(still_busy).is_empty());
+    let before = opens.load(Ordering::SeqCst);
+    assert_eq!(
+        models.load(Ordering::SeqCst),
+        0,
+        "the held vault has no catalog"
+    );
+    drop(held);
+
+    assert_eq!(
+        accounts.handle(Event::AudioRepaired),
+        std::slice::from_ref(&busy)
+    );
+    let pending = accounts.vault_load_pending();
+    if pending {
+        read_ended(&mut accounts).await;
+    }
+    assert_eq!(
+        (
+            opens.load(Ordering::SeqCst) - before,
+            models.load(Ordering::SeqCst),
+            pending
+        ),
+        (0, 0, false),
+        "audio re-pair must only replay Busy, not load credentials or discover models"
+    );
+    assert_eq!(accounts.view(), AccountView::Busy);
+
+    assert_eq!(accounts.handle(Input::Connected), [busy]);
+    let offline =
+        UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry]).unwrap();
+    assert_eq!(
+        read_ended(&mut accounts).await,
+        [ControlToShell::Error(offline)]
+    );
+    assert_eq!(
+        (
+            opens.load(Ordering::SeqCst) - before,
+            models.load(Ordering::SeqCst)
+        ),
+        (1, 1)
+    );
+    assert_eq!(
+        accounts.view(),
+        AccountView::SignedIn {
+            email: None,
+            plan: PlanState::Enabled,
+            recovery: None
+        }
+    );
+    accounts.close(Instant::now(), Instant::now()).await;
 }
 
 fn secret(text: &str) -> Secret<Zeroizing<String>> {
@@ -658,6 +752,22 @@ fn seeded_at(
     expires_at: u64,
     clock: Arc<dyn Clock>,
 ) -> Accounts {
+    save_seeded_account(scratch, store, expires_at);
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let opening = store.clone();
+    let worker = Worker::new(
+        Box::new(move || Vault::with_service(opening.clone(), SHUTDOWN_SERVICE, &lock)),
+        Arc::clone(&clock),
+    );
+    let net = Net {
+        http,
+        clock,
+        ..test_support::net()
+    };
+    Accounts::spawn_unconfigured(worker, net).expect("accounts")
+}
+
+fn save_seeded_account(scratch: &Scratch, store: &FakeStore, expires_at: u64) {
     let seed = scratch.db().with_file_name("seed.lock");
     let saved = Vault::with_service(store.clone(), SHUTDOWN_SERVICE, &seed)
         .expect("vault")
@@ -678,18 +788,6 @@ fn seeded_at(
             }),
         }));
     assert!(matches!(saved, SaveResult::Committed));
-    let lock = scratch.db().with_file_name(SESSION_LOCK);
-    let opening = store.clone();
-    let worker = Worker::new(
-        Box::new(move || Vault::with_service(opening.clone(), SHUTDOWN_SERVICE, &lock)),
-        Arc::clone(&clock),
-    );
-    let net = Net {
-        http,
-        clock,
-        ..test_support::net()
-    };
-    Accounts::spawn_unconfigured(worker, net).expect("accounts")
 }
 
 /// Asks for the bearer and runs the account system until its refresh is out.
@@ -1827,6 +1925,148 @@ async fn an_ordinary_bearer_refresh_refusal_reaches_all_waiters_and_later_shells
     assert_unsupported_reconnects(&mut brain).await;
     assert_eq!(starts.load(Ordering::Relaxed), 2);
     brain.close().await;
+}
+
+#[tokio::test]
+async fn idle_talk_back_repair_does_not_retry_the_account_catalog() {
+    let scratch = Scratch::new("voice-repair-catalog");
+    super::voice::seed_voice_settings(
+        &scratch,
+        "installed = [\"spoken-replies\"]\ntalk_back = false",
+    );
+    let requests = Arc::new(AtomicU64::new(0));
+    let http = SharedHttp::new(Probe {
+        models: Arc::clone(&requests),
+        dropped: None,
+    });
+    let account = seeded(&scratch, &FakeStore::default(), http, LATER);
+    let mut brain = test_support::brain_with(&scratch, "0 text Hello there.", account);
+    let (fetcher, _fetch) = super::voice::held_fetch();
+    let (release, _) = super::voice::attach_tts(&mut brain, None, fetcher);
+    release.send(()).unwrap();
+    let offline = ControlToShell::Error(
+        UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry]).unwrap(),
+    );
+
+    let mut tap = Tap::from_env();
+    for (generation, start) in [
+        (1, PairStart::Ordinary),
+        (2, PairStart::AudioRepair),
+        (3, PairStart::Ordinary),
+    ] {
+        let ((control, data), shell) = duplex();
+        let output = OutputGeneration(generation);
+        let client = register_catalog_pair(shell, output, &offline);
+        let (ended, ()) = timeout(PATIENCE, async {
+            tokio::join!(
+                brain.serve_with_profile(
+                    control,
+                    data,
+                    &mut tap,
+                    AudioSession::QueuedRequired,
+                    None,
+                    start
+                ),
+                client
+            )
+        })
+        .await
+        .expect("queued pair completes");
+        assert_eq!(ended, Ended::Lost);
+        match generation {
+            1 => assert_eq!(
+                requests.load(Ordering::SeqCst),
+                1,
+                "initial catalog request"
+            ),
+            2 => {
+                let pending = brain.account.catalog_read_pending();
+                if pending {
+                    assert_eq!(
+                        read_ended(&mut brain.account).await,
+                        std::slice::from_ref(&offline)
+                    );
+                }
+                assert_eq!(
+                    (requests.load(Ordering::SeqCst), pending),
+                    (1, false),
+                    "the audio re-pair must not start another catalog request"
+                );
+                brain
+                    .account_input(Input::Op(AccountOp::Retry), None)
+                    .unwrap();
+                assert_eq!(
+                    read_ended(&mut brain.account).await,
+                    std::slice::from_ref(&offline)
+                );
+                assert_eq!(requests.load(Ordering::SeqCst), 2, "explicit Retry");
+            }
+            _ => assert_eq!(requests.load(Ordering::SeqCst), 3, "genuine reconnect"),
+        }
+    }
+    brain.close().await;
+}
+
+async fn register_catalog_pair(
+    mut shell: Shell<tokio::io::DuplexStream>,
+    output: OutputGeneration,
+    offline: &ControlToShell,
+) {
+    let talk_back = output != OutputGeneration(1);
+    shell
+        .send(&ControlToBrain::QueuedAudioOutput(
+            24_000,
+            output,
+            Narration::Plain,
+        ))
+        .await;
+    let (mut ready, mut registered, mut signed_in, mut failed) = (false, false, false, false);
+    while !(ready && registered && signed_in && failed) {
+        match shell
+            .next_control()
+            .await
+            .unwrap()
+            .expect("pair stays open")
+        {
+            ControlToShell::Settings {
+                answer: false,
+                view,
+            } => assert_eq!(view.talk_back, talk_back),
+            ControlToShell::Account(AccountView::SignedIn {
+                plan: PlanState::Enabled,
+                recovery: None,
+                ..
+            }) => signed_in = true,
+            ControlToShell::Voice(view) => ready = view.spoken_replies == PartState::Ready,
+            ControlToShell::QueuedAudioRegistered(actual) => {
+                assert_eq!(actual, output);
+                registered = true;
+            }
+            ControlToShell::Ping => shell.send(&ControlToBrain::Pong).await,
+            frame if &frame == offline => failed = true,
+            _ => {}
+        }
+    }
+    if !talk_back {
+        shell
+            .send(&ControlToBrain::Settings(SettingsOp::SetTalkBack(true)))
+            .await;
+        loop {
+            match shell
+                .next_control()
+                .await
+                .unwrap()
+                .expect("settings answered")
+            {
+                ControlToShell::Settings { answer: true, view } => {
+                    assert!(view.talk_back);
+                    break;
+                }
+                ControlToShell::Ping => shell.send(&ControlToBrain::Pong).await,
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Design §6: a usable account's catalog is read at startup; a failed read offers Retry, which

@@ -622,6 +622,15 @@ fn attached_at(
     fetcher: Arc<dyn Fetch>,
 ) -> (Brain, std_mpsc::Sender<()>, Arc<AtomicUsize>) {
     let mut brain = test_support::brain(scratch, "0 text Hello there.");
+    let (release, loads) = attach_tts(&mut brain, models, fetcher);
+    (brain, release, loads)
+}
+
+pub(super) fn attach_tts(
+    brain: &mut Brain,
+    models: Option<PathBuf>,
+    fetcher: Arc<dyn Fetch>,
+) -> (std_mpsc::Sender<()>, Arc<AtomicUsize>) {
     let (release, released) = std_mpsc::channel();
     let loads = Arc::new(AtomicUsize::new(0));
     let begun = Arc::clone(&loads);
@@ -643,19 +652,13 @@ fn attached_at(
     if let Some(models) = models {
         brain.attach_voice(models, &[], (None, Some(tts)), reports, fetcher);
     } else {
-        attach_policy_voice(
-            &mut brain,
-            [false, true],
-            (None, Some(tts)),
-            reports,
-            fetcher,
-        );
+        attach_policy_voice(brain, [false, true], (None, Some(tts)), reports, fetcher);
     }
     brain.offline(Input::AudioOutput {
         rate: 24_000,
         generation: OutputGeneration(1),
     });
-    (brain, release, loads)
+    (release, loads)
 }
 
 /// Writes `voice` as the `[voice]` table and spoken replies' files, the last one `short` bytes
@@ -665,7 +668,7 @@ fn seeded(scratch: &Scratch, voice: &str, short: u64) -> PathBuf {
     seeded_at(scratch, scratch.dir().join("models"), voice, short)
 }
 
-fn seed_voice_settings(scratch: &Scratch, voice: &str) {
+pub(super) fn seed_voice_settings(scratch: &Scratch, voice: &str) {
     std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
     std::fs::write(
         scratch.dir().join(CONFIG_FILE),

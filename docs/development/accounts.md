@@ -740,7 +740,10 @@ describes the recorded shape behind both decoders.
 
 `runtime::Accounts` owns the catalog, in memory only. It reads when the account becomes usable
 (`SignedIn`, plan `Enabled`, no recovery but Retry), and again on `Retry` or a new connection
-while no read has succeeded. One read runs at a time. The catalog has an epoch that moves when the
+while no read has succeeded. A queued audio re-pair for a Talk-back change only replays the
+ChatGPT account view and the cached catalog or its last failure. It doesn't reload a Busy vault
+or start discovery, so the user can still Retry without the audio switch doing it for them.
+One read runs at a time. The catalog has an epoch that moves when the
 account stops being usable: the read out is cancelled, whether it waits for the bearer, builds
 its client or awaits the answer, and the list is cleared; the shell then hears an empty
 `Models`. Closing cancels it too. Cancelling drops only its bearer wait, never a refresh that

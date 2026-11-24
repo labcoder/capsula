@@ -45,6 +45,7 @@ impl Tapped for ControlToBrain {
         match self {
             Self::Hello(_) => "Hello",
             Self::QueuedHello(_) => "QueuedHello",
+            Self::QueuedAudioReconnect(..) => "QueuedAudioReconnect",
             Self::Quitting => "Quitting",
             Self::Stop { .. } => "Stop",
             Self::Pong => "Pong",

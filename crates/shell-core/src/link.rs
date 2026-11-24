@@ -1656,13 +1656,14 @@ impl Link {
     ) {
         let mut state = LinkState::Connecting;
         let mut last_loss: Option<Instant> = None;
+        let mut repair_of = None;
         loop {
             if self.quitting() || events.send_blocking(LinkEvent::State(state)).is_err() {
                 return;
             }
             let reconnect_by = Instant::now() + CONNECT_TIMEOUT;
             let connection = match self.connect_with(reconnect_by, |attempt| {
-                self.handshake(attempt, || text_metrics(reconnect_by))
+                self.handshake(attempt, repair_of, || text_metrics(reconnect_by))
             }) {
                 Ok(connection) => connection,
                 Err(_) if self.quitting() => return,
@@ -1671,11 +1672,12 @@ impl Link {
                     if !wait_for_retry(events, retries) {
                         return;
                     }
-                    (state, last_loss) = (LinkState::Connecting, None);
+                    (state, last_loss, repair_of) = (LinkState::Connecting, None, None);
                     continue;
                 }
             };
             tracing::info!(incarnation = ?connection.issue_origin.incarnation, "connected to the brain");
+            let previous = connection.issue_origin;
             let attended = self.attend_until(connection, events, reconnect_by);
             if attended == Attendance::Ended || self.quitting() {
                 return;
@@ -1683,10 +1685,10 @@ impl Link {
             if attended != Attendance::TalkBackChanged {
                 tracing::warn!("lost the brain");
             }
-            let Some(next) = self.after_loss(events, retries, attended, last_loss) else {
+            let Some(next) = self.after_loss(events, retries, attended, last_loss, previous) else {
                 return;
             };
-            (state, last_loss) = next;
+            (state, last_loss, repair_of) = next;
         }
     }
 
@@ -1696,7 +1698,8 @@ impl Link {
         retries: &Receiver<()>,
         attended: Attendance,
         last_loss: Option<Instant>,
-    ) -> Option<(LinkState, Option<Instant>)> {
+        previous: IssueSession,
+    ) -> Option<(LinkState, Option<Instant>, Option<IssueSession>)> {
         let refused_tail = if self.audio == AudioSession::QueuedRequired {
             self.shared.output.wait_for_refused_tail()
         } else {
@@ -1710,16 +1713,16 @@ impl Link {
             return None;
         }
         if attended == Attendance::TalkBackChanged && refused_tail.is_none() {
-            return Some((LinkState::Reconnecting, last_loss));
+            return Some((LinkState::Reconnecting, last_loss, Some(previous)));
         }
         let now = Instant::now();
         if attended == Attendance::Retry
             || refused_tail == Some(output::RefusedTail::Quiet)
             || last_loss.is_some_and(|at| now.duration_since(at) < REPEAT_WINDOW)
         {
-            return wait_for_retry(events, retries).then_some((LinkState::Connecting, None));
+            return wait_for_retry(events, retries).then_some((LinkState::Connecting, None, None));
         }
-        Some((LinkState::Reconnecting, Some(now)))
+        Some((LinkState::Reconnecting, Some(now), None))
     }
 
     fn quitting(&self) -> bool {
@@ -2088,6 +2091,7 @@ impl Link {
     fn handshake(
         &self,
         attempt: Option<Instant>,
+        repair_of: Option<IssueSession>,
         text_metrics: impl FnOnce() -> DrawingText,
     ) -> Result<Connection, LinkError> {
         let control = open(&Pipe::Control.name(self.session), &self.brain, attempt)?;
@@ -2097,9 +2101,15 @@ impl Link {
             build_id: BUILD_ID.to_owned(),
             capability: credential::read(self.session)?,
         };
-        handshake_pair(control, hello, self.audio, attempt, text_metrics(), || {
-            open(&Pipe::Data.name(self.session), &self.brain, attempt)
-        })
+        handshake_pair(
+            control,
+            hello,
+            self.audio,
+            repair_of,
+            attempt,
+            text_metrics(),
+            || open(&Pipe::Data.name(self.session), &self.brain, attempt),
+        )
     }
 }
 
@@ -2107,13 +2117,17 @@ fn handshake_pair(
     control: PipeClient,
     hello: Hello,
     audio: AudioSession,
+    repair_of: Option<IssueSession>,
     attempt: Option<Instant>,
     drawing: DrawingText,
     open_data: impl FnOnce() -> Result<PipeClient, LinkError>,
 ) -> Result<Connection, LinkError> {
-    let greeting = match audio {
-        AudioSession::Legacy => ControlToBrain::Hello(hello.clone()),
-        AudioSession::QueuedRequired => ControlToBrain::QueuedHello(hello.clone()),
+    let greeting = match (audio, repair_of) {
+        (AudioSession::Legacy, _) => ControlToBrain::Hello(hello.clone()),
+        (AudioSession::QueuedRequired, None) => ControlToBrain::QueuedHello(hello.clone()),
+        (AudioSession::QueuedRequired, Some(previous)) => {
+            ControlToBrain::QueuedAudioReconnect(Box::new(hello.clone()), previous)
+        }
     };
     let mut handshake = HandshakeIo(&control, attempt);
     frame::write(&mut handshake, &greeting, Pipe::Control)?;
