@@ -33,6 +33,7 @@ use crate::platform::input::{Button, input};
 use crate::platform::{Deliver, PresenceEvent, with_raw_keys, with_raw_modifiers};
 use crate::presence::kumo::{Motion, v2};
 use crate::presence::pulling::{Grab, PullSpace};
+use crate::presence::test_fixture::without_desktop;
 use crate::strings::Text;
 use kumochi_shell_core::presenter::fixture::{scene_ids, select};
 

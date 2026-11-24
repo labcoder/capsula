@@ -12,6 +12,7 @@ use crate::input::{Edge, Event, Key};
 use crate::link::{Batch, LinkEvent};
 use crate::platform::microphone::{MicError, Running};
 use crate::platform::{Deliver, EventTime};
+use crate::presence::test_fixture::without_desktop;
 
 #[derive(Clone, Default)]
 struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
