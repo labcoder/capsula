@@ -23,6 +23,28 @@ use crate::escape::{Activity, Escape, Panel, decide};
 const BYTES: u32 = 10;
 
 #[test]
+fn the_escape_frontier_advances_before_a_new_typed_run_is_named() {
+    let mut runs = answering(4);
+    let before = (runs.newest_submission(), runs.newest_run());
+    assert_eq!(before, (0, RunId(4)));
+    assert!(runs.working());
+
+    submit(&mut runs, "new turn");
+    assert_eq!((runs.newest_submission(), runs.newest_run()), (1, RunId(4)));
+    assert_eq!(runs.stoppable(), Some(RunId(4)));
+    assert!(runs.working());
+
+    runs.apply_state(
+        RunId(5),
+        ThreadId(1),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    );
+    assert_eq!((runs.newest_submission(), runs.newest_run()), (1, RunId(5)));
+    assert_eq!(runs.stoppable(), Some(RunId(5)));
+}
+
+#[test]
 fn unowned_runs_show_and_stop_without_taking_pending_text_or_focus() {
     use kumochi_protocol::message::GestureId;
 
