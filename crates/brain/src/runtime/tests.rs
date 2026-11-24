@@ -62,6 +62,8 @@ mod speech;
 mod stop_scenes;
 #[path = "thread_op_tests.rs"]
 mod thread_ops;
+#[path = "typed_screen_tests.rs"]
+mod typed_screen;
 #[path = "voice_tests.rs"]
 mod voice;
 
@@ -758,7 +760,7 @@ fn outcome(state: &str, reason: &str) -> (String, Option<String>) {
 
 #[tokio::test]
 async fn submit_numbers_reach_refusals_and_only_the_first_run_state_in_fifo_order() {
-    use kumochi_protocol::message::{RunOrigin, ScreenChoice};
+    use kumochi_protocol::message::{LeaseGeneration, RunOrigin, ScreenChoice};
 
     let scratch = Scratch::new("submit-origins");
     let mut brain = test_support::brain(&scratch, "5000 text late");
@@ -766,10 +768,20 @@ async fn submit_numbers_reach_refusals_and_only_the_first_run_state_in_fifo_orde
     let mut tap = Tap::from_env();
     let client = async {
         assert_eq!(shell.scenes().await, []);
-        for (turn, text) in [(73, " "), (91, "accepted")] {
+        for (turn, screen, text) in [
+            (73, ScreenChoice::None, " "),
+            (
+                90,
+                ScreenChoice::Include {
+                    lease: LeaseGeneration(1),
+                },
+                "never plain",
+            ),
+            (91, ScreenChoice::None, "accepted"),
+        ] {
             let message = DataToBrain::TextSubmit {
                 turn,
-                screen: ScreenChoice::None,
+                screen,
                 thread: None,
                 text: text.into(),
             };
@@ -784,6 +796,13 @@ async fn submit_numbers_reach_refusals_and_only_the_first_run_state_in_fifo_orde
             Some(ControlToShell::TurnRefused {
                 turn: 73,
                 thread: None
+            })
+        );
+        assert_eq!(
+            shell.control().await,
+            Some(ControlToShell::TurnRefused {
+                turn: 90,
+                thread: None,
             })
         );
         assert_eq!(

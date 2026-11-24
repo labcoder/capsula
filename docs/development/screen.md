@@ -49,6 +49,9 @@ A hostile worker can make the brain hold up to 16 × 12 MiB of streamed replies 
 
 Each request carries its caller's absolute deadline, including queue time; a hold's screen work
 stays within the 1.5 s screen budget (`MAX_TTL`) [guess], and fixtures pass their own.
+The client assigns the hold's capture id and ticket number from one checked counter under the
+enqueue lock. Retirement fences that hold and earlier holds. An answer from a later worker
+proves the original holder exited; if no worker answers, fallback names the known holder.
 A loss fails all pending operations and requests worker termination. The supervisor then waits
 off the async thread, up to 2 s [guess], for the process to exit, and broadcasts
 `Exit { generation, confirmed }` and then the loss's `Generation`: the first worker is 0 and each
@@ -76,7 +79,50 @@ release worker. Windows UI Automation supplies the element operation; OCR is not
 The macOS platform equivalent is `posix_spawn` file actions for stdio and a process-group kill;
 it remains unimplemented and unverified.
 
+## Typed reply wire compatibility
+
+On the paired control pipe, `ControlToShell` keeps B97's `AccountUnsupported` at tag 37.
+The dormant replies are appended in order: `TypedScreenOffered` 38, `TypedScreenHeld` 39,
+`TypedScreenRecipient` 40, and `TypedScreenNotSent` 41. Their old draft assignments never
+shipped. The separate `SpokenRepliesDefaulted` notice follows these replies at tag 42. The brain
+and shell must have matching build IDs, and the tap records these replies and the notice without
+payloads. No shell-to-brain or data tag moves.
+
 ## Local shell exclusion
+
+Typed submissions must not convert a requested picture into plain text. The legacy
+`ScreenChoice::Include` cannot prove which draft, display or recipient was authorized,
+so the brain refuses it in the normal turn queue without starting capture or a run.
+
+The one-shot typed protocol is dormant until the native exclusion and display adapter
+can establish continuous exclusion. The brain keeps at most one offer and one capturing
+turn on a paired connection. It pins the draft, selection, chat, display and committed
+global choice. The brain sends the displayed model and a paired revision that changes with the
+verified account generation or model. The shell asks with the revision it actually displayed;
+an old revision cannot authorize the new recipient. The brain spends the offer before attempting
+capture, even on refusal. An exact cancel can overtake data. A lease lapse fences that generation
+and earlier ones on the pair, so a late submit spends the offer without starting the worker.
+A refusal stays in turn order; credit and other control frames do not wait for capture.
+
+Holds and typed requests share a checked capture ID sequence. A typed request selects
+the exact display and waits for the shell to confirm continuous exclusion for the
+matching lease and held frame before sealing. Dropping the pending request releases
+only its frame; it cannot retire another hold or a newer capture. A hold that can't
+confirm release relies on its frame's expiry while a typed capture might still own the worker.
+Definite refusal, completed seal or exact revocation releases that capture's protection
+immediately. Ambiguous work stays protected only within the worker deadline.
+
+Responses is the only modeled route for one-shot typed pictures: its first request
+carries the image, and a later tool round cannot rebuild it. Key continuations resend
+their original prefix, so the Key and Code routes are not offered for typed pictures.
+Only a full Responses flush on the original pictured lease writes the history mark.
+Losing capability after seal ends the pending pictured send, even before a grant exists and even
+if capability returns later. To preserve words after a named refusal, the brain must also fence
+the exact grant before its first write reservation. The shell then permits one explicit text-only
+retry for the original chat or draft, retaining the words if enqueue fails. An unknown or
+incomplete flush leaves no mark and does not imply that no bytes went out.
+If Esc overtakes the name of a confirmed pictured run, the shell binds its late run ID only
+to match that receipt; the cancelled run stays hidden and its original target does not change.
 
 Presence owns the exclusion transaction in `presence/exclusion.rs`; the lease and
 its cleanup rules are in `crates/shell-core/src/presence/exclusion/machine.rs`, with no GPUI.

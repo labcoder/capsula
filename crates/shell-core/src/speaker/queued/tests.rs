@@ -1052,3 +1052,48 @@ fn a_discarded_segment_keeps_ingress_order_and_never_stages_late_pcm() {
     assert!(engine.queue.discarded(SegmentId(limit - 1)));
     assert!(!engine.queue.discarded(SegmentId(limit)));
 }
+
+#[test]
+fn speech_evidence_wakes_at_onset_and_runs_out_on_its_own() {
+    use std::time::{Duration, Instant};
+
+    let ms = Duration::from_millis;
+    let (wake, woken) = async_channel::bounded(1);
+    let speech = super::Speech::new(wake);
+    assert_eq!(speech.until(), None);
+    speech.hold(Duration::ZERO, ms(500));
+    assert_eq!(
+        speech.until(),
+        None,
+        "a frame a whole grace old holds nothing"
+    );
+    assert!(woken.try_recv().is_err(), "and wakes nothing");
+    let before = Instant::now();
+    speech.hold(ms(1000), ms(1420));
+    let until = speech.until().expect("a recent frame holds");
+    assert!(
+        until >= before + ms(80) && until <= Instant::now() + ms(80),
+        "it runs out a grace after the frame, not after the report"
+    );
+    assert_eq!(woken.try_recv(), Ok(()), "onset wakes the shell");
+    speech.hold(ms(1010), ms(1420));
+    assert!(woken.try_recv().is_err(), "an extension doesn't");
+    let extended = speech.until();
+    speech.hold(ms(1005), ms(1420));
+    assert_eq!(speech.until(), extended, "an older frame never shortens it");
+    std::thread::sleep(Duration::from_millis(120));
+    assert_eq!(
+        speech.until(),
+        None,
+        "the evidence runs out with no more reports"
+    );
+    speech.hold(ms(10_000), ms(10_000));
+    assert_eq!(
+        woken.try_recv(),
+        Ok(()),
+        "a new onset after it ran out wakes again"
+    );
+    speech.clear();
+    assert_eq!(speech.until(), None);
+    assert_eq!(woken.try_recv(), Ok(()), "a cleared route wakes the shell");
+}

@@ -26,7 +26,7 @@ pub enum WorkerFault {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureId(pub u64);
 
-/// One capture's authority. Only the brain's hold client mints it, for a recognized hold; this
+/// One capture's authority. Only the brain's hold client mints it, for either capture path; this
 /// module only carries and checks it.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct TicketWire {

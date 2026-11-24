@@ -2,6 +2,9 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{
     MAX_AHEAD_SEGMENTS, MAX_SEGMENTS_PER_RUN, MAX_UNPLAYED_SECONDS, OutputGeneration, RunId,
@@ -71,6 +74,62 @@ impl fmt::Debug for Packet {
 impl Drop for Packet {
     fn drop(&mut self) {
         self.pcm.samples.zeroize();
+    }
+}
+
+/// How long a presented frame keeps speech evidence.
+const SPEECH_GRACE: Duration = Duration::from_millis(500);
+
+/// Expiring evidence that a run's audio is presenting: it holds Esc, never admits a microphone.
+#[derive(Clone)]
+pub(crate) struct Speech {
+    base: Instant,
+    until: Arc<AtomicU64>,
+    changed: async_channel::Sender<()>,
+}
+
+impl Speech {
+    pub(crate) fn new(changed: async_channel::Sender<()>) -> Self {
+        Self {
+            base: Instant::now(),
+            until: Arc::default(),
+            changed,
+        }
+    }
+
+    /// Holds to a grace past the frame presented at `presented`, on a clock now at `now`.
+    fn hold(&self, presented: Duration, now: Duration) {
+        let Some(left) = presented
+            .saturating_add(SPEECH_GRACE)
+            .checked_sub(now)
+            .filter(|left| !left.is_zero())
+        else {
+            return;
+        };
+        let until = Instant::now() + left;
+        let nanos = u64::try_from(until.saturating_duration_since(self.base).as_nanos())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let before = self.at(self.until.fetch_max(nanos, Ordering::AcqRel));
+        if before.is_none_or(|at| at <= Instant::now()) {
+            let _woken = self.changed.try_send(());
+        }
+    }
+
+    fn clear(&self) {
+        if self.until.swap(0, Ordering::AcqRel) != 0 {
+            let _woken = self.changed.try_send(());
+        }
+    }
+
+    /// When the evidence runs out, while it still holds.
+    pub(crate) fn until(&self) -> Option<Instant> {
+        self.at(self.until.load(Ordering::Acquire))
+            .filter(|at| *at > Instant::now())
+    }
+
+    fn at(&self, nanos: u64) -> Option<Instant> {
+        (nanos != 0).then(|| self.base + Duration::from_nanos(nanos))
     }
 }
 

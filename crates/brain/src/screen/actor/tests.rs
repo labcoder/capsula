@@ -30,24 +30,28 @@ const DISPLAY: PhysicalRect = PhysicalRect {
     size: [4, 3],
 };
 
+fn hold_owner() -> Owner {
+    Owner {
+        epoch: 1,
+        gesture: 7,
+    }
+}
+
 fn key(id: u64) -> Key {
     Key {
-        owner: Owner {
-            epoch: 1,
-            gesture: 7,
-        },
+        owner: Some(hold_owner()),
         capture: CaptureId(id),
     }
 }
 
 fn context(id: u64) -> Request {
-    context_for(id, key(id).owner)
+    context_for(id, hold_owner())
 }
 
 fn context_for(id: u64, owner: Owner) -> Request {
     Request::Context {
         key: Key {
-            owner,
+            owner: Some(owner),
             capture: CaptureId(id),
         },
         ticket: TicketWire::new(CaptureId(id), id, [91; 16], 30_000, FAR),
@@ -199,6 +203,26 @@ impl Capturer for Fake {
         }
         let arrived = *self.clock.lock().unwrap();
         Ok((Acquired { arrived, dpi: 120 }, DISPLAY))
+    }
+
+    fn capture_typed_display(
+        &mut self,
+        _: PhysicalPoint,
+        expected: TypedDisplay,
+        _: u64,
+        _: Instant,
+        frame: &mut RawFrame,
+    ) -> Result<Acquired, Failure> {
+        if expected != display::TYPED {
+            return Err(Refusal::DisplayChanged.into());
+        }
+        frame.audit(self.audit.clone());
+        frame.begin(4, 3)?.fill(91);
+        if let Some(gate) = self.capture.take() {
+            gate.wait();
+        }
+        let arrived = *self.clock.lock().unwrap();
+        Ok(Acquired { arrived, dpi: 120 })
     }
 }
 
@@ -352,6 +376,7 @@ impl Rig {
                     let mut screen = Screen::default();
                     screen.unchanged = unchanged;
                     screen.display_at = |bounds| (bounds == DISPLAY).then_some((DISPLAY, 120));
+                    screen.typed_display_at = display::typed_at;
                     screen.left_until = MILLIS_LEFT;
                     screen
                 },
@@ -421,7 +446,7 @@ fn drop_and_retire_are_accepted_during_foreground_or_capture_and_no_ack_precedes
             let request = if control == "drop" {
                 Request::Drop(key(1))
             } else {
-                Request::Retire(key(1).owner)
+                Request::Retire(hold_owner())
             };
             let capture = if control == "drop" {
                 Some(CaptureId(1))
@@ -446,12 +471,12 @@ fn drop_and_retire_are_accepted_during_foreground_or_capture_and_no_ack_precedes
                 (1, Reply::Refused(Refusal::Stale)),
                 "no late publication"
             );
-            assert_eq!(rig.reply(), (2, Reply::Released(key(1).owner, capture)));
+            assert_eq!(rig.reply(), (2, Reply::Released(hold_owner(), capture)));
             rig.scrubbed();
             rig.send(4, &Request::Drop(key(1)));
             assert_eq!(
                 rig.reply(),
-                (4, Reply::Released(key(1).owner, Some(CaptureId(1))))
+                (4, Reply::Released(hold_owner(), Some(CaptureId(1))))
             );
             rig.finish();
         }
@@ -478,7 +503,7 @@ fn exactly_queue_release_waiters_finish_after_scrub_and_the_extra_one_is_refused
     for id in 2..=u64::try_from(QUEUE + 1).unwrap() {
         assert_eq!(
             rig.reply(),
-            (id, Reply::Released(key(1).owner, Some(CaptureId(1))))
+            (id, Reply::Released(hold_owner(), Some(CaptureId(1))))
         );
     }
     rig.scrubbed();
@@ -491,7 +516,7 @@ fn wrong_owner_and_capture_cannot_release_the_live_frame() {
     rig.send(1, &context(1));
     rig.acquired(1);
     let mut foreign = key(1);
-    foreign.owner.gesture = 8;
+    foreign.owner.as_mut().unwrap().gesture = 8;
     for (id, wrong) in [(2, foreign), (3, key(2))] {
         rig.send(id, &Request::Drop(wrong));
         assert_eq!(rig.reply(), (id, Reply::Refused(Refusal::Stale)));
@@ -517,7 +542,7 @@ fn wrong_owner_and_capture_cannot_release_the_live_frame() {
     rig.send(5, &Request::Drop(key(1)));
     assert_eq!(
         rig.reply(),
-        (5, Reply::Released(key(1).owner, Some(CaptureId(1))))
+        (5, Reply::Released(hold_owner(), Some(CaptureId(1))))
     );
     rig.scrubbed();
     rig.finish();
@@ -557,7 +582,7 @@ fn a_late_walk_is_taken_and_discarded_before_release_ack_and_the_reader_can_be_r
     );
     assert_eq!(
         rig.reply(),
-        (3, Reply::Released(key(1).owner, Some(CaptureId(1))))
+        (3, Reply::Released(hold_owner(), Some(CaptureId(1))))
     );
     rig.send(5, &context(5));
     rig.acquired(5);
@@ -591,7 +616,7 @@ fn retirement_without_a_capture_fences_old_owners_and_a_failed_attempt_stays_spe
     };
     rig.send(1, &Request::Retire(fence));
     assert_eq!(rig.reply(), (1, Reply::Released(fence, None)));
-    rig.send(2, &context_for(2, key(1).owner));
+    rig.send(2, &context_for(2, hold_owner()));
     assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Stale)));
     rig.send(3, &context_for(3, fence));
     assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Stale)));
@@ -607,7 +632,7 @@ fn retirement_without_a_capture_fences_old_owners_and_a_failed_attempt_stays_spe
     );
     rig.send(5, &context_for(5, newer));
     let fresh = Key {
-        owner: newer,
+        owner: Some(newer),
         capture: CaptureId(5),
     };
     let (_, reply) = rig.reply();
@@ -787,7 +812,7 @@ fn a_return_that_cannot_prove_native_cleanup_ends_the_loop_without_acknowledging
 
 #[test]
 fn both_controls_dispose_an_already_acquired_frame_and_duplicate_disposal_is_idempotent() {
-    for request in [Request::Drop(key(1)), Request::Retire(key(1).owner)] {
+    for request in [Request::Drop(key(1)), Request::Retire(hold_owner())] {
         let rig = Rig::start(None, None, None);
         rig.send(1, &context(1));
         rig.acquired(1);
@@ -797,7 +822,7 @@ fn both_controls_dispose_an_already_acquired_frame_and_duplicate_disposal_is_ide
         };
         for id in [2, 3] {
             rig.send(id, &request);
-            assert_eq!(rig.reply(), (id, Reply::Released(key(1).owner, capture)));
+            assert_eq!(rig.reply(), (id, Reply::Released(hold_owner(), capture)));
         }
         rig.scrubbed();
         rig.finish();
@@ -925,7 +950,7 @@ fn a_blocked_walk_does_not_queue_the_next_captures_foreground_behind_it() {
     assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Stale)));
     assert_eq!(
         rig.reply(),
-        (4, Reply::Released(key(3).owner, Some(CaptureId(3))))
+        (4, Reply::Released(hold_owner(), Some(CaptureId(3))))
     );
     rig.finish();
 }

@@ -274,8 +274,34 @@ The local effect always happens first, and nothing waits on the brain:
 Esc is held system-wide with `RegisterHotKey` while held voice is active or a drawing is shown:
 the overlay is showing scene frames (`Presenter::drawn`), or run steps show in the open typing
 panel. Mirrored, preparing and recovering scenes that aren't painted yet don't hold it, and an
-open status panel alone never does. Spoken replies don't hold it yet; `Activity::speaking` is
-always false.
+open status panel alone never does.
+
+Speech holds it too, from positive evidence only. The queued speaker's worker extends a
+`Speech` lease each time the native route reports presented PCM for the run, to 500 ms past
+that frame's presentation time. Evidence already past that is ignored, and an older frame never
+shortens the lease. It clears the lease when it recovers or retires the route, and when it stops.
+Admission, an owed quiet receipt, a virtual route or a heard prefix never arm it, and
+`LOCAL_QUIET` and `RECEIPT_QUEUED` still gate the microphone and typed turns alone. Onset
+and clearing wake the output owner's change channel. Presence reads the lease there through
+`OutputOwner::speech`, which never waits. When it is busy, Presence keeps only a lease that
+hasn't run out and reads again after 10 ms, doubling up to 80 ms. It also reads again when the lease runs out, and a session
+that ended has no lease. `Activity::speaking` is true while the lease holds and no focused
+Kumochi panel (the typing box, Tasks or Settings, by window activation rather than visibility)
+takes Esc itself. Those panels keep their own
+Esc, which stops speech first. Focus changes resync the hotkey.
+
+A hotkey press carries the lease's session and run and whether the foreground window is an
+owned typing surface, captured before deferred delivery. If no panel owns the press, it does
+only one thing (`Presence::stop_speech`), checked first: from another
+session, nothing; if that run is still the moving one and its `Done` hasn't come, it fences that
+run alone (`fence_spoken`); otherwise it offers that run's speaker a local `Stop`
+(`OutputOwner::stop_locally`), because `Done` comes on control before `RunEnd` on data, so an
+ended run's audio can still play. No outcome of a local stop ends the pair or reaches the brain.
+That speech-only press never takes marks, ends a selection, cancels voice or a pull, or clears a
+drawing. A focused panel keeps the local order even when a drawing or pull keeps the hotkey
+registered. The panel's own Esc and Stop also carry the speech target at the point of input.
+After those priorities, a current speech lease counts as work. A speech-targeted Stop never
+retargets its successor; a finished or replaced run's audio stops only at its own speaker.
 Held voice additionally owns global Esc through preparation and pre-answer work. A raw Escape
 revokes collection before deferred UI; its hotkey delivery consumes one marker so that the
 same press cannot also dismiss typing. Cleanup debt alone does not capture Esc from newer

@@ -1,3 +1,4 @@
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +14,13 @@ const RECT: PhysicalRect = PhysicalRect {
     origin: [0, 0],
     size: [4, 3],
 };
+
+const EXPECTED: TypedDisplay = TypedDisplay {
+    id: NonZeroU64::new(15).unwrap(),
+    bounds: RECT,
+    dpi: 96,
+};
+const POINT: PhysicalPoint = PhysicalPoint([1, 1]);
 
 fn owner(gesture: u64) -> Owner {
     Owner { epoch: 1, gesture }
@@ -33,7 +41,7 @@ fn meta(capture: CaptureId) -> FrameMeta {
 
 fn held(capture: u64) -> Held {
     let key = Key {
-        owner: owner(7),
+        owner: Some(owner(7)),
         capture: CaptureId(capture),
     };
     Held {
@@ -63,6 +71,246 @@ fn client(rig: &Rig<Holds>) -> Arc<HoldClient> {
 }
 
 #[tokio::test]
+async fn both_capture_paths_share_checked_ids_at_exhaustion() {
+    let mut rig = fixture::start::<Holds>();
+    let client = client(&rig);
+    client.admission.lock().unwrap().last_capture = u64::MAX - 2;
+    let hold = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.context(owner(7), POINT, until()).await }
+    });
+    let (id, request) = rig.next().await;
+    hold_frame(&rig, id, request).await;
+    assert_eq!(
+        hold.await.unwrap().unwrap().key.capture,
+        CaptureId(u64::MAX - 1)
+    );
+
+    let typed = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.typed_display(POINT, EXPECTED, 5, until()).await }
+    });
+    let (id, request) = rig.next().await;
+    hold_frame(&rig, id, request).await;
+    let picture = typed.await.unwrap().unwrap();
+    assert_eq!(picture.capture_id(), CaptureId(u64::MAX));
+    drop(picture);
+    let (id, request) = rig.next().await;
+    let key = Key {
+        owner: None,
+        capture: CaptureId(u64::MAX),
+    };
+    assert!(matches!(request, Request::Drop(dropped) if dropped == key));
+    rig.reply(id, &Reply::Revoked(key)).await;
+
+    for error in [
+        client.context(owner(8), POINT, until()).await.err(),
+        client
+            .typed_display(POINT, EXPECTED, 5, until())
+            .await
+            .err(),
+        client.context(owner(9), POINT, until()).await.err(),
+    ] {
+        assert_eq!(error, Some(Closed::Lost(WorkerLost::Lost)));
+    }
+}
+
+#[tokio::test]
+async fn typed_retirement_tracking_is_bounded_by_the_worker_queue() {
+    let mut rig = fixture::start::<Holds>();
+    let client = client(&rig);
+    {
+        let mut admission = client.admission.lock().unwrap();
+        let prior = u64::try_from(crate::supervise::QUEUE - 1).unwrap();
+        admission.last_capture = prior;
+        admission.typed = (1..=prior).map(|id| (CaptureId(id), until())).collect();
+    }
+    let last = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.typed_display(POINT, EXPECTED, 5, until()).await }
+    });
+    let (id, request) = rig.next().await;
+    assert!(matches!(request, Request::TypedDisplay { .. }));
+    assert_eq!(
+        client
+            .typed_display(POINT, EXPECTED, 5, until())
+            .await
+            .err(),
+        Some(Closed::Busy)
+    );
+    rig.expect_idle(std::time::Duration::from_millis(50)).await;
+    rig.reply(id, &Reply::Busy).await;
+    assert_eq!(last.await.unwrap().err(), Some(Closed::Busy));
+    assert_eq!(
+        client.admission.lock().unwrap().typed.len(),
+        crate::supervise::QUEUE - 1
+    );
+}
+
+#[tokio::test]
+async fn a_typed_busy_reply_allows_active_hold_worker_recovery() {
+    let mut rig = fixture::start::<Holds>();
+    let client = client(&rig);
+    let active = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.context(owner(7), POINT, until()).await }
+    });
+    let (id, request) = rig.next().await;
+    hold_frame(&rig, id, request).await;
+    let generation = active.await.unwrap().unwrap().generation;
+
+    let typed = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.typed_display(POINT, EXPECTED, 5, until()).await }
+    });
+    let (busy, request) = rig.next().await;
+    assert!(matches!(request, Request::TypedDisplay { .. }));
+    let releasing =
+        tokio::spawn(async move { client.retire(owner(7), Some(generation), until()).await });
+    let (retire, request) = rig.next().await;
+    assert!(matches!(request, Request::Retire(held) if held == owner(7)));
+    rig.reply(busy, &Reply::Busy).await;
+    assert_eq!(typed.await.unwrap().err(), Some(Closed::Busy));
+
+    rig.confirm.send(true).expect("fixture listens");
+    rig.reply(retire, &Reply::Busy).await;
+    assert_eq!(releasing.await.unwrap(), Ok(()));
+    assert_eq!(
+        rig.terminations.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_missing_hold_release_receipt_does_not_retire_a_live_typed_capture() {
+    let mut rig = fixture::start::<Holds>();
+    let client = client(&rig);
+    let old = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.context(owner(7), POINT, until()).await }
+    });
+    let (id, request) = rig.next().await;
+    hold_frame(&rig, id, request).await;
+    let generation = old.await.unwrap().unwrap().generation;
+    let releasing = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.retire(owner(7), Some(generation), until()).await }
+    });
+    let (retire, request) = rig.next().await;
+    assert!(matches!(request, Request::Retire(held) if held == owner(7)));
+    let typed = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.typed_display(POINT, EXPECTED, 5, until()).await }
+    });
+    let (id, request) = rig.next().await;
+    let overlapping = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.typed_display(POINT, EXPECTED, 5, until()).await }
+    });
+    let (busy, _) = rig.next().await;
+    rig.reply(busy, &Reply::Busy).await;
+    assert_eq!(overlapping.await.unwrap().err(), Some(Closed::Busy));
+
+    rig.confirm.send(true).expect("fixture listens");
+    rig.reply(retire, &Reply::Busy).await;
+    assert_eq!(releasing.await.unwrap(), Err(Unreleased));
+    assert_eq!(
+        rig.terminations.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    hold_frame(&rig, id, request).await;
+    let picture = typed.await.unwrap().unwrap();
+    assert_eq!(picture.capture_id(), CaptureId(2));
+
+    let sealing = tokio::spawn(picture.seal());
+    let (id, request) = rig.next().await;
+    let Request::Seal(key) = request else {
+        panic!("expected seal: {request:?}");
+    };
+    rig.reply(id, &Reply::Sealed(key, context())).await;
+    assert_eq!(sealing.await.unwrap(), Ok(context()));
+
+    let releasing =
+        tokio::spawn(async move { client.retire(owner(7), Some(generation), until()).await });
+    let (id, request) = rig.next().await;
+    assert!(matches!(request, Request::Retire(held) if held == owner(7)));
+    rig.reply(id, &Reply::Busy).await;
+    assert_eq!(releasing.await.unwrap(), Ok(()));
+}
+
+#[tokio::test]
+async fn aborting_typed_acquisition_queues_exact_revocation() {
+    let mut rig = fixture::start::<Holds>();
+    let client = client(&rig);
+    let acquisition = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.typed_display(POINT, EXPECTED, 5, until()).await }
+    });
+    let (pending, request) = rig.next().await;
+    let Request::TypedDisplay {
+        ticket,
+        point,
+        expected,
+        excluded,
+    } = request
+    else {
+        panic!("not typed: {request:?}");
+    };
+    assert_eq!((point, expected, excluded), (POINT, EXPECTED, 5));
+    acquisition.abort();
+    assert!(acquisition.await.unwrap_err().is_cancelled());
+
+    let (id, request) = rig.next().await;
+    let key = Key {
+        owner: None,
+        capture: ticket.capture(),
+    };
+    assert!(matches!(request, Request::Drop(dropped) if dropped == key));
+    rig.reply(id, &Reply::Revoked(key)).await;
+    rig.reply(pending, &Reply::Refused(Refusal::Stale)).await;
+}
+
+#[tokio::test]
+async fn typed_seal_rejects_a_replacement_and_cleanup_leaves_it_running() {
+    let mut rig = fixture::start_at::<Holds>(Generation(1));
+    let key = Key {
+        owner: None,
+        capture: CaptureId(3),
+    };
+    let frame = TypedHeld {
+        held: Held {
+            key,
+            generation: Generation(0),
+        },
+        cleanup: TypedDrop {
+            client: client(&rig),
+            key,
+            runtime: tokio::runtime::Handle::current(),
+            armed: true,
+        },
+        until: until(),
+    };
+    let sealing = tokio::spawn(frame.seal());
+    let (id, request) = rig.next().await;
+    assert!(matches!(request, Request::Seal(sealed) if sealed == key));
+    rig.reply(id, &Reply::Sealed(key, context())).await;
+    assert_eq!(
+        sealing.await.unwrap().err(),
+        Some(Closed::Lost(WorkerLost::Lost))
+    );
+
+    let (id, request) = rig.next().await;
+    assert!(matches!(request, Request::Drop(dropped) if dropped == key));
+    rig.reply(id, &Reply::Refused(Refusal::Stale)).await;
+    let inner = rig.handle.clone();
+    let ping = tokio::spawn(async move { inner.request(Request::Ping, until()).await });
+    let (id, request) = rig.next().await;
+    assert!(matches!(request, Request::Ping));
+    rig.reply(id, &Reply::Pong).await;
+    assert_eq!(ping.await.unwrap(), Ok((Reply::Pong, Generation(1))));
+}
+
+#[tokio::test]
 async fn each_capture_gets_a_fresh_key_and_a_higher_ticket_and_names_its_worker() {
     let mut rig = fixture::start::<Holds>();
     let client = client(&rig);
@@ -82,7 +330,7 @@ async fn each_capture_gets_a_fresh_key_and_a_higher_ticket_and_names_its_worker(
         };
         assert_eq!(
             (key.owner, ticket.capture(), point),
-            (owner(gesture), key.capture, PhysicalPoint([5, 6]))
+            (Some(owner(gesture)), key.capture, PhysicalPoint([5, 6]))
         );
         assert_eq!(
             ticket.ttl_ms(),
@@ -105,6 +353,34 @@ async fn each_capture_gets_a_fresh_key_and_a_higher_ticket_and_names_its_worker(
     };
     assert!(second_capture.0 > first_capture.0);
     assert!(second_ticket > first_ticket);
+}
+
+#[tokio::test]
+async fn hold_capture_ids_stop_at_exhaustion_without_wrapping_the_ticket() {
+    let mut rig = fixture::start::<Holds>();
+    let client = client(&rig);
+    client.admission.lock().unwrap().last_capture = u64::MAX - 1;
+    let last = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.context(owner(7), POINT, until()).await }
+    });
+    let (id, request) = rig.next().await;
+    let Request::Context { key, ticket, .. } = request else {
+        panic!("a hold capture");
+    };
+    assert_eq!(
+        (key.capture, ticket.capture(), ticket.generation()),
+        (CaptureId(u64::MAX), CaptureId(u64::MAX), u64::MAX)
+    );
+    rig.reply(id, &Reply::Acquired(key, meta(key.capture)))
+        .await;
+    rig.reply(id, &Reply::Complete(key)).await;
+    assert_eq!(last.await.unwrap().unwrap().key, key);
+    assert_eq!(
+        client.context(owner(8), POINT, until()).await.err(),
+        Some(Closed::Lost(WorkerLost::Lost))
+    );
+    rig.expect_idle(std::time::Duration::from_millis(50)).await;
 }
 
 #[tokio::test]
@@ -138,7 +414,7 @@ async fn a_retired_hold_never_reaches_the_worker_again_and_a_later_one_does() {
     });
     let (_, request) = rig.next().await;
     assert!(
-        matches!(request, Request::Context { key, .. } if key.owner == owner(8)),
+        matches!(request, Request::Context { key, .. } if key.owner == Some(owner(8))),
         "{request:?}"
     );
 }
@@ -282,7 +558,7 @@ async fn a_replacement_that_answers_anything_but_the_release_is_left_running() {
     let Request::Context { key, .. } = request else {
         panic!("not a capture: {request:?}")
     };
-    assert_eq!(key.owner, owner(8));
+    assert_eq!(key.owner, Some(owner(8)));
     rig.reply(id, &Reply::Acquired(key, meta(key.capture)))
         .await;
     rig.reply(id, &Reply::Complete(key)).await;

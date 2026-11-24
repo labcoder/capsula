@@ -142,7 +142,7 @@ pub(super) struct Holds {
     send: mpsc::Sender<Packet>,
     receive: mpsc::Receiver<Packet>,
     /// The screen worker's client; 2c4 gives the brain one.
-    screen: Option<Arc<HoldClient>>,
+    pub(super) screen: Option<Arc<HoldClient>>,
     /// Whether this platform captures one window; a client alone doesn't say so.
     window_capture: bool,
     /// The gate's state last sent on this connection, unstamped, with the sign-in it spoke for.

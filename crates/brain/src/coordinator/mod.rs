@@ -33,6 +33,7 @@ pub(crate) use tests::mcp::draft::draft_launch;
 pub(crate) use tests::routes::{built_for, pictured_claude_run, pictured_run};
 mod thread_op;
 mod tools;
+pub mod typed_screen;
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -145,6 +146,24 @@ pub enum Input {
         /// What the user typed.
         text: Content,
     },
+    /// A typed submit that must settle in turn order without admitting a run.
+    RefuseTurn {
+        /// The submit's connection-local number.
+        turn: u32,
+        /// The original target, or `None` for a new thread.
+        thread: Option<ThreadId>,
+    },
+    /// The store checked an opt-in's existing chat before it could inherit a global choice.
+    TypedTargetRead {
+        /// The paired connection, separate from the offer's local number.
+        epoch: u64,
+        /// The candidate's offer number.
+        offer: kumochi_protocol::message::TypedScreenOffer,
+        /// Success only when the chat exists, is live and has no per-task choice.
+        result: Result<(), ()>,
+    },
+    /// A pictured typed attempt. Only the paired runtime can establish capture authority.
+    PicturedTurn(typed_screen::PicturedTurn),
     /// The user clicked a labelled 3D part: a turn about it, in its drawing's thread.
     Ask {
         /// The ask's connection-local number, shared with typed turns.
@@ -225,6 +244,11 @@ pub enum Input {
     },
     /// A granted send stopped: it finished, failed, or was dropped.
     SendSettled {
+        /// Its lease.
+        lease: LeaseId,
+    },
+    /// The transport reported a full flush for a typed picture's exact send.
+    SendFlushed {
         /// Its lease.
         lease: LeaseId,
     },
@@ -645,6 +669,7 @@ struct Run {
     /// Resolved once before the first send; the raw snapshot still fences held input.
     effective_effort: Option<kumochi_protocol::message::Effort>,
     hold: Option<HoldSnapshot>,
+    typed_screen: Option<typed_screen::TypedRun>,
     /// The hold's screen, which every request of the run carries.
     screen: Option<crate::context::Screen>,
     /// The run took up a screen hold's picture, so while marks are on every round stores its
@@ -972,7 +997,9 @@ impl Coordinator {
     fn route(&mut self, input: Input) -> Result<Vec<Effect>, Stale> {
         let mut effects = Vec::new();
         match input {
-            Input::HoldPrepared { .. } | Input::IssueWritten { .. } => return Err(Stale),
+            Input::HoldPrepared { .. }
+            | Input::IssueWritten { .. }
+            | Input::TypedTargetRead { .. } => return Err(Stale),
             Input::StopScenes { run, .. } if run < self.session_start || run > self.last_run => {
                 return Err(Stale);
             }
@@ -990,7 +1017,13 @@ impl Coordinator {
                 return Ok(vec![Effect::Store(StoreOp::ReadCards { cards })]);
             }
             Input::CardsRead { cards, reply } => return Ok(vec![Effect::Cards { cards, reply }]),
-            Input::Turn { turn, thread, text } => self.typed(turn, thread, text, &mut effects),
+            Input::Turn { turn, thread, text } => {
+                self.typed(turn, thread, Some(text), &mut effects);
+            }
+            Input::RefuseTurn { turn, thread }
+            | Input::PicturedTurn(typed_screen::PicturedTurn { turn, thread, .. }) => {
+                self.typed(turn, thread, None, &mut effects);
+            }
             Input::Ask {
                 turn,
                 scene,
@@ -1060,8 +1093,15 @@ impl Coordinator {
             } => self.inline_written(key, &mut effects)?,
             Input::SignedIn { generation } => self.signed_in(generation, &mut effects)?,
             Input::SignedOut { generation } => self.signed_out(generation, &mut effects)?,
-            Input::SendSettled { lease } => self.send_settled(lease, false, &mut effects)?,
-            Input::SendUnsent { lease } => self.send_settled(lease, true, &mut effects)?,
+            Input::SendFlushed { lease } => {
+                self.send_settled(lease, lease::Settlement::Flushed, &mut effects)?;
+            }
+            Input::SendSettled { lease } => {
+                self.send_settled(lease, lease::Settlement::Unknown, &mut effects)?;
+            }
+            Input::SendUnsent { lease } => {
+                self.send_settled(lease, lease::Settlement::Unsent, &mut effects)?;
+            }
             Input::SendDeadline { lease } => self.send_deadline(lease, &mut effects)?,
             Input::TurnStored { run } => self.turn_stored(run, &mut effects)?,
             Input::StepStored {
@@ -1416,6 +1456,7 @@ impl Coordinator {
             effective_effort: None,
             untold,
             hold,
+            typed_screen: None,
             pictured: matches!(screen, Some(crate::context::Screen::Picture(..))),
             screen_lost: None,
             grant_closed: None,
@@ -1563,6 +1604,19 @@ impl Coordinator {
         effects: &mut Vec<Effect>,
     ) {
         run.control.0.cancel();
+        if let Some(typed) = &mut run.typed_screen {
+            self.close_grants(run.id);
+            if notify == Notify::Shell
+                && matches!(outcome, RunEnd::Failed(_))
+                && typed.close_before_write()
+            {
+                effects.push(Effect::Control(ControlToShell::TypedScreenNotSent {
+                    run: run.id,
+                    offer: typed.offer(),
+                }));
+            }
+            typed.jpeg = None;
+        }
         self.close_digest_grants(run.id);
         // No send carrying the hold's picture was granted, or none wrote any of it, so its turn
         // mustn't say it was sent.

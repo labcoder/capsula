@@ -717,6 +717,7 @@ fn failed_backend_start_and_idle_exit_notify_without_an_ingress_packet() {
                     true
                 },
                 |_| panic!("the healthy worker did not refuse a report"),
+                Speech::new(async_channel::bounded(1).0),
             ),
             |_, provided| {
                 assert_eq!(provided, origin);

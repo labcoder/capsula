@@ -346,7 +346,8 @@ impl Coordinator {
         }) {
             return Err(Stale);
         }
-        let first = current.snapshot.is_none() || (current.hold.is_some() && key.round == 1);
+        let first = current.snapshot.is_none()
+            || (key.round == 1 && (current.hold.is_some() || current.typed_screen.is_some()));
         if let Some(snapshot) = snapshot {
             current.snapshot.get_or_insert(snapshot);
         }
@@ -398,11 +399,18 @@ impl Coordinator {
         current.finding = None;
         let made = match made {
             Ok(made) => made,
+            Err(_) if key.round == 1 && current.typed_screen.is_some() => {
+                return self.fail_typed_picture(key.run, effects);
+            }
             Err(room) => return self.compact_inline(key, room, effects),
         };
         self.admit_built(key, made, effects)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "image consumption stays ordered with delete fences and engine admission"
+    )]
     fn admit_built(
         &mut self,
         key: BuildKey,
@@ -421,6 +429,24 @@ impl Coordinator {
         }
         let route = current.route;
         let pictured = self.request_pictured(route, request.choice.as_ref());
+        let typed_picture = key.round == 1
+            && self
+                .current
+                .as_ref()
+                .is_some_and(|run| run.typed_screen.is_some());
+        if typed_picture
+            && !self.current.as_ref().is_some_and(|run| {
+                self.typed_picture_current(run)
+                    && run.typed_screen.as_ref().is_some_and(|typed| {
+                        request.choice.as_ref().is_some_and(|choice| {
+                            choice.connection == typed.recipient.route.kind
+                                && choice.model == typed.recipient.model
+                        })
+                    })
+            })
+        {
+            return self.fail_typed_picture(key.run, effects);
+        }
         let current = self.current(key.run)?;
         let pictured = pictured && current.screen_lost.is_none();
         if !pictured {
@@ -460,18 +486,31 @@ impl Coordinator {
                 Some(crate::context::Screen::Image(_) | crate::context::Screen::Picture(..))
             );
         let build = current.build.as_mut().expect("the build was just matched");
-        build.offers_draw = offers_draw;
-        build.pictured = image;
-        build.offered = request
-            .tools
-            .iter()
-            .filter_map(|tool| crate::dispatch::named(tool.name))
-            .collect();
         let voided = build.voided(&made.sources);
         if !voided.is_empty() {
             self.rebuild(key, &voided, &pending, effects);
             return Ok(());
         }
+        if typed_picture {
+            let typed = current
+                .typed_screen
+                .as_mut()
+                .expect("typed picture was matched");
+            let Some(jpeg) = typed.jpeg.take() else {
+                return self.fail_typed_picture(key.run, effects);
+            };
+            if request.insert_image(jpeg, true).is_err() {
+                return self.fail_typed_picture(key.run, effects);
+            }
+            typed.attempt = Some(key);
+        }
+        build.offers_draw = offers_draw;
+        build.pictured = image || typed_picture;
+        build.offered = request
+            .tools
+            .iter()
+            .filter_map(|tool| crate::dispatch::named(tool.name))
+            .collect();
         build.admit(made.sources.clone());
         if key.round == 1 {
             current.sent.clear();

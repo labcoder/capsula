@@ -351,6 +351,34 @@ mod tests {
     }
 
     #[test]
+    fn first_install_default_notice_has_its_own_wire_tag_without_tap_payload() {
+        use crate::message::ControlToShell;
+        use crate::tap::Tapped as _;
+
+        let event = ControlToShell::SpokenRepliesDefaulted(SettingsView {
+            assistant_name: AssistantName::new("K").unwrap(),
+            user_name: None,
+            talk_back: true,
+            hold_to_talk: true,
+            screen_holds: false,
+            show_screen: false,
+            ..view()
+        });
+        let bytes = [42, 1, b'K', 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0];
+        assert_eq!(postcard::to_allocvec(&event).unwrap(), bytes);
+        assert_eq!(
+            postcard::from_bytes::<ControlToShell>(&bytes).unwrap(),
+            event
+        );
+        assert!(!event.content_free(), "settings contain names");
+        let debug = format!("{:?}", ControlToShell::SpokenRepliesDefaulted(view()));
+        for marker in ["Sentinelname", "Sentineluser"] {
+            assert!(!debug.contains(marker));
+            assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+        }
+    }
+
+    #[test]
     fn voice_operations_are_appended_and_round_trip() {
         let ops = [
             (7, SettingsOp::SetTalkBack(true)),

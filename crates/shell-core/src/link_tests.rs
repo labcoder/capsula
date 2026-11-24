@@ -2671,6 +2671,165 @@ fn queued_talk_back_waits_for_both_ends_of_a_deleted_reply() {
     }
 }
 
+#[test]
+fn queued_first_install_notice_keeps_the_active_text_and_does_not_acknowledge_off() {
+    use super::output::Denied;
+    use kumochi_protocol::message::SettingsOp;
+
+    let link = attended_queued("queued-default-notice");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let generation = session.generation();
+    let control = |message: ControlToShell| {
+        frame::write(&mut &link.control, &message, Pipe::Control).unwrap();
+    };
+    let off = settings_view();
+    let mut on = off.clone();
+    on.talk_back = true;
+    control(ControlToShell::Settings {
+        view: off.clone(),
+        answer: false,
+    });
+    let Some(ControlToBrain::QueuedAudioOutput(24_000, output, Narration::Plain)) =
+        frame::read(&mut &link.control, Pipe::Control).unwrap()
+    else {
+        panic!("silent pair registers once");
+    };
+    acknowledge_queued(&link.control, output);
+    assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+    let text = queued_text(1, "before install");
+    assert!(link.handle.send_data(&session, text.clone()));
+    assert_eq!(
+        frame::read(&mut &*link.data, Pipe::Data).unwrap(),
+        Some(text)
+    );
+    control(run_state(
+        7,
+        ThreadId(1),
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+    ));
+    assert!(matches!(
+        next(&events),
+        LinkEvent::RunState { run: RunId(7), .. }
+    ));
+    control(ControlToShell::SpokenRepliesDefaulted(on.clone()));
+    assert!(matches!(
+        next(&events),
+        LinkEvent::SpokenRepliesDefaulted { generation: current, view } if current == generation && view.talk_back
+    ));
+    assert_eq!(
+        link.handle.send_talk_back(&session, false),
+        Err(Denied::Busy)
+    );
+
+    for message in [
+        DataToShell::AssistantText {
+            run: RunId(7),
+            delta: "still connected".into(),
+        },
+        DataToShell::RunEnd { run: RunId(7) },
+    ] {
+        frame::write(&mut &*link.data, &message, Pipe::Data).unwrap();
+        assert!(matches!(next(&events), LinkEvent::Data { message: m, .. } if m == message));
+    }
+    control(run_state(7, ThreadId(1), Phase::Done, None));
+    assert!(matches!(
+        next(&events),
+        LinkEvent::RunState {
+            phase: Phase::Done,
+            ..
+        }
+    ));
+    assert_eq!(link.handle.send_talk_back(&session, false), Ok(()));
+    assert_eq!(
+        frame::read(&mut &link.control, Pipe::Control).unwrap(),
+        Some(ControlToBrain::Settings(SettingsOp::SetTalkBack(false)))
+    );
+    control(ControlToShell::Settings {
+        view: on.clone(),
+        answer: false,
+    });
+    assert!(matches!(
+        next(&events),
+        LinkEvent::Settings { answer: false, .. }
+    ));
+    assert!(
+        !link.handle.admits_text(Some(&session)),
+        "Off still waits for its own answer"
+    );
+    control(ControlToShell::Settings {
+        view: off,
+        answer: true,
+    });
+    assert!(
+        matches!(next(&events), LinkEvent::Settings { answer: true, view, .. } if !view.talk_back)
+    );
+    assert!(link.handle.admits_text(Some(&session)));
+
+    control(ControlToShell::SpokenRepliesDefaulted(on));
+    queued_pair_closed(link.link, &link.control, &link.data);
+    assert!(
+        !session.open(),
+        "invalid replay does not masquerade as an accepted change"
+    );
+}
+
+#[test]
+fn a_failed_on_save_after_the_default_keeps_the_registered_pair_silent() {
+    use kumochi_protocol::message::SettingsOp;
+
+    let link = attended_queued("queued-default-on-refused");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    let control = |message: ControlToShell| {
+        frame::write(&mut &link.control, &message, Pipe::Control).unwrap();
+    };
+    control(ControlToShell::Settings {
+        view: settings_view(),
+        answer: false,
+    });
+    let Some(ControlToBrain::QueuedAudioOutput(24_000, output, Narration::Plain)) =
+        frame::read(&mut &link.control, Pipe::Control).unwrap()
+    else {
+        panic!("silent pair registers");
+    };
+    acknowledge_queued(&link.control, output);
+    assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+    assert_eq!(link.handle.send_talk_back(&session, true), Ok(()));
+    assert_eq!(
+        frame::read(&mut &link.control, Pipe::Control).unwrap(),
+        Some(ControlToBrain::Settings(SettingsOp::SetTalkBack(true)))
+    );
+    let on = kumochi_protocol::message::SettingsView {
+        talk_back: true,
+        ..settings_view()
+    };
+    control(ControlToShell::SpokenRepliesDefaulted(on.clone()));
+    assert!(matches!(
+        next(&events),
+        LinkEvent::SpokenRepliesDefaulted { .. }
+    ));
+    control(ControlToShell::Error(ErrorKey::SettingsRefused.into()));
+    assert!(matches!(
+        next(&events),
+        LinkEvent::Error { error, .. } if error.key() == ErrorKey::SettingsRefused
+    ));
+    assert!(!link.handle.admits_text(Some(&session)));
+    control(ControlToShell::Settings {
+        view: on,
+        answer: true,
+    });
+    assert!(matches!(
+        next(&events),
+        LinkEvent::Settings { answer: true, .. }
+    ));
+    assert!(link.handle.admits_text(Some(&session)));
+    assert!(!link.handle.output().queued_speaking(session.generation()));
+    link.handle.end(&session);
+    queued_pair_closed(link.link, &link.control, &link.data);
+}
+
 #[cfg(debug_assertions)]
 #[test]
 fn queued_admission_waits_for_the_outbox_but_the_first_voice_edge_refuses() {
@@ -3614,6 +3773,32 @@ fn assert_silent_speech_refused(label: &str, at: SilentSpeechAt) {
         ),
         "the silent pair never tried to prime its fake device"
     );
+}
+
+#[test]
+fn a_local_queued_stop_the_speaker_cannot_take_leaves_the_pair_open() {
+    let link = attended_queued("queued-stop-local");
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    acknowledge_queued(
+        &link.control,
+        queued_registration(&link.control, &link.handle.shared),
+    );
+    assert!(link.handle.admits_text(Some(&session)));
+    assert_eq!(
+        link.handle
+            .output()
+            .stop_locally(session.generation(), RunId(42)),
+        Ok(()),
+    );
+    assert!(session.open(), "a local stop never closes the pair");
+    assert!(
+        link.handle.admits_text(Some(&session)),
+        "and the pair still takes a turn"
+    );
+    let teardown = thread::spawn(move || link.handle.end(&session));
+    queued_pair_closed(link.link, &link.control, &link.data);
+    teardown.join().unwrap();
 }
 
 #[test]

@@ -15,7 +15,7 @@ use crate::link::{
 };
 use crate::speaker::DRAIN;
 use crate::speaker::conductor::Assignment;
-use crate::speaker::queued::{Command, Input, Packet, RATE, spawn, spawn_plain};
+use crate::speaker::queued::{Command, Input, Packet, RATE, Speech, spawn, spawn_plain};
 
 #[cfg(test)]
 #[path = "queued_tests.rs"]
@@ -52,7 +52,8 @@ pub(in crate::link) struct Queued {
     deadline: Instant,
     ack: Option<SyncSender<()>>,
     talk_back: Option<bool>,
-    switching: Option<bool>,
+    default_notice: DefaultNotice,
+    switching: Option<TalkBackSwitch>,
     show_screen: Option<bool>,
     wake: Arc<OnceLock<Thread>>,
     stopped: RunId,
@@ -61,6 +62,19 @@ pub(in crate::link) struct Queued {
     early_end: Option<RunId>,
     pending: Option<u32>,
     active: Option<Active>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DefaultNotice {
+    Unseen,
+    Deferred,
+    Retired,
+}
+
+#[derive(PartialEq, Eq)]
+enum TalkBackSwitch {
+    Pending(bool),
+    Refused,
 }
 
 enum Delivery {
@@ -82,6 +96,7 @@ struct Active {
     delivery: Option<Delivery>,
     locally_stopped: bool,
     run_end_by: Option<Instant>,
+    speech: Speech,
 }
 
 impl Queued {
@@ -97,6 +112,7 @@ impl Queued {
             deadline,
             ack: Some(ack),
             talk_back: None,
+            default_notice: DefaultNotice::Unseen,
             switching: None,
             show_screen: None,
             wake,
@@ -250,6 +266,34 @@ impl State {
 }
 
 impl OutputOwner {
+    /// The run `session`'s native route is presenting, and when that evidence runs out.
+    ///
+    /// # Errors
+    /// `Busy` on contention.
+    pub fn speech(&self, session: u64) -> Result<Option<(RunId, Instant)>, Denied> {
+        // The plain lock: refusals a test scripts for the owner's calls aren't spent on this read.
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(state)) => state.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(Denied::Busy),
+        };
+        Ok(state.queue(session).and_then(|(_, owner)| {
+            let active = owner.active.as_ref()?;
+            Some((active.id, active.speech.until()?))
+        }))
+    }
+
+    /// Stops `run`'s audio on `session` locally; nothing it finds refuses the pair.
+    ///
+    /// # Errors
+    /// `Busy` on contention.
+    pub fn stop_locally(&self, session: u64, run: RunId) -> Result<(), Denied> {
+        if let Some((_, owner)) = self.try_lock()?.queue(session) {
+            owner.stop(run, StopOrigin::Local);
+        }
+        Ok(())
+    }
+
     pub(in crate::link) fn wait_for_refused_tail(&self) -> Option<RefusedTail> {
         let proof = {
             let state = self.lock();
@@ -335,6 +379,13 @@ impl OutputOwner {
             .is_some_and(|(_, owner)| owner.hold_ready() && owner.pending.is_none())
     }
 
+    /// Whether this pair registered to speak, independent of the saved preference.
+    pub fn queued_speaking(&self, session: u64) -> bool {
+        self.lock()
+            .queue(session)
+            .is_some_and(|(_, owner)| owner.talk_back == Some(true))
+    }
+
     #[expect(
         clippy::fn_params_excessive_bools,
         reason = "the wire preference is a boolean"
@@ -363,11 +414,40 @@ impl OutputOwner {
         {
             return Err(Denied::Busy);
         }
-        if owner.talk_back == Some(on) || !send() {
+        if (owner.talk_back == Some(on) && owner.default_notice != DefaultNotice::Deferred)
+            || !send()
+        {
             return Err(Denied::Lost);
         }
-        owner.switching = Some(on);
+        owner.switching = Some(TalkBackSwitch::Pending(on));
         Ok(())
+    }
+
+    pub(in crate::link) fn refuse_talk_back(&self, session: u64) {
+        if let Some((_, owner)) = self.lock().queue(session)
+            && owner.switching.is_some()
+        {
+            owner.switching = Some(TalkBackSwitch::Refused);
+        }
+    }
+
+    pub(in crate::link) fn defer_spoken_replies(
+        &self,
+        session: u64,
+        settings: &SettingsView,
+    ) -> bool {
+        self.lock()
+            .queue(session)
+            .filter(|(_, owner)| {
+                owner.talk_back == Some(false)
+                    && owner.default_notice == DefaultNotice::Unseen
+                    && owner.show_screen == Some(settings.show_screen)
+                    && settings.talk_back
+            })
+            .is_some_and(|(_, owner)| {
+                owner.default_notice = DefaultNotice::Deferred;
+                true
+            })
     }
 
     /// Whether the pair's registered Show Screen differs from the one `settings` carries.
@@ -402,12 +482,16 @@ impl OutputOwner {
             .talk_back
             .is_some_and(|registered| registered != settings.talk_back)
         {
-            owner.show_screen = None;
-            return Err(if answer && owner.switching == Some(settings.talk_back) {
-                Attendance::TalkBackChanged
-            } else {
-                Attendance::Lost
-            });
+            if answer && owner.switching == Some(TalkBackSwitch::Pending(settings.talk_back)) {
+                owner.show_screen = None;
+                return Err(Attendance::TalkBackChanged);
+            }
+            if owner.default_notice != DefaultNotice::Deferred {
+                owner.show_screen = None;
+                return Err(Attendance::Lost);
+            }
+        } else if owner.default_notice == DefaultNotice::Deferred {
+            owner.default_notice = DefaultNotice::Retired;
         }
         if answer {
             owner.switching = None;
@@ -467,6 +551,7 @@ impl OutputOwner {
         shared: Weak<Shared>,
     ) -> bool {
         let proof = Arc::new(AtomicU8::new(0));
+        let speech = Speech::new(self.changed.clone());
         let (output, wake, narrated) = {
             let mut state = self.lock();
             let Some((output, owner)) = state.queue(session).filter(|(_, q)| {
@@ -508,6 +593,7 @@ impl OutputOwner {
                     .then_some(Delivery::Unpromised),
                 locally_stopped: false,
                 run_end_by: None,
+                speech: speech.clone(),
             });
             if silent {
                 owner.wake();
@@ -539,6 +625,7 @@ impl OutputOwner {
                 });
                 link_thread.unpark();
             },
+            speech,
         );
         let exit = move |refused| {
             if (refused || exit.load(Ordering::Acquire) & RETIRING == 0)

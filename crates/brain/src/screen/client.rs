@@ -1,11 +1,9 @@
-//! The brain's side of a hold's screen work: one frame in the worker, from its capture through its
-//! walk to its image, or its release.
+//! Brain-side capture and release of the screen worker's single held frame.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use kumochi_protocol::geometry::{PhysicalPoint, PointerPath};
+use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, TypedDisplay};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 
@@ -13,7 +11,7 @@ use super::actor::{Key, Owner, Reply, Request};
 use super::context::ScreenContext;
 use super::wire::{CaptureId, MAX_REPLY_BYTES, Refusal, TicketWire};
 use crate::platform::Job;
-use crate::supervise::{Generation, Handle, Kind, WorkerLost, Zeroed};
+use crate::supervise::{Generation, Handle, Kind, ReplyStream, WorkerLost, Zeroed};
 
 #[cfg(test)]
 mod tests;
@@ -41,15 +39,86 @@ impl Kind for Holds {
     }
 }
 
-/// A frame the worker holds for one hold, on the worker that holds it. A later answer from any
-/// other worker is lost: a replacement holds nothing.
+/// A frame pinned to its capture ID and the worker that acquired it.
 #[derive(Debug)]
 pub(crate) struct Held {
     pub(crate) key: Key,
     pub(crate) generation: Generation,
 }
 
-/// Why a hold's screen work ended without what it asked for.
+/// A typed frame awaiting the caller's matching, live exclusion proof.
+#[derive(Debug)]
+pub(crate) struct TypedHeld {
+    held: Held,
+    cleanup: TypedDrop,
+    until: Instant,
+}
+
+impl TypedHeld {
+    /// The capture named in the shell's exclusion confirmation.
+    pub(crate) fn capture_id(&self) -> CaptureId {
+        self.held.key.capture
+    }
+
+    /// Only call after validating the shell's proof for this capture and lease.
+    /// Cancellation or a rejected proof must drop the held frame instead.
+    ///
+    /// # Errors
+    /// The frame expired, changed, was revoked or did not seal on its worker.
+    pub(crate) async fn seal(mut self) -> Result<ScreenContext, Closed> {
+        if Instant::now() >= self.until {
+            return Err(Closed::Refused(Refusal::Expired));
+        }
+        let sealed = seal_held(&self.cleanup.client.inner, &self.held, self.until).await;
+        if matches!(sealed, Ok(_) | Err(Closed::Refused(_) | Closed::Fault(_))) {
+            self.cleanup.release();
+        }
+        let context = sealed?;
+        if Instant::now() >= self.until {
+            return Err(Closed::Refused(Refusal::Expired));
+        }
+        Ok(context)
+    }
+}
+
+#[derive(Debug)]
+struct TypedDrop {
+    client: Arc<HoldClient>,
+    key: Key,
+    runtime: tokio::runtime::Handle,
+    armed: bool,
+}
+
+impl TypedDrop {
+    fn release(&mut self) {
+        self.client.release_typed(self.key.capture);
+        self.armed = false;
+    }
+}
+
+impl Drop for TypedDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let client = Arc::clone(&self.client);
+        let key = self.key;
+        drop(self.runtime.spawn(async move {
+            let until = Instant::now() + MAX_TTL;
+            match client.inner.request(Request::Drop(key), until).await {
+                Ok((Reply::Revoked(revoked), _)) if revoked == key => {
+                    client.release_typed(key.capture);
+                }
+                Ok((Reply::Refused(Refusal::Stale), _)) => client.release_typed(key.capture),
+                _ => {
+                    tracing::debug!("exact screen revocation unavailable; frame expires in worker");
+                }
+            }
+        }));
+    }
+}
+
+/// Why a capture's screen work ended without what it asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Closed {
     /// The worker refused, without a fault.
@@ -75,11 +144,15 @@ pub(crate) struct Unreleased;
 #[derive(Debug)]
 pub struct HoldClient {
     inner: Handle<Holds>,
-    tickets: AtomicU64,
-    captures: AtomicU64,
-    /// Every hold at or below it is retired. The worker's own fence ends with its process, so
-    /// this one keeps a retired hold from reaching a replacement.
-    fence: Mutex<Option<Owner>>,
+    admission: Mutex<Admission>,
+}
+
+#[derive(Debug, Default)]
+struct Admission {
+    last_capture: u64,
+    /// Keeps retired holds from reaching replacement workers, which start with no fence.
+    hold_fence: Option<Owner>,
+    typed: Vec<(CaptureId, Instant)>,
 }
 
 impl HoldClient {
@@ -94,9 +167,7 @@ impl HoldClient {
     pub(crate) fn new(inner: Handle<Holds>) -> Self {
         Self {
             inner,
-            tickets: AtomicU64::new(1),
-            captures: AtomicU64::new(1),
-            fence: Mutex::new(None),
+            admission: Mutex::default(),
         }
     }
 
@@ -175,16 +246,63 @@ impl HoldClient {
         .await
     }
 
+    /// Captures only the expected display and never carries ink.
+    ///
+    /// # Errors
+    /// A changed or unknown display, deadline, busy slot or worker loss refuses the capture.
+    pub(crate) async fn typed_display(
+        self: &Arc<Self>,
+        point: PhysicalPoint,
+        expected: TypedDisplay,
+        excluded: u64,
+        until: Instant,
+    ) -> Result<TypedHeld, Closed> {
+        let now = Instant::now();
+        if until <= now {
+            return Err(Closed::Refused(Refusal::Expired));
+        }
+        let until = until.min(now + MAX_TTL);
+        let runtime =
+            tokio::runtime::Handle::try_current().map_err(|_| Closed::Lost(WorkerLost::Lost))?;
+        let (key, stream) = self.begin_capture(None, until, |_, ticket| Request::TypedDisplay {
+            ticket,
+            point,
+            expected,
+            excluded,
+        })?;
+        let mut cleanup = TypedDrop {
+            client: Arc::clone(self),
+            key,
+            runtime,
+            armed: true,
+        };
+        let held = receive_capture(key, stream, Some((expected, &mut cleanup))).await?;
+        if Instant::now() >= until {
+            return Err(Closed::Refused(Refusal::Expired));
+        }
+        Ok(TypedHeld {
+            held,
+            cleanup,
+            until,
+        })
+    }
+
     async fn capture(
         &self,
         owner: Owner,
         until: Instant,
         request: impl FnOnce(Key, TicketWire) -> Request,
     ) -> Result<Held, Closed> {
-        let key = Key {
-            owner,
-            capture: CaptureId(self.captures.fetch_add(1, Ordering::Relaxed)),
-        };
+        let (key, stream) = self.begin_capture(Some(owner), until, request)?;
+        receive_capture(key, stream, None).await
+    }
+
+    fn begin_capture(
+        &self,
+        owner: Option<Owner>,
+        until: Instant,
+        request: impl FnOnce(Key, TicketWire) -> Request,
+    ) -> Result<(Key, ReplyStream<Holds>), Closed> {
         let mut nonce = [0; 16];
         getrandom::fill(&mut nonce)
             .map_err(|error| Closed::Fault(error.raw_os_error().unwrap_or(-1)))?;
@@ -192,45 +310,47 @@ impl HoldClient {
         let ttl_ms = u32::try_from(ttl.as_millis()).unwrap_or(u32::MAX);
         // 0, which no worker reads as later than now, when the counter can't be read.
         let deadline_qpc = crate::platform::qpc_at(until.into_std()).unwrap_or(0);
-        let mut stream = {
-            let fence = self
-                .fence
-                .lock()
-                .map_err(|_| Closed::Lost(WorkerLost::Lost))?;
-            if fence.is_some_and(|fence| owner <= fence) {
-                return Err(Closed::Refused(Refusal::Stale));
+        let mut admission = self
+            .admission
+            .lock()
+            .map_err(|_| Closed::Lost(WorkerLost::Lost))?;
+        if owner
+            .zip(admission.hold_fence)
+            .is_some_and(|(owner, fence)| owner <= fence)
+        {
+            return Err(Closed::Refused(Refusal::Stale));
+        }
+        if owner.is_none() {
+            let now = Instant::now();
+            admission.typed.retain(|&(_, until)| now < until);
+            if admission.typed.len() == crate::supervise::QUEUE {
+                return Err(Closed::Busy);
             }
-            // Minted under the lock, so tickets reach the worker in the order of their numbers.
-            let ticket = TicketWire::new(
-                key.capture,
-                self.tickets.fetch_add(1, Ordering::Relaxed),
-                nonce,
-                ttl_ms,
-                deadline_qpc,
-            )
+        }
+        admission.last_capture = admission
+            .last_capture
+            .checked_add(1)
+            .ok_or(Closed::Lost(WorkerLost::Lost))?;
+        // Mint and enqueue under the same lock so both paths reach the worker in ticket order.
+        let key = Key {
+            owner,
+            capture: CaptureId(admission.last_capture),
+        };
+        let ticket = TicketWire::new(key.capture, key.capture.0, nonce, ttl_ms, deadline_qpc)
             .for_shell(crate::platform::connected_shell_pid());
-            self.inner
-                .request_stream(request(key, ticket), until)
-                .map_err(Closed::Lost)?
-        };
-        let generation = match stream.next().await {
-            Some(Ok((Reply::Acquired(acquired, meta), generation)))
-                if acquired == key && meta.capture == key.capture =>
-            {
-                generation
-            }
-            Some(Ok((reply, _))) => return Err(closed(&reply)),
-            Some(Err(lost)) => return Err(Closed::Lost(lost)),
-            None => return Err(Closed::Lost(WorkerLost::Lost)),
-        };
-        match stream.next().await {
-            Some(Ok((Reply::Complete(complete), from)))
-                if complete == key && from == generation =>
-            {
-                Ok(Held { key, generation })
-            }
-            Some(Err(lost)) => Err(Closed::Lost(lost)),
-            _ => Err(Closed::Lost(WorkerLost::Lost)),
+        let stream = self
+            .inner
+            .request_stream(request(key, ticket), until)
+            .map_err(Closed::Lost)?;
+        if owner.is_none() {
+            admission.typed.push((key.capture, until));
+        }
+        Ok((key, stream))
+    }
+
+    fn release_typed(&self, capture: CaptureId) {
+        if let Ok(mut admission) = self.admission.lock() {
+            admission.typed.retain(|&(id, _)| id != capture);
         }
     }
 
@@ -239,16 +359,14 @@ impl HoldClient {
     /// # Errors
     /// `TooLarge`, `WindowChanged`, `Stale` or another refusal, a fault, or `Lost`.
     pub(crate) async fn seal(&self, held: Held, until: Instant) -> Result<ScreenContext, Closed> {
-        match self.answer(&held, Request::Seal(held.key), until).await? {
-            Reply::Sealed(key, context) if key == held.key => Ok(context),
-            reply => Err(closed(&reply)),
-        }
+        seal_held(&self.inner, &held, until).await
     }
 
     /// Retires `owner` and every earlier hold, here and in the worker, and waits until their
     /// frames are released. `holder` is the worker that captured for `owner`, when one answered.
     /// A worker that answers anything but the release, or can't be reached, may still hold a
-    /// frame, so it's ended instead and its exit is the release.
+    /// frame, so it's ended instead and its exit is the release, unless that could stop a
+    /// separate typed capture before its deadline.
     ///
     /// # Errors
     /// `Unreleased` when neither the release nor that exit was shown by `until`.
@@ -259,8 +377,8 @@ impl HoldClient {
         until: Instant,
     ) -> Result<(), Unreleased> {
         {
-            let mut fence = self.fence.lock().map_err(|_| Unreleased)?;
-            *fence = (*fence).max(Some(owner));
+            let mut admission = self.admission.lock().map_err(|_| Unreleased)?;
+            admission.hold_fence = admission.hold_fence.max(Some(owner));
         }
         let mut exits = self.inner.exits();
         let worker = match self.inner.request(Request::Retire(owner), until).await {
@@ -275,10 +393,17 @@ impl HoldClient {
             Ok((_, from)) => from,
             Err(_) => holder.ok_or(Unreleased)?,
         };
-        self.inner
-            .retirement()
-            .request(worker)
-            .map_err(|_| Unreleased)?;
+        {
+            let admission = self.admission.lock().map_err(|_| Unreleased)?;
+            let now = Instant::now();
+            if admission.typed.iter().any(|&(_, until)| now < until) {
+                return Err(Unreleased);
+            }
+            self.inner
+                .retirement()
+                .request(worker)
+                .map_err(|_| Unreleased)?;
+        }
         loop {
             match tokio::time::timeout_at(until, exits.recv()).await {
                 Ok(Ok(exit)) if exit.generation == worker => {
@@ -293,14 +418,57 @@ impl HoldClient {
             }
         }
     }
+}
 
-    /// `request`'s one answer, when the worker that holds `held` sent it.
-    async fn answer(&self, held: &Held, request: Request, until: Instant) -> Result<Reply, Closed> {
-        match self.inner.request(request, until).await {
-            Ok((reply, from)) if from == held.generation => Ok(reply),
-            Ok(_) => Err(Closed::Lost(WorkerLost::Lost)),
-            Err(lost) => Err(Closed::Lost(lost)),
+async fn seal_held(
+    inner: &Handle<Holds>,
+    held: &Held,
+    until: Instant,
+) -> Result<ScreenContext, Closed> {
+    match inner.request(Request::Seal(held.key), until).await {
+        Ok((Reply::Sealed(key, context), from)) if key == held.key && from == held.generation => {
+            Ok(context)
         }
+        Ok((reply, from)) if from == held.generation => Err(closed(&reply)),
+        Ok(_) => Err(Closed::Lost(WorkerLost::Lost)),
+        Err(lost) => Err(Closed::Lost(lost)),
+    }
+}
+
+async fn receive_capture(
+    key: Key,
+    mut stream: ReplyStream<Holds>,
+    typed: Option<(TypedDisplay, &mut TypedDrop)>,
+) -> Result<Held, Closed> {
+    let generation = match stream.next().await {
+        Some(Ok((Reply::Acquired(acquired, meta), generation)))
+            if acquired == key && meta.capture == key.capture =>
+        {
+            if typed
+                .as_ref()
+                .is_some_and(|(wanted, _)| wanted.bounds != meta.display || wanted.dpi != meta.dpi)
+            {
+                return Err(Closed::Refused(Refusal::DisplayChanged));
+            }
+            generation
+        }
+        Some(Ok((reply, _))) => {
+            if matches!(reply, Reply::Busy | Reply::Refused(_) | Reply::Fault(_))
+                && let Some((_, cleanup)) = typed
+            {
+                cleanup.release();
+            }
+            return Err(closed(&reply));
+        }
+        Some(Err(lost)) => return Err(Closed::Lost(lost)),
+        None => return Err(Closed::Lost(WorkerLost::Lost)),
+    };
+    match stream.next().await {
+        Some(Ok((Reply::Complete(complete), from))) if complete == key && from == generation => {
+            Ok(Held { key, generation })
+        }
+        Some(Err(lost)) => Err(Closed::Lost(lost)),
+        _ => Err(Closed::Lost(WorkerLost::Lost)),
     }
 }
 
@@ -323,16 +491,31 @@ pub(crate) async fn hold_frame(
     id: u64,
     request: Request,
 ) {
-    let (Request::Context { key, .. } | Request::Display { key, .. }) = request else {
-        panic!("not a capture: {request:?}")
+    let (key, display, dpi) = match request {
+        Request::Context { key, .. } | Request::Display { key, .. } => (
+            key,
+            kumochi_protocol::geometry::PhysicalRect {
+                origin: [0, 0],
+                size: [4, 3],
+            },
+            96,
+        ),
+        Request::TypedDisplay {
+            ticket, expected, ..
+        } => (
+            Key {
+                owner: None,
+                capture: ticket.capture(),
+            },
+            expected.bounds,
+            expected.dpi,
+        ),
+        _ => panic!("not a capture: {request:?}"),
     };
     let meta = super::wire::FrameMeta {
         capture: key.capture,
-        display: kumochi_protocol::geometry::PhysicalRect {
-            origin: [0, 0],
-            size: [4, 3],
-        },
-        dpi: 96,
+        display,
+        dpi,
         acquired_after_ms: 1,
     };
     rig.reply(id, &Reply::Acquired(key, meta)).await;

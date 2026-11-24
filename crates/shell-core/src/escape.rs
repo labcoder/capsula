@@ -4,8 +4,56 @@
 //! third, otherwise dismiss the topmost local panel. Esc is held system-wide only while Kumochi
 //! speaks, shows a drawing or has Kumo pulled out, so an app in front keeps it otherwise.
 
-/// What the shell knows is moving or on screen. Speech arrives in slice 7, so `speaking` stays
-/// false until then.
+use std::time::Instant;
+
+use kumochi_protocol::message::RunId;
+
+use crate::runs::Runs;
+
+/// Which surface received the press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpeechEscapeOwner {
+    /// A Kumochi surface keeps its local Esc order.
+    Panel,
+    /// The native hotkey from outside a Kumochi surface can only stop speech.
+    Outside,
+}
+
+/// The run and Esc owner observed at the press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpeechPress {
+    /// The link generation that presented the speech.
+    pub session: u64,
+    /// The run that presented the speech.
+    pub run: RunId,
+    /// The owner at input delivery, even if focus changes before handling.
+    pub owner: SpeechEscapeOwner,
+}
+
+impl SpeechPress {
+    /// Captures the target and owner before a delivery can wait on the UI.
+    pub fn capture(
+        lease: Option<(u64, RunId, Instant)>,
+        now: Instant,
+        owner: SpeechEscapeOwner,
+    ) -> Option<Self> {
+        let (session, run, until) = lease?;
+        (until > now).then_some(Self {
+            session,
+            run,
+            owner,
+        })
+    }
+
+    /// An ended or replaced run can only be stopped at its own speaker.
+    pub fn speaker_only(self, runs: &Runs, moving: Option<RunId>) -> bool {
+        moving != Some(self.run)
+            || runs.state_ended(self.run)
+            || (runs.newest_run() >= self.run && runs.stoppable() != Some(self.run))
+    }
+}
+
+/// What the shell knows is moving or on screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -14,7 +62,7 @@
 pub struct Activity {
     /// A run streams, speaks or acts.
     pub working: bool,
-    /// Audio is playing.
+    /// The native route presents a run's audio, and no focused Kumochi panel takes Esc itself.
     pub speaking: bool,
     /// A drawing is on screen.
     pub drawing: bool,
@@ -178,8 +226,73 @@ impl<H> TalkEscape<H> {
 mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
+    use std::time::{Duration, Instant};
 
-    use super::{Activity, Escape, EscapeHold, Panel, TalkEscape, TalkEscapeRefused, decide};
+    use kumochi_protocol::message::{DataToShell, Phase, RunId, ThreadId};
+
+    use super::{
+        Activity, Escape, EscapeHold, Panel, SpeechEscapeOwner, SpeechPress, TalkEscape,
+        TalkEscapeRefused, decide,
+    };
+    use crate::runs::Runs;
+
+    #[test]
+    fn focused_panel_owns_native_escape_even_when_a_pull_keeps_the_hotkey() {
+        let now = Instant::now();
+        let lease = Some((1, RunId(5), now + Duration::from_millis(400)));
+        let activity = Activity {
+            pulling: true,
+            ..Activity::default()
+        };
+        assert!(activity.holds_global_escape());
+        let press =
+            SpeechPress::capture(lease, now, SpeechEscapeOwner::Panel).expect("live speech");
+        assert_eq!(
+            SpeechPress::capture(lease, now, SpeechEscapeOwner::Outside)
+                .expect("live speech")
+                .owner,
+            SpeechEscapeOwner::Outside
+        );
+        assert_eq!(
+            press.owner,
+            SpeechEscapeOwner::Panel,
+            "the pull did not give Esc to speech"
+        );
+        assert_eq!(decide(activity, Panel::Open), Escape::CancelPull);
+        assert_eq!(
+            SpeechPress::capture(
+                lease,
+                now + Duration::from_millis(400),
+                SpeechEscapeOwner::Panel
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn focused_escape_stops_terminal_audio_without_stopping_a_brain_run() {
+        let mut runs = Runs::default();
+        let press = SpeechPress {
+            session: 1,
+            run: RunId(5),
+            owner: SpeechEscapeOwner::Panel,
+        };
+        runs.apply_state(press.run, ThreadId(1), Phase::Answering, None);
+        assert!(!press.speaker_only(&runs, runs.stoppable()));
+        runs.apply_state(press.run, ThreadId(1), Phase::Done, None);
+        assert_eq!(runs.stoppable(), Some(press.run), "RunEnd has not arrived");
+        assert!(runs.state_ended(press.run));
+        assert!(press.speaker_only(&runs, runs.stoppable()));
+        runs.apply_data(DataToShell::RunEnd { run: press.run }, 0);
+        assert_eq!(runs.take_ended(), Some(press.run));
+        assert!(
+            press.speaker_only(&runs, Some(press.run)),
+            "an ended run's drawing does not make its audio a live run again"
+        );
+        runs.apply_state(RunId(6), ThreadId(1), Phase::Answering, None);
+        assert_eq!(runs.stoppable(), Some(RunId(6)));
+        assert!(press.speaker_only(&runs, runs.stoppable()));
+    }
 
     #[test]
     fn work_stops_before_a_drawing_clears_before_a_panel_dismisses() {

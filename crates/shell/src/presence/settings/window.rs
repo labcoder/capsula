@@ -313,10 +313,11 @@ impl Presence {
         cx.defer(move |cx| {
             let result = window.update(cx, |_, window, cx| {
                 owner.update(cx, |this, cx| {
-                    let activation = cx.observe_window_activation(window, |this, window, _| {
+                    let activation = cx.observe_window_activation(window, |this, window, cx| {
                         if let Some(panel) = &mut this.settings_panel {
                             panel.focused = window.is_window_active();
                         }
+                        this.focus_changed(cx);
                     });
                     if let Some(panel) = &mut this.settings_panel {
                         panel.focused = window.is_window_active();

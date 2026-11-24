@@ -90,6 +90,8 @@ pub(crate) enum PresenceEvent {
     DismissPanel,
     /// Esc reached Kumochi: the global hotkey, a focused panel, or the Stop fallback.
     Escape,
+    /// The local action observed speech on this exact pair and run.
+    EscapeSpeech(crate::escape::SpeechPress),
     /// The user picked Quit in the tray menu.
     Quit,
     /// `--gate-observer` only: the harness asked for one dock repaint.
@@ -681,6 +683,31 @@ fn subclass_hover(
         return Err(PresenceError::Subclass);
     }
     Ok(())
+}
+
+pub(super) fn foreground_owns_escape() -> bool {
+    // SAFETY: reads the foreground window without taking ownership.
+    let foreground = unsafe { GetForegroundWindow() };
+    if !super::overlay_input::owned(foreground) {
+        return false;
+    }
+    let mut data = 0;
+    // SAFETY: the handle is on this UI thread; only this module installs this callback and id.
+    if !unsafe {
+        GetWindowSubclass(
+            foreground,
+            Some(hover_subclass),
+            HOVER_SUBCLASS_ID,
+            Some(&raw mut data),
+        )
+    }
+    .as_bool()
+    {
+        return false;
+    }
+    let hover = std::ptr::with_exposed_provenance::<Hover>(data);
+    // SAFETY: the subclass owns the Hover until this UI thread dispatches WM_NCDESTROY.
+    unsafe { hover.as_ref() }.is_some_and(|hover| !hover.pointer)
 }
 
 /// Moves a presence window to `[x, y, width, height]` in physical pixels, topmost, and shows

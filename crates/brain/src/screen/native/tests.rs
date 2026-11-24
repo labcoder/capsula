@@ -61,10 +61,10 @@ impl Drop for Local {
 fn job() -> Job {
     Job {
         key: Key {
-            owner: Owner {
+            owner: Some(Owner {
                 epoch: 4,
                 gesture: 2,
-            },
+            }),
             capture: CaptureId(7),
         },
         frame: RawFrame::default(),

@@ -64,6 +64,7 @@ pub(crate) struct EventTime {
     pub(crate) held: TalkHeld,
     pub(crate) repeated_modifier: bool,
     pub(crate) defer_terminal: bool,
+    pub(crate) speech_escape_owner: crate::escape::SpeechEscapeOwner,
     read_chord: Option<fn(Instant) -> Option<Instant>>,
     layout: Option<HKL>,
 }
@@ -75,6 +76,7 @@ impl EventTime {
             held: TalkHeld::default(),
             repeated_modifier: false,
             defer_terminal: false,
+            speech_escape_owner: crate::escape::SpeechEscapeOwner::Outside,
             read_chord: None,
             layout: None,
         }
@@ -203,6 +205,9 @@ impl Keys {
         let mut id = None;
         let event = match message {
             _ if self.plain_escape(message, wparam) => {
+                if !hwnd.is_invalid() && super::presence::foreground_owns_escape() {
+                    at.speech_escape_owner = crate::escape::SpeechEscapeOwner::Panel;
+                }
                 self.physical.borrow_mut().lose();
                 Event::Escape
             }

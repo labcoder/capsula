@@ -1,15 +1,14 @@
-//! The screen worker's loop: it owns one hold's frame from its capture through its walk to its
-//! image, or its release.
+//! The screen worker's loop: it owns one frame from acquisition to seal or release.
 
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::Instant;
 
 use kumochi_protocol::frame;
-use kumochi_protocol::geometry::{PhysicalPoint, PointerPath};
+use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, TypedDisplay};
 use serde::{Deserialize, Serialize};
 
 use super::capture::{Capturer, Failure, Screen, Shown};
-use super::client::Holds as Kind;
+use super::client::{Holds as Kind, MAX_TTL};
 use super::context::ScreenContext;
 use super::elements::{ElementTree, OpenElements, Wake};
 use super::encode::JPEG_CAP;
@@ -45,7 +44,8 @@ impl From<crate::coordinator::HoldKey> for Owner {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Key {
-    pub(super) owner: Owner,
+    /// None for a typed capture, which never participates in the hold fence.
+    pub(super) owner: Option<Owner>,
     pub(super) capture: CaptureId,
 }
 
@@ -78,6 +78,12 @@ pub(crate) enum Request {
     /// Trigger one failure without modifying the parent's environment.
     #[cfg(debug_assertions)]
     Fault(WorkerFault),
+    TypedDisplay {
+        ticket: TicketWire,
+        point: PhysicalPoint,
+        expected: TypedDisplay,
+        excluded: u64,
+    },
 }
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +97,8 @@ pub(crate) enum Reply {
     Refused(Refusal),
     Busy,
     Fault(i32),
+    /// Exact revocation; an in-flight native buffer is discarded on return.
+    Revoked(Key),
 }
 
 impl std::fmt::Debug for Request {
@@ -245,7 +253,9 @@ fn run(
                         send(id, Reply::Pong)?;
                         None
                     }
-                    request @ (Request::Context { .. } | Request::Display { .. }) => {
+                    request @ (Request::Context { .. }
+                    | Request::Display { .. }
+                    | Request::TypedDisplay { .. }) => {
                         let (key, ticket, point, aim, ink) = match request {
                             Request::Context { key, ticket, point } => {
                                 let aim = Aim::Window {
@@ -260,8 +270,45 @@ fn run(
                                 excluded,
                                 ink,
                             } => (key, ticket, point, Aim::Display { excluded }, Some(ink)),
+                            Request::TypedDisplay {
+                                ticket,
+                                point,
+                                expected,
+                                excluded,
+                            } => {
+                                if ticket.capture().0 == 0
+                                    || ticket.generation() != ticket.capture().0
+                                {
+                                    send(id, Reply::Refused(Refusal::Invalid))?;
+                                    continue;
+                                }
+                                let key = Key {
+                                    owner: None,
+                                    capture: ticket.capture(),
+                                };
+                                (
+                                    key,
+                                    ticket,
+                                    point,
+                                    Aim::TypedDisplay { expected, excluded },
+                                    None,
+                                )
+                            }
                             _ => unreachable!(),
                         };
+                        if key.owner.is_none() && !matches!(&aim, Aim::TypedDisplay { .. }) {
+                            send(id, Reply::Refused(Refusal::Invalid))?;
+                            continue;
+                        }
+                        if key.owner.is_none() && (live || capturing.is_some() || walking.is_some())
+                        {
+                            let reply = match screen.spend(&ticket) {
+                                Ok(()) => Reply::Busy,
+                                Err(why) => Reply::Refused(why),
+                            };
+                            send(id, reply)?;
+                            continue;
+                        }
                         if current.is_some_and(|held: Key| held.owner != key.owner) {
                             screen.clear();
                         }
@@ -269,7 +316,10 @@ fn run(
                         expires = None;
                         let admitted = screen.admit(&ticket, received, now);
                         current = Some(key);
-                        let retired = fence.is_some_and(|fence| key.owner <= fence);
+                        let retired = key
+                            .owner
+                            .zip(fence)
+                            .is_some_and(|(owner, fence)| owner <= fence);
                         let result =
                             if retired || key.capture != ticket.capture() || capturing.is_some() {
                                 Err(Failure::Refused(Refusal::Stale))
@@ -280,7 +330,14 @@ fn run(
                             };
                         match result {
                             Ok(until) => {
-                                if let Some(Ok(reader)) = &mut screen.reader {
+                                let until = if key.owner.is_none() {
+                                    until.min(received + MAX_TTL)
+                                } else {
+                                    until
+                                };
+                                if key.owner.is_some()
+                                    && let Some(Ok(reader)) = &mut screen.reader
+                                {
                                     reader.set_shell_pid(ticket.shell_pid());
                                 }
                                 let job = Job {
@@ -325,17 +382,37 @@ fn run(
                             send(id, Reply::Refused(Refusal::Stale))?;
                         } else {
                             live = false;
-                            expires = None;
+                            let until = expires.take();
                             match screen.seal(key.capture, JPEG_CAP) {
+                                Ok(_)
+                                    if key.owner.is_none()
+                                        && until.is_some_and(|until| now() >= until) =>
+                                {
+                                    send(id, Reply::Refused(Refusal::Expired))?;
+                                }
                                 Ok(context) => send(id, Reply::Sealed(key, context))?,
                                 Err(error) => send(id, failed(error))?,
                             }
                         }
                         None
                     }
+                    Request::Drop(key) if key.owner.is_none() => {
+                        if current == Some(key) {
+                            live = false;
+                            expires = None;
+                            screen.clear();
+                            send(id, Reply::Revoked(key))?;
+                        } else {
+                            send(id, Reply::Refused(Refusal::Stale))?;
+                        }
+                        None
+                    }
                     control @ (Request::Drop(_) | Request::Retire(_)) => {
                         let (owner, capture) = match control {
-                            Request::Drop(key) => (key.owner, Some(key.capture)),
+                            Request::Drop(key) => (
+                                key.owner.expect("typed drops handled separately"),
+                                Some(key.capture),
+                            ),
                             Request::Retire(owner) => {
                                 fence = fence.max(Some(owner));
                                 (owner, None)
@@ -343,8 +420,8 @@ fn run(
                             _ => unreachable!(),
                         };
                         let matches = current.is_some_and(|held: Key| match capture {
-                            Some(capture) => held.owner == owner && held.capture == capture,
-                            None => held.owner <= owner,
+                            Some(capture) => held.owner == Some(owner) && held.capture == capture,
+                            None => held.owner.is_some_and(|held| held <= owner),
                         });
                         if capture.is_some() && !matches {
                             send(id, Reply::Refused(Refusal::Stale))?;
@@ -364,7 +441,12 @@ fn run(
                     }
                 };
                 if let Some((key, target)) = walk {
-                    if !live || current != Some(key) || capturing.is_some() || walking.is_some() {
+                    if key.owner.is_none()
+                        || !live
+                        || current != Some(key)
+                        || capturing.is_some()
+                        || walking.is_some()
+                    {
                         send(id, Reply::Refused(Refusal::Stale))?;
                     } else {
                         match screen.walk_job(key.capture, target, now) {
@@ -425,6 +507,7 @@ fn run(
                         let (surface, foreground) = match &shown {
                             Shown::Window(target) => (target.top.rect, Some(target.top.clone())),
                             Shown::Display { bounds, .. } => (*bounds, None),
+                            Shown::TypedDisplay { expected, .. } => (expected.bounds, None),
                         };
                         let meta = screen.acquired(
                             &pending.ticket,
@@ -473,7 +556,11 @@ fn run(
                 return Ok(());
             }
         }
-        if capturing.is_none() && walking.is_none() {
+        if capturing
+            .as_ref()
+            .is_none_or(|pending| pending.key.owner.is_none())
+            && walking.is_none()
+        {
             for (id, owner, capture) in releasing.drain(..) {
                 send(id, Reply::Released(owner, capture))?;
             }

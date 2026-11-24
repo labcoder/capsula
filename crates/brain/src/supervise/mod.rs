@@ -46,7 +46,7 @@ use crate::platform::{Helper, Job};
 /// Losses are counted over this window for backoff.
 const WINDOW: Duration = Duration::from_secs(60);
 /// Pending requests, and queued frames per channel [guess].
-const QUEUE: usize = 16;
+pub(crate) const QUEUE: usize = 16;
 /// Whole replies queued per stream, under the message cap so a reader that falls behind is caught
 /// [guess].
 const STREAM_QUEUE: usize = 4;

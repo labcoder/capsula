@@ -72,6 +72,15 @@ impl super::Store {
         Ok(())
     }
 
+    pub(crate) fn flushed_typed_screen(&mut self, run: RunId) -> Result<(), StoreError> {
+        let run = super::sql_id(run.0, StoreError::NoRun)?;
+        self.conn.execute(
+            "UPDATE runs SET screen = ?2 WHERE id = ?1 AND screen IS NULL",
+            rusqlite::params![run, column(HeldScreen::Screen)],
+        )?;
+        Ok(())
+    }
+
     fn unsent_screen(&mut self, run: RunId, to: Option<&str>) -> Result<(), StoreError> {
         let run = super::sql_id(run.0, StoreError::NoRun)?;
         self.conn.execute(

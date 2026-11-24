@@ -11,10 +11,10 @@ use crate::screen::actor::{Key, Owner, Reply};
 
 /// The hold a walk's reply answers.
 const KEY: Key = Key {
-    owner: Owner {
+    owner: Some(Owner {
         epoch: 1,
         gesture: 1,
-    },
+    }),
     capture: CaptureId(1),
 };
 

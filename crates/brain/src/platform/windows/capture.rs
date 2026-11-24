@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
+use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, TypedDisplay};
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
@@ -522,7 +522,20 @@ impl Capturer for Wgc {
         until: Instant,
         frame: &mut RawFrame,
     ) -> Result<(Acquired, PhysicalRect), Failure> {
-        frame.fill(|frame| self.display_frame(point, excluded, until, frame))
+        frame.fill(|frame| self.display_frame(point, None, excluded, until, frame))
+    }
+
+    fn capture_typed_display(
+        &mut self,
+        point: PhysicalPoint,
+        expected: TypedDisplay,
+        excluded: u64,
+        until: Instant,
+        frame: &mut RawFrame,
+    ) -> Result<Acquired, Failure> {
+        frame
+            .fill(|frame| self.display_frame(point, Some(expected), excluded, until, frame))
+            .map(|(acquired, _)| acquired)
     }
 }
 
@@ -576,15 +589,31 @@ impl Wgc {
     fn display_frame(
         &self,
         point: PhysicalPoint,
+        expected: Option<TypedDisplay>,
         excluded: u64,
         until: Instant,
         frame: &mut RawFrame,
     ) -> Result<(Acquired, PhysicalRect), Failure> {
+        if expected.is_some_and(|expected| super::super::typed_display_at(point) != Some(expected))
+        {
+            return Err(Refusal::DisplayChanged.into());
+        }
         let not_before = not_before(excluded, redraw()?)?;
         let [x, y] = point.0;
-        // SAFETY: asks which monitor is nearest a point; no pointers.
-        let monitor = unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) };
+        let fallback = if expected.is_some() {
+            MONITOR_DEFAULTTONULL
+        } else {
+            MONITOR_DEFAULTTONEAREST
+        };
+        // SAFETY: asks which monitor to use for a point; no pointers.
+        let monitor = unsafe { MonitorFromPoint(POINT { x, y }, fallback) };
         let (bounds, dpi) = geometry(monitor).ok_or(Refusal::DisplayChanged)?;
+        if let Some(expected) = expected
+            && ((bounds, dpi) != (expected.bounds, expected.dpi)
+                || super::super::typed_display_at(point) != Some(expected))
+        {
+            return Err(Refusal::DisplayChanged.into());
+        }
         let interop: IGraphicsCaptureItemInterop =
             factory::<GraphicsCaptureItem, _>().map_err(|e| fault(&e))?;
         // SAFETY: `monitor` came from MonitorFromPoint just now.
@@ -599,6 +628,10 @@ impl Wgc {
             not_before: Some(not_before),
         };
         let arrived = self.grab(&item, size, bounds.size, shot, until, frame)?;
+        if expected.is_some_and(|expected| super::super::typed_display_at(point) != Some(expected))
+        {
+            return Err(Refusal::DisplayChanged.into());
+        }
         Ok((Acquired { arrived, dpi }, bounds))
     }
 }

@@ -427,12 +427,12 @@ fn escape_consumes_the_native_input_marker_without_dismissing_typing(cx: &mut Te
         owner.text.as_mut().expect("typing fixture").typing.open();
         owner.link.cancel_input();
         owner
-            .native_escape(Some(GestureId(1)), cx)
+            .native_escape(Some(GestureId(1)), None, cx)
             .expect("cancel voice only");
         assert!(owner.voice.pending.is_none());
         assert!(owner.text_open());
         owner
-            .native_escape(Some(GestureId(1)), cx)
+            .native_escape(Some(GestureId(1)), None, cx)
             .expect("consume a deferred native marker");
         assert!(owner.text_open());
     });

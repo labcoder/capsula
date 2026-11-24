@@ -87,6 +87,11 @@ impl Presence {
 
     /// A watch's `HostChanged`, or an Esc or Quit that ends a drop under way.
     pub(super) fn carry_event(&mut self, event: &PresenceEvent, cx: &mut Context<'_, Self>) {
+        if let PresenceEvent::EscapeSpeech(press) = *event
+            && self.speech_session(press).is_none()
+        {
+            return;
+        }
         if let Some(event) = carry_signal(*event) {
             self.carry.candidates.event(event);
         }
@@ -185,7 +190,9 @@ fn label(strings: &Strings, title: &Label) -> SharedString {
 
 fn carry_signal(event: PresenceEvent) -> Option<CarryEvent> {
     match event {
-        PresenceEvent::Escape | PresenceEvent::Quit => Some(CarryEvent::Cancel),
+        PresenceEvent::Escape | PresenceEvent::EscapeSpeech(_) | PresenceEvent::Quit => {
+            Some(CarryEvent::Cancel)
+        }
         PresenceEvent::HostChanged { w, change } => {
             Some(CarryEvent::HostChanged { watch: w, change })
         }

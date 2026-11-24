@@ -4,10 +4,14 @@
 //! postcard encodes a variant by its position, so a new variant goes at the end of its enum and
 //! the handshake's bytes stay readable by other builds.
 
+use std::num::NonZeroU64;
+
 use serde::{Deserialize, Serialize};
 
 use crate::Secret;
-use crate::geometry::{PhysicalPoint, PhysicalRect, PointerPath, ReleasePointer, WindowRef};
+use crate::geometry::{
+    PhysicalPoint, PhysicalRect, PointerPath, ReleasePointer, TypedDisplay, WindowRef,
+};
 pub use kumochi_scene::display::TextMetricsV1;
 
 mod account;
@@ -186,11 +190,79 @@ pub enum RunOrigin {
 pub enum ScreenChoice {
     /// Text only.
     None,
-    /// Include the screen under this exclusion lease.
+    /// Obsolete; this carries no consent or display identity and is always refused.
     Include {
         /// The exclusion lease protecting capture.
         lease: LeaseGeneration,
     },
+    /// Request the composer's display with a single-use offer and continuous exclusion.
+    Typed(TypedScreenSubmit),
+}
+
+/// One offer issued by the brain on this paired connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedScreenOffer(pub NonZeroU64);
+
+/// One displayed recipient on this pair, including the Brain's account generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedScreenRevision(pub NonZeroU64);
+
+/// Display this exact model choice before using its pictured-send revision.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedScreenRecipient {
+    /// The pair-local authority to refer to this selection, not an account identifier.
+    pub revision: TypedScreenRevision,
+    /// The model and route this revision describes.
+    pub choice: ModelChoice,
+}
+
+impl std::fmt::Debug for TypedScreenRecipient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TypedScreenRecipient")
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The shell's exact draft and selection lifetimes, including for a New chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedScreenDraft {
+    /// The draft lifetime.
+    pub revision: u64,
+    /// The chat-selection lifetime.
+    pub selection: u64,
+}
+
+/// Bounded authority and exclusion metadata for one pictured submit; never image data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedScreenSubmit {
+    /// The brain's unspent offer for this turn.
+    pub offer: TypedScreenOffer,
+    /// The draft that the offer covered.
+    pub draft: TypedScreenDraft,
+    /// The lease protecting all shell surfaces.
+    pub lease: LeaseGeneration,
+    /// The composer's original display, including its geometry and DPI.
+    pub display: TypedDisplay,
+    /// A physical point inside that display.
+    pub point: ReleasePointer,
+    /// The submit's performance-counter stamp.
+    pub submitted_qpc: u64,
+    /// The performance-counter stamp after all exclusion setters finished.
+    pub excluded_qpc: u64,
+}
+
+/// The exact held frame whose continuous exclusion the shell must confirm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedScreenProof {
+    /// The submit on this pair.
+    pub turn: u32,
+    /// Its consumed single-use offer.
+    pub offer: TypedScreenOffer,
+    /// Its still-live exclusion lease.
+    pub lease: LeaseGeneration,
+    /// The brain's worker capture identifier.
+    pub capture: NonZeroU64,
 }
 
 /// The shell's first frame on each pipe.
@@ -561,6 +633,28 @@ pub enum ControlToBrain {
     SpeechDecision(SpeechDispatch, SpeechDecision),
     /// First control frame when this session requires queued output.
     QueuedHello(Hello),
+    /// Ask for an offer without capturing a frame.
+    RequestTypedScreenOffer {
+        /// The next typed turn, bound by the offer.
+        turn: u32,
+        /// The current chat, or an exact New draft.
+        thread: Option<ThreadId>,
+        /// The current draft and selection.
+        draft: TypedScreenDraft,
+        /// The recipient revision actually displayed when the user opted in.
+        recipient: TypedScreenRevision,
+        /// The display where the draft is composed.
+        display: Box<TypedDisplay>,
+    },
+    /// Revoke a pictured submission even before the data pipe has delivered its turn.
+    CancelTypedScreen {
+        /// The submit on this pair.
+        turn: u32,
+        /// Its offer, never transferable to another submit.
+        offer: TypedScreenOffer,
+    },
+    /// Complete exclusion covered this frame until this proof was queued.
+    ConfirmTypedScreen(TypedScreenProof),
 }
 
 /// What a thread's delete came to.
@@ -816,6 +910,33 @@ pub enum ControlToShell {
     QueuedAudioRegistered(OutputGeneration),
     /// The local account state when this build cannot use the account's network service.
     AccountUnsupported(AccountView),
+    /// The answer to an offer request; refusal carries no authority.
+    TypedScreenOffered {
+        /// The requested turn.
+        turn: u32,
+        /// The requested chat.
+        thread: Option<ThreadId>,
+        /// The requested draft and selection.
+        draft: TypedScreenDraft,
+        /// The requested displayed recipient, unchanged even on refusal.
+        recipient: TypedScreenRevision,
+        /// The single-use offer, or no offer if unavailable.
+        offer: Option<TypedScreenOffer>,
+    },
+    /// This exact frame is held, but cannot be sealed until exclusion is confirmed.
+    TypedScreenHeld(TypedScreenProof),
+    /// This pair's eligible displayed recipient changed, or became unavailable.
+    TypedScreenRecipient(Option<TypedScreenRecipient>),
+    /// The pictured run is ending and its first transport write never had a reservation.
+    TypedScreenNotSent {
+        /// The named pictured run.
+        run: RunId,
+        /// The exact paired offer that authorized it.
+        offer: TypedScreenOffer,
+    },
+    /// First Spoken Replies activation saved Talk-back on for a queued pair that opened off.
+    /// An unsolicited snapshot; the pair keeps its registered mode.
+    SpokenRepliesDefaulted(SettingsView),
 }
 
 /// What a screen hold carried into its turn. It never says the window was sent: a run can end

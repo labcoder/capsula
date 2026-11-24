@@ -15,7 +15,7 @@ use super::super::conductor::{Assignment, Binding};
 use super::backend::{self, Power, Reply, Request};
 use super::receipts::Receipts;
 use super::timeline::{Anchor, Engine, Observation, Opened, Phase, Tail};
-use super::{Admission, Credit, Fault, Packet};
+use super::{Admission, Credit, Fault, Packet, Speech};
 use crate::platform::speaker_cpal::{
     Control, OutputError, OutputEvent, PRESENTATION_SLOTS, PacketKind, Source, TailAck, Transport,
 };
@@ -132,6 +132,7 @@ pub(crate) fn spawn_plain(
     reports: (
         impl FnMut(ControlToBrain) -> bool + Send + 'static,
         impl FnOnce(bool) + Send + 'static,
+        Speech,
     ),
     exit: impl FnMut(bool) + Send + 'static,
     #[cfg(any(test, feature = "test-support"))] fake: Option<FakeOutput>,
@@ -196,6 +197,7 @@ struct Worker {
     retired_route: Option<u64>,
     virtual_route: bool,
     drawing: Option<Drawing>,
+    speech: Speech,
 }
 
 #[cfg_attr(
@@ -215,6 +217,7 @@ pub(crate) fn spawn(
     reports: (
         impl FnMut(ControlToBrain) -> bool + Send + 'static,
         impl FnOnce(bool) + Send + 'static,
+        Speech,
     ),
     #[cfg(any(test, feature = "test-support"))] fake: Option<FakeOutput>,
 ) -> io::Result<Input> {
@@ -276,7 +279,11 @@ fn own(
     (engine, origin): (Engine, Instant),
     drawing: Drawing,
     give: impl FnMut(Credit),
-    (report, refused_tail): (impl FnMut(ControlToBrain) -> bool, impl FnOnce(bool)),
+    (report, refused_tail, speech): (
+        impl FnMut(ControlToBrain) -> bool,
+        impl FnOnce(bool),
+        Speech,
+    ),
     start: impl FnOnce(Thread, Instant) -> io::Result<(SyncSender<Request>, Receiver<Reply>)>,
     #[cfg(any(test, feature = "test-support"))] fixture: FixtureStart,
 ) {
@@ -294,6 +301,7 @@ fn own(
         retired_route: None,
         virtual_route: false,
         drawing: Some(drawing),
+        speech,
     };
     #[cfg(any(test, feature = "test-support"))]
     let worker = if matches!(fixture, FixtureStart::Primed) {
@@ -646,6 +654,7 @@ impl Worker {
             };
             match self.engine.observe(anchor) {
                 Observation::Accepted => {
+                    self.speech.hold(anchor.at, now);
                     if let Some(drawing) = &mut self.drawing {
                         drawing.observe(anchor, now);
                     }
@@ -689,6 +698,7 @@ impl Worker {
     }
 
     fn recover(&mut self, now: Duration) {
+        self.speech.clear();
         if let Some(route) = &mut self.physical {
             self.engine.require_recovery(route.generation);
             self.retired_route = Some(route.generation);
@@ -705,6 +715,7 @@ impl Worker {
     }
 
     fn stop(&mut self, now: Duration, give: &mut impl FnMut(Credit)) {
+        self.speech.clear();
         if let Some(Request::Open(_, control)) = &self.job {
             control.stop();
         }

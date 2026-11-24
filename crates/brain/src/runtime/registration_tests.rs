@@ -5,6 +5,7 @@ use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
     AudioSession, ControlToBrain, ControlToShell, DataToBrain, GestureId, LeaseGeneration,
     MAX_RATE, MIN_RATE, Narration, NoticeRevision, OutputGeneration, SceneId, ScreenChoice,
+    ThreadId,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
 use tokio::sync::{Notify, mpsc};
@@ -75,6 +76,45 @@ async fn early_turns_close_both_pipes_without_replaying_after_a_late_register() 
             assert_ne!(event, Seen::ControlApplied);
         }
     }
+    brain.close().await;
+    assert_eq!(outcomes(&scratch), []);
+}
+
+#[tokio::test]
+async fn a_registered_pair_refuses_legacy_include_without_closing() {
+    let scratch = Scratch::new("queued-legacy-screen");
+    let mut brain = test_support::brain(&scratch, "");
+    let ended = queued(&mut brain, async |mut shell| {
+        assert_eq!(shell.scenes().await, []);
+        shell.send(&REGISTER).await;
+        assert_eq!(shell.control().await, Some(RECEIPT));
+        for turn in 1..=2 {
+            let message = DataToBrain::TextSubmit {
+                turn,
+                thread: Some(ThreadId(1)),
+                screen: ScreenChoice::Include {
+                    lease: LeaseGeneration(1),
+                },
+                text: "never plain".into(),
+            };
+            shell
+                .data_out
+                .write_all(&frame::encode(&message, Pipe::Data).unwrap())
+                .await
+                .unwrap();
+        }
+        for turn in 1..=2 {
+            assert_eq!(
+                shell.control().await,
+                Some(ControlToShell::TurnRefused {
+                    turn,
+                    thread: Some(ThreadId(1)),
+                })
+            );
+        }
+    })
+    .await;
+    assert_eq!(ended, Ended::Lost);
     brain.close().await;
     assert_eq!(outcomes(&scratch), []);
 }

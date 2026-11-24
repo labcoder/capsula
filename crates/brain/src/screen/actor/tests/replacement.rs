@@ -154,7 +154,7 @@ impl Replacement {
             })
         });
         let next = Key {
-            owner,
+            owner: Some(owner),
             capture: CaptureId(2),
         };
         let mut rig = Self {
@@ -243,7 +243,7 @@ impl Replacement {
     }
 
     fn retire_old_and_complete(&self) {
-        self.send(3, Request::Retire(key(1).owner));
+        self.send(3, Request::Retire(hold_owner()));
         self.send(4, Request::Ping);
         assert_eq!(
             self.replies.recv_timeout(PATIENCE).unwrap(),
@@ -254,7 +254,7 @@ impl Replacement {
         self.acquired(self.next, NEW);
         assert_eq!(
             self.replies.recv_timeout(PATIENCE).unwrap(),
-            (3, Reply::Released(key(1).owner, None))
+            (3, Reply::Released(hold_owner(), None))
         );
     }
 }
@@ -279,7 +279,7 @@ impl Drop for Replacement {
 
 #[test]
 fn expired_same_owner_replacement_disposes_before_second_capture() {
-    let rig = Replacement::held(key(2).owner, Duration::from_secs(31));
+    let rig = Replacement::held(hold_owner(), Duration::from_secs(31));
     rig.disposed_before_handoff();
     rig.release_capture.send(()).unwrap();
     rig.acquired(rig.next, NEW);
@@ -289,7 +289,7 @@ fn expired_same_owner_replacement_disposes_before_second_capture() {
 fn replacement_by_a_later_gesture_disposes_before_handoff_and_old_release() {
     let owner = Owner {
         gesture: 8,
-        ..key(2).owner
+        ..hold_owner()
     };
     let rig = Replacement::held(owner, Duration::ZERO);
     rig.disposed_before_handoff();
@@ -309,7 +309,7 @@ fn replacement_by_a_later_epoch_disposes_before_handoff_and_old_release() {
 
 #[test]
 fn unexpired_same_owner_replacement_reuses_the_allocation() {
-    let rig = Replacement::held(key(2).owner, Duration::ZERO);
+    let rig = Replacement::held(hold_owner(), Duration::ZERO);
     assert_eq!(rig.handoff, rig.old_allocation);
     assert_eq!(rig.scrubbed.try_recv(), Err(mpsc::TryRecvError::Empty));
     rig.release_capture.send(()).unwrap();

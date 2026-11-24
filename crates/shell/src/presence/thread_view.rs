@@ -626,6 +626,9 @@ impl Render for ThreadsView {
         let escape_events = self.events.clone();
         let cancel_events = self.events.clone();
         let stop_events = self.events.clone();
+        let escape_owner = self.owner.clone();
+        let cancel_owner = self.owner.clone();
+        let stop_owner = self.owner.clone();
         let state = self.model.read(cx);
         let notice = if !state.online() {
             Some(Text::ThreadsOffline)
@@ -654,9 +657,11 @@ impl Render for ThreadsView {
             .bg(cx.theme().popover)
             .text_color(cx.theme().popover_foreground)
             .key_context("ThreadsPanel")
-            .on_action(move |_: &EscapeKey, _, _| send(&escape_events, PresenceEvent::Escape))
-            .on_action(move |_: &gpui_kit::base::actions::Cancel, _, _| {
-                send(&cancel_events, PresenceEvent::Escape);
+            .on_action(move |_: &EscapeKey, _, cx| {
+                super::send_escape(&escape_events, Some(&escape_owner), cx);
+            })
+            .on_action(move |_: &gpui_kit::base::actions::Cancel, _, cx| {
+                super::send_escape(&cancel_events, Some(&cancel_owner), cx);
             })
             .child(toolbar)
             .child(
@@ -691,7 +696,9 @@ impl Render for ThreadsView {
                 Button::new("stop")
                     .small()
                     .label(stop_label)
-                    .on_click(move |_, _, _| send(&stop_events, PresenceEvent::Escape))
+                    .on_click(move |_, _, cx| {
+                        super::send_escape(&stop_events, Some(&stop_owner), cx);
+                    })
             }))
     }
 }

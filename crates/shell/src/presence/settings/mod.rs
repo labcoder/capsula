@@ -11,7 +11,7 @@ mod window;
 
 pub(super) use window::SettingsPanel;
 
-use super::{Presence, PresenceEvent, send};
+use super::{Presence, PresenceEvent};
 use crate::settings::{Field, Settings};
 use crate::strings::{Strings, Text};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -379,6 +379,8 @@ impl Render for SettingsView {
         let events = self.events.clone();
         let close = self.owner.clone();
         let stop_events = self.events.clone();
+        let escape_owner = self.owner.clone();
+        let stop_owner = self.owner.clone();
         div()
             .size_full()
             .flex()
@@ -394,7 +396,9 @@ impl Render for SettingsView {
             .text_color(cx.theme().popover_foreground)
             .key_context("SettingsPanel")
             .track_focus(&self.focus)
-            .on_action(move |_: &Escape, _, _| send(&events, PresenceEvent::Escape))
+            .on_action(move |_: &Escape, _, cx| {
+                super::send_escape(&events, Some(&escape_owner), cx);
+            })
             .on_action(cx.listener(|view, _: &NextTab, window, cx| {
                 view.select_tab(view.tab.next(), view.github_generation(cx), window, cx);
             }))
@@ -458,11 +462,13 @@ impl Render for SettingsView {
                     .into_any_element()
             })
             .children(self.stop.then(|| {
-                div().p_4().child(
-                    Button::new("stop")
-                        .label(strings.get(Text::Stop))
-                        .on_click(move |_, _, _| send(&stop_events, PresenceEvent::Escape)),
-                )
+                div()
+                    .p_4()
+                    .child(Button::new("stop").label(strings.get(Text::Stop)).on_click(
+                        move |_, _, cx| {
+                            super::send_escape(&stop_events, Some(&stop_owner), cx);
+                        },
+                    ))
             }))
     }
 }

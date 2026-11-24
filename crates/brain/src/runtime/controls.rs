@@ -209,6 +209,9 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         | ControlToBrain::Settings(_)
         | ControlToBrain::AccountOp(_)
         | ControlToBrain::Connection(_)
+        | ControlToBrain::RequestTypedScreenOffer { .. }
+        | ControlToBrain::CancelTypedScreen { .. }
+        | ControlToBrain::ConfirmTypedScreen(..)
         | ControlToBrain::Warm { .. } => None,
     })
 }
@@ -299,6 +302,9 @@ impl Brain {
             link.control(&ControlToShell::QueuedAudioRegistered(output))
                 .map_err(|Full| Ended::Lost)?;
             registration.set(Registration::Applied(output));
+            return Ok(None);
+        }
+        if self.typed_screen_control(&message, link)? {
             return Ok(None);
         }
         let hold = self.hold_control(&message, link);

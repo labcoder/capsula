@@ -1309,7 +1309,7 @@ fn the_hotkey_s_esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestApp
         // The hotkey's reducer revokes the hold's input before the press is applied.
         let cancelled = owner.link.cancel_input_gesture();
         assert_eq!(cancelled, Some(GestureId(1)));
-        owner.native_escape(cancelled, cx).expect("escape");
+        owner.native_escape(cancelled, None, cx).expect("escape");
     });
     cx.run_until_parked();
     let [stop, clear] = gone();
@@ -1378,6 +1378,73 @@ fn esc_through_the_hotkey_s_reducer_takes_a_pending_hold_s_marks_and_cancels_it(
     let [stop, clear] = gone();
     assert_eq!(told(&watching), [cancel(), cancel(), stop, clear]);
     only_taken(&watching, cx);
+}
+
+#[gpui::test]
+fn a_stale_speech_press_leaves_newer_marks_up(cx: &mut TestAppContext) {
+    let watching = marks_up(cx);
+    told(&watching);
+    watching.ready.owner.update(cx, |owner, cx| {
+        let marked = owner.presenter.marks_shown().expect("marks are up");
+        let session = owner.session.as_ref().expect("connected").generation();
+        let older = RunId(marked.0.saturating_sub(1));
+        owner
+            .native_escape(
+                None,
+                Some(crate::escape::SpeechPress {
+                    session,
+                    run: older,
+                    owner: crate::escape::SpeechEscapeOwner::Outside,
+                }),
+                cx,
+            )
+            .expect("Esc");
+        assert_eq!(
+            owner.presenter.marks_shown(),
+            Some(marked),
+            "a press that saw older speech leaves newer marks up"
+        );
+    });
+    assert_eq!(told(&watching), [], "and tells the brain nothing");
+}
+
+#[gpui::test]
+fn a_focused_panel_keeps_pull_and_mark_priority_when_speech_is_live(cx: &mut TestAppContext) {
+    let watching = marks_up(cx);
+    pull(&watching, cx);
+    let owner = &watching.ready.owner;
+    let at = Instant::now();
+    owner.update(cx, |owner, cx| {
+        let text = owner.text.as_mut().expect("typing panel");
+        text.typing.open();
+        text.focused = true;
+        let session = owner.session.as_ref().expect("connected").generation();
+        owner
+            .speech
+            .set(Some((session, RunId(RUN), at + Duration::from_secs(1))));
+        owner.focus_changed(cx);
+        assert!(!owner.activity.speaking);
+        assert!(
+            owner.activity.holds_global_escape(),
+            "the pull owns the hotkey"
+        );
+    });
+    let mut time = after(at, 0);
+    time.speech_escape_owner = crate::escape::SpeechEscapeOwner::Panel;
+    native(owner, cx)(Event::Escape, time);
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, cx| {
+        assert!(
+            !owner.kumo.read(cx).pull_live(),
+            "the same Esc cancelled the pull"
+        );
+        assert_eq!(owner.presenter.marks_shown(), None);
+        assert!(
+            owner.text_focused(),
+            "the press did not also dismiss typing"
+        );
+    });
+    assert_eq!(told(&watching), taken());
 }
 
 #[gpui::test]
@@ -1768,8 +1835,9 @@ fn measure_captured_stop_and_raw_intake(cx: &mut TestAppContext) {
                 let cancel = |cx: &mut TestAppContext| {
                     watching.ready.owner.update(cx, |owner, cx| {
                         let start = Instant::now();
-                        let (result, counts, bytes) =
-                            allocation::usage(|| owner.native_escape(Some(GestureId(gesture)), cx));
+                        let (result, counts, bytes) = allocation::usage(|| {
+                            owner.native_escape(Some(GestureId(gesture)), None, cx)
+                        });
                         (result, start.elapsed().as_nanos(), counts, bytes)
                     })
                 };
@@ -2479,7 +2547,9 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     let watching = watch(true, cx);
     drawn(&watching, cx);
     watching.ready.owner.update(cx, |owner, cx| {
-        owner.native_escape(Some(GestureId(1)), cx).expect("escape");
+        owner
+            .native_escape(Some(GestureId(1)), None, cx)
+            .expect("escape");
     });
     cx.run_until_parked();
     assert_eq!(told(&watching), [clear()]);
@@ -2490,7 +2560,7 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     let _native = ended_by_esc_down(&watching, cx);
     told(&watching);
     watching.ready.owner.update(cx, |owner, cx| {
-        owner.native_escape(None, cx).expect("escape");
+        owner.native_escape(None, None, cx).expect("escape");
         assert_eq!(owner.voice.ended, None);
     });
     cx.run_until_parked();
@@ -2502,7 +2572,9 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     let _native = ended_by_esc_down(&watching, cx);
     hold(&watching, 2, cx);
     watching.ready.owner.update(cx, |owner, cx| {
-        owner.native_escape(Some(GestureId(2)), cx).expect("escape");
+        owner
+            .native_escape(Some(GestureId(2)), None, cx)
+            .expect("escape");
         assert!(owner.voice.pending.is_none(), "hold 2 is cancelled");
     });
 
@@ -2515,7 +2587,9 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     });
     hold(&watching, 2, cx);
     watching.ready.owner.update(cx, |owner, cx| {
-        owner.native_escape(Some(GestureId(1)), cx).expect("escape");
+        owner
+            .native_escape(Some(GestureId(1)), None, cx)
+            .expect("escape");
         let hold = owner.voice.pending.as_ref().expect("hold 2");
         assert_eq!(hold.token.gesture(), GestureId(2));
     });
