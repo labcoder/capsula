@@ -44,13 +44,13 @@ impl Presence {
         }
     }
 
-    /// Settings closed, however it closed: each sign-in it asked for that hasn't ended is
-    /// cancelled once, past the model's gate. One that can't be sent stays owed.
+    /// Settings cancels its own sign-ins once. A replacement connection must first show a wait.
     pub(super) fn cancel_settings_sign_ins(&mut self, cx: &mut Context<'_, Self>) {
-        if self.settings_chatgpt.take() && self.send_chatgpt_cancel(cx) {
+        let generation = self.session.as_ref().map(crate::link::Session::generation);
+        if self.settings_chatgpt.take_on(generation) && self.send_chatgpt_cancel(cx) {
             self.settings_chatgpt.cancel_sent();
         }
-        if self.settings_claude.take() && self.send_claude_cancel(cx) {
+        if self.settings_claude.take_on(generation) && self.send_claude_cancel(cx) {
             self.settings_claude.cancel_sent();
         }
     }

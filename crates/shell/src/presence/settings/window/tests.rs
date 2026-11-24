@@ -36,6 +36,183 @@ fn detached_settings(
     (window, view)
 }
 
+#[gpui::test]
+fn a_failed_settings_hide_preserves_the_edit_and_defers_close_effects(cx: &mut TestAppContext) {
+    use crate::presence::OpenError;
+    use crate::settings::{Field, Update};
+    use crate::strings::Text;
+    use kumochi_protocol::message::{AssistantName, SettingsOp};
+
+    test_fixture::without_desktop(cx);
+    let owner = test_fixture::presence(cx);
+    let (window, view, controls) = owner.update(cx, |owner, cx| {
+        owner.session = Some(Session::detached(1, Incarnation(1)));
+        owner.settings_chatgpt.sent(1);
+        owner.settings.update(cx, |state, _| {
+            assert_eq!(
+                state.set_view(super::super::general::tests::saved(), Update::Unsolicited),
+                None
+            );
+            state.change(Field::Assistant, "Cirrus");
+        });
+        let (window, view) = detached_settings(owner, cx);
+        let panel = owner.settings_panel.as_mut().expect("detached Settings");
+        panel.visible = true;
+        panel.focused = true;
+        (window, view, owner.link.record_controls())
+    });
+    window
+        .update(cx, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.editing = Some(Field::Assistant);
+                view.hold_notice = Some(Text::SettingsUnavailable);
+                view.inputs[0].update(cx, |input, cx| {
+                    input.set_value("Cirrus", window, cx);
+                    input.focus(window, cx);
+                });
+            });
+            let focus = window.focused(cx).expect("focused editor");
+            assert!(matches!(
+                owner.update(cx, Presence::dismiss_settings),
+                Err(OpenError::Gpui(_))
+            ));
+            assert_eq!(window.focused(cx), Some(focus));
+        })
+        .expect("the Settings window is still open");
+    owner.read_with(cx, |owner, cx| {
+        assert!(owner.settings_focused());
+        assert_eq!(
+            owner.settings_chatgpt,
+            SignInMark::Open {
+                generation: 1,
+                shown: false
+            }
+        );
+        let state = owner.settings.read(cx);
+        assert_eq!(state.value(Field::Assistant), "Cirrus");
+        assert!(!state.field(Field::Assistant).saving);
+        let view = view.read(cx);
+        assert_eq!(view.editing(), Some(Field::Assistant));
+        assert_eq!(view.hold_notice, Some(Text::SettingsUnavailable));
+    });
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+
+    owner.update(cx, |owner, cx| {
+        owner.dismiss_settings(cx).expect("retry close");
+    });
+    assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.editing(), None);
+        assert_eq!(view.hold_notice, None);
+    });
+    assert_eq!(
+        drain(&controls),
+        [
+            ControlToBrain::AccountOp(AccountOp::CancelSignIn),
+            ControlToBrain::Settings(SettingsOp::SetAssistantName(
+                AssistantName::new("Cirrus").expect("valid name")
+            )),
+        ]
+    );
+    window
+        .update(cx, |_, window, _| window.remove_window())
+        .expect("remove the detached Settings window");
+    drop(view);
+    drop(owner);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn settings_close_after_reconnect_waits_for_each_sign_in_snapshot(cx: &mut TestAppContext) {
+    use crate::link::LinkHandle;
+    use crate::presence::OpenError;
+
+    test_fixture::without_desktop(cx);
+    let owner = test_fixture::presence(cx);
+    let (window, view, controls, _requests) = owner.update(cx, |owner, cx| {
+        let (mut link, requests) = LinkHandle::recording();
+        let controls = link.record_controls();
+        link.set_recorded_generation(6);
+        owner.link = link;
+        owner.session = Some(Session::detached(6, Incarnation(1)));
+        owner.settings_chatgpt.sent(6);
+        owner.settings_claude.sent(6);
+        let (window, view) = detached_settings(owner, cx);
+        owner
+            .settings_panel
+            .as_mut()
+            .expect("detached Settings")
+            .visible = true;
+        (window, view, controls, requests)
+    });
+    window
+        .update(cx, |_, _, cx| {
+            assert!(matches!(
+                owner.update(cx, Presence::dismiss_settings),
+                Err(OpenError::Gpui(_))
+            ));
+        })
+        .expect("the Settings window is still open");
+    assert!(owner.read_with(cx, |owner, _| owner.settings_open()));
+    assert!(drain(&controls).is_empty());
+
+    owner.update(cx, |owner, _| owner.link.set_recorded_generation(7));
+    account_views(
+        &owner,
+        vec![
+            LinkEvent::State(LinkState::Reconnecting),
+            LinkEvent::Connected(Session::detached(7, Incarnation(1))),
+        ],
+        cx,
+    );
+    owner.update(cx, |owner, cx| {
+        assert_eq!(owner.session.as_ref().map(Session::generation), Some(7));
+        owner.dismiss_settings(cx).expect("retry close");
+        assert!(!owner.settings_open());
+        assert_eq!(
+            [owner.settings_chatgpt, owner.settings_claude],
+            [SignInMark::CancelOwed { generation: 6 }; 2]
+        );
+    });
+    assert!(drain(&controls).is_empty());
+
+    account_views(
+        &owner,
+        vec![
+            chatgpt(AccountView::SignedOut {
+                revocation_unconfirmed: false,
+            }),
+            claude_code(ClaudeCodeView::SigningIn),
+        ],
+        cx,
+    );
+    assert_eq!(
+        drain(&controls).as_slice(),
+        std::slice::from_ref(&CANCELS[1])
+    );
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(
+            [owner.settings_chatgpt, owner.settings_claude],
+            [SignInMark::Settled; 2]
+        );
+    });
+    account_views(
+        &owner,
+        vec![
+            chatgpt(AccountView::SigningIn),
+            claude_code(ClaudeCodeView::SigningIn),
+        ],
+        cx,
+    );
+    assert!(drain(&controls).is_empty());
+    window
+        .update(cx, |_, window, _| window.remove_window())
+        .expect("remove the detached Settings window");
+    drop(view);
+    drop(owner);
+    cx.run_until_parked();
+}
+
 fn settings_over_hold(
     owner: &Entity<Presence>,
     tab: SettingsTab,

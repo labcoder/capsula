@@ -15,8 +15,12 @@ clear, cancel the active field edit, then dismiss on the next Esc. Stop and clea
 edit intact. Its close button dismisses it too. The status panel stays hidden until Settings
 closes, so Retry and Quit there require closing Settings first; native-menu Retry still works.
 Opening the typing panel
-or Tasks, or moving the dock, uses the same dismissal path. On dismissal, an active field
-saves as on blur. If local validation or sending fails, **Settings not saved** remains on the
+or Tasks, or moving the dock, uses the same dismissal path. If the window update is refused,
+the editor and sign-in state stay intact. If the native hide fails after handing back the
+foreground, Settings skips the close effects, but an ordinary blur can still save the edit.
+After a successful hide, an immediate sign-in cancel goes only to the connection that owns
+it; a replacement reconciles the owed cancel against its account view. An active field saves
+as on blur. If local validation or sending fails, **Settings not saved** remains on the
 dock and the retained draft and error are available on reopening. The previous foreground is restored through the existing platform
 presence interface. The native focus handoff requires a real Window and remains an owner
 hand check; pure Esc and save ordering are unit-tested. A new Settings panel inherits the

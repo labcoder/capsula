@@ -102,6 +102,37 @@ fn an_owed_cancel_is_dropped_by_a_new_connection_with_no_wait_or_by_the_user() {
 }
 
 #[test]
+fn close_before_a_replacement_snapshot_does_not_cancel_on_that_session() {
+    use crate::link::Session;
+    use kumochi_protocol::message::Incarnation;
+
+    let mut current = Some(Session::detached(1, Incarnation(1)));
+    let mut mark = open(1);
+    let mut immediate = mark;
+    assert!(immediate.take_on(current.as_ref().map(Session::generation)));
+    assert!(!immediate.take_on(current.as_ref().map(Session::generation)));
+
+    assert_eq!(current.take().map(|session| session.generation()), Some(1));
+    let mut offline = mark;
+    let immediate_offline = offline.take_on(current.as_ref().map(Session::generation));
+    current = Some(Session::detached(2, Incarnation(1)));
+    let replacement = current.as_ref().map(Session::generation);
+    assert!(!mark.take_on(replacement), "a replacement needs a snapshot");
+    assert!(!immediate_offline);
+    assert_eq!(offline, SignInMark::CancelOwed { generation: 1 });
+    assert_eq!(mark, SignInMark::CancelOwed { generation: 1 });
+    assert!(!mark.take_on(replacement));
+
+    let mut settled = mark;
+    assert_eq!(settled.view(2, Shows::Other), Seen::Nothing);
+    assert_eq!(settled, SignInMark::Settled);
+    assert_eq!(settled.view(2, Shows::Waiting), Seen::Nothing);
+    assert_eq!(mark.view(2, Shows::Waiting), Seen::SendCancel);
+    mark.cancel_sent();
+    assert_eq!(mark.view(2, Shows::Waiting), Seen::Nothing);
+}
+
+#[test]
 fn the_finish_hands_a_waiting_sign_in_over_and_keeps_an_owed_cancel() {
     let mut waiting = open(1);
     waiting.hand_over();
