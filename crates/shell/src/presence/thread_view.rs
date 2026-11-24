@@ -1,5 +1,6 @@
 //! The two virtualized lists in the threads surface.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -7,6 +8,7 @@ use gpui_kit::component::input::{Escape as EscapeKey, Input, InputEvent, InputSt
 use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, IndexPath, Sizable as _};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, WeakEntity, Window,
@@ -194,7 +196,7 @@ pub(super) struct ThreadsView {
     owner: WeakEntity<Presence>,
     events: async_channel::Sender<PresenceEvent>,
     messages: Entity<Messages>,
-    rename: Option<(ThreadId, ThreadKind)>,
+    pub(super) rename: super::escape::RenameEdit,
     rename_error: Option<Text>,
     rename_input: Entity<InputState>,
     _rename_events: Subscription,
@@ -231,9 +233,10 @@ impl ThreadsView {
             let state = view.model.read(cx);
             if view
                 .rename
+                .get()
                 .is_some_and(|(thread, _)| state.open != Some(thread))
             {
-                view.rename = None;
+                view.rename.set(None);
                 view.rename_error = None;
             }
             cx.notify();
@@ -247,7 +250,7 @@ impl ThreadsView {
             owner,
             events,
             messages,
-            rename: None,
+            rename: Rc::default(),
             rename_error: None,
             rename_input,
             _rename_events: rename_events,
@@ -258,18 +261,18 @@ impl ThreadsView {
 
 impl ThreadsView {
     pub(super) fn editing(&self) -> bool {
-        self.rename.is_some()
+        self.rename.get().is_some()
     }
 
     pub(super) fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.rename = None;
+        self.rename.set(None);
         self.rename_error = None;
         self.list.update(cx, |list, cx| list.focus(window, cx));
         cx.notify();
     }
 
     fn save_rename(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let Some((thread, kind)) = self.rename else {
+        let Some((thread, kind)) = self.rename.get() else {
             return;
         };
         if !self.model.read(cx).can_rename(thread) {
@@ -513,7 +516,7 @@ impl ThreadsView {
         let row = state.row(state.open?)?.clone();
         let title = row_label(&row, state.settings.as_ref());
         let disabled = !state.can_rename(row.id);
-        if self.rename.is_some() {
+        if self.editing() {
             return Some(self.rename_editor(row.id, cx));
         }
         let strings = cx.global::<Strings>();
@@ -556,8 +559,13 @@ impl ThreadsView {
                                 .ghost()
                                 .disabled(disabled)
                                 .label(rename_label)
+                                .map(|button| {
+                                    #[cfg(test)]
+                                    let button = button.debug_selector(|| "rename-task".into());
+                                    button
+                                })
                                 .on_click(cx.listener(move |view, _, window, cx| {
-                                    view.rename = Some((thread, kind));
+                                    view.rename.set(Some((thread, kind)));
                                     view.rename_error = None;
                                     view.rename_input.update(cx, |input, cx| {
                                         input.set_value(edit_title.clone(), window, cx);

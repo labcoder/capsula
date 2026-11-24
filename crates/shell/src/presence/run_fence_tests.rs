@@ -252,6 +252,7 @@ fn a_queued_panel_escape_stops_only_the_speech_it_saw(cx: &mut TestAppContext) {
     use crate::platform::PresenceEvent;
     use std::time::{Duration, Instant};
 
+    super::test_fixture::without_desktop(cx);
     for (successor_already_named, closed) in [(false, false), (true, false), (true, true)] {
         let (owner, _data, controls) = ready(cx);
         let (_commands, _tail) = answering(&owner, SPOKEN, cx);

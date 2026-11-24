@@ -66,6 +66,7 @@ impl Presence {
         self.kumo.update(cx, KumoView::close);
         self.end_carry(cx);
         self.activity.pulling = false;
+        self.publish_plain_escape(cx);
         if let Err(error) = self.sync_escape(cx) {
             tracing::warn!(%error, "can't give back Esc at Quit");
         }
@@ -81,6 +82,7 @@ impl Presence {
             self.line.pull_started();
             self.want_pull_frames(cx);
         }
+        self.publish_plain_escape(cx);
         if activity != self.activity {
             self.activity = activity;
             self.sync_escape(cx)?;

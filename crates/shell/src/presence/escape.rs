@@ -1,11 +1,255 @@
 //! Local Esc routing for the focused surface.
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::time::Instant;
+
 use super::drag::Event;
 use super::{Activity, Context, Escape, EscapePanel, OpenError, Presence, Session, diagnostics};
 use crate::escape::{self, SpeechEscapeOwner, SpeechPress};
-use kumochi_protocol::message::{GestureId, RunId};
+use crate::settings::Field;
+use kumochi_protocol::message::{
+    GestureId, MAX_VISIBLE_SCENES, RunId, SceneId, ThreadId, ThreadKind,
+};
+
+pub(super) type SpeechLease = Rc<Cell<Option<(u64, RunId, Instant)>>>;
+pub(super) type NameEdit = Rc<Cell<Option<Field>>>;
+pub(super) type RenameEdit = Rc<Cell<Option<(ThreadId, ThreadKind)>>>;
+pub(super) type PlainEscapeCell = Rc<RefCell<Option<PublishedEscape>>>;
+
+enum PanelEdit {
+    Name(NameEdit),
+    Rename(RenameEdit),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edit {
+    Name(Field),
+    Rename(ThreadId, ThreadKind),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct MarkedAnswer {
+    run: RunId,
+    scene: SceneId,
+    other_work: Option<RunId>,
+}
+
+/// The owners the aggregate plain Esc route may affect, excluding paint and phase progress.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct PlainEscape {
+    pair: Option<u64>,
+    target: (Option<ThreadId>, u64),
+    frontier: (u32, RunId),
+    moving: (Option<RunId>, Option<RunId>),
+    action: Escape,
+    scenes: [[Option<SceneId>; MAX_VISIBLE_SCENES]; 2],
+    hold: Option<GestureId>,
+    watch: Option<super::marks::Watched>,
+    marks: Option<MarkedAnswer>,
+    selection: Option<GestureId>,
+    pull: Option<super::drag::Generation>,
+    panel: Option<(EscapePanel, gpui_kit::WindowId)>,
+    edit: Option<Edit>,
+}
+
+impl PlainEscape {
+    pub(super) fn still_owns(&self, live: &Self) -> bool {
+        if self == live {
+            return true;
+        }
+        let Some(MarkedAnswer {
+            run,
+            scene,
+            other_work,
+        }) = self.marks
+        else {
+            return false;
+        };
+        if self.action != Escape::Stop
+            || self.hold.is_some()
+            || self.selection.is_some()
+            || self.moving.0 != Some(run)
+            || self.moving.1.is_some_and(|drawing| drawing > run)
+            || !self.scenes[1].contains(&Some(scene))
+        {
+            return false;
+        }
+        let [legacy, presented] = self.scenes;
+        let mut remaining = presented.into_iter().filter(|&id| id != Some(scene));
+        let scenes = [legacy, std::array::from_fn(|_| remaining.next().flatten())];
+        Self {
+            marks: None,
+            scenes,
+            moving: (Some(run), other_work),
+            ..*self
+        } == *live
+    }
+}
+
+pub(super) struct PublishedEscape {
+    scope: PlainEscape,
+    edit: Option<PanelEdit>,
+}
+
+impl PublishedEscape {
+    fn capture(&self) -> PlainEscape {
+        let edit = match &self.edit {
+            Some(PanelEdit::Name(edit)) => edit.get().map(Edit::Name),
+            Some(PanelEdit::Rename(edit)) => {
+                edit.get().map(|(thread, kind)| Edit::Rename(thread, kind))
+            }
+            None => None,
+        };
+        PlainEscape {
+            action: if edit.is_some() {
+                Escape::CancelEdit
+            } else {
+                self.scope.action
+            },
+            edit,
+            ..self.scope
+        }
+    }
+}
+
+pub(super) struct Presses {
+    pub(super) speech: SpeechLease,
+    plain: PlainEscapeCell,
+}
+
+impl Presses {
+    pub(super) fn plain(&self) -> Option<PlainEscape> {
+        self.plain.borrow().as_ref().map(PublishedEscape::capture)
+    }
+}
 
 impl Presence {
+    pub(super) fn escape_presses(&self, cx: &gpui_kit::App) -> Presses {
+        self.publish_plain_escape(cx);
+        Presses {
+            speech: Rc::clone(&self.speech),
+            plain: Rc::clone(&self.plain_escape),
+        }
+    }
+
+    pub(super) fn publish_plain_escape(&self, cx: &gpui_kit::App) {
+        self.plain_escape.replace(self.plain_escape_snapshot(cx));
+    }
+
+    pub(super) fn plain_escape_at(&self, cx: &gpui_kit::App) -> Option<PlainEscape> {
+        let scope = self.plain_escape_snapshot(cx)?.capture();
+        if matches!(scope.action, Escape::Dismiss | Escape::CancelEdit)
+            && matches!(scope.panel, Some((EscapePanel::Onboarding, _)))
+            && scope.edit != self.onboarding_name_edit(cx).map(Edit::Name)
+        {
+            return None;
+        }
+        Some(scope)
+    }
+
+    fn plain_escape_snapshot(&self, cx: &gpui_kit::App) -> Option<PublishedEscape> {
+        let panel = self.plain_escape_panel();
+        let pull = self.kumo.read(cx).pull_generation();
+        self.plain_escape_scope(Self::activity(&self.runs, panel, &self.presenter), pull)
+    }
+
+    pub(super) fn publish_plain_escape_for(
+        &self,
+        activity: Activity,
+        pull: Option<super::drag::Generation>,
+    ) {
+        self.plain_escape
+            .replace(self.plain_escape_scope(activity, pull));
+    }
+
+    fn plain_escape_panel(&self) -> EscapePanel {
+        if self.settings_focused() {
+            EscapePanel::Settings
+        } else if self.threads_focused() {
+            EscapePanel::Threads
+        } else if self.onboarding.is_some() {
+            EscapePanel::Onboarding
+        } else if self.text_open() {
+            EscapePanel::Open
+        } else {
+            EscapePanel::Closed
+        }
+    }
+
+    fn plain_escape_scope(
+        &self,
+        mut activity: Activity,
+        pull: Option<super::drag::Generation>,
+    ) -> Option<PublishedEscape> {
+        let pair = match self.session.as_ref() {
+            Some(session) if session.open() => Some(session.generation()),
+            Some(_) => return None,
+            None => None,
+        };
+        let scenes = [self.runs.escape_scenes()?, self.presenter.escape_scenes()?];
+        let panel = self.plain_escape_panel();
+        if panel != EscapePanel::Open {
+            activity.drawing = self.presenter.drawn();
+        }
+        activity.pulling = pull.is_some();
+        let action = local_decision(activity, panel, &self.presenter);
+        let run = self.runs.stoppable();
+        let hold = self.voice_escape_owner();
+        let selection = self.presenter.input.selection();
+        let marks = self
+            .presenter
+            .marks_owner()
+            .map(|(marked_run, scene)| MarkedAnswer {
+                run: marked_run,
+                scene,
+                other_work: (action == Escape::Stop
+                    && run == Some(marked_run)
+                    && hold.is_none()
+                    && selection.is_none())
+                .then(|| self.presenter.stoppable_run_excluding(Some(scene)))
+                .flatten(),
+            });
+        let reads_edit = action == Escape::Dismiss;
+        let (window, edit) = match panel {
+            EscapePanel::Open => (Some(self.text.as_ref()?.window), None),
+            EscapePanel::Settings => {
+                let panel = self.settings_panel.as_ref()?;
+                let edit = reads_edit.then(|| PanelEdit::Name(Rc::clone(&panel.editing)));
+                (Some(panel.window), edit)
+            }
+            EscapePanel::Threads => {
+                let panel = self.thread_panel.as_ref()?;
+                let edit = reads_edit.then(|| PanelEdit::Rename(Rc::clone(&panel.rename)));
+                (Some(panel.window), edit)
+            }
+            EscapePanel::Onboarding => {
+                let panel = self.onboarding.as_ref()?;
+                let edit = reads_edit.then(|| PanelEdit::Name(Rc::clone(&panel.escape_edit)));
+                (Some(panel.window), edit)
+            }
+            _ => (None, None),
+        };
+        Some(PublishedEscape {
+            scope: PlainEscape {
+                pair,
+                target: (self.runs.thread(), self.runs.revision()),
+                frontier: (self.runs.newest_submission(), self.runs.newest_run()),
+                moving: (run, self.presenter.stoppable_run()),
+                action,
+                scenes,
+                hold,
+                watch: self.voice.watched,
+                marks,
+                selection,
+                pull,
+                panel: window.map(|window| (panel, window.window_id())),
+                edit: None,
+            },
+            edit,
+        })
+    }
+
     pub(super) fn native_escape(
         &mut self,
         gesture: Option<GestureId>,
@@ -245,37 +489,7 @@ impl Presence {
                 return Ok(());
             }
         }
-        let panel = if self.settings_focused() {
-            if self
-                .settings_panel
-                .as_ref()
-                .is_some_and(|panel| panel.view.read(cx).editing().is_some())
-            {
-                EscapePanel::SettingsEdit
-            } else {
-                EscapePanel::Settings
-            }
-        } else if self.threads_focused() {
-            if self
-                .thread_panel
-                .as_ref()
-                .is_some_and(|panel| panel.view.read(cx).editing())
-            {
-                EscapePanel::Rename
-            } else {
-                EscapePanel::Threads
-            }
-        } else if self.onboarding.is_some() {
-            if self.onboarding_editing(cx) {
-                EscapePanel::OnboardingEdit
-            } else {
-                EscapePanel::Onboarding
-            }
-        } else if self.text_open() {
-            EscapePanel::Open
-        } else {
-            EscapePanel::Closed
-        };
+        let panel = self.escape_panel(cx);
         let action = local_decision(
             Activity {
                 speaking: speech.is_some(),
@@ -368,7 +582,42 @@ impl Presence {
             self.stop_run(message, cx);
         }
         self.escape_fixture = false;
+        self.publish_plain_escape(cx);
         self.sync_escape(cx)
+    }
+
+    fn escape_panel(&self, cx: &gpui_kit::App) -> EscapePanel {
+        if self.settings_focused() {
+            if self
+                .settings_panel
+                .as_ref()
+                .is_some_and(|panel| panel.view.read(cx).editing().is_some())
+            {
+                EscapePanel::SettingsEdit
+            } else {
+                EscapePanel::Settings
+            }
+        } else if self.threads_focused() {
+            if self
+                .thread_panel
+                .as_ref()
+                .is_some_and(|panel| panel.view.read(cx).editing())
+            {
+                EscapePanel::Rename
+            } else {
+                EscapePanel::Threads
+            }
+        } else if self.onboarding.is_some() {
+            if self.onboarding_name_edit(cx).is_some() {
+                EscapePanel::OnboardingEdit
+            } else {
+                EscapePanel::Onboarding
+            }
+        } else if self.text_open() {
+            EscapePanel::Open
+        } else {
+            EscapePanel::Closed
+        }
     }
 }
 

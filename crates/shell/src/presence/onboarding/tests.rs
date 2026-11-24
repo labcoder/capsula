@@ -110,6 +110,7 @@ fn open_at(
         owner.set_onboarding(
             OnboardingPanel {
                 window,
+                escape_edit: std::rc::Rc::clone(&view.read(cx).escape_edit),
                 view,
                 bounds: [0; 4],
                 previous: None,
@@ -631,7 +632,7 @@ fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
             Rc::clone(&owner.voice.target),
             Rc::clone(&owner.voice.paused),
             owner.voice.gates.clone(),
-            Rc::clone(&owner.speech),
+            owner.escape_presses(cx),
             cx,
         )
     })

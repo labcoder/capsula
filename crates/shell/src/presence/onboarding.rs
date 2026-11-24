@@ -8,6 +8,8 @@ mod close_tests;
 #[cfg(test)]
 mod tests;
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -39,6 +41,7 @@ const SIZE_REMS: [f32; 2] = [30.0, 22.0];
 pub(super) struct OnboardingPanel {
     pub(super) window: AnyWindowHandle,
     pub(super) view: Entity<OnboardingView>,
+    pub(super) escape_edit: super::escape::NameEdit,
     pub(super) bounds: [i32; 4],
     previous: Option<Foreground>,
 }
@@ -53,7 +56,8 @@ pub(super) struct OnboardingView {
     inputs: [Entity<InputState>; 2],
     focus: FocusHandle,
     /// Kept for the shared name handler; Esc reads the Settings draft instead.
-    editing: Option<Field>,
+    editing: Cell<Option<Field>>,
+    escape_edit: super::escape::NameEdit,
     /// Kumo's still pose under the welcome, once its bake lands.
     kumo: Option<Arc<RenderImage>>,
     _kumo_bake: Task<()>,
@@ -94,13 +98,14 @@ impl OnboardingView {
                         field,
                         input,
                         event,
-                        &mut view.editing,
+                        &view.editing,
                         &focus,
                         &view.model,
                         &view.owner,
                         window,
                         cx,
                     );
+                    view.update_escape_edit(cx);
                     if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                         go_on(&view.owner, cx);
                     }
@@ -109,6 +114,7 @@ impl OnboardingView {
             })
             .collect();
         let watch = cx.observe_in(&model, window, |view, _, window, cx| {
+            view.update_escape_edit(cx);
             for (field, input) in [Field::Assistant, Field::User]
                 .into_iter()
                 .zip(&view.inputs)
@@ -147,6 +153,12 @@ impl OnboardingView {
             super::settings::restore_lost_focus(&view.focus, window, cx);
             cx.notify();
         });
+        let escape_edit = Rc::new(Cell::new(
+            state
+                .step()
+                .field()
+                .filter(|&field| model.read(cx).editing(field)),
+        ));
         Self {
             state,
             link: LinkState::Connected,
@@ -155,7 +167,8 @@ impl OnboardingView {
             events,
             inputs,
             focus: cx.focus_handle(),
-            editing: None,
+            editing: Cell::default(),
+            escape_edit,
             kumo: None,
             _kumo_bake: kumo_bake,
             plan: false,
@@ -164,6 +177,15 @@ impl OnboardingView {
             _watch: watch,
             _focus_lost: focus_lost,
         }
+    }
+
+    fn update_escape_edit(&self, cx: &App) {
+        self.escape_edit.set(
+            self.state
+                .step()
+                .field()
+                .filter(|&field| self.model.read(cx).editing(field)),
+        );
     }
 
     /// Whether the step's save or the finish is in flight.
@@ -512,8 +534,11 @@ impl Presence {
         }
         let settings = self.settings.clone();
         let (from, next) = view.update(cx, |view, cx| {
+            let from = view.state.step();
+            let next = view.state.submit(settings.read(cx));
+            view.update_escape_edit(cx);
             cx.notify();
-            (view.state.step(), view.state.submit(settings.read(cx)))
+            (from, next)
         });
         self.onboarding_next(from, next, cx)
     }
@@ -655,6 +680,7 @@ impl Presence {
         self.set_onboarding(
             OnboardingPanel {
                 window,
+                escape_edit: Rc::clone(&view.read(cx).escape_edit),
                 view,
                 bounds: [0; 4],
                 previous: None,
@@ -684,6 +710,7 @@ impl Presence {
         self.onboarding = Some(panel);
         self.voice.paused.set(true);
         self.cancel_voice(cx);
+        self.publish_plain_escape(cx);
         self.adopt_onboarding_sign_ins(cx);
     }
 
@@ -755,19 +782,19 @@ impl Presence {
             state.cancel(field);
             cx.notify();
         });
+        panel.escape_edit.set(None);
     }
 
     /// Whether Esc cancels the onboarding step's unsaved name.
-    pub(super) fn onboarding_editing(&self, cx: &gpui_kit::App) -> bool {
-        self.onboarding.as_ref().is_some_and(|panel| {
-            panel
-                .view
-                .read(cx)
-                .state
-                .step()
-                .field()
-                .is_some_and(|field| self.settings.read(cx).editing(field))
-        })
+    pub(super) fn onboarding_name_edit(&self, cx: &App) -> Option<Field> {
+        self.onboarding
+            .as_ref()?
+            .view
+            .read(cx)
+            .state
+            .step()
+            .field()
+            .filter(|&field| self.settings.read(cx).editing(field))
     }
 
     /// Removes the window first and only then lets go of it and unpauses holds, as `hide_text`
@@ -788,6 +815,7 @@ impl Presence {
             .map_err(|error| OpenError::Gpui(error.into()))?;
         self.onboarding = None;
         self.voice.paused.set(false);
+        self.publish_plain_escape(cx);
         tracing::info!("onboarding closed");
         self.place_drawings(cx.weak_entity(), cx);
         self.pointer_changed(cx)
