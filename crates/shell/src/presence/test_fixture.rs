@@ -25,6 +25,23 @@ impl Render for Blank {
     }
 }
 
+pub(super) struct WithoutDesktop {
+    _work_area: platform::work_area_fixture::Guard,
+    _cursor: platform::cursor_fixture::Guard,
+}
+
+impl gpui_kit::Global for WithoutDesktop {}
+
+pub(super) fn without_desktop(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        assert!(!cx.has_global::<WithoutDesktop>());
+        cx.set_global(WithoutDesktop {
+            _work_area: platform::work_area_fixture::set([0, 0, 2560, 1400]),
+            _cursor: platform::cursor_fixture::scoped([4096, 4096]),
+        });
+    });
+}
+
 /// Presence as `open` builds it, minus every native surface, with its typing panel created and
 /// hidden. Its status panel and dock are plain entities behind blank GPUI test windows.
 #[expect(
@@ -37,8 +54,12 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
         cx.set_global(Strings::english());
         kumochi_scene::deferred::start().expect("the dropper starts before intake");
         let (events, events_in) = async_channel::unbounded();
-        let native = PresenceNative::detached(presence_labels(cx), events.clone())
-            .expect("a 1x1 memory mask");
+        let native = PresenceNative::detached(
+            presence_labels(cx),
+            events.clone(),
+            !cx.has_global::<WithoutDesktop>(),
+        )
+        .expect("detached presence");
         let mut blank = || {
             gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| Blank))
                 .expect("a GPUI test window opens")

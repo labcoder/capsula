@@ -686,6 +686,7 @@ fn recognised(
 fn holds_while_onboarding_shows_reach_neither_the_brain_nor_the_microphone(
     cx: &mut TestAppContext,
 ) {
+    test_fixture::without_desktop(cx);
     let (owner, _data, controls) = ready(cx);
     let deliver = native(&owner, cx);
     open_over(&owner, cx);

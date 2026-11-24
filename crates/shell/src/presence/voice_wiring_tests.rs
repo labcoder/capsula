@@ -191,6 +191,7 @@ pub(super) fn status(
 
 #[gpui::test]
 fn a_pre_run_failure_clears_only_its_matching_hold(cx: &mut TestAppContext) {
+    test_fixture::without_desktop(cx);
     let (owner, _data, _controls) = ready(cx);
     let (token, _) = hold(&owner, 1, cx);
     status(&owner, 1, 1, HoldStatus::Failed(HoldFailure::Busy), cx);
@@ -217,6 +218,7 @@ fn a_pre_run_failure_clears_only_its_matching_hold(cx: &mut TestAppContext) {
 fn not_loaded_distinguishes_missing_and_unloaded_without_opening_microphone(
     cx: &mut TestAppContext,
 ) {
+    test_fixture::without_desktop(cx);
     for (state, expected) in [
         (PartState::Unloaded, Text::VoiceUnloaded),
         (PartState::NotInstalled, Text::VoiceNotInstalled),
@@ -318,6 +320,7 @@ fn a_captured_target_or_session_cannot_be_rebound_at_delivery(cx: &mut TestAppCo
 
 #[gpui::test]
 fn late_status_and_release_cannot_cancel_a_newer_held_input(cx: &mut TestAppContext) {
+    test_fixture::without_desktop(cx);
     let (owner, _data, _controls) = ready(cx);
     let (old, old_stamp) = hold(&owner, 1, cx);
     owner.update(cx, Presence::cancel_voice);
@@ -359,6 +362,7 @@ fn late_status_and_release_cannot_cancel_a_newer_held_input(cx: &mut TestAppCont
 
 #[gpui::test]
 fn one_typed_send_cancels_and_drains_a_hold_before_submitting(cx: &mut TestAppContext) {
+    test_fixture::without_desktop(cx);
     let (owner, data, _controls) = ready(cx);
     let (token, _) = hold(&owner, 1, cx);
     owner.update(cx, |owner, cx| {

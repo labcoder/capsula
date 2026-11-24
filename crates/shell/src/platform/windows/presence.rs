@@ -240,7 +240,10 @@ pub(crate) struct PresenceNative {
     instance: HINSTANCE,
     atom: u16,
     hwnd: HWND,
+    #[cfg(not(test))]
     mask: HitMask,
+    #[cfg(test)]
+    mask: Option<HitMask>,
     tray: bool,
     /// Raw Input and its lifecycle notifications are registered.
     keyboard: bool,
@@ -290,7 +293,10 @@ impl PresenceNative {
             instance,
             atom: 0,
             hwnd: HWND::default(),
+            #[cfg(not(test))]
             mask,
+            #[cfg(test)]
+            mask: Some(mask),
             tray: false,
             keyboard: false,
             state: Rc::into_raw(state),
@@ -354,7 +360,11 @@ impl PresenceNative {
         window: [i32; 4],
         spans: impl Fn(i32) -> crate::platform::RowSpans,
     ) -> Result<MaskUpdate, PresenceError> {
-        self.mask.update(self.hwnd, window, spans)
+        #[cfg(not(test))]
+        let mask = &mut self.mask;
+        #[cfg(test)]
+        let mask = self.mask.as_mut().ok_or(PresenceError::NotWin32)?;
+        mask.update(self.hwnd, window, spans)
     }
 
     /// Shows the proxy topmost and checks `position` in the tray menu. Call after `reshape`.
@@ -362,6 +372,10 @@ impl PresenceNative {
     /// # Errors
     /// Fails when Windows refuses the change.
     pub(crate) fn show(&mut self, position: usize) -> Result<(), PresenceError> {
+        #[cfg(test)]
+        if self.mask.is_none() {
+            return Err(PresenceError::NotWin32);
+        }
         let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
         // SAFETY: `hwnd` is this thread's live window; only its z-order and visibility change.
         unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags) }?;
@@ -378,6 +392,10 @@ impl PresenceNative {
     /// # Errors
     /// Fails when Windows refuses the change.
     pub(crate) fn hide(&mut self) -> Result<(), PresenceError> {
+        #[cfg(test)]
+        if self.mask.is_none() {
+            return Err(PresenceError::NotWin32);
+        }
         Ok(hide(self.hwnd)?)
     }
 
@@ -477,16 +495,21 @@ impl PresenceNative {
     }
 
     /// The owner's state with no window, tray icon, keyboard hook, hotkey or taskbar button:
-    /// only the mask's 1x1 memory DC, so presence's glue runs headless in GPUI tests. Nothing
-    /// that needs the proxy window may be called on it.
+    /// optionally a 1x1 memory DC for the mask. Nothing that needs the proxy window may be
+    /// called on it.
     ///
     /// # Errors
     /// Fails when Windows refuses the mask's memory DC.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "one fixture choice controls whether to allocate a native mask"
+    )]
     pub(crate) fn detached(
         labels: PresenceLabels,
         events: Sender<PresenceEvent>,
+        with_mask: bool,
     ) -> Result<Self, PresenceError> {
-        let mask = HitMask::new([1, 1])?;
+        let mask = with_mask.then(|| HitMask::new([1, 1])).transpose()?;
         let state = Rc::new(ProxyState {
             labels,
             keys: Keys::default(),
