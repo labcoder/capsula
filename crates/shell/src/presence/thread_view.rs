@@ -539,6 +539,7 @@ impl ThreadsView {
                         }))
                         .child(
                             Button::new("rename-task")
+                                .debug_selector(|| "rename-task".into())
                                 .small()
                                 .ghost()
                                 .disabled(disabled)
@@ -731,6 +732,104 @@ mod tests {
             cx.notify();
         });
         assert_eq!(drawn(cx, window), [false, false]);
+    }
+
+    #[gpui::test]
+    fn a_stale_rename_closes_without_sending_but_the_current_editor_sends(cx: &mut TestAppContext) {
+        use async_channel::TryRecvError;
+        use kumochi_protocol::message::{Incarnation, ThreadTitle};
+
+        use crate::link::{LinkHandle, Session};
+        use crate::presence::{test_fixture, threads::ThreadsPanel};
+
+        test_fixture::without_desktop(cx);
+        let owner = test_fixture::presence(cx);
+        let first = ThreadId(1);
+        let second = ThreadId(2);
+        let (window, view, controls, _requests) = owner.update(cx, |owner, cx| {
+            let (mut link, requests) = LinkHandle::recording();
+            let controls = link.record_controls();
+            owner.link = link;
+            owner.session = Some(Session::detached(1, Incarnation(1)));
+            owner.threads.update(cx, |state, cx| {
+                state.connected();
+                state.rows = [first, second]
+                    .map(|id| ThreadRow {
+                        id,
+                        title: format!("Task {}", id.0),
+                        updated_ms: 0,
+                        kind: ThreadKind::Thread,
+                        choice: None,
+                        task: None,
+                    })
+                    .to_vec();
+                state.show_for(Some(first));
+                cx.notify();
+            });
+            let panel = ThreadsPanel::detached(owner.threads.clone(), cx);
+            (panel.window, panel.view, controls, requests)
+        });
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .expect("test window");
+        let open_rename = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            let mut frame = VisualTestContext::from_window(window, cx);
+            let button = frame.debug_bounds("rename-task").expect("Rename task");
+            frame.simulate_click(button.center(), gpui_kit::Modifiers::default());
+            frame.run_until_parked();
+        };
+        open_rename(cx);
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.rename_input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    view.save_rename(window, cx);
+                    assert_eq!(view.rename_error, Some(Text::RenameEmpty));
+                    view.rename_input.update(cx, |input, cx| {
+                        input.set_value("Stale edit", window, cx);
+                    });
+                    owner.update(cx, |owner, cx| owner.select_thread(Some(second), cx));
+                    let state = view.model.read(cx);
+                    assert_eq!(state.open, Some(second));
+                    assert!(state.rows.iter().any(|row| row.id == first));
+                    assert_eq!(view.rename, Some(first), "observer hasn't refreshed yet");
+                    view.save_rename(window, cx);
+                    assert!(!view.editing(), "the save closes the stale editor");
+                    assert_eq!(view.rename_error, None);
+                    assert_eq!(view.model.read(cx).open, Some(second));
+                    assert_eq!(controls.try_recv(), Err(TryRecvError::Empty));
+                });
+            })
+            .expect("test window");
+
+        open_rename(cx);
+        window
+            .update(cx, |_, window, cx| {
+                let state = view.read(cx);
+                assert_eq!(state.rename, Some(second));
+                state.rename_input.clone().update(cx, |input, cx| {
+                    input.set_value("Current edit", window, cx);
+                });
+            })
+            .expect("test window");
+        cx.simulate_keystrokes(window, "enter");
+        assert_eq!(
+            controls.try_recv(),
+            Ok(ControlToBrain::ThreadOp(ThreadOp::Rename {
+                thread: second,
+                title: ThreadTitle::new("Current edit").expect("valid title"),
+            }))
+        );
+        assert_eq!(controls.try_recv(), Err(TryRecvError::Empty));
+        assert!(!view.read_with(cx, |view, _| view.editing()));
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .expect("close the test window");
+        drop(view);
+        drop(owner);
+        cx.run_until_parked();
     }
 
     #[test]
