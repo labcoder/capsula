@@ -175,6 +175,8 @@ impl SettingsView {
     fn hold_to_talk(&self, cx: &Context<'_, Self>) -> impl IntoElement {
         let state = self.model.read(cx);
         let strings = cx.global::<Strings>();
+        let owner = self.owner.clone();
+        let settings = cx.weak_entity();
         div()
             .flex()
             .flex_col()
@@ -184,14 +186,18 @@ impl SettingsView {
                     .label(strings.get(Text::HoldToTalk))
                     .checked(state.hold_to_talk_choice() == Some(true))
                     .disabled(state.view().is_none() || state.hold_to_talk_pending())
-                    .on_change(cx.listener(|view, on, _, cx| {
-                        let sent = view
-                            .owner
+                    .on_change(move |on, _, cx| {
+                        let Some(settings) = settings.upgrade() else {
+                            return;
+                        };
+                        let sent = owner
                             .update(cx, |owner, cx| owner.save_hold_to_talk(*on, cx))
                             .unwrap_or(false);
-                        view.hold_notice = (!sent).then_some(Text::SettingsUnavailable);
-                        cx.notify();
-                    }))
+                        settings.update(cx, |view, cx| {
+                            view.hold_notice = (!sent).then_some(Text::SettingsUnavailable);
+                            cx.notify();
+                        });
+                    })
                     .map(|checkbox| {
                         #[cfg(test)]
                         let checkbox = checkbox.debug_selector(|| "hold-to-talk".into());
