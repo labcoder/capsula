@@ -42,6 +42,20 @@ pub struct Pending<D> {
     stage: Stage<D>,
 }
 
+/// What the view does with a delivered Rearm reply, before the receiver accepts the card.
+pub enum ReviewReply {
+    Ignore,
+    Retire,
+    Preview(ReviewOffer),
+}
+
+/// The version and approval checked for the preview, not permission to file.
+#[derive(Clone, Copy)]
+pub struct ReviewOffer {
+    version: StateVersion,
+    approval: ApprovalRev,
+}
+
 enum Stage<D> {
     Awaiting,
     Offered {
@@ -326,16 +340,23 @@ impl<D> Pending<D> {
         ))
     }
 
-    /// The reply this intent waits for.
-    pub fn awaits(&self, request: u64) -> bool {
-        self.review == request && self.awaiting()
-    }
-
-    /// The reply can't be offered: the intent or window moved on, or the card isn't the newer
-    /// approval of the same fileable draft.
-    pub fn refuses(&self, card: &IssueCard, window: &Window, facts: &Facts<'_>) -> bool {
+    /// Ignore unrelated or duplicate replies; retire a matching reply that can no longer be
+    /// previewed. A preview still requires the receiver to accept the card.
+    pub fn review_reply(
+        &self,
+        request: u64,
+        card: &IssueCard,
+        window: &Window,
+        facts: &Facts<'_>,
+    ) -> ReviewReply {
+        if self.review != request || !self.awaiting() {
+            return ReviewReply::Ignore;
+        }
+        let Some(approval) = card.approval else {
+            return ReviewReply::Retire;
+        };
         let pending = &self.opening;
-        !pending.live.get()
+        if !pending.live.get()
             || !window.active
             || !window.visible
             || !self.matches(facts)
@@ -343,22 +364,22 @@ impl<D> Pending<D> {
             || card.thread != pending.thread
             || card.hash != pending.hash
             || card.version <= pending.version
-            || card.approval.is_none()
-            || card.approval == pending.previous_approval
+            || Some(approval) == pending.previous_approval
             || !fileable(card, facts.connection)
+        {
+            return ReviewReply::Retire;
+        }
+        ReviewReply::Preview(ReviewOffer {
+            version: card.version,
+            approval,
+        })
     }
 
-    pub fn offer(
-        &mut self,
-        model: &mut Threads,
-        version: StateVersion,
-        approval: ApprovalRev,
-        dialog: D,
-    ) {
+    pub fn offer(&mut self, model: &mut Threads, offer: ReviewOffer, dialog: D) {
         model.begin_issue_confirmation(self.opening.draft, &self.opening.live);
         self.stage = Stage::Offered {
-            version,
-            approval,
+            version: offer.version,
+            approval: offer.approval,
             dialog,
         };
     }

@@ -178,22 +178,23 @@ impl Messages {
         let Some(mut pending) = self.pending_issue.take() else {
             return false;
         };
-        if !pending.awaits(request) {
-            self.pending_issue = Some(pending);
-            return false;
-        }
-        if pending.refuses(&card, &shown(window), &self.facts(cx)) {
-            self.pending_issue = Some(pending);
-            self.retire_issue(window, cx);
-            return false;
-        }
+        let offer = match pending.review_reply(request, &card, &shown(window), &self.facts(cx)) {
+            machine::ReviewReply::Ignore => {
+                self.pending_issue = Some(pending);
+                return false;
+            }
+            machine::ReviewReply::Retire => {
+                self.pending_issue = Some(pending);
+                self.retire_issue(window, cx);
+                return false;
+            }
+            machine::ReviewReply::Preview(offer) => offer,
+        };
         let strings = cx.global::<Strings>();
         let preview = Preview::new(&card, cx);
         let heading = strings.get(Text::IssueConsentTitle).into();
         let cancel = strings.get(Text::IssueConsentCancel).into();
         let confirm = strings.get(Text::IssueConsentConfirm).into();
-        let version = card.version;
-        let approval = card.approval.expect("the offered approval was checked");
         let accepted = self
             .owner
             .update(cx, |owner, cx| owner.accept_issue_review(request, card, cx))
@@ -226,7 +227,7 @@ impl Messages {
             return false;
         };
         self.model.update(cx, |model, _| {
-            pending.offer(model, version, approval, dialog);
+            pending.offer(model, offer, dialog);
         });
         self.pending_issue = Some(pending);
         true

@@ -268,24 +268,31 @@ impl Fixture {
     }
 
     fn receive(&mut self, at: usize, request: u64, card: IssueCard) -> bool {
+        use crate::presence::messages::consent::machine::ReviewReply;
+
         let Some(mut pending) = self.pending[at].take() else {
             return false;
         };
-        if !pending.awaits(request) {
-            self.pending[at] = Some(pending);
-            return false;
-        }
-        let refused = pending.refuses(&card, &SHOWN, &self.facts(at));
-        let (version, approval) = (card.version, card.approval);
-        if refused
-            || !self.review(|reviews| reviews.accepts(request))
+        let offer = match pending.review_reply(request, &card, &SHOWN, &self.facts(at)) {
+            ReviewReply::Ignore => {
+                self.pending[at] = Some(pending);
+                return false;
+            }
+            ReviewReply::Retire => {
+                self.pending[at] = Some(pending);
+                self.retire(at);
+                return false;
+            }
+            ReviewReply::Preview(offer) => offer,
+        };
+        if !self.review(|reviews| reviews.accepts(request))
             || !self.models[0].issue_review(request, card)
         {
             self.pending[at] = Some(pending);
             self.retire(at);
             return false;
         }
-        pending.offer(&mut self.models[at], version, approval.unwrap(), ());
+        pending.offer(&mut self.models[at], offer, ());
         self.pending[at] = Some(pending);
         true
     }

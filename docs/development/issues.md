@@ -60,6 +60,11 @@ repository clears it. Only the matching live committed reply returns
 Cancel-first, keyboard-scrollable literal preview, including the bound account and repository.
 An ordinary saved card or state notification can never open it.
 
+Shell Core ignores replies for a different request or an already-offered review. It retires
+a matching reply if the window, scope, binding or card no longer matches; otherwise it supplies
+the checked version and approval for the preview. The owner still checks the live route and
+thread card watermark before the view opens a dialog. Neither step grants permission to file.
+
 Each owned history surface holds one pending review intent or confirmation. Its current Session,
 connection origin, displayed thread/draft, full version/hash/approval, account,
 repository membership and Draft/Failed state must match again at activation.
