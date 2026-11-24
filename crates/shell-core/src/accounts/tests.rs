@@ -5,7 +5,7 @@ use super::{
     SavedSignInFailure, StatusLine, UserError, cleanup_notice,
 };
 use crate::link::LinkEvent;
-use crate::strings::Text;
+use crate::strings::{Strings, Text};
 
 const OPS: [AccountOp; 7] = [
     AccountOp::SignIn,
@@ -94,7 +94,7 @@ fn unavailable_saved_sign_in_explains_each_reason_and_only_offers_the_local_chec
         (
             SavedSignInFailure::Missing,
             Text::AccountSavedSignInMissing,
-            Text::AccountSavedSignInCheckHelp,
+            Text::AccountSavedSignInMissingHelp,
         ),
         (
             SavedSignInFailure::Malformed,
@@ -147,6 +147,57 @@ fn unavailable_saved_sign_in_explains_each_reason_and_only_offers_the_local_chec
 }
 
 #[test]
+fn uncheckable_missing_saved_sign_in_offers_restart_but_not_check_or_sign_in() {
+    let mut accounts = Accounts::default();
+    receive(
+        &mut accounts,
+        AccountView::SavedSignInUnavailable {
+            reason: SavedSignInFailure::Missing,
+            checkable: false,
+            checking: false,
+            revocation_unconfirmed: true,
+        },
+    );
+    assert_eq!(allowed(&accounts), []);
+    let (status, lines) = accounts.status(None);
+    assert_eq!(status, Text::AccountSavedSignInMissing);
+    let [
+        StatusLine::Note(note),
+        StatusLine::Remote {
+            heading: Text::AccountRemote,
+            note: Text::AccountEarlierRevocationUnconfirmed,
+        },
+    ] = lines.as_slice()
+    else {
+        panic!("uncheckable Missing must keep its guidance and earlier revocation warning");
+    };
+    let strings = Strings::english();
+    let copy = strings.get(*note);
+    assert!(
+        copy.contains(&strings.get(Text::AccountSavedSignInChangedHelp)),
+        "uncheckable Missing should point to a startup check: {copy}"
+    );
+    assert!(
+        !copy.contains(&strings.get(Text::AccountCheckAgain)),
+        "uncheckable Missing must not suggest Check again: {copy}"
+    );
+    assert_missing_guidance(&copy);
+}
+
+fn assert_missing_guidance(copy: &str) {
+    assert!(
+        copy.contains("You can't reconnect ChatGPT by signing in while this part is missing."),
+        "ordinary sign-in must not be presented as recovery: {copy}"
+    );
+    assert!(
+        copy.contains(
+            "If another account you've already connected has an available model, choose it in Settings → General"
+        ),
+        "continuing must depend on another connected account having a model available: {copy}"
+    );
+}
+
+#[test]
 fn saved_sign_in_check_stays_pending_until_an_authoritative_result() {
     let view = |checking| AccountView::SavedSignInUnavailable {
         reason: SavedSignInFailure::Missing,
@@ -170,7 +221,7 @@ fn saved_sign_in_check_stays_pending_until_an_authoritative_result() {
         (
             Text::AccountSavedSignInMissing,
             vec![
-                StatusLine::Note(Text::AccountSavedSignInCheckHelp),
+                StatusLine::Note(Text::AccountSavedSignInMissingHelp),
                 StatusLine::SendFailed(Text::AccountSendFailed),
             ],
         )
@@ -193,13 +244,18 @@ fn saved_sign_in_check_stays_pending_until_an_authoritative_result() {
     );
     receive(&mut accounts, view(false));
     assert_eq!(allowed(&accounts), [op]);
-    assert_eq!(
-        accounts.status(None),
-        (
-            Text::AccountSavedSignInMissing,
-            vec![StatusLine::Note(Text::AccountSavedSignInCheckHelp)],
-        )
+    let (status, lines) = accounts.status(None);
+    assert_eq!(status, Text::AccountSavedSignInMissing);
+    let [StatusLine::Note(note)] = lines.as_slice() else {
+        panic!("persistent Missing should show next-step guidance, not a recovery notice");
+    };
+    let strings = Strings::english();
+    let copy = strings.get(*note);
+    assert!(
+        copy.contains(&strings.get(Text::AccountSavedSignInCheckHelp)),
+        "Check must still be explained as a local read"
     );
+    assert_missing_guidance(&copy);
     press(&mut accounts, op, &mut sent);
     receive(&mut accounts, view(true));
     receive(

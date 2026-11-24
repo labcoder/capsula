@@ -292,6 +292,8 @@ texts! {
     AccountLoadModelsHelp => "accounts-load-models-help",
     AccountCheckingSavedSignIn => "accounts-checking-saved-sign-in",
     AccountSavedSignInMissing => "accounts-saved-sign-in-missing",
+    AccountSavedSignInMissingHelp => "accounts-saved-sign-in-missing-help",
+    AccountSavedSignInMissingRestartHelp => "accounts-saved-sign-in-missing-restart-help",
     AccountSavedSignInMalformed => "accounts-saved-sign-in-malformed",
     AccountSavedSignInUnreadable => "accounts-saved-sign-in-unreadable",
     AccountSavedSignInChanged => "accounts-saved-sign-in-changed",

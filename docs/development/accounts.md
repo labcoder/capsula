@@ -502,6 +502,9 @@ recorded unknown instead, so the next sign-out's notice is unconfirmed.
   The head and active layout are observed in one SQLite statement. Without a valid pinned
   revision, or if the revision changed, the shell cannot check again in this session. A
   readable current sign-in recovers locally; **Load models** is a separate provider action.
+  For a missing component, the shared Accounts view explains that ordinary sign-in cannot
+  reconnect ChatGPT, even when Check again isn't available. If another already connected
+  account has an available model, the user can choose it in Settings → General.
   Check and its reply do not fence held input or change model routing. Account operations
   that can affect a route, including **Load models**, keep their existing hold fences.
   Host, vault-open and revocation prerequisites still block sign-in on their own paths.
