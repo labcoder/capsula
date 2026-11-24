@@ -1229,7 +1229,7 @@ mod tests {
                 ]
             );
             for row in rows.iter().filter(|row| row.id.1 != 21) {
-                assert_eq!(row.label.as_deref(), Some("Drawing unavailable in history"));
+                assert_eq!(row.label.as_deref(), Some("Drawing step"));
                 assert_eq!(
                     row.text.as_ref(),
                     if [7, 13].contains(&row.id.1) {
