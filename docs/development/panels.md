@@ -69,8 +69,9 @@ stored title. Before any settings arrive, it falls back to
 the same assistant name.
 
 Choosing **Rename** on the viewed row opens an inline gpui-kit `Input`. Enter validates
-and sends the edit; Esc cancels it only after stop and clear have had their turns. Validation
-errors stay inline:
+and sends the edit; Esc cancels it only after stop and clear have had their turns. Shell-core
+checks the currently open row and its kind at save time, so a stale editor closes without a
+send even if the view hasn't refreshed yet. Validation errors stay inline:
 
 - A task uses `ThreadTitle`: trimmed, one line, 1–80 Unicode scalar values, no control
   characters or U+2028/U+2029. It sends `ThreadOp::Rename`.
