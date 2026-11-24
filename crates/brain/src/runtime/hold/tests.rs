@@ -2339,7 +2339,7 @@ async fn a_hold_asks_for_its_picture_without_a_walk_that_could_be_cut_short() {
     brain.close().await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn a_queued_picture_is_accepted_only_while_its_stamp_is_live() {
     use crate::context::ScreenClass;
     type HoldProtocol = crate::screen::Holds;
@@ -2356,7 +2356,7 @@ async fn a_queued_picture_is_accepted_only_while_its_stamp_is_live() {
         LEFT.set(Some(MAX_TTL));
         let scratch = Scratch::new("hold-screen-stamp");
         let mut brain = test_support::brain(&scratch, "");
-        let (mut rig, sol, _) = sees_on_sol(&mut brain);
+        let mut rig = attach_capture_fixture(&mut brain);
         brain.holds.screen_time_left = |_| LEFT.get();
         screen_hold(&mut brain, KEY, ScreenPart::None);
         let deadline = screen_deadline();
@@ -2365,11 +2365,17 @@ async fn a_queued_picture_is_accepted_only_while_its_stamp_is_live() {
             kumochi_protocol::geometry::PhysicalPoint([5, 5]),
             LEASE,
             deadline,
-            (sol.connection, sol.model),
+            (
+                ConnectionKind::ChatGpt,
+                ModelSlug::new("gpt-6-sol").unwrap()
+            ),
         ));
         let (id, capture) = rig.next().await;
         crate::screen::hold_frame(&rig, id, capture).await;
-        let held = brain.holds.screen_answers.recv().await.expect("held event");
+        let held = tokio::time::timeout(Duration::from_secs(5), brain.holds.screen_answers.recv())
+            .await
+            .expect("held event arrived")
+            .expect("held event");
         brain.holds.screen_event(held);
         let (id, request) = rig.next().await;
         let Request::Seal(key) = request else {
@@ -2380,12 +2386,11 @@ async fn a_queued_picture_is_accepted_only_while_its_stamp_is_live() {
             &Reply::Sealed(key, crate::screen::ScreenContext::fixture(JPEG)),
         )
         .await;
-        let sealed = brain
-            .holds
-            .screen_answers
-            .recv()
-            .await
-            .expect("queued seal");
+        let sealed =
+            tokio::time::timeout(Duration::from_secs(5), brain.holds.screen_answers.recv())
+                .await
+                .expect("seal event arrived")
+                .expect("queued seal");
         assert!(matches!(sealed.outcome, Outcome::Sealed(_)));
 
         LEFT.set(left);
