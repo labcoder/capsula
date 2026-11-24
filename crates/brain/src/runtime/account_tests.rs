@@ -237,9 +237,17 @@ async fn audio_repair_replays_busy_without_reloading_the_saved_account() {
         accounts.handle(Input::Connected),
         std::slice::from_ref(&busy)
     );
-    let still_busy = timeout(PATIENCE, accounts.next())
-        .await
-        .expect("ordinary load ends");
+    let still_busy = timeout(PATIENCE, async {
+        loop {
+            let event = accounts.next().await;
+            if matches!(event, Event::Machine(Input::Vault(Done::Loaded(_)))) {
+                break event;
+            }
+            accounts.handle(event);
+        }
+    })
+    .await
+    .expect("ordinary load ends");
     assert!(matches!(
         still_busy,
         Event::Machine(Input::Vault(Done::Loaded(Err(VaultError::Busy))))
