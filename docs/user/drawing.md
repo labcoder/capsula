@@ -3,9 +3,9 @@
 Claude Code can draw diagrams and other 2D visuals over your windows. It can’t mark a spot
 in a screenshot; screen annotations need the ChatGPT connection and a shared picture.
 
-Conversation history shows **Drawing unavailable in history** for stored drawing steps.
-It keeps surrounding text, but does not reconstruct the picture there. This message does
-not mean a drawing still visible on screen has failed, and reading history does not change it.
+Conversation history marks stored steps with **Drawing step**. The label doesn't say whether
+the step appeared on screen. History keeps surrounding text but doesn't show the picture or
+change any drawing still on screen.
 
 When Kumochi draws a 2D diagram, each step appears on screen once it is prepared, and its parts
 draw or fade in one after another unless the drawing times them itself. A newly saved step's
