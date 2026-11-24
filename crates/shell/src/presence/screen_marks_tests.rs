@@ -1440,7 +1440,7 @@ fn esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     let [stop, clear] = gone();
-    assert_eq!(told(&watching), [stop, clear, cancel(), cancel()]);
+    assert_eq!(told(&watching), [stop, clear, cancel()]);
     ended(&watching, cx);
 }
 
