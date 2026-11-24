@@ -94,9 +94,10 @@ revision; changing a name never retargets input. See [settings](settings.md).
 
 ## Page state
 
-`shell-core/threads.rs` owns plain page state. `presence/threads.rs` owns window lifetime, activation,
-and nonblocking requests; `presence/thread_view.rs` composes the task list with the retained
-`presence/messages.rs` conversation component:
+`shell-core/threads.rs` owns page state and projects the stored conversation rows, including
+grouping and the event id used as each row's key. `presence/threads.rs` owns window lifetime,
+activation, and nonblocking requests; `presence/thread_view.rs` composes the task list with the
+retained `presence/messages.rs` conversation component:
 
 - gpui-kit's `ListState<ThreadsDelegate>` supplies thread selection, search, and load-more;
 - GPUI's variable-height `list()` supplies the messages, displayed oldest first. Scroll-triggered

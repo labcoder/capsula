@@ -7,8 +7,8 @@ use kumochi_protocol::constants;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     DataToBrain, DataToShell, DraftId, EventId, MAX_ISSUE_CARDS, MAX_PAGE_BYTES, MAX_PAGE_ROWS,
-    ModelName, PageEvent, PageOf, RunId, SettingsView, ThreadCursor, ThreadId, ThreadKind,
-    ThreadRow,
+    ModelName, PageEvent, PageEventKind, PageOf, RunId, SceneId, SettingsView, ThreadCursor,
+    ThreadId, ThreadKind, ThreadRow,
 };
 use kumochi_scene::text::Bounded;
 
@@ -21,6 +21,21 @@ mod tests;
 
 const HISTORY_ROWS: usize = 4 * MAX_PAGE_ROWS;
 const HISTORY_TEXT_BYTES: usize = 4 * MAX_PAGE_BYTES;
+
+fn drawing_group(event: &PageEvent) -> Option<(RunId, SceneId)> {
+    match (event.kind, event.run) {
+        (PageEventKind::NoVisual { scene }, Some(run))
+            if run.0 != 0
+                && event.text.is_empty()
+                && !event.cut
+                && scene.0 != 0
+                && i64::try_from(scene.0).is_ok() =>
+        {
+            Some((run, scene))
+        }
+        _ => None,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HistoryEdge {
@@ -509,6 +524,17 @@ impl Threads {
 
     pub fn history_revision(&self) -> u64 {
         self.event_revision
+    }
+
+    /// Stored conversation rows, oldest first. Adjacent drawing markers in the same group
+    /// use the newest event as their row, so loading older markers keeps its key.
+    pub fn history_rows(&self) -> impl Iterator<Item = &PageEvent> {
+        self.events
+            .chunk_by(|left, right| {
+                drawing_group(left).is_some_and(|group| drawing_group(right) == Some(group))
+            })
+            .rev()
+            .map(|group| &group[0])
     }
 
     pub fn connected(&mut self) {

@@ -385,25 +385,10 @@ impl Render for Messages {
 }
 
 fn stored_rows(state: &Threads, cx: &App) -> Rc<[Row]> {
-    let mut rows: Vec<Row> = Vec::new();
-    let mut current_group = None;
-    for event in state.events.iter().rev() {
-        let group = match (event.kind, event.run) {
-            (PageEventKind::NoVisual { scene }, Some(run))
-                if run.0 != 0
-                    && event.text.is_empty()
-                    && !event.cut
-                    && scene.0 != 0
-                    && i64::try_from(scene.0).is_ok() =>
-            {
-                Some((run, scene))
-            }
-            _ => None,
-        };
-        if group.is_some() && group == current_group {
-            rows.last_mut().expect("a group has a row").id = ("event", event.id.0);
-        } else {
-            rows.push(row(
+    let mut rows: Vec<_> = state
+        .history_rows()
+        .map(|event| {
+            row(
                 ("event", event.id.0),
                 event.run,
                 event.kind,
@@ -411,10 +396,9 @@ fn stored_rows(state: &Threads, cx: &App) -> Rc<[Row]> {
                 event.cut.then_some(Text::ThreadCut),
                 state,
                 cx,
-            ));
-        }
-        current_group = group;
-    }
+            )
+        })
+        .collect();
     if let Some(note) = state
         .visible_screen_note()
         .filter(|note| Some(note.thread) == state.open)
