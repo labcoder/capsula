@@ -36,6 +36,92 @@ fn detached_settings(
     (window, view)
 }
 
+#[gpui::test]
+fn a_failed_settings_hide_preserves_the_edit_and_defers_close_effects(cx: &mut TestAppContext) {
+    use crate::presence::OpenError;
+    use crate::settings::{Field, Update};
+    use crate::strings::Text;
+    use kumochi_protocol::message::{AssistantName, SettingsOp};
+
+    test_fixture::without_desktop(cx);
+    let owner = test_fixture::presence(cx);
+    let (window, view, controls) = owner.update(cx, |owner, cx| {
+        owner.session = Some(Session::detached(1, Incarnation(1)));
+        owner.settings_chatgpt.sent(1);
+        owner.settings.update(cx, |state, _| {
+            assert_eq!(
+                state.set_view(super::super::general::tests::saved(), Update::Unsolicited),
+                None
+            );
+            state.change(Field::Assistant, "Cirrus");
+        });
+        let (window, view) = detached_settings(owner, cx);
+        let panel = owner.settings_panel.as_mut().expect("detached Settings");
+        panel.visible = true;
+        panel.focused = true;
+        (window, view, owner.link.record_controls())
+    });
+    window
+        .update(cx, |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.editing = Some(Field::Assistant);
+                view.hold_notice = Some(Text::SettingsUnavailable);
+                view.inputs[0].update(cx, |input, cx| {
+                    input.set_value("Cirrus", window, cx);
+                    input.focus(window, cx);
+                });
+            });
+            let focus = window.focused(cx).expect("focused editor");
+            assert!(matches!(
+                owner.update(cx, Presence::dismiss_settings),
+                Err(OpenError::Gpui(_))
+            ));
+            assert_eq!(window.focused(cx), Some(focus));
+        })
+        .expect("the Settings window is still open");
+    owner.read_with(cx, |owner, cx| {
+        assert!(owner.settings_focused());
+        assert_eq!(
+            owner.settings_chatgpt,
+            SignInMark::Open {
+                generation: 1,
+                shown: false
+            }
+        );
+        let state = owner.settings.read(cx);
+        assert_eq!(state.value(Field::Assistant), "Cirrus");
+        assert!(!state.field(Field::Assistant).saving);
+        let view = view.read(cx);
+        assert_eq!(view.editing(), Some(Field::Assistant));
+        assert_eq!(view.hold_notice, Some(Text::SettingsUnavailable));
+    });
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+
+    owner.update(cx, |owner, cx| {
+        owner.dismiss_settings(cx).expect("retry close")
+    });
+    assert!(!owner.read_with(cx, |owner, _| owner.settings_open()));
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.editing(), None);
+        assert_eq!(view.hold_notice, None);
+    });
+    assert_eq!(
+        drain(&controls),
+        [
+            ControlToBrain::AccountOp(AccountOp::CancelSignIn),
+            ControlToBrain::Settings(SettingsOp::SetAssistantName(
+                AssistantName::new("Cirrus").expect("valid name")
+            )),
+        ]
+    );
+    window
+        .update(cx, |_, window, _| window.remove_window())
+        .expect("remove the detached Settings window");
+    drop(view);
+    drop(owner);
+    cx.run_until_parked();
+}
+
 fn settings_over_hold(
     owner: &Entity<Presence>,
     tab: SettingsTab,

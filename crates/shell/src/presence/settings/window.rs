@@ -343,9 +343,18 @@ impl Presence {
         &mut self,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        if !self.settings_open() {
+        let Some(panel) = self.settings_panel.as_ref().filter(|panel| panel.visible) else {
             return Ok(());
-        }
+        };
+        panel
+            .window
+            .update(cx, |_, window, _| {
+                if let Some(previous) = panel.previous {
+                    platform::restore_foreground(window, previous);
+                }
+                platform::hide_presence_window(window)
+            })
+            .map_err(|error| OpenError::Gpui(error.into()))??;
         self.dismiss_github_settings(cx);
         self.cancel_settings_sign_ins(cx);
         if let Some(field) = self
@@ -362,20 +371,15 @@ impl Presence {
             .expect("the Settings panel is visible");
         panel.visible = false;
         panel.focused = false;
-        let previous = panel.previous.take();
+        panel.previous = None;
         panel
             .window
             .update(cx, |_, window, cx| {
                 panel
                     .view
                     .update(cx, |view, cx| view.finish_edit(window, cx));
-                if let Some(previous) = previous {
-                    platform::restore_foreground(window, previous);
-                }
-                platform::hide_presence_window(window)?;
-                Ok::<_, platform::PresenceError>(())
             })
-            .map_err(|error| OpenError::Gpui(error.into()))??;
+            .map_err(|error| OpenError::Gpui(error.into()))?;
         self.place_drawings(cx.weak_entity(), cx);
         self.pointer_changed(cx)
     }
