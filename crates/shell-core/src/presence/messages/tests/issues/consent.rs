@@ -1,6 +1,8 @@
 use crate::link::{LinkHandle, Session};
 use crate::presence::issue_review::machine::{Effect, Reviews, Route};
-use crate::presence::messages::consent::machine::{Facts, Opening, Pending, Window};
+use crate::presence::messages::consent::machine::{
+    Facts, Opening, Pending, ReviewControl, Window, review_control,
+};
 use crate::settings::Settings;
 use crate::threads::Threads;
 use async_channel::Receiver;
@@ -47,16 +49,9 @@ fn connected() -> GitHubView {
 
 #[test]
 fn a_bound_draft_waits_for_listing_instead_of_needing_replacement() {
-    use crate::presence::messages::consent::machine::{fileable, repository_listing_hint};
     use crate::strings::Text;
 
     let mut f = fixture(ActionState::Draft);
-    let card = f.models[0]
-        .issue(DraftId(9))
-        .unwrap()
-        .card()
-        .unwrap()
-        .clone();
     for (login, listing, expected) in [
         ("octo", false, Some(Text::IssueListRepositories)),
         ("octo", true, Some(Text::GitHubRefreshing)),
@@ -71,18 +66,62 @@ fn a_bound_draft_waits_for_listing_instead_of_needing_replacement() {
             },
             Instant::now(),
         ));
-        let connection = Some((&f.session, &f.settings));
-        assert_eq!(repository_listing_hint(&card, connection), expected);
-        assert!(!fileable(&card, connection));
+        assert_eq!(
+            f.review_control(),
+            ReviewControl::Unavailable {
+                listing_hint: expected
+            }
+        );
     }
     assert!(
         f.settings
             .github
             .receive(Some(1), 1, connected(), Instant::now())
     );
-    let connection = Some((&f.session, &f.settings));
-    assert_eq!(repository_listing_hint(&card, connection), None);
-    assert!(fileable(&card, connection));
+    assert_eq!(f.review_control(), ReviewControl::Open { disabled: false });
+
+    let stale = Session::detached(2, Incarnation(1));
+    let entry = f.models[0].issue(DraftId(9)).unwrap();
+    assert_eq!(
+        review_control(&entry, Some((&stale, &f.settings))),
+        ReviewControl::Unavailable { listing_hint: None }
+    );
+}
+
+#[test]
+fn a_pending_action_disables_review_and_a_possible_filing_hides_it() {
+    use kumochi_protocol::message::IssueUnavailableKind;
+
+    let mut f = fixture(ActionState::Draft);
+    let draft = DraftId(9);
+    let saved = f.models[0].issue(draft).unwrap().card().unwrap().clone();
+    f.models[0].issue_review_started(draft, 10);
+    assert_eq!(f.review_control(), ReviewControl::Open { disabled: false });
+
+    f.models[0].issue_submitted(draft, Some(11));
+    assert_eq!(f.review_control(), ReviewControl::Open { disabled: true });
+    assert_eq!(
+        review_control(&f.models[0].issue(draft).unwrap(), None),
+        ReviewControl::Hidden
+    );
+    f.models[0].issue_unavailable(11, draft, IssueUnavailableKind::AttemptNotSaved);
+    assert_eq!(f.review_control(), ReviewControl::Hidden);
+    assert_eq!(f.models[0].issue(draft).unwrap().card(), Some(&saved));
+}
+
+#[test]
+fn an_unknown_filing_never_offers_review_even_on_the_bound_connection() {
+    use kumochi_protocol::message::LookupResult;
+
+    let f = fixture(ActionState::Unknown {
+        lookup: LookupResult::None,
+        maybe_duplicate: true,
+    });
+    assert_eq!(f.review_control(), ReviewControl::Hidden);
+    assert_eq!(
+        review_control(&f.models[0].issue(DraftId(9)).unwrap(), None),
+        ReviewControl::Unavailable { listing_hint: None }
+    );
 }
 
 fn page(request: u32) -> DataToShell {
@@ -157,6 +196,11 @@ fn fixture(state: ActionState) -> Fixture {
 }
 
 impl Fixture {
+    fn review_control(&self) -> ReviewControl {
+        let facts = self.facts(0);
+        review_control(&facts.model.issue(DraftId(9)).unwrap(), facts.connection)
+    }
+
     fn facts(&self, at: usize) -> Facts<'_> {
         Facts {
             model: &self.models[at],

@@ -186,6 +186,7 @@ fn a_dialog_that_appears_while_saving_is_not_replaced_by_a_review_reply(cx: &mut
 
 #[gpui::test]
 fn deferred_review_credit_stays_with_the_original_session_after_reconnect(cx: &mut TestAppContext) {
+    test_fixture::without_desktop(cx);
     let f = fixture(cx, ActionState::Draft, "saved body");
     let card = offer(&f, cx);
     let original = f
@@ -301,6 +302,7 @@ fn review_terminals_retire_pending_and_deferred_permission_without_filing(cx: &m
 
 #[gpui::test]
 fn possible_post_handoff_storage_failure_never_invites_another_file(cx: &mut TestAppContext) {
+    test_fixture::without_desktop(cx);
     let f = fixture(cx, ActionState::Draft, "saved body");
     open(&f, 0, cx);
     confirm(&f, 0, cx);

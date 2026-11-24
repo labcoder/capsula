@@ -560,6 +560,7 @@ fn unknown_check_again_is_get_only_and_final_unchanged_busy_or_offline_replies_r
 fn unusable_bound_drafts_offer_replacement_guidance_and_dismiss_without_retargeting(
     cx: &mut TestAppContext,
 ) {
+    test_fixture::without_desktop(cx);
     let f = fixture(cx, ActionState::Draft, "saved body");
     deliver(
         &f,
@@ -704,6 +705,7 @@ fn navigating_away_and_back_never_reuses_an_operation_request(cx: &mut TestAppCo
 fn only_unknown_offers_check_again_and_final_states_offer_no_filing_controls(
     cx: &mut TestAppContext,
 ) {
+    test_fixture::without_desktop(cx);
     for (state, file, dismiss, check) in [
         (ActionState::Draft, true, true, false),
         (ActionState::Failed(FailReason::Network), true, true, false),
