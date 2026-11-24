@@ -86,7 +86,7 @@ use kumochi_protocol::message::DataToBrain;
 
 #[cfg(test)]
 #[path = "voice_source_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 #[cfg(test)]
 #[path = "screen_marks_tests.rs"]
