@@ -20,9 +20,14 @@ impl Presence {
         let hold = self.voice.pending.as_ref().expect("admitted hold");
         let (token, session, stamp) = (hold.token.clone(), hold.session.clone(), hold.stamp);
         #[cfg(test)]
-        let source = match self.voice.start.take() {
-            Some(start) => start(reserved, session.alive()),
-            None => MicOwner::start_reserved(reserved, session.alive()),
+        let source = if let Some(start) = self.voice.start.take() {
+            start(reserved, session.alive())
+        } else {
+            assert!(
+                !cx.has_global::<super::super::test_fixture::WithoutDesktop>(),
+                "this test must inject its microphone source"
+            );
+            MicOwner::start_reserved(reserved, session.alive())
         };
         #[cfg(not(test))]
         let source = MicOwner::start_reserved(reserved, session.alive());
