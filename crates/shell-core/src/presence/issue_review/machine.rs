@@ -1,6 +1,6 @@
 use crate::link::{LinkHandle, Session};
 use crate::threads::Threads;
-use kumochi_protocol::message::{ControlToBrain, DraftId, IssueOp};
+use kumochi_protocol::message::{ControlToBrain, DraftId, IssueOp, IssueUnavailableKind};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -24,6 +24,7 @@ pub enum Update {
     Submitted(DraftId, Option<u64>),
     Started(DraftId, u64),
     Cancelled(u64, DraftId),
+    Unavailable(u64, DraftId, IssueUnavailableKind),
 }
 
 impl Update {
@@ -32,6 +33,9 @@ impl Update {
             Self::Submitted(draft, request) => model.issue_submitted(draft, request),
             Self::Started(draft, request) => model.issue_review_started(draft, request),
             Self::Cancelled(request, draft) => model.cancel_issue_review(request, draft),
+            Self::Unavailable(request, draft, kind) => {
+                model.issue_unavailable(request, draft, kind);
+            }
         }
     }
 }
@@ -133,6 +137,11 @@ impl<T> Reviews<'_, T> {
         {
             self.retire();
         }
+    }
+
+    pub fn unavailable(&mut self, request: u64, draft: DraftId, kind: IssueUnavailableKind) {
+        (self.apply)(Effect::Threads(Update::Unavailable(request, draft, kind)));
+        self.fail(request, draft);
     }
 
     pub fn confirm(&mut self, review: u64, op: IssueOp) -> bool {

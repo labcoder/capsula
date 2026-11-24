@@ -100,6 +100,59 @@ fn a_preview_decision_does_not_override_a_newer_receiver_watermark() {
 }
 
 #[test]
+fn an_unavailable_rearm_retires_a_deferred_preview_without_filing() {
+    use crate::threads::IssueFeedback;
+    use kumochi_protocol::message::IssueUnavailableKind;
+
+    for kind in [
+        IssueUnavailableKind::ReviewNotSaved,
+        IssueUnavailableKind::ReviewCapacity,
+    ] {
+        let mut f = fixture(ActionState::Draft);
+        let card = next_card(&f);
+        let draft = card.draft;
+        let review = f.click(0);
+        f.controls.try_recv().expect("the explicit rearm");
+        let (at, _, live) = f.review(|reviews| reviews.deliver(review, draft)).unwrap();
+        assert_eq!(at, 0);
+
+        for (request, id) in [(review + 1, draft), (review, DraftId(10))] {
+            f.review(|reviews| reviews.unavailable(request, id, kind));
+            assert!(live.get());
+            assert!(f.models[0].issue(draft).unwrap().pending_review());
+            assert_eq!(
+                f.controls.try_recv(),
+                Err(async_channel::TryRecvError::Empty)
+            );
+        }
+
+        f.review(|reviews| reviews.unavailable(review, draft, kind));
+        assert!(!live.get(), "the deferred reply cannot open the preview");
+        cancelled(&f, 2, review);
+        f.reply(review, card);
+        f.decide(at, true, &SHOWN);
+        assert!(f.pending[at].is_none());
+        assert_eq!(
+            f.controls.try_recv(),
+            Err(async_channel::TryRecvError::Empty)
+        );
+        for model in &f.models {
+            let entry = model.issue(draft).unwrap();
+            assert_eq!(entry.feedback, Some(IssueFeedback::Unavailable(kind)));
+            assert_eq!(entry.card().unwrap().version, StateVersion(1));
+        }
+
+        f.open(1);
+        f.decide(1, true, &SHOWN);
+        assert_eq!(f.controls.try_recv().unwrap(), payload(4, 2));
+        assert_eq!(
+            f.controls.try_recv(),
+            Err(async_channel::TryRecvError::Empty)
+        );
+    }
+}
+
+#[test]
 fn cancelling_before_mint_and_superseding_in_the_peer_view_leave_no_old_authority() {
     let mut f = fixture(ActionState::Draft);
     let mut card = f.models[0]

@@ -104,6 +104,8 @@ session/request, immutable draft/version/hash, absolute 60-second deadline and c
 scope. Cancellation, supersession or disconnect invalidates it immediately, but it occupies its
 slot until acknowledgement. Registration checks liveness and the deadline again at acknowledgement,
 even if the timer event has not run. A late committed reply may publish saved state, never permission.
+The shared shell handler records the terminal feedback before retiring the matching route.
+This invalidates any deferred delivery from that request before a view can open a preview.
 At capacity, new rearms receive ReviewCapacity without SQL or HTTP; there is no automatic retry.
 The deadline applies to the pending rearm, not to a preview already open. An open preview has
 no independent timeout; cancellation, editing, supersession, disconnect and the final binding
