@@ -16,6 +16,8 @@ use crate::strings::Text;
 
 mod cards;
 pub use cards::{Entry as IssueEntry, Feedback as IssueFeedback};
+mod rename;
+pub use rename::Rename;
 #[cfg(test)]
 mod tests;
 

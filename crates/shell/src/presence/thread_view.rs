@@ -13,8 +13,7 @@ use gpui_kit::{
     div,
 };
 use kumochi_protocol::message::{
-    AssistantName, ControlToBrain, NameError, SettingsOp, ThreadId, ThreadKind, ThreadOp,
-    ThreadRow, ThreadTitle,
+    ControlToBrain, SettingsOp, ThreadId, ThreadKind, ThreadOp, ThreadRow,
 };
 
 use super::messages::Messages;
@@ -22,7 +21,7 @@ use super::thread_selection::Selection;
 use super::{Presence, PresenceEvent, send};
 use crate::runs::Target;
 use crate::strings::{Strings, Text};
-use crate::threads::{Threads, row_label};
+use crate::threads::{Rename, Threads, row_label};
 
 /// Search settles for this long before reading a page [guess].
 const SEARCH_DELAY: Duration = Duration::from_millis(150);
@@ -194,7 +193,7 @@ pub(super) struct ThreadsView {
     owner: WeakEntity<Presence>,
     events: async_channel::Sender<PresenceEvent>,
     messages: Entity<Messages>,
-    rename: Option<(ThreadId, ThreadKind)>,
+    rename: Option<ThreadId>,
     rename_error: Option<Text>,
     rename_input: Entity<InputState>,
     _rename_events: Subscription,
@@ -229,10 +228,7 @@ impl ThreadsView {
         let messages = cx.new(|cx| Messages::new(model.clone(), owner.clone(), window, cx));
         let watch = cx.observe(&model, |view, _, cx| {
             let state = view.model.read(cx);
-            if view
-                .rename
-                .is_some_and(|(thread, _)| state.open != Some(thread))
-            {
+            if view.rename.is_some_and(|thread| state.open != Some(thread)) {
                 view.rename = None;
                 view.rename_error = None;
             }
@@ -269,34 +265,26 @@ impl ThreadsView {
     }
 
     fn save_rename(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let Some((thread, kind)) = self.rename else {
+        let Some(thread) = self.rename else {
             return;
         };
-        if !self.model.read(cx).can_rename(thread) {
-            return;
-        }
-        let Some(current) = self
+        let message = match self
             .model
             .read(cx)
-            .row(thread)
-            .map(|row| row_label(row, self.model.read(cx).settings.as_ref()))
-        else {
-            self.cancel_rename(window, cx);
-            return;
+            .prepare_rename(thread, &self.rename_input.read(cx).value())
+        {
+            Ok(Rename::Send(message)) => message,
+            Ok(Rename::Blocked) => return,
+            Ok(Rename::Close) => {
+                self.cancel_rename(window, cx);
+                return;
+            }
+            Err(error) => {
+                self.rename_error = Some(error);
+                cx.notify();
+                return;
+            }
         };
-        let message =
-            match rename_message(thread, kind, &self.rename_input.read(cx).value(), &current) {
-                Ok(Some(message)) => message,
-                Ok(None) => {
-                    self.cancel_rename(window, cx);
-                    return;
-                }
-                Err(error) => {
-                    self.rename_error = Some(error);
-                    cx.notify();
-                    return;
-                }
-            };
         let renamed = match &message {
             ControlToBrain::ThreadOp(ThreadOp::Rename { title, .. }) => {
                 Some(title.as_str().to_owned())
@@ -522,7 +510,6 @@ impl ThreadsView {
         let switch = !row_is_target(&row, self.target);
         let switch_owner = self.owner.clone();
         let thread = row.id;
-        let kind = row.kind;
         let edit_title = title.clone();
         Some(
             div()
@@ -552,12 +539,13 @@ impl ThreadsView {
                         }))
                         .child(
                             Button::new("rename-task")
+                                .debug_selector(|| "rename-task".into())
                                 .small()
                                 .ghost()
                                 .disabled(disabled)
                                 .label(rename_label)
                                 .on_click(cx.listener(move |view, _, window, cx| {
-                                    view.rename = Some((thread, kind));
+                                    view.rename = Some(thread);
                                     view.rename_error = None;
                                     view.rename_input.update(cx, |input, cx| {
                                         input.set_value(edit_title.clone(), window, cx);
@@ -703,28 +691,6 @@ fn row_is_target(row: &ThreadRow, target: Target) -> bool {
     }
 }
 
-fn rename_message(
-    thread: ThreadId,
-    kind: ThreadKind,
-    text: &str,
-    current: &str,
-) -> Result<Option<ControlToBrain>, Text> {
-    let result = match kind {
-        ThreadKind::Main => AssistantName::new(text)
-            .map(|name| ControlToBrain::Settings(SettingsOp::SetAssistantName(name))),
-        ThreadKind::Thread => ThreadTitle::new(text)
-            .map(|title| ControlToBrain::ThreadOp(ThreadOp::Rename { thread, title })),
-    };
-    result
-        .map(|message| (text.trim() != current).then_some(message))
-        .map_err(|error| match error {
-            NameError::Empty => Text::RenameEmpty,
-            NameError::TooLong if kind == ThreadKind::Main => Text::RenameNameTooLong,
-            NameError::TooLong => Text::RenameTooLong,
-            NameError::NotOneLine => Text::RenameOneLine,
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,93 +734,102 @@ mod tests {
         assert_eq!(drawn(cx, window), [false, false]);
     }
 
-    fn changed_rename_message(
-        thread: ThreadId,
-        kind: ThreadKind,
-        text: &str,
-    ) -> Result<ControlToBrain, Text> {
-        super::rename_message(thread, kind, text, "previous")
-            .map(|message| message.expect("the test requests a changed name"))
-    }
+    #[gpui::test]
+    fn a_stale_rename_closes_without_sending_but_the_current_editor_sends(cx: &mut TestAppContext) {
+        use async_channel::TryRecvError;
+        use kumochi_protocol::message::{Incarnation, ThreadTitle};
 
-    #[test]
-    fn unchanged_names_and_titles_send_no_rename() {
-        assert_eq!(
-            super::rename_message(ThreadId(4), ThreadKind::Main, " Kumo ", "Kumo"),
-            Ok(None)
-        );
-        assert_eq!(
-            super::rename_message(ThreadId(5), ThreadKind::Thread, " Birthday ", "Birthday"),
-            Ok(None)
-        );
-        assert_eq!(
-            super::rename_message(ThreadId(4), ThreadKind::Main, "   ", "Kumo"),
-            Err(Text::RenameEmpty)
-        );
-    }
+        use crate::link::{LinkHandle, Session};
+        use crate::presence::{test_fixture, threads::ThreadsPanel};
 
-    #[test]
-    fn rename_uses_the_kind_and_validates_before_sending() {
+        test_fixture::without_desktop(cx);
+        let owner = test_fixture::presence(cx);
+        let first = ThreadId(1);
+        let second = ThreadId(2);
+        let (window, view, controls, _requests) = owner.update(cx, |owner, cx| {
+            let (mut link, requests) = LinkHandle::recording();
+            let controls = link.record_controls();
+            owner.link = link;
+            owner.session = Some(Session::detached(1, Incarnation(1)));
+            owner.threads.update(cx, |state, cx| {
+                state.connected();
+                state.rows = [first, second]
+                    .map(|id| ThreadRow {
+                        id,
+                        title: format!("Task {}", id.0),
+                        updated_ms: 0,
+                        kind: ThreadKind::Thread,
+                        choice: None,
+                        task: None,
+                    })
+                    .to_vec();
+                state.show_for(Some(first));
+                cx.notify();
+            });
+            let panel = ThreadsPanel::detached(owner.threads.clone(), cx);
+            (panel.window, panel.view, controls, requests)
+        });
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .expect("test window");
+        let open_rename = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            let mut frame = VisualTestContext::from_window(window, cx);
+            let button = frame.debug_bounds("rename-task").expect("Rename task");
+            frame.simulate_click(button.center(), gpui_kit::Modifiers::default());
+            frame.run_until_parked();
+        };
+        open_rename(cx);
+        window
+            .update(cx, |_, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.rename_input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    view.save_rename(window, cx);
+                    assert_eq!(view.rename_error, Some(Text::RenameEmpty));
+                    view.rename_input.update(cx, |input, cx| {
+                        input.set_value("Stale edit", window, cx);
+                    });
+                    owner.update(cx, |owner, cx| owner.select_thread(Some(second), cx));
+                    let state = view.model.read(cx);
+                    assert_eq!(state.open, Some(second));
+                    assert!(state.rows.iter().any(|row| row.id == first));
+                    assert_eq!(view.rename, Some(first), "observer hasn't refreshed yet");
+                    view.save_rename(window, cx);
+                    assert!(!view.editing(), "the save closes the stale editor");
+                    assert_eq!(view.rename_error, None);
+                    assert_eq!(view.model.read(cx).open, Some(second));
+                    assert_eq!(controls.try_recv(), Err(TryRecvError::Empty));
+                });
+            })
+            .expect("test window");
+
+        open_rename(cx);
+        window
+            .update(cx, |_, window, cx| {
+                let state = view.read(cx);
+                assert_eq!(state.rename, Some(second));
+                state.rename_input.clone().update(cx, |input, cx| {
+                    input.set_value("Current edit", window, cx);
+                });
+            })
+            .expect("test window");
+        cx.simulate_keystrokes(window, "enter");
         assert_eq!(
-            changed_rename_message(ThreadId(4), ThreadKind::Main, " Cloud "),
-            Ok(ControlToBrain::Settings(SettingsOp::SetAssistantName(
-                AssistantName::new("Cloud").expect("valid name")
-            )))
-        );
-        assert_eq!(
-            changed_rename_message(ThreadId(5), ThreadKind::Thread, " Birthday "),
+            controls.try_recv(),
             Ok(ControlToBrain::ThreadOp(ThreadOp::Rename {
-                thread: ThreadId(5),
-                title: ThreadTitle::new("Birthday").expect("valid title")
+                thread: second,
+                title: ThreadTitle::new("Current edit").expect("valid title"),
             }))
         );
-        assert_eq!(
-            changed_rename_message(ThreadId(4), ThreadKind::Main, ""),
-            Err(Text::RenameEmpty)
-        );
-        assert_eq!(
-            changed_rename_message(ThreadId(4), ThreadKind::Main, &"a".repeat(25)),
-            Err(Text::RenameNameTooLong)
-        );
-        assert_eq!(
-            changed_rename_message(ThreadId(5), ThreadKind::Thread, &"a".repeat(81)),
-            Err(Text::RenameTooLong)
-        );
-        assert_eq!(
-            changed_rename_message(ThreadId(5), ThreadKind::Thread, "two\nlines"),
-            Err(Text::RenameOneLine)
-        );
-    }
-
-    #[test]
-    fn assistant_names_and_task_titles_have_different_character_limits() {
-        let name = "🌥".repeat(24);
-        assert_eq!(
-            changed_rename_message(ThreadId(4), ThreadKind::Main, &name),
-            Ok(ControlToBrain::Settings(SettingsOp::SetAssistantName(
-                AssistantName::new(&name).expect("24 characters")
-            ))),
-        );
-        let title = "🌥".repeat(80);
-        assert_eq!(
-            changed_rename_message(ThreadId(5), ThreadKind::Thread, &title),
-            Ok(ControlToBrain::ThreadOp(ThreadOp::Rename {
-                thread: ThreadId(5),
-                title: ThreadTitle::new(&title).expect("80 characters")
-            })),
-        );
-        let title = "a".repeat(25);
-        assert_eq!(
-            changed_rename_message(ThreadId(5), ThreadKind::Thread, &title),
-            Ok(ControlToBrain::ThreadOp(ThreadOp::Rename {
-                thread: ThreadId(5),
-                title: ThreadTitle::new(&title).expect("25 characters")
-            })),
-        );
-        assert_eq!(
-            changed_rename_message(ThreadId(4), ThreadKind::Main, "Cloud\u{7}"),
-            Err(Text::RenameOneLine)
-        );
+        assert_eq!(controls.try_recv(), Err(TryRecvError::Empty));
+        assert!(!view.read_with(cx, |view, _| view.editing()));
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .expect("close the test window");
+        drop(view);
+        drop(owner);
+        cx.run_until_parked();
     }
 
     #[test]
