@@ -139,6 +139,15 @@ A placement change re-samples the kept pose but preserves its frame epoch, paint
 and pending-start timestamp. A drawing waiting for its first paint is already placed, and
 moving it does not advance or restart that entrance.
 
+For two independent 2D drawings, a newer `others:"keep"` drawing can use a free band
+inside that stage without moving the older drawing or shrinking the new one. The
+presenter uses the older drawing's fitted extent and the same band geometry as the
+dock and panels. If no band fits the new drawing at its normal scale, it stays centered
+as before. Step installation, recovery and stage changes account for both extents. An
+older drawing's edit can move the newer one if its band no longer fits. A Stop cut
+keeps the cut drawing's current box. Screen marks keep their own coordinates and do
+not reserve a band. Placement does not pack three or more drawings.
+
 The stored layout version is **2**. Version-1 visible scenes are skipped and durably cleared
 by the existing recovery path after upgrading, rather than reinterpreted with new coordinates.
 The drawing record version remains 1; this does not migrate or delete conversation history.
