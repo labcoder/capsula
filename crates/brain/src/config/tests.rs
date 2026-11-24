@@ -897,7 +897,6 @@ fn the_max_frame_rate_persists_and_automatic_removes_the_key() {
 fn first_save_and_replacement_ignore_an_abandoned_temp() {
     let scratch = Scratch::new("config-stale-temp");
     let dir = dir(&scratch);
-    let path = dir.join(CONFIG_FILE);
     let temp = dir.join(format!("{CONFIG_FILE}.tmp"));
     let mut config = Config::load(Some(dir.clone()), ThreadId(1));
     for name_after_save in ["Nimbus", "Cirrus"] {
