@@ -81,21 +81,33 @@ impl SettingsView {
             cancel,
             confirm,
             move |confirmed, _, cx| {
-                let _gone = view.update(cx, |view, cx| {
+                let owner = view.update(cx, |view, cx| {
                     if view
                         .confirmation
                         .as_ref()
                         .is_none_or(|(current, _)| *current != generation)
                     {
-                        return;
+                        return None;
                     }
                     view.confirmation = None;
-                    if confirmed && view.model.read(cx).accounts.generation == Some(generation) {
-                        let _gone = view
-                            .owner
-                            .update(cx, |owner, cx| owner.account_op(AccountOp::SignOut, cx));
-                    }
+                    let accounts = &view.model.read(cx).accounts;
+                    (confirmed
+                        && accounts.generation == Some(generation)
+                        && accounts.allows(AccountOp::SignOut))
+                    .then(|| view.owner.clone())
                 });
+                if let Ok(Some(owner)) = owner {
+                    let _gone = owner.update(cx, |owner, cx| match owner.session.as_ref() {
+                        Some(session) if session.generation() == generation => {
+                            owner.account_op(AccountOp::SignOut, cx);
+                        }
+                        None => owner.settings.update(cx, |state, cx| {
+                            state.accounts.send(AccountOp::SignOut, |_| false);
+                            cx.notify();
+                        }),
+                        Some(_) => {}
+                    });
+                }
             },
         );
         if let Some(dialog) = dialog {
