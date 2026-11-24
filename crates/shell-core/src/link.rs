@@ -557,6 +557,11 @@ enum QueuedHold {
 }
 
 impl QueuedHold {
+    fn cancelled(self, gesture: GestureId) -> Option<Self> {
+        matches!(self, Self::Recognized(id) | Self::Listening(id) if id == gesture)
+            .then_some(Self::Cancelled(gesture))
+    }
+
     fn gesture(self) -> GestureId {
         match self {
             Self::Recognized(id)
@@ -782,8 +787,8 @@ impl Shared {
                 matches!(message, ControlToBrain::KeyUp { .. })
                     .then_some(QueuedHold::Released(*gesture))
             }
-            ControlToBrain::GestureCancel { gesture } if matches!(hold, Some(QueuedHold::Recognized(id) | QueuedHold::Listening(id)) if id == gesture) => {
-                Some(QueuedHold::Cancelled(*gesture))
+            ControlToBrain::GestureCancel { gesture } => {
+                hold.and_then(|hold| hold.cancelled(*gesture))
             }
             _ => None,
         };
@@ -996,12 +1001,12 @@ impl LinkHandle {
             return generation.is_none_or(|generation| generation == self.link_generation())
                 && recording.try_send(cancel).is_ok();
         }
-        let outbox = self
+        let mut outbox = self
             .shared
             .outbox
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let Some(outbox) = outbox.as_ref().filter(|outbox| {
+        let Some(outbox) = outbox.as_mut().filter(|outbox| {
             generation.is_none_or(|generation| {
                 generation == outbox.generation && !outbox.pipe.is_aborted()
             })
@@ -1009,6 +1014,14 @@ impl LinkHandle {
             return false;
         };
         if outbox.control.try_send(cancel).is_ok() {
+            if generation.is_some()
+                && let Some(cancelled) = outbox
+                    .queued_input
+                    .hold
+                    .and_then(|hold| hold.cancelled(gesture))
+            {
+                outbox.queued_input.hold = Some(cancelled);
+            }
             true
         } else {
             outbox.pipe.abort();

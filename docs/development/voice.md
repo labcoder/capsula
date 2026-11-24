@@ -987,9 +987,10 @@ Quit immediately cancels collection and fences the last tracked gesture for the
 background shutdown owner. No new microphone packets are admitted, and the
 data writer discards buffered PCM it takes after Quit. A transfer already in
 progress is not recalled. Ordinary Esc still uses its normal cancellation path.
-If the presence drops outside Quit, it revokes local input before ending the
-connection. A Runs cancel is skipped only if the same gesture's cancel was
-already queued on that connection; a distinct pending cancel is still attempted.
+Explicit voice cancellation and Presence Drop outside Quit both revoke local input.
+They skip a Runs cancel only after successfully queuing the same gesture's cancel
+on the same connection generation. A distinct or unsent cancel is still attempted.
+Explicit cancellation still waits for the microphone's stop receipt; Drop ends the connection.
 
 `voice.hold_to_talk` defaults on, including older files without the key. Settings → Voice
 persists its separate `SetHoldToTalk` operation; changing the idle policy leaves it alone.

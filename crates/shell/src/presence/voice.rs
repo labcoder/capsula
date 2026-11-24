@@ -9,6 +9,8 @@ use kumochi_protocol::message::{
 };
 
 use gpui_kit::Window;
+use kumochi_shell_core::link::InputCancel;
+use kumochi_shell_core::presence::teardown::{cancel_tracked_input, drain_hold_cancel};
 
 use super::gesture::ReleaseInput;
 use super::ink::Sampler;
@@ -350,20 +352,25 @@ impl Presence {
             .follow(self.settings.read(cx).hold_to_talk_notice().is_none());
     }
 
-    fn drain_voice_cancel(&mut self) -> bool {
-        self.runs.take_hold_cancel().is_none_or(|message| {
-            self.session.as_ref().is_some_and(|s| {
-                let sent = self.link.send_control(s, message);
-                if !sent {
-                    tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::CancelDrain, "held speech input failed");
-                    self.link.end(s);
-                }
-                sent
-            })
-        })
+    fn drain_voice_cancel(&mut self, queued: Option<&InputCancel>) -> bool {
+        let sent = drain_hold_cancel(&self.link, self.session.as_ref(), &mut self.runs, queued);
+        if !sent && let Some(session) = &self.session {
+            tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::CancelDrain, "held speech input failed");
+            self.link.end(session);
+        }
+        sent
     }
 
     fn end_voice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
+        self.end_voice_after_cancel(text, None, cx);
+    }
+
+    fn end_voice_after_cancel(
+        &mut self,
+        text: Text,
+        queued: Option<&InputCancel>,
+        cx: &mut Context<'_, Self>,
+    ) {
         if let Some(hold) = &self.voice.pending {
             self.discard_voice_recovery(hold.token.gesture());
         }
@@ -389,20 +396,20 @@ impl Presence {
             }
         }
         self.runs.cancel_hold();
-        self.drain_voice_cancel();
+        self.drain_voice_cancel(queued);
         self.voice_notice(notice, cx);
     }
 
     pub(super) fn cancel_voice(&mut self, cx: &mut Context<'_, Self>) {
         self.voice.recovery = None;
-        self.link.cancel_input();
+        let queued = cancel_tracked_input(&self.link);
         if self.voice.pending.is_some() {
-            self.end_voice(Text::HoldCancelled, cx);
+            self.end_voice_after_cancel(Text::HoldCancelled, queued.as_ref(), cx);
         } else if self.voice.status.take().is_some() {
             self.refresh_dock(cx);
             self.refresh_conversation(cx);
         }
-        self.drain_voice_cancel();
+        self.drain_voice_cancel(queued.as_ref());
     }
 
     pub(super) fn stop_voice_for_quit(&mut self) {
@@ -1095,7 +1102,7 @@ impl Presence {
                 tracing::warn!(stage = ?FailureStage::Admission, ?reason, "held speech input failed");
                 false
             }
-            Ok(_) if !self.drain_voice_cancel() => {
+            Ok(_) if !self.drain_voice_cancel(None) => {
                 tracing::warn!(stage = ?FailureStage::Admission, reason = ?FailureReason::CancelDrain, "held speech input failed");
                 false
             }

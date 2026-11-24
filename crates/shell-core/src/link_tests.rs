@@ -2859,6 +2859,73 @@ fn queued_hold_waits_for_its_saved_preferences_and_rejects_another_run_origin() 
 }
 
 #[test]
+fn explicit_cancel_keeps_queued_hold_cancelled_until_stop_is_acknowledged() {
+    use crate::presence::teardown::{cancel_tracked_input, drain_hold_cancel};
+    use kumochi_protocol::message::{GestureId, HoldStatus};
+
+    let link = attended_queued("explicit-queued-voice-cancel");
+    let events = patient(link.events.clone());
+    let session = connected(next(&events));
+    let generation = session.generation();
+    let send = |message| frame::write(&mut &link.control, &message, Pipe::Control).unwrap();
+    send(ControlToShell::Settings {
+        view: settings_view(),
+        answer: false,
+    });
+    assert!(matches!(next(&events), LinkEvent::Settings { .. }));
+    let ControlToBrain::QueuedAudioOutput(_, output, Narration::Plain) = link.next_control() else {
+        panic!("the pair offers its logical output");
+    };
+    acknowledge_queued(&link.control, output);
+
+    let gesture = GestureId(41);
+    let mut runs = ready_runs(&session);
+    link.handle.track_input(gesture);
+    let recognized = runs.begin_hold(gesture, None).unwrap();
+    assert!(link.handle.send_control(&session, recognized.clone()));
+    assert_eq!(link.next_control(), recognized);
+
+    let queued = cancel_tracked_input(&link.handle);
+    runs.cancel_hold();
+    assert!(drain_hold_cancel(
+        &link.handle,
+        Some(&session),
+        &mut runs,
+        queued.as_ref()
+    ));
+    assert_eq!(
+        link.next_control(),
+        ControlToBrain::GestureCancel { gesture }
+    );
+    send(ControlToShell::VoiceHoldStatus {
+        gesture,
+        status: HoldStatus::Admitted,
+    });
+    assert!(matches!(
+        next(&events),
+        LinkEvent::VoiceHold { gesture: admitted, status: HoldStatus::Admitted, .. } if admitted == gesture
+    ));
+    assert_eq!(
+        link.handle
+            .shared
+            .with_queued_input(generation, |input| input.hold),
+        Some(Some(super::QueuedHold::Cancelled(gesture)))
+    );
+
+    let stopped = ControlToBrain::VoiceHoldStopped { gesture };
+    assert!(link.handle.send_control(&session, stopped.clone()));
+    assert_eq!(link.next_control(), stopped);
+    assert!(link.handle.voice_stop_pending());
+    send(ControlToShell::VoiceHoldStopAccepted { gesture });
+    send(ControlToShell::Ping);
+    assert_eq!(link.next_control(), ControlToBrain::Pong);
+    assert!(!link.handle.voice_stop_pending());
+    assert!(session.open());
+    drop(link.control);
+    assert!(link.link.join().unwrap());
+}
+
+#[test]
 fn a_queued_screen_release_goes_only_while_its_hold_listens_unrevoked() {
     use kumochi_protocol::geometry::{PhysicalPoint, PointerPath, ReleasePointer};
     use kumochi_protocol::message::{
