@@ -1560,6 +1560,120 @@ fn event(id: u64) -> PageEvent {
     }
 }
 
+fn drawing_marker(id: u64, scene: u64) -> PageEvent {
+    PageEvent {
+        kind: PageEventKind::NoVisual {
+            scene: SceneId(scene),
+        },
+        text: String::new(),
+        ..event(id)
+    }
+}
+
+#[test]
+fn history_rows_keep_the_newest_drawing_key_when_an_older_page_extends_its_group() {
+    let mut state = loaded();
+    assert_eq!(state.history_rows().next(), None);
+    let scene = i64::MAX.cast_unsigned();
+    let thread = ThreadId(3);
+    state.select(Some(thread));
+    let first = request_id(&state.requests()[0]);
+    state.apply(DataToShell::Page {
+        request: first,
+        thread,
+        events: vec![event(9), drawing_marker(8, scene), drawing_marker(7, scene)],
+        next: Some(EventId(7)),
+    });
+    let ids = |state: &Threads| state.history_rows().map(|row| row.id.0).collect::<Vec<_>>();
+    assert_eq!(ids(&state), [8, 9]);
+
+    state.older_events();
+    let older = state.requests();
+    let request = request_id(&older[0]);
+    assert_eq!(
+        older,
+        [DataToBrain::PageRequest {
+            request,
+            page: PageOf::Events {
+                thread,
+                before: Some(EventId(7)),
+            },
+        }]
+    );
+    state.apply(DataToShell::Page {
+        request,
+        thread,
+        events: vec![
+            drawing_marker(6, scene),
+            drawing_marker(5, 1),
+            drawing_marker(4, 1),
+            PageEvent {
+                run: Some(RunId(2)),
+                ..drawing_marker(3, 1)
+            },
+            PageEvent {
+                run: Some(RunId(2)),
+                ..drawing_marker(2, 1)
+            },
+        ],
+        next: Some(EventId(2)),
+    });
+    assert_eq!(ids(&state), [3, 5, 8, 9]);
+    assert_eq!(
+        state.events.iter().map(|row| row.id.0).collect::<Vec<_>>(),
+        [9, 8, 7, 6, 5, 4, 3, 2]
+    );
+    assert_eq!(state.before, Some(EventId(2)));
+}
+
+#[test]
+fn history_rows_keep_non_groupable_markers_and_their_payloads_separate() {
+    let marker = drawing_marker(2, 1);
+    let barriers = [
+        PageEvent {
+            text: "drawing text".into(),
+            ..marker.clone()
+        },
+        PageEvent {
+            cut: true,
+            ..marker.clone()
+        },
+        PageEvent {
+            kind: PageEventKind::SceneStep,
+            ..marker.clone()
+        },
+        PageEvent {
+            run: None,
+            ..marker.clone()
+        },
+        PageEvent {
+            run: Some(RunId(0)),
+            ..marker
+        },
+        drawing_marker(2, 0),
+        drawing_marker(2, i64::MAX.cast_unsigned() + 1),
+    ];
+    for older in barriers {
+        let newer = PageEvent {
+            id: EventId(3),
+            ..older.clone()
+        };
+        let state = Threads {
+            events: vec![drawing_marker(4, 1), newer, older, drawing_marker(1, 1)],
+            ..Threads::default()
+        };
+        assert_eq!(
+            state.history_rows().collect::<Vec<_>>(),
+            [
+                &state.events[3],
+                &state.events[2],
+                &state.events[1],
+                &state.events[0]
+            ]
+        );
+    }
+}
+
 fn request_id(request: &DataToBrain) -> u32 {
     match request {
         DataToBrain::PageRequest { request, .. }
