@@ -36,6 +36,91 @@ fn detached_settings(
     (window, view)
 }
 
+fn settings_over_hold(
+    owner: &Entity<Presence>,
+    tab: SettingsTab,
+    cx: &mut TestAppContext,
+) -> (AnyWindowHandle, Entity<SettingsView>) {
+    let (window, view) = owner.update(cx, |owner, cx| {
+        assert!(owner.activity.working && owner.voice_working());
+        let (window, view) = detached_settings(owner, cx);
+        let panel = owner.settings_panel.as_mut().unwrap();
+        panel.visible = true;
+        panel.focused = true;
+        owner.panel_visibility = crate::presence::PanelVisibility::Hidden;
+        view.update(cx, |view, _| {
+            view.tab = tab;
+            view.stop = owner.escape_hold.shows_stop();
+        });
+        (window, view)
+    });
+    let mut frame = VisualTestContext::from_window(window, cx);
+    frame.simulate_resize(size(px(768.), px(1600.)));
+    frame.update(|window, cx| {
+        assert!(view.read(cx).stop);
+        view.update(cx, |view, cx| view.focus(window, cx));
+    });
+    (window, view)
+}
+
+#[gpui::test]
+fn cancelling_a_loading_speech_model_ends_the_waiting_hold_and_keeps_settings_focused(
+    cx: &mut TestAppContext,
+) {
+    use crate::presence::voice_wiring_tests::{hold, ready};
+    use crate::strings::Text;
+    use kumochi_protocol::message::{GestureId, PartState, SettingsOp};
+
+    test_fixture::without_desktop(cx);
+    let (owner, data, controls) = ready(cx);
+    account_views(
+        &owner,
+        vec![LinkEvent::Voice {
+            generation: 1,
+            speech_input: PartState::Loading,
+        }],
+        cx,
+    );
+    owner.update(cx, |owner, _| {
+        owner.panel_visibility = crate::presence::PanelVisibility::Visible;
+    });
+    let (token, _) = hold(&owner, 1, cx);
+    let gesture = GestureId(1);
+    assert!(matches!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::VoiceHoldRecognized { gesture: id, .. } if id == gesture
+    ));
+    let (window, view) = settings_over_hold(&owner, SettingsTab::Voice, cx);
+    VisualTestContext::from_window(window, cx).update(|window, cx| {
+        window.draw(cx).clear(cx);
+        window.focus_next(cx);
+        assert!(!view.read(cx).focus.is_focused(window));
+    });
+    click_github(window, "speech-model-action", cx);
+    assert!(!view.read_with(cx, |view, _| view.stop));
+    owner.read_with(cx, |owner, cx| {
+        assert!(!owner.activity.working);
+        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+        assert!(owner.settings.read(cx).speech_input_pending());
+    });
+    let messages = drain(&controls);
+    assert_eq!(
+        messages
+            .into_iter()
+            .filter(|message| message != &ControlToBrain::GestureCancel { gesture })
+            .collect::<Vec<_>>(),
+        [
+            ControlToBrain::Settings(SettingsOp::CancelVoiceInstall),
+            ControlToBrain::VoiceHoldStopped { gesture },
+        ]
+    );
+    assert!(token.retired());
+    assert!(data.is_empty());
+    VisualTestContext::from_window(window, cx)
+        .update(|window, cx| assert!(view.read(cx).focus.is_focused(window)));
+}
+
 fn github_panel(
     cx: &mut TestAppContext,
 ) -> (
@@ -1144,6 +1229,134 @@ const SIGNED_IN: AccountView = AccountView::SignedIn {
     plan: PlanState::Enabled,
     recovery: None,
 };
+
+#[gpui::test]
+fn confirming_sign_out_during_a_recording_stops_only_that_hold(cx: &mut TestAppContext) {
+    use crate::presence::voice::tests::{source, until};
+    use crate::presence::voice_wiring_tests::{hold, ready, status};
+    use crate::strings::Text;
+    use gpui_kit::component::WindowExt as _;
+    use kumochi_protocol::message::{GestureId, HoldStatus};
+    use std::time::Duration;
+
+    test_fixture::without_desktop(cx);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (owner, data, controls) = ready(cx);
+    account_views(
+        &owner,
+        vec![LinkEvent::Account {
+            generation: 1,
+            view: SIGNED_IN,
+        }],
+        cx,
+    );
+    owner.update(cx, |owner, _| {
+        owner.panel_visibility = crate::presence::PanelVisibility::Visible;
+    });
+    let (open, finish, started, samples) = source(&owner, cx, None);
+    let (token, _) = hold(&owner, 1, cx);
+    let gesture = GestureId(1);
+    assert!(matches!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::VoiceHoldRecognized { gesture: id, .. } if id == gesture
+    ));
+    status(&owner, 1, 1, HoldStatus::Admitted, cx);
+    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    open.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| {
+            owner.voice.status == Some(Text::HoldListening)
+        })
+    });
+    samples.recv_timeout(Duration::from_secs(3)).unwrap();
+
+    let (window, view) = settings_over_hold(&owner, SettingsTab::Accounts, cx);
+    click_github(window, "account-sign-out", cx);
+    click_github(window, "confirmation-cancel", cx);
+    assert!(controls.is_empty(), "declining must not send or stop");
+    owner.read_with(cx, |owner, _| assert!(owner.voice_working()));
+
+    click_github(window, "account-sign-out", cx);
+    owner.update(cx, |owner, cx| {
+        owner.settings.update(cx, |state, _| {
+            assert!(state.accounts.receive(Some(2), 2, SIGNED_IN));
+        });
+    });
+    click_github(window, "confirmation-danger", cx);
+    assert!(
+        controls.is_empty(),
+        "a stale confirmation must not send or stop"
+    );
+    owner.read_with(cx, |owner, _| assert!(owner.voice_working()));
+    account_views(
+        &owner,
+        vec![LinkEvent::Account {
+            generation: 1,
+            view: SIGNED_IN,
+        }],
+        cx,
+    );
+
+    click_github(window, "account-sign-out", cx);
+    click_github(window, "confirmation-danger", cx);
+    assert_eq!(
+        drain(&controls)
+            .into_iter()
+            .filter(|message| message != &ControlToBrain::GestureCancel { gesture })
+            .collect::<Vec<_>>(),
+        [ControlToBrain::AccountOp(AccountOp::SignOut)]
+    );
+    assert!(!view.read_with(cx, |view, _| view.stop));
+    assert!(!token.retired());
+    owner.read_with(cx, |owner, _| {
+        assert!(!owner.activity.working);
+        assert_eq!(owner.voice.status, Some(Text::HoldStopping));
+    });
+
+    finish.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+    });
+    assert!(token.retired());
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::VoiceHoldStopped { gesture }]
+    );
+    assert!(data.is_empty());
+    VisualTestContext::from_window(window, cx).update(|window, cx| {
+        assert!(!window.has_active_dialog(cx));
+        assert!(view.read(cx).focus.contains_focused(window, cx));
+    });
+}
+
+#[gpui::test]
+fn confirmed_sign_out_reports_a_lost_session_before_the_account_snapshot_changes(
+    cx: &mut TestAppContext,
+) {
+    use crate::accounts::StatusLine;
+    use crate::strings::Text;
+    use gpui_kit::component::WindowExt as _;
+
+    test_fixture::without_desktop(cx);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (window, owner, controls) = accounts_panel(cx);
+    account_views(&owner, vec![chatgpt(SIGNED_IN)], cx);
+    click_github(window, "account-sign-out", cx);
+    owner.update(cx, Presence::end_scene_connection);
+    click_github(window, "confirmation-danger", cx);
+
+    assert!(controls.is_empty());
+    assert!(owner.read_with(cx, |owner, cx| {
+        let settings = owner.settings.read(cx);
+        let (_, lines) = settings.accounts.status(settings.view());
+        lines
+            .iter()
+            .any(|line| matches!(line, StatusLine::SendFailed(Text::AccountSendFailed)))
+    }));
+    VisualTestContext::from_window(window, cx).update(|window, cx| {
+        assert!(!window.has_active_dialog(cx));
+    });
+}
 
 #[gpui::test]
 fn resolved_sign_out_confirmation_does_not_steal_focus_on_account_change(cx: &mut TestAppContext) {

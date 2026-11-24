@@ -142,6 +142,9 @@ uses the existing finish-edit/focus path, without changing Escape dispatch.
 If an authoritative update removes the focused control, a retained focus-lost subscription
 uses GPUI's surviving-ancestor target, falling back to the Settings frame. Ordinary focus moves
 and Voice updates do not request focus; asynchronous removal preserves the Settings key context.
+Speech model actions run through Presence before returning focus to the Settings frame.
+ChatGPT Sign Out consumes the originating confirmation before asking Presence to act.
+Neither action holds the Settings view during cancellation, so Presence can refresh Stop.
 
 Settings stays visible when deactivated. With Settings focused, Esc stops work, then clears a
 drawing, then cancels the active field edit; another Esc dismisses. The close button also
