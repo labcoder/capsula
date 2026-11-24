@@ -2339,8 +2339,9 @@ The frozen owners remain charged against combined logical object/work caps and t
 64 MiB presenter residency allowance, including fixed staging and returned owners. If a new
 admission, preparation or activation would fit only without retirement, the bank relinquishes
 its frozen owners through the existing dropper and continues the ordinary replacement. It never
-adds a new capacity refusal. Worker answers and physical dropper retention remain separate from
-that presenter allowance. At most four frames are selected, never outgoing plus incoming.
+adds a new capacity refusal. A refused activation does not release another replacement's frozen
+picture. Worker answers and physical dropper retention remain separate from that presenter
+allowance. At most four frames are selected, never outgoing plus incoming.
 
 One watchdog deadline, 250 ms from marker processing, releases the visual hold without failing
 the newcomer. Continuations do not reset it. After handoff the successor epoch is guarded only

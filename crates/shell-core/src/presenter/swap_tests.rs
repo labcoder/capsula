@@ -544,6 +544,93 @@ fn residency_at_the_limit_keeps_retirement_and_one_over_falls_back_without_refus
 }
 
 #[test]
+fn unrelated_activation_residency_refusal_preserves_frozen_retirement() {
+    use kumochi_protocol::message::{ControlToBrain, SceneFailure};
+
+    let (mut presenter, now) = fixture(&[LIVE]);
+    let old = picture(&presenter);
+    replace(&mut presenter, &[LIVE], NEXT, now);
+    let unrelated = SceneId(31);
+    assert!(controls(&begin(&mut presenter, unrelated, now)).is_empty());
+    let job = only_job(
+        commit_as(&mut presenter, RUN, unrelated, 0, rect("unrelated"), now)
+            .expect("admitted unrelated step"),
+    );
+    presenter
+        .completed(job.run(&mut Shaper), now)
+        .expect("prepared unrelated step");
+    assert_eq!(picture(&presenter), old);
+    let frozen = presenter.frames.borrow().retirement_bytes();
+    assert_ne!(frozen, 0);
+
+    presenter.stage = Box::new(Charged(MAX_RESIDENT_BYTES));
+    let effects = presenter
+        .advance(GENERATION, now)
+        .expect("terminal residency refusal");
+    assert_eq!(
+        controls(&effects),
+        [&ControlToBrain::StepFailed {
+            run: RUN,
+            scene: unrelated,
+            index: 0,
+            reason: SceneFailure::Residency,
+            cut: kumochi_scene::StopCut {
+                activated: 0,
+                revealed: kumochi_scene::text::Bounded::default(),
+            },
+        }]
+    );
+    assert_eq!(
+        picture(&presenter),
+        old,
+        "unrelated refusal lost the frozen picture"
+    );
+    assert_eq!(presenter.frames.borrow().retirement_bytes(), frozen);
+}
+
+#[test]
+fn activation_at_the_residency_limit_discards_retirement_before_sampling() {
+    let prepared = || {
+        let (mut presenter, now) = fixture(&[SceneId(10), LIVE]);
+        let old = picture(&presenter);
+        replace(&mut presenter, &[LIVE], NEXT, now);
+        assert!(controls(&begin(&mut presenter, NEXT, now)).is_empty());
+        prepare(&mut presenter, 0, rect("successor"), now);
+        (presenter, now, old)
+    };
+    let (mut twin, twin_now, _) = prepared();
+    twin.frames.borrow_mut().discard_retirement();
+    let consumed = twin
+        .consume_ready(NEXT, 0, twin_now, 0, 0)
+        .expect("unpressured activation");
+    assert!(controls(&consumed.effects.expect("unpressured effects")).is_empty());
+    let with_owner = twin.residency();
+    drop(consumed.step);
+    let returned = with_owner - twin.residency();
+    assert!(returned > 0);
+
+    let (mut presenter, now, old) = prepared();
+    assert_eq!(old.len(), 2);
+    assert_eq!(picture(&presenter), old);
+    assert!(presenter.frames.borrow().retirement_bytes() > 0);
+    let usage = presenter.global.usage();
+    presenter.stage = Box::new(Charged(MAX_RESIDENT_BYTES - with_owner));
+    assert!(presenter.residency() < MAX_RESIDENT_BYTES);
+
+    let effects = presenter.advance(GENERATION, now).expect("activation fits");
+    assert!(controls(&effects).is_empty());
+    assert_eq!(presenter.scenes[&NEXT].view.activated(), 1);
+    assert_eq!(
+        presenter.frames.borrow().retirement_bytes(),
+        0,
+        "activation must release retirement before sampling"
+    );
+    assert_eq!(picture(&presenter), old[..1]);
+    assert_eq!(presenter.residency(), MAX_RESIDENT_BYTES - returned);
+    assert_eq!(presenter.global.usage(), usage);
+}
+
+#[test]
 fn a_refused_successor_header_reports_failure_without_guessing_a_run() {
     use kumochi_protocol::message::ControlToBrain;
     let (mut presenter, now) = fixture(&[LIVE]);
