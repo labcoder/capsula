@@ -1014,7 +1014,7 @@ fn a_removal_that_leaves_a_file_behind_isnt_finished() {
     assert_eq!(purge_files(&scratch.db()), Vec::<PathBuf>::new());
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, unix))]
 #[test]
 fn without_hard_links_the_swap_still_replaces_the_store() {
     let scratch = Scratch::new("no-links");
@@ -1025,7 +1025,7 @@ fn without_hard_links_the_swap_still_replaces_the_store() {
     let unsupported = std::io::Error::from_raw_os_error(
         windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED.cast_signed(),
     );
-    #[cfg(target_os = "linux")]
+    #[cfg(not(windows))]
     let unsupported = std::io::Error::from(std::io::ErrorKind::Unsupported);
     let swapped = store.swap_with(&copied, |_, _| Err(unsupported));
     assert_eq!(swapped.expect("swap"), Swap::Done);

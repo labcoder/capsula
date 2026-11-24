@@ -111,7 +111,7 @@ test-support = []
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["test-util"] }
 
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 rustix = { version = "1", features = ["fs"] }
 
 [target.'cfg(windows)'.dev-dependencies]
