@@ -721,6 +721,19 @@ impl Presenter {
         self.assembler.described()
     }
 
+    /// The membership a deferred Esc can still address without clearing unidentified work.
+    pub fn escape_scenes(&self) -> Option<[Option<SceneId>; MAX_VISIBLE_SCENES]> {
+        if matches!(self.phase, Phase::Recovering(_))
+            || self.assembler.pending()
+            || !self.held.is_empty()
+            || self.frames.borrow().successor().is_some()
+        {
+            return None;
+        }
+        let mut ids = self.scenes.keys().copied();
+        Some(std::array::from_fn(|_| ids.next()))
+    }
+
     /// Whether a v1 scene is mirrored or recovering, so Esc sends v1 cuts, not the placeholder Stop.
     pub fn holds_scenes(&self) -> bool {
         self.frames.borrow().retirement.is_some()

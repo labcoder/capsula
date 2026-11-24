@@ -20,8 +20,9 @@ pub use typed_screen::{TypedScreenInput, TypedScreenIo};
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{
     Action, AudioSession, Content, ControlToBrain, DataToBrain, DataToShell, Deleted, ErrorKey,
-    GestureId, Incarnation, MAX_PENDING_DELETES, MAX_PENDING_TURNS, Phase, RunId, RunOrigin,
-    SceneDescriptor, SceneId, ScreenChoice, ThreadId, ThreadKind, ThreadRow, UserError,
+    GestureId, Incarnation, MAX_PENDING_DELETES, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase,
+    RunId, RunOrigin, SceneDescriptor, SceneId, ScreenChoice, ThreadId, ThreadKind, ThreadRow,
+    UserError,
 };
 
 #[cfg(any(test, feature = "test-support"))]
@@ -363,6 +364,16 @@ impl Runs {
     /// The highest run any `RunState` has named so far on this brain.
     pub fn newest_run(&self) -> RunId {
         self.answered
+    }
+
+    /// The accepted turn frontier on this pair, including turns not yet named by the brain.
+    pub fn newest_submission(&self) -> u32 {
+        self.turns_sent
+    }
+
+    /// The legacy drawing's exact shown membership when no other snapshot is in flight.
+    pub fn escape_scenes(&self) -> Option<[Option<SceneId>; MAX_VISIBLE_SCENES]> {
+        self.drawing.escape_scenes()
     }
 
     /// The run whose terminal `RunState` and `RunEnd` are now both in, whichever came last,
