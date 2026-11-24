@@ -991,6 +991,106 @@ fn a_replacement_saved_after_the_user_ended_its_run_reports_no_loss() {
 }
 
 #[test]
+fn a_second_replacement_saved_after_its_run_closed_does_not_tell_the_loss_again() {
+    let mut drawing = Drawing::default();
+    let mut store = Store::default();
+    replaced(&mut drawing, &mut store, 1);
+    store.run(
+        &mut drawing,
+        streamed(
+            "again",
+            0,
+            r#"{"begin":{"v":1,"scene":"again","surface":"overlay","alt":""}}"#,
+        ),
+    );
+    let held = drawing
+        .handle(streamed("again", 1, &step(&text("again", "again"))))
+        .expect("a fresh step");
+    let (_, write) = sent(&held).expect("the second replacement's first step is being saved");
+
+    let ended = store.run(&mut drawing, closed(1));
+    assert_eq!(notices_in(&ended), []);
+    let first = store.run(&mut drawing, first_step_failed());
+    assert_eq!(notices_in(&first), [(THREAD, RunId(1))]);
+
+    let committed = reply(&mut drawing, &held, Ok(store.answer(&write)));
+    let committed = store.settle(&mut drawing, committed);
+    assert!(committed.effects.iter().any(|effect| matches!(
+        effect,
+        Effect::RetireScenes { scenes, successor: Some(SceneId(3)) } if scenes == &[SceneId(2)]
+    )));
+    assert_eq!(notices_in(&committed), []);
+
+    let second = store.run(
+        &mut drawing,
+        Input::StepFailed {
+            run: RunId(1),
+            scene: SceneId(3),
+            index: 0,
+            reason: SceneFailure::Timeout,
+            cut: cut(0, vec![]),
+        },
+    );
+    assert_eq!(notices_in(&second), []);
+
+    store.run(
+        &mut drawing,
+        call(2, "old", args("later-old", &[text("old", "old")])),
+    );
+    store.run(
+        &mut drawing,
+        call(
+            2,
+            "new",
+            replacement_args("later-new", &[text("new", "new")]),
+        ),
+    );
+    let failed = store.run(&mut drawing, Input::SceneFailed { scene: SceneId(5) });
+    assert_eq!(notices_in(&failed), []);
+    let ended = store.run(&mut drawing, closed(2));
+    assert_eq!(notices_in(&ended), [(THREAD, RunId(2))]);
+}
+
+#[test]
+fn the_last_admitted_call_can_replace_again_without_telling_the_loss_again() {
+    let mut drawing = Drawing {
+        tuning: DrawingTuning {
+            calls: 4,
+            ..DrawingTuning::default()
+        },
+        ..Drawing::default()
+    };
+    let mut store = Store::default();
+    replaced(&mut drawing, &mut store, 1);
+    store.run(
+        &mut drawing,
+        call(1, "keep", args("keep", &[text("keep", "keep")])),
+    );
+    store.run(
+        &mut drawing,
+        streamed(
+            "again",
+            0,
+            r#"{"begin":{"v":1,"scene":"again","surface":"overlay","alt":""}}"#,
+        ),
+    );
+    let first = store.run(&mut drawing, first_step_failed());
+    assert_eq!(notices_in(&first), [(THREAD, RunId(1))]);
+
+    let committed = store.run(
+        &mut drawing,
+        streamed("again", 1, &step(&text("again", "again"))),
+    );
+    assert!(committed.effects.iter().any(|effect| matches!(
+        effect,
+        Effect::RetireScenes { scenes, successor: Some(SceneId(4)) } if scenes == &[SceneId(3)]
+    )));
+    assert_eq!(notices_in(&committed), []);
+    let second = store.run(&mut drawing, Input::SceneFailed { scene: SceneId(4) });
+    assert_eq!(notices_in(&second), []);
+}
+
+#[test]
 fn deleting_the_thread_drops_its_loss_silently() {
     let mut drawing = Drawing::default();
     let mut store = Store::default();

@@ -150,9 +150,11 @@ takes from the run's outcome: `Drop` for `Interrupted(Stop | Replaced | Deleted)
 caused, and `Tell` for every other end, including `Done` and `Failed`. Either way the ledger
 leaves with the run. After `Drop`, none of the run's scenes reports a loss, including a
 replacement whose first step was still being saved. After `Tell`, a scene of the run that still
-shows nothing and fails later is told at once, at most once per run. A thread deletion drops its
-runs' losses silently. A run that loses a replacement and then paints a different drawing gives
-no notice.
+shows nothing and fails later is told at once if the run hasn't already reported a loss. Once
+told, the run can't warn again, including for a replacement still being saved or a first step
+its last admitted call writes later. A thread deletion drops its runs' losses silently. A run
+that loses a replacement and then paints a different drawing before the loss is told gives no
+notice.
 Whole-scene `SceneFailed` refusals derive their original
 identity here even when the shell had no run at header refusal; they are distinct from explicit
 `ClearDrawing` requests. The shell retains only its existing single notice, filters it by
