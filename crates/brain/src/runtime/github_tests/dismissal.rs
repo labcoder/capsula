@@ -184,11 +184,9 @@ async fn an_unobserved_connected_save_is_terminal_for_both_wire_cancel_and_eof()
         settle_owner(&mut accounts).await;
         let stamp = accounts.github.machine().stamp();
         let fence = accounts.github.machine().fence();
-        let snapshot = GitHubView::Connected {
+        let snapshot = GitHubView::ConnectedUnlisted {
             login: GitHubLogin::new("owner-sentinel").unwrap(),
-            repos: kumochi_scene::text::Bounded::default(),
-            truncated: false,
-            default: None,
+            listing: true,
         };
         assert_eq!(accounts.github.machine().view(Instant::now()), snapshot);
         assert_eq!(store.writes.load(Ordering::SeqCst), 1);

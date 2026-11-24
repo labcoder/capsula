@@ -135,11 +135,9 @@ async fn short_lifetimes_schedule_a_positive_delay_before_expiry_without_immedia
         let connected = m.stamp();
         let delay = Duration::from_millis(delay_ms);
         assert!(matches!(effects.as_slice(), [
-            Effect::RefreshRepos { generation },
             Effect::Wake(at),
-            Effect::View(GitHubView::Connected { .. }),
-        ] if *generation == connected.generation
-            && *at == now + delay
+            Effect::View(GitHubView::ConnectedUnlisted { listing: false, .. }),
+        ] if *at == now + delay
             && *at > now
             && *at < now + Duration::from_secs(lifetime)));
         assert_eq!(m.user(), Some(&user()));
@@ -391,16 +389,16 @@ async fn rotation_checks_the_numeric_user_and_saves_the_whole_new_pair_before_co
     assert_eq!(m.repositories(), None);
     let effects = m.on(Input::Saved { stamp, saved: true }, Instant::now());
     assert!(matches!(effects.as_slice(), [
-        Effect::RefreshRepos { generation },
         Effect::Wake(at),
-        Effect::View(GitHubView::Connected { login, .. }),
-    ] if *generation == stamp.generation + 1
-        && *at == Instant::now() + Duration::from_mins(59)
+        Effect::View(GitHubView::ConnectedUnlisted { login, listing: false }),
+    ] if *at == Instant::now() + Duration::from_mins(59)
         && *login == renamed.login));
+    assert_eq!(m.stamp().generation, stamp.generation + 1);
     assert_eq!(m.user(), Some(&renamed));
     assert_eq!(m.token().unwrap().expose().as_str(), "ghu_rotated_sentinel");
     assert_eq!(m.repositories(), None);
     let repo = RepoName::new("Owner/After").unwrap();
+    m.on(Input::Op(GitHubOp::RefreshRepos), Instant::now());
     m.on(
         Input::Repos {
             generation: m.stamp().generation,

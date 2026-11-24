@@ -14,7 +14,7 @@ use gpui_kit::{
 use kumochi_protocol::message::{GitHubOp, GitHubView, RepoName, VERIFICATION_URI};
 
 use super::super::Presence;
-use super::SettingsView;
+use super::{SettingsTab, SettingsView};
 use crate::link::Session;
 use crate::strings::{Strings, Text};
 
@@ -66,7 +66,7 @@ fn configured(_: &SettingsView) -> bool {
 }
 
 impl SettingsView {
-    fn github_generation(&self, cx: &App) -> Option<u64> {
+    pub(super) fn github_generation(&self, cx: &App) -> Option<u64> {
         self.owner
             .upgrade()?
             .read(cx)
@@ -98,6 +98,7 @@ impl SettingsView {
                 GitHubView::SignedOut { .. }
                 | GitHubView::Requesting
                 | GitHubView::AwaitingUser { .. }
+                | GitHubView::ConnectedUnlisted { .. }
                 | GitHubView::NotInstalled { .. }
                 | GitHubView::NeedsSignIn { .. }
                 | GitHubView::NotVerified { .. },
@@ -119,6 +120,31 @@ impl SettingsView {
                 let _gone = view.update(cx, |_, cx| cx.notify());
             })
         });
+    }
+
+    pub(super) fn schedule_github_on_open(&self, cx: &mut Context<'_, Self>) {
+        let state = &self.model.read(cx).github;
+        if !state.list_on_accounts_visit(state.generation) {
+            return;
+        }
+        let owner = self.owner.clone();
+        cx.defer(move |cx| {
+            let _gone = owner.update(cx, Presence::refresh_github_on_accounts_open);
+        });
+    }
+
+    pub(super) fn accounts_opened(&self, generation: Option<u64>, cx: &mut Context<'_, Self>) {
+        let available = self.tab == SettingsTab::Accounts && configured(self);
+        #[cfg(debug_assertions)]
+        let available = available && !self.fixture;
+        self.model.update(cx, |model, _| {
+            if available {
+                model.github.open_accounts_visit(generation);
+            } else {
+                model.github.close_accounts_visit();
+            }
+        });
+        self.schedule_github_on_open(cx);
     }
 
     pub(super) fn choose_github_repo(
@@ -149,6 +175,7 @@ impl SettingsView {
             GitHubOp::RefreshRepos => "github-refresh",
             GitHubOp::SignOut => "github-sign-out",
             GitHubOp::SetDefaultRepo(_) => unreachable!("repository selection uses Select"),
+            GitHubOp::ListReposIfUnlisted => unreachable!("opening Accounts loads a missing list"),
         };
         let state = &self.model.read(cx).github;
         let generation = state.generation;
@@ -344,6 +371,18 @@ impl SettingsView {
         if matches!(state.view, Some(GitHubView::Connected { .. })) {
             block = block.child(self.github_repositories(cx));
         }
+        if matches!(
+            state.view,
+            Some(GitHubView::ConnectedUnlisted { listing: false, .. })
+        ) && status == Text::GitHubConnected
+        {
+            block = block.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(strings.get(Text::GitHubUnlistedRepositories)),
+            );
+        }
         if let Some(error) = state.error_text() {
             block = block.child(
                 div()
@@ -374,6 +413,19 @@ impl SettingsView {
 }
 
 impl Presence {
+    fn refresh_github_on_accounts_open(&mut self, cx: &mut Context<'_, Self>) {
+        let current = self.session.as_ref().map(Session::generation);
+        if self.settings_open()
+            && self
+                .settings
+                .read(cx)
+                .github
+                .list_on_accounts_visit(current)
+        {
+            self.github_op(GitHubOp::ListReposIfUnlisted, cx);
+        }
+    }
+
     pub(in crate::presence) fn settle_github_interactive(&mut self, cx: &mut Context<'_, Self>) {
         let current = self.session.as_ref().map(Session::generation);
         let state = &self.settings.read(cx).github;
@@ -431,6 +483,8 @@ impl Presence {
     }
 
     pub(in crate::presence) fn dismiss_github_settings(&mut self, cx: &mut Context<'_, Self>) {
+        self.settings
+            .update(cx, |model, _| model.github.close_accounts_visit());
         let interactive = self.settings_panel.as_ref().and_then(|panel| {
             panel
                 .view

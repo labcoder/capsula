@@ -45,6 +45,46 @@ fn connected() -> GitHubView {
     }
 }
 
+#[test]
+fn a_bound_draft_waits_for_listing_instead_of_needing_replacement() {
+    use crate::presence::messages::consent::machine::{fileable, repository_listing_hint};
+    use crate::strings::Text;
+
+    let mut f = fixture(ActionState::Draft);
+    let card = f.models[0]
+        .issue(DraftId(9))
+        .unwrap()
+        .card()
+        .unwrap()
+        .clone();
+    for (login, listing, expected) in [
+        ("octo", false, Some(Text::IssueListRepositories)),
+        ("octo", true, Some(Text::GitHubRefreshing)),
+        ("another", false, None),
+    ] {
+        assert!(f.settings.github.receive(
+            Some(1),
+            1,
+            GitHubView::ConnectedUnlisted {
+                login: GitHubLogin::new(login).unwrap(),
+                listing,
+            },
+            Instant::now(),
+        ));
+        let connection = Some((&f.session, &f.settings));
+        assert_eq!(repository_listing_hint(&card, connection), expected);
+        assert!(!fileable(&card, connection));
+    }
+    assert!(
+        f.settings
+            .github
+            .receive(Some(1), 1, connected(), Instant::now())
+    );
+    let connection = Some((&f.session, &f.settings));
+    assert_eq!(repository_listing_hint(&card, connection), None);
+    assert!(fileable(&card, connection));
+}
+
 fn page(request: u32) -> DataToShell {
     DataToShell::Page {
         request,

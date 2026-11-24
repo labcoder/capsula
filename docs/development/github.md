@@ -366,12 +366,25 @@ The adapter borrows the sender and creates no second credential worker or accoun
 cache. Numeric identity remains the machine's connected identity; fetched membership,
 Store admission and separately reviewed activation remain prerequisites to filing.
 
-Successful saved-account verification at startup and successful renewal both
-start a fresh complete repository traversal. Each identity request has its existing
-15-second request/body limit; each traversal shares 60 seconds and at most twelve
-requests, with at most two 100-row pages per resource and 200 unique repositories.
-These bounds apply to background refresh as well as the explicit Refresh command;
-they do not bound client construction or promise one combined startup deadline.
+Startup and automatic renewal check the saved account's identity, not its
+installations or repositories. Entering visible Settings → Accounts requests a
+missing list once the current session has a verified GitHub account. It leaves
+an already complete list and any filing that uses it alone. Leaving the tab,
+dismissing Settings, or replacing the shell session drops the entry's intent;
+a sent refresh can finish. An entry opened before the first handshake belongs
+to that first session only, even if it ends before the first GitHub snapshot.
+An entry still waiting for a listing can survive a renewal in the same session,
+but renewing after a listing was acknowledged does not start another. Connect,
+Check again and Refresh still allow listing through the explicit GitHub controls.
+
+`ConnectedUnlisted` (wire tag 7) distinguishes a verified account with no complete
+current-generation list from a complete empty list. It carries no repository
+authority. An in-flight refresh clears choices and prevents a duplicate refresh,
+but does not block sign-out.
+No change is made to review approval or the separate per-attempt identity and
+membership checks before filing. Each identity request has a 15-second
+request/body limit; each listing shares 60 seconds and at most twelve requests,
+with at most two 100-row pages per resource and 200 unique repositories.
 
 GitHub records use the same credential thread, vault session lock and write-once
 generation names as other accounts. The record contains the checked `ghu_`/`ghr_` pair,

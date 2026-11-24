@@ -1,6 +1,6 @@
 use super::super::*;
 use super::connection;
-use super::machine::{bound_to_connection, fileable};
+use super::machine::{bound_to_connection, fileable, repository_listing_hint};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::{ScrollHandle, StatefulInteractiveElement as _};
@@ -113,6 +113,20 @@ impl Labels {
             replacement: strings.get(Text::IssueReplacement).into(),
         }
     }
+
+    fn unavailable(&self, listing_hint: Option<Text>, cx: &App) -> impl IntoElement {
+        let (id, text) = if let Some(hint) = listing_hint {
+            (
+                "issue-repository-listing",
+                cx.global::<Strings>().get(hint).into(),
+            )
+        } else {
+            ("issue-replacement", self.replacement.clone())
+        };
+        div()
+            .debug_selector(move || id.into())
+            .child(gpui_kit::Text::new(id.into(), text))
+    }
 }
 
 pub(in crate::presence::messages) fn controls(
@@ -138,7 +152,8 @@ pub(in crate::presence::messages) fn controls(
         card.state,
         ActionState::Draft | ActionState::Failed(_) | ActionState::Unknown { .. }
     );
-    let file = fileable(card, connection(owner, cx)) && !entry.review_blocked();
+    let connection = connection(owner, cx);
+    let file = fileable(card, connection) && !entry.review_blocked();
     let pending = entry.pending();
     let mut controls = div().flex().flex_col().gap_2();
     if actionable {
@@ -204,11 +219,10 @@ pub(in crate::presence::messages) fn controls(
         if !pending
             && !entry.review_blocked()
             && ((!file && !matches!(card.state, ActionState::Unknown { .. }))
-                || !bound_to_connection(card, connection(owner, cx)))
+                || !bound_to_connection(card, connection))
         {
-            controls = controls.child(div().debug_selector(|| "issue-replacement".into()).child(
-                gpui_kit::Text::new("issue-replacement".into(), labels.replacement.clone()),
-            ));
+            controls =
+                controls.child(labels.unavailable(repository_listing_hint(card, connection), cx));
         }
     }
     controls.into_any_element()

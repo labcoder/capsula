@@ -612,6 +612,14 @@ impl GitHub {
         events: &mpsc::UnboundedSender<Event>,
         http: &HttpFactory,
     ) -> Vec<ControlToShell> {
+        if op == GitHubOp::ListReposIfUnlisted
+            && (self.unsupported
+                || self.session.is_none()
+                || self.verification.is_some()
+                || !self.machine.can_list_repositories())
+        {
+            return self.opened();
+        }
         if self.unsupported
             && matches!(
                 op,

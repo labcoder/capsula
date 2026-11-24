@@ -121,13 +121,14 @@ impl Presence {
         if !self.settings_open() {
             self.toggle_settings(cx)?;
         }
+        let generation = self.session.as_ref().map(crate::link::Session::generation);
         let panel = self.settings_panel.as_ref().expect("settings opened above");
         panel
             .window
             .update(cx, |_, window, cx| {
                 panel
                     .view
-                    .update(cx, |view, cx| view.select_tab(tab, window, cx));
+                    .update(cx, |view, cx| view.select_tab(tab, generation, window, cx));
             })
             .map_err(|error| OpenError::Gpui(error.into()))?;
         Ok(())
@@ -242,6 +243,7 @@ impl Presence {
         self.pointer_settle = None;
         self.set_panel(super::super::PanelVisibility::Hidden, cx)?;
         let area = platform::work_area()?;
+        let generation = self.session.as_ref().map(crate::link::Session::generation);
         let panel = self.settings_panel.as_mut().expect("created above");
         let rem = panel
             .window
@@ -271,6 +273,9 @@ impl Presence {
                     }
                     Err(error) => tracing::warn!(%error, "can't focus the settings panel"),
                 }
+                panel
+                    .view
+                    .update(cx, |view, cx| view.accounts_opened(generation, cx));
                 Ok::<_, platform::PresenceError>(())
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;

@@ -126,6 +126,7 @@ impl SettingsView {
         );
         let watch = cx.observe_in(&model, window, |view, _, window, cx| {
             view.sync_github(window, cx);
+            view.schedule_github_on_open(cx);
             let account = &view.model.read(cx).accounts;
             if view.confirmation.as_ref().is_some_and(|(generation, _)| {
                 account.generation != Some(*generation)
@@ -211,9 +212,27 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn select_tab(&mut self, tab: SettingsTab, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.tab = tab;
+    fn select_tab(
+        &mut self,
+        tab: SettingsTab,
+        generation: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.switch_tab(tab, generation, cx);
         self.finish_edit(window, cx);
+    }
+
+    fn switch_tab(
+        &mut self,
+        tab: SettingsTab,
+        generation: Option<u64>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.tab != tab {
+            self.tab = tab;
+            self.accounts_opened(generation, cx);
+        }
     }
 
     #[cfg(debug_assertions)]
@@ -325,7 +344,7 @@ impl SettingsView {
                 view.confirmation = None;
                 crate::confirmation::retire_in(window, cx);
                 window.close_all_dialogs(cx);
-                view.tab = tab;
+                view.switch_tab(tab, view.github_generation(cx), cx);
                 cx.notify();
             }))
     }
@@ -354,10 +373,10 @@ impl Render for SettingsView {
             .track_focus(&self.focus)
             .on_action(move |_: &Escape, _, _| send(&events, PresenceEvent::Escape))
             .on_action(cx.listener(|view, _: &NextTab, window, cx| {
-                view.select_tab(view.tab.next(), window, cx);
+                view.select_tab(view.tab.next(), view.github_generation(cx), window, cx);
             }))
             .on_action(cx.listener(|view, _: &PreviousTab, window, cx| {
-                view.select_tab(view.tab.previous(), window, cx);
+                view.select_tab(view.tab.previous(), view.github_generation(cx), window, cx);
             }))
             .child(
                 div()

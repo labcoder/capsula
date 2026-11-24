@@ -84,6 +84,39 @@ pub(super) async fn posting_acknowledgement(
 }
 
 #[tokio::test]
+async fn opening_accounts_does_not_interrupt_a_filing_with_a_complete_list() {
+    let scratch = Scratch::new("github-filing-accounts-open");
+    let server = Arc::new(FilingServer::default());
+    let (mut brain, action) = reviewed_filing_owner(&scratch, &server).await;
+    let (posting, _) = posting_acknowledgement(&mut brain, &action).await;
+    brain
+        .github_op(
+            kumochi_protocol::message::GitHubOp::ListReposIfUnlisted,
+            None,
+        )
+        .unwrap();
+    let effects = brain.handle(posting).unwrap();
+    brain.apply(effects, None).unwrap();
+    assert_eq!(
+        super::storage::settle(&mut brain).await,
+        vec![ControlToShell::ActionState {
+            request: Some(601),
+            draft: action.draft,
+            version: StateVersion(5),
+            state: ActionState::Filed {
+                number: 17,
+                url: IssueUrl::new("https://github.com/owner/repo/issues/17").unwrap(),
+                confirmed_by_user: false,
+                maybe_duplicate: false,
+            },
+            approval: None,
+        }]
+    );
+    assert_eq!(server.posts.load(Ordering::SeqCst), 1);
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn final_permit_rechecks_same_generation_repository_authority_after_posting_commits() {
     use crate::connections::github::api::ApiError;
 
