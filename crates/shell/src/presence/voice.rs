@@ -632,15 +632,16 @@ impl Presence {
         input: &ReleaseInput,
         lease: Option<LeaseGeneration>,
     ) -> bool {
-        let seen = (
-            (self.runs.thread(), self.runs.revision()),
-            self.link.choice_revision(),
-            self.session.as_ref(),
-        );
         self.voice.state.permits(
             gesture,
-            seen,
             || input.continuous() && self.native.escape_trusted() && self.link.input_is(gesture),
+            || {
+                (
+                    (self.runs.thread(), self.runs.revision()),
+                    self.link.choice_revision(),
+                    self.session.as_ref(),
+                )
+            },
             || lease.is_none_or(|lease| self.exclusion.live(lease)),
         )
     }
@@ -839,22 +840,20 @@ impl Presence {
         let queued =
             self.link.audio_session() == kumochi_protocol::message::AudioSession::QueuedRequired;
         let settings = self.settings.read(cx);
-        let link = &self.link;
-        let busy = || {
-            queued
-                && (!link.admits_voice(stamp.session)
-                    || settings.view().is_none()
-                    || settings.show_screen_pending())
-                || link.voice_stop_pending()
-        };
-        if let Some(notice) = self
-            .voice
-            .state
-            .held_back(settings.hold_to_talk_notice(), busy)
-        {
+        if let Some(notice) = State::held_back(
+            queued,
+            || {
+                self.link.admits_voice(stamp.session)
+                    && settings.view().is_some()
+                    && !settings.show_screen_pending()
+            },
+            || settings.hold_to_talk_notice(),
+            || self.link.voice_stop_pending(),
+        ) {
             tracing::debug!(stage = ?FailureStage::Admission, reason = ?notice, "held speech input refused");
             self.unused_voice(&token, self.session.as_ref());
             self.link.clear_input(gesture);
+            self.voice.state.admission_refused(notice);
             self.refresh_dock(cx);
             self.refresh_conversation(cx);
             return;

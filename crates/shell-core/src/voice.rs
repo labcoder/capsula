@@ -652,28 +652,36 @@ impl State {
     /// display shows and after the screen watch is told, never kept: its live hold under the
     /// target, choice and connection it was recognized under, then `input` (a continuous,
     /// trusted release on its own input fence), then `lease` (its capture lease still live).
-    pub fn permits(
+    pub fn permits<'a>(
         &self,
         gesture: GestureId,
-        (target, choice, session): (Target, u64, Option<&Session>),
         input: impl FnOnce() -> bool,
+        current: impl FnOnce() -> (Target, u64, Option<&'a Session>),
         lease: impl FnOnce() -> bool,
     ) -> bool {
-        self.live(gesture)
-            && self
-                .pending
-                .as_ref()
-                .is_some_and(|hold| hold.stamp.current(target, choice, session))
-            && input()
-            && lease()
+        input()
+            && self.pending.as_ref().is_some_and(|hold| {
+                if hold.token.gesture() != gesture || hold.terminal.is_some() {
+                    return false;
+                }
+                let (target, choice, session) = current();
+                hold.stamp.current(target, choice, session) && lease()
+            })
     }
 
-    /// A recognition hold-to-talk can't take (`off`), or one a queued pair's pending consent or
-    /// a voice stop still owed holds back as busy: that notice shows.
-    pub fn held_back(&mut self, off: Option<Text>, busy: impl FnOnce() -> bool) -> Option<Text> {
-        let notice = off.or_else(|| busy().then_some(Text::TurnBusy))?;
+    /// Samples queued consent before settings, then a stop still owed only if neither refused.
+    pub fn held_back(
+        queued: bool,
+        consent: impl FnOnce() -> bool,
+        off: impl FnOnce() -> Option<Text>,
+        stop_owed: impl FnOnce() -> bool,
+    ) -> Option<Text> {
+        let consent_pending = queued && !consent();
+        off().or_else(|| (consent_pending || stop_owed()).then_some(Text::TurnBusy))
+    }
+
+    pub fn admission_refused(&mut self, notice: Text) {
         self.status = Some(notice);
-        Some(notice)
     }
 
     /// The warning a listening hold gets near `token`'s deadline: still before it, its notice

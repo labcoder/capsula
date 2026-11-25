@@ -320,12 +320,12 @@ fn a_release_is_current_only_under_its_own_target_choice_and_pair() {
     let yes = || true;
     let never = || -> bool { panic!("read after the hold refused") };
     let permits = |gesture, target, choice, session| {
-        state.permits(GestureId(gesture), (target, choice, session), never, never)
+        state.permits(GestureId(gesture), yes, || (target, choice, session), never)
     };
     assert!(state.permits(
         GestureId(1),
-        (STAMP.target, STAMP.choice, Some(&open)),
         yes,
+        || (STAMP.target, STAMP.choice, Some(&open)),
         yes
     ));
     assert!(!permits(2, STAMP.target, STAMP.choice, Some(&open)));
@@ -338,13 +338,18 @@ fn a_release_is_current_only_under_its_own_target_choice_and_pair() {
     assert!(!permits(1, STAMP.target, 3, Some(&open)));
     let next = Session::detached(STAMP.session + 1, Incarnation(1));
     assert!(!permits(1, STAMP.target, STAMP.choice, Some(&next)));
-    let seen = (STAMP.target, STAMP.choice, Some(&open));
+    let seen = || (STAMP.target, STAMP.choice, Some(&open));
     assert!(
-        !state.permits(GestureId(1), seen, || false, never),
+        !state.permits(
+            GestureId(1),
+            || false,
+            || panic!("read after untrusted input"),
+            never
+        ),
         "an untrusted release"
     );
     assert!(
-        !state.permits(GestureId(1), seen, yes, || false),
+        !state.permits(GestureId(1), yes, seen, || false),
         "a revoked lease"
     );
     open.close();
@@ -376,16 +381,31 @@ fn only_an_unclaimed_or_retired_generation_tells_its_session() {
 #[test]
 fn a_disabled_or_busy_recognition_is_held_back_with_its_notice() {
     let mut state = State::default();
-    let unasked = || -> bool { panic!("hold-to-talk is off") };
-    assert_eq!(
-        state.held_back(Some(Text::VoiceNotInstalled), unasked),
-        Some(Text::VoiceNotInstalled)
-    );
-    assert_eq!(state.status, Some(Text::VoiceNotInstalled));
-    assert_eq!(state.held_back(None, || true), Some(Text::TurnBusy));
-    state.status = None;
-    assert_eq!(state.held_back(None, || false), None);
+    let unasked = || -> bool { panic!("didn't need this check") };
+    let consent_seen = std::cell::Cell::new(false);
+    let notice = State::held_back(
+        true,
+        || {
+            consent_seen.set(true);
+            false
+        },
+        || consent_seen.get().then_some(Text::VoiceNotInstalled),
+        unasked,
+    )
+    .expect("hold-to-talk refusal wins after reading consent");
+    assert_eq!(notice, Text::VoiceNotInstalled);
     assert_eq!(state.status, None);
+    state.admission_refused(notice);
+    assert_eq!(state.status, Some(Text::VoiceNotInstalled));
+    assert_eq!(
+        State::held_back(true, || false, || None, unasked),
+        Some(Text::TurnBusy)
+    );
+    assert_eq!(
+        State::held_back(false, unasked, || None, || true),
+        Some(Text::TurnBusy)
+    );
+    assert_eq!(State::held_back(false, unasked, || None, || false), None);
 }
 
 #[test]
