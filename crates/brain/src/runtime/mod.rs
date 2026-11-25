@@ -214,6 +214,7 @@ pub(crate) struct Brain {
     config_write: Option<settings::Write>,
     /// The account system; its credential work runs on its own thread.
     account: Accounts,
+    issue_epochs: issues::IssueEpochs,
     filing: issues::Filing,
     /// Claude Code's connection; its calls run on its own lane.
     claude: claude::Claude,
@@ -283,9 +284,8 @@ impl Brain {
     ) -> std::io::Result<Self> {
         account.github.restore_default(config.github_default());
         account.github.tuning = config.github_tuning();
-        account
-            .connections
-            .configure_transport(config.model_tuning());
+        let connections = &mut account.connections;
+        connections.configure_transport(config.model_tuning());
         #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
         let (engine, access, fixture) = match engine {
             #[cfg(any(test, debug_assertions))]
@@ -360,6 +360,7 @@ impl Brain {
             settings_ops: VecDeque::new(),
             config_write: None,
             account,
+            issue_epochs: issues::IssueEpochs::default(),
             filing: issues::Filing::new(),
             claude: claude::Claude::default(),
             #[cfg(test)]

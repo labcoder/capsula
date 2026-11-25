@@ -11,6 +11,7 @@ async fn failed_request_identities_are_fenced_at_zero_and_max_until_the_session_
     let scratch = crate::test_support::Scratch::new("github-filing-request-watermark");
     let mut brain = crate::test_support::brain(&scratch, "");
     let session = brain.prepare_issue_session(Incarnation(1));
+    assert_eq!(session.epoch, 1);
     for request in [0, u64::MAX] {
         let effects = brain
             .issue_op(
@@ -62,8 +63,11 @@ async fn failed_request_identities_are_fenced_at_zero_and_max_until_the_session_
         assert_eq!(brain.filing.deadline_for_test(), None);
         assert!(!brain.filing.pending());
     }
+    let reserved = brain.reserve_issue_session(Incarnation(1));
+    assert_eq!(reserved.epoch, 2);
+    assert_eq!(brain.issue_session(), Some(session));
     let replacement = brain.prepare_issue_session(Incarnation(1));
-    assert_eq!(replacement.epoch, session.epoch + 1);
+    assert_eq!(replacement.epoch, 3);
     for stale in [
         session,
         IssueSession {

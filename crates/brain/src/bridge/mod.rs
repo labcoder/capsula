@@ -85,7 +85,7 @@ pub enum BridgeError {
 /// # Errors
 /// [`BridgeError`]; a lost pipe isn't one, since the launch ends with it.
 pub fn serve(launch: &str) -> Result<(), BridgeError> {
-    platform::require_native_runtime().map_err(BridgeError::NativeRuntime)?;
+    platform::require_mode(platform::Mode::Detached).map_err(BridgeError::NativeRuntime)?;
     // A bridge that failed to start would make the audit refuse every launch, so logging is optional.
     if crate::logging::init(BRIDGE_LOG).is_err() {
         crate::logging::install_panic_hook();
