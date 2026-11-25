@@ -514,9 +514,12 @@ file or read the wrong one:
 The path goes to SQLite as a `file:` URI with every byte but unreserved ones percent-encoded, so
 separators, drive colons and UNC prefixes reach the VFS unchanged.
 
-Nothing calls it yet. A caller must already exclude writers, because `immutable` takes no lock and
-the file check happens before the open, not atomically with it: a WAL removed in between is
-created again as an empty file. No other connection to that database may be open in the same
+Nothing calls it yet. It takes the caller's `SessionLock` and returns a connection borrowed from
+it, so the lock stays held through SQLite's last use. That excludes only writers that take the
+same lock, and `immutable` takes none of its own while the file check happens before the open,
+not atomically with it: a WAL removed in between is created again as an empty file. The
+credential authority is only written under that lock. The history store isn't yet, since the
+brain opens it before taking the lock, so it isn't read through this opener. No other connection to that database may be open in the same
 process, since SQLite shares one index handle per process. SQLite run as root re-owns the WAL and index to the main
 file's owner; Kumochi doesn't run as root. Unit tests compare each file's name, bytes,
 permissions and owner before and after: a closed database, a copy left with a live WAL, every
