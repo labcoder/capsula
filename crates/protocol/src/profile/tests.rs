@@ -53,6 +53,10 @@ fn first_open_needs_disjoint_targets_and_definite_absence() {
             ..fresh
         },
         ProfileFacts {
+            lock: Matching,
+            ..fresh
+        },
+        ProfileFacts {
             history: Unverified,
             ..fresh
         },
@@ -115,6 +119,11 @@ fn resume_requires_the_exact_durable_prefix_and_never_reissues_an_uncertain_writ
         ..before
     };
     for facts in [
+        ProfileFacts {
+            root: Root::Pending(Step::Owner, Intent::Unstarted),
+            fresh_namespace: Destination::Unverified,
+            ..EMPTY
+        },
         before,
         ProfileFacts {
             authority: Matching,

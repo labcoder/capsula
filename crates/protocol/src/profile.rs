@@ -100,7 +100,8 @@ pub enum Decision {
     FirstUse,
     /// Reopen without creating, subject to independent admission by the actual owner.
     OpenExisting,
-    /// An identifiable setup can be resumed after revalidation.
+    /// Reinspect the pending setup only. Even an unstarted owner reservation must revalidate
+    /// the credential namespace under the reacquired guard before any write.
     ResumeSetup,
     /// Another session is active.
     Busy,

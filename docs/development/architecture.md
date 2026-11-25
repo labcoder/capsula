@@ -105,8 +105,10 @@ stub that reports itself unavailable, never the other way round.
 The shared, read-only `protocol::profile` classifier describes a local installation, not a
 Kumochi account. First open can be a background setup candidate only with positive evidence
 for a disjoint protected root and credential namespace, and definite absence of all known
-profile footprints. An intact installation reopens; an identifiable pending setup may resume
-only at its verified step. Uncertain or conflicting evidence leaves the data untouched.
+profile footprints. An intact installation can reopen. `ResumeSetup` permits reinspection
+only: even a pending, unstarted owner reservation can receive this result while its credential
+namespace is unverified. A writer must reacquire the guard and revalidate that namespace and
+the exact step before any write. Uncertain or conflicting evidence leaves the data untouched.
 Windows and macOS use the same policy. No native observer or executable calls it yet, and its
 decisions do not authorize writes, reconnect a provider, or identify a person.
 
