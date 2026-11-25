@@ -39,7 +39,7 @@ impl Presence {
     }
 
     pub(super) fn place_drawings(&mut self, owner: WeakEntity<Self>, cx: &mut App) {
-        let Ok(area) = crate::platform::work_area() else {
+        let Ok(area) = crate::platform::work_area(cx) else {
             tracing::warn!("can't refresh the drawing stage");
             return;
         };

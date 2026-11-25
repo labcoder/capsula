@@ -10,8 +10,12 @@ pub(crate) use macos::logging::Admitted;
 pub(crate) use kumochi_shell::presence_platform::{PresenceError, require_connected_geometry};
 #[cfg(all(not(windows), not(test)))]
 pub(crate) use kumochi_shell::presence_platform::{
-    client_origin, hide_presence_window, place_presence_window, work_area,
+    client_origin, hide_presence_window, place_presence_window,
 };
+#[cfg(all(not(windows), not(test)))]
+pub(crate) fn work_area(_: &gpui_kit::App) -> Result<[i32; 4], PresenceError> {
+    kumochi_shell::presence_platform::work_area()
+}
 
 mod connected_events;
 mod connected_keyboard;
@@ -102,6 +106,12 @@ pub(crate) mod work_area_fixture {
     pub(crate) fn get() -> Option<[i32; 4]> {
         AREA.get()
     }
+
+    #[cfg(windows)]
+    pub(crate) struct Headless;
+
+    #[cfg(windows)]
+    impl gpui_kit::Global for Headless {}
 
     impl Drop for Guard {
         fn drop(&mut self) {

@@ -519,7 +519,7 @@ impl Presence {
             panel_hwnd,
             scale: self.scale,
             position,
-            work_area: platform::work_area()?,
+            work_area: platform::work_area(cx)?,
             dock: self.layout.dock,
             overlay: self.layout.overlay,
             panel: self.layout.panel,

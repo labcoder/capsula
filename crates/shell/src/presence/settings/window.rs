@@ -241,7 +241,7 @@ impl Presence {
         self.protect_surface(super::super::exclusion::Slot::Settings, cx)?;
         self.pointer_settle = None;
         self.set_panel(super::super::PanelVisibility::Hidden, cx)?;
-        let area = platform::work_area()?;
+        let area = platform::work_area(cx)?;
         let generation = self.session.as_ref().map(crate::link::Session::generation);
         let panel = self.settings_panel.as_mut().expect("created above");
         let rem = panel

@@ -173,7 +173,7 @@ pub(crate) fn hide_presence_window(window: &mut impl HasWindowHandle) -> Result<
 }
 
 #[cfg(test)]
-pub(crate) fn work_area() -> Result<[i32; 4], PresenceError> {
+pub(crate) fn work_area(_: &gpui_kit::App) -> Result<[i32; 4], PresenceError> {
     super::work_area_fixture::get()
         .or(DetachedInputs::active().then_some([0, 0, 2560, 1400]))
         .map_or_else(geometry::work_area, Ok)

@@ -87,7 +87,7 @@ impl KumoView {
             return;
         };
         let placed =
-            platform::work_area().and_then(|area| Ok((area, platform::client_origin(window)?)));
+            platform::work_area(cx).and_then(|area| Ok((area, platform::client_origin(window)?)));
         let (area, origin) = match placed {
             Ok(placed) => placed,
             Err(error) => {
@@ -147,13 +147,13 @@ impl KumoView {
     fn pointer(
         &mut self,
         event: Event,
-        now: impl FnOnce() -> Result<PullSpace, PresenceError>,
+        now: impl FnOnce(&App) -> Result<PullSpace, PresenceError>,
         cx: &mut Context<'_, Self>,
     ) {
         if !self.pull_live() {
             return;
         }
-        let outcome = match now() {
+        let outcome = match now(cx) {
             Ok(space) => self.pulling.rescale(space),
             Err(error) => {
                 tracing::debug!(%error, "can't read the work area mid-pull");
@@ -244,7 +244,7 @@ pub(super) fn listen(bounds: Bounds<Pixels>, view: WeakEntity<KumoView>, window:
                 pressed: event.pressed_button.map(button),
             };
             update(&moved, cx, |view, cx| {
-                view.pointer(event, || space(window), cx);
+                view.pointer(event, |cx| space(window, cx), cx);
             });
         }
     });
@@ -254,7 +254,9 @@ pub(super) fn listen(bounds: Bounds<Pixels>, view: WeakEntity<KumoView>, window:
                 button: button(event.button),
                 at: point(event.position),
             };
-            update(&view, cx, |view, cx| view.pointer(up, || space(window), cx));
+            update(&view, cx, |view, cx| {
+                view.pointer(up, |cx| space(window, cx), cx)
+            });
         }
     });
 }
@@ -276,9 +278,9 @@ fn point(at: Point<Pixels>) -> [f32; 2] {
 }
 
 /// The work area and scale now.
-fn space(window: &Window) -> Result<PullSpace, PresenceError> {
+fn space(window: &Window, cx: &App) -> Result<PullSpace, PresenceError> {
     Ok(PullSpace {
-        area: platform::work_area()?,
+        area: platform::work_area(cx)?,
         scale: window.scale_factor(),
     })
 }
@@ -450,7 +452,7 @@ mod tests {
         let (view, seen, _) = grabbed(cx);
         let at = [300.0, -40.0];
         view.update(cx, |view, cx| {
-            view.pointer(Event::Up { button: LEFT, at }, || now, cx);
+            view.pointer(Event::Up { button: LEFT, at }, |_| now, cx);
         });
         let changes = seen.borrow();
         let [

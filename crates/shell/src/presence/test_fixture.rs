@@ -63,11 +63,11 @@ fn detached_defaults_do_not_replace_or_restore_expired_overrides() {
             "an area alone is not a keyboard fixture"
         );
         without_desktop(&mut app);
-        assert_eq!(platform::work_area().unwrap(), [20, 30, 600, 400]);
+        assert_eq!(app.read(platform::work_area).unwrap(), [20, 30, 600, 400]);
         assert_eq!(platform::cursor_position().unwrap(), [100, 100]);
     }
     assert!(event.layout_current());
-    assert_eq!(platform::work_area().unwrap(), [0, 0, 2560, 1400]);
+    assert_eq!(app.read(platform::work_area).unwrap(), [0, 0, 2560, 1400]);
     assert_eq!(platform::cursor_position().unwrap(), [4096, 4096]);
     platform::cursor_fixture::set(None);
     assert!(matches!(
@@ -77,15 +77,15 @@ fn detached_defaults_do_not_replace_or_restore_expired_overrides() {
     app.quit();
     drop(app);
     assert!(!event.layout_current());
+    let mut next = TestAppContext::single();
     assert!(matches!(
-        platform::work_area(),
+        next.read(platform::work_area),
         Err(platform::PresenceError::GeometryUnavailable)
     ));
     assert!(matches!(
         platform::cursor_position(),
         Err(platform::PresenceError::BindingsUnavailable)
     ));
-    let mut next = TestAppContext::single();
     without_desktop(&mut next);
     assert_eq!(platform::cursor_position().unwrap(), [4096, 4096]);
 }
@@ -102,6 +102,8 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
         without_desktop(cx);
     }
     cx.update(|cx| {
+        #[cfg(windows)]
+        cx.set_global(platform::work_area_fixture::Headless);
         gpui_kit::init(cx);
         cx.set_global(Strings::english());
         kumochi_scene::deferred::start().expect("the dropper starts before intake");

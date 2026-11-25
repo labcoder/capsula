@@ -74,9 +74,11 @@ AppKit termination does not return a caller-selected process status through GPUI
 status after native termination requires a separately validated native boundary.
 
 The connected presence requires native desktop geometry before opening any of its windows.
-Its Win32 backend still supplies physical work area and client origin and moves, shows, and hides
-windows without activation. Platforms without that backend refuse these operations; the local
-disconnected window uses GPUI's logical visible bounds and does not cross this boundary.
+On Windows the primary GPUI display supplies the work area through its visible bounds. The shell
+uses that monitor's effective DPI to round the logical bounds to physical pixels. Win32 still
+supplies the physical client origin and moves, shows, and hides windows without activation.
+Platforms without connected geometry refuse these operations; the local disconnected window uses
+GPUI's logical visible bounds and does not cross this boundary.
 Connected overlay bindings also require an admitted native owner before allocating windows.
 The local route never constructs that owner and does not bind overlay hit regions.
 Legacy panel activation similarly requires a native foreground backend; there is no placeholder
