@@ -156,9 +156,9 @@ pub struct HistoryFailure {
 /// Connection failures that can be named in saved history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HistoryFailureCause {
-    /// The ChatGPT plan connection requires sign-in again.
+    /// The `ChatGPT` plan connection requires sign-in again.
     ChatGptSignIn,
-    /// The ChatGPT plan reached its usage limit.
+    /// The `ChatGPT` plan reached its usage limit.
     ChatGptUsageLimit,
     /// Anthropic refused the configured key.
     AnthropicKeyRejected,
