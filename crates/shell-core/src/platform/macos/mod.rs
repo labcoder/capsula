@@ -13,6 +13,14 @@
 )]
 mod child;
 mod instance;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the Mac connection starts its brain child from I1e-2"
+    )
+)]
+mod pair;
 
 pub(crate) use instance::try_acquire_instance_lock;
 pub use kumochi_storage::application_support_dir as support_dir;
