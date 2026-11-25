@@ -18,7 +18,7 @@ use tokio::time::{Instant, timeout};
 
 use super::data::{DataQueue, Owner};
 use super::terminal::{Fatal, Fence, Terminal};
-use super::{Ended, QUIT_GRACE, Seen, close_wait, hold, read_control, read_data};
+use super::{Ended, PairStart, QUIT_GRACE, Seen, close_wait, hold, read_control, read_data};
 use crate::coordinator::StoreOp;
 use crate::ipc;
 use crate::platform::shell_process::{Unconfirmed, Verdict};
@@ -362,6 +362,7 @@ async fn an_initial_cause_refuses_to_open_the_session() {
                 &mut tap,
                 audio,
                 None,
+                PairStart::Ordinary,
                 Some(terminal),
             ),
         )
@@ -393,6 +394,7 @@ async fn an_idle_core_wakes_for_parent_exit_without_new_input() {
                 &mut tap,
                 audio,
                 None,
+                PairStart::Ordinary,
                 Some(terminal),
             ));
             assert_eq!(poll_once(serve.as_mut()), Poll::Pending);
@@ -429,6 +431,7 @@ async fn a_cause_stored_next_to_inputs_refuses_them_before_dispatch() {
                 &mut tap,
                 audio,
                 None,
+                PairStart::Ordinary,
                 Some(terminal),
             ));
             tokio::select! {
@@ -567,6 +570,7 @@ async fn an_accepted_quit_drains_its_delete_but_not_later_controls() {
                 &mut tap,
                 audio,
                 None,
+                PairStart::Ordinary,
                 Some(terminal),
             ),
         )
@@ -602,6 +606,7 @@ async fn fatal_interrupts_grace_with_an_empty_control_pipe() {
                 &mut tap,
                 audio,
                 None,
+                PairStart::Ordinary,
                 Some(terminal),
             ));
             assert_eq!(poll_once(serve.as_mut()), Poll::Pending);
@@ -640,6 +645,7 @@ async fn loss_without_a_cause_still_applies_an_account_op_during_grace() {
                 &mut tap,
                 audio,
                 None,
+                PairStart::Ordinary,
                 Some(terminal),
             ));
             assert_eq!(poll_once(serve.as_mut()), Poll::Pending);
@@ -726,6 +732,7 @@ async fn a_read_that_refuses_during_grace_cannot_end_as_loss() {
                 &mut tap,
                 audio,
                 None,
+                PairStart::Ordinary,
                 Some(terminal),
             ));
             assert_eq!(poll_once(serve.as_mut()), Poll::Pending);
@@ -780,6 +787,7 @@ async fn a_writer_refusal_skips_grace_even_though_the_reader_is_still_open() {
                     &mut tap,
                     audio,
                     None,
+                    PairStart::Ordinary,
                     Some(terminal),
                 )
             )

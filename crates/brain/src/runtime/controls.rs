@@ -75,7 +75,12 @@ pub(super) async fn read_control<const WATCH_FATAL: bool>(
 ) -> Ended {
     loop {
         match ipc::read_sized::<ControlToBrain>(pipe, Pipe::Control).await {
-            Ok(Some((ControlToBrain::Hello(_) | ControlToBrain::QueuedHello(_), _))) => {
+            Ok(Some((
+                ControlToBrain::Hello(_)
+                | ControlToBrain::QueuedHello(_)
+                | ControlToBrain::QueuedAudioReconnect(..),
+                _,
+            ))) => {
                 if WATCH_FATAL && let Some(cause) = fence.and_then(Fence::check) {
                     return Ended::Fatal(cause);
                 }
@@ -229,6 +234,7 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         ControlToBrain::Pong
         | ControlToBrain::Hello(_)
         | ControlToBrain::QueuedHello(_)
+        | ControlToBrain::QueuedAudioReconnect(..)
         | ControlToBrain::Quitting
         | ControlToBrain::Settings(_)
         | ControlToBrain::AccountOp(_)
