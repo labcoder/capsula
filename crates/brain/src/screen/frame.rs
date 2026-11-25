@@ -32,8 +32,8 @@ impl RawFrame {
     /// # Errors
     /// `Invalid` for an empty side, a side over [`MAX_SIDE`] or an overflowing length.
     #[cfg_attr(
-        not(any(test, windows)),
-        expect(dead_code, reason = "only the Windows adapter fills it")
+        not(any(test, windows, target_os = "macos")),
+        expect(dead_code, reason = "only the Windows and macOS adapters fill it")
     )]
     pub(crate) fn begin(&mut self, width: u32, height: u32) -> Result<&mut [u8], Refusal> {
         self.valid = None;
@@ -54,7 +54,7 @@ impl RawFrame {
 
     /// Runs one capture into this frame, then zeroes and frees it if the capture failed, so a
     /// refused or partial copy never stays in the buffer. Windows and macOS share it.
-    #[cfg(any(test, windows))]
+    #[cfg(any(test, windows, target_os = "macos"))]
     pub(crate) fn fill<T, E>(
         &mut self,
         capture: impl FnOnce(&mut Self) -> Result<T, E>,

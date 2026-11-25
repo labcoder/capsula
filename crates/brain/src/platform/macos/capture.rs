@@ -3,11 +3,24 @@
 //! systems, where capture refuses `Unsupported`.
 
 use std::ffi::CStr;
-use std::sync::OnceLock;
+use std::ptr::NonNull;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
+use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
 use objc2::runtime::{AnyClass, Sel};
 
-use crate::screen::{Capturer, Failure, Refusal};
+use crate::screen::{Acquired, Capturer, Deadline, Failure, RawFrame, Refusal};
+
+mod chain;
+mod layout;
+mod native;
+
+use chain::{Clock, Request, Sck};
+use native::{Domain, Native};
+
+/// How long a stopped or late chain gets to show it finished before the worker retires.
+const GRACE: Duration = Duration::from_millis(200);
 
 /// The first macOS major version with `SCScreenshotManager`.
 const FIRST_MAJOR: u32 = 14;
@@ -15,7 +28,7 @@ const FIRST_MAJOR: u32 = 14;
 const FRAMEWORK: &CStr = c"/System/Library/Frameworks/ScreenCaptureKit.framework/ScreenCaptureKit";
 
 /// The classes and selectors captures use: `true` for a class method.
-const REQUIRED: [(&CStr, bool, &CStr); 7] = [
+const REQUIRED: &[(&CStr, bool, &CStr)] = &[
     (
         c"SCScreenshotManager",
         true,
@@ -39,13 +52,74 @@ const REQUIRED: [(&CStr, bool, &CStr); 7] = [
     (c"SCStreamConfiguration", false, c"setWidth:"),
     (c"SCStreamConfiguration", false, c"setHeight:"),
     (c"SCStreamConfiguration", false, c"setShowsCursor:"),
+    (c"SCStreamConfiguration", false, c"setPixelFormat:"),
+    (c"SCShareableContent", false, c"displays"),
+    (c"SCShareableContent", false, c"applications"),
+    (c"SCDisplay", false, c"displayID"),
+    (c"SCDisplay", false, c"width"),
+    (c"SCDisplay", false, c"height"),
+    (c"SCRunningApplication", false, c"processID"),
 ];
 
-/// `ScreenCaptureKit`'s capturer. Its captures land with the display and window paths; until
-/// then the trait's refusals answer.
-struct ScreenCaptureKit;
+/// `ScreenCaptureKit`'s capturer. A display capture runs; a window capture refuses with the
+/// trait's defaults until its path lands.
+struct ScreenCaptureKit<S> {
+    sck: Arc<S>,
+    clock: Clock,
+}
 
-impl Capturer for ScreenCaptureKit {}
+impl<S: Sck> Capturer for ScreenCaptureKit<S> {
+    /// The order the design fixed: the stamp's zero check, the layout and the size, the shell's
+    /// identity, then the deadline and the grant on both sides of each other before any request.
+    /// The chain checks again inside the framework's callback, and the deadline is checked once
+    /// more before the image is drawn.
+    fn capture_display(
+        &mut self,
+        point: PhysicalPoint,
+        shell: u32,
+        excluded: u64,
+        deadline: Deadline,
+        frame: &mut RawFrame,
+    ) -> Result<(Acquired, PhysicalRect), Failure> {
+        frame.fill(|frame| {
+            if excluded == 0 {
+                return Err(Refusal::Expired.into());
+            }
+            let display = layout::display_at(&self.sck.displays()?, point)?;
+            let size = display.bounds.size;
+            // Sizing the buffer now refuses an oversized display before any request.
+            frame.begin(size[0], size[1])?;
+            if shell == 0 {
+                return Err(Refusal::Excluded.into());
+            }
+            let live =
+                |deadline: Deadline| deadline.tighten(Instant::now()).ok_or(Refusal::Expired);
+            let deadline = live(deadline)?;
+            if !self.sck.preflight() {
+                return Err(Refusal::NotPermitted.into());
+            }
+            let deadline = live(deadline)?;
+            let request = Request {
+                display: display.id,
+                points: display.points,
+                size,
+                shell,
+            };
+            let image = chain::run(&self.sck, deadline, request, self.clock)?;
+            live(deadline)?;
+            let arrived = Instant::now();
+            self.sck
+                .draw(&image, size, frame.begin(size[0], size[1])?)?;
+            Ok((
+                Acquired {
+                    arrived,
+                    dpi: display.dpi,
+                },
+                display.bounds,
+            ))
+        })
+    }
+}
 
 /// Opens the capturer after capability checks only: no grant query and no capture.
 ///
@@ -53,8 +127,21 @@ impl Capturer for ScreenCaptureKit {}
 /// `Unsupported` before macOS 14, or when the framework or a class or selector it needs is
 /// missing.
 pub(crate) fn screen_capturer() -> Result<Box<dyn Capturer>, Failure> {
-    admit(os_major, loaded)?;
-    Ok(Box::new(ScreenCaptureKit))
+    admit(os_major, || loaded().is_some())?;
+    let domain = loaded().ok_or(Refusal::Unsupported)?;
+    Ok(Box::new(ScreenCaptureKit {
+        sck: Arc::new(Native::new(domain)),
+        clock: Clock {
+            now: Instant::now,
+            continuous: super::clock::counter,
+            grace: GRACE,
+        },
+    }))
+}
+
+/// The bounds and DPI of the display that has exactly `bounds` now, if the arrangement still maps.
+pub(crate) fn display_at(bounds: PhysicalRect) -> Option<(PhysicalRect, u32)> {
+    layout::covering(&native::displays().ok()?, bounds)
 }
 
 /// The OS version decides first, so an older system never loads the framework.
@@ -95,15 +182,16 @@ fn major(version: &[u8]) -> Option<u32> {
     text.split('.').next()?.parse().ok()
 }
 
-/// Loads the framework once for the process's life, then checks every class and selector.
-fn loaded() -> bool {
-    static LOADED: OnceLock<bool> = OnceLock::new();
+/// Loads the framework once for the process's life, checks every class and selector, and reads
+/// its stream error domain.
+fn loaded() -> Option<Domain> {
+    static LOADED: OnceLock<Option<Domain>> = OnceLock::new();
     *LOADED.get_or_init(|| {
         // SAFETY: The path is NUL-terminated, and the handle is never closed, so nothing it loads
         // is unloaded while in use.
         let handle =
             unsafe { libc::dlopen(FRAMEWORK.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
-        !handle.is_null()
+        let complete = !handle.is_null()
             && REQUIRED.iter().all(|&(class, class_method, selector)| {
                 AnyClass::get(class).is_some_and(|class| {
                     let class = if class_method {
@@ -113,7 +201,15 @@ fn loaded() -> bool {
                     };
                     class.responds_to(Sel::register(selector))
                 })
-            })
+            });
+        if !complete {
+            return None;
+        }
+        // SAFETY: The handle is open and the name is NUL-terminated.
+        let symbol = unsafe { libc::dlsym(handle, c"SCStreamErrorDomain".as_ptr()) };
+        // SAFETY: The framework exports this name as its `NSString *const` error domain, and it
+        // stays loaded.
+        unsafe { Domain::read(NonNull::new(symbol.cast())?) }
     })
 }
 

@@ -107,12 +107,13 @@ pub(crate) trait Capturer {
     ///
     /// - Windows: the frame must be drawn at least one compositor redraw after `excluded`, a
     ///   performance-counter stamp. `shell` is ignored.
-    /// - macOS (planned; its capture isn't built or active): `excluded` must be nonzero, and the
-    ///   frame comes through a content filter that excludes exactly the application whose
-    ///   process is `shell`. When that process can't be identified or the filter can't be built
-    ///   exactly, the capture refuses `Excluded` before any screenshot. The screenshot is
-    ///   requested only after the stamp, but Apple doesn't document when a one-shot screenshot
-    ///   samples, so that ordering alone doesn't prove the frame was composed after the stamp.
+    /// - macOS (built, not active while the Mac worker route is closed): `excluded` must be
+    ///   nonzero, and the frame comes through a content filter that excludes exactly the
+    ///   application whose process is `shell`. When that process can't be identified or the
+    ///   filter can't be built exactly, the capture refuses `Excluded` before any screenshot.
+    ///   The screenshot is requested only after the stamp, but Apple doesn't document when a
+    ///   one-shot screenshot samples, so that ordering alone doesn't prove the frame was composed
+    ///   after the stamp.
     ///
     /// # Errors
     /// `Expired` for a zero exclusion stamp or, on Windows, when no frame drawn late enough
