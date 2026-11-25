@@ -7,8 +7,9 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
 };
 use gpui_kit::{
-    Context, FontWeight, Global, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    Role, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    ClickEvent, Context, FontWeight, Global, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, div,
 };
 
 use crate::platform::screen_access;
@@ -46,17 +47,18 @@ impl Access {
         self.granted = preflight();
     }
 
-    /// Asks only for a press in the active window, and at most once per launch. A false answer
-    /// is not a denial: the Settings route takes over.
+    /// Asks only for a separate press in the active window, and at most once per launch.
+    /// A false answer is not a denial: the Settings route takes over.
     fn press(
         &mut self,
-        window_active: impl FnOnce() -> bool,
+        window_active: bool,
+        focusing_click: bool,
         request: impl FnOnce() -> bool,
     ) -> Press {
         if self.granted || self.requested {
             return Press::Ignored;
         }
-        if !window_active() {
+        if focusing_click || !window_active {
             return Press::Activate;
         }
         self.requested = true;
@@ -89,12 +91,12 @@ impl ScreenAccess {
         }
     }
 
-    fn press(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+    fn press(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<'_, Self>) {
         let active = window.is_window_active();
-        self.forward = cx
-            .global_mut::<Access>()
-            .press(|| active, screen_access::request)
-            == Press::Activate;
+        self.forward =
+            cx.global_mut::<Access>()
+                .press(active, event.first_focus(), screen_access::request)
+                == Press::Activate;
         if self.forward {
             // Neither call confirms activation; the person presses again.
             cx.activate(false);
@@ -137,7 +139,9 @@ impl Render for ScreenAccess {
                     Button::new("screen-access-request")
                         .label(request)
                         .primary()
-                        .on_click(cx.listener(|this, _, window, cx| this.press(window, cx))),
+                        .on_click(
+                            cx.listener(|this, event, window, cx| this.press(event, window, cx)),
+                        ),
                 );
                 open = open.outline();
             }
@@ -177,12 +181,17 @@ mod tests {
     #[test]
     fn an_inactive_press_only_asks_to_come_forward_and_the_next_active_press_asks_once() {
         let mut access = Access::default();
-        assert_eq!(access.press(|| false, never), Press::Activate);
+        assert_eq!(access.press(false, false, never), Press::Activate);
+        assert_eq!(
+            access.press(true, true, never),
+            Press::Activate,
+            "activation before mouse-up must not make the focusing click request"
+        );
         assert!(
             !access.requested,
             "bringing the window forward is not a request"
         );
-        assert_eq!(access.press(|| true, || false), Press::Requested);
+        assert_eq!(access.press(true, false, || false), Press::Requested);
         assert!(
             access.requested && !access.granted,
             "false leaves Settings, not a denial"
@@ -192,10 +201,10 @@ mod tests {
     #[test]
     fn a_launch_never_asks_twice_and_a_recheck_does_not_reopen_the_request() {
         let mut access = Access::default();
-        assert_eq!(access.press(|| true, || false), Press::Requested);
+        assert_eq!(access.press(true, false, || false), Press::Requested);
         access.recheck(|| false);
-        assert_eq!(access.press(|| true, never), Press::Ignored);
-        assert_eq!(access.press(|| false, never), Press::Ignored);
+        assert_eq!(access.press(true, false, never), Press::Ignored);
+        assert_eq!(access.press(false, false, never), Press::Ignored);
         access.recheck(|| true);
         assert!(access.granted, "a later nonprompting grant is taken");
     }
@@ -204,7 +213,7 @@ mod tests {
     fn granted_access_is_never_requested() {
         let mut access = Access::default();
         access.recheck(|| true);
-        assert_eq!(access.press(|| true, never), Press::Ignored);
+        assert_eq!(access.press(true, false, never), Press::Ignored);
         assert!(!access.requested, "no request was made");
     }
 }
