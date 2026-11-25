@@ -30,7 +30,7 @@ use super::windows::{
     modules, open_locked, owner_only_dir, system_dir,
 };
 
-pub(crate) use crate::speech::NativeError;
+pub(crate) use super::speech_wire::NativeError;
 
 /// Decoder threads [S5].
 const THREADS: i32 = 8;
