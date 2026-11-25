@@ -205,6 +205,16 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   captures nothing: display and window capture (`SCScreenshotManager`) aren't built yet, so its
   captures refuse with the trait's defaults, and the Mac worker route stays unavailable. Other
   platforms refuse every capture as `Unsupported`.
+- **Keeping Kumochi out of a display frame differs by platform.** On Windows the frame must be
+  drawn after the exclusion stamp, as described under "Display under a point". On macOS (planned,
+  not active) the stamp only has to be nonzero, and the frame comes through a content filter that
+  excludes exactly the application whose process is the connected shell's. When that process can't
+  be identified or the filter can't be built exactly, the capture refuses `Excluded` before any
+  screenshot. The screenshot is requested only after the stamp, but Apple's documentation for
+  `captureImage(contentFilter:configuration:completionHandler:)` says only that it captures a
+  single frame from a stream as an image. It doesn't say when the frame is sampled, so request
+  order alone doesn't prove the frame was composed after the stamp; the native gate has to check
+  that.
 
 ```mermaid
 sequenceDiagram

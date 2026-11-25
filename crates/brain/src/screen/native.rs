@@ -16,8 +16,9 @@ pub(super) enum Aim {
     /// The window under it, then one frame of it alone. `shell` is the connected shell's process,
     /// which the walk counts as Kumochi's.
     Window { shell: u32 },
-    /// One frame of the monitor nearest it, drawn after `excluded`, the shell's exclusion stamp,
-    /// with `shell` the connected shell's process.
+    /// One frame of the monitor nearest it, with Kumochi kept out as [`Capturer::capture_display`]
+    /// requires on each platform: `excluded` is the shell's exclusion stamp and `shell` the
+    /// connected shell's process.
     Display { shell: u32, excluded: u64 },
 }
 
