@@ -201,6 +201,38 @@ absent, while a folder, a file, an item or any refusal is unverified, because no
 the allocator's own from anything else. The owner probe drops the item's bytes unread. Nothing
 writes either name yet, so both stay cheap to change until cut 9 does.
 
+`brain::profile::NativeProbes` composes the real probes, still with no caller. Its guard is
+`acquire_setup_guard` on Windows and `Support::try_setup_guard` on the admitted Support anchor on
+macOS: only contention is `Busy`, and any other failure, an anchor that can't be found or admitted
+included, is `Unavailable`. Its anchors are the Local and Roaming AppData Known Folders on Windows
+and `application_support_dir` on macOS, never `LOCALAPPDATA`, `APPDATA` or the Gate override,
+whose admission creates the product folders. Each probe holds its anchors through its reads. Legacy
+is absent only when every legacy product folder (local data and, on Windows, roaming settings) is a
+definitive not-found under its verified anchor. A present local data folder is read in place under
+its existing `session.lock`, taken with `try_acquire_existing` and held through every read, and
+matches only with the current history schema and with an authority and committed host that both
+match, read by `connections::authority::existing::legacy` under the same lock over the native
+credential store. An absent authority or host is unverified, since the folder is there. An older
+known schema needs a migration, so it reads unverified until the owner decides how legacy schema
+updates are explained. A roaming folder without local data and any failed lookup are unverified
+too.
+
+The lookup carries the identity of the held product folder (volume and file ID on Windows, device
+and inode on macOS), and the folder at that path must have it before the lock is taken and again
+after the last read. SQLite opens the databases by path, so those checks catch only a lasting
+replacement, not one restored in between. Nothing in a present folder is read without
+`ExclusiveUse`: evidence that older writers, which don't take the session lock, are excluded and
+that the folder's path stays stable for the read, both established outside this read by the
+installation (owner decision 4). On Windows the held lock already keeps the path stable, since
+NTFS refuses to rename a folder with a file open under it; on macOS it doesn't. Nothing can make
+the token yet, so a present legacy folder reads unverified unread. On macOS the guard keeps
+the Support anchor it locks, and the root and legacy lookups open their children relative to it
+(`Support::child`), so a renamed path can't leave the guard on one folder and the lookup on
+another. On Windows the guard is a named mutex, so each probe holds its own anchor chain. Legacy
+Matching is schema-level evidence: the current history schema and a validated authority and host.
+It proves no history invariant, such as the `approval_mark` row, so runtime admission (cut 10)
+revalidates those before use.
+
 On Windows `kumochi_storage::hold_product_folder(anchor)` looks up only this edition's product
 folder (`DATA_DIR`) and `profile_root(anchor)` only its root slot, both through one private lookup
 under a held, trusted anchor folder that creates nothing. The name is opened relative to the held
