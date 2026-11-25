@@ -6,7 +6,6 @@
 //! (`LoadReport`) the same way speech input does: a load that finishes after its unload or a
 //! newer ask is freed here and reported `Discarded`, and `unload` only touches its own ask.
 
-#[cfg(any(test, windows))]
 mod phonon;
 #[cfg(test)]
 mod tests;
@@ -138,8 +137,8 @@ pub(crate) struct TtsHandle {
 }
 
 impl TtsHandle {
-    #[cfg(windows)]
     pub(crate) fn spawn(runtime: Handle, reports: Reports) -> io::Result<Self> {
+        crate::platform::require_mode(crate::platform::Mode::Detached)?;
         Self::spawn_with(runtime, reports, phonon::Phonon::load)
     }
 

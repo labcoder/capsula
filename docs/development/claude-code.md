@@ -4,6 +4,17 @@ Kumochi runs Claude Code through its installed `claude.exe`, headless, with `str
 stdin and stdout. Kumochi's own tools reach it as an MCP server named in `--mcp-config`. That
 server is a mode of the brain's own executable, the bridge.
 
+The lane and supervisor own queueing, deadlines, admission and teardown order. They use
+`platform::process` for the contained child, stdio and explicit environment, and the platform's
+protected-folder and peer-checked pipe adapters for each launch. Startup selects the native host
+before it can run any of that work. Non-Windows builds still refuse native startup without
+creating a worker or transport.
+
+A macOS adapter would have to discover the approved executable and policy sources, hold private
+folders through launch and cleanup, and admit only the expected local bridge peer. Its containment
+also needs to make process creation and admission atomic and prove that the child and its
+descendants ended. The shared queue, deadline and refusal policy stays the same.
+
 ## The bridge
 
 Native bridge connections require the platform's owner-only pipe and peer process checks. The
