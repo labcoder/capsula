@@ -1,58 +1,37 @@
-//! Holding a chain of folders so none of its names can be rebound while it's open, the trusted
-//! per-user root, and the owner-only folders natives are staged in.
-//!
-//! The threat is code that isn't the signed-in user at medium integrity: another account, or a
-//! lower-integrity process. A component is trusted when it's no reparse point, it resolves to the
-//! path that named it, its owner is this user, SYSTEM, Administrators or `TrustedInstaller`, no one
-//! else may change it (its name, data, attributes or security), and its integrity label isn't
-//! below medium. Medium-integrity code running as this user can already change the brain, so it
-//! isn't defended against here.
+//! The brain's protected operations on a held chain: marker files, private trees, deletion and
+//! model storage, built from kumochi-storage's chain check, which documents the threat model.
 
 use std::ffi::OsString;
 use std::fs::File;
 use std::io;
-use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+use std::os::windows::ffi::OsStringExt as _;
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::AsRawHandle as _;
-use std::path::{Component, Path, PathBuf, Prefix};
+use std::path::{Path, PathBuf};
 
-use windows_sys::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, ERROR_NO_MORE_FILES, ERROR_SUCCESS, GENERIC_ALL, GENERIC_EXECUTE,
-    GENERIC_READ, GENERIC_WRITE, LocalFree,
+#[cfg(test)]
+pub(crate) use kumochi_storage::checked::final_path_matches;
+use kumochi_storage::checked::{
+    Aces, Kind, Security, Trusted, attributes, check, open, open_checked, same_final_path,
 };
-use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, GetSecurityInfo,
-    SDDL_REVISION_1, SE_FILE_OBJECT,
-};
-use windows_sys::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, GENERIC_MAPPING,
-    GetAce, GetSidSubAuthority, GetSidSubAuthorityCount, INHERIT_ONLY_ACE,
-    LABEL_SECURITY_INFORMATION, MapGenericMask, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-    PSID, SECURITY_ATTRIBUTES,
-};
+use kumochi_storage::known_folder;
+#[cfg(test)]
+use kumochi_storage::user_sid;
+#[cfg(test)]
+pub(crate) use kumochi_storage::{DaclEntry, dacl_entries, dacl_sddl, set_dacl};
+pub(crate) use kumochi_storage::{hold_chain, owner_only_dir};
+use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-    FILE_DELETE_CHILD, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
+    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_FULL_DIR_INFO, FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_LIST_DIRECTORY,
     FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, FileAttributeTagInfo,
-    FileDispositionInfo, FileFullDirectoryInfo, FileFullDirectoryRestartInfo, FileIdInfo,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-    READ_CONTROL, SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS, WRITE_DAC, WRITE_OWNER,
+    FILE_SHARE_WRITE, FileDispositionInfo, FileFullDirectoryInfo, FileFullDirectoryRestartInfo,
+    FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, READ_CONTROL,
+    SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
 };
-use windows_sys::Win32::System::Com::CoTaskMemFree;
-use windows_sys::Win32::System::SystemServices::{
-    ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
-    ACCESS_DENIED_CALLBACK_ACE_TYPE, SECURITY_MANDATORY_MEDIUM_RID,
-    SYSTEM_MANDATORY_LABEL_ACE_TYPE, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
-};
-use windows_sys::Win32::UI::Shell::{
-    FOLDERID_LocalAppData, FOLDERID_Profile, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
-};
+use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_Profile};
 
-use super::pipe::user_sid;
 use crate::platform::Untrusted;
 
 mod models;
@@ -61,19 +40,6 @@ pub(crate) use models::{
     model_file, model_final, open_model_write, publish_model, remove_model_tree,
     validate_model_path,
 };
-
-/// SYSTEM, Administrators and `TrustedInstaller`, which may change anything here; this user joins
-/// them at run time.
-const SYSTEM_SIDS: [&str; 3] = [
-    "S-1-5-18",
-    "S-1-5-32-544",
-    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
-];
-
-/// The rights that change a component's name, data, attributes (setting a reparse point needs
-/// only write-data or write-attributes) or security, or remove a child.
-const CHANGES: u32 =
-    DELETE | WRITE_DAC | WRITE_OWNER | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | FILE_DELETE_CHILD;
 
 /// The rights that read what's in a file or folder.
 const READS: u32 = FILE_READ_DATA | FILE_READ_EA;
@@ -86,92 +52,6 @@ pub(crate) fn local_app_data() -> io::Result<PathBuf> {
 /// The user's profile folder as the shell knows it, not as `USERPROFILE` says.
 pub(crate) fn profile_dir() -> io::Result<PathBuf> {
     known_folder(FOLDERID_Profile)
-}
-
-fn known_folder(folder: windows_sys::core::GUID) -> io::Result<PathBuf> {
-    let mut path: *mut u16 = std::ptr::null_mut();
-    // SAFETY: on success `path` holds a CoTaskMemAlloc'd, NUL-terminated string freed below.
-    let status = unsafe {
-        SHGetKnownFolderPath(
-            &raw const folder,
-            KF_FLAG_DEFAULT.cast_unsigned(),
-            std::ptr::null_mut(),
-            &raw mut path,
-        )
-    };
-    let read = if status < 0 || path.is_null() {
-        Err(io::Error::from_raw_os_error(status))
-    } else {
-        let mut len = 0;
-        loop {
-            // SAFETY: the string is NUL-terminated and `len` hasn't passed its NUL.
-            let unit = unsafe { path.add(len) };
-            // SAFETY: as above, `unit` points inside the string.
-            if unsafe { *unit } == 0 {
-                break;
-            }
-            len += 1;
-        }
-        // SAFETY: `path` holds `len` readable units before its NUL.
-        let units = unsafe { std::slice::from_raw_parts(path, len) };
-        Ok(PathBuf::from(OsString::from_wide(units)))
-    };
-    // SAFETY: `path` is null or the buffer the shell allocated, freed once.
-    unsafe { CoTaskMemFree(path.cast()) };
-    read
-}
-
-/// Opens every component of the absolute folder `path`, from the volume root down, and checks
-/// each through its own handle while the ones above it stay open. The handles have no data access,
-/// so they take no part in share checks and don't stop a rename or removal. The checks keep the
-/// chain in place: each refuses a component that someone untrusted may rename, remove or change,
-/// or whose children they may delete. This user's own processes are outside that threat model.
-pub(crate) fn hold_chain(path: &Path) -> Result<Vec<File>, Untrusted> {
-    let trusted = Trusted::new()?;
-    let mut held = Vec::new();
-    let mut prefix = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(disk) if matches!(disk.kind(), Prefix::Disk(_)) => {
-                prefix.push(disk.as_os_str());
-            }
-            Component::RootDir if !prefix.as_os_str().is_empty() && held.is_empty() => {
-                prefix.push(r"\");
-                held.push(open_checked(&prefix, Kind::Folder, &trusted)?);
-            }
-            Component::Normal(name) if !held.is_empty() => {
-                prefix.push(name);
-                held.push(open_checked(&prefix, Kind::Folder, &trusted)?);
-            }
-            _ => return Err(Untrusted::Unsafe),
-        }
-    }
-    if held.is_empty() {
-        return Err(Untrusted::Unsafe);
-    }
-    Ok(held)
-}
-
-/// Creates `path` when it's missing as an owner-only folder whose files inherit that DACL, then
-/// opens and checks it. An existing folder is used only if it passes the same checks: one others
-/// could change is refused, never re-secured, because a new DACL doesn't take back rights already
-/// granted to open handles. Its parent must be held.
-pub(crate) fn owner_only_dir(path: &Path) -> Result<File, Untrusted> {
-    let user = user_sid().map_err(|_| Untrusted::Io)?;
-    let descriptor = Descriptor::new(&format!("D:P(A;OICI;FA;;;{user})"))?;
-    let attributes = SECURITY_ATTRIBUTES {
-        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).map_err(|_| Untrusted::Io)?,
-        lpSecurityDescriptor: descriptor.0,
-        bInheritHandle: 0,
-    };
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: `wide` is NUL-terminated and `attributes` points to a live descriptor.
-    if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0
-        && io::Error::last_os_error().raw_os_error() != Some(ERROR_ALREADY_EXISTS.cast_signed())
-    {
-        return Err(Untrusted::Io);
-    }
-    open_checked(path, Kind::Folder, &Trusted::new()?)
 }
 
 /// Opens the file at `path` for reading, refusing writers and deleters while it's open, and
@@ -511,520 +391,10 @@ fn granted(path: &Path) -> Vec<u32> {
         .collect()
 }
 
-/// Which ACEs a DACL check counts.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Aces {
-    /// Those that apply to the object itself.
-    Effective,
-    /// Those too that only what's made in it inherits.
-    Inheritable,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Folder,
-    File,
-}
-
-fn open_checked(path: &Path, kind: Kind, trusted: &Trusted) -> Result<File, Untrusted> {
-    let opened = open(path, kind, 0)?;
-    check(&opened, path, kind, trusted)?;
-    Ok(opened)
-}
-
-fn open(path: &Path, kind: Kind, extra: u32) -> Result<File, Untrusted> {
-    let (access, share) = match kind {
-        Kind::Folder => (0, FILE_SHARE_READ | FILE_SHARE_WRITE),
-        Kind::File => (FILE_READ_DATA | SYNCHRONIZE, FILE_SHARE_READ),
-    };
-    File::options()
-        .access_mode(access | READ_CONTROL | FILE_READ_ATTRIBUTES | extra)
-        .share_mode(share)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => Untrusted::Missing,
-            _ => Untrusted::Io,
-        })
-}
-
-fn check(opened: &File, path: &Path, kind: Kind, trusted: &Trusted) -> Result<(), Untrusted> {
-    check_not_reparse(opened)?;
-    if !same_final_path(opened, path)? {
-        return Err(Untrusted::Reparse);
-    }
-    trusted_security(&Security::read(opened)?, kind, trusted)
-}
-
-/// Whether `security` has a trusted owner, no label below medium, and no ACE that lets someone
-/// untrusted change the object.
-fn trusted_security(security: &Security, kind: Kind, trusted: &Trusted) -> Result<(), Untrusted> {
-    if !trusted.contains(security.owner) || security.writable_from_below()? {
-        return Err(Untrusted::Unsafe);
-    }
-    let changes = match kind {
-        Kind::Folder => CHANGES,
-        Kind::File => CHANGES | FILE_APPEND_DATA | FILE_WRITE_EA,
-    };
-    if security.others_may(changes, trusted, Aces::Effective)? {
-        return Err(Untrusted::Unsafe);
-    }
-    Ok(())
-}
-
-fn check_not_reparse(opened: &File) -> Result<(), Untrusted> {
-    if attributes(opened)? & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(Untrusted::Reparse);
-    }
-    Ok(())
-}
-
-fn attributes(opened: &File) -> Result<u32, Untrusted> {
-    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
-    let size = u32::try_from(size_of::<FILE_ATTRIBUTE_TAG_INFO>()).map_err(|_| Untrusted::Io)?;
-    // SAFETY: `info` is writable for `size` bytes and the handle is open for the call.
-    let read = unsafe {
-        GetFileInformationByHandleEx(
-            opened.as_raw_handle(),
-            FileAttributeTagInfo,
-            (&raw mut info).cast(),
-            size,
-        )
-    };
-    if read == 0 {
-        return Err(Untrusted::Io);
-    }
-    Ok(info.FileAttributes)
-}
-
-/// Whether the object behind the handle is the one `path` names.
-fn same_final_path(opened: &File, path: &Path) -> Result<bool, Untrusted> {
-    let mut buffer = vec![0_u16; 32_768];
-    let capacity = u32::try_from(buffer.len()).map_err(|_| Untrusted::Io)?;
-    // SAFETY: `buffer` is writable for `capacity` units and the handle is open for the call.
-    let len = unsafe {
-        GetFinalPathNameByHandleW(
-            opened.as_raw_handle(),
-            buffer.as_mut_ptr(),
-            capacity,
-            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
-        )
-    };
-    if len == 0 || len >= capacity {
-        return Err(Untrusted::Io);
-    }
-    buffer.truncate(usize::try_from(len).map_err(|_| Untrusted::Io)?);
-    Ok(final_path_matches(
-        &String::from_utf16_lossy(&buffer),
-        &path.to_string_lossy(),
-    ))
-}
-
-/// Whether a final path as Windows reports it (`\\?\C:\…`) names the same drive path as
-/// `lexical`, ignoring case and a trailing separator. A UNC or volume-GUID result never does.
-pub(crate) fn final_path_matches(resolved: &str, lexical: &str) -> bool {
-    let Some(resolved) = resolved.strip_prefix(r"\\?\") else {
-        return false;
-    };
-    if resolved.as_bytes().get(1) != Some(&b':') {
-        return false;
-    }
-    let tidy = |path: &str| {
-        let path = path.to_lowercase();
-        match path.trim_end_matches('\\') {
-            drive if drive.len() == 2 => format!(r"{drive}\"),
-            trimmed => trimmed.to_owned(),
-        }
-    };
-    tidy(resolved) == tidy(lexical)
-}
-
-/// The DACL of the folder at `path` as SDDL, for tests to read back.
-#[cfg(test)]
-pub(crate) fn dacl_sddl(path: &Path) -> String {
-    use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
-    let folder = open(path, Kind::Folder, 0).expect("the folder opens");
-    let security = Security::read(&folder).expect("its security reads");
-    let mut text: *mut u16 = std::ptr::null_mut();
-    let mut len = 0_u32;
-    // SAFETY: the descriptor is live; on success `text` is LocalAlloc'd and freed below.
-    let converted = unsafe {
-        ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            security.descriptor.0,
-            SDDL_REVISION_1,
-            DACL_SECURITY_INFORMATION,
-            &raw mut text,
-            &raw mut len,
-        )
-    };
-    assert_ne!(converted, 0, "the descriptor converts");
-    // SAFETY: `text` holds `len` units, the last being its NUL.
-    let units = unsafe { std::slice::from_raw_parts(text, usize::try_from(len).expect("u32")) };
-    let sddl = String::from_utf16_lossy(units)
-        .trim_end_matches('\0')
-        .to_owned();
-    // SAFETY: allocated by the conversion and freed once.
-    unsafe { LocalFree(text.cast()) };
-    sddl
-}
-
-/// One entry of a DACL, read without SDDL's account aliases.
-#[cfg(test)]
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct DaclEntry {
-    /// An access-allowed entry; any other kind reads as false.
-    pub(crate) allow: bool,
-    /// Its flags, less `INHERITED_ACE`.
-    pub(crate) flags: u32,
-    /// Whether `INHERITED_ACE` is set: where it came from, not what it grants.
-    pub(crate) inherited: bool,
-    pub(crate) rights: u32,
-    /// Its SID as `S-1-...`.
-    pub(crate) sid: String,
-}
-
-/// The entries of the DACL on the folder or file at `path`, in order.
-#[cfg(test)]
-pub(crate) fn dacl_entries(path: &Path) -> Vec<DaclEntry> {
-    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows_sys::Win32::Security::INHERITED_ACE;
-    let entry = open(path, Kind::Folder, 0).expect("the entry opens");
-    let security = Security::read(&entry).expect("its security reads");
-    assert!(!security.dacl.is_null(), "a DACL, not a null one");
-    let aces = aces(security.dacl).expect("its entries read");
-    aces.into_iter()
-        .map(|(header, ace)| {
-            let (rights, sid) = mask_and_sid(ace);
-            let mut text: *mut u16 = std::ptr::null_mut();
-            // SAFETY: `sid` lies inside the live descriptor and `text` is a writable local.
-            let converted = unsafe { ConvertSidToStringSidW(sid, &raw mut text) };
-            assert_ne!(converted, 0, "the SID converts");
-            let mut len = 0;
-            loop {
-                // SAFETY: the string is NUL-terminated and `len` hasn't passed its NUL.
-                let unit = unsafe { text.add(len) };
-                // SAFETY: as above, `unit` points inside the string.
-                if unsafe { *unit } == 0 {
-                    break;
-                }
-                len += 1;
-            }
-            // SAFETY: `text` holds `len` units before its NUL.
-            let units = unsafe { std::slice::from_raw_parts(text, len) };
-            let sid = String::from_utf16_lossy(units);
-            // SAFETY: allocated by the conversion and freed once.
-            unsafe { LocalFree(text.cast()) };
-            let flags = u32::from(header.AceFlags);
-            DaclEntry {
-                allow: u32::from(header.AceType) == ACCESS_ALLOWED_ACE_TYPE,
-                flags: flags & !INHERITED_ACE,
-                inherited: flags & INHERITED_ACE != 0,
-                rights,
-                sid,
-            }
-        })
-        .collect()
-}
-
-/// Replaces the folder at `path`'s DACL with the protected one in `sddl`, which gets this user's
-/// SID, for tests to set up.
-#[cfg(test)]
-pub(crate) fn set_dacl(path: &Path, sddl: impl FnOnce(&str) -> String) {
-    use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
-    use windows_sys::Win32::Security::{
-        GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
-    };
-    let user = user_sid().expect("this user's SID");
-    let descriptor = Descriptor::new(&sddl(&user)).expect("the SDDL parses");
-    let folder = open(path, Kind::Folder, WRITE_DAC).expect("the folder opens");
-    let (mut present, mut defaulted) = (0, 0);
-    let mut dacl: *mut ACL = std::ptr::null_mut();
-    // SAFETY: the descriptor is live and every output is a writable local.
-    let read = unsafe {
-        GetSecurityDescriptorDacl(
-            descriptor.0,
-            &raw mut present,
-            &raw mut dacl,
-            &raw mut defaulted,
-        )
-    };
-    assert!(read != 0 && present != 0, "the SDDL has a DACL");
-    // SAFETY: the handle has WRITE_DAC and `dacl` lives inside `descriptor` for the call.
-    let set = unsafe {
-        SetSecurityInfo(
-            folder.as_raw_handle(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            dacl,
-            std::ptr::null(),
-        )
-    };
-    assert_eq!(set, ERROR_SUCCESS, "the DACL is set");
-}
-
 /// This user's SID, for tests to expect.
 #[cfg(test)]
 pub(crate) fn this_user() -> String {
     user_sid().expect("this user's SID")
-}
-
-/// This user's SID and the system SIDs.
-struct Trusted(Vec<Sid>);
-
-impl Trusted {
-    fn new() -> Result<Self, Untrusted> {
-        let user = user_sid().map_err(|_| Untrusted::Io)?;
-        let mut sids = vec![Sid::parse(&user)?];
-        for system in SYSTEM_SIDS {
-            sids.push(Sid::parse(system)?);
-        }
-        Ok(Self(sids))
-    }
-
-    /// This user and SYSTEM: the only ones who may read an owner-only folder.
-    fn readers() -> Result<Self, Untrusted> {
-        let user = user_sid().map_err(|_| Untrusted::Io)?;
-        Ok(Self(vec![Sid::parse(&user)?, Sid::parse(SYSTEM_SIDS[0])?]))
-    }
-
-    fn contains(&self, sid: PSID) -> bool {
-        !sid.is_null()
-            && self.0.iter().any(|known| {
-                // SAFETY: both are valid SIDs: one parsed here, one inside a live descriptor.
-                unsafe { EqualSid(known.0, sid) != 0 }
-            })
-    }
-}
-
-/// A SID parsed from text, freed on drop.
-struct Sid(PSID);
-
-impl Sid {
-    fn parse(text: &str) -> Result<Self, Untrusted> {
-        let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-        let mut sid: PSID = std::ptr::null_mut();
-        // SAFETY: `text` is NUL-terminated; on success `sid` is LocalAlloc'd and owned by Self.
-        if unsafe { ConvertStringSidToSidW(text.as_ptr(), &raw mut sid) } == 0 {
-            return Err(Untrusted::Io);
-        }
-        Ok(Self(sid))
-    }
-}
-
-impl Drop for Sid {
-    fn drop(&mut self) {
-        // SAFETY: allocated by ConvertStringSidToSidW and freed once.
-        unsafe { LocalFree(self.0) };
-    }
-}
-
-/// A security descriptor allocated by `LocalAlloc`, freed on drop.
-struct Descriptor(PSECURITY_DESCRIPTOR);
-
-impl Descriptor {
-    fn new(sddl: &str) -> Result<Self, Untrusted> {
-        let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
-        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-        // SAFETY: `sddl` is NUL-terminated; on success `descriptor` is LocalAlloc'd, owned here.
-        let converted = unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                sddl.as_ptr(),
-                SDDL_REVISION_1,
-                &raw mut descriptor,
-                std::ptr::null_mut(),
-            )
-        };
-        if converted == 0 {
-            return Err(Untrusted::Io);
-        }
-        Ok(Self(descriptor))
-    }
-}
-
-impl Drop for Descriptor {
-    fn drop(&mut self) {
-        // SAFETY: allocated by the conversion or by GetSecurityInfo, and freed once.
-        unsafe { LocalFree(self.0) };
-    }
-}
-
-/// An object's owner, DACL and label ACL, pointing into one descriptor read through its handle.
-struct Security {
-    owner: PSID,
-    dacl: *const ACL,
-    sacl: *const ACL,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "it owns the buffer the other fields point into")
-    )]
-    descriptor: Descriptor,
-}
-
-impl Security {
-    fn read(opened: &File) -> Result<Self, Untrusted> {
-        let mut owner: PSID = std::ptr::null_mut();
-        let mut dacl: *mut ACL = std::ptr::null_mut();
-        let mut sacl: *mut ACL = std::ptr::null_mut();
-        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-        // SAFETY: the handle has READ_CONTROL; on success every pointer lands inside
-        // `descriptor`, which is LocalAlloc'd and owned by the result.
-        let status = unsafe {
-            GetSecurityInfo(
-                opened.as_raw_handle(),
-                SE_FILE_OBJECT,
-                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
-                &raw mut owner,
-                std::ptr::null_mut(),
-                &raw mut dacl,
-                &raw mut sacl,
-                &raw mut descriptor,
-            )
-        };
-        if status != ERROR_SUCCESS {
-            return Err(Untrusted::Io);
-        }
-        Ok(Self {
-            owner,
-            dacl,
-            sacl,
-            descriptor: Descriptor(descriptor),
-        })
-    }
-
-    /// The owner and DACL `sddl` describes, for tests to judge without a file.
-    #[cfg(test)]
-    fn parse(sddl: &str) -> Self {
-        use windows_sys::Win32::Security::{GetSecurityDescriptorDacl, GetSecurityDescriptorOwner};
-        let descriptor = Descriptor::new(sddl).expect("the SDDL parses");
-        let (mut owner, mut defaulted) = (std::ptr::null_mut(), 0);
-        // SAFETY: the descriptor is live and both outputs are writable locals.
-        let read =
-            unsafe { GetSecurityDescriptorOwner(descriptor.0, &raw mut owner, &raw mut defaulted) };
-        assert_ne!(read, 0, "the owner reads");
-        let (mut present, mut dacl): (_, *mut ACL) = (0, std::ptr::null_mut());
-        // SAFETY: the descriptor is live and every output is a writable local.
-        let read = unsafe {
-            GetSecurityDescriptorDacl(
-                descriptor.0,
-                &raw mut present,
-                &raw mut dacl,
-                &raw mut defaulted,
-            )
-        };
-        assert!(read != 0 && present != 0, "the DACL reads");
-        Self {
-            owner,
-            dacl,
-            sacl: std::ptr::null(),
-            descriptor,
-        }
-    }
-
-    /// Whether an ACE `counted` covers grants someone untrusted one of `rights`. A null DACL grants
-    /// everyone everything, and an allow ACE of a kind not read here counts.
-    fn others_may(&self, rights: u32, trusted: &Trusted, counted: Aces) -> Result<bool, Untrusted> {
-        if self.dacl.is_null() {
-            return Ok(true);
-        }
-        for (header, ace) in aces(self.dacl)? {
-            let kind = u32::from(header.AceType);
-            if kind == ACCESS_DENIED_ACE_TYPE || kind == ACCESS_DENIED_CALLBACK_ACE_TYPE {
-                continue;
-            }
-            if kind != ACCESS_ALLOWED_ACE_TYPE && kind != ACCESS_ALLOWED_CALLBACK_ACE_TYPE {
-                return Ok(true);
-            }
-            if counted == Aces::Effective && u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 {
-                continue;
-            }
-            let (mask, sid) = mask_and_sid(ace);
-            if mapped(mask) & rights != 0 && !trusted.contains(sid) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// Whether lower-integrity code may write to this object: a label that applies to it is below
-    /// medium or lacks no-write-up. With no such label, Windows applies medium and no-write-up.
-    fn writable_from_below(&self) -> Result<bool, Untrusted> {
-        if self.sacl.is_null() {
-            return Ok(false);
-        }
-        for (header, ace) in aces(self.sacl)? {
-            if u32::from(header.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE
-                || u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0
-            {
-                continue;
-            }
-            let (mask, sid) = mask_and_sid(ace);
-            if mask & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP == 0 {
-                return Ok(true);
-            }
-            // SAFETY: `sid` is a valid SID inside the live descriptor.
-            let count = unsafe { GetSidSubAuthorityCount(sid) };
-            // SAFETY: it points to the SID's subauthority count.
-            let count = unsafe { *count };
-            let Some(last) = u32::from(count).checked_sub(1) else {
-                return Ok(true);
-            };
-            // SAFETY: `last` indexes an existing subauthority of the valid SID.
-            let rid = unsafe { GetSidSubAuthority(sid, last) };
-            // SAFETY: it points to that subauthority.
-            let rid = unsafe { *rid };
-            if rid < SECURITY_MANDATORY_MEDIUM_RID.cast_unsigned() {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-}
-
-/// Every ACE of a live ACL: its header and its address.
-fn aces(acl: *const ACL) -> Result<Vec<(ACE_HEADER, *const u8)>, Untrusted> {
-    // SAFETY: `acl` points to a valid ACL inside a live descriptor.
-    let count = unsafe { (*acl).AceCount };
-    let mut list = Vec::with_capacity(usize::from(count));
-    for index in 0..u32::from(count) {
-        let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
-        // SAFETY: `index` is below the ACL's count and `ace` is writable.
-        if unsafe { GetAce(acl, index, &raw mut ace) } == 0 {
-            return Err(Untrusted::Io);
-        }
-        // SAFETY: every ACE starts with an ACE_HEADER.
-        let header = unsafe { ace.cast::<ACE_HEADER>().read_unaligned() };
-        list.push((header, ace.cast_const().cast::<u8>()));
-    }
-    Ok(list)
-}
-
-/// The mask and SID of an ACE laid out like `ACCESS_ALLOWED_ACE`, as the allow, callback-allow and
-/// mandatory-label kinds are.
-fn mask_and_sid(ace: *const u8) -> (u32, PSID) {
-    // SAFETY: the ACE has this layout, so its mask follows the header.
-    let mask = unsafe { ace.cast::<ACCESS_ALLOWED_ACE>().read_unaligned().Mask };
-    let sid = ace
-        .wrapping_add(std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart))
-        .cast_mut()
-        .cast();
-    (mask, sid)
-}
-
-/// `mask` with its generic rights mapped to file rights.
-fn mapped(mut mask: u32) -> u32 {
-    let mapping = GENERIC_MAPPING {
-        GenericRead: FILE_GENERIC_READ,
-        GenericWrite: FILE_GENERIC_WRITE,
-        GenericExecute: FILE_GENERIC_EXECUTE,
-        GenericAll: FILE_ALL_ACCESS,
-    };
-    if mask & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL) != 0 {
-        // SAFETY: both pointers are to live locals.
-        unsafe { MapGenericMask(&raw mut mask, &raw const mapping) };
-    }
-    mask
 }
 
 #[cfg(test)]
@@ -1035,9 +405,10 @@ mod tests {
 
     use super::{
         DELETE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, Kind, READ_CONTROL,
-        SYNCHRONIZE, Security, Trusted, Untrusted, granted, this_user, trusted_security,
+        Untrusted, granted,
     };
     use crate::scratch::Scratch;
+    use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 
     /// What reading an entry's attributes and security needs. Opening by name always adds
     /// SYNCHRONIZE and read-attributes.
@@ -1126,18 +497,5 @@ mod tests {
         drop(held);
         fs::rename(&roaming_profile, &moved).expect("releasing the chain allows the move");
         assert!(moved.join("AppData").join("Local").is_dir());
-    }
-
-    #[test]
-    fn only_an_owner_in_the_trusted_set_is_trusted() {
-        let user = this_user();
-        let judged = |owner: &str| {
-            let security = Security::parse(&format!("O:{owner}D:P(A;OICI;FA;;;{user})"));
-            trusted_security(&security, Kind::Folder, &Trusted::new().expect("the set"))
-        };
-        assert_eq!(judged(&user), Ok(()));
-        assert_eq!(judged("SY"), Ok(()));
-        assert_eq!(judged("BA"), Ok(()));
-        assert_eq!(judged("S-1-5-21-1-2-3-1002"), Err(Untrusted::Unsafe));
     }
 }

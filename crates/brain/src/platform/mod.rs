@@ -83,7 +83,7 @@ pub(crate) use process::spawn_if;
 pub use process::{
     ChildPipes, Helper, Job, Launch, Spawned, Stdio, launch_detached, spawn, system_env,
 };
-pub(crate) use protected::Untrusted;
+pub(crate) use protected::{Untrusted, is_unsupported};
 #[cfg(not(windows))]
 pub(crate) use protected::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,

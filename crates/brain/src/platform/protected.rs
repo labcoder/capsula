@@ -1,13 +1,14 @@
 //! Protected model storage and Claude Code's private paths.
 
+#[cfg(windows)]
+pub(crate) use kumochi_storage::Untrusted;
+
 /// Why a path can't be trusted. It carries no path.
+#[cfg(not(windows))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[cfg_attr(
-    not(windows),
-    expect(
-        dead_code,
-        reason = "only a native adapter can classify a checked path"
-    )
+#[expect(
+    dead_code,
+    reason = "only a native adapter can classify a checked path"
 )]
 pub(crate) enum Untrusted {
     #[error("a path component doesn't exist")]
@@ -18,21 +19,20 @@ pub(crate) enum Untrusted {
     Unsafe,
     #[error("a path component can't be opened or read")]
     Io,
-    #[cfg(not(windows))]
     #[error("protected paths are unsupported on this platform")]
     Unsupported,
 }
 
-impl Untrusted {
-    #[cfg(windows)]
-    pub(crate) fn is_unsupported(_: Self) -> bool {
-        false
-    }
+/// Whether `error` says this platform has no protected paths at all.
+#[cfg(windows)]
+pub(crate) fn is_unsupported(_: Untrusted) -> bool {
+    false
+}
 
-    #[cfg(not(windows))]
-    pub(crate) fn is_unsupported(error: Self) -> bool {
-        error == Self::Unsupported
-    }
+/// Whether `error` says this platform has no protected paths at all.
+#[cfg(not(windows))]
+pub(crate) fn is_unsupported(error: Untrusted) -> bool {
+    error == Untrusted::Unsupported
 }
 
 #[cfg(not(windows))]
