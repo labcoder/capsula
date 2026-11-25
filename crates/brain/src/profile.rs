@@ -14,8 +14,8 @@ use kumochi_protocol::profile::{Probes, Root};
 use crate::connections::authority::existing::Legacy;
 #[cfg(any(windows, target_os = "macos"))]
 use crate::connections::authority::existing::legacy as legacy_authority;
-use crate::platform::SessionLock;
 use crate::platform::credential::CredentialStore;
+use crate::platform::{FolderId, SessionLock, folder_id};
 #[cfg(any(windows, target_os = "macos"))]
 use crate::platform::{credential::NativeCredentialStore, profile as native};
 use crate::store::existing::{CURRENT_HISTORY, LegacyHistory, legacy_history};
@@ -24,14 +24,14 @@ use crate::store::existing::{CURRENT_HISTORY, LegacyHistory, legacy_history};
 pub(crate) enum Folder {
     /// A definitive not-found of the exact name under its held, verified anchor.
     Missing,
-    /// A trusted folder at this path, held.
-    Present(PathBuf),
+    /// A trusted folder at this path, held, with the identity of what the held handle is open on.
+    Present(PathBuf, FolderId),
     /// No verified anchor, or anything else at the name.
     Unknown,
 }
 
 /// The probes over this machine's Known Folders (Application Support on macOS), setup guard and
-/// credential store. Each probe holds its own anchors through its reads.
+/// credential store. Each probe holds its anchors through its reads.
 #[cfg(any(windows, target_os = "macos"))]
 #[cfg_attr(
     test,
@@ -47,17 +47,17 @@ impl Probes for NativeProbes {
         taken(native::setup_guard(), &native::GuardError::Busy)
     }
 
-    fn legacy(&self, _: &Self::Guard) -> Observation {
-        let folders = native::legacy();
-        legacy(&folders.data, folders.roaming.as_ref(), |data| {
-            intact(data, |db, session| {
+    fn legacy(&self, guard: &Self::Guard) -> Observation {
+        let folders = native::legacy(guard);
+        legacy(&folders.data, folders.roaming.as_ref(), |data, held| {
+            intact(data, held, |db, session| {
                 legacy_authority(db, session, &NativeCredentialStore)
             })
         })
     }
 
-    fn root(&self, _: &Self::Guard) -> Root {
-        native::profile_root()
+    fn root(&self, guard: &Self::Guard) -> Root {
+        native::profile_root(guard)
     }
 
     fn owner(&self, _: &Self::Guard) -> Observation {
@@ -80,25 +80,36 @@ fn taken<G, E: PartialEq>(result: Result<G, E>, busy: &E) -> Guard<G> {
 fn legacy(
     data: &Folder,
     roaming: Option<&Folder>,
-    intact: impl FnOnce(&Path) -> Observation,
+    intact: impl FnOnce(&Path, FolderId) -> Observation,
 ) -> Observation {
     match (data, roaming) {
         (Folder::Missing, None | Some(Folder::Missing)) => Observation::Absent,
-        (Folder::Present(data), None | Some(Folder::Missing | Folder::Present(_))) => intact(data),
+        (Folder::Present(data, held), None | Some(Folder::Missing | Folder::Present(..))) => {
+            intact(data, *held)
+        }
         _ => Observation::Unverified,
     }
 }
 
 /// The legacy profile in the present folder `data`, read under its existing session lock, which
-/// stays held through every read. Matching only with the current history schema and an authority
-/// and committed host that both match. Anything else is unverified: an absent authority or host
-/// too, since the folder is there, and an older known schema, whose migration waits on the owner's
-/// call on legacy schema updates.
-fn intact(data: &Path, authority: impl FnOnce(&Path, &SessionLock) -> Legacy) -> Observation {
+/// stays held through every read. Nothing is opened unless the folder at `data` is the admitted
+/// one, `held`, which it must still be after the last read. Matching only with the current history
+/// schema and an authority and committed host that both match. Anything else is unverified: an
+/// absent authority or host too, since the folder is there, and an older known schema, whose
+/// migration waits on the owner's call on legacy schema updates.
+fn intact(
+    data: &Path,
+    held: FolderId,
+    authority: impl FnOnce(&Path, &SessionLock) -> Legacy,
+) -> Observation {
+    let admitted = || folder_id(data) == Some(held);
+    if !admitted() {
+        return Observation::Unverified;
+    }
     let Ok(session) = SessionLock::try_acquire_existing(&data.join(SESSION_LOCK)) else {
         return Observation::Unverified;
     };
-    match legacy_history(&data.join(STORE_FILE), &session) {
+    let read = match legacy_history(&data.join(STORE_FILE), &session) {
         LegacyHistory::KnownSchema(CURRENT_HISTORY) => {
             match authority(&data.join(AUTHORITY_FILE), &session) {
                 Legacy {
@@ -111,6 +122,11 @@ fn intact(data: &Path, authority: impl FnOnce(&Path, &SessionLock) -> Legacy) ->
         LegacyHistory::KnownSchema(_) | LegacyHistory::Missing | LegacyHistory::Unverified => {
             Observation::Unverified
         }
+    };
+    if admitted() {
+        read
+    } else {
+        Observation::Unverified
     }
 }
 
@@ -130,6 +146,7 @@ pub(crate) fn owner(store: &impl CredentialStore) -> Observation {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::fs;
 
     use kumochi_protocol::Secret;
@@ -168,7 +185,8 @@ mod tests {
 
     #[test]
     fn legacy_is_absent_only_when_every_folder_is_missing() {
-        let present = || Folder::Present(PathBuf::from("data"));
+        let id = folder_id(&std::env::temp_dir()).expect("a folder's identity");
+        let present = || Folder::Present(PathBuf::from("data"), id);
         let cases = [
             (Folder::Missing, None, Observation::Absent),
             (Folder::Missing, Some(Folder::Missing), Observation::Absent),
@@ -191,7 +209,8 @@ mod tests {
         ];
         for (case, (data, roaming, expected)) in cases.into_iter().enumerate() {
             let mut read = None;
-            let found = legacy(&data, roaming.as_ref(), |data| {
+            let found = legacy(&data, roaming.as_ref(), |data, held| {
+                assert_eq!(held, id, "case {case}");
                 read = Some(data.to_owned());
                 Observation::Matching
             });
@@ -209,20 +228,62 @@ mod tests {
         host: Observation::Matching,
     };
 
-    /// A legacy data folder with an empty session lock and a history store the brain opened.
-    fn profile(scratch: &Scratch) -> PathBuf {
-        let data = scratch.dir().to_owned();
+    /// A legacy data folder at `data` with an empty session lock and a history store the brain
+    /// opened.
+    fn profile(data: PathBuf) -> PathBuf {
         drop(Store::open(&data.join(STORE_FILE)).expect("a history store"));
         fs::write(data.join(SESSION_LOCK), b"").expect("the session lock");
         data
     }
 
+    /// `intact` on the folder at `data` as admitted now.
+    fn read_admitted(
+        data: &Path,
+        authority: impl FnOnce(&Path, &SessionLock) -> Legacy,
+    ) -> Observation {
+        let held = folder_id(data).expect("an admitted folder");
+        intact(data, held, authority)
+    }
+
+    #[test]
+    fn a_folder_swapped_after_admission_is_unverified() {
+        let scratch = Scratch::new("profile-swapped");
+        let data = profile(scratch.dir().join("data"));
+        let other = profile(scratch.dir().join("other"));
+        let admitted = scratch.dir().join("admitted");
+        let held = folder_id(&data).expect("an admitted folder");
+        let swap = || {
+            fs::rename(&data, &admitted).expect("move the admitted folder away");
+            fs::rename(&other, &data).expect("put another profile in its place");
+        };
+        swap();
+        let called = Cell::new(false);
+        let before = intact(&data, held, |_, _| {
+            called.set(true);
+            MATCHING
+        });
+        assert_eq!(before, Observation::Unverified, "swapped before the read");
+        assert!(!called.get(), "nothing in the other folder was read");
+        fs::rename(&data, &other).expect("move the other profile back");
+        fs::rename(&admitted, &data).expect("restore the admitted folder");
+        assert_eq!(
+            intact(&data, held, |_, _| MATCHING),
+            Observation::Matching,
+            "the admitted folder in place"
+        );
+        let during = intact(&data, held, |_, _| {
+            swap();
+            MATCHING
+        });
+        assert_eq!(during, Observation::Unverified, "swapped during the reads");
+    }
+
     #[test]
     fn an_intact_legacy_profile_matches_only_with_a_matching_authority() {
         let scratch = Scratch::new("profile-intact");
-        let data = profile(&scratch);
+        let data = profile(scratch.dir().to_owned());
         let before = files(&data);
-        let read = intact(&data, |db, _| {
+        let read = read_admitted(&data, |db, _| {
             assert_eq!(db, data.join(AUTHORITY_FILE));
             assert!(
                 matches!(
@@ -243,14 +304,14 @@ mod tests {
             (Observation::Matching, unverified),
         ] {
             assert_eq!(
-                intact(&data, |_, _| Legacy { authority, host }),
+                read_admitted(&data, |_, _| Legacy { authority, host }),
                 Observation::Unverified,
                 "{authority:?} authority, {host:?} host"
             );
         }
         let store = FakeStore::default();
         assert_eq!(
-            intact(&data, |db, session| legacy_authority(db, session, &store)),
+            read_admitted(&data, |db, session| legacy_authority(db, session, &store)),
             Observation::Unverified,
             "the real step finds no authority, which a present folder can't have"
         );
@@ -261,12 +322,15 @@ mod tests {
     #[test]
     fn a_matching_authority_without_its_host_is_unverified() {
         let scratch = Scratch::new("profile-no-host");
-        let data = profile(&scratch);
+        let data = profile(scratch.dir().to_owned());
         let no_host = Legacy {
             authority: Observation::Matching,
             host: Observation::Absent,
         };
-        assert_eq!(intact(&data, |_, _| no_host), Observation::Unverified);
+        assert_eq!(
+            read_admitted(&data, |_, _| no_host),
+            Observation::Unverified
+        );
     }
 
     #[test]
@@ -278,7 +342,7 @@ mod tests {
             fs::rename(db, data.join(STORE_FILE)).expect("the history store's name");
             fs::write(data.join(SESSION_LOCK), b"").expect("the session lock");
             let before = files(&data);
-            let read = intact(&data, |_, _| MATCHING);
+            let read = read_admitted(&data, |_, _| MATCHING);
             let expected = if version == CURRENT_HISTORY {
                 Observation::Matching
             } else {
@@ -299,19 +363,31 @@ mod tests {
     #[test]
     fn a_legacy_profile_without_its_lock_or_store_is_unverified_and_kept() {
         let scratch = Scratch::new("profile-partial");
-        let data = profile(&scratch);
+        let data = profile(scratch.dir().to_owned());
         let matching = |_: &Path, _: &SessionLock| MATCHING;
         let held = SessionLock::try_acquire_existing(&data.join(SESSION_LOCK)).expect("held");
-        assert_eq!(intact(&data, matching), Observation::Unverified, "busy");
+        assert_eq!(
+            read_admitted(&data, matching),
+            Observation::Unverified,
+            "busy"
+        );
         drop(held);
         fs::remove_file(data.join(SESSION_LOCK)).expect("no lock");
         let before = files(&data);
-        assert_eq!(intact(&data, matching), Observation::Unverified, "no lock");
+        assert_eq!(
+            read_admitted(&data, matching),
+            Observation::Unverified,
+            "no lock"
+        );
         assert_eq!(files(&data), before, "looking created no lock");
         fs::write(data.join(SESSION_LOCK), b"").expect("the session lock");
         fs::remove_file(data.join(STORE_FILE)).expect("no store");
         let before = files(&data);
-        assert_eq!(intact(&data, matching), Observation::Unverified, "no store");
+        assert_eq!(
+            read_admitted(&data, matching),
+            Observation::Unverified,
+            "no store"
+        );
         assert_eq!(files(&data), before);
     }
 
