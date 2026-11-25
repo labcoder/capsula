@@ -183,7 +183,7 @@ fn let_go(watching: &Watching, cx: &mut TestAppContext) {
         ]
     );
     watching.ready.owner.update(cx, |owner, _| {
-        owner.voice.pending.as_mut().expect("the hold").source = Source::Sent;
+        owner.voice.state.pending.as_mut().expect("the hold").source = Source::Sent;
     });
 }
 
@@ -432,7 +432,7 @@ fn talk_escape_refusal_never_admits_a_hold_or_arms_a_screen_watch(cx: &mut TestA
         1
     );
     watching.ready.owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.pending.is_none());
+        assert!(owner.voice.state.pending.is_none());
         assert!(!owner.talk_escape.held());
         assert!(!owner.link.input_is(GestureId(1)));
     });
@@ -471,7 +471,7 @@ fn a_release_with_no_sources_does_none_of_the_watch_s_work(cx: &mut TestAppConte
     assert_eq!(watchdog(&watching, cx), None, "no limit to keep");
     watching.ready.owner.update(cx, |owner, _| {
         assert!(owner.voice.watched.is_none());
-        owner.voice.pending.as_mut().expect("the hold").source = Source::Sent;
+        owner.voice.state.pending.as_mut().expect("the hold").source = Source::Sent;
     });
     // A screen scene that arrives all the same finds no watch and is skipped.
     state(&watching, RUN, Phase::Thinking, HOLD, cx);
@@ -571,7 +571,7 @@ fn a_reset_before_recognition_delivery_retires_only_that_unstarted_generation(
     )));
     owner.read_with(cx, |owner, _| {
         assert_eq!(owner.link.microphone_gate().latest(), 1);
-        assert!(owner.voice.pending.is_none());
+        assert!(owner.voice.state.pending.is_none());
     });
 
     chord(&deliver, Edge::Down, at + Duration::from_secs(1));
@@ -600,16 +600,17 @@ fn a_reset_before_recognition_delivery_retires_only_that_unstarted_generation(
         owner.read_with(cx, |owner, _| {
             owner
                 .voice
+                .state
                 .pending
                 .as_ref()
-                .is_some_and(|hold| hold.token.gesture() == GestureId(2) && hold.collected)
+                .is_some_and(|hold| hold.token().gesture() == GestureId(2) && hold.collected)
         })
     });
     samples.recv_timeout(Duration::from_secs(3)).unwrap();
     deliver(Event::Reset, after(at, 1_302));
     finish.send(()).unwrap();
     until(cx, |cx| {
-        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+        owner.read_with(cx, |owner, _| owner.voice.state.pending.is_none())
     });
 }
 
@@ -804,7 +805,7 @@ fn stale_releases_cannot_arm_or_send_at_either_delivery_boundary(cx: &mut TestAp
                 stops > 0
                     && watching.ready.owner.read_with(cx, |owner, _| {
                         if reset {
-                            owner.voice.pending.is_none()
+                            owner.voice.state.pending.is_none()
                         } else {
                             releases > 0
                         }
@@ -824,9 +825,9 @@ fn stale_releases_cannot_arm_or_send_at_either_delivery_boundary(cx: &mut TestAp
 fn an_older_failed_send_cannot_revoke_the_successors_watch_or_exclusion(cx: &mut TestAppContext) {
     let watching = released(true, cx);
     watching.ready.owner.update(cx, |owner, cx| {
-        let hold = owner.voice.pending.as_ref().expect("the first hold");
-        hold.token.discard_unstarted().expect("never started");
-        owner.voice.gates.received(&hold.token);
+        let hold = owner.voice.state.pending.as_ref().expect("the first hold");
+        hold.token().discard_unstarted().expect("never started");
+        owner.voice.gates.received(hold.token());
         let session = owner.session.as_ref().expect("connected");
         let stopped = ControlToBrain::VoiceHoldStopped {
             gesture: GestureId(1),
@@ -1037,9 +1038,9 @@ fn esc_the_next_hold_and_the_setting_end_the_watch(cx: &mut TestAppContext) {
     let watching = released(true, cx);
     // The fixture never opened the microphone, so the gate is given back by hand.
     watching.ready.owner.read_with(cx, |owner, _| {
-        let hold = owner.voice.pending.as_ref().expect("the hold");
-        hold.token.discard_unstarted().expect("never started");
-        owner.voice.gates.received(&hold.token);
+        let hold = owner.voice.state.pending.as_ref().expect("the hold");
+        hold.token().discard_unstarted().expect("never started");
+        owner.voice.gates.received(hold.token());
     });
     state(&watching, RUN, Phase::Thinking, HOLD, cx);
     state(&watching, RUN, Phase::Answering, None, cx);
@@ -1317,7 +1318,7 @@ fn a_deferred_plain_esc_stops_its_marked_answer_after_the_screen_wake(cx: &mut T
         let watching = marks_up(cx);
         let owner = &watching.ready.owner;
         owner.read_with(cx, |owner, _| {
-            assert!(owner.voice.pending.is_none());
+            assert!(owner.voice.state.pending.is_none());
             assert!(!owner.link.input_is(GestureId(1)));
             assert_eq!(owner.presenter.marks_shown(), Some(RunId(RUN)));
         });
@@ -1464,15 +1465,15 @@ fn terminal_microphone_receipt_does_not_take_the_drawing_s_deferred_clear(cx: &m
         open.send(()).unwrap();
         until(cx, |cx| {
             owner.read_with(cx, |owner, _| {
-                owner.voice.status == Some(Text::HoldListening)
+                owner.voice.state.status == Some(Text::HoldListening)
             })
         });
         samples.recv_timeout(Duration::from_secs(3)).unwrap();
         owner.update(cx, |owner, cx| {
             owner.cancel_voice(cx);
-            assert_eq!(owner.voice.status, Some(Text::HoldStopping));
+            assert_eq!(owner.voice.state.status, Some(Text::HoldStopping));
             assert!(!owner.voice_working());
-            assert!(owner.voice.pending.is_some());
+            assert!(owner.voice.state.pending.is_some());
             assert!(!owner.link.input_is(GestureId(1)));
             assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
         });
@@ -1483,7 +1484,7 @@ fn terminal_microphone_receipt_does_not_take_the_drawing_s_deferred_clear(cx: &m
         });
         finish.send(()).unwrap();
         until(cx, |cx| {
-            owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+            owner.read_with(cx, |owner, _| owner.voice.state.pending.is_none())
         });
         assert_eq!(
             told(&watching),
@@ -1523,7 +1524,7 @@ fn terminal_microphone_receipt_does_not_take_the_drawing_s_deferred_clear(cx: &m
 /// The pending hold is gone and its run is fenced off.
 fn ended(watching: &Watching, cx: &mut TestAppContext) {
     watching.ready.owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.pending.is_none());
+        assert!(owner.voice.state.pending.is_none());
         assert_eq!(owner.runs.stoppable(), None);
     });
 }
@@ -1561,7 +1562,7 @@ fn natively_pending(watching: &Watching, cx: &mut TestAppContext) -> (Deliver, I
     finish.send(()).expect("the fake microphone ends");
     until(cx, |cx| {
         owner.read_with(cx, |owner, _| {
-            let hold = owner.voice.pending.as_ref();
+            let hold = owner.voice.state.pending.as_ref();
             hold.is_some_and(|hold| matches!(hold.source, Source::Sent))
         })
     });
@@ -2099,7 +2100,7 @@ fn panel(watching: &Watching, cx: &mut TestAppContext) -> (Option<RunId>, bool) 
 /// The press cancelled hold 1 and did nothing else, as [`nothing_else`] says.
 fn only_cancelled(watching: &Watching, before: (Option<RunId>, bool), cx: &mut TestAppContext) {
     watching.ready.owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+        assert_eq!(owner.voice.state.status, Some(Text::HoldCancelled));
     });
     nothing_else(watching, before, cx);
 }
@@ -2194,7 +2195,7 @@ fn ended_by_esc_down(watching: &Watching, cx: &mut TestAppContext) -> (Deliver, 
     deliver(Event::Deadline, after(at, 301));
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
-        let hold = owner.voice.pending.as_ref().expect("the hold");
+        let hold = owner.voice.state.pending.as_ref().expect("the hold");
         assert!(matches!(hold.source, Source::Waiting));
     });
     let (key, edge) = (
@@ -2204,8 +2205,8 @@ fn ended_by_esc_down(watching: &Watching, cx: &mut TestAppContext) -> (Deliver, 
     deliver(Event::Key { key, edge }, after(at, 600));
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.pending.is_none());
-        assert_eq!(owner.voice.ended, Some((GestureId(1), None)));
+        assert!(owner.voice.state.pending.is_none());
+        assert_eq!(owner.voice.state.ended, Some((GestureId(1), None)));
     });
     (deliver, at)
 }
@@ -2224,7 +2225,7 @@ fn the_hotkey_s_press_after_an_esc_down_that_ended_a_waiting_hold_does_nothing_m
     assert_eq!(told(&watching), []);
     only_cancelled(&watching, before, cx);
     watching.ready.owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.voice.ended, None, "the press took the receipt");
+        assert_eq!(owner.voice.state.ended, None, "the press took the receipt");
     });
 }
 
@@ -2267,7 +2268,10 @@ fn a_reply_that_ends_the_hold_before_its_deferred_press_leaves_an_ordinary_drawi
             status(&watching.ready.owner, 1, 1, HoldStatus::Cancelled, cx);
         }
         watching.ready.owner.read_with(cx, |owner, _| {
-            assert!(owner.voice.pending.is_none(), "the reply ended the hold");
+            assert!(
+                owner.voice.state.pending.is_none(),
+                "the reply ended the hold"
+            );
         });
         cx.run_until_parked();
         // The press's cancel and what the reply itself did, and nothing from the press after
@@ -2280,7 +2284,7 @@ fn a_reply_that_ends_the_hold_before_its_deferred_press_leaves_an_ordinary_drawi
         assert_eq!(told(&watching), expected, "interrupted {interrupted}");
         let notice = (!interrupted).then_some(Text::HoldCancelled);
         watching.ready.owner.read_with(cx, |owner, _| {
-            assert_eq!(owner.voice.status, notice);
+            assert_eq!(owner.voice.state.status, notice);
         });
         nothing_else(&watching, before, cx);
     }
@@ -2334,8 +2338,8 @@ fn measure_captured_stop_and_raw_intake(cx: &mut TestAppContext) {
                 hold(&watching, gesture, cx);
                 release(&watching.ready.owner, gesture, Some(DOWN), cx);
                 watching.ready.owner.update(cx, |owner, _| {
-                    let hold = owner.voice.pending.as_mut().expect("released hold");
-                    hold.token
+                    let hold = owner.voice.state.pending.as_mut().expect("released hold");
+                    hold.token()
                         .discard_unstarted()
                         .expect("the fixture never starts a source");
                     hold.source = Source::Sent;
@@ -2567,7 +2571,13 @@ fn captured_cancel_before_first_state_never_promotes_its_automatic_stop(cx: &mut
         assert!(owner.presenter.live_work(Instant::now()));
         assert_eq!(owner.presenter.stoppable_run(), Some(RunId(RUN + 1)));
         assert_eq!(
-            owner.voice.pending.as_ref().expect("pending hold").run,
+            owner
+                .voice
+                .state
+                .pending
+                .as_ref()
+                .expect("pending hold")
+                .run(),
             None
         );
     });
@@ -2616,12 +2626,17 @@ fn automatic_hold_stop_keeps_newer_voice_ownership_and_folds_a_prebind_raw_end(
     hold(&watching, 2, cx);
     release(&watching.ready.owner, 2, Some(DOWN), cx);
     watching.ready.owner.update(cx, |owner, _| {
-        let hold = owner.voice.pending.as_mut().expect("newer pending hold");
-        hold.token.discard_unstarted().expect("no source started");
+        let hold = owner
+            .voice
+            .state
+            .pending
+            .as_mut()
+            .expect("newer pending hold");
+        hold.token().discard_unstarted().expect("no source started");
         hold.source = Source::Sent;
-        assert_eq!(hold.token.gesture(), GestureId(2));
-        assert_eq!(hold.run, None);
-        assert_eq!(owner.voice.ended, None);
+        assert_eq!(hold.token().gesture(), GestureId(2));
+        assert_eq!(hold.run(), None);
+        assert_eq!(owner.voice.state.ended, None);
     });
     told(&watching);
     state(&watching, RUN, Phase::Thinking, HOLD, cx);
@@ -2634,10 +2649,15 @@ fn automatic_hold_stop_keeps_newer_voice_ownership_and_folds_a_prebind_raw_end(
         })]
     );
     watching.ready.owner.read_with(cx, |owner, _| {
-        let hold = owner.voice.pending.as_ref().expect("newer hold survives");
-        assert_eq!(hold.token.gesture(), GestureId(2));
-        assert_eq!(hold.run, None);
-        assert_eq!(owner.voice.ended, None);
+        let hold = owner
+            .voice
+            .state
+            .pending
+            .as_ref()
+            .expect("newer hold survives");
+        assert_eq!(hold.token().gesture(), GestureId(2));
+        assert_eq!(hold.run(), None);
+        assert_eq!(owner.voice.state.ended, None);
         assert_eq!(
             owner.runs.owned_disposition(RunId(RUN)),
             crate::runs::RunDisposition::Stopped
@@ -2659,10 +2679,15 @@ fn automatic_hold_stop_keeps_newer_voice_ownership_and_folds_a_prebind_raw_end(
             owner.runs.owned_disposition(RunId(RUN)),
             crate::runs::RunDisposition::Live
         );
-        let hold = owner.voice.pending.as_ref().expect("newer named hold");
-        assert_eq!(hold.token.gesture(), GestureId(2));
-        assert_eq!(hold.run.expect("newer run").run, RunId(RUN + 1));
-        assert_eq!(owner.voice.ended, None);
+        let hold = owner
+            .voice
+            .state
+            .pending
+            .as_ref()
+            .expect("newer named hold");
+        assert_eq!(hold.token().gesture(), GestureId(2));
+        assert_eq!(hold.run().expect("newer run").run, RunId(RUN + 1));
+        assert_eq!(owner.voice.state.ended, None);
         assert_eq!(owner.runs.stoppable(), Some(RunId(RUN + 1)));
     });
 }
@@ -2765,10 +2790,11 @@ fn voice_receipt_keeps_a_prebind_raw_end_and_terminal_closure_through_teardown(
     watching.ready.owner.read_with(cx, |owner, _| {
         let tail = owner
             .voice
+            .state
             .pending
             .as_ref()
             .expect("pending voice")
-            .run
+            .run()
             .expect("bound receipt");
         assert_eq!(
             tail,
@@ -2784,9 +2810,9 @@ fn voice_receipt_keeps_a_prebind_raw_end_and_terminal_closure_through_teardown(
     state(&watching, RUN, Phase::Done, None, cx);
     state(&watching, RUN, Phase::Thinking, None, cx);
     watching.ready.owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.pending.is_none());
+        assert!(owner.voice.state.pending.is_none());
         assert_eq!(
-            owner.voice.ended,
+            owner.voice.state.ended,
             Some((
                 GestureId(1),
                 Some(crate::runs::RunTail {
@@ -2813,6 +2839,7 @@ fn voice_receipt_accepts_only_owned_successful_delete_closure(cx: &mut TestAppCo
                     assert!(
                         !owner
                             .voice
+                            .state
                             .ended
                             .expect("receipt")
                             .1
@@ -2824,6 +2851,7 @@ fn voice_receipt_accepts_only_owned_successful_delete_closure(cx: &mut TestAppCo
                     assert!(
                         !owner
                             .voice
+                            .state
                             .ended
                             .expect("receipt")
                             .1
@@ -2835,6 +2863,7 @@ fn voice_receipt_accepts_only_owned_successful_delete_closure(cx: &mut TestAppCo
                     assert!(
                         !owner
                             .voice
+                            .state
                             .ended
                             .expect("receipt")
                             .1
@@ -2854,7 +2883,7 @@ fn voice_receipt_accepts_only_owned_successful_delete_closure(cx: &mut TestAppCo
                 }
                 watching.ready.owner.read_with(cx, |owner, _| {
                     assert_eq!(
-                        owner.voice.ended,
+                        owner.voice.state.ended,
                         Some((
                             GestureId(1),
                             Some(crate::runs::RunTail {
@@ -2879,7 +2908,13 @@ fn a_suppressed_terminal_updates_its_receipt_before_retiring_the_pending_input(
     state(&watching, RUN, Phase::Answering, None, cx);
     end(&watching, RUN, cx);
     watching.ready.owner.update(cx, |owner, _| {
-        let tail = owner.voice.ended.expect("ended hold").1.expect("bound run");
+        let tail = owner
+            .voice
+            .state
+            .ended
+            .expect("ended hold")
+            .1
+            .expect("bound run");
         assert!(!tail.control_closed);
         assert!(tail.data_ended);
         assert_eq!(
@@ -2897,7 +2932,7 @@ fn a_suppressed_terminal_updates_its_receipt_before_retiring_the_pending_input(
             crate::runs::RunDisposition::Live
         );
         assert_eq!(
-            owner.voice.ended,
+            owner.voice.state.ended,
             Some((
                 GestureId(1),
                 Some(crate::runs::RunTail {
@@ -2949,7 +2984,7 @@ fn a_deferred_press_stops_its_done_run_before_the_run_s_end(cx: &mut TestAppCont
     press_deferred(&deliver, at, cx);
     state(&watching, RUN, Phase::Done, None, cx);
     watching.ready.owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.pending.is_none());
+        assert!(owner.voice.state.pending.is_none());
         assert_eq!(owner.runs.stoppable(), Some(RunId(RUN)));
     });
     cx.run_until_parked();
@@ -3029,7 +3064,10 @@ fn a_deferred_press_whose_hold_became_an_answer_first_stops_that_answer(cx: &mut
     press_deferred(&deliver, at, cx);
     state(&watching, RUN, Phase::Answering, None, cx);
     watching.ready.owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.pending.is_none(), "the answer ended the hold");
+        assert!(
+            owner.voice.state.pending.is_none(),
+            "the answer ended the hold"
+        );
         assert_eq!(owner.runs.stoppable(), Some(RunId(RUN)));
     });
     cx.run_until_parked();
@@ -3070,7 +3108,7 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     told(&watching);
     watching.ready.owner.update(cx, |owner, cx| {
         owner.native_escape(None, None, cx).expect("escape");
-        assert_eq!(owner.voice.ended, None);
+        assert_eq!(owner.voice.state.ended, None);
     });
     cx.run_until_parked();
     assert_eq!(told(&watching), [clear()]);
@@ -3084,7 +3122,7 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
         owner
             .native_escape(Some(GestureId(2)), None, cx)
             .expect("escape");
-        assert!(owner.voice.pending.is_none(), "hold 2 is cancelled");
+        assert!(owner.voice.state.pending.is_none(), "hold 2 is cancelled");
     });
 
     // And hold 1's marker, whatever brings it back, leaves hold 2 pending.
@@ -3099,8 +3137,8 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
         owner
             .native_escape(Some(GestureId(1)), None, cx)
             .expect("escape");
-        let hold = owner.voice.pending.as_ref().expect("hold 2");
-        assert_eq!(hold.token.gesture(), GestureId(2));
+        let hold = owner.voice.state.pending.as_ref().expect("hold 2");
+        assert_eq!(hold.token().gesture(), GestureId(2));
     });
 
     // A lost session forgets the marker.
@@ -3109,7 +3147,7 @@ fn a_cancel_marker_left_behind_takes_no_other_press_and_cancels_no_other_hold(
     let lost = LinkEvent::State(LinkState::Reconnecting);
     receive(&watching.ready.owner, lost, cx);
     watching.ready.owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.voice.ended, None);
+        assert_eq!(owner.voice.state.ended, None);
     });
 }
 

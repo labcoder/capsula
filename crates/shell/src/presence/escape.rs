@@ -257,31 +257,18 @@ impl Presence {
         // Marks that are up go, as at any press. The run the hold became is stopped if it is
         // what Esc would stop now. Nothing else: no local decision is left for it.
         if let Some(gesture) = gesture {
-            let ended = self
-                .voice
-                .ended
-                .take_if(|(hold, _)| *hold == gesture)
-                .map(|(_, tail)| tail);
-            let pending = self
-                .voice
-                .pending
-                .as_ref()
-                .filter(|hold| hold.token.gesture() == gesture)
-                .map(|hold| hold.run);
-            let Some(tail) = ended.or(pending) else {
+            let Some(revoked) = self.voice.state.revoked(gesture) else {
                 return if self.voice_working() {
                     Ok(())
                 } else {
                     self.escape_with_speech(speech, cx)
                 };
             };
-            self.discard_voice_recovery(gesture);
             self.marks_changed(cx);
             self.cancel_voice_gesture(gesture, cx);
-            self.voice.ended.take_if(|(hold, _)| *hold == gesture);
             let now = std::time::Instant::now();
-            let target = self.moving_run(now);
-            if let Some(tail) = tail.filter(|tail| target == Some(tail.run)) {
+            let moving = self.moving_run(now);
+            if let Some(tail) = revoked.settle(&mut self.voice.state, moving) {
                 let message = self.runs.stop_owned(tail);
                 let stop = escape::stop_owned(&mut self.presenter, tail.run, now);
                 let valid = stop.effects.is_ok();
@@ -295,7 +282,7 @@ impl Presence {
             }
             return self.runs_changed(cx);
         }
-        self.voice.ended = None;
+        self.voice.state.ended = None;
         // Marks that are up go at this press, and `escape` takes them before it ends a hold.
         // A hold is still pending here when its first mark came before its run's `Answering`.
         if self.presenter.marks_shown().is_some() || mark.is_some() {
@@ -430,7 +417,7 @@ impl Presence {
         // answer too, whatever else it does here.
         let press = escape::Press::new(speech, self.presenter.marks_shown().or(mark), &self.runs);
         self.marks_changed(cx);
-        self.voice.recovery = None;
+        self.voice.state.recovery = None;
         match press.lead(self.voice_escape_owner(), self.presenter.input.selection()) {
             Lead::CancelHold => {
                 self.cancel_voice(cx);

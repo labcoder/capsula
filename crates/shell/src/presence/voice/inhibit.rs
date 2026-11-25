@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
 use gpui_kit::{BackgroundExecutor, Task};
-use kumochi_protocol::message::{ControlToBrain, GestureId, NoticeRevision, RunId, ThreadId};
+use kumochi_protocol::message::{ControlToBrain, GestureId, RunId};
 use kumochi_shell_core::link::output::{Claim, Denied, InhibitToken, OutputOwner, Retirement};
 
 use super::{Context, FailureReason, FailureStage, Presence, Session, Source};
@@ -48,17 +48,7 @@ enum Stage {
     Ending,
 }
 
-/// The screen offer a hold's first input is seen under: the brain's revision, bound to the
-/// connection, choice revision and target it was published for. `epoch` counts every change the
-/// shell published, so an offer that went and came back is another one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::presence) struct Offer {
-    pub(in crate::presence) session: u64,
-    pub(in crate::presence) choice: u64,
-    pub(in crate::presence) target: (Option<ThreadId>, u64),
-    pub(in crate::presence) revision: NoticeRevision,
-    pub(in crate::presence) epoch: u64,
-}
+pub(in crate::presence) use kumochi_shell_core::voice::Offer;
 
 struct Gate {
     gesture: GestureId,
@@ -522,9 +512,10 @@ impl Presence {
                 After::End(gesture, text) => {
                     if self
                         .voice
+                        .state
                         .pending
                         .as_ref()
-                        .is_some_and(|hold| hold.token.gesture() == gesture)
+                        .is_some_and(|hold| hold.token().gesture() == gesture)
                     {
                         tracing::debug!(stage = ?FailureStage::Inhibit, reason = ?text, "held speech input refused");
                         self.end_voice(text, cx);
@@ -534,9 +525,10 @@ impl Presence {
                 After::Retired(gesture) => {
                     if let Some(hold) = self
                         .voice
+                        .state
                         .pending
                         .as_mut()
-                        .filter(|hold| hold.token.gesture() == gesture)
+                        .filter(|hold| hold.token().gesture() == gesture)
                     {
                         hold.unretired = false;
                         self.finish_voice();
@@ -559,8 +551,8 @@ impl Presence {
                 }
                 // A hold's own failure notice stays until the hold is gone.
                 After::Unconfirmed => {
-                    if self.voice.pending.is_none()
-                        && self.voice.status != Some(Text::HoldUnconfirmed)
+                    if self.voice.state.pending.is_none()
+                        && self.voice.state.status != Some(Text::HoldUnconfirmed)
                     {
                         self.voice_notice(Text::HoldUnconfirmed, cx);
                     }
@@ -664,22 +656,22 @@ impl Presence {
         if executor.now() >= *at {
             return Err(Text::HoldCancelled);
         }
-        let Some(hold) = self.voice.pending.as_ref().filter(|hold| {
-            hold.token.gesture() == gate.gesture
+        let Some(hold) = self.voice.state.pending.as_ref().filter(|hold| {
+            hold.token().gesture() == gate.gesture
                 && matches!(hold.source, Source::Waiting)
-                && hold.terminal.is_none()
+                && hold.terminal().is_none()
         }) else {
             return Ok(());
         };
         if !gates.on.get()
-            || !self.voice_current(hold.stamp)
+            || !self.voice_current(hold.stamp())
             || !self.link.input_is(gate.gesture)
-            || hold.token.mode(&hold.session.alive(), Instant::now()) != Ok(Mode::Preparing)
+            || hold.token().mode(&hold.session().alive(), Instant::now()) != Ok(Mode::Preparing)
         {
             return Err(Text::HoldCancelled);
         }
         let output = self.link.output();
-        let claimed = match output.claim(token, hold.session.generation()) {
+        let claimed = match output.claim(token, hold.session().generation()) {
             Ok(claimed) => claimed,
             Err(Denied::Opening | Denied::NotQuiet) => return Ok(()),
             Err(Denied::Busy) if gate.recheck(gates, executor) => return Ok(()),

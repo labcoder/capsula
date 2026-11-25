@@ -707,8 +707,8 @@ fn holds_while_onboarding_shows_reach_neither_the_brain_nor_the_microphone(
         assert!(controls.is_empty(), "{threshold:?}");
         owner.read_with(cx, |owner, _| {
             assert_eq!(owner.link.microphone_gate().latest(), 0, "{threshold:?}");
-            assert!(owner.voice.pending.is_none(), "{threshold:?}");
-            assert_eq!(owner.voice.status, None, "{threshold:?}");
+            assert!(owner.voice.state.pending.is_none(), "{threshold:?}");
+            assert_eq!(owner.voice.state.status, None, "{threshold:?}");
         });
     }
     owner.update(cx, |owner, cx| owner.close_onboarding(cx).expect("close"));
@@ -727,7 +727,7 @@ fn holds_while_onboarding_shows_reach_neither_the_brain_nor_the_microphone(
         ]
     ));
     owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
+        assert_eq!(owner.voice.state.status, Some(Text::HoldPreparing));
     });
 }
 
@@ -762,8 +762,8 @@ fn a_hold_held_as_onboarding_opens_ends_as_refused_and_the_next_one_after_close_
     };
     assert_eq!(ended, [cancel, stopped]);
     owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.pending.is_none());
-        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+        assert!(owner.voice.state.pending.is_none());
+        assert_eq!(owner.voice.state.status, Some(Text::HoldCancelled));
         assert!(!owner.link.input_is(GestureId(1)));
     });
     chord(&deliver, Edge::Up, at + Duration::from_millis(400));
@@ -790,7 +790,7 @@ fn a_hold_held_as_onboarding_opens_ends_as_refused_and_the_next_one_after_close_
         ]
     ));
     owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
+        assert_eq!(owner.voice.state.status, Some(Text::HoldPreparing));
     });
 }
 
@@ -897,8 +897,8 @@ fn saved_sign_in_dispatch(
                 [owner.settings_chatgpt, owner.onboarding_chatgpt],
                 [owed; 2]
             );
-            assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
-            assert!(owner.voice.pending.is_some());
+            assert_eq!(owner.voice.state.status, Some(Text::HoldPreparing));
+            assert!(owner.voice.state.pending.is_some());
             assert!(owner.link.input_is(GestureId(1)));
             assert_eq!(owner.link.choice_revision(), stamp.choice);
             assert!(owner.session.as_ref().unwrap().open());
@@ -949,8 +949,8 @@ fn saved_sign_in_dispatch(
             [owner.settings_chatgpt, owner.onboarding_chatgpt],
             [SignInMark::Settled; 2]
         );
-        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
-        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.voice.state.status, Some(Text::HoldCancelled));
+        assert!(owner.voice.state.pending.is_none());
         assert!(!owner.link.input_is(GestureId(1)));
         assert_eq!(owner.link.choice_revision(), stamp.choice + 1);
     });

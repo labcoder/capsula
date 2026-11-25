@@ -283,8 +283,8 @@ fn cancelling_a_loading_speech_model_ends_the_waiting_hold_and_keeps_settings_fo
     assert!(!view.read_with(cx, |view, _| view.stop));
     owner.read_with(cx, |owner, cx| {
         assert!(!owner.activity.working);
-        assert!(owner.voice.pending.is_none());
-        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+        assert!(owner.voice.state.pending.is_none());
+        assert_eq!(owner.voice.state.status, Some(Text::HoldCancelled));
         assert!(owner.settings.read(cx).voice_setup_pending(SpeechInput));
     });
     let messages = drain(&controls);
@@ -329,14 +329,14 @@ fn disabling_hold_to_talk_in_focused_settings_finishes_existing_cleanup(cx: &mut
     open.send(()).unwrap();
     until(cx, |cx| {
         owner.read_with(cx, |owner, _| {
-            owner.voice.status == Some(Text::HoldListening)
+            owner.voice.state.status == Some(Text::HoldListening)
         })
     });
     samples.recv_timeout(Duration::from_secs(3)).unwrap();
     let (window, before) = owner.update(cx, |owner, cx| {
         owner.cancel_voice(cx);
-        assert_eq!(owner.voice.status, Some(Text::HoldStopping));
-        assert!(owner.voice.pending.is_some());
+        assert_eq!(owner.voice.state.status, Some(Text::HoldStopping));
+        assert!(owner.voice.state.pending.is_some());
         assert!(!token.retired());
         let (window, view) = detached_settings(owner, cx);
         let panel = owner.settings_panel.as_mut().unwrap();
@@ -359,15 +359,15 @@ fn disabling_hold_to_talk_in_focused_settings_finishes_existing_cleanup(cx: &mut
     );
     owner.read_with(cx, |owner, cx| {
         assert_eq!(owner.activity, before);
-        assert_eq!(owner.voice.status, Some(Text::HoldStopping));
-        assert!(owner.voice.pending.is_some());
+        assert_eq!(owner.voice.state.status, Some(Text::HoldStopping));
+        assert!(owner.voice.state.pending.is_some());
         assert!(owner.settings.read(cx).hold_to_talk_pending());
     });
     assert!(!token.retired());
 
     finish.send(()).unwrap();
     until(cx, |cx| {
-        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+        owner.read_with(cx, |owner, _| owner.voice.state.pending.is_none())
     });
     assert!(token.retired());
     assert_eq!(
@@ -1009,8 +1009,8 @@ fn rejected_speech_input_keeps_the_settings_panel_open(cx: &mut TestAppContext) 
         );
         assert!(owner.settings_open());
         assert!(owner.settings_focused());
-        assert_eq!(owner.voice.status, Some(Text::VoiceNotInstalled));
-        assert!(owner.voice.pending.is_none());
+        assert_eq!(owner.voice.state.status, Some(Text::VoiceNotInstalled));
+        assert!(owner.voice.state.pending.is_none());
     });
 }
 
@@ -1039,7 +1039,7 @@ fn a_stale_or_output_only_setup_cancel_does_not_revoke_the_current_hold(cx: &mut
         owner.voice_setup_action(cancel, cx);
         assert!(controls.is_empty());
         assert!(owner.link.input_is(GestureId(1)));
-        assert!(owner.voice.pending.is_some());
+        assert!(owner.voice.state.pending.is_some());
 
         let cancel = owner.settings.update(cx, |settings, _| {
             assert!(settings.receive_voice(Some(1), 1, downloading));
@@ -1054,7 +1054,7 @@ fn a_stale_or_output_only_setup_cancel_does_not_revoke_the_current_hold(cx: &mut
         );
         assert!(controls.is_empty());
         assert!(owner.link.input_is(GestureId(1)));
-        assert!(owner.voice.pending.is_some());
+        assert!(owner.voice.state.pending.is_some());
     });
 }
 
@@ -1632,7 +1632,7 @@ fn confirming_sign_out_during_a_recording_stops_only_that_hold(cx: &mut TestAppC
     open.send(()).unwrap();
     until(cx, |cx| {
         owner.read_with(cx, |owner, _| {
-            owner.voice.status == Some(Text::HoldListening)
+            owner.voice.state.status == Some(Text::HoldListening)
         })
     });
     samples.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -1677,12 +1677,12 @@ fn confirming_sign_out_during_a_recording_stops_only_that_hold(cx: &mut TestAppC
     assert!(!token.retired());
     owner.read_with(cx, |owner, _| {
         assert!(!owner.activity.working);
-        assert_eq!(owner.voice.status, Some(Text::HoldStopping));
+        assert_eq!(owner.voice.state.status, Some(Text::HoldStopping));
     });
 
     finish.send(()).unwrap();
     until(cx, |cx| {
-        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+        owner.read_with(cx, |owner, _| owner.voice.state.pending.is_none())
     });
     assert!(token.retired());
     assert_eq!(
@@ -2202,7 +2202,7 @@ fn disabling_hold_to_talk_in_settings_stops_live_recording_without_moving_focus(
     open.send(()).unwrap();
     until(cx, |cx| {
         owner.read_with(cx, |owner, _| {
-            owner.voice.status == Some(Text::HoldListening)
+            owner.voice.state.status == Some(Text::HoldListening)
         })
     });
     samples.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -2241,7 +2241,7 @@ fn disabling_hold_to_talk_in_settings_stops_live_recording_without_moving_focus(
     assert!(!view.read_with(cx, |view, _| view.stop));
     owner.read_with(cx, |owner, cx| {
         assert!(!owner.activity.working);
-        assert_eq!(owner.voice.status, Some(Text::HoldStopping));
+        assert_eq!(owner.voice.state.status, Some(Text::HoldStopping));
         assert_eq!(
             owner.settings.read(cx).hold_to_talk_notice(),
             Some(Text::HoldDisabled)
@@ -2251,7 +2251,7 @@ fn disabling_hold_to_talk_in_settings_stops_live_recording_without_moving_focus(
 
     finish.send(()).unwrap();
     until(cx, |cx| {
-        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+        owner.read_with(cx, |owner, _| owner.voice.state.pending.is_none())
     });
     assert!(token.retired());
     assert_eq!(

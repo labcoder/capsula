@@ -556,7 +556,7 @@ fn apply(
         let applied = owner.update(app, |this, cx| {
             if pending.escape.is_some()
                 && matches!(cancel, CancelDispatch::Inline)
-                && this.voice.pending.is_some()
+                && this.voice.state.pending.is_some()
             {
                 return None;
             }
@@ -612,7 +612,7 @@ fn apply(
                                         && this.link.input_is(gesture);
                                     this.link.clear_input(gesture);
                                     if refused {
-                                        this.voice.lost = None;
+                                        this.voice.state.lost = None;
                                         this.voice_notice(Text::HoldFailed, cx);
                                     }
                                 }

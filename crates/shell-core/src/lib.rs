@@ -43,3 +43,4 @@ pub mod sign_in_mark;
 pub mod speaker;
 pub mod strings;
 pub mod threads;
+pub mod voice;

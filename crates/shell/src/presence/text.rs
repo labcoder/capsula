@@ -313,7 +313,7 @@ impl Presence {
             Admission::Proceed => {}
         }
         self.cancel_voice(cx);
-        self.voice.lost = None;
+        self.voice.state.lost = None;
         let Some(text) = &self.text else {
             return Ok(());
         };
@@ -430,8 +430,9 @@ impl Presence {
             typing::Notice::Fallback => {
                 let status = self
                     .voice
+                    .state
                     .lost
-                    .or(self.voice.status)
+                    .or(self.voice.state.status)
                     .map(|status| strings.get(status).into())
                     // A hold's screen line outlives its voice status: the reason arrives with the run.
                     .or_else(|| {
