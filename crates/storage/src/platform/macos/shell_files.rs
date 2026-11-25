@@ -77,6 +77,42 @@ struct Directories {
 #[derive(Clone)]
 pub struct ShellStorage(Arc<Directories>);
 
+/// A held, admitted Support anchor with nothing created beneath it.
+#[must_use = "dropping the anchor releases its held chain"]
+pub struct Support(Directories);
+
+/// This edition's product folder under a held anchor.
+#[derive(Debug)]
+pub enum ProductFolder {
+    /// The anchor's chain with the admitted product folder last.
+    Held(Product),
+    /// Opening the exact name in the held anchor found nothing; the anchor is still held.
+    Missing(Support),
+}
+
+/// The anchor's chain with this edition's admitted product folder last, all held.
+#[must_use = "dropping the product folder releases its held chain"]
+pub struct Product {
+    _held: Directories,
+}
+
+/// Why the setup guard wasn't taken. It carries no path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GuardError {
+    /// Another open holds the guard. It says nothing about who, so it only means refuse or wait.
+    #[error("another session holds the setup guard")]
+    Busy,
+    /// The anchor couldn't be re-inspected, reopened or locked.
+    #[error("the setup guard can't be verified")]
+    Unavailable,
+}
+
+/// Holds the setup guard until dropped or until its process exits.
+#[must_use = "dropping the guard releases it"]
+pub struct SetupGuard {
+    _lock: File,
+}
+
 /// An opaque private lock descriptor retaining its admitted ancestors until it closes.
 #[must_use = "dropping the owner releases its descriptor and any instance lock"]
 pub struct AdmittedLock {
@@ -99,6 +135,24 @@ pub struct AdmittedLog {
 impl fmt::Debug for ShellStorage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ShellStorage").finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for Support {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Support").finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for Product {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Product").finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for SetupGuard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SetupGuard").finish_non_exhaustive()
     }
 }
 
@@ -144,6 +198,33 @@ impl Write for &AdmittedLog {
 /// crossings below Support, and creation/open failure. No cleanup or retry is performed.
 pub fn open_shell_storage(support: &Path, product: &str) -> Result<ShellStorage, AcquisitionError> {
     let product = basename(product)?;
+    let Support(mut directories) = admit_support(support)?;
+    for name in [product, c"logs".to_owned()] {
+        directories.check()?;
+        let parent = &directories.held.last().ok_or(Untrusted::Io)?.file;
+        // SAFETY: parent is retained; name is a validated basename; no existing object is repaired.
+        if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EEXIST) {
+                return Err(AcquisitionError::Open(error.kind()));
+            }
+        }
+        let file = open_at(parent.as_raw_fd(), &name, DIRECTORY_FLAGS, 0)?;
+        directories.push_private(file, name)?;
+    }
+    directories.check()?;
+    Ok(ShellStorage(Arc::new(directories)))
+}
+
+/// Holds and inspects an existing absolute Support anchor, creating nothing.
+///
+/// This is the read-only walk `open_shell_storage` starts with. Holding the anchor authorizes no
+/// write, and says nothing about what is in it.
+///
+/// # Errors
+/// Refuses privileged identity, invalid names, links, unsafe or incomplete inspection, an anchor
+/// owned by anyone else and unsupported volumes. A missing component is `Open(NotFound)`.
+pub fn admit_support(support: &Path) -> Result<Support, AcquisitionError> {
     if !support.is_absolute() {
         return Err(Untrusted::Unsafe.into());
     }
@@ -177,36 +258,63 @@ pub fn open_shell_storage(support: &Path, product: &str) -> Result<ShellStorage,
     }
     volume(&support.file, true)?;
     let private_start = held.len();
-    let mut directories = Directories {
+    let directories = Directories {
         held,
         private_start,
         user,
     };
     directories.check()?;
-    for name in [product, c"logs".to_owned()] {
+    Ok(Support(directories))
+}
+
+impl Support {
+    /// Takes the setup guard without waiting: an exclusive `flock` on a fresh open of this held
+    /// folder. Every edition and anything else that locks this user's Support folder contends for
+    /// it, and closing the guard or its holder's exit releases it.
+    ///
+    /// # Errors
+    /// `Busy` when another open holds it, which says nothing about who. `Unavailable` when the
+    /// held chain no longer passes inspection, or the folder can't be reopened or locked.
+    pub fn try_setup_guard(&self) -> Result<SetupGuard, GuardError> {
+        self.0.check().map_err(|_| GuardError::Unavailable)?;
+        let held = self.0.held.last().ok_or(GuardError::Unavailable)?;
+        let file = open_at(held.file.as_raw_fd(), c".", DIRECTORY_FLAGS, 0)
+            .map_err(|_| GuardError::Unavailable)?;
+        let opened = protected::stat(file.as_raw_fd()).map_err(|_| GuardError::Unavailable)?;
+        if !protected::same_inspection(&held.identity, &opened) {
+            return Err(GuardError::Unavailable);
+        }
+        match file.try_lock() {
+            Ok(()) => Ok(SetupGuard { _lock: file }),
+            Err(TryLockError::WouldBlock) => Err(GuardError::Busy),
+            Err(TryLockError::Error(_)) => Err(GuardError::Unavailable),
+        }
+    }
+
+    /// Looks up the folder `product` in this anchor without creating it. Only `ENOENT` from opening
+    /// that exact name in the held folder is `Missing`, which hands the anchor back. A folder there
+    /// is admitted like `open_shell_storage`'s: private, this user's, on the anchor's volume.
+    ///
+    /// # Errors
+    /// Refuses an invalid name, a link, a file or an unsafe folder at the name, a failed
+    /// re-inspection of the chain, and any other open failure.
+    pub fn product_folder(self, product: &str) -> Result<ProductFolder, AcquisitionError> {
+        let product = basename(product)?;
+        let Self(mut directories) = self;
         directories.check()?;
         let parent = &directories.held.last().ok_or(Untrusted::Io)?.file;
-        // SAFETY: parent is retained; name is a validated basename; no existing object is repaired.
-        if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EEXIST) {
-                return Err(AcquisitionError::Open(error.kind()));
+        let file = match open_at(parent.as_raw_fd(), &product, DIRECTORY_FLAGS, 0) {
+            Ok(file) => file,
+            Err(AcquisitionError::Open(io::ErrorKind::NotFound)) => {
+                directories.check()?;
+                return Ok(ProductFolder::Missing(Self(directories)));
             }
-        }
-        let child = directory(
-            open_at(parent.as_raw_fd(), &name, DIRECTORY_FLAGS, 0)?,
-            name,
-            user,
-        )?;
-        private_directory(&child.identity, user)?;
-        if child.volume != directories.held[private_start - 1].volume {
-            return Err(Untrusted::Unsafe.into());
-        }
-        named(parent, &child.name, &child.identity)?;
-        directories.held.push(child);
+            Err(error) => return Err(error),
+        };
+        directories.push_private(file, product)?;
+        directories.check()?;
+        Ok(ProductFolder::Held(Product { _held: directories }))
     }
-    directories.check()?;
-    Ok(ShellStorage(Arc::new(directories)))
 }
 
 impl ShellStorage {
@@ -419,6 +527,20 @@ fn checked_candidate<T>(
 }
 
 impl Directories {
+    /// Admits `file`, just opened as `name` in the last held folder, as a private folder on the
+    /// anchor's volume and holds it.
+    fn push_private(&mut self, file: File, name: CString) -> Result<(), AcquisitionError> {
+        let child = directory(file, name, self.user)?;
+        private_directory(&child.identity, self.user)?;
+        if child.volume != self.held[self.private_start - 1].volume {
+            return Err(Untrusted::Unsafe.into());
+        }
+        let parent = &self.held.last().ok_or(Untrusted::Io)?.file;
+        named(parent, &child.name, &child.identity)?;
+        self.held.push(child);
+        Ok(())
+    }
+
     fn check(&self) -> Result<(), AcquisitionError> {
         for (index, node) in self.held.iter().enumerate() {
             let now = protected::inspect(&node.file, self.user)?;

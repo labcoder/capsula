@@ -1060,3 +1060,104 @@ fn native_present_acl_query_failure() {
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");
 }
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_product_lookup_creates_nothing_and_the_setup_guard_excludes_other_opens() {
+    use crate::{AcquisitionError, GuardError, ProductFolder, admit_support};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut scratch = Scratch::new();
+    let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
+        .expect("an explicitly commissioned fixture parent");
+    let support =
+        std::path::PathBuf::from(parent).join(OsStr::from_bytes(scratch.residual.to_bytes()));
+    let root = scratch.root.try_clone().expect("retain fixture parent");
+
+    let anchor = admit_support(&support).expect("admit the fixture anchor");
+    let guard = anchor.try_setup_guard().expect("an uncontended guard");
+    assert_eq!(
+        anchor.try_setup_guard().err(),
+        Some(GuardError::Busy),
+        "another open of the same anchor"
+    );
+    let other = admit_support(&support).expect("an independent walk to the same anchor");
+    assert_eq!(
+        other.try_setup_guard().err(),
+        Some(GuardError::Busy),
+        "an independently admitted anchor"
+    );
+    drop(guard);
+    drop(
+        other
+            .try_setup_guard()
+            .expect("dropping the holder released it"),
+    );
+
+    let anchor = match anchor.product_folder("product") {
+        Ok(ProductFolder::Missing(anchor)) => anchor,
+        other => panic!("expected the product folder missing, not {other:?}"),
+    };
+    assert_eq!(
+        std::fs::symlink_metadata(support.join("product"))
+            .expect_err("looking created nothing")
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    drop(
+        anchor
+            .try_setup_guard()
+            .expect("the anchor is still held after a miss"),
+    );
+    assert_eq!(
+        admit_support(&support.join("absent")).err(),
+        Some(AcquisitionError::Open(io::ErrorKind::NotFound)),
+        "a missing anchor is refused, not a missing product folder"
+    );
+
+    let product = scratch.directory(c"product");
+    assert!(matches!(
+        admit_support(&support)
+            .expect("admit the fixture anchor")
+            .product_folder("product"),
+        Ok(ProductFolder::Held(_))
+    ));
+    std::fs::set_permissions(
+        support.join("product"),
+        std::fs::Permissions::from_mode(0o750),
+    )
+    .expect("loosen only the fixture product folder");
+    assert_eq!(
+        admit_support(&support)
+            .expect("admit the fixture anchor")
+            .product_folder("product")
+            .err(),
+        Some(AcquisitionError::Admission(Untrusted::Unsafe)),
+        "a product folder others may read"
+    );
+    std::fs::set_permissions(
+        support.join("product"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .expect("restore the fixture product folder");
+
+    std::fs::write(support.join("plain"), b"").expect("a fixture file at a product name");
+    scratch.record(&root, c"plain").expect("record the file");
+    std::os::unix::fs::symlink("product", support.join("linked")).expect("a fixture link");
+    scratch.record(&root, c"linked").expect("record the link");
+    // Darwin's O_DIRECTORY reports ENOTDIR for a link before O_NOFOLLOW's ELOOP.
+    for name in ["plain", "linked"] {
+        assert_eq!(
+            admit_support(&support)
+                .expect("admit the fixture anchor")
+                .product_folder(name)
+                .err(),
+            Some(AcquisitionError::Admission(Untrusted::Unsafe)),
+            "{name}"
+        );
+    }
+
+    drop(product);
+    drop(root);
+    scratch.cleanup().expect("remove recorded fixture objects");
+}
