@@ -342,7 +342,8 @@ impl Session {
         }
     }
 
-    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn playback_stop_requested(&self, run: RunId) -> Option<bool> {
         self.io
             .playback_stop

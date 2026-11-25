@@ -65,7 +65,8 @@ impl StopSignal {
         self.worker.unpark();
     }
 
-    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn requested(&self) -> bool {
         self.stop.load(Ordering::Acquire)
     }

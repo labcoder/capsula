@@ -776,7 +776,8 @@ impl OutputOwner {
         self.refusals.store(calls, Ordering::Release);
     }
 
-    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn while_locked(&self, test: impl FnOnce()) {
         let _state = self.lock();
         test();
