@@ -1,28 +1,39 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use super::{CredentialStore, NativeCredentialStore};
+use super::CredentialStore;
+#[cfg(windows)]
+use super::NativeCredentialStore;
 
 /// Serial native fixture access; `docs/development/accounts.md` says why the store needs it.
 static STORE: Mutex<()> = Mutex::new(());
 
 #[must_use]
-pub(crate) struct Fixture {
+pub(crate) struct Fixture<S: CredentialStore> {
+    store: S,
     targets: Vec<String>,
     _guard: MutexGuard<'static, ()>,
 }
 
-impl Fixture {
+#[cfg(windows)]
+impl Fixture<NativeCredentialStore> {
     pub(crate) fn new(targets: Vec<String>) -> Self {
+        Self::with_store(NativeCredentialStore, targets)
+    }
+}
+
+impl<S: CredentialStore> Fixture<S> {
+    pub(crate) fn with_store(store: S, targets: Vec<String>) -> Self {
         Self {
+            store,
             targets,
             _guard: STORE.lock().unwrap_or_else(PoisonError::into_inner),
         }
     }
 }
 
-impl Drop for Fixture {
+impl<S: CredentialStore> Drop for Fixture<S> {
     fn drop(&mut self) {
-        let store = NativeCredentialStore;
+        let store = &self.store;
         let mut failed = false;
         for target in &self.targets {
             if let Err(error) = store.delete(target) {

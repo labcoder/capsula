@@ -813,6 +813,24 @@ We chose not to add that second keyring stack: our store is small and reviewed, 
 zeroizing bytes, and its guard wipes the validated native read blob and frees the allocation
 on every exit, including panic unwinding. `CredentialStore` is the seam for a macOS Keychain store.
 
+On macOS, `platform::macos::credential::MacCredentialStore` is dormant: only tests construct it,
+and the native store stays `Unsupported`. It uses the data protection keychain, never the
+file-based login keychain: one generic password per exact target, as the account under
+`CREDENTIAL_SERVICE`, not synchronizable, readable only while unlocked on this device. Every query
+pins one access group, the `com.apple.application-identifier` the process claims;
+`MacCredentialStore::admitted` refuses a process that claims none before any Keychain call.
+Whether the OS honors that claim (validated provisioning) is proved only by a signed run. Every SecItem call carries its own `LAContext`
+with interaction not allowed, so the adapter requests no UI; if that context can't be set up, the
+call is refused. A write adds, or on a duplicate updates only the data. It hands the framework a
+no-copy view of a zeroizing copy that the view owns: CoreFoundation wipes and frees it when the
+view's last reference goes (the framework may still make its own copies, and a read's returned
+data can't be wiped). It keeps Windows' name and
+2,560-byte limits. Measured once on macOS 26.5.1 arm64 with an ad-hoc-signed test build and a
+scratch name: a missing read came back not-found, a delete returned `errSecMissingEntitlement`
+(-34018), and nothing was written; signed CRUD, locked-store and UI behavior are Apple's documented
+expectations, not measured. The native contract test is ignored until a signed test host exists.
+`platform::credential::conformance` holds the exact-name contract both stores' tests run.
+
 Credential Manager protects entries per Windows user, not per process. Any process running
 as the same Windows user can read these entries. The session lock coordinates cooperating
 brain instances; it does not provide isolation from other processes running as that user.

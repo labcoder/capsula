@@ -25,6 +25,7 @@ kumochi-audio.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 kumochi-storage = { path = "../storage" }
+libc = "=0.2.191"
 
 [target.'cfg(windows)'.dependencies]
 keyring.workspace = true

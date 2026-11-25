@@ -3,8 +3,9 @@
 On the Mac, the shell starts the brain as its child and the two talk over two inherited socket
 pairs: a control leg and a data leg. `crates/session` is the portable core of that connection:
 both roles' handshake and binding state machines, and the record sealer and opener that carry
-today's frames. It does no I/O. Callers read and write the bytes, and nothing in the product uses
-the crate yet; Windows keeps its pipes and capability check.
+today's frames. It does no I/O. The Mac brain's record stream below does that over tokio, but
+nothing in the product calls it yet. Windows keeps its pipes and capability check and doesn't link
+the crate.
 
 ## Protocol
 
@@ -127,11 +128,49 @@ What this crate does about its own buffers, under the exception's conditions:
 That limits how long these buffers hold their bytes. It doesn't remove copies the compiler or the
 library made.
 
+## The brain's record stream (dormant)
+
+`crates/brain/src/platform/macos/stream.rs` moves one leg's records over tokio I/O. It takes the
+`Sealer` and `Opener` the handshake already advanced, so application nonces carry on from the table
+above. The four adapters of a pair share one `watch` cell, the pair cell that
+`runtime::terminal::Terminal` reads. Nothing creates a pair or a cell outside tests yet.
+
+- `RecordReader` implements `AsyncRead`, so the existing frame readers (`ipc::read`,
+  `ipc::read_sized`) work on it unchanged. It holds at most one record: its ciphertext while it
+  arrives, then its plaintext in the same buffer, wiped as it's read and on drop. Short or
+  interrupted reads keep their offsets, and a read future dropped mid-record loses nothing.
+- `RecordWriter` has no `AsyncWrite`. Its only write is `write_frame`, which takes exactly one frame
+  (a header that declares the rest, within the leg's cap) and sends it as maximally sliced records,
+  sealing the next record only after the last one is fully written. Short or interrupted writes
+  resume from `unwritten()`.
+- **The whole-frame guard.** `write_frame` arms a guard before the first seal. Dropping the pending
+  future latches refusal immediately, even between records. Dropping it before the first poll
+  changes nothing. An ordinary transport error ends the write without latching refusal, but the
+  writer refuses any attempt to use it again.
+- **Refusals set the cell first.** A session refusal (authentication, length, cap, a record that
+  crosses its frame, `Exhausted`, `Retired`), the end of the stream inside an envelope, a record or a
+  frame (`Truncated`), reusing a writer whose frame was cut off, or bytes that aren't one frame,
+  set the cell and only then return the error (`io::ErrorKind::InvalidData`, carrying a
+  content-free `Refusal`). Every poll of every adapter reads the cell first. Once it's set, neither
+  leg reads, opens, hands out buffered plaintext or writes again.
+- **Ordinary loss isn't a refusal.** The end of the stream between frames reads as end of file, and
+  a transport error (reset, broken pipe, a zero-length write) comes back as it came. Neither touches
+  the cell.
+
+Activation must change the three places that write frames today: `write_control` and `write_data`
+in `runtime/mod.rs`, and `send` in `ipc.rs`, which writes the greeting replies and Welcome. The Mac
+must use `write_frame` for the whole encoded frame at each call site. When an ordinary loss has
+already stopped writes, the runtime must keep any pending writer futures alive without polling
+them through the final disposition checks and control grace. Dropping them earlier would turn
+teardown into refusal and suppress the ordinary-loss drain. After disposition is settled the
+entry drops both legs. This cut doesn't change runtime wiring. The full C-7 proof needs both the
+brain's adapter and the shell's blocking adapter, which arrives in I1e-2.
+
 ## What this crate doesn't do
 
-No sockets, I/O, async or OS code; no Keychain; no READY byte, deadline, pair abort or write guard
-(I1b); no Hello or Welcome checks; no callers. It creates no listener and makes no connection, and
-it is not for remote or static pairing.
+No sockets, I/O, async or OS code; no Keychain; no READY byte, deadline or socket shutdown; no Hello
+or Welcome checks; no product callers. The brain's adapter above does the I/O and owns the write
+guard. It creates no listener or connection and isn't for remote or static pairing.
 
 ## Tests
 

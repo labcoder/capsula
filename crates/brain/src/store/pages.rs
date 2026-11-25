@@ -467,7 +467,8 @@ impl Pages<'_> {
                      END END END
                  END,
                  CASE WHEN e.kind IN ('draft', 'action') THEN substr(CAST(e.body AS BLOB), 1, 33) END,
-                 r.screen, r.state = 'active', r.state = 'failed', e.created_ms
+                 r.screen, r.state = 'active', r.state = 'failed', e.created_ms,
+                 CASE WHEN r.state = 'failed' AND octet_length(r.reason) <= ?7 THEN r.reason END
                  FROM events e
              JOIN threads t ON t.id = e.thread AND t.state = 'live'
              LEFT JOIN runs r ON e.kind = 'user' AND r.id = e.run AND r.thread = e.thread
@@ -486,6 +487,7 @@ impl Pages<'_> {
                     i64::try_from(MAX_PAGE_BYTES).map_err(|_| StoreError::Read)?,
                     i64::try_from(MAX_BODY_BYTES).map_err(|_| StoreError::Read)?,
                     upper,
+                    super::history_failure::MAX_REASON_BYTES,
                 ],
                 |row| {
                     let kind: String = row.get(2)?;
@@ -500,20 +502,7 @@ impl Pages<'_> {
                         text.truncate(error.valid_up_to());
                     }
                     let kind = match kind.as_str() {
-                        "user" => {
-                            let active: Option<bool> = row.get(7)?;
-                            let failed = row.get::<_, Option<bool>>(8)? == Some(true);
-                            let screen = row
-                                .get::<_, Option<String>>(6)?
-                                .as_deref()
-                                .and_then(|screen| super::held::shown(screen, active));
-                            match (failed, screen) {
-                                (false, None) => PageEventKind::User,
-                                (false, Some(screen)) => PageEventKind::HeldTurn { screen },
-                                (true, None) => PageEventKind::FailedUser,
-                                (true, Some(screen)) => PageEventKind::FailedHeldTurn { screen },
-                            }
-                        }
+                        "user" => user_event_kind(row)?,
                         "assistant_text" => PageEventKind::AssistantText,
                         "scene_step" => row.get::<_, Option<i64>>(4)?.map_or(
                             PageEventKind::SceneStep,
@@ -546,6 +535,26 @@ impl Pages<'_> {
         let next = rows.last().filter(|_| more).map(|row| row.id);
         Ok((rows, next))
     }
+}
+
+fn user_event_kind(row: &Row<'_>) -> rusqlite::Result<PageEventKind> {
+    let active: Option<bool> = row.get(7)?;
+    let failed = row.get::<_, Option<bool>>(8)? == Some(true);
+    let screen = row
+        .get::<_, Option<String>>(6)?
+        .as_deref()
+        .and_then(|screen| super::held::shown(screen, active));
+    let failure = match row.get_ref(10)? {
+        rusqlite::types::ValueRef::Text(reason) => super::history_failure::decode(reason),
+        _ => None,
+    };
+    Ok(match (failed, failure, screen) {
+        (false, _, None) => PageEventKind::User,
+        (false, _, Some(screen)) => PageEventKind::HeldTurn { screen },
+        (true, Some(failure), screen) => PageEventKind::ConnectionFailed { failure, screen },
+        (true, None, None) => PageEventKind::FailedUser,
+        (true, None, Some(screen)) => PageEventKind::FailedHeldTurn { screen },
+    })
 }
 
 fn bounded_id(id: u64) -> i64 {

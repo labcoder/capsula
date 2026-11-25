@@ -144,6 +144,42 @@ pub enum TaskState {
     Sleeping,
 }
 
+/// A connection failure recorded for a user turn with known delivery evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryFailure {
+    /// The closed connection reason, not provider text.
+    pub cause: HistoryFailureCause,
+    /// Evidence recorded at the original attempt, not inferred on read.
+    pub delivery: DeliveryProof,
+}
+
+/// Connection failures that can be named in saved history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoryFailureCause {
+    /// The `ChatGPT` plan connection requires sign-in again.
+    ChatGptSignIn,
+    /// The `ChatGPT` plan reached its usage limit.
+    ChatGptUsageLimit,
+    /// Anthropic refused the configured key.
+    AnthropicKeyRejected,
+    /// The Anthropic account ran out of credit.
+    AnthropicCredit,
+    /// Claude Code confirmed it was signed out.
+    ClaudeCodeSignedOut,
+}
+
+/// Facts about delivery that distinguish a saved failure from an ambiguous one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeliveryProof {
+    /// The request never left the app.
+    NotSent,
+    /// The provider explicitly rejected the first request after receiving it, before any answer
+    /// or accepted effect.
+    NotAccepted,
+    /// An answer was received but broke off.
+    PartialAnswer,
+}
+
 /// What a stored event records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PageEventKind {
@@ -178,6 +214,13 @@ pub enum PageEventKind {
     FailedHeldTurn {
         /// The image, or why not.
         screen: super::HeldScreen,
+    },
+    /// A failed user turn with a known connection reason and delivery evidence.
+    ConnectionFailed {
+        /// The recorded outcome.
+        failure: HistoryFailure,
+        /// The original held-screen status, if this was a screen hold.
+        screen: Option<super::HeldScreen>,
     },
 }
 
@@ -290,6 +333,36 @@ mod tests {
                     screen: HeldScreen::Screen,
                 },
                 &[8, 3],
+            ),
+            (
+                PageEventKind::ConnectionFailed {
+                    failure: HistoryFailure {
+                        cause: HistoryFailureCause::ChatGptSignIn,
+                        delivery: DeliveryProof::NotSent,
+                    },
+                    screen: None,
+                },
+                &[9, 0, 0, 0],
+            ),
+            (
+                PageEventKind::ConnectionFailed {
+                    failure: HistoryFailure {
+                        cause: HistoryFailureCause::AnthropicKeyRejected,
+                        delivery: DeliveryProof::NotAccepted,
+                    },
+                    screen: Some(HeldScreen::Screen),
+                },
+                &[9, 2, 1, 1, 3],
+            ),
+            (
+                PageEventKind::ConnectionFailed {
+                    failure: HistoryFailure {
+                        cause: HistoryFailureCause::ClaudeCodeSignedOut,
+                        delivery: DeliveryProof::PartialAnswer,
+                    },
+                    screen: None,
+                },
+                &[9, 4, 2, 0],
             ),
         ];
         let events = kinds
