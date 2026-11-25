@@ -249,8 +249,11 @@ fn a_refresh_reaches_an_old_held_turn_without_moving_its_window() {
         PageEventKind::User
     );
     store
-        .end_run(thread, RunId(1), &[], RunEnd::Done)
+        .record_sent_screen_for_tests(RunId(1))
         .expect("saved attachment mark");
+    store
+        .end_run(thread, RunId(1), &[], RunEnd::Done)
+        .expect("ended held run");
     state.events_changed(thread);
     for before in [None, Some(201), Some(151), Some(101), Some(51)] {
         let (page, reply) = read(&mut state, &store);

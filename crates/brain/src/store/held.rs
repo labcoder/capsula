@@ -101,6 +101,18 @@ impl super::Store {
         Ok(())
     }
 
+    /// Records a transport write attempt for an offline history fixture.
+    ///
+    /// # Errors
+    /// Returns an error if the run cannot authorize a picture or the store write fails.
+    #[cfg(feature = "test-support")]
+    pub fn record_sent_screen_for_tests(&mut self, run: RunId) -> Result<(), StoreError> {
+        if !self.grant_screen(run)? {
+            return Err(StoreError::NoRun);
+        }
+        self.sent_screen(run)
+    }
+
     /// Corrects a known-unsent picture. An already corrected or absent row is a success.
     pub(crate) fn unsent_screen(&mut self, run: RunId, to: UnsentScreen) -> Result<(), StoreError> {
         let run = super::sql_id(run.0, StoreError::NoRun)?;
