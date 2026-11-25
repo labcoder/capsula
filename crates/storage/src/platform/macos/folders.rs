@@ -33,6 +33,7 @@ pub enum ApplicationSupportError {
 /// # Errors
 /// Refuses if the OS cannot supply a unique, absolute candidate.
 pub fn application_support_dir() -> Result<PathBuf, ApplicationSupportError> {
+    // shortcut: Not an App Sandbox container locator; use a container-aware API for sandboxed builds.
     // SAFETY: These SDK constants select only the user-domain Application Support search.
     let state = unsafe {
         libc::sysdir_start_search_path_enumeration(
