@@ -75,6 +75,11 @@ impl CommitGate {
         self.swap(CLAIMED)
     }
 
+    #[cfg(all(test, target_os = "macos"))]
+    pub(in crate::platform) fn lost(&self) -> bool {
+        self.0.load(Ordering::Acquire) == LOST
+    }
+
     fn swap(&self, to: u8) -> bool {
         self.0
             .compare_exchange(OPEN, to, Ordering::AcqRel, Ordering::Acquire)
