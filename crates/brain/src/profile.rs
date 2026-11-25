@@ -4,12 +4,16 @@
 use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants::{
-    PROFILE_OWNER_ACCOUNT, ProductIdentity, SESSION_LOCK, STORE_FILE, account_target,
+    AUTHORITY_FILE, PROFILE_OWNER_ACCOUNT, ProductIdentity, SESSION_LOCK, STORE_FILE,
+    account_target,
 };
 use kumochi_protocol::profile::{Guard, Observation};
 #[cfg(any(windows, target_os = "macos"))]
 use kumochi_protocol::profile::{Probes, Root};
 
+use crate::connections::authority::existing::Legacy;
+#[cfg(any(windows, target_os = "macos"))]
+use crate::connections::authority::existing::legacy as legacy_authority;
 use crate::platform::SessionLock;
 use crate::platform::credential::CredentialStore;
 #[cfg(any(windows, target_os = "macos"))]
@@ -46,7 +50,9 @@ impl Probes for NativeProbes {
     fn legacy(&self, _: &Self::Guard) -> Observation {
         let folders = native::legacy();
         legacy(&folders.data, folders.roaming.as_ref(), |data| {
-            intact(data, authority_and_host)
+            intact(data, |db, session| {
+                legacy_authority(db, session, &NativeCredentialStore)
+            })
         })
     }
 
@@ -84,30 +90,28 @@ fn legacy(
 }
 
 /// The legacy profile in the present folder `data`, read under its existing session lock, which
-/// stays held through every read. Matching only with the current history schema and `authority`'s
-/// match; anything else, an absent authority included, is unverified. An older known schema needs
-/// a migration, which waits on the owner's call on legacy schema updates.
-fn intact(data: &Path, authority: impl FnOnce(&Path, &SessionLock) -> Observation) -> Observation {
+/// stays held through every read. Matching only with the current history schema and an authority
+/// and committed host that both match. Anything else is unverified: an absent authority or host
+/// too, since the folder is there, and an older known schema, whose migration waits on the owner's
+/// call on legacy schema updates.
+fn intact(data: &Path, authority: impl FnOnce(&Path, &SessionLock) -> Legacy) -> Observation {
     let Ok(session) = SessionLock::try_acquire_existing(&data.join(SESSION_LOCK)) else {
         return Observation::Unverified;
     };
     match legacy_history(&data.join(STORE_FILE), &session) {
-        LegacyHistory::KnownSchema(CURRENT_HISTORY) => match authority(data, &session) {
-            Observation::Matching => Observation::Matching,
-            Observation::Absent | Observation::Unverified => Observation::Unverified,
-        },
+        LegacyHistory::KnownSchema(CURRENT_HISTORY) => {
+            match authority(&data.join(AUTHORITY_FILE), &session) {
+                Legacy {
+                    authority: Observation::Matching,
+                    host: Observation::Matching,
+                } => Observation::Matching,
+                Legacy { .. } => Observation::Unverified,
+            }
+        }
         LegacyHistory::KnownSchema(_) | LegacyHistory::Missing | LegacyHistory::Unverified => {
             Observation::Unverified
         }
     }
-}
-
-/// The legacy authority in `data` and its committed host, read under `session`.
-///
-/// shortcut: always unverified, so a present legacy folder never matches, until the read-only
-/// authority and host checks land; wiring them in replaces this body with their call.
-fn authority_and_host(_data: &Path, _session: &SessionLock) -> Observation {
-    Observation::Unverified
 }
 
 /// Reads this edition's owner item by its exact name, creating, changing and removing nothing.
@@ -132,6 +136,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::*;
+    use crate::connections::authority::existing::legacy as legacy_authority;
     use crate::connections::vault::fake::FakeStore;
     use crate::store::Store;
     use crate::test_support::{Scratch, files};
@@ -199,6 +204,11 @@ mod tests {
         }
     }
 
+    const MATCHING: Legacy = Legacy {
+        authority: Observation::Matching,
+        host: Observation::Matching,
+    };
+
     /// A legacy data folder with an empty session lock and a history store the brain opened.
     fn profile(scratch: &Scratch) -> PathBuf {
         let data = scratch.dir().to_owned();
@@ -212,8 +222,8 @@ mod tests {
         let scratch = Scratch::new("profile-intact");
         let data = profile(&scratch);
         let before = files(&data);
-        let read = intact(&data, |dir, _| {
-            assert_eq!(dir, data);
+        let read = intact(&data, |db, _| {
+            assert_eq!(db, data.join(AUTHORITY_FILE));
             assert!(
                 matches!(
                     SessionLock::try_acquire_existing(&data.join(SESSION_LOCK)),
@@ -221,18 +231,42 @@ mod tests {
                 ),
                 "the session lock is held through the authority read"
             );
-            Observation::Matching
+            MATCHING
         });
         assert_eq!(read, Observation::Matching);
-        for verdict in [Observation::Absent, Observation::Unverified] {
-            assert_eq!(intact(&data, |_, _| verdict), Observation::Unverified);
+        let (absent, unverified) = (Observation::Absent, Observation::Unverified);
+        for (authority, host) in [
+            (absent, absent),
+            (absent, Observation::Matching),
+            (unverified, unverified),
+            (unverified, Observation::Matching),
+            (Observation::Matching, unverified),
+        ] {
+            assert_eq!(
+                intact(&data, |_, _| Legacy { authority, host }),
+                Observation::Unverified,
+                "{authority:?} authority, {host:?} host"
+            );
         }
+        let store = FakeStore::default();
         assert_eq!(
-            intact(&data, authority_and_host),
+            intact(&data, |db, session| legacy_authority(db, session, &store)),
             Observation::Unverified,
-            "no authority check is wired in yet"
+            "the real step finds no authority, which a present folder can't have"
         );
+        assert!(store.names().is_empty());
         assert_eq!(files(&data), before);
+    }
+
+    #[test]
+    fn a_matching_authority_without_its_host_is_unverified() {
+        let scratch = Scratch::new("profile-no-host");
+        let data = profile(&scratch);
+        let no_host = Legacy {
+            authority: Observation::Matching,
+            host: Observation::Absent,
+        };
+        assert_eq!(intact(&data, |_, _| no_host), Observation::Unverified);
     }
 
     #[test]
@@ -244,7 +278,7 @@ mod tests {
             fs::rename(db, data.join(STORE_FILE)).expect("the history store's name");
             fs::write(data.join(SESSION_LOCK), b"").expect("the session lock");
             let before = files(&data);
-            let read = intact(&data, |_, _| Observation::Matching);
+            let read = intact(&data, |_, _| MATCHING);
             let expected = if version == CURRENT_HISTORY {
                 Observation::Matching
             } else {
@@ -266,7 +300,7 @@ mod tests {
     fn a_legacy_profile_without_its_lock_or_store_is_unverified_and_kept() {
         let scratch = Scratch::new("profile-partial");
         let data = profile(&scratch);
-        let matching = |_: &Path, _: &SessionLock| Observation::Matching;
+        let matching = |_: &Path, _: &SessionLock| MATCHING;
         let held = SessionLock::try_acquire_existing(&data.join(SESSION_LOCK)).expect("held");
         assert_eq!(intact(&data, matching), Observation::Unverified, "busy");
         drop(held);
