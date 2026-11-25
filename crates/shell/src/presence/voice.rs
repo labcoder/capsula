@@ -4,17 +4,15 @@ use std::time::Instant;
 
 use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect, PointerPath};
 use kumochi_protocol::message::{
-    CaptureFor, ControlToBrain, GestureId, HoldStatus, LeaseGeneration, ModelName, Phase, RunId,
-    RunOrigin, ThreadId,
+    CaptureFor, ControlToBrain, GestureId, HoldFailure, HoldStatus, LeaseGeneration, ModelName,
+    Phase, RunId, RunOrigin, ThreadId,
 };
 
 use gpui_kit::Window;
 use kumochi_shell_core::link::InputCancel;
 use kumochi_shell_core::presence::teardown::{cancel_tracked_input, drain_hold_cancel};
 pub(super) use kumochi_shell_core::voice::Stamp;
-use kumochi_shell_core::voice::{
-    FailureReason, FailureStage, Hold, RunStep, Source, State, StatusStep,
-};
+use kumochi_shell_core::voice::{Hold, RunStep, Source, State};
 
 use super::gesture::ReleaseInput;
 use super::ink::Sampler;
@@ -44,12 +42,54 @@ pub(super) fn screen_text(strings: &Strings, text: Text, model: Option<&ModelNam
     )
 }
 
+#[derive(Debug)]
+enum FailureStage {
+    Input,
+    Inhibit,
+    Admission,
+    CaptureStart,
+    CaptureReceipt,
+    Release,
+    Run,
+    Brain,
+    Notice,
+}
+
+#[derive(Debug)]
+enum FailureReason {
+    GestureUnavailable,
+    DismissPanels,
+    CancelDrain,
+    RecognitionSend,
+    FenceSend,
+    PacketCountMismatch,
+    RunBeforeStop,
+    NoSession,
+    NoInhibit,
+    PendingHold,
+    StaleContext,
+    InputFence,
+    GenerationNotPreparing,
+    EscapeLease,
+    NoPendingHold,
+    StaleStatus,
+    TerminalStatus,
+    RunningRejected,
+    WarmSend,
+    StopSend,
+    ReleaseSend,
+    StaleReceipt,
+    PointerUnread,
+    CaptureClockUnavailable,
+    ScreenReleaseSend,
+}
+
 #[cfg(test)]
 use crate::platform::microphone::{Finalization, MicOwner};
 #[cfg(test)]
 use kumochi_protocol::message::DataToBrain;
 #[cfg(test)]
-use kumochi_protocol::message::{HoldFailure, MAX_TRANSCRIPT_BYTES};
+use kumochi_protocol::message::MAX_TRANSCRIPT_BYTES;
 #[cfg(test)]
 use kumochi_shell_core::voice::Recovery;
 
@@ -121,6 +161,7 @@ impl Presence {
                 self.end_voice_after_cancel(Text::HoldFailed, deferred.as_ref(), cx);
             }
             RunStep::BeforeStop => {
+                tracing::warn!(stage = ?FailureStage::Run, reason = ?FailureReason::RunBeforeStop, "held speech input failed");
                 self.end_voice(Text::HoldFailed, cx);
                 if let Some(session) = &self.session {
                     self.link.end(session);
@@ -1047,17 +1088,48 @@ impl Presence {
         status: HoldStatus,
         cx: &mut Context<'_, Self>,
     ) {
-        let speech = || self.settings.read(cx).speech_input_status();
-        match self.voice.state.status(generation, gesture, status, speech) {
-            StatusStep::Ignored => {}
+        let Some(hold) = self
+            .voice
+            .state
+            .pending
+            .as_ref()
+            .filter(|h| h.stamp().session == generation && h.token().gesture() == gesture)
+        else {
+            tracing::debug!(stage = ?FailureStage::Brain, reason = ?FailureReason::StaleStatus, "held speech input refused");
+            return;
+        };
+        if hold.terminal().is_some() {
+            tracing::debug!(stage = ?FailureStage::Brain, reason = ?FailureReason::TerminalStatus, "held speech input refused");
+            return;
+        }
+        match status {
             // The waiter is installed, then checked at once.
-            StatusStep::Admit => {
+            HoldStatus::Admitted if matches!(hold.source, Source::Waiting) => {
                 if self.voice.gates.admit(gesture, cx.background_executor()) {
                     self.dispatch(cx);
                 }
             }
-            StatusStep::Notice(text) => self.voice_notice(text, cx),
-            StatusStep::End(text) => self.end_voice(text, cx),
+            HoldStatus::Admitted => {}
+            HoldStatus::Loading => self.voice_notice(Text::VoiceLoading, cx),
+            HoldStatus::Transcribing => self.voice_notice(Text::HoldTranscribing, cx),
+            HoldStatus::Empty => self.end_voice(Text::HoldEmpty, cx),
+            HoldStatus::Cancelled => self.end_voice(Text::HoldCancelled, cx),
+            HoldStatus::Failed(reason) => {
+                tracing::warn!(stage = ?FailureStage::Brain, ?reason, "held speech input failed");
+                self.end_voice(
+                    match reason {
+                        HoldFailure::NotLoaded => {
+                            match self.settings.read(cx).speech_input_status() {
+                                text @ (Text::VoiceNotInstalled | Text::VoiceUnloaded) => text,
+                                _ => Text::VoiceStatusUnknown,
+                            }
+                        }
+                        HoldFailure::Busy => Text::TurnBusy,
+                        _ => Text::HoldFailed,
+                    },
+                    cx,
+                );
+            }
         }
     }
 }

@@ -1,11 +1,11 @@
 //! The hold lifecycle without windows: terminal notices, unstarted discards, run receipts across
-//! the hold's end, brain statuses, a lost brain's words and a native Esc press's continuation.
+//! the hold's end, a lost brain's words and a native Esc press's continuation.
 
 use kumochi_protocol::message::{
-    Content, GestureId, HoldStatus, Incarnation, Phase, RunId, RunOrigin, ThreadId,
+    Content, GestureId, Incarnation, Phase, RunId, RunOrigin, ThreadId,
 };
 
-use super::{RunStep, Source, Stamp, State, StatusStep};
+use super::{RunStep, Source, Stamp, State};
 use crate::link::Session;
 use crate::platform::microphone::CollectionGate;
 use crate::runs::Applied;
@@ -95,20 +95,6 @@ fn a_run_before_the_release_was_sent_fails_the_hold() {
     let (mut state, _gate) = holding(Source::Joined(2));
     let step = state.run_state(RunId(1), ThreadId(7), HOLD, Phase::Thinking, &visible());
     assert_eq!(step, RunStep::BeforeStop);
-}
-
-#[test]
-fn a_status_from_another_connection_or_after_the_end_does_nothing() {
-    let (mut state, _gate) = holding(Source::Waiting);
-    let speech = || Text::VoiceUnloaded;
-    let other = state.status(5, GestureId(1), HoldStatus::Admitted, speech);
-    assert_eq!(other, StatusStep::Ignored);
-    let own = state.status(4, GestureId(1), HoldStatus::Admitted, speech);
-    assert_eq!(own, StatusStep::Admit);
-    state.pending.as_mut().expect("pending").source = Source::Recording;
-    state.end(Text::HoldCancelled);
-    let late = state.status(4, GestureId(1), HoldStatus::Empty, speech);
-    assert_eq!(late, StatusStep::Ignored);
 }
 
 #[test]

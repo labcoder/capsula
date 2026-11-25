@@ -1070,20 +1070,20 @@ there is no second queue of recognized words waiting for capacity.
 
 `shell-core`'s `voice.rs` owns the pending Hold once: its generation, stamp, session, terminal
 notice and the run it became, the last ended Hold, the notice and the words kept for a lost
-brain. A brain status, a run state, an end and a lost brain each go through one method there,
+brain. A run state, an end and a lost brain each go through one method there,
 which returns the step for the shell to apply. A native Esc press that revoked a Hold's input
 takes that Hold's run from it, and after the shell applies its marks and cancel the same value
 names the run to stop, only while it is still the one moving.
 
 The shell (`presence/voice.rs`) samples windows, settings and the link, applies each step, and
-reads the state again after anything that changes it. Capture admission, release, the screen
-release, the source's acceptance and its receipt still run in the shell and move the Hold's
+reads the state again after anything that changes it. Brain statuses, capture admission,
+release, the screen release, the source's acceptance and its receipt still run in the shell and move the Hold's
 source, collection, release, screen ask and retirement wait; the capture inhibit's gates below
 are a shell adapter.
 
 ```mermaid
 flowchart LR
-  in["brain status<br/>run state<br/>end, lost brain<br/>Esc press"] --> shell["presence/voice.rs<br/>samples facts"]
+  in["run state<br/>end, lost brain<br/>Esc press"] --> shell["presence/voice.rs<br/>samples facts"]
   shell --> core["shell-core voice::State<br/>decides"]
   core -->|"step"| shell
   shell --> apply["microphone gate, link,<br/>runs, dock, marks"]

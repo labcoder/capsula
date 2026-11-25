@@ -1,60 +1,17 @@
 //! What a held-key voice turn's lifecycle decides, apart from the windows, tasks and microphone
-//! that apply it: what each brain status, run state, end and lost brain does to the pending
+//! that apply it: what each run state, end and lost brain does to the pending
 //! hold, which notice it leaves, and which run a native Esc press may still stop. The shell
 //! samples its owners, applies each returned step, and reads this state again after anything
 //! that changes it.
 
 use kumochi_protocol::message::{
-    Content, GestureId, HoldFailure, HoldStatus, MAX_TRANSCRIPT_BYTES, NoticeRevision, Phase,
-    RunId, RunOrigin, ThreadId,
+    Content, GestureId, MAX_TRANSCRIPT_BYTES, NoticeRevision, Phase, RunId, RunOrigin, ThreadId,
 };
 
 use crate::link::Session;
 use crate::platform::microphone::Generation;
 use crate::runs::{Applied, RunTail};
 use crate::strings::Text;
-
-#[derive(Debug)]
-pub enum FailureStage {
-    Input,
-    Inhibit,
-    Admission,
-    CaptureStart,
-    CaptureReceipt,
-    Release,
-    Run,
-    Brain,
-    Notice,
-}
-
-#[derive(Debug)]
-pub enum FailureReason {
-    GestureUnavailable,
-    DismissPanels,
-    CancelDrain,
-    RecognitionSend,
-    FenceSend,
-    PacketCountMismatch,
-    RunBeforeStop,
-    NoSession,
-    NoInhibit,
-    PendingHold,
-    StaleContext,
-    InputFence,
-    GenerationNotPreparing,
-    EscapeLease,
-    NoPendingHold,
-    StaleStatus,
-    TerminalStatus,
-    RunningRejected,
-    WarmSend,
-    StopSend,
-    ReleaseSend,
-    StaleReceipt,
-    PointerUnread,
-    CaptureClockUnavailable,
-    ScreenReleaseSend,
-}
 
 /// The target, connection and choice a hold's key-down was seen under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,16 +131,6 @@ pub struct Ended {
     /// Its unstarted generation, to discard and tell its session about.
     pub unused: Option<(Generation, Session)>,
     pub notice: Text,
-}
-
-/// What a brain status does to the hold it names.
-#[derive(Debug, PartialEq, Eq)]
-pub enum StatusStep {
-    Ignored,
-    /// Install the admitted hold's waiter, then check it at once.
-    Admit,
-    Notice(Text),
-    End(Text),
 }
 
 /// A native Esc press that revoked a hold's input, until that hold's marks and cancel apply.
@@ -371,7 +318,6 @@ impl State {
             return RunStep::None;
         };
         if !matches!(hold.source, Source::Sent) {
-            tracing::warn!(stage = ?FailureStage::Run, reason = ?FailureReason::RunBeforeStop, "held speech input failed");
             return RunStep::BeforeStop;
         }
         match phase {
@@ -400,48 +346,6 @@ impl State {
         for (_, receipt) in self.receipts() {
             if let Some(tail) = receipt.as_mut().filter(|tail| tail.thread == thread) {
                 tail.control_closed = true;
-            }
-        }
-    }
-
-    /// What the brain's `status` for the hold of `generation` and `gesture` does. `speech`
-    /// reads speech input's state, only for a model that wasn't loaded.
-    pub fn status(
-        &self,
-        generation: u64,
-        gesture: GestureId,
-        status: HoldStatus,
-        speech: impl FnOnce() -> Text,
-    ) -> StatusStep {
-        let Some(hold) = self
-            .pending
-            .as_ref()
-            .filter(|h| h.stamp.session == generation && h.token.gesture() == gesture)
-        else {
-            tracing::debug!(stage = ?FailureStage::Brain, reason = ?FailureReason::StaleStatus, "held speech input refused");
-            return StatusStep::Ignored;
-        };
-        if hold.terminal.is_some() {
-            tracing::debug!(stage = ?FailureStage::Brain, reason = ?FailureReason::TerminalStatus, "held speech input refused");
-            return StatusStep::Ignored;
-        }
-        match status {
-            HoldStatus::Admitted if matches!(hold.source, Source::Waiting) => StatusStep::Admit,
-            HoldStatus::Admitted => StatusStep::Ignored,
-            HoldStatus::Loading => StatusStep::Notice(Text::VoiceLoading),
-            HoldStatus::Transcribing => StatusStep::Notice(Text::HoldTranscribing),
-            HoldStatus::Empty => StatusStep::End(Text::HoldEmpty),
-            HoldStatus::Cancelled => StatusStep::End(Text::HoldCancelled),
-            HoldStatus::Failed(reason) => {
-                tracing::warn!(stage = ?FailureStage::Brain, ?reason, "held speech input failed");
-                StatusStep::End(match reason {
-                    HoldFailure::NotLoaded => match speech() {
-                        text @ (Text::VoiceNotInstalled | Text::VoiceUnloaded) => text,
-                        _ => Text::VoiceStatusUnknown,
-                    },
-                    HoldFailure::Busy => Text::TurnBusy,
-                    _ => Text::HoldFailed,
-                })
             }
         }
     }
