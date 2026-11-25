@@ -2,14 +2,19 @@
 
 pub mod credential;
 
-/// A greeting read by its own authenticated pair. No platform can produce one yet.
+/// A greeting read by its own authenticated pair. Only macOS has such a pair.
+#[cfg(not(target_os = "macos"))]
 pub(crate) enum BoundHello {}
 
+#[cfg(not(target_os = "macos"))]
 impl BoundHello {
     pub(crate) fn into_greeting(self) -> kumochi_protocol::message::Hello {
         match self {}
     }
 }
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos::pair::BoundHello;
 
 #[cfg(target_os = "macos")]
 pub(crate) use macos::capture::{display_at, screen_capturer};

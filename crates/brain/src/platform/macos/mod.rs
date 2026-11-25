@@ -10,6 +10,12 @@ pub(super) mod clock;
     reason = "the dormant Keychain store calls Security and LocalAuthentication"
 )]
 pub(super) mod credential;
+#[expect(unsafe_code, reason = "reads the inherited sockets' options")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "parent-bound admission is not wired yet")
+)]
+pub(super) mod pair;
 #[expect(
     unsafe_code,
     reason = "the parent watch owns Darwin process and kqueue calls"
