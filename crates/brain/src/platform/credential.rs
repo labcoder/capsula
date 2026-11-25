@@ -91,7 +91,9 @@ pub fn delete_instance(_: u32) -> Result<(), CredentialError> {
     Err(CredentialError::Unsupported)
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "macos")))]
+pub(crate) mod conformance;
+#[cfg(all(test, any(windows, target_os = "macos")))]
 pub(crate) mod fixture;
 
 /// Secret bytes whose owned allocation is wiped on drop and whose debug output is redacted.

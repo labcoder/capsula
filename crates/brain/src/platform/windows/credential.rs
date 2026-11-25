@@ -178,6 +178,7 @@ mod tests {
 
     use kumochi_protocol::constants::CREDENTIAL_SERVICE;
 
+    use crate::platform::credential::conformance;
     use crate::platform::credential::fixture::Fixture;
 
     use super::*;
@@ -210,6 +211,16 @@ mod tests {
                 "persisted secret matches"
             );
         });
+    }
+
+    #[test]
+    fn the_store_meets_the_shared_contract() {
+        let nonce = getrandom::u64().expect("random test service");
+        let target = format!("{CREDENTIAL_SERVICE}-credential-test-{nonce:016x}");
+        let other = format!("{target}-other");
+        let _fixture = Fixture::new(vec![target.clone(), other.clone()]);
+        conformance::refuses_invalid_input(&WindowsCredentialStore, &target);
+        conformance::round_trip(&WindowsCredentialStore, &target, &other);
     }
 
     #[test]
