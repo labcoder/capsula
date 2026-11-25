@@ -861,19 +861,25 @@ mod tests {
         }
     }
 
+    /// A scratch profile whose hold tuning differs from the defaults, with the tuning it sends.
     #[cfg(windows)]
-    #[tokio::test]
-    async fn paired_handshake_accepts_only_matching_authenticated_legs() {
-        let mut id = identity();
-        id.shell_image = std::env::current_exe().unwrap();
-        let scratch = Scratch::new("queued-hello-pair");
+    fn tuned_scratch(name: &str) -> (Scratch, ShellTuning) {
+        let scratch = Scratch::new(name);
         std::fs::create_dir_all(scratch.dir()).unwrap();
         std::fs::write(
             scratch.dir().join(kumochi_protocol::constants::CONFIG_FILE),
             "[tuning.hold]\nstart_ms = 2500\ndrain_ms = 750",
         )
         .unwrap();
-        let tuning = ShellTuning::from_ms(2500, 750).unwrap();
+        (scratch, ShellTuning::from_ms(2500, 750).unwrap())
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn paired_handshake_accepts_only_matching_authenticated_legs() {
+        let mut id = identity();
+        id.shell_image = std::env::current_exe().unwrap();
+        let (scratch, tuning) = tuned_scratch("queued-hello-pair");
         let mut brain = test_support::brain(&scratch, "");
         let mut tap = Tap::from_env();
         let queued = AudioSession::QueuedRequired;
