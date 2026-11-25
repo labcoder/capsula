@@ -192,11 +192,12 @@ absent, while a folder, a file, an item or any refusal is unverified, because no
 the allocator's own from anything else. The owner probe drops the item's bytes unread. Nothing
 writes either name yet, so both stay cheap to change until cut 9 does.
 
-On Windows `kumochi_storage::hold_product_folder` looks up a named folder, such as this edition's
-product folder (`DATA_DIR`) or its root slot, under a held, trusted anchor folder without creating
-it. Only "file not found" from that exact open, under an anchor no one untrusted may add to,
-counts as missing; a missing or non-folder anchor, a lost path, a file at the name or an untrusted
-folder is refused. Nothing calls it yet outside `profile_root`.
+On Windows `kumochi_storage::hold_product_folder(anchor)` looks up only this edition's product
+folder (`DATA_DIR`) and `profile_root(anchor)` only its root slot, both through one private lookup
+under a held, trusted anchor folder that creates nothing. Only "file not found" from that exact
+open, under an anchor no one untrusted may add to, counts as missing; a missing or non-folder
+anchor, a lost path, a file at the name or an untrusted folder is refused. Nothing calls either
+yet.
 
 On Windows the guard is a named mutex per user and edition in the global namespace, so every
 session of that user contends on one object and taking it writes nothing to disk
