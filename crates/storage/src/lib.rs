@@ -22,8 +22,9 @@ pub use platform::macos::{
 };
 #[cfg(windows)]
 pub use platform::windows::{
-    AppDataError, SQLITE_FILES, Today, admit_leaf, check_leaf, hold_chain, known_folder,
-    local_app_data, new_owner_only_dir, owner_only_dir, roaming_app_data, user_sid,
+    AppDataError, Child, SQLITE_FILES, Today, admit_leaf, check_leaf, hold_chain,
+    hold_product_folder, known_folder, local_app_data, new_owner_only_dir, owner_only_dir,
+    roaming_app_data, user_sid,
 };
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub use platform::windows::{DaclEntry, dacl_entries, dacl_sddl, set_dacl, set_junction};

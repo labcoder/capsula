@@ -181,6 +181,11 @@ until an allocator can prove them disjoint, so observation never yields first us
 executable calls it yet, and its decisions do not authorize writes, reconnect a provider, or
 identify a person.
 
+On Windows `kumochi_storage::hold_product_folder` looks up this edition's product folder under a
+held, trusted anchor folder without creating it. Only "file not found" from that exact open,
+under an anchor no one untrusted may add to, counts as missing; a missing or non-folder anchor, a
+lost path, a file at the name or an untrusted folder is refused. Nothing calls it yet.
+
 Tests that need files use the shared scratch guard in `tests/support/scratch.rs`. It creates
 a new child of Temp (or of an existing trusted root for fixtures that need one), skips
 occupied names, and removes its recorded child path on return or unwind. It does not

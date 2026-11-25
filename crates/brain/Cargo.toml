@@ -138,6 +138,22 @@ test-support = []
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["test-util"] }
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CFBase",
+    "CFData",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-security = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "SecBase",
+    "SecItem",
+    "SecTask",
+] }
+
 [target.'cfg(windows)'.dev-dependencies]
 # Lets tests read the access a handle was granted.
 windows-sys = { version = "0.61", features = ["Wdk_Foundation"] }
