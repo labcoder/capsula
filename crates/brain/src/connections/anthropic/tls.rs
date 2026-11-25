@@ -8,8 +8,9 @@ use rustls::pki_types::ServerName;
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
-use crate::connections::http_client::{self, HttpError};
+use crate::connections::http_client::HttpError;
 use crate::connections::model::conn::Connect;
+use crate::platform::{self, TrustDiagnostics};
 
 pub(super) const HOST: &str = "api.anthropic.com";
 
@@ -33,7 +34,7 @@ impl AnthropicTls {
     /// # Errors
     /// Refuses missing trust roots or an invalid TLS configuration.
     pub fn build() -> Result<Self, HttpError> {
-        let mut config = http_client::client_config(crate::platform::trust_roots())?;
+        let mut config = platform::native_client_tls(TrustDiagnostics::Account)?;
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         Ok(Self(TlsConnector::from(Arc::new(config))))
     }

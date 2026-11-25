@@ -92,7 +92,8 @@ startup never resumes anything automatically. Its only caller is the installer's
 through the `download::Fetch` seam, which makes a `Downloader` for each fetch, so start-up builds
 none. Installing, cancelling, removing and start-up are in [The installer](#the-installer).
 
-The separate HTTPS client uses the OS trust roots, no proxy, credentials, cookies, Referer or
+The downloader shares the platform TLS config factory but doesn't emit the account client's
+trust diagnostics. Its separate HTTPS client uses no proxy, credentials, cookies, Referer or
 compression, and `Accept-Encoding: identity`. The first URL and up to five redirects must use
 port 443 without userinfo, on `huggingface.co` or a subdomain of `hf.co`; IP literals are refused.
 Signed CDN queries never enter diagnostics.

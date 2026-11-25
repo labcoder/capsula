@@ -93,9 +93,13 @@ pub(crate) use protected::{
 pub use runtime_admission::{Mode, supports};
 pub(crate) use runtime_admission::{require_mode, serve_speech};
 pub use session_lock::{SessionLock, SessionLockError};
-pub(crate) use trust_roots::native_trust_supported;
+#[cfg(test)]
+pub(crate) use trust_roots::client_tls_from_roots;
 #[cfg(not(windows))]
 pub use trust_roots::trust_roots;
+pub(crate) use trust_roots::{
+    NativeTlsError, TrustDiagnostics, native_client_tls, native_trust_supported,
+};
 pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
 pub(crate) use windows::DumpExclusion;
