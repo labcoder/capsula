@@ -295,21 +295,38 @@ impl Presence {
             return Ok(());
         }
         self.pointer_settle = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(80))
-                .await;
-            let result = this.update(cx, |this, cx| {
-                let point = platform::cursor_position()?;
-                if !this.hovered(point, PanelVisibility::Visible) {
-                    let visibility = panels::left(this.panel_owner(cx));
-                    if !this.text_open() && visibility != this.panel_visibility {
-                        this.set_panel(visibility, cx)?;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(80))
+                    .await;
+                let result =
+                    this.update(cx, |this, cx| {
+                        let owner = this.panel_owner(cx);
+                        if this.panel_visibility == PanelVisibility::Hidden
+                            || owner != panels::Owner::Pointer
+                        {
+                            return Ok(true);
+                        }
+                        let point = platform::cursor_position()?;
+                        if this.hovered(point, PanelVisibility::Visible) {
+                            return Ok(true);
+                        }
+                        if this.line.accepted_frame().is_some_and(|frame| {
+                            panels::gap_contains(frame, this.layout.panel, point)
+                        }) {
+                            return Ok(false);
+                        }
+                        this.set_panel(panels::left(owner), cx)?;
+                        Ok::<_, OpenError>(true)
+                    });
+                match result {
+                    Ok(Ok(false)) => {}
+                    Ok(Err(error)) => {
+                        tracing::error!(%error, "can't dismiss the status panel");
+                        break;
                     }
+                    _ => break,
                 }
-                Ok::<_, OpenError>(())
-            });
-            if let Ok(Err(error)) = result {
-                tracing::error!(%error, "can't dismiss the status panel");
             }
         }));
         Ok(())
