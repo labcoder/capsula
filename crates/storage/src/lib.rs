@@ -16,7 +16,8 @@ mod scratch;
 pub use platform::Untrusted;
 #[cfg(target_os = "macos")]
 pub use platform::macos::{
-    AcquisitionError, AdmittedLock, AdmittedLog, ApplicationSupportError, Retention, ShellStorage,
+    AcquisitionError, AdmittedLock, AdmittedLog, ApplicationSupportError, GuardError, Product,
+    ProductFolder, Retention, SetupGuard, ShellStorage, Support, admit_support,
     application_support_dir, hold_chain, open_shell_storage,
 };
 #[cfg(windows)]
