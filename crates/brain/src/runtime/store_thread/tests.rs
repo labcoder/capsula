@@ -8,12 +8,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
+use kumochi_protocol::constants::SESSION_LOCK;
 use kumochi_protocol::message::{DataToShell, Deleted, PageOf, RunId, Step, ThreadId};
 use rusqlite::Connection;
 use tokio::sync::mpsc;
 
 use super::{Attempt, Purger, Schedule, StoreThread};
 use crate::coordinator::{Input, StoreOp};
+use crate::platform::{SessionLock, SessionLockError};
 use crate::store::{Cancel, Pause, Pauses, Point, RunEnd, SceneTarget, Store, Swap};
 use crate::test_support::Scratch;
 
@@ -53,7 +55,8 @@ fn spawn_with_room(
         after_close: None,
         pauses: None,
     };
-    let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
+    let custody = crate::test_support::custody(&store);
+    let thread = StoreThread::spawn(store, custody, acks, schedule).expect("thread");
     (thread, attempts)
 }
 
@@ -160,7 +163,8 @@ fn a_failed_purge_is_retried_in_session() {
         }),
         ..Schedule::default()
     };
-    let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
+    let custody = crate::test_support::custody(&store);
+    let thread = StoreThread::spawn(store, custody, acks, schedule).expect("thread");
     // Fixed while the first copy holds its snapshot, so the retry's copy never meets the fixer.
     reaching
         .recv_timeout(PATIENCE)
@@ -331,8 +335,10 @@ async fn a_held_model_write_answers_only_after_release() {
             release: wait,
         })
         .expect("gate");
+    let custody = crate::test_support::custody(&store);
     let worker = StoreThread::spawn(
         store,
+        custody,
         acks,
         Schedule {
             observed: Some(observed),
@@ -384,8 +390,10 @@ async fn close_releases_the_reply_sender_before_post_close_cleanup_finishes() {
     let (acks, mut replies) = mpsc::unbounded_channel();
     let (reached, closed) = std_mpsc::channel();
     let (release, wait) = std_mpsc::channel();
+    let custody = crate::test_support::custody(&store);
     let worker = StoreThread::spawn(
         store,
+        custody,
         acks,
         Schedule {
             after_close: Some((reached, wait)),
@@ -405,6 +413,49 @@ async fn close_releases_the_reply_sender_before_post_close_cleanup_finishes() {
         Err(mpsc::error::TryRecvError::Disconnected)
     );
     release.send(()).expect("release post-close cleanup");
+}
+
+#[tokio::test]
+async fn the_worker_keeps_the_writer_lock_until_post_close_cleanup_ends() {
+    let scratch = Scratch::new("close-custody");
+    let store = owing(&scratch);
+    let lock = scratch.dir().join(SESSION_LOCK);
+    let custody = Arc::new(SessionLock::try_acquire(&lock).expect("lock"));
+    let (acks, _replies) = mpsc::unbounded_channel();
+    let (reached, closed) = std_mpsc::channel();
+    let (release, wait) = std_mpsc::channel();
+    let worker = StoreThread::spawn(
+        store,
+        custody,
+        acks,
+        Schedule {
+            after_close: Some((reached, wait)),
+            ..Schedule::default()
+        },
+    )
+    .expect("worker");
+    tokio::time::timeout(PATIENCE, worker.close())
+        .await
+        .expect("close completes in time")
+        .expect("closed");
+    closed
+        .recv_timeout(PATIENCE)
+        .expect("worker holds after close");
+    assert!(
+        matches!(SessionLock::try_acquire(&lock), Err(SessionLockError::Busy)),
+        "the lock outlives the caller and close's acknowledgement while the worker cleans up"
+    );
+    release.send(()).expect("release post-close cleanup");
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        match SessionLock::try_acquire(&lock) {
+            Ok(_) => break,
+            Err(SessionLockError::Busy) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(error) => panic!("the worker kept the lock after its cleanup: {error}"),
+        }
+    }
 }
 
 pub(super) fn after_close(gate: Option<(std_mpsc::Sender<()>, std_mpsc::Receiver<()>)>) {
@@ -537,7 +588,8 @@ async fn an_op_fails_while_the_store_cant_reopen_and_the_next_is_stored_once_it_
         observed: None,
         ..Schedule::default()
     };
-    let thread = StoreThread::spawn(store, acks, schedule).expect("thread");
+    let custody = crate::test_support::custody(&store);
+    let thread = StoreThread::spawn(store, custody, acks, schedule).expect("thread");
     assert_eq!(
         next(&attempts),
         Attempt::Failed,
@@ -695,7 +747,8 @@ fn every_operation_gets_one_reply_in_order() {
     let store = Store::open(&scratch.db()).expect("store");
     let (thread, run) = (ThreadId(1), RunId(1));
     let (acks, mut replies) = mpsc::unbounded_channel();
-    let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
+    let custody = crate::test_support::custody(&store);
+    let store = StoreThread::spawn(store, custody, acks, Schedule::default()).expect("thread");
     for op in [
         StoreOp::BeginTurn {
             thread,
@@ -769,7 +822,8 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
     let store = Store::open(&scratch.db()).expect("store");
     let thread = ThreadId(1);
     let (acks, mut replies) = mpsc::unbounded_channel();
-    let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
+    let custody = crate::test_support::custody(&store);
+    let store = StoreThread::spawn(store, custody, acks, Schedule::default()).expect("thread");
     let round = |run, item: &str, output| {
         StoreOp::RoundItems(RoundItems {
             thread,
@@ -879,7 +933,8 @@ fn a_heard_point_is_stored_and_answers_nothing() {
         .expect("trigger");
     let (thread, run, refused) = (ThreadId(1), RunId(1), RunId(2));
     let (acks, mut replies) = mpsc::unbounded_channel();
-    let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
+    let custody = crate::test_support::custody(&store);
+    let store = StoreThread::spawn(store, custody, acks, Schedule::default()).expect("thread");
     let heard = crate::voice::reply::Heard {
         segment: kumochi_protocol::message::SegmentId(2),
         sample: 480,
@@ -967,7 +1022,8 @@ fn a_held_turns_screen_is_stored_with_its_turn() {
     let store = Store::open(&scratch.db()).expect("store");
     let (thread, run) = (ThreadId(1), RunId(1));
     let (acks, mut replies) = mpsc::unbounded_channel();
-    let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
+    let custody = crate::test_support::custody(&store);
+    let store = StoreThread::spawn(store, custody, acks, Schedule::default()).expect("thread");
     assert!(store.send(StoreOp::BeginTurn {
         thread,
         title: Some("t".into()),
@@ -1112,7 +1168,8 @@ fn armed_and_paused(scratch: &Scratch, points: &[Point]) -> Paused {
         }
     });
     let side = store.side();
-    let thread = StoreThread::spawn(store, acks_tx, schedule).expect("thread");
+    let custody = crate::test_support::custody(&store);
+    let thread = StoreThread::spawn(store, custody, acks_tx, schedule).expect("thread");
     let paused = Paused {
         thread,
         side,
@@ -1292,7 +1349,8 @@ fn measure_delete_during_a_purge() {
                 .take()
                 .unwrap_or_else(|| Store::open(&scratch.db()).expect("reopen"));
             let (acks, mut replies) = mpsc::unbounded_channel();
-            let thread = StoreThread::spawn(opened, acks, schedule).expect("thread");
+            let custody = crate::test_support::custody(&opened);
+            let thread = StoreThread::spawn(opened, custody, acks, schedule).expect("thread");
             let mut ack = || replies.blocking_recv().expect("acknowledged");
             let started = Instant::now();
             assert!(thread.send(StoreOp::Delete {
@@ -1376,7 +1434,8 @@ fn a_withdrawn_screen_is_stored_after_its_turn() {
     let store = Store::open(&scratch.db()).expect("store");
     let (thread, run) = (ThreadId(1), RunId(1));
     let (acks, mut replies) = mpsc::unbounded_channel();
-    let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
+    let custody = crate::test_support::custody(&store);
+    let store = StoreThread::spawn(store, custody, acks, Schedule::default()).expect("thread");
     assert!(store.send(StoreOp::BeginTurn {
         thread,
         title: Some("t".into()),
@@ -1409,7 +1468,8 @@ fn an_unsent_screen_is_cleared_after_its_turn() {
     let store = Store::open(&scratch.db()).expect("store");
     let (thread, run) = (ThreadId(1), RunId(1));
     let (acks, mut replies) = mpsc::unbounded_channel();
-    let store = StoreThread::spawn(store, acks, Schedule::default()).expect("thread");
+    let custody = crate::test_support::custody(&store);
+    let store = StoreThread::spawn(store, custody, acks, Schedule::default()).expect("thread");
     assert!(store.send(StoreOp::BeginTurn {
         thread,
         title: Some("t".into()),

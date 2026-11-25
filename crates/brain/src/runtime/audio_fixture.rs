@@ -28,7 +28,7 @@ use crate::voice::{LoadEvent, Reports};
 
 use super::account::{Accounts, Net};
 use super::data::DataQueue;
-use super::{Brain, Config, Input, Selected, Store};
+use super::{Brain, Config, Input, Selected};
 
 thread_local! {
     static PROBE: std::cell::OnceCell<Arc<AudioProbe>> = const { std::cell::OnceCell::new() };
@@ -648,8 +648,13 @@ async fn attach_hold_input(brain: &mut Brain, dir: &Path, probe: Arc<AudioProbe>
         .expect("record offline recognizer state");
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the offline fixture brain is assembled in one place, part by part"
+)]
 pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain {
-    let mut store = Store::open(&dir.join("store.db")).expect("open the test store");
+    let (profile, mut store) = crate::open_profile(&dir.join("store.db"))
+        .expect("take the profile and open the test store");
     store.recover().expect("recover the test store");
     let main = store.main_thread().expect("test store main thread");
     let high = store.high_water().expect("test store high water");
@@ -677,8 +682,17 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
     let config = Config::load(Some(dir.to_path_buf()), main);
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let lock = dir.join(SESSION_LOCK);
+    let held = Arc::clone(&profile);
     let worker = Worker::new(
-        Box::new(move || Vault::with_service(Offline, "test-accounts", &lock)),
+        Box::new(move || {
+            Vault::with_lock(
+                Offline,
+                "test-accounts",
+                Arc::clone(&held),
+                &lock,
+                crate::connections::vault::HistoryLink::unbound(),
+            )
+        }),
         Arc::clone(&clock),
     );
     let accounts = Accounts::spawn_unconfigured(
@@ -714,7 +728,7 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
             Fixture::parse(script).expect("read the answer fixture"),
         ))
     };
-    let mut brain = Brain::new(store, main, high, scenes, engine, config, accounts)
+    let mut brain = Brain::new(store, profile, main, high, scenes, engine, config, accounts)
         .expect("start the fixture Brain");
     if let Some(probe) = probe.filter(|probe| probe.hold) {
         attach_hold_input(&mut brain, dir, probe).await;

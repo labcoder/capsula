@@ -12,7 +12,7 @@ use crate::config::tuning::{OAuthTuning, TokenTuning};
 #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
 use crate::connections::model::text_observation::Observation;
 use crate::ipc::{self, Identity, Pipes};
-use crate::platform::{self, Job, native_workers};
+use crate::platform::{self, Job, SessionLock, native_workers};
 use crate::runtime::{Brain, Quit, Selected, account::Accounts};
 use crate::store::{self, SceneState, Store};
 use crate::{
@@ -24,6 +24,8 @@ mod tests;
 type VaultHeld = Arc<AtomicBool>;
 
 struct OpenedState {
+    /// The profile's writer lock, taken before the store opened.
+    profile: Arc<SessionLock>,
     store: Store,
     main_thread: ThreadId,
     high_water: (ThreadId, RunId),
@@ -33,10 +35,12 @@ struct OpenedState {
 }
 
 struct Lifecycle {
-    // Before publication, retain the old passive unwind order: Job, Brain, store, then pipes.
+    // Before publication, retain the old passive unwind order: Job, Brain, store, the profile
+    // lock, then pipes. The store and credential workers keep their own references to the lock.
     jobs: Option<Arc<Job>>,
     brain: Option<Brain>,
     opened: Option<OpenedState>,
+    profile: Option<Arc<SessionLock>>,
     exe: PathBuf,
     pipes: Pipes,
     session: u32,
@@ -78,6 +82,7 @@ impl Lifecycle {
             jobs: None,
             brain: None,
             opened: None,
+            profile: None,
             exe,
             pipes,
             session,
@@ -88,9 +93,14 @@ impl Lifecycle {
     fn start(
         mut self,
         opened: OpenedState,
-        accounts: impl FnOnce(OAuthTuning, TokenTuning) -> Result<(Accounts, VaultHeld), BrainError>,
+        accounts: impl FnOnce(
+            OAuthTuning,
+            TokenTuning,
+            Arc<SessionLock>,
+        ) -> Result<(Accounts, VaultHeld), BrainError>,
         #[cfg(test)] mut checkpoint: impl FnMut(Checkpoint, &mut Self) -> Result<(), BrainError>,
     ) -> Result<Self, BrainError> {
+        self.profile = Some(Arc::clone(&opened.profile));
         self.opened = Some(opened);
         #[cfg(test)]
         checkpoint(Checkpoint::Open, &mut self)?;
@@ -188,9 +198,10 @@ impl OpenedState {
         config_dir: impl FnOnce() -> Option<PathBuf>,
         replay: Option<Selected>,
     ) -> Result<Self, BrainError> {
-        // Before any shell is served, so no run starts ahead of the recovery scan. Blocking is fine:
-        // nothing else runs on the runtime yet.
-        let mut store = Store::open(path)?;
+        // Every writer of the store and the credential authority holds this lock for its whole run,
+        // so a brain of this user in another session stops here. Before any shell is served, so no
+        // run starts ahead of the recovery scan. Blocking is fine: nothing else runs on the runtime yet.
+        let (profile, mut store) = super::open_profile(path)?;
         let recovered = store.recover()?;
         tracing::info!(
             target: STARTUP_LOG_TARGET,
@@ -210,6 +221,7 @@ impl OpenedState {
         #[cfg(all(windows, feature = "gate-draw-replay", not(debug_assertions)))]
         super::require_draw_model(&config)?;
         Ok(Self {
+            profile,
             store,
             main_thread,
             high_water,
@@ -222,11 +234,18 @@ impl OpenedState {
 
 fn start_accounts(
     opened: &mut OpenedState,
-    accounts: impl FnOnce(OAuthTuning, TokenTuning) -> Result<(Accounts, VaultHeld), BrainError>,
+    accounts: impl FnOnce(
+        OAuthTuning,
+        TokenTuning,
+        Arc<SessionLock>,
+    ) -> Result<(Accounts, VaultHeld), BrainError>,
 ) -> Result<(Accounts, VaultHeld), BrainError> {
     // Before the capability is stored, so its write never overlaps the vault's first reads.
-    let (account, vault_held) =
-        accounts(opened.config.oauth_tuning(), opened.config.token_tuning())?;
+    let (account, vault_held) = accounts(
+        opened.config.oauth_tuning(),
+        opened.config.token_tuning(),
+        Arc::clone(&opened.profile),
+    )?;
     opened
         .config
         .count_in_use(&account.view(), opened.high_water.1);
@@ -235,6 +254,7 @@ fn start_accounts(
 
 fn build_brain(opened: OpenedState, account: Accounts) -> Result<Brain, BrainError> {
     let OpenedState {
+        profile,
         store,
         main_thread,
         high_water,
@@ -244,6 +264,7 @@ fn build_brain(opened: OpenedState, account: Accounts) -> Result<Brain, BrainErr
     } = opened;
     Brain::new(
         store,
+        profile,
         main_thread,
         high_water,
         scenes,

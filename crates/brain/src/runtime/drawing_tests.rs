@@ -110,9 +110,11 @@ fn typed_brain_with_steps(
             .expect("fault trigger");
     }
     let high = store.high_water().expect("high water");
+    let custody = crate::test_support::custody(&store);
     (
         Brain::new(
             store,
+            custody,
             main,
             high,
             Vec::new(),
@@ -208,8 +210,10 @@ async fn a_corrupt_scene_is_cleared_without_losing_the_other_three_or_stopping_t
     let high = store.high_water().expect("high water");
     let captured = crate::test_support::Captured::default();
     let guard = captured.install();
+    let custody = crate::test_support::custody(&store);
     let mut brain = Brain::new(
         store,
+        custody,
         main,
         high,
         Vec::new(),
@@ -767,8 +771,10 @@ async fn an_unavailable_drawing_read_starts_the_brain_but_cannot_confirm_quit() 
         .conn_for_tests()
         .execute_batch("ALTER TABLE threads RENAME TO unreadable_threads")
         .expect("make drawing read fail");
+    let custody = crate::test_support::custody(&store);
     let mut brain = Brain::new(
         store,
+        custody,
         main,
         high,
         Vec::new(),
@@ -865,6 +871,10 @@ async fn quit_with_an_unconfirmed_typed_clear_is_incomplete() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one restart, from the first run to the queued log"
+)]
 async fn a_typed_restart_describes_and_queues_the_original_log_with_scene_ownership() {
     let scratch = Scratch::new("drawing-runtime-recovery");
     let mut store = Store::open(&scratch.db()).expect("store");
@@ -903,8 +913,10 @@ async fn a_typed_restart_describes_and_queues_the_original_log_with_scene_owners
     let mut store = Store::open(&scratch.db()).expect("reopen");
     store.recover().expect("restart scan");
     let high = store.high_water().expect("high water");
+    let custody = crate::test_support::custody(&store);
     let mut brain = Brain::new(
         store,
+        custody,
         main,
         high,
         Vec::new(),

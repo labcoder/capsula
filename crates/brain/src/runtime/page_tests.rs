@@ -1086,8 +1086,10 @@ async fn a_page_read_failure_answers_page_failed_and_keeps_the_connection() {
         .conn_for_tests()
         .execute_batch("DROP TABLE threads")
         .expect("broken schema");
+    let custody = crate::test_support::custody(&store);
     let mut brain = Brain::new(
         store,
+        custody,
         ThreadId(1),
         (ThreadId(1), RunId(0)),
         Vec::new(),
