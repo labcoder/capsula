@@ -13,8 +13,8 @@ use kumochi_protocol::message::{
 use serde_json::{Value, json};
 
 use super::super::{
-    Startup, startup,
-    tests::{PAIR_FIXTURE, SAFE_PLAN, TEXT_ONLY, clean_metadata, fixture},
+    startup,
+    tests::{PAIR_FIXTURE, SAFE_PLAN, TEXT_ONLY, clean_metadata},
 };
 use super::{
     CLAIM, Fact, Frame, Outcomes, PAIR, PLAN, Sample, Seen, claim_checked, confirm_setting, drive,
@@ -303,12 +303,14 @@ fn a_new_connection_or_pending_work_is_refused_before_claim_or_spawn() {
         let plan = startup::check(&db, &authority, TEXT_ONLY, 19).expect("approved startup");
         assert_eq!(plan, SAFE_PLAN);
         fs::write(folder.join(PLAN), plan).expect("approved plan");
+        fs::write(folder.join(PAIR), PAIR_FIXTURE).expect("approved pair");
         (if scope { &authority } else { &db })
             .execute_batch(sql)
             .expect("changed metadata");
         let actual = claim_checked(
             &folder,
-            || startup::check(&db, &authority, TEXT_ONLY, 19).map(fixture),
+            PAIR_FIXTURE,
+            || startup::check(&db, &authority, TEXT_ONLY, 19),
             || -> anyhow::Result<()> { panic!("unapproved startup must never reach the child") },
         );
         assert_eq!(
@@ -324,10 +326,12 @@ fn text_only_settings_are_checked_before_taking_the_claim() {
     let (db, authority) = clean_metadata();
     let folder = crate::scratch::dir("first-text-settings");
     fs::write(folder.join(PLAN), SAFE_PLAN).expect("approved plan");
+    fs::write(folder.join(PAIR), PAIR_FIXTURE).expect("approved pair");
     let changed = TEXT_ONLY.replace("hold_to_talk=false", "hold_to_talk=true");
     let result = claim_checked(
         &folder,
-        || startup::check(&db, &authority, &changed, 19).map(fixture),
+        PAIR_FIXTURE,
+        || startup::check(&db, &authority, &changed, 19),
         || -> anyhow::Result<()> { panic!("voice settings must never reach the child") },
     );
     assert_eq!(
@@ -338,7 +342,7 @@ fn text_only_settings_are_checked_before_taking_the_claim() {
 }
 
 #[test]
-fn another_eligible_pair_with_the_same_plan_is_refused_before_claim_or_spawn() {
+fn another_pair_is_refused_before_inspection_claim_or_spawn() {
     let folder = crate::scratch::dir("first-text-other-pair");
     fs::write(folder.join(PLAN), SAFE_PLAN).expect("approved plan");
     fs::write(folder.join(PAIR), PAIR_FIXTURE).expect("approved pair");
@@ -346,12 +350,8 @@ fn another_eligible_pair_with_the_same_plan_is_refused_before_claim_or_spawn() {
     other[23] ^= 1;
     let result = claim_checked(
         &folder,
-        || {
-            Ok(Startup {
-                plan: SAFE_PLAN.to_owned(),
-                pair: other,
-            })
-        },
+        other,
+        || -> anyhow::Result<String> { panic!("another profile must never be inspected") },
         || -> anyhow::Result<()> { panic!("another profile must never reach the child") },
     );
     assert_eq!(
@@ -368,12 +368,8 @@ fn a_missing_receipt_keeps_the_only_claim_and_a_repeat_cannot_report_another_cha
     fs::write(folder.join(PAIR), PAIR_FIXTURE).expect("approved pair");
     let mismatched = claim_checked(
         &folder,
-        || {
-            Ok(fixture(SAFE_PLAN.replace(
-                "connections=chatgpt",
-                "connections=chatgpt,anthropic",
-            )))
-        },
+        PAIR_FIXTURE,
+        || Ok(SAFE_PLAN.replace("connections=chatgpt", "connections=chatgpt,anthropic")),
         || -> anyhow::Result<()> { panic!("a changed plan cannot start its child") },
     );
     assert_eq!(
@@ -383,7 +379,8 @@ fn a_missing_receipt_keeps_the_only_claim_and_a_repeat_cannot_report_another_cha
     assert!(!folder.join(CLAIM).exists());
     let result = claim_checked(
         &folder,
-        || Ok(fixture(SAFE_PLAN.to_owned())),
+        PAIR_FIXTURE,
+        || Ok(SAFE_PLAN.to_owned()),
         || -> anyhow::Result<()> {
             assert!(folder.join(CLAIM).exists());
             Err(anyhow!("fixture exited before a receipt"))
@@ -399,7 +396,8 @@ fn a_missing_receipt_keeps_the_only_claim_and_a_repeat_cannot_report_another_cha
     );
     let duplicate = claim_checked(
         &folder,
-        || Ok(fixture(SAFE_PLAN.to_owned())),
+        PAIR_FIXTURE,
+        || Ok(SAFE_PLAN.to_owned()),
         || -> anyhow::Result<()> {
             panic!("a duplicate cannot start the charge-reporting callback")
         },

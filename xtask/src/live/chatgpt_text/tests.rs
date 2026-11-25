@@ -124,6 +124,18 @@ fn a_half_pair_or_a_profile_outside_local_app_data_is_refused() {
             "first-text needs both KUMOCHI_GATE_LOCALAPPDATA and KUMOCHI_GATE_APPDATA"
         );
     }
+    let verbatim = std::path::PathBuf::from(format!(r"\\?\{}", profile.display()));
+    let dotted = profile
+        .join("..")
+        .join(profile.file_name().expect("a named profile"));
+    for spelled in [&verbatim, &dotted] {
+        assert_eq!(
+            startup::profile(variables(spelled, [true, true]))
+                .expect_err("not as plainly given")
+                .to_string(),
+            "profile folders must be absolute paths on a local drive"
+        );
+    }
     // The checkout is outside Local AppData on Rez and in CI.
     let outside = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     assert_eq!(
@@ -144,7 +156,7 @@ fn identities_tell_two_profile_pairs_apart_and_refuse_a_link() {
         }
     }
     let pair = |profile: &std::path::Path| {
-        startup::identities(&profile.join("local"), &profile.join("roaming"))
+        startup::identities(&profile.join("local"), &profile.join("roaming")).map(|(pair, _)| pair)
     };
     let one = pair(&first).expect("the first pair");
     assert_eq!(pair(&first).expect("the same pair again"), one);

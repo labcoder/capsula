@@ -286,11 +286,14 @@ and `APPDATA` instead doesn't isolate a debug build: it refuses to start. The ha
 half a pair, an existing history, pending issue work, a pinned main model, voice or screen
 settings, pending authority work, a Claude cleanup marker in the profile's own
 `local\Kumochi Dev` (the Claude Code folder that brain uses), and any active connection other
-than ChatGPT. Prepare also records the two folders' identities (volume serial number and file
-index, read through a chain hold that refuses links) beside the plan, and never prints them.
-The inner check compares current read-only metadata and the identities of the pair it sees
-with the prepared ones before taking its claim or spawning a brain, so another eligible
-profile can't stand in for the approved one. It then requires the brain to report
+than ChatGPT. All three paths must be absolute, in plain drive form and without `..`; they're
+used as spelled, never resolved. Prepare holds both folders from the volume root down, which
+refuses a link anywhere on either path, and records their identities (volume serial number and
+file index) beside the plan, never printing them. The inner check holds the pair the same way
+until the run ends and compares its identities with the prepared ones before it reads anything
+in the profile, so another eligible profile can't stand in for the approved one. Only then does
+it check the cleanup marker and read the metadata through the held folders, and it compares the
+plan before taking its claim or spawning a brain. It then requires the brain to report
 ChatGPT already signed in, with plan use enabled and no recovery required.
 
 An ordinary Dev start still opens the user-level Dev credential service and sweeps

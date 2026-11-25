@@ -3,7 +3,7 @@
 pub(super) mod execute;
 mod startup;
 
-pub(super) use startup::Startup;
+pub(super) use startup::{Profile, Startup};
 #[cfg(test)]
 mod tests;
 
@@ -30,11 +30,20 @@ pub(super) fn budget(words: &[String]) -> Result<u32> {
 }
 
 pub(super) fn plan(budget: u32) -> Result<Startup> {
+    let profile = profile()?;
+    Ok(Startup {
+        plan: profile.plan(budget)?,
+        pair: profile.pair,
+    })
+}
+
+/// The disposable profile, held, unless the fixture engine override is set.
+fn profile() -> Result<Profile> {
     ensure!(
         std::env::var_os(FIXTURE_ENV).is_none(),
         "fixture engine override is set"
     );
-    startup::plan(budget)
+    Profile::hold()
 }
 
 pub(super) fn prepared(folder: &Path, startup: &Startup) -> Result<()> {

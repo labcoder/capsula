@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read as _};
-use std::path::{Path, PathBuf, Prefix};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use anyhow::{Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
@@ -20,38 +20,63 @@ pub(in crate::live) struct Startup {
     pub(super) pair: [u8; 24],
 }
 
-pub(super) fn plan(budget: u32) -> Result<Startup> {
-    let var = |name: &str| std::env::var_os(name);
-    let (local, roaming) = profile(var)?;
-    let data = local.join(DATA_DIR);
-    check_claude_cleanup(&data)?;
-    let db = data.join(STORE_FILE);
-    let authority = data.join(AUTHORITY_FILE);
-    let config = roaming.join(DATA_DIR).join(CONFIG_FILE);
-    ensure!(
-        [&db, &authority, &config]
-            .into_iter()
-            .all(|path| { path.canonicalize().is_ok_and(|resolved| resolved == *path) }),
-        "profile files are missing or outside the disposable profile"
-    );
-    let db = store::open(&db).map_err(|_| anyhow!("cannot open the disposable store read-only"))?;
-    let authority =
-        store::open(&authority).map_err(|_| anyhow!("cannot open the authority read-only"))?;
-    let config = File::open(config)
-        .and_then(|file| io::read_to_string(file.take(131_073)))
-        .map_err(|_| anyhow!("cannot read text-only settings"))?;
-    Ok(Startup {
-        plan: check(&db, &authority, &config, budget)?,
-        pair: identities(
-            &PathBuf::from(var(LOCAL_APPDATA_OVERRIDE).unwrap_or_default()),
-            &PathBuf::from(var(ROAMING_APPDATA_OVERRIDE).unwrap_or_default()),
-        )?,
-    })
+/// The disposable profile's local and roaming folders as the override pair names them, each held
+/// from the volume root down while this lives, and their identities.
+pub(in crate::live) struct Profile {
+    local: PathBuf,
+    roaming: PathBuf,
+    pub(super) pair: [u8; 24],
+    _held: Vec<File>,
 }
 
-/// The canonical local and roaming halves of the override pair `var` reads. Both must be set, as
-/// `local` and `roaming` in the disposable profile, which must lie strictly below the real local
-/// application data folder and outside its Kumochi Dev data.
+impl Profile {
+    /// Holds the two folders the override pair names, as it spells them.
+    pub(super) fn hold() -> Result<Self> {
+        let (local, roaming) = profile(|name| std::env::var_os(name))?;
+        let (pair, held) = identities(&local, &roaming)?;
+        Ok(Self {
+            local,
+            roaming,
+            pair,
+            _held: held,
+        })
+    }
+
+    /// The startup plan, read through the held folders: their data folders must hold too, and
+    /// each file read must be a plain file of its own.
+    pub(super) fn plan(&self, budget: u32) -> Result<String> {
+        let data = self.local.join(DATA_DIR);
+        let settings = self.roaming.join(DATA_DIR);
+        let _held = [data.as_path(), settings.as_path()]
+            .map(kumochi_storage::hold_chain)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| anyhow!("profile files are missing or outside the disposable profile"))?;
+        check_claude_cleanup(&data)?;
+        let db = data.join(STORE_FILE);
+        let authority = data.join(AUTHORITY_FILE);
+        let config = settings.join(CONFIG_FILE);
+        for file in [&db, &authority, &config] {
+            ensure!(
+                file.is_file() && kumochi_storage::check_leaf(file).is_ok(),
+                "profile files are missing or outside the disposable profile"
+            );
+        }
+        let db =
+            store::open(&db).map_err(|_| anyhow!("cannot open the disposable store read-only"))?;
+        let authority =
+            store::open(&authority).map_err(|_| anyhow!("cannot open the authority read-only"))?;
+        let config = File::open(config)
+            .and_then(|file| io::read_to_string(file.take(131_073)))
+            .map_err(|_| anyhow!("cannot read text-only settings"))?;
+        check(&db, &authority, &config, budget)
+    }
+}
+
+/// The local and roaming halves of the override pair `var` reads, as it spells them. Both must be
+/// set, as `local` and `roaming` in the disposable profile, which must lie strictly below the real
+/// local application data folder and outside its Kumochi Dev data. Nothing is resolved: a link on
+/// either path is refused when it's held.
 pub(super) fn profile(var: impl Fn(&str) -> Option<OsString>) -> Result<(PathBuf, PathBuf)> {
     let (Some(local), Some(roaming)) = (var(LOCAL_APPDATA_OVERRIDE), var(ROAMING_APPDATA_OVERRIDE))
     else {
@@ -59,7 +84,6 @@ pub(super) fn profile(var: impl Fn(&str) -> Option<OsString>) -> Result<(PathBuf
     };
     let root = local_path(var("KUMOCHI_LIVE_TEXT_PROFILE"))?;
     let everyday = crate::platform::local_app_data()
-        .and_then(|path| Ok(path.canonicalize()?))
         .map_err(|_| anyhow!("cannot identify ordinary local app data"))?;
     ensure!(
         root.starts_with(&everyday)
@@ -77,9 +101,10 @@ pub(super) fn profile(var: impl Fn(&str) -> Option<OsString>) -> Result<(PathBuf
 }
 
 /// The identities of the folders at `local` and `roaming`, as the variables spell them, each
-/// read through its held chain, so a link anywhere on either path refuses.
-pub(super) fn identities(local: &Path, roaming: &Path) -> Result<[u8; 24]> {
+/// read through its held chain, so a link anywhere on either path refuses; and those chains.
+pub(super) fn identities(local: &Path, roaming: &Path) -> Result<([u8; 24], Vec<File>)> {
     let mut pair = [0; 24];
+    let mut chains = Vec::new();
     for (bytes, folder) in pair
         .as_chunks_mut::<12>()
         .0
@@ -94,8 +119,9 @@ pub(super) fn identities(local: &Path, roaming: &Path) -> Result<[u8; 24]> {
         let (volume, index) = crate::platform::file_identity(root)?;
         bytes[..4].copy_from_slice(&volume.to_le_bytes());
         bytes[4..].copy_from_slice(&index.to_le_bytes());
+        chains.extend(held);
     }
-    Ok(pair)
+    Ok((pair, chains))
 }
 
 /// Refuses while Claude Code's cleanup is owed in `data`, the data folder the run's brain uses.
@@ -108,16 +134,15 @@ pub(super) fn check_claude_cleanup(data: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `value` as given, which must be an absolute path in plain drive form with no `..`.
 fn local_path(value: Option<OsString>) -> Result<PathBuf> {
     let path = PathBuf::from(value.ok_or_else(|| anyhow!("missing profile folder"))?);
-    ensure!(path.is_absolute(), "profile folders must be absolute");
-    let path = path
-        .canonicalize()
-        .map_err(|_| anyhow!("cannot resolve profile folder"))?;
     ensure!(
-        matches!(path.components().next(), Some(std::path::Component::Prefix(part))
-        if matches!(part.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))),
-        "profile must use a local drive"
+        path.is_absolute()
+            && matches!(path.components().next(), Some(Component::Prefix(part))
+            if matches!(part.kind(), Prefix::Disk(_)))
+            && !path.components().any(|part| part == Component::ParentDir),
+        "profile folders must be absolute paths on a local drive"
     );
     Ok(path)
 }
