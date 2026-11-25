@@ -149,7 +149,8 @@ nonblocking exclusive `flock` on a fresh open of the held folder. It is per user
 the Windows guard, since every edition and anything else that locks Application Support contends
 for it. Closing the guard or its holder's exit releases it, and `Busy` says nothing about who
 holds it. `open_shell_storage` starts with `admit_support`; the product-folder lookup and the
-guard have no caller yet.
+guard have no caller yet. `Support::profile_root` uses the same lookup for the root slot (see
+below).
 
 Linux is a build and test host for `shell-core`, not a supported runtime. Its native
 IPC, process launch, credential storage, file logging, and audio entry points return
@@ -181,10 +182,21 @@ until an allocator can prove them disjoint, so observation never yields first us
 executable calls it yet, and its decisions do not authorize writes, reconnect a provider, or
 identify a person.
 
-On Windows `kumochi_storage::hold_product_folder` looks up this edition's product folder under a
-held, trusted anchor folder without creating it. Only "file not found" from that exact open,
-under an anchor no one untrusted may add to, counts as missing; a missing or non-folder anchor, a
-lost path, a file at the name or an untrusted folder is refused. Nothing calls it yet.
+Two probes feed it so far, and both only read (OSC-1085 cut 7). The root slot is a folder named
+`ProductIdentity::profile_root` (`Kumochi Profile`, `Kumochi Dev Profile` or `Kumochi Gate
+Profile`) beside the legacy product folder under the same anchor; `kumochi_storage::profile_root`
+on Windows and `Support::profile_root` on macOS read it. The owner item is
+`brain::profile::owner`'s exact read of [the owner target](accounts.md#profile-owner-item). Until
+the allocator (cut 9) writes them, each reads only absent or unverified: a missing slot or item is
+absent, while a folder, a file, an item or any refusal is unverified, because nothing yet tells
+the allocator's own from anything else. The owner probe drops the item's bytes unread. Nothing
+writes either name yet, so both stay cheap to change until cut 9 does.
+
+On Windows `kumochi_storage::hold_product_folder` looks up a named folder, such as this edition's
+product folder (`DATA_DIR`) or its root slot, under a held, trusted anchor folder without creating
+it. Only "file not found" from that exact open, under an anchor no one untrusted may add to,
+counts as missing; a missing or non-folder anchor, a lost path, a file at the name or an untrusted
+folder is refused. Nothing calls it yet outside `profile_root`.
 
 On Windows the guard is a named mutex per user and edition in the global namespace, so every
 session of that user contends on one object and taking it writes nothing to disk

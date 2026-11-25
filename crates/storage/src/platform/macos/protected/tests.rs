@@ -1162,6 +1162,55 @@ fn native_product_lookup_creates_nothing_and_the_setup_guard_excludes_other_open
     scratch.cleanup().expect("remove recorded fixture objects");
 }
 
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_root_slot_is_absent_only_when_missing_and_reading_it_creates_nothing() {
+    use crate::admit_support;
+    use kumochi_protocol::constants::ProductIdentity;
+    use kumochi_protocol::profile::Root;
+
+    let name = ProductIdentity::ACTIVE.profile_root;
+    let slot = CString::new(name).expect("the slot name has no NUL");
+    let fixture = || {
+        let scratch = Scratch::new();
+        let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
+            .expect("an explicitly commissioned fixture parent");
+        let support =
+            std::path::PathBuf::from(parent).join(OsStr::from_bytes(scratch.residual.to_bytes()));
+        (scratch, support)
+    };
+    let read = |support: &Path| {
+        admit_support(support)
+            .expect("admit the fixture anchor")
+            .profile_root()
+    };
+
+    let (mut scratch, support) = fixture();
+    assert_eq!(read(&support), Root::Absent);
+    assert_eq!(
+        std::fs::symlink_metadata(support.join(name))
+            .expect_err("reading created nothing")
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    let folder = scratch.directory(&slot);
+    assert_eq!(read(&support), Root::Unverified, "a folder");
+    drop(folder);
+    scratch.cleanup().expect("remove recorded fixture objects");
+
+    let (mut scratch, support) = fixture();
+    let root = scratch.root.try_clone().expect("retain fixture parent");
+    std::fs::write(support.join(name), b"").expect("a fixture file at the slot");
+    scratch.record(&root, &slot).expect("record the file");
+    assert_eq!(read(&support), Root::Unverified, "a file");
+    assert_eq!(
+        std::fs::read(support.join(name)).expect("the file stays"),
+        b""
+    );
+    drop(root);
+    scratch.cleanup().expect("remove recorded fixture objects");
+}
+
 const GUARD_HOLDER: &str = "STORAGE_GUARD_HOLDER_ANCHOR";
 
 /// The holder process. Dropping it stops it, and outside a panic a holder that won't exit fails.

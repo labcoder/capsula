@@ -56,7 +56,7 @@ use windows_sys::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 use crate::platform::Untrusted;
 
 mod anchor;
-pub use anchor::{Child, hold_product_folder};
+pub use anchor::{Child, hold_product_folder, profile_root};
 mod guard;
 pub use guard::{GuardError, SetupGuard, acquire_setup_guard};
 
