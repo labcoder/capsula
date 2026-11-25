@@ -174,3 +174,17 @@ reread_bytes = 32768
 # 10–20: text events a new history.read result may show, still subject to its byte limit.
 read_events_count = 20
 ```
+
+## Hold to talk
+
+These timings can only shorten waits. The microphone's 60-second recording ceiling and checks
+that confirm it has stopped don't change. Negative numbers use the default; nonnegative values
+outside the range are clamped.
+
+```toml
+[tuning.hold]
+# 2000–10000 milliseconds: microphone startup time after its start is reserved.
+start_ms = 10000
+# 500–2000 milliseconds: time to finish draining the last audio.
+drain_ms = 2000
+```

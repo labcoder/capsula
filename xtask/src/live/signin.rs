@@ -49,7 +49,11 @@ pub(super) fn harness(
     drive: impl FnOnce(&mut Client, &mut io::StdoutLock<'static>) -> Result<()>,
 ) -> Result<()> {
     let brain = Brain::start(0, 0)?;
-    let (driven, quit_sent) = session(Client::connect(), &mut io::stdout().lock(), drive);
+    let (driven, quit_sent) = session(
+        Client::connect(brain.child.id()),
+        &mut io::stdout().lock(),
+        drive,
+    );
     let cleanup = if quit_sent {
         brain.quit()
     } else {

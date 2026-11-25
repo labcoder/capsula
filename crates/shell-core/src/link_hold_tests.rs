@@ -17,6 +17,49 @@ fn voice_request(gesture: GestureId) -> ControlToBrain {
 }
 
 #[test]
+fn closing_legacy_session_revokes_native_hold_while_the_outbox_is_held() {
+    let link = attended("close-legacy-hold");
+    let session = connected(next(&patient(link.events.clone())));
+    let generation = session.generation();
+    assert!(link.handle.can_start_voice_gesture(generation));
+    with_outbox_held(&link.handle, &session, || {
+        session.close();
+        assert!(!link.handle.can_start_voice_gesture(generation));
+    });
+    link.handle.end(&session);
+    drop(link.control);
+    assert!(link.link.join().unwrap());
+}
+
+#[test]
+fn refusing_a_physical_stop_revokes_legacy_hold_before_link_teardown() {
+    use super::super::{Outbox, QueuedInput};
+
+    let (handle, _data) = LinkHandle::recording();
+    let (_peer, pipe) = pair("stop-aborts-legacy-hold");
+    let (control, _control_queue) = async_channel::bounded(1);
+    let (data, _data_queue) = async_channel::bounded(1);
+    let session = Session::detached(1, Incarnation(1));
+    assert!(handle.can_start_voice_gesture(session.generation()));
+    *handle.shared.outbox.lock().unwrap() = Some(Outbox {
+        generation: session.generation(),
+        control,
+        data,
+        pipe: Arc::new(pipe),
+        submits: 0.into(),
+        queued_input: QueuedInput::default(),
+        closing: Arc::clone(&session.closing),
+    });
+    let gesture = GestureId(1);
+    assert!(handle.send_control(&session, voice_request(gesture)));
+    assert!(handle.send_control(&session, ControlToBrain::VoiceHoldStopped { gesture }));
+    let outbox = handle.shared.outbox.lock().unwrap();
+    assert!(outbox.as_ref().unwrap().pipe.is_aborted());
+    assert!(handle.voice_stop_pending());
+    assert!(!handle.can_start_voice_gesture(session.generation()));
+}
+
+#[test]
 fn microphone_stop_reserves_one_receipt_until_the_brain_accepts_it() {
     let mut link = LinkHandle::detached();
     let queue = link.record_controls();
@@ -275,7 +318,8 @@ fn any_session_owner_ending_revokes_only_its_own_live_flag() {
     let old = Session::detached(1, Incarnation(1));
     let current = Session::detached(2, Incarnation(1));
     let writer = EndSession {
-        queued: None,
+        queued: false,
+        generation: old.generation(),
         alive: old.alive(),
         shared: Arc::default(),
     };
@@ -297,6 +341,7 @@ fn control_and_data_eof_revoke_without_dispatching_ui_events() {
         });
         let session = connected(link.events.recv_blocking().expect("connected"));
         assert_eq!(link.handle.link_generation(), session.generation());
+        assert!(link.handle.can_start_voice_gesture(session.generation()));
         if data_loss {
             drop(link.data);
         } else {
@@ -307,6 +352,7 @@ fn control_and_data_eof_revoke_without_dispatching_ui_events() {
             thread::sleep(Duration::from_millis(1));
         }
         assert!(!session.alive().load(Ordering::Acquire));
+        assert!(!link.handle.can_start_voice_gesture(session.generation()));
         assert!(link.link.join().expect("joined"));
     }
 }

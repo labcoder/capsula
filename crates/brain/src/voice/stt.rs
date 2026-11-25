@@ -282,7 +282,7 @@ impl SttHandle {
         .expect("offline recognizer starts")
     }
 
-    pub(crate) fn admit_use(&self) -> Result<u64, HoldFailure> {
+    pub(crate) fn admit_use(&self) -> Result<(u64, tokio::time::Instant), HoldFailure> {
         self.control.update(|state| {
             let ask = state.current.ok_or(HoldFailure::NotLoaded)?;
             if state.shutdown || !state.ready || !wants(state, ask) {
@@ -291,8 +291,9 @@ impl SttHandle {
             if state.waiting.is_some() || state.has_live_decode() {
                 return Err(HoldFailure::Busy);
             }
+            let admitted_at = tokio::time::Instant::now();
             state.idle_since = Instant::now();
-            Ok(ask)
+            Ok((ask, admitted_at))
         })
     }
 

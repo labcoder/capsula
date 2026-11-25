@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use kumochi_protocol::message::{HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, ShellTuning};
 use toml::{Table, Value};
 
 use crate::connections::{anthropic::messages, model, oauth};
@@ -34,7 +35,7 @@ const fn limit(key: &'static str, default: u64, min: u64, max: u64) -> Limit {
 
 /// Every group by its name under `[tuning]`, for the docs check.
 #[cfg(test)]
-pub(crate) const GROUPS: [(&str, &[Limit]); 7] = [
+pub(crate) const GROUPS: [(&str, &[Limit]); 8] = [
     ("github", &GITHUB),
     ("model", &MODEL),
     ("runs", &RUNS),
@@ -42,6 +43,7 @@ pub(crate) const GROUPS: [(&str, &[Limit]); 7] = [
     ("tokens", &TOKENS),
     ("drawing", &DRAWING),
     ("context", &CONTEXT),
+    ("hold", &HOLD),
 ];
 
 /// `[tuning.github]`. These bound requests to the user's account, so every build keeps them in
@@ -135,6 +137,26 @@ const CONTEXT: [Limit; 6] = [
     limit("reread_bytes", 32_768, 16_384, 32_768),
     limit("read_events_count", 20, 10, 20),
 ];
+
+const HOLD: [Limit; 2] = [
+    limit(
+        "start_ms",
+        HOLD_START_TIMEOUT_MS,
+        ShellTuning::MIN_START_MS,
+        HOLD_START_TIMEOUT_MS,
+    ),
+    limit(
+        "drain_ms",
+        HOLD_DRAIN_TIMEOUT_MS,
+        ShellTuning::MIN_DRAIN_MS,
+        HOLD_DRAIN_TIMEOUT_MS,
+    ),
+];
+
+pub(super) fn shell_tuning(table: &Table) -> ShellTuning {
+    let [start, drain] = read(table, "hold", &HOLD, |_| true);
+    ShellTuning::from_ms(start, drain).expect("the hold table uses the protocol bounds")
+}
 
 /// Requests a filing makes besides its listing: the user, two match pages and the create.
 const FILING_EXTRA_REQUESTS: u64 = 4;

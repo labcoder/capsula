@@ -170,6 +170,7 @@ impl Tapped for ControlToShell {
             Self::ScreenHolds(_) => "ScreenHolds",
             Self::HoldScreen { .. } => "HoldScreen",
             Self::FixtureEngineActive => "FixtureEngineActive",
+            Self::ShellTuning { .. } => "ShellTuning",
         }
     }
 
