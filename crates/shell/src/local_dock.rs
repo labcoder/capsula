@@ -21,8 +21,8 @@ gpui_kit::actions!(local_dock, [QuitLocalDock]);
 pub type Admission = Rc<Cell<Option<Box<dyn Send>>>>;
 
 /// Runs the disconnected dock with the already admitted startup state.
-/// An open failure releases the admission before any window exists; Quit releases it off the
-/// UI thread, because its owners may block while they close.
+/// An open failure and Quit both release the admission off the UI thread, because its owners
+/// may block while they close.
 /// The returned status applies only to backends whose event loop returns.
 pub fn run(
     admission: impl Send + 'static,
@@ -35,9 +35,8 @@ pub fn run(
         .with_assets(crate::assets::Assets)
         .run(move |cx| {
             initialize(cx);
-            match open_with_rollback(cx, &admission) {
-                Ok(_) => startup.set(true),
-                Err(_) => cx.quit(),
+            if open_with_rollback(cx, &admission).is_ok() {
+                startup.set(true);
             }
         });
     if opened.get() {
@@ -50,8 +49,38 @@ pub fn run(
 fn open_with_rollback(cx: &mut App, admission: &Admission) -> Result<AnyWindowHandle, OpenError> {
     open(cx, Rc::clone(admission)).inspect_err(|error| {
         tracing::error!(%error, "can't open the disconnected dock");
-        drop(admission.take());
+        release(cx, None, admission.take(), None);
     })
+}
+
+/// Finishes the link and drops the admission off the UI thread, because the logger joins as it
+/// closes; then removes the window and quits on the UI thread once that has finished.
+fn release(
+    cx: &App,
+    link: Option<LinkHandle>,
+    admission: Option<Box<dyn Send>>,
+    window: Option<AnyWindowHandle>,
+) {
+    let finished = cx.background_executor().spawn(async move {
+        if let Some(link) = link {
+            link.finish_quit();
+        }
+        drop(admission);
+    });
+    cx.spawn(async move |cx| {
+        finished.await;
+        cx.update(|cx| {
+            if let Some(window) = window
+                && window
+                    .update(cx, |_, window, _| window.remove_window())
+                    .is_err()
+            {
+                tracing::debug!("the dock window was already gone");
+            }
+            cx.quit();
+        });
+    })
+    .detach();
 }
 
 /// Why the ordinary disconnected window could not be opened.
@@ -143,24 +172,12 @@ impl LocalDock {
         if !self.link.begin_quit() {
             return;
         }
-        let link = self.link.clone();
-        let admission = self.admission.take();
-        let finished = cx.background_executor().spawn(async move {
-            link.finish_quit();
-            drop(admission);
-        });
-        cx.spawn(async move |cx| {
-            finished.await;
-            cx.update(|cx| {
-                if window
-                    .update(cx, |_, window, _| window.remove_window())
-                    .is_ok()
-                {
-                    cx.quit();
-                }
-            });
-        })
-        .detach();
+        release(
+            cx,
+            Some(self.link.clone()),
+            self.admission.take(),
+            Some(window),
+        );
     }
 }
 

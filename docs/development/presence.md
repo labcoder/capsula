@@ -2,12 +2,19 @@
 
 On macOS the shell logs through the admitted storage owner, not a filesystem path. Startup
 takes the per-user instance lock first, then starts and installs the logger in that lock's
-storage, so refusals before that point are not logged. The logger and the lock travel together
-as the dock's admission: an open failure drops it before any window exists, and Quit drops it
-on the background executor after the link finishes, closing and joining the logger before the
-lock is released. Termination that AppKit starts on its own does not yet wait for this. The
-backend preserves terminal storage-admission refusals; ordinary I/O failures remain best
-effort. The Windows logger is unchanged.
+storage. The logger and the lock travel together as the dock's admission. Rollback and Quit
+must close and join the logger off the UI thread before releasing that lock: both drop the
+admission on the background executor (after the link finishes, for Quit) and only then
+remove the window and quit. Quits that AppKit starts itself (the Dock menu, logout) do not
+wait for this yet. The backend preserves terminal storage-admission refusals; ordinary I/O failures
+remain best effort. The Windows logger is unchanged.
+
+Known limits on macOS:
+
+- Refusals before the logger starts (a missing or unsafe support folder, a failed lock or
+  logger start) exit without a log line.
+- A second shell finds the lock held and exits before it would start logging, so it leaves
+  no log line either.
 
 Overlay hit testing belongs to the presenter's `OverlayOwner`, not to a view. The native
 `OverlayWindows` adapter binds the dock paint window and body proxy in the Dock layer,

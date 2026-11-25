@@ -1,25 +1,50 @@
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use gpui_kit::base::Root;
 use gpui_kit::{Modifiers, OwnedMenuItem, TestAppContext, VisualTestContext, WeakEntity};
 
 use super::*;
 
-fn admission() -> (Admission, Weak<()>) {
-    let guard = Arc::new(());
-    let held = Arc::downgrade(&guard);
-    (Rc::new(Cell::new(Some(Box::new(guard)))), held)
+/// An admission that records whether it was dropped on GPUI's main thread.
+struct Probe {
+    executor: gpui_kit::BackgroundExecutor,
+    on_main: Arc<Mutex<Option<bool>>>,
+    _alive: Arc<()>,
+}
+
+impl Drop for Probe {
+    fn drop(&mut self) {
+        *self.on_main.lock().unwrap() = Some(self.executor.is_main_thread());
+    }
+}
+
+fn admission(cx: &TestAppContext) -> (Admission, Weak<()>, Arc<Mutex<Option<bool>>>) {
+    let alive = Arc::new(());
+    let held = Arc::downgrade(&alive);
+    let on_main = Arc::new(Mutex::new(None));
+    let probe = Probe {
+        executor: cx.executor(),
+        on_main: Arc::clone(&on_main),
+        _alive: alive,
+    };
+    (Rc::new(Cell::new(Some(Box::new(probe)))), held, on_main)
 }
 
 #[gpui::test]
 fn failed_open_releases_admission_before_returning_to_the_quit_caller(cx: &mut TestAppContext) {
     let display = cx.read(|cx| cx.primary_display().expect("the test display").id());
     cx.simulate_display_removed(display);
-    let (admission, held) = admission();
+    let (admission, held, on_main) = admission(cx);
 
     let opened = cx.update(|cx| open_with_rollback(cx, &admission));
+    cx.run_until_parked();
 
     assert!(matches!(opened, Err(OpenError::Display)));
+    assert_eq!(
+        *on_main.lock().unwrap(),
+        Some(false),
+        "the rollback drop runs off the UI thread"
+    );
     assert!(
         held.upgrade().is_none(),
         "the failure hands back no live lock"
@@ -59,7 +84,7 @@ fn mount_with(
 
 #[gpui::test]
 fn local_pointer_quits_only_when_the_rendered_button_is_clicked(cx: &mut TestAppContext) {
-    let (admission, held) = admission();
+    let (admission, held, on_main) = admission(cx);
     let (window, owner) = mount_with(cx, Rc::clone(&admission));
     let mut visual = VisualTestContext::from_window(window, cx);
     let status = visual
@@ -89,6 +114,11 @@ fn local_pointer_quits_only_when_the_rendered_button_is_clicked(cx: &mut TestApp
     assert!(cx.windows().is_empty());
     assert!(owner.upgrade().is_none());
     assert!(held.upgrade().is_none(), "Quit releases the admission");
+    assert_eq!(
+        *on_main.lock().unwrap(),
+        Some(false),
+        "the Quit drop runs off the UI thread"
+    );
 }
 
 #[gpui::test]
