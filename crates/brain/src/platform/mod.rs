@@ -73,12 +73,10 @@ pub use fs::{free_space, links_unsupported, replace_file};
 mod folders;
 #[cfg(target_os = "macos")]
 pub use folders::{config_dir, data_dir};
-pub(crate) use pipe::ClientRefused;
 pub use pipe::Instance;
+pub(crate) use pipe::{BridgeConnectError, ClientRefused};
 #[cfg(not(windows))]
-pub(crate) use pipe::{
-    PipeClient, bridge_peer, client_image, open_pipe, server_image, shell_connection,
-};
+pub(crate) use pipe::{PipeClient, bridge_peer, client_image, open_bridge, shell_connection};
 #[cfg(not(windows))]
 pub use pipe::{PipeServer, create_owner_only, session_id};
 pub(crate) use process::spawn_if;
@@ -106,7 +104,7 @@ pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
 pub(crate) use windows::DumpExclusion;
 #[cfg(windows)]
-pub(crate) use windows::{PipeClient, bridge_peer, open_pipe, shell_connection};
+pub(crate) use windows::{PipeClient, bridge_peer, open_bridge, shell_connection};
 
 #[cfg(windows)]
 #[expect(
