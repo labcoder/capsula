@@ -654,6 +654,7 @@ async fn an_earlier_connections_refused_change_sends_the_next_one_nothing() {
 /// Attempt `attempt` of run `run`'s first round in task 2, before or after its snapshot.
 fn build(run: u64, attempt: u64, snapshot: Option<RunSnapshot>) -> BuildContext {
     BuildContext {
+        require_recovery: None,
         control: crate::recall::control::Control::new(
             std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
         ),

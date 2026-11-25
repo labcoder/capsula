@@ -138,15 +138,55 @@ pub(crate) fn read_active(
 ) -> Result<SecretBytes, AuthorityError> {
     let mut bytes = Zeroizing::new(Vec::with_capacity(active.layout.bytes()));
     for index in 0..active.layout.chunks() {
-        let found = store
-            .get(&target(service, active.kind, active.generation, index))?
-            .ok_or(AuthorityError::MissingChunk)?;
-        if found.expose().len() != active.layout.chunk_len(index) {
-            return Err(AuthorityError::WrongChunkLength);
-        }
+        let found =
+            read_chunk(store, service, active, index)?.ok_or(AuthorityError::MissingChunk)?;
         bytes.extend_from_slice(found.expose());
     }
     Ok(Secret::new(bytes))
+}
+
+pub(in crate::connections) fn read_staged_once(
+    store: &dyn CredentialStore,
+    service: &str,
+    plan: &WritePlan,
+) -> Result<SecretBytes, AuthorityError> {
+    read_active(
+        store,
+        service,
+        &ActiveRef {
+            kind: plan.kind,
+            generation: plan.generation,
+            layout: plan.layout,
+        },
+    )
+}
+
+pub(in crate::connections) fn has_missing_chunk(
+    store: &dyn CredentialStore,
+    service: &str,
+    active: &ActiveRef,
+) -> Result<bool, AuthorityError> {
+    let mut missing = false;
+    for index in 0..active.layout.chunks() {
+        missing |= read_chunk(store, service, active, index)?.is_none();
+    }
+    Ok(missing)
+}
+
+fn read_chunk(
+    store: &dyn CredentialStore,
+    service: &str,
+    active: &ActiveRef,
+    index: usize,
+) -> Result<Option<SecretBytes>, AuthorityError> {
+    let found = store.get(&target(service, active.kind, active.generation, index))?;
+    if found
+        .as_ref()
+        .is_some_and(|part| part.expose().len() != active.layout.chunk_len(index))
+    {
+        return Err(AuthorityError::WrongChunkLength);
+    }
+    Ok(found)
 }
 
 /// Reads staged chunks without authorizing them; the caller must still validate and CAS.
