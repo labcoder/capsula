@@ -52,25 +52,26 @@ impl CaptureThread {
                     let mut capturer = None;
                     while let Ok(mut job) = requests.recv() {
                         let result = (|| {
-                            let capturer = match &mut capturer {
-                                Some(capturer) => capturer,
-                                None => capturer.insert(open()?),
+                            let live = |deadline: Deadline| {
+                                deadline.tighten(Instant::now()).ok_or(Refusal::Expired)
                             };
-                            let until = || {
-                                job.deadline
-                                    .tighten(Instant::now())
-                                    .map(|deadline| deadline.until)
-                                    .ok_or(Refusal::Expired)
+                            let mut deadline = job.deadline;
+                            let capturer = if let Some(capturer) = &mut capturer {
+                                capturer
+                            } else {
+                                deadline = live(deadline)?;
+                                capturer.insert(open()?)
                             };
+                            let deadline = live(deadline)?;
                             match job.aim {
                                 Aim::Window { shell } => {
                                     let target = capturer.pointer_window(job.point, shell)?;
                                     capturer
-                                        .capture_window(&target, until()?, &mut job.frame)
+                                        .capture_window(&target, live(deadline)?, &mut job.frame)
                                         .map(|acquired| (acquired, Shown::Window(target)))
                                 }
                                 Aim::Display { excluded } => capturer
-                                    .capture_display(job.point, excluded, until()?, &mut job.frame)
+                                    .capture_display(job.point, excluded, deadline, &mut job.frame)
                                     .map(|(acquired, bounds)| {
                                         let dpi = acquired.dpi;
                                         (acquired, Shown::Display { bounds, dpi })

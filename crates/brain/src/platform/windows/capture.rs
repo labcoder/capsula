@@ -42,7 +42,7 @@ use windows::Win32::UI::HiDpi::{
 use windows::core::{Interface, factory};
 
 use super::clock::{qpc_hns, qpc_hns_up, qpc_now, qpc_ticks};
-use crate::screen::{Acquired, Capturer, Failure, RawFrame, Refusal, Target};
+use crate::screen::{Acquired, Capturer, Deadline, Failure, RawFrame, Refusal, Target};
 
 const POLL: Duration = Duration::from_millis(1);
 /// The redraw a display frame waits out when the compositor's timing can't be read.
@@ -212,6 +212,7 @@ impl Wgc {
         })?;
         let captured = poll(
             until,
+            Instant::now,
             || match pool.TryGetNextFrame() {
                 Ok(captured) => drawn_after(shot.not_before, captured, drawn, |early| {
                     early.Close().map_err(|e| Failure::Retire(e.code().0))
@@ -304,6 +305,7 @@ impl Wgc {
         let flags = u32::try_from(D3D11_MAP_FLAG_DO_NOT_WAIT.0).map_err(|_| Failure::Fault(0))?;
         let _mapping = poll(
             until,
+            Instant::now,
             || {
                 // SAFETY: subresource zero exists and isn't mapped; `mapped` is writable.
                 match unsafe {
@@ -324,16 +326,20 @@ impl Wgc {
     }
 }
 
-/// Polls `attempt` until it's ready. A result that's ready at or after `until` goes to `late`
-/// to be released and is refused.
+/// Probes only while the sampled clock is before `until`. A result that returns at or after
+/// `until` goes to `late` to be released and is refused.
 fn poll<T>(
     until: Instant,
+    now: impl Fn() -> Instant,
     mut attempt: impl FnMut() -> Result<Option<T>, Failure>,
     late: impl FnOnce(T) -> Result<(), Failure>,
 ) -> Result<T, Failure> {
     loop {
+        if now() >= until {
+            return Err(Refusal::Expired.into());
+        }
         let ready = attempt()?;
-        if Instant::now() >= until {
+        if now() >= until {
             if let Some(value) = ready {
                 late(value)?;
             }
@@ -398,6 +404,7 @@ fn start_after(
     if let Some(not_before) = not_before {
         poll(
             until,
+            Instant::now,
             || Ok((now()? >= not_before).then_some(())),
             |()| Ok(()),
         )?;
@@ -520,20 +527,32 @@ impl Capturer for Wgc {
     fn capture_window(
         &mut self,
         target: &Target,
-        until: Instant,
+        deadline: Deadline,
         frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
-        frame.fill(|frame| self.window_frame(target, until, frame))
+        frame.fill(|frame| {
+            let until = deadline
+                .tighten(Instant::now())
+                .ok_or(Refusal::Expired)?
+                .until;
+            self.window_frame(target, until, frame)
+        })
     }
 
     fn capture_display(
         &mut self,
         point: PhysicalPoint,
         excluded: u64,
-        until: Instant,
+        deadline: Deadline,
         frame: &mut RawFrame,
     ) -> Result<(Acquired, PhysicalRect), Failure> {
-        frame.fill(|frame| self.display_frame(point, excluded, until, frame))
+        frame.fill(|frame| {
+            let until = deadline
+                .tighten(Instant::now())
+                .ok_or(Refusal::Expired)?
+                .until;
+            self.display_frame(point, excluded, until, frame)
+        })
     }
 }
 
@@ -617,6 +636,7 @@ impl Wgc {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::time::{Duration, Instant};
 
     use kumochi_protocol::geometry::PhysicalRect;
@@ -649,11 +669,30 @@ mod tests {
     }
 
     #[test]
+    fn an_expired_poll_never_issues_its_probe() {
+        let until = Instant::now();
+        let result = poll::<()>(
+            until,
+            || until,
+            || panic!("issued an expired probe"),
+            |()| panic!("an expired probe returned a result"),
+        );
+        assert_eq!(result, Err(Failure::Refused(Refusal::Expired)));
+    }
+
+    #[test]
     fn a_result_ready_at_the_deadline_is_released_and_refused() {
+        let before = Instant::now();
+        let until = before + Duration::from_millis(1);
+        let now = Cell::new(before);
         let mut released = Vec::new();
         let late = poll(
-            Instant::now(),
-            || Ok(Some(7)),
+            until,
+            || now.get(),
+            || {
+                now.set(until);
+                Ok(Some(7))
+            },
             |value| {
                 released.push(value);
                 Ok(())
@@ -661,7 +700,16 @@ mod tests {
         );
         assert_eq!(late, Err(Failure::Refused(Refusal::Expired)));
         assert_eq!(released, [7]);
-        let failed_release = poll(Instant::now(), || Ok(Some(7)), |_| Err(Failure::Retire(-7)));
+        now.set(before);
+        let failed_release = poll(
+            until,
+            || now.get(),
+            || {
+                now.set(until);
+                Ok(Some(7))
+            },
+            |_| Err(Failure::Retire(-7)),
+        );
         assert_eq!(failed_release, Err(Failure::Retire(-7)));
     }
 
@@ -671,6 +719,7 @@ mod tests {
         let mut tries = 0;
         let ready = poll(
             far,
+            Instant::now,
             || {
                 tries += 1;
                 Ok((tries == 3).then_some(tries))
@@ -680,11 +729,17 @@ mod tests {
         assert_eq!(ready, Ok(3));
         let never = poll(
             Instant::now() + Duration::from_millis(5),
+            Instant::now,
             || Ok(None::<u8>),
             |_| Ok(()),
         );
         assert_eq!(never, Err(Failure::Refused(Refusal::Expired)));
-        let fault = poll(far, || Err::<Option<u8>, _>(Failure::Fault(-5)), |_| Ok(()));
+        let fault = poll(
+            far,
+            Instant::now,
+            || Err::<Option<u8>, _>(Failure::Fault(-5)),
+            |_| Ok(()),
+        );
         assert_eq!(fault, Err(Failure::Fault(-5)));
     }
 
@@ -729,6 +784,7 @@ mod tests {
         let mut released = Vec::new();
         let taken = poll(
             far,
+            Instant::now,
             || {
                 let Some(frame) = queue.next() else {
                     return Ok(None);
@@ -748,9 +804,13 @@ mod tests {
         assert_eq!(taken, Ok((2, 100)));
         assert_eq!(released, [1]);
         let mut early = 0;
+        let now = Cell::new(Instant::now());
+        let until = now.get() + Duration::from_millis(1);
         let never = poll(
-            Instant::now() + Duration::from_millis(5),
+            until,
+            || now.get(),
             || {
+                now.set(until);
                 drawn_after(
                     Some(100),
                     7,
@@ -764,10 +824,7 @@ mod tests {
             |_| Ok(()),
         );
         assert_eq!(never, Err(Failure::Refused(Refusal::Expired)));
-        assert!(
-            early >= 1,
-            "every early frame was released, {early} of them"
-        );
+        assert_eq!(early, 1, "the early frame was released");
     }
 
     #[test]
