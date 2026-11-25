@@ -11,6 +11,7 @@ never fall back to the working directory.
 On macOS both config and data use `<Application Support>/<product>`, where the shared lookup
 asks Darwin for the current user's Application Support folder. It never falls back to `HOME`,
 opens or creates the directory, or establishes that it's writable.
+It is not an App Sandbox container locator.
 The macOS brain still refuses to start, and folder discovery doesn't enable settings writes.
 
 Linux and macOS unit tests use the same settings writer with an explicit scratch directory. Run
