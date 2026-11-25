@@ -302,6 +302,10 @@ pub(crate) enum Seen {
 }
 
 impl Brain {
+    pub(crate) fn shell_tuning(&self) -> kumochi_protocol::message::ShellTuning {
+        self.config.shell_tuning()
+    }
+
     /// Starts the store thread, which keeps `profile` until it ends. The store must already be recovered, `main_thread` is its main
     /// thread, and `high_water` is its highest thread and run ids.
     ///

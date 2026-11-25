@@ -31,8 +31,9 @@ existing bytes. Both modes follow their data Hello with one drawing-font startup
 The internal queued-required selection instead sends the appended QueuedHello
 on both pipes. Its data Hello echoes this Welcome's incarnation and issue epoch. The brain
 checks the executable, matching build and capability on both legs and the existing same-process
-pairing. It refuses a mixed mode or a data Hello from another session. The queued second leg
-has one deadline for connecting and reading; refusal renews both pipe instances.
+pairing. It refuses a mixed mode or a data Hello from another session. In either mode, one
+absolute deadline covers startup through ShellTuning acceptance; refusal renews both pipe
+instances.
 
 After a deliberate Talk-back switch, the replacement's control greeting names the previous
 pair in `QueuedAudioReconnect`. Its data greeting still echoes the new Welcome. Only a match
@@ -152,8 +153,8 @@ keeps its authenticated process handle: a matching same-live-process receipt or 
 old-process exit can release it, not a timeout or connection replacement. A receipt whose
 process can't be checked stays unanswered, and the connection's existing 500 ms tick checks it
 again until it can answer, even with no run; it sends no ping and ends nothing while idle.
-The provisional 10-second startup and 2-second final-PCM drain bounds are unmeasured;
-expiry is terminal but never releases an unconfirmed device owner.
+The default 10-second startup and 2-second final-PCM drain bounds can be shortened by the
+connection's tuning. Expiry is terminal but never releases an unconfirmed device owner.
 
 `EventsChanged { thread }` (data tag 24) says a thread's stored events changed with no run frame,
 such as a held turn's picture marked sent. The brain sends it only on the hold's own connection,
@@ -441,10 +442,11 @@ sequenceDiagram
   else build id differs
     B-->>S: BuildMismatch, then the brain exits
   else match
-    B-->>S: Welcome(incarnation)
+    B-->>S: Welcome(incarnation, epoch)
     S->>B: open data pipe, Hello again
     B->>B: validate both legs as one pair
     S->>B: TextMetrics (or explicit None)
+    B-->>S: ShellTuning(incarnation, epoch, timings)
   end
 ```
 
@@ -453,8 +455,8 @@ whether its build matches. A shell that meets a brain from another build waits f
 exit and starts the one beside itself.
 
 After authenticating both legs as one process, the brain reads that pair's single
-`TextMetrics` frame. Both Hello modes use one absolute deadline for connecting the data leg,
-reading its Hello and accepting its metrics. A completed frame at or after the deadline
+`TextMetrics` frame. Both Hello modes use one absolute deadline from the control handshake
+through the data Hello, metrics and tuning. A completed frame at or after the deadline
 doesn't start the session. The brain rejects a declared payload
 over 304 bytes before allocating or reading the body. The optional profile has 99 postcard
 `u16` values in 1/1024 em: advances for U+0020–U+007E in order, line height, then the CJK,
@@ -462,6 +464,18 @@ remaining BMP and wide-exception maxima. An explicit `None` or a decoded profile
 out-of-range value selects the complete built-in measure. Missing, malformed, repeated and
 late frames are protocol failures. The Hello and mismatch bytes are unchanged; exact-build
 checking happens before either peer uses the new frame. No font name or text is sent.
+
+The brain sends `ShellTuning` only after the authenticated startup data is complete, before
+Settings and before queued registration. Before publishing Connected, the shell-core link
+stores the pair in the session's existing shared allocation, so session clones don't grow.
+It rejects missing, invalid or wrong-session tuning, and tears down the connection
+on a later duplicate. A reconnect must authenticate its own values. Both eligible raw modifier
+makes must be queued strictly after the current connection's readiness and any input-coverage
+boundary. A modifier known down at reset needs its own source's break; a first make with no
+prior evidence may be a repeat of an already-held key. The exact-chord read validates the
+recovered pair but supplies neither a make nor evidence of release. Closing
+or locally aborting the pair revokes native hold eligibility
+without waiting for the outbox. This doesn't block local Quit or cancellation.
 
 ## After the handshake
 

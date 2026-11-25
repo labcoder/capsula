@@ -357,6 +357,12 @@ async fn prepared_hold_across_loading_is_admitted_before_first_serve_iteration()
     use crate::runtime::{Recovery, voice};
     use kumochi_protocol::message::PartState;
     let scratch = Scratch::new("hold-loaded-ready");
+    std::fs::create_dir_all(scratch.dir()).unwrap();
+    std::fs::write(
+        scratch.dir().join(kumochi_protocol::constants::CONFIG_FILE),
+        "[tuning.hold]\nstart_ms = 2000",
+    )
+    .unwrap();
     let (mut brain, release, _decoded, _fetch) =
         crate::runtime::tests::holds::loading_input(&scratch, Vec::new(), "unused");
     let resume = crate::voice::stt::hold_before_serving(brain.hold_voice().1.unwrap());
@@ -378,7 +384,11 @@ async fn prepared_hold_across_loading_is_admitted_before_first_serve_iteration()
     let event = tokio::time::timeout(Duration::from_secs(5), voice::next(&mut brain.voice))
         .await
         .unwrap();
+    tokio::time::pause();
+    let admitted_at = Instant::now();
     brain.voice_event(event, Some(&mut link)).unwrap();
+    let deadline = brain.holds.pending.as_ref().unwrap().deadline;
+    tokio::time::resume();
     let grant = status(&mut output);
     let bytes = output.try_recv().unwrap();
     let view = kumochi_protocol::frame::decode::<ControlToShell>(
@@ -392,9 +402,48 @@ async fn prepared_hold_across_loading_is_admitted_before_first_serve_iteration()
     brain.holds.lost();
     brain.close().await;
     assert_eq!(grant, HoldStatus::Admitted);
+    assert_eq!(deadline, admitted_at + Duration::from_secs(62));
     assert!(matches!(view, ControlToShell::Voice(view) if view.speech_input == PartState::Ready));
     assert_eq!(ask, Some(1));
     assert_eq!(more, Err(mpsc::error::TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn preparing_audio_does_not_restart_the_admitted_hold_clock() {
+    let scratch = Scratch::new("hold-admission-clock");
+    let mut brain = test_support::brain(&scratch, "");
+    let (out, mut output) = mpsc::channel(8);
+    let queue = RefCell::new(DataQueue::new(0));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    recording(&mut brain);
+    let hold = brain.holds.pending.as_mut().unwrap();
+    hold.ask = None;
+    hold.audio = None;
+    brain.holds.debt = None;
+
+    tokio::time::pause();
+    let admitted_at = Instant::now();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    brain.hold_admitted(1, admitted_at, &mut link).unwrap();
+    assert_eq!(status(&mut output), HoldStatus::Admitted);
+    tokio::time::advance(Duration::from_secs(65)).await;
+    brain.hold_voice_changed(&mut link).unwrap();
+    let expired = output.try_recv();
+    tokio::time::resume();
+    brain.close().await;
+    let bytes = expired.expect("the original admission ceiling elapsed");
+    assert_eq!(
+        kumochi_protocol::frame::decode::<ControlToShell>(
+            &bytes[kumochi_protocol::frame::HEADER_LEN..],
+        )
+        .unwrap(),
+        ControlToShell::VoiceHoldStatus {
+            gesture: KEY.gesture,
+            status: HoldStatus::Failed(HoldFailure::TimedOut),
+        }
+    );
 }
 
 #[tokio::test]
@@ -1085,6 +1134,12 @@ async fn bounded_pcm_overflow_is_scoped_and_never_waits_for_turn_capacity() {
 #[tokio::test]
 async fn deadline_and_eof_never_fabricate_a_physical_stop_receipt() {
     let scratch = Scratch::new("hold-device-debt");
+    std::fs::create_dir_all(scratch.dir()).unwrap();
+    std::fs::write(
+        scratch.dir().join(kumochi_protocol::constants::CONFIG_FILE),
+        "[tuning.hold]\ndrain_ms = 500",
+    )
+    .unwrap();
     let mut brain = test_support::brain(&scratch, "");
     let (out, mut output) = mpsc::channel(16);
     let queue = RefCell::new(DataQueue::new(super::super::window()));
@@ -1092,6 +1147,8 @@ async fn deadline_and_eof_never_fabricate_a_physical_stop_receipt() {
     let mut tap = Tap::from_env();
     let mut link = Link::new(&out, &queue, &ready, &mut tap);
     recording(&mut brain);
+    tokio::time::pause();
+    let released = Instant::now();
     brain
         .hold_control(
             &ControlToBrain::KeyUp {
@@ -1111,8 +1168,9 @@ async fn deadline_and_eof_never_fabricate_a_physical_stop_receipt() {
         )
         .unwrap();
     let deadline = brain.holds.pending.as_ref().unwrap().deadline;
+    tokio::time::resume();
     accepted(&mut output, KEY.gesture);
-    assert!(deadline <= Instant::now() + Duration::from_millis(u64::from(HOLD_DRAIN_TIMEOUT_MS)));
+    assert_eq!(deadline, released + Duration::from_millis(500));
     brain.holds.pending.as_mut().unwrap().deadline = Instant::now();
     assert!(matches!(next(&mut brain.holds).await, Event::Deadline));
     brain.hold_event(Event::Deadline, &mut link).unwrap();

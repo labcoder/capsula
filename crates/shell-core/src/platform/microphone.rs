@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
 use kumochi_protocol::message::MicPcm;
-use kumochi_protocol::message::{GestureId, HOLD_START_TIMEOUT_MS};
+use kumochi_protocol::message::{GestureId, ShellTuning};
 use zeroize::Zeroize;
 
 #[cfg(windows)]
@@ -332,7 +332,7 @@ pub struct Generation {
 
 #[derive(Debug, Default)]
 struct Startup {
-    claimed: OnceLock<Instant>,
+    deadline: OnceLock<Instant>,
     #[cfg(windows)]
     accepted_qpc_100ns: AtomicU64,
 }
@@ -348,7 +348,7 @@ impl Generation {
     /// Retires denied admission only if no source start has claimed this generation.
     pub fn discard_unstarted(&self) -> Result<(), MicError> {
         self.startup
-            .claimed
+            .deadline
             .set(Instant::now())
             .map_err(|_| MicError::Stale)?;
         self.cancel();
@@ -377,9 +377,13 @@ impl Generation {
     /// Claims this generation's single start (`Armed → Opening`), for [`MicOwner::start_reserved`].
     /// A refused claim retires it.
     pub fn reserve(&self) -> Result<Reserved, MicError> {
+        self.reserve_with_tuning(ShellTuning::default())
+    }
+
+    pub(crate) fn reserve_with_tuning(&self, tuning: ShellTuning) -> Result<Reserved, MicError> {
         self.startup
-            .claimed
-            .set(Instant::now())
+            .deadline
+            .set(Instant::now() + tuning.start())
             .map_err(|_| MicError::Stale)?;
         if let Err(error) = self.advance(ARMED, OPENING) {
             self.cancel();
@@ -427,10 +431,7 @@ impl Generation {
         let error = if !session.load(Ordering::Acquire) {
             Some(MicError::SessionLost)
         } else if (state & 7 < COLLECTING
-            && self.startup.claimed.get().is_some_and(|start| {
-                now.saturating_duration_since(*start)
-                    >= Duration::from_millis(u64::from(HOLD_START_TIMEOUT_MS))
-            }))
+            && self.startup.deadline.get().is_some_and(|end| now >= *end))
             || (state & 7 < RELEASED && now.saturating_duration_since(self.at) >= HOLD_LIMIT)
         {
             Some(MicError::Deadline)

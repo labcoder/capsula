@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use kumochi_protocol::message::ShellTuning;
 use toml::Table;
 
 use super::{
@@ -234,6 +235,24 @@ fn tuned_context_can_only_tighten_its_selected_inputs() {
 }
 
 #[test]
+fn negative_hold_values_use_defaults_but_positive_outliers_clamp() {
+    let tuned = super::shell_tuning(
+        &"[tuning.hold]\nstart_ms = -1\ndrain_ms = 1"
+            .parse()
+            .unwrap(),
+    );
+    assert_eq!(tuned.start(), Duration::from_secs(10));
+    assert_eq!(tuned.drain(), Duration::from_millis(500));
+    let tuned = super::shell_tuning(
+        &"[tuning.hold]\nstart_ms = 1\ndrain_ms = -1"
+            .parse()
+            .unwrap(),
+    );
+    assert_eq!(tuned.start(), Duration::from_secs(2));
+    assert_eq!(tuned.drain(), Duration::from_secs(2));
+}
+
+#[test]
 fn the_user_docs_list_every_key_with_its_default_and_range() {
     let blocks: Vec<&str> = DOCS
         .split("```toml")
@@ -278,4 +297,5 @@ fn the_user_docs_list_every_key_with_its_default_and_range() {
     assert_eq!(TokenTuning::from_table(&all), TokenTuning::default());
     assert_eq!(DrawingTuning::from_table(&all), DrawingTuning::default());
     assert_eq!(ContextTuning::from_table(&all), ContextTuning::default());
+    assert_eq!(super::shell_tuning(&all), ShellTuning::default());
 }

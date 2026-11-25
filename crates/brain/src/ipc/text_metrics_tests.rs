@@ -123,6 +123,7 @@ async fn data_connect_hello_and_metrics_share_one_budget_in_both_modes() {
                     &identity,
                     expected,
                     &mut tap,
+                    start + HANDSHAKE_TIMEOUT,
                     async {
                         sleep_until(start + tick * connect_at).await;
                         Ok(&mut pipe)
