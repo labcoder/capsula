@@ -6,9 +6,13 @@ use std::time::Instant;
 
 use super::drag::Event;
 use super::{Activity, Context, Escape, EscapePanel, OpenError, Presence, Session, diagnostics};
-use crate::escape::{self, SpeechEscapeOwner, SpeechPress};
+pub(super) use crate::escape::local_decision;
+use crate::escape::{
+    self, AfterClear, AfterPull, Edit, Lead, MarkedAnswer, MovingStop, PlainMatch, SpeechPress,
+    SpeechRoute, SpeechStop,
+};
 use crate::settings::Field;
-use kumochi_protocol::message::{GestureId, MAX_VISIBLE_SCENES, RunId, SceneId, ThreadId};
+use kumochi_protocol::message::{GestureId, RunId, ThreadId};
 
 pub(super) type SpeechLease = Rc<Cell<Option<(u64, RunId, Instant)>>>;
 pub(super) type NameEdit = Rc<EditSlot<Field>>;
@@ -46,71 +50,8 @@ enum PanelEdit {
     Rename(RenameEdit),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Edit {
-    Name(u64, Field),
-    Rename(u64, ThreadId),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct MarkedAnswer {
-    run: RunId,
-    scene: SceneId,
-    other_work: Option<RunId>,
-}
-
-/// The owners the aggregate plain Esc route may affect, excluding paint and phase progress.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct PlainEscape {
-    pair: Option<u64>,
-    target: (Option<ThreadId>, u64),
-    frontier: (u32, RunId),
-    moving: (Option<RunId>, Option<RunId>),
-    action: Escape,
-    scenes: [[Option<SceneId>; MAX_VISIBLE_SCENES]; 2],
-    hold: Option<GestureId>,
-    watch: Option<super::marks::Watched>,
-    marks: Option<MarkedAnswer>,
-    selection: Option<GestureId>,
-    pull: Option<super::drag::Generation>,
-    panel: Option<(EscapePanel, gpui_kit::WindowId, u64)>,
-    edit: Option<Edit>,
-}
-
-enum PlainMatch {
-    Unchanged,
-    MarkGone(RunId),
-}
-
-impl PlainEscape {
-    fn matches(&self, live: &Self) -> Option<PlainMatch> {
-        if self == live {
-            return Some(PlainMatch::Unchanged);
-        }
-        let MarkedAnswer {
-            run,
-            scene,
-            other_work,
-        } = self.marks?;
-        if !matches!(self.action, Escape::Stop | Escape::CancelPull)
-            || self.hold.is_some()
-            || self.moving.0 != Some(run)
-            || !self.scenes[1].contains(&Some(scene))
-        {
-            return None;
-        }
-        let [legacy, presented] = self.scenes;
-        let mut remaining = presented.into_iter().filter(|&id| id != Some(scene));
-        let scenes = [legacy, std::array::from_fn(|_| remaining.next().flatten())];
-        (Self {
-            marks: None,
-            scenes,
-            moving: (Some(run), other_work),
-            ..*self
-        } == *live)
-            .then_some(PlainMatch::MarkGone(run))
-    }
-}
+/// The owners the aggregate plain Esc route may affect, with the shell's window and watch tokens.
+pub(super) type PlainEscape = escape::PlainEscape<gpui_kit::WindowId, super::marks::Watched>;
 
 pub(super) struct PublishedEscape {
     scope: PlainEscape,
@@ -126,15 +67,7 @@ impl PublishedEscape {
             }
             None => None,
         };
-        PlainEscape {
-            action: if edit.is_some() {
-                Escape::CancelEdit
-            } else {
-                self.scope.action
-            },
-            edit,
-            ..self.scope
-        }
+        self.scope.with_edit(edit)
     }
 }
 
@@ -166,17 +99,9 @@ impl Presence {
 
     fn plain_escape_at(&self, cx: &gpui_kit::App) -> Option<PlainEscape> {
         let scope = self.plain_escape_snapshot(cx)?.capture();
-        let field = match scope.edit {
-            Some(Edit::Name(_, field)) => Some(field),
-            _ => None,
-        };
-        if matches!(scope.action, Escape::Dismiss | Escape::CancelEdit)
-            && matches!(scope.panel, Some((EscapePanel::Onboarding, ..)))
-            && field != self.onboarding_name_edit(cx)
-        {
-            return None;
-        }
-        Some(scope)
+        scope
+            .onboarding_current(|| self.onboarding_name_edit(cx))
+            .then_some(scope)
     }
 
     fn plain_escape_snapshot(&self, cx: &gpui_kit::App) -> Option<PublishedEscape> {
@@ -228,18 +153,11 @@ impl Presence {
         let run = self.runs.stoppable();
         let hold = self.voice_escape_owner();
         let selection = self.presenter.input.selection();
-        let marks = self
-            .presenter
-            .marks_owner()
-            .map(|(marked_run, scene)| MarkedAnswer {
-                run: marked_run,
-                scene,
-                other_work: (matches!(action, Escape::Stop | Escape::CancelPull)
-                    && run == Some(marked_run)
-                    && hold.is_none())
-                .then(|| self.presenter.stoppable_run_excluding(Some(scene)))
-                .flatten(),
-            });
+        let marks = self.presenter.marks_owner().map(|owner| {
+            MarkedAnswer::new(owner, action, run, hold, || {
+                self.presenter.stoppable_run_excluding(Some(owner.1))
+            })
+        });
         let reads_edit = action == Escape::Dismiss;
         let (window, edit) = match panel {
             EscapePanel::Open => {
@@ -320,15 +238,16 @@ impl Presence {
         if gesture.is_none()
             && let Some(press) = speech
         {
-            if press.owner == SpeechEscapeOwner::Outside {
-                return if self.stop_speech(press, cx) {
-                    self.runs_changed(cx)
-                } else {
-                    Ok(())
-                };
-            }
-            if self.speech_session(press).is_none() {
-                return Ok(());
+            match press.route(self.open_pair()) {
+                SpeechRoute::Outside => {
+                    return if self.stop_speech(press, cx) {
+                        self.runs_changed(cx)
+                    } else {
+                        Ok(())
+                    };
+                }
+                SpeechRoute::Stale => return Ok(()),
+                SpeechRoute::Current => {}
             }
         }
         self.voice.gates.forget_runs();
@@ -361,26 +280,13 @@ impl Presence {
             self.cancel_voice_gesture(gesture, cx);
             self.voice.ended.take_if(|(hold, _)| *hold == gesture);
             let now = std::time::Instant::now();
-            let scenes = self.presenter.holds_scenes() || self.presenter.live_work(now);
             let target = self.moving_run(now);
             if let Some(tail) = tail.filter(|tail| target == Some(tail.run)) {
                 let message = self.runs.stop_owned(tail);
-                let effects = self.presenter.stop_owned(tail.run, now).map(|mut effects| {
-                    if !scenes {
-                        effects.retain(|effect| {
-                            !matches!(
-                                effect,
-                                crate::presenter::Effect::Control(
-                                    kumochi_protocol::message::ControlToBrain::StopScenes { .. }
-                                )
-                            )
-                        });
-                    }
-                    effects
-                });
-                let valid = effects.is_ok();
-                self.scene_effects(effects, cx);
-                if !scenes
+                let stop = escape::stop_owned(&mut self.presenter, tail.run, now);
+                let valid = stop.effects.is_ok();
+                self.scene_effects(stop.effects, cx);
+                if !stop.scenes
                     && valid
                     && let Some(message) = message
                 {
@@ -402,9 +308,14 @@ impl Presence {
     }
 
     pub(super) fn speech_session(&self, press: SpeechPress) -> Option<&Session> {
+        self.session.as_ref().filter(|_| press.on(self.open_pair()))
+    }
+
+    fn open_pair(&self) -> Option<u64> {
         self.session
             .as_ref()
-            .filter(|session| session.open() && session.generation() == press.session)
+            .filter(|session| session.open())
+            .map(Session::generation)
     }
 
     /// Stops the press's exact run. Returns whether the run view needs refreshing.
@@ -412,14 +323,17 @@ impl Presence {
         let Some(current) = self.speech_session(press).cloned() else {
             return false;
         };
-        // Done comes on control before RunEnd on data, so an ended run can still speak.
-        if press.speaker_only(&self.runs, self.moving_run(std::time::Instant::now())) {
-            // The lease observer follows the quiet, so no refresh here can fail the pair.
-            self.stop_speech_locally(current, press.run, cx);
-            return false;
+        match press.stop(&self.runs, self.moving_run(std::time::Instant::now())) {
+            SpeechStop::Speaker => {
+                // The lease observer follows the quiet, so no refresh here can fail the pair.
+                self.stop_speech_locally(current, press.run, cx);
+                false
+            }
+            SpeechStop::Run => {
+                self.fence_spoken(press.run, &current, cx);
+                true
+            }
         }
-        self.fence_spoken(press.run, &current, cx);
-        true
     }
 
     /// Stops `run`, which was speaking when a hold's keys went down, before that hold starts:
@@ -437,22 +351,9 @@ impl Presence {
         if self.moving_run(now) != Some(run) {
             return true;
         }
-        let scenes = self.presenter.holds_scenes() || self.presenter.live_work(now);
         let message = self.runs.fence_run(run);
-        let effects = self.presenter.stop_owned(run, now).map(|mut effects| {
-            if !scenes {
-                effects.retain(|effect| {
-                    !matches!(
-                        effect,
-                        crate::presenter::Effect::Control(
-                            kumochi_protocol::message::ControlToBrain::StopScenes { .. }
-                        )
-                    )
-                });
-            }
-            effects
-        });
-        self.scene_effects(effects, cx);
+        let stop = escape::stop_owned(&mut self.presenter, run, now);
+        self.scene_effects(stop.effects, cx);
         // A refused scene control already ended the connection and took the session.
         if self
             .session
@@ -461,7 +362,7 @@ impl Presence {
         {
             return false;
         }
-        if scenes {
+        if stop.scenes {
             return true;
         }
         message.is_none_or(|message| self.send_stop(session, message, cx))
@@ -470,36 +371,21 @@ impl Presence {
     /// The run Esc's stop would stop at `now`: the moving run, else the one whose drawing still
     /// moves.
     pub(super) fn moving_run(&self, now: std::time::Instant) -> Option<RunId> {
-        self.runs
-            .stoppable()
-            .map(|run| {
-                if self.presenter.holds_scenes() || self.presenter.live_work(now) {
-                    self.presenter
-                        .stoppable_run()
-                        .map_or(run, |drawing| drawing.max(run))
-                } else {
-                    run
-                }
-            })
-            .or_else(|| {
-                let moving = self.presenter.live_work(now);
-                self.presenter.stoppable_run().filter(|_| moving)
-            })
+        escape::moving_run(&self.runs, &self.presenter, now)
     }
 
     /// Esc's stop: fences the moving run off, or stops what the presenter still moves.
     fn stop_moving(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(message) = self.runs.stop() {
-            self.stop_run(message, cx);
-        } else if self.presenter.live_work(std::time::Instant::now()) {
-            self.place_drawings(cx.weak_entity(), cx);
-            if let Some(run) = self.presenter.stoppable_run() {
-                let effects = self.presenter.stop(run, std::time::Instant::now());
-                self.scene_effects(effects, cx);
-            } else {
-                self.presenter.discard_replacement();
-                self.draw_changed(cx);
+        match escape::stop_moving(&mut self.runs, &self.presenter, std::time::Instant::now()) {
+            MovingStop::Run(message) => self.stop_run(message, cx),
+            MovingStop::Drawing => {
+                self.place_drawings(cx.weak_entity(), cx);
+                match escape::stop_drawing(&mut self.presenter, std::time::Instant::now()) {
+                    Some(effects) => self.scene_effects(effects, cx),
+                    None => self.draw_changed(cx),
+                }
             }
+            MovingStop::Idle => {}
         }
     }
 
@@ -511,7 +397,7 @@ impl Presence {
             SpeechPress::capture(
                 self.speech.get(),
                 std::time::Instant::now(),
-                SpeechEscapeOwner::Panel,
+                escape::SpeechEscapeOwner::Panel,
             ),
             cx,
         )
@@ -535,29 +421,28 @@ impl Presence {
         mark: Option<RunId>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        if speech.is_some_and(|press| self.speech_session(press).is_none()) {
+        if speech.is_some_and(|press| !press.on(self.open_pair())) {
             return Ok(());
         }
         self.voice.gates.forget_runs();
         // Esc is a key like any other to screen marks: they go at the first press, whatever
         // else that press stops. When they are a running answer's, the same press stops that
         // answer too, whatever else it does here.
-        let answer = self.presenter.marks_shown().or(mark).filter(|run| {
-            self.runs.stoppable() == Some(*run)
-                && speech.is_none_or(|press| press.run == *run && !self.runs.state_ended(*run))
-        });
+        let press = escape::Press::new(speech, self.presenter.marks_shown().or(mark), &self.runs);
         self.marks_changed(cx);
         self.voice.recovery = None;
-        if self.voice_working() {
-            self.cancel_voice(cx);
-            return Ok(());
-        }
-        if self.presenter.input.selection().is_some() {
-            self.end_selection(crate::presenter::overlay_input::ExitCause::Escape, cx);
-            // With a running answer's marks taken the press goes on, to stop that answer.
-            if answer.is_none() {
+        match press.lead(self.voice_escape_owner(), self.presenter.input.selection()) {
+            Lead::CancelHold => {
+                self.cancel_voice(cx);
                 return Ok(());
             }
+            Lead::EndSelection { goes_on } => {
+                self.end_selection(crate::presenter::overlay_input::ExitCause::Escape, cx);
+                if !goes_on {
+                    return Ok(());
+                }
+            }
+            Lead::Decide => {}
         }
         let panel = self.escape_panel(cx);
         let action = local_decision(
@@ -572,14 +457,13 @@ impl Presence {
             Escape::CancelPull => {
                 self.kumo
                     .update(cx, |kumo, cx| kumo.pull_event(Event::Escape, cx));
-                // The answer whose marks this press took is stopped after the pull's cancel.
-                if let Some(press) = speech {
-                    if answer.is_some() {
-                        self.stop_speech(press, cx);
+                match press.after_pull() {
+                    Some(AfterPull::Speech(speech)) => {
+                        self.stop_speech(speech, cx);
+                        None
                     }
-                    None
-                } else {
-                    answer.and_then(|_| self.runs.stop())
+                    Some(AfterPull::Run) => self.runs.stop(),
+                    None => None,
                 }
             }
             Escape::Stop => {
@@ -591,14 +475,15 @@ impl Presence {
                 None
             }
             Escape::Clear => {
-                let effect = self.runs.clear();
-                self.grant(effect.credit);
-                if self.presenter.holds_scenes() {
-                    let effects = self.presenter.clear(std::time::Instant::now());
-                    self.scene_effects(effects, cx);
-                    None
-                } else {
-                    effect.clear
+                let cleared = escape::clear(&mut self.runs, &self.presenter);
+                self.grant(cleared.credit);
+                match cleared.then {
+                    AfterClear::Presenter => {
+                        let effects = self.presenter.clear(std::time::Instant::now());
+                        self.scene_effects(effects, cx);
+                        None
+                    }
+                    AfterClear::Tell(message) => message,
                 }
             }
             Escape::Dismiss => {
@@ -689,13 +574,4 @@ impl Presence {
             EscapePanel::Closed
         }
     }
-}
-
-pub(super) fn local_decision(
-    mut activity: Activity,
-    panel: EscapePanel,
-    presenter: &crate::presenter::Presenter,
-) -> Escape {
-    activity.drawing |= matches!(panel, EscapePanel::Open) && presenter.holds_scenes();
-    escape::decide(activity, panel)
 }

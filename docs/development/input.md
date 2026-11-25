@@ -292,6 +292,10 @@ matching local audio is stopped.
 For a moving run the shell fences it and offers the brain its Stop before the speaker stop.
 If the control queue refuses, the shell signals the exact local worker before sealing the
 pair, without waiting for the output owner or background teardown.
+Shell-core's `escape.rs` decides these steps and the shell only applies them: a published
+press's owners and how a press that waited still matches them, the marked-answer exception,
+the order of a press's local effects, the ordinary stop and clear, and where a speech press
+goes and which stop it gets.
 
 Held voice additionally owns global Esc through preparation and pre-answer work. A raw Escape
 revokes collection before deferred UI; its hotkey delivery consumes one marker so that the
