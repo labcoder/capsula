@@ -180,7 +180,9 @@ pub trait Probes {
     /// Tries the setup guard without waiting.
     fn guard(&self) -> Guard<Self::Guard>;
 
-    /// Legacy footprints: all definitively absent, a validated intact installation, or neither.
+    /// Legacy footprints: all definitively absent, schema-level evidence of an intact installation
+    /// (the current history schema and a validated authority and host), or neither. Matching proves
+    /// no history invariant, so runtime admission revalidates them before use.
     fn legacy(&self, guard: &Self::Guard) -> Observation;
 
     /// The new-format root slot and its record.

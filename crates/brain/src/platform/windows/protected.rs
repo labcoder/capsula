@@ -260,7 +260,12 @@ pub(crate) fn folder_id(dir: &Path) -> Option<FolderId> {
     if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return None;
     }
-    let (volume, file) = file_id(&folder).ok()?;
+    held_folder_id(&folder)
+}
+
+/// The identity of what `held` is open on, by its volume and file ID, to compare with [`folder_id`].
+pub(crate) fn held_folder_id(held: &File) -> Option<FolderId> {
+    let (volume, file) = file_id(held).ok()?;
     Some(FolderId {
         volume,
         file: u128::from_ne_bytes(file),
