@@ -59,6 +59,7 @@ fn closed_history_arguments_reject_foreign_fields_duplicates_and_bad_shapes() {
 fn outer_history_carriers_redact_query_text_and_its_bytes() {
     let marker = "zqxhistoryprivate";
     let read = ReadCall {
+        require_recovery: None,
         key: dispatch::LedgerKey {
             run: RunId(1),
             route: Route::Model,
@@ -153,6 +154,7 @@ fn reading_joins_canonical_retries_and_refusal_cancels_without_revival() {
     };
     let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut ctx = dispatch::RunCtx {
+        require_recovery: None,
         build: BuildKey {
             run,
             round: 1,

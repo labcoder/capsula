@@ -136,6 +136,7 @@ fn request() -> ModelRequest {
 /// Attempt `attempt` of `run`'s first round in task `thread`, before the run read its snapshot.
 fn build_context(run: RunId, thread: ThreadId, attempt: u64) -> Effect {
     Effect::Store(StoreOp::BuildContext(BuildContext {
+        require_recovery: None,
         control: crate::recall::control::Control::new(
             std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
         ),
@@ -168,6 +169,7 @@ fn built(run: RunId, attempt: u64, sources: &[ThreadId]) -> Input {
         },
         snapshot: None,
         result: Ok(Built {
+            recovered_context: None,
             request: request(),
             sources: sources.to_vec(),
         }),

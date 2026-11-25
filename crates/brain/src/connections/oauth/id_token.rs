@@ -2,6 +2,8 @@
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::{FixtureSignature, repair_exchange_fixture};
 
 use std::collections::HashSet;
 
@@ -69,6 +71,7 @@ pub struct VerifiedIdentity {
     pub subject: Secret<Zeroizing<String>>,
     /// Optional signed display email, never an account/workspace identifier.
     pub email: Option<Secret<Zeroizing<String>>>,
+    pub(in crate::connections) expires_at: u64,
 }
 
 #[derive(Deserialize)]
@@ -284,6 +287,7 @@ fn signed(
     Ok(VerifiedIdentity {
         subject: Secret::new(claims.sub),
         email: claims.email.map(Secret::new),
+        expires_at: claims.exp,
     })
 }
 

@@ -703,6 +703,8 @@ pub(crate) struct Built {
     pub(crate) request: ModelRequest,
     /// Sorted, each once.
     pub(crate) sources: Vec<ThreadId>,
+    /// The history cutoff of the read that built it, which a recovered route's send requires.
+    pub(crate) recovered_context: Option<crate::store::Boundary>,
 }
 
 /// Why no request was built.

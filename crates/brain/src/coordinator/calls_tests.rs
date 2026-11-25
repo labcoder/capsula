@@ -50,6 +50,7 @@ fn rendering(key: BuildKey, reach: Origin, sources: Vec<ThreadId>) -> Input {
         key,
         snapshot: None,
         result: Ok(Built {
+            recovered_context: None,
             request: ModelRequest {
                 choice: None,
                 instructions: "built".to_owned(),
@@ -121,6 +122,7 @@ fn b_hidden() -> Input {
 /// Kumo's round built again, from the snapshot it never read.
 fn rebuilt(attempt: u64) -> Effect {
     Effect::Store(StoreOp::BuildContext(BuildContext {
+        require_recovery: None,
         control: crate::recall::control::Control::new(
             std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
         ),

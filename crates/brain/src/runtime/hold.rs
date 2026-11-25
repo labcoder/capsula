@@ -436,6 +436,15 @@ impl Brain {
             {
                 Some(HoldStatus::Failed(HoldFailure::ChoiceChanged))
             }
+            Input::RecoveredChatGpt { ready, boundary }
+                if self.coordinator.hold_recovery_changes(
+                    ready,
+                    *boundary,
+                    hold.snapshot.as_ref(),
+                ) =>
+            {
+                Some(HoldStatus::Failed(HoldFailure::ChoiceChanged))
+            }
             _ => None,
         };
         if let Some(status) = status {

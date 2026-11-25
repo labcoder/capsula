@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use kumochi_protocol::Secret;
 use serde_json::{Value, json};
@@ -11,13 +11,14 @@ use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Respon
 use crate::connections::oauth::Authorization;
 use crate::test_support::{Captured, SENTINEL};
 
-struct Scripted {
+pub(crate) struct Scripted {
     replies: Mutex<VecDeque<Result<Response, HttpError>>>,
     requests: Mutex<Vec<Request>>,
+    pause: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl Scripted {
-    fn new(status: u16, body: Vec<u8>) -> Self {
+    pub(crate) fn new(status: u16, body: Vec<u8>) -> Self {
         Self {
             replies: Mutex::new(VecDeque::from([Ok(Response {
                 status,
@@ -26,7 +27,17 @@ impl Scripted {
                 body: Secret::new(Zeroizing::new(body)),
             })])),
             requests: Mutex::new(Vec::new()),
+            pause: None,
         }
+    }
+
+    pub(crate) fn request_count(&self) -> usize {
+        self.requests.lock().expect("requests").len()
+    }
+
+    pub(crate) fn with_pause(mut self, pause: Arc<tokio::sync::Notify>) -> Self {
+        self.pause = Some(pause);
+        self
     }
 }
 
@@ -36,17 +47,23 @@ impl Http for Scripted {
         request: Request,
     ) -> impl std::future::Future<Output = Result<Response, HttpError>> + Send {
         self.requests.lock().expect("requests").push(request);
-        std::future::ready(
-            self.replies
-                .lock()
-                .expect("replies")
-                .pop_front()
-                .expect("one scripted response"),
-        )
+        let reply = self
+            .replies
+            .lock()
+            .expect("replies")
+            .pop_front()
+            .expect("one scripted response");
+        let pause = self.pause.clone();
+        async move {
+            if let Some(pause) = pause {
+                pause.notified().await;
+            }
+            reply
+        }
     }
 }
 
-fn authorization() -> Authorization {
+pub(crate) fn authorization() -> Authorization {
     Authorization {
         code: Secret::new(Zeroizing::new(SENTINEL.to_owned())),
         client_id: Secret::new(Zeroizing::new("issued-client".into())),
@@ -56,7 +73,7 @@ fn authorization() -> Authorization {
     }
 }
 
-fn tokens() -> Value {
+pub(crate) fn tokens() -> Value {
     json!({"access_token":"fixture-access", "refresh_token":"fixture-refresh", "id_token":"fixture-id", "token_type":"Bearer", "scope":"openid chatgpt.tokens.use.direct", "expires_in":3600, "earliest_refresh_at":1234})
 }
 
@@ -399,6 +416,7 @@ async fn transport_failure_remains_uncertain() {
     let fixture = Scripted {
         replies: Mutex::new(VecDeque::from([Err(HttpError::Timeout)])),
         requests: Mutex::new(Vec::new()),
+        pause: None,
     };
     assert_eq!(
         exchange(&fixture, &authorization()).await.unwrap_err(),
