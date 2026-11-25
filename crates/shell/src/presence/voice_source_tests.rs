@@ -2613,7 +2613,7 @@ fn check_native_cancel(cx: &mut TestAppContext, at: CancelAt) {
             }
         ));
         let token = owner.read_with(cx, |owner, _| {
-            owner.voice.state.pending.as_ref().unwrap().token.clone()
+            owner.voice.state.pending.as_ref().unwrap().token().clone()
         });
         (GestureId(1), token)
     } else {
