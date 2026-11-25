@@ -776,7 +776,7 @@ mod tests {
         require_built(&profile, &["kumochi-brain"]).expect("slice2's brain alone");
         let error = require_built(&profile, &["kumochi-shell", "kumochi-brain"])
             .expect_err("no shell was built");
-        assert_eq!(format!("{error:#}"), format!("{SHELL_EXE} is unavailable"));
+        assert_eq!(error.to_string(), format!("{SHELL_EXE} is unavailable"));
         fs::write(
             profile.join(SHELL_EXE),
             image("shell started", ProductIdentity::GATE),
@@ -802,14 +802,14 @@ mod tests {
 
     #[test]
     fn the_runs_folder_is_admitted_once_made_and_refused_as_a_link() {
-        let anchor = scratch::dir("gate-runs");
+        let anchor = scratch::local("gate-runs");
         let (runs, held) = runs_folder(&anchor).expect("a new runs folder");
         assert_eq!(runs, anchor.join("kumochi-gate-runs"));
         drop(held);
         runs_folder(&anchor).expect("the same folder, admitted again");
 
-        let anchor = scratch::dir("gate-runs-linked");
-        let target = scratch::dir("gate-runs-target");
+        let anchor = scratch::local("gate-runs-linked");
+        let target = scratch::local("gate-runs-target");
         let link = anchor.join("kumochi-gate-runs");
         fs::create_dir(&link).expect("an empty folder");
         kumochi_storage::set_junction(&link, &target).expect("a junction");

@@ -108,7 +108,7 @@ fn variables(
 
 #[test]
 fn a_half_pair_or_a_profile_outside_local_app_data_is_refused() {
-    let profile = crate::scratch::dir("first-text-profile");
+    let profile = crate::scratch::local("first-text-profile");
     for half in ["local", "roaming"] {
         fs::create_dir(profile.join(half)).expect("half");
     }
@@ -136,8 +136,8 @@ fn a_half_pair_or_a_profile_outside_local_app_data_is_refused() {
 
 #[test]
 fn identities_tell_two_profile_pairs_apart_and_refuse_a_link() {
-    let first = crate::scratch::dir("first-text-identity-a");
-    let second = crate::scratch::dir("first-text-identity-b");
+    let first = crate::scratch::local("first-text-identity-a");
+    let second = crate::scratch::local("first-text-identity-b");
     for profile in [&first, &second] {
         for half in ["local", "roaming"] {
             fs::create_dir(profile.join(half)).expect("half");
@@ -149,7 +149,7 @@ fn identities_tell_two_profile_pairs_apart_and_refuse_a_link() {
     let one = pair(&first).expect("the first pair");
     assert_eq!(pair(&first).expect("the same pair again"), one);
     assert_ne!(pair(&second).expect("the second pair"), one);
-    let linked = crate::scratch::dir("first-text-identity-linked");
+    let linked = crate::scratch::local("first-text-identity-linked");
     fs::create_dir(linked.join("local")).expect("half");
     fs::create_dir(linked.join("roaming")).expect("an empty folder");
     kumochi_storage::set_junction(&linked.join("roaming"), &second.join("roaming"))
