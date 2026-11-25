@@ -10,7 +10,7 @@ use kumochi_protocol::message::{
 use super::super::{Output, Retirement};
 use super::{
     Active, Delivery, LOCAL_QUIET, NarratedReservation, OutputOwner, Queued, RECEIPT_QUEUED,
-    StopOrigin,
+    Speech, StopOrigin,
 };
 use crate::link::{
     Attendance, HANDSHAKE_TIMEOUT, Shared, narrated::Narrated, queued::MetadataFrame,
@@ -156,6 +156,7 @@ fn a_speaking_hold_needs_the_previous_runs_queued_receipt_not_its_local_quiet() 
         delivery: None,
         locally_stopped: false,
         run_end_by: None,
+        speech: Speech::new(async_channel::bounded(1).0),
     });
     assert!(!owner.hold_ready(), "local quiet alone admits no hold");
     proof.fetch_or(RECEIPT_QUEUED, Ordering::AcqRel);
@@ -214,6 +215,7 @@ fn bound(proof: u8) -> Active {
         delivery: Some(Delivery::Unpromised),
         locally_stopped: false,
         run_end_by: None,
+        speech: Speech::new(async_channel::bounded(1).0),
     }
 }
 

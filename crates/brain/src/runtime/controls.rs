@@ -10,6 +10,7 @@ use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use super::terminal::Fence;
 use super::{Brain, Ended, Full, Link, close_wait};
 use crate::connections::account::Input as AccountInput;
 use crate::coordinator::Input;
@@ -66,10 +67,11 @@ impl Registration {
     }
 }
 
-pub(super) async fn read_control(
+pub(super) async fn read_control<const WATCH_FATAL: bool>(
     pipe: &mut (impl AsyncRead + Unpin),
     frames: &mpsc::Sender<(ControlToBrain, usize)>,
     quit: &Cell<Option<Instant>>,
+    fence: Option<&Fence>,
 ) -> Ended {
     loop {
         match ipc::read_sized::<ControlToBrain>(pipe, Pipe::Control).await {
@@ -79,21 +81,43 @@ pub(super) async fn read_control(
                 | ControlToBrain::QueuedAudioReconnect(..),
                 _,
             ))) => {
+                if WATCH_FATAL && let Some(cause) = fence.and_then(Fence::check) {
+                    return Ended::Fatal(cause);
+                }
                 return Ended::Broken("Hello sent twice");
             }
             Ok(Some((ControlToBrain::Quitting, _))) => {
+                if WATCH_FATAL
+                    && let Some(fence) = fence
+                    && let Err(cause) = fence.accept_quit()
+                {
+                    return Ended::Fatal(cause);
+                }
                 let deadline = Instant::now() + close_wait();
                 quit.set(Some(deadline));
                 return Ended::Quit { deadline };
             }
             Ok(Some(sized)) => {
-                if frames.send(sized).await.is_err() {
+                if WATCH_FATAL {
+                    let permit = frames.reserve().await;
+                    if let Some(cause) = fence.and_then(Fence::check) {
+                        return Ended::Fatal(cause);
+                    }
+                    let Ok(permit) = permit else {
+                        return Ended::Lost;
+                    };
+                    permit.send(sized);
+                } else if frames.send(sized).await.is_err() {
                     return Ended::Lost;
                 }
             }
-            Ok(None) => return Ended::Lost,
-            Err(error) => {
-                tracing::warn!(%error, "control pipe failed");
+            ended => {
+                if WATCH_FATAL && let Some(cause) = fence.and_then(Fence::check) {
+                    return Ended::Fatal(cause);
+                }
+                if let Err(error) = ended {
+                    tracing::warn!(%error, "control pipe failed");
+                }
                 return Ended::Lost;
             }
         }

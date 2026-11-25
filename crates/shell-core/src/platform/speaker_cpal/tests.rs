@@ -454,6 +454,43 @@ fn callback_source_spans_follow_rendered_frames_not_converter_intake() {
 }
 
 #[test]
+fn a_full_speech_evidence_ring_does_not_change_pcm_or_progress() {
+    use std::time::Duration;
+
+    use kumochi_protocol::message::{RunId, SegmentId};
+
+    let (mut submit, mut playback) = pair(SOURCE_RATE, 1);
+    let source = super::Source {
+        run: RunId(5),
+        generation: 3,
+        segment: SegmentId(8),
+        at: 100,
+    };
+    submit
+        .packet_for(&[16_384; 120], PacketKind::End, Some(source))
+        .unwrap();
+    for frame in 0..=BLOCKS {
+        let at = Duration::from_millis(u64::try_from(frame).unwrap());
+        let mut out = [0.0];
+        let ((), activity) = crate::allocation::activity(|| playback.fill_at(&mut out, Some(at)));
+        assert_eq!(activity, [0, 0]);
+        assert_eq!(out.map(f32::to_bits), [0.5_f32.to_bits()]);
+        let receipt = submit.observed.pop().expect("ordinary receipt");
+        assert_eq!(receipt.through, 101 + u64::try_from(frame).unwrap());
+        assert_eq!(receipt.at, Some(at));
+    }
+    for frame in 0..BLOCKS {
+        let at = Duration::from_millis(u64::try_from(frame).unwrap());
+        assert_eq!(submit.sound.pop(), Some((at, at)));
+    }
+    assert_eq!(
+        submit.sound.pop(),
+        None,
+        "overflow drops only optional evidence"
+    );
+}
+
+#[test]
 fn missing_device_time_reports_handoff_without_confirming_presentation() {
     use kumochi_protocol::message::{RunId, SegmentId};
 

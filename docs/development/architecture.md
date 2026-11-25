@@ -141,6 +141,16 @@ It asks Darwin for the user-domain path, resolving any home-relative result thro
 OS account, not `HOME`. It opens and creates nothing. Callers append or admit the product
 folder separately; a candidate does not authorize a write.
 
+`kumochi_storage::admit_support` holds and inspects that folder the way `open_shell_storage`
+does, creating nothing. On the held anchor, `Support::product_folder` looks up this edition's
+product folder: only `ENOENT` from opening that exact name in the held folder is `Missing`, and a
+folder there must pass the same private-folder checks. `Support::try_setup_guard` takes a
+nonblocking exclusive `flock` on a fresh open of the held folder. It is per user and coarser than
+the Windows guard, since every edition and anything else that locks Application Support contends
+for it. Closing the guard or its holder's exit releases it, and `Busy` says nothing about who
+holds it. `open_shell_storage` starts with `admit_support`; the product-folder lookup and the
+guard have no caller yet.
+
 Linux is a build and test host for `shell-core`, not a supported runtime. Its native
 IPC, process launch, credential storage, file logging, and audio entry points return
 `Unsupported`. The shared tests use scripted audio and need ALSA development headers
