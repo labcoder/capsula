@@ -30,13 +30,14 @@ pub(crate) enum Folder {
     Unknown,
 }
 
-/// Evidence that history writers older than the session lock, which don't take it, are excluded
-/// from outside, as the legacy store reads require. Nothing can make one yet: that waits on the
-/// owner's call on legacy schema updates.
-pub(crate) struct WritersExcluded(());
+/// Evidence that older writers, which don't take the session lock, are excluded and that the
+/// folder's path stays stable for the read, both established outside this read by the installation
+/// (owner decision 4). SQLite opens by path, so the identity checks around the read catch only a
+/// lasting replacement, not one restored in between. Nothing can make one yet.
+pub(crate) struct ExclusiveUse(());
 
 #[cfg(test)]
-impl WritersExcluded {
+impl ExclusiveUse {
     pub(crate) fn for_tests() -> Self {
         Self(())
     }
@@ -51,7 +52,7 @@ impl WritersExcluded {
 )]
 pub(crate) struct NativeProbes {
     /// Without it a present legacy folder reads unverified, and nothing in it is opened.
-    writers: Option<WritersExcluded>,
+    exclusive: Option<ExclusiveUse>,
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -65,7 +66,7 @@ impl Probes for NativeProbes {
     fn legacy(&self, guard: &Self::Guard) -> Observation {
         let folders = native::legacy(guard);
         legacy(&folders.data, folders.roaming.as_ref(), |data, held| {
-            intact(data, held, self.writers.as_ref(), |db, session| {
+            intact(data, held, self.exclusive.as_ref(), |db, session| {
                 legacy_authority(db, session, &NativeCredentialStore)
             })
         })
@@ -107,7 +108,7 @@ fn legacy(
 }
 
 /// The legacy profile in the present folder `data`, read under its existing session lock, which
-/// stays held through every read. Nothing is opened without `writers`, or unless the folder at
+/// stays held through every read. Nothing is opened without `exclusive`, or unless the folder at
 /// `data` is the admitted one, `held`, which it must still be after the last read. Matching only
 /// with the current history schema and an authority and committed host that both match: schema
 /// evidence, not the history's invariants, which runtime admission revalidates before use.
@@ -116,11 +117,11 @@ fn legacy(
 fn intact(
     data: &Path,
     held: FolderId,
-    writers: Option<&WritersExcluded>,
+    exclusive: Option<&ExclusiveUse>,
     authority: impl FnOnce(&Path, &SessionLock) -> Legacy,
 ) -> Observation {
     let admitted = || folder_id(data) == Some(held);
-    if writers.is_none() || !admitted() {
+    if exclusive.is_none() || !admitted() {
         return Observation::Unverified;
     }
     let Ok(session) = SessionLock::try_acquire_existing(&data.join(SESSION_LOCK)) else {
@@ -258,18 +259,18 @@ mod tests {
         data
     }
 
-    /// `intact` on the folder at `data` as admitted now, with older writers excluded.
+    /// `intact` on the folder at `data` as admitted now, in exclusive use.
     fn read_admitted(
         data: &Path,
         authority: impl FnOnce(&Path, &SessionLock) -> Legacy,
     ) -> Observation {
         let held = folder_id(data).expect("an admitted folder");
-        intact(data, held, Some(&WritersExcluded::for_tests()), authority)
+        intact(data, held, Some(&ExclusiveUse::for_tests()), authority)
     }
 
     #[test]
-    fn without_excluded_writers_a_present_folder_is_left_unread() {
-        let scratch = Scratch::new("profile-writers");
+    fn without_exclusive_use_a_present_folder_is_left_unread() {
+        let scratch = Scratch::new("profile-exclusive");
         let data = profile(scratch.dir().to_owned());
         let held = folder_id(&data).expect("an admitted folder");
         let before = files(&data);
@@ -291,14 +292,14 @@ mod tests {
         let other = profile(scratch.dir().join("other"));
         let admitted = scratch.dir().join("admitted");
         let held = folder_id(&data).expect("an admitted folder");
-        let writers = WritersExcluded::for_tests();
+        let exclusive = ExclusiveUse::for_tests();
         let swap = || {
             fs::rename(&data, &admitted).expect("move the admitted folder away");
             fs::rename(&other, &data).expect("put another profile in its place");
         };
         swap();
         let called = Cell::new(false);
-        let before = intact(&data, held, Some(&writers), |_, _| {
+        let before = intact(&data, held, Some(&exclusive), |_, _| {
             called.set(true);
             MATCHING
         });
@@ -307,15 +308,33 @@ mod tests {
         fs::rename(&data, &other).expect("move the other profile back");
         fs::rename(&admitted, &data).expect("restore the admitted folder");
         assert_eq!(
-            intact(&data, held, Some(&writers), |_, _| MATCHING),
+            intact(&data, held, Some(&exclusive), |_, _| MATCHING),
             Observation::Matching,
             "the admitted folder in place"
         );
-        let during = intact(&data, held, Some(&writers), |_, _| {
-            swap();
-            MATCHING
-        });
-        assert_eq!(during, Observation::Unverified, "swapped during the reads");
+        #[cfg(unix)]
+        {
+            let during = intact(&data, held, Some(&exclusive), |_, _| {
+                swap();
+                MATCHING
+            });
+            assert_eq!(during, Observation::Unverified, "swapped during the reads");
+        }
+        // NTFS refuses to rename a folder with a file open under it, so on Windows the held
+        // session lock is what keeps the path stable through the reads.
+        #[cfg(windows)]
+        {
+            let refused = Cell::new(false);
+            let during = intact(&data, held, Some(&exclusive), |_, _| {
+                refused.set(fs::rename(&data, &admitted).is_err());
+                MATCHING
+            });
+            assert!(
+                refused.get(),
+                "the folder can't move while the lock is held"
+            );
+            assert_eq!(during, Observation::Matching);
+        }
     }
 
     #[test]
