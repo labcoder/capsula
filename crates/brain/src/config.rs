@@ -211,11 +211,10 @@ impl Config {
 
     pub(crate) fn implicit_talk_back(&self) -> bool {
         self.table.as_ref().is_ok_and(|table| {
-            table.get(VOICE).is_none_or(|voice| {
-                voice
-                    .as_table()
-                    .is_some_and(|voice| !voice.contains_key(TALK_BACK))
-            })
+            table
+                .get(VOICE)
+                .and_then(Value::as_table)
+                .is_none_or(|voice| !voice.contains_key(TALK_BACK))
         })
     }
 
@@ -459,7 +458,7 @@ impl Config {
     pub(crate) fn stage_activate(&self, part: VoicePart) -> Result<Pending, ConfigError> {
         let (path, mut table) = self.editable()?;
         let voice = voice_mut(&mut table);
-        if part == VoicePart::SpokenReplies && !voice.contains_key(TALK_BACK) {
+        if part == VoicePart::SpokenReplies && self.implicit_talk_back() {
             voice.insert(TALK_BACK.to_owned(), Value::Boolean(true));
         }
         listed_add(voice, INSTALLED, part);

@@ -1149,6 +1149,7 @@ impl Presence {
                 picture: screen,
                 words: None,
             });
+            let unretired = queued && self.link.output().queued_speaking(session.generation());
             self.voice.pending = Some(Hold {
                 token,
                 stamp,
@@ -1160,12 +1161,7 @@ impl Presence {
                 offer: offer.filter(|_| screen),
                 terminal: None,
                 run: None,
-                unretired: queued
-                    && self
-                        .settings
-                        .read(cx)
-                        .view()
-                        .is_some_and(|view| view.talk_back),
+                unretired,
             });
             self.chat_notice.clear();
             self.error = None;
