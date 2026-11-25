@@ -35,6 +35,7 @@ time = "0.3.55"
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+gpui-pre-windows = "=0.3.10"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

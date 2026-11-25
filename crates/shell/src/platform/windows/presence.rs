@@ -3,13 +3,13 @@
 //! proxy's alpha mask lives in `hit_mask.rs`.
 
 use std::cell::{Cell, OnceCell};
-use std::ffi::c_void;
 use std::rc::Rc;
 
 use async_channel::Sender;
+use gpui_kit::{Bounds, Pixels};
 use kumochi_protocol::constants::{FOCUS_INPUT_MARKER, OBJECT_PREFIX};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
@@ -30,13 +30,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, GWL_EXSTYLE, GWLP_USERDATA, GetCursorPos, GetForegroundWindow,
     GetWindowLongPtrW, HICON, HMENU, HWND_TOPMOST, IDC_ARROW, IDI_APPLICATION, LoadCursorW,
     LoadIconW, MA_NOACTIVATE, MENU_ITEM_FLAGS, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    PostMessageW, RegisterClassExW, RegisterWindowMessageW, SPI_GETWORKAREA, SWP_HIDEWINDOW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    SystemParametersInfoW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
-    UnregisterClassW, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONDOWN,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY, WM_NULL, WNDCLASSEXW, WS_EX_APPWINDOW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    PostMessageW, RegisterClassExW, RegisterWindowMessageW, SWP_HIDEWINDOW, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPos, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, UnregisterClassW,
+    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_NCDESTROY, WM_NULL, WNDCLASSEXW, WS_EX_APPWINDOW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_STYLE, SWP_FRAMECHANGED, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
@@ -781,28 +780,45 @@ pub(crate) fn performance_counter() -> i64 {
 /// The primary monitor's work area, `[x, y, width, height]` in physical pixels.
 ///
 /// # Errors
-/// Fails when Windows can't report it.
+/// Fails without a primary display work area from GPUI.
 pub(crate) fn work_area() -> Result<[i32; 4], PresenceError> {
     #[cfg(test)]
     if let Some(area) = crate::platform::work_area_fixture::get() {
         return Ok(area);
     }
-    let mut rect = RECT::default();
-    // SAFETY: SPI_GETWORKAREA writes one RECT into `rect`, which is writable for the call.
-    unsafe {
-        SystemParametersInfoW(
-            SPI_GETWORKAREA,
-            0,
-            Some((&raw mut rect).cast::<c_void>()),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+    let (bounds, scale) =
+        gpui_windows::primary_visible_bounds().ok_or(PresenceError::GeometryUnavailable)?;
+    Ok(physical_work_area(bounds, scale))
+}
+
+fn physical_work_area(bounds: Bounds<Pixels>, scale: f32) -> [i32; 4] {
+    let physical = bounds.to_device_pixels(scale);
+    [
+        physical.origin.x,
+        physical.origin.y,
+        physical.size.width,
+        physical.size.height,
+    ]
+    .map(i32::from)
+}
+
+#[cfg(test)]
+#[test]
+fn work_area_rounds_negative_origins_and_sizes_in_physical_pixels() {
+    let make = |x, y, w, h| {
+        Bounds::new(
+            gpui_kit::point(gpui_kit::px(x), gpui_kit::px(y)),
+            gpui_kit::size(gpui_kit::px(w), gpui_kit::px(h)),
         )
-    }?;
-    Ok([
-        rect.left,
-        rect.top,
-        rect.right - rect.left,
-        rect.bottom - rect.top,
-    ])
+    };
+    assert_eq!(
+        physical_work_area(make(-103.0, -31.0, 1021.0, 703.0), 1.0),
+        [-103, -31, 1021, 703],
+    );
+    assert_eq!(
+        physical_work_area(make(-82.2, -24.7, 816.7, 562.3), 1.25),
+        [-103, -31, 1021, 703],
+    );
 }
 
 /// Where the pointer is, `[x, y]` in physical screen pixels.
