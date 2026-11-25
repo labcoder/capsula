@@ -8,7 +8,16 @@ the logger on the UI thread, and Quit still works without a window. Rollback and
 close and join the logger off the UI thread before releasing that lock: both run the one
 release, which drops the admission on the background executor (after the link finishes, once
 the dock opened) and only then removes the window and quits. Quits that AppKit starts itself
-(the Dock menu, logout) do not wait for this yet. The backend preserves terminal
+(the Dock menu, logout) reach the same custody through GPUI's opt-in termination negotiation,
+and every request gets an answer: before the dock opens it is refused; while the admission is
+live it starts the release, or joins the one under way, and is approved after it; once the
+release has finished it is approved at once. A request approved that way ends the app by itself.
+For its own quit after the release, the app goes through GPUI's platform quit rather than
+`cx.quit()`, because GPUI sends that one from a main-queue block where a reply queued behind the
+block could never arrive. The platform approves later requests
+ahead, so they answer Now, leaves a request already in flight to end the app, waits for a
+refusal already queued to return, and asks AppKit itself only when it can answer Now.
+The backend preserves terminal
 storage-admission refusals; ordinary I/O failures remain best effort. The Windows logger is
 unchanged.
 
