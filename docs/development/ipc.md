@@ -23,12 +23,12 @@ placeholder on either leg. A nonzero placeholder is refused without capability f
 The bound greeting type cannot be constructed on any platform yet, so neither shell startup
 nor brain admission selects session authorization.
 
-## Queued-required session mode (internal)
+## Queued-required session mode
 
-The shipped shell selects Legacy: control Hello, Welcome, then data Hello, with their
+Ordinary launch selects queued-required with Plain output and sends QueuedHello on both
+pipes. The brain still accepts Legacy: control Hello, Welcome, then data Hello, with their
 existing bytes. Both modes follow their data Hello with one drawing-font startup frame.
-The internal queued-required selection instead sends the appended QueuedHello
-on both pipes. Its data Hello echoes this Welcome's incarnation and issue epoch. The brain
+The queued data Hello echoes this Welcome's incarnation and issue epoch. The brain
 checks the executable, matching build and capability on both legs and the existing same-process
 pairing. It refuses a mixed mode or a data Hello from another session. The queued second leg
 has one deadline for connecting and reading; refusal renews both pipe instances.
@@ -41,7 +41,7 @@ loss uses normal connection behavior. Pipe authentication and output registratio
 
 This negotiates a requirement, not an installed audio output. An authenticated queued pair
 installs the exact reserved issue session. Both pipes return to regular I/O after their bounded
-handshake. Ordinary launch still selects Legacy, with no queued-to-Legacy fallback.
+handshake. There is no queued-to-Legacy fallback.
 The Brain starts each queued pair closed to turns. It sends
 `QueuedAudioRegistered(output)` once, only after a valid `QueuedAudioOutput` installs the
 exact logical output in Queued mode. It opens admission only if that receipt queues.
@@ -906,7 +906,7 @@ records only their operation and length.
 - **Progress.** `SpeechProgress` goes out at most every 250 ms. `SpeechStopped` confirms that
   output for the run is quiet; `cursor` is `None` when nothing of it played.
 - **Out of bounds.** A `MicPcm` or an `AudioOutput` rate out of bounds ends the connection as
-  broken. A stock Legacy connection announces no audio output; unexpected speech PCM is
+  broken. A Legacy connection announces no audio output; unexpected speech PCM is
   wiped, credited and dropped. On a registered queued pair the worker handles PCM and revoke
   ([speaker.md](speaker.md)).
 
@@ -1172,7 +1172,7 @@ existing metadata-only Stop replay on the authenticated pair.
 If the user quits before publication, a fully authenticated queued pair sends held deletes in
 order (with no turns on that pair), then Quitting. It starts no session or playback, and it
 doesn't replay or settle microphone Stop debt. A partial or unauthenticated pair never carries
-these shutdown frames. Stock selection remains Legacy.
+these shutdown frames.
 
 ## How a connection ends
 

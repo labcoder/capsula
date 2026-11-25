@@ -231,7 +231,7 @@ stateDiagram-v2
 
 - **The window.** At most one Speak is out at a time. A new one goes out only while the unplayed audio is under 20 s and at most two segments lie beyond the playing one.
 - **Credit.** The pump reads TTS only on credit, which keeps forwarded audio inside the window. `SpeechProgress` gives credit back as it plays, so a 30 s segment streams through the 20 s window.
-- **Queued output (dormant).** Ordered retirement
+- **Queued output.** Ordered retirement
   refunds the synthesis window even for unheard samples. Only the separate heard prefix updates
   history; duplicate retirement and a producer-side drop cannot refund the same samples twice.
   The device callback reserves presentation evidence before copying stamped speech. If the receipt
@@ -308,8 +308,8 @@ flowchart LR
 ### A spoken run
 
 Only a registered queued pair can play a reply. The brain admits speech when its voice is
-`Ready` and Talk-back is on. Stock Legacy sessions never register output, so their text
-and steps still run without audio.
+`Ready` and Talk-back is on. A Legacy session never registers output, so its text and steps
+run without audio.
 
 ```mermaid
 sequenceDiagram

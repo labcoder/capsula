@@ -125,7 +125,7 @@ fn initialize_gpui(cx: &mut gpui_kit::App) {
 
 fn run_connected(flags: presence::Launch) -> ExitCode {
     let (events, link_events) = async_channel::unbounded();
-    let (link, start) = match link::prepare(events, AudioSession::Legacy) {
+    let (link, start) = match link::prepare(events, AudioSession::QueuedRequired) {
         Ok(prepared) => prepared,
         Err(error) => {
             tracing::error!(%error, "can't prepare the link to the brain");
