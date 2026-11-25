@@ -280,13 +280,18 @@ pub(crate) enum Seen {
 }
 
 impl Brain {
-    /// Starts the store thread. The store must already be recovered, `main_thread` is its main
+    /// Starts the store thread, which keeps `profile` until it ends. The store must already be recovered, `main_thread` is its main
     /// thread, and `high_water` is its highest thread and run ids.
     ///
     /// # Errors
     /// Fails when the store's thread can't be started.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the recovered store, its writer lock and what the store's scan read"
+    )]
     pub(crate) fn new(
         store: Store,
+        profile: std::sync::Arc<crate::platform::SessionLock>,
         main_thread: ThreadId,
         high_water: (ThreadId, RunId),
         scenes: Vec<SceneState>,
@@ -336,7 +341,7 @@ impl Brain {
         coordinator.tuning = config.run_tuning();
         coordinator.configure_drawing(config.drawing_tuning());
         let recovery_clears = coordinator.restore_drawings(drawing_scenes);
-        let store = StoreThread::spawn(store, inputs_tx.clone(), schedule)?;
+        let store = StoreThread::spawn(store, profile, inputs_tx.clone(), schedule)?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         let mut brain = Self {
             crashes: crate::relaunch::Crashes::default(),

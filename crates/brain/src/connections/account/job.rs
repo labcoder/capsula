@@ -17,6 +17,7 @@ use crate::connections::records::{
     Account, MAX_EXCHANGES, Origin, Revocable, RevocationList, entry_fits,
 };
 use crate::connections::vault::{DeleteResult, SaveResult, SavedSignIn, Vault};
+use crate::platform::SessionLock;
 use crate::platform::credential::{CredentialStore, NativeCredentialStore};
 
 /// How often a patient load tries the session lock [guess]: Windows releases a dead brain's
@@ -184,8 +185,12 @@ impl<S: CredentialStore> fmt::Debug for Worker<S> {
 
 impl Worker<NativeCredentialStore> {
     /// The worker on the real credential store: the only way the brain reaches it outside tests.
-    pub fn system(clock: Arc<dyn Clock>) -> Self {
-        Self::new(Box::new(|| Vault::open(NativeCredentialStore)), clock)
+    /// Its vault opens under `profile`, the lock the brain holds for its whole run.
+    pub fn system(clock: Arc<dyn Clock>, profile: Arc<SessionLock>) -> Self {
+        Self::new(
+            Box::new(move || Vault::open_held(NativeCredentialStore, Arc::clone(&profile))),
+            clock,
+        )
     }
 }
 
