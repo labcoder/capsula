@@ -101,7 +101,21 @@ fn scalar_dimension_minimums_match_admission() {
         } else {
             let error = scene.admit(&step, &global).expect_err("invalid dimension");
             assert_eq!(error.code, ErrorCode::OutOfRange);
-            assert_eq!(error.path.as_str(), format!("put[0].{path}"));
+            assert_eq!(
+                error.to_string(),
+                format!("put[0].{path}: scene.OutOfRange")
+            );
+            assert_eq!(
+                error.tool_text(),
+                format!(
+                    "step s: put[0].{path}: scene.OutOfRange{}",
+                    match path {
+                        "shape.width" | "shape.radius" => " (allowed: 0 <= value <= 20000)",
+                        "path.scale" => " (use a positive scale; composed scale must be <= 64)",
+                        _ => " (allowed: 0 < value <= 20000)",
+                    }
+                )
+            );
         }
     };
     for field in ["width", "radius"] {
