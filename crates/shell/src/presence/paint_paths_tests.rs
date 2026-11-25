@@ -1067,9 +1067,13 @@ fn one_passed(line: &str) -> bool {
 /// child with the variable set writes libtest's own framing and nothing else.
 #[test]
 fn lyon_logging_is_compiled_out() {
-    use std::os::windows::process::CommandExt as _;
-
-    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test executable"));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+    }
+    let output = command
         .args([
             "--exact",
             LYON_LOGGING_CHILD,
@@ -1078,7 +1082,6 @@ fn lyon_logging_is_compiled_out() {
             "--test-threads=1",
         ])
         .env("LYON_FORCE_LOGGING", "1")
-        .creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0)
         .output()
         .expect("the child test process runs");
     assert!(output.status.success(), "the child builds every fill");
