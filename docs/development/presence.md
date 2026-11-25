@@ -54,16 +54,15 @@ one bounded, opaque normal GPUI window on the primary display, consumes the work
 initial Failed event before painting, and offers only Quit. GPUI delivers local button input;
 the button, app menu and native window close share the same one-time link teardown. This surface
 has no global keyboard, retry, capture or background link, and is not topmost or click-through.
-The ordinary macOS launcher selects this route but opens the window only after logging and
-instance admission. Those gates still refuse, so selecting the route does not enable startup.
+The ordinary macOS launcher selects this route and opens the window only after the instance
+lock is taken and logging has started in its storage.
 The local route also refuses connected diagnostic launch modes.
 
 If the admitted local dock cannot open, the launch callback records the error synchronously
-and releases its instance lock before requesting GPUI Quit. A successful open keeps the lock
-for the app lifetime and keeps the existing dock-owned Quit path. AppKit termination does not
-return a caller-selected process status through GPUI; a failure status after native termination
-requires a separately validated native boundary. This does not arm the dormant Mac logger or
-replace its future close-before-unlock requirement.
+and runs the same release as Quit, so the logger closes and the instance lock is released off
+the UI thread before GPUI quits. A successful open keeps the admission for the app lifetime.
+AppKit termination does not return a caller-selected process status through GPUI; a failure
+status after native termination requires a separately validated native boundary.
 
 The connected presence requires native desktop geometry before opening any of its windows.
 Its Win32 backend still supplies physical work area and client origin and moves, shows, and hides
