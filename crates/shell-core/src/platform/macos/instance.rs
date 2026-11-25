@@ -12,7 +12,7 @@ use crate::instance::SessionLockError;
 /// another shell of this user and identity holds it. The storage stays with the lock.
 pub(crate) fn try_acquire_instance_lock()
 -> Result<Option<(AdmittedLock, ShellStorage)>, SessionLockError> {
-    try_acquire_under(super::support_dir())
+    try_acquire_under(super::support_dir().ok())
 }
 
 fn try_acquire_under(
