@@ -533,14 +533,11 @@ impl Brain {
             };
             self.voice_written(write, result, link.as_deref_mut())?;
         }
-        let answered = if defaulted {
-            link.as_deref_mut().map_or(Ok(()), |link| {
-                link.control(&ControlToShell::SpokenRepliesDefaulted(
-                    self.config.view().clone(),
-                ))
-            })
-        } else {
-            self.settled(epoch, outcome, link.as_deref_mut())
+        let answered = match link.as_deref_mut() {
+            Some(link) if defaulted => link.control(&ControlToShell::SpokenRepliesDefaulted(
+                self.config.view().clone(),
+            )),
+            link => self.settled(epoch, outcome, link),
         };
         let input_enabled = self.config.view().hold_to_talk;
         if input_enabled != input_was_enabled {
