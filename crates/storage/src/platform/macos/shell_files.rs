@@ -9,6 +9,9 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use kumochi_protocol::constants::ProductIdentity;
+use kumochi_protocol::profile::Root;
+
 use super::protected::{self, ObjectKind};
 use crate::Untrusted;
 
@@ -314,6 +317,17 @@ impl Support {
         directories.push_private(file, product)?;
         directories.check()?;
         Ok(ProductFolder::Held(Product { _held: directories }))
+    }
+
+    /// Reads this edition's new-format root slot in this anchor, creating nothing, and releases
+    /// the anchor. Only a missing slot is absent: before the allocator writes its record, a folder
+    /// there is a footprint of unknown origin, and any refusal or failure proves nothing either.
+    #[must_use]
+    pub fn profile_root(self) -> Root {
+        match self.product_folder(ProductIdentity::ACTIVE.profile_root) {
+            Ok(ProductFolder::Missing(_)) => Root::Absent,
+            Ok(ProductFolder::Held(_)) | Err(_) => Root::Unverified,
+        }
     }
 }
 

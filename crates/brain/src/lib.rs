@@ -17,6 +17,14 @@ pub mod issues;
 mod jobs;
 pub mod logging;
 pub mod platform;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "cut 9's allocator and the observer's callers read it"
+    )
+)]
+mod profile;
 mod recall;
 mod relaunch;
 mod runtime;

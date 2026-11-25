@@ -176,13 +176,13 @@ impl<S: CredentialStore> Vault<S> {
 
     /// Takes the lock at `path`, then opens the authority beside it and sweeps once, legacy
     /// names included. No history writer is bound, so no cutoff can be written or confirmed.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn with_service(store: S, service: &str, path: &Path) -> Result<Self, VaultError> {
         Self::bound_to_history(store, service, path, HistoryLink::unbound())
     }
 
     /// [`Vault::with_service`], bound for its life to the profile's one history writer.
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn bound_to_history(
         store: S,
         service: &str,

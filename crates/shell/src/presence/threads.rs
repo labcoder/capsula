@@ -259,6 +259,7 @@ impl Presence {
                 panel.typing.activated();
             }
         }
+        self.focus_changed(cx);
         if active {
             return;
         }

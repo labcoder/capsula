@@ -207,7 +207,7 @@ fn interactive(hwnd: HWND, enabled: bool) -> Result<(), PresenceError> {
     Ok(())
 }
 
-fn owned(hwnd: HWND) -> bool {
+pub(super) fn owned(hwnd: HWND) -> bool {
     // SAFETY: reads the owner thread; a destroyed handle returns zero.
     let owner =
         unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, None) };

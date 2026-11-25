@@ -207,6 +207,7 @@ fn run(method: Method, label: &str) {
             queued: false,
             narrated: None,
             control: None,
+            playback_stop: std::sync::Arc::default(),
             bytes: std::sync::atomic::AtomicU32::new(0),
             wake: async_channel::bounded(1).0.downgrade(),
             drawing_font_family: None,

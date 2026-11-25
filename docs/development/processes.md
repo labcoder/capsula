@@ -148,6 +148,53 @@ stops without spawning or reusing an identity. Closing the ordinary command lane
 the final worker. The retirement receiver remains alive until its final exit is published;
 closing that lane is unavailability, never an exit receipt.
 
+## The shell's brain child (ParentBound, dormant)
+
+Under ParentBound the shell will start the brain as its own child and own its lifetime. The
+custody rules live in shared code (`shell-core/platform/child.rs`), so every platform tests them
+against a scripted child; macOS supplies the system calls (`platform/macos/child.rs`):
+`posix_spawn` with an empty environment, an exact-pid `waitpid(WNOHANG)`, SIGKILL, and a read of
+SIGCHLD's disposition. Nothing starts a child yet, and Windows has none.
+
+- **One owner.** A `ChildOwner` thread exists before the spawn, spawns on itself and is the only
+  code in the shell that waits on, signals or reaps the brain. The UI never blocks on it. It polls
+  every 20 ms; that's a poll period, not a scheduling bound, so each deadline is acted on at the
+  first poll at or after it.
+- **What a wait means.** Only an exit or a signal is a reap. Any other status, such as a traced
+  stop, which Darwin can report without `WUNTRACED`, counts as alive. An interrupted wait is
+  retried. Any other error is **Lost**: custody is gone, never success, and the child is never
+  signalled again.
+- **Quit against spawn.** One atomic word holds SPAWN and QUIT. The owner claims it right before
+  the spawn, only while both bits are clear, and `LinkHandle::begin_quit` sets QUIT on it. Quit
+  first means no child from that link. Claim first means the owner holds whatever the spawn made,
+  sees QUIT on its next poll and retires it. SPAWN is cleared only when the spawn made no child or
+  the child was reaped, so each replacement needs a fresh claim. QUIT is never cleared.
+- **Retirement.** On Quit, on `retire` (link loss, or startup cancelled before readiness) or when
+  the link drops the owner, the owner waits for the child to exit, then sends one SIGKILL and
+  waits once more. A failed kill isn't retried. A child still unreaped after that is
+  **Unsettled**: it's reported once, the claim stays taken so nothing replaces it, and the owner
+  keeps reaping it quietly while the shell lives.
+- **Preconditions.** Before the spawn and before the signal the owner checks that SIGCHLD isn't
+  ignored and `SA_NOCLDWAIT` isn't set, and refuses otherwise. It never changes a process-wide
+  disposition, and nothing else in the shell may wait on children (`wait`, `waitpid(-1)`,
+  `waitid(P_ALL)`); review enforces that, since a check can't exclude a change racing it.
+- **A clean Quit** is the link having sent `Quitting` and the child reaped with exit code 0.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Claimed: claim (SPAWN and QUIT clear)
+  [*] --> NotSpawned: Quit or another claim first
+  Claimed --> NotSpawned: SIGCHLD auto-reaps, or spawn fails (SPAWN cleared)
+  Claimed --> Alive: spawned
+  Alive --> Reaped: exit or signal (SPAWN cleared)
+  Alive --> Lost: wait error
+  Alive --> Grace: Quit, retire or owner dropped
+  Grace --> Reaped: exits in time
+  Grace --> Killed: deadline, one SIGKILL
+  Killed --> Reaped: reaped in time
+  Killed --> Unsettled: deadline
+```
+
 ## Recovery
 
 | What happens | What the other process does |

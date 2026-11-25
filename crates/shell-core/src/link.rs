@@ -329,6 +329,30 @@ impl Session {
         self.closing.store(true, Ordering::Release);
     }
 
+    /// Signals the matching queued worker without waiting on the output owner.
+    pub fn stop_playback(&self, run: RunId) {
+        if let Some((_, stop)) = self
+            .io
+            .playback_stop
+            .load()
+            .as_deref()
+            .filter(|(id, _)| *id == run)
+        {
+            stop.request();
+        }
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn playback_stop_requested(&self, run: RunId) -> Option<bool> {
+        self.io
+            .playback_stop
+            .load()
+            .as_deref()
+            .filter(|(id, _)| *id == run)
+            .map(|(_, stop)| stop.requested())
+    }
+
     /// Alive and not closing: what sends and capture admission require.
     pub fn open(&self) -> bool {
         self.alive.load(Ordering::Acquire) && !self.closing.load(Ordering::Acquire)
@@ -427,6 +451,7 @@ struct SessionIo {
     queued: bool,
     narrated: Option<Arc<narrated::Narrated>>,
     control: Option<WeakSender<ControlToBrain>>,
+    playback_stop: Arc<output::PlaybackStop>,
     bytes: AtomicU32,
     wake: WeakSender<DataOut>,
     drawing_font_family: Option<Arc<str>>,
@@ -613,6 +638,9 @@ struct Shared {
     /// Locked only after `outbox`, so a delete and a turn are counted in the order they're
     /// queued.
     deletes: Mutex<Vec<Held>>,
+    /// Orders Quit against an owned brain child's spawn.
+    #[cfg(target_os = "macos")]
+    spawn: Arc<platform::SpawnWord>,
 }
 
 impl Shared {
@@ -1044,6 +1072,8 @@ impl LinkHandle {
     /// Returns false when Quit was already under way.
     pub fn begin_quit(&self) -> bool {
         let first = self.shared.input.fetch_or(QUIT_INPUT, Ordering::SeqCst) & QUIT_INPUT == 0;
+        #[cfg(target_os = "macos")]
+        self.shared.spawn.quit();
         self.shared.microphone.cancel_current();
         // Wakes a link waiting for Retry, so it sees Quit and ends.
         if let Some(worker) = &self.worker {
@@ -1434,6 +1464,7 @@ impl Session {
                 queued: false,
                 narrated: None,
                 control: None,
+                playback_stop: Arc::default(),
                 bytes: AtomicU32::new(0),
                 wake: wake.downgrade(),
                 drawing_font_family: None,
@@ -1747,6 +1778,7 @@ impl Link {
             queued,
             narrated,
             control: Some(control_out.downgrade()),
+            playback_stop: Arc::default(),
             bytes: AtomicU32::new(0),
             wake: data_out.downgrade(),
             drawing_font_family,
@@ -1790,7 +1822,7 @@ impl Link {
                         deadline,
                         ack,
                         Arc::clone(reader),
-                        Arc::clone(&closing),
+                        (Arc::clone(&closing), Arc::clone(&credit.playback_stop)),
                         credit.narrated.clone(),
                     )
                 },

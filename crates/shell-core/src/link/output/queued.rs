@@ -15,7 +15,9 @@ use crate::link::{
 };
 use crate::speaker::DRAIN;
 use crate::speaker::conductor::Assignment;
-use crate::speaker::queued::{Command, Input, Packet, RATE, Speech, spawn, spawn_plain};
+use crate::speaker::queued::{
+    Command, Input, Packet, RATE, Speech, StopSignal, spawn, spawn_plain,
+};
 
 #[cfg(test)]
 #[path = "queued_tests.rs"]
@@ -47,8 +49,11 @@ pub(super) enum StopOrigin {
     Brain,
 }
 
+pub(in crate::link) type PlaybackStop = arc_swap::ArcSwapOption<(RunId, StopSignal)>;
+
 pub(in crate::link) struct Queued {
     closing: Arc<AtomicBool>,
+    playback_stop: Arc<PlaybackStop>,
     deadline: Instant,
     ack: Option<SyncSender<()>>,
     talk_back: Option<bool>,
@@ -104,11 +109,12 @@ impl Queued {
         deadline: Instant,
         ack: SyncSender<()>,
         wake: Arc<OnceLock<Thread>>,
-        closing: Arc<AtomicBool>,
+        (closing, playback_stop): (Arc<AtomicBool>, Arc<PlaybackStop>),
         narrated: Option<Arc<Narrated>>,
     ) -> Self {
         Self {
             closing,
+            playback_stop,
             deadline,
             ack: Some(ack),
             talk_back: None,
@@ -147,6 +153,7 @@ impl Queued {
     }
 
     fn retire(&mut self) {
+        self.playback_stop.store(None);
         if let Some(run) = &mut self.active {
             run.proof.fetch_or(RETIRING, Ordering::AcqRel);
             drop(run.input.take());
@@ -679,6 +686,9 @@ impl OutputOwner {
         if stopped && !input.stop() {
             return false;
         }
+        owner
+            .playback_stop
+            .store(Some(Arc::new((run, input.stop_signal()))));
         active.input = Some(input);
         owner.wake();
         true

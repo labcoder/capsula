@@ -185,7 +185,9 @@ fn label(strings: &Strings, title: &Label) -> SharedString {
 
 fn carry_signal(event: PresenceEvent) -> Option<CarryEvent> {
     match event {
-        PresenceEvent::Escape | PresenceEvent::Quit => Some(CarryEvent::Cancel),
+        PresenceEvent::Escape | PresenceEvent::EscapeSpeech(_) | PresenceEvent::Quit => {
+            Some(CarryEvent::Cancel)
+        }
         PresenceEvent::HostChanged { w, change } => {
             Some(CarryEvent::HostChanged { watch: w, change })
         }
