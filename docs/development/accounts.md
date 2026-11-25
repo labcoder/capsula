@@ -1085,7 +1085,9 @@ pass's 16, and any whose names come back, stay owed to later passes and opens.
 host it commits, for the existing-profile observer. Nothing calls it yet. It takes the caller's
 `SessionLock` and opens the file only through [`store::existing::open`](store.md#reading-an-existing-database),
 inside `store::existing::in_folder`, as the [legacy history read](store.md#a-legacy-history-store)
-does: the folder's identity is taken first and must read the same at the same path afterwards.
+does: the folder's identity is taken first and must read the same at the same path afterwards,
+so a lasting rename or replacement is refused. A stable path through the read is the caller's
+guarantee, by holding the product folder's chain.
 It creates, migrates, checkpoints, retires and sweeps nothing, and it never writes or deletes a
 credential name. It returns two `Observation`s from one snapshot:
 
@@ -1109,7 +1111,8 @@ simply `Unverified`. How each `user_version` maps:
 | 5 and newer | `Unverified` | written by a newer build |
 
 At version 3 the file's shape must be exactly that of one built in memory from the open's own
-SQL: the same tables, strictness and columns (name, type, not-null, default, key), the same
+SQL: the same schema objects by type, name and table (so an extra virtual table, which has no
+columns to compare, still shows), the same tables, strictness and columns (name, type, not-null, default, key), the same
 foreign keys (table, columns, actions), the same index keys (unique, origin, partial, columns)
 and the same index SQL. The candidate's rows are read once, unsorted, each using up a distinct
 entry of the small expected set, so SQLite sorts nothing and at most one row past that set is

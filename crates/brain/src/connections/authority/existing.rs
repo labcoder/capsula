@@ -15,16 +15,17 @@ use crate::platform::SessionLock;
 use crate::platform::credential::CredentialStore;
 use crate::store::existing::{self, ExistingError};
 
-/// Every table's columns, foreign keys and index keys, and every other object's SQL, unsorted.
-/// Table SQL isn't compared, since a file migrated to the current version differs in text from a
-/// fresh one.
+/// Every schema object's type, name and table, every table's columns, foreign keys and index keys,
+/// and every other object's SQL, unsorted. Table SQL isn't compared, since a file migrated to the
+/// current version differs in text from a fresh one; a virtual table has no columns here, so its
+/// object row is what shows it.
 const SHAPE: &str = "
 SELECT 'column', t.name, t.strict, c.cid, c.name, c.type, c.\"notnull\", c.dflt_value, c.pk
 FROM pragma_table_list t, pragma_table_xinfo(t.name) c
 WHERE t.schema = 'main' AND t.type = 'table'
 UNION ALL
-SELECT 'object', tbl_name, type, name, sql, NULL, NULL, NULL, NULL
-FROM sqlite_schema WHERE type <> 'table'
+SELECT 'object', tbl_name, type, name, iif(type = 'table', NULL, sql), NULL, NULL, NULL, NULL
+FROM sqlite_schema
 UNION ALL
 SELECT 'reference', m.name, f.id, f.seq, f.\"table\", f.\"from\", f.\"to\",
     f.on_update || ' ' || f.on_delete, f.match
@@ -352,6 +353,11 @@ mod tests {
         }
         for (case, sql) in [
             ("extra-table", "CREATE TABLE extra (x INTEGER)"),
+            (
+                "extra-virtual-table",
+                "CREATE VIRTUAL TABLE extra USING fts5vocab('heads', 'row')",
+            ),
+            ("extra-view", "CREATE VIEW extra AS SELECT 1"),
             ("extra-index", "CREATE INDEX extra ON generations (kind)"),
             ("dropped-index", "DROP INDEX one_active"),
             (
