@@ -521,7 +521,8 @@ fn row(
         PageEventKind::User
         | PageEventKind::HeldTurn { .. }
         | PageEventKind::FailedUser
-        | PageEventKind::FailedHeldTurn { .. } => Some(strings.get(Text::ThreadUser)),
+        | PageEventKind::FailedHeldTurn { .. }
+        | PageEventKind::ConnectionFailed { .. } => Some(strings.get(Text::ThreadUser)),
         PageEventKind::AssistantText => Some(strings.assistant(state.settings.as_ref().map_or(
             kumochi_protocol::constants::DEFAULT_ASSISTANT_NAME,
             |settings| settings.assistant_name.as_str(),
@@ -539,6 +540,7 @@ fn row(
         PageEventKind::HeldTurn { screen } | PageEventKind::FailedHeldTurn { screen } => {
             Some(screen)
         }
+        PageEventKind::ConnectionFailed { screen, .. } => screen,
         _ => None,
     };
     Row {
@@ -1040,7 +1042,9 @@ mod tests {
     fn saved_failure_keeps_the_user_row_and_its_screen_without_a_delivery_claim(
         cx: &mut TestAppContext,
     ) {
-        use kumochi_protocol::message::{HeldScreen, ScreenClass};
+        use kumochi_protocol::message::{
+            DeliveryProof, HeldScreen, HistoryFailure, HistoryFailureCause, ScreenClass,
+        };
 
         cx.update(|cx| {
             cx.set_global(Strings::english());
@@ -1061,6 +1065,18 @@ mod tests {
                     },
                     PageEventKind::FailedHeldTurn {
                         screen: HeldScreen::NotIncluded(ScreenClass::Changed),
+                    },
+                ),
+                (
+                    PageEventKind::HeldTurn {
+                        screen: HeldScreen::Screen,
+                    },
+                    PageEventKind::ConnectionFailed {
+                        failure: HistoryFailure {
+                            cause: HistoryFailureCause::AnthropicKeyRejected,
+                            delivery: DeliveryProof::NotAccepted,
+                        },
+                        screen: Some(HeldScreen::Screen),
                     },
                 ),
             ] {

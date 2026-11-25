@@ -430,6 +430,164 @@ fn saved_failure_marks_only_its_user_event_and_preserves_partial_history() {
 }
 
 #[test]
+fn connection_failure_survives_reopen_on_its_user_event_only() {
+    use kumochi_protocol::message::{
+        DeliveryProof, HeldScreen, HistoryFailure, HistoryFailureCause,
+    };
+
+    let scratch = Scratch::new("connection-failure-history");
+    let mut store = Store::open(&scratch.db()).unwrap();
+    store.recover().unwrap();
+    let thread = add(&mut store, "connection history", "older");
+    let other = add(&mut store, "other task", "untouched");
+    let unsent = HistoryFailure {
+        cause: HistoryFailureCause::ChatGptSignIn,
+        delivery: DeliveryProof::NotSent,
+    };
+    let rejected = HistoryFailure {
+        cause: HistoryFailureCause::AnthropicKeyRejected,
+        delivery: DeliveryProof::NotAccepted,
+    };
+    let broke_off = HistoryFailure {
+        cause: HistoryFailureCause::AnthropicCredit,
+        delivery: DeliveryProof::PartialAnswer,
+    };
+    let partial = [NewEvent {
+        kind: EventKind::AssistantText,
+        text: Some("partial answer"),
+        body: None,
+    }];
+    let turns = [
+        (RunId(3), "typed", None, unsent),
+        (RunId(4), "held", Some(HeldScreen::Screen), rejected),
+        (RunId(5), "continue", None, broke_off),
+    ];
+    for (run, text, screen, failure) in turns {
+        store
+            .begin_held_turn(thread, None, run, text, screen)
+            .unwrap();
+        if screen.is_some() {
+            store.sent_screen(run).unwrap();
+        }
+        let final_events = if run == RunId(5) { &partial[..] } else { &[] };
+        store
+            .end_run_with_connection_failure(thread, run, final_events, failure)
+            .unwrap();
+    }
+    assert!(matches!(
+        store.end_run_with_connection_failure(thread, RunId(5), &partial, unsent),
+        Err(StoreError::NoRun)
+    ));
+    store
+        .conn
+        .execute(
+            "UPDATE runs SET started_ms = 50, ended_ms = 150 WHERE id = 5",
+            [],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE threads SET updated_ms = 100 WHERE id = ?1",
+            [bounded_id(thread.0)],
+        )
+        .unwrap();
+    drop(store);
+
+    let mut store = Store::open(&scratch.db()).unwrap();
+    assert_eq!(store.recover().unwrap().crashed_runs, 0);
+    let (rows, next) = store.pages().events_page(thread, None, 10).unwrap();
+    assert_eq!(next, None);
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows[0].run, Some(RunId(5)));
+    assert_eq!(rows[0].kind, PageEventKind::AssistantText);
+    assert_eq!(rows[0].text, "partial answer");
+    for (row, (run, text, screen, failure)) in rows[1..4].iter().zip(turns.into_iter().rev()) {
+        assert_eq!(row.run, Some(run));
+        assert_eq!(
+            row.kind,
+            PageEventKind::ConnectionFailed { failure, screen }
+        );
+        assert_eq!(row.text, text);
+    }
+    assert_eq!(rows[4].run, Some(RunId(1)));
+    assert_eq!(rows[4].kind, PageEventKind::User);
+    assert_eq!(
+        task_rows(&store, Some("connection history"), 151)[0].task,
+        Some(TaskFact {
+            latest_run: Some(TaskRun {
+                id: RunId(5),
+                outcome: TaskRunOutcome::Failed
+            }),
+            last_activity_ms: 150,
+            state: TaskState::NeedsYou,
+        })
+    );
+    store
+        .conn
+        .execute(
+            "UPDATE events SET run = 3 WHERE thread = ?1 AND kind = 'user'",
+            [bounded_id(other.0)],
+        )
+        .unwrap();
+    let (rows, _) = store.pages().events_page(other, None, 10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, PageEventKind::User);
+}
+
+#[test]
+fn old_unknown_and_unproven_reasons_stay_generic() {
+    use crate::store::Failure;
+    use kumochi_protocol::message::HeldScreen;
+
+    let scratch = Scratch::new("generic-connection-history");
+    let mut store = Store::open(&scratch.db()).unwrap();
+    store.recover().unwrap();
+    let thread = store.main_thread().unwrap();
+    for (id, reason) in (1..).zip([
+        None,
+        Some("engine"),
+        Some("connection/chatgpt_sign_in/unknown"),
+        Some("connection/claude_code_signed_out/partial_answerX"),
+        Some("connection/private_provider_text/not_sent"),
+    ]) {
+        let run = RunId(id);
+        store
+            .begin_held_turn(thread, None, run, "held", Some(HeldScreen::Screen))
+            .unwrap();
+        store.sent_screen(run).unwrap();
+        store
+            .end_run(thread, run, &[], RunEnd::Failed(Failure::Engine))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET reason = ?1 WHERE id = ?2",
+                params![reason, bounded_id(id)],
+            )
+            .unwrap();
+    }
+    let reply = events(&store, thread, None);
+    let encoded = frame::encode(&reply, Pipe::Data).unwrap();
+    let marker = b"private_provider_text";
+    assert!(!encoded.windows(marker.len()).any(|bytes| bytes == marker));
+    let DataToShell::Page {
+        events: rows,
+        next: None,
+        ..
+    } = reply
+    else {
+        panic!("one complete history page");
+    };
+    assert_eq!(
+        rows.into_iter().map(|row| row.kind).collect::<Vec<_>>(),
+        [PageEventKind::FailedHeldTurn {
+            screen: HeldScreen::Screen
+        }; 5]
+    );
+}
+
+#[test]
 fn keyset_pages_keep_original_threads_once_while_new_threads_arrive() {
     let scratch = Scratch::new("pages-keyset");
     let mut store = Store::open(&scratch.db()).expect("store");
@@ -724,14 +882,27 @@ fn hidden_drawing_and_tool_rows_do_not_consume_a_page_or_create_a_continuation()
 
 #[test]
 fn oversized_unicode_event_is_cut_to_the_full_frame_budget_and_can_continue() {
+    use kumochi_protocol::message::{DeliveryProof, HistoryFailure, HistoryFailureCause};
+
     let scratch = Scratch::new("pages-unicode");
     let mut store = Store::open(&scratch.db()).expect("store");
     let thread = add(&mut store, "title", "older");
-    let text = "🙂漢é".repeat(40_000);
+    let marker = "sensitive-text-marker";
+    let text = format!("{marker}{}", "🙂漢é".repeat(40_000));
+    let failure = HistoryFailure {
+        cause: HistoryFailureCause::AnthropicCredit,
+        delivery: DeliveryProof::NotAccepted,
+    };
     store
         .begin_turn(thread, None, RunId(2), &text)
         .expect("huge event");
+    store
+        .end_run_with_connection_failure(thread, RunId(2), &[], failure)
+        .expect("refined outcome");
     let mut reply = events(&store, thread, None);
+    let debug = format!("{reply:?}");
+    assert!(!debug.contains(marker));
+    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
     let DataToShell::Page {
         request,
         events: rows,
@@ -744,6 +915,13 @@ fn oversized_unicode_event_is_cut_to_the_full_frame_budget_and_can_continue() {
     assert_eq!(*request, u32::MAX);
     assert_eq!(rows.len(), 1);
     assert_eq!(*before, Some(EventId(2)));
+    assert_eq!(
+        rows[0].kind,
+        PageEventKind::ConnectionFailed {
+            failure,
+            screen: None
+        }
+    );
     assert!(rows[0].cut);
     assert!(text.starts_with(&rows[0].text));
     assert!(frame::encode(&reply, Pipe::Data).expect("frame").len() <= MAX_PAGE_BYTES);
