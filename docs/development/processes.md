@@ -170,8 +170,10 @@ SIGCHLD's disposition. Nothing starts a child yet, and Windows has none.
   instance secret.
 - **Retirement waits** are the link's Quit timeout, 3 s, before the kill and again after it.
   `start_brain` hands the shell its ends only after the owner reports its one spawn attempt,
-  and waits for that report without a deadline, since a timeout couldn't tell a refused spawn
-  from a late one. On a refusal all four ends are closed before it returns.
+  and waits 5 s for that report. A refusal means no child; a report that's late is **Pending**,
+  not a refusal: a child may still start, but its owner is gone, so the owner retires it, and
+  the spawn claim stays taken until it's reaped. Either way all four ends are closed before
+  `start_brain` returns.
 
 - **One owner.** A `ChildOwner` thread exists before the spawn, spawns on itself and is the only
   code in the shell that waits on, signals or reaps the brain. The UI never blocks on it. It polls

@@ -156,10 +156,14 @@ impl ChildOwner {
         let _settled = self.retire.send(());
     }
 
-    /// The spawn report, waiting for it: the owner sends one right after its single spawn
-    /// attempt, or the channel closes if the thread died first. None only in that second case.
-    pub(crate) fn spawned(&self) -> Option<Report> {
-        self.reports.recv().ok()
+    /// The spawn report, which the owner sends right after its single spawn attempt.
+    ///
+    /// # Errors
+    /// `Timeout` when none came by `by`: the outcome is pending, and a child may still start.
+    /// `Disconnected` when the thread died before reporting.
+    pub(crate) fn spawned(&self, by: Instant) -> Result<Report, RecvTimeoutError> {
+        self.reports
+            .recv_timeout(by.saturating_duration_since(Instant::now()))
     }
 
     /// The next report, or None when none arrives by `by`.
@@ -782,6 +786,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_spawn_late_past_the_wait_is_pending_and_its_child_is_retired() {
+        let word = Arc::new(SpawnWord::default());
+        let (gate, held) = gate();
+        let fake = Fake::with(|s| {
+            s.killable = true;
+            s.spawn_gate = Some(gate);
+        });
+        let owner = ChildOwner::start(fake.clone(), Arc::clone(&word), WAIT).expect("owner");
+        held.entered();
+        let by = Instant::now() + WAIT;
+        assert!(matches!(owner.spawned(by), Err(RecvTimeoutError::Timeout)));
+        assert!(Instant::now() >= by, "waited until the deadline");
+        drop(owner);
+        held.release();
+        assert!(!word.claim(), "the late child holds the claim");
+        fake.until(|s| s.reaped);
+        let script = fake.script();
+        assert_eq!((script.spawns, script.kills, script.forbidden), (1, 1, 0));
+    }
+
     /// Delegates to a fake, and is slow to drop, so a refusal heard before the drop shows.
     struct SlowDrop(Fake, Arc<std::sync::atomic::AtomicBool>);
 
@@ -820,7 +845,10 @@ mod tests {
             let os = SlowDrop(fake, Arc::clone(&dropped));
             let owner = ChildOwner::start(os, Arc::clone(&word), WAIT).expect("owner");
             assert!(
-                matches!(owner.spawned(), Some(Report::NotSpawned(_))),
+                matches!(
+                    owner.spawned(Instant::now() + BOUND),
+                    Ok(Report::NotSpawned(_))
+                ),
                 "{refusal}"
             );
             assert!(

@@ -9,32 +9,53 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants::PARENT_BOUND;
 
 use super::pair::{self, Action, ChildEnds, ShellEnds};
 use crate::platform::child::{ChildOwner, Exit, Observation, Os, Refusal, Report, SpawnWord};
 
+/// How long `start_brain` waits for the spawn report. A spawn takes milliseconds; this only
+/// bounds one that stalls.
+const SPAWN_REPORT: Duration = Duration::from_secs(5);
+
+/// Why `start_brain` handed out no ends. All four are closed by the time it returns.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum NotStarted {
+    /// No child exists, and this attempt starts none.
+    #[error(transparent)]
+    Refused(#[from] Refusal),
+    /// The spawn hadn't reported by its deadline, so a child may still start. Its owner is
+    /// dropped, so it retires any child it makes, and the spawn claim stays taken until that
+    /// child is reaped.
+    #[error("the brain's spawn didn't report in time")]
+    Pending,
+}
+
 /// Starts a parent-bound brain as the shell's child, with the control leg on its descriptor 3 and
 /// the data leg on 4, and hands out the shell's ends only once the child exists. Retirement
 /// waits the link's Quit timeout before the kill, and again after. Blocks until the owner reports
-/// its one spawn attempt, which follows a single `posix_spawn` call; there's no deadline,
-/// because a timeout couldn't tell a refused spawn from a late one. Call it off the UI thread.
+/// its one spawn attempt, or for `SPAWN_REPORT` at most. Call it off the UI thread.
 ///
 /// # Errors
-/// The owner's refusal, or `Spawn` when the sockets, the path or the owner thread can't be made
-/// or the thread died before reporting. All four ends are closed by then.
+/// `Pending` when the report didn't come in time. Otherwise the owner's refusal, or `Spawn` when
+/// the sockets, the path or the owner thread can't be made or the thread died before reporting.
 pub(crate) fn start_brain(
     brain: &Path,
     word: Arc<SpawnWord>,
-) -> Result<(ChildOwner, ShellEnds), Refusal> {
+) -> Result<(ChildOwner, ShellEnds), NotStarted> {
     let (shell, child) = pair::pairs().map_err(Refusal::Spawn)?;
     let os = Darwin::new(brain, &[OsStr::new(PARENT_BOUND)], child).map_err(Refusal::Spawn)?;
     let owner = ChildOwner::start(os, word, crate::link::QUIT_TIMEOUT).map_err(Refusal::Spawn)?;
-    match owner.spawned() {
-        Some(Report::Spawned) => Ok((owner, shell)),
-        Some(Report::NotSpawned(refusal)) => Err(refusal),
-        Some(Report::Settled(_)) | None => Err(Refusal::Spawn(io::ErrorKind::BrokenPipe.into())),
+    match owner.spawned(Instant::now() + SPAWN_REPORT) {
+        Ok(Report::Spawned) => Ok((owner, shell)),
+        Ok(Report::NotSpawned(refusal)) => Err(refusal.into()),
+        Err(RecvTimeoutError::Timeout) => Err(NotStarted::Pending),
+        Ok(Report::Settled(_)) | Err(RecvTimeoutError::Disconnected) => {
+            Err(Refusal::Spawn(io::ErrorKind::BrokenPipe.into()).into())
+        }
     }
 }
 
@@ -581,13 +602,13 @@ mod tests {
         );
         assert!(matches!(
             refused,
-            Err(Refusal::Spawn(error)) if error.kind() == io::ErrorKind::NotFound
+            Err(NotStarted::Refused(Refusal::Spawn(error))) if error.kind() == io::ErrorKind::NotFound
         ));
         let word = Arc::new(SpawnWord::default());
         word.quit();
         assert!(matches!(
             start_brain(Path::new("/bin/test"), word),
-            Err(Refusal::Quitting)
+            Err(NotStarted::Refused(Refusal::Quitting))
         ));
     }
 }
