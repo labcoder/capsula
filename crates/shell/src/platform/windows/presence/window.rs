@@ -81,7 +81,7 @@ impl Hover {
 
 /// Configures a tool window, reporting pointer boundaries on status panels. Overlay and status
 /// surfaces never activate, and overlays pass clicks through. A text surface activates only
-/// through [`activate_presence_window`]. This neither shows nor resizes the window.
+/// through [`super::activate_presence_window`]. This neither shows nor resizes the window.
 ///
 /// # Errors
 /// Fails when the window has no Win32 handle or Windows refuses a change.
