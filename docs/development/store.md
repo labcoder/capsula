@@ -539,10 +539,11 @@ must be a folder itself, not a link or reparse point, since the opener checks on
 file and could otherwise read a store through a redirected folder. A held, admitted product
 folder is still the caller's to establish.
 
-- `KnownSchema`: the file's `user_version` is one this build knows (1 to the newest), and its
-  schema objects (type, name, table and SQL, from `sqlite_schema`) are exactly those the
-  migrations make at that version, built in memory to compare. The candidate's catalog is counted
-  first, then read once without sorting, each row using up a distinct entry of the small
+- `KnownSchema(version)`: the file's `user_version` is one this build knows (1 to the newest,
+  carried as `version`; below `CURRENT_HISTORY` it still needs a migration), and its schema
+  objects (type, name, table and SQL, from `sqlite_schema`) are exactly those the migrations make
+  at that version, built in memory to compare. The candidate's catalog is counted first, then
+  read once without sorting, each row using up a distinct entry of the small
   expected set, so neither Rust nor a SQLite sorter copies a large foreign catalog. This is schema
   evidence only. It reads no rows, product invariants (such as the `approval_mark` singleton),
   page integrity or binding, so it promises neither an intact store nor a successful open or

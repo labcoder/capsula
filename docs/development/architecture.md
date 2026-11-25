@@ -201,9 +201,11 @@ whose admission creates the product folders. Each probe holds its anchors throug
 is absent only when every legacy product folder (local data and, on Windows, roaming settings) is a
 definitive not-found under its verified anchor. A present local data folder is read in place under
 its existing `session.lock`, taken with `try_acquire_existing` and held through every read, and
-matches only with a known history schema and a matching authority and host. That last check isn't
-wired in yet (`authority_and_host` reads unverified), so a present legacy folder reads unverified
-for now. A roaming folder without local data and any failed lookup are unverified too.
+matches only with the current history schema and a matching authority and host. An older
+known schema needs a migration, so it reads unverified until the owner decides how legacy schema
+updates are explained. The authority and host check isn't wired in yet (`authority_and_host`
+reads unverified), so a present legacy folder reads unverified for now. A roaming folder without
+local data and any failed lookup are unverified too.
 
 On Windows `kumochi_storage::hold_product_folder(anchor)` looks up only this edition's product
 folder (`DATA_DIR`) and `profile_root(anchor)` only its root slot, both through one private lookup

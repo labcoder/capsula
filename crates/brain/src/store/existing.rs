@@ -110,6 +110,9 @@ pub(crate) fn open<'lock>(
     })
 }
 
+/// The history version this build's migrations end at.
+pub(crate) const CURRENT_HISTORY: usize = MIGRATIONS.len();
+
 /// What a legacy history store at `db` shows, read under `session`, the profile's writer lock.
 #[cfg_attr(
     not(test),
@@ -125,8 +128,9 @@ pub(crate) enum LegacyHistory {
     Missing,
     /// A schema version this build knows, with exactly the objects its migrations make at that
     /// version. Schema evidence only: no rows, product invariants, page integrity or binding are
-    /// read, so it promises neither an intact store nor a successful open.
-    KnownSchema,
+    /// read, so it promises neither an intact store nor a successful open. It carries that
+    /// version: one below [`CURRENT_HISTORY`] still needs a migration.
+    KnownSchema(usize),
     /// Anything else, including any failed read.
     Unverified,
 }
@@ -149,8 +153,8 @@ pub(crate) fn legacy_history(db: &Path, session: &SessionLock) -> LegacyHistory 
     }
     match open(db, session) {
         Ok(read) => match known_schema(&read) {
-            Ok(true) => LegacyHistory::KnownSchema,
-            Ok(false) | Err(_) => LegacyHistory::Unverified,
+            Ok(Some(version)) => LegacyHistory::KnownSchema(version),
+            Ok(None) | Err(_) => LegacyHistory::Unverified,
         },
         Err(ExistingError::Missing)
             if ["-wal", "-shm", "-journal"]
@@ -167,17 +171,17 @@ pub(crate) fn legacy_history(db: &Path, session: &SessionLock) -> LegacyHistory 
 /// Every schema object's type, name, table and SQL.
 const CATALOG: &str = "SELECT type, name, tbl_name, sql FROM sqlite_schema";
 
-/// Whether `conn`'s objects are exactly those this build's migrations make at its `user_version`.
+/// That `user_version` when `conn`'s objects are exactly those this build's migrations make at it.
 /// The candidate's catalog is counted first, then each of its rows is read once, unsorted, and
 /// must use up a distinct entry of the small expected set, so Rust holds no copy of a candidate
 /// row and SQLite sorts nothing.
-fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
+fn known_schema(conn: &Connection) -> Result<Option<usize>, StoreError> {
     let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let Some(version) = usize::try_from(found)
         .ok()
         .filter(|version| (1..=MIGRATIONS.len()).contains(version))
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let mut built = Connection::open_in_memory()?;
     schema::migrate_to(&mut built, version)?;
@@ -189,7 +193,7 @@ fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
         .collect::<rusqlite::Result<Vec<Option<[Option<String>; 4]>>>>()?;
     let count: i64 = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))?;
     if usize::try_from(count).ok() != Some(expected.len()) {
-        return Ok(false);
+        return Ok(None);
     }
     let mut catalog = conn.prepare(CATALOG)?;
     let mut rows = catalog.query([])?;
@@ -197,7 +201,7 @@ fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
         let mut candidate = [None; 4];
         for (column, value) in candidate.iter_mut().enumerate() {
             let Ok(text) = row.get_ref(column)?.as_str_or_null() else {
-                return Ok(false);
+                return Ok(None);
             };
             *value = text;
         }
@@ -208,11 +212,11 @@ fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
                     .all(|(want, got)| want.as_deref() == got)
             })
         }) else {
-            return Ok(false);
+            return Ok(None);
         };
         *entry = None;
     }
-    Ok(expected.iter().all(Option::is_none))
+    Ok(expected.iter().all(Option::is_none).then_some(version))
 }
 
 /// Whether `dir` is a folder itself, not a link or reparse point to one.
@@ -262,7 +266,7 @@ fn uri(db: &Path) -> Result<String, ExistingError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -465,7 +469,7 @@ mod tests {
     }
 
     /// A cleanly closed WAL store in `dir`, migrated to `version`.
-    fn store_at(dir: &Path, version: usize) -> PathBuf {
+    pub(crate) fn store_at(dir: &Path, version: usize) -> PathBuf {
         fs::create_dir_all(dir).expect("store folder");
         let db = dir.join("x.db");
         let mut conn = Connection::open(&db).expect("store");
@@ -487,14 +491,17 @@ mod tests {
             let before = files(dir);
             assert_eq!(
                 legacy_history(&db, &lock),
-                LegacyHistory::KnownSchema,
+                LegacyHistory::KnownSchema(version),
                 "v{version}"
             );
             assert_eq!(files(dir), before, "v{version}");
         }
         let opened = scratch.dir().join("opened").join("x.db");
         drop(super::super::Store::open(&opened).expect("the brain's own open"));
-        assert_eq!(legacy_history(&opened, &lock), LegacyHistory::KnownSchema);
+        assert_eq!(
+            legacy_history(&opened, &lock),
+            LegacyHistory::KnownSchema(CURRENT_HISTORY)
+        );
         let copy = scratch.dir().join("copy");
         fs::create_dir(&copy).expect("copy folder");
         let source = Connection::open(scratch.dir().join("opened").join("x.db")).expect("source");
@@ -507,7 +514,7 @@ mod tests {
         drop(source);
         assert_eq!(
             legacy_history(&copy.join("x.db"), &lock),
-            LegacyHistory::KnownSchema
+            LegacyHistory::KnownSchema(CURRENT_HISTORY)
         );
     }
 
@@ -611,7 +618,10 @@ mod tests {
         let (_held, lock) = session();
         let scratch = Scratch::new("existing-history-linked");
         let known = store_at(&scratch.dir().join("known"), MIGRATIONS.len());
-        assert_eq!(legacy_history(&known, &lock), LegacyHistory::KnownSchema);
+        assert_eq!(
+            legacy_history(&known, &lock),
+            LegacyHistory::KnownSchema(CURRENT_HISTORY)
+        );
         let target = known.parent().expect("store folder");
         symlink(target, scratch.dir().join("linked")).expect("folder link");
         let before = files(target);

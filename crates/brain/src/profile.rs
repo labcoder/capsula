@@ -14,7 +14,7 @@ use crate::platform::SessionLock;
 use crate::platform::credential::CredentialStore;
 #[cfg(any(windows, target_os = "macos"))]
 use crate::platform::{credential::NativeCredentialStore, profile as native};
-use crate::store::existing::{LegacyHistory, legacy_history};
+use crate::store::existing::{CURRENT_HISTORY, LegacyHistory, legacy_history};
 
 /// What the noncreating lookup found for one legacy product folder.
 pub(crate) enum Folder {
@@ -84,18 +84,21 @@ fn legacy(
 }
 
 /// The legacy profile in the present folder `data`, read under its existing session lock, which
-/// stays held through every read. Matching only with a known history schema and `authority`'s
-/// match; anything else, an absent authority included, is unverified.
+/// stays held through every read. Matching only with the current history schema and `authority`'s
+/// match; anything else, an absent authority included, is unverified. An older known schema needs
+/// a migration, which waits on the owner's call on legacy schema updates.
 fn intact(data: &Path, authority: impl FnOnce(&Path, &SessionLock) -> Observation) -> Observation {
     let Ok(session) = SessionLock::try_acquire_existing(&data.join(SESSION_LOCK)) else {
         return Observation::Unverified;
     };
     match legacy_history(&data.join(STORE_FILE), &session) {
-        LegacyHistory::KnownSchema => match authority(data, &session) {
+        LegacyHistory::KnownSchema(CURRENT_HISTORY) => match authority(data, &session) {
             Observation::Matching => Observation::Matching,
             Observation::Absent | Observation::Unverified => Observation::Unverified,
         },
-        LegacyHistory::Missing | LegacyHistory::Unverified => Observation::Unverified,
+        LegacyHistory::KnownSchema(_) | LegacyHistory::Missing | LegacyHistory::Unverified => {
+            Observation::Unverified
+        }
     }
 }
 
@@ -230,6 +233,33 @@ mod tests {
             "no authority check is wired in yet"
         );
         assert_eq!(files(&data), before);
+    }
+
+    #[test]
+    fn only_the_current_history_version_can_match() {
+        let scratch = Scratch::new("profile-history-versions");
+        for version in 1..=CURRENT_HISTORY {
+            let data = scratch.dir().join(format!("v{version}"));
+            let db = crate::store::existing::tests::store_at(&data, version);
+            fs::rename(db, data.join(STORE_FILE)).expect("the history store's name");
+            fs::write(data.join(SESSION_LOCK), b"").expect("the session lock");
+            let before = files(&data);
+            let read = intact(&data, |_, _| Observation::Matching);
+            let expected = if version == CURRENT_HISTORY {
+                Observation::Matching
+            } else {
+                Observation::Unverified
+            };
+            assert_eq!(read, expected, "v{version}");
+            assert_eq!(files(&data), before, "v{version}");
+            let session = SessionLock::try_acquire_existing(&data.join(SESSION_LOCK))
+                .expect("the session lock is free again");
+            assert_eq!(
+                legacy_history(&data.join(STORE_FILE), &session),
+                LegacyHistory::KnownSchema(version),
+                "v{version} is a known schema"
+            );
+        }
     }
 
     #[test]
