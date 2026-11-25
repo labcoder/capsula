@@ -6,7 +6,9 @@
 
 use std::time::Instant;
 
-use kumochi_protocol::message::{GestureId, MAX_VISIBLE_SCENES, RunId, SceneId, ThreadId};
+use kumochi_protocol::message::{
+    ControlToBrain, GestureId, MAX_VISIBLE_SCENES, RunId, SceneId, ThreadId,
+};
 
 use crate::presence::drag::Generation;
 use crate::presenter::{Broken, Effect, Presenter};
@@ -179,26 +181,40 @@ pub fn local_decision(mut activity: Activity, panel: Panel, presenter: &Presente
 /// moves.
 pub fn moving_run(runs: &Runs, presenter: &Presenter, now: Instant) -> Option<RunId> {
     runs.stoppable()
-        .map(|run| {
-            if presenter.holds_scenes() || presenter.live_work(now) {
-                presenter
-                    .stoppable_run()
-                    .map_or(run, |drawing| drawing.max(run))
-            } else {
-                run
-            }
-        })
+        .map(|run| drawing_stop_target(presenter, run, now).unwrap_or(run))
         .or_else(|| {
             let moving = presenter.live_work(now);
             presenter.stoppable_run().filter(|_| moving)
         })
 }
 
+fn drawing_stop_target(presenter: &Presenter, run: RunId, now: Instant) -> Option<RunId> {
+    (presenter.holds_scenes() || presenter.live_work(now)).then(|| {
+        presenter
+            .stoppable_run()
+            .map_or(run, |drawing| drawing.max(run))
+    })
+}
+
+pub enum RunStop {
+    Tell(ControlToBrain),
+    PlaceAndStop(RunId),
+}
+
+pub fn run_stop(presenter: &Presenter, message: ControlToBrain, now: Instant) -> RunStop {
+    if let ControlToBrain::Stop { run, .. } = message
+        && let Some(run) = drawing_stop_target(presenter, run, now)
+    {
+        RunStop::PlaceAndStop(run)
+    } else {
+        RunStop::Tell(message)
+    }
+}
+
 /// Esc's ordinary stop, once nothing ahead of it took the press.
-#[derive(Debug)]
 pub enum MovingStop {
-    /// The moving run is fenced; tell the brain this.
-    Run(kumochi_protocol::message::ControlToBrain),
+    /// The moving run is fenced; resolve its stop against the drawings at delivery.
+    Run(ControlToBrain),
     /// Only a drawing moves: place the drawings, then [`stop_drawing`].
     Drawing,
     Idle,
@@ -227,18 +243,16 @@ pub fn stop_drawing(
 }
 
 /// Esc's clear: grant `credit` first, then clear what holds the scenes.
-#[derive(Debug)]
 pub struct Cleared {
     pub credit: u32,
     pub then: AfterClear,
 }
 
-#[derive(Debug)]
 pub enum AfterClear {
     /// The presenter holds them: its own clear tells the brain.
     Presenter,
     /// Tell the brain the runs' `ClearDrawing`, if any.
-    Tell(Option<kumochi_protocol::message::ControlToBrain>),
+    Tell(Option<ControlToBrain>),
 }
 
 pub fn clear(runs: &mut Runs, presenter: &Presenter) -> Cleared {
@@ -254,7 +268,6 @@ pub fn clear(runs: &mut Runs, presenter: &Presenter) -> Cleared {
 }
 
 /// One exact run's stop at the presenter, for a press or a hold that names that run.
-#[derive(Debug)]
 pub struct OwnedStop {
     /// A drawing is on screen or still moving, so its `StopScenes` tells the brain and the
     /// run's own `Stop` stays unsent.
@@ -269,10 +282,7 @@ pub fn stop_owned(presenter: &mut Presenter, run: RunId, now: Instant) -> OwnedS
     let effects = presenter.stop_owned(run, now).map(|mut effects| {
         if !scenes {
             effects.retain(|effect| {
-                !matches!(
-                    effect,
-                    Effect::Control(kumochi_protocol::message::ControlToBrain::StopScenes { .. })
-                )
+                !matches!(effect, Effect::Control(ControlToBrain::StopScenes { .. }))
             });
         }
         effects
@@ -568,16 +578,17 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use kumochi_protocol::message::{
-        ControlToBrain, DataToShell, GestureId, MAX_VISIBLE_SCENES, Phase, RunId, SceneId, ThreadId,
+        ControlToBrain, DataToShell, GestureId, MAX_VISIBLE_SCENES, Phase, RunId, SceneId, Step,
+        ThreadId,
     };
 
     use super::{
         Activity, AfterClear, AfterPull, Edit, Escape, EscapeHold, Lead, MarkedAnswer, MovingStop,
-        Panel, PlainEscape, PlainMatch, Press, SpeechEscapeOwner, SpeechPress, SpeechRoute,
-        SpeechStop, TalkEscape, TalkEscapeRefused, clear, decide, moving_run, stop_drawing,
-        stop_moving,
+        Panel, PlainEscape, PlainMatch, Press, RunStop, SpeechEscapeOwner, SpeechPress,
+        SpeechRoute, SpeechStop, TalkEscape, TalkEscapeRefused, clear, decide, moving_run,
+        run_stop, stop_drawing, stop_moving,
     };
-    use crate::presenter::fixture::presenter;
+    use crate::presenter::fixture::{begin, commit_as, live, presenter, rect};
     use crate::runs::Runs;
     use crate::settings::Field;
 
@@ -591,10 +602,13 @@ mod tests {
         runs.apply_state(ANSWER, ThreadId(1), Phase::Answering, None);
         let now = Instant::now();
         assert_eq!(moving_run(&runs, &presenter, now), Some(ANSWER));
-        let MovingStop::Run(ControlToBrain::Stop { run, revealed }) =
-            stop_moving(&mut runs, &presenter, now)
-        else {
+        let MovingStop::Run(message) = stop_moving(&mut runs, &presenter, now) else {
             panic!("the moving run is stopped first");
+        };
+        let RunStop::Tell(ControlToBrain::Stop { run, revealed }) =
+            run_stop(&presenter, message, now)
+        else {
+            panic!("without drawings the original Stop goes to the brain");
         };
         assert_eq!((run, revealed), (ANSWER, Vec::new()));
         assert_eq!(moving_run(&runs, &presenter, now), None, "fenced");
@@ -609,12 +623,50 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_live_drawing_owns_the_stop_of_an_older_run() {
+        let (mut presenter, now) = live();
+        let drawing = RunId(6);
+        begin(&mut presenter, MARKED, now);
+        commit_as(&mut presenter, drawing, MARKED, 0, rect("target"), now)
+            .expect("a newer drawing");
+        let mut runs = Runs::default();
+        runs.apply_state(ANSWER, ThreadId(1), Phase::Answering, None);
+
+        assert_eq!(moving_run(&runs, &presenter, now), Some(drawing));
+        let MovingStop::Run(message) = stop_moving(&mut runs, &presenter, now) else {
+            panic!("fence the older run before resolving the drawing");
+        };
+        let RunStop::PlaceAndStop(target) = run_stop(&presenter, message, now) else {
+            panic!("the live drawing selects a presenter stop");
+        };
+        assert_eq!(target, drawing);
+        assert_eq!(runs.stoppable(), None);
+    }
+
+    #[test]
     fn a_clear_with_no_scenes_at_the_presenter_tells_the_runs_clear() {
         let mut runs = Runs::default();
         let presenter = presenter();
+        runs.apply_state(ANSWER, ThreadId(1), Phase::Answering, None);
+        runs.apply_data(
+            DataToShell::StepCommit {
+                run: ANSWER,
+                scene: MARKED,
+                index: 0,
+                step: Step {
+                    label: "drawing".into(),
+                },
+            },
+            40,
+        );
         let cleared = clear(&mut runs, &presenter);
         assert_eq!(cleared.credit, 0);
-        assert!(matches!(cleared.then, AfterClear::Tell(None)));
+        let AfterClear::Tell(Some(ControlToBrain::ClearDrawing { scene_ids })) = cleared.then
+        else {
+            panic!("clear the scene through the runs");
+        };
+        assert_eq!(scene_ids, vec![MARKED]);
+        assert!(!runs.drawing());
     }
 
     #[test]

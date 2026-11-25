@@ -7,6 +7,7 @@ use kumochi_protocol::message::{AudioSession, ControlToBrain};
 
 use super::line::on_next_frame;
 use super::{EscapePanel, OpenError, Presence};
+use crate::escape::{RunStop, run_stop};
 use crate::presenter::{Broken, Completion, Effect, Measure, PairFont};
 
 impl Presence {
@@ -248,18 +249,13 @@ impl Presence {
 
     pub(super) fn stop_run(&mut self, message: ControlToBrain, cx: &mut Context<'_, Self>) {
         let now = Instant::now();
-        if let ControlToBrain::Stop { run, .. } = message
-            && (self.presenter.holds_scenes() || self.presenter.live_work(now))
-        {
-            let run = self
-                .presenter
-                .stoppable_run()
-                .map_or(run, |live| live.max(run));
-            self.place_drawings(cx.weak_entity(), cx);
-            let effects = self.presenter.stop(run, now);
-            self.scene_effects(effects, cx);
-        } else {
-            self.tell(message, cx);
+        match run_stop(&self.presenter, message, now) {
+            RunStop::PlaceAndStop(run) => {
+                self.place_drawings(cx.weak_entity(), cx);
+                let effects = self.presenter.stop(run, now);
+                self.scene_effects(effects, cx);
+            }
+            RunStop::Tell(message) => self.tell(message, cx),
         }
     }
 }
