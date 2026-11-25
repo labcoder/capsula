@@ -2,7 +2,7 @@ use std::mem::ManuallyDrop;
 use windows::Win32::Media::Audio::{WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0};
 use windows::core::GUID;
 
-use super::{Mix, read_format};
+use super::{Mix, capture_cutoff_100ns, read_format};
 use crate::platform::microphone::MicError;
 
 fn extensible(channels: u16, bits: u16, mask: u32, subtype: u32) -> WAVEFORMATEXTENSIBLE {
@@ -42,4 +42,17 @@ fn stereo_channel_mask_does_not_affect_capture_format_equality() {
         read_format(&back).expect("back stereo capture"),
         read_format(&front).expect("front stereo capture")
     );
+}
+
+#[test]
+fn collection_cutoff_excludes_the_ambiguous_tick_and_rounds_forward() {
+    assert_eq!(capture_cutoff_100ns(100, 10_000_000), Ok(102));
+    assert_eq!(capture_cutoff_100ns(3, 3_000_000), Ok(15));
+    assert_eq!(capture_cutoff_100ns(10, 24_000_000), Ok(6));
+    assert_eq!(
+        capture_cutoff_100ns(0, 10_000_000),
+        Err(MicError::Timestamp)
+    );
+    assert_eq!(capture_cutoff_100ns(100, 0), Err(MicError::Timestamp));
+    assert_eq!(capture_cutoff_100ns(i64::MAX, 1), Err(MicError::Timestamp));
 }

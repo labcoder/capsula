@@ -190,6 +190,8 @@ pub struct Threads {
     /// The note for what the default model last did with a hold's picture; none until it has
     /// said.
     pub sees: Option<Text>,
+    #[cfg(debug_assertions)]
+    pub fixture_engine: bool,
     connected: bool,
     /// Pages are read only while the panel is shown.
     shown: bool,
@@ -541,6 +543,10 @@ impl Threads {
 
     pub fn connected(&mut self) {
         self.retire_issue_confirmation();
+        #[cfg(debug_assertions)]
+        {
+            self.fixture_engine = false;
+        }
         self.connected = true;
         self.proven = None;
         self.settled = None;
@@ -595,6 +601,10 @@ impl Threads {
         }
         drop(reads);
         self.fresh.clear();
+        #[cfg(debug_assertions)]
+        {
+            self.fixture_engine = false;
+        }
         self.connected = false;
         self.proven = None;
         self.settled = None;

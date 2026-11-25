@@ -311,6 +311,7 @@ pub(crate) fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError
             | ControlToShell::VoiceHoldStatus { .. }
             | ControlToShell::VoiceHoldStopAccepted { .. }
             | ControlToShell::ScreenHolds(_)
+            | ControlToShell::FixtureEngineActive
             | ControlToShell::HoldScreen { .. }
             | ControlToShell::Voice(_),
         ) => Err(LinkError::Rejected),
