@@ -74,6 +74,23 @@ async fn a_found_install_shows_by_its_sign_in_and_the_store() {
 }
 
 #[test]
+fn warming_without_a_lane_refuses() {
+    let mut claude = Claude {
+        view: READY,
+        ..Claude::default()
+    };
+    let snapshot = claude
+        .snapshot(ThreadId(1), "claude-test".to_owned(), None, Offer::Nothing)
+        .expect("ready view");
+    assert_eq!(
+        claude.warm(snapshot),
+        Err(LaunchRefused::NotReady),
+        "a ready view does not supply a native lane"
+    );
+    assert!(claude.warm.is_none(), "no attempt was cached");
+}
+
+#[test]
 fn finding_without_a_lane_keeps_not_found() {
     let mut claude = Claude::default();
     claude.op(ConnectionOp::FindClaudeCode);

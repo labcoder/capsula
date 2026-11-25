@@ -96,7 +96,7 @@ impl From<WorkerLost> for SpeechError {
 
 /// Checks a capture rate and a sample count against the rate bounds, the byte ceiling and the
 /// duration ceiling. Every duration computed later relies on this having passed.
-pub(super) fn check_audio(rate: u32, samples: usize) -> Result<(), SpeechError> {
+pub(crate) fn check_audio(rate: u32, samples: usize) -> Result<(), SpeechError> {
     let longest = u64::from(rate) * u64::from(MAX_SECONDS);
     let fits = (MIN_RATE..=MAX_RATE).contains(&rate)
         && samples > 0
@@ -112,7 +112,7 @@ pub(super) fn check_audio(rate: u32, samples: usize) -> Result<(), SpeechError> 
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) enum SpeechRequest {
+pub(crate) enum SpeechRequest {
     /// Stage the natives from `natives`, load them, create Parakeet's recognizer from `models`
     /// and warm it up. Any model already loaded is dropped first.
     Load { natives: PathBuf, models: PathBuf },
@@ -131,7 +131,7 @@ impl std::fmt::Debug for SpeechRequest {
 }
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum SpeechReply {
+pub(crate) enum SpeechReply {
     Loaded,
     Text(String),
     Unloaded,

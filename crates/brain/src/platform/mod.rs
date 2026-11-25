@@ -22,7 +22,6 @@ mod connected_shell;
 mod fs;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(any(test, windows))]
 mod model_files;
 pub(crate) mod native_workers;
 mod pipe;
@@ -31,9 +30,9 @@ mod protected;
 mod runtime_admission;
 mod session_lock;
 pub(crate) mod shell_process;
+pub(crate) mod speech_wire;
 mod trust_roots;
 
-#[cfg(any(test, windows))]
 pub(crate) use model_files::ModelFiles;
 pub(crate) use shell_process::ShellProcess;
 
@@ -72,26 +71,24 @@ pub use fs::{free_space, links_unsupported, replace_file};
 mod folders;
 #[cfg(target_os = "macos")]
 pub use folders::{config_dir, data_dir};
-#[cfg(windows)]
 pub(crate) use pipe::ClientRefused;
 pub use pipe::Instance;
 #[cfg(not(windows))]
-pub(crate) use pipe::{PipeClient, client_image, open_pipe, server_image, shell_connection};
+pub(crate) use pipe::{
+    PipeClient, bridge_peer, client_image, open_pipe, server_image, shell_connection,
+};
 #[cfg(not(windows))]
 pub use pipe::{PipeServer, create_owner_only, session_id};
-#[cfg(windows)]
 pub(crate) use process::spawn_if;
 pub use process::{
     ChildPipes, Helper, Job, Launch, Spawned, Stdio, launch_detached, spawn, system_env,
 };
 pub(crate) use protected::Untrusted;
-#[cfg(all(test, not(windows)))]
-pub(crate) use protected::model_file;
 #[cfg(not(windows))]
 pub(crate) use protected::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_model_creation, mark, model_final, open_model_write, publish_model, remove_model_tree,
-    validate_model_path,
+    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
+    private_tree, publish_model, remove_model_tree, remove_tree, unmark, validate_model_path,
 };
 pub use runtime_admission::{Mode, supports};
 pub(crate) use runtime_admission::{require_mode, serve_speech};
