@@ -1868,7 +1868,7 @@ fn the_real_busy_notification_reaches_consumption_and_the_first_canvas_paint(
 #[gpui::test]
 fn the_admission_worker_only_delivers_to_a_live_presence(cx: &mut gpui_kit::TestAppContext) {
     use crate::{link::Session, presenter::Effect};
-    use kumochi_protocol::message::Incarnation;
+    use kumochi_protocol::message::{ControlToBrain, Incarnation, RunId, SceneId};
     use std::time::Instant;
 
     let shown = [
@@ -1879,14 +1879,16 @@ fn the_admission_worker_only_delivers_to_a_live_presence(cx: &mut gpui_kit::Test
         let owner = crate::presence::test_fixture::presence(cx);
         let session = Session::detached(1, Incarnation(1));
         let script = HostGuard::install(if live { &shown } else { &[] });
-        owner.update(cx, |this, cx| {
+        let controls = owner.update(cx, |this, cx| {
             this.presenter = super::ready_canvas();
             let now = Instant::now() + std::time::Duration::from_secs(60);
             let effects = offer_canvas_tail(&mut this.presenter, now);
             assert!(matches!(effects.as_slice(), [Effect::Admit(_)]));
             this.session = Some(session.clone());
+            let controls = this.link.record_controls();
             this.scene_effects(Ok(effects), cx);
             assert!(this.overlay.window().is_none());
+            controls
         });
         assert_eq!(session.granted(), 0, "credit waits for the worker");
         let weak = owner.downgrade();
@@ -1904,9 +1906,22 @@ fn the_admission_worker_only_delivers_to_a_live_presence(cx: &mut gpui_kit::Test
         assert_eq!(session.granted(), if live { 100 } else { 0 });
         script.finish();
         if let Some(owner) = owner {
+            assert_eq!(
+                controls.try_recv(),
+                Ok(ControlToBrain::StepReady {
+                    run: RunId(6),
+                    scene: SceneId(1),
+                    index: 0,
+                })
+            );
+            assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
             assert!(owner.read_with(cx, |this, _| this.overlay.window().is_some()));
             close_callback_scene(&owner, cx);
         } else {
+            assert_eq!(
+                controls.try_recv(),
+                Err(async_channel::TryRecvError::Closed)
+            );
             assert!(weak.upgrade().is_none());
         }
     }
