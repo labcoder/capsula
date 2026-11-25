@@ -954,15 +954,19 @@ fn bare_link() -> Link {
 
 #[test]
 fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
-    use std::io::Read as _;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use kumochi_protocol::Secret;
     use kumochi_protocol::message::{AudioSession, CAPABILITY_LEN, Hello, TextMetricsV1};
 
-    for (mode, control_tag, data_tag) in [
-        (AudioSession::Legacy, 0, 0),
-        (AudioSession::QueuedRequired, 37, 9),
+    let previous = IssueSession {
+        incarnation: Incarnation(5),
+        epoch: 127,
+    };
+    for (mode, repair_of, control_tag, data_tag) in [
+        (AudioSession::Legacy, None, 0, 0),
+        (AudioSession::QueuedRequired, None, 37, 9),
+        (AudioSession::QueuedRequired, Some(previous), 38, 9),
     ] {
         let profile = (mode == AudioSession::QueuedRequired).then_some(TextMetricsV1 {
             advances: [630; 95],
@@ -990,6 +994,7 @@ fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
                     control,
                     hello,
                     mode,
+                    repair_of,
                     attempt,
                     super::DrawingText {
                         profile,
@@ -1002,19 +1007,11 @@ fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
                 )
             })
         };
-        let greeting = |tag, echo| {
-            let mut payload = vec![tag, 1, b'b'];
-            payload.extend([7; CAPABILITY_LEN]);
-            if echo {
-                payload.extend([5, 128, 1]);
-            }
-            let len = u32::try_from(payload.len()).unwrap().to_le_bytes();
-            [len.as_slice(), &payload].concat()
-        };
-        let control_bytes = greeting(control_tag, false);
-        let mut got = vec![0; control_bytes.len()];
-        (&peer_control).read_exact(&mut got).unwrap();
-        assert_eq!(got, control_bytes);
+        assert_handshake_hello(
+            &peer_control,
+            control_tag,
+            if repair_of.is_some() { &[5, 127] } else { &[] },
+        );
         allowed.store(true, Ordering::Release);
         frame::write(
             &mut &peer_control,
@@ -1025,10 +1022,15 @@ fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
             Pipe::Control,
         )
         .unwrap();
-        let data_bytes = greeting(data_tag, mode == AudioSession::QueuedRequired);
-        got.resize(data_bytes.len(), 0);
-        (&peer_data).read_exact(&mut got).unwrap();
-        assert_eq!(got, data_bytes);
+        assert_handshake_hello(
+            &peer_data,
+            data_tag,
+            if mode == AudioSession::QueuedRequired {
+                &[5, 128, 1]
+            } else {
+                &[]
+            },
+        );
         assert_eq!(
             frame::read(&mut &peer_data, Pipe::Data).unwrap(),
             Some(DataToBrain::TextMetrics(profile))
@@ -1048,6 +1050,27 @@ fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
             None
         );
     }
+}
+
+fn assert_handshake_hello(mut peer: &PipeClient, tag: u8, echo: &[u8]) {
+    use std::io::Read as _;
+
+    use kumochi_protocol::message::CAPABILITY_LEN;
+
+    let mut payload = vec![tag, 1, b'b'];
+    payload.extend([7; CAPABILITY_LEN]);
+    payload.extend(echo);
+    let len = u32::try_from(payload.len())
+        .expect("the fixed handshake fixture fits in a frame")
+        .to_le_bytes();
+    let expected = [len.as_slice(), &payload].concat();
+    let mut actual = vec![0; expected.len()];
+    peer.read_exact(&mut actual)
+        .expect("the peer writes a complete handshake frame");
+    assert_eq!(
+        actual, expected,
+        "the handshake frame matches byte for byte"
+    );
 }
 
 fn text(run: u64, delta: &str) -> DataToShell {
@@ -4055,17 +4078,41 @@ fn talk_back_reconnects_do_not_spend_or_reset_the_loss_budget() {
     };
     let (events, states) = async_channel::unbounded();
     let (retry, retries) = async_channel::bounded::<()>(1);
-    drop(retry);
     let genuine_loss = Some(Instant::now());
+    let previous = IssueSession {
+        incarnation: Incarnation(1),
+        epoch: 2,
+    };
     for _ in 0..2 {
         assert_eq!(
-            link.after_loss(&events, &retries, Attendance::TalkBackChanged, genuine_loss),
-            Some((LinkState::Reconnecting, genuine_loss))
+            link.after_loss(
+                &events,
+                &retries,
+                Attendance::TalkBackChanged,
+                genuine_loss,
+                previous
+            ),
+            Some((LinkState::Reconnecting, genuine_loss, Some(previous)))
         );
     }
     assert!(states.is_empty());
+    let next = link.after_loss(&events, &retries, Attendance::Lost, None, previous);
+    let Some((LinkState::Reconnecting, Some(_), None)) = next else {
+        panic!("a genuine loss spends the budget and doesn't name a re-pair");
+    };
+    assert!(states.is_empty());
+    retry.try_send(()).unwrap();
     assert_eq!(
-        link.after_loss(&events, &retries, Attendance::Lost, genuine_loss),
+        link.after_loss(&events, &retries, Attendance::Retry, genuine_loss, previous),
+        Some((LinkState::Connecting, None, None))
+    );
+    assert!(matches!(
+        states.try_recv(),
+        Ok(LinkEvent::State(LinkState::Failed))
+    ));
+    drop(retry);
+    assert_eq!(
+        link.after_loss(&events, &retries, Attendance::Lost, genuine_loss, previous),
         None
     );
     assert!(matches!(
@@ -4092,7 +4139,16 @@ fn queued_refused_progress_without_tail_becomes_unavailable() {
         .try_send(())
         .expect("queue a Retry before any quiet proof");
     assert_eq!(
-        link.after_loss(&events, &retries, Attendance::Lost, None),
+        link.after_loss(
+            &events,
+            &retries,
+            Attendance::Lost,
+            None,
+            IssueSession {
+                incarnation: Incarnation(1),
+                epoch: 2
+            }
+        ),
         None,
         "terminal loss does not choose a reconnect state"
     );
@@ -4766,6 +4822,7 @@ fn queued_fixture_connector(
             control,
             queued_fixture_hello(),
             super::AudioSession::QueuedRequired,
+            None,
             attempt,
             super::DrawingText::default(),
             open_data,

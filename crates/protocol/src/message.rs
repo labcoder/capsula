@@ -572,6 +572,8 @@ pub enum ControlToBrain {
     SpeechDecision(SpeechDispatch, SpeechDecision),
     /// First control frame when this session requires queued output.
     QueuedHello(Hello),
+    /// First control frame when deliberately replacing the previous queued audio pair.
+    QueuedAudioReconnect(Box<Hello>, IssueSession),
 }
 
 /// What a thread's delete came to.
@@ -1271,6 +1273,19 @@ mod tests {
         let message = ControlToBrain::QueuedHello(hello.clone());
         assert_eq!(postcard::to_allocvec(&message).unwrap(), control);
         assert_eq!(frame::decode::<ControlToBrain>(&control).unwrap(), message);
+
+        let mut repair = control.clone();
+        repair[0] = 38;
+        repair.extend([5, 127]);
+        let message = ControlToBrain::QueuedAudioReconnect(
+            Box::new(hello.clone()),
+            super::IssueSession {
+                incarnation: Incarnation(5),
+                epoch: 127,
+            },
+        );
+        assert_eq!(postcard::to_allocvec(&message).unwrap(), repair);
+        assert_eq!(frame::decode::<ControlToBrain>(&repair).unwrap(), message);
 
         let mut data = control;
         data[0] = 9;
