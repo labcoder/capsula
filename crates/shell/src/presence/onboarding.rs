@@ -691,7 +691,7 @@ impl Presence {
         select: Select,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        let area = platform::work_area(cx)?;
+        let area = platform::work_area()?;
         let (layout, scale) = (self.layout, self.scale);
         let Some(panel) = self.onboarding.as_mut() else {
             return Ok(());

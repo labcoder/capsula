@@ -151,7 +151,7 @@ impl Presence {
         self.protect_surface(super::exclusion::Slot::Threads, cx)?;
         self.pointer_settle = None;
         self.set_panel(PanelVisibility::Hidden, cx)?;
-        let area = platform::work_area(cx)?;
+        let area = platform::work_area()?;
         let panel = self
             .thread_panel
             .as_mut()

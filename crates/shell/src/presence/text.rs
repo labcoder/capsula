@@ -94,7 +94,7 @@ impl Presence {
             .update(cx, |_, window, _| f32::from(window.rem_size()))
             .map_err(|error| OpenError::Gpui(error.into()))?;
         let bounds = self.layout.anchored_panel(
-            platform::work_area(cx)?,
+            platform::work_area()?,
             [30.0, 34.0].map(|value| super::scaled(value * rem, self.scale)),
         );
         let Some(text) = self.text.as_mut() else {

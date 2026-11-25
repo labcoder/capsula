@@ -6,7 +6,7 @@ use std::cell::{Cell, OnceCell};
 use std::rc::Rc;
 
 use async_channel::Sender;
-use gpui_kit::{App, Bounds, Pixels};
+use gpui_kit::{Bounds, Pixels};
 use kumochi_protocol::constants::{FOCUS_INPUT_MARKER, OBJECT_PREFIX};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -14,11 +14,9 @@ use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
 };
-use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEINPUT, SendInput, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
@@ -782,40 +780,15 @@ pub(crate) fn performance_counter() -> i64 {
 /// The primary monitor's work area, `[x, y, width, height]` in physical pixels.
 ///
 /// # Errors
-/// Fails without a GPUI primary display or its monitor DPI.
-pub(crate) fn work_area(cx: &App) -> Result<[i32; 4], PresenceError> {
+/// Fails without a primary display work area from GPUI.
+pub(crate) fn work_area() -> Result<[i32; 4], PresenceError> {
     #[cfg(test)]
-    {
-        use crate::platform::work_area_fixture::{self, Headless};
-        if let Some(area) = work_area_fixture::get() {
-            return Ok(area);
-        }
-        if cx.has_global::<Headless>() {
-            return Ok([0, 0, 2560, 1400]);
-        }
+    if let Some(area) = crate::platform::work_area_fixture::get() {
+        return Ok(area);
     }
-    let display = cx
-        .primary_display()
-        .ok_or(PresenceError::GeometryUnavailable)?;
-    // GPUI's pinned Windows backend uses the monitor handle as its display ID and
-    // doesn't expose the display's scale. Use the same monitor and effective DPI.
-    let monitor =
-        usize::try_from(u64::from(display.id())).map_err(|_| PresenceError::GeometryUnavailable)?;
-    let monitor = HMONITOR(std::ptr::with_exposed_provenance_mut(monitor));
-    if monitor.is_invalid() {
-        return Err(PresenceError::GeometryUnavailable);
-    }
-    let (mut x, mut y) = (0, 0);
-    // SAFETY: both DPI outputs are writable for the duration of this query.
-    unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut x, &raw mut y) }?;
-    let dpi = u16::try_from(x).map_err(|_| PresenceError::GeometryUnavailable)?;
-    if dpi == 0 || x != y {
-        return Err(PresenceError::GeometryUnavailable);
-    }
-    Ok(physical_work_area(
-        display.visible_bounds(),
-        f32::from(dpi) / 96.0,
-    ))
+    let (bounds, scale) =
+        gpui_windows::primary_visible_bounds().ok_or(PresenceError::GeometryUnavailable)?;
+    Ok(physical_work_area(bounds, scale))
 }
 
 fn physical_work_area(bounds: Bounds<Pixels>, scale: f32) -> [i32; 4] {

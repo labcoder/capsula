@@ -64,7 +64,7 @@ impl Presence {
         position: Position,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
-        let area = platform::work_area(cx)?;
+        let area = platform::work_area()?;
         // Moving the anchor invalidates a live selection's screen-space input geometry.
         self.end_selection(
             crate::presenter::overlay_input::ExitCause::DisplayChanged,
@@ -103,7 +103,7 @@ impl Presence {
         {
             return Ok(());
         }
-        let area = platform::work_area(cx)?;
+        let area = platform::work_area()?;
         let mut status_bounds = self.layout.panel;
         let panels = [
             self.onboarding
