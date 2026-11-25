@@ -6,7 +6,8 @@ use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::frame::{self, HEADER_LEN, Pipe};
 use kumochi_protocol::message::{
     AssistantName, AudioSession, ControlToBrain, ControlToShell, DataToBrain, DockPosition, Hello,
-    Incarnation, IssueSession, MaxFrameRate, OnboardingStep, SettingsView, SttUnload, ThreadId,
+    Incarnation, IssueSession, MaxFrameRate, OnboardingStep, SettingsView, ShellTuning, SttUnload,
+    ThreadId,
 };
 use kumochi_session::{
     BrainAwaitsInit, Channel, ENVELOPE_LEN, MAX_PLAINTEXT, SECRET_LEN, Session, SessionError,
@@ -406,6 +407,10 @@ fn attempt(
         };
         assert_eq!(brain.data_message(), expected);
         assert_eq!(brain.data_message(), DataToBrain::TextMetrics(None));
+        brain.control(&ControlToShell::ShellTuning {
+            session: ORIGIN,
+            tuning: ShellTuning::default(),
+        });
         match commit {
             Commit::Settings => brain.control(&ControlToShell::Settings {
                 view: view(),

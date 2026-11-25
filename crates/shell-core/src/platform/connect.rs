@@ -266,10 +266,10 @@ pub(crate) fn connect_pair(
     Ok((connection, owner))
 }
 
-/// The session path's attempt: the initiator, both greetings with the zero placeholder, and then
-/// the first brain control frame, which must be Settings. The runtime sends Settings first once
-/// it has committed, so it's the attempt's completion point. It stays in the control leg, so the
-/// link reads it first and in order.
+/// The session path's attempt: the initiator, both greetings with the zero placeholder and the
+/// brain's `ShellTuning`, and then the next control frame, which must be Settings. The runtime
+/// sends Settings first once it has committed, so it's the attempt's completion point. It stays in
+/// the control leg, so the link reads it first and in order.
 #[cfg(target_os = "macos")]
 pub(super) fn over_pair(
     ends: super::macos::ShellEnds,

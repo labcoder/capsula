@@ -418,11 +418,11 @@ and writes it whole, because a frame cut off part way can't be resumed. A record
 authenticate, a stream that ends inside a record, or a write that stops part way refuses the
 whole pair and shuts down both legs, so a reader blocked on the other leg wakes. The stream
 ending between frames is an ordinary end. `connect_pair` starts the child, runs `initiate`,
-sends both greetings with the zero placeholder and the text metrics, and then reads the brain's
-first control frame by the same deadline. That frame must be `Settings`, which the runtime
-sends first once it has committed, in both audio modes; anything else is `Rejected`. So the link
-reports Connected only on the first authenticated frame after commit. The frame stays buffered
-in the control leg, and the link reads it first and in order.
+sends both greetings with the zero placeholder and the text metrics, accepts `ShellTuning` as
+the pipes do, and then reads the next control frame by the same deadline. That frame must be
+`Settings`, which the runtime sends first once it has committed, in both audio modes; anything
+else is `Rejected`. So the link reports Connected only on the first authenticated frame after
+commit. The frame stays buffered in the control leg, and the link reads it first and in order.
 
 ## Who may connect
 
