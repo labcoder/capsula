@@ -3,7 +3,7 @@
 //!
 //! The brain only serves the `kumochi.exe` beside it, so the gate copies the brain and itself, as
 //! `kumochi.exe`, into a fresh folder under `target/slice2-gate` and runs the client from that copy.
-//! Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%`, with Claude Code off, and the run
+//! Each item gets its own local and roaming folders, with Claude Code off, and the run
 //! deletes what its brains left: see `docs/development/gate-identity.md`.
 #![expect(
     clippy::print_stdout,

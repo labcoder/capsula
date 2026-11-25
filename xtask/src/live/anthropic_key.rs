@@ -658,7 +658,9 @@ mod tests {
     use std::ffi::OsStr;
     use std::fs;
 
-    use kumochi_protocol::constants::{CONFIG_FILE, ProductIdentity};
+    use kumochi_protocol::constants::{
+        CONFIG_FILE, LOCAL_APPDATA_OVERRIDE, ProductIdentity, ROAMING_APPDATA_OVERRIDE,
+    };
     use kumochi_protocol::message::{ClaudeCodeView, KeyRejection};
 
     use super::*;
@@ -710,8 +712,11 @@ mod tests {
                 Some(OsStr::new(messages))
             );
             assert_eq!(set(PIPE_TAP_ENV), Some(tap.as_os_str()));
-            assert_eq!(set("LOCALAPPDATA"), Some(folders.local.as_os_str()));
-            let roaming = Path::new(set("APPDATA").expect("isolated settings directory"));
+            assert_eq!(set(LOCAL_APPDATA_OVERRIDE), Some(folders.local.as_os_str()));
+            assert_eq!(set("LOCALAPPDATA"), None);
+            assert_eq!(set("APPDATA"), None);
+            let roaming =
+                Path::new(set(ROAMING_APPDATA_OVERRIDE).expect("isolated settings directory"));
             assert!(
                 roaming.starts_with(&*dir)
                     && roaming != folders.local
@@ -742,9 +747,11 @@ mod tests {
         );
         assert!(matches!(set(PIPE_TAP_ENV), None | Some(None)));
         assert_eq!(
-            set("LOCALAPPDATA"),
+            set(LOCAL_APPDATA_OVERRIDE),
             Some(Some(folders.local.to_string_lossy().into_owned()))
         );
+        assert_eq!(set("LOCALAPPDATA"), None);
+        assert_eq!(set("APPDATA"), None);
     }
 
     /// Product processes as (pid, parent, shell).

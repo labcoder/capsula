@@ -576,7 +576,7 @@ mod tests {
     use kumochi_protocol::constants::{BRAIN_EXE, SHELL_EXE};
 
     use super::{Images, Workload, cycle_percent, idle_args, options, percent, settled_paints};
-    use crate::hermetic::{Folders, Prebuilt};
+    use crate::hermetic::{Folders, Prebuilt, image};
 
     #[test]
     fn baseline_and_duration_options_combine_in_either_order() {
@@ -693,9 +693,9 @@ mod tests {
         }
 
         let dir = crate::scratch::dir("prebuilt-release-pair");
-        let gate = kumochi_protocol::constants::ProductIdentity::GATE.instance_service;
-        let shell = format!("shell started|{gate}");
-        let brain = format!("brain started|{gate}");
+        let gate = kumochi_protocol::constants::ProductIdentity::GATE;
+        let shell = image("shell started", gate);
+        let brain = image("brain started", gate);
         let mut hashes = [shell.as_bytes(), brain.as_bytes()]
             .into_iter()
             .map(|bytes| {
@@ -745,29 +745,37 @@ mod tests {
         use crate::platform::gate_capture::file_sha256;
         use kumochi_protocol::constants::ProductIdentity;
 
-        let gate = ProductIdentity::GATE.instance_service;
-        let release = ProductIdentity::RELEASE.instance_service;
-        let dev = ProductIdentity::DEV.instance_service;
+        let gate = ProductIdentity::GATE;
+        let release = ProductIdentity::RELEASE;
         for (shell, brain, wrong) in [
             (
-                format!("shell started|{release}"),
-                format!("brain started|{gate}"),
+                image("shell started", release),
+                image("brain started", gate),
                 SHELL_EXE,
             ),
             (
-                format!("shell started|{gate}"),
-                format!("brain started|{dev}"),
+                image("shell started", gate),
+                image("brain started", ProductIdentity::DEV),
                 BRAIN_EXE,
             ),
             (
-                format!("shell started|{gate}"),
-                format!("brain started|{gate}|{release}"),
+                image("shell started", gate),
+                format!(
+                    "{}|{}",
+                    image("brain started", gate),
+                    release.instance_service
+                ),
                 BRAIN_EXE,
             ),
             (
-                format!("brain started|{gate}"),
-                format!("shell started|{gate}"),
+                image("brain started", gate),
+                image("shell started", gate),
                 SHELL_EXE,
+            ),
+            (
+                image("shell started", gate),
+                format!("brain started|{}", gate.instance_service),
+                BRAIN_EXE,
             ),
         ] {
             let dir = crate::scratch::dir("prebuilt-wrong-identity");
@@ -778,8 +786,10 @@ mod tests {
                 .map(|name| file_sha256(&dir.join(name)).expect("matching pin"));
             let pins = Prebuilt::parse(&mut hashes).expect("both supplied hashes match");
             let folders = Folders::create(&dir.join("owned")).expect("isolated folders");
-            let expected =
-                format!("prebuilt {wrong} does not have the expected Gate identity and role");
+            let expected = format!(
+                "{wrong} does not have the expected Gate identity, role and folder override; \
+                 rebuild it"
+            );
             assert_eq!(
                 pins.stage(&dir, &folders)
                     .expect_err("matching hashes do not establish which app will run")

@@ -1,4 +1,4 @@
-//! The real brain, started from the gate's folder with its own `%LOCALAPPDATA%`, `%APPDATA%` and
+//! The real brain, started from the gate's folder with its own local and roaming folders and
 //! fixture.
 
 use std::fs;
@@ -26,13 +26,13 @@ pub(super) fn leftovers() -> Vec<Child> {
     std::mem::take(&mut *LEFTOVERS.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
-/// One gate item's folder: its fixture script, and the `%LOCALAPPDATA%` and `%APPDATA%` its
+/// One gate item's folder: its fixture script, and the local and roaming folders its
 /// brains share.
 #[derive(Debug)]
 pub(super) struct Case {
     bin: PathBuf,
     fixture: PathBuf,
-    /// What the brain sees as `%LOCALAPPDATA%` (its store and logs) and `%APPDATA%`.
+    /// The brain's local (its store and logs) and roaming folders, passed as the override pair.
     pub(super) folders: Folders,
 }
 

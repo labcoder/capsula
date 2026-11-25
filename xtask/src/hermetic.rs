@@ -12,9 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
-    ACCOUNT_MAX_CHUNKS, AUTHORITY_FILE, BRAIN_EXE, CONFIG_FILE, ProductIdentity, SHELL_EXE,
-    anthropic_key_target, anthropic_staging_target, generation_hex, generation_target,
-    instance_target,
+    ACCOUNT_MAX_CHUNKS, AUTHORITY_FILE, BRAIN_EXE, CONFIG_FILE, LOCAL_APPDATA_OVERRIDE,
+    ProductIdentity, ROAMING_APPDATA_OVERRIDE, SHELL_EXE, anthropic_key_target,
+    anthropic_staging_target, generation_hex, generation_target, instance_target,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -37,6 +37,33 @@ const OWING_ONBOARDING: &str = "[claude_code]\nenabled = false\n";
 const BUILD_LIMIT: Duration = Duration::from_mins(40);
 /// How long the run's surviving processes get to exit once they're ended.
 const END_LIMIT: Duration = Duration::from_secs(10);
+/// What the shell and the brain each log at start, so an image names its role.
+pub(crate) const SHELL_ROLE: &str = "shell started";
+pub(crate) const BRAIN_ROLE: &str = "brain started";
+
+/// Refuses the image `exe` unless it carries the Gate identity, `role` and both folder override
+/// names, and neither other identity. An image from before the override would follow the
+/// launch's `LOCALAPPDATA`, which a gate tool no longer sets, so it never launches.
+pub(crate) fn require_compatible(exe: &Path, role: &str) -> Result<()> {
+    let name = exe.file_name().unwrap_or(exe.as_os_str()).display();
+    let bytes = fs::read(exe).with_context(|| format!("{name} is unavailable"))?;
+    let contains = |marker: &str| {
+        bytes
+            .windows(marker.len())
+            .any(|window| window == marker.as_bytes())
+    };
+    // shortcut: existing UTF-8 strings catch mix-ups, not debug Gate or tampering; use attestation if provenance is needed.
+    ensure!(
+        contains(GATE.instance_service)
+            && contains(role)
+            && contains(LOCAL_APPDATA_OVERRIDE)
+            && contains(ROAMING_APPDATA_OVERRIDE)
+            && !contains(ProductIdentity::RELEASE.instance_service)
+            && !contains(ProductIdentity::DEV.instance_service),
+        "{name} does not have the expected Gate identity, role and folder override; rebuild it"
+    );
+    Ok(())
+}
 
 /// Fails unless `active` is the gate identity.
 pub(crate) fn require_gate(active: ProductIdentity) -> Result<()> {
@@ -103,8 +130,8 @@ impl Prebuilt {
 
     pub(crate) fn verify(&self, dir: &Path) -> Result<()> {
         for (name, expected, role) in [
-            (SHELL_EXE, &self.shell_sha256, "shell started"),
-            (BRAIN_EXE, &self.brain_sha256, "brain started"),
+            (SHELL_EXE, &self.shell_sha256, SHELL_ROLE),
+            (BRAIN_EXE, &self.brain_sha256, BRAIN_ROLE),
         ] {
             let bytes = fs::read(dir.join(name))
                 .with_context(|| format!("prebuilt {name} is unavailable; no build fallback"))?;
@@ -114,19 +141,7 @@ impl Prebuilt {
                 actual == *expected,
                 "prebuilt {name} SHA-256 differs from its pin"
             );
-            let contains = |marker: &str| {
-                bytes
-                    .windows(marker.len())
-                    .any(|window| window == marker.as_bytes())
-            };
-            // shortcut: existing UTF-8 strings catch mix-ups, not debug Gate or tampering; use attestation if provenance is needed.
-            ensure!(
-                contains(GATE.instance_service)
-                    && contains(role)
-                    && !contains(ProductIdentity::RELEASE.instance_service)
-                    && !contains(ProductIdentity::DEV.instance_service),
-                "prebuilt {name} does not have the expected Gate identity and role"
-            );
+            require_compatible(&dir.join(name), role)?;
         }
         Ok(())
     }
@@ -142,6 +157,8 @@ pub(crate) enum Profile {
 /// `checkout`'s workspace or this one, and returns the profile folder holding them. Cargo rebuilds
 /// anything built there without the feature, so what this returns is always a gate image. Also
 /// returns how long the build took, so a timed run that started right after a full build shows.
+/// Refuses what it built unless each image is compatible with its role, so a baseline checkout
+/// from before the folder override never launches.
 pub(crate) fn build(
     packages: &[&str],
     profile: Profile,
@@ -181,11 +198,25 @@ pub(crate) fn build(
         .arg(checkout.unwrap_or(workspace).join("Cargo.toml"));
     let built = live::run_bounded(cargo, BUILD_LIMIT, "the gate build")?;
     ensure!(built.success(), "the gate build failed ({built})");
-    let profile = match profile {
+    let profile = target.join(match profile {
         Profile::Debug => "debug",
         Profile::Release => "release",
-    };
-    Ok((target.join(profile), started.elapsed()))
+    });
+    require_built(&profile, packages)?;
+    Ok((profile, started.elapsed()))
+}
+
+/// Refuses the images `packages` built into `profile` unless each is compatible with its role.
+fn require_built(profile: &Path, packages: &[&str]) -> Result<()> {
+    for package in packages {
+        let (exe, role) = match *package {
+            "kumochi-shell" => (SHELL_EXE, SHELL_ROLE),
+            "kumochi-brain" => (BRAIN_EXE, BRAIN_ROLE),
+            other => bail!("{other} is not a Gate image"),
+        };
+        require_compatible(&profile.join(exe), role)?;
+    }
+    Ok(())
 }
 
 /// Removes from `cargo` each of `names` that `cargo run` gives xtask about its own package:
@@ -201,7 +232,7 @@ fn drop_run_variables(cargo: &mut Command, names: impl IntoIterator<Item = std::
     }
 }
 
-/// One launch's own `%LOCALAPPDATA%` and `%APPDATA%`, with Claude Code off in its settings.
+/// One launch's own local and roaming folders, with Claude Code off in its settings.
 #[derive(Debug)]
 pub(crate) struct Folders {
     pub(crate) local: PathBuf,
@@ -240,11 +271,12 @@ impl Folders {
         .context("writing the gate settings")
     }
 
-    /// Points `command`'s data and settings folders here.
+    /// Points `command`'s data and settings folders here through the override pair. It leaves
+    /// `LOCALAPPDATA` and `APPDATA` alone: a Gate image ignores them once the pair is set.
     pub(crate) fn apply<'a>(&self, command: &'a mut Command) -> &'a mut Command {
         command
-            .env("LOCALAPPDATA", &self.local)
-            .env("APPDATA", &self.roaming)
+            .env(LOCAL_APPDATA_OVERRIDE, &self.local)
+            .env(ROAMING_APPDATA_OVERRIDE, &self.roaming)
     }
 }
 
@@ -591,7 +623,7 @@ fn own_entries(authority: &Path) -> Result<Vec<String>> {
 }
 
 #[cfg(test)]
-pub(crate) use tests::assert_claim_after_refusal;
+pub(crate) use tests::{assert_claim_after_refusal, image};
 
 #[cfg(test)]
 mod tests {
@@ -696,6 +728,78 @@ mod tests {
         assert_eq!(format!("{error:#}"), REFUSAL);
     }
 
+    /// An image's strings: `role`, `identity`'s instance service and the override names.
+    pub(crate) fn image(role: &str, identity: ProductIdentity) -> String {
+        format!(
+            "{role}|{}|KUMOCHI_GATE_LOCALAPPDATA|KUMOCHI_GATE_APPDATA",
+            identity.instance_service
+        )
+    }
+
+    #[test]
+    fn an_image_without_the_override_names_or_its_role_is_refused() {
+        let dir = scratch::dir("gate-image");
+        let exe = dir.join(BRAIN_EXE);
+        fs::write(&exe, image("brain started", ProductIdentity::GATE)).expect("image");
+        require_compatible(&exe, BRAIN_ROLE).expect("a current brain");
+        let refusal = format!(
+            "{BRAIN_EXE} does not have the expected Gate identity, role and folder override; \
+             rebuild it"
+        );
+        for (case, bytes) in [
+            ("old", "brain started|Kumochi Gate instance".to_owned()),
+            (
+                "no roaming name",
+                "brain started|Kumochi Gate instance|KUMOCHI_GATE_LOCALAPPDATA".to_owned(),
+            ),
+            (
+                "no local name",
+                "brain started|Kumochi Gate instance|KUMOCHI_GATE_APPDATA".to_owned(),
+            ),
+            ("shell role", image("shell started", ProductIdentity::GATE)),
+            ("dev identity", image("brain started", ProductIdentity::DEV)),
+        ] {
+            fs::write(&exe, bytes).expect("image");
+            let error = require_compatible(&exe, BRAIN_ROLE).expect_err(case);
+            assert_eq!(format!("{error:#}"), refusal, "{case}");
+        }
+    }
+
+    #[test]
+    fn a_built_pair_or_brain_alone_is_checked_for_each_role() {
+        let profile = scratch::dir("gate-built");
+        fs::write(
+            profile.join(BRAIN_EXE),
+            image("brain started", ProductIdentity::GATE),
+        )
+        .expect("brain");
+        require_built(&profile, &["kumochi-brain"]).expect("slice2's brain alone");
+        let error = require_built(&profile, &["kumochi-shell", "kumochi-brain"])
+            .expect_err("no shell was built");
+        assert_eq!(format!("{error:#}"), format!("{SHELL_EXE} is unavailable"));
+        fs::write(
+            profile.join(SHELL_EXE),
+            image("shell started", ProductIdentity::GATE),
+        )
+        .expect("shell");
+        require_built(&profile, &["kumochi-shell", "kumochi-brain"]).expect("the current pair");
+        fs::write(
+            profile.join(BRAIN_EXE),
+            "brain started|Kumochi Gate instance",
+        )
+        .expect("a baseline brain from before the override");
+        for packages in [&["kumochi-brain"][..], &["kumochi-shell", "kumochi-brain"]] {
+            let error = require_built(&profile, packages).expect_err("an old brain");
+            assert_eq!(
+                format!("{error:#}"),
+                format!(
+                    "{BRAIN_EXE} does not have the expected Gate identity, role and folder \
+                     override; rebuild it"
+                )
+            );
+        }
+    }
+
     #[test]
     fn the_runs_folder_is_admitted_once_made_and_refused_as_a_link() {
         let anchor = scratch::dir("gate-runs");
@@ -735,8 +839,11 @@ mod tests {
         assert_eq!(
             envs,
             [
-                ("APPDATA".as_ref(), Some(roaming.as_os_str())),
-                ("LOCALAPPDATA".as_ref(), Some(local.as_os_str())),
+                ("KUMOCHI_GATE_APPDATA".as_ref(), Some(roaming.as_os_str())),
+                (
+                    "KUMOCHI_GATE_LOCALAPPDATA".as_ref(),
+                    Some(local.as_os_str())
+                ),
             ]
         );
         folders

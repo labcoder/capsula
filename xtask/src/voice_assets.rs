@@ -88,10 +88,8 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
 // shortcut: links for the xtask's own build profile (debug: "Kumochi Dev"), so a release brain
 // looks under "Kumochi"; add a profile flag when a release measurement needs linked models.
 fn models_root() -> Result<PathBuf> {
-    let local = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .context("%LOCALAPPDATA% is not set to an absolute path")?;
+    let local = kumochi_storage::local_app_data(kumochi_storage::Today::Environment)
+        .context("resolving the local application data folder the brain uses")?;
     Ok(local.join(DATA_DIR).join(MODELS_DIR))
 }
 

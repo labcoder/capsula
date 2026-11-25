@@ -12,7 +12,7 @@ cargo run --release --package xtask --features kumochi-protocol/gate-identity --
 
 ```mermaid
 flowchart LR
-  X[gate xtask: slice2-gate] -->|cargo build, gate identity| B[kumochid.exe, debug gate build]
+  X[gate xtask: slice2-gate] -->|cargo build, gate identity, image check| B[kumochid.exe, debug gate build]
   X -->|copies| F["target/slice2-gate/&lt;time&gt;/bin"]
   F --> C["kumochi.exe (a copy of xtask)"]
   F --> D[kumochid.exe]
@@ -24,7 +24,8 @@ flowchart LR
   copies the brain and itself, renamed `kumochi.exe`, into a fresh folder and runs the scripted
   client from that copy. The client reads the instance capability from Credential Manager and
   sends `Hello` on both pipes, as the shell does.
-- Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%` folders, under the gate run's root
+- Each item gets its own local and roaming folders, passed as the override pair
+  (`KUMOCHI_GATE_LOCALAPPDATA`, `KUMOCHI_GATE_APPDATA`), under the gate run's root
   `slice2-<time>` (see [the gate identity](gate-identity.md)), with Claude Code off, and its own fixture script (`KUMOCHI_FIXTURE`, debug builds only), so items
   never share a store or settings. A brain still names its pipes, its instance capability, its
   Credential Manager entries and its Claude Code lane folder by identity rather than by the

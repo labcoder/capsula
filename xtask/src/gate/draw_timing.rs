@@ -105,7 +105,8 @@ fn stage_debug(images: &Path, bin: &Path, hashes: [&str; 2]) -> Result<()> {
             "prebuilt {name} SHA-256 does not match its pin; no launch"
         );
     }
-    Ok(())
+    hermetic::require_compatible(&bin.join(SHELL_EXE), hermetic::SHELL_ROLE)?;
+    hermetic::require_compatible(&bin.join(BRAIN_EXE), hermetic::BRAIN_ROLE)
 }
 
 fn trial(output: &Path, shell: &Path, stamps: &Path, folders: &Folders) -> Result<()> {
@@ -178,9 +179,8 @@ fn release_draw_stages_the_pinned_pair_in_the_owned_live_layout() {
     let dir = crate::scratch::dir("draw-prebuilt-layout");
     let images = dir.join("images");
     fs::create_dir(&images).unwrap();
-    let service = ProductIdentity::GATE.instance_service;
-    let shell = format!("shell started|{service}");
-    let brain = format!("brain started|{service}");
+    let shell = hermetic::image("shell started", ProductIdentity::GATE);
+    let brain = hermetic::image("brain started", ProductIdentity::GATE);
     fs::write(images.join(SHELL_EXE), shell.as_bytes()).unwrap();
     fs::write(images.join(BRAIN_EXE), brain.as_bytes()).unwrap();
     let mut hashes = [SHELL_EXE, BRAIN_EXE]
