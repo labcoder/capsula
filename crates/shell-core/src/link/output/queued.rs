@@ -15,7 +15,7 @@ use crate::link::{
 };
 use crate::speaker::DRAIN;
 use crate::speaker::conductor::Assignment;
-use crate::speaker::queued::{Command, Input, Packet, RATE, spawn, spawn_plain};
+use crate::speaker::queued::{Command, Input, Packet, RATE, Speech, spawn, spawn_plain};
 
 #[cfg(test)]
 #[path = "queued_tests.rs"]
@@ -96,6 +96,7 @@ struct Active {
     delivery: Option<Delivery>,
     locally_stopped: bool,
     run_end_by: Option<Instant>,
+    speech: Speech,
 }
 
 impl Queued {
@@ -265,6 +266,34 @@ impl State {
 }
 
 impl OutputOwner {
+    /// The run `session`'s native route is presenting, and when that evidence runs out.
+    ///
+    /// # Errors
+    /// `Busy` on contention.
+    pub fn speech(&self, session: u64) -> Result<Option<(RunId, Instant)>, Denied> {
+        // The plain lock: refusals a test scripts for the owner's calls aren't spent on this read.
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(state)) => state.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(Denied::Busy),
+        };
+        Ok(state.queue(session).and_then(|(_, owner)| {
+            let active = owner.active.as_ref()?;
+            Some((active.id, active.speech.until()?))
+        }))
+    }
+
+    /// Stops `run`'s audio on `session` locally; nothing it finds refuses the pair.
+    ///
+    /// # Errors
+    /// `Busy` on contention.
+    pub fn stop_locally(&self, session: u64, run: RunId) -> Result<(), Denied> {
+        if let Some((_, owner)) = self.try_lock()?.queue(session) {
+            owner.stop(run, StopOrigin::Local);
+        }
+        Ok(())
+    }
+
     pub(in crate::link) fn wait_for_refused_tail(&self) -> Option<RefusedTail> {
         let proof = {
             let state = self.lock();
@@ -522,6 +551,7 @@ impl OutputOwner {
         shared: Weak<Shared>,
     ) -> bool {
         let proof = Arc::new(AtomicU8::new(0));
+        let speech = Speech::new(self.changed.clone());
         let (output, wake, narrated) = {
             let mut state = self.lock();
             let Some((output, owner)) = state.queue(session).filter(|(_, q)| {
@@ -563,6 +593,7 @@ impl OutputOwner {
                     .then_some(Delivery::Unpromised),
                 locally_stopped: false,
                 run_end_by: None,
+                speech: speech.clone(),
             });
             if silent {
                 owner.wake();
@@ -594,6 +625,7 @@ impl OutputOwner {
                 });
                 link_thread.unpark();
             },
+            speech,
         );
         let exit = move |refused| {
             if (refused || exit.load(Ordering::Acquire) & RETIRING == 0)

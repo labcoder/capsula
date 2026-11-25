@@ -183,6 +183,11 @@ impl Presenter {
         self.watch.shown_run()
     }
 
+    /// The run and exact scene owned by the visible screen marks.
+    pub fn marks_owner(&self) -> Option<(RunId, SceneId)> {
+        self.watch.shown_run().zip(self.watch.shown())
+    }
+
     /// The bit and the limits, before a frame is activated or sampled and before a job's
     /// answer is used, so neither shows marks that a change or a limit has already taken. One
     /// read while no sources listen.

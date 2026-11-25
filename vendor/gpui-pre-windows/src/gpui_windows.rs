@@ -1,3 +1,4 @@
+// Modified for Kumochi: export the primary work-area snapshot.
 #![cfg(target_os = "windows")]
 
 mod clipboard;
@@ -38,6 +39,7 @@ pub(crate) use vsync::*;
 pub(crate) use window::*;
 pub(crate) use wrapper::*;
 
+pub use display::primary_visible_bounds;
 pub use platform::WindowsPlatform;
 
 pub(crate) use windows::Win32::Foundation::HWND;

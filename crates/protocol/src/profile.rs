@@ -160,5 +160,66 @@ impl Inspection {
     }
 }
 
+/// The outcome of trying the cooperating writers' setup guard.
+#[derive(Debug)]
+pub enum Guard<G> {
+    /// Taken; the guard stays held while the value lives.
+    Held(G),
+    /// A cooperating owner holds it.
+    Busy,
+    /// The guard or its user and edition context could not be established.
+    Unavailable,
+}
+
+/// Read-only probes of one edition's footprints. Each looks under the held guard and creates,
+/// changes and removes nothing.
+pub trait Probes {
+    /// The held setup guard.
+    type Guard;
+
+    /// Tries the setup guard without waiting.
+    fn guard(&self) -> Guard<Self::Guard>;
+
+    /// Legacy footprints: all definitively absent, a validated intact installation, or neither.
+    fn legacy(&self, guard: &Self::Guard) -> Observation;
+
+    /// The new-format root slot and its record.
+    fn root(&self, guard: &Self::Guard) -> Root;
+
+    /// The exact edition-scoped owner record in the OS credential store.
+    fn owner(&self, guard: &Self::Guard) -> Observation;
+}
+
+/// Takes the guard, then samples every fact under it, and releases it on return. Objects inside
+/// the new-format root are absent only with the root itself; nothing yet reads inside one. Fresh
+/// targets stay unverified until an allocator can prove them disjoint, so this never yields
+/// first use, and like `classify` it authorizes nothing.
+pub fn observe<P: Probes>(probes: &P) -> Inspection {
+    let guard = match probes.guard() {
+        Guard::Held(guard) => guard,
+        Guard::Busy => return Inspection::Busy,
+        Guard::Unavailable => return Inspection::Unavailable,
+    };
+    let legacy = probes.legacy(&guard);
+    let root = probes.root(&guard);
+    let owner = probes.owner(&guard);
+    let inside = if root == Root::Absent {
+        Observation::Absent
+    } else {
+        Observation::Unverified
+    };
+    Inspection::Held(ProfileFacts {
+        legacy,
+        root,
+        owner,
+        lock: inside,
+        authority: inside,
+        host: inside,
+        history: inside,
+        fresh_root: Destination::Unverified,
+        fresh_namespace: Destination::Unverified,
+    })
+}
+
 #[cfg(test)]
 mod tests;

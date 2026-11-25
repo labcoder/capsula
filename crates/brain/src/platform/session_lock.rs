@@ -1,4 +1,7 @@
 //! Exclusive account-session ownership through the standard library's file lock.
+//!
+//! On Unix the existing-lock open refuses a final link at the open itself. A device node at the
+//! path is still opened, without becoming a controlling terminal, before its type check refuses it.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
@@ -95,14 +98,21 @@ fn open_leaf(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Opens the leaf itself, never a link's target, so the checks and the lock land on what this
+/// open found: a final link is refused as `InvalidData`. Nonblocking, so a FIFO is refused as a
+/// non-file instead of waiting for a writer.
 #[cfg(not(windows))]
 fn open_leaf(path: &Path) -> io::Result<File> {
-    // shortcut: the check and the open aren't atomic, so a link swapped in between is followed;
-    // open with O_NOFOLLOW before a Unix profile reader is wired into startup.
-    if !fs::symlink_metadata(path)?.is_file() {
-        return Err(io::ErrorKind::InvalidData.into());
+    use rustix::fs::{Mode, OFlags};
+    use rustix::io::Errno;
+
+    let flags =
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+    match rustix::fs::open(path, flags, Mode::empty()) {
+        Ok(fd) => Ok(File::from(fd)),
+        Err(Errno::LOOP) => Err(io::ErrorKind::InvalidData.into()),
+        Err(errno) => Err(errno.into()),
     }
-    File::open(path)
 }
 
 #[cfg(test)]
@@ -186,6 +196,21 @@ mod tests {
             other => panic!("expected a link refusal, not {other:?}"),
         }
         assert_eq!(fs::read_link(&path).expect("the link stays"), other);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_existing_fifo_is_refused_without_waiting() {
+        let scratch = Scratch::new("session-lock-existing-fifo");
+        let path = scratch.db().with_file_name(SESSION_LOCK);
+        fs::create_dir_all(scratch.dir()).expect("scratch folder");
+        rustix::fs::mkfifoat(rustix::fs::CWD, &path, rustix::fs::Mode::RUSR).expect("own fifo");
+        match SessionLock::try_acquire_existing(&path) {
+            Err(SessionLockError::Io(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            }
+            other => panic!("expected a non-file refusal, not {other:?}"),
+        }
     }
 
     #[cfg(windows)]
