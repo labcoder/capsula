@@ -33,6 +33,28 @@ mod vendor;
 #[cfg(windows)]
 mod voice_assets;
 
+// As the gate identity, a test would drive the real gate tools, their run lock and folders in the
+// real Local AppData, so a test build with that feature doesn't compile.
+#[cfg(test)]
+const _: () = {
+    let active = kumochi_protocol::constants::ProductIdentity::ACTIVE
+        .instance_service
+        .as_bytes();
+    let gate = kumochi_protocol::constants::ProductIdentity::GATE
+        .instance_service
+        .as_bytes();
+    let mut same = active.len() == gate.len();
+    let mut at = 0;
+    while same && at < active.len() {
+        same = active[at] == gate[at];
+        at += 1;
+    }
+    assert!(
+        !same,
+        "xtask's tests never run as the gate identity: drop kumochi-protocol/gate-identity"
+    );
+};
+
 fn usage() -> String {
     format!(
         "usage: cargo xtask <task>

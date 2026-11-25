@@ -28,6 +28,7 @@ kumochi-storage = { path = "../storage" }
 
 [target.'cfg(windows)'.dependencies]
 keyring.workspace = true
+kumochi-storage = { path = "../storage" }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",

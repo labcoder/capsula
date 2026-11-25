@@ -26,8 +26,8 @@ use sha2::{Digest as _, Sha256};
 
 use self::abi::{RawRecognizer, RawStream, RecognizerConfig, RecognizerResult};
 use super::windows::{
-    Library, RawExport, Untrusted, hold_chain, hold_file, local_app_data, missing_dependency,
-    modules, open_locked, owner_only_dir, system_dir,
+    Library, RawExport, Untrusted, hold_chain, hold_file, missing_dependency, modules, open_locked,
+    owner_only_dir, system_dir,
 };
 
 pub(crate) use super::speech_wire::NativeError;
@@ -392,11 +392,13 @@ impl Drop for ResultGuard<'_> {
 }
 
 /// The trusted root natives are staged under: Kumochi's folder in the local application data
-/// folder the shell reports, never the environment's `LOCALAPPDATA`.
+/// folder the shell reports, never the environment's `LOCALAPPDATA`, or the admitted override
+/// in a Gate or debug build. Its parent's chain is held while it's made.
 pub(crate) fn staging_root() -> Result<PathBuf, NativeError> {
-    let root = local_app_data()
-        .map_err(|_| NativeError::Unsafe)?
-        .join(constants::DATA_DIR);
+    let parent = kumochi_storage::local_app_data(kumochi_storage::Today::KnownFolder)
+        .map_err(|_| NativeError::Unsafe)?;
+    let _parent = hold_chain(&parent).map_err(|_| NativeError::Unsafe)?;
+    let root = parent.join(constants::DATA_DIR);
     match std::fs::create_dir(&root) {
         Ok(()) => Ok(root),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(root),

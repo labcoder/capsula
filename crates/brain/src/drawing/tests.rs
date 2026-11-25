@@ -2117,6 +2117,12 @@ fn a_continuing_call_repeats_the_whole_header() {
     let out = store.run(&mut drawing, call(1, "c2", other));
     assert!(trace(&out).is_empty(), "nothing is written");
     assert_eq!(error(&out.calls[0]), ErrorCode::HeaderMismatch);
+    assert_eq!(
+        out.calls[0].tool_text(),
+        format!(
+            "drawn: []; stopped: $: scene.HeaderMismatch: keep the listed scene, version and surface; omit size or repeat it exactly{RETRY}"
+        )
+    );
     let out = store.run(&mut drawing, call(2, "c3", args("s", &[text("b", "y")])));
     assert_eq!(trace(&out), ["write step 2", "step 1#1", "end 1 true"]);
 }
@@ -3259,7 +3265,7 @@ fn a_refusal_says_whether_a_repair_follows_and_the_repair_reuses_the_unsaved_sce
     let mut store = Store::default();
     let refused =
         || r#"{"id":"a","put":[{"text":{"id":"x","text":"","at":[0,0],"size":0}}]}"#.to_owned();
-    let stopped = "drawn: []; stopped: step a: put[0].text.size: scene.OutOfRange";
+    let stopped = "drawn: []; stopped: step a: put[0].text.size: scene.OutOfRange (allowed: 0 < value <= 20000)";
     let first = store.run(&mut drawing, call(1, "c1", args("sky", &[refused()])));
     assert_eq!(first.calls[0].tool_text(), format!("{stopped}{RETRY}"));
     assert!(store.scenes.is_empty(), "the refused call saved no scene");
@@ -3288,7 +3294,9 @@ fn a_replayed_step_before_a_refusal_stays_without_being_listed_as_drawn() {
     );
     assert_eq!(
         out.calls[0].tool_text(),
-        format!("drawn: []; stopped: step b: put[0].text.size: scene.OutOfRange{RETRY}")
+        format!(
+            "drawn: []; stopped: step b: put[0].text.size: scene.OutOfRange (allowed: 0 < value <= 20000){RETRY}"
+        )
     );
     assert_eq!(drawing.scenes[0].state.committed(), 1, "a stays as it was");
 }
@@ -3309,7 +3317,9 @@ fn a_refusal_after_the_run_s_last_step_says_no_further_step_while_replays_still_
     let short = store.run(&mut drawing, call(1, "c2", args("s", &[refused])));
     assert_eq!(
         short.calls[0].tool_text(),
-        format!("drawn: []; stopped: step r: put[0].text.size: scene.OutOfRange{RETRY}")
+        format!(
+            "drawn: []; stopped: step r: put[0].text.size: scene.OutOfRange (allowed: 0 < value <= 20000){RETRY}"
+        )
     );
     // Two scenes of 32, so only the run's budget is full, not either scene's own.
     let half = MAX_DRAW_STEPS_PER_RUN / 2;
@@ -3439,11 +3449,11 @@ fn debug_and_display_never_carry_drawing_content() {
         call: CallId::new("c").expect("a short ASCII id"),
         scene: None,
         drawn: vec![wire(SECRET)],
-        error: Some(CallError::Step(kumochi_scene::StepError {
-            step: Some(wire(SECRET)),
-            path: kumochi_scene::FieldPath::default(),
-            code: ErrorCode::IdReused,
-        })),
+        error: Some(CallError::Step(StepError::in_step(
+            &wire(SECRET),
+            kumochi_scene::FieldPath::default(),
+            ErrorCode::IdReused,
+        ))),
         remaining: Remaining::Steps,
         after_records: false,
         picture: None,

@@ -1,4 +1,5 @@
-//! File logging through `tracing`, to `%LOCALAPPDATA%\\<product>\\logs`, one file a day for a week.
+//! File logging through `tracing`, to the product's `logs` folder in the local application data
+//! root, one file a day for a week.
 //!
 //! Content (prompts, transcripts, screen text, images, tool arguments) is never logged, so nothing
 //! needs redacting after the fact. Secrets are [`kumochi_protocol::Secret`]s and print as `***`.
@@ -54,7 +55,7 @@ pub fn init(prefix: &str) -> Result<(), LoggingError> {
         .map_err(LoggingError::NativeRuntime)?;
     let dir = crate::platform::data_dir()
         .ok_or(LoggingError::NoLocalAppData)?
-        .join("logs");
+        .join(kumochi_protocol::constants::LOGS_DIR);
     tracing::subscriber::set_global_default(file_subscriber(&dir, prefix)?)?;
     install_panic_hook();
     Ok(())

@@ -44,7 +44,9 @@ pub(crate) fn instance_lock_path() -> Result<std::path::PathBuf, crate::instance
         let data_dir = data_dir().ok_or(SessionLockError::DataDirectory)?;
         let session = session_id().map_err(SessionLockError::Session)?;
         let name = kumochi_protocol::constants::SHELL_LOCK;
-        Ok(data_dir.join(format!("{name}-{session}.lock")))
+        let path = data_dir.join(format!("{name}-{session}.lock"));
+        kumochi_storage::admit_leaf(&path).map_err(|_| SessionLockError::DataDirectory)?;
+        Ok(path)
     }
     #[cfg(not(windows))]
     {

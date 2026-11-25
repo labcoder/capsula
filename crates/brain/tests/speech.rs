@@ -17,6 +17,8 @@ use kumochi_brain::platform::{Job, Launch, Stdio, spawn};
 use kumochi_brain::speech::{
     Deadlines, Generation, NativeError, SpeechError, SpeechFault, SpeechHandle, SpeechSupervisor,
 };
+use kumochi_protocol::constants::{LOCAL_APPDATA_OVERRIDE, ROAMING_APPDATA_OVERRIDE};
+use windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData;
 
 const WORKER: &str = env!("CARGO_BIN_EXE_kumochid");
 const FIXTURE_PATIENCE: Duration = Duration::from_secs(180);
@@ -89,7 +91,11 @@ fn unconfirmed_teardown_preserves_scratch() {
 fn run_fixture(fixture: &str) {
     let exe = std::env::current_exe().expect("test binary");
     let system_root = std::env::var_os("SystemRoot").expect("Windows system root");
-    let dir = scratch::dir("speech");
+    let local = kumochi_storage::known_folder(FOLDERID_LocalAppData).expect("local app data");
+    let dir = scratch::Scratch::under(&local, "speech");
+    for half in ["local", "roaming"] {
+        std::fs::create_dir(dir.join(half)).expect("an override half");
+    }
     let job = Job::new().expect("fixture job");
     let dir = ManuallyDrop::new(dir);
     let mut stdout = None;
@@ -98,8 +104,8 @@ fn run_fixture(fixture: &str) {
         let args = ["--exact".into(), fixture.into(), "--ignored".into()];
         let env = [
             ("SystemRoot".into(), system_root),
-            ("LOCALAPPDATA".into(), dir.as_os_str().to_owned()),
-            ("APPDATA".into(), dir.as_os_str().to_owned()),
+            (LOCAL_APPDATA_OVERRIDE.into(), dir.join("local").into()),
+            (ROAMING_APPDATA_OVERRIDE.into(), dir.join("roaming").into()),
             ("TEMP".into(), dir.as_os_str().to_owned()),
             ("TMP".into(), dir.as_os_str().to_owned()),
             ("RUST_TEST_THREADS".into(), "1".into()),

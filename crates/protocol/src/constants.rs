@@ -33,8 +33,22 @@ pub const BRAIN_EXE: &str = if cfg!(windows) {
     "kumochid"
 };
 
-/// The folder under `%LOCALAPPDATA%` (logs, store, models) and `%APPDATA%` (config).
+/// The folder in the local application data root (logs, store, models) and the roaming one
+/// (config).
 pub const DATA_DIR: &str = ProductIdentity::ACTIVE.data_dir;
+
+/// Whether this build honours the application data override pair below. Gate-identity and debug
+/// builds do, so gate and test launches stay out of the real profile; a build with the release
+/// names never reads it.
+pub const HONOURS_APPDATA_OVERRIDE: bool =
+    cfg!(debug_assertions) || cfg!(feature = "gate-identity");
+
+/// Overrides the local application data root on Windows, where [`HONOURS_APPDATA_OVERRIDE`].
+/// Only with [`ROAMING_APPDATA_OVERRIDE`]: one alone is refused.
+pub const LOCAL_APPDATA_OVERRIDE: &str = "KUMOCHI_GATE_LOCALAPPDATA";
+
+/// Overrides the roaming application data root on Windows, where [`HONOURS_APPDATA_OVERRIDE`].
+pub const ROAMING_APPDATA_OVERRIDE: &str = "KUMOCHI_GATE_APPDATA";
 
 /// Stored namespaces, selectable independently of the caller's build profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +104,21 @@ impl ProductIdentity {
         Self::RELEASE
     };
 }
+
+/// What only a Gate-identity build of the shell and the brain carries, in the line each logs at
+/// start, so a gate tool can tell its images from any other build, which compiles the Gate names
+/// for comparison too.
+pub const GATE_EDITION: &str = "kumochi-edition-gate";
+
+/// The edition this build logs at start: [`GATE_EDITION`] only in a Gate-identity build.
+pub const EDITION: &str = if cfg!(feature = "gate-identity") {
+    GATE_EDITION
+} else {
+    "kumochi-edition-other"
+};
+
+/// The log folder, in the [`DATA_DIR`] folder in the local application data root.
+pub const LOGS_DIR: &str = "logs";
 
 /// The brain's SQLite store, in the [`DATA_DIR`] folder under `%LOCALAPPDATA%`.
 pub const STORE_FILE: &str = "kumochi.db";
@@ -351,9 +380,14 @@ mod identity_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        BRAIN_LOG, CREDENTIAL_GENERATION_SEGMENT, CREDENTIAL_SERVICE, SCREEN_LOG, SHELL_LOG,
-        SPEECH_LOG, account_targets, generation_target,
+        BRAIN_LOG, CREDENTIAL_GENERATION_SEGMENT, CREDENTIAL_SERVICE, EDITION, GATE_EDITION,
+        SCREEN_LOG, SHELL_LOG, SPEECH_LOG, account_targets, generation_target,
     };
+
+    #[test]
+    fn only_a_gate_identity_build_logs_the_gate_edition() {
+        assert_eq!(EDITION == GATE_EDITION, cfg!(feature = "gate-identity"));
+    }
 
     #[test]
     fn github_registration_matches_the_build_profile() {

@@ -1,6 +1,14 @@
 // The removal shortcut is documented in the shared guard below.
 include!("../../tests/support/scratch.rs");
 
+/// Scratch in the real local application data folder, for a test whose folders must pass a chain
+/// hold: the Temp chain may not, depending on how the machine's folders were made.
+#[cfg(windows)]
+pub(crate) fn local(label: &str) -> Scratch {
+    let local = crate::platform::local_app_data().expect("local app data");
+    Scratch::under(&local, label)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

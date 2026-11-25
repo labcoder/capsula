@@ -66,6 +66,17 @@ impl InstanceLock {
         }
     }
 
+    /// Resolves this session's lock and checks what's at its name, without taking it, so an
+    /// unusable data folder or a linked lock refuses before the shell writes anything, its log
+    /// included.
+    ///
+    /// # Errors
+    /// As [`Self::try_acquire_current_session`], before any lock is taken.
+    #[cfg(not(target_os = "macos"))]
+    pub fn admit_current_session() -> Result<(), SessionLockError> {
+        crate::platform::instance_lock_path().map(drop)
+    }
+
     /// The admitted storage that holds this lock, for owners that must close before it is released.
     #[cfg(target_os = "macos")]
     #[must_use]

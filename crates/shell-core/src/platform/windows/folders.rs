@@ -1,36 +1,17 @@
-//! Per-user data folder, honoring the environment used by sandboxed runs.
+//! The per-user data folder, from the resolver the brain shares: today's route in an ordinary
+//! build, and in Gate and debug builds the override pair, admitted before the first write, or
+//! the Known Folder.
 
-use std::ffi::OsString;
 use std::path::PathBuf;
 
 use kumochi_protocol::constants;
+use kumochi_storage::{Today, local_app_data};
 
-/// The local data folder, only when `%LOCALAPPDATA%` is an absolute path.
+/// This product's folder in the local application data root, unless the resolver refuses.
 pub fn data_dir() -> Option<PathBuf> {
-    data_dir_under(std::env::var_os("LOCALAPPDATA"))
-}
-
-fn data_dir_under(base: Option<OsString>) -> Option<PathBuf> {
-    let base = PathBuf::from(base?);
-    base.is_absolute().then(|| base.join(constants::DATA_DIR))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::data_dir_under;
-    use std::path::PathBuf;
-
-    use kumochi_protocol::constants::DATA_DIR;
-
-    #[test]
-    fn the_data_folder_needs_an_absolute_base() {
-        for bad in ["", ".", "AppData", r"\Users\me", "C:AppData"] {
-            assert_eq!(data_dir_under(Some(bad.into())), None, "{bad:?}");
-        }
-        assert_eq!(data_dir_under(None), None);
-        assert_eq!(
-            data_dir_under(Some(r"C:\Users\me\AppData\Local".into())),
-            Some(PathBuf::from(r"C:\Users\me\AppData\Local").join(DATA_DIR))
-        );
-    }
+    Some(
+        local_app_data(Today::Environment)
+            .ok()?
+            .join(constants::DATA_DIR),
+    )
 }

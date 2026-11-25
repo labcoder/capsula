@@ -192,6 +192,7 @@ texts! {
     SpokenRepliesDownloading => "voice-spoken-replies-downloading",
     SpokenRepliesLoading => "voice-spoken-replies-loading",
     SpokenRepliesRestartRequired => "voice-spoken-replies-restart-required",
+    SpokenRepliesRestartToHear => "voice-spoken-replies-restart-to-hear",
     SpokenRepliesInstalledFailed => "voice-spoken-replies-installed-failed",
     SpokenRepliesNotInstalledFailed => "voice-spoken-replies-not-installed-failed",
     VoiceIdlePolicy => "voice-idle-policy",
