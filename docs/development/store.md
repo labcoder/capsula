@@ -17,9 +17,12 @@ the test process before reopen or alias cleanup. Windows sharing-mode tests stay
 No non-Windows production store startup, swap or capacity fallback is enabled.
 On Linux, direct file-logging startup returns `NativeRuntime` before resolving a data path.
 
-## Dormant macOS shell-file admission
+## macOS shell-file admission
 
-The dormant macOS shell-file primitives admit an OS-discovered Support candidate without
+On macOS the shell's instance lock and file logger use these primitives: startup takes the lock
+in the admitted product folder, then starts the logger in the same storage.
+
+The macOS shell-file primitives admit an OS-discovered Support candidate without
 creating its ancestors. The read-only anchor walk independently requires local, ownership-enforced
 APFS volumes; product/log directories and private files cannot cross the Support volume. Legacy
 `hold_chain` still refuses every device crossing. Private directories require current UID/0700;
@@ -35,8 +38,7 @@ Ancestor admission failures propagate separately from candidate skips in both re
 Concurrent missing/busy/unsafe/replaced candidates are skipped, without a rotation lock or mandatory new
 Darwin unlink flags. Held-directory deletion remains name-based with a check-to-unlink race under
 the trusted OS/owning-UID boundary. Neither seven-file retention nor latency is guaranteed.
-These primitives do not integrate the shell/logger, certify the real anchor or native races,
-make kernel operations cancelable, or establish a deployment floor or durable flush guarantee.
+These primitives do not certify the real anchor or native races, make kernel operations cancelable, or establish a deployment floor or durable flush guarantee.
 
 ## Settings
 
