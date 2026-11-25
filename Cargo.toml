@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/audio", "crates/protocol", "crates/scene", "crates/brain", "crates/shell-core", "crates/shell", "xtask"]
+members = ["crates/audio", "crates/protocol", "crates/scene", "crates/brain", "crates/shell-core", "crates/shell", "crates/storage", "xtask"]
 # Vendored third-party crates build as dependencies, not members, so workspace lints skip them.
 exclude = ["vendor"]
 
