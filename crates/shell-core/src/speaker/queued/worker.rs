@@ -15,7 +15,7 @@ use super::super::conductor::{Assignment, Binding};
 use super::backend::{self, Power, Reply, Request};
 use super::receipts::Receipts;
 use super::timeline::{Anchor, Engine, Observation, Opened, Phase, Tail};
-use super::{Admission, Credit, Fault, Packet};
+use super::{Admission, Credit, Fault, Packet, Speech};
 use crate::platform::speaker_cpal::{
     Control, OutputError, OutputEvent, PRESENTATION_SLOTS, PacketKind, Source, TailAck, Transport,
 };
@@ -132,6 +132,7 @@ pub(crate) fn spawn_plain(
     reports: (
         impl FnMut(ControlToBrain) -> bool + Send + 'static,
         impl FnOnce(bool) + Send + 'static,
+        Speech,
     ),
     exit: impl FnMut(bool) + Send + 'static,
     #[cfg(any(test, feature = "test-support"))] fake: Option<FakeOutput>,
@@ -183,10 +184,12 @@ struct Physical {
     power: Power,
     retire_deadline: Option<Duration>,
     watchdog: Option<(Duration, u64)>,
+    pending_sound: Vec<Duration>,
 }
 
 struct Worker {
     engine: Engine,
+    origin: Instant,
     physical: Option<Physical>,
     job: Option<Request>,
     pending_packet: Option<Packet>,
@@ -196,6 +199,7 @@ struct Worker {
     retired_route: Option<u64>,
     virtual_route: bool,
     drawing: Option<Drawing>,
+    speech: Speech,
 }
 
 #[cfg_attr(
@@ -215,6 +219,7 @@ pub(crate) fn spawn(
     reports: (
         impl FnMut(ControlToBrain) -> bool + Send + 'static,
         impl FnOnce(bool) + Send + 'static,
+        Speech,
     ),
     #[cfg(any(test, feature = "test-support"))] fake: Option<FakeOutput>,
 ) -> io::Result<Input> {
@@ -276,7 +281,11 @@ fn own(
     (engine, origin): (Engine, Instant),
     drawing: Drawing,
     give: impl FnMut(Credit),
-    (report, refused_tail): (impl FnMut(ControlToBrain) -> bool, impl FnOnce(bool)),
+    (report, refused_tail, speech): (
+        impl FnMut(ControlToBrain) -> bool,
+        impl FnOnce(bool),
+        Speech,
+    ),
     start: impl FnOnce(Thread, Instant) -> io::Result<(SyncSender<Request>, Receiver<Reply>)>,
     #[cfg(any(test, feature = "test-support"))] fixture: FixtureStart,
 ) {
@@ -285,6 +294,7 @@ fn own(
     };
     let worker = Worker {
         engine,
+        origin,
         physical: None,
         job: None,
         pending_packet: None,
@@ -294,27 +304,28 @@ fn own(
         retired_route: None,
         virtual_route: false,
         drawing: Some(drawing),
+        speech,
     };
     #[cfg(any(test, feature = "test-support"))]
     let worker = if matches!(fixture, FixtureStart::Primed) {
-        worker.prime_fake(origin)
+        worker.prime_fake()
     } else {
         worker
     };
-    worker.serve(port, origin, give, report, Some(refused_tail));
+    worker.serve(port, give, report, Some(refused_tail));
 }
 
 impl Worker {
     #[cfg(any(test, feature = "test-support"))]
-    fn prime_fake(mut self, origin: Instant) -> Self {
-        let now = origin.elapsed();
+    fn prime_fake(mut self) -> Self {
+        let now = self.origin.elapsed();
         self.engine.expect(now);
         self.drive(now);
         let opened = self
             .replies
             .recv_timeout(Duration::from_secs(3))
             .expect("the fake device answers before source admission");
-        self.apply_backend_reply(Ok(opened), origin.elapsed());
+        self.apply_backend_reply(Ok(opened), self.origin.elapsed());
         assert!(
             self.physical.is_some(),
             "the worker owns the primed fake route"
@@ -325,11 +336,11 @@ impl Worker {
     fn serve(
         mut self,
         port: &Port,
-        origin: Instant,
         mut give: impl FnMut(Credit),
         mut report: impl FnMut(ControlToBrain) -> bool,
         refused_tail: Option<impl FnOnce(bool)>,
     ) {
+        let origin = self.origin;
         let mut source = Zeroizing::new([0; 480]);
         let mut receipts = Receipts::default();
         loop {
@@ -414,7 +425,13 @@ impl Worker {
             .chain(
                 self.physical
                     .iter()
-                    .flat_map(|route| [route.retire_deadline, route.watchdog.map(|(at, _)| at)])
+                    .flat_map(|route| {
+                        [
+                            route.retire_deadline,
+                            route.watchdog.map(|(at, _)| at),
+                            route.pending_sound.iter().copied().min(),
+                        ]
+                    })
                     .flatten()
                     .filter(|&deadline| deadline > now),
             )
@@ -432,6 +449,11 @@ impl Worker {
         self.observations(now);
         self.watch_playback(now);
         self.apply_stop(port, give, now);
+        if let Some(route) = &mut self.physical
+            && route.retire_deadline.is_none()
+        {
+            route.observe_sound(&self.speech, self.origin, now);
+        }
         if self.pending_packet.is_none() && self.engine.queue.held.is_none() {
             self.pending_packet = port.packets.try_recv().ok();
         }
@@ -549,6 +571,7 @@ impl Worker {
                         power: Power::Playing,
                         retire_deadline: None,
                         watchdog: None,
+                        pending_sound: Vec::with_capacity(PRESENTATION_SLOTS * 2),
                     };
                     if !accepted {
                         self.retired_route = Some(generation);
@@ -689,6 +712,7 @@ impl Worker {
     }
 
     fn recover(&mut self, now: Duration) {
+        self.speech.clear();
         if let Some(route) = &mut self.physical {
             self.engine.require_recovery(route.generation);
             self.retired_route = Some(route.generation);
@@ -705,6 +729,7 @@ impl Worker {
     }
 
     fn stop(&mut self, now: Duration, give: &mut impl FnMut(Credit)) {
+        self.speech.clear();
         if let Some(Request::Open(_, control)) = &self.job {
             control.stop();
         }
@@ -833,9 +858,39 @@ impl Worker {
 }
 
 impl Physical {
+    fn observe_sound(&mut self, speech: &Speech, origin: Instant, now: Duration) {
+        let mut latest = None;
+        self.pending_sound.retain(|&at| {
+            if at > now {
+                return true;
+            }
+            latest = latest.max(Some(at));
+            false
+        });
+        for _ in 0..PRESENTATION_SLOTS {
+            let Some((first, last)) = self.transport.nonzero_output() else {
+                break;
+            };
+            for at in [Some(first), (first != last).then_some(last)]
+                .into_iter()
+                .flatten()
+            {
+                if at <= now {
+                    latest = latest.max(Some(at));
+                } else if self.pending_sound.len() < PRESENTATION_SLOTS * 2 {
+                    self.pending_sound.push(at);
+                }
+            }
+        }
+        if let Some(at) = latest.and_then(|at| origin.checked_add(at)) {
+            speech.hold(at);
+        }
+    }
+
     fn retire(&mut self, now: Duration) {
         self.transport.control().stop();
         self.watchdog = None;
+        self.pending_sound.clear();
         self.retire_deadline
             .get_or_insert(now.saturating_add(DRAIN));
     }
