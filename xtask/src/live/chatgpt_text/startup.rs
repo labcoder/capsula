@@ -1,28 +1,30 @@
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf, Prefix};
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
-    AUTHORITY_FILE, CLAUDE_CODE_DELETING, CONFIG_FILE, DATA_DIR, STORE_FILE,
+    AUTHORITY_FILE, CLAUDE_CODE_DELETING, CONFIG_FILE, DATA_DIR, LOCAL_APPDATA_OVERRIDE,
+    ROAMING_APPDATA_OVERRIDE, STORE_FILE,
 };
 use rusqlite::Connection;
 
 use crate::slice2::store;
 
-pub(super) fn plan(budget: u32) -> Result<String> {
-    let root = local_path("KUMOCHI_LIVE_TEXT_PROFILE")?;
-    let local = local_path("LOCALAPPDATA")?;
-    let roaming = local_path("APPDATA")?;
-    let everyday = crate::platform::local_app_data()
-        .and_then(|path| Ok(path.canonicalize()?))
-        .map_err(|_| anyhow!("cannot identify ordinary local app data"))?;
-    ensure!(
-        local != everyday && local == root.join("local") && roaming == root.join("roaming"),
-        "the folders do not match the disposable profile"
-    );
-    check_claude_cleanup(&everyday.join(DATA_DIR))?;
+/// What a first-text run may start with: the plan the operator approved, and the identities
+/// (volume serial and file index) of the profile's local and roaming roots it was made from. The
+/// identities name no path and are never printed.
+pub(in crate::live) struct Startup {
+    pub(super) plan: String,
+    pub(super) pair: [u8; 24],
+}
+
+pub(super) fn plan(budget: u32) -> Result<Startup> {
+    let var = |name: &str| std::env::var_os(name);
+    let (local, roaming) = profile(var)?;
     let data = local.join(DATA_DIR);
+    check_claude_cleanup(&data)?;
     let db = data.join(STORE_FILE);
     let authority = data.join(AUTHORITY_FILE);
     let config = roaming.join(DATA_DIR).join(CONFIG_FILE);
@@ -38,21 +40,76 @@ pub(super) fn plan(budget: u32) -> Result<String> {
     let config = File::open(config)
         .and_then(|file| io::read_to_string(file.take(131_073)))
         .map_err(|_| anyhow!("cannot read text-only settings"))?;
-    check(&db, &authority, &config, budget)
+    Ok(Startup {
+        plan: check(&db, &authority, &config, budget)?,
+        pair: identities(
+            &PathBuf::from(var(LOCAL_APPDATA_OVERRIDE).unwrap_or_default()),
+            &PathBuf::from(var(ROAMING_APPDATA_OVERRIDE).unwrap_or_default()),
+        )?,
+    })
 }
 
-pub(super) fn check_claude_cleanup(known_data: &Path) -> Result<()> {
+/// The canonical local and roaming halves of the override pair `var` reads. Both must be set, as
+/// `local` and `roaming` in the disposable profile, which must lie strictly below the real local
+/// application data folder and outside its Kumochi Dev data.
+pub(super) fn profile(var: impl Fn(&str) -> Option<OsString>) -> Result<(PathBuf, PathBuf)> {
+    let (Some(local), Some(roaming)) = (var(LOCAL_APPDATA_OVERRIDE), var(ROAMING_APPDATA_OVERRIDE))
+    else {
+        bail!("first-text needs both {LOCAL_APPDATA_OVERRIDE} and {ROAMING_APPDATA_OVERRIDE}");
+    };
+    let root = local_path(var("KUMOCHI_LIVE_TEXT_PROFILE"))?;
+    let everyday = crate::platform::local_app_data()
+        .and_then(|path| Ok(path.canonicalize()?))
+        .map_err(|_| anyhow!("cannot identify ordinary local app data"))?;
     ensure!(
-        fs::symlink_metadata(known_data.join(CLAUDE_CODE_DELETING))
+        root.starts_with(&everyday)
+            && root != everyday
+            && !root.starts_with(everyday.join(DATA_DIR)),
+        "the disposable profile must lie below local app data, outside its own data"
+    );
+    let local = local_path(Some(local))?;
+    let roaming = local_path(Some(roaming))?;
+    ensure!(
+        local == root.join("local") && roaming == root.join("roaming"),
+        "the folders do not match the disposable profile"
+    );
+    Ok((local, roaming))
+}
+
+/// The identities of the folders at `local` and `roaming`, as the variables spell them, each
+/// read through its held chain, so a link anywhere on either path refuses.
+pub(super) fn identities(local: &Path, roaming: &Path) -> Result<[u8; 24]> {
+    let mut pair = [0; 24];
+    for (bytes, folder) in pair
+        .as_chunks_mut::<12>()
+        .0
+        .iter_mut()
+        .zip([local, roaming])
+    {
+        let held = kumochi_storage::hold_chain(folder)
+            .map_err(|_| anyhow!("cannot hold the profile folders"))?;
+        let root = held
+            .last()
+            .ok_or_else(|| anyhow!("cannot hold the profile folders"))?;
+        let (volume, index) = crate::platform::file_identity(root)?;
+        bytes[..4].copy_from_slice(&volume.to_le_bytes());
+        bytes[4..].copy_from_slice(&index.to_le_bytes());
+    }
+    Ok(pair)
+}
+
+/// Refuses while Claude Code's cleanup is owed in `data`, the data folder the run's brain uses.
+pub(super) fn check_claude_cleanup(data: &Path) -> Result<()> {
+    ensure!(
+        fs::symlink_metadata(data.join(CLAUDE_CODE_DELETING))
             .is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
         "Claude Code cleanup is pending or unknown"
     );
     Ok(())
 }
 
-fn local_path(name: &str) -> Result<PathBuf> {
-    let path =
-        PathBuf::from(std::env::var_os(name).ok_or_else(|| anyhow!("missing profile folder"))?);
+fn local_path(value: Option<OsString>) -> Result<PathBuf> {
+    let path = PathBuf::from(value.ok_or_else(|| anyhow!("missing profile folder"))?);
     ensure!(path.is_absolute(), "profile folders must be absolute");
     let path = path
         .canonicalize()

@@ -329,6 +329,22 @@ pub(crate) fn local_app_data() -> Result<PathBuf> {
     Ok(folder)
 }
 
+/// The volume serial number and file index of what `opened` is open on: an identity that names no
+/// path.
+pub(crate) fn file_identity(opened: &std::fs::File) -> Result<(u32, u64)> {
+    use windows::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `opened` is a live handle and `info` a writable struct of the expected type.
+    unsafe { GetFileInformationByHandle(HANDLE(opened.as_raw_handle()), &raw mut info) }
+        .context("reading a folder's identity")?;
+    Ok((
+        info.dwVolumeSerialNumber,
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    ))
+}
+
 /// The command that force-ends `pid` and every process it started. std can end one child, not
 /// its descendants (cargo's rustc, a run's brain), so this is the platform's own tool.
 pub(crate) fn kill_tree(pid: u32) -> Result<Command> {

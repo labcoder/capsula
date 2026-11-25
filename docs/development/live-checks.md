@@ -25,7 +25,7 @@ flowchart LR
   it and itself, renamed `kumochi.exe`, into a fresh folder, then usually runs that copy. Unlike the slice 2
   gate, the brain uses the developer's real `%LOCALAPPDATA%` and the dev credential service, since
   the point is a signed-in dev account that later checks and the dev shell use. First-text requires
-  separate disposable data folders. Debug names keep it
+  separate disposable data folders, passed through the override pair (see below). Debug names keep it
   away from an installed Kumochi, and a release or gate xtask refuses to run.
 - Both sides refuse anything but the dev identity: a release build uses the installed product's
   names, and the [gate identity](gate-identity.md) never signs in, since its runs delete what
@@ -278,17 +278,25 @@ The model cap must be 1–60. There are no
 Claude Code questions, automatic retries of typed turns, or replacement samples.
 
 Use a disposable Kumochi Dev setup whose local and roaming folders are the `local` and
-`roaming` children of the directory named by `KUMOCHI_LIVE_TEXT_PROFILE`. The harness refuses
-an existing history, pending issue work, a pinned main model, voice or screen settings,
-pending authority work, a Claude cleanup marker, and any active connection other than
-ChatGPT. The inner check compares current read-only metadata with the prepared plan
-before taking its claim or spawning a brain. It then requires the brain to report
+`roaming` children of the directory named by `KUMOCHI_LIVE_TEXT_PROFILE`, which must lie
+strictly below the real Local AppData and outside its `Kumochi Dev` folder. Pass them as the
+override pair, `KUMOCHI_GATE_LOCALAPPDATA` and `KUMOCHI_GATE_APPDATA`, for both the prepare
+step and the copied run; the Dev brain the copy starts inherits them. Setting `LOCALAPPDATA`
+and `APPDATA` instead doesn't isolate a debug build: it refuses to start. The harness refuses
+half a pair, an existing history, pending issue work, a pinned main model, voice or screen
+settings, pending authority work, a Claude cleanup marker in the profile's own
+`local\Kumochi Dev` (the Claude Code folder that brain uses), and any active connection other
+than ChatGPT. Prepare also records the two folders' identities (volume serial number and file
+index, read through a chain hold that refuses links) beside the plan, and never prints them.
+The inner check compares current read-only metadata and the identities of the pair it sees
+with the prepared ones before taking its claim or spawning a brain, so another eligible
+profile can't stand in for the approved one. It then requires the brain to report
 ChatGPT already signed in, with plan use enabled and no recovery required.
 
 An ordinary Dev start still opens the user-level Dev credential service and sweeps
 legacy and retired credential entries, including the old staged key name. Turning
-Claude Code off still lets the brain sweep old launch and session files in its
-ordinary Dev folder. ChatGPT may refresh a due bearer and fetch its catalog.
+Claude Code off still lets the brain sweep old launch and session files in the
+profile's Dev folder. ChatGPT may refresh a due bearer and fetch its catalog.
 
 Signing in through Kumochi with the disposable folders creates its own host and ChatGPT
 generations in the current Windows user's Dev credential service. The disposable authority

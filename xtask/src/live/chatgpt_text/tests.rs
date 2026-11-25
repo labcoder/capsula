@@ -2,7 +2,7 @@ use std::fs;
 
 use kumochi_protocol::constants::ProductIdentity;
 
-use super::{PLAN, prepared, startup};
+use super::{PAIR, PLAN, Startup, prepared, startup};
 use crate::live::{Check, Entry, entry};
 
 #[test]
@@ -33,6 +33,17 @@ fn the_first_text_command_has_an_explicit_dev_only_budget() {
 pub(super) const TEXT_ONLY: &str =
     "[claude_code]\nenabled=false\n[voice]\nhold_to_talk=false\nscreen_holds=false\n";
 pub(super) const SAFE_PLAN: &str = "model_budget=19\nconnections=chatgpt\nchatgpt_startup_identity_validation=one possible check not visible in metadata (discovery and up to two signing-key requests)\n";
+
+/// The identities of a prepared profile pair, for tests that don't read real folders.
+pub(super) const PAIR_FIXTURE: [u8; 24] = [7; 24];
+
+/// `plan` as made from [`PAIR_FIXTURE`].
+pub(super) fn fixture(plan: String) -> Startup {
+    Startup {
+        plan,
+        pair: PAIR_FIXTURE,
+    }
+}
 
 pub(super) fn clean_metadata() -> (rusqlite::Connection, rusqlite::Connection) {
     let db = rusqlite::Connection::open_in_memory().expect("fixture history");
@@ -73,9 +84,78 @@ fn an_ordinary_profile_claude_cleanup_marker_refuses_startup() {
 #[test]
 fn prepare_records_the_inspectable_plan_in_the_fresh_folder() {
     let folder = crate::scratch::dir("first-text-prepare");
-    prepared(&folder, SAFE_PLAN).expect("prepared plan");
+    prepared(&folder, &fixture(SAFE_PLAN.to_owned())).expect("prepared plan");
     assert_eq!(
         fs::read_to_string(folder.join(PLAN)).expect("plan"),
         SAFE_PLAN
+    );
+    assert_eq!(fs::read(folder.join(PAIR)).expect("pair"), PAIR_FIXTURE);
+}
+
+/// The override pair as a fixture: `local` and `roaming` under `profile`, set as named.
+fn variables(
+    profile: &std::path::Path,
+    set: [bool; 2],
+) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+    let profile = profile.to_owned();
+    move |name| match name {
+        "KUMOCHI_LIVE_TEXT_PROFILE" => Some(profile.clone().into()),
+        "KUMOCHI_GATE_LOCALAPPDATA" if set[0] => Some(profile.join("local").into()),
+        "KUMOCHI_GATE_APPDATA" if set[1] => Some(profile.join("roaming").into()),
+        _ => None,
+    }
+}
+
+#[test]
+fn a_half_pair_or_a_profile_outside_local_app_data_is_refused() {
+    let profile = crate::scratch::dir("first-text-profile");
+    for half in ["local", "roaming"] {
+        fs::create_dir(profile.join(half)).expect("half");
+    }
+    let (local, roaming) =
+        startup::profile(variables(&profile, [true, true])).expect("a whole pair below the anchor");
+    assert_eq!(local.file_name(), Some("local".as_ref()));
+    assert_eq!(roaming.file_name(), Some("roaming".as_ref()));
+    for set in [[true, false], [false, true], [false, false]] {
+        assert_eq!(
+            startup::profile(variables(&profile, set))
+                .expect_err("half a pair")
+                .to_string(),
+            "first-text needs both KUMOCHI_GATE_LOCALAPPDATA and KUMOCHI_GATE_APPDATA"
+        );
+    }
+    // The checkout is outside Local AppData on Rez and in CI.
+    let outside = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert_eq!(
+        startup::profile(variables(outside, [true, true]))
+            .expect_err("outside the anchor")
+            .to_string(),
+        "the disposable profile must lie below local app data, outside its own data"
+    );
+}
+
+#[test]
+fn identities_tell_two_profile_pairs_apart_and_refuse_a_link() {
+    let first = crate::scratch::dir("first-text-identity-a");
+    let second = crate::scratch::dir("first-text-identity-b");
+    for profile in [&first, &second] {
+        for half in ["local", "roaming"] {
+            fs::create_dir(profile.join(half)).expect("half");
+        }
+    }
+    let pair = |profile: &std::path::Path| {
+        startup::identities(&profile.join("local"), &profile.join("roaming"))
+    };
+    let one = pair(&first).expect("the first pair");
+    assert_eq!(pair(&first).expect("the same pair again"), one);
+    assert_ne!(pair(&second).expect("the second pair"), one);
+    let linked = crate::scratch::dir("first-text-identity-linked");
+    fs::create_dir(linked.join("local")).expect("half");
+    fs::create_dir(linked.join("roaming")).expect("an empty folder");
+    kumochi_storage::set_junction(&linked.join("roaming"), &second.join("roaming"))
+        .expect("a junction");
+    assert_eq!(
+        pair(&linked).expect_err("a linked half").to_string(),
+        "cannot hold the profile folders"
     );
 }

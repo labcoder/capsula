@@ -8,7 +8,7 @@ use std::io::Read as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use super::{PLAN, plan};
+use super::{PAIR, PLAN, Startup, plan};
 use crate::slice2::client::{Client, Frame, Seen};
 use anyhow::{Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
@@ -45,7 +45,7 @@ pub(in crate::live) fn run(budget: u32) -> Result<()> {
 
 fn claim_checked<T>(
     folder: &Path,
-    inspect: impl FnOnce() -> Result<String>,
+    inspect: impl FnOnce() -> Result<Startup>,
     claimed: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     let claim = folder.join(CLAIM);
@@ -53,9 +53,15 @@ fn claim_checked<T>(
     let plan = std::fs::File::open(folder.join(PLAN))
         .and_then(|file| std::io::read_to_string(file.take(256)))
         .map_err(|_| anyhow!("missing prepared plan"))?;
+    let startup = inspect()?;
     ensure!(
-        plan == inspect()?,
+        plan == startup.plan,
         "budget or startup work differs from the prepared plan"
+    );
+    let pair = std::fs::read(folder.join(PAIR)).map_err(|_| anyhow!("missing prepared pair"))?;
+    ensure!(
+        pair == startup.pair,
+        "the profile folders differ from the prepared ones"
     );
     ensure!(
         !folder.join(LIVE_CHATGPT_TEXT_STAMPS_FILE).exists(),
