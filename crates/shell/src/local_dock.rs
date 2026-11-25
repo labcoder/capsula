@@ -8,17 +8,26 @@ use std::{
 
 use gpui_kit::component::{ActiveTheme as _, button::Button};
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement,
-    KeyBinding, Menu, MenuItem, ParentElement as _, Render, Role, StatefulInteractiveElement as _,
-    Styled as _, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
-    WindowOptions, div, px, size,
+    AnyWindowHandle, App, AppContext as _, AsyncApp, Bounds, Context, InteractiveElement as _,
+    IntoElement, KeyBinding, Menu, MenuItem, ParentElement as _, Render, Role,
+    StatefulInteractiveElement as _, Styled as _, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, px, size,
 };
 use kumochi_protocol::constants::DISPLAY_NAME;
 use kumochi_shell_core::link::{self, LinkEvent, LinkHandle, LinkState};
 
 use crate::strings::{Strings, Text};
 
+#[cfg(target_os = "macos")]
+mod termination;
+
 gpui_kit::actions!(local_dock, [QuitLocalDock]);
+
+/// The answer to one platform termination request: `true` lets the app terminate.
+type Reply = Box<dyn FnOnce(bool)>;
+
+/// The platform's quit after the release, which settles with its termination requests.
+type PlatformQuit = Box<dyn Fn()>;
 
 /// App-wide cleanup custody: the startup admission (the instance lock and anything that must
 /// close before it) and what has to finish before it is released. The app's Quit action owns
@@ -29,6 +38,16 @@ pub struct Custody {
     link: RefCell<Option<LinkHandle>>,
     window: Cell<Option<AnyWindowHandle>>,
     closing: Cell<bool>,
+    /// The app itself asked to quit: Quit, a window close or a failed open.
+    requested: Cell<bool>,
+    /// The release finished, so nothing is left to close.
+    released: Cell<bool>,
+    /// A platform termination request still owed its answer.
+    owed: RefCell<Option<Reply>>,
+    /// Lets a platform request start the release; set once the dock opens.
+    app: RefCell<Option<AsyncApp>>,
+    /// Ends the app after the release where the platform asks before terminating.
+    platform_quit: RefCell<Option<PlatformQuit>>,
 }
 
 impl std::fmt::Debug for Custody {
@@ -48,7 +67,53 @@ impl Custody {
             link: RefCell::default(),
             window: Cell::default(),
             closing: Cell::default(),
+            requested: Cell::default(),
+            released: Cell::default(),
+            owed: RefCell::default(),
+            app: RefCell::default(),
+            platform_quit: RefCell::default(),
         })
+    }
+
+    /// Sets the platform's quit, used after the release instead of the app's own. The platform
+    /// then decides whether it must still ask to terminate: a request already in flight ends the
+    /// app, and a new one would wait inside the quit for a reply it blocks.
+    pub fn quit_through(&self, quit: impl Fn() + 'static) {
+        *self.platform_quit.borrow_mut() = Some(Box::new(quit));
+    }
+
+    /// Answers a platform request to terminate the app, such as a quit from the macOS Dock.
+    /// Before the dock opens the request is refused. While the admission is live the request
+    /// starts the release, or joins the one under way, and is approved once it finishes. After
+    /// the release it is approved at once, whether or not the dock is still there.
+    /// Call it on the UI thread outside any `App` update, because it may start the release.
+    pub fn answer_termination(self: &Rc<Self>, reply: impl FnOnce(bool) + 'static) {
+        if self.released.get() {
+            return reply(true);
+        }
+        let app = self.app.borrow().clone();
+        if app.is_none() && !self.closing.get() {
+            return reply(false);
+        }
+        if let Some(earlier) = self.owed.replace(Some(Box::new(reply))) {
+            earlier(false);
+        }
+        if let Some(app) = app
+            && !self.closing.get()
+        {
+            app.update(|cx| close(self, cx));
+        }
+    }
+
+    /// Marks the release finished and answers a request owed an answer. Returns whether the app
+    /// still has to quit on its own: only for its own quit, when no platform request was approved.
+    fn finish(&self) -> bool {
+        self.released.set(true);
+        let Some(reply) = self.owed.take() else {
+            return self.requested.get();
+        };
+        reply(true);
+        false
     }
 }
 
@@ -63,7 +128,11 @@ pub fn run(
     let custody = Custody::new(admission);
     let opened = Rc::new(Cell::new(false));
     let startup = Rc::clone(&opened);
-    gpui_kit::application()
+    #[cfg(target_os = "macos")]
+    let application = termination::application(&custody);
+    #[cfg(not(target_os = "macos"))]
+    let application = gpui_kit::application();
+    application
         .with_assets(crate::assets::Assets)
         .run(move |cx| {
             initialize(cx);
@@ -81,15 +150,33 @@ pub fn run(
 fn open_with_rollback(cx: &mut App, custody: &Rc<Custody>) -> Result<AnyWindowHandle, OpenError> {
     open(cx, custody).inspect_err(|error| {
         tracing::error!(%error, "can't open the disconnected dock");
-        close(custody, cx);
+        request(custody, cx);
     })
+}
+
+/// An app-owned quit: the release, then the app quits on its own. After the release, such as when
+/// the platform cancelled a termination it had been allowed, only the platform quit is left.
+fn request(custody: &Rc<Custody>, cx: &App) {
+    custody.requested.set(true);
+    if !custody.released.get() {
+        return close(custody, cx);
+    }
+    quit(custody, cx);
+}
+
+/// Ends the app after the release, through the platform's quit where it has one.
+fn quit(custody: &Custody, cx: &App) {
+    match custody.platform_quit.borrow().as_ref() {
+        Some(quit) => quit(),
+        None => cx.quit(),
+    }
 }
 
 /// Begins the one release: finishes the link (once the dock opened) and drops the admission off
 /// the UI thread, because the logger joins as it closes; then removes the window, if any, and
-/// quits on the UI thread once that has finished.
+/// settles the quit on the UI thread once that has finished.
 fn close(custody: &Rc<Custody>, cx: &App) {
-    if custody.closing.replace(true) {
+    if custody.closing.get() {
         return;
     }
     let link = custody.link.borrow().clone();
@@ -98,8 +185,10 @@ fn close(custody: &Rc<Custody>, cx: &App) {
     {
         return;
     }
+    custody.closing.set(true);
     let admission = custody.admission.take();
     let window = custody.window.get();
+    let custody = Rc::clone(custody);
     let finished = cx.background_executor().spawn(async move {
         if let Some(link) = link {
             link.finish_quit();
@@ -109,6 +198,7 @@ fn close(custody: &Rc<Custody>, cx: &App) {
     cx.spawn(async move |cx| {
         finished.await;
         cx.update(|cx| {
+            let ends = custody.finish();
             if let Some(window) = window
                 && window
                     .update(cx, |_, window, _| window.remove_window())
@@ -116,7 +206,9 @@ fn close(custody: &Rc<Custody>, cx: &App) {
             {
                 tracing::debug!("the dock window was already gone");
             }
-            cx.quit();
+            if ends {
+                quit(&custody, cx);
+            }
         });
     })
     .detach();
@@ -177,7 +269,7 @@ pub fn open(cx: &mut App, custody: &Rc<Custody>) -> Result<AnyWindowHandle, Open
     let (window, dock) = gpui_kit::open_window(options, cx, |window, cx| {
         let closer = Rc::clone(custody);
         window.on_window_should_close(cx, move |_, cx| {
-            close(&closer, cx);
+            request(&closer, cx);
             false
         });
         cx.new(|_| LocalDock {
@@ -189,8 +281,9 @@ pub fn open(cx: &mut App, custody: &Rc<Custody>) -> Result<AnyWindowHandle, Open
     *custody.link.borrow_mut() = Some(link);
     custody.window.set(Some(window));
 
+    *custody.app.borrow_mut() = Some(cx.to_async());
     let closer = Rc::clone(custody);
-    cx.on_action(move |_: &QuitLocalDock, cx| close(&closer, cx));
+    cx.on_action(move |_: &QuitLocalDock, cx| request(&closer, cx));
     let quit = cx.global::<Strings>().get(Text::Quit);
     // The local dock runs only on macOS, so its quit shortcut is the macOS one by design.
     cx.bind_keys([KeyBinding::new("cmd-q", QuitLocalDock, None)]);
@@ -245,7 +338,7 @@ impl Render for LocalDock {
                     Button::new("local-dock-quit")
                         .label(quit)
                         .debug_selector(|| "local-dock-quit".into())
-                        .on_click(cx.listener(|dock, _, _, cx| close(&dock.custody, cx))),
+                        .on_click(cx.listener(|dock, _, _, cx| request(&dock.custody, cx))),
                 ),
             )
     }

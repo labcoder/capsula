@@ -29,6 +29,7 @@ tracing-appender.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+gpui-pre-macos = "=0.3.10"
 kumochi-storage = { path = "../storage" }
 time = "0.3.55"
 tracing-subscriber.workspace = true
