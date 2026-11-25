@@ -200,10 +200,12 @@ async fn handshake(
 
 /// Hands an adopted pair to the brain's runtime and runs the responder handshake on it, all of it
 /// by `by`, returning the pair bound once `BindAck` is written. `brain` is made before the first
-/// await, so the caller can wipe its own copy of the secret first.
+/// await, so the caller can wipe its own copy of the secret first. Must run inside a tokio runtime
+/// with I/O enabled.
 ///
 /// # Errors
-/// `Adopt` outside a tokio runtime, a session refusal, the deadline, or a transport failure.
+/// `Adopt` when tokio can't register an end, a session refusal, the deadline, or a transport
+/// failure.
 pub(crate) async fn respond(
     pair: InheritedPair,
     brain: BrainAwaitsInit,
