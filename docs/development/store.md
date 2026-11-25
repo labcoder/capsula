@@ -428,6 +428,43 @@ Beyond what deleting rows can reach: SSD wear levelling, the disk clusters a rem
 truncated file frees (`purge-old`, the snapshot, the WAL), Volume Shadow Copy restore points,
 backups and the pagefile.
 
+## Reading an existing database
+
+`store::existing::open` reads a database that must already exist without creating, changing or
+removing any of its files, and without migrating or checkpointing. A plain read-only open does
+change them: SQLite creates `-wal` and `-shm` beside a cleanly closed WAL database and rewrites
+an existing `-shm`. So the opener looks at the files first and picks one mode or refuses:
+
+| Files beside a main file of at least 512 bytes | Mode |
+|---|---|
+| none | `immutable`: reads only the main file and takes no SQLite lock |
+| nonempty `-wal` and `-shm`, no `-journal` | `readonly_shm`: reads the WAL's commits through read-only index handles |
+| anything else | `Uncertain`, nothing opened |
+
+A missing main file is `Missing`. Everything else is `Uncertain`, because SQLite would change a
+file or read the wrong one:
+
+- a main file shorter than SQLite's smallest page reads as zero pages, and SQLite then deletes
+  the WAL beside it;
+- an empty WAL or index has its permissions reset to the main file's when SQLite opens it;
+- a journal would be replayed, and a WAL or index alone would be created or rebuilt;
+- a main file or sidecar that is a link, a reparse point or not a regular file, or on Unix has a
+  second hard link, may not be the file SQLite reads, and `immutable` through a link skips the
+  target's WAL.
+
+The path goes to SQLite as a `file:` URI with every byte but unreserved ones percent-encoded, so
+separators, drive colons and UNC prefixes reach the VFS unchanged.
+
+Nothing calls it yet. A caller must already exclude writers, because `immutable` takes no lock and
+the file check happens before the open, not atomically with it: a WAL removed in between is
+created again as an empty file. No other connection to that database may be open in the same
+process, since SQLite shares one index handle per process. SQLite run as root re-owns the WAL and index to the main
+file's owner; Kumochi doesn't run as root. Unit tests compare each file's name, bytes,
+permissions and owner before and after: a closed database, a copy left with a live WAL, every
+refused case, and on Unix the linked cases. On Windows the VFS also honours `readonly_shm`, but
+opens the index with `OPEN_ALWAYS`, so an index removed between the check and the open would be
+created there, and a second hard link isn't detected.
+
 ## Recovery at start
 
 The shell crash guard also uses durable `scene_cleared` events before relaunch (see
