@@ -179,6 +179,23 @@ fn a_first_mark_is_shown_while_nothing_changed_since_the_release() {
 }
 
 #[test]
+fn the_stop_frontier_without_the_mark_keeps_the_other_scene_s_work() {
+    let (mut presenter, now, log, _) = shown();
+    begin(&mut presenter, LIVE, now);
+    commit_as(&mut presenter, AFTER, LIVE, 0, rect("a"), now).expect("an ordinary step");
+    assert_eq!(presenter.marks_owner(), Some((RUN, MARKS)));
+    assert_eq!(presenter.stoppable_run(), Some(RUN));
+    assert_eq!(presenter.stoppable_run_excluding(Some(MARKS)), Some(AFTER));
+
+    set(&log);
+    let effects = presenter.source_woke(now).expect("a wake");
+    assert_eq!(controls(&effects), [&cleared(&[MARKS])]);
+    assert_eq!(scene_ids(&presenter), [LIVE]);
+    assert_eq!(presenter.marks_owner(), None);
+    assert_eq!(presenter.stoppable_run(), Some(AFTER));
+}
+
+#[test]
 fn a_change_before_the_first_mark_skips_the_scene_and_names_its_run() {
     let (mut presenter, now, log) = watched();
     release(&mut presenter, AFTER, now);
