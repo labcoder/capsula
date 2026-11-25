@@ -65,6 +65,17 @@ impl FakePlayback {
         self.0.fill_at(out, Some(at));
     }
 
+    #[cfg(test)]
+    pub(crate) fn fill_with_refill(
+        &mut self,
+        out: &mut [f32],
+        at: std::time::Duration,
+        refill: impl FnMut(),
+    ) {
+        self.0.control.note_callback();
+        self.0.render(out, Some(at), Control::begin_copy, refill);
+    }
+
     pub(crate) fn ready(&self) -> bool {
         self.0.current.is_some() || self.0.ready.len() != 0
     }

@@ -141,6 +141,16 @@ It asks Darwin for the user-domain path, resolving any home-relative result thro
 OS account, not `HOME`. It opens and creates nothing. Callers append or admit the product
 folder separately; a candidate does not authorize a write.
 
+`kumochi_storage::admit_support` holds and inspects that folder the way `open_shell_storage`
+does, creating nothing. On the held anchor, `Support::product_folder` looks up this edition's
+product folder: only `ENOENT` from opening that exact name in the held folder is `Missing`, and a
+folder there must pass the same private-folder checks. `Support::try_setup_guard` takes a
+nonblocking exclusive `flock` on a fresh open of the held folder. It is per user and coarser than
+the Windows guard, since every edition and anything else that locks Application Support contends
+for it. Closing the guard or its holder's exit releases it, and `Busy` says nothing about who
+holds it. `open_shell_storage` starts with `admit_support`; the product-folder lookup and the
+guard have no caller yet.
+
 Linux is a build and test host for `shell-core`, not a supported runtime. Its native
 IPC, process launch, credential storage, file logging, and audio entry points return
 `Unsupported`. The shared tests use scripted audio and need ALSA development headers
@@ -163,8 +173,18 @@ profile footprints. An intact installation can reopen. `ResumeSetup` permits rei
 only: even a pending, unstarted owner reservation can receive this result while its credential
 namespace is unverified. A writer must reacquire the guard and revalidate that namespace and
 the exact step before any write. Uncertain or conflicting evidence leaves the data untouched.
-Windows and macOS use the same policy. No native observer or executable calls it yet, and its
-decisions do not authorize writes, reconnect a provider, or identify a person.
+Windows and macOS use the same policy. `profile::observe` feeds it: it tries the setup guard
+without waiting, samples the legacy footprints, the root slot and the owner record under that
+guard, and releases it on return. A busy or unavailable guard samples nothing. Objects inside
+the new-format root count as absent only with the root, and fresh targets stay unverified
+until an allocator can prove them disjoint, so observation never yields first use. No
+executable calls it yet, and its decisions do not authorize writes, reconnect a provider, or
+identify a person.
+
+On Windows `kumochi_storage::hold_product_folder` looks up this edition's product folder under a
+held, trusted anchor folder without creating it. Only "file not found" from that exact open,
+under an anchor no one untrusted may add to, counts as missing; a missing or non-folder anchor, a
+lost path, a file at the name or an untrusted folder is refused. Nothing calls it yet.
 
 On Windows the guard is a named mutex per user and edition in the global namespace, so every
 session of that user contends on one object and taking it writes nothing to disk
