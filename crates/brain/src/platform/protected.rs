@@ -24,15 +24,14 @@ pub(crate) enum Untrusted {
 }
 
 impl Untrusted {
-    pub(crate) fn is_unsupported(self) -> bool {
-        #[cfg(windows)]
-        {
-            false
-        }
-        #[cfg(not(windows))]
-        {
-            self == Self::Unsupported
-        }
+    #[cfg(windows)]
+    pub(crate) fn is_unsupported(_: Self) -> bool {
+        false
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn is_unsupported(error: Self) -> bool {
+        error == Self::Unsupported
     }
 }
 
