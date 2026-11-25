@@ -2,10 +2,34 @@
 
 use std::io;
 
+use kumochi_protocol::constants;
+use kumochi_shell_core::instance::InstanceLock;
 use kumochi_storage::{AcquisitionError, AdmittedLog, ShellStorage};
 use time::Date;
 
+use crate::platform::logging::owner::Logging;
 use crate::platform::logging::{self, Error, Log, Retention, Store};
+
+/// Startup admission: the logger and the lock whose storage it writes to.
+/// Field order is drop order, so the logger closes and joins before the lock is released.
+pub(crate) struct Admitted {
+    _logging: Logging<Backend>,
+    _instance: InstanceLock,
+}
+
+impl Admitted {
+    /// Starts and installs the shell logger in the lock's admitted storage.
+    pub(crate) fn start(instance: InstanceLock) -> Option<Self> {
+        let storage = instance.storage()?.clone();
+        let logging = Logging::start(Backend::new(storage, constants::SHELL_LOG))
+            .and_then(Logging::install)
+            .ok()?;
+        Some(Self {
+            _logging: logging,
+            _instance: instance,
+        })
+    }
+}
 
 pub(crate) struct Backend {
     storage: ShellStorage,

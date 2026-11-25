@@ -10,39 +10,45 @@ use gpui_kit::{
     WindowOptions, div, px, size,
 };
 use kumochi_protocol::constants::DISPLAY_NAME;
-use kumochi_shell_core::instance::InstanceLock;
 use kumochi_shell_core::link::{self, LinkEvent, LinkHandle, LinkState};
 
 use crate::strings::{Strings, Text};
 
 gpui_kit::actions!(local_dock, [QuitLocalDock]);
 
-/// Runs the disconnected dock with the already admitted session lock.
-/// Records and rolls back an open failure before requesting platform termination.
+/// Startup admission (the instance lock and anything that must close before it) that the dock
+/// releases before requesting platform termination.
+pub type Admission = Rc<Cell<Option<Box<dyn Send>>>>;
+
+/// Runs the disconnected dock with the already admitted startup state.
+/// An open failure releases the admission before any window exists; Quit releases it off the
+/// UI thread, because its owners may block while they close.
 /// The returned status applies only to backends whose event loop returns.
-pub fn run(instance: InstanceLock, initialize: impl FnOnce(&mut App) + 'static) -> ExitCode {
-    let admission = Rc::new(Cell::new(Some(instance)));
-    let startup = Rc::clone(&admission);
+pub fn run(
+    admission: impl Send + 'static,
+    initialize: impl FnOnce(&mut App) + 'static,
+) -> ExitCode {
+    let admission: Admission = Rc::new(Cell::new(Some(Box::new(admission))));
+    let opened = Rc::new(Cell::new(false));
+    let startup = Rc::clone(&opened);
     gpui_kit::application()
         .with_assets(crate::assets::Assets)
         .run(move |cx| {
             initialize(cx);
-            if open_with_rollback(cx, &startup).is_err() {
-                cx.quit();
+            match open_with_rollback(cx, &admission) {
+                Ok(_) => startup.set(true),
+                Err(_) => cx.quit(),
             }
         });
-    if admission.take().is_some() {
+    if opened.get() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     }
 }
 
-fn open_with_rollback<G>(
-    cx: &mut App,
-    admission: &Cell<Option<G>>,
-) -> Result<AnyWindowHandle, OpenError> {
-    open(cx).inspect_err(|error| {
+fn open_with_rollback(cx: &mut App, admission: &Admission) -> Result<AnyWindowHandle, OpenError> {
+    open(cx, Rc::clone(admission)).inspect_err(|error| {
         tracing::error!(%error, "can't open the disconnected dock");
         drop(admission.take());
     })
@@ -69,7 +75,7 @@ pub enum OpenError {
 ///
 /// # Errors
 /// Refuses to open without a usable display or a delivered disconnected state.
-pub fn open(cx: &mut App) -> Result<AnyWindowHandle, OpenError> {
+pub fn open(cx: &mut App, admission: Admission) -> Result<AnyWindowHandle, OpenError> {
     let display = cx.primary_display().ok_or(OpenError::Display)?;
     let visible = display.visible_bounds();
     if visible.size.width <= px(0.) || visible.size.height <= px(0.) {
@@ -101,7 +107,7 @@ pub fn open(cx: &mut App) -> Result<AnyWindowHandle, OpenError> {
         ..WindowOptions::default()
     };
     let (window, dock) = gpui_kit::open_window(options, cx, |window, cx| {
-        let dock = cx.new(|_| LocalDock { link });
+        let dock = cx.new(|_| LocalDock { link, admission });
         let owner = dock.downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             let Some(owner) = owner.upgrade() else {
@@ -129,6 +135,7 @@ pub fn open(cx: &mut App) -> Result<AnyWindowHandle, OpenError> {
 
 struct LocalDock {
     link: LinkHandle,
+    admission: Admission,
 }
 
 impl LocalDock {
@@ -137,8 +144,10 @@ impl LocalDock {
             return;
         }
         let link = self.link.clone();
+        let admission = self.admission.take();
         let finished = cx.background_executor().spawn(async move {
             link.finish_quit();
+            drop(admission);
         });
         cx.spawn(async move |cx| {
             finished.await;

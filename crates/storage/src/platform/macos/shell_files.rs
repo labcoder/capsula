@@ -74,6 +74,7 @@ struct Directories {
 ///
 /// Only the read-only anchor walk permits independently inspected local APFS device transitions.
 /// Descendants stay on the Support volume. This is not paired-boot-volume proof or native admission.
+#[derive(Clone)]
 pub struct ShellStorage(Arc<Directories>);
 
 /// An opaque private lock descriptor retaining its admitted ancestors until it closes.

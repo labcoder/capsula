@@ -1,10 +1,13 @@
 # Presence and native surfaces
 
-The dormant macOS logger takes the admitted storage owner, not a filesystem path. Before
-starting or publishing it, startup must hold the admitted lock for the graphical session.
-Rollback and Quit must close and join the logger off the UI thread before releasing that
-lock. The backend preserves terminal storage-admission refusals; ordinary I/O failures
-remain best effort. This source does not enable logging or change the Windows logger.
+On macOS the shell logs through the admitted storage owner, not a filesystem path. Startup
+takes the per-user instance lock first, then starts and installs the logger in that lock's
+storage, so refusals before that point are not logged. The logger and the lock travel together
+as the dock's admission: an open failure drops it before any window exists, and Quit drops it
+on the background executor after the link finishes, closing and joining the logger before the
+lock is released. Termination that AppKit starts on its own does not yet wait for this. The
+backend preserves terminal storage-admission refusals; ordinary I/O failures remain best
+effort. The Windows logger is unchanged.
 
 Overlay hit testing belongs to the presenter's `OverlayOwner`, not to a view. The native
 `OverlayWindows` adapter binds the dock paint window and body proxy in the Dock layer,

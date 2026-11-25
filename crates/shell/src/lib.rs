@@ -12,6 +12,7 @@ pub mod strings;
 pub mod theme;
 
 pub use local_dock::{
-    OpenError as LocalDockOpenError, open as open_local_dock, run as run_local_dock,
+    Admission as LocalDockAdmission, OpenError as LocalDockOpenError, open as open_local_dock,
+    run as run_local_dock,
 };
 pub use qpc::QpcClock;

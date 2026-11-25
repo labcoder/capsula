@@ -1,15 +1,21 @@
+use std::sync::{Arc, Weak};
+
 use gpui_kit::base::Root;
 use gpui_kit::{Modifiers, OwnedMenuItem, TestAppContext, VisualTestContext, WeakEntity};
 
 use super::*;
 
+fn admission() -> (Admission, Weak<()>) {
+    let guard = Arc::new(());
+    let held = Arc::downgrade(&guard);
+    (Rc::new(Cell::new(Some(Box::new(guard)))), held)
+}
+
 #[gpui::test]
 fn failed_open_releases_admission_before_returning_to_the_quit_caller(cx: &mut TestAppContext) {
     let display = cx.read(|cx| cx.primary_display().expect("the test display").id());
     cx.simulate_display_removed(display);
-    let guard = Rc::new(());
-    let held = Rc::downgrade(&guard);
-    let admission = Cell::new(Some(guard));
+    let (admission, held) = admission();
 
     let opened = cx.update(|cx| open_with_rollback(cx, &admission));
 
@@ -22,11 +28,18 @@ fn failed_open_releases_admission_before_returning_to_the_quit_caller(cx: &mut T
 }
 
 fn mount(cx: &mut TestAppContext) -> (AnyWindowHandle, WeakEntity<LocalDock>) {
+    mount_with(cx, Rc::default())
+}
+
+fn mount_with(
+    cx: &mut TestAppContext,
+    admission: Admission,
+) -> (AnyWindowHandle, WeakEntity<LocalDock>) {
     let window = cx.update(|cx| {
         gpui_kit::init(cx);
         crate::theme::init(cx);
         cx.set_global(Strings::english());
-        open(cx).expect("open the product dock on the test display")
+        open(cx, admission).expect("open the product dock on the test display")
     });
     let owner = window
         .update(cx, |root, _, cx| {
@@ -46,7 +59,8 @@ fn mount(cx: &mut TestAppContext) -> (AnyWindowHandle, WeakEntity<LocalDock>) {
 
 #[gpui::test]
 fn local_pointer_quits_only_when_the_rendered_button_is_clicked(cx: &mut TestAppContext) {
-    let (window, owner) = mount(cx);
+    let (admission, held) = admission();
+    let (window, owner) = mount_with(cx, Rc::clone(&admission));
     let mut visual = VisualTestContext::from_window(window, cx);
     let status = visual
         .debug_bounds("local-dock-status Can't reach Kumochi's background process.")
@@ -57,6 +71,10 @@ fn local_pointer_quits_only_when_the_rendered_button_is_clicked(cx: &mut TestApp
 
     visual.simulate_click(status.center(), Modifiers::none());
     assert_eq!(cx.windows(), [window]);
+    assert!(
+        held.upgrade().is_some(),
+        "the open dock keeps its admission"
+    );
     assert!(!cx.read(|cx| {
         owner
             .upgrade()
@@ -67,8 +85,10 @@ fn local_pointer_quits_only_when_the_rendered_button_is_clicked(cx: &mut TestApp
     }));
 
     visual.simulate_click(quit.center(), Modifiers::none());
+    cx.run_until_parked();
     assert!(cx.windows().is_empty());
     assert!(owner.upgrade().is_none());
+    assert!(held.upgrade().is_none(), "Quit releases the admission");
 }
 
 #[gpui::test]

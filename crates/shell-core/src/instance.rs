@@ -9,6 +9,8 @@ use std::path::Path;
 #[must_use = "dropping the guard lets another shell start"]
 pub struct InstanceLock {
     _held: Held,
+    #[cfg(target_os = "macos")]
+    storage: Option<kumochi_storage::ShellStorage>,
 }
 
 #[derive(Debug)]
@@ -52,8 +54,9 @@ impl InstanceLock {
         #[cfg(target_os = "macos")]
         {
             let lock = crate::platform::macos::try_acquire_instance_lock()?;
-            Ok(lock.map(|lock| Self {
+            Ok(lock.map(|(lock, storage)| Self {
                 _held: Held::Admitted { _lock: lock },
+                storage: Some(storage),
             }))
         }
         #[cfg(not(target_os = "macos"))]
@@ -61,6 +64,13 @@ impl InstanceLock {
             let path = crate::platform::instance_lock_path()?;
             Self::try_acquire(&path).map_err(SessionLockError::Lock)
         }
+    }
+
+    /// The admitted storage that holds this lock, for owners that must close before it is released.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn storage(&self) -> Option<&kumochi_storage::ShellStorage> {
+        self.storage.as_ref()
     }
 
     /// Opens or creates the empty lock file at `path` and locks it without waiting, or returns
@@ -82,6 +92,8 @@ impl InstanceLock {
         match file.try_lock() {
             Ok(()) => Ok(Some(Self {
                 _held: Held::File { _file: file },
+                #[cfg(target_os = "macos")]
+                storage: None,
             })),
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(error)) => Err(error),

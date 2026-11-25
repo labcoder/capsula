@@ -68,7 +68,15 @@ impl Counts {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the logger's tests read close statistics")
+)]
 pub(crate) struct Statistics([usize; COUNTS]);
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the logger's tests read close statistics")
+)]
 impl Statistics {
     pub(crate) fn get(&self, kind: Count) -> usize {
         self.0[kind.index()]

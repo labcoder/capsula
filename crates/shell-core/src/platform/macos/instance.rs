@@ -4,17 +4,20 @@ use std::fs::TryLockError;
 use std::path::PathBuf;
 
 use kumochi_protocol::constants;
-use kumochi_storage::AdmittedLock;
+use kumochi_storage::{AdmittedLock, ShellStorage};
 
 use crate::instance::SessionLockError;
 
 /// Takes `<SHELL_LOCK>.lock` in the product folder without waiting, or returns `None` when
-/// another shell of this user and identity holds it.
-pub(crate) fn try_acquire_instance_lock() -> Result<Option<AdmittedLock>, SessionLockError> {
+/// another shell of this user and identity holds it. The storage stays with the lock.
+pub(crate) fn try_acquire_instance_lock()
+-> Result<Option<(AdmittedLock, ShellStorage)>, SessionLockError> {
     try_acquire_under(super::support_dir())
 }
 
-fn try_acquire_under(support: Option<PathBuf>) -> Result<Option<AdmittedLock>, SessionLockError> {
+fn try_acquire_under(
+    support: Option<PathBuf>,
+) -> Result<Option<(AdmittedLock, ShellStorage)>, SessionLockError> {
     let support = support.ok_or(SessionLockError::DataDirectory)?;
     let storage = kumochi_storage::open_shell_storage(&support, constants::DATA_DIR)
         .map_err(SessionLockError::Admission)?;
@@ -22,7 +25,7 @@ fn try_acquire_under(support: Option<PathBuf>) -> Result<Option<AdmittedLock>, S
         .open_instance_lock(&format!("{}.lock", constants::SHELL_LOCK))
         .map_err(SessionLockError::Admission)?;
     match lock.try_lock() {
-        Ok(()) => Ok(Some(lock)),
+        Ok(()) => Ok(Some((lock, storage))),
         Err(TryLockError::WouldBlock) => Ok(None),
         Err(TryLockError::Error(error)) => Err(SessionLockError::Lock(error)),
     }
