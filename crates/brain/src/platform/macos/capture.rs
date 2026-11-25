@@ -75,8 +75,8 @@ impl<S: Sck> Capturer for ScreenCaptureKit<S> {
     /// The order the design fixed: the stamp's zero check, the layout and the size, the shell's
     /// identity, then the deadline and the grant, with the last deadline check inside the query's
     /// submission. The callback checks again and matches the display's frame, the result is
-    /// checked against the deadline on receipt, and the same display must still be under the
-    /// point, unmoved, before the image is drawn.
+    /// checked against the deadline on receipt, the same display must still be under the point,
+    /// unmoved, and the deadline is checked once more right before the image is drawn.
     fn capture_display(
         &mut self,
         point: PhysicalPoint,
@@ -113,11 +113,12 @@ impl<S: Sck> Capturer for ScreenCaptureKit<S> {
             };
             let image = chain::run(&self.sck, deadline, request, self.clock)?;
             let arrived = Instant::now();
-            if layout::display_at(&self.sck.displays()?, point)? != display {
+            if layout::display_at(&self.sck.displays()?, point) != Ok(display) {
                 return Err(Refusal::DisplayChanged.into());
             }
-            self.sck
-                .draw(&image, size, frame.begin(size[0], size[1])?)?;
+            let buffer = frame.begin(size[0], size[1])?;
+            live(deadline)?;
+            self.sck.draw(&image, size, buffer)?;
             if let Ok(mut captured) = CAPTURED.lock() {
                 *captured = Some((display.id, display.bounds));
             }

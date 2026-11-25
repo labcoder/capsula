@@ -117,7 +117,10 @@ struct Fake {
     screens: Vec<Screen>,
     /// What every read after the first sees, when set.
     moved: Option<Vec<Screen>>,
+    /// Every read after the first spends the stamp.
+    spend_on_reread: bool,
     reads: AtomicUsize,
+    draws: AtomicUsize,
     preflights: AtomicUsize,
     queries: AtomicUsize,
     prepares: AtomicUsize,
@@ -198,6 +201,9 @@ impl Sck for Fake {
 
     fn displays(&self) -> Result<Vec<Screen>, Failure> {
         let later = self.reads.fetch_add(1, Ordering::SeqCst) > 0;
+        if later && self.spend_on_reread {
+            self.spend();
+        }
         Ok(match &self.moved {
             Some(moved) if later => moved.clone(),
             _ => self.screens.clone(),
@@ -292,6 +298,7 @@ impl Sck for Fake {
         if size != [8, 6] {
             return Err(Failure::Fault(-99));
         }
+        self.draws.fetch_add(1, Ordering::SeqCst);
         frame.fill(7);
         Ok(())
     }
@@ -602,5 +609,25 @@ fn an_image_that_arrives_after_the_stamp_is_spent_is_released_unused() {
     let fake = Arc::new(fake);
     assert_eq!(shot(&fake, LONG, LONG), Err(Refusal::Expired.into()));
     assert_eq!(fake.counts(), [2, 1, 1, 1]);
+    assert_eq!(fake.released.load(Ordering::SeqCst), 1);
+}
+#[test]
+fn a_stamp_spent_during_the_display_recheck_draws_nothing() {
+    let mut fake = Fake::new();
+    fake.spend_on_reread = true;
+    let fake = Arc::new(fake);
+    assert_eq!(shot(&fake, LONG, LONG), Err(Refusal::Expired.into()));
+    assert_eq!(fake.counts(), [2, 1, 1, 1]);
+    assert_eq!(fake.draws.load(Ordering::SeqCst), 0);
+    assert_eq!(fake.released.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_display_gone_after_the_image_refuses_display_changed() {
+    let mut fake = Fake::new();
+    fake.moved = Some(Vec::new());
+    let fake = Arc::new(fake);
+    assert_eq!(shot(&fake, LONG, LONG), Err(Refusal::DisplayChanged.into()));
+    assert_eq!(fake.draws.load(Ordering::SeqCst), 0);
     assert_eq!(fake.released.load(Ordering::SeqCst), 1);
 }

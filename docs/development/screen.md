@@ -227,7 +227,7 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   200 ms on the continuous clock for the chain to finish, and takes a result only while that
   clock still reads inside the grace. Otherwise it answers `Retire`. After the image arrives,
   the same display must still be under the point with the same bounds, or it refuses
-  `DisplayChanged`. The image is checked for size and format, then the frame is cleared and the
+  `DisplayChanged`, and the deadline is checked once more right before drawing. The image is checked for size and format, then the frame is cleared and the
   image copied over all of it as premultiplied BGRA. Drawing reports no failure, so only those
   checks can refuse. The seal accepts only the display that capture sampled, still at the same
   bounds and DPI, so a same-sized display moved into its place doesn't pass.

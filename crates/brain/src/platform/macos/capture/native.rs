@@ -97,10 +97,10 @@ impl Sck for Native {
                 ready(content.ok_or_else(|| ended(error, domain)));
             });
         });
-        if !admit() {
-            return Err(Ended::Stopped);
-        }
         autoreleasepool(|_| {
+            if !admit() {
+                return Err(Ended::Stopped);
+            }
             // SAFETY: The class method takes two BOOLs and a block of (content, error).
             unsafe {
                 let () = msg_send![
@@ -110,8 +110,8 @@ impl Sck for Native {
                     completionHandler: &*block
                 ];
             }
-        });
-        Ok(())
+            Ok(())
+        })
     }
 
     fn prepare(&self, content: Retained<AnyObject>, request: &Request) -> Result<Shot, Ended> {
@@ -206,10 +206,10 @@ impl Sck for Native {
                 });
             });
         });
-        if !commit() {
-            return Err(Ended::Stopped);
-        }
         autoreleasepool(|_| {
+            if !commit() {
+                return Err(Ended::Stopped);
+            }
             // SAFETY: The class method takes a filter, a configuration and a block of
             // (image, error).
             unsafe {
@@ -220,8 +220,8 @@ impl Sck for Native {
                     completionHandler: &*block
                 ];
             }
-        });
-        Ok(())
+            Ok(())
+        })
     }
 
     fn draw(
