@@ -470,7 +470,9 @@ fn an_admission_refusal_preserves_an_existing_hold_and_cleans_up_only_its_own_at
     ] {
         let refused = Recognition::new(&own, &Err(reason));
         assert_eq!(refused.notice, notice);
-        assert!(matches!(refused.unsent, Unsent::StopOn(session) if std::ptr::eq(session, &own)));
+        assert!(
+            matches!(refused.unsent, Unsent::StopOn(session) if std::ptr::eq(session, std::ptr::from_ref(&own)))
+        );
     }
     let prepared = Recognition::new(
         &own,
