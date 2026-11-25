@@ -47,23 +47,31 @@ fn main() -> ExitCode {
         presence::run_accounts_fixture(state, flags.accounts_appearance, delay);
         return ExitCode::SUCCESS;
     }
-    let Some(flags) = launch_with_logging(launch, || logging::init(constants::SHELL_LOG)) else {
-        return ExitCode::FAILURE;
-    };
-    let instance = match instance::InstanceLock::try_acquire_current_session() {
-        Ok(Some(lock)) => lock,
-        Ok(None) => {
-            tracing::info!("another shell is running in this session");
-            return ExitCode::SUCCESS;
-        }
-        Err(failure) => {
-            if let Some(error) = std::error::Error::source(&failure) {
-                tracing::error!(%error, "{failure}");
-            } else {
-                tracing::error!("{failure}");
-            }
+    #[cfg(not(target_os = "macos"))]
+    let (flags, admitted) = {
+        let Some(flags) = launch_with_logging(launch, || logging::init(constants::SHELL_LOG))
+        else {
             return ExitCode::FAILURE;
+        };
+        match acquire_instance() {
+            Ok(lock) => (flags, lock),
+            Err(code) => return code,
         }
+    };
+    // macOS logs into the lock's admitted storage, so the lock comes first and its refusals go unlogged.
+    #[cfg(target_os = "macos")]
+    let (flags, admitted) = {
+        let instance = match acquire_instance() {
+            Ok(lock) => lock,
+            Err(code) => return code,
+        };
+        let Some(admitted) = platform::Admitted::start(instance) else {
+            return ExitCode::FAILURE;
+        };
+        let Some(flags) = launch_with_logging(launch, || Ok(())) else {
+            return ExitCode::FAILURE;
+        };
+        (flags, admitted)
     };
     tracing::info!(
         build = kumochi_protocol::BUILD_ID,
@@ -72,10 +80,29 @@ fn main() -> ExitCode {
     );
     match frontend {
         Frontend::Connected => {
-            let _instance = instance;
+            let _admitted = admitted;
             run_connected(flags)
         }
-        Frontend::Local => kumochi_shell::run_local_dock(instance, initialize_gpui),
+        Frontend::Local => kumochi_shell::run_local_dock(admitted, initialize_gpui),
+    }
+}
+
+/// The current session's lock, or the exit code when another shell holds it or it fails.
+fn acquire_instance() -> Result<instance::InstanceLock, ExitCode> {
+    match instance::InstanceLock::try_acquire_current_session() {
+        Ok(Some(lock)) => Ok(lock),
+        Ok(None) => {
+            tracing::info!("another shell is running in this session");
+            Err(ExitCode::SUCCESS)
+        }
+        Err(failure) => {
+            if let Some(error) = std::error::Error::source(&failure) {
+                tracing::error!(%error, "{failure}");
+            } else {
+                tracing::error!("{failure}");
+            }
+            Err(ExitCode::FAILURE)
+        }
     }
 }
 
