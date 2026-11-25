@@ -15,6 +15,7 @@ use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     CoUninitialize,
 };
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::core::{GUID, HRESULT, Interface};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -200,6 +201,23 @@ fn live(token: &Generation, session: &AtomicBool) -> Result<(), MicError> {
     }
 }
 
+pub(in crate::platform) fn collection_start() -> Result<u64, MicError> {
+    let mut frequency = 0;
+    // SAFETY: the output is writable and stays alive through the call.
+    unsafe { QueryPerformanceFrequency(&raw mut frequency) }.map_err(|_| MicError::Timestamp)?;
+    let mut ticks = 0;
+    // SAFETY: the output is writable and stays alive through the call.
+    unsafe { QueryPerformanceCounter(&raw mut ticks) }.map_err(|_| MicError::Timestamp)?;
+    let scale = u64::try_from(frequency).map_err(|_| MicError::Timestamp)?;
+    let ticks = u64::try_from(ticks).map_err(|_| MicError::Timestamp)?;
+    if scale == 0 || ticks == 0 {
+        return Err(MicError::Timestamp);
+    }
+    // GetBuffer uses QPC in 100 ns units; round the admission edge later, never earlier.
+    u64::try_from((u128::from(ticks) * 10_000_000).div_ceil(u128::from(scale)))
+        .map_err(|_| MicError::Timestamp)
+}
+
 pub(crate) fn capture(
     token: &Generation,
     session: &AtomicBool,
@@ -334,7 +352,6 @@ fn read(
     raw: &mut [u8],
     boundary: &mut PacketBoundary,
 ) -> Result<(), MicError> {
-    let mut ready = false;
     loop {
         let now = Instant::now();
         let mode = token.mode(session, now)?;
@@ -344,7 +361,6 @@ fn read(
         }
         // SAFETY: no buffer is currently held; this is a nonblocking capture-size query.
         if unsafe { source.input.GetNextPacketSize() }.map_err(|_| MicError::Unavailable)? == 0 {
-            ready = mode == Mode::Collecting;
             std::thread::park_timeout(POLL);
             continue;
         }
@@ -352,6 +368,7 @@ fn read(
         let mut frames = 0;
         let mut flags = 0;
         let mut position = 0;
+        let mut captured_qpc_100ns = 0;
         let vtable = source.input.vtable();
         let interface = source.input.as_raw();
         // SAFETY: outputs outlive the call; raw HRESULT avoids allocating COM errors while borrowing audio.
@@ -362,7 +379,7 @@ fn read(
                 &raw mut frames,
                 &raw mut flags,
                 &raw mut position,
-                std::ptr::null_mut(),
+                &raw mut captured_qpc_100ns,
             )
         };
         if acquired.is_err() {
@@ -375,10 +392,11 @@ fn read(
         let status = PacketStatus {
             frames,
             position,
+            captured_qpc_100ns,
             discontinuity: flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0.cast_unsigned() != 0,
             timestamp_error: flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() != 0,
         };
-        let allowed = boundary.packet(token.collecting(session), ready, status);
+        let allowed = boundary.packet(token.capture_cutoff(session), status);
         let copied = match bytes {
             Some(n) if n <= raw.len() && allowed == Ok(true) && (silent || !data.is_null()) => {
                 let borrowed = if silent {

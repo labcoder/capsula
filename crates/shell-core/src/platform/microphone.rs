@@ -112,6 +112,7 @@ pub(super) struct PacketStatus {
     pub(super) frames: u32,
     /// The device's stream position of the packet's first frame, in frames.
     pub(super) position: u64,
+    pub(super) captured_qpc_100ns: u64,
     pub(super) discontinuity: bool,
     pub(super) timestamp_error: bool,
 }
@@ -146,7 +147,6 @@ const MISSING_SHARE_DIVISOR: u64 = 4;
     )
 )]
 pub(super) struct PacketBoundary {
-    startup: bool,
     listening: bool,
     failed: Option<MicError>,
     started: Option<Instant>,
@@ -165,7 +165,6 @@ pub(super) struct PacketBoundary {
 impl Default for PacketBoundary {
     fn default() -> Self {
         Self {
-            startup: true,
             listening: false,
             failed: None,
             started: None,
@@ -201,35 +200,26 @@ impl PacketBoundary {
         }
     }
 
-    #[expect(
-        clippy::fn_params_excessive_bools,
-        reason = "collection authority and the drained queue fence one startup packet"
-    )]
     pub(super) fn packet(
         &mut self,
-        live: bool,
-        drained: bool,
+        accepted_qpc_100ns: Option<u64>,
         packet: PacketStatus,
     ) -> Result<bool, MicError> {
         if let Some(error) = self.failed {
             return Err(error);
         }
-        if packet.timestamp_error {
+        if packet.timestamp_error
+            || accepted_qpc_100ns.is_some() && packet.frames != 0 && packet.captured_qpc_100ns == 0
+        {
             self.failed = Some(MicError::Timestamp);
             return Err(MicError::Timestamp);
         }
-        self.listening |= live || drained;
+        self.listening |= accepted_qpc_100ns.is_some();
         if !self.listening && packet.frames != 0 {
             self.discarded_before_listening = self.discarded_before_listening.saturating_add(1);
         }
-        if !live || !drained || packet.frames == 0 {
-            return Ok(false);
-        }
-        if self.startup {
-            self.startup = false;
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(packet.frames != 0
+            && accepted_qpc_100ns.is_some_and(|accepted| packet.captured_qpc_100ns >= accepted))
     }
 
     pub(super) fn kept(&mut self, packet: PacketStatus, at: Instant) {
@@ -320,7 +310,7 @@ impl CollectionGate {
             gate: Arc::clone(&self.0),
             gesture,
             at,
-            startup: Arc::new(OnceLock::new()),
+            startup: Arc::new(Startup::default()),
         })
     }
 
@@ -356,7 +346,14 @@ pub struct Generation {
     gate: Arc<AtomicU64>,
     gesture: GestureId,
     at: Instant,
-    startup: Arc<OnceLock<Instant>>,
+    startup: Arc<Startup>,
+}
+
+#[derive(Debug, Default)]
+struct Startup {
+    claimed: OnceLock<Instant>,
+    #[cfg(windows)]
+    accepted_qpc_100ns: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -370,6 +367,7 @@ impl Generation {
     /// Retires denied admission only if no source start has claimed this generation.
     pub fn discard_unstarted(&self) -> Result<(), MicError> {
         self.startup
+            .claimed
             .set(Instant::now())
             .map_err(|_| MicError::Stale)?;
         self.cancel();
@@ -399,6 +397,7 @@ impl Generation {
     /// A refused claim retires it.
     pub fn reserve(&self) -> Result<Reserved, MicError> {
         self.startup
+            .claimed
             .set(Instant::now())
             .map_err(|_| MicError::Stale)?;
         if let Err(error) = self.advance(ARMED, OPENING) {
@@ -432,6 +431,13 @@ impl Generation {
         self.mode(session, Instant::now()) == Ok(Mode::Collecting)
     }
 
+    /// The collecting transition publishes the acceptance timestamp to the capture worker.
+    #[cfg(windows)]
+    pub(super) fn capture_cutoff(&self, session: &AtomicBool) -> Option<u64> {
+        self.collecting(session)
+            .then(|| self.startup.accepted_qpc_100ns.load(Ordering::Relaxed))
+    }
+
     pub fn mode(&self, session: &AtomicBool, now: Instant) -> Result<Mode, MicError> {
         let state = self.gate.load(Ordering::Acquire);
         if state >> 3 != u64::from(self.gesture.0) {
@@ -440,7 +446,7 @@ impl Generation {
         let error = if !session.load(Ordering::Acquire) {
             Some(MicError::SessionLost)
         } else if (state & 7 < COLLECTING
-            && self.startup.get().is_some_and(|start| {
+            && self.startup.claimed.get().is_some_and(|start| {
                 now.saturating_duration_since(*start)
                     >= Duration::from_millis(u64::from(HOLD_START_TIMEOUT_MS))
             }))
@@ -743,6 +749,20 @@ impl MicOwner {
             return Err(MicError::Stale);
         }
         self.generation.mode(&self.session, Instant::now())?;
+        #[cfg(windows)]
+        {
+            let generation = &self.generation;
+            let expected = u64::from(running.gesture.0) << 3 | RUNNING;
+            if generation.gate.load(Ordering::Acquire) != expected {
+                return Err(MicError::Stale);
+            }
+            let accepted = super::windows::microphone::collection_start()?;
+            generation
+                .startup
+                .accepted_qpc_100ns
+                .compare_exchange(0, accepted, Ordering::Relaxed, Ordering::Relaxed)
+                .map_err(|_| MicError::Stale)?;
+        }
         self.generation.advance(RUNNING, COLLECTING)
     }
 

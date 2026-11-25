@@ -35,13 +35,14 @@ one. A `Reserved` dropped unstarted retires its generation, since no worker ever
 
 `Running { gesture, rate }` means a stream exists but collection is **disarmed**.
 After accepting this exact receipt and publishing the corresponding UI state,
-call `accept_running(Running) -> Result<(), MicError>`. The source discards native
-startup/backlog buffers until it observes an empty queue after collection was
-enabled, then drops the first complete packet: it may straddle UI acceptance even
-though it was not yet available at the empty observation. Following packets begin
-after acceptance, so no startup/pre-roll samples enter the packetizer. Preparing and stopping
-must remain distinct from Listening. A late open/running result cannot reopen a
-released/cancelled gate.
+call `accept_running(Running) -> Result<(), MicError>`. On Windows this records the
+acceptance edge on the same performance clock that WASAPI uses to timestamp each
+packet's first frame. The source rejects a packet that starts before the edge,
+including a straddling packet, and keeps the first packet whose first sample is
+known to follow or meet the edge. The edge is rounded forward to WASAPI's 100 ns
+units. Missing capture timestamps after acceptance and explicit timestamp faults
+fail closed. Preparing and stopping must remain distinct from Listening. A late
+open/running result cannot reopen a released/cancelled gate.
 
 The native gate's release and `stop(StopReason::Cancel)` are idempotent requests, never
 physical receipts. `receipt(&mut self).await -> Result<StopReceipt, MicError>` awaits
