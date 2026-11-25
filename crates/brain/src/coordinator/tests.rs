@@ -60,6 +60,24 @@ const R: RunId = RunId(10);
 /// The scene run 10's first step begins.
 const S: SceneId = SceneId(50);
 
+impl Coordinator {
+    /// Drives one send when the fixture has no store behind the coordinator.
+    pub(crate) fn handle_with_screen_grant(&mut self, input: Input) -> Result<Vec<Effect>, Stale> {
+        let effects = self.handle(input)?;
+        if let [
+            Effect::Store(StoreOp::GrantScreen { lease }),
+            Effect::ArmSendDeadline { .. },
+        ] = effects.as_slice()
+        {
+            return self.handle(Input::ScreenGrantStored {
+                lease: *lease,
+                result: Ok(()),
+            });
+        }
+        Ok(effects)
+    }
+}
+
 fn step(label: &str) -> Step {
     Step {
         label: label.to_owned(),
@@ -282,6 +300,7 @@ fn text(delta: &str) -> Effect {
 /// Run 10's outcome in thread 4.
 fn end_run(text: Option<&str>, revealed: Option<Vec<u32>>, end: RunEnd) -> Effect {
     Effect::Store(StoreOp::EndRun {
+        screen: None,
         thread: T,
         run: R,
         text: text.map(super::ReplyText::from),
@@ -294,6 +313,7 @@ fn end_run(text: Option<&str>, revealed: Option<Vec<u32>>, end: RunEnd) -> Effec
 /// Run 10's outcome after a Stop that kept none of its scene's steps, clearing the scene.
 fn end_run_clearing(revealed: Vec<u32>, end: RunEnd) -> Effect {
     Effect::Store(StoreOp::EndRun {
+        screen: None,
         thread: T,
         run: R,
         text: None,
@@ -571,6 +591,7 @@ fn a_stop_before_the_turn_is_stored_ends_it_after_the_turn_and_the_engine_never_
     assert_eq!(
         core.handle(Input::TurnStored { run: R }).expect("ending"),
         vec![Effect::Store(StoreOp::EndRun {
+            screen: None,
             thread: ThreadId(2),
             run: R,
             text: None,
@@ -623,6 +644,7 @@ fn a_new_turn_replaces_the_current_run_with_a_higher_id() {
         ))
         .expect("current"),
         vec![Effect::Store(StoreOp::EndRun {
+            screen: None,
             thread: T,
             run: RunId(11),
             text: None,
@@ -774,6 +796,7 @@ fn a_failed_ending_is_reported_after_done_after_stop_and_after_a_replacement() {
         vec![
             state(R, T, Phase::Failed),
             Effect::Store(StoreOp::EndRun {
+                screen: None,
                 thread: T,
                 run: R,
                 text: None,
@@ -1171,6 +1194,7 @@ fn a_replacement_is_stored_and_started_only_after_the_runs_before_it() {
         core.handle(Input::TurnStored { run: b }).expect("ending"),
         vec![
             Effect::Store(StoreOp::EndRun {
+                screen: None,
                 thread: T,
                 run: b,
                 text: None,

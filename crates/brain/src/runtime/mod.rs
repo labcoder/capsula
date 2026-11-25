@@ -723,6 +723,29 @@ impl Brain {
                 key,
                 event: self.claude.history_event(key, event),
             },
+            Input::ScreenGrantStored { lease, result } => {
+                let before_deadline = self
+                    .send_deadlines
+                    .iter()
+                    .position(|(id, _)| *id == lease)
+                    .is_some_and(|at| Instant::now() < self.send_deadlines.swap_remove(at).1);
+                let stale_claude_launch = matches!(lease.key, SendKey::Build(key)
+                    if self.coordinator.route_kind(key.run) == Some(ConnectionKind::ClaudeCode)
+                        && !self.claude.picture_launch_current(lease.key));
+                Input::ScreenGrantStored {
+                    lease,
+                    result: result.and_then(|()| {
+                        use crate::coordinator::ScreenGrantRefusal;
+                        if !before_deadline || !engines::waiting(&self.asks, lease.key) {
+                            Err(ScreenGrantRefusal::Expired)
+                        } else if stale_claude_launch {
+                            Err(ScreenGrantRefusal::LaunchChanged)
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                }
+            }
             other => other,
         };
         if matches!(input, Input::ShellLost) {
@@ -1659,6 +1682,7 @@ impl Brain {
                 Effect::ArmSendDeadline { lease, after } => {
                     self.send_deadlines.push((lease, Instant::now() + after));
                 }
+                Effect::ArmSendDeadlineAt { lease, at } => self.send_deadlines.push((lease, at)),
                 Effect::Revoke { run } => {
                     if let Some(link) = link.as_deref_mut() {
                         link.queue.borrow_mut().revoke(run);

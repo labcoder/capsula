@@ -1883,7 +1883,7 @@ fn pictured_key() -> (Coordinator, RunSnapshot) {
     built.result.as_mut().unwrap().request.tools = crate::context::tools(snapshot.origin);
     core.handle(Input::ContextBuilt(built)).unwrap();
     let leases = core
-        .handle(Input::SendReady {
+        .handle_with_screen_grant(Input::SendReady {
             key: SendKey::Build(key()),
             hold: None,
         })
@@ -2742,7 +2742,7 @@ fn seed_private_overlay_only(
     built.result.as_mut().unwrap().request.tools = crate::context::tools(snapshot.origin);
     core.handle(Input::ContextBuilt(built)).unwrap();
     let lease = core
-        .handle(Input::SendReady {
+        .handle_with_screen_grant(Input::SendReady {
             key: SendKey::Build(key()),
             hold: None,
         })
@@ -3488,7 +3488,7 @@ fn a_mixed_picture_and_digest_send_keeps_its_valid_picture_when_only_a_drawing_c
     context.snapshot = Some(snapshot.clone());
     core.handle(Input::ContextBuilt(context)).unwrap();
     let lease = core
-        .handle(Input::SendReady {
+        .handle_with_screen_grant(Input::SendReady {
             key: SendKey::Build(key),
             hold: None,
         })
@@ -3824,7 +3824,7 @@ fn show_screen_off_carries_through_pending_overlay_write_and_late_protected_draw
         context.result.as_mut().unwrap().request.tools = crate::context::tools(snapshot.origin);
         core.handle(Input::ContextBuilt(context)).unwrap();
         let lease = core
-            .handle(Input::SendReady {
+            .handle_with_screen_grant(Input::SendReady {
                 key: SendKey::Build(key()),
                 hold: None,
             })

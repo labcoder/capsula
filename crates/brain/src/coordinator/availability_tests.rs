@@ -146,6 +146,7 @@ fn told(reason: Option<UserError>) -> Vec<Effect> {
 /// Run 10's failure is written.
 fn written() -> Vec<Effect> {
     vec![Effect::Store(StoreOp::EndRun {
+        screen: None,
         thread: T,
         run: R,
         text: None,

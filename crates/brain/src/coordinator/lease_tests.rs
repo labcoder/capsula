@@ -348,6 +348,7 @@ fn a_failed_transport_grants_nothing_until_the_brain_restarts() {
             }),
             Effect::Data(DataToShell::RunEnd { run: R2 }),
             Effect::Store(StoreOp::EndRun {
+                screen: None,
                 thread: T,
                 run: R2,
                 text: None,
@@ -376,6 +377,7 @@ fn deleting_the_sending_runs_own_task_settles_without_a_cycle() {
             }),
             Effect::Data(DataToShell::RunEnd { run: R }),
             Effect::Store(StoreOp::EndRun {
+                screen: None,
                 thread: T,
                 run: R,
                 text: None,
@@ -441,24 +443,22 @@ fn armed(lease: LeaseId, seconds: u64) -> Vec<Effect> {
 }
 
 /// H-h, a build's send: the default, under the cap, exactly at it, and over it.
-#[test]
-fn a_held_build_send_arms_its_hold_capped_at_165_seconds() {
+#[tokio::test(start_paused = true)]
+async fn a_held_build_send_arms_its_hold_capped_at_165_seconds() {
     assert_eq!(MAX_HOLD, Duration::from_secs(165));
     let first = lease(R, 1, 1);
     assert_eq!(armed_for_build(None, 15), armed(first, 15));
     assert_eq!(armed_for_build(None, 11), armed(first, 11));
-    assert_eq!(
-        armed_for_build(Some(Duration::from_secs(20)), 11),
-        armed(first, 20)
-    );
-    assert_eq!(
-        armed_for_build(Some(Duration::from_secs(165)), 11),
-        armed(first, 165)
-    );
-    assert_eq!(
-        armed_for_build(Some(Duration::from_secs(166)), 11),
-        armed(first, 165)
-    );
+    for (hold, seconds) in [(20, 20), (165, 165), (166, 165)] {
+        let at = tokio::time::Instant::now() + Duration::from_secs(seconds);
+        assert_eq!(
+            armed_for_build(Some(Duration::from_secs(hold)), 11),
+            [
+                Effect::Grant(first),
+                Effect::ArmSendDeadlineAt { lease: first, at },
+            ],
+        );
+    }
 }
 
 /// H-h: a held send's deadline fails closed like any other.

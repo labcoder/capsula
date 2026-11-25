@@ -1,10 +1,12 @@
-//! A held image's mark stays from its turn's write until a send carrying it proves it wrote
-//! nothing: the coordinator's half of that, from the grant to the run's end.
+//! A held picture may be marked only after durable authorization and a transport write attempt.
 
-use kumochi_protocol::message::HeldScreen;
+use kumochi_protocol::message::{
+    DeliveryProof, ErrorKey, HeldScreen, HistoryFailure, HistoryFailureCause,
+};
 
 use super::*;
-use crate::coordinator::LeaseId;
+use crate::coordinator::{LeaseId, ScreenGrantRefusal};
+use crate::store::UnsentScreen;
 
 /// The lease `effects` grant.
 fn lease_of(effects: &[Effect]) -> LeaseId {
@@ -35,16 +37,47 @@ fn refreshed() -> Effect {
     }
 }
 
-/// Held image run R in task T, carrying B as a source too, with its first send granted and
-/// nothing told yet.
-fn granted() -> (Coordinator, LeaseId) {
+fn ask(core: &Coordinator) -> Input {
+    Input::SendReady {
+        key: SendKey::Build(engine_key(core, R)),
+        hold: None,
+    }
+}
+
+fn pictured() -> Coordinator {
     let mut core = ready_for("captured");
     core.submit_hold(prepared(&core, Some(T)), "words".into(), Some(image()))
         .unwrap();
     core.handle(Input::TurnStored { run: R }).unwrap();
     let first = engine_key(&core, R);
     assert_eq!(starts(&core.handle(screened(first, &[T, B])).unwrap()), 1);
-    let effects = sending(&mut core);
+    core
+}
+
+fn awaiting_grant() -> (Coordinator, LeaseId) {
+    let mut core = pictured();
+    let effects = core.handle(ask(&core)).unwrap();
+    let [
+        Effect::Store(StoreOp::GrantScreen { lease }),
+        Effect::ArmSendDeadline { lease: timer, .. },
+    ] = effects.as_slice()
+    else {
+        panic!("a store write and its deadline, no transport grant: {effects:?}")
+    };
+    assert_eq!(lease, timer);
+    assert!(core.leases.is_empty());
+    assert_eq!(core.current.as_ref().unwrap().progress.first_grant, None);
+    (core, *lease)
+}
+
+fn granted() -> (Coordinator, LeaseId) {
+    let (mut core, lease) = awaiting_grant();
+    let effects = core
+        .handle(Input::ScreenGrantStored {
+            lease,
+            result: Ok(()),
+        })
+        .unwrap();
     assert_eq!(
         told(&effects),
         Vec::<&Effect>::new(),
@@ -56,18 +89,22 @@ fn granted() -> (Coordinator, LeaseId) {
 const B: ThreadId = ThreadId(2);
 
 #[test]
-fn a_granted_send_that_wrote_nothing_clears_the_mark_before_the_run_is_told_ended() {
+fn a_granted_send_that_wrote_nothing_clears_the_mark_with_the_terminal_write() {
     let (mut core, lease) = granted();
-    assert_eq!(core.handle(Input::SendUnsent { lease }).unwrap(), []);
+    assert_eq!(
+        core.handle(Input::SendUnsent { lease }).unwrap(),
+        [Effect::Store(StoreOp::RestoreScreen { run: R })]
+    );
     let effects = ended(&mut core, 4);
     assert_eq!(forgotten(&effects), [R]);
     assert_eq!(told(&effects), Vec::<&Effect>::new());
-    let at = |wanted: fn(&Effect) -> bool| effects.iter().position(wanted).expect("present");
-    assert!(
-        at(|effect| matches!(effect, Effect::Store(StoreOp::ForgetScreen { .. })))
-            < at(|effect| matches!(effect, Effect::Control(ControlToShell::RunState { .. }))),
-        "{effects:?}"
-    );
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Store(StoreOp::EndRun {
+            screen: Some(UnsentScreen::Clear),
+            ..
+        })
+    )));
 }
 
 #[test]
@@ -90,12 +127,168 @@ fn a_send_that_may_have_written_tells_once_and_no_later_send_clears_the_mark() {
         [sent(), marked(), refreshed()]
     );
     assert_eq!(core.handle(Input::SendSettled { lease }), Err(Stale));
-    let again = lease_of(&sending(&mut core));
+    let again = lease_of(&core.handle(ask(&core)).unwrap());
     assert_ne!(again, lease);
     assert_eq!(core.handle(Input::SendUnsent { lease: again }).unwrap(), []);
     let effects = ended(&mut core, 4);
     assert_eq!(forgotten(&effects), []);
     assert_eq!(told(&effects), Vec::<&Effect>::new());
+}
+
+#[test]
+fn a_connection_lost_before_authorization_ack_is_not_sent_and_cannot_be_regranted() {
+    let (mut core, lease) = awaiting_grant();
+    let effects = core
+        .handle(Input::Engines(
+            ConnectionKind::ChatGpt,
+            Availability::Unavailable(ErrorKey::SessionEnded.into()),
+        ))
+        .unwrap();
+    assert!(effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Store(StoreOp::EndRun {
+                screen: Some(UnsentScreen::Clear),
+                end: RunEnd::Failed(Failure::Connection(HistoryFailure {
+                    cause: HistoryFailureCause::ChatGptSignIn,
+                    delivery: DeliveryProof::NotSent,
+                })),
+                ..
+            })
+        )
+    }));
+    assert_eq!(
+        core.handle(Input::ScreenGrantStored {
+            lease,
+            result: Ok(()),
+        }),
+        Err(Stale)
+    );
+}
+
+#[test]
+fn withdrawal_while_authorizing_rechecks_the_picture_after_commit() {
+    let (mut core, lease) = awaiting_grant();
+    assert_eq!(
+        withdrawals(&core.handle(Input::ScreenHoldsOff).unwrap()),
+        [R]
+    );
+    let effects = core
+        .handle(Input::ScreenGrantStored {
+            lease,
+            result: Ok(()),
+        })
+        .unwrap();
+    assert!(effects.contains(&Effect::Rebuild(lease.key)));
+    assert!(effects.iter().all(|effect| !matches!(
+        effect,
+        Effect::Grant(_) | Effect::Store(StoreOp::SentScreen { .. })
+    )));
+    assert!(core.leases.is_empty());
+    assert_eq!(core.current_run(), None);
+}
+
+#[test]
+fn a_picture_capability_lost_and_restored_while_authorizing_still_withholds_the_picture() {
+    let (mut core, lease) = awaiting_grant();
+    let Availability::Ready(ready) = core.availability_of(ConnectionKind::ChatGpt).clone() else {
+        panic!("ready route");
+    };
+    let mut no_images = ready.clone();
+    no_images.images.clear();
+    for catalog in [no_images, ready] {
+        core.handle(Input::Engines(
+            ConnectionKind::ChatGpt,
+            Availability::Ready(catalog),
+        ))
+        .unwrap();
+    }
+    let effects = core
+        .handle(Input::ScreenGrantStored {
+            lease,
+            result: Ok(()),
+        })
+        .unwrap();
+    assert!(effects.contains(&Effect::Rebuild(lease.key)));
+    assert!(effects.contains(&Effect::Store(StoreOp::CantSeeScreen { run: R })));
+    assert!(core.leases.is_empty());
+    assert_eq!(core.current.as_ref().unwrap().progress.first_grant, None);
+}
+
+#[test]
+fn a_failed_or_expired_authorization_retires_the_ask_without_a_transport_lease() {
+    for expired in [false, true] {
+        let (mut core, lease) = awaiting_grant();
+        let input = if expired {
+            Input::SendDeadline { lease }
+        } else {
+            Input::ScreenGrantStored {
+                lease,
+                result: Err(ScreenGrantRefusal::Store),
+            }
+        };
+        let effects = core.handle(input).unwrap();
+        assert!(effects.contains(&Effect::Rebuild(lease.key)));
+        assert_eq!(forgotten(&effects), [R]);
+        let expected = if expired {
+            Failure::Engine
+        } else {
+            Failure::Store
+        };
+        assert!(effects.iter().any(|effect| matches!(effect,
+            Effect::Store(StoreOp::EndRun { end: RunEnd::Failed(failure), .. })
+            if *failure == expected)));
+        assert!(core.leases.is_empty());
+        assert!(!core.transport_failed);
+        assert_eq!(
+            core.handle(Input::ScreenGrantStored {
+                lease,
+                result: Ok(()),
+            }),
+            Err(Stale)
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_picture_grant_keeps_the_original_deadline_after_the_store_wait() {
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    for delay in [Duration::from_secs(3), Duration::from_secs(10)] {
+        let mut core = pictured();
+        let hold = Duration::from_secs(10);
+        let until = Instant::now() + hold;
+        let key = SendKey::Build(engine_key(&core, R));
+        let effects = core
+            .handle(Input::SendReady {
+                key,
+                hold: Some(hold),
+            })
+            .unwrap();
+        let [
+            Effect::Store(StoreOp::GrantScreen { lease }),
+            Effect::ArmSendDeadlineAt { at, .. },
+        ] = effects.as_slice()
+        else {
+            panic!("authorization: {effects:?}")
+        };
+        assert_eq!(*at, until);
+        tokio::time::advance(delay).await;
+        let effects = core
+            .handle(Input::ScreenGrantStored {
+                lease: *lease,
+                result: Ok(()),
+            })
+            .unwrap();
+        if delay == hold {
+            assert!(effects.contains(&Effect::Rebuild(key)));
+            assert!(core.leases.is_empty(), "the expired ask never got a lease");
+        } else {
+            let lease = lease_of(&effects);
+            assert!(effects.contains(&Effect::ArmSendDeadlineAt { lease, at: until }));
+        }
+    }
 }
 
 #[test]
@@ -141,7 +334,13 @@ fn a_failed_lease_s_late_settlement_settles_its_picture_once_and_nothing_else() 
         };
         let late = core.handle(settle()).unwrap();
         let expected = if unsent {
-            vec![Effect::Store(StoreOp::ForgetScreen { run: R }), refreshed()]
+            vec![
+                Effect::Store(StoreOp::RepairScreen {
+                    run: R,
+                    correction: UnsentScreen::Clear,
+                }),
+                refreshed(),
+            ]
         } else {
             vec![sent(), marked(), refreshed()]
         };
@@ -163,7 +362,10 @@ fn withdrawing_while_a_send_carries_the_picture_waits_for_that_send() {
     assert_eq!(
         unsent[..2],
         [
-            Effect::Store(StoreOp::WithdrawScreen { run: R }),
+            Effect::Store(StoreOp::RepairScreen {
+                run: R,
+                correction: UnsentScreen::Withdrawn
+            }),
             refreshed()
         ]
     );
@@ -194,7 +396,13 @@ fn an_old_send_that_wrote_nothing_clears_only_its_own_stopped_run() {
     assert_ne!(next, R);
     assert_eq!(
         core.handle(Input::SendUnsent { lease }).unwrap(),
-        [Effect::Store(StoreOp::ForgetScreen { run: R }), refreshed()]
+        [
+            Effect::Store(StoreOp::RepairScreen {
+                run: R,
+                correction: UnsentScreen::Clear
+            }),
+            refreshed()
+        ]
     );
     assert_eq!(core.current_run(), Some(next));
 }

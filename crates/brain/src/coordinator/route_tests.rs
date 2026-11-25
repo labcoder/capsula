@@ -356,7 +356,7 @@ pub(super) fn held(
 }
 
 fn granted(core: &mut Coordinator) -> bool {
-    core.handle(Input::SendReady {
+    core.handle_with_screen_grant(Input::SendReady {
         key: SendKey::Build(key()),
         hold: None,
     })
@@ -577,7 +577,6 @@ pub(crate) fn pictured_run(
     (core, effects)
 }
 
-#[cfg(windows)]
 pub(crate) fn pictured_claude_run(
     available: Availability,
     screen: crate::context::Screen,
@@ -713,7 +712,7 @@ fn a_revoked_picture_grant_that_wrote_nothing_rebuilds_without_the_picture() {
     for unsent in [true, false] {
         let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
         let effects = core
-            .handle(Input::SendReady {
+            .handle_with_screen_grant(Input::SendReady {
                 key: SendKey::Build(key()),
                 hold: None,
             })
@@ -768,7 +767,7 @@ fn a_chatgpt_picture_grant_is_revocable() {
     core.handle(built_for(key(), &choice(CHATGPT, "m")))
         .expect("current");
     let effects = core
-        .handle(Input::SendReady {
+        .handle_with_screen_grant(Input::SendReady {
             key: SendKey::Build(key()),
             hold: None,
         })
@@ -792,7 +791,7 @@ fn only_a_lease_granted_with_its_picture_grant_carries_a_picture() {
     use crate::engines::SendLease;
     let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
     let effects = core
-        .handle(Input::SendReady {
+        .handle_with_screen_grant(Input::SendReady {
             key: SendKey::Build(key()),
             hold: None,
         })
@@ -970,7 +969,7 @@ fn a_granted_picture_lost_and_back_stays_shut_and_a_written_one_never_goes_again
             key: SendKey::Build(key()),
             hold: None,
         };
-        let effects = core.handle(ask.clone()).expect("current");
+        let effects = core.handle_with_screen_grant(ask.clone()).expect("current");
         let lease = effects
             .iter()
             .find_map(|effect| match effect {
@@ -1062,7 +1061,7 @@ fn a_written_picture_lost_ends_its_run_by_its_first_cause_and_its_lease_settles_
             key: SendKey::Build(key()),
             hold: None,
         };
-        let lease = lease_of(&core.handle(ask.clone()).expect("current"));
+        let lease = lease_of(&core.handle_with_screen_grant(ask.clone()).expect("current"));
         let fact = |core: &mut Coordinator| {
             for images in [&[][..], &["m"]] {
                 core.handle(Input::Engines(CLAUDE, pictured(5, images)))
@@ -1111,7 +1110,7 @@ fn a_written_settlement_sends_no_marker_for_a_thread_being_deleted_and_releases_
     let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
     let lease = lease_of(
         &core
-            .handle(Input::SendReady {
+            .handle_with_screen_grant(Input::SendReady {
                 key: SendKey::Build(key()),
                 hold: None,
             })
@@ -1148,7 +1147,7 @@ fn a_chatgpt_written_settlement_refreshes_its_thread() {
         .expect("current");
     let lease = lease_of(
         &core
-            .handle(Input::SendReady {
+            .handle_with_screen_grant(Input::SendReady {
                 key: SendKey::Build(key()),
                 hold: None,
             })
@@ -1166,7 +1165,7 @@ fn screen_sharing_turned_off_after_a_write_stops_the_turn_and_keeps_its_history(
     let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
     let lease = lease_of(
         &core
-            .handle(Input::SendReady {
+            .handle_with_screen_grant(Input::SendReady {
                 key: SendKey::Build(key()),
                 hold: None,
             })
@@ -1192,7 +1191,7 @@ fn a_later_build_of_a_written_picture_lost_since_ends_as_the_picture_stopping() 
     let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
     let lease = lease_of(
         &core
-            .handle(Input::SendReady {
+            .handle_with_screen_grant(Input::SendReady {
                 key: SendKey::Build(key()),
                 hold: None,
             })
@@ -1245,7 +1244,7 @@ fn a_written_picture_lost_stops_every_later_send_of_its_run() {
             key: SendKey::Build(key),
             hold: None,
         };
-        let first = lease_of(&core.handle(ask(key())).expect("current"));
+        let first = lease_of(&core.handle_with_screen_grant(ask(key())).expect("current"));
         core.handle(Input::SendSettled { lease: first })
             .expect("written");
         if schedule == "before the inline read" {
@@ -1331,7 +1330,7 @@ fn a_key_run_that_may_have_written_its_picture_starts_no_inline_rewrite() {
             key: SendKey::Build(key()),
             hold: None,
         };
-        let lease = lease_of(&core.handle(ask).expect("current"));
+        let lease = lease_of(&core.handle_with_screen_grant(ask).expect("current"));
         core.handle(Input::SendSettled { lease }).expect("written");
     };
     let hungry = |core: &mut Coordinator| {
@@ -1399,7 +1398,7 @@ fn a_key_send_withheld_by_its_grant_ends_by_the_grants_first_cause() {
     let (mut core, _) = pictured_run(KEY, PictureRoutes::new(true, false));
     let lease = lease_of(
         &core
-            .handle(Input::SendReady {
+            .handle_with_screen_grant(Input::SendReady {
                 key: SendKey::Build(key()),
                 hold: None,
             })
@@ -1476,7 +1475,7 @@ fn turning_the_screen_off_mid_key_write_ends_the_run_and_admits_nothing_after() 
             .expect("current");
         let lease = lease_of(
             &core
-                .handle(Input::SendReady {
+                .handle_with_screen_grant(Input::SendReady {
                     key: SendKey::Build(key()),
                     hold: None,
                 })

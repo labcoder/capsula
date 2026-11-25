@@ -110,6 +110,7 @@ fn deleting_the_main_thread_answers_not_hidden_before_anything_else() {
             state(R, MAIN, Phase::Interrupted),
             super::run_end(R),
             Effect::Store(StoreOp::EndRun {
+                screen: None,
                 thread: MAIN,
                 run: R,
                 text: None,

@@ -312,6 +312,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+pub(crate) fn waiting(asks: &Asks, key: SendKey) -> bool {
+    lock(asks)
+        .iter()
+        .find(|(asked, _)| *asked == key)
+        .is_some_and(|(_, answer)| !answer.is_closed())
+}
+
 /// Answers the round waiting on `key`, if it still waits. A grant nobody takes is dropped
 /// here, which settles it.
 pub(crate) fn answer(asks: &Asks, key: SendKey, answer: Answer) {

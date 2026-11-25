@@ -30,8 +30,10 @@ mod store_op;
 mod tests;
 #[cfg(test)]
 pub(crate) use tests::mcp::draft::draft_launch;
+#[cfg(test)]
+pub(crate) use tests::routes::pictured_claude_run;
 #[cfg(all(test, windows))]
-pub(crate) use tests::routes::{built_for, pictured_claude_run, pictured_run};
+pub(crate) use tests::routes::{built_for, pictured_run};
 mod thread_op;
 mod tools;
 
@@ -46,7 +48,7 @@ use kumochi_protocol::message::{
 
 use crate::engines::{RunRequest, TurnEvent};
 use crate::recall::control::Control as ReadControl;
-use crate::store::{Failure, Interruption, RunEnd, SceneState};
+use crate::store::{Failure, Interruption, RunEnd, SceneState, UnsentScreen};
 use crate::voice::reply::ReportMode;
 
 pub use admission::{BuildContext, BuildKey, ContextBuilt, Unbuilt};
@@ -58,7 +60,7 @@ pub use hold::{HoldKey, HoldRead, HoldSnapshot};
 pub use inline::{CompactBuilt, CompactContext};
 pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
-pub use lease::{LeaseId, MAX_HOLD, SEND_DEADLINE, SendKey};
+pub use lease::{LeaseId, MAX_HOLD, SEND_DEADLINE, ScreenGrantRefusal, SendKey};
 pub(crate) use lease::{PictureGrant, PictureWrite};
 pub use speech::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
 pub use store_op::{CutoffSlot, ReplyText, StoreOp, SummaryText};
@@ -179,6 +181,18 @@ pub enum Input {
         /// How long its lease may go unsettled, for a send that can go out again until a process
         /// tree ends; capped at `MAX_HOLD`. `None` is `SEND_DEADLINE`.
         hold: Option<Duration>,
+    },
+    /// The ordered store writer answered a picture authorization.
+    ScreenGrantStored {
+        /// The exact authorization the build is waiting on.
+        lease: LeaseId,
+        /// The committed authorization or a content-free refusal.
+        result: Result<(), ScreenGrantRefusal>,
+    },
+    /// A deferred picture correction committed a change to a live thread.
+    ScreenRepaired {
+        /// The thread whose history changed.
+        thread: ThreadId,
     },
     /// An inline compaction's read finished.
     CompactBuilt(CompactBuilt),
@@ -500,6 +514,13 @@ pub enum Effect {
         /// How long from now.
         after: Duration,
     },
+    /// The held sender's original deadline, which a store wait never extends.
+    ArmSendDeadlineAt {
+        /// The authorization or transport lease.
+        lease: LeaseId,
+        /// Its absolute deadline.
+        at: tokio::time::Instant,
+    },
     /// Stop the engine for `run` and drop whatever it still produces.
     CancelEngine {
         /// The run.
@@ -719,6 +740,10 @@ struct TurnProgress {
     text_bytes: usize,
     /// The first grant that could have sent the user's turn, not an inline compaction.
     first_grant: Option<BuildKey>,
+    /// A held picture waiting on its first transport authorization.
+    screen_grant: Option<lease::PendingScreenGrant>,
+    /// An omission to retain even if its earlier history update failed.
+    unsent_screen: Option<UnsentScreen>,
 }
 
 /// How an ended run is being written.
@@ -1055,14 +1080,21 @@ impl Coordinator {
             }
             Input::Engine { key, event } => self.engine(key, event, &mut effects)?,
             Input::ContextBuilt(built) => self.context_built(built, &mut effects)?,
-            Input::SendReady {
-                key: SendKey::Build(key),
-                hold,
-            } => self.send_ready(key, hold, &mut effects),
-            Input::SendReady {
-                key: SendKey::Job(key),
-                hold,
-            } => self.job_ready(key, hold, &mut effects),
+            Input::SendReady { key, hold } => {
+                let until = hold.map(|hold| tokio::time::Instant::now() + hold.min(MAX_HOLD));
+                match key {
+                    SendKey::Build(key) => self.send_ready(key, until, None, &mut effects),
+                    SendKey::Job(key) => self.job_ready(key, until, &mut effects),
+                }
+            }
+            Input::ScreenGrantStored { lease, result } => {
+                self.screen_grant_stored(lease, result, &mut effects)?;
+            }
+            Input::ScreenRepaired { thread } => {
+                if !self.deleting_thread(thread) {
+                    effects.push(Effect::Data(DataToShell::EventsChanged { thread }));
+                }
+            }
             Input::CompactBuilt(built) => self.compact_built(built, &mut effects)?,
             Input::JobBuilt(built) => self.job_built(built, &mut effects)?,
             Input::JobDone { key, output } => self.job_done(key, output, &mut effects)?,
@@ -1602,20 +1634,15 @@ impl Coordinator {
     ) {
         run.control.0.cancel();
         self.close_digest_grants(run.id);
+        if let Some(lease) = run.progress.screen_grant.take() {
+            effects.push(Effect::Rebuild(lease.id.key));
+        }
         // No send carrying the hold's picture was granted, or none wrote any of it, so its turn
         // mustn't say it was sent.
-        if run.untold.is_some()
-            && run.screen.as_ref().is_some_and(|screen| {
-                matches!(
-                    screen.held(),
-                    kumochi_protocol::message::HeldScreen::Attached
-                        | kumochi_protocol::message::HeldScreen::Screen
-                )
-            })
-        {
+        if run.carried().is_some() {
             match &mut run.begin {
                 Some(StoreOp::BeginTurn { screen, .. }) => *screen = None,
-                _ => effects.push(Effect::Store(StoreOp::ForgetScreen { run: run.id })),
+                _ => run.progress.unsent_screen = Some(UnsentScreen::Clear),
             }
         }
         if outcome != RunEnd::Done {
@@ -1706,24 +1733,18 @@ impl Coordinator {
             ending.trimmed = true;
             ending.clear = scenes::keep(&mut self.scenes, scene, revealed);
         }
-        let op = if ending.failed {
-            StoreOp::EndRun {
-                thread,
-                run,
-                text: None,
-                revealed: ending.revealed.clone(),
-                clear: ending.clear,
-                end: RunEnd::Failed(Failure::Store),
-            }
-        } else {
-            StoreOp::EndRun {
-                thread,
-                run,
-                text,
-                revealed: ending.revealed.clone(),
-                clear: ending.clear,
-                end: ending.outcome,
-            }
+        let op = StoreOp::EndRun {
+            thread,
+            run,
+            text: text.filter(|_| !ending.failed),
+            revealed: ending.revealed.clone(),
+            clear: ending.clear,
+            end: if ending.failed {
+                RunEnd::Failed(Failure::Store)
+            } else {
+                ending.outcome
+            },
+            screen: ended.progress.unsent_screen,
         };
         if tell_end {
             self.data_end(run, thread, effects);

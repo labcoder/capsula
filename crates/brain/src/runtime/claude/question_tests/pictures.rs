@@ -71,6 +71,23 @@ async fn start_screen_picture(brain: &mut Brain) -> (LeaseId, Vec<Effect>) {
     let Some(Effect::StartEngine { request }) = effects.last() else {
         panic!("pictured request was not admitted");
     };
+    assert!(
+        brain
+            .store
+            .as_ref()
+            .expect("store")
+            .send(StoreOp::BeginTurn {
+                thread: request.thread,
+                title: None,
+                run: request.run,
+                text: "words".into(),
+                screen: Some(kumochi_protocol::message::HeldScreen::Screen),
+            })
+    );
+    let stored = timeout(WAIT, brain.inputs.recv())
+        .await
+        .expect("turn stored in time");
+    assert_eq!(stored, Some(Input::TurnStored { run: request.run }));
     let config = brain
         .config
         .stage(kumochi_protocol::message::SettingsOp::SetDefaultModel(
@@ -89,7 +106,16 @@ async fn start_screen_picture(brain: &mut Brain) -> (LeaseId, Vec<Effect>) {
         .await
         .expect("send ask in time")
         .expect("send ask");
-    let grants = brain.handle(ask).expect("grant effects");
+    brain.offline(ask);
+    let ack = timeout(WAIT, brain.inputs.recv())
+        .await
+        .expect("picture authorization in time")
+        .expect("picture authorization");
+    assert!(matches!(
+        ack,
+        Input::ScreenGrantStored { result: Ok(()), .. }
+    ));
+    let grants = brain.handle(ack).expect("grant effects");
     let Some(Effect::Grant(lease)) = grants.first() else {
         panic!("no send grant");
     };

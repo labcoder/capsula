@@ -11,7 +11,6 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::time::Duration;
 
 use kumochi_protocol::message::{ConnectionKind, EventId, RunId, ThreadId, ThreadTitle};
 
@@ -392,7 +391,7 @@ impl Coordinator {
     pub(super) fn job_ready(
         &mut self,
         key: JobKey,
-        hold: Option<Duration>,
+        hold: Option<tokio::time::Instant>,
         effects: &mut Vec<Effect>,
     ) {
         let sources = self

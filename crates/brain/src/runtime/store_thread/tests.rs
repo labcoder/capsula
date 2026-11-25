@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 #[cfg(windows)]
 use std::fs::{File, OpenOptions};
 #[cfg(windows)]
@@ -16,7 +17,7 @@ use tokio::sync::mpsc;
 use super::{Attempt, Purger, Schedule, StoreThread};
 use crate::coordinator::{Input, StoreOp};
 use crate::platform::{SessionLock, SessionLockError};
-use crate::store::{Cancel, Pause, Pauses, Point, RunEnd, SceneTarget, Store, Swap};
+use crate::store::{Cancel, Pause, Pauses, Point, RunEnd, SceneTarget, Store, Swap, UnsentScreen};
 use crate::test_support::Scratch;
 
 /// A store owing the purge of its deleted thread 1.
@@ -93,6 +94,7 @@ fn an_owed_purge_waits_for_the_active_run_and_then_runs_in_session() {
     assert_eq!(next(&attempts), Attempt::Busy);
     assert_eq!(owed(&scratch), 1);
     assert!(thread.send(StoreOp::EndRun {
+        screen: None,
         thread: ThreadId(2),
         run: RunId(2),
         text: None,
@@ -509,6 +511,7 @@ async fn a_failed_model_write_is_not_rescued_by_a_later_success() {
             &mut store,
             &mut purger,
             &acks,
+            &mut BTreeMap::new(),
             StoreOp::SetModel {
                 thread: ThreadId(id),
                 choice,
@@ -768,6 +771,7 @@ fn every_operation_gets_one_reply_in_order() {
             },
         },
         StoreOp::EndRun {
+            screen: None,
             thread,
             run,
             text: None,
@@ -842,6 +846,7 @@ fn a_round_the_reader_would_refuse_fails_its_run_and_the_thread_goes_on() {
     let growing = format!(r#"{{"n":[{}1e5]}}"#, "1e5,".repeat(59_999));
     let ok = || ToolOutput::Text("ok".into());
     let end = |run, end| StoreOp::EndRun {
+        screen: None,
         thread,
         run,
         text: None,
@@ -949,6 +954,7 @@ fn a_heard_point_is_stored_and_answers_nothing() {
             screen: None,
         },
         StoreOp::EndRun {
+            screen: None,
             thread,
             run,
             text: None,
@@ -964,6 +970,7 @@ fn a_heard_point_is_stored_and_answers_nothing() {
             screen: None,
         },
         StoreOp::EndRun {
+            screen: None,
             thread,
             run: refused,
             text: None,
@@ -1395,6 +1402,7 @@ fn measure_delete_during_a_purge() {
             assert_eq!(ack(), Input::TurnStored { run: turn.1 });
             behind.push(released.elapsed());
             assert!(thread.send(StoreOp::EndRun {
+                screen: None,
                 thread: turn.0,
                 run: turn.1,
                 text: None,
@@ -1485,7 +1493,10 @@ fn an_unsent_screen_is_cleared_after_its_turn() {
         text: "hey".into(),
         screen: Some(HeldScreen::Attached),
     }));
-    assert!(store.send(StoreOp::ForgetScreen { run }));
+    assert!(store.send(StoreOp::RepairScreen {
+        run,
+        correction: UnsentScreen::Clear
+    }));
     store.close().blocking_recv().expect("closed");
     let mut got = Vec::new();
     while let Ok(reply) = replies.try_recv() {
@@ -1505,4 +1516,87 @@ fn an_unsent_screen_is_cleared_after_its_turn() {
     };
     assert_eq!(stored(1), None);
     assert_eq!(stored(2).as_deref(), Some("pending_attached"));
+}
+
+#[test]
+fn an_owed_picture_correction_refuses_new_authority_until_its_row_is_gone() {
+    use kumochi_protocol::message::HeldScreen;
+
+    use crate::coordinator::{BuildKey, LeaseId, ScreenGrantRefusal, SendKey};
+
+    let scratch = Scratch::new("bounded-screen-repair");
+    let mut store = Store::open(&scratch.db()).unwrap();
+    for id in [1, 2] {
+        store
+            .begin_held_turn(
+                ThreadId(id),
+                Some("t"),
+                RunId(id),
+                "words",
+                Some(HeldScreen::Screen),
+            )
+            .unwrap();
+    }
+    assert!(store.grant_screen(RunId(1)).unwrap());
+    store
+        .end_run(ThreadId(1), RunId(1), &[], RunEnd::Done)
+        .unwrap();
+    store
+        .conn_for_tests()
+        .execute_batch(
+            "CREATE TRIGGER refuse_late_clear BEFORE UPDATE OF screen ON runs
+         WHEN old.id = 1 AND new.screen IS NULL BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
+        )
+        .unwrap();
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let mut repairs = BTreeMap::new();
+    let mut purger = Purger::new(Schedule::default(), &store);
+    let lease = LeaseId {
+        key: SendKey::Build(BuildKey {
+            run: RunId(2),
+            round: 1,
+            attempt: 1,
+        }),
+        send: 2,
+    };
+    super::serve_op(
+        &mut store,
+        &mut purger,
+        &acks,
+        &mut repairs,
+        StoreOp::RepairScreen {
+            run: RunId(1),
+            correction: UnsentScreen::Clear,
+        },
+    );
+    super::serve_op(
+        &mut store,
+        &mut purger,
+        &acks,
+        &mut repairs,
+        StoreOp::GrantScreen { lease },
+    );
+    assert_eq!(
+        replies.try_recv().unwrap(),
+        Input::ScreenGrantStored {
+            lease,
+            result: Err(ScreenGrantRefusal::Store)
+        }
+    );
+    assert_eq!(store.delete(ThreadId(1)).outcome, Deleted::Removed);
+    let lease = LeaseId { send: 3, ..lease };
+    super::serve_op(
+        &mut store,
+        &mut purger,
+        &acks,
+        &mut repairs,
+        StoreOp::GrantScreen { lease },
+    );
+    assert_eq!(
+        replies.try_recv().unwrap(),
+        Input::ScreenGrantStored {
+            lease,
+            result: Ok(())
+        }
+    );
 }

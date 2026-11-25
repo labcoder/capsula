@@ -380,6 +380,7 @@ fn saved_failure_marks_only_its_user_event_and_preserves_partial_history() {
             .begin_held_turn(thread, None, run, text, screen)
             .expect("saved user turn");
         if run == held {
+            assert!(store.grant_screen(run).expect("authorized"));
             store.sent_screen(run).expect("saved screen metadata");
         }
         if let Some(end) = end {
@@ -471,6 +472,7 @@ fn connection_failure_survives_reopen_on_its_user_event_only() {
             Err(StoreError::NoRun)
         ));
         if screen.is_some() {
+            assert!(store.grant_screen(run).unwrap());
             store.sent_screen(run).unwrap();
         }
         let final_events = if run == RunId(5) { &partial[..] } else { &[] };
@@ -548,11 +550,13 @@ fn old_unknown_and_unproven_reasons_stay_generic() {
         Some("connection/chatgpt_sign_in/unknown"),
         Some("connection/claude_code_signed_out/partial_answerX"),
         Some("connection/private_provider_text/not_sent"),
+        Some("connection/chatgpt_sign_in/not_sent"),
     ]) {
         let run = RunId(id);
         store
             .begin_held_turn(thread, None, run, "held", Some(HeldScreen::Screen))
             .unwrap();
+        assert!(store.grant_screen(run).unwrap());
         store.sent_screen(run).unwrap();
         store
             .end_run(thread, run, &[], RunEnd::Failed(Failure::Engine))
@@ -581,7 +585,7 @@ fn old_unknown_and_unproven_reasons_stay_generic() {
         rows.into_iter().map(|row| row.kind).collect::<Vec<_>>(),
         [PageEventKind::FailedHeldTurn {
             screen: HeldScreen::Screen
-        }; 5]
+        }; 6]
     );
 }
 

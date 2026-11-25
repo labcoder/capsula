@@ -470,6 +470,7 @@ async fn a_heard_point_the_gone_store_cant_take_answers_nothing() {
         text: 12,
     };
     let end = StoreOp::EndRun {
+        screen: None,
         thread: ThreadId(1),
         run,
         text: None,

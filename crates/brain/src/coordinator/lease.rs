@@ -15,10 +15,11 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use kumochi_protocol::message::{ConnectionKind, Deleted, HeldScreen, RunId, ThreadId};
+use tokio::time::Instant;
 
 use super::availability::sign_in_needed;
 use super::{BuildKey, Coordinator, Effect, HoldKey, JobKey, Stale, StoreOp};
-use crate::store::Failure;
+use crate::store::{Failure, UnsentScreen};
 
 /// How long a granted send may go without settling [guess].
 pub const SEND_DEADLINE: Duration = Duration::from_secs(15);
@@ -100,6 +101,17 @@ pub struct LeaseId {
     pub send: u64,
 }
 
+/// Why an outstanding picture authorization cannot release its transport grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenGrantRefusal {
+    /// The writer did not confirm the authorization.
+    Store,
+    /// The original deadline passed or nobody is still asking.
+    Expired,
+    /// The Claude Code launch no longer owns the authorization.
+    LaunchChanged,
+}
+
 /// The protected digest a Key run's first request carried, which later true continuations resend
 /// verbatim in their held prefix.
 #[derive(Clone, Debug)]
@@ -136,7 +148,7 @@ pub(super) struct Lease {
     digest: Option<DigestGate>,
 }
 
-/// A granted send carrying a hold's picture, which its turn already records as sent.
+/// The held picture a send would carry, without any of its data or recipient.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Carried {
     pub(super) run: RunId,
@@ -145,6 +157,13 @@ pub(super) struct Carried {
     /// The held turn's thread, so a settlement that changes its row tells the shell even after
     /// the run has gone.
     pub(super) thread: ThreadId,
+}
+
+#[derive(Debug)]
+pub(super) struct PendingScreenGrant {
+    pub(super) id: LeaseId,
+    hold: Option<Instant>,
+    picture: Carried,
 }
 
 impl Coordinator {
@@ -409,9 +428,25 @@ impl Coordinator {
     pub(super) fn send_ready(
         &mut self,
         key: BuildKey,
-        hold: Option<Duration>,
+        hold: Option<Instant>,
+        authorized: Option<Carried>,
         effects: &mut Vec<Effect>,
     ) {
+        if let Some(run) = self.current.as_mut()
+            && run.build.as_ref().is_some_and(|build| build.key() == key)
+            && let Some(waiting) = &run.progress.screen_grant
+        {
+            if waiting.id.key == SendKey::Build(key) {
+                return;
+            }
+            let retired = run
+                .progress
+                .screen_grant
+                .take()
+                .expect("the old ask is pending");
+            effects.push(Effect::Rebuild(retired.id.key));
+            effects.push(Effect::Store(StoreOp::RestoreScreen { run: key.run }));
+        }
         let pending = self.pending_deletes();
         if !self.hold_valid() {
             effects.push(Effect::Rebuild(SendKey::Build(key)));
@@ -426,11 +461,21 @@ impl Coordinator {
             .as_ref()
             .filter(|run| run.id == key.run)
             .and_then(|run| Some((run, run.build.as_ref()?)))
-            .filter(|(_, build)| build.key() == key && build.admitted());
+            .filter(|(run, build)| {
+                build.key() == key
+                    && build.admitted()
+                    && authorized.is_none_or(|_| !run.finishing && build.control.0.check().is_ok())
+            });
         let Some((run, build)) = current else {
             effects.push(Effect::Rebuild(SendKey::Build(key)));
             return;
         };
+        if hold.is_some_and(|at| at <= Instant::now()) {
+            effects.push(Effect::Rebuild(SendKey::Build(key)));
+            self.fail(key.run, Failure::Engine, effects)
+                .expect("the run is current");
+            return;
+        }
         let refused = run
             .route
             .map_or_else(
@@ -476,7 +521,6 @@ impl Coordinator {
             self.rebuild(key, &voided, &pending, effects);
             return;
         }
-        let sources = build.sources().to_vec();
         let inline = build.inline.is_some();
         let key_continuation = key.round > 1
             && !inline
@@ -530,6 +574,30 @@ impl Coordinator {
             self.rebuild_without_picture(key, &pending, effects);
             return;
         }
+        let screen = if pictured { run.carried() } else { None };
+        match (authorized, screen) {
+            (None, Some(picture)) => {
+                let id = self.next_send(SendKey::Build(key));
+                self.current
+                    .as_mut()
+                    .expect("the run is current")
+                    .progress
+                    .screen_grant = Some(PendingScreenGrant { id, hold, picture });
+                effects.push(Effect::Store(StoreOp::GrantScreen { lease: id }));
+                self.arm_send(
+                    id,
+                    hold.map(|at| at.min(Instant::now() + self.tuning.send_lease)),
+                    effects,
+                );
+                return;
+            }
+            (Some(expected), actual) if actual != Some(expected) => {
+                effects.push(Effect::Rebuild(SendKey::Build(key)));
+                return;
+            }
+            _ => {}
+        }
+        let sources = build.sources().to_vec();
         // A later Key continuation resends its first request, so only that round's digest went
         // out; a standalone inline rewrite sends a fresh body without the prior prefix.
         let carried = if key_continuation {
@@ -592,7 +660,9 @@ impl Coordinator {
         if !inline {
             run.progress.first_grant.get_or_insert(key);
         }
-        let screen = if pictured { run.carried() } else { None };
+        if screen.is_some() {
+            run.untold = None;
+        }
         self.grant(SendKey::Build(key), sources, hold, screen, effects);
         if revocable && let Some(lease) = self.leases.last_mut() {
             lease.picture = Some(PictureGrant::new());
@@ -600,21 +670,74 @@ impl Coordinator {
         }
     }
 
+    /// Recheck the live request before turning a committed authorization into a transport lease.
+    pub(super) fn screen_grant_stored(
+        &mut self,
+        id: LeaseId,
+        result: Result<(), ScreenGrantRefusal>,
+        effects: &mut Vec<Effect>,
+    ) -> Result<(), Stale> {
+        let SendKey::Build(key) = id.key else {
+            return Err(Stale);
+        };
+        let current = self.current.as_mut().ok_or(Stale)?;
+        let waiting = current
+            .progress
+            .screen_grant
+            .take_if(|waiting| waiting.id == id)
+            .ok_or(Stale)?;
+        let before = effects.len();
+        let same_build = current
+            .build
+            .as_ref()
+            .is_some_and(|build| build.key() == key);
+        match result {
+            Ok(()) | Err(ScreenGrantRefusal::LaunchChanged) => {
+                if result == Err(ScreenGrantRefusal::LaunchChanged) && same_build {
+                    current.screen_lost.get_or_insert(super::Lost::Generation);
+                }
+                self.send_ready(key, waiting.hold, Some(waiting.picture), effects);
+            }
+            Err(refusal) => {
+                effects.push(Effect::Rebuild(id.key));
+                if same_build {
+                    let failure = if refusal == ScreenGrantRefusal::Store {
+                        Failure::Store
+                    } else {
+                        Failure::Engine
+                    };
+                    self.fail(key.run, failure, effects)?;
+                }
+            }
+        }
+        if self.current.as_ref().and_then(super::Run::carried) == Some(waiting.picture) {
+            effects.insert(
+                before,
+                Effect::Store(StoreOp::RestoreScreen { run: key.run }),
+            );
+        }
+        Ok(())
+    }
+
+    fn next_send(&mut self, key: SendKey) -> LeaseId {
+        self.sends += 1;
+        LeaseId {
+            key,
+            send: self.sends,
+        }
+    }
+
     /// Records a lease for `key` carrying `sources` and `screen`, grants it and arms its deadline:
-    /// `hold`, capped at [`MAX_HOLD`], or the configured send lease.
+    /// the original held deadline or the configured send lease.
     pub(super) fn grant(
         &mut self,
         key: SendKey,
         sources: Vec<ThreadId>,
-        hold: Option<Duration>,
+        hold: Option<Instant>,
         screen: Option<Carried>,
         effects: &mut Vec<Effect>,
     ) {
-        self.sends += 1;
-        let id = LeaseId {
-            key,
-            send: self.sends,
-        };
+        let id = self.next_send(key);
         self.leases.push(Lease {
             id,
             sources,
@@ -625,10 +748,17 @@ impl Coordinator {
             digest: None,
         });
         effects.push(Effect::Grant(id));
-        effects.push(Effect::ArmSendDeadline {
-            lease: id,
-            after: hold.map_or(self.tuning.send_lease, |hold| hold.min(MAX_HOLD)),
-        });
+        self.arm_send(id, hold, effects);
+    }
+
+    fn arm_send(&self, lease: LeaseId, until: Option<Instant>, effects: &mut Vec<Effect>) {
+        effects.push(until.map_or(
+            Effect::ArmSendDeadline {
+                lease,
+                after: self.tuning.send_lease,
+            },
+            |at| Effect::ArmSendDeadlineAt { lease, at },
+        ));
     }
 
     /// A granted send stopped: the picture it carried is settled, its lease retires, and each held
@@ -716,7 +846,7 @@ impl Coordinator {
     }
 
     /// A send that may have written any of its request tells the shell, once, and marks the turn's
-    /// pending picture sent. One that wrote nothing leaves its run as if never granted: a
+    /// authorized picture sent. One that wrote nothing leaves its run as if never granted: a
     /// current run clears the mark at its end, or a later grant carries the picture again, and
     /// any other run's mark is cleared now. Either change to the turn's row refreshes its thread.
     #[expect(
@@ -728,12 +858,17 @@ impl Coordinator {
             && let Some(run) = self.current.as_mut().filter(|run| {
                 run.id == carried.run
                     && run
+                        .hold
+                        .as_ref()
+                        .is_some_and(|hold| hold.key == carried.hold)
+                    && run
                         .screen
                         .as_ref()
                         .is_some_and(|screen| screen.held() == carried.outcome)
             })
         {
             run.untold = Some(carried.hold.gesture);
+            effects.push(Effect::Store(StoreOp::RestoreScreen { run: carried.run }));
             return;
         }
         let run = carried.run;
@@ -741,11 +876,15 @@ impl Coordinator {
             let withdrawn = self
                 .find(run)
                 .is_ok_and(|run| matches!(run.screen, Some(crate::context::Screen::Withdrawn)));
-            effects.push(Effect::Store(if withdrawn {
-                StoreOp::WithdrawScreen { run }
+            let correction = if withdrawn {
+                UnsentScreen::Withdrawn
             } else {
-                StoreOp::ForgetScreen { run }
-            }));
+                UnsentScreen::Clear
+            };
+            if let Some(ended) = self.ending.iter_mut().find(|ended| ended.id == run) {
+                ended.progress.unsent_screen = Some(correction);
+            }
+            effects.push(Effect::Store(StoreOp::RepairScreen { run, correction }));
         } else {
             effects.push(Effect::HoldScreen {
                 hold: carried.hold,
@@ -768,6 +907,14 @@ impl Coordinator {
         lease: LeaseId,
         effects: &mut Vec<Effect>,
     ) -> Result<(), Stale> {
+        if self.current.as_ref().is_some_and(|run| {
+            run.progress
+                .screen_grant
+                .as_ref()
+                .is_some_and(|waiting| waiting.id == lease)
+        }) {
+            return self.screen_grant_stored(lease, Err(ScreenGrantRefusal::Expired), effects);
+        }
         let held = self
             .leases
             .iter_mut()
