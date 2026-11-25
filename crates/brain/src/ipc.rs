@@ -168,6 +168,22 @@ pub struct Pipes {
     data: PipeServer,
 }
 
+#[cfg(all(test, windows))]
+impl Pipes {
+    pub(crate) fn create_for_startup_test(slot: u32) -> io::Result<Self> {
+        let name = format!(
+            r"\\.\pipe\{}-fixture-startup-unwind-{}-{slot}",
+            kumochi_protocol::constants::OBJECT_PREFIX,
+            std::process::id()
+        );
+        Ok(Self {
+            session: 0,
+            control: platform::create_owner_only(&format!("{name}-control"), Instance::First)?,
+            data: platform::create_owner_only(&format!("{name}-data"), Instance::First)?,
+        })
+    }
+}
+
 impl Pipes {
     /// Creates both pipes for `session`, owner-only and single-instance.
     ///

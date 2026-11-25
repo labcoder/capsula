@@ -62,6 +62,16 @@ The file is mode `0600` and is locked exclusively without waiting. The file stay
 closing the lock handle or exiting the process releases the lock. Platforms without an
 admitted lock target still refuse before opening a file, with no fallback location.
 
+Detached brain startup acquires both pipes before touching the store. It opens and recovers
+the store, loads settings, starts accounts, and builds the Brain. It retries any interrupted
+voice model removals before creating the helpers' Job Object, then starts the optional workers.
+Only then does it publish the instance capability and serve the shell. The lifecycle owner
+keeps the pipes alive through teardown. Before capability publication, a failure drops the
+resources that started without entering graceful shutdown. After serving, it quits or closes
+the Brain, shuts down the Job off the async thread, and deletes the capability in that order.
+Detached keeps the result of serving as its exit status; an incomplete Quit or capability
+deletion warning does not change that status.
+
 ## Crates
 
 ```mermaid

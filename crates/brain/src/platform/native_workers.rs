@@ -29,39 +29,74 @@ pub(crate) fn claude_setting(_: &Config) -> ClaudeSetting {
     ClaudeSetting::Disabled
 }
 
-#[cfg(windows)]
-pub(crate) fn start(
-    brain: &mut Brain,
-    vault_held: Arc<AtomicBool>,
-    exe: &Path,
+pub(crate) struct Prepared {
+    #[cfg(windows)]
     setting: ClaudeSetting,
-) -> Result<Arc<Job>, BrainError> {
+    #[cfg(windows)]
+    models: Option<std::path::PathBuf>,
+    #[cfg(windows)]
+    stuck: Vec<(kumochi_protocol::voice::VoicePart, voice::installer::Folder)>,
+}
+
+#[cfg(windows)]
+pub(crate) fn prepare(
+    brain: &mut Brain,
+    setting: ClaudeSetting,
+) -> Result<(Arc<Job>, Prepared), BrainError> {
     let models = super::data_dir().map(|data| data.join(kumochi_protocol::voice::MODELS_DIR));
     let stuck = models
         .as_deref()
         .map(|models| brain.finish_removals(models))
         .unwrap_or_default();
     let jobs = Arc::new(Job::new().map_err(BrainError::Helpers)?);
+    Ok((
+        jobs,
+        Prepared {
+            setting,
+            models,
+            stuck,
+        },
+    ))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn prepare(_: &mut Brain, _: ClaudeSetting) -> Result<(Arc<Job>, Prepared), BrainError> {
+    let jobs = Arc::new(Job::new().map_err(BrainError::Helpers)?);
+    Ok((jobs, Prepared {}))
+}
+
+#[cfg(windows)]
+pub(crate) fn start(
+    prepared: Prepared,
+    brain: &mut Brain,
+    vault_held: Arc<AtomicBool>,
+    exe: &Path,
+    jobs: &Arc<Job>,
+) {
+    let Prepared {
+        setting,
+        models,
+        stuck,
+    } = prepared;
     if let Some(models) = models {
-        start_voice(brain, models, &stuck, exe, &jobs);
+        start_voice(brain, models, &stuck, exe, jobs);
     }
-    let lane = claude_lane(vault_held, &jobs, exe);
+    let lane = claude_lane(vault_held, jobs, exe);
     brain.attach_claude(match (setting, lane) {
         (ClaudeSetting::Enabled, Some(lane)) => claude::Claude::start(lane, claude::SIGN_IN),
         (ClaudeSetting::Enabled, None) => claude::Claude::default(),
         (ClaudeSetting::Disabled, lane) => claude::Claude::turned_off(lane),
     });
-    Ok(jobs)
 }
 
 #[cfg(not(windows))]
 pub(crate) fn start(
+    _: Prepared,
     _: &mut Brain,
     _vault_held: Arc<AtomicBool>,
     _: &Path,
-    _: ClaudeSetting,
-) -> Result<Arc<Job>, BrainError> {
-    Job::new().map(Arc::new).map_err(BrainError::Helpers)
+    _: &Arc<Job>,
+) {
 }
 
 #[cfg(windows)]
@@ -151,12 +186,7 @@ async fn requested_native_workers_refuse_without_containment() {
 
     let scratch = crate::test_support::Scratch::new("native-worker-refusal");
     let mut brain = crate::test_support::brain(&scratch, "");
-    let result = start(
-        &mut brain,
-        Arc::new(AtomicBool::new(false)),
-        &scratch.dir().join("missing-worker"),
-        ClaudeSetting::Enabled,
-    );
+    let result = prepare(&mut brain, ClaudeSetting::Enabled);
     brain.close().await;
     assert!(
         matches!(result, Err(BrainError::Helpers(error)) if error.kind() == ErrorKind::Unsupported)

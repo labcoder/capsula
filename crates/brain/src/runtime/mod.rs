@@ -452,6 +452,14 @@ impl Brain {
         }
     }
 
+    #[cfg(all(test, windows))]
+    pub(crate) fn take_store_close_receipt(&mut self) -> tokio::sync::oneshot::Receiver<()> {
+        self.store
+            .as_mut()
+            .expect("store started")
+            .take_close_receipt()
+    }
+
     /// Shuts down after an accepted Quit, all by one absolute `deadline`: ends the current run
     /// as shell loss would, drains every accepted store write and delete, clears the visible set
     /// and what's still clearing in one write, waits for its commit, then closes the store. No
