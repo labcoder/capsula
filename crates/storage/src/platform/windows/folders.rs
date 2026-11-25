@@ -187,15 +187,22 @@ fn choose(
     }
 }
 
-/// The cheap early refusal: each half is an absolute path on a disk that exists, strictly below
-/// the canonical local application data folder once resolved, and the halves don't overlap. Startup still holds
-/// the chain of each half as given, so a link anywhere on it refuses there.
+/// The cheap early refusal: each half is an absolute path in plain drive form (`C:\…`, never
+/// `\\?\C:\…`, which the chain hold doesn't walk) that exists, strictly below the canonical local
+/// application data folder once resolved, and the halves don't overlap. Startup still holds the
+/// chain of each half as given, so a link anywhere on it refuses there.
 fn validated(pair: Pair, inputs: &Inputs<'_>) -> Result<Pair, AppDataError> {
     let anchor = (inputs.known)(Half::Local)
         .and_then(|known| (inputs.canonical)(&known))
         .and_then(|path| on_disk(&path))
         .ok_or(AppDataError::InvalidOverride)?;
     let below = |path: &Path| {
+        let Some(Component::Prefix(prefix)) = path.components().next() else {
+            return None;
+        };
+        if !matches!(prefix.kind(), Prefix::Disk(_)) {
+            return None;
+        }
         let resolved = on_disk(path)
             .filter(|path| path.is_absolute())
             .and_then(|path| (inputs.canonical)(&path))
@@ -240,8 +247,10 @@ mod tests {
     use std::collections::HashMap;
 
     use kumochi_protocol::constants::ProductIdentity;
+    use windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData;
 
     use super::*;
+    use crate::scratch::Scratch;
 
     /// Values for each input, local then roaming, with a fixed canonical map: a path missing from
     /// it doesn't exist, and one mapped elsewhere resolves there.
@@ -492,6 +501,40 @@ mod tests {
             same.choose(Build::Honours, Today::Environment, Half::Roaming),
             Err(AppDataError::InvalidOverride)
         );
+    }
+
+    #[test]
+    fn a_real_pair_is_chosen_only_in_plain_drive_form() {
+        let anchor = known_folder(FOLDERID_LocalAppData).expect("local app data");
+        let scratch = Scratch::under(&anchor, "verbatim-pair");
+        let plain = [scratch.join("local"), scratch.join("roaming")];
+        for half in &plain {
+            std::fs::create_dir(half).expect("a scratch folder");
+        }
+        let chosen = |pair: &[PathBuf; 2]| {
+            choose(
+                Build::Honours,
+                Today::Environment,
+                Half::Local,
+                &Inputs {
+                    overrides: &|half| {
+                        Some(pair[usize::from(half == Half::Roaming)].clone().into())
+                    },
+                    environment: &|_| None,
+                    known: &|_| Some(anchor.clone()),
+                    canonical: &|path| std::fs::canonicalize(path).ok(),
+                },
+            )
+        };
+        assert_eq!(
+            chosen(&plain),
+            Ok(Root::Override(Pair {
+                local: plain[0].clone(),
+                roaming: plain[1].clone(),
+            }))
+        );
+        let verbatim = plain.map(|half| PathBuf::from(format!(r"\\?\{}", half.display())));
+        assert_eq!(chosen(&verbatim), Err(AppDataError::InvalidOverride));
     }
 
     #[test]

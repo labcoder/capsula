@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use kumochi_protocol::constants::{
-    AUTHORITY_FILE, CONFIG_FILE, DATA_DIR, LOGS_DIR, SESSION_LOCK, STORE_FILE,
+    AUTHORITY_FILE, CLAUDE_CODE_LOCK, CONFIG_FILE, DATA_DIR, LOGS_DIR, SESSION_LOCK, STORE_FILE,
 };
 
 use super::folders::{AppDataError, Pair};
@@ -63,7 +63,12 @@ fn admit(pair: &Pair) -> Result<Admitted, AppDataError> {
         .into_iter()
         .flat_map(|db| SQLITE_FILES.map(|suffix| local.join(format!("{db}{suffix}"))))
         .collect();
-    leaves.extend([local.join(SESSION_LOCK), roaming.join(CONFIG_FILE)]);
+    leaves.extend([
+        local.join(SESSION_LOCK),
+        local.join(CLAUDE_CODE_LOCK),
+        roaming.join(CONFIG_FILE),
+        roaming.join(format!("{CONFIG_FILE}.tmp")),
+    ]);
     for entry in std::fs::read_dir(&logs).map_err(|_| AppDataError::InvalidOverride)? {
         let entry = entry.map_err(|_| AppDataError::InvalidOverride)?;
         leaves.push(logs.join(entry.file_name()));
@@ -86,7 +91,9 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use kumochi_protocol::constants::{CONFIG_FILE, DATA_DIR, LOGS_DIR, SESSION_LOCK, STORE_FILE};
+    use kumochi_protocol::constants::{
+        CLAUDE_CODE_LOCK, CONFIG_FILE, DATA_DIR, LOGS_DIR, SESSION_LOCK, STORE_FILE,
+    };
     use windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData;
 
     use super::{AppDataError, Pair, admit};
@@ -192,13 +199,38 @@ mod tests {
     }
 
     #[test]
+    fn a_hard_linked_settings_temp_file_refuses() {
+        let run = run("admit-linked-settings-temp");
+        let settings = run.pair.roaming.join(DATA_DIR);
+        fs::create_dir(&settings).expect("the settings folder");
+        fs::hard_link(
+            run.target.join("kept"),
+            settings.join(format!("{CONFIG_FILE}.tmp")),
+        )
+        .expect("a hard link");
+        run.assert_refused();
+    }
+
+    #[test]
+    fn a_hard_linked_claude_code_lock_refuses() {
+        let run = run("admit-linked-claude-lock");
+        let data = run.pair.local.join(DATA_DIR);
+        fs::create_dir(&data).expect("the product folder");
+        fs::hard_link(run.target.join("kept"), data.join(CLAUDE_CODE_LOCK)).expect("a hard link");
+        run.assert_refused();
+    }
+
+    #[test]
     fn a_linked_session_lock_refuses() {
         let run = run("admit-linked-lock");
         let data = run.pair.local.join(DATA_DIR);
         fs::create_dir(&data).expect("the product folder");
         let lock = data.join(SESSION_LOCK);
         // A file symlink needs Developer Mode or the privilege; a junction is the same reparse leaf.
-        if std::os::windows::fs::symlink_file(run.target.join("kept"), &lock).is_err() {
+        if std::os::windows::fs::symlink_file(run.target.join("kept"), &lock).is_ok() {
+            eprintln!("session.lock witness: symlink");
+        } else {
+            eprintln!("session.lock witness: junction");
             run.junction(&lock);
         }
         run.assert_refused();
