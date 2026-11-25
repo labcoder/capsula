@@ -11,11 +11,11 @@ use std::time::Duration;
 
 use kumochi_protocol::Secret;
 use reqwest::redirect::Policy;
-use rustls::pki_types::CertificateDer;
 use url::Url;
 use zeroize::Zeroizing;
 
 use super::github::GitHubEndpoint;
+use crate::platform::{self, NativeTlsError, TrustDiagnostics};
 
 /// The issuer from the public `OpenAI` discovery document.
 pub(crate) const ISSUER: &str = "https://auth.openai.com";
@@ -56,6 +56,16 @@ pub enum HttpError {
     /// The body exceeded its local byte bound.
     #[error("account response exceeds its bound")]
     BodyTooLarge,
+}
+
+impl From<NativeTlsError> for HttpError {
+    fn from(error: NativeTlsError) -> Self {
+        match error {
+            NativeTlsError::Unsupported => Self::UnsupportedPlatform,
+            NativeTlsError::TrustStoreUnavailable => Self::TrustStoreUnavailable,
+            NativeTlsError::Configuration => Self::Configuration,
+        }
+    }
 }
 
 /// An HTTPS URL from discovery, such as the JWKS or revocation endpoint, validated against the
@@ -291,21 +301,28 @@ impl fmt::Debug for Client {
 /// # Errors
 /// Refuses an unreadable/empty trust store or a failed TLS/HTTP configuration.
 pub fn build() -> Result<Client, HttpError> {
-    from_roots(crate::platform::trust_roots()).map(Client)
+    let tls = platform::native_client_tls(TrustDiagnostics::Account)?;
+    with_tls(tls, Duration::from_secs(15)).map(Client)
 }
 
+#[cfg(test)]
 fn from_roots(
-    roots: Result<crate::platform::TrustRoots, crate::platform::TrustRootsError>,
+    roots: Result<platform::TrustRoots, platform::TrustRootsError>,
 ) -> Result<reqwest::Client, HttpError> {
     connecting_within(roots, Duration::from_secs(15))
 }
 
-/// The client, with `connect` as its deadline for the connection and TLS handshake.
+#[cfg(test)]
 fn connecting_within(
-    roots: Result<crate::platform::TrustRoots, crate::platform::TrustRootsError>,
+    roots: Result<platform::TrustRoots, platform::TrustRootsError>,
     connect: Duration,
 ) -> Result<reqwest::Client, HttpError> {
-    let tls = client_config(roots)?;
+    let tls = platform::client_tls_from_roots(roots, TrustDiagnostics::Account)?;
+    with_tls(tls, connect)
+}
+
+/// The client, with `connect` as its deadline for the connection and TLS handshake.
+fn with_tls(tls: rustls::ClientConfig, connect: Duration) -> Result<reqwest::Client, HttpError> {
     // shortcut: proxied networks can't sign in, until there's a user-set proxy setting
     reqwest::Client::builder()
         .use_preconfigured_tls(tls)
@@ -319,42 +336,6 @@ fn connecting_within(
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|_| HttpError::Configuration)
-}
-
-/// TLS through ring with the usable public roots from `roots`; the model connection uses it too.
-pub(crate) fn client_config(
-    roots: Result<crate::platform::TrustRoots, crate::platform::TrustRootsError>,
-) -> Result<rustls::ClientConfig, HttpError> {
-    let roots = roots.map_err(|error| {
-        tracing::warn!(loader_error = ?error, "account trust roots unavailable");
-        match error {
-            crate::platform::TrustRootsError::Unsupported => HttpError::UnsupportedPlatform,
-            _ => HttpError::TrustStoreUnavailable,
-        }
-    })?;
-    let mut store = rustls::RootCertStore::empty();
-    let (usable, unparsable) =
-        store.add_parsable_certificates(roots.certificates.into_iter().map(CertificateDer::from));
-    tracing::info!(
-        kept = usable,
-        skipped = roots.skipped,
-        unreadable = roots.unreadable,
-        unparsable,
-        "account trust roots"
-    );
-    if usable == 0 {
-        return Err(HttpError::TrustStoreUnavailable);
-    }
-    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|_| HttpError::Configuration)?
-    .with_root_certificates(store)
-    .with_no_client_auth();
-    // shortcut: a root Windows hasn't fetched yet fails as UnknownIssuer; revisit if users hit it
-    // shortcut: server-supplied intermediate distrust, usage-specific not-before and revocation aren't checked; revisit before broad release
-    Ok(tls)
 }
 
 impl Http for Client {
