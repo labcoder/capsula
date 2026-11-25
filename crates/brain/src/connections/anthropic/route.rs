@@ -22,8 +22,9 @@ use crate::context::ConnectionTag;
 
 const SERVE_ANTHROPIC_KEY: bool = true;
 
-/// Hears the tag of an authority a Messages post found refused with a 401.
-pub(crate) type Refused = Arc<dyn Fn(ConnectionTag) + Send + Sync>;
+/// Hears which authority was refused, and if the response answered a completed upload.
+pub(crate) type Refused =
+    Arc<dyn Fn(ConnectionTag, crate::connections::model::error::RejectionOrigin) + Send + Sync>;
 
 #[derive(Clone)]
 pub(crate) struct Transport {
@@ -130,7 +131,7 @@ impl Transport {
         {
             authority.fence.revoke();
             if let Some(refused) = &self.refused {
-                refused(authority.tag);
+                refused(authority.tag, failure.origin);
             }
         }
         result

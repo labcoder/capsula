@@ -185,8 +185,9 @@ impl Coordinator {
             TurnEvent::Finished(Finish::Completed) => self.round_end(run, effects)?,
             // Only the coordinator interrupts a run, so an engine's interruption fails it too.
             TurnEvent::Finished(finish) => {
+                let failure = super::history_failure::from_finish(key, current, &finish);
                 self.current(run)?.error = self.round_reason(key, finish);
-                self.fail(run, Failure::Engine, effects)?;
+                self.fail(run, failure, effects)?;
             }
         }
         Ok(())
@@ -197,10 +198,10 @@ impl Coordinator {
         let run = key.run;
         let delayed = self.drawing.pending_for(run);
         let current = self.current(run)?;
-        if current.text_bytes + delta.len() > MAX_TEXT {
+        if current.progress.text_bytes + delta.len() > MAX_TEXT {
             return self.fail(run, Failure::Budget, effects);
         }
-        current.text_bytes += delta.len();
+        current.progress.text_bytes += delta.len();
         current.unstored.accept(delta);
         if delayed {
             current.unstored.defer(delta.len());

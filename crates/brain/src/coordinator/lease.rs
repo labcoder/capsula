@@ -588,11 +588,11 @@ impl Coordinator {
                 });
             }
         }
-        let screen = self
-            .current
-            .as_mut()
-            .filter(|_| pictured)
-            .and_then(super::Run::carried);
+        let run = self.current.as_mut().expect("the run is current");
+        if !inline {
+            run.progress.first_grant.get_or_insert(key);
+        }
+        let screen = if pictured { run.carried() } else { None };
         self.grant(SendKey::Build(key), sources, hold, screen, effects);
         if revocable && let Some(lease) = self.leases.last_mut() {
             lease.picture = Some(PictureGrant::new());

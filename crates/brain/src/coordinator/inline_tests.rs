@@ -693,7 +693,7 @@ fn a_refused_keys_inline_compaction_fails_with_the_rejected_key_notice_in_either
                 Anthropic::Provider(refused),
             ))),
         );
-        let told = Input::KeyRefused(RefusedKey(ConnectionTag(3)));
+        let told = Input::KeyRefused(RefusedKey(ConnectionTag(3), None));
         let steps = if engine_first {
             [
                 (round, rejected()),
