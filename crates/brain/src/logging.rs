@@ -50,7 +50,8 @@ pub enum LoggingError {
 /// Fails when native logging isn't admitted, the log folder can't be found or created,
 /// or logging already started.
 pub fn init(prefix: &str) -> Result<(), LoggingError> {
-    crate::platform::require_native_runtime().map_err(LoggingError::NativeRuntime)?;
+    crate::platform::require_mode(crate::platform::Mode::Detached)
+        .map_err(LoggingError::NativeRuntime)?;
     let dir = crate::platform::data_dir()
         .ok_or(LoggingError::NoLocalAppData)?
         .join("logs");
