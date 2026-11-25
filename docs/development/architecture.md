@@ -104,8 +104,9 @@ state, after accounts, after the Brain and after the Job. Detached passes a no-o
 parent-bound start, not wired yet, makes one commit claim and then passes a fence at each
 checkpoint. The watch thread latches the parent's loss in an atomic gate before it publishes,
 so a claim that comes after a loss fails, and a fence refuses once a loss or a closed watch is
-visible. Each passed checkpoint admits the one unit after it. A loss during a unit lets that
-unit finish, and the next fence refuses with the same unwind as an error there.
+visible. Each passed checkpoint admits the work up to the next one; the fences owed inside the
+helpers' Job and worker starts come with containment. A loss during admitted work lets it
+finish, and the next fence refuses with the same unwind as an error there.
 Only then does it publish the instance capability and serve the shell. The lifecycle owner
 keeps the pipes alive through teardown. Before capability publication, a failure drops the
 resources that started without entering graceful shutdown. The store and credential workers

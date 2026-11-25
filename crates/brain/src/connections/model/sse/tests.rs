@@ -120,6 +120,7 @@ fn a_failed_response_after_text_is_its_provider_error() {
         status: 200,
         code: Some(Code::UsageLimit),
         param: None,
+        origin: crate::connections::model::error::RejectionOrigin::Unproven,
     };
     assert_eq!(
         read(FAILED, 3),
@@ -143,6 +144,7 @@ fn an_error_event_is_its_provider_error() {
             status: 200,
             code: Some(Code::Unavailable),
             param: None,
+            origin: crate::connections::model::error::RejectionOrigin::Unproven,
         }))
     );
 }

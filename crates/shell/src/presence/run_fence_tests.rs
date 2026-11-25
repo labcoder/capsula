@@ -365,7 +365,6 @@ fn legacy_authenticated_pair_still_admits_and_stops_a_typed_run() {
     assert!(brain.join().expect("Brain joined"));
 }
 
-#[cfg(all(windows, debug_assertions))]
 pub(super) fn submit_draft(owner: &Entity<Presence>, draft: &'static str, cx: &mut TestAppContext) {
     owner.update(cx, |owner, cx| {
         let text = owner.text.as_ref().unwrap();

@@ -6,8 +6,8 @@
 //! model check (S4) runs once, on the first build, against the route's catalog.
 
 use kumochi_protocol::message::{
-    Action, ConnectionKind, Effort, ErrorKey, ModelChoice, ModelInfo, ModelSlug, RunId, UserError,
-    effective_effort,
+    Action, ConnectionKind, DeliveryProof, Effort, ErrorKey, HistoryFailureCause, ModelChoice,
+    ModelInfo, ModelSlug, RunId, UserError, effective_effort,
 };
 
 use super::{Coordinator, Effect, SendKey, Stale};
@@ -150,9 +150,9 @@ impl PictureRoutes {
     }
 }
 
-/// The tag of the Anthropic key a Messages post or a Check found refused.
+/// The Anthropic key a Messages post or a Check found refused, with the post's own attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RefusedKey(pub(crate) ConnectionTag);
+pub struct RefusedKey(pub(crate) ConnectionTag, pub(crate) Option<SendKey>);
 
 /// The sign-in each connection kind had ready when a turn arrived, the cutoff when `ChatGPT`'s
 /// was recovered, and whether `ChatGPT` was refused for an inconsistent recovery report. A run
@@ -480,7 +480,23 @@ impl Coordinator {
             }
         };
         if let Some(reason) = reason {
-            self.fail_with(run, Failure::Engine, reason, effects)
+            let current = self.current.as_ref().expect("the run is current");
+            let failure = if route.is_some_and(|route| route.kind == ConnectionKind::ChatGpt)
+                && super::history_failure::needs_chatgpt_sign_in(reason.key())
+            {
+                super::history_failure::from_evidence(
+                    current,
+                    HistoryFailureCause::ChatGptSignIn,
+                    current
+                        .progress
+                        .first_grant
+                        .is_none()
+                        .then_some(DeliveryProof::NotSent),
+                )
+            } else {
+                Failure::Engine
+            };
+            self.fail_with(run, failure, reason, effects)
                 .expect("the run is current");
         }
     }
@@ -488,22 +504,43 @@ impl Coordinator {
     /// A Messages post or a Check found the Anthropic key under `tag` refused. A current run bound
     /// to that key was sending on it, so it ends with the key's rejection before the route change that
     /// follows would end it as unavailable; any other run keeps its own outcome.
-    pub(super) fn key_refused(&mut self, tag: ConnectionTag, effects: &mut Vec<Effect>) {
+    pub(super) fn key_refused(
+        &mut self,
+        RefusedKey(tag, attempt): RefusedKey,
+        effects: &mut Vec<Effect>,
+    ) {
         let refused = Route {
             kind: ConnectionKind::AnthropicKey,
             tag,
         };
-        let Some(run) = self
+        let Some(current) = self
             .current
             .as_ref()
             .filter(|current| current.route == Some(refused))
-            .map(|current| current.id)
         else {
             return;
         };
+        let run = current.id;
+        let failure = match attempt {
+            Some(SendKey::Build(key))
+                if current.started()
+                    && !current.finishing
+                    && current.build.as_ref().is_some_and(|build| {
+                        build.key() == key && build.admitted() && build.inline.is_none()
+                    }) =>
+            {
+                super::history_failure::from_evidence(
+                    current,
+                    HistoryFailureCause::AnthropicKeyRejected,
+                    (key.round == 1 && current.progress.first_grant == Some(key))
+                        .then_some(DeliveryProof::NotAccepted),
+                )
+            }
+            _ => Failure::Engine,
+        };
         self.close_grants(run);
         let rejected = crate::connections::anthropic::error::Failure::Credential.user_error();
-        self.fail_with(run, Failure::Engine, rejected, effects)
+        self.fail_with(run, failure, rejected, effects)
             .expect("the run is current");
     }
 
@@ -726,6 +763,7 @@ impl Coordinator {
             Finish::Failed(EngineFailure::Access(Some(error)) | EngineFailure::Claude(error)) => {
                 Some(error)
             }
+            Finish::Failed(EngineFailure::ClaudeSignedOut { notice, .. }) => Some(notice),
             Finish::Failed(EngineFailure::Access(None)) => Some(
                 route
                     .and_then(|route| self.refusal(route))

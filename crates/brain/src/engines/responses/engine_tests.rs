@@ -449,6 +449,7 @@ async fn a_refused_bearer_is_reported_with_its_generation() {
             status,
             code: None,
             param: None,
+            origin: crate::connections::model::error::RejectionOrigin::AfterUpload,
         });
         assert_eq!(
             round.ended().await,

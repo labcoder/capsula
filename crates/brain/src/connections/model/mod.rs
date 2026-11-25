@@ -283,7 +283,9 @@ async fn send<C: Connect, L: Lease>(
         .expect("an upload that flushed holds its connection");
     let head = conn.head(tuning.idle).await?;
     if !(200..300).contains(&head.status) {
-        return Err(Failure::Provider(refusal(conn, head, tuning).await?));
+        let mut error = refusal(conn, head, tuning).await?;
+        error.origin = error::RejectionOrigin::AfterUpload;
+        return Err(Failure::Provider(error));
     }
     let mut events = Reader::default();
     let mut body = Body::new(head.framing);

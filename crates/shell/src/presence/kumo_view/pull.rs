@@ -47,7 +47,14 @@ impl KumoView {
     }
 
     pub(in crate::presence) fn pull_live(&self) -> bool {
-        matches!(self.pulling.phase(), Phase::Live(_))
+        self.pull_generation().is_some()
+    }
+
+    pub(in crate::presence) fn pull_generation(&self) -> Option<Generation> {
+        match self.pulling.phase() {
+            Phase::Live(generation) => Some(generation),
+            _ => None,
+        }
     }
 
     /// The live drag, once its neck has snapped: the carry.
