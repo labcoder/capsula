@@ -669,7 +669,7 @@ async fn startup_text_metrics_are_rejected_on_the_live_data_link() {
     let (pages, _pages) = mpsc::channel(1);
     let frame = frame::encode(&DataToBrain::TextMetrics(None), Pipe::Data).unwrap();
     assert_eq!(
-        super::read_data(
+        super::read_data::<false>(
             &mut frame.as_slice(),
             &turns,
             &pages,
@@ -678,7 +678,7 @@ async fn startup_text_metrics_are_rejected_on_the_live_data_link() {
             1,
             None,
             None,
-            &super::Fence::new(None),
+            None,
         )
         .await,
         Ended::Broken("startup frame on live data pipe")

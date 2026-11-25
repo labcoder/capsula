@@ -1978,14 +1978,13 @@ async fn first_pcm_with_full_fifo(at: AtFirstPcm) {
         assert!(queue.bytes() >= DATA_CAP);
     }
     {
-        let fence = crate::runtime::Fence::new(None);
-        let core = brain.core(
+        let core = brain.core::<false>(
             &mut controls,
             &mut turns,
             &mut pages,
             &room,
             link,
-            &fence,
+            None,
             None::<std::pin::Pin<&mut std::future::Pending<()>>>,
         );
         tokio::pin!(core);

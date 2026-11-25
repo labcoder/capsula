@@ -154,7 +154,12 @@ async fn fatal_refuses_quit_on_first_and_resumed_reads() {
         let (frames, mut accepted) = mpsc::channel(1);
         let (mut input, mut shell) = tokio::io::duplex(256);
         let quit = Cell::new(None);
-        let mut reader = pin!(read_control(&mut input, &frames, &quit, &fence));
+        let mut reader = pin!(read_control::<true>(
+            &mut input,
+            &frames,
+            &quit,
+            Some(&fence)
+        ));
         if resumed {
             assert_eq!(poll_once(reader.as_mut()), Poll::Pending);
         }
@@ -181,7 +186,12 @@ async fn fatal_refuses_delete_with_room_or_after_waiting_for_room() {
         if full {
             frames.try_send((ControlToBrain::Pong, 0)).unwrap();
         }
-        let mut reader = pin!(read_control(&mut input, &frames, &quit, &fence));
+        let mut reader = pin!(read_control::<true>(
+            &mut input,
+            &frames,
+            &quit,
+            Some(&fence)
+        ));
         if !full {
             pair.send_replace(true);
         }
@@ -214,9 +224,12 @@ async fn a_quit_latches_without_waiting_for_room_and_keeps_only_its_prefix() {
     let mut input = frame.as_slice();
     let deadline = Instant::now() + close_wait();
     assert_eq!(
-        timeout(LIMIT, read_control(&mut input, &frames, &quit, &fence))
-            .await
-            .unwrap(),
+        timeout(
+            LIMIT,
+            read_control::<true>(&mut input, &frames, &quit, Some(&fence))
+        )
+        .await
+        .unwrap(),
         Ended::Quit { deadline }
     );
     assert_eq!(quit.get(), Some(deadline));
@@ -262,7 +275,7 @@ async fn fatal_rejects_pcm_and_credit_on_first_and_resumed_reads() {
             let (pages, _pages) = mpsc::channel(1);
             let ingress = brain.holds.ingress();
             let (mut input, mut shell) = tokio::io::duplex(4096);
-            let mut reader = pin!(read_data(
+            let mut reader = pin!(read_data::<true>(
                 &mut input,
                 &turns,
                 &pages,
@@ -271,7 +284,7 @@ async fn fatal_rejects_pcm_and_credit_on_first_and_resumed_reads() {
                 1,
                 Some(&ingress),
                 None,
-                &fence,
+                Some(&fence),
             ));
             if resumed {
                 assert_eq!(poll_once(reader.as_mut()), Poll::Pending);
@@ -294,13 +307,19 @@ async fn both_readers_prioritize_refusal_at_eof() {
     pair.send_replace(true);
     let (frames, _frames) = mpsc::channel(1);
     assert_eq!(
-        read_control(&mut tokio::io::empty(), &frames, &Cell::new(None), &fence).await,
+        read_control::<true>(
+            &mut tokio::io::empty(),
+            &frames,
+            &Cell::new(None),
+            Some(&fence)
+        )
+        .await,
         Ended::Fatal(Fatal::Refused)
     );
     let (turns, _turns) = mpsc::channel(1);
     let (pages, _pages) = mpsc::channel(1);
     assert_eq!(
-        read_data(
+        read_data::<true>(
             &mut tokio::io::empty(),
             &turns,
             &pages,
@@ -309,7 +328,7 @@ async fn both_readers_prioritize_refusal_at_eof() {
             1,
             None,
             None,
-            &fence,
+            Some(&fence),
         )
         .await,
         Ended::Fatal(Fatal::Refused)

@@ -77,6 +77,16 @@ pub(crate) use store_thread::StoreThread;
 use store_thread::StoreThread;
 use terminal::{Fatal, Fence, Terminal};
 
+macro_rules! select_connection {
+    ($watch_fatal:expr, [$($fatal_arm:tt)*], $($arms:tt)*) => {
+        if $watch_fatal {
+            tokio::select! { biased; $($fatal_arm)* $($arms)* }
+        } else {
+            tokio::select! { biased; $($arms)* }
+        }
+    };
+}
+
 /// Control frames queued for the shell (architecture v1 §3.2) [guess]. A full queue ends the
 /// connection: a deliberate overload policy, not proof that the shell hung.
 /// shortcut: no slots reserved for urgent frames and no coalescing of `RunState`, so a burst a
@@ -745,10 +755,6 @@ impl Brain {
         self.filing.report_live_block();
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keeps connection cleanup and disposition in order"
-    )]
     pub(crate) async fn serve_with_profile<C, D>(
         &mut self,
         control: C,
@@ -762,10 +768,40 @@ impl Brain {
         C: AsyncRead + AsyncWrite + Unpin,
         D: AsyncRead + AsyncWrite + Unpin,
     {
-        let watch_fatal = terminal.is_some();
-        let mut wake = pin!(terminal.clone().map(Terminal::wake_on_fatal));
-        let fence = Fence::new(terminal);
-        if let Some(cause) = fence.check() {
+        if terminal.is_some() {
+            self.serve_pair::<true, _, _>(control, data, tap, audio, text_metrics, terminal)
+                .await
+        } else {
+            self.serve_pair::<false, _, _>(control, data, tap, audio, text_metrics, None)
+                .await
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps connection cleanup and disposition in order"
+    )]
+    async fn serve_pair<const WATCH_FATAL: bool, C, D>(
+        &mut self,
+        control: C,
+        data: D,
+        tap: &mut Tap,
+        audio: AudioSession,
+        text_metrics: Option<TextMetricsV1>,
+        terminal: Option<Terminal>,
+    ) -> Ended
+    where
+        C: AsyncRead + AsyncWrite + Unpin,
+        D: AsyncRead + AsyncWrite + Unpin,
+    {
+        let mut wake = pin!(if WATCH_FATAL {
+            terminal.clone().map(Terminal::wake_on_fatal)
+        } else {
+            None
+        });
+        let fence = WATCH_FATAL.then(|| Fence::new(terminal));
+        let fence = fence.as_ref();
+        if WATCH_FATAL && let Some(cause) = fence.and_then(Fence::check) {
             return Ended::Fatal(cause);
         }
         self.begin_pair();
@@ -784,11 +820,12 @@ impl Brain {
             (audio == AudioSession::QueuedRequired).then_some(Cell::new(Registration::Awaiting));
         let registration = registration.as_ref();
 
-        let control_reader = read_control(&mut control_in, &controls_tx, &quit, &fence);
+        let control_reader =
+            read_control::<WATCH_FATAL>(&mut control_in, &controls_tx, &quit, fence);
         tokio::pin!(control_reader);
         let mut reading = true;
         let mut ended = {
-            let data_reader = read_data(
+            let data_reader = read_data::<WATCH_FATAL>(
                 &mut data_in,
                 &turns_tx,
                 &pages_tx,
@@ -797,20 +834,20 @@ impl Brain {
                 self.epoch,
                 Some(&pcm),
                 registration,
-                &fence,
+                fence,
             );
             let control_writer = write_control(&mut control_out, &mut out);
             let data_writer = write_data(&mut data_out, &queue, &ready, &room);
             let mut link = Link::new(&out_tx, &queue, &ready, &mut *tap);
             link.registration = registration;
             link.text_metrics = text_metrics;
-            let core = self.core(
+            let core = self.core::<WATCH_FATAL>(
                 &mut controls,
                 &mut turns,
                 &mut pages,
                 &room,
                 link,
-                &fence,
+                fence,
                 wake.as_mut().as_pin_mut(),
             );
             tokio::select! {
@@ -824,7 +861,7 @@ impl Brain {
                 ended = core => ended,
             }
         };
-        if let Some(cause) = fence.check() {
+        if WATCH_FATAL && let Some(cause) = fence.and_then(Fence::check) {
             ended = Ended::Fatal(cause);
         }
         if let Some(reaccount) = &self.drawing_reaccount {
@@ -837,29 +874,29 @@ impl Brain {
         self.holds.lost();
         self.filing.cancel();
         queue.borrow_mut().end_reads();
-        if reading && !quitting && !matches!(ended, Ended::Fatal(_)) {
+        if reading && !quitting && (!WATCH_FATAL || !matches!(ended, Ended::Fatal(_))) {
             #[cfg(test)]
             self.observer.send(Seen::Grace).ok();
             let grace = tokio::time::sleep(QUIT_GRACE);
             tokio::pin!(grace);
             loop {
-                tokio::select! {
-                    biased;
-                    cause = poll_fn(|cx| fence.poll_fatal(
+                select_connection!(WATCH_FATAL, [
+                    cause = poll_fn(|cx| fence.expect("active pair has a fence").poll_fatal(
                         wake.as_mut().as_pin_mut().expect("enabled fatal arm has a wake"),
                         cx,
-                    )), if watch_fatal => {
+                    )) => {
                         ended = Ended::Fatal(cause);
                         break;
                     }
+                ],
                     Some((message, len)) = controls.recv() => {
                         self.control_after_loss(message, len, tap, audio);
                     }
                     _ = &mut control_reader => break,
                     () = &mut grace => break,
-                }
+                );
             }
-            if let Some(cause) = fence.check() {
+            if WATCH_FATAL && let Some(cause) = fence.and_then(Fence::check) {
                 ended = Ended::Fatal(cause);
             }
         }
@@ -867,17 +904,16 @@ impl Brain {
             self.claude.stop();
         }
         // The reader may have forwarded controls in the same poll that saw the pipe end.
-        while !matches!(ended, Ended::Fatal(_)) {
-            let Ok((message, len)) = controls.try_recv() else {
-                break;
-            };
-            if let Some(cause) = fence.check() {
-                ended = Ended::Fatal(cause);
-                break;
+        if !WATCH_FATAL || !matches!(ended, Ended::Fatal(_)) {
+            while let Ok((message, len)) = controls.try_recv() {
+                if WATCH_FATAL && let Some(cause) = fence.and_then(Fence::check) {
+                    ended = Ended::Fatal(cause);
+                    break;
+                }
+                #[cfg(test)]
+                self.observer.send(Seen::ControlDrained).ok();
+                self.control_after_loss(message, len, tap, audio);
             }
-            #[cfg(test)]
-            self.observer.send(Seen::ControlDrained).ok();
-            self.control_after_loss(message, len, tap, audio);
         }
         let ended = match quit.get() {
             Some(deadline) => Ended::Quit { deadline },
@@ -940,17 +976,16 @@ impl Brain {
         clippy::too_many_arguments,
         reason = "one connection owns the ingress and terminal state"
     )]
-    async fn core(
+    async fn core<const WATCH_FATAL: bool>(
         &mut self,
         controls: &mut mpsc::Receiver<(ControlToBrain, usize)>,
         turns: &mut mpsc::Receiver<Turn>,
         pages: &mut mpsc::Receiver<Input>,
         room: &Notify,
         mut link: Link<'_, '_>,
-        fence: &Fence,
+        fence: Option<&Fence>,
         mut wake: Option<Pin<&mut impl Future<Output = ()>>>,
     ) -> Ended {
-        let watch_fatal = wake.is_some();
         let mut ticks = tokio::time::interval(PING_EVERY);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ping_sent: Option<Instant> = None;
@@ -981,12 +1016,12 @@ impl Brain {
             let take_engine = link.queue.borrow().bytes() < DATA_CAP;
             let take_turns = self.admits_turn(&link);
             let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
-            let input = tokio::select! {
-                biased;
-                cause = poll_fn(|cx| fence.poll_fatal(
+            let input = select_connection!(WATCH_FATAL, [
+                cause = poll_fn(|cx| fence.expect("active pair has a fence").poll_fatal(
                     wake.as_mut().map(Pin::as_mut).expect("enabled fatal arm has a wake"),
                     cx,
-                )), if watch_fatal => return Ended::Fatal(cause),
+                )) => return Ended::Fatal(cause),
+            ],
                 () = tokio::time::sleep_until(barrier.deadline), if !described => continue,
                 Some((message, len)) = controls.recv() => {
                     match self.control_frame(message, len, &mut link, &mut ping_sent) {
@@ -1124,7 +1159,7 @@ impl Brain {
                         Err(ended) => return ended,
                     }
                 }
-            };
+            );
             if let Input::HoldPrepared { key, result } = input {
                 if self.hold_prepared(key, result, &mut link).is_err() {
                     return Ended::Lost;
@@ -1718,7 +1753,7 @@ fn take(turns: &mpsc::Sender<Turn>, turn: Turn) -> Option<Ended> {
     clippy::too_many_arguments,
     reason = "the reader borrows per-connection ingress"
 )]
-async fn read_data(
+async fn read_data<const WATCH_FATAL: bool>(
     pipe: &mut (impl AsyncRead + Unpin),
     turns: &mpsc::Sender<Turn>,
     pages: &mpsc::Sender<Input>,
@@ -1727,14 +1762,19 @@ async fn read_data(
     epoch: u64,
     pcm: Option<&hold::Ingress>,
     registration: Option<&Cell<Registration>>,
-    fence: &Fence,
+    fence: Option<&Fence>,
 ) -> Ended {
     #[cfg(all(windows, debug_assertions, feature = "test-support"))]
     let probe = audio_fixture::probe();
     loop {
         let message = ipc::read::<DataToBrain>(pipe, Pipe::Data).await;
-        let fatal = fence.check();
-        if let Some(cause) = fatal
+        let fatal = if WATCH_FATAL {
+            fence.and_then(Fence::check)
+        } else {
+            None
+        };
+        if WATCH_FATAL
+            && let Some(cause) = fatal
             && !matches!(message, Ok(Some(DataToBrain::MicPcm(_))))
         {
             return Ended::Fatal(cause);
@@ -1744,14 +1784,14 @@ async fn read_data(
                 return Ended::Broken("startup frame on live data pipe");
             }
             Ok(Some(DataToBrain::MicPcm(mut chunk))) => {
-                if let Some(pcm) =
-                    pcm.filter(|_| fatal.is_none() && Registration::admits(registration))
-                {
+                if let Some(pcm) = pcm.filter(|_| {
+                    (!WATCH_FATAL || fatal.is_none()) && Registration::admits(registration)
+                }) {
                     pcm.push(chunk);
                 } else {
                     zeroize::Zeroize::zeroize(&mut chunk.samples);
                 }
-                if let Some(cause) = fatal {
+                if WATCH_FATAL && let Some(cause) = fatal {
                     return Ended::Fatal(cause);
                 }
             }

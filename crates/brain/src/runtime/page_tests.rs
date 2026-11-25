@@ -282,14 +282,13 @@ async fn held_page_output_retains_its_original_admission_end_and_owner() {
             })
             .unwrap();
         let mut tap = Tap::from_env();
-        let fence = crate::runtime::Fence::new(None);
-        let core = brain.core(
+        let core = brain.core::<false>(
             &mut controls,
             &mut turns,
             &mut pages,
             &room,
             Link::new(&out, &queue, &ready, &mut tap),
-            &fence,
+            None,
             None::<std::pin::Pin<&mut std::future::Pending<()>>>,
         );
         let (mut output, _client) = tokio::io::duplex(1);
@@ -439,9 +438,8 @@ async fn staged_issue_data_is_dropped_without_blocking_credit() {
     let (turns_tx, mut turns) = mpsc::channel(1);
     let (pages_tx, mut pages) = mpsc::channel(1);
     let (mut input, mut shell) = tokio::io::duplex(DUPLEX_BUFFER);
-    let fence = crate::runtime::Fence::new(None);
-    let reader = super::super::read_data(
-        &mut input, &turns_tx, &pages_tx, &queue, &ready, 0, None, None, &fence,
+    let reader = super::super::read_data::<false>(
+        &mut input, &turns_tx, &pages_tx, &queue, &ready, 0, None, None, None,
     );
     let writer = async {
         for message in [
@@ -480,9 +478,8 @@ async fn uncorrelated_cards_are_a_protocol_error_not_an_ignored_read() {
     let (turns, _turns) = mpsc::channel(1);
     let (pages, mut requests) = mpsc::channel(1);
     let (mut input, mut shell) = tokio::io::duplex(DUPLEX_BUFFER);
-    let fence = crate::runtime::Fence::new(None);
-    let reader = super::super::read_data(
-        &mut input, &turns, &pages, &queue, &ready, 1, None, None, &fence,
+    let reader = super::super::read_data::<false>(
+        &mut input, &turns, &pages, &queue, &ready, 1, None, None, None,
     );
     let writer = async {
         let bytes = frame::encode(
@@ -510,9 +507,8 @@ async fn correlated_card_admission_never_holds_up_credit() {
     let (turns, _turns) = mpsc::channel(1);
     let (pages, mut requests) = mpsc::channel(1);
     let (mut input, mut shell) = tokio::io::duplex(DUPLEX_BUFFER);
-    let fence = crate::runtime::Fence::new(None);
-    let reader = super::super::read_data(
-        &mut input, &turns, &pages, &queue, &ready, 3, None, None, &fence,
+    let reader = super::super::read_data::<false>(
+        &mut input, &turns, &pages, &queue, &ready, 3, None, None, None,
     );
     let writer = async {
         for message in [
@@ -632,9 +628,8 @@ async fn a_repeated_active_page_id_breaks_before_a_second_read_is_forwarded() {
     let (turns_tx, _turns) = mpsc::channel(1);
     let (pages_tx, mut pages) = mpsc::channel(MAX_PENDING_PAGES);
     let (mut input, mut client) = tokio::io::duplex(DUPLEX_BUFFER);
-    let fence = crate::runtime::Fence::new(None);
-    let reader = super::super::read_data(
-        &mut input, &turns_tx, &pages_tx, &queue, &ready, 9, None, None, &fence,
+    let reader = super::super::read_data::<false>(
+        &mut input, &turns_tx, &pages_tx, &queue, &ready, 9, None, None, None,
     );
     let send = async {
         let request = DataToBrain::PageRequest {
@@ -673,18 +668,17 @@ async fn a_fifth_unanswered_page_breaks_the_connection_even_after_reads_finish()
     let (mut input, mut shell) = tokio::io::duplex(DUPLEX_BUFFER);
     let mut tap = Tap::from_env();
     let link = Link::new(&out, &queue, &ready, &mut tap);
-    let fence = crate::runtime::Fence::new(None);
-    let core = brain.core(
+    let core = brain.core::<false>(
         &mut controls,
         &mut turns,
         &mut pages,
         &room,
         link,
-        &fence,
+        None,
         None::<std::pin::Pin<&mut std::future::Pending<()>>>,
     );
-    let reader = super::super::read_data(
-        &mut input, &turns_tx, &pages_tx, &queue, &ready, 0, None, None, &fence,
+    let reader = super::super::read_data::<false>(
+        &mut input, &turns_tx, &pages_tx, &queue, &ready, 0, None, None, None,
     );
     let client = async {
         for request in 0..u32::try_from(MAX_PENDING_PAGES).expect("small") {
@@ -754,14 +748,13 @@ async fn a_page_waits_for_credit_and_is_not_revoked_by_a_matching_run_id() {
     let (mut output, mut client) = tokio::io::duplex(DUPLEX_BUFFER);
     let mut tap = Tap::from_env();
     let link = Link::new(&out, &queue, &ready, &mut tap);
-    let fence = crate::runtime::Fence::new(None);
-    let core = brain.core(
+    let core = brain.core::<false>(
         &mut controls,
         &mut turns,
         &mut pages,
         &room,
         link,
-        &fence,
+        None,
         None::<std::pin::Pin<&mut std::future::Pending<()>>>,
     );
     let writer = super::super::write_data(&mut output, &queue, &ready, &room);
@@ -888,14 +881,13 @@ async fn a_fixture_finishes_in_order_while_both_pages_wait_for_credit_and_a_late
     let (mut output, mut client) = tokio::io::duplex(DUPLEX_BUFFER);
     let mut tap = Tap::from_env();
     let link = Link::new(&out, &queue, &ready, &mut tap);
-    let fence = crate::runtime::Fence::new(None);
-    let core = brain.core(
+    let core = brain.core::<false>(
         &mut controls,
         &mut turns,
         &mut pages,
         &room,
         link,
-        &fence,
+        None,
         None::<std::pin::Pin<&mut std::future::Pending<()>>>,
     );
     let writer = super::super::write_data(&mut output, &queue, &ready, &room);
@@ -1141,14 +1133,13 @@ async fn a_reply_that_lands_while_the_queue_is_full_waits_for_room() {
     let (pages_tx, mut pages) = mpsc::channel(MAX_PENDING_PAGES);
     let mut tap = Tap::from_env();
     let link = Link::new(&out, &queue, &ready, &mut tap);
-    let fence = crate::runtime::Fence::new(None);
-    let core = brain.core(
+    let core = brain.core::<false>(
         &mut controls,
         &mut turns,
         &mut pages,
         &room,
         link,
-        &fence,
+        None,
         None::<std::pin::Pin<&mut std::future::Pending<()>>>,
     );
     let client = async {

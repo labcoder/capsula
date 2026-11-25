@@ -1380,8 +1380,7 @@ async fn saturated_audio_still_reads_credit_behind_a_full_turn_queue() {
     assert_eq!(queue.borrow_mut().pop(std::time::Instant::now()), None);
     let ready = Notify::new();
     let (mut reader, mut writer) = tokio::io::duplex(32);
-    let fence = crate::runtime::Fence::new(None);
-    let read = super::super::read_data(
+    let read = super::super::read_data::<false>(
         &mut reader,
         &turns,
         &pages,
@@ -1390,7 +1389,7 @@ async fn saturated_audio_still_reads_credit_behind_a_full_turn_queue() {
         0,
         Some(&ingress),
         None,
-        &fence,
+        None,
     );
     let write = async {
         for seq in 0..9 {
