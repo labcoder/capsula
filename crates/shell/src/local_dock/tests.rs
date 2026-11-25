@@ -67,6 +67,7 @@ fn mount_with(
         cx.set_global(Strings::english());
         open(cx, &custody).expect("open the product dock on the test display")
     });
+    drop(custody);
     let owner = window
         .update(cx, |root, _, cx| {
             root.downcast::<Root>()
