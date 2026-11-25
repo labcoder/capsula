@@ -53,42 +53,44 @@ impl Drop for TerminationRequest {
     }
 }
 
-/// Approves the app's own termination ahead of time, once its cleanup has finished.
+/// The app's own quit once its cleanup has finished, with the platform deciding whether a new
+/// `terminate:` is needed.
 ///
-/// A later request then answers Now with no queued delivery. GPUI's `quit()` sends
-/// `terminate:` from a main-queue block, and AppKit waits for a Later reply inside that block,
-/// so a reply delivered by a later job on the same serial queue never arrives. Requests already
-/// pending keep their own answer, and disposal still refuses.
+/// GPUI's `quit()` sends `terminate:` from a main-queue block, and AppKit waits for a Later
+/// reply inside that block, so a reply delivered by a later job on the same serial queue never
+/// arrives. This quit instead approves every later request ahead of time, so one admitted from
+/// Idle answers Now. A request already in flight (Pending, or a queued yes) is left to end the
+/// app. A queued no settles first, and the quit is sent only after it returns. `terminate:` is
+/// sent only while Idle or Approved, where it answers Now.
 #[derive(Clone)]
-pub struct TerminationApproval {
+pub struct AppQuit {
     control: Weak<Control>,
 }
 
-impl fmt::Debug for TerminationApproval {
+impl fmt::Debug for AppQuit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("TerminationApproval { .. }")
+        f.write_str("AppQuit { .. }")
     }
 }
 
-impl TerminationApproval {
+impl AppQuit {
     pub(super) fn new(control: &Rc<Control>) -> Self {
         Self {
             control: Rc::downgrade(control),
         }
     }
 
-    /// Lets every later request terminate at once. Returns whether a request is already in
-    /// flight: admitted and still awaiting the app's answer, or with a yes queued. Once cleanup
-    /// has finished the app approves that request and it ends the app, so the app must not also
-    /// quit for that exit.
-    #[must_use]
-    pub fn approve(&self) -> bool {
-        let Some(control) = self.control.upgrade() else {
-            return false;
-        };
-        let mut state = control.state.borrow_mut();
-        state.approved_ahead = true;
-        matches!(state.phase, Phase::Pending(_) | Phase::Queued(_, true))
+    /// Quits from a later main-queue job, outside any caller borrow. Call it only after the
+    /// app's cleanup has finished.
+    pub fn quit(&self) {
+        if let Some(control) = self.control.upgrade() {
+            {
+                let mut state = control.state.borrow_mut();
+                state.approved_ahead = true;
+                state.quit_wanted = true;
+            }
+            control.schedule_quit();
+        }
     }
 }
 
@@ -108,6 +110,7 @@ struct State {
     disposing: bool,
     delivering: bool,
     approved_ahead: bool,
+    quit_wanted: bool,
 }
 
 impl State {
@@ -158,7 +161,8 @@ impl State {
         Some(allow)
     }
 
-    fn finish_settlement(&mut self, epoch: u64) {
+    /// Returns whether the app's own quit, held behind this refusal, is now due.
+    fn finish_settlement(&mut self, epoch: u64) -> bool {
         if self.phase == Phase::Rejecting(epoch) {
             self.phase = if self.disposing {
                 Phase::Disposed
@@ -166,6 +170,20 @@ impl State {
                 Phase::Idle
             };
         }
+        self.phase == Phase::Idle && self.quit_wanted
+    }
+
+    /// Whether to send the app's own `terminate:` now: only while Idle or Approved, where it
+    /// answers Now. A request in flight ends the app or settles a no that reschedules the quit.
+    fn take_quit(&mut self) -> bool {
+        if !self.quit_wanted || self.disposing {
+            return false;
+        }
+        if !matches!(self.phase, Phase::Idle | Phase::Approved) {
+            return false;
+        }
+        self.quit_wanted = false;
+        true
     }
 
     fn dispose(&mut self) -> Option<u64> {
@@ -204,6 +222,7 @@ impl Control {
                 disposing: false,
                 delivering: false,
                 approved_ahead: false,
+                quit_wanted: false,
             }),
             handler: RefCell::new(Some(handler)),
             application: RefCell::new(None),
@@ -280,7 +299,22 @@ impl Control {
         (self.queue)(Box::new(move || control.settle(epoch)));
     }
 
-    fn settle(&self, epoch: u64) {
+    fn schedule_quit(self: &Rc<Self>) {
+        let control = Rc::clone(self);
+        (self.queue)(Box::new(move || control.run_quit()));
+    }
+
+    fn run_quit(&self) {
+        if !self.state.borrow_mut().take_quit() {
+            return;
+        }
+        let application = self.application.borrow().clone();
+        if let Some(application) = application {
+            application.terminate(None);
+        }
+    }
+
+    fn settle(self: &Rc<Self>, epoch: u64) {
         if self.state.borrow().delivering {
             return;
         }
@@ -295,10 +329,13 @@ impl Control {
         if let Some(application) = application {
             application.replyToApplicationShouldTerminate(allow);
         }
-        self.state.borrow_mut().finish_settlement(epoch);
+        let quit = self.state.borrow_mut().finish_settlement(epoch);
         if self.state.borrow().disposing {
             let application = self.application.borrow_mut().take();
             drop(application);
+        }
+        if quit {
+            self.schedule_quit();
         }
     }
 

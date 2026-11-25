@@ -207,7 +207,7 @@ is compared with that retained application, never dereferenced, made static or t
 
 ```mermaid
 stateDiagram-v2
-    Idle --> Approved: request after approval ahead / Now
+    Idle --> Approved: request after the app's quit / Now
     Idle --> Pending: first request / Later
     Pending --> Pending: repeat / Later
     Pending --> Queued: reply or Drop
@@ -232,21 +232,25 @@ production catch_unwind. Missing recipients must drop the token; an absent handl
 the same. AppKit is called with no state/application/handler borrow: Approved is set
 before YES; Rejecting remains until NO returns. No callback runs under a lock or App borrow.
 
-### Approving the app's own quit ahead of time
+### The app's own quit
 
 GPUI's `quit()` sends `terminate:` from a block on the main dispatch queue. AppKit answers
 Later by waiting for `replyToApplicationShouldTerminate:` inside that call, so inside that block.
 Delivery and settlement are jobs on the same serial queue, so they can't run until the block
 returns, and the block can't return until they run: the app hangs with its window already gone.
-A first native Mac launch hit exactly this. So `MacPlatform::termination_approval()` hands the
-app a `TerminationApproval` (weak, non-Send). Its `approve()` marks the state approved ahead:
-a request admitted from Idle then answers Now and enters Approved, with no delivery queued and no
-handler call. A queued decision keeps its own request, and disposal still refuses. Call it as
-soon as cleanup has finished, before any other work. It returns whether a request is already in
-flight (Pending, or a queued yes): the app then answers that request and must not send its own
-`terminate:`, which would wait inside its block for a settlement queued behind it. A queued no
-is not in flight; its settlement was queued earlier, so the app's own quit runs after it and is
-answered Now.
+A first native Mac launch hit exactly this. So an app with a termination handler quits through
+`MacPlatform::app_quit()` instead, an `AppQuit` (weak, non-Send) whose `quit()` the app calls
+once, after its cleanup has finished. The platform then decides whether a `terminate:` is needed:
+
+- `quit()` approves every later request ahead of time, so one admitted from Idle answers Now
+  and enters Approved, with no delivery and no handler call.
+- It sends `terminate:` itself from a later main-queue job, outside the caller's borrows, and only
+  while Idle or Approved, where the answer is Now.
+- A request already in flight (Pending, or a queued yes) is left to end the app; no second
+  `terminate:` is sent behind it.
+- A queued no settles first. The quit stays wanted, and once that no has returned and the phase
+  is Idle, the platform queues the quit again.
+- Disposal never sends one.
 
 On run-loop return, disposal revokes approval and queues a negative settlement before
 the existing platform ivars are cleared. Its strong queued owner retains the original

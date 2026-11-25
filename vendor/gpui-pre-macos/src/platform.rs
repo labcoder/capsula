@@ -2,7 +2,7 @@
 mod termination;
 
 use termination::Control as TerminationControl;
-pub use termination::{TerminationApproval, TerminationRequest};
+pub use termination::{AppQuit, TerminationRequest};
 
 use crate::{
     AppleActivity, AppleDispatcher, BoolExt, MacDisplay, MacKeyboardLayout, MacKeyboardMapper,
@@ -313,10 +313,10 @@ impl MacPlatform {
         platform
     }
 
-    /// The approval an app gives once its cleanup is done and it is about to quit itself; `None`
-    /// without a termination handler.
-    pub fn termination_approval(&self) -> Option<TerminationApproval> {
-        self.2.as_ref().map(TerminationApproval::new)
+    /// The app's own quit after its cleanup, arbitrated with pending termination requests;
+    /// `None` without a termination handler.
+    pub fn app_quit(&self) -> Option<AppQuit> {
+        self.2.as_ref().map(AppQuit::new)
     }
 
     unsafe fn create_menu_bar(
