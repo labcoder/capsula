@@ -343,7 +343,7 @@ impl Coordinator {
         arrived.1 = arrived
             .get(ConnectionKind::ChatGpt)
             .and_then(|tag| self.recovered(tag));
-        arrived.2 = self.chatgpt_blocked;
+        arrived.2 = self.chatgpt_blocked || self.chatgpt_fenced;
         arrived
     }
 
@@ -390,10 +390,16 @@ impl Coordinator {
         self.available(ConnectionKind::ChatGpt, Availability::Ready(ready), effects);
     }
 
-    /// `ChatGPT`'s sign-in isn't proved ordinary or recovered, so a turn that arrives now reads no
-    /// history for it, until the next ready report.
-    pub(crate) fn refuse_unproved_chatgpt(&mut self) {
-        self.chatgpt_blocked = true;
+    /// Whether the account's sign-in keeps `ChatGPT`'s history from a turn that arrives now: one
+    /// not proved, or recovered but not ready. Only the account lifts it; a refused report's own
+    /// block is apart.
+    pub(crate) fn fence_chatgpt_reads(&mut self) {
+        self.chatgpt_fenced = true;
+    }
+
+    /// The account's sign-in no longer fences `ChatGPT`'s history.
+    pub(crate) fn lift_chatgpt_fence(&mut self) {
+        self.chatgpt_fenced = false;
     }
 
     /// The cutoff `tag`'s `ChatGPT` reads keep to, when that sign-in was recovered.

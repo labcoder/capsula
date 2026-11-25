@@ -26,6 +26,8 @@ pub(super) struct Proofs {
     check: Option<Check>,
     epochs: u64,
     held: bool,
+    /// Shutdown began: no check goes out, and no answer starts a catalog read.
+    closing: bool,
 }
 
 impl Proofs {
@@ -34,6 +36,15 @@ impl Proofs {
             check: None,
             epochs: 0,
             held: true,
+            closing: false,
+        }
+    }
+
+    pub(super) fn close(&mut self) {
+        self.closing = true;
+        self.held = true;
+        if let Some(check) = &mut self.check {
+            check.read_owed = false;
         }
     }
 
@@ -43,7 +54,7 @@ impl Proofs {
         jobs: Option<&std_mpsc::Sender<Work>>,
         reads: &mpsc::UnboundedSender<Event>,
     ) {
-        self.held = false;
+        self.held = self.closing;
         self.send(jobs, reads);
     }
 
@@ -112,6 +123,9 @@ impl Proofs {
 
     /// The current check, unanswered, holds back a catalog read.
     pub(super) fn owe_read(&mut self) {
+        if self.closing {
+            return;
+        }
         if let Some(check) = self.check.as_mut().filter(|check| check.proof.is_none()) {
             check.read_owed = true;
         }
@@ -119,8 +133,9 @@ impl Proofs {
 
     /// Records the current check's answer, and says whether a catalog read waited for it; any
     /// other answer changes nothing. A cutoff for another connection proves nothing.
-    // shortcut: an unproved connection is never checked again until the connection changes;
-    // repair ingress must check again once the replacement's context is established.
+    // shortcut: an unproved connection is never checked again until the connection changes,
+    // even when only a transient authority read made it unproved; repair ingress must check
+    // again once the replacement's context is established.
     pub(super) fn found(&mut self, connection: u64, epoch: u64, proof: Proof) -> Option<bool> {
         if !self.awaits(connection, epoch) {
             return None;
@@ -272,5 +287,17 @@ mod tests {
         }
         lost.sort_unstable();
         assert_eq!(lost, [(7, 1), (8, 2)]);
+    }
+
+    /// An answer that arrives after shutdown began starts no catalog read, and nothing new is owed.
+    #[test]
+    fn an_answer_during_close_starts_no_catalog_read() {
+        let (reads, _answers) = reads();
+        let mut proofs = Proofs::held();
+        proofs.track(Some(7), None, &reads);
+        proofs.owe_read();
+        proofs.close();
+        proofs.owe_read();
+        assert_eq!(proofs.found(7, 1, Proof::Ordinary), Some(false));
     }
 }

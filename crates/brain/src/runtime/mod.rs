@@ -441,26 +441,37 @@ impl Brain {
         #[cfg(not(any(test, debug_assertions, all(windows, feature = "gate-draw-replay"))))]
         let fixture: Option<Ready> = None;
         let chatgpt = kumochi_protocol::message::ConnectionKind::ChatGpt;
-        let (input, unproved) = if let Some(ready) = fixture {
-            (Input::Engines(chatgpt, Availability::Ready(ready)), false)
+        let input = if let Some(ready) = fixture {
+            Input::Engines(chatgpt, Availability::Ready(ready))
         } else {
-            let input = match (self.account.availability(), self.account.recovered()) {
+            match (self.account.availability(), self.account.recovered()) {
                 (Availability::Ready(ready), Some(boundary)) => {
                     Input::RecoveredChatGpt { ready, boundary }
                 }
                 (now, _) => Input::Engines(chatgpt, now),
-            };
-            (input, self.account.unproved())
+            }
         };
         self.hold_fence(&input);
         let effects = self
             .coordinator
             .handle(input)
             .expect("availability is never stale");
-        if unproved {
-            self.coordinator.refuse_unproved_chatgpt();
-        }
+        self.fence_chatgpt_reads();
         self.apply(effects, link)
+    }
+
+    /// Tells the coordinator whether the account's sign-in keeps `ChatGPT`'s history from a turn
+    /// that arrives now. The dev fixture answers without the account.
+    fn fence_chatgpt_reads(&mut self) {
+        #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
+        let fixture = self.fixture.is_some();
+        #[cfg(not(any(test, debug_assertions, all(windows, feature = "gate-draw-replay"))))]
+        let fixture = false;
+        if !fixture && self.account.reads_fenced() {
+            self.coordinator.fence_chatgpt_reads();
+        } else {
+            self.coordinator.lift_chatgpt_fence();
+        }
     }
 
     /// Holds the next store op `matches` accepts before it runs, until the returned sender

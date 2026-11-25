@@ -1536,11 +1536,12 @@ fn a_turn_after_a_refused_report_arrives_blocked() {
     }
 }
 
-/// A turn that arrives while `ChatGPT`'s sign-in isn't proved, whether its check is pending or
-/// refused, records the block, so its build reads no history for `ChatGPT`; the same report
-/// without the block doesn't, and a ready report lifts it for the next turn.
+/// A turn that arrives while the account fences `ChatGPT`'s history, whether its check is pending
+/// or refused, records the block, so its build reads no history for `ChatGPT`; the same report
+/// without the fence doesn't. Only the account lifts the fence, not a ready report, and lifting
+/// it leaves a refused report's own block.
 #[test]
-fn a_turn_while_chatgpt_is_unproved_arrives_blocked_until_ready() {
+fn a_turn_while_chatgpt_is_fenced_arrives_blocked_until_the_account_lifts_it() {
     let arrival = |core: &mut Coordinator| {
         core.handle(Input::Turn {
             turn: 1,
@@ -1564,13 +1565,31 @@ fn a_turn_while_chatgpt_is_unproved_arrives_blocked_until_ready() {
             core.handle(Input::Engines(chatgpt, now.clone()))
                 .expect("never stale");
             if unproved {
-                core.refuse_unproved_chatgpt();
+                core.fence_chatgpt_reads();
             }
             assert_eq!(arrival(&mut core).chatgpt_blocked(), unproved, "{now:?}");
         }
     }
     let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
-    core.refuse_unproved_chatgpt();
+    core.fence_chatgpt_reads();
     core.handle(ready(8, &["m"])).expect("never stale");
-    assert!(!arrival(&mut core).chatgpt_blocked());
+    assert!(
+        arrival(&mut core).chatgpt_blocked(),
+        "a ready report leaves it"
+    );
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+    core.fence_chatgpt_reads();
+    core.lift_chatgpt_fence();
+    assert!(
+        !arrival(&mut core).chatgpt_blocked(),
+        "the account lifts it"
+    );
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+    core.handle(recovered(8, Boundary::fixture(7, 3, 9)))
+        .expect("never stale");
+    core.lift_chatgpt_fence();
+    assert!(
+        arrival(&mut core).chatgpt_blocked(),
+        "a refused report's block is its own"
+    );
 }

@@ -849,6 +849,8 @@ pub struct Coordinator {
     refused_recovery: Vec<crate::context::ConnectionTag>,
     /// Whether `ChatGPT`'s current state is such a refusal, until it is ready again.
     chatgpt_blocked: bool,
+    /// Whether the account's sign-in keeps `ChatGPT`'s history from a turn, as it last said.
+    chatgpt_fenced: bool,
     /// The `ChatGPT` sign-in last ready, and the earlier ones another replaced: a sign-in's tag is
     /// never issued again, so a recovery report naming a retired one is late and changes nothing.
     last_chatgpt: Option<crate::context::ConnectionTag>,
@@ -930,6 +932,7 @@ impl Coordinator {
             recovered_chatgpt: Vec::new(),
             refused_recovery: Vec::new(),
             chatgpt_blocked: false,
+            chatgpt_fenced: false,
             last_chatgpt: None,
             chatgpt_retired: Vec::new(),
             anthropic_key: Availability::Unavailable(availability::model_unavailable()),

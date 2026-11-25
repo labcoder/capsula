@@ -511,9 +511,17 @@ impl Accounts {
         }
     }
 
-    /// A sign-in is held whose history isn't proved readable yet, or can't be.
-    pub(super) fn unproved(&self) -> bool {
-        self.state.connection().is_some() && !self.proved()
+    /// A sign-in is held whose history a turn mustn't read unscoped: one not proved yet or
+    /// unprovable, or a recovered one that can't publish its cutoff because it isn't ready.
+    pub(super) fn reads_fenced(&self) -> bool {
+        if self.state.connection().is_none() {
+            return false;
+        }
+        match self.proof() {
+            Some(Proof::Ordinary) => false,
+            Some(Proof::Recovered(_)) => !matches!(self.availability(), Availability::Ready(_)),
+            Some(Proof::Unproved) | None => true,
+        }
     }
 
     /// A catalog read ended; one for an account that has since changed is dropped.
@@ -875,6 +883,7 @@ impl Accounts {
     /// start counts it as uncertainty.
     pub(crate) async fn close(&mut self, deadline: Instant, refresh_by: Instant) {
         drop(self.listener.take());
+        self.proofs.close();
         self.github
             .stop(self.jobs.as_ref(), &self.reads_tx, &self.net.http);
         self.catalog.cancel();
@@ -995,6 +1004,8 @@ impl Brain {
             )
         ) {
             let frames = self.account.handle(event);
+            // A saved sign-in it reads back is held before its check answers.
+            self.fence_chatgpt_reads();
             return link.map_or(Ok(()), |link| {
                 frames
                     .iter()

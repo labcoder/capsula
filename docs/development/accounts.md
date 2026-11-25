@@ -1036,9 +1036,12 @@ stateDiagram-v2
     Unproved --> Unchecked: connection changes
 ```
 
-While a check is out, `ChatGPT` is Finding. Unproved asks for a sign-in. In both states a turn
-that arrives reads no history for `ChatGPT`, Claude's turns read as before, and no catalog read
-or round gets a bearer. Ordinary publishes plain Ready; Recovered publishes Ready with its cutoff.
+While a check is out, `ChatGPT` is Finding. Unproved asks for a sign-in. In both states, and
+while a recovered sign-in is held but not ready to publish its cutoff, a turn that arrives reads
+no history for `ChatGPT`; Claude's turns read as before. The account sets and lifts that fence
+after every change, the local saved-sign-in check included. No catalog read or round gets a
+bearer for an unproved sign-in, and an answer after shutdown begins starts no catalog read.
+Ordinary publishes plain Ready; Recovered publishes Ready with its cutoff.
 
 `connections::authority` (OSC-233) decides which credential bytes count. On Rez, with two
 processes writing, Credential Manager hid a fresh write for 120 ms and brought back a confirmed
