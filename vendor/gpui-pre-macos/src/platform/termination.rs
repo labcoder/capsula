@@ -174,12 +174,10 @@ impl State {
     }
 
     /// Whether to send the app's own `terminate:` now: only while Idle or Approved, where it
-    /// answers Now. A request in flight ends the app or settles a no that reschedules the quit.
+    /// answers Now; disposal leaves neither. A request in flight ends the app or settles a no that
+    /// reschedules the quit.
     fn take_quit(&mut self) -> bool {
-        if !self.quit_wanted || self.disposing {
-            return false;
-        }
-        if !matches!(self.phase, Phase::Idle | Phase::Approved) {
+        if !self.quit_wanted || !matches!(self.phase, Phase::Idle | Phase::Approved) {
             return false;
         }
         self.quit_wanted = false;
