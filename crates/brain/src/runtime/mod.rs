@@ -1529,6 +1529,9 @@ impl Brain {
                     }
                 }
                 Effect::CancelEngine { run } => {
+                    for grant in self.coordinator.code_picture_grants(run) {
+                        grant.close();
+                    }
                     self.retire_key_run(run);
                     if self.round.as_ref().is_some_and(|(round, _)| *round == run) {
                         self.round = None;
