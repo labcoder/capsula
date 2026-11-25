@@ -8,7 +8,7 @@ mod macos;
 pub(crate) use macos::logging::Admitted;
 
 pub(crate) use kumochi_shell::presence_platform::{PresenceError, require_connected_geometry};
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(test)))]
 pub(crate) use kumochi_shell::presence_platform::{
     client_origin, hide_presence_window, place_presence_window, work_area,
 };
@@ -26,6 +26,10 @@ pub(crate) use connected_desktop::{
     Affinity, EscapeHotkey, Foreground, HostWatch, OverlayWindows, PresenceNative, ProxyHandle,
     activate_presence_window, configure_presence_window, cursor_position, exclude_window, host_at,
     restore_foreground, restore_window_affinity, watch_host, window_affinity, window_handle,
+};
+#[cfg(all(test, not(windows)))]
+pub(crate) use connected_desktop::{
+    DetachedInputs, client_origin, hide_presence_window, place_presence_window, work_area,
 };
 pub(crate) use kumochi_shell_core::platform::{host, input, microphone};
 
@@ -61,7 +65,10 @@ pub(crate) mod cursor_fixture {
 
     /// Puts this test thread's pointer at `at`; none makes the read fail.
     pub(crate) fn set(at: Option<[i32; 2]>) {
+        #[cfg(windows)]
         AT.set(Some(at.ok_or(())));
+        #[cfg(not(windows))]
+        super::DetachedInputs::set_cursor(at);
     }
 
     /// What this test thread set, if it set anything.

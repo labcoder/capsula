@@ -15,6 +15,7 @@ use crate::link::{Batch, LinkEvent, LinkHandle, Session};
 use crate::platform::microphone::{Generation, Mode};
 use crate::strings::Text;
 
+#[cfg(windows)]
 #[gpui::test]
 fn actual_quit_revokes_legacy_capture_without_waiting_for_the_outbox(cx: &mut TestAppContext) {
     use crate::link::fixture;

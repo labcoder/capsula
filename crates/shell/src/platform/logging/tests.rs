@@ -107,6 +107,10 @@ impl Store for TestStore {
     }
 }
 impl Log for TestLog {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "injects an unwind on the log worker, not a write error"
+    )]
     fn append(&self, bytes: &[u8]) -> io::Result<()> {
         let paused = self.fixture.write_pause.lock().unwrap().take();
         if let Some(paused) = paused {
@@ -266,6 +270,10 @@ impl FailedField {
     }
 }
 impl fmt::Display for FailedField {
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "tests a producer unwind separately from a formatter error"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
         f.write_str("PRIVATE_FORMAT_PREFIX")?;

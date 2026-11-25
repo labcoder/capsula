@@ -3,15 +3,19 @@
 //! primary display. It never activates a view, conducts or sends `StepShown`; its motion is
 //! fixture-local translation, opacity, reveal and dash flow on cloned items, never font size.
 
+use std::sync::{Arc, atomic::AtomicBool};
+#[cfg(windows)]
 use std::{
     cell::RefCell,
     rc::Rc,
-    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
 use gpui_kit::component::{ActiveTheme as _, Theme as UiTheme, theme::ThemeMode};
+#[cfg(windows)]
 use gpui_kit::{AppContext as _, Context, IntoElement, Render, Styled as _, Window, canvas};
+#[cfg(windows)]
 use kumochi_protocol::message::MaxFrameRate;
 use kumochi_scene::{
     Admission, Frame, FrameItem, GlobalBudget, Record, SceneState, SceneView,
@@ -22,13 +26,17 @@ use kumochi_scene::{
     theme::Theme,
 };
 
+#[cfg(windows)]
 use super::{
     frame_rate::FrameLoop, line::on_next_frame, options, overlay, paint_cache::PaintScene,
 };
 
+#[cfg(windows)]
 const LIFETIME: Duration = Duration::from_secs(60);
 /// Fixture-local motion runs only between these seconds; outside them nothing asks for frames.
+#[cfg(windows)]
 const START: f32 = 10.0;
+#[cfg(windows)]
 const END: f32 = 40.0;
 
 type PaintUnit = (FrameItem, Arc<[Prim]>);
@@ -36,14 +44,32 @@ type PaintUnit = (FrameItem, Arc<[Prim]>);
 #[derive(Clone, Copy)]
 pub(super) enum Mode {
     Dry,
+    #[cfg(windows)]
     Rest,
+    #[cfg(windows)]
     Animated,
+    #[cfg(windows)]
     Capped,
+    #[cfg(windows)]
     Hide,
     /// Four copies of the animated picture, each item with its own paint cache, capped at 144.
+    #[cfg(windows)]
     FullRate,
     /// The at-caps picture, capped at 144.
+    #[cfg(windows)]
     CappedFullRate,
+}
+
+impl Mode {
+    fn capped(self) -> bool {
+        match self {
+            Self::Dry => false,
+            #[cfg(windows)]
+            Self::Capped | Self::CappedFullRate => true,
+            #[cfg(windows)]
+            Self::Rest | Self::Animated | Self::Hide | Self::FullRate => false,
+        }
+    }
 }
 
 /// A rounded bordered card with a label, a rounded rect the fixture turns, a translucent
@@ -68,16 +94,13 @@ pub(super) fn resting(
     let Ok(Record::Begin(begin)) = parse_record(header) else {
         panic!("a begin record");
     };
-    let step = match mode {
-        Mode::Capped | Mode::CappedFullRate => {
-            crate::presenter::tests::cap_measurements::drawing(0, 40)
-        }
-        Mode::Dry | Mode::Rest | Mode::Animated | Mode::Hide | Mode::FullRate => {
-            let Ok(Record::Step(step)) = parse_record(STEP.as_bytes()) else {
-                panic!("a step record");
-            };
-            step
-        }
+    let step = if mode.capped() {
+        crate::presenter::tests::cap_measurements::drawing(0, 40)
+    } else {
+        let Ok(Record::Step(step)) = parse_record(STEP.as_bytes()) else {
+            panic!("a step record");
+        };
+        step
     };
     let mut budget = GlobalBudget::default();
     let mut state = SceneState::begin(begin).expect("fixture state");
@@ -106,7 +129,7 @@ pub(super) fn resting(
                 .position(|each| std::ptr::eq(each, item))
                 .expect("a paint unit of a frame item");
             let mut item = item.clone();
-            if !matches!(mode, Mode::Capped | Mode::CappedFullRate)
+            if !mode.capped()
                 && let Some((_, pivot)) = TURNED.iter().find(|(turned, _)| *turned == index)
             {
                 item.transform = Affine::pose(1.0, 0.4, *pivot)
@@ -119,6 +142,7 @@ pub(super) fn resting(
     (painted, rest.paint_work())
 }
 
+#[cfg(windows)]
 struct Row {
     seconds: f32,
     nanos: u128,
@@ -126,6 +150,7 @@ struct Row {
     released: usize,
 }
 
+#[cfg(windows)]
 struct Picture {
     items: Vec<PaintUnit>,
     /// Each unit's fills, staged once before it paints, as a committed view's are.
@@ -137,12 +162,14 @@ struct Picture {
     failures: usize,
 }
 
+#[cfg(windows)]
 struct Probe {
     picture: Rc<RefCell<Picture>>,
     frames: FrameLoop,
     rate: MaxFrameRate,
 }
 
+#[cfg(windows)]
 impl Probe {
     fn frame(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let seconds = self.picture.borrow().epoch.elapsed().as_secs_f32();
@@ -170,6 +197,7 @@ impl Probe {
     }
 }
 
+#[cfg(windows)]
 impl Render for Probe {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let picture = Rc::clone(&self.picture);
@@ -224,6 +252,7 @@ impl Render for Probe {
     clippy::too_many_lines,
     reason = "one bounded native probe and its content-free samples"
 )]
+#[cfg(windows)]
 fn run(mode: Mode) {
     let animated = matches!(
         mode,
@@ -429,42 +458,49 @@ fn run(mode: Mode) {
     );
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "manual input-free five-second native item-painter dry run; numbers do not count"]
 fn smoke_primary_overlay() {
     run(Mode::Dry);
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "manual input-free seven-second capture: star, ring, empty repaint, then hide"]
 fn capture_fill_rules_then_hide() {
     run(Mode::Hide);
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "manual quiet-Rez fixed 60 s production item painter at all paint caps, no input"]
 fn measure_primary_overlay_at_paint_caps() {
     run(Mode::Capped);
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "manual quiet-Rez fixed 60 s resting overlay through production paint_item, no input"]
 fn measure_primary_overlay_at_rest() {
     run(Mode::Rest);
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "manual quiet-Rez fixed 60 s diagnostic-only animated painter fixture, no input"]
 fn measure_primary_overlay_animated() {
     run(Mode::Animated);
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "manual quiet-Rez fixed 60 s animated painter fixture, four copies at a 144 cap, no input"]
 fn measure_primary_overlay_animated_four_at_full_rate() {
     run(Mode::FullRate);
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "manual quiet-Rez fixed 60 s production item painter at all paint caps, capped at 144, no input"]
 fn measure_primary_overlay_at_paint_caps_at_full_rate() {

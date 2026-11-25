@@ -153,6 +153,8 @@ pub fn client_origin(_: &impl HasWindowHandle) -> Result<[i32; 2], PresenceError
 
 #[cfg(all(test, not(windows)))]
 mod tests {
+    use std::cell::Cell;
+
     use raw_window_handle::{HandleError, WindowHandle};
 
     use super::*;
@@ -172,17 +174,19 @@ mod tests {
         );
     }
 
-    struct UnreadHandle;
+    #[derive(Default)]
+    struct UnreadHandle(Cell<bool>);
 
     impl HasWindowHandle for UnreadHandle {
         fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-            panic!("unsupported geometry must not read a native window handle");
+            self.0.set(true);
+            Err(HandleError::Unavailable)
         }
     }
 
     #[test]
     fn connected_geometry_refuses_without_coordinates_or_handle_access() {
-        let mut unopened = UnreadHandle;
+        let mut unopened = UnreadHandle::default();
         assert!(matches!(
             require_connected_geometry(),
             Err(PresenceError::GeometryUnavailable)
@@ -203,5 +207,9 @@ mod tests {
             client_origin(&unopened),
             Err(PresenceError::GeometryUnavailable)
         ));
+        assert!(
+            !unopened.0.get(),
+            "unsupported geometry read the window handle"
+        );
     }
 }
