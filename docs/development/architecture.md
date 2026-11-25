@@ -192,6 +192,12 @@ absent, while a folder, a file, an item or any refusal is unverified, because no
 the allocator's own from anything else. The owner probe drops the item's bytes unread. Nothing
 writes either name yet, so both stay cheap to change until cut 9 does.
 
+`brain::profile` reads a present legacy data folder in place under its existing `session.lock`,
+taken with `try_acquire_existing` and held through every read. It matches only with a known history
+schema and a matching authority and host. That last check isn't wired in yet
+(`authority_and_host` reads unverified), so a present legacy folder reads unverified for now.
+Nothing calls it yet.
+
 On Windows `kumochi_storage::hold_product_folder(anchor)` looks up only this edition's product
 folder (`DATA_DIR`) and `profile_root(anchor)` only its root slot, both through one private lookup
 under a held, trusted anchor folder that creates nothing. Only "file not found" from that exact
