@@ -307,6 +307,7 @@ impl Brain {
         clippy::too_many_arguments,
         reason = "the recovered store, its writer lock and what the store's scan read"
     )]
+    #[expect(clippy::too_many_lines, reason = "one field per part of the brain")]
     pub(crate) fn new(
         store: Store,
         profile: std::sync::Arc<crate::platform::SessionLock>,
@@ -360,6 +361,7 @@ impl Brain {
         coordinator.configure_drawing(config.drawing_tuning());
         let recovery_clears = coordinator.restore_drawings(drawing_scenes);
         let store = StoreThread::spawn(store, profile, inputs_tx.clone(), schedule)?;
+        account.history.bind(&store.history_link());
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         let mut brain = Self {
             crashes: crate::relaunch::Crashes::default(),
@@ -547,6 +549,8 @@ impl Brain {
         })
         .await
         .unwrap_or(false);
+        // The vault's link holds the store thread's queue open, so it goes first.
+        self.account.history.release();
         if let Some(store) = self.store.take() {
             match tokio::time::timeout_at(deadline, store.close()).await {
                 Ok(Ok(())) => {}
@@ -595,6 +599,8 @@ impl Brain {
             let ending = self.coordinator.ending_runs();
             tracing::warn!(ending, "closing before the store confirmed every run");
         }
+        // The vault's link holds the store thread's queue open, so it goes first.
+        self.account.history.release();
         if let Some(store) = self.store.take() {
             match tokio::time::timeout(close_wait(), store.close()).await {
                 Ok(Ok(())) => {}

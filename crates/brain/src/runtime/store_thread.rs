@@ -533,11 +533,8 @@ impl StoreThread {
         sent
     }
 
-    /// A vault's binding to this thread's store, the profile's one history writer.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "reconnect admission has no production ingress")
-    )]
+    /// A vault's binding to this thread's store, the profile's one history writer. It keeps this
+    /// thread's queue open, so whoever holds it releases it before [`StoreThread::close`].
     pub(crate) fn history_link(&self) -> HistoryLink {
         let ops = self.ops.clone();
         HistoryLink::new(move |request| ops.send(StoreOp::Cutoff(CutoffSlot::new(request))).is_ok())
