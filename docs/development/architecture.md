@@ -194,10 +194,11 @@ writes either name yet, so both stay cheap to change until cut 9 does.
 
 On Windows `kumochi_storage::hold_product_folder(anchor)` looks up only this edition's product
 folder (`DATA_DIR`) and `profile_root(anchor)` only its root slot, both through one private lookup
-under a held, trusted anchor folder that creates nothing. Only "file not found" from that exact
-open, under an anchor no one untrusted may add to, counts as missing; a missing or non-folder
-anchor, a lost path, a file at the name or an untrusted folder is refused. Nothing calls either
-yet.
+under a held, trusted anchor folder that creates nothing. The name is opened relative to the held
+anchor handle (`NtCreateFile` with a root directory), not by path, so renaming the anchor after its
+check can't redirect the open to a replacement. Only "file not found" from that exact open, under
+an anchor no one untrusted may add to, counts as missing; a missing or non-folder anchor, a lost
+path, a file at the name or an untrusted folder is refused. Nothing calls either yet.
 
 On Windows the guard is a named mutex per user and edition in the global namespace, so every
 session of that user contends on one object and taking it writes nothing to disk
