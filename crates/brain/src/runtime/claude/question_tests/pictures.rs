@@ -1,7 +1,8 @@
 use std::sync::mpsc as std_mpsc;
 
 use super::*;
-use crate::context::{InputItem, Jpeg, Role};
+use crate::context::{Geometry, InputItem, Jpeg, Role, Screen};
+use crate::coordinator::{Effect, pictured_claude_run};
 use crate::engines::ClaudeStreamFailure;
 use crate::engines::claude_code::lane::tests::PICTURE_JPEG;
 use crate::screen::ScreenContext;
@@ -56,6 +57,220 @@ async fn receipt(played: &mut Played, decision: fn(LeaseId) -> Input) {
         .await
         .expect("settled in time");
     assert_eq!(actual, Some(decision(lease)));
+}
+
+async fn start_screen_picture(brain: &mut Brain) -> (LeaseId, Vec<Effect>) {
+    brain.claude.fixture_picture = Some(ModelSlug::new("haiku").expect("alias"));
+    let screen = Screen::Picture(
+        ScreenContext::fixture(PICTURE_JPEG).into_jpeg(),
+        None,
+        Geometry::FIXTURE,
+    );
+    let (coordinator, effects) = pictured_claude_run(brain.claude.availability(), screen);
+    *brain.coordinator = coordinator;
+    let Some(Effect::StartEngine { request }) = effects.last() else {
+        panic!("pictured request was not admitted");
+    };
+    let config = brain
+        .config
+        .stage(kumochi_protocol::message::SettingsOp::SetDefaultModel(
+            request.request.choice.clone().expect("run choice"),
+        ))
+        .expect("model choice");
+    brain.config.commit(config);
+    brain.apply(effects, None).expect("launch");
+    let note = timeout(WAIT, brain.claude.notes.1.recv())
+        .await
+        .expect("bind note in time")
+        .expect("bind note");
+    assert!(matches!(note, Note::Bind(_)));
+    brain.claude_done(Wake::Note(note), None).expect("bound");
+    let ask = timeout(WAIT, brain.inputs.recv())
+        .await
+        .expect("send ask in time")
+        .expect("send ask");
+    let grants = brain.handle(ask).expect("grant effects");
+    let Some(Effect::Grant(lease)) = grants.first() else {
+        panic!("no send grant");
+    };
+    (*lease, grants)
+}
+
+async fn picture_receipt(brain: &mut Brain, lease: LeaseId) -> Input {
+    timeout(WAIT, async {
+        loop {
+            let input = brain.inputs.recv().await.expect("input");
+            if matches!(
+                input,
+                Input::SendSettled { lease: received } | Input::SendUnsent { lease: received }
+                    if received == lease
+            ) {
+                brain.offline(input.clone());
+                return input;
+            }
+            brain.offline(input);
+        }
+    })
+    .await
+    .expect("picture receipt in time")
+}
+
+#[tokio::test]
+async fn show_screen_off_stops_the_claude_question_that_read_its_picture() {
+    use std::cell::RefCell;
+
+    use kumochi_protocol::frame::{HEADER_LEN, decode};
+    use kumochi_protocol::message::{
+        ControlToBrain, ControlToShell, DataToShell, ErrorKey, Phase, SettingsOp,
+    };
+    use tokio::sync::Notify;
+
+    use crate::runtime::{Link, data::DataQueue, window};
+    use crate::tap::Tap;
+
+    let mut script = synthetic_signed_in()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS)
+        .held_at_user("stay-open");
+    script
+        .user
+        .insert(0, Value::String("!expect-picture".into()));
+    let mut rig = Rig::new("picture-screen-off", &script).await;
+    let scratch = Scratch::new("picture-screen-off");
+    let mut brain = brain_on(&mut rig, &scratch);
+    let on = brain
+        .config
+        .stage(SettingsOp::SetShowScreen(true))
+        .expect("show screen on");
+    brain.config.commit(on);
+    let (lease, grants) = start_screen_picture(&mut brain).await;
+    let SendKey::Build(key) = lease.key else {
+        panic!("run send");
+    };
+    let launch = brain.claude.launches.last().expect("launch");
+    let folder = rig.base.owned().join(ENGINE_DIR).join(launch.id.hex());
+    let control = Arc::clone(&launch.control);
+    brain.apply(grants, None).expect("grant");
+    until("the child read and checked the actual picture", || {
+        rig.base.0.join("picture-shape.1").is_file()
+    })
+    .await;
+    assert!(folder.is_dir() && !control.is_revoked());
+    brain.offline(Input::ScreenHoldsOff);
+    assert_eq!(brain.coordinator.current_run(), Some(key.run));
+
+    let (out, mut controls) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    assert_eq!(
+        brain
+            .control_frame(
+                ControlToBrain::Settings(SettingsOp::SetShowScreen(false)),
+                0,
+                &mut link,
+                &mut None,
+            )
+            .expect("connected Show Screen Off"),
+        None
+    );
+    assert!(
+        brain.config.view().show_screen,
+        "the save isn't committed yet"
+    );
+    let screen_unavailable = std::iter::from_fn(|| controls.try_recv().ok()).any(|frame| {
+        matches!(
+            decode::<ControlToShell>(&frame[HEADER_LEN..]).expect("shell control frame"),
+            ControlToShell::RunState { run, phase: Phase::Failed, error: Some(error), .. }
+                if run == key.run && error.key() == ErrorKey::ScreenUnavailable
+        )
+    });
+    let mut queue = queue.into_inner();
+    queue.grant(u32::MAX);
+    let run_end = std::iter::from_fn(|| queue.pop(Instant::now())).any(|frame| {
+        decode::<DataToShell>(&frame[HEADER_LEN..]).expect("shell data frame")
+            == DataToShell::RunEnd { run: key.run }
+    });
+    if brain.coordinator.current_run().is_some() {
+        brain.close().await;
+        panic!("Show Screen Off left the pictured question running");
+    }
+    assert_eq!(
+        picture_receipt(&mut brain, lease).await,
+        Input::SendSettled { lease }
+    );
+    until("the pictured child was torn down", || !folder.exists()).await;
+    assert!(control.is_revoked());
+    brain.close().await;
+    assert_eq!(
+        (screen_unavailable, run_end),
+        (true, true),
+        "the shell must receive both the failed RunState and RunEnd at receipt"
+    );
+}
+
+#[tokio::test]
+async fn stop_closes_the_claude_picture_grant_before_async_teardown() {
+    use crate::engines::claude_code::supervisor::tests::barrier;
+    use crate::store::{Interruption, RunEnd};
+
+    let script = synthetic_signed_in()
+        .pre_tools(BOTH_TOOLS)
+        .post_tools(BOTH_TOOLS);
+    let mut rig = Rig::new("picture-stop-grant", &script).await;
+    let scratch = Scratch::new("picture-stop-grant");
+    let mut brain = brain_on(&mut rig, &scratch);
+    let (lease, grants) = start_screen_picture(&mut brain).await;
+    let SendKey::Build(key) = lease.key else {
+        panic!("run send");
+    };
+    let launch = brain.claude.launches.last().expect("launch");
+    let folder = rig.base.owned().join(ENGINE_DIR).join(launch.id.hex());
+    let control = Arc::clone(&launch.control);
+    let (pause, writing) = barrier();
+    control.picture_hooks.lock().expect("hooks").write = Some(pause);
+    let grant = brain
+        .coordinator
+        .picture_grant(lease)
+        .expect("picture grant");
+    brain.apply(grants, None).expect("grant");
+    let writing = tokio::task::spawn_blocking(move || {
+        assert!(writing.reached_within(WAIT), "picture chunk poised");
+        writing
+    })
+    .await
+    .expect("write barrier");
+    assert!(grant.is_open() && !control.is_revoked());
+
+    let effects = brain
+        .handle(Input::Stop {
+            run: key.run,
+            revealed: Vec::new(),
+        })
+        .expect("stop");
+    let interrupted = effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::Store(crate::coordinator::StoreOp::EndRun {
+                run,
+                end: RunEnd::Interrupted(Interruption::Stop),
+                ..
+            }) if *run == key.run
+        )
+    });
+    brain.apply(effects, None).expect("cancel");
+    let before_abort = !control.is_revoked();
+    let fenced = grant.reserve_write().is_none();
+    writing.release();
+    let receipt = picture_receipt(&mut brain, lease).await;
+    until("the stopped child was torn down", || !folder.exists()).await;
+    brain.close().await;
+    assert!(before_abort, "the async abort hadn't run");
+    assert!(fenced, "Stop must fence the queued write now");
+    assert!(interrupted);
+    assert_eq!(receipt, Input::SendUnsent { lease });
+    assert_eq!(rig.stdin(), ["1 initialize", "1 mcp_status"]);
 }
 
 #[tokio::test]
@@ -248,7 +463,7 @@ async fn closed_picture_grant_does_not_truncate_while_teardown_holds_the_receipt
     reason = "one ordered launch, teardown and rebuild"
 )]
 async fn a_bound_find_keeps_the_round_until_its_picture_settles_unsent() {
-    use crate::coordinator::{Effect, StoreOp, built_for, pictured_claude_run};
+    use crate::coordinator::{StoreOp, built_for};
     use crate::engines::claude_code::supervisor::tests::{Barrier, barrier};
 
     let script = synthetic_signed_in()
@@ -260,7 +475,7 @@ async fn a_bound_find_keeps_the_round_until_its_picture_settles_unsent() {
     brain.claude.fixture_picture = Some(ModelSlug::new("haiku").expect("alias"));
     let (coordinator, effects) = pictured_claude_run(
         brain.claude.availability(),
-        ScreenContext::fixture(PICTURE_JPEG).into_jpeg(),
+        Screen::Image(ScreenContext::fixture(PICTURE_JPEG).into_jpeg()),
     );
     *brain.coordinator = coordinator;
     let Some(Effect::StartEngine { request }) = effects.last() else {
@@ -386,7 +601,7 @@ async fn a_bound_find_keeps_the_round_until_its_picture_settles_unsent() {
     reason = "one ordered launch, refusal and rebuild"
 )]
 async fn a_generation_move_before_the_grant_refuses_the_picture_and_rebuilds_text_only() {
-    use crate::coordinator::{Effect, StoreOp, built_for, pictured_claude_run};
+    use crate::coordinator::{StoreOp, built_for};
 
     let script = synthetic_signed_in()
         .pre_tools(BOTH_TOOLS)
@@ -397,7 +612,7 @@ async fn a_generation_move_before_the_grant_refuses_the_picture_and_rebuilds_tex
     brain.claude.fixture_picture = Some(ModelSlug::new("haiku").expect("alias"));
     let (coordinator, effects) = pictured_claude_run(
         brain.claude.availability(),
-        ScreenContext::fixture(PICTURE_JPEG).into_jpeg(),
+        Screen::Image(ScreenContext::fixture(PICTURE_JPEG).into_jpeg()),
     );
     *brain.coordinator = coordinator;
     let Some(Effect::StartEngine { request }) = effects.last() else {
