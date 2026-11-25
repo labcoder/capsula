@@ -10,18 +10,18 @@ use std::time::Instant;
 
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
-    Content, ControlToBrain, GestureId, HoldFailure, HoldStatus, Incarnation, NoticeRevision,
-    Phase, RunId, RunOrigin, ThreadId,
+    AudioSession, Content, ControlToBrain, GestureId, HoldFailure, HoldStatus, Incarnation,
+    NoticeRevision, Phase, RunId, RunOrigin, ThreadId,
 };
 
 use super::{
-    Cancel, Discard, Hold, Offer, ReceiptStep, Refused, Release, RunStep, Source, Stamp, State,
-    StatusStep, VoiceOnly, discard,
+    Cancel, Collection, Discard, Hold, Offer, ReceiptStep, Recognition, Refused, Release, RunStep,
+    Source, Stamp, State, StatusStep, Unsent, VoiceOnly, discard,
 };
 use crate::link::Session;
 use crate::link::output::Denied;
 use crate::platform::microphone::{CollectionGate, Finalization, MicError};
-use crate::runs::Applied;
+use crate::runs::{Applied, Refused as RunRefused};
 use crate::strings::Text;
 
 const STAMP: Stamp = Stamp {
@@ -277,6 +277,35 @@ fn admission_refuses_in_order_and_fences_only_a_valid_or_unleased_hold() {
 }
 
 #[test]
+fn collection_retries_busy_and_publishes_listening_only_after_its_own_acceptance() {
+    let gesture = GestureId(1);
+    let (mut state, _gate) = holding(Source::Waiting);
+    let no_accept = || panic!("the source must not accept again or out of order");
+    assert_eq!(state.collecting(gesture, no_accept), Err(Denied::Stale));
+    state.record();
+    assert_eq!(
+        state.collecting(GestureId(2), no_accept),
+        Err(Denied::Stale)
+    );
+    let before = state.collecting(gesture, || Err(Denied::Busy));
+    assert_eq!(before, Err(Denied::Busy));
+    assert_eq!(Collection::after(before.map(|_| ())), Collection::Retry);
+    assert_eq!(
+        state.collecting(gesture, || Ok(())),
+        Ok(Some(Text::HoldListening))
+    );
+    assert_eq!(Collection::after(Err(Denied::Busy)), Collection::Retry);
+    assert_eq!(state.collecting(gesture, no_accept), Ok(None));
+    assert!(matches!(
+        state.release(gesture, false, 5, STAMP),
+        Release::Released { .. }
+    ));
+    assert_eq!(state.collecting(gesture, no_accept), Err(Denied::Stale));
+    assert_eq!(Collection::after(Err(Denied::Stale)), Collection::Cancel);
+    assert_eq!(Collection::after(Ok(())), Collection::Complete);
+}
+
+#[test]
 fn only_an_accepted_collection_releases_and_only_once() {
     let (mut state, _gate) = showing(offer(1));
     assert!(matches!(
@@ -284,8 +313,16 @@ fn only_an_accepted_collection_releases_and_only_once() {
         Release::Cancel
     ));
     let (mut state, _gate) = showing(offer(1));
-    state.accepted().expect("pending");
-    assert_eq!(state.copies(), Ok(()), "the keys are down");
+    assert_eq!(
+        state.collecting(GestureId(1), || Ok(())),
+        Ok(Some(Text::HoldListening))
+    );
+    let no_accept = || panic!("the same source already accepted");
+    assert_eq!(
+        state.collecting(GestureId(1), no_accept),
+        Ok(None),
+        "the keys are down"
+    );
     let moved = Stamp { choice: 3, ..STAMP };
     let Release::Released { screen } = state.release(GestureId(1), false, 5, moved) else {
         panic!("an accepted collection releases");
@@ -297,7 +334,7 @@ fn only_an_accepted_collection_releases_and_only_once() {
     );
     assert_eq!(state.pending.as_ref().and_then(Hold::released), Some(5));
     assert_eq!(
-        state.copies(),
+        state.collecting(GestureId(1), no_accept),
         Err(Denied::Stale),
         "a release while copies wait wins"
     );
@@ -384,7 +421,7 @@ fn a_disabled_or_busy_recognition_is_held_back_with_its_notice() {
     let unasked = || -> bool { panic!("didn't need this check") };
     let consent_seen = std::cell::Cell::new(false);
     let notice = State::held_back(
-        true,
+        AudioSession::QueuedRequired,
         || {
             consent_seen.set(true);
             false
@@ -398,14 +435,53 @@ fn a_disabled_or_busy_recognition_is_held_back_with_its_notice() {
     state.admission_refused(notice);
     assert_eq!(state.status, Some(Text::VoiceNotInstalled));
     assert_eq!(
-        State::held_back(true, || false, || None, unasked),
+        State::held_back(AudioSession::QueuedRequired, || false, || None, unasked),
         Some(Text::TurnBusy)
     );
     assert_eq!(
-        State::held_back(false, unasked, || None, || true),
+        State::held_back(AudioSession::Legacy, unasked, || None, || true),
         Some(Text::TurnBusy)
     );
-    assert_eq!(State::held_back(false, unasked, || None, || false), None);
+    assert_eq!(
+        State::held_back(AudioSession::Legacy, unasked, || None, || false),
+        None
+    );
+}
+
+#[test]
+fn an_admission_refusal_preserves_an_existing_hold_and_cleans_up_only_its_own_attempt() {
+    let (state, _gate) = holding(Source::Recording);
+    assert_eq!(
+        state.no_inhibit(|| panic!("a pending Hold keeps its notice")),
+        None
+    );
+    assert_eq!(state.replace_hold(), Some(Text::HoldCancelled));
+    let state = State::default();
+    assert_eq!(state.no_inhibit(|| None), Some(Text::TurnBusy));
+    assert_eq!(
+        state.no_inhibit(|| Some(Text::VoiceUnloaded)),
+        Some(Text::VoiceUnloaded)
+    );
+    assert_eq!(state.replace_hold(), None);
+    let own = Session::detached(STAMP.session, Incarnation(1));
+    for (reason, notice) in [
+        (RunRefused::Busy, Text::TurnBusy),
+        (RunRefused::Offline, Text::HoldFailed),
+    ] {
+        let refused = Recognition::new(&own, &Err(reason));
+        assert_eq!(refused.notice, notice);
+        assert!(matches!(refused.unsent, Unsent::StopOn(session) if std::ptr::eq(session, &own)));
+    }
+    let prepared = Recognition::new(
+        &own,
+        &Ok(ControlToBrain::VoiceHoldRecognized {
+            gesture: GestureId(1),
+            thread: STAMP.target.0,
+            selection: STAMP.target.1,
+        }),
+    );
+    assert_eq!(prepared.notice, Text::HoldFailed);
+    assert!(matches!(prepared.unsent, Unsent::DiscardRun));
 }
 
 #[test]
@@ -488,7 +564,10 @@ fn only_the_exact_packet_count_joins_and_sends_once_retired() {
     let session = Session::detached(STAMP.session, Incarnation(1));
     state.begin(token, STAMP, session, false, None, true);
     state.record();
-    state.accepted().expect("pending");
+    assert_eq!(
+        state.collecting(GestureId(1), || Ok(())),
+        Ok(Some(Text::HoldListening))
+    );
     assert!(matches!(
         state.release(GestureId(1), false, 9, STAMP),
         Release::Released { .. }

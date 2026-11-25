@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{ControlToBrain, DataToBrain};
 use kumochi_shell_core::link::output::Denied;
+use kumochi_shell_core::voice::Collection;
 use zeroize::Zeroize as _;
 
 use super::inhibit::RECHECK;
@@ -85,9 +86,7 @@ impl Presence {
         .detach();
         cx.spawn(async move |this, cx| {
             let _warning = warning;
-            let mut refused = false;
-            if let Ok(running) = mic.running.recv().await {
-                let mut accepted = false;
+            let refused = if let Ok(running) = mic.running.recv().await {
                 // The same receipt and worker through every recheck: collected, or drained.
                 loop {
                     let collected = this.update(cx, |this, cx| {
@@ -96,29 +95,27 @@ impl Presence {
                         }
                         let (gates, owner) = (this.voice.gates.clone(), this.link.clone());
                         let (output, gesture) = (owner.output(), token.gesture());
-                        if accepted {
-                            // A release or an end while the copies waited wins: none open.
-                            this.voice.state.copies()?;
-                        } else {
-                            gates.claimed(gesture, |claim| output.accept(claim, &mic, running))?;
-                            accepted = true;
-                            this.voice.state.accepted()?;
+                        if let Some(notice) = this.voice.state.collecting(gesture, || {
+                            gates.claimed(gesture, |claim| output.accept(claim, &mic, running))
+                        })? {
                             #[cfg(test)]
                             if let Some(publish) = this.voice.publish.as_mut() {
                                 publish();
                             }
-                            this.voice_notice(Text::HoldListening, cx);
+                            this.voice_notice(notice, cx);
                         }
                         // Copies open only once Listening is up, under the same claim.
                         gates.claimed(gesture, |claim| output.collect(claim, &mic, running))
                     });
-                    if !matches!(collected, Ok(Err(Denied::Busy))) {
-                        refused = !matches!(collected, Ok(Ok(())));
-                        break;
+                    match Collection::after(collected.unwrap_or(Err(Denied::Stale))) {
+                        Collection::Complete => break false,
+                        Collection::Cancel => break true,
+                        Collection::Retry => cx.background_executor().timer(RECHECK).await,
                     }
-                    cx.background_executor().timer(RECHECK).await;
                 }
-            }
+            } else {
+                false
+            };
             if refused {
                 tracing::debug!(stage = ?FailureStage::CaptureStart, reason = ?FailureReason::RunningRejected, "held speech input refused");
                 mic.stop(StopReason::Cancel);

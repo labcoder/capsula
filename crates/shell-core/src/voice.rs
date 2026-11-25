@@ -10,14 +10,14 @@ use std::time::Instant;
 
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
-    Content, ControlToBrain, GestureId, HoldFailure, HoldStatus, MAX_TRANSCRIPT_BYTES,
-    NoticeRevision, Phase, RunId, RunOrigin, ThreadId,
+    AudioSession, Content, ControlToBrain, GestureId, HoldFailure, HoldStatus,
+    MAX_TRANSCRIPT_BYTES, NoticeRevision, Phase, RunId, RunOrigin, ThreadId,
 };
 
 use crate::link::output::Denied;
 use crate::link::{InputCancel, Session};
 use crate::platform::microphone::{Finalization, Generation, MicError, Mode};
-use crate::runs::{Applied, RunTail};
+use crate::runs::{Applied, Refused as RunRefused, RunTail};
 use crate::strings::Text;
 
 /// The target, connection and choice a hold's key-down was seen under.
@@ -248,6 +248,49 @@ pub struct Admission {
     /// A valid recognition still stops the earlier spoken run if Windows refused its Esc
     /// hotkey; any other refusal leaves it alone.
     pub fence: bool,
+}
+
+pub struct Recognition<'a> {
+    pub screen: bool,
+    pub notice: Text,
+    pub unsent: Unsent<'a>,
+}
+
+pub enum Unsent<'a> {
+    DiscardRun,
+    StopOn(&'a Session),
+}
+
+impl<'a> Recognition<'a> {
+    pub fn new(session: &'a Session, request: &Result<ControlToBrain, RunRefused>) -> Self {
+        let (notice, unsent) = match request {
+            Ok(_) => (Text::HoldFailed, Unsent::DiscardRun),
+            Err(RunRefused::Busy) => (Text::TurnBusy, Unsent::StopOn(session)),
+            Err(_) => (Text::HoldFailed, Unsent::StopOn(session)),
+        };
+        Self {
+            screen: matches!(request, Ok(ControlToBrain::ScreenHoldRecognized { .. })),
+            notice,
+            unsent,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Collection {
+    Complete,
+    Retry,
+    Cancel,
+}
+
+impl Collection {
+    pub fn after(result: Result<(), Denied>) -> Self {
+        match result {
+            Ok(()) => Self::Complete,
+            Err(Denied::Busy) => Self::Retry,
+            Err(_) => Self::Cancel,
+        }
+    }
 }
 
 /// What a brain status does to the hold it names.
@@ -649,9 +692,8 @@ impl State {
     }
 
     /// Whether `gesture`'s screen release may still go, read fresh at its release, after the
-    /// display shows and after the screen watch is told, never kept: its live hold under the
-    /// target, choice and connection it was recognized under, then `input` (a continuous,
-    /// trusted release on its own input fence), then `lease` (its capture lease still live).
+    /// display shows and after the screen watch is told: continuous, trusted input on its own
+    /// fence first, then the live hold and its original stamp, then the capture lease.
     pub fn permits<'a>(
         &self,
         gesture: GestureId,
@@ -671,17 +713,27 @@ impl State {
 
     /// Samples queued consent before settings, then a stop still owed only if neither refused.
     pub fn held_back(
-        queued: bool,
+        audio: AudioSession,
         consent: impl FnOnce() -> bool,
         off: impl FnOnce() -> Option<Text>,
         stop_owed: impl FnOnce() -> bool,
     ) -> Option<Text> {
-        let consent_pending = queued && !consent();
+        let consent_pending = audio == AudioSession::QueuedRequired && !consent();
         off().or_else(|| (consent_pending || stop_owed()).then_some(Text::TurnBusy))
     }
 
     pub fn admission_refused(&mut self, notice: Text) {
         self.status = Some(notice);
+    }
+
+    pub fn no_inhibit(&self, off: impl FnOnce() -> Option<Text>) -> Option<Text> {
+        self.pending
+            .is_none()
+            .then(|| off().unwrap_or(Text::TurnBusy))
+    }
+
+    pub fn replace_hold(&self) -> Option<Text> {
+        self.pending.as_ref().map(|_| Text::HoldCancelled)
     }
 
     /// The warning a listening hold gets near `token`'s deadline: still before it, its notice
@@ -783,20 +835,29 @@ impl State {
         }
     }
 
-    /// The owner accepted the pending hold's collection: only now can its release send words.
-    pub fn accepted(&mut self) -> Result<(), Denied> {
-        self.pending.as_mut().ok_or(Denied::Stale)?.collected = true;
-        Ok(())
-    }
-
-    /// Whether an accepted hold's copies may still open: a release or an end while they waited
-    /// wins, and none open.
-    pub fn copies(&self) -> Result<(), Denied> {
-        self.pending
-            .as_ref()
-            .filter(|hold| hold.released.is_none() && hold.terminal.is_none())
-            .map(|_| ())
-            .ok_or(Denied::Stale)
+    /// Accepts this source once. Publish the returned notice before opening its copies.
+    pub fn collecting(
+        &mut self,
+        gesture: GestureId,
+        accept: impl FnOnce() -> Result<(), Denied>,
+    ) -> Result<Option<Text>, Denied> {
+        let hold = self
+            .pending
+            .as_mut()
+            .filter(|hold| {
+                hold.token.gesture() == gesture && matches!(hold.source, Source::Recording)
+            })
+            .ok_or(Denied::Stale)?;
+        if hold.collected {
+            return if hold.released.is_some() || hold.terminal.is_some() {
+                Err(Denied::Stale)
+            } else {
+                Ok(None)
+            };
+        }
+        accept()?;
+        hold.collected = true;
+        Ok(Some(Text::HoldListening))
     }
 
     /// The keys of `gesture` came up at `qpc`, or its gesture was cancelled.

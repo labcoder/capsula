@@ -827,21 +827,23 @@ impl Presence {
             .recognize(self.link.output(), gesture, &token)
         else {
             tracing::debug!(stage = ?FailureStage::Admission, reason = ?FailureReason::NoInhibit, "held speech input refused");
-            if token.discard_unstarted().is_err() {
+            if matches!(voice::discard(&token, None), Discard::Cancel) {
                 self.link.microphone_gate().cancel(gesture);
             }
             self.link.clear_input(gesture);
-            if self.voice.state.pending.is_none() {
-                let notice = self.settings.read(cx).hold_to_talk_notice();
-                self.voice_notice(notice.unwrap_or(Text::TurnBusy), cx);
+            if let Some(notice) = self
+                .voice
+                .state
+                .no_inhibit(|| self.settings.read(cx).hold_to_talk_notice())
+            {
+                self.voice_notice(notice, cx);
             }
             return;
         };
-        let queued =
-            self.link.audio_session() == kumochi_protocol::message::AudioSession::QueuedRequired;
+        let audio = self.link.audio_session();
         let settings = self.settings.read(cx);
         if let Some(notice) = State::held_back(
-            queued,
+            audio,
             || {
                 self.link.admits_voice(stamp.session)
                     && settings.view().is_some()
@@ -858,8 +860,8 @@ impl Presence {
             self.refresh_conversation(cx);
             return;
         }
-        if self.voice.state.pending.is_some() {
-            self.end_voice(Text::HoldCancelled, cx);
+        if let Some(notice) = self.voice.state.replace_hold() {
+            self.end_voice(notice, cx);
         }
         let Some(session) = self.session.clone() else {
             tracing::debug!(stage = ?FailureStage::Admission, reason = ?FailureReason::NoSession, "held speech input refused");
@@ -930,14 +932,8 @@ impl Presence {
             );
             (offer, request)
         };
-        let screen = matches!(request, Ok(ControlToBrain::ScreenHoldRecognized { .. }));
-        let notice = if matches!(request, Err(crate::runs::Refused::Busy)) {
-            Text::TurnBusy
-        } else {
-            Text::HoldFailed
-        };
+        let recognition = voice::Recognition::new(&session, &request);
         self.link.watch_revoke(gesture, stamp.session);
-        let prepared = request.is_ok();
         let sent = match request {
             Err(reason) => {
                 tracing::warn!(stage = ?FailureStage::Admission, ?reason, "held speech input failed");
@@ -956,6 +952,7 @@ impl Presence {
             }
         };
         if sent {
+            let screen = recognition.screen;
             // The keys of a new hold are down: marks of the answer before it go now.
             self.marks_changed(cx);
             // The line starts only once the brain was told this hold shows the screen, and
@@ -963,7 +960,8 @@ impl Presence {
             if screen && let Some(origin) = pointer {
                 self.start_line(gesture, origin, cx);
             }
-            let unretired = queued && self.link.output().queued_speaking(session.generation());
+            let unretired = audio == kumochi_protocol::message::AudioSession::QueuedRequired
+                && self.link.output().queued_speaking(session.generation());
             self.voice
                 .state
                 .begin(token, stamp, session, screen, offer, unretired);
@@ -972,12 +970,16 @@ impl Presence {
             self.refusal = None;
             self.voice_notice(Text::HoldPreparing, cx);
         } else {
-            if prepared {
-                self.runs.discard_unpublished_hold(gesture);
-            }
-            self.unused_voice(&token, (!prepared).then_some(&session));
+            let session = match recognition.unsent {
+                voice::Unsent::DiscardRun => {
+                    self.runs.discard_unpublished_hold(gesture);
+                    None
+                }
+                voice::Unsent::StopOn(session) => Some(session),
+            };
+            self.unused_voice(&token, session);
             self.link.clear_input(gesture);
-            self.voice_notice(notice, cx);
+            self.voice_notice(recognition.notice, cx);
         }
     }
 
