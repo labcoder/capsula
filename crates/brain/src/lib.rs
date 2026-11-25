@@ -90,8 +90,7 @@ pub const SPEECH_WORKER: &str = "--speech";
 /// The argument that starts `kumochid` as Claude Code's MCP bridge, before the launch value.
 pub const MCP_BRIDGE: &str = "--mcp-bridge";
 
-/// The sole argument for a brain launched under the shell's lifetime.
-pub const PARENT_BOUND: &str = "--parent-bound";
+pub use kumochi_protocol::constants::PARENT_BOUND;
 
 /// Why the brain stopped with an error.
 #[derive(Debug, thiserror::Error)]
@@ -335,18 +334,18 @@ fn accounts(
     if !platform::native_trust_supported() {
         return Err(platform::TrustRootsError::Unsupported.into());
     }
-    let worker = Worker::system(Arc::new(SystemClock), profile);
+    let (history, binding) = connections::vault::HistoryLink::pending();
+    let worker = Worker::system(Arc::new(SystemClock), profile, history);
     let net = runtime::account::Net {
         http: Arc::new(|| http_client::build().map(SharedHttp::new)),
         launcher: Arc::new(SystemBrowser),
         clock: Arc::new(SystemClock),
     };
     let held = worker.held();
-    Ok((
-        runtime::account::Accounts::spawn(worker, net, oauth, tokens)
-            .map_err(BrainError::Accounts)?,
-        held,
-    ))
+    let mut accounts = runtime::account::Accounts::spawn(worker, net, oauth, tokens)
+        .map_err(BrainError::Accounts)?;
+    accounts.history = binding;
+    Ok((accounts, held))
 }
 
 #[cfg(all(

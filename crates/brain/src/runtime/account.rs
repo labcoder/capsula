@@ -42,7 +42,7 @@ use crate::platform::credential::{CredentialStore, CredentialStoreError};
 
 use super::connections::{ConnectionEvent, Connections};
 use super::{Brain, Full, Link, settings};
-use crate::coordinator::{Input as CoreInput, RefusedKey};
+use crate::coordinator::Input as CoreInput;
 
 pub(super) mod github;
 #[cfg(test)]
@@ -209,6 +209,8 @@ pub(crate) struct Accounts {
     pub(super) jobs: Option<std_mpsc::Sender<Work>>,
     /// Fires once the credential thread has dropped the vault and its session lock.
     released: Option<oneshot::Receiver<()>>,
+    /// Binds the vault's history link to the store thread, and releases it before that closes.
+    pub(crate) history: crate::connections::vault::HistoryBinding,
     events_tx: mpsc::UnboundedSender<Input>,
     events: mpsc::UnboundedReceiver<Input>,
     /// The live attempt; dropping it fences the opener and aborts the listener.
@@ -285,6 +287,7 @@ impl Accounts {
             state,
             jobs: Some(jobs),
             released: Some(released),
+            history: crate::connections::vault::HistoryBinding::default(),
             events_tx,
             events,
             listener: None,
@@ -931,7 +934,7 @@ impl Brain {
             .account
             .connections
             .take_refused()
-            .and_then(|tag| self.handle(CoreInput::KeyRefused(RefusedKey(tag))))
+            .and_then(|refused| self.handle(CoreInput::KeyRefused(refused)))
         {
             self.apply(effects, link.as_deref_mut()).map_err(|_| Full)?;
         }

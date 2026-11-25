@@ -82,9 +82,13 @@ The ordinary open migrates through version 11. A separate, explicit ChatGPT repa
 can establish a version 12 cutoff only with a still-locked replacement binding. The upgrade and
 immutable tag row commit together, taking the last issued thread and run IDs from SQLite's
 sequences, including deleted IDs. A ceiling below a surviving ID or a missing sequence for
-existing rows refuses establishment. History keeps one writer: the vault is bound once, when it
-is built, to the owner of the store ordinary startup opens, and Establish, its Check and every
-later confirmation are requests that owner serves on that store in order. No call takes a store,
+existing rows refuses establishment. History keeps one writer: the vault's link is bound once,
+when the store thread starts, to the owner of the store ordinary startup opens, and Establish,
+its Check and every later confirmation are requests that owner serves on that store in order.
+Startup builds the vault before that thread runs, so until then the link refuses every request.
+Shutdown releases the link before the store closes, since the store thread ends only once nothing
+can queue for it. What the link already queued is still served, and a released link never binds
+again. No call takes a store,
 path or earlier result. Because the cutoff commits on the writer's own connection, a purge copy
 taken before it is stale and isn't swapped in. The purge's `VACUUM INTO` copy keeps every table,
 so the cutoff row (a tag and two IDs, no conversation content) carries over, and after a swap the
@@ -93,8 +97,7 @@ or a connection still inside a transaction. Ordinary open never creates a cutoff
 unlock a replacement. The binding is spent once a commit is attempted, or when the writer's
 answer is lost, so a lost row is never reseeded. Establish returns a receipt of the exact row it
 wrote. The credential authority marks the context established only when a fresh Check reads
-exactly that row, and each confirmation reads the row again. The production vault isn't bound
-to the store thread yet, so every request is refused there. The history and authority files
+exactly that row, and each confirmation reads the row again. The history and authority files
 share no installation binding, so nothing here compares one; that belongs to the local profile
 work. A byte-identical copy of the right file put in its place by a process running as the same
 user is outside this design's trust model and isn't detected.
@@ -107,6 +110,13 @@ recovered connection and sends only bodies read to it ([runs](runs.md#availabili
 requests take no page-read stamp, but the vault learns the cutoff only after it commits, so a read
 sent once the coordinator knows it always finds the row. Nothing reports a recovered connection
 at startup yet, so the replacement stays unavailable.
+
+The recovery version sits one past the ordinary ones, and a compile-time assert keeps it there.
+The next ordinary migration can't simply take version 12, because a recovered file is already
+at 12 and would read as current while missing it. That migration instead makes the cutoff table
+ordinary: every file is migrated to it with the table empty, a recovered file is recognized by
+its table at version 12 and moved on from there, and a recovered connection is told by its row
+rather than by the version. New ordinary migrations then follow as usual.
 
 **Scenes** are events, so they need no migration. A run's first step writes `scene_begin`, whose
 event id is the `SceneId`; `AUTOINCREMENT` keeps it unique even after a deletion, and a
@@ -251,8 +261,9 @@ the app, an explicit rejection before any answer or effect, and an answer that b
 History projects the typed values only onto that run's user event, keeping its held-screen
 metadata and any partial assistant reply. Older, unknown, and unproven outcomes, including
 crashes, stay generic; neither the generic mark nor the screen metadata proves delivery
-or a safe retry. The reason stores no provider text or payload. No schema migration or
-live provider change is needed. New page kinds follow the old wire tags; the
+or a safe retry. The reason stores no provider text or payload. The run end only supplies
+these facts when the [original attempt proves them](runs.md#availability). No schema migration
+is needed. New page kinds follow the old wire tags; the
 [paired build check](ipc.md#the-handshake) runs before any page can cross to another build.
 
 A read waits until the store thread has finished every op queued before it, failed and empty
@@ -534,10 +545,17 @@ created there, and a second hard link isn't detected.
 ### A legacy history store
 
 `store::existing::legacy_history` reads `kumochi.db` through that opener under the same held lock and
-returns `LegacyHistory`. Nothing calls it yet. Before it opens anything, the store's own folder
-must be a folder itself, not a link or reparse point, since the opener checks only the final
-file and could otherwise read a store through a redirected folder. A held, admitted product
-folder is still the caller's to establish.
+returns `LegacyHistory`. Nothing calls it yet. It reads inside `in_folder`: before anything is
+opened, the store's own folder must be a folder itself, not a link or reparse point, since the
+opener checks only the final file and could otherwise read a store through a redirected folder.
+Its identity (volume and file ID on Windows, device and inode on Unix) is taken then, and the
+same identity must read at the same path after every lookup, or the result is `Unverified`. So a
+lasting rename or replacement of the folder in between, which would make every name under the
+path read as not found and look like `Missing`, is refused. A swap restored before the second
+read isn't caught: the `SessionLock` holds only its own file, not the folder, so a stable path
+through the read is the caller's guarantee, which the existing-profile probes give by holding
+the product folder's chain. A held, admitted product folder is likewise the caller's to
+establish.
 
 - `KnownSchema(version)`: the file's `user_version` is one this build knows (1 to the newest,
   carried as `version`; below `CURRENT_HISTORY` it still needs a migration), and its schema
@@ -558,8 +576,9 @@ folder is still the caller's to establish.
   store missing beside something it left, and any failed read.
 
 Tests cover every known version, a store the brain itself opened, a `VACUUM INTO` copy like a
-purge's, each refused change, each leftover, a missing folder, and a linked folder whether empty
-or holding a known store, and check that no file changes.
+purge's, each refused change, each leftover, a missing folder, a linked folder whether empty
+or holding a known store, and a folder renamed or replaced between the two identity reads, and
+check that no file changes.
 
 ## Recovery at start
 

@@ -194,10 +194,15 @@ impl Voice {
 
 impl Presence {
     pub(super) fn voice_working(&self) -> bool {
+        self.voice_escape_owner().is_some()
+    }
+
+    pub(super) fn voice_escape_owner(&self) -> Option<GestureId> {
         self.voice
             .pending
             .as_ref()
-            .is_some_and(|hold| hold.terminal.is_none())
+            .filter(|hold| hold.terminal.is_none())
+            .map(|hold| hold.token.gesture())
     }
 
     /// Whether a hold's keys are down: recognized, and neither released nor ended.

@@ -80,7 +80,11 @@ async fn native_account_startup_refuses_unsupported_without_publishing_retry() {
     let _logs = captured.install();
     let net = test_support::net();
     let (_scratch, profile) = profile();
-    let worker = Worker::system(Arc::clone(&net.clock), profile);
+    let worker = Worker::system(
+        Arc::clone(&net.clock),
+        profile,
+        crate::connections::vault::HistoryLink::unbound(),
+    );
     let held = worker.held();
 
     let refusal = Accounts::spawn(worker, net, OAuthTuning::default(), TokenTuning::default())

@@ -185,14 +185,18 @@ fn accounts_connect_uses_keyboard_and_cancel_uses_the_current_presence_session(
 fn verification_activation_rechecks_session_origin_and_monotonic_code_expiry(
     cx: &mut TestAppContext,
 ) {
-    for stale in 0..3 {
+    for (selector, stale) in ["github-verification", "github-copy-code"]
+        .into_iter()
+        .flat_map(|selector| (0..3).map(move |stale| (selector, stale)))
+    {
         let (window, view, owner, _) = open(cx, AppConfiguration::Product);
         receive(&owner, awaiting(), cx);
         let mut frame = VisualTestContext::from_window(window, cx);
+        frame.write_to_clipboard(ClipboardItem::new_string("keep this".into()));
         frame.update(|window, cx| window.draw(cx).clear(cx));
         let bounds = frame
-            .debug_bounds("github-verification")
-            .expect("fresh verification link");
+            .debug_bounds(selector)
+            .expect("fresh challenge control");
         frame.simulate_mouse_down(
             bounds.center(),
             gpui_kit::MouseButton::Left,
@@ -227,10 +231,21 @@ fn verification_activation_rechecks_session_origin_and_monotonic_code_expiry(
         );
         frame.run_until_parked();
         assert_eq!(frame.opened_url(), None, "stale activation {stale}");
+        assert_eq!(
+            frame.read_from_clipboard().and_then(|item| item.text()),
+            Some("keep this".into()),
+            "{selector} must not copy stale challenge {stale}"
+        );
     }
     let (window, _, owner, _) = open(cx, AppConfiguration::Product);
     receive(&owner, awaiting(), cx);
     let mut frame = VisualTestContext::from_window(window, cx);
+    click(&mut frame, "github-copy-code");
+    assert_eq!(
+        frame.read_from_clipboard().and_then(|item| item.text()),
+        Some("ABCD-EFGH".into())
+    );
+    assert_eq!(frame.opened_url(), None);
     click(&mut frame, "github-verification");
     assert_eq!(frame.opened_url().as_deref(), Some(VERIFICATION_URI));
 }

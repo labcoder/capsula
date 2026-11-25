@@ -30,7 +30,7 @@ mod github;
 mod repair;
 pub(crate) mod staging;
 
-pub(crate) use repair::{CutoffRequest, HistoryLink, Work};
+pub(crate) use repair::{CutoffRequest, HistoryBinding, HistoryLink, Work};
 
 /// Removed generations one sweep pass visits [guess]; the rest wait for the next pass.
 const SWEEP: usize = 16;
@@ -158,25 +158,20 @@ impl<S: CredentialStore> Vault<S> {
     }
 
     /// Opens the production vault under the profile lock the brain already holds for its run,
-    /// rather than taking its own.
+    /// rather than taking its own, bound to the profile's one history writer by `history`.
     ///
     /// # Errors
     /// Returns an unsupported-store error or a path failure.
     pub(in crate::connections) fn open_held(
         store: S,
         session: Arc<SessionLock>,
+        history: HistoryLink,
     ) -> Result<Self, VaultError> {
         let path = native_session_lock_path().map_err(|error| match error {
             CredentialStoreError::NoDataDir => VaultError::NoDataDir,
             error => error.into(),
         })?;
-        Self::with_lock(
-            store,
-            CREDENTIAL_SERVICE,
-            session,
-            &path,
-            HistoryLink::unbound(),
-        )
+        Self::with_lock(store, CREDENTIAL_SERVICE, session, &path, history)
     }
 
     /// Takes the lock at `path`, then opens the authority beside it and sweeps once, legacy
@@ -728,7 +723,7 @@ pub(super) fn decode<T: DeserializeOwned>(
     serde_json::from_slice(bytes.expose()).map_err(|_| VaultError::Unreadable)
 }
 
-fn valid_host(host: &str) -> bool {
+pub(super) fn valid_host(host: &str) -> bool {
     host.len() == 45
         && host.starts_with("urn:uuid:")
         && host.bytes().enumerate().skip(9).all(|(index, byte)| {

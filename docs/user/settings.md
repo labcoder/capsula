@@ -1,8 +1,8 @@
 # Settings
 
 Click the dock, then **Settings…**. The **General** tab lets you change the assistant's name
-and your name. Press Enter or leave a field to save it. A field says **Saving…** until the
-background process answers; a failed save restores its saved value and explains the problem
+and your name. Press Enter, Tab, or click outside a name field to save it. The label shows
+**Unsaved**, **Saving…**, or **Saved**. A failed save restores its saved value and explains the problem
 beside the field. Change the field to clear that error and try again.
 
 Names use one line and 1–24 characters, with surrounding whitespace removed. Leave **Your

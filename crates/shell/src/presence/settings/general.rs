@@ -55,18 +55,18 @@ impl SettingsView {
                     .text_color(cx.theme().danger)
                     .child(strings.error(error))
             }))
-            .child(self.field(Field::Assistant, cx))
-            .child(self.field(Field::User, cx))
-            .child(self.default_model(cx))
-            .child(self.frame_rate(window, cx))
-            .child(self.dock_positions(cx))
-            .child(self.taskbar(cx))
             .child(
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(strings.get(Text::SettingsSaveHelp)),
             )
+            .child(self.field(Field::Assistant, cx))
+            .child(self.field(Field::User, cx))
+            .child(self.default_model(cx))
+            .child(self.frame_rate(window, cx))
+            .child(self.dock_positions(cx))
+            .child(self.taskbar(cx))
             .child(
                 div()
                     .flex()
@@ -198,12 +198,39 @@ impl SettingsView {
             Field::User => Text::UserName,
         });
         let (saving, error) = state.field_status(field, strings);
+        let status = saving.or_else(|| {
+            (state.view().is_some() && error.is_none()).then(|| {
+                strings.get(if state.editing(field) {
+                    Text::SettingsFieldUnsaved
+                } else {
+                    Text::SettingsFieldSaved
+                })
+            })
+        });
         let ix = usize::from(field == Field::User);
         div()
             .flex()
             .flex_col()
             .gap_1()
-            .child(div().text_sm().child(label.clone()))
+            .map(|field_row| {
+                #[cfg(test)]
+                let field_row = field_row.debug_selector(move || format!("settings-name-{ix}"));
+                field_row
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(div().text_sm().child(label.clone()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .children(status),
+                    ),
+            )
             .child(
                 Input::new(&self.inputs[ix])
                     .aria_label(label)
@@ -216,7 +243,6 @@ impl SettingsView {
                     .text_color(cx.theme().muted_foreground)
                     .child(strings.get(Text::UserNameHelp))
             }))
-            .children(saving.map(|saving| div().text_xs().child(saving)))
             .children(error.map(|error| div().text_sm().text_color(cx.theme().danger).child(error)))
     }
 
@@ -329,8 +355,40 @@ pub(super) mod tests {
     use kumochi_protocol::message::{AssistantName, MaxFrameRate, SettingsView, ThreadId};
 
     use super::super::SettingsTab;
-    use crate::settings::{Settings, Update};
+    use crate::settings::{Field, Settings, Update};
     use crate::strings::Strings;
+
+    #[gpui::test]
+    fn saving_a_name_does_not_move_the_next_field(cx: &mut TestAppContext) {
+        let (window, view) = open(cx);
+        let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+        visual.simulate_resize(size(px(768.), px(1000.)));
+        let field_bounds = |visual: &mut gpui_kit::VisualTestContext| {
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            visual
+                .debug_bounds("settings-name-1")
+                .expect("user name row")
+        };
+        let before = field_bounds(&mut visual);
+        visual.update(|_, cx| {
+            view.read(cx).model.clone().update(cx, |model, cx| {
+                model.change(Field::Assistant, "Example");
+                assert!(model.save(Field::Assistant, |_| true));
+                cx.notify();
+            });
+        });
+        assert_eq!(field_bounds(&mut visual), before);
+        visual.update(|_, cx| {
+            view.read(cx).model.clone().update(cx, |model, cx| {
+                let mut saved = model.view().expect("settings loaded").clone();
+                saved.assistant_name = AssistantName::new("Example").unwrap();
+                assert!(model.set_view(saved, Update::Answer).is_some());
+                cx.notify();
+            });
+        });
+        assert_eq!(field_bounds(&mut visual), before);
+    }
 
     #[gpui::test]
     fn the_copy_control_copies_the_running_build(cx: &mut TestAppContext) {

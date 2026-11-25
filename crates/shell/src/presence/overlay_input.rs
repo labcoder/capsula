@@ -60,6 +60,7 @@ impl Presence {
         effects: Vec<Effect>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
+        self.publish_plain_escape(cx);
         run_effects(effects, |effect| {
             if effect == Effect::Configure {
                 self.presenter.input.configure(&mut self.input_windows)?;

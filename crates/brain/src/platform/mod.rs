@@ -90,6 +90,17 @@ pub use process::{
     ChildPipes, Helper, Job, Launch, Spawned, Stdio, launch_detached, spawn, system_env,
 };
 pub(crate) use protected::{Untrusted, is_unsupported};
+
+/// A folder's identity, which a rename doesn't change: volume and file ID on Windows, device and
+/// inode on Unix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FolderId {
+    volume: u64,
+    file: u128,
+}
+
+#[cfg(not(windows))]
+pub(crate) use fs::folder_id;
 #[cfg(not(windows))]
 pub(crate) use protected::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
@@ -109,6 +120,8 @@ pub(crate) use trust_roots::{
 pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
 pub(crate) use windows::DumpExclusion;
+#[cfg(windows)]
+pub(crate) use windows::folder_id;
 #[cfg(windows)]
 pub(crate) use windows::{PipeClient, bridge_peer, open_bridge, shell_connection};
 
