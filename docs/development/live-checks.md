@@ -25,7 +25,7 @@ flowchart LR
   it and itself, renamed `kumochi.exe`, into a fresh folder, then usually runs that copy. Unlike the slice 2
   gate, the brain uses the developer's real `%LOCALAPPDATA%` and the dev credential service, since
   the point is a signed-in dev account that later checks and the dev shell use. First-text requires
-  separate disposable data folders. Debug names keep it
+  separate disposable data folders, passed through the override pair (see below). Debug names keep it
   away from an installed Kumochi, and a release or gate xtask refuses to run.
 - Both sides refuse anything but the dev identity: a release build uses the installed product's
   names, and the [gate identity](gate-identity.md) never signs in, since its runs delete what
@@ -278,17 +278,31 @@ The model cap must be 1–60. There are no
 Claude Code questions, automatic retries of typed turns, or replacement samples.
 
 Use a disposable Kumochi Dev setup whose local and roaming folders are the `local` and
-`roaming` children of the directory named by `KUMOCHI_LIVE_TEXT_PROFILE`. The harness refuses
-an existing history, pending issue work, a pinned main model, voice or screen settings,
-pending authority work, a Claude cleanup marker, and any active connection other than
-ChatGPT. The inner check compares current read-only metadata with the prepared plan
-before taking its claim or spawning a brain. It then requires the brain to report
+`roaming` children of the directory named by `KUMOCHI_LIVE_TEXT_PROFILE`, which must lie
+strictly below the real Local AppData and outside its `Kumochi Dev` folder. Pass them as the
+override pair, `KUMOCHI_GATE_LOCALAPPDATA` and `KUMOCHI_GATE_APPDATA`, for both the prepare
+step and the copied run; the Dev brain the copy starts inherits them. Setting `LOCALAPPDATA`
+and `APPDATA` instead doesn't isolate a debug build: it refuses to start. The harness refuses
+half a pair, an existing history, pending issue work, a pinned main model, voice or screen
+settings, pending authority work, a Claude cleanup marker in the profile's own
+`local\Kumochi Dev` (the Claude Code folder that brain uses), and any active connection other
+than ChatGPT. All three paths must be absolute, in plain drive form and without `..`; they're
+used as spelled, never resolved. Prepare holds both folders from the volume root down, which
+refuses a link anywhere on either path, and records their identities (volume serial number and
+file index) beside the plan, never printing them. The inner check holds the pair the same way
+until the run ends and compares its identities with the prepared ones before it reads anything
+in the profile, so another eligible profile can't stand in for the approved one. Only then does
+it check the cleanup marker, refuse a linked or hard-linked database or SQLite side file
+(`-wal`, `-shm`, `-journal`; a missing one is fine) before either database opens, and read the
+metadata through the held folders, and it compares the
+plan before taking its claim or spawning a brain. Those read-only opens can create ordinary
+`-wal` and `-shm` files beside a database inside the admitted disposable profile. It then requires the brain to report
 ChatGPT already signed in, with plan use enabled and no recovery required.
 
 An ordinary Dev start still opens the user-level Dev credential service and sweeps
 legacy and retired credential entries, including the old staged key name. Turning
-Claude Code off still lets the brain sweep old launch and session files in its
-ordinary Dev folder. ChatGPT may refresh a due bearer and fetch its catalog.
+Claude Code off still lets the brain sweep old launch and session files in the
+profile's Dev folder. ChatGPT may refresh a due bearer and fetch its catalog.
 
 Signing in through Kumochi with the disposable folders creates its own host and ChatGPT
 generations in the current Windows user's Dev credential service. The disposable authority
@@ -607,7 +621,7 @@ Runs Anthropic API key chat end to end on two keys the owner enters, A and B. Un
 cargo run --release --package xtask --features kumochi-protocol/gate-identity -- live anthropic-key
 ```
 
-Run it only with the owner present and their approval for that run, at a head where the key row and the key route are on. It builds debug gate images of the shell and the brain, because the transport's budget variables bind only in a debug build. All three launches share one folder set under `target/live/anthropic-key/<time>/key`, and the default model is set to `claude-haiku-5-5` at low effort.
+Run it only with the owner present and their approval for that run, at a head where the key row and the key route are on. It builds debug gate images of the shell and the brain, because the transport's budget variables bind only in a debug build. All three launches share one folder set, `key`, under the gate run's root `anthropic-key-<time>` (see [the gate identity](gate-identity.md)), and the default model is set to `claude-haiku-5-5` at low effort.
 
 | Launch | Allowance | Steps |
 | --- | --- | --- |

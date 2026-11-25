@@ -51,7 +51,7 @@ pub(crate) enum ConfigError {
     /// The platform did not supply a settings folder candidate.
     #[cfg_attr(
         not(target_os = "macos"),
-        error("%APPDATA% is not set to an absolute path")
+        error("the roaming application data folder is unavailable")
     )]
     #[cfg_attr(
         target_os = "macos",
@@ -140,7 +140,7 @@ impl Config {
     /// failure refuses every change until the user repairs or removes the file and restarts.
     pub(crate) fn load(dir: Option<PathBuf>, main_thread: ThreadId) -> Self {
         let Some(path) = dir.map(|dir| dir.join(CONFIG_FILE)) else {
-            tracing::warn!("%APPDATA% isn't an absolute path; settings won't be saved");
+            tracing::warn!("no settings folder; settings won't be saved");
             return Self::refusing(None, Refusal::NoHome, main_thread);
         };
         let table = match std::fs::read_to_string(&path) {
@@ -211,11 +211,10 @@ impl Config {
 
     pub(crate) fn implicit_talk_back(&self) -> bool {
         self.table.as_ref().is_ok_and(|table| {
-            table.get(VOICE).is_none_or(|voice| {
-                voice
-                    .as_table()
-                    .is_some_and(|voice| !voice.contains_key(TALK_BACK))
-            })
+            table
+                .get(VOICE)
+                .and_then(Value::as_table)
+                .is_none_or(|voice| !voice.contains_key(TALK_BACK))
         })
     }
 
@@ -459,7 +458,7 @@ impl Config {
     pub(crate) fn stage_activate(&self, part: VoicePart) -> Result<Pending, ConfigError> {
         let (path, mut table) = self.editable()?;
         let voice = voice_mut(&mut table);
-        if part == VoicePart::SpokenReplies && !voice.contains_key(TALK_BACK) {
+        if part == VoicePart::SpokenReplies && self.implicit_talk_back() {
             voice.insert(TALK_BACK.to_owned(), Value::Boolean(true));
         }
         listed_add(voice, INSTALLED, part);

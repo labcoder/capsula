@@ -145,6 +145,8 @@ pub(super) struct Holds {
     screen: Option<Arc<HoldClient>>,
     /// Whether this platform captures one window; a client alone doesn't say so.
     window_capture: bool,
+    /// Whether this platform captures a display for a screen hold; a client alone doesn't say so.
+    display_capture: bool,
     /// The gate's state last sent on this connection, unstamped, with the sign-in it spoke for.
     screen_sent: Option<(ScreenHolds, Option<crate::context::ConnectionTag>)>,
     /// The revision of the last offer sent on this connection.
@@ -233,6 +235,9 @@ impl Default for Holds {
             receive,
             screen: None,
             window_capture: crate::platform::WINDOW_CAPTURE,
+            // shortcut: a display is captured only where a window is; give it its own platform
+            // constant when the macOS display adapter activates.
+            display_capture: crate::platform::WINDOW_CAPTURE,
             screen_sent: None,
             notice: None,
             stamp_age: crate::platform::qpc_age,
@@ -247,9 +252,14 @@ impl Default for Holds {
 }
 
 impl Holds {
-    /// Whether this platform can capture and the screen worker started.
-    pub(super) fn can_capture(&self) -> bool {
+    /// Whether this platform can capture a window and the screen worker started.
+    pub(super) fn can_capture_window(&self) -> bool {
         self.window_capture && self.screen.is_some()
+    }
+
+    /// Whether this platform can capture a display and the screen worker started.
+    pub(super) fn can_capture_display(&self) -> bool {
+        self.display_capture && self.screen.is_some()
     }
 
     fn connected(&mut self, peer: ShellProcess) {
@@ -982,7 +992,11 @@ impl Brain {
 
     /// Whether a hold on `choice` may show the model the window under the pointer now, or why not.
     fn screen_gate(&self, choice: Option<&ModelChoice>) -> ScreenHolds {
-        self.picture_gate(choice, self.config.view().screen_holds)
+        self.picture_gate(
+            choice,
+            self.holds.can_capture_window(),
+            self.config.view().screen_holds,
+        )
     }
 
     /// The user turned screen holds off: a pending window hold goes on as voice with no line, and
@@ -1131,6 +1145,7 @@ impl Brain {
         // Only ever cleared, so nothing later in the session offers screen holds again.
         if unsupported {
             self.holds.window_capture = false;
+            self.holds.display_capture = false;
         }
         let mut lease = match event.outcome {
             _ if event.key.epoch != self.epoch => None,

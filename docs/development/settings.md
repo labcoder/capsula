@@ -1,12 +1,16 @@
 # Settings
 
 The brain owns the user's settings and keeps them in `config.toml`, in the `Kumochi` folder
-under `%APPDATA%` (`Kumochi Dev` for debug builds, so a dev build never touches an install).
+in the roaming application data root (`Kumochi Dev` for debug builds, so a dev build never
+touches an install).
 The shell shows them and asks for changes; it never reads the file.
 
-On Windows, `platform::config_dir` reads `APPDATA` and requires an absolute path, just as
-the local data folder requires an absolute `LOCALAPPDATA`. Missing, empty or relative roots
-never fall back to the working directory.
+On Windows, `platform::config_dir` asks the shared resolver for the roaming root. A release
+build reads `APPDATA` and requires an absolute path, just as the local data folder requires an
+absolute `LOCALAPPDATA`; missing, empty or relative roots never fall back to the working
+directory, and only mean settings can't be saved. Gate and debug builds take
+`KUMOCHI_GATE_APPDATA` with its local half, or the Known Folder, and admit `config.toml` before
+the brain reads it (see [architecture](architecture.md)).
 
 On macOS both config and data use `<Application Support>/<product>`, where the shared lookup
 asks Darwin for the current user's Application Support folder. It never falls back to `HOME`,
@@ -110,6 +114,15 @@ admission until the ordered answer. A changed answer for that save ends the pair
 reconnects without counting as a connection loss; Settings reads the next pair's saved value.
 Hiding or removing the exact active reply's thread ends its control side, but the pair still
 waits for the reply's data end and any speaking quiet receipt before allowing a change.
+When successful Spoken Replies setup supplies the default (On for an unset preference),
+a queued pair opened Off gets the tagged `SpokenRepliesDefaulted` snapshot instead of an
+ordinary Settings change. It still speaks no new replies until its next ordinary connection,
+while the setting shows what was saved. That snapshot doesn't answer any queued preference
+write. An explicit Off still saves normally and clears the difference without re-registering.
+The registered mode still governs hold release. An explicit On racing the default only
+reconnects if its own write succeeds; an On snapshot after a refusal reflects the default.
+If the pair drops with an Off save pending, its replacement waits for that save before
+advertising a playback mode. If the opening deadline expires first, the pair never registers.
 
 The control reader forwards the whole `VoiceView` to the settings model with its connection
 generation. Each part's status comes only from that snapshot, not its saved preference. The
@@ -466,8 +479,9 @@ no shell is connected, and Quit and close write what's left before they end.
   until the user sets it.
 - **Unreadable or not TOML:** the brain runs on the defaults and refuses every change, so the file
   is never overwritten. Repair or delete it, then restart Kumochi. `onboarded` reads `true`
-  here, and with no absolute `%APPDATA%`, so a file Kumochi can't save never asks for onboarding.
-- **No absolute `%APPDATA%`:** the defaults, and changes are refused.
+  here, and with no roaming root, so a file Kumochi can't save never asks for onboarding.
+- **No roaming root** (a release build's `APPDATA` missing or relative): the defaults, and changes
+  are refused.
 
 ## Tuning
 

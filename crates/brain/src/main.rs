@@ -136,6 +136,7 @@ fn run_detached() -> ExitCode {
     tracing::info!(
         build = kumochi_protocol::BUILD_ID,
         identity = constants::DATA_DIR,
+        edition = constants::EDITION,
         "brain started"
     );
     let runtime = match tokio::runtime::Builder::new_current_thread()

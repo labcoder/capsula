@@ -1,7 +1,8 @@
 # The store
 
 The brain keeps threads, their events and runs in one SQLite file,
-`%LOCALAPPDATA%\<product>\kumochi.db`, through `rusqlite` with SQLite and FTS5 built in. Only the
+`<product>\kumochi.db` in the local application data root (`LOCALAPPDATA` in a release build, the
+admitted override or the Known Folder in Gate and debug builds; see [architecture](architecture.md)), through `rusqlite` with SQLite and FTS5 built in. Only the
 brain opens it. The code is `crates/brain/src/store/`.
 
 On macOS the default path is `<Application Support>/<product>/kumochi.db`, beside the
@@ -523,15 +524,47 @@ file or read the wrong one:
 The path goes to SQLite as a `file:` URI with every byte but unreserved ones percent-encoded, so
 separators, drive colons and UNC prefixes reach the VFS unchanged.
 
-Nothing calls it yet. A caller must already exclude writers, because `immutable` takes no lock and
-the file check happens before the open, not atomically with it: a WAL removed in between is
-created again as an empty file. No other connection to that database may be open in the same
-process, since SQLite shares one index handle per process. SQLite run as root re-owns the WAL and index to the main
+Nothing calls it yet. It takes the caller's `SessionLock` and returns a connection borrowed from
+it, so the lock stays held through SQLite's last use. That excludes only writers that take the
+same lock, and `immutable` takes none of its own while the file check happens before the open,
+not atomically with it: a WAL removed in between is created again as an empty file. The brain
+writes the credential authority and the history store only under that lock, the profile's
+writer lock, which it takes before it opens the store. No other connection to that database may
+be open in the same process, since SQLite shares one index handle per process. SQLite run as root re-owns the WAL and index to the main
 file's owner; Kumochi doesn't run as root. Unit tests compare each file's name, bytes,
 permissions and owner before and after: a closed database, a copy left with a live WAL, every
 refused case, and on Unix the linked cases. On Windows the VFS also honours `readonly_shm`, but
 opens the index with `OPEN_ALWAYS`, so an index removed between the check and the open would be
 created there, and a second hard link isn't detected.
+
+### A legacy history store
+
+`store::existing::legacy_history` reads `kumochi.db` through that opener under the same held lock and
+returns `LegacyHistory`. Nothing calls it yet. Before it opens anything, the store's own folder
+must be a folder itself, not a link or reparse point, since the opener checks only the final
+file and could otherwise read a store through a redirected folder. A held, admitted product
+folder is still the caller's to establish.
+
+- `KnownSchema`: the file's `user_version` is one this build knows (1 to the newest), and its
+  schema objects (type, name, table and SQL, from `sqlite_schema`) are exactly those the
+  migrations make at that version, built in memory to compare. The candidate's catalog is counted
+  first, then read once without sorting, each row using up a distinct entry of the small
+  expected set, so neither Rust nor a SQLite sorter copies a large foreign catalog. This is schema
+  evidence only. It reads no rows, product invariants (such as the `approval_mark` singleton),
+  page integrity or binding, so it promises neither an intact store nor a successful open or
+  migration, and it isn't the new-format history fact. `quick_check` wouldn't change that: it
+  scans the whole file and still passes a store missing a required row.
+- `Missing`: the store's own folder exists as a folder and holds no
+  main file, no `-wal`, `-shm` or `-journal`, and none of the files a purge leaves (`.purge-old`,
+  the snapshot and the clean copy with their sidecars). The folder itself is still a footprint,
+  so this isn't an absent profile.
+- `Unverified`: everything else. That covers a newer or unversioned schema, any extra or missing
+  object, a schema ahead of its version, files the opener refuses, a missing or linked folder, a
+  store missing beside something it left, and any failed read.
+
+Tests cover every known version, a store the brain itself opened, a `VACUUM INTO` copy like a
+purge's, each refused change, each leftover, a missing folder, and a linked folder whether empty
+or holding a known store, and check that no file changes.
 
 ## Recovery at start
 

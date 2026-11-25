@@ -34,11 +34,10 @@ fn parse_draw(bytes: &[u8], extra: Option<Surface>) -> Result<Record, StepError>
     if let Record::Begin(begin) = &record
         && begin.display.is_some()
     {
-        return Err(StepError {
-            step: None,
-            path: FieldPath::default().field("display"),
-            code: ErrorCode::Unsupported,
-        });
+        return Err(StepError::at(
+            FieldPath::default().field("display"),
+            ErrorCode::Unsupported,
+        ));
     }
     if let Record::Step(step) = &record {
         crate::refuse_three_dimensional(step)?;
@@ -77,11 +76,10 @@ fn check_draw_surface(record: &Record, extra: Option<Surface>) -> Result<(), Ste
         Record::Begin(begin)
             if begin.surface != Surface::Overlay && extra != Some(begin.surface) =>
         {
-            return Err(StepError {
-                step: None,
-                path: FieldPath::default().field("surface"),
-                code: ErrorCode::Unsupported,
-            });
+            return Err(StepError::at(
+                FieldPath::default().field("surface"),
+                ErrorCode::Unsupported,
+            ));
         }
         Record::Step(step) if extra.is_none() => {
             let boxed = |op: &Op| match op {
@@ -140,11 +138,7 @@ fn decode<'de, T: serde::Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, StepEr
     let record = serde_path_to_error::deserialize(&mut decoder).map_err(|error| {
         let mut path = FieldPath::from_decode(error.path());
         let code = ErrorCode::from_decode(&error.inner().to_string(), &mut path);
-        StepError {
-            step: None,
-            path,
-            code,
-        }
+        StepError::at(path, code)
     })?;
     decoder
         .end()

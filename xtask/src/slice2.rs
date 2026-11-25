@@ -3,7 +3,7 @@
 //!
 //! The brain only serves the `kumochi.exe` beside it, so the gate copies the brain and itself, as
 //! `kumochi.exe`, into a fresh folder under `target/slice2-gate` and runs the client from that copy.
-//! Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%`, with Claude Code off, and the run
+//! Each item gets its own local and roaming folders, with Claude Code off, and the run
 //! deletes what its brains left: see `docs/development/gate-identity.md`.
 #![expect(
     clippy::print_stdout,
@@ -84,8 +84,11 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     hermetic::require_gate(ProductIdentity::ACTIVE)?;
     match args.next() {
         Some(inner) if inner == INNER => {
-            let folder = args.next().context("the inner gate needs its folder")?;
-            gate(Path::new(&folder), args.next().as_deref())
+            let root = args.next().context("the inner gate needs its run's root")?;
+            let id = args.next().context("the inner gate needs its run's id")?;
+            let me = std::env::current_exe()?;
+            let bin = me.parent().context("the gate runs from its folder")?;
+            gate(bin, Path::new(&root), &id, args.next().as_deref())
         }
         only => {
             ensure!(
@@ -108,7 +111,7 @@ fn prepare(only: Option<&str>) -> Result<()> {
         .context("the profile folder has a parent")?
         .join("slice2-gate")
         .join(stamp.to_string());
-    let run = Run::begin(folder.join(brain::DATA))?;
+    let run = Run::begin("slice2")?;
     let ran = (|| {
         let (debug, took) = hermetic::build(&["kumochi-brain"], Profile::Debug, None)?;
         println!("build_seconds={:.1}", took.as_secs_f64());
@@ -118,7 +121,10 @@ fn prepare(only: Option<&str>) -> Result<()> {
         fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
         println!("slice 2 gate in {}", folder.display());
         let mut gate = Command::new(bin.join(SHELL_EXE));
-        gate.args(["slice2-gate", INNER]).arg(&folder).args(only);
+        gate.args(["slice2-gate", INNER])
+            .arg(run.root())
+            .arg(run.id())
+            .args(only);
         let ran = live::run_bounded(gate, GATE_LIMIT, "the gate")?;
         ensure!(ran.success(), "the gate failed");
         Ok(())
@@ -142,7 +148,18 @@ fn end_leftovers(brains: Vec<Child>) -> Vec<String> {
         .collect()
 }
 
-fn gate(folder: &Path, only: Option<&str>) -> Result<()> {
+/// Runs the items with their folders under `root`, once the brain staged in `bin` is a current
+/// Gate image and `root` is the live run's own, marked with `id`; the report goes to the folder
+/// `bin` is in.
+fn gate(bin: &Path, root: &Path, id: &str, only: Option<&str>) -> Result<()> {
+    let folder = bin.parent().context("the gate runs from its folder")?;
+    hermetic::require_compatible(&bin.join(BRAIN_EXE), hermetic::BRAIN_ROLE)?;
+    let _held = hermetic::admit_root(
+        &hermetic::runs_path()?,
+        &hermetic::gate_file("run.lock")?,
+        root,
+        id,
+    )?;
     let items: [(&'static str, Item); 7] = [
         ("Esc against a non-reading shell", stop::not_reading),
         ("Esc against a saturated data writer", stop::saturated),
@@ -161,7 +178,7 @@ fn gate(folder: &Path, only: Option<&str>) -> Result<()> {
             continue;
         }
         println!("running: {name}");
-        let row = item(folder).unwrap_or_else(|error| Row {
+        let row = item(root).unwrap_or_else(|error| Row {
             item: name,
             verdict: Verdict::Fail,
             detail: format!("{error:#}"),
@@ -272,7 +289,9 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
-    use super::{INNER, end_leftovers, percentile, run};
+    use kumochi_protocol::constants::{BRAIN_EXE, ProductIdentity};
+
+    use super::{INNER, end_leftovers, gate, percentile, run};
 
     /// A harmless child that waits on its stdin, which stays open while the command or child lives.
     fn held() -> Command {
@@ -290,6 +309,7 @@ mod tests {
         let inner = [
             INNER,
             folder.to_str().expect("Unicode"),
+            "0123456789abcdef0123456789abcdef",
             "no item is named this",
         ];
         for args in [&inner[..], &[]] {
@@ -316,6 +336,47 @@ mod tests {
                 "refused before output"
             );
         }
+    }
+
+    #[test]
+    fn the_inner_gate_refuses_a_stale_brain_or_a_foreign_root_before_writing() {
+        let dir = crate::scratch::dir("slice2-inner");
+        let (bin, root) = (dir.join("bin"), dir.join("root"));
+        for folder in [&bin, &root] {
+            std::fs::create_dir(folder).expect("a scratch folder");
+        }
+        std::fs::write(root.join("gate-run"), "0123456789abcdef0123456789abcdef")
+            .expect("a marker");
+        let untouched = || {
+            let mut names: Vec<_> = std::fs::read_dir(&root)
+                .expect("the root lists")
+                .map(|entry| entry.expect("an entry").file_name())
+                .collect();
+            names.sort();
+            assert_eq!(names, ["gate-run"], "nothing was written in the root");
+            assert_eq!(std::fs::read_dir(&dir).expect("lists").count(), 2);
+        };
+        let run = |id| gate(&bin, &root, id, None).expect_err("refused");
+        std::fs::write(bin.join(BRAIN_EXE), "brain started|Kumochi Gate instance")
+            .expect("a brain from before the folder override");
+        assert_eq!(
+            format!("{:#}", run("0123456789abcdef0123456789abcdef")),
+            format!(
+                "{BRAIN_EXE} does not have the expected Gate identity, role and folder override; \
+                 rebuild it"
+            )
+        );
+        untouched();
+        std::fs::write(
+            bin.join(BRAIN_EXE),
+            crate::hermetic::image("brain started", ProductIdentity::GATE),
+        )
+        .expect("a current brain");
+        assert_eq!(
+            format!("{:#}", run("0123456789abcdef0123456789abcdef")),
+            format!("{} isn't a gate run's folder", root.display())
+        );
+        untouched();
     }
 
     #[test]

@@ -1060,3 +1060,229 @@ fn native_present_acl_query_failure() {
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");
 }
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_product_lookup_creates_nothing_and_the_setup_guard_excludes_other_opens() {
+    use crate::{AcquisitionError, GuardError, ProductFolder, admit_support};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut scratch = Scratch::new();
+    let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
+        .expect("an explicitly commissioned fixture parent");
+    let support =
+        std::path::PathBuf::from(parent).join(OsStr::from_bytes(scratch.residual.to_bytes()));
+    let root = scratch.root.try_clone().expect("retain fixture parent");
+
+    let anchor = admit_support(&support).expect("admit the fixture anchor");
+    let guard = anchor.try_setup_guard().expect("an uncontended guard");
+    assert_eq!(
+        anchor.try_setup_guard().err(),
+        Some(GuardError::Busy),
+        "another open of the same anchor"
+    );
+    let other = admit_support(&support).expect("an independent walk to the same anchor");
+    assert_eq!(
+        other.try_setup_guard().err(),
+        Some(GuardError::Busy),
+        "an independently admitted anchor"
+    );
+    drop(guard);
+    drop(
+        other
+            .try_setup_guard()
+            .expect("dropping the holder released it"),
+    );
+
+    let anchor = match anchor.product_folder("product") {
+        Ok(ProductFolder::Missing(anchor)) => anchor,
+        other => panic!("expected the product folder missing, not {other:?}"),
+    };
+    assert_eq!(
+        std::fs::symlink_metadata(support.join("product"))
+            .expect_err("looking created nothing")
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    drop(
+        anchor
+            .try_setup_guard()
+            .expect("the anchor is still held after a miss"),
+    );
+    assert_eq!(
+        admit_support(&support.join("absent")).err(),
+        Some(AcquisitionError::Open(io::ErrorKind::NotFound)),
+        "a missing anchor is refused, not a missing product folder"
+    );
+
+    let product = scratch.directory(c"product");
+    assert!(matches!(
+        admit_support(&support)
+            .expect("admit the fixture anchor")
+            .product_folder("product"),
+        Ok(ProductFolder::Held(_))
+    ));
+    std::fs::set_permissions(
+        support.join("product"),
+        std::fs::Permissions::from_mode(0o750),
+    )
+    .expect("loosen only the fixture product folder");
+    assert_eq!(
+        admit_support(&support)
+            .expect("admit the fixture anchor")
+            .product_folder("product")
+            .err(),
+        Some(AcquisitionError::Admission(Untrusted::Unsafe)),
+        "a product folder others may read"
+    );
+    std::fs::set_permissions(
+        support.join("product"),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .expect("restore the fixture product folder");
+
+    std::fs::write(support.join("plain"), b"").expect("a fixture file at a product name");
+    scratch.record(&root, c"plain").expect("record the file");
+    std::os::unix::fs::symlink("product", support.join("linked")).expect("a fixture link");
+    scratch.record(&root, c"linked").expect("record the link");
+    // Darwin's O_DIRECTORY reports ENOTDIR for a link before O_NOFOLLOW's ELOOP.
+    for name in ["plain", "linked"] {
+        assert_eq!(
+            admit_support(&support)
+                .expect("admit the fixture anchor")
+                .product_folder(name)
+                .err(),
+            Some(AcquisitionError::Admission(Untrusted::Unsafe)),
+            "{name}"
+        );
+    }
+
+    drop(product);
+    drop(root);
+    scratch.cleanup().expect("remove recorded fixture objects");
+}
+
+const GUARD_HOLDER: &str = "STORAGE_GUARD_HOLDER_ANCHOR";
+
+/// The holder process. Dropping it stops it, and outside a panic a holder that won't exit fails.
+struct Holder(std::process::Child);
+
+impl Holder {
+    /// Kills the holder, leaving its input open, and waits at most 10 s for its exit status.
+    fn kill(&mut self) -> Option<std::process::ExitStatus> {
+        self.0.kill().ok();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if let Ok(Some(status)) = self.0.try_wait() {
+                return Some(status);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        None
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        drop(self.0.stdin.take());
+        let exited = self.kill().is_some();
+        if !exited {
+            eprintln!("the holder didn't exit");
+        }
+        assert!(exited || std::thread::panicking(), "the holder didn't exit");
+    }
+}
+
+/// Runs `work` on its own thread and fails if it takes longer than 30 s, so a blocked read or
+/// take ends the test instead of wedging it.
+fn within_deadline<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sent, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sent.send(work()).ok());
+    result
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("finished within the deadline")
+}
+
+/// The child half of the cross-process guard test, spawned only by it with the anchor in
+/// `GUARD_HOLDER`; without it there is nothing to hold. Holds the guard until killed.
+#[test]
+#[ignore = "spawned by native_setup_guard_is_busy_while_another_process_holds_it"]
+fn native_setup_guard_holder() {
+    let Some(support) = std::env::var_os(GUARD_HOLDER) else {
+        return;
+    };
+    let anchor = crate::admit_support(Path::new(&support)).expect("admit the fixture anchor");
+    let _guard = anchor
+        .try_setup_guard()
+        .expect("the holder takes the guard");
+    // The test harness has already written this test's name without ending the line.
+    let mut out = io::stdout();
+    out.write_all(b"\nguard-held\n")
+        .and_then(|()| out.flush())
+        .expect("report holding");
+    io::stdin()
+        .read_to_end(&mut Vec::new())
+        .expect("wait until the parent ends");
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_setup_guard_is_busy_while_another_process_holds_it() {
+    use crate::{GuardError, admit_support};
+    use std::io::BufRead as _;
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::{Command, Stdio};
+
+    let scratch = Scratch::new();
+    let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
+        .expect("an explicitly commissioned fixture parent");
+    let support =
+        std::path::PathBuf::from(parent).join(OsStr::from_bytes(scratch.residual.to_bytes()));
+    let anchor = admit_support(&support).expect("admit the fixture anchor");
+    let mut holder = Holder(
+        Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "platform::macos::protected::tests::native_setup_guard_holder",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(GUARD_HOLDER, &support)
+            .env_remove("STORAGE_ADMISSION_FIXTURE_PARENT")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the holder"),
+    );
+    let output = holder.0.stdout.take().expect("the holder's piped output");
+    assert!(
+        within_deadline(move || io::BufReader::new(output)
+            .lines()
+            .map_while(Result::ok)
+            .any(|line| line == "guard-held")),
+        "the holder reported taking the guard"
+    );
+    assert_eq!(
+        within_deadline(move || admit_support(&support)
+            .expect("admit the fixture anchor")
+            .try_setup_guard()
+            .err()),
+        Some(GuardError::Busy),
+        "another process holds it"
+    );
+    let status = holder.kill().expect("the holder exits once killed");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "the holder was killed"
+    );
+    assert_eq!(
+        within_deadline(move || anchor.try_setup_guard().map(drop)),
+        Ok(()),
+        "the holder's exit released it"
+    );
+    drop(holder);
+    scratch.cleanup().expect("remove recorded fixture objects");
+}

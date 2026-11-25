@@ -72,6 +72,34 @@ fn voice_stop_acceptance_appends_a_redacted_control_tag() {
 }
 
 #[test]
+fn spoken_replies_default_appends_a_redacted_settings_snapshot() {
+    let name = "fixture-name";
+    let message = ControlToShell::SpokenRepliesDefaulted(super::SettingsView {
+        assistant_name: super::AssistantName::new("Test").unwrap(),
+        user_name: Some(super::UserName::new(name).unwrap()),
+        onboarded: true,
+        main_thread: ThreadId(1),
+        max_frame_rate: super::MaxFrameRate::AUTOMATIC,
+        default_model: None,
+        dock_position: super::DockPosition::TopCenter,
+        show_in_taskbar: false,
+        talk_back: true,
+        stt_unload: super::SttUnload::Kept,
+        hold_to_talk: true,
+        onboarding_from: super::OnboardingStep::Welcome,
+        screen_holds: true,
+        show_screen: false,
+    });
+    let bytes = postcard::to_allocvec(&message).unwrap();
+    assert_eq!(bytes[0], 38);
+    round_trip(&message, Pipe::Control, 32);
+    redacted(&message, Direction::ToShell, "SpokenRepliesDefaulted", 32);
+    let debug = format!("{message:?}");
+    assert!(!debug.contains(name));
+    assert!(!debug.contains(&format!("{:?}", name.as_bytes())));
+}
+
+#[test]
 fn screen_hold_states_append_a_redacted_control_tag() {
     let model =
         super::ModelName::new(&"\u{1F600}".repeat(super::MAX_MODEL_NAME_CHARS)).expect("valid");

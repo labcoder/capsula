@@ -36,6 +36,8 @@ use crate::voice::{LoadEvent, LoadReport, Reports};
 
 #[path = "voice_input_off_tests.rs"]
 mod input_off;
+#[path = "voice_queued_default_tests.rs"]
+mod queued_default;
 
 /// Returns the owner's idle terminal report without applying it to the installer.
 pub(super) async fn released_input(

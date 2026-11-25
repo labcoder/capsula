@@ -62,7 +62,7 @@ pub(super) struct SettingsView {
     pub(super) model: Entity<Settings>,
     pub(super) owner: WeakEntity<Presence>,
     pub(super) confirmation: Option<(u64, crate::confirmation::Handle)>,
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     pub(super) fixture: bool,
     #[cfg(test)]
     github_configured: Option<bool>,
@@ -167,7 +167,7 @@ impl SettingsView {
             model,
             owner,
             confirmation: None,
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, debug_assertions))]
             fixture: false,
             #[cfg(test)]
             github_configured: None,

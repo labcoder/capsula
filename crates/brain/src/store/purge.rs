@@ -356,6 +356,11 @@ impl Owed {
 }
 
 impl Leftovers {
+    /// The purge's files beside `db`, for a store that isn't open.
+    pub(super) fn of(db: &Path) -> Self {
+        Self { db: db.to_owned() }
+    }
+
     /// Whether any is left. One that can't be checked counts as left.
     #[must_use]
     pub fn exist(&self) -> bool {

@@ -147,6 +147,10 @@ impl Settings {
         self.talk_back_send_error
     }
 
+    pub fn talk_back_restart_needed(&self) -> bool {
+        self.talk_back_deferred && self.voice_part_state(SpokenReplies) == Some(PartState::Ready)
+    }
+
     #[expect(
         clippy::fn_params_excessive_bools,
         reason = "the checkbox and wire setter carry this boolean unchanged"

@@ -208,6 +208,11 @@ impl SettingsView {
                     .talk_back_pending()
                     .then(|| div().text_xs().child(strings.get(Text::SettingsSaving))),
             )
+            .children(state.talk_back_restart_needed().then(|| {
+                div()
+                    .text_xs()
+                    .child(strings.get(Text::SpokenRepliesRestartToHear))
+            }))
             .children(error.map(|error| {
                 let error = div().text_sm().text_color(cx.theme().danger).child(error);
                 #[cfg(test)]

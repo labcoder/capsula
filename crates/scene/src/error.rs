@@ -400,6 +400,13 @@ fn known_field(key: &str) -> bool {
     )
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DimensionRange {
+    Positive,
+    NonNegative,
+    Scale,
+}
+
 /// A validation failure with a private-safe diagnostic surface.
 #[derive(Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{path}: {code}")]
@@ -410,29 +417,68 @@ pub struct StepError {
     pub path: FieldPath,
     /// Stable content-free code.
     pub code: ErrorCode,
+    dimension: Option<DimensionRange>,
 }
 impl StepError {
-    pub(crate) fn in_step(step: &WireId, path: FieldPath, code: ErrorCode) -> Self {
+    /// Builds a failure at a field of the model's step.
+    pub fn in_step(step: &WireId, path: FieldPath, code: ErrorCode) -> Self {
         Self {
             step: Some(step.clone()),
-            path,
-            code,
+            ..Self::at(path, code)
         }
     }
     /// Builds a root-level failure.
     pub fn new(code: ErrorCode) -> Self {
+        Self::at(FieldPath::default(), code)
+    }
+
+    pub(crate) fn at(path: FieldPath, code: ErrorCode) -> Self {
         Self {
             step: None,
-            path: FieldPath::default(),
+            path,
             code,
+            dimension: None,
         }
     }
-    /// Formats a model reply, including its own validated step id, never field values.
+
+    pub(crate) fn with_dimension(mut self, dimension: DimensionRange) -> Self {
+        self.dimension = Some(dimension);
+        self
+    }
+
+    /// Formats a model reply with its step id and any known constraint, never field values.
     pub fn tool_text(&self) -> String {
-        match &self.step {
+        use std::fmt::Write;
+        let mut text = match &self.step {
             Some(step) => format!("step {}: {self}", step.as_str()),
             None => self.to_string(),
+        };
+        match self.dimension {
+            Some(DimensionRange::Scale) => write!(
+                text,
+                " (use a positive scale; composed scale must be <= {})",
+                crate::limits::MAX_COMPOSED_SCALE
+            )
+            .expect("writing to a string cannot fail"),
+            Some(dimension) => {
+                let relation = if dimension == DimensionRange::NonNegative {
+                    "<="
+                } else {
+                    "<"
+                };
+                write!(
+                    text,
+                    " (allowed: 0 {relation} value <= {})",
+                    crate::limits::MAX_COORD
+                )
+                .expect("writing to a string cannot fail");
+            }
+            None if self.code == ErrorCode::HeaderMismatch => text.push_str(
+                ": keep the listed scene, version and surface; omit size or repeat it exactly",
+            ),
+            None => {}
         }
+        text
     }
 }
 impl fmt::Debug for StepError {

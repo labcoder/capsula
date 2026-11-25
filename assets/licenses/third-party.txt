@@ -83,9 +83,9 @@ SOFTWARE.
 - Upstream: Zed's `gpui_windows` crate (github.com/zed-industries/zed, `crates/gpui_windows`),
   published to crates.io as `gpui-pre-windows` 0.3.10, a snapshot of zed@08cbb88.
 - License: Apache-2.0. The full text is in `vendor/gpui-pre-windows/LICENSE-APACHE`.
-- Changes: Kumochi modifies six files in `src/` and adds `src/vsync/frame_demand.rs`, so that idle
-  windows stop waking every vblank and hidden windows open at their requested size. Each modified
-  file says so in its first line; the changes are described in [docs/development/gpui-patch.md](docs/development/gpui-patch.md).
+- Changes: Kumochi patches demand-driven frame wakes, hidden-window sizing, fast successful vsync
+  waits, and primary work-area snapshots. Each modified file says so in its first line; the changes
+  are described in [docs/development/gpui-patch.md](docs/development/gpui-patch.md).
 
 ## gpui-pre-macos 0.3.10 (`vendor/gpui-pre-macos/`)
 

@@ -1,8 +1,12 @@
+#[cfg(target_os = "macos")]
 #[expect(
     unsafe_code,
     reason = "Darwin descriptor and filesec APIs stay in platform"
 )]
 pub(crate) mod macos;
+#[cfg(windows)]
+#[expect(unsafe_code, reason = "Win32 file and security APIs stay in platform")]
+pub(crate) mod windows;
 
 /// Why a path can't be trusted. It carries no path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

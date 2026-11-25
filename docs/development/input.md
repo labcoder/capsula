@@ -239,6 +239,12 @@ Rejected alternatives:
 
 ## Esc
 
+Shell-core exposes the ownership facts an Esc press can capture: the audio pair and run,
+the latest submitted turn (even before the brain names it), and the drawing and
+selection owners. A run that already sent a terminal state can still have an audible
+tail; that tail is a local speaker stop, not permission to stop another brain run.
+These facts don't register a key or change which session ordinary launch selects.
+
 An Esc captured by an admitted voice gesture consumes only that gesture's receipt and held
 words. It takes screen marks, then compares the receipt's run with the ordinary effective
 stop target, including the presenter's newer run only when ordinary Esc would use it. A
