@@ -49,6 +49,10 @@ fn main() -> ExitCode {
     }
     #[cfg(not(target_os = "macos"))]
     let (flags, admitted) = {
+        // The lock's folder and name are admitted before the log opens, so a refusal writes nothing.
+        if instance::InstanceLock::admit_current_session().is_err() {
+            return ExitCode::FAILURE;
+        }
         let Some(flags) = launch_with_logging(launch, || logging::init(constants::SHELL_LOG))
         else {
             return ExitCode::FAILURE;
