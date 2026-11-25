@@ -195,6 +195,8 @@ pub(crate) struct Brain {
     /// The dev fixture was picked, so runs never wait on the account.
     #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
     fixture: Option<Ready>,
+    #[cfg(debug_assertions)]
+    fixture_engine: bool,
     /// Store replies, never paused.
     inputs_tx: mpsc::UnboundedSender<Input>,
     inputs: mpsc::UnboundedReceiver<Input>,
@@ -322,6 +324,8 @@ impl Brain {
         account.github.tuning = config.github_tuning();
         let connections = &mut account.connections;
         connections.configure_transport(config.model_tuning());
+        #[cfg(debug_assertions)]
+        let fixture_engine = matches!(&engine, Selected::Fixture(_));
         #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
         let (engine, access, fixture) = match engine {
             #[cfg(any(test, debug_assertions))]
@@ -370,6 +374,8 @@ impl Brain {
             engine,
             #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
             fixture,
+            #[cfg(debug_assertions)]
+            fixture_engine,
             inputs_tx,
             inputs,
             engine_tx,
@@ -1254,6 +1260,11 @@ impl Brain {
         self.voice_opened(link).map_err(|Full| Ended::Lost)?;
         self.screen_holds_changed(link)
             .map_err(|Full| Ended::Lost)?;
+        #[cfg(debug_assertions)]
+        if self.fixture_engine {
+            link.control(&ControlToShell::FixtureEngineActive)
+                .map_err(|Full| Ended::Lost)?;
+        }
         if let Some(models) = self.account.connections.models_unsent() {
             link.data(&models).map_err(|Full| Ended::Lost)?;
         }

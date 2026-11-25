@@ -234,6 +234,10 @@ the shell keeps a connection's last `ScreenHolds` until that connection ends, an
 from another connection is dropped. Before `Welcome` the shell rejects either one and ends the connection.
 All three are payload-redacted in the pipe tap.
 
+A debug brain using the fixture engine sends the fieldless `FixtureEngineActive` control frame
+once after the pair opens. It doesn't change the handshake. A debug shell shows the Chat marker
+only for the current connection and clears it when the link changes.
+
 `ScreenHolds` speaks for the default model, but a turn's image goes to its run's model, which is
 the thread's own when it has one. So the shell sends `ScreenHoldRecognized` only when three
 things hold at recognition, and a hold's line and the conversation's screen note

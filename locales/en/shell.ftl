@@ -35,6 +35,7 @@ recovery-sign-in = Sign in
 dismiss-notice = Dismiss
 chat-live-cut = Earlier streamed text isn't shown here.
 chat-empty = Start a conversation.
+chat-fixture-engine = Fixture mode
 chat-loading = Loading messages…
 chat-history-failed = Couldn't load messages. Try again.
 turn-busy = Still answering earlier messages. Try again in a moment.

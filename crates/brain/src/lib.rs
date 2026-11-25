@@ -505,6 +505,7 @@ fn engine(tuning: config::tuning::ModelTuning) -> Result<Selected, BrainError> {
         let fixture = Fixture::parse(&script).map_err(|error| {
             BrainError::Fixture(io::Error::new(io::ErrorKind::InvalidData, error))
         })?;
+        tracing::info!("fixture engine active");
         return Ok(Selected::Fixture(Box::new(fixture)));
     }
     let (access, asks) = AccessHandle::new();
