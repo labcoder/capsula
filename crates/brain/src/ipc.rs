@@ -118,7 +118,7 @@ pub(crate) enum PeerAuth<'a> {
         expected: &'a Capability,
     },
     #[cfg_attr(
-        not(test),
+        not(all(test, target_os = "macos")),
         expect(
             dead_code,
             reason = "only an authenticated pair reader can produce this greeting"

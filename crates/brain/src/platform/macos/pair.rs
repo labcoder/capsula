@@ -1,7 +1,7 @@
 //! The brain's side of the inherited pair. The shell passes the control leg on descriptor 3 and the
-//! data leg on 4; [`adopt`] checks both and hands them to tokio, [`respond`] runs the responder
-//! handshake over them, and the greetings are read only through the pair's own openers, so a
-//! [`BoundHello`] never travels apart from the pair that authenticated it. See
+//! data leg on 4; [`adopt`] checks both before the runtime exists, [`respond`] hands them to tokio
+//! and runs the responder handshake over them, and the greetings are read only through the pair's
+//! own openers, so a [`BoundHello`] never travels apart from the pair that authenticated it. See
 //! `docs/development/ipc.md`.
 
 use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, OwnedFd};
@@ -9,9 +9,7 @@ use std::os::unix::net::UnixStream as StdStream;
 
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{ControlToBrain, DataToBrain, Hello, IssueSession};
-use kumochi_session::{
-    BoundPair, BrainAwaitsInit, Channel, ENVELOPE_LEN, Outgoing, SECRET_LEN, Session, SessionError,
-};
+use kumochi_session::{BoundPair, BrainAwaitsInit, ENVELOPE_LEN, Outgoing, Session, SessionError};
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
@@ -109,36 +107,50 @@ fn checked(fd: OwnedFd) -> Result<(StdStream, Identity), PairError> {
     Ok((stream, identity))
 }
 
-fn into_tokio(stream: StdStream) -> Result<UnixStream, PairError> {
-    rustix::io::fcntl_setfd(&stream, rustix::io::FdFlags::CLOEXEC).map_err(|_| PairError::Adopt)?;
-    stream.set_nonblocking(true).map_err(|_| PairError::Adopt)?;
-    UnixStream::from_std(stream).map_err(|_| PairError::Adopt)
+fn prepared(stream: &StdStream) -> Result<(), PairError> {
+    rustix::io::fcntl_setfd(stream, rustix::io::FdFlags::CLOEXEC).map_err(|_| PairError::Adopt)?;
+    stream.set_nonblocking(true).map_err(|_| PairError::Adopt)
 }
 
-/// Checks both inherited ends and adopts them into the brain's runtime, close-on-exec and
-/// non-blocking. Proves a connected, distinct pair of Unix streams, not who holds the other ends:
-/// that's the handshake's job.
+/// Both inherited ends, checked, close-on-exec and non-blocking. Only [`adopt`] makes one.
+#[derive(Debug)]
+pub(crate) struct InheritedPair {
+    control: StdStream,
+    data: StdStream,
+}
+
+/// Checks both inherited ends. Needs no runtime, so it can run before one exists. Proves a
+/// connected, distinct pair of Unix streams, not who holds the other ends: that's the
+/// handshake's job.
 ///
 /// # Errors
 /// The first check either end fails, or `Aliased` when both are one socket.
-pub(crate) fn adopt(
-    control: OwnedFd,
-    data: OwnedFd,
-) -> Result<(UnixStream, UnixStream), PairError> {
+pub(crate) fn adopt(control: OwnedFd, data: OwnedFd) -> Result<InheritedPair, PairError> {
     let (control, control_identity) = checked(control)?;
     let (data, data_identity) = checked(data)?;
     if control_identity == data_identity {
         return Err(PairError::Aliased);
     }
-    Ok((into_tokio(control)?, into_tokio(data)?))
+    prepared(&control)?;
+    prepared(&data)?;
+    Ok(InheritedPair { control, data })
+}
+
+/// A deadline is final: work that finishes after it doesn't count, even when its I/O was ready.
+fn before(by: Instant) -> Result<(), PairError> {
+    if Instant::now() >= by {
+        return Err(PairError::Timeout);
+    }
+    Ok(())
 }
 
 async fn exact(io: &mut UnixStream, bytes: &mut [u8], by: Instant) -> Result<(), PairError> {
+    before(by)?;
     timeout_at(by, io.read_exact(bytes))
         .await
         .map_err(|_| PairError::Timeout)?
         .map_err(|_| PairError::Transport)?;
-    Ok(())
+    before(by)
 }
 
 /// One handshake message, its length taken from the envelope by the state that expects it.
@@ -155,21 +167,21 @@ async fn message(
 }
 
 async fn send(io: &mut UnixStream, out: &Outgoing, by: Instant) -> Result<(), PairError> {
+    before(by)?;
     timeout_at(by, io.write_all(&out.bytes))
         .await
         .map_err(|_| PairError::Timeout)?
-        .map_err(|_| PairError::Transport)
+        .map_err(|_| PairError::Transport)?;
+    before(by)
 }
 
 /// The responder's side, in the order the session crate enforces: control, data, then Bind.
 async fn handshake(
     control: &mut UnixStream,
     data: &mut UnixStream,
-    secret: &[u8; SECRET_LEN],
-    channel: Channel,
+    mut brain: BrainAwaitsInit,
     by: Instant,
 ) -> Result<(Session, BoundPair), PairError> {
-    let mut brain = BrainAwaitsInit::new(secret, channel)?;
     let init = message(control, by, |envelope| brain.record_len(envelope)).await?;
     let (mut brain, reply) = brain.receive(&init)?;
     send(control, &reply, by).await?;
@@ -186,19 +198,20 @@ async fn handshake(
     Ok((session, proof))
 }
 
-/// Runs the responder handshake on an adopted pair, all of it by `by`, and returns the pair
-/// bound once `BindAck` is written.
+/// Hands an adopted pair to the brain's runtime and runs the responder handshake on it, all of it
+/// by `by`, returning the pair bound once `BindAck` is written. `brain` is made before the first
+/// await, so the caller can wipe its own copy of the secret first.
 ///
 /// # Errors
-/// A session refusal, the deadline, or a transport failure.
+/// `Adopt` outside a tokio runtime, a session refusal, the deadline, or a transport failure.
 pub(crate) async fn respond(
-    mut control: UnixStream,
-    mut data: UnixStream,
-    secret: &[u8; SECRET_LEN],
-    channel: Channel,
+    pair: InheritedPair,
+    brain: BrainAwaitsInit,
     by: Instant,
 ) -> Result<AuthenticatedPair, PairError> {
-    let (session, proof) = handshake(&mut control, &mut data, secret, channel, by).await?;
+    let mut control = UnixStream::from_std(pair.control).map_err(|_| PairError::Adopt)?;
+    let mut data = UnixStream::from_std(pair.data).map_err(|_| PairError::Adopt)?;
+    let (session, proof) = handshake(&mut control, &mut data, brain, by).await?;
     AuthenticatedPair::new(session, &proof, control, data)
 }
 
@@ -281,16 +294,6 @@ impl AuthenticatedPair {
         })
     }
 
-    /// Spends the current stage, so a refused read stays refused.
-    fn spend(&mut self) -> Stage {
-        std::mem::replace(&mut self.stage, Stage::Spent)
-    }
-
-    fn refuse(&self, error: PairError) -> PairError {
-        self.pair.send_replace(true);
-        error
-    }
-
     /// Reads the control greeting, one whole frame through this pair's control opener. Succeeds
     /// once, and first.
     ///
@@ -301,21 +304,20 @@ impl AuthenticatedPair {
         &mut self,
         by: Instant,
     ) -> Result<(BoundHello, Opening, usize), PairError> {
-        if self.spend() != Stage::Control {
-            return Err(self.refuse(PairError::Order));
+        let refusing = Refusing(&self.pair);
+        if std::mem::replace(&mut self.stage, Stage::Spent) != Stage::Control {
+            return Err(PairError::Order);
         }
-        let (first, len) = match greeting(&mut self.control, Pipe::Control, by).await {
-            Ok(read) => read,
-            Err(error) => return Err(self.refuse(error)),
-        };
+        let (first, len) = greeting(&mut self.control, Pipe::Control, by).await?;
         let (greeting, opening) = match first {
             ControlToBrain::Hello(hello) => (hello, Opening::Legacy),
             ControlToBrain::QueuedHello(hello) => (hello, Opening::Queued),
             ControlToBrain::QueuedAudioReconnect(hello, previous) => {
                 (*hello, Opening::Reconnect(previous))
             }
-            _ => return Err(self.refuse(PairError::Greeting)),
+            _ => return Err(PairError::Greeting),
         };
+        std::mem::forget(refusing);
         self.stage = Stage::Data {
             queued: opening != Opening::Legacy,
         };
@@ -332,19 +334,28 @@ impl AuthenticatedPair {
         &mut self,
         by: Instant,
     ) -> Result<(BoundHello, Option<IssueSession>, usize), PairError> {
-        let Stage::Data { queued } = self.spend() else {
-            return Err(self.refuse(PairError::Order));
+        let refusing = Refusing(&self.pair);
+        let Stage::Data { queued } = std::mem::replace(&mut self.stage, Stage::Spent) else {
+            return Err(PairError::Order);
         };
-        let (first, len) = match greeting(&mut self.data, Pipe::Data, by).await {
-            Ok(read) => read,
-            Err(error) => return Err(self.refuse(error)),
-        };
+        let (first, len) = greeting(&mut self.data, Pipe::Data, by).await?;
         let (greeting, echo) = match (queued, first) {
             (false, DataToBrain::Hello(hello)) => (hello, None),
             (true, DataToBrain::QueuedHello(hello, echo)) => (hello, Some(echo)),
-            _ => return Err(self.refuse(PairError::Greeting)),
+            _ => return Err(PairError::Greeting),
         };
+        std::mem::forget(refusing);
         Ok((BoundHello { greeting }, echo, len))
+    }
+}
+
+/// Sets the pair cell when dropped: on every early return, and when a pending greeting read is
+/// dropped. Forgotten only on success.
+struct Refusing<'a>(&'a watch::Sender<bool>);
+
+impl Drop for Refusing<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
     }
 }
 
@@ -353,11 +364,14 @@ async fn greeting<T: DeserializeOwned>(
     pipe: Pipe,
     by: Instant,
 ) -> Result<(T, usize), PairError> {
-    match timeout_at(by, ipc::read_sized::<T>(reader, pipe)).await {
-        Err(_) => Err(PairError::Timeout),
-        Ok(Ok(Some(read))) => Ok(read),
-        Ok(Ok(None) | Err(_)) => Err(PairError::Greeting),
-    }
+    before(by)?;
+    let read = match timeout_at(by, ipc::read_sized::<T>(reader, pipe)).await {
+        Err(_) => return Err(PairError::Timeout),
+        Ok(Ok(Some(read))) => read,
+        Ok(Ok(None) | Err(_)) => return Err(PairError::Greeting),
+    };
+    before(by)?;
+    Ok(read)
 }
 
 #[cfg(test)]

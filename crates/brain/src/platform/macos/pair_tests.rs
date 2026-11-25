@@ -70,8 +70,8 @@ async fn adoption_takes_two_connected_streams_and_makes_them_close_on_exec_and_n
         rustix::io::fcntl_setfd(end, rustix::io::FdFlags::empty()).expect("inheritable");
         end.set_nonblocking(false).expect("blocking");
     }
-    let (control, data) = adopt(fd(control), fd(data)).expect("adopted");
-    for end in [&control, &data] {
+    let pair = adopt(fd(control), fd(data)).expect("adopted");
+    for end in [&pair.control, &pair.data] {
         let flags = rustix::io::fcntl_getfd(end).expect("fd flags");
         assert!(
             flags.contains(rustix::io::FdFlags::CLOEXEC),
@@ -130,9 +130,9 @@ async fn adoption_refuses_one_socket_passed_as_both_legs() {
 async fn a_write_after_the_shell_closes_fails_with_epipe_instead_of_a_signal() {
     let (control, shell_control) = sockets();
     let (data, _shell_data) = sockets();
-    let (mut control, _data) = adopt(fd(control), fd(data)).expect("adopted");
+    let pair = adopt(fd(control), fd(data)).expect("adopted");
     drop(shell_control);
-    let error = control.write_all(b"x").await.expect_err("the peer is gone");
+    let error = std::io::Write::write_all(&mut &pair.control, b"x").expect_err("the peer is gone");
     assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
 }
 
@@ -188,25 +188,39 @@ impl Shell {
     }
 }
 
-/// Two adopted ends and the shell's two, as tokio streams.
-fn ends() -> ([UnixStream; 2], [UnixStream; 2]) {
+/// The adopted pair and the shell's two ends, as tokio streams.
+fn ends() -> (InheritedPair, [UnixStream; 2]) {
     let (control, shell_control) = sockets();
     let (data, shell_data) = sockets();
-    let (control, data) = adopt(fd(control), fd(data)).expect("adopted");
+    let pair = adopt(fd(control), fd(data)).expect("adopted");
     let shell = [shell_control, shell_data].map(|end| {
         end.set_nonblocking(true).expect("non-blocking");
         UnixStream::from_std(end).expect("tokio")
     });
-    ([control, data], shell)
+    (pair, shell)
+}
+
+fn brain() -> BrainAwaitsInit {
+    BrainAwaitsInit::new(&SECRET, Channel::Dev).expect("brain starts")
+}
+
+/// Runs a two-sided exchange to completion within the bound, so a side that stops answering
+/// fails the test instead of hanging it.
+async fn bounded<F: Future>(exchange: F) -> F::Output {
+    tokio::time::timeout(BOUND, exchange)
+        .await
+        .expect("the exchange finishes within the bound")
 }
 
 async fn bound() -> (AuthenticatedPair, Shell) {
-    let ([control, data], [mut shell_control, mut shell_data]) = ends();
-    let by = Instant::now() + BOUND;
-    let (pair, session) = tokio::join!(
-        respond(control, data, &SECRET, Channel::Dev, by),
-        shell(&mut shell_control, &mut shell_data, &SECRET),
-    );
+    let (pair, [mut shell_control, mut shell_data]) = ends();
+    let (pair, session) = bounded(async {
+        tokio::join!(
+            respond(pair, brain(), by()),
+            shell(&mut shell_control, &mut shell_data, &SECRET),
+        )
+    })
+    .await;
     let pair = pair.expect("bound");
     let (shell_control_in, shell_control_out) = shell_control.into_split();
     let (shell_data_in, shell_data_out) = shell_data.into_split();
@@ -392,35 +406,58 @@ async fn a_greeting_that_misses_its_deadline_refuses_the_pair() {
     assert!(*pair.pair.borrow(), "the pair cell is set");
 }
 
-#[tokio::test]
-async fn a_proof_names_only_its_own_pair() {
-    let mut runs = Vec::new();
-    for _ in 0..2 {
-        let ([mut control, mut data], [mut shell_control, mut shell_data]) = ends();
-        let (run, _) = tokio::join!(
-            handshake(&mut control, &mut data, &SECRET, Channel::Dev, by()),
+/// One completed handshake: the brain's owners and proof, its two ends and the shell's.
+async fn run() -> (Session, BoundPair, [UnixStream; 2], [UnixStream; 2]) {
+    let (pair, [mut shell_control, mut shell_data]) = ends();
+    let mut control = UnixStream::from_std(pair.control).expect("tokio");
+    let mut data = UnixStream::from_std(pair.data).expect("tokio");
+    let (run, _) = bounded(async {
+        tokio::join!(
+            handshake(&mut control, &mut data, brain(), by()),
             shell(&mut shell_control, &mut shell_data, &SECRET),
-        );
-        runs.push((
-            run.expect("handshake"),
-            control,
-            data,
-            [shell_control, shell_data],
-        ));
-    }
-    let ((_, other_proof), _, _, _other_shell) = runs.pop().expect("two runs");
-    let ((own, _own_proof), control, data, _own_shell) = runs.pop().expect("two runs");
+        )
+    })
+    .await;
+    let (session, proof) = run.expect("handshake");
+    (session, proof, [control, data], [shell_control, shell_data])
+}
+
+#[tokio::test]
+async fn a_proof_names_both_of_its_own_openers_and_no_others() {
+    let (own, proof, [control, data], _own_shell) = run().await;
+    let (other, _, _, _other_shell) = run().await;
+    let foreign_data = Session {
+        control: own.control,
+        data: other.data,
+    };
     assert!(matches!(
-        AuthenticatedPair::new(own, &other_proof, control, data),
+        AuthenticatedPair::new(foreign_data, &proof, control, data),
+        Err(PairError::Unbound)
+    ));
+    let (own, proof, [control, data], _own_shell) = run().await;
+    let (other, _, _, _other_shell) = run().await;
+    let foreign_control = Session {
+        control: other.control,
+        data: own.data,
+    };
+    assert!(matches!(
+        AuthenticatedPair::new(foreign_control, &proof, control, data),
         Err(PairError::Unbound)
     ));
 }
 
+#[test]
+fn adoption_needs_no_runtime() {
+    let (control, _shell_control) = sockets();
+    let (data, _shell_data) = sockets();
+    assert!(adopt(fd(control), fd(data)).is_ok());
+}
+
 #[tokio::test]
 async fn the_handshake_ends_at_its_deadline() {
-    let ([control, data], _shell) = ends();
+    let (pair, _shell) = ends();
     let by = Instant::now() + SHORT;
-    let refused = tokio::time::timeout(BOUND, respond(control, data, &SECRET, Channel::Dev, by))
+    let refused = tokio::time::timeout(BOUND, respond(pair, brain(), by))
         .await
         .expect("the handshake ends within the bound");
     assert!(matches!(refused, Err(PairError::Timeout)));
@@ -429,13 +466,41 @@ async fn the_handshake_ends_at_its_deadline() {
 
 #[tokio::test]
 async fn a_shell_with_another_secret_is_refused() {
-    let ([control, data], [mut shell_control, _shell_data]) = ends();
+    let (pair, [mut shell_control, _shell_data]) = ends();
     let (init, _) = ShellAwaitsReply::start(&[0xA5; SECRET_LEN], Channel::Dev)
         .map(|(state, init)| (init, state))
         .expect("shell starts");
     shell_control.write_all(&init.bytes).await.expect("init");
     assert!(matches!(
-        respond(control, data, &SECRET, Channel::Dev, by()).await,
+        respond(pair, brain(), by()).await,
         Err(PairError::Session(SessionError::Handshake))
     ));
+}
+
+#[tokio::test]
+async fn ready_input_after_the_deadline_still_misses_it() {
+    let (pair, [mut shell_control, _shell_data]) = ends();
+    let (_, init) = ShellAwaitsReply::start(&SECRET, Channel::Dev).expect("shell starts");
+    shell_control.write_all(&init.bytes).await.expect("init");
+    let refused = respond(pair, brain(), Instant::now()).await;
+    assert!(matches!(refused, Err(PairError::Timeout)));
+
+    let (mut pair, mut shell) = bound().await;
+    shell
+        .send(Pipe::Control, &ControlToBrain::Hello(hello()))
+        .await;
+    let refused = pair.control_greeting(Instant::now()).await;
+    assert!(matches!(refused, Err(PairError::Timeout)));
+    assert!(*pair.pair.borrow(), "the pair cell is set");
+}
+
+#[tokio::test]
+async fn a_greeting_read_dropped_part_way_refuses_the_pair() {
+    let (mut pair, _shell) = bound().await;
+    let dropped = tokio::time::timeout(SHORT, pair.control_greeting(by())).await;
+    assert!(
+        dropped.is_err(),
+        "nothing was sent, so the read was still pending"
+    );
+    assert!(*pair.pair.borrow(), "the pair cell is set before any retry");
 }
