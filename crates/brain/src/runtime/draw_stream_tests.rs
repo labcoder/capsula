@@ -622,7 +622,9 @@ async fn unspoken_crash_keeps_the_step_without_an_unsettled_reply() {
     if child.try_wait().expect("child status").is_none() {
         child.kill().expect("kill the owned fixture");
     }
-    assert!(!child.wait().expect("reap the owned fixture").success());
+    let status = child.wait().expect("reap the owned fixture");
+    test_support::propagate_scratch_publication(status);
+    assert!(!status.success());
     assert!(ready, "the child reached the commit before it was killed");
     let db = std::fs::read_to_string(marker).expect("committed store path");
     let mut store = Store::open(std::path::Path::new(&db)).expect("reopen after crash");
