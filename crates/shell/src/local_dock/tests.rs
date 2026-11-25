@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::{Arc, Mutex, Weak};
 
 use gpui_kit::base::Root;
@@ -228,4 +229,142 @@ fn losing_the_view_keeps_the_admission_for_a_later_quit(cx: &mut TestAppContext)
         Some(false),
         "the release runs off the UI thread"
     );
+}
+
+/// Counts the app's quits through a fake platform quit.
+fn platform_quits(custody: &Custody) -> Rc<Cell<u32>> {
+    let count = Rc::new(Cell::new(0));
+    let counter = Rc::clone(&count);
+    custody.quit_through(move || counter.set(counter.get() + 1));
+    count
+}
+
+/// A platform termination request whose answer the test reads back.
+fn termination(custody: &Rc<Custody>) -> Rc<Cell<Option<bool>>> {
+    let answer = Rc::new(Cell::new(None));
+    let reply = Rc::clone(&answer);
+    custody.answer_termination(move |allow| reply.set(Some(allow)));
+    answer
+}
+
+#[gpui::test]
+fn a_termination_request_before_open_is_refused_and_one_after_a_failed_open_is_approved(
+    cx: &mut TestAppContext,
+) {
+    let display = cx.read(|cx| cx.primary_display().expect("the test display").id());
+    cx.simulate_display_removed(display);
+    let (custody, held, _) = custody(cx);
+
+    assert_eq!(termination(&custody).get(), Some(false));
+    assert!(held.upgrade().is_some(), "a refusal releases nothing");
+
+    let opened = cx.update(|cx| open_with_rollback(cx, &custody));
+    assert!(matches!(opened, Err(OpenError::Display)));
+    let during = termination(&custody);
+    assert_eq!(during.get(), None, "the rollback is still releasing");
+    cx.run_until_parked();
+    assert!(held.upgrade().is_none());
+    assert_eq!(during.get(), Some(true));
+    assert_eq!(termination(&custody).get(), Some(true));
+}
+
+#[gpui::test]
+fn a_termination_request_during_quit_is_approved_after_the_release(cx: &mut TestAppContext) {
+    let (custody, held, on_main) = custody(cx);
+    let quits = platform_quits(&custody);
+    let (_, owner) = mount_with(cx, Rc::clone(&custody));
+
+    cx.update(|cx| cx.dispatch_action(&QuitLocalDock));
+    let answer = termination(&custody);
+    assert_eq!(answer.get(), None, "approval waits for the release");
+    assert!(held.upgrade().is_some());
+
+    cx.run_until_parked();
+    assert_eq!(answer.get(), Some(true));
+    assert!(held.upgrade().is_none());
+    assert_eq!(*on_main.lock().unwrap(), Some(false));
+    assert!(owner.upgrade().is_none());
+    assert_eq!(
+        quits.get(),
+        0,
+        "the approved platform request ends the app; the app sends no quit of its own"
+    );
+}
+
+#[gpui::test]
+fn a_termination_request_after_the_view_is_lost_releases_then_approves(cx: &mut TestAppContext) {
+    let (custody, held, on_main) = custody(cx);
+    let (window, owner) = mount_with(cx, Rc::clone(&custody));
+    window
+        .update(cx, |_, window, _| window.remove_window())
+        .expect("dock window is open");
+    cx.run_until_parked();
+    assert!(owner.upgrade().is_none());
+
+    let answer = termination(&custody);
+    assert_eq!(answer.get(), None, "approval waits for the release");
+    assert!(held.upgrade().is_some());
+    cx.run_until_parked();
+    assert_eq!(answer.get(), Some(true));
+    assert!(held.upgrade().is_none());
+    assert_eq!(*on_main.lock().unwrap(), Some(false));
+
+    assert_eq!(
+        termination(&custody).get(),
+        Some(true),
+        "with the dock and its admission gone, a request is approved at once"
+    );
+}
+
+#[test]
+fn the_app_quits_on_its_own_only_when_no_platform_request_was_approved() {
+    let custody = Custody::new(());
+    custody.requested.set(true);
+    custody.closing.set(true);
+    let answer = termination(&custody);
+    assert_eq!(answer.get(), None);
+    assert!(
+        !custody.finish(),
+        "the approved platform request terminates the app"
+    );
+    assert_eq!(answer.get(), Some(true));
+
+    let custody = Custody::new(());
+    custody.requested.set(true);
+    custody.closing.set(true);
+    assert!(custody.finish());
+}
+
+#[gpui::test]
+fn an_explicit_quit_after_an_approved_release_only_asks_the_platform_again(
+    cx: &mut TestAppContext,
+) {
+    let (custody, held, on_main) = custody(cx);
+    let quits = platform_quits(&custody);
+    mount_with(cx, Rc::clone(&custody));
+    let answer = termination(&custody);
+    cx.run_until_parked();
+    assert_eq!(answer.get(), Some(true));
+    assert!(held.upgrade().is_none());
+    *on_main.lock().unwrap() = None;
+    assert_eq!(quits.get(), 0, "the native yes alone ends the app");
+
+    cx.update(|cx| cx.dispatch_action(&QuitLocalDock));
+    cx.run_until_parked();
+    assert_eq!(*on_main.lock().unwrap(), None, "no second release");
+    assert_eq!(quits.get(), 1, "a fresh quit goes to the platform once");
+}
+
+#[gpui::test]
+fn the_app_quits_through_the_platform_only_after_the_release(cx: &mut TestAppContext) {
+    let (custody, held, _) = custody(cx);
+    let quits = platform_quits(&custody);
+    mount_with(cx, Rc::clone(&custody));
+
+    cx.update(|cx| cx.dispatch_action(&QuitLocalDock));
+    assert_eq!(quits.get(), 0, "nothing quits while the admission is live");
+    assert!(held.upgrade().is_some());
+    cx.run_until_parked();
+    assert!(held.upgrade().is_none());
+    assert_eq!(quits.get(), 1);
 }
