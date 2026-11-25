@@ -391,11 +391,18 @@ impl Presenter {
     }
 
     pub fn stoppable_run(&self) -> Option<RunId> {
+        self.stoppable_run_excluding(None)
+    }
+
+    /// The same stop frontier without work owned by a single scene.
+    pub fn stoppable_run_excluding(&self, excluded: Option<SceneId>) -> Option<RunId> {
         let scenes = self
             .scenes
-            .values()
-            .filter(|scene| scene.cut == Cut::Open && !scene.skipping)
-            .flat_map(|scene| {
+            .iter()
+            .filter(|(id, scene)| {
+                Some(**id) != excluded && scene.cut == Cut::Open && !scene.skipping
+            })
+            .flat_map(|(_, scene)| {
                 scene
                     .activation
                     .installed
@@ -411,18 +418,30 @@ impl Presenter {
             .iter()
             .filter(|(_, _, disposition)| *disposition == super::RunDisposition::Live)
             .filter_map(|(frame, _, _)| match &**frame {
-                DataToShell::SceneStepCommit { run, .. } => Some(*run),
+                DataToShell::SceneStepCommit { run, scene, .. } if Some(*scene) != excluded => {
+                    Some(*run)
+                }
                 _ => None,
             });
         scenes
             .chain(
                 self.lane
                     .as_ref()
-                    .filter(|lane| lane.disposition == super::RunDisposition::Live)
+                    .filter(|lane| {
+                        Some(lane.scene) != excluded
+                            && lane.disposition == super::RunDisposition::Live
+                    })
                     .map(|lane| lane.run),
             )
             .chain(held)
-            .chain(self.frames.borrow().retirement.as_ref().and_then(|r| r.run))
+            .chain(
+                self.frames
+                    .borrow()
+                    .retirement
+                    .as_ref()
+                    .filter(|r| Some(r.successor) != excluded)
+                    .and_then(|r| r.run),
+            )
             .filter(|run| self.fenced.is_none_or(|f| *run > f))
             .max()
     }
