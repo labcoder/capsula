@@ -22,7 +22,7 @@ use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout, timeout_at};
 
 use crate::platform::{self, Instance, PipeServer};
-use crate::runtime::{Brain, Ended};
+use crate::runtime::{Brain, Ended, PairStart};
 use crate::tap::Tap;
 
 #[cfg(all(windows, debug_assertions, feature = "test-support"))]
@@ -160,12 +160,52 @@ fn require_session_placeholder(field: &Capability) -> Result<(), Refusal> {
     Ok(())
 }
 
+fn startup_hello(
+    first: ControlToBrain,
+    last_queued: Option<IssueSession>,
+) -> Result<(Hello, AudioSession, PairStart), SessionError> {
+    Ok(match first {
+        ControlToBrain::Hello(hello) => (hello, AudioSession::Legacy, PairStart::Ordinary),
+        ControlToBrain::QueuedHello(hello) => {
+            (hello, AudioSession::QueuedRequired, PairStart::Ordinary)
+        }
+        ControlToBrain::QueuedAudioReconnect(hello, previous) => (
+            *hello,
+            AudioSession::QueuedRequired,
+            if last_queued == Some(previous) {
+                PairStart::AudioRepair
+            } else {
+                PairStart::Ordinary
+            },
+        ),
+        _ => return Err(SessionError::NotHello),
+    })
+}
+
 /// The control and data pipes.
 #[derive(Debug)]
 pub struct Pipes {
     session: u32,
     control: PipeServer,
     data: PipeServer,
+    last_queued: Option<IssueSession>,
+}
+
+#[cfg(all(test, windows))]
+impl Pipes {
+    pub(crate) fn create_for_startup_test(slot: u32) -> io::Result<Self> {
+        let name = format!(
+            r"\\.\pipe\{}-fixture-startup-unwind-{}-{slot}",
+            kumochi_protocol::constants::OBJECT_PREFIX,
+            std::process::id()
+        );
+        Ok(Self {
+            session: 0,
+            control: platform::create_owner_only(&format!("{name}-control"), Instance::First)?,
+            data: platform::create_owner_only(&format!("{name}-data"), Instance::First)?,
+            last_queued: None,
+        })
+    }
 }
 
 impl Pipes {
@@ -178,6 +218,7 @@ impl Pipes {
             session,
             control: create(session, Pipe::Control, Instance::First)?,
             data: create(session, Pipe::Data, Instance::First)?,
+            last_queued: None,
         })
     }
 
@@ -238,11 +279,7 @@ impl Pipes {
             return Err(SessionError::ClosedEarly);
         };
         tap.record(Pipe::Control, Direction::ToBrain, &first, len);
-        let (hello, audio) = match first {
-            ControlToBrain::Hello(hello) => (hello, AudioSession::Legacy),
-            ControlToBrain::QueuedHello(hello) => (hello, AudioSession::QueuedRequired),
-            _ => return Err(SessionError::NotHello),
-        };
+        let (hello, audio, start) = startup_hello(first, self.last_queued)?;
         match check_hello(PeerAuth::Capability {
             hello: &hello,
             expected: &identity.capability,
@@ -286,12 +323,20 @@ impl Pipes {
         if audio == AudioSession::QueuedRequired {
             brain.install_issue_session(session);
         }
+        self.last_queued = (audio == AudioSession::QueuedRequired).then_some(session);
         let _shell_identity = process.register();
         brain.connected_shell(process);
         tracing::info!("shell connected");
         Ok(
             match brain
-                .serve_with_profile(&mut self.control, &mut self.data, tap, audio, text_metrics)
+                .serve_with_profile(
+                    &mut self.control,
+                    &mut self.data,
+                    tap,
+                    audio,
+                    text_metrics,
+                    start,
+                )
                 .await
             {
                 Ended::Quit { deadline } => Session::Quit { deadline },
@@ -475,11 +520,11 @@ mod tests {
     use std::path::PathBuf;
 
     use kumochi_protocol::frame::{self, FrameError, Pipe};
-    #[cfg(windows)]
     use kumochi_protocol::message::{
-        AudioSession, ControlToShell, DataToBrain, DataToShell, IssueSession, Narration,
+        AudioSession, CAPABILITY_LEN, ControlToBrain, Hello, Incarnation, IssueSession,
     };
-    use kumochi_protocol::message::{CAPABILITY_LEN, ControlToBrain, Hello, Incarnation};
+    #[cfg(windows)]
+    use kumochi_protocol::message::{ControlToShell, DataToBrain, DataToShell, Narration};
     use kumochi_protocol::{BUILD_ID, Secret};
 
     use tokio::io::AsyncWriteExt as _;
@@ -490,9 +535,12 @@ mod tests {
     #[cfg(windows)]
     use tokio::time::timeout;
 
-    use super::{Identity, PeerAuth, Refusal, check_hello, require_session_placeholder};
+    use super::{
+        Identity, PeerAuth, Refusal, check_hello, require_session_placeholder, startup_hello,
+    };
     #[cfg(windows)]
     use super::{Pipes, Session, SessionError};
+    use crate::runtime::PairStart;
     #[cfg(windows)]
     use crate::tap::Tap;
     #[cfg(windows)]
@@ -510,6 +558,46 @@ mod tests {
         Hello {
             build_id: build.to_owned(),
             capability: Secret::new([byte; CAPABILITY_LEN]),
+        }
+    }
+
+    #[test]
+    fn re_pair_names_the_last_authenticated_queued_pair() {
+        let previous = IssueSession {
+            incarnation: Incarnation(1),
+            epoch: 7,
+        };
+        let hello = hello(1, BUILD_ID);
+        let repair = ControlToBrain::QueuedAudioReconnect(Box::new(hello.clone()), previous);
+        for (greeting, last_queued, start) in [
+            (
+                ControlToBrain::QueuedHello(hello.clone()),
+                Some(previous),
+                PairStart::Ordinary,
+            ),
+            (repair.clone(), Some(previous), PairStart::AudioRepair),
+            (repair.clone(), None, PairStart::Ordinary),
+            (
+                repair.clone(),
+                Some(IssueSession {
+                    epoch: 8,
+                    ..previous
+                }),
+                PairStart::Ordinary,
+            ),
+            (
+                repair,
+                Some(IssueSession {
+                    incarnation: Incarnation(2),
+                    ..previous
+                }),
+                PairStart::Ordinary,
+            ),
+        ] {
+            assert_eq!(
+                startup_hello(greeting, last_queued).unwrap(),
+                (hello.clone(), AudioSession::QueuedRequired, start)
+            );
         }
     }
 
@@ -605,6 +693,7 @@ mod tests {
                 session: 0,
                 control,
                 data,
+                last_queued: None,
             };
             let peer = async {
                 let welcomed = request_audio(&mut peer_control, control_mode).await;
@@ -787,6 +876,7 @@ mod tests {
                 session: 0,
                 control,
                 data,
+                last_queued: None,
             };
             let peer = async {
                 request_audio(&mut peer_control, AudioSession::QueuedRequired).await;
@@ -945,6 +1035,7 @@ mod tests {
             session: 0,
             control,
             data,
+            last_queued: None,
         };
         let mut id = identity();
         id.shell_image = std::env::current_exe().expect("test executable");

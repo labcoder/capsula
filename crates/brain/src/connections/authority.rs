@@ -4,6 +4,11 @@
 //! name can hide a credential but never authorize one.
 
 pub(crate) mod io;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "reconnect admission has no production ingress")
+)]
+pub(super) mod repair;
 #[cfg(test)]
 mod tests;
 
@@ -31,6 +36,16 @@ CREATE TABLE \"heads\" (
     revision INTEGER NOT NULL CHECK (revision >= 0)
 ) STRICT;
 INSERT INTO heads (kind, revision) VALUES ('host', 0), ('chatgpt', 0), ('revoke', 0), ('anthropic', 0), ('github', 0);
+CREATE TABLE control (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    lifetime INTEGER NOT NULL CHECK (lifetime >= 0),
+    marker TEXT NOT NULL,
+    legacy_deleted_in INTEGER,
+    legacy_done INTEGER NOT NULL DEFAULT 0 CHECK (legacy_done IN (0, 1))
+) STRICT;
+";
+
+const GENERATIONS: &str = "
 CREATE TABLE generations (
     generation BLOB NOT NULL UNIQUE CHECK (length(generation) = 16),
     kind TEXT NOT NULL REFERENCES heads (kind),
@@ -44,13 +59,6 @@ CREATE TABLE generations (
 CREATE UNIQUE INDEX one_active ON generations (kind) WHERE state = 'active';
 CREATE UNIQUE INDEX one_pending ON generations (kind) WHERE state = 'pending';
 CREATE INDEX removed ON generations (state) WHERE state = 'removed';
-CREATE TABLE control (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    lifetime INTEGER NOT NULL CHECK (lifetime >= 0),
-    marker TEXT NOT NULL,
-    legacy_deleted_in INTEGER,
-    legacy_done INTEGER NOT NULL DEFAULT 0 CHECK (legacy_done IN (0, 1))
-) STRICT;
 ";
 /// Version 1 to 2: the legacy cleanup's progress.
 const LEGACY: &str = "
@@ -113,6 +121,7 @@ pub(crate) enum Kind {
     Revocations,
     AnthropicKey,
     GitHub,
+    Repair,
 }
 
 impl Kind {
@@ -123,6 +132,7 @@ impl Kind {
             Self::Revocations => "revoke",
             Self::AnthropicKey => "anthropic",
             Self::GitHub => "github",
+            Self::Repair => "repair",
         }
     }
 
@@ -133,6 +143,7 @@ impl Kind {
             Self::Revocations,
             Self::AnthropicKey,
             Self::GitHub,
+            Self::Repair,
         ]
         .into_iter()
         .find(|kind| kind.label() == label)
@@ -292,8 +303,12 @@ pub(crate) struct Retired {
 /// The open authority, held by the credential worker under its session lock.
 pub(crate) struct Authority {
     conn: Connection,
+    account_fenced: bool,
     /// This open's count; a sweep in a later one is what turns Removed into Swept.
     lifetime: i64,
+    /// Leaves the next refused repair-context COMMIT's transaction open, as a failed rollback would.
+    #[cfg(test)]
+    pub(in crate::connections) refuse_rollback: bool,
 }
 
 impl fmt::Debug for Authority {
@@ -331,6 +346,7 @@ impl Authority {
             match version {
                 0 => {
                     tx.execute_batch(SCHEMA)?;
+                    tx.execute_batch(GENERATIONS)?;
                     tx.execute(
                         "INSERT INTO control (id, lifetime, marker) VALUES (1, 0, ?1)",
                         [marker_json(SignOutMarker::default())?],
@@ -372,12 +388,31 @@ impl Authority {
         })();
         conn.pragma_update(None, "foreign_keys", true)?;
         let lifetime = opening?;
-        Ok(Self { conn, lifetime })
+        Ok(Self {
+            conn,
+            lifetime,
+            account_fenced: false,
+            #[cfg(test)]
+            refuse_rollback: false,
+        })
+    }
+
+    #[cfg(test)]
+    pub(in crate::connections) fn in_transaction(&self) -> bool {
+        !self.conn.is_autocommit()
+    }
+
+    fn ordinary(&self, kind: Kind) -> Result<(), AuthorityError> {
+        if kind == Kind::Repair || (kind == Kind::Account && self.account_fenced) {
+            return Err(AuthorityError::Conflict);
+        }
+        Ok(())
     }
 
     /// # Errors
     /// Fails on a SQLite failure or a missing or invalid row.
     pub(crate) fn current(&self, kind: Kind) -> Result<Current, AuthorityError> {
+        self.ordinary(kind)?;
         current(&self.conn, kind)
     }
 
@@ -385,6 +420,7 @@ impl Authority {
         &self,
         kind: Kind,
     ) -> Result<(u64, Result<Option<ActiveRef>, AuthorityError>), AuthorityError> {
+        self.ordinary(kind)?;
         observe(&self.conn, kind)
     }
 
@@ -399,6 +435,7 @@ impl Authority {
         expected: u64,
         len: usize,
     ) -> Result<WritePlan, AuthorityError> {
+        self.ordinary(kind)?;
         let layout = Layout::for_len(len)?;
         let (chunks, bytes) = layout.sql()?;
         let generation = Generation::fresh()?;
@@ -437,42 +474,17 @@ impl Authority {
         marker: Option<SignOutMarker>,
     ) -> Result<(ActiveRef, u64), AuthorityError> {
         let plan = verified.into_plan();
+        self.ordinary(plan.kind)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let pending = tx
-            .query_row(
-                "SELECT 1 FROM generations WHERE generation = ?1 AND kind = ?2 AND state = 'pending'",
-                params![plan.generation.0.as_slice(), plan.kind.label()],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !pending || current(&tx, plan.kind)?.revision != plan.base {
-            return Err(AuthorityError::Conflict);
-        }
-        tx.execute(
-            "UPDATE generations SET state = 'removed' WHERE kind = ?1 AND state = 'active'",
-            [plan.kind.label()],
-        )?;
-        tx.execute(
-            "UPDATE generations SET state = 'active' WHERE generation = ?1",
-            [plan.generation.0.as_slice()],
-        )?;
-        bump(&tx, plan.kind)?;
+        let active = activate_plan(&tx, &plan)?;
         if let Some(marker) = marker {
             write_marker(&tx, marker)?;
         }
-        let revision = head_revision(&tx, plan.kind)?;
+        let revision = head_revision(&tx, active.kind)?;
         tx.commit()?;
-        Ok((
-            ActiveRef {
-                kind: plan.kind,
-                generation: plan.generation,
-                layout: plan.layout,
-            },
-            revision,
-        ))
+        Ok((active, revision))
     }
 
     /// Removes every Active and Pending generation of these kinds, for good, with the marker, if
@@ -486,6 +498,9 @@ impl Authority {
         marker: Option<SignOutMarker>,
         expected: Option<(Kind, u64)>,
     ) -> Result<(), AuthorityError> {
+        for kind in kinds {
+            self.ordinary(*kind)?;
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -514,20 +529,7 @@ impl Authority {
     /// # Errors
     /// Fails on a SQLite failure or a missing control row.
     pub(crate) fn marker(&self) -> Result<SignOutMarker, AuthorityError> {
-        let json: String = self
-            .conn
-            .query_row("SELECT marker FROM control WHERE id = 1", [], |row| {
-                row.get(0)
-            })
-            .optional()?
-            .ok_or(AuthorityError::Corrupt)?;
-        if json.len() > MARKER_BYTES {
-            return Ok(SignOutMarker::fail_closed());
-        }
-        Ok(match serde_json::from_str::<SignOutMarker>(&json) {
-            Ok(marker) if marker.valid() => marker,
-            _ => SignOutMarker::fail_closed(),
-        })
+        read_marker(&self.conn)
     }
 
     /// # Errors
@@ -664,6 +666,39 @@ impl Authority {
     }
 }
 
+fn activate_plan(conn: &Connection, plan: &WritePlan) -> Result<ActiveRef, AuthorityError> {
+    let pending = conn
+        .query_row(
+            "SELECT 1 FROM generations WHERE generation = ?1 AND kind = ?2 AND state = 'pending'",
+            params![plan.generation.0.as_slice(), plan.kind.label()],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !pending || current(conn, plan.kind)?.revision != plan.base {
+        return Err(AuthorityError::Conflict);
+    }
+    retire_active(conn, plan.kind)?;
+    conn.execute(
+        "UPDATE generations SET state = 'active' WHERE generation = ?1",
+        [plan.generation.0.as_slice()],
+    )?;
+    bump(conn, plan.kind)?;
+    Ok(ActiveRef {
+        kind: plan.kind,
+        generation: plan.generation,
+        layout: plan.layout,
+    })
+}
+
+fn retire_active(conn: &Connection, kind: Kind) -> Result<(), AuthorityError> {
+    conn.execute(
+        "UPDATE generations SET state = 'removed' WHERE kind = ?1 AND state = 'active'",
+        [kind.label()],
+    )?;
+    Ok(())
+}
+
 fn current(conn: &Connection, kind: Kind) -> Result<Current, AuthorityError> {
     let (revision, active) = observe(conn, kind)?;
     Ok(Current {
@@ -735,6 +770,22 @@ fn marker_json(marker: SignOutMarker) -> Result<String, AuthorityError> {
         return Err(AuthorityError::Bounds);
     }
     Ok(json)
+}
+
+fn read_marker(conn: &Connection) -> Result<SignOutMarker, AuthorityError> {
+    let json: String = conn
+        .query_row("SELECT marker FROM control WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .optional()?
+        .ok_or(AuthorityError::Corrupt)?;
+    if json.len() > MARKER_BYTES {
+        return Ok(SignOutMarker::fail_closed());
+    }
+    Ok(match serde_json::from_str::<SignOutMarker>(&json) {
+        Ok(marker) if marker.valid() => marker,
+        _ => SignOutMarker::fail_closed(),
+    })
 }
 
 fn write_marker(conn: &Connection, marker: SignOutMarker) -> Result<(), AuthorityError> {

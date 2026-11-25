@@ -1,13 +1,14 @@
 //! Protected model storage and Claude Code's private paths.
 
+#[cfg(windows)]
+pub(crate) use kumochi_storage::Untrusted;
+
 /// Why a path can't be trusted. It carries no path.
+#[cfg(not(windows))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[cfg_attr(
-    not(windows),
-    expect(
-        dead_code,
-        reason = "only a native adapter can classify a checked path"
-    )
+#[expect(
+    dead_code,
+    reason = "only a native adapter can classify a checked path"
 )]
 pub(crate) enum Untrusted {
     #[error("a path component doesn't exist")]
@@ -18,9 +19,20 @@ pub(crate) enum Untrusted {
     Unsafe,
     #[error("a path component can't be opened or read")]
     Io,
-    #[cfg(not(windows))]
     #[error("protected paths are unsupported on this platform")]
     Unsupported,
+}
+
+/// Whether `error` says this platform has no protected paths at all.
+#[cfg(windows)]
+pub(crate) fn is_unsupported(_: Untrusted) -> bool {
+    false
+}
+
+/// Whether `error` says this platform has no protected paths at all.
+#[cfg(not(windows))]
+pub(crate) fn is_unsupported(error: Untrusted) -> bool {
+    error == Untrusted::Unsupported
 }
 
 #[cfg(not(windows))]
@@ -38,12 +50,10 @@ mod unsupported {
         Err(Untrusted::Unsupported)
     }
 
-    #[cfg(test)]
     pub(crate) fn owner_only_dir(_: &Path) -> Result<File, Untrusted> {
         Err(Untrusted::Unsupported)
     }
 
-    #[cfg(test)]
     pub(crate) fn private_tree(_: &Path) -> Result<(), Untrusted> {
         Err(Untrusted::Unsupported)
     }
@@ -52,17 +62,14 @@ mod unsupported {
         Err(Untrusted::Unsupported)
     }
 
-    #[cfg(test)]
     pub(crate) fn marker(_: &Path) -> Result<Option<File>, Untrusted> {
         Err(Untrusted::Unsupported)
     }
 
-    #[cfg(test)]
     pub(crate) fn unmark(_: File) -> Result<(), Untrusted> {
         Err(Untrusted::Unsupported)
     }
 
-    #[cfg(test)]
     pub(crate) fn remove_tree(_: &Path) -> Result<(), Untrusted> {
         Err(Untrusted::Unsupported)
     }
@@ -75,7 +82,6 @@ mod unsupported {
         Err(Untrusted::Unsupported)
     }
 
-    #[cfg(test)]
     pub(crate) fn model_file(_: &Path) -> Result<File, Untrusted> {
         Err(Untrusted::Unsupported)
     }
@@ -155,11 +161,9 @@ mod unsupported {
     }
 }
 
-#[cfg(all(test, not(windows)))]
-pub(crate) use unsupported::model_file;
 #[cfg(not(windows))]
 pub(crate) use unsupported::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_model_creation, mark, model_final, open_model_write, publish_model, remove_model_tree,
-    validate_model_path,
+    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
+    private_tree, publish_model, remove_model_tree, remove_tree, unmark, validate_model_path,
 };

@@ -338,6 +338,11 @@ impl AccountState {
         account.tokens.as_ref().map(|tokens| tokens.connection)
     }
 
+    #[cfg(test)]
+    pub(crate) fn vault_load_pending(&self) -> bool {
+        self.loading
+    }
+
     /// Where the account stands now.
     #[must_use]
     pub fn view(&self) -> AccountView {

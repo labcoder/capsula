@@ -1,4 +1,5 @@
-//! File logging through `tracing`, to `%LOCALAPPDATA%\\<product>\\logs`, one file a day for a week.
+//! File logging through `tracing`, to the product's `logs` folder in the local application data
+//! root, one file a day for a week.
 //!
 //! Content (prompts, transcripts, screen text, images, tool arguments) is never logged, so nothing
 //! needs redacting after the fact. Secrets are [`kumochi_protocol::Secret`]s and print as `***`.
@@ -18,7 +19,7 @@ pub enum LoggingError {
     #[error("native file logging is unsupported on this platform")]
     Unsupported,
     /// The per-user data folder isn't known.
-    #[error("%LOCALAPPDATA% is not set to an absolute path")]
+    #[error("the local application data folder is unavailable")]
     NoLocalAppData,
     /// The log folder or file couldn't be created.
     #[error("can't open the log file")]
@@ -36,7 +37,7 @@ pub enum LoggingError {
 /// # Errors
 /// Fails when the log folder can't be found or created, or logging already started.
 pub fn init(prefix: &str) -> Result<(), LoggingError> {
-    let dir = crate::platform::logging_data_dir()?.join("logs");
+    let dir = crate::platform::logging_data_dir()?.join(kumochi_protocol::constants::LOGS_DIR);
     tracing::subscriber::set_global_default(file_subscriber(&dir, prefix)?)?;
     // The payload can hold any value an assertion printed, so only the location is logged.
     std::panic::set_hook(Box::new(|info| {

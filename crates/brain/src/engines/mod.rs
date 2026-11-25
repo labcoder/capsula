@@ -258,7 +258,6 @@ impl SendLease {
 
     /// Gives the lease up unsettled: its send may still be going out, so its sources stay held
     /// until its deadline fails it closed.
-    #[cfg(windows)]
     pub(crate) fn abandon(mut self) {
         self.inputs = None;
     }

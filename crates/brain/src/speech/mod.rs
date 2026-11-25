@@ -3,7 +3,7 @@
 //! the brain. See `docs/development/voice.md`, "The speech worker".
 
 mod supervisor;
-mod wire;
+use crate::platform::speech_wire as wire;
 #[cfg(windows)]
 pub(crate) mod worker;
 

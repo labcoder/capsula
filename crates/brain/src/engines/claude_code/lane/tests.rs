@@ -3,6 +3,7 @@
 //! held grandchild's appends a line to `starts.log` in the test's base folder, two above its
 //! working folder, so the log outlives a Disconnect: its arguments, a tab, then its whole
 //! environment.
+#![cfg(windows)]
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};

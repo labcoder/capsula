@@ -19,6 +19,8 @@ mod screen_gate;
 mod settings;
 mod store_thread;
 #[cfg(test)]
+pub(crate) use store_thread::{Attempt, Schedule};
+#[cfg(test)]
 mod tests;
 mod voice;
 
@@ -64,6 +66,9 @@ use account::Accounts;
 use controls::{Registration, read_control};
 use data::{DataQueue, Owner};
 use recovery::Recovery;
+#[cfg(test)]
+pub(crate) use store_thread::StoreThread;
+#[cfg(not(test))]
 use store_thread::StoreThread;
 
 /// Control frames queued for the shell (architecture v1 §3.2) [guess]. A full queue ends the
@@ -128,6 +133,12 @@ pub(crate) enum Ended {
     Broken(&'static str),
     /// The visible set didn't settle in time, so no `Scenes` was sent; the shell reconnects.
     Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PairStart {
+    Ordinary,
+    AudioRepair,
 }
 
 /// Whether a Quit's last clear committed.
@@ -249,6 +260,7 @@ pub(crate) enum Seen {
     /// The brain handled a control input and applied its effects.
     ControlApplied,
     FirstPcmExpired,
+    HoldPcmBuffered,
     /// A page reply landed while the data queue was full and waits for room.
     PageHeld,
     /// Another pipe ended first, and the control reader's grace began.
@@ -268,13 +280,18 @@ pub(crate) enum Seen {
 }
 
 impl Brain {
-    /// Starts the store thread. The store must already be recovered, `main_thread` is its main
+    /// Starts the store thread, which keeps `profile` until it ends. The store must already be recovered, `main_thread` is its main
     /// thread, and `high_water` is its highest thread and run ids.
     ///
     /// # Errors
     /// Fails when the store's thread can't be started.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the recovered store, its writer lock and what the store's scan read"
+    )]
     pub(crate) fn new(
         store: Store,
+        profile: std::sync::Arc<crate::platform::SessionLock>,
         main_thread: ThreadId,
         high_water: (ThreadId, RunId),
         scenes: Vec<SceneState>,
@@ -324,7 +341,7 @@ impl Brain {
         coordinator.tuning = config.run_tuning();
         coordinator.configure_drawing(config.drawing_tuning());
         let recovery_clears = coordinator.restore_drawings(drawing_scenes);
-        let store = StoreThread::spawn(store, inputs_tx.clone(), schedule)?;
+        let store = StoreThread::spawn(store, profile, inputs_tx.clone(), schedule)?;
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         let mut brain = Self {
             crashes: crate::relaunch::Crashes::default(),
@@ -450,6 +467,14 @@ impl Brain {
         if matches!(input, Input::Deleted { .. }) {
             self.observer.send(Seen::DeleteAnswered).ok();
         }
+    }
+
+    #[cfg(all(test, windows))]
+    pub(crate) fn take_store_close_receipt(&mut self) -> tokio::sync::oneshot::Receiver<()> {
+        self.store
+            .as_mut()
+            .expect("store started")
+            .take_close_receipt()
     }
 
     /// Shuts down after an accepted Quit, all by one absolute `deadline`: ends the current run
@@ -705,7 +730,7 @@ impl Brain {
         C: AsyncRead + AsyncWrite + Unpin,
         D: AsyncRead + AsyncWrite + Unpin,
     {
-        self.serve_with_profile(control, data, tap, audio, None)
+        self.serve_with_profile(control, data, tap, audio, None, PairStart::Ordinary)
             .await
     }
 
@@ -730,6 +755,7 @@ impl Brain {
         tap: &mut Tap,
         audio: AudioSession,
         text_metrics: Option<TextMetricsV1>,
+        start: PairStart,
     ) -> Ended
     where
         C: AsyncRead + AsyncWrite + Unpin,
@@ -770,6 +796,7 @@ impl Brain {
             let mut link = Link::new(&out_tx, &queue, &ready, &mut *tap);
             link.registration = registration;
             link.text_metrics = text_metrics;
+            link.start = start;
             let core = self.core(&mut controls, &mut turns, &mut pages, &room, link);
             tokio::select! {
                 ended = &mut control_reader => {
@@ -889,6 +916,12 @@ impl Brain {
             deadline: Instant::now() + scenes_wait(),
             settled: false,
         };
+        if tokio::time::timeout_at(barrier.deadline, self.settle_deferred_talk_back())
+            .await
+            .is_err()
+        {
+            return Ended::Unavailable;
+        }
         if let Err(ended) = self.open(&mut link) {
             return ended;
         }
@@ -1080,10 +1113,21 @@ impl Brain {
     /// A connection's first frames: the settings and the account, then anything owed from while
     /// no shell was connected.
     fn open(&mut self, link: &mut Link<'_, '_>) -> Result<(), Ended> {
+        if self
+            .voice
+            .as_mut()
+            .is_some_and(|voice| std::mem::take(&mut voice.deferred_talk_back))
+        {
+            self.voice_policy();
+        }
         link.queued_talk_back = link.registration.map(|_| self.config.view().talk_back);
         self.settings_now(link).map_err(|Full| Ended::Lost)?;
         self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
-        self.account_input(AccountInput::Connected, Some(link))
+        let connected = match link.start {
+            PairStart::Ordinary => AccountInput::Connected.into(),
+            PairStart::AudioRepair => account::Event::AudioRepaired,
+        };
+        self.account_input(connected, Some(link))
             .map_err(|Full| Ended::Lost)?;
         for frame in self.account.github_opened() {
             link.control(&frame).map_err(|Full| Ended::Lost)?;
@@ -1515,6 +1559,9 @@ impl Brain {
                     }
                 }
                 Effect::CancelEngine { run } => {
+                    for grant in self.coordinator.code_picture_grants(run) {
+                        grant.close();
+                    }
                     self.retire_key_run(run);
                     if self.round.as_ref().is_some_and(|(round, _)| *round == run) {
                         self.round = None;
@@ -1860,6 +1907,7 @@ struct Link<'a, 't> {
     ready: &'a Notify,
     tap: &'t mut Tap,
     registration: Option<&'a Cell<Registration>>,
+    start: PairStart,
     /// The pair's opening Talk-back choice, until its first change in either direction.
     queued_talk_back: Option<bool>,
     text_metrics: Option<TextMetricsV1>,
@@ -1882,6 +1930,7 @@ impl<'a, 't> Link<'a, 't> {
             ready,
             tap,
             registration: None,
+            start: PairStart::Ordinary,
             queued_talk_back: None,
             text_metrics: None,
             recovery: None,

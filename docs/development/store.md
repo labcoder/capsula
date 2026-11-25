@@ -1,7 +1,8 @@
 # The store
 
 The brain keeps threads, their events and runs in one SQLite file,
-`%LOCALAPPDATA%\<product>\kumochi.db`, through `rusqlite` with SQLite and FTS5 built in. Only the
+`<product>\kumochi.db` in the local application data root (`LOCALAPPDATA` in a release build, the
+admitted override or the Known Folder in Gate and debug builds; see [architecture](architecture.md)), through `rusqlite` with SQLite and FTS5 built in. Only the
 brain opens it. The code is `crates/brain/src/store/`.
 
 On macOS the default path is `<Application Support>/<product>/kumochi.db`, beside the
@@ -76,6 +77,36 @@ a reservation with no row behind it outlives a purge and a restart ([tools](tool
 Later slices add assets, sends and cleanup jobs, each as a
 new migration. Migrations are numbered by `PRAGMA user_version`, run forward only, one
 transaction each, and a brain refuses a file whose version is newer than it knows.
+
+The ordinary open migrates through version 11. A separate, explicit ChatGPT repair operation
+can establish a version 12 cutoff only with a still-locked replacement binding. The upgrade and
+immutable tag row commit together, taking the last issued thread and run IDs from SQLite's
+sequences, including deleted IDs. A ceiling below a surviving ID or a missing sequence for
+existing rows refuses establishment. History keeps one writer: the vault is bound once, when it
+is built, to the owner of the store ordinary startup opens, and Establish, its Check and every
+later confirmation are requests that owner serves on that store in order. No call takes a store,
+path or earlier result. Because the cutoff commits on the writer's own connection, a purge copy
+taken before it is stale and isn't swapped in. The purge's `VACUUM INTO` copy keeps every table,
+so the cutoff row (a tag and two IDs, no conversation content) carries over, and after a swap the
+Check reads the replacement file. A Check refuses an absent or invalid row for the expected tag
+or a connection still inside a transaction. Ordinary open never creates a cutoff or uses one to
+unlock a replacement. The binding is spent once a commit is attempted, or when the writer's
+answer is lost, so a lost row is never reseeded. Establish returns a receipt of the exact row it
+wrote. The credential authority marks the context established only when a fresh Check reads
+exactly that row, and each confirmation reads the row again. The production vault isn't bound
+to the store thread yet, so every request is refused there. The history and authority files
+share no installation binding, so nothing here compares one; that belongs to the local profile
+work. A byte-identical copy of the right file put in its place by a process running as the same
+user is outside this design's trust model and isn't detected.
+Earlier history stays available locally. A read that carries the established cutoff reads that
+row again in the same snapshot, refuses when it is missing, invalid or different, and keeps to
+it: a run that began before the cutoff is refused, and context, summaries, drawings, deletion
+notes, recall, titles and compaction see only threads created after it. A new run in an older
+thread sees only its own turn. The coordinator carries the cutoff on every read for the
+recovered connection and sends only bodies read to it ([runs](runs.md#availability)). Cutoff
+requests take no page-read stamp, but the vault learns the cutoff only after it commits, so a read
+sent once the coordinator knows it always finds the row. Nothing reports a recovered connection
+at startup yet, so the replacement stays unavailable.
 
 **Scenes** are events, so they need no migration. A run's first step writes `scene_begin`, whose
 event id is the `SceneId`; `AUTOINCREMENT` keeps it unique even after a deletion, and a
@@ -255,7 +286,11 @@ finish, then closes the reader, the helper and the store, in that order, so the 
 connection is the last to close; nothing blocks the caller meanwhile. It releases its own
 acknowledgement sender before signalling close completion, so that worker cannot keep a reply
 receiver open during subsequent purge-file cleanup. Close still does not wait for that cleanup,
-and other producers can keep a shared input channel open. If the store thread
+and other producers can keep a shared input channel open. The store thread holds a reference to
+the profile's writer lock (see [accounts](accounts.md)) until that cleanup ends, so a close the
+brain stopped waiting for, or a start that failed after the thread began, never releases the lock
+while the thread still has work on the store or its purge files. A test holds the thread after
+close and finds the lock still Busy with no other reference left. If the store thread
 panics, waiting reads fail and both side connections close for good.
 
 ## Deleting a thread
@@ -501,7 +536,8 @@ tests capture those warnings and isolate a corrupt scene from the other three. T
 32 MiB body limit is tested at exactly the limit and one byte over with individually valid
 bodies below 8 MiB, independently of the per-body limit.
 
-The brain opens the store and runs the recovery scan before it serves any shell:
+The brain opens the store only after it holds the profile's writer lock (see
+[accounts](accounts.md)), and runs the recovery scan before it serves any shell:
 
 - threads left `deleting` by a crash between the two transactions finish deleting. One that fails
   again is logged by id, stays hidden, and is retried at the next start, so it can't stop the brain;

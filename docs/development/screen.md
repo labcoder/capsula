@@ -165,7 +165,7 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   Windows uses QPC ticks. macOS uses continuous nanoseconds
   (`clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`), so native and Rosetta processes do not exchange
   architecture-dependent ticks. A suspend spends the grant. This supports only the ticket clock;
-  macOS still refuses native capture and doesn't read shell input age. Verify suspend and resume
+  macOS doesn't capture yet and doesn't read shell input age. Verify suspend and resume
   before enabling capture. The producer passes the original stamp and its reader with the local
   bound to both adapter methods. Windows uses the conservative projection on its QPC-backed
   `Instant` for the start and wait checks, without changing the draw/exclusion clock. Each retry
@@ -198,8 +198,49 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   answers `Fault` and exits, so no capture can keep running. A lost device
   (`DXGI_ERROR_DEVICE_REMOVED`, `_RESET` or `_HUNG`) retires the worker the same way, so the next
   ticket gets a fresh device. Foreign failures are HRESULT codes.
-- **macOS.** `SCScreenshotManager` with `desktopIndependentWindow`, not built yet; other platforms
-  refuse every capture as `Unsupported`.
+- **macOS.** The capturer opens on macOS 14 and later, after capability checks only: the OS version
+  first, then ScreenCaptureKit, loaded at runtime with a handle kept for the process's life, then
+  the classes and selectors its captures use. Anything missing refuses `Unsupported`. The brain
+  doesn't link ScreenCaptureKit, so it still launches on older systems. Opening reads no grant and
+  captures nothing. Display capture is built but not active, because the Mac worker route stays
+  unavailable; window capture isn't built, so it refuses with the trait's defaults. Other
+  platforms refuse every capture as `Unsupported`.
+- **macOS display capture.** It maps every active display onto physical pixels as Quartz points
+  times one integer scale, so DPI is 96 times that scale. Mirroring, a fractional or mixed scale,
+  a fractional rectangle, overlapping displays, or a point on no display refuses `Layout`. In
+  order, it checks the nonzero stamp, the display's size (`Invalid` over 8,192 pixels, before
+  anything is allocated), the shell's process (`Excluded` when it's unknown), then the deadline
+  and the grant (`CGPreflightScreenCaptureAccess`, which never prompts; `NotPermitted` when it
+  says no). The query for shareable content is prepared first and admitted on the deadline right
+  before it's sent. All ScreenCaptureKit work happens inside that query's callback: a stop check,
+  the display matched by ID and its whole frame in points, an exact filter leaving out the one
+  application with the shell's process (`Excluded` when it can't be built), then the grant. The
+  screenshot is prepared, and only then do the deadline check and the `Live` to `Committed`
+  exchange run, right before `captureImage`. That orders Kumochi's own steps; it can't control
+  when the system runs the request. Native work on each side runs inside an autorelease pool.
+  The screenshot's completion and the content callback each finish one phase, and only the
+  second sends the capture thread its one result: an owned `CGImage` or a numeric code.
+  ScreenCaptureKit's user-declined error, matched on its domain and code, refuses
+  `NotPermitted`; no error text is kept. The capture thread waits in slices of at most 20 ms,
+  checking the deadline, whose stamp keeps counting through sleep, after each slice and on
+  every result. At expiry it moves `Live` to `Stopped` if nothing is committed, then waits up to
+  200 ms on the continuous clock for the chain to finish, and takes a result only while that
+  clock still reads inside the grace. Otherwise it answers `Retire`. After the image arrives,
+  the same display must still be under the point with the same bounds, or it refuses
+  `DisplayChanged`, and the deadline is checked once more right before drawing. The image is checked for size and format, then the frame is cleared and the
+  image copied over all of it as premultiplied BGRA. Drawing reports no failure, so only those
+  checks can refuse. The seal accepts only the display that capture sampled, still at the same
+  bounds and DPI, so a same-sized display moved into its place doesn't pass.
+- **Keeping Kumochi out of a display frame differs by platform.** On Windows the frame must be
+  drawn after the exclusion stamp, as described under "Display under a point". On macOS (built,
+  not active) the stamp only has to be nonzero, and the frame comes through a content filter that
+  excludes exactly the application whose process is the connected shell's. When that process can't
+  be identified or the filter can't be built exactly, the capture refuses `Excluded` before any
+  screenshot. The screenshot is requested only after the stamp, but Apple's documentation for
+  `captureImage(contentFilter:configuration:completionHandler:)` says only that it captures a
+  single frame from a stream as an image. It doesn't say when the frame is sampled, so request
+  order alone doesn't prove the frame was composed after the stamp; the native gate has to check
+  that.
 
 ```mermaid
 sequenceDiagram
@@ -534,9 +575,12 @@ worker that can't start doesn't stop the brain: screen holds get no client, so t
 `Unsupported` for the session, and voice holds go on as before. Only a screen hold's task calls
 the client. It speaks to the worker through the
 shared supervisor as its own kind, `Holds`, with the screen worker's argument and caps, the
-actor's messages and the zeroing reply reader. The image gate takes the platform's
-`WINDOW_CAPTURE` as well as the client, so off Windows it reads `Unsupported` even though the
-client starts.
+actor's messages and the zeroing reply reader. The image gate also takes what the platform
+captures, one flag per kind of hold: a window for a window hold, a display for a screen hold.
+Both default to the platform's `WINDOW_CAPTURE`, so Windows offers both and every other platform
+reads `Unsupported`. A platform given display capture alone offers
+screen holds under the same model and user checks, while the window gate stays `Unsupported` and
+the hold's task refuses a window aim.
 
 The gate itself is `runtime/screen_gate.rs`, one for every route. `ChatGPT` reads its
 account's catalog. The direct Anthropic key route ships with its picture switch on, but the
@@ -551,8 +595,8 @@ already finished can still complete normally (engines.md, "A held run's screen")
 Whether this system can capture a window is the worker's answer, not the brain's. The worker
 asks when it opens its capturer, on a hold's first capture, and a no comes back as the
 `Unsupported` refusal. That hold ends `NotReady`, with no image and no line beyond what
-`NotReady` gives. The brain then clears its window capture flag until the brain restarts, across
-shell reconnects, and sends the gate once as `Off(Unsupported)`. Nothing turns the flag back on,
+`NotReady` gives. The brain then clears both capture flags until the brain restarts, across
+shell reconnects, and sends the gate once as `Off(Unsupported)`. Nothing turns a flag back on,
 so a settings write, a catalog change or a worker restart leaves it off. Until that first hold
 the gate reads `On` on a system that can't capture. The brain doesn't ask itself because its
 start-up runs on the process's main thread (a current-thread runtime under `block_on`): a WinRT
@@ -652,7 +696,7 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 
 | Class | Worker answers |
 |---|---|
-| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition or release too old for its lease, a refused release, or still `Waiting` or `Armed` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
+| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `NotPermitted` and `Layout` (which don't, since a grant or a display change can come later), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition or release too old for its lease, a refused release, or still `Waiting` or `Armed` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
 | `NothingThere` | `NoWindow` |
 | `CantShare` | `Minimized`, `Cloaked`, `Elevated`, `Protected`, `Excluded` |
 | `Unreadable` | `Ambiguous`, and `Unmasked`, which no worker sends now |

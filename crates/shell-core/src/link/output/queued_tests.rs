@@ -2,14 +2,19 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::message::{GestureId, RunId, RunOrigin, SceneId, SegmentId, StepRef};
+use kumochi_protocol::message::{
+    AssistantName, DockPosition, GestureId, MaxFrameRate, OnboardingStep, RunId, RunOrigin,
+    SceneId, SegmentId, SettingsView, StepRef, SttUnload, ThreadId,
+};
 
 use super::super::{Output, Retirement};
 use super::{
     Active, Delivery, LOCAL_QUIET, NarratedReservation, OutputOwner, Queued, RECEIPT_QUEUED,
     StopOrigin,
 };
-use crate::link::{HANDSHAKE_TIMEOUT, Shared, narrated::Narrated, queued::MetadataFrame};
+use crate::link::{
+    Attendance, HANDSHAKE_TIMEOUT, Shared, narrated::Narrated, queued::MetadataFrame,
+};
 use crate::speaker::conductor::Assignment;
 
 /// A registered, acknowledged Plain pair with Talk-back on and Show Screen off.
@@ -26,6 +31,118 @@ fn speaking(deadline: Instant) -> Queued {
     owner.talk_back = Some(true);
     owner.show_screen = Some(false);
     owner
+}
+
+fn silent_owner() -> OutputOwner {
+    let owner = OutputOwner::default();
+    assert!(
+        owner
+            .begin_queued(
+                7,
+                Arc::new(|| {}),
+                Instant::now() + Duration::from_secs(5),
+                || false,
+                |deadline| {
+                    let mut pair = speaking(deadline);
+                    pair.talk_back = Some(false);
+                    pair
+                },
+            )
+            .is_some()
+    );
+    owner
+}
+
+fn settings_modes() -> (SettingsView, SettingsView) {
+    let off = SettingsView {
+        assistant_name: AssistantName::new("Cloud").unwrap(),
+        user_name: None,
+        onboarded: true,
+        main_thread: ThreadId(1),
+        max_frame_rate: MaxFrameRate::AUTOMATIC,
+        default_model: None,
+        dock_position: DockPosition::TopCenter,
+        show_in_taskbar: false,
+        talk_back: false,
+        stt_unload: SttUnload::Kept,
+        hold_to_talk: true,
+        onboarding_from: OnboardingStep::Welcome,
+        screen_holds: true,
+        show_screen: false,
+    };
+    let on = SettingsView {
+        talk_back: true,
+        ..off.clone()
+    };
+    (off, on)
+}
+
+#[test]
+fn the_install_notice_neither_switches_modes_nor_answers_an_explicit_change() {
+    let owner = silent_owner();
+    let (off, on) = settings_modes();
+    let (out, frames) = async_channel::bounded(1);
+    assert!(!owner.defer_spoken_replies(6, &on));
+    assert!(owner.defer_spoken_replies(7, &on));
+    assert!(!owner.defer_spoken_replies(7, &on));
+    assert!(!owner.queued_speaking(7));
+    let inhibit = owner
+        .acquire(GestureId(1))
+        .expect("no spoken reply to stop");
+    assert!(
+        owner.queued_turn(7, Some(1), || true),
+        "the registered silent mode is unchanged"
+    );
+    owner.queued_refused(7, 1);
+    assert_eq!(owner.retire(inhibit, Retirement::NoMic), Ok(()));
+    assert_eq!(owner.switch_talk_back(7, false, || true), Ok(()));
+    assert_eq!(owner.register_queued(7, &on, false, &out), Ok(()));
+    assert!(
+        !owner.queued_turn(7, Some(2), || true),
+        "still waiting for the Off answer"
+    );
+    assert_eq!(owner.register_queued(7, &off, true, &out), Ok(()));
+    assert!(owner.queued_turn(7, Some(2), || true));
+    assert!(
+        !owner.defer_spoken_replies(7, &on),
+        "later Off can't be undone by replay"
+    );
+    assert_eq!(
+        owner.register_queued(7, &on, false, &out),
+        Err(Attendance::Lost)
+    );
+    assert!(frames.is_empty(), "registration was never offered again");
+}
+
+#[test]
+fn an_explicit_on_racing_the_default_reconnects_only_if_written() {
+    for written in [false, true] {
+        let owner = silent_owner();
+        let (_, on) = settings_modes();
+        let (out, frames) = async_channel::bounded(1);
+        assert_eq!(owner.switch_talk_back(7, true, || true), Ok(()));
+        assert!(owner.defer_spoken_replies(7, &on));
+        assert!(!owner.queued_speaking(7));
+        if written {
+            owner.refuse_talk_back(6);
+        } else {
+            owner.refuse_talk_back(7);
+        }
+        assert!(
+            !owner.queued_turn(7, Some(1), || true),
+            "the setting still owes its own answer"
+        );
+        if written {
+            assert_eq!(
+                owner.register_queued(7, &on, true, &out),
+                Err(Attendance::TalkBackChanged)
+            );
+        } else {
+            assert_eq!(owner.register_queued(7, &on, true, &out), Ok(()));
+            assert!(owner.queued_turn(7, Some(1), || true));
+        }
+        assert!(frames.is_empty());
+    }
 }
 
 #[test]

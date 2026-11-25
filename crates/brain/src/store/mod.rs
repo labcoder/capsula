@@ -34,6 +34,7 @@ mod purge;
 #[cfg(test)]
 mod rearm_tests;
 pub(crate) mod recall;
+mod recovered_context;
 mod rounds;
 mod scenes;
 mod schema;
@@ -60,6 +61,7 @@ pub(crate) use pages::Pages;
 pub use purge::{Cancel, Copied, Leftovers, Owed, Swap};
 #[cfg(test)]
 pub(crate) use purge::{Pause, Pauses, Point};
+pub use recovered_context::Boundary;
 pub(crate) use scenes::cleared_body;
 pub use scenes::{SceneState, SceneTarget};
 pub use side::Side;
@@ -106,6 +108,9 @@ pub enum StoreError {
     /// A replay read exhausted its budget; no partial context is usable.
     #[error("the history read exhausted its budget")]
     RecallBudget,
+    /// The replacement's required history boundary is missing or invalid.
+    #[error("the replacement history cutoff is unavailable")]
+    RecoveryContext,
 
     /// A drawing write or recovery failed; no database or drawing content is exposed.
     #[error("can't store or recover the drawing")]
@@ -316,7 +321,7 @@ pub struct Store {
 /// The store's file, in the data folder.
 ///
 /// # Errors
-/// Fails without an absolute `%LOCALAPPDATA%` on Windows or an OS Application Support
+/// Fails without a local application data root on Windows or an OS Application Support
 /// candidate on macOS.
 /// Other builds without a data folder also fail.
 pub fn default_path() -> Result<PathBuf, StoreError> {
@@ -326,6 +331,11 @@ pub fn default_path() -> Result<PathBuf, StoreError> {
 }
 
 impl Store {
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     /// Opens or creates the store at `path` and brings its schema up to date.
     ///
     /// # Errors

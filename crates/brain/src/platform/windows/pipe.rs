@@ -11,35 +11,46 @@ use std::path::{Path, PathBuf};
 use tokio::net::windows::named_pipe::{
     ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
 };
-use windows_sys::Win32::Foundation::{
-    ERROR_SUCCESS, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
-};
+use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
+    ConvertSecurityDescriptorToStringSecurityDescriptorW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
     SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    DACL_SECURITY_INFORMATION, GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
-    TOKEN_QUERY, TOKEN_USER, TokenUser,
+    DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
 };
 use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetProcessId, OpenProcess, OpenProcessToken, PROCESS_ACCESS_RIGHTS,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    QueryFullProcessImageNameW, WaitForSingleObject,
+    GetProcessId, OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
+    WaitForSingleObject,
 };
 
-use crate::platform::{ClientRefused, Instance, Job};
+use kumochi_storage::user_sid;
+
+use crate::platform::{BridgeConnectError, ClientRefused, Instance, Job};
 
 /// The brain's end of a pipe.
 pub type PipeServer = NamedPipeServer;
 
 pub(crate) type PipeClient = NamedPipeClient;
 
-pub(crate) fn open_pipe(name: &str) -> io::Result<PipeClient> {
-    ClientOptions::new().open(name)
+pub(crate) fn open_bridge(name: &str, expected: &Path) -> Result<PipeClient, BridgeConnectError> {
+    let pipe = ClientOptions::new().open(name)?;
+    let server = server_image(&pipe)?;
+    if !server
+        .as_os_str()
+        .eq_ignore_ascii_case(expected.as_os_str())
+    {
+        return Err(BridgeConnectError::NotOurBrain);
+    }
+    Ok(pipe)
+}
+
+pub(crate) struct BridgePeer {
+    _process: OwnedHandle,
 }
 
 /// Holds the checked client process for the lifetime of its bridge session.
@@ -47,7 +58,7 @@ pub(crate) fn bridge_peer(
     server: &PipeServer,
     job: &Job,
     expected: &Path,
-) -> Result<OwnedHandle, ClientRefused> {
+) -> Result<BridgePeer, ClientRefused> {
     let query = |_| ClientRefused::Query;
     let process = client_process(server).map_err(query)?;
     if has_exited(process.as_handle()).map_err(query)? {
@@ -60,7 +71,7 @@ pub(crate) fn bridge_peer(
     if !job.contains(process.as_handle()).map_err(query)? {
         return Err(ClientRefused::NotInJob);
     }
-    Ok(process)
+    Ok(BridgePeer { _process: process })
 }
 
 /// A connected owner-only pipe and its client, under a name no running brain uses, for tests
@@ -198,66 +209,6 @@ fn descriptor_sddl(descriptor: PSECURITY_DESCRIPTOR) -> io::Result<String> {
     // SAFETY: `text` came from the conversion above (or is null) and is no longer referenced.
     unsafe { LocalFree(text.cast()) };
     result
-}
-
-/// The SID of the user this process runs as, in string form (`S-1-5-21-…`).
-pub(super) fn user_sid() -> io::Result<String> {
-    let mut token: HANDLE = std::ptr::null_mut();
-    // SAFETY: plain call returning a pseudo-handle that needs no closing.
-    let process = unsafe { GetCurrentProcess() };
-    // SAFETY: `token` receives a handle owned below.
-    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &raw mut token) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `token` is a fresh handle owned only here.
-    let token = unsafe { OwnedHandle::from_raw_handle(token) };
-    let mut len = 0u32;
-    // SAFETY: the sizing call writes only `len`; its expected failure is ignored.
-    unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenUser,
-            std::ptr::null_mut(),
-            0,
-            &raw mut len,
-        )
-    };
-    // u64s, so the TOKEN_USER at the start is aligned.
-    let mut buffer = vec![0u64; usize::try_from(len).expect("u32 fits in usize").div_ceil(8)];
-    // SAFETY: `buffer` holds at least `len` writable bytes.
-    let ok = unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenUser,
-            buffer.as_mut_ptr().cast(),
-            len,
-            &raw mut len,
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: GetTokenInformation wrote a TOKEN_USER at the start of the aligned buffer.
-    let sid = unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-    let mut text: *mut u16 = std::ptr::null_mut();
-    // SAFETY: `sid` points into `buffer`, alive here; on success `text` is LocalAlloc'd.
-    if unsafe { ConvertSidToStringSidW(sid, &raw mut text) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SID strings are under 200 characters; the bound only stops a runaway scan.
-    let len = (0..256)
-        .take_while(|&i| {
-            // SAFETY: `text` is NUL-terminated and `i` never passes the NUL.
-            let unit = unsafe { text.add(i) };
-            // SAFETY: as above.
-            unsafe { *unit != 0 }
-        })
-        .count();
-    // SAFETY: the `len` units before the NUL are initialized.
-    let sid = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) });
-    // SAFETY: `text` came from ConvertSidToStringSidW and is no longer referenced.
-    unsafe { LocalFree(text.cast()) };
-    Ok(sid)
 }
 
 /// Accepts a protected DACL with exactly one allow entry, for `user`.
@@ -525,5 +476,58 @@ mod tests {
         assert_eq!(crate::platform::connected_shell_pid(), std::process::id());
         drop(registration);
         assert_eq!(crate::platform::connected_shell_pid(), 0);
+    }
+
+    const CAPTURE_OWNER_ARGS: [&str; 4] = [
+        "--exact",
+        "platform::windows::pipe::tests::capture_owner_entry",
+        "--ignored",
+        "--test-threads=1",
+    ];
+    const CAPTURE_OWNER_EXIT: i32 = 17;
+
+    #[test]
+    fn retained_capture_owner_handle_reports_that_exact_childs_exit() {
+        use crate::platform::{Job, Launch, ShellProcess, Stdio, spawn};
+        use crate::test_support::Scratch;
+        use std::time::Duration;
+
+        let scratch = Scratch::new("hold-exit-witness");
+        std::fs::create_dir(scratch.dir()).expect("create the child's scratch folder");
+        let job = Job::new().expect("contain the owned child");
+        let mut child = spawn(&Launch {
+            exe: &std::env::current_exe().unwrap(),
+            args: &CAPTURE_OWNER_ARGS.map(Into::into),
+            cwd: scratch.dir(),
+            env: &[],
+            stdio: Stdio::Piped,
+            jobs: &[&job],
+        })
+        .expect("start the synthetic capture owner");
+        let pid = child.process.pid();
+        let handle = super::open_process(
+            pid,
+            super::PROCESS_QUERY_LIMITED_INFORMATION | super::PROCESS_SYNCHRONIZE,
+        )
+        .expect("retain the live child's waitable handle");
+        let owner = ShellProcess::new(pid, handle);
+        assert!(!owner.exited().unwrap(), "the exact owner is still alive");
+        drop(child.stdin.take().unwrap());
+        assert!(child.process.exits_within(Duration::from_secs(5)).unwrap());
+        assert_eq!(
+            child.process.exit_code().unwrap(),
+            CAPTURE_OWNER_EXIT.cast_unsigned()
+        );
+        assert!(owner.exited().unwrap(), "the retained owner witnessed exit");
+    }
+
+    #[test]
+    #[ignore = "entry for the owned child; not a standalone test"]
+    fn capture_owner_entry() {
+        if std::env::args_os().skip(1).eq(CAPTURE_OWNER_ARGS) {
+            use std::io::Read as _;
+            assert_eq!(std::io::stdin().read(&mut [0]).unwrap(), 0);
+            std::process::exit(CAPTURE_OWNER_EXIT);
+        }
     }
 }

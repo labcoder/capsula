@@ -282,9 +282,11 @@ sequenceDiagram
 
 ### Checked HTTP and roots
 
-`connections::http_client::build()` is the only production constructor. It loads the current
-user's public Windows ROOT store through `platform::trust_roots`, which includes machine-supplied
-roots. The loader keeps only time-valid roots allowed for server authentication or all uses.
+`connections::http_client::build()` is the account client's only production constructor.
+It gets its TLS config from `platform::native_client_tls`, the factory shared with the direct
+model connectors and voice downloader. On Windows the factory still loads the current user's
+public ROOT store through `platform::trust_roots`, including machine-supplied roots. The loader
+keeps only time-valid roots allowed for server authentication or all uses.
 An unrestricted-use result requires a successful EKU call, zero identifiers and immediately
 captured `CRYPT_E_NOT_FOUND`; unreadable usage isn't treated as unrestricted. Enumeration owns
 one context at a time and transfers that ownership back to the next Win32 enumeration call.
@@ -402,7 +404,7 @@ vault and its session lock; the listener and the exchange are tokio tasks; every
 on one channel the core loop polls. The startup load runs there too, and the brain waits for it
 before it stores the instance capability or serves anything. On
 quit or close, a refresh already out runs to its end and its save, for up to `REFRESH_WAIT`
-(5 s [guess]), with the session lock still held; past that the lock is released and the token
+(5 s [guess]), with the session lock still held; past that the vault is dropped and the token
 stays marked as sent, so the next start never sends it again. Then it waits for the job already dispatched, past the quit deadline if it must, before the instance
 capability is deleted. The runtime delivers exactly one `Vault` result per dispatched job (the
 credentials thread sends one per job it runs) and one `Exchanged` per sent request (the exchange
@@ -511,7 +513,8 @@ recorded unknown instead, so the next sign-out's notice is unconfirmed.
 - A refused registration or pending-flag write ends the attempt and offers a new sign-in, since
   Retry would have nothing to rerun.
 - A Busy session lock at startup is retried 5 times, 250 ms apart [guess]; after that, on each
-  op and each connection.
+  op and each connection. Only a vault that takes its own lock, such as a dev diagnostic's,
+  can meet Busy: the brain's credentials thread uses the lock the brain already holds.
 - A list entry stamped on a clock before 1970 gets `added_at = u64::MAX`, so age-out never
   evicts it early.
 
@@ -740,7 +743,10 @@ describes the recorded shape behind both decoders.
 
 `runtime::Accounts` owns the catalog, in memory only. It reads when the account becomes usable
 (`SignedIn`, plan `Enabled`, no recovery but Retry), and again on `Retry` or a new connection
-while no read has succeeded. One read runs at a time. The catalog has an epoch that moves when the
+while no read has succeeded. A queued audio re-pair for a Talk-back change only replays the
+ChatGPT account view and the cached catalog or its last failure. It doesn't reload a Busy vault
+or start discovery, so the user can still Retry without the audio switch doing it for them.
+One read runs at a time. The catalog has an epoch that moves when the
 account stops being usable: the read out is cancelled, whether it waits for the bearer, builds
 its client or awaits the answer, and the list is cleared; the shell then hears an empty
 `Models`. Closing cancels it too. Cancelling drops only its bearer wait, never a refresh that
@@ -823,7 +829,23 @@ it is dropped.
 
 `platform::SessionLock` guards the empty `%LOCALAPPDATA%\<DATA_DIR>\session.lock` using
 `File::try_lock`; only contention returns typed `Busy`, and dropping the guard releases it.
-`platform::session_lock_path()` uses the Dev data folder in debug builds. Startup wiring is separate.
+`platform::session_lock_path()` uses the Dev data folder in debug builds.
+
+The lock is the profile's one writer lock, for the store (`kumochi.db`) and the credential
+authority alike. The brain takes it after its pipes and before it opens the store, and holds it
+for its whole run. The store thread and the credentials thread each keep a reference to that same
+lock: the store thread until its last close and purge cleanup end, past any wait the brain gave up
+on, and the credentials thread by opening its vault under it (`Vault::open_held`) instead of
+taking its own. So a second brain of the same Windows user in
+another session, whose pipes don't collide, stops at the lock before it touches the store. It
+tries to take the lock before it opens or creates the store and, refused, logs only that another
+session is using the profile and exits with code 75. Only brains with this lock are excluded: an earlier build opens
+the store before it takes any lock. The shell starts a brain that doesn't answer once per
+connection attempt (it starts another within the attempt only after a brain of a different build
+exits), and gives up after `CONNECT_TIMEOUT` (10 s), then waits for Retry, so a refused brain is
+never restarted in a loop; it shows the same can't-reach-the-brain
+state as any other failed start. Dev diagnostics run as their own processes and still take
+their own lock, so they're Busy while a brain runs.
 `SessionLock::try_acquire_existing` locks an existing empty session file without creating it or
 its parent, and only contention is Busy. On Windows it opens the leaf itself, never a reparse
 target, sharing read and write so a stock opener still meets the lock, but not delete, so the name
@@ -930,6 +952,35 @@ The owner can remove stray entries matching those exact test patterns in Windows
 Manager; there is no automatic enumeration or cleanup of other test runs.
 
 ## Credential authority
+
+The dormant ChatGPT repair transaction admits only the exact current registration with a
+missing chunk, a readable existing host, and no outstanding sign-out, sweep, or revocation
+work. The account worker's vault lock spans the generation re-read and admission. An explicit
+claim moves the authority to version 4, fences the old account, and records the attempt
+without replacing the saved registration or writing any credential names. Cancelling that
+exact attempt clears its unspent slot, not the fence; a stale Cancel cannot clear a newer
+attempt. A confirmed attempt can charge one exchange only after the request passes local
+validation and the issued client reads back under a dedicated repair generation. Dropping
+the vault or attempt before the dispatch claim suppresses the call. Cancelling after dispatch
+seals the attempt against promotion, but the same vault and attempt can still drain its receipt.
+If either owner goes away after the claim, the persisted charge is unresolved and stays fenced.
+The drain can settle once: a known refresh handle is escrowed even if the response is
+unusable, while a missing receipt or a refused write keeps the attempt fenced. No retry or
+ordinary account save follows. A still-live, settled receipt can be verified against the
+issued client and nonce using the standard signed-identity verifier. The authority checks
+the same escrow, predecessor, host, and staged successor before it atomically retires the
+predecessor and escrow and records the exact successor/tag as locked Pending. A failed commit
+can count as a binding only if the transaction has ended and the exact binding reads back.
+This transaction does not open history, establish a context, or authorize use. A later history
+cutoff and exact Check are required. The still-locked binding is also the one-shot proof for the
+separate [history cutoff](store.md), written only by the profile's one history writer, which
+the vault is bound to when it is built. Only that cutoff's receipt, matched by the writer's
+fresh Check, marks the context established, recording its tag and thread/run bounds beside the
+successor. Confirming it later has the writer re-read the row, which a history purge carries
+over; a missing, changed or unreadable row leaves the successor locked, and nothing mints a
+replacement cutoff. A refused establishment COMMIT is rolled back, and confirmation reads
+only committed authority state, so a connection still inside a transaction is never established. Only scripted tests
+call this path; ordinary startup still refuses version 4 and there is no browser or runtime ingress.
 
 `connections::authority` (OSC-233) decides which credential bytes count. On Rez, with two
 processes writing, Credential Manager hid a fresh write for 120 ms and brought back a confirmed

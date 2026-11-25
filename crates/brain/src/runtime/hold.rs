@@ -145,6 +145,8 @@ pub(super) struct Holds {
     screen: Option<Arc<HoldClient>>,
     /// Whether this platform captures one window; a client alone doesn't say so.
     window_capture: bool,
+    /// Whether this platform captures a display for a screen hold; a client alone doesn't say so.
+    display_capture: bool,
     /// The gate's state last sent on this connection, unstamped, with the sign-in it spoke for.
     screen_sent: Option<(ScreenHolds, Option<crate::context::ConnectionTag>)>,
     /// The revision of the last offer sent on this connection.
@@ -233,6 +235,9 @@ impl Default for Holds {
             receive,
             screen: None,
             window_capture: crate::platform::WINDOW_CAPTURE,
+            // shortcut: a display is captured only where a window is; give it its own platform
+            // constant when the macOS display adapter activates.
+            display_capture: crate::platform::WINDOW_CAPTURE,
             screen_sent: None,
             notice: None,
             stamp_age: crate::platform::qpc_age,
@@ -247,9 +252,14 @@ impl Default for Holds {
 }
 
 impl Holds {
-    /// Whether this platform can capture and the screen worker started.
-    pub(super) fn can_capture(&self) -> bool {
+    /// Whether this platform can capture a window and the screen worker started.
+    pub(super) fn can_capture_window(&self) -> bool {
         self.window_capture && self.screen.is_some()
+    }
+
+    /// Whether this platform can capture a display and the screen worker started.
+    pub(super) fn can_capture_display(&self) -> bool {
+        self.display_capture && self.screen.is_some()
     }
 
     fn connected(&mut self, peer: ShellProcess) {
@@ -431,6 +441,15 @@ impl Brain {
                 if self.coordinator.hold_availability_changes(
                     *kind,
                     now,
+                    hold.snapshot.as_ref(),
+                ) =>
+            {
+                Some(HoldStatus::Failed(HoldFailure::ChoiceChanged))
+            }
+            Input::RecoveredChatGpt { ready, boundary }
+                if self.coordinator.hold_recovery_changes(
+                    ready,
+                    *boundary,
                     hold.snapshot.as_ref(),
                 ) =>
             {
@@ -793,6 +812,10 @@ impl Brain {
         let Some(hold) = &mut self.holds.pending else {
             return Ok(());
         };
+        #[cfg(test)]
+        if hold.audio.as_ref().is_some_and(audio::Audio::has_samples) {
+            self.observer.send(super::Seen::HoldPcmBuffered).ok();
+        }
         if self.holds.gate.overflow.load(Ordering::SeqCst) == hold.key.gesture.0 {
             return self.hold_end(HoldStatus::Failed(HoldFailure::InvalidAudio), link);
         }
@@ -969,7 +992,11 @@ impl Brain {
 
     /// Whether a hold on `choice` may show the model the window under the pointer now, or why not.
     fn screen_gate(&self, choice: Option<&ModelChoice>) -> ScreenHolds {
-        self.picture_gate(choice, self.config.view().screen_holds)
+        self.picture_gate(
+            choice,
+            self.holds.can_capture_window(),
+            self.config.view().screen_holds,
+        )
     }
 
     /// The user turned screen holds off: a pending window hold goes on as voice with no line, and
@@ -988,7 +1015,10 @@ impl Brain {
 
     /// The user turned showing the screen off: a pending screen hold goes on as voice with no
     /// line, and every run's screen picture is withdrawn.
-    pub(super) fn show_screen_off(&mut self) {
+    pub(super) fn show_screen_off(
+        &mut self,
+        link: Option<&mut Link<'_, '_>>,
+    ) -> Result<(), super::Ended> {
         if self
             .holds
             .pending
@@ -997,7 +1027,10 @@ impl Brain {
         {
             self.holds.close_screen_as(None);
         }
-        self.offline(Input::ShowScreenOff);
+        if let Some(effects) = self.handle(Input::ShowScreenOff) {
+            self.apply(effects, link)?;
+        }
+        Ok(())
     }
 
     /// Claude Code's generation moved: every picture held for it that wasn't granted is lost, so
@@ -1112,6 +1145,7 @@ impl Brain {
         // Only ever cleared, so nothing later in the session offers screen holds again.
         if unsupported {
             self.holds.window_capture = false;
+            self.holds.display_capture = false;
         }
         let mut lease = match event.outcome {
             _ if event.key.epoch != self.epoch => None,

@@ -34,7 +34,6 @@ use crate::engines::{
 };
 
 /// How long a warm launch waits for its question [guess, the design's 30 s].
-#[cfg(windows)]
 pub(crate) const WARM: Duration = Duration::from_secs(30);
 /// How long the audit before input may take once the control lines are queued (C3).
 pub(crate) const AUDIT: Duration = Duration::from_secs(3);

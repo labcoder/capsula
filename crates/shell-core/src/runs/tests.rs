@@ -4,15 +4,15 @@ use kumochi_protocol::message::{
     RunId, RunOrigin, SceneDescriptor, SceneId, ScreenChoice, Step, ThreadId, UserError,
 };
 
-#[cfg(windows)]
+#[cfg(all(windows, debug_assertions))]
 use kumochi_brain::coordinator::{
     ContextBuilt, Coordinator, Effect as BrainEffect, Input, StoreOp,
 };
-#[cfg(windows)]
+#[cfg(all(windows, debug_assertions))]
 use kumochi_brain::engines::TurnEvent;
-#[cfg(windows)]
+#[cfg(all(windows, debug_assertions))]
 use kumochi_brain::store::Store;
-#[cfg(windows)]
+#[cfg(all(windows, debug_assertions))]
 use kumochi_protocol::message::ControlToShell;
 
 use super::{Applied, Refused, Runs, TEXT_KEPT, Target};
@@ -588,7 +588,7 @@ fn a_new_brain_reusing_a_run_id_is_shown_afresh_and_the_same_brain_keeps_its_fen
 
 /// Routes a brain's effects the way the runtime would, storing a `BeginTurn` only when
 /// there's a `store`.
-#[cfg(windows)]
+#[cfg(all(windows, debug_assertions))]
 fn deliver(runs: &mut Runs, mut store: Option<&mut Store>, effects: Vec<BrainEffect>) {
     for effect in effects {
         match effect {
@@ -632,7 +632,7 @@ fn typed(runs: &mut Runs, typed: &str) -> DataToBrain {
     sent.expect("a turn was sent")
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, debug_assertions))]
 fn turn_input(runs: &mut Runs, text: &str) -> Input {
     let DataToBrain::TextSubmit {
         turn,
@@ -647,7 +647,7 @@ fn turn_input(runs: &mut Runs, text: &str) -> Input {
 }
 
 /// A brain started on `store`, as after a restart.
-#[cfg(windows)]
+#[cfg(all(windows, debug_assertions))]
 fn restarted(store: &Store) -> Coordinator {
     let (thread, run) = store.high_water().expect("ids");
     let main = store.main_thread().expect("recovered");
@@ -655,7 +655,7 @@ fn restarted(store: &Store) -> Coordinator {
 }
 
 #[test]
-#[cfg(windows)]
+#[cfg(all(windows, debug_assertions))]
 fn a_new_thread_lost_in_a_brain_crash_is_not_continued_and_an_answered_one_is() {
     use kumochi_brain::store::{EventKind, NewEvent, RunEnd};
 
@@ -1358,6 +1358,7 @@ fn press(runs: &mut Runs) -> (Escape, Option<ControlToBrain>) {
         speaking: false,
         drawing: runs.drawing(),
         pulling: false,
+        voice: false,
     };
     let action = decide(activity, Panel::Open);
     let message = match action {

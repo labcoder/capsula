@@ -13,6 +13,7 @@ use crate::recall::control::READ_TIME;
 use crate::store::choice::StoredChoice;
 use crate::store::context::Snapshot;
 use crate::store::{Side, StoreError};
+use kumochi_protocol::message::ConnectionKind;
 use std::time::Instant;
 
 fn closed(control: &crate::recall::control::Control) -> StoreError {
@@ -79,9 +80,10 @@ pub(super) fn read_call(
                 .until(Instant::now() + READ_TIME)
                 .with_handler(conn, |conn, scope| {
                     scope.query(conn, || {
-                        let read = Snapshot::begin(conn)
-                            .map_err(crate::recall::Error::from)?
-                            .with_tuning(tuning);
+                        let read = Snapshot::begin(conn)?
+                            .with_tuning(tuning)
+                            .for_recovery(call.require_recovery)?;
+                        read.recovery_run(call.build.run)?;
                         #[cfg(test)]
                         hold();
                         let result = read.recall_call(call.origin, &call.query)?;
@@ -100,6 +102,10 @@ pub(super) fn read_call(
 
 /// Builds `job` on `side`, or fails it when the store closed before its turn (`None`). A run's
 /// first build reads its model choice into its snapshot. Failures are logged by kind only.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one read transaction, its checks in order"
+)]
 pub(super) fn read(
     side: Option<&Side>,
     job: BuildContext,
@@ -116,6 +122,7 @@ pub(super) fn read(
         drawings,
         picture_models,
         key_results,
+        require_recovery,
         ..
     } = job;
     let Some(mut snapshot) = snapshot else {
@@ -142,6 +149,15 @@ pub(super) fn read(
                             .execution(snapshot.choice.take())?;
                         snapshot.connection = arrived.replay(snapshot.choice.as_ref());
                     }
+                    let answers_chatgpt = snapshot
+                        .choice
+                        .as_ref()
+                        .is_none_or(|choice| choice.connection == ConnectionKind::ChatGpt);
+                    if answers_chatgpt && arrived.chatgpt_blocked() {
+                        return Err(StoreError::RecoveryContext);
+                    }
+                    let read = read.for_recovery(require_recovery.filter(|_| answers_chatgpt))?;
+                    read.recovery_run(key.run)?;
                     let local_time = read.local_time(key.run)?;
                     let picture = snapshot.choice.as_ref().and_then(|choice| {
                         let route = Route {
@@ -212,6 +228,7 @@ pub(super) fn read_compact(
         key,
         thread,
         snapshot,
+        require_recovery,
         room,
     } = job;
     let Some(snapshot) = snapshot else {
@@ -226,10 +243,17 @@ pub(super) fn read_compact(
             control
                 .until(Instant::now() + READ_TIME)
                 .with_handler(conn, |conn, scope| {
-                    let read = Snapshot::begin(conn)?.controlled(scope.clone());
+                    let read = Snapshot::begin(conn)?
+                        .controlled(scope.clone())
+                        .for_recovery(require_recovery)?;
                     #[cfg(test)]
                     hold();
-                    let found = rewrite(&read, &snapshot, thread, room);
+                    read.recovery_run(key.run)?;
+                    let found = if read.permits_history(thread) {
+                        rewrite(&read, &snapshot, thread, room)
+                    } else {
+                        Ok(None)
+                    };
                     read.end()?;
                     Ok(found)
                 })
@@ -276,6 +300,7 @@ pub(super) fn read_job(
         control,
         key,
         kind,
+        require_recovery,
         snapshot,
         compact_at,
         ..
@@ -294,9 +319,13 @@ pub(super) fn read_job(
                 .with_handler(conn, |conn, scope| {
                     let read = Snapshot::begin(conn)?
                         .controlled(scope.clone())
-                        .with_tuning(tuning);
+                        .with_tuning(tuning)
+                        .for_recovery(require_recovery)?;
                     #[cfg(test)]
                     hold();
+                    if !read.permits_history(key.thread) {
+                        return Ok(Ok(None));
+                    }
                     snapshot.choice = read
                         .stored_choice(key.thread)?
                         .execution(snapshot.choice.take())?;
@@ -306,6 +335,7 @@ pub(super) fn read_job(
                             built: Built {
                                 request: crate::jobs::title_request(&snapshot, &ask.text),
                                 sources: vec![key.thread],
+                                recovered_context: read.recovery(),
                             },
                             covers: None,
                         })),

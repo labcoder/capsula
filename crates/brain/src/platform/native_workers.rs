@@ -1,20 +1,21 @@
 use std::path::Path;
 use std::sync::{Arc, atomic::AtomicBool};
 
-use super::Job;
+use super::{Job, Mode};
 use crate::{BrainError, config::Config, runtime::Brain};
 
-#[cfg(windows)]
-use crate::{engines, runtime::claude, speech, voice};
+use crate::engines::claude_code::lane::{Host, Lane};
+use crate::{runtime::claude, speech, voice};
 
 pub(crate) enum ClaudeSetting {
-    #[cfg(any(test, windows))]
     Enabled,
     Disabled,
 }
 
-#[cfg(windows)]
 pub(crate) fn claude_setting(config: &Config) -> ClaudeSetting {
+    if !super::supports(Mode::Detached) {
+        return ClaudeSetting::Disabled;
+    }
     let enabled = config.claude_code_enabled();
     tracing::info!(target: env!("CARGO_CRATE_NAME"), enabled, "Claude Code setting");
     if enabled {
@@ -24,47 +25,66 @@ pub(crate) fn claude_setting(config: &Config) -> ClaudeSetting {
     }
 }
 
-#[cfg(not(windows))]
-pub(crate) fn claude_setting(_: &Config) -> ClaudeSetting {
-    ClaudeSetting::Disabled
+pub(crate) struct Prepared {
+    setting: ClaudeSetting,
+    models: Option<std::path::PathBuf>,
+    stuck: Vec<(kumochi_protocol::voice::VoicePart, voice::installer::Folder)>,
 }
 
-#[cfg(windows)]
-pub(crate) fn start(
+pub(crate) fn prepare(
     brain: &mut Brain,
-    vault_held: Arc<AtomicBool>,
-    exe: &Path,
     setting: ClaudeSetting,
-) -> Result<Arc<Job>, BrainError> {
+) -> Result<(Arc<Job>, Prepared), BrainError> {
+    super::require_mode(Mode::Detached).map_err(BrainError::Helpers)?;
     let models = super::data_dir().map(|data| data.join(kumochi_protocol::voice::MODELS_DIR));
     let stuck = models
         .as_deref()
         .map(|models| brain.finish_removals(models))
         .unwrap_or_default();
     let jobs = Arc::new(Job::new().map_err(BrainError::Helpers)?);
+    Ok((
+        jobs,
+        Prepared {
+            setting,
+            models,
+            stuck,
+        },
+    ))
+}
+
+pub(crate) fn start(
+    prepared: Prepared,
+    brain: &mut Brain,
+    vault_held: Arc<AtomicBool>,
+    exe: &Path,
+    jobs: &Arc<Job>,
+) {
+    let Prepared {
+        setting,
+        models,
+        stuck,
+    } = prepared;
     if let Some(models) = models {
-        start_voice(brain, models, &stuck, exe, &jobs);
+        start_voice(brain, models, &stuck, exe, jobs);
     }
-    let lane = claude_lane(vault_held, &jobs, exe);
-    brain.attach_claude(match (setting, lane) {
+    let lane = claude_host(vault_held, jobs, exe).and_then(|host| {
+        Lane::start(host)
+            .inspect_err(|error| {
+                tracing::warn!(target: env!("CARGO_CRATE_NAME"), kind = ?error.kind(), "Claude Code's lane didn't start");
+            })
+            .ok()
+    });
+    let claude = match (setting, lane) {
         (ClaudeSetting::Enabled, Some(lane)) => claude::Claude::start(lane, claude::SIGN_IN),
         (ClaudeSetting::Enabled, None) => claude::Claude::default(),
         (ClaudeSetting::Disabled, lane) => claude::Claude::turned_off(lane),
-    });
-    Ok(jobs)
+    };
+    #[cfg(any(test, windows))]
+    brain.attach_claude(claude);
+    #[cfg(not(any(test, windows)))]
+    drop(claude);
 }
 
-#[cfg(not(windows))]
-pub(crate) fn start(
-    _: &mut Brain,
-    _vault_held: Arc<AtomicBool>,
-    _: &Path,
-    _: ClaudeSetting,
-) -> Result<Arc<Job>, BrainError> {
-    Job::new().map(Arc::new).map_err(BrainError::Helpers)
-}
-
-#[cfg(windows)]
 fn start_voice(
     brain: &mut Brain,
     models: std::path::PathBuf,
@@ -99,28 +119,29 @@ fn start_voice(
 }
 
 #[cfg(windows)]
-fn claude_lane(
-    vault_held: Arc<AtomicBool>,
-    jobs: &Arc<Job>,
-    brain_exe: &Path,
-) -> Option<engines::claude_code::lane::Lane> {
-    use engines::claude_code::install::{FindError, locate};
-    use engines::claude_code::lane::{Host, Lane, Program};
+fn claude_host(vault_held: Arc<AtomicBool>, jobs: &Arc<Job>, brain_exe: &Path) -> Option<Host> {
+    use crate::engines::claude_code::install::{FindError, locate};
+    use crate::engines::claude_code::lane::Program;
 
-    let base = match super::local_app_data() {
-        Ok(local) => local.join(kumochi_protocol::constants::DATA_DIR),
+    let root = match kumochi_storage::local_app_data(kumochi_storage::Today::KnownFolder) {
+        Ok(root) => root,
         Err(error) => {
-            tracing::warn!(target: env!("CARGO_CRATE_NAME"), kind = ?error.kind(), "no local data folder for Claude Code");
+            tracing::warn!(target: env!("CARGO_CRATE_NAME"), kind = ?error, "no local data folder for Claude Code");
             return None;
         }
     };
+    let Ok(_root) = super::hold_chain(&root) else {
+        tracing::warn!(target: env!("CARGO_CRATE_NAME"), "the local data root for Claude Code isn't trusted");
+        return None;
+    };
+    let base = root.join(kumochi_protocol::constants::DATA_DIR);
     if let Err(error) = std::fs::create_dir(&base)
         && error.kind() != std::io::ErrorKind::AlreadyExists
     {
         tracing::warn!(target: env!("CARGO_CRATE_NAME"), kind = ?error.kind(), "couldn't make the local data folder for Claude Code");
         return None;
     }
-    let host = Host {
+    Some(Host {
         find: Box::new(|| {
             let profile = super::profile_dir().map_err(|_| FindError::NotFound)?;
             locate(&profile).map(|exe| Program {
@@ -136,12 +157,12 @@ fn claude_lane(
         terminate: Job::terminate,
         brain_exe: brain_exe.to_owned(),
         runtime: tokio::runtime::Handle::current(),
-    };
-    Lane::start(host)
-        .inspect_err(|error| {
-            tracing::warn!(target: env!("CARGO_CRATE_NAME"), kind = ?error.kind(), "Claude Code's lane didn't start");
-        })
-        .ok()
+    })
+}
+
+#[cfg(not(windows))]
+fn claude_host(_: Arc<AtomicBool>, _: &Arc<Job>, _: &Path) -> Option<Host> {
+    None
 }
 
 #[cfg(all(test, not(windows)))]
@@ -151,12 +172,7 @@ async fn requested_native_workers_refuse_without_containment() {
 
     let scratch = crate::test_support::Scratch::new("native-worker-refusal");
     let mut brain = crate::test_support::brain(&scratch, "");
-    let result = start(
-        &mut brain,
-        Arc::new(AtomicBool::new(false)),
-        &scratch.dir().join("missing-worker"),
-        ClaudeSetting::Enabled,
-    );
+    let result = prepare(&mut brain, ClaudeSetting::Enabled);
     brain.close().await;
     assert!(
         matches!(result, Err(BrainError::Helpers(error)) if error.kind() == ErrorKind::Unsupported)

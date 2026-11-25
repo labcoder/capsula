@@ -18,6 +18,7 @@ use super::{Activity, EscapePanel, Presence, Runs, test_fixture};
 use crate::link::{Batch, LinkEvent, Session};
 use crate::presenter::{Effect, Presenter};
 
+#[cfg(windows)]
 #[gpui::test]
 fn exhausted_page_ids_close_the_actual_link_not_only_the_view_models(cx: &mut TestAppContext) {
     use crate::link::fixture::{attended, connected, next, patient};

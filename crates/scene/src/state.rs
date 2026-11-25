@@ -14,6 +14,7 @@ use crate::{
     Begin, Budget, ErrorCode, FieldPath, GlobalBudget, Handle, Record, Step, StepError, WireId,
     budget::Usage,
     deferred::Deferred,
+    error::DimensionRange,
     layout::heap,
     limits::{MAX_LIVE_OBJECTS, MAX_STEPS},
     mermaid,
@@ -314,11 +315,11 @@ impl SceneState {
         if let Some(size) = header.size {
             for (index, value) in size.into_iter().enumerate() {
                 if value.get() <= 0.0 {
-                    return Err(StepError {
-                        step: None,
-                        path: FieldPath::default().field("size").index(index),
-                        code: ErrorCode::OutOfRange,
-                    });
+                    return Err(StepError::at(
+                        FieldPath::default().field("size").index(index),
+                        ErrorCode::OutOfRange,
+                    )
+                    .with_dimension(DimensionRange::Positive));
                 }
             }
         }
@@ -331,11 +332,10 @@ impl SceneState {
         if (header.surface == crate::record::Surface::Screen) != stamped
             || (!stamped && header.display.is_some())
         {
-            return Err(StepError {
-                step: None,
-                path: FieldPath::default().field("display"),
-                code: ErrorCode::Unsupported,
-            });
+            return Err(StepError::at(
+                FieldPath::default().field("display"),
+                ErrorCode::Unsupported,
+            ));
         }
         Ok(Self {
             header,
@@ -645,11 +645,7 @@ impl SceneState {
         if self.cleared {
             return Ok(StopOutcome::Cleared);
         }
-        let at = |field, code| StepError {
-            step: None,
-            path: FieldPath::default().field("stop").field(field),
-            code,
-        };
+        let at = |field, code| StepError::at(FieldPath::default().field("stop").field(field), code);
         if cut.activated > self.revision
             || cut.activated < self.activated
             || (cut.activated != 0 && !self.steps.get(&cut.activated).is_some_and(|s| s.kept))
@@ -687,24 +683,22 @@ impl SceneState {
         let mut revealed = BTreeSet::new();
         for (index, handle) in cut.revealed.iter().enumerate() {
             if !revealed.insert(*handle) {
-                return Err(StepError {
-                    step: None,
-                    path: FieldPath::default()
+                return Err(StepError::at(
+                    FieldPath::default()
                         .field("stop")
                         .field("revealed")
                         .index(index),
-                    code: ErrorCode::DuplicateKey,
-                });
+                    ErrorCode::DuplicateKey,
+                ));
             }
             if !present.contains(handle) {
-                return Err(StepError {
-                    step: None,
-                    path: FieldPath::default()
+                return Err(StepError::at(
+                    FieldPath::default()
                         .field("stop")
                         .field("revealed")
                         .index(index),
-                    code: ErrorCode::UnknownRef,
-                });
+                    ErrorCode::UnknownRef,
+                ));
             }
         }
         metrics::freeze_detached(&mut after, &revealed).map_err(StepError::new)?;
@@ -848,11 +842,11 @@ impl SceneState {
             match event {
                 SceneEvent::Step { revision, step } => {
                     if *revision != state.revision + 1 {
-                        return Err(StepError {
-                            step: Some(step.id.clone()),
-                            path: FieldPath::default().field("revision"),
-                            code: ErrorCode::OutOfRange,
-                        }
+                        return Err(StepError::in_step(
+                            &step.id,
+                            FieldPath::default().field("revision"),
+                            ErrorCode::OutOfRange,
+                        )
                         .into());
                     }
                     let Admission::New(admitted) = state.admit(step, &global)? else {
@@ -983,11 +977,10 @@ impl CallState {
         match self.phase {
             CallPhase::Ended => Ok(()),
             CallPhase::Before => Err(StepError::new(ErrorCode::BeforeBegin)),
-            CallPhase::Open => Err(StepError {
-                step: None,
-                path: FieldPath::default().field("end"),
-                code: ErrorCode::MissingField,
-            }),
+            CallPhase::Open => Err(StepError::at(
+                FieldPath::default().field("end"),
+                ErrorCode::MissingField,
+            )),
         }
     }
 }

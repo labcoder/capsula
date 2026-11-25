@@ -80,7 +80,10 @@ flowchart LR
   M --> X["cargo xtask voice-assets link"]
 ```
 
-Installed files live in `%LOCALAPPDATA%\<DATA_DIR>\models\<part>\<file>`, where the part folders
+Installed files live in `<local root>\<DATA_DIR>\models\<part>\<file>`. The local root is
+`LOCALAPPDATA` in an ordinary release build, a legacy route until cut 8 moves it to the Known
+Folder and not a way to isolate a run, and the override pair's local half or the Known Folder in
+Gate and debug builds (see [architecture](architecture.md)). The part folders
 are `speech-input` and `spoken-replies`. The native libraries ship beside `kumochid.exe`, and
 nothing downloads them.
 
@@ -92,7 +95,8 @@ startup never resumes anything automatically. Its only caller is the installer's
 through the `download::Fetch` seam, which makes a `Downloader` for each fetch, so start-up builds
 none. Installing, cancelling, removing and start-up are in [The installer](#the-installer).
 
-The separate HTTPS client uses the OS trust roots, no proxy, credentials, cookies, Referer or
+The downloader shares the platform TLS config factory but doesn't emit the account client's
+trust diagnostics. Its separate HTTPS client uses no proxy, credentials, cookies, Referer or
 compression, and `Accept-Encoding: identity`. The first URL and up to five redirects must use
 port 443 without userinfo, on `huggingface.co` or a subdomain of `hf.co`; IP literals are refused.
 Signed CDN queries never enter diagnostics.
@@ -527,7 +531,8 @@ cargo xtask voice-assets link <user-models-dir> <user-native-library-dir>
 Supply your own model directory and the directory containing the native runtime DLLs described
 in [voice-natives.md](voice-natives.md).
 The task checks every source's size and SHA-256 before it copies anything, then copies the
-models into the dev models folder (`Kumochi Dev`) and the DLLs beside
+models into the dev models folder (`Kumochi Dev`, under the local root a dev brain resolves
+without the override pair) and the DLLs beside
 `target\debug\kumochid.exe` and `target\release\kumochid.exe`, checking each copy's size
 and SHA-256 as it writes it. Each file is written under a temporary name beside its destination,
 then linked to its final name, which never replaces an existing file. It doesn't hardlink the
@@ -540,6 +545,11 @@ copies nothing, changes nothing and names the file, to be moved aside by hand. A
 leaves nothing at its final name, and files already placed stay. A leftover
 `*.voice-assets-*.tmp` in the models folder, from a run that was stopped, is safe to delete by
 hand. Run it again after `cargo clean`.
+
+The task refuses while either half of the override pair (`KUMOCHI_GATE_LOCALAPPDATA`,
+`KUMOCHI_GATE_APPDATA`) is set. A brain admits its models folder inside an override profile when
+it starts, and this copy doesn't, so it links only into the everyday dev folder; that refusal is
+the smallest safe answer. Unset both to run it.
 
 ### Vendored worker-startup tests
 
@@ -741,7 +751,8 @@ policy.
 
 - **Root.** In production `root` is Kumochi's folder in the local application data folder that
   `SHGetKnownFolderPath` reports. The `LOCALAPPDATA` variable isn't consulted, because a value
-  pointing elsewhere would choose which folders are trusted.
+  pointing elsewhere would choose which folders are trusted. A Gate or debug build with the
+  override pair set uses the pair's local half, which it admitted at startup.
 - **Held chain.** Each component from the volume root to `root` is opened without delete sharing
   and with `FILE_FLAG_OPEN_REPARSE_POINT`. Then it's checked through that handle while the
   components above it stay open:
@@ -791,7 +802,8 @@ The installer must not put a VC++ runtime beside `kumochid.exe`: the brain impor
 worker's supervisor (`supervise`; see [screen.md](screen.md) and [processes.md](processes.md)). A
 native exception, abort, access violation or hang costs that process. The brain gets a
 content-free `WorkerLost` and keeps running. The model goes with the worker: a respawned worker has
-nothing loaded until the next load.
+nothing loaded until the next load. The worker and parent share the request, reply and
+content-free native error types in `platform::speech_wire`.
 
 The Linux test host builds the shared protocol and parent-side supervisor, but has no native
 speech worker, recognizer or voice runtime. Its native entry refuses before dispatching

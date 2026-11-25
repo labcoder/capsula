@@ -45,6 +45,7 @@ impl Tapped for ControlToBrain {
         match self {
             Self::Hello(_) => "Hello",
             Self::QueuedHello(_) => "QueuedHello",
+            Self::QueuedAudioReconnect(..) => "QueuedAudioReconnect",
             Self::Quitting => "Quitting",
             Self::Stop { .. } => "Stop",
             Self::Pong => "Pong",
@@ -153,6 +154,7 @@ impl Tapped for ControlToShell {
             Self::SpeechDecisionTaken(..) => "SpeechDecisionTaken",
             Self::QueuedAudioRegistered(..) => "QueuedAudioRegistered",
             Self::AccountUnsupported(..) => "AccountUnsupported",
+            Self::SpokenRepliesDefaulted(..) => "SpokenRepliesDefaulted",
             Self::SpeechRevoked { .. } => "SpeechRevoked",
             Self::GitHub(_) => "GitHub",
             Self::ActionState { .. } => "ActionState",

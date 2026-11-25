@@ -17,13 +17,10 @@ use super::{Brain, Full, Input, Link};
 use crate::platform::{self, Untrusted};
 use crate::voice::LoadReport;
 use crate::voice::download::{DownloadError, Fetch, FetchPhase, Progress};
-#[cfg(any(test, windows))]
 use crate::voice::installer::Durable;
 use crate::voice::installer::{self, Effect, Folder, Installer, RemoveAnswer};
-#[cfg(any(test, windows))]
 use crate::voice::pump::Pump;
 use crate::voice::stt::SttHandle;
-#[cfg(any(test, windows))]
 use crate::voice::tts::TtsHandle;
 
 #[cfg(all(test, windows))]
@@ -42,6 +39,7 @@ pub(crate) struct Voice {
     deletes: [Option<Deleting>; 2],
     /// What the coordinator was last told about spoken replies.
     spoken: bool,
+    pub(super) deferred_talk_back: bool,
 }
 
 impl std::fmt::Debug for Voice {
@@ -193,17 +191,16 @@ pub(super) fn delete(models: &Path, part: VoicePart) -> Folder {
         Ok(()) => Folder::Missing,
         Err(error) => {
             tracing::warn!(?part, ?error, "a removed voice part wasn't deleted");
-            Folder::Refused(match error {
-                #[cfg(not(windows))]
-                Untrusted::Unsupported => ErrorKey::UnsupportedPlatform,
-                _ => ErrorKey::VoiceStorage,
+            Folder::Refused(if platform::is_unsupported(error) {
+                ErrorKey::UnsupportedPlatform
+            } else {
+                ErrorKey::VoiceStorage
             })
         }
     }
 }
 
 /// Whether every file of `part` under `models` has its manifest size.
-#[cfg(any(test, windows))]
 fn whole(models: &Path, part: VoicePart) -> Result<bool, ErrorKey> {
     let dir = models.join(part.dir());
     let manifest = part.files().collect::<Vec<_>>();
@@ -212,9 +209,10 @@ fn whole(models: &Path, part: VoicePart) -> Result<bool, ErrorKey> {
         Ok(held) => held,
         Err(Untrusted::Missing) => return Ok(false),
         Err(Untrusted::Reparse | Untrusted::Unsafe) => return Err(ErrorKey::VoiceModelPath),
-        Err(Untrusted::Io) => return Err(ErrorKey::VoiceStorage),
-        #[cfg(not(windows))]
-        Err(Untrusted::Unsupported) => return Err(ErrorKey::UnsupportedPlatform),
+        Err(error) if platform::is_unsupported(error) => {
+            return Err(ErrorKey::UnsupportedPlatform);
+        }
+        Err(_) => return Err(ErrorKey::VoiceStorage),
     };
     for (file, pin) in held.files.iter().zip(manifest) {
         if file.metadata().map_err(|_| ErrorKey::VoiceStorage)?.len() != pin.bytes {
@@ -245,7 +243,6 @@ impl Brain {
     /// unfinished removal has its `RemoveDone` queued. A handle that didn't start is `None`, and
     /// its part fails to load for the session. `reports` are the handles' report receivers, in
     /// `VoicePart::ALL` order, and `fetcher` fetches what an install asks for.
-    #[cfg(any(test, windows))]
     pub(crate) fn attach_voice(
         &mut self,
         models: PathBuf,
@@ -283,6 +280,7 @@ impl Brain {
             fetch: None,
             deletes: [None, None],
             spoken: false,
+            deferred_talk_back: false,
         });
         self.run(effects);
         self.voice_policy();
@@ -476,8 +474,9 @@ impl Brain {
             .and_then(|()| platform::hold_chain(&voice.models.join(part.dir())))
         {
             Err(Untrusted::Missing) => Folder::Missing,
-            #[cfg(not(windows))]
-            Err(Untrusted::Unsupported) => Folder::Refused(ErrorKey::UnsupportedPlatform),
+            Err(error) if platform::is_unsupported(error) => {
+                Folder::Refused(ErrorKey::UnsupportedPlatform)
+            }
             Ok(_) | Err(_) => Folder::Present,
         };
         let (answer, effects) = voice.installer.remove(part, folder);
@@ -523,8 +522,9 @@ impl Brain {
                 SttUnload::Kept
             });
         }
-        let loaded =
-            voice.installer.ready(VoicePart::SpokenReplies) && self.config.view().talk_back;
+        let loaded = voice.installer.ready(VoicePart::SpokenReplies)
+            && self.config.view().talk_back
+            && !voice.deferred_talk_back;
         if loaded != voice.spoken {
             voice.spoken = loaded;
             self.offline(Input::SpokenReplies { loaded });

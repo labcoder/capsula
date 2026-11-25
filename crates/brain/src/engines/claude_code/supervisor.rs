@@ -5,55 +5,39 @@
 //! A folder a stopped brain left behind is swept under the lane's lock before anything starts.
 //! macOS counterpart: unverified, behind `platform`.
 
-#[cfg(windows)]
 use std::collections::BTreeSet;
-#[cfg(windows)]
 use std::ffi::OsString;
 use std::fmt;
-#[cfg(windows)]
 use std::fs::File;
-#[cfg(any(test, windows))]
 use std::io;
-#[cfg(windows)]
 use std::io::{PipeReader, PipeWriter};
-#[cfg(any(test, windows))]
 use std::path::Path;
-#[cfg(windows)]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-#[cfg(windows)]
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-#[cfg(any(test, windows))]
 use kumochi_protocol::constants::MCP_SERVER_NAME;
-#[cfg(windows)]
 use kumochi_protocol::constants::{CLAUDE_CODE_DIR, ENGINE_DIR};
 use kumochi_protocol::message::ThreadId;
-#[cfg(any(test, windows))]
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 use zeroize::Zeroizing;
 
 use super::audit::AuditGate;
 use super::lane::Failure;
-#[cfg(any(test, windows))]
 use super::lane::POLL;
-#[cfg(windows)]
 use super::lane::{Folders, Host, PIPE_GRACE, Program};
-#[cfg(windows)]
 use super::policy::{self, EntryPoint, OwnedFolders};
 use super::seed::pictured::PicturedSeed;
 use crate::bridge::LaunchId;
 use crate::bridge::listener::{Binding, McpCall};
-#[cfg(windows)]
 use crate::bridge::listener::{LaunchContext, Listener};
 use crate::connections::model::Lease as _;
 use crate::context::ToolSchema;
 use crate::coordinator::PictureWrite;
 use crate::engines::{PictureReceipt, SendLease};
-#[cfg(windows)]
 use crate::platform::{self, Job, Stdio};
 
 /// The longest a launch may live, from admission [guess, not measured: C5b's 30 s warm window
@@ -82,13 +66,6 @@ const REVOKED: u8 = 2;
 const REVOKED_WRITING: u8 = 3;
 
 /// What C5b's snapshot fixes for one launch. Nothing in it is user content.
-#[cfg_attr(
-    not(windows),
-    expect(
-        dead_code,
-        reason = "the shared snapshot retains inputs consumed by the native launch"
-    )
-)]
 pub(crate) struct Question {
     /// The thread whose deletion revokes it.
     pub(crate) thread: ThreadId,
@@ -385,12 +362,6 @@ impl Control {
         self.ended.load(Ordering::Acquire)
     }
 
-    /// Whether the listener would admit a call by the gate.
-    #[cfg(windows)]
-    pub(crate) fn may_call(&self) -> bool {
-        self.gate.may_call()
-    }
-
     /// The launch's gate, which its revocation and its teardown fail.
     pub(crate) fn gate(&self) -> &AuditGate {
         &self.gate
@@ -492,13 +463,6 @@ pub(crate) enum LaunchRefused {
 
 /// Why a queued launch never ran.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(windows),
-    expect(
-        dead_code,
-        reason = "the shared launch reply includes failures sent by the native supervisor"
-    )
-)]
 pub(crate) enum LaunchFailed {
     /// Revoked before its turn.
     Revoked,
@@ -514,13 +478,6 @@ pub(crate) enum LaunchFailed {
 
 /// How a launch ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(windows),
-    expect(
-        dead_code,
-        reason = "native teardown supplies the acknowledgement variants"
-    )
-)]
 pub(crate) enum Teardown {
     /// Its job was confirmed empty, its pumps ended and its folder is gone.
     Done,
@@ -537,13 +494,6 @@ pub(crate) struct Launch {
     binding: Binding,
     lease: RunLease,
     started: Option<oneshot::Receiver<Result<Pipes, LaunchFailed>>>,
-    #[cfg_attr(
-        not(windows),
-        expect(
-            dead_code,
-            reason = "the native lane reports when its teardown is complete"
-        )
-    )]
     ended: oneshot::Receiver<Teardown>,
 }
 
@@ -603,13 +553,6 @@ impl Launch {
     }
 
     /// Revokes the launch and waits for its teardown.
-    #[cfg_attr(
-        not(windows),
-        expect(
-            dead_code,
-            reason = "native tests await the complete process and pipe teardown"
-        )
-    )]
     pub(crate) async fn end(self) -> Teardown {
         let Self { lease, ended, .. } = self;
         drop(lease);
@@ -619,13 +562,6 @@ impl Launch {
 }
 
 /// A launch as the lane's queue holds it.
-#[cfg_attr(
-    not(windows),
-    expect(
-        dead_code,
-        reason = "the queued launch retains its snapshot and both notification senders until taken by the native worker"
-    )
-)]
 pub(crate) struct Start {
     id: LaunchId,
     question: Question,
@@ -637,7 +573,7 @@ pub(crate) struct Start {
     round_stdin: mpsc::Sender<Input>,
     started: oneshot::Sender<Result<Pipes, LaunchFailed>>,
     ended: oneshot::Sender<Teardown>,
-    #[cfg(all(test, windows))]
+    #[cfg(test)]
     pub(crate) hooks: tests::Hooks,
 }
 
@@ -647,7 +583,6 @@ impl Start {
     }
 
     /// Whether it may start now.
-    #[cfg(windows)]
     pub(super) fn due(&self, closing: &AtomicBool) -> Result<(), LaunchFailed> {
         if self.control.is_revoked() {
             Err(LaunchFailed::Revoked)
@@ -661,7 +596,6 @@ impl Start {
     }
 
     /// Answers a launch that never starts: nothing was made, so its teardown is done.
-    #[cfg(windows)]
     pub(super) fn refuse(self, why: LaunchFailed) {
         self.control.revoke();
         // Nothing ran, so nothing was sent under it.
@@ -708,7 +642,7 @@ pub(crate) fn admit(question: Question) -> Result<(Start, Launch), LaunchRefused
         round_stdin,
         started: started_tx,
         ended: ended_tx,
-        #[cfg(all(test, windows))]
+        #[cfg(test)]
         hooks: tests::Hooks::default(),
     };
     let launch = Launch {
@@ -723,14 +657,12 @@ pub(crate) fn admit(question: Question) -> Result<(Start, Launch), LaunchRefused
 }
 
 /// What the lane checked before a launch's own folder: the install and Kumochi's folders.
-#[cfg(windows)]
 pub(super) struct Ready {
     pub(super) program: Program,
     pub(super) folders: Folders,
 }
 
 /// Runs `start` from its turn to its teardown, on the lane's thread.
-#[cfg(windows)]
 pub(super) fn run(
     start: Start,
     ready: Result<Ready, Failure>,
@@ -799,7 +731,6 @@ pub(super) fn run(
 }
 
 /// What `begin` takes from the launch.
-#[cfg(windows)]
 struct Parts<'a> {
     id: LaunchId,
     question: Question,
@@ -814,7 +745,6 @@ struct Parts<'a> {
 
 /// Makes the launch's folder, its bridge pipe and job, then starts it and its pumps. Everything
 /// made goes into `running` as it's made, so a failure part way stops what exists, in order.
-#[cfg(windows)]
 fn begin(
     running: &mut Running,
     ready: Ready,
@@ -921,7 +851,6 @@ fn begin(
 
 /// Starts the three pumps on the child's pipes, each into `running` as it starts; the round's
 /// stdout.
-#[cfg(windows)]
 fn pumps(
     running: &mut Running,
     child_pipes: (Option<PipeWriter>, Option<PipeReader>, Option<PipeReader>),
@@ -981,7 +910,6 @@ fn pumps(
 
 /// The engine folder, held with Kumochi's, and the launch's own owner-only folder in it with
 /// its `work` and `tmp` folders, held apart so the teardown can let them go.
-#[cfg(windows)]
 fn make_folder(
     running: &mut Running,
     host: &Host,
@@ -1004,7 +932,6 @@ fn make_folder(
 }
 
 /// What the listener's task owns.
-#[cfg(windows)]
 struct Context {
     job: Arc<Job>,
     brain_exe: PathBuf,
@@ -1017,7 +944,6 @@ struct Context {
 
 /// Serves `listener` on `runtime` until its session ends or it's aborted; the receiver hears
 /// the task end, however it ends.
-#[cfg(windows)]
 fn serve(
     listener: Listener,
     context: Context,
@@ -1044,7 +970,6 @@ fn serve(
 }
 
 /// Everything a launch has made so far, which its teardown ends in order.
-#[cfg(windows)]
 struct Running {
     control: Arc<Control>,
     /// Kumochi's folders and the engine folder: held through the deletion.
@@ -1061,7 +986,6 @@ struct Running {
     terminate: Option<tests::Pause>,
 }
 
-#[cfg(windows)]
 impl Running {
     /// Fails the gate and closes stdin, seals the held send, aborts the listener and waits up to
     /// [`PIPE_GRACE`] for its task to end, ends the job and confirms it empty, waits for the pumps,
@@ -1145,7 +1069,6 @@ impl Running {
 }
 
 /// Whether every pump ended, each given up to [`PIPE_GRACE`].
-#[cfg(windows)]
 fn ended(pumps: &[std_mpsc::Receiver<()>]) -> bool {
     pumps.iter().all(|pump| {
         matches!(
@@ -1156,7 +1079,6 @@ fn ended(pumps: &[std_mpsc::Receiver<()>]) -> bool {
 }
 
 /// Runs `work` on its own thread; the receiver hears it end, however it ends.
-#[cfg(windows)]
 fn pump(
     name: &'static str,
     work: impl FnOnce() + Send + 'static,
@@ -1180,7 +1102,6 @@ fn pump(
 
 /// stdin: each chunk is admitted, then written. `End`, `Wake`, a refused admission or a failed
 /// write closes the pipe.
-#[cfg(any(test, windows))]
 fn write_input(
     mut pipe: impl io::Write,
     mut input: mpsc::Receiver<Input>,
@@ -1237,7 +1158,6 @@ fn write_input(
     }
 }
 
-#[cfg(any(test, windows))]
 fn write_picture(
     pipe: &mut impl io::Write,
     control: &Control,
@@ -1261,7 +1181,6 @@ fn write_picture(
 /// stdout, in chunks of at most [`CHUNK`], until its end. A full channel is retried every
 /// [`POLL`], never waited on, and once the round has let go what's read is dropped. The read
 /// buffer and every chunk, queued or pending, are zeroed when they drop.
-#[cfg(any(test, windows))]
 fn read_output(
     mut pipe: impl io::Read,
     output: &mpsc::Sender<Zeroizing<Vec<u8>>>,
@@ -1304,7 +1223,6 @@ fn read_output(
 
 /// stderr, read to its end and dropped: nothing Claude Code prints there is kept, and the buffer
 /// is zeroed when it drops.
-#[cfg(any(test, windows))]
 fn drain_stderr(mut pipe: impl io::Read) {
     let mut buffer = Zeroizing::new(vec![0; 8 * 1024]);
     loop {
@@ -1318,7 +1236,6 @@ fn drain_stderr(mut pipe: impl io::Read) {
 
 /// The launch's `mcp.json`: the bridge is the brain's executable with the launch's id, and
 /// nothing else. `None` for an executable path that isn't text.
-#[cfg(any(test, windows))]
 fn mcp_json(brain_exe: &Path, id: LaunchId) -> Option<Vec<u8>> {
     let config = serde_json::json!({
         "mcpServers": {

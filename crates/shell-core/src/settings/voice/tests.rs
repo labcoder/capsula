@@ -646,6 +646,48 @@ fn only_current_queued_cancel_that_affects_input_requests_local_input_revocation
 }
 
 #[test]
+fn only_the_current_pair_shows_deferred_saved_talk_back_without_settling_preferences() {
+    let mut state = connected();
+    let mut on = saved(SttUnload::Kept);
+    on.talk_back = true;
+    assert!(state.receive_voice(
+        Some(7),
+        7,
+        VoiceView {
+            speech_input: PartState::Ready,
+            spoken_replies: PartState::Ready,
+        }
+    ));
+    assert!(state.send_stt_unload(SttUnload::After15Min, |_| true));
+    assert!(!state.receive(Some(7), 6, on.clone(), Update::SpokenRepliesDefaulted));
+    assert!(!state.talk_back_restart_needed());
+    assert!(state.receive(Some(7), 7, on.clone(), Update::SpokenRepliesDefaulted));
+    assert_eq!(state.talk_back_choice(), Some(true));
+    assert!(state.talk_back_restart_needed());
+    assert!(state.stt_unload_pending());
+
+    let off = saved(SttUnload::After15Min);
+    assert!(state.receive(Some(7), 7, off, Update::Answer));
+    assert!(!state.talk_back_restart_needed());
+    assert_eq!(state.talk_back_choice(), Some(false));
+    state.disconnected();
+    assert!(state.receive(Some(8), 8, on, Update::Unsolicited));
+    assert!(state.receive_voice(
+        Some(8),
+        8,
+        VoiceView {
+            speech_input: PartState::Ready,
+            spoken_replies: PartState::Ready,
+        }
+    ));
+    assert_eq!(state.talk_back_choice(), Some(true));
+    assert!(
+        !state.talk_back_restart_needed(),
+        "a new pair opens in the saved mode"
+    );
+}
+
+#[test]
 fn show_screen_waits_for_its_own_answer_and_a_refusal_restores_the_saved_choice() {
     let mut saved = saved(SttUnload::Kept);
     saved.screen_holds = false;

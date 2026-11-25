@@ -174,6 +174,16 @@ impl Coordinator {
             .clone()
     }
 
+    pub(crate) fn code_picture_grants(&self, run: RunId) -> impl Iterator<Item = &PictureGrant> {
+        let on_code = self.route_kind(run) == Some(ConnectionKind::ClaudeCode);
+        self.leases
+            .iter()
+            .filter_map(move |lease| match lease.id.key {
+                SendKey::Build(key) if on_code && key.run == run => lease.picture.as_ref(),
+                _ => None,
+            })
+    }
+
     /// Fences new write admissions for each picture grant whose run may no longer send it: its
     /// picture was withdrawn or lost, its recipient no longer takes it, or the drawings its digest
     /// lists no longer read as its build read them. Each grant's first
@@ -423,7 +433,16 @@ impl Coordinator {
         };
         let refused = run
             .route
-            .map_or_else(|| Some(sign_in_needed()), |route| self.refusal(route))
+            .map_or_else(
+                || Some(sign_in_needed()),
+                |route| {
+                    self.refusal(route).or_else(|| {
+                        // A recovered route sends only a body read to its exact cutoff.
+                        (build.recovered_context != self.required_recovery(route))
+                            .then(sign_in_needed)
+                    })
+                },
+            )
             .or_else(|| {
                 // A request that started before the switch went off still holds its own copy.
                 matches!(run.screen, Some(crate::context::Screen::Withdrawn))

@@ -810,6 +810,7 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
         assert_eq!(app_paths(events, redraw.clone()), 0);
         let [allocations, bytes] = gpui(events, redraw);
         println!("recovery_redraw case={case:?} gpui_allocations={allocations} gpui_bytes={bytes}");
+        #[cfg(windows)]
         assert!(
             allocations <= 91 && bytes <= 23_137,
             "GPUI's own redraw stays within its measured ceiling"
@@ -830,6 +831,7 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     // Bytes include each held LayoutState's empty behind-anchor and fit maps (24 bytes each, no
     // allocation): two in the kept Scene (rest and view) and four in the recovered-scenes buffer.
     // They also include the screen unit each step's preparation carries (8 bytes, never retained).
+    #[cfg(windows)]
     let bound = match case {
         // No case opens a host: a closed one is replaced only by the next show.
         Case::A => [150, 46_140, 21, 8_432],
@@ -837,6 +839,7 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
         Case::C | Case::E => [149, 46_108, 65, 19_394],
         Case::D => [162, 47_340, 33, 9_632],
     };
+    #[cfg(windows)]
     assert!(
         allocations <= bound[0]
             && bytes <= bound[1]

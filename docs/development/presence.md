@@ -89,6 +89,13 @@ The optional gate observer and input diagnostics require the Windows QPC backend
 opening an output file. A normal launch requests neither, and an unsupported target cannot
 substitute a portable clock or emit native timing receipts.
 
+The shell's GPUI tests can run the connected presence's shared reducers on macOS without
+starting the connected desktop. Their detached owner uses GPUI test windows, a fixture work
+area and input stamp, and an in-memory talk-Escape lease. It cannot bind native surfaces
+or supply native capture exclusion. Tests that use Win32 named pipes, Raw Input decoding,
+native overlay order or Windows font shaping stay on Windows, as do the recovery tests'
+measured allocation ceilings. The recovery tests still check the same owner behavior.
+
 The shell and its offline fixtures register `shell::assets::Assets`: GPUI Kit's default
 component bundle plus the `Monitor` icon used for a held picture in history and screen notes.
 An `IconName` supplies a path, not its SVG bytes; icons outside the default bundle must be

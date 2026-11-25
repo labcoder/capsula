@@ -9,6 +9,8 @@ use kumochi_protocol::constants;
 
 const UNAVAILABLE: u8 = 69;
 const BAD_ARGUMENTS: u8 = 64;
+/// Another session of this user is using the profile: a refusal, not a crash.
+const PROFILE_BUSY: u8 = 75;
 
 #[derive(PartialEq, Eq)]
 enum Route {
@@ -134,6 +136,7 @@ fn run_detached() -> ExitCode {
     tracing::info!(
         build = kumochi_protocol::BUILD_ID,
         identity = constants::DATA_DIR,
+        edition = constants::EDITION,
         "brain started"
     );
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -150,6 +153,10 @@ fn run_detached() -> ExitCode {
     kumochi_brain::shut_down(runtime);
     match ran {
         Ok(()) => ExitCode::SUCCESS,
+        Err(BrainError::ProfileBusy) => {
+            tracing::warn!("another session is using this profile");
+            ExitCode::from(PROFILE_BUSY)
+        }
         Err(error) => {
             log_brain_stopped(&error);
             ExitCode::FAILURE

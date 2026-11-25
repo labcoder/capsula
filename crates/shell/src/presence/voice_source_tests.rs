@@ -1189,7 +1189,7 @@ pub(in crate::presence) fn source(
     (open, finish, started, samples)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, debug_assertions))]
 #[gpui::test]
 fn queued_presence_claims_silent_output_and_cancels_the_fake_microphone(cx: &mut TestAppContext) {
     use crate::link::fixture;
@@ -1286,6 +1286,128 @@ fn queued_presence_claims_silent_output_and_cancels_the_fake_microphone(cx: &mut
             && pipe.handle.admits_text(Some(&session))
     });
     assert_eq!(probe.decoded(), 0);
+    pipe.handle.end(&session);
+    assert!(pipe.link.join().unwrap());
+    assert!(brain.join().unwrap());
+    drop(owner);
+    cx.run_until_parked();
+}
+
+#[cfg(all(windows, debug_assertions))]
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "drives one authenticated hold through a deferred setting and physical release"
+)]
+fn a_silent_hold_releases_even_with_a_saved_default_on_and_retirement_held(
+    cx: &mut TestAppContext,
+) {
+    use crate::link::fixture;
+    use kumochi_protocol::message::{PartState, VoiceView};
+
+    let _device = fixture::serialize_playback();
+    let (id, hello, probe, brain) = kumochi_brain::ipc::offline_hold_peer();
+    let pipe = fixture::authenticated_primed(id, hello);
+    let events = fixture::patient(pipe.events);
+    let owner = crate::presence::test_fixture::presence(cx);
+    owner.update(cx, |owner, _| owner.link = pipe.handle.clone());
+    let apply = |event, cx: &mut TestAppContext| {
+        owner.update(cx, |owner, cx| {
+            owner.link_events(Batch::Plain(vec![event]), cx).unwrap();
+        });
+    };
+    let session = fixture::connected(fixture::next(&events));
+    apply(LinkEvent::Connected(session.clone()), cx);
+    loop {
+        let event = fixture::next(&events);
+        let ready = matches!(
+            &event,
+            LinkEvent::Voice {
+                view: VoiceView {
+                    speech_input: PartState::Ready,
+                    ..
+                },
+                ..
+            }
+        );
+        apply(event, cx);
+        if ready {
+            break;
+        }
+    }
+    probe.release_ack();
+    probe.release_run();
+    probe.allow_data_credit();
+    until(cx, |_| pipe.handle.admits_voice(session.generation()));
+    let mut view = owner.read_with(cx, |owner, cx| {
+        owner
+            .settings
+            .read(cx)
+            .view()
+            .expect("saved settings")
+            .clone()
+    });
+    assert!(!view.talk_back);
+    view.talk_back = true;
+    apply(
+        LinkEvent::SpokenRepliesDefaulted {
+            generation: session.generation(),
+            view,
+        },
+        cx,
+    );
+    owner.read_with(cx, |owner, cx| {
+        assert_eq!(owner.settings.read(cx).talk_back_choice(), Some(true));
+    });
+
+    let (open, finish, started, samples) = source(&owner, cx, None);
+    let (_, stamp) = hold(&owner, 1, cx);
+    loop {
+        let event = fixture::next(&events);
+        let admitted = matches!(
+            &event,
+            LinkEvent::VoiceHold {
+                gesture: GestureId(1),
+                status: HoldStatus::Admitted,
+                ..
+            }
+        );
+        apply(event, cx);
+        if admitted {
+            break;
+        }
+    }
+    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    open.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| {
+            owner.voice.status == Some(Text::HoldListening)
+        })
+    });
+    samples.recv_timeout(Duration::from_secs(3)).unwrap();
+    let barrier = owner.read_with(cx, |owner, _| owner.voice.gates.hold_back());
+    owner.update(cx, |owner, cx| {
+        owner.link.microphone_gate().release(GestureId(1));
+        owner.voice_intent(
+            Intent::End {
+                gesture: GestureId(1),
+                cancelled: false,
+            },
+            stamp,
+            443,
+            None,
+            TalkHeld::default(),
+            cx,
+        );
+    });
+    finish.send(()).unwrap();
+    until(cx, |cx| {
+        while let Ok(event) = events.try_recv() {
+            apply(event, cx);
+        }
+        probe.decoded() == 1
+    });
+    drop(barrier);
     pipe.handle.end(&session);
     assert!(pipe.link.join().unwrap());
     assert!(brain.join().unwrap());
@@ -2283,6 +2405,7 @@ fn the_native_callback_reads_the_pointer_at_recognition_and_when_the_keys_come_u
     }
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn superseding_native_hold_returns_before_outbox_release_and_sends_cancel_first(
     cx: &mut TestAppContext,
@@ -2338,6 +2461,7 @@ fn superseding_native_hold_returns_before_outbox_release_and_sends_cancel_first(
     ));
 }
 
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug)]
 enum CancelAt {
     RawEscape,
@@ -2348,6 +2472,7 @@ enum CancelAt {
     ClosedQueue,
 }
 
+#[cfg(windows)]
 impl CancelAt {
     fn deliver(self, send: &Deliver, now: Instant) {
         use crate::presence::gesture::{CLOSE_DELIVERY, FAIL_CLOCK};
@@ -2391,6 +2516,7 @@ impl CancelAt {
     }
 }
 
+#[cfg(windows)]
 fn check_native_cancel(cx: &mut TestAppContext, at: CancelAt) {
     use crate::link::fixture;
 
@@ -2480,36 +2606,43 @@ fn check_native_cancel(cx: &mut TestAppContext, at: CancelAt) {
     }
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_on_raw_escape(cx: &mut TestAppContext) {
     check_native_cancel(cx, CancelAt::RawEscape);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_on_hotkey_escape(cx: &mut TestAppContext) {
     check_native_cancel(cx, CancelAt::HotkeyEscape);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_on_cancelled_end(cx: &mut TestAppContext) {
     check_native_cancel(cx, CancelAt::End);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_on_open_input(cx: &mut TestAppContext) {
     check_native_cancel(cx, CancelAt::OpenInput);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_on_clock_failure(cx: &mut TestAppContext) {
     check_native_cancel(cx, CancelAt::ClockFailure);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_on_closed_queue(cx: &mut TestAppContext) {
     check_native_cancel(cx, CancelAt::ClosedQueue);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_or_offers_a_replacement_after_a_stale_cancel(cx: &mut TestAppContext) {
     use crate::link::fixture;
@@ -2707,5 +2840,78 @@ fn a_fenced_first_state_ends_transcribing_and_releases_escape(cx: &mut TestAppCo
         [ControlToBrain::GestureCancel {
             gesture: GestureId(1),
         }]
+    );
+}
+
+/// One run's state, as the brain tells it.
+fn run_state(
+    owner: &Entity<Presence>,
+    run: u64,
+    phase: Phase,
+    origin: Option<RunOrigin>,
+    cx: &mut TestAppContext,
+) {
+    let event = LinkEvent::RunState {
+        generation: 1,
+        run: RunId(run),
+        thread: ThreadId(1),
+        phase,
+        error: None,
+        origin,
+    };
+    owner.update(cx, |owner, cx| {
+        owner.link_events(Batch::Plain(vec![event]), cx).unwrap();
+    });
+}
+
+/// Whether Esc is wanted system-wide: tests have no window to register it, so Stop shows.
+fn esc_held(owner: &Entity<Presence>, cx: &mut TestAppContext) -> bool {
+    owner.read_with(cx, |owner, _| owner.escape_hold.shows_stop())
+}
+
+/// Global Esc follows the hold itself, not the runs it folds into: a hold takes Esc beside a run
+/// that already works.
+#[gpui::test]
+fn a_hold_takes_global_esc_beside_a_working_run(cx: &mut TestAppContext) {
+    super::super::test_fixture::without_desktop(cx);
+    let (owner, _data, _controls) = ready(cx);
+    run_state(&owner, 3, Phase::Thinking, None, cx);
+    assert!(
+        !esc_held(&owner, cx),
+        "a thinking run alone leaves Esc to other apps"
+    );
+    hold(&owner, 1, cx);
+    assert!(
+        esc_held(&owner, cx),
+        "the hold takes Esc beside the working run"
+    );
+}
+
+/// A hold gives global Esc back once its own run answers, though that run still works.
+#[gpui::test]
+fn a_hold_gives_global_esc_back_once_its_run_answers(cx: &mut TestAppContext) {
+    super::super::test_fixture::without_desktop(cx);
+    let (owner, _data, _controls) = ready(cx);
+    // The brain described no scenes, so the answer's open panel shows no drawing Esc clears.
+    owner.update(cx, |owner, _| {
+        owner.runs.apply_scenes(&[]).unwrap();
+    });
+    hold(&owner, 1, cx);
+    assert!(esc_held(&owner, cx), "the hold takes Esc");
+    owner.update(cx, |owner, _| {
+        owner.voice.pending.as_mut().expect("the hold").source = Source::Sent;
+    });
+    let origin = Some(RunOrigin::Hold {
+        gesture: GestureId(1),
+    });
+    run_state(&owner, 1, Phase::Thinking, origin, cx);
+    assert!(
+        esc_held(&owner, cx),
+        "the hold's question is still being taken"
+    );
+    run_state(&owner, 1, Phase::Answering, None, cx);
+    assert!(
+        !esc_held(&owner, cx),
+        "the hold's own answer gives Esc back"
     );
 }

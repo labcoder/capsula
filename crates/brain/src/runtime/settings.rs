@@ -3,7 +3,6 @@
 //! connection: it's still written while no shell is connected and during Quit, and a later
 //! connection only hears the settled settings, never an answer meant for another shell.
 
-#[cfg(any(test, windows))]
 use std::path::Path;
 
 use kumochi_protocol::message::{ControlToShell, ErrorKey, SettingsOp, VoiceView};
@@ -13,7 +12,6 @@ use tokio::task::{JoinError, JoinHandle};
 use super::{Brain, Full, Link, controls::Registration};
 use crate::config::{ConfigError, Pending};
 use crate::connections::github::device::DefaultRepo;
-#[cfg(any(test, windows))]
 use crate::voice::installer::Folder;
 use crate::voice::installer::{Installer, RemoveAnswer};
 
@@ -201,7 +199,12 @@ impl Brain {
         let Some(link) = link else {
             return Ok(());
         };
-        if link.queued_talk_back != Some(self.config.view().talk_back) {
+        if !self
+            .voice
+            .as_ref()
+            .is_some_and(|voice| voice.deferred_talk_back)
+            && link.queued_talk_back != Some(self.config.view().talk_back)
+        {
             link.queued_talk_back = None;
         }
         if epoch == self.epoch {
@@ -257,12 +260,12 @@ impl Brain {
     }
 
     /// Stops superseded installs and manual loads at receipt, without reordering their replies.
-    pub(super) fn queue_settings(&mut self, op: SettingsOp) {
-        // Off withdraws as it's taken, so a slow, queued or refused save keeps no granted send
-        // going; the commit's withdrawal then finds nothing left to close.
-        if op == SettingsOp::SetShowScreen(false) {
-            self.show_screen_off();
-        }
+    pub(super) fn queue_settings(
+        &mut self,
+        op: SettingsOp,
+        link: Option<&mut Link<'_, '_>>,
+    ) -> Result<(), super::Ended> {
+        let off = op == SettingsOp::SetShowScreen(false);
         let change = if matches!(op, SettingsOp::CancelVoiceInstall)
             && let Some(before) = self.fence_voice_installs()
         {
@@ -282,6 +285,12 @@ impl Brain {
             change,
             epoch: self.epoch,
         });
+        // Off withdraws as it's taken, so a slow, queued or refused save keeps no granted send
+        // going; the commit's withdrawal then finds nothing left to close.
+        if off {
+            self.show_screen_off(link)?;
+        }
+        Ok(())
     }
 
     /// Starts the next waiting settings change, unless a write is in flight. A refused one is
@@ -446,19 +455,37 @@ impl Brain {
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
         let input_was_enabled = self.config.view().hold_to_talk;
+        let mut defaulted = false;
         let outcome = match written {
             Ok((pending, Ok(()))) => {
                 let (screen_holds, show_screen) = {
                     let view = self.config.view();
                     (view.screen_holds, view.show_screen)
                 };
+                let first_spoken_install = matches!(
+                    voice,
+                    Some(VoiceWrite::Activate {
+                        part: VoicePart::SpokenReplies,
+                        ..
+                    })
+                ) && self.config.implicit_talk_back();
                 self.config.commit(pending);
+                defaulted = first_spoken_install
+                    && self.config.view().talk_back
+                    && link
+                        .as_ref()
+                        .is_some_and(|link| link.queued_talk_back == Some(false));
+                if let Some(voice) = &mut self.voice {
+                    voice.deferred_talk_back =
+                        self.config.view().talk_back && (voice.deferred_talk_back || defaulted);
+                }
                 self.voice_policy();
                 if screen_holds && !self.config.view().screen_holds {
                     self.screen_holds_off();
                 }
                 if show_screen && !self.config.view().show_screen {
-                    self.show_screen_off();
+                    self.show_screen_off(link.as_deref_mut())
+                        .map_err(|_| Full)?;
                 }
                 #[cfg(test)]
                 self.observer.send(super::Seen::SettingsCommitted).ok();
@@ -506,7 +533,12 @@ impl Brain {
             };
             self.voice_written(write, result, link.as_deref_mut())?;
         }
-        let answered = self.settled(epoch, outcome, link.as_deref_mut());
+        let answered = match link.as_deref_mut() {
+            Some(link) if defaulted => link.control(&ControlToShell::SpokenRepliesDefaulted(
+                self.config.view().clone(),
+            )),
+            link => self.settled(epoch, outcome, link),
+        };
         let input_enabled = self.config.view().hold_to_talk;
         if input_enabled != input_was_enabled {
             let voice_link = if answered.is_ok() {
@@ -530,7 +562,6 @@ impl Brain {
     /// deletes nothing. A folder that's already gone counts as deleted. A part whose folder can't
     /// be deleted stays listed with the refusal, so only ordinary cleanup failures can retry.
     /// Blocking is fine: it runs at start-up, before anything is served.
-    #[cfg(any(test, windows))]
     pub(crate) fn finish_removals(&mut self, models: &Path) -> Vec<(VoicePart, Folder)> {
         let mut stuck = Vec::new();
         for part in self.config.removing() {
@@ -552,6 +583,25 @@ impl Brain {
     pub(super) fn pump_settings_offline(&mut self) {
         let pumped = self.pump_settings(None);
         debug_assert!(pumped.is_ok(), "settling without a shell can't fail");
+    }
+
+    /// A replacement pair must not advertise the saved default before a pending Off settles.
+    pub(super) async fn settle_deferred_talk_back(&mut self) {
+        let off = SettingsOp::SetTalkBack(false);
+        while self
+            .voice
+            .as_ref()
+            .is_some_and(|voice| voice.deferred_talk_back)
+            && self.turning_off(&off)
+        {
+            self.pump_settings_offline();
+            if self.config_write.is_none() {
+                break;
+            }
+            let done = written(&mut self.config_write).await;
+            let settled = self.settings_done(done, None);
+            debug_assert!(settled.is_ok(), "settling without a shell can't fail");
+        }
     }
 
     /// Writes every waiting settings change, one after another, with no shell to tell.

@@ -30,6 +30,7 @@ pub enum Field {
 pub enum Update {
     Answer,
     Unsolicited,
+    SpokenRepliesDefaulted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,6 +177,7 @@ pub struct Settings {
     stt_error: Option<UserError>,
     stt_send_failed: bool,
     talk_back_send_error: Option<Text>,
+    talk_back_deferred: bool,
     /// Each catalog on offer, in picker order.
     models: Vec<(ConnectionKind, Vec<ModelInfo>)>,
     /// The newest default model sent and not yet answered.
@@ -244,8 +246,10 @@ impl Settings {
                 self.clear_notice();
             }
         }
+        self.talk_back_deferred =
+            view.talk_back && (self.talk_back_deferred || update == Update::SpokenRepliesDefaulted);
         self.view = Some(view);
-        if update == Update::Unsolicited {
+        if update != Update::Answer {
             return None;
         }
         let pending = self.pending.pop_front()?;
@@ -655,6 +659,7 @@ impl Settings {
         self.voice_feedback = Default::default();
         self.stt_send_failed = false;
         self.talk_back_send_error = None;
+        self.talk_back_deferred = false;
         self.pending.clear();
         self.models.clear();
         self.model_queued = None;

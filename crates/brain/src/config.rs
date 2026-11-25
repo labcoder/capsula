@@ -30,7 +30,6 @@ const ONBOARDED: &str = "onboarded";
 const ONBOARDING_FROM: &str = "onboarding_from";
 const MAX_FRAME_RATE: &str = "max_frame_rate";
 const DEFAULT_MODEL: &str = "default_model";
-#[cfg(any(test, windows))]
 const CLAUDE_CODE: &str = "claude_code";
 const GITHUB: &str = "github";
 const DEFAULT_ACCOUNT: &str = "default_account";
@@ -52,7 +51,7 @@ pub(crate) enum ConfigError {
     /// The platform did not supply a settings folder candidate.
     #[cfg_attr(
         not(target_os = "macos"),
-        error("%APPDATA% is not set to an absolute path")
+        error("the roaming application data folder is unavailable")
     )]
     #[cfg_attr(
         target_os = "macos",
@@ -141,7 +140,7 @@ impl Config {
     /// failure refuses every change until the user repairs or removes the file and restarts.
     pub(crate) fn load(dir: Option<PathBuf>, main_thread: ThreadId) -> Self {
         let Some(path) = dir.map(|dir| dir.join(CONFIG_FILE)) else {
-            tracing::warn!("%APPDATA% isn't an absolute path; settings won't be saved");
+            tracing::warn!("no settings folder; settings won't be saved");
             return Self::refusing(None, Refusal::NoHome, main_thread);
         };
         let table = match std::fs::read_to_string(&path) {
@@ -212,11 +211,10 @@ impl Config {
 
     pub(crate) fn implicit_talk_back(&self) -> bool {
         self.table.as_ref().is_ok_and(|table| {
-            table.get(VOICE).is_none_or(|voice| {
-                voice
-                    .as_table()
-                    .is_some_and(|voice| !voice.contains_key(TALK_BACK))
-            })
+            table
+                .get(VOICE)
+                .and_then(Value::as_table)
+                .is_none_or(|voice| !voice.contains_key(TALK_BACK))
         })
     }
 
@@ -272,7 +270,6 @@ impl Config {
 
     /// `[claude_code] enabled`: on unless it's `false`. Anything else there, or a file that
     /// couldn't be read, turns it off, because it may have said so.
-    #[cfg(any(test, windows))]
     pub(crate) fn claude_code_enabled(&self) -> bool {
         let Ok(table) = &self.table else {
             return false;
@@ -407,13 +404,11 @@ impl Config {
 
     /// The parts `[voice] removing` names, by their folder names: a removal that hasn't
     /// finished. A name this build doesn't know names nothing.
-    #[cfg(any(test, windows))]
     pub(crate) fn removing(&self) -> Vec<VoicePart> {
         self.listed(REMOVING)
     }
 
     /// The parts `[voice] installed` names and `removing` doesn't: a removal wins.
-    #[cfg(any(test, windows))]
     pub(crate) fn installed(&self) -> Vec<VoicePart> {
         let removing = self.removing();
         let mut installed = self.listed(INSTALLED);
@@ -421,7 +416,6 @@ impl Config {
         installed
     }
 
-    #[cfg(any(test, windows))]
     fn listed(&self, key: &str) -> Vec<VoicePart> {
         let names = self
             .table
@@ -464,7 +458,7 @@ impl Config {
     pub(crate) fn stage_activate(&self, part: VoicePart) -> Result<Pending, ConfigError> {
         let (path, mut table) = self.editable()?;
         let voice = voice_mut(&mut table);
-        if part == VoicePart::SpokenReplies && !voice.contains_key(TALK_BACK) {
+        if part == VoicePart::SpokenReplies && self.implicit_talk_back() {
             voice.insert(TALK_BACK.to_owned(), Value::Boolean(true));
         }
         listed_add(voice, INSTALLED, part);

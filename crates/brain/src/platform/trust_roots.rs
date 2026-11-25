@@ -1,6 +1,9 @@
 //! The root certificates the account client trusts, read from the operating system's store.
 
 use std::fmt;
+use std::sync::Arc;
+
+use rustls::pki_types::CertificateDer;
 
 /// Root certificates as owned public DER, plus how many the store held that weren't kept.
 #[derive(Clone, PartialEq, Eq)]
@@ -44,6 +47,69 @@ pub enum TrustRootsError {
 
 pub(crate) const fn native_trust_supported() -> bool {
     cfg!(windows)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum NativeTlsError {
+    #[error("native TLS is unsupported on this platform")]
+    Unsupported,
+    #[error("native TLS trust store unavailable")]
+    TrustStoreUnavailable,
+    #[error("native TLS configuration failed")]
+    Configuration,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrustDiagnostics {
+    Account,
+    Quiet,
+}
+
+pub(crate) fn native_client_tls(
+    diagnostics: TrustDiagnostics,
+) -> Result<rustls::ClientConfig, NativeTlsError> {
+    client_tls_from_roots(super::trust_roots(), diagnostics)
+}
+
+pub(crate) fn client_tls_from_roots(
+    roots: Result<TrustRoots, TrustRootsError>,
+    diagnostics: TrustDiagnostics,
+) -> Result<rustls::ClientConfig, NativeTlsError> {
+    const ACCOUNT_LOG: &str = concat!(env!("CARGO_CRATE_NAME"), "::connections::http_client");
+    let roots = roots.map_err(|error| {
+        if diagnostics == TrustDiagnostics::Account {
+            tracing::warn!(target: ACCOUNT_LOG, loader_error = ?error, "account trust roots unavailable");
+        }
+        match error {
+            TrustRootsError::Unsupported => NativeTlsError::Unsupported,
+            _ => NativeTlsError::TrustStoreUnavailable,
+        }
+    })?;
+    let mut store = rustls::RootCertStore::empty();
+    let (usable, unparsable) =
+        store.add_parsable_certificates(roots.certificates.into_iter().map(CertificateDer::from));
+    if diagnostics == TrustDiagnostics::Account {
+        tracing::info!(
+            target: ACCOUNT_LOG,
+            kept = usable,
+            skipped = roots.skipped,
+            unreadable = roots.unreadable,
+            unparsable,
+            "account trust roots"
+        );
+    }
+    if usable == 0 {
+        return Err(NativeTlsError::TrustStoreUnavailable);
+    }
+    // shortcut: a root Windows hasn't fetched yet fails as UnknownIssuer; revisit if users hit it
+    // shortcut: server-supplied intermediate distrust, usage-specific not-before and revocation aren't checked; revisit before broad release
+    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|_| NativeTlsError::Configuration)?
+    .with_root_certificates(store)
+    .with_no_client_auth())
 }
 
 /// Loads the usable public roots from the OS trust store.

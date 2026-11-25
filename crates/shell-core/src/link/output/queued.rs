@@ -52,7 +52,8 @@ pub(in crate::link) struct Queued {
     deadline: Instant,
     ack: Option<SyncSender<()>>,
     talk_back: Option<bool>,
-    switching: Option<bool>,
+    default_notice: DefaultNotice,
+    switching: Option<TalkBackSwitch>,
     show_screen: Option<bool>,
     wake: Arc<OnceLock<Thread>>,
     stopped: RunId,
@@ -61,6 +62,19 @@ pub(in crate::link) struct Queued {
     early_end: Option<RunId>,
     pending: Option<u32>,
     active: Option<Active>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DefaultNotice {
+    Unseen,
+    Deferred,
+    Retired,
+}
+
+#[derive(PartialEq, Eq)]
+enum TalkBackSwitch {
+    Pending(bool),
+    Refused,
 }
 
 enum Delivery {
@@ -97,6 +111,7 @@ impl Queued {
             deadline,
             ack: Some(ack),
             talk_back: None,
+            default_notice: DefaultNotice::Unseen,
             switching: None,
             show_screen: None,
             wake,
@@ -335,6 +350,13 @@ impl OutputOwner {
             .is_some_and(|(_, owner)| owner.hold_ready() && owner.pending.is_none())
     }
 
+    /// Whether this pair registered to speak, independent of the saved preference.
+    pub fn queued_speaking(&self, session: u64) -> bool {
+        self.lock()
+            .queue(session)
+            .is_some_and(|(_, owner)| owner.talk_back == Some(true))
+    }
+
     #[expect(
         clippy::fn_params_excessive_bools,
         reason = "the wire preference is a boolean"
@@ -363,11 +385,40 @@ impl OutputOwner {
         {
             return Err(Denied::Busy);
         }
-        if owner.talk_back == Some(on) || !send() {
+        if (owner.talk_back == Some(on) && owner.default_notice != DefaultNotice::Deferred)
+            || !send()
+        {
             return Err(Denied::Lost);
         }
-        owner.switching = Some(on);
+        owner.switching = Some(TalkBackSwitch::Pending(on));
         Ok(())
+    }
+
+    pub(in crate::link) fn refuse_talk_back(&self, session: u64) {
+        if let Some((_, owner)) = self.lock().queue(session)
+            && owner.switching.is_some()
+        {
+            owner.switching = Some(TalkBackSwitch::Refused);
+        }
+    }
+
+    pub(in crate::link) fn defer_spoken_replies(
+        &self,
+        session: u64,
+        settings: &SettingsView,
+    ) -> bool {
+        self.lock()
+            .queue(session)
+            .filter(|(_, owner)| {
+                owner.talk_back == Some(false)
+                    && owner.default_notice == DefaultNotice::Unseen
+                    && owner.show_screen == Some(settings.show_screen)
+                    && settings.talk_back
+            })
+            .is_some_and(|(_, owner)| {
+                owner.default_notice = DefaultNotice::Deferred;
+                true
+            })
     }
 
     /// Whether the pair's registered Show Screen differs from the one `settings` carries.
@@ -402,12 +453,16 @@ impl OutputOwner {
             .talk_back
             .is_some_and(|registered| registered != settings.talk_back)
         {
-            owner.show_screen = None;
-            return Err(if answer && owner.switching == Some(settings.talk_back) {
-                Attendance::TalkBackChanged
-            } else {
-                Attendance::Lost
-            });
+            if answer && owner.switching == Some(TalkBackSwitch::Pending(settings.talk_back)) {
+                owner.show_screen = None;
+                return Err(Attendance::TalkBackChanged);
+            }
+            if owner.default_notice != DefaultNotice::Deferred {
+                owner.show_screen = None;
+                return Err(Attendance::Lost);
+            }
+        } else if owner.default_notice == DefaultNotice::Deferred {
+            owner.default_notice = DefaultNotice::Retired;
         }
         if answer {
             owner.switching = None;

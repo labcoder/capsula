@@ -403,6 +403,7 @@ fn page_forwarding_leaves_the_current_run_and_its_pending_writes_alone() {
     assert_eq!(
         coordinator.handle(Input::TurnStored { run: RunId(1) }),
         Ok(vec![Effect::Store(StoreOp::BuildContext(BuildContext {
+            require_recovery: None,
             control: crate::recall::control::Control::new(
                 std::time::Instant::now() + crate::coordinator::WALL_CLOCK
             ),
@@ -1047,8 +1048,10 @@ async fn a_page_read_failure_answers_page_failed_and_keeps_the_connection() {
         .conn_for_tests()
         .execute_batch("DROP TABLE threads")
         .expect("broken schema");
+    let custody = crate::test_support::custody(&store);
     let mut brain = Brain::new(
         store,
+        custody,
         ThreadId(1),
         (ThreadId(1), RunId(0)),
         Vec::new(),

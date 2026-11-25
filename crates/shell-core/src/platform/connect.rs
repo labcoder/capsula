@@ -63,10 +63,15 @@ pub(crate) struct Connection {
 
 /// Connects, starting the brain once if none answers. Legacy uses the deadline for retries;
 /// `QueuedRequired` uses it as a hard deadline for the whole attempt.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the link supplies the pair identity, deadline and existing callbacks"
+)]
 pub(crate) fn connect_brain(
     brain: &Path,
     session: u32,
     audio: AudioSession,
+    repair_of: Option<IssueSession>,
     deadline: Instant,
     quitting: impl Fn() -> bool,
     quit_parked: impl Fn(&PipeClient),
@@ -77,7 +82,11 @@ pub(crate) fn connect_brain(
         deadline,
         quitting,
         quit_parked,
-        |attempt| handshake(brain, session, audio, attempt, || text_metrics(deadline)),
+        |attempt| {
+            handshake(brain, session, audio, repair_of, attempt, || {
+                text_metrics(deadline)
+            })
+        },
         || launch_detached(brain),
     )
 }
@@ -139,6 +148,7 @@ fn handshake(
     brain: &Path,
     session: u32,
     audio: AudioSession,
+    repair_of: Option<IssueSession>,
     attempt: Option<Instant>,
     text_metrics: impl FnOnce() -> DrawingText,
 ) -> Result<Connection, LinkError> {
@@ -149,21 +159,28 @@ fn handshake(
         build_id: BUILD_ID.to_owned(),
         capability: credential::read(session)?,
     };
-    handshake_pair(control, hello, audio, attempt, text_metrics(), || {
-        open(&Pipe::Data.name(session), brain, attempt)
-    })
+    handshake_pair(
+        control,
+        hello,
+        audio,
+        repair_of,
+        attempt,
+        text_metrics(),
+        || open(&Pipe::Data.name(session), brain, attempt),
+    )
 }
 
 pub(crate) fn handshake_pair(
     control: PipeClient,
     hello: Hello,
     audio: AudioSession,
+    repair_of: Option<IssueSession>,
     attempt: Option<Instant>,
     drawing: DrawingText,
     open_data: impl FnOnce() -> Result<PipeClient, LinkError>,
 ) -> Result<Connection, LinkError> {
     let mut handshake = HandshakeIo(&control, attempt);
-    write_control_hello(&mut handshake, hello.clone(), audio)?;
+    write_control_hello(&mut handshake, hello.clone(), audio, repair_of)?;
     let issue_origin = welcome(&mut handshake)?;
     check_attempt(attempt)?;
     let data_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
@@ -191,10 +208,14 @@ fn write_control_hello(
     writer: &mut impl Write,
     hello: Hello,
     audio: AudioSession,
+    repair_of: Option<IssueSession>,
 ) -> Result<(), FrameError> {
-    let greeting = match audio {
-        AudioSession::Legacy => ControlToBrain::Hello(hello),
-        AudioSession::QueuedRequired => ControlToBrain::QueuedHello(hello),
+    let greeting = match (audio, repair_of) {
+        (AudioSession::Legacy, _) => ControlToBrain::Hello(hello),
+        (AudioSession::QueuedRequired, None) => ControlToBrain::QueuedHello(hello),
+        (AudioSession::QueuedRequired, Some(previous)) => {
+            ControlToBrain::QueuedAudioReconnect(Box::new(hello), previous)
+        }
     };
     frame::write(writer, &greeting, Pipe::Control)
 }
@@ -261,6 +282,7 @@ pub(crate) fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError
             | ControlToShell::ThreadDeleted { .. }
             | ControlToShell::TurnRefused { .. }
             | ControlToShell::Settings { .. }
+            | ControlToShell::SpokenRepliesDefaulted(_)
             | ControlToShell::Error(_)
             | ControlToShell::ScenesV1 { .. }
             | ControlToShell::NoVisual { .. }

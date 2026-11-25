@@ -183,6 +183,7 @@ mod tests {
     /// The brain's wide measure bounds the shipped font: on this corpus its lines, width and height
     /// are never below the shell's, nor its width on a run of any one printable ASCII character,
     /// and the shell's lines are at most 1.5 em.
+    #[cfg(windows)]
     #[test]
     fn the_brain_measure_bounds_the_shipped_font() {
         use kumochi_scene::display::WideMeasure;

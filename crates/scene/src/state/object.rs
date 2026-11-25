@@ -1,5 +1,6 @@
 use crate::{
     ErrorCode, FieldPath, Finite, Handle, Ms, Step, StepError, WireId,
+    error::DimensionRange,
     limits::MAX_OBJECT_DEPTH,
     record::{Anchor, Change, KeyValue, Op, Track},
 };
@@ -323,17 +324,20 @@ pub(super) fn validate_op(
 }
 
 fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), StepError> {
-    let positive = |value: Option<Finite>, field| {
-        if value.is_some_and(|v| v.get() <= 0.0) {
-            Err(StepError::in_step(
-                &step.id,
-                prefix.clone().field(field),
-                ErrorCode::OutOfRange,
-            ))
+    let dimension = |value: Option<Finite>, field, range| {
+        if value.is_some_and(|v| match range {
+            DimensionRange::Positive | DimensionRange::Scale => v.get() <= 0.0,
+            DimensionRange::NonNegative => v.get() < 0.0,
+        }) {
+            Err(
+                StepError::in_step(&step.id, prefix.clone().field(field), ErrorCode::OutOfRange)
+                    .with_dimension(range),
+            )
         } else {
             Ok(())
         }
     };
+    let positive = |value, field| dimension(value, field, DimensionRange::Positive);
     let bounds = |value: Option<[Finite; 4]>| {
         if let Some(value) = value {
             for index in [2, 3] {
@@ -342,7 +346,8 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
                         &step.id,
                         prefix.clone().field("box").index(index),
                         ErrorCode::OutOfRange,
-                    ));
+                    )
+                    .with_dimension(DimensionRange::Positive));
                 }
             }
         }
@@ -352,14 +357,14 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
         Op::Line(r) | Op::Arrow(r) => positive(r.width, "width")?,
         Op::Path(r) => {
             positive(r.width, "width")?;
-            positive(r.scale, "scale")?;
+            dimension(r.scale, "scale", DimensionRange::Scale)?;
         }
         Op::Shape(r) => {
             bounds(r.bounds)?;
             positive(r.r, "r")?;
             // Zero means none here: square corners, or no outline.
             for (field, value) in [("radius", r.radius), ("width", r.width)] {
-                positive(value.filter(|value| value.get() != 0.0), field)?;
+                dimension(value, field, DimensionRange::NonNegative)?;
             }
             if let Some(size) = r.size {
                 for (index, value) in size.into_iter().enumerate() {
@@ -368,7 +373,8 @@ fn validate_dimensions(op: &Op, prefix: &FieldPath, step: &Step) -> Result<(), S
                             &step.id,
                             prefix.clone().field("size").index(index),
                             ErrorCode::OutOfRange,
-                        ));
+                        )
+                        .with_dimension(DimensionRange::Positive));
                     }
                 }
             }

@@ -13,7 +13,7 @@ use super::{Barrier, Exit};
 use crate::context::{Built, ConnectionTag, InputItem, Origin, Role, RunSnapshot};
 use crate::coordinator::{BuildContext, BuildKey, ContextBuilt, Input, StoreOp, Unbuilt};
 use crate::runtime::Seen;
-use crate::store::{Cancel, Pause, Pauses, Point, RunEnd, Store, StoreError};
+use crate::store::{Boundary, Cancel, Pause, Pauses, Point, RunEnd, Store, StoreError};
 use crate::test_support::Scratch;
 
 mod history;
@@ -104,8 +104,9 @@ fn run_with(
         after_close: None,
         pauses,
     };
+    let custody = crate::test_support::custody(&store);
     Running {
-        thread: StoreThread::spawn(store, acks, schedule).expect("thread"),
+        thread: StoreThread::spawn(store, custody, acks, schedule).expect("thread"),
         acks: forward(replies),
         seen: forward(seen),
         gates,
@@ -425,6 +426,7 @@ fn a_read_sees_the_ops_queued_before_it() {
 /// A run's first build in task `thread`, run `thread`.
 fn build(thread: u64, attempt: u64, choice: Option<ModelChoice>) -> StoreOp {
     StoreOp::BuildContext(BuildContext {
+        require_recovery: None,
         control: crate::recall::control::Control::new(
             std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
         ),
@@ -496,6 +498,7 @@ fn a_saved_route_reaches_the_build_and_the_jobs_read() {
         assert_eq!(built.request.choice.as_ref(), Some(&picked));
         for kind in [JobKind::Title, JobKind::Compact] {
             assert!(running.thread.send(StoreOp::ReadJob(ReadJob {
+                require_recovery: None,
                 control: crate::recall::control::Control::new(
                     std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
                 ),
@@ -582,6 +585,199 @@ fn a_build_reads_after_the_ops_queued_before_it_and_takes_the_default_model() {
         Some(choice("default-model")),
         "the thread chose none"
     );
+    running.thread.close().blocking_recv().expect("closed");
+}
+
+/// Thread 2's run 2 and thread 3's run 3 from before cutoff 7, a saved summary of run 2, and
+/// run 5 in thread 2 after the cutoff quoting run 2.
+fn old_thread_quoted_after_its_cutoff(store: &mut Store, scratch: &Scratch) -> Boundary {
+    use crate::engines::{CallId, Opaque};
+    use kumochi_protocol::message::{ConnectionKind, EventId};
+
+    store
+        .begin_turn(ThreadId(2), Some("t"), RunId(2), "old-source-marker")
+        .expect("turn");
+    store
+        .end_run(ThreadId(2), RunId(2), &[], RunEnd::Done)
+        .expect("ended");
+    let ids: [i64; 2] = rusqlite::Connection::open(scratch.db())
+        .expect("reader")
+        .query_row(
+            "SELECT min(id), max(id) FROM events WHERE thread = 2",
+            [],
+            |row| Ok([row.get(0)?, row.get(1)?]),
+        )
+        .expect("events");
+    let [first, last] = ids.map(|id| u64::try_from(id).expect("an event id"));
+    assert!(
+        store
+            .store_summary(
+                ThreadId(2),
+                crate::store::Generation(0),
+                (EventId(first), EventId(last)),
+                "old-summary-marker",
+                None
+            )
+            .expect("summary")
+    );
+    with_thread(store, 3);
+    let cut = store.cut_history(7);
+    store
+        .begin_turn(ThreadId(2), None, RunId(5), "again")
+        .expect("turn");
+    store
+        .append_round(
+            (ThreadId(2), RunId(5)),
+            crate::context::Route {
+                kind: ConnectionKind::ChatGpt,
+                tag: ConnectionTag(0),
+            },
+            None,
+            &[Opaque::new(
+                br#"{"type":"function_call","call_id":"quote","name":"read_history","arguments":"{}"}"#
+                    .to_vec(),
+            )
+            .expect("item")],
+            &[(
+                CallId::new("quote").expect("call"),
+                crate::dispatch::ToolOutput::Recall(crate::recall::Selection::Read {
+                    task: 2,
+                    first_shown: Some(first),
+                    last_shown: Some(first),
+                    cut: None,
+                    next: None,
+                }),
+            )],
+        )
+        .expect("round");
+    cut
+}
+
+/// A build for a turn that arrived while `ChatGPT` was refused reads no history when it answers on
+/// `ChatGPT`, and reads as usual when it answers on another kind.
+#[test]
+fn a_build_that_arrived_while_chatgpt_was_refused_reads_nothing_for_it() {
+    let scratch = Scratch::new("build-blocked");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    store.recover().expect("recovered");
+    store
+        .begin_turn(ThreadId(2), Some("t"), RunId(2), "words")
+        .expect("turn");
+    let running = run(store, None);
+    for (kind, refused) in [
+        (kumochi_protocol::message::ConnectionKind::ChatGpt, true),
+        (kumochi_protocol::message::ConnectionKind::ClaudeCode, false),
+    ] {
+        let StoreOp::BuildContext(mut blocked) = build(
+            2,
+            1,
+            Some(ModelChoice {
+                connection: kind,
+                ..choice("m")
+            }),
+        ) else {
+            unreachable!("build makes a build");
+        };
+        blocked.arrived = crate::coordinator::Arrived::blocked();
+        assert!(running.thread.send(StoreOp::BuildContext(blocked)));
+        let reply = running.ack();
+        let failed = matches!(
+            reply,
+            Input::ContextBuilt(ContextBuilt {
+                result: Err(Unbuilt::Failed),
+                ..
+            })
+        );
+        assert_eq!(failed, refused, "{kind:?}");
+    }
+    running.thread.close().blocking_recv().expect("closed");
+}
+
+/// A recovered build of a new run in a thread from before the cutoff reads only that run, with
+/// neither the thread's saved summary nor a quote of its older turns; a build of a run from
+/// before the cutoff, or against a missing or different cutoff, fails.
+#[test]
+fn a_recovered_build_keeps_to_its_own_run_in_a_thread_from_before_the_cutoff() {
+    let scratch = Scratch::new("build-recovery");
+    let mut store = Store::open(&scratch.db()).expect("store");
+    store.recover().expect("recovered");
+    let cut = old_thread_quoted_after_its_cutoff(&mut store, &scratch);
+    let running = run(store, None);
+    let recovered = |thread, run, round, require| {
+        let StoreOp::BuildContext(mut job) = build(thread, 1, Some(choice("m"))) else {
+            unreachable!("build makes a build");
+        };
+        job.key.run = RunId(run);
+        job.key.round = round;
+        job.require_recovery = require;
+        StoreOp::BuildContext(job)
+    };
+    let failed = |reply| {
+        matches!(
+            reply,
+            Input::ContextBuilt(ContextBuilt {
+                result: Err(Unbuilt::Failed),
+                ..
+            })
+        )
+    };
+    let read = |reply| {
+        let (built, _) = made(reply);
+        built
+            .request
+            .input
+            .iter()
+            .filter_map(|item| match item {
+                InputItem::Message { text, .. } => Some(text.clone()),
+                InputItem::FunctionOutput { output, .. } => Some(output.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(running.thread.send(recovered(2, 5, 2, None)));
+    let all = read(running.ack());
+    assert!(all.contains("old-summary-marker"), "{all}");
+    assert!(all.contains("old-source-marker"), "{all}");
+    assert!(running.thread.send(recovered(2, 5, 2, Some(cut))));
+    let kept = read(running.ack());
+    assert!(kept.contains("again\n\nLocal time: "), "{kept}");
+    assert!(!kept.contains("old-summary-marker"), "{kept}");
+    assert!(!kept.contains("old-source-marker"), "{kept}");
+    let StoreOp::BuildContext(mut elsewhere) = recovered(2, 5, 2, Some(cut)) else {
+        unreachable!("recovered makes a build");
+    };
+    if let Some(choice) = elsewhere
+        .snapshot
+        .as_mut()
+        .and_then(|snapshot| snapshot.choice.as_mut())
+    {
+        choice.connection = kumochi_protocol::message::ConnectionKind::ClaudeCode;
+    }
+    assert!(
+        running
+            .thread
+            .send(StoreOp::BuildContext(elsewhere.clone()))
+    );
+    assert_eq!(made(running.ack()).0.recovered_context, None);
+    assert!(running.thread.send(StoreOp::BuildContext(elsewhere)));
+    let whole = read(running.ack());
+    assert!(
+        whole.contains("old-summary-marker"),
+        "another kind reads it all: {whole}"
+    );
+    assert!(running.thread.send(recovered(3, 3, 1, None)));
+    made(running.ack());
+    assert!(running.thread.send(recovered(3, 3, 1, Some(cut))));
+    assert!(failed(running.ack()));
+    let (threads, runs) = cut.bounds();
+    for wrong in [
+        Boundary::fixture(8, threads, runs),
+        Boundary::fixture(7, threads - 1, runs),
+    ] {
+        assert!(running.thread.send(recovered(2, 5, 2, Some(wrong))));
+        assert!(failed(running.ack()));
+    }
     running.thread.close().blocking_recv().expect("closed");
 }
 

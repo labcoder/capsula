@@ -45,13 +45,46 @@ flowchart LR
 | Screen worker | Screen capture, UI Automation, OCR and image encoding. It's killable, because a stuck UIA provider can't be stopped any other way |
 | Claude Code | The user's own Claude Code, started fresh for each question in its own nested run job, restricted to Kumochi's tools. Ending a question terminates that run job only |
 
-The shell keeps no state on disk, only its log and an empty single-instance lock file, so restarting it is always safe. Both processes log through `tracing` to `%LOCALAPPDATA%\Kumochi\logs` (`Kumochi Dev` for debug builds), one file per process per day, kept for seven days. Content is never logged, and panics record only their source location. A shell started by hand finds a running brain through a rotating instance capability in Windows Credential Manager.
+The shell keeps no state on disk, only its log and an empty single-instance lock file, so restarting it is always safe. Both processes log through `tracing` to the `Kumochi\logs` folder in the local application data root (`Kumochi Dev` for debug builds), one file per process per day, kept for seven days. Content is never logged, and panics record only their source location. A shell started by hand finds a running brain through a rotating instance capability in Windows Credential Manager.
 
-Each crate resolves its data folder behind its own `platform` interface. The Windows
-implementations read `LOCALAPPDATA` and require an absolute path before appending the product
-folder, so missing, empty or relative values never put logs or brain data under the working
-directory. They read the variables directly, so the slice 2 gate's per-item `LOCALAPPDATA` is
-respected. The brain's session lock uses the same local data root.
+Each crate resolves its data folder behind its own `platform` interface, and on Windows the
+shell and the brain ask one resolver in `kumochi-storage`. An ordinary release build keeps each
+row's route: the store, logs, voice models, session lock, settings and the shell read
+`LOCALAPPDATA` or `APPDATA` and require an absolute path, so missing, empty or relative values
+never put data under the working directory, and the Claude Code base and sherpa staging read the
+Known Folder. It never reads the override variables.
+
+Gate-identity and debug builds take one root pair from one source, so a run can't land in the
+real profile by accident:
+
+```mermaid
+flowchart TD
+    A{KUMOCHI_GATE_LOCALAPPDATA and KUMOCHI_GATE_APPDATA} -->|both set| B[Each half exists on a drive, strictly below the canonical Local AppData, halves apart]
+    A -->|one set| X[Refused: InvalidOverride]
+    A -->|neither| C{LOCALAPPDATA or APPDATA set and unlike its Known Folder?}
+    C -->|yes| Y[Refused: OldDriver]
+    C -->|no| K[Both Known Folders]
+    B -->|no| X
+    B -->|yes| D[Hold both roots' chains for the process's life]
+    D --> E[Checked create of the product folders and logs]
+    E --> F[Refuse a linked, hard-linked or non-file store, authority, SQLite side file, session.lock, config.toml or log]
+    F --> G[Writers open the admitted paths]
+```
+
+With the pair set, `LOCALAPPDATA` and `APPDATA` are ignored. The canonical containment check is
+only an early refusal; admission holds the chain of each half as spelled, so a junction or link
+on it refuses at its own component, and nothing is created at its target. The first row a
+process resolves admits the pair, which in every process is the log folder, before its first
+write. The shell checks its instance lock the same way before it opens it. The Claude Code
+folder, the voice models and the staging pins were already made by the checked create under a
+held parent; the Claude Code base and the staging root now hold their parent's chain while they
+create the product folder, in every build. A refusal ends startup with the fixed data-root error.
+
+The chain check itself (`hold_chain`, the checked create and the checks they're built from)
+lives in `kumochi-storage`'s Windows module, shared by the shell and the brain; the brain's
+markers, private trees, deletion and model storage build on it. The brain's session lock uses the
+same local data root. It is the profile's one
+writer lock: the brain takes it before it opens the store and holds it for its whole run.
 
 The ordinary shell asks its instance-lock owner to acquire the lock. Windows holds one lock
 per session until exit, named `<SHELL_LOCK>-<session id>.lock` in the existing data folder.
@@ -61,6 +94,18 @@ macOS has no Windows-style session ID. Its lock is per user and product identity
 The file is mode `0600` and is locked exclusively without waiting. The file stays in place:
 closing the lock handle or exiting the process releases the lock. Platforms without an
 admitted lock target still refuse before opening a file, with no fallback location.
+
+Detached brain startup acquires both pipes before touching the store. It takes the profile's
+writer lock, then opens and recovers the store, loads settings, starts accounts, and builds the Brain. It retries any interrupted
+voice model removals before creating the helpers' Job Object, then starts the optional workers.
+Only then does it publish the instance capability and serve the shell. The lifecycle owner
+keeps the pipes alive through teardown. Before capability publication, a failure drops the
+resources that started without entering graceful shutdown. The store and credential workers
+each keep a reference to the writer lock until they finish, so neither a failed start nor a
+close that stopped waiting releases it while a writer still runs. After serving, it quits or closes
+the Brain, shuts down the Job off the async thread, and deletes the capability in that order.
+Detached keeps the result of serving as its exit status; an incomplete Quit or capability
+deletion warning does not change that status.
 
 ## Crates
 

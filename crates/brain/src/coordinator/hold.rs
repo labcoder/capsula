@@ -198,7 +198,8 @@ impl Coordinator {
         }
         self.revoke_pictures();
         if let Some(run) = self.current.as_ref().filter(|run| {
-            run.key_granted && matches!(run.screen, Some(crate::context::Screen::Withdrawn))
+            matches!(run.screen, Some(crate::context::Screen::Withdrawn))
+                && (run.key_granted || self.code_picture_grants(run.id).next().is_some())
         }) {
             self.fail_with(
                 run.id,
@@ -324,6 +325,22 @@ impl Coordinator {
             && hold.is_none_or(|hold| hold.kind() == kind)
     }
 
+    /// Whether `ChatGPT` becoming ready on `ready`, recovered with `boundary`, fails a pending
+    /// hold: anything but the installed cutoff on its own unchanged sign-in counts as a change.
+    pub(crate) fn hold_recovery_changes(
+        &self,
+        ready: &super::Ready,
+        boundary: crate::store::Boundary,
+        hold: Option<&HoldSnapshot>,
+    ) -> bool {
+        let kind = ConnectionKind::ChatGpt;
+        hold.is_none_or(|hold| hold.kind() == kind)
+            && !self.chatgpt_retired.contains(&ready.connection)
+            && (self.recovered(ready.connection) != Some(boundary)
+                || super::Availability::Ready(ready.clone())
+                    .differs_beyond_pictures(self.availability_of(kind)))
+    }
+
     /// Cancels only the real run transferred from this exact hold.
     pub(crate) fn cancel_hold(&mut self, key: HoldKey) -> Vec<Effect> {
         let Some(current) = self
@@ -367,6 +384,12 @@ impl Coordinator {
             }
             Input::Engines(kind, super::Availability::Ready(ready)) => {
                 *kind == hold.kind() && hold.arrived.get(*kind) != Some(ready.connection)
+            }
+            Input::RecoveredChatGpt { ready, boundary } => {
+                hold.kind() == kumochi_protocol::message::ConnectionKind::ChatGpt
+                    && !self.chatgpt_retired.contains(&ready.connection)
+                    && (hold.arrived.get(hold.kind()) != Some(ready.connection)
+                        || hold.arrived.recovered() != Some(*boundary))
             }
             Input::Engines(
                 kind,

@@ -8,21 +8,20 @@ use std::future::Future;
 use std::io::{Read, Seek, Write};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 
 use kumochi_protocol::constants;
 use kumochi_protocol::voice::{ModelFile, VoicePart};
 use reqwest::header::{ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
-use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tokio::time::{self, Instant};
 use url::{Host, Url};
 
 use crate::platform::{
-    Untrusted, check_model_final, create_model_dir, create_model_write, discard_model,
-    hold_model_creation, model_final, open_model_write, publish_model,
+    self, NativeTlsError, TrustDiagnostics, Untrusted, check_model_final, create_model_dir,
+    create_model_write, discard_model, hold_model_creation, model_final, open_model_write,
+    publish_model,
 };
 
 const IDLE: Duration = Duration::from_secs(30);
@@ -76,6 +75,17 @@ pub(crate) enum DownloadError {
     Cancelled,
     #[error("the speech model path is unsafe")]
     ModelPath,
+}
+
+impl From<NativeTlsError> for DownloadError {
+    fn from(error: NativeTlsError) -> Self {
+        match error {
+            NativeTlsError::Unsupported => Self::UnsupportedPlatform,
+            NativeTlsError::TrustStoreUnavailable | NativeTlsError::Configuration => {
+                Self::Transport
+            }
+        }
+    }
 }
 
 /// A part's fetch, as the installer starts it.
@@ -143,31 +153,30 @@ impl Rules {
 
 impl Downloader {
     pub(crate) fn new(models: PathBuf) -> Result<Self, DownloadError> {
-        let roots = crate::platform::trust_roots().map_err(|error| match error {
-            crate::platform::TrustRootsError::Unsupported => DownloadError::UnsupportedPlatform,
-            _ => DownloadError::Transport,
-        })?;
-        Self::from_roots(models, roots.certificates, Rules::default())
+        let tls = platform::native_client_tls(TrustDiagnostics::Quiet)?;
+        Self::with_tls(models, tls, Rules::default())
     }
 
+    #[cfg(test)]
     fn from_roots(
         models: PathBuf,
         roots: Vec<Vec<u8>>,
         rules: Rules,
     ) -> Result<Self, DownloadError> {
-        let mut store = rustls::RootCertStore::empty();
-        let (usable, _) =
-            store.add_parsable_certificates(roots.into_iter().map(CertificateDer::from));
-        if usable == 0 {
-            return Err(DownloadError::Transport);
-        }
-        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .map_err(|_| DownloadError::Transport)?
-        .with_root_certificates(store)
-        .with_no_client_auth();
+        let roots = platform::TrustRoots {
+            certificates: roots,
+            skipped: 0,
+            unreadable: 0,
+        };
+        let tls = platform::client_tls_from_roots(Ok(roots), TrustDiagnostics::Quiet)?;
+        Self::with_tls(models, tls, rules)
+    }
+
+    fn with_tls(
+        models: PathBuf,
+        tls: rustls::ClientConfig,
+        rules: Rules,
+    ) -> Result<Self, DownloadError> {
         let redirects = rules.clone();
         let client = reqwest::Client::builder()
             .use_preconfigured_tls(tls)

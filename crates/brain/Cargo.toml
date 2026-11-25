@@ -52,9 +52,29 @@ xn = { version = "=0.2.13", default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 kumochi-storage = { path = "../storage" }
 libc = "=0.2.191"
+block2 = "=0.6.2"
+objc2 = "=0.6.5"
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CFCGTypes",
+    "objc2",
+] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGDirectDisplay",
+    "CGDisplayConfiguration",
+    "CGError",
+    "CGImage",
+    "CGWindow",
+    "libc",
+] }
 
 [target.'cfg(windows)'.dependencies]
 keyring.workspace = true
+kumochi-storage = { path = "../storage" }
 windows = { version = "0.62", features = [
     "Foundation",
     "Media_Ocr",
@@ -121,3 +141,4 @@ rustix = { version = "1", features = ["fs"] }
 [target.'cfg(windows)'.dev-dependencies]
 # Lets tests read the access a handle was granted.
 windows-sys = { version = "0.61", features = ["Wdk_Foundation"] }
+kumochi-storage = { path = "../storage", features = ["test-support"] }

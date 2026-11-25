@@ -59,6 +59,7 @@ fn built(key: BuildKey, sources: Vec<ThreadId>) -> Input {
             connection: ConnectionTag(0),
         }),
         result: Ok(Built {
+            recovered_context: None,
             request: crate::context::ModelRequest {
                 tools: crate::context::tools(Origin::Task(T)),
                 ..super::request()

@@ -73,7 +73,12 @@ pub(super) async fn read_control(
 ) -> Ended {
     loop {
         match ipc::read_sized::<ControlToBrain>(pipe, Pipe::Control).await {
-            Ok(Some((ControlToBrain::Hello(_) | ControlToBrain::QueuedHello(_), _))) => {
+            Ok(Some((
+                ControlToBrain::Hello(_)
+                | ControlToBrain::QueuedHello(_)
+                | ControlToBrain::QueuedAudioReconnect(..),
+                _,
+            ))) => {
                 return Ended::Broken("Hello sent twice");
             }
             Ok(Some((ControlToBrain::Quitting, _))) => {
@@ -205,6 +210,7 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         ControlToBrain::Pong
         | ControlToBrain::Hello(_)
         | ControlToBrain::QueuedHello(_)
+        | ControlToBrain::QueuedAudioReconnect(..)
         | ControlToBrain::Quitting
         | ControlToBrain::Settings(_)
         | ControlToBrain::AccountOp(_)
@@ -267,7 +273,8 @@ impl Brain {
         }
         if let ControlToBrain::Settings(op) = message {
             // Still written; the shell that sent it is gone, so nothing answers it.
-            self.queue_settings(op);
+            let applied = self.queue_settings(op, None);
+            debug_assert!(applied.is_ok(), "applying without a shell can't fail");
             return;
         }
         if let Ok(Some(input)) = control_input(message) {
@@ -311,7 +318,7 @@ impl Brain {
             }
             // Off closes the offer as it's taken; only a finished save opens it again.
             let off = op == SettingsOp::SetShowScreen(false);
-            self.queue_settings(op);
+            self.queue_settings(op, Some(link))?;
             hold.map_err(|Full| Ended::Lost)?;
             self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
             if off {

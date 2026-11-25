@@ -104,6 +104,7 @@ fn key(attempt: u64) -> BuildKey {
 
 fn kumo_build(attempt: u64, snapshot: Option<RunSnapshot>) -> Effect {
     Effect::Store(StoreOp::BuildContext(BuildContext {
+        require_recovery: None,
         control: crate::recall::control::Control::new(
             std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
         ),
@@ -291,6 +292,7 @@ fn a_rebuild_reuses_the_snapshot_the_first_build_read() {
         key: key(1),
         snapshot: Some(snapshot.clone()),
         result: Ok(crate::context::Built {
+            recovered_context: None,
             request: request(),
             sources: vec![MAIN, B],
         }),

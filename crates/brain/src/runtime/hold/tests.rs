@@ -1948,6 +1948,8 @@ fn every_worker_answer_closes_a_part_with_its_class() {
         (Closed::Lost(WorkerLost::Lost), NotReady),
         (refused(Refusal::Expired), NotReady),
         (refused(Refusal::Unsupported), NotReady),
+        (refused(Refusal::NotPermitted), NotReady),
+        (refused(Refusal::Layout), NotReady),
         (refused(Refusal::NoWindow), NothingThere),
         (refused(Refusal::Minimized), CantShare),
         (refused(Refusal::Cloaked), CantShare),
@@ -2050,6 +2052,7 @@ async fn a_part_closed_during_its_capture_retires_the_frame_without_a_walk() {
     let scratch = Scratch::new("hold-screen-stop");
     let mut brain = test_support::brain(&scratch, "");
     let (mut rig, sol, _) = sees_on_sol(&mut brain);
+    brain.holds.window_capture = true;
     let recipient = (sol.connection, sol.model);
     screen_hold(&mut brain, KEY, ScreenPart::None);
     let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
@@ -2165,6 +2168,7 @@ pub(in crate::runtime) fn attach_capture_fixture(
     let rig = crate::supervise::fixture::start::<crate::screen::Holds>();
     brain.attach_screen(Arc::new(HoldClient::new(rig.handle.clone())));
     brain.holds.window_capture = true;
+    brain.holds.display_capture = true;
     rig
 }
 
@@ -2218,6 +2222,7 @@ async fn the_threads_choice_rechecks_the_gate_and_a_closed_gate_closes_the_part_
     link.recovery = Some(crate::runtime::Recovery::new(&[], 1024));
     let (mut rig, sol, luna) = sees_on_sol(&mut brain);
     brain.holds.window_capture = true;
+    brain.holds.display_capture = true;
     // The pin, the switch, and how the part ends: open (`None`), or closed with its line, if any.
     let cases = [
         (Some(luna), true, Some(Some(ScreenClass::ModelCantSee))),
@@ -2266,6 +2271,7 @@ async fn a_screen_worker_that_cant_start_leaves_screen_holds_unsupported() {
     let scratch = Scratch::new("screen-worker-missing");
     let mut brain = test_support::brain(&scratch, "");
     brain.holds.window_capture = true;
+    brain.holds.display_capture = true;
     let jobs = Arc::new(crate::platform::Job::new().expect("job"));
     crate::start_screen(&mut brain, scratch.dir().join("missing.exe"), Ok(jobs));
     assert_screen_holds_unsupported(&mut brain);
@@ -2278,10 +2284,11 @@ async fn unavailable_containment_leaves_screen_holds_unsupported() {
     let scratch = Scratch::new("screen-worker-no-containment");
     let mut brain = test_support::brain(&scratch, "");
     assert!(
-        !brain.holds.window_capture,
-        "native window capture is unavailable"
+        !brain.holds.window_capture && !brain.holds.display_capture,
+        "native capture is unavailable"
     );
     brain.holds.window_capture = true;
+    brain.holds.display_capture = true;
     let job = crate::platform::Job::new().map(Arc::new);
     assert!(matches!(&job, Err(error) if error.kind() == std::io::ErrorKind::Unsupported));
     crate::start_screen(&mut brain, scratch.dir().join("missing-worker"), job);
@@ -2347,6 +2354,7 @@ async fn a_system_that_cant_capture_ends_the_hold_not_ready_and_holds_stay_unsup
     let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
     let (rig, sol, _luna) = sees_on_sol(&mut brain);
     brain.holds.window_capture = true;
+    brain.holds.display_capture = true;
     brain.screen_holds_changed(&mut link).unwrap();
     assert!(matches!(gates(&mut output)[..], [ScreenHolds::On { .. }]));
     screen_hold(&mut brain, KEY, unanswered());
@@ -2449,6 +2457,7 @@ async fn a_capture_the_system_refuses_comes_back_from_the_task_as_unsupported() 
     let scratch = Scratch::new("hold-screen-refused");
     let mut brain = test_support::brain(&scratch, "");
     let (mut rig, sol, _) = sees_on_sol(&mut brain);
+    brain.holds.window_capture = true;
     let recipient = (sol.connection, sol.model);
     screen_hold(&mut brain, KEY, ScreenPart::None);
     let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
@@ -2478,6 +2487,7 @@ async fn a_hold_asks_for_its_picture_without_a_walk_that_could_be_cut_short() {
     let scratch = Scratch::new("hold-screen-no-walk");
     let mut brain = test_support::brain(&scratch, "");
     let (mut rig, sol, _) = sees_on_sol(&mut brain);
+    brain.holds.window_capture = true;
     let recipient = (sol.connection, sol.model);
     screen_hold(&mut brain, KEY, ScreenPart::None);
     let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
@@ -2711,6 +2721,7 @@ async fn a_capture_fault_ends_the_hold_not_ready_and_leaves_screen_holds_on() {
     let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
     let (_rig, sol, _luna) = sees_on_sol(&mut brain);
     brain.holds.window_capture = true;
+    brain.holds.display_capture = true;
     brain.screen_holds_changed(&mut link).unwrap();
     gates(&mut output);
     screen_hold(&mut brain, KEY, unanswered());
@@ -2740,6 +2751,7 @@ async fn without_window_capture_the_gate_reads_unsupported_whatever_the_client()
         crate::runtime::tests::holds::input(&scratch, Vec::new(), "not submitted").await;
     let (_rig, sol, _luna) = sees_on_sol(&mut brain);
     brain.holds.window_capture = true;
+    brain.holds.display_capture = true;
     assert!(matches!(
         brain.screen_gate(Some(&sol)),
         ScreenHolds::On { .. }
@@ -2765,6 +2777,7 @@ async fn the_gate_is_sent_once_per_connection_and_again_only_when_it_changes() {
     let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
     let (_rig, _sol, luna) = sees_on_sol(&mut brain);
     brain.holds.window_capture = true;
+    brain.holds.display_capture = true;
     let off = |why| ControlToShell::ScreenHolds(ScreenHolds::Off(why));
     brain.screen_holds_changed(&mut link).unwrap();
     assert_eq!(
@@ -2815,6 +2828,7 @@ async fn a_new_sign_in_alone_revises_the_offer_once() {
     let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
     let (_rig, _sol, _luna) = sees_on_sol(&mut brain);
     brain.holds.window_capture = true;
+    brain.holds.display_capture = true;
     let seen = ModelSlug::new("seen").unwrap();
     brain
         .coordinator
@@ -2879,6 +2893,7 @@ async fn only_a_change_in_what_the_offer_authorizes_counts_its_revision_up() {
     let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
     let (_rig, sol, _luna) = sees_on_sol(&mut brain);
     brain.holds.window_capture = true;
+    brain.holds.display_capture = true;
     let on = |name: &str, revision| {
         [ScreenHolds::On {
             model: ModelName::new(name).unwrap(),
@@ -3263,6 +3278,7 @@ async fn a_connection_control_sends_the_screen_notice_it_changed_at_once() {
     let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
     let (_rig, _sol, _luna) = sees_on_sol(&mut brain);
     brain.holds.window_capture = true;
+    brain.holds.display_capture = true;
     let seen = ModelSlug::new("seen").unwrap();
     brain
         .coordinator

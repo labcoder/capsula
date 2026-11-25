@@ -2,6 +2,8 @@
 
 pub(super) mod execute;
 mod startup;
+
+pub(super) use startup::{Profile, Startup};
 #[cfg(test)]
 mod tests;
 
@@ -11,6 +13,8 @@ use anyhow::{Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::FIXTURE_ENV;
 
 const PLAN: &str = "chatgpt-text.plan";
+/// The identities of the profile pair the plan was made from, kept beside it and never printed.
+const PAIR: &str = "chatgpt-text.pair";
 
 pub(super) fn budget(words: &[String]) -> Result<u32> {
     let [phase, flag, value] = words else {
@@ -25,16 +29,29 @@ pub(super) fn budget(words: &[String]) -> Result<u32> {
     Ok(budget)
 }
 
-pub(super) fn plan(budget: u32) -> Result<String> {
+pub(super) fn plan(budget: u32) -> Result<Startup> {
+    let profile = profile()?;
+    Ok(Startup {
+        plan: profile.plan(budget)?,
+        pair: profile.pair,
+    })
+}
+
+/// The disposable profile, held, unless the fixture engine override is set.
+fn profile() -> Result<Profile> {
     ensure!(
         std::env::var_os(FIXTURE_ENV).is_none(),
         "fixture engine override is set"
     );
-    startup::plan(budget)
+    Profile::hold()
 }
 
-pub(super) fn prepared(folder: &Path, plan: &str) -> Result<()> {
-    std::fs::write(folder.join(PLAN), plan)?;
-    println!("prepared first-text; no brain was started\n{plan}");
+pub(super) fn prepared(folder: &Path, startup: &Startup) -> Result<()> {
+    std::fs::write(folder.join(PLAN), &startup.plan)?;
+    std::fs::write(folder.join(PAIR), startup.pair)?;
+    println!(
+        "prepared first-text; no brain was started\n{}",
+        startup.plan
+    );
     Ok(())
 }

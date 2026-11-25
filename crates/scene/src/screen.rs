@@ -138,13 +138,7 @@ pub fn stamp(
     picture: [u32; 2],
     display: ScreenDisplay,
 ) -> Result<(), StepError> {
-    let fail = |field, code| {
-        Err(StepError {
-            step: None,
-            path: FieldPath::default().field(field),
-            code,
-        })
-    };
+    let fail = |field, code| Err(StepError::at(FieldPath::default().field(field), code));
     if begin.surface != Surface::Screen {
         return fail("surface", ErrorCode::Unsupported);
     }

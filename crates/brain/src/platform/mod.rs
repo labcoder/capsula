@@ -12,6 +12,8 @@ impl BoundHello {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) use macos::capture::{display_at, screen_capturer};
+#[cfg(target_os = "macos")]
 pub(crate) use macos::clock::{qpc_at, qpc_left};
 
 #[cfg(all(windows, feature = "test-support"))]
@@ -22,7 +24,6 @@ mod connected_shell;
 mod fs;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(any(test, windows))]
 mod model_files;
 pub(crate) mod native_workers;
 mod pipe;
@@ -31,9 +32,9 @@ mod protected;
 mod runtime_admission;
 mod session_lock;
 pub(crate) mod shell_process;
+pub(crate) mod speech_wire;
 mod trust_roots;
 
-#[cfg(any(test, windows))]
 pub(crate) use model_files::ModelFiles;
 pub(crate) use shell_process::ShellProcess;
 
@@ -60,7 +61,7 @@ pub(crate) fn test_is_link(metadata: &std::fs::Metadata) -> bool {
 pub(crate) use connected_shell::connected_shell_pid;
 pub(super) use connected_shell::register_shell;
 #[cfg(not(target_os = "macos"))]
-pub(crate) const DATA_ROOT_ERROR: &str = "%LOCALAPPDATA% is not set to an absolute path";
+pub(crate) const DATA_ROOT_ERROR: &str = "the local application data folder is unavailable";
 #[cfg(target_os = "macos")]
 pub(crate) const DATA_ROOT_ERROR: &str = "macOS Application Support folder is unavailable";
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -72,38 +73,38 @@ pub use fs::{free_space, links_unsupported, replace_file};
 mod folders;
 #[cfg(target_os = "macos")]
 pub use folders::{config_dir, data_dir};
-#[cfg(windows)]
-pub(crate) use pipe::ClientRefused;
 pub use pipe::Instance;
+pub(crate) use pipe::{BridgeConnectError, ClientRefused};
 #[cfg(not(windows))]
-pub(crate) use pipe::{PipeClient, client_image, open_pipe, server_image, shell_connection};
+pub(crate) use pipe::{PipeClient, bridge_peer, client_image, open_bridge, shell_connection};
 #[cfg(not(windows))]
 pub use pipe::{PipeServer, create_owner_only, session_id};
-#[cfg(windows)]
 pub(crate) use process::spawn_if;
 pub use process::{
     ChildPipes, Helper, Job, Launch, Spawned, Stdio, launch_detached, spawn, system_env,
 };
-pub(crate) use protected::Untrusted;
-#[cfg(all(test, not(windows)))]
-pub(crate) use protected::model_file;
+pub(crate) use protected::{Untrusted, is_unsupported};
 #[cfg(not(windows))]
 pub(crate) use protected::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_model_creation, mark, model_final, open_model_write, publish_model, remove_model_tree,
-    validate_model_path,
+    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
+    private_tree, publish_model, remove_model_tree, remove_tree, unmark, validate_model_path,
 };
 pub use runtime_admission::{Mode, supports};
 pub(crate) use runtime_admission::{require_mode, serve_speech};
 pub use session_lock::{SessionLock, SessionLockError};
-pub(crate) use trust_roots::native_trust_supported;
+#[cfg(test)]
+pub(crate) use trust_roots::client_tls_from_roots;
 #[cfg(not(windows))]
 pub use trust_roots::trust_roots;
+pub(crate) use trust_roots::{
+    NativeTlsError, TrustDiagnostics, native_client_tls, native_trust_supported,
+};
 pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
 pub(crate) use windows::DumpExclusion;
 #[cfg(windows)]
-pub(crate) use windows::{PipeClient, bridge_peer, open_pipe, shell_connection};
+pub(crate) use windows::{PipeClient, bridge_peer, open_bridge, shell_connection};
 
 #[cfg(windows)]
 #[expect(
@@ -164,6 +165,8 @@ pub(crate) mod sherpa;
 pub(crate) use windows::call_throwing_export;
 #[cfg(all(test, windows))]
 pub(crate) use windows::fake_claude::FAKE_CLAUDE;
+#[cfg(all(test, windows))]
+pub(crate) use windows::local_app_data;
 #[cfg(windows)]
 pub use windows::managed_presence;
 #[cfg(windows)]
@@ -192,9 +195,9 @@ pub(crate) use windows::{
 #[cfg(windows)]
 pub(crate) use windows::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_model_creation, local_app_data, mark, marker, model_file, model_final, open_model_write,
-    owner_only_dir, private_tree, profile_dir, publish_model, remove_model_tree, remove_tree,
-    unmark, validate_model_path,
+    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
+    private_tree, profile_dir, publish_model, remove_model_tree, remove_tree, unmark,
+    validate_model_path,
 };
 
 /// Whether this platform captures one window alone. No platform but Windows does yet.
@@ -237,10 +240,9 @@ pub(crate) fn window_unchanged(_target: &crate::screen::Target) -> bool {
     false
 }
 
-/// The monitor that covers a captured display's bounds now. No platform but Windows captures a
-/// display yet, so there's none.
-// shortcut: macOS will read its display here.
-#[cfg(not(windows))]
+/// The monitor that covers a captured display's bounds now. Only Windows and macOS capture a
+/// display, so there's none.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn display_at(
     _bounds: kumochi_protocol::geometry::PhysicalRect,
 ) -> Option<(kumochi_protocol::geometry::PhysicalRect, u32)> {
@@ -299,7 +301,7 @@ fn missing_data_root_diagnostics_name_the_platform_source() {
     let expected = if cfg!(target_os = "macos") {
         "macOS Application Support folder is unavailable"
     } else {
-        "%LOCALAPPDATA% is not set to an absolute path"
+        "the local application data folder is unavailable"
     };
     assert_eq!(
         crate::store::StoreError::NoLocalAppData.to_string(),

@@ -2019,6 +2019,7 @@ fn renewal_run() -> LinkEvent {
     }
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn queued_pre_ack_send_preserves_the_composer_and_older_recovery(cx: &mut TestAppContext) {
     use crate::strings::Text;

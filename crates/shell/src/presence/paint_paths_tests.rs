@@ -1,8 +1,10 @@
 use std::f32::consts::{FRAC_PI_4, TAU};
 
 use gpui_kit::{Path, PathBuilder, Pixels, Point, point, px};
+#[cfg(debug_assertions)]
+use kumochi_scene::Handle;
 use kumochi_scene::{
-    Handle, Text,
+    Text,
     display::{
         BUILD_VERTEX_LIMIT, Contour, FILL_VERTEX_LIMIT, Paint, PaintWork, Prim, TextStyle,
         corner_segments, crossings, fallback_corner_segments,
@@ -12,6 +14,7 @@ use kumochi_scene::{
     record::{Align, Rgb},
 };
 
+#[cfg(debug_assertions)]
 use super::super::paint_cache::PaintScene;
 use super::{BuildError, Strokes, corners, paths, rounded, scale};
 
@@ -968,11 +971,13 @@ fn a_pentagram_fills_its_centre_nonzero() {
 }
 
 /// The lyon logging child, as libtest names it.
+#[cfg(debug_assertions)]
 const LYON_LOGGING_CHILD: &str = "presence::paint_paths::tests::lyon_logging_child";
 
 /// Builds today's static fill, the same fill staged and placed by the paint cache, and the rect
 /// fallbacks (background, ring, sector) at sentinel coordinates, for a parent that set
 /// `LYON_FORCE_LOGGING` and reads everything this prints.
+#[cfg(debug_assertions)]
 #[test]
 #[ignore = "the child process of lyon_logging_is_compiled_out"]
 fn lyon_logging_child() {
@@ -1044,6 +1049,7 @@ fn lyon_logging_child() {
 }
 
 /// Whether `line` is libtest's summary for exactly one passed test.
+#[cfg(debug_assertions)]
 fn one_passed(line: &str) -> bool {
     let Some(rest) =
         line.strip_prefix("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")
@@ -1065,11 +1071,16 @@ fn one_passed(line: &str) -> bool {
 /// lyon's debug build prints every point it fills while `LYON_FORCE_LOGGING` is set. The
 /// workspace builds `lyon_tessellation` without debug assertions in supported profiles, so a debug
 /// child with the variable set writes libtest's own framing and nothing else.
+#[cfg(debug_assertions)]
 #[test]
 fn lyon_logging_is_compiled_out() {
-    use std::os::windows::process::CommandExt as _;
-
-    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test executable"));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+    }
+    let output = command
         .args([
             "--exact",
             LYON_LOGGING_CHILD,
@@ -1078,7 +1089,6 @@ fn lyon_logging_is_compiled_out() {
             "--test-threads=1",
         ])
         .env("LYON_FORCE_LOGGING", "1")
-        .creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0)
         .output()
         .expect("the child test process runs");
     assert!(output.status.success(), "the child builds every fill");

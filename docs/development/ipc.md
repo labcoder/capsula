@@ -33,6 +33,12 @@ checks the executable, matching build and capability on both legs and the existi
 pairing. It refuses a mixed mode or a data Hello from another session. The queued second leg
 has one deadline for connecting and reading; refusal renews both pipe instances.
 
+After a deliberate Talk-back switch, the replacement's control greeting names the previous
+pair in `QueuedAudioReconnect`. Its data greeting still echoes the new Welcome. Only a match
+with the last authenticated queued pair makes the replacement replay ChatGPT account state
+without reloading the vault or retrying the catalog; an old pair, a restarted brain, or a genuine
+loss uses normal connection behavior. Pipe authentication and output registration are unchanged.
+
 This negotiates a requirement, not an installed audio output. An authenticated queued pair
 installs the exact reserved issue session. Both pipes return to regular I/O after their bounded
 handshake. Ordinary launch still selects Legacy, with no queued-to-Legacy fallback.
