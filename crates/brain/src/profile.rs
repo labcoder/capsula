@@ -30,6 +30,18 @@ pub(crate) enum Folder {
     Unknown,
 }
 
+/// Evidence that history writers older than the session lock, which don't take it, are excluded
+/// from outside, as the legacy store reads require. Nothing can make one yet: that waits on the
+/// owner's call on legacy schema updates.
+pub(crate) struct WritersExcluded(());
+
+#[cfg(test)]
+impl WritersExcluded {
+    pub(crate) fn for_tests() -> Self {
+        Self(())
+    }
+}
+
 /// The probes over this machine's Known Folders (Application Support on macOS), setup guard and
 /// credential store. Each probe holds its anchors through its reads.
 #[cfg(any(windows, target_os = "macos"))]
@@ -37,7 +49,10 @@ pub(crate) enum Folder {
     test,
     expect(dead_code, reason = "tests never read the person's real profile")
 )]
-pub(crate) struct NativeProbes;
+pub(crate) struct NativeProbes {
+    /// Without it a present legacy folder reads unverified, and nothing in it is opened.
+    writers: Option<WritersExcluded>,
+}
 
 #[cfg(any(windows, target_os = "macos"))]
 impl Probes for NativeProbes {
@@ -50,7 +65,7 @@ impl Probes for NativeProbes {
     fn legacy(&self, guard: &Self::Guard) -> Observation {
         let folders = native::legacy(guard);
         legacy(&folders.data, folders.roaming.as_ref(), |data, held| {
-            intact(data, held, |db, session| {
+            intact(data, held, self.writers.as_ref(), |db, session| {
                 legacy_authority(db, session, &NativeCredentialStore)
             })
         })
@@ -92,18 +107,19 @@ fn legacy(
 }
 
 /// The legacy profile in the present folder `data`, read under its existing session lock, which
-/// stays held through every read. Nothing is opened unless the folder at `data` is the admitted
-/// one, `held`, which it must still be after the last read. Matching only with the current history
-/// schema and an authority and committed host that both match. Anything else is unverified: an
-/// absent authority or host too, since the folder is there, and an older known schema, whose
-/// migration waits on the owner's call on legacy schema updates.
+/// stays held through every read. Nothing is opened without `writers`, or unless the folder at
+/// `data` is the admitted one, `held`, which it must still be after the last read. Matching only
+/// with the current history schema and an authority and committed host that both match. Anything
+/// else is unverified: an absent authority or host too, since the folder is there, and an older
+/// known schema, whose migration waits on the owner's call on legacy schema updates.
 fn intact(
     data: &Path,
     held: FolderId,
+    writers: Option<&WritersExcluded>,
     authority: impl FnOnce(&Path, &SessionLock) -> Legacy,
 ) -> Observation {
     let admitted = || folder_id(data) == Some(held);
-    if !admitted() {
+    if writers.is_none() || !admitted() {
         return Observation::Unverified;
     }
     let Ok(session) = SessionLock::try_acquire_existing(&data.join(SESSION_LOCK)) else {
@@ -236,13 +252,30 @@ mod tests {
         data
     }
 
-    /// `intact` on the folder at `data` as admitted now.
+    /// `intact` on the folder at `data` as admitted now, with older writers excluded.
     fn read_admitted(
         data: &Path,
         authority: impl FnOnce(&Path, &SessionLock) -> Legacy,
     ) -> Observation {
         let held = folder_id(data).expect("an admitted folder");
-        intact(data, held, authority)
+        intact(data, held, Some(&WritersExcluded::for_tests()), authority)
+    }
+
+    #[test]
+    fn without_excluded_writers_a_present_folder_is_left_unread() {
+        let scratch = Scratch::new("profile-writers");
+        let data = profile(scratch.dir().to_owned());
+        let held = folder_id(&data).expect("an admitted folder");
+        let before = files(&data);
+        let called = Cell::new(false);
+        let unread = intact(&data, held, None, |_, _| {
+            called.set(true);
+            MATCHING
+        });
+        assert_eq!(unread, Observation::Unverified);
+        assert!(!called.get(), "nothing was read");
+        assert_eq!(files(&data), before);
+        assert_eq!(read_admitted(&data, |_, _| MATCHING), Observation::Matching);
     }
 
     #[test]
@@ -252,13 +285,14 @@ mod tests {
         let other = profile(scratch.dir().join("other"));
         let admitted = scratch.dir().join("admitted");
         let held = folder_id(&data).expect("an admitted folder");
+        let writers = WritersExcluded::for_tests();
         let swap = || {
             fs::rename(&data, &admitted).expect("move the admitted folder away");
             fs::rename(&other, &data).expect("put another profile in its place");
         };
         swap();
         let called = Cell::new(false);
-        let before = intact(&data, held, |_, _| {
+        let before = intact(&data, held, Some(&writers), |_, _| {
             called.set(true);
             MATCHING
         });
@@ -267,11 +301,11 @@ mod tests {
         fs::rename(&data, &other).expect("move the other profile back");
         fs::rename(&admitted, &data).expect("restore the admitted folder");
         assert_eq!(
-            intact(&data, held, |_, _| MATCHING),
+            intact(&data, held, Some(&writers), |_, _| MATCHING),
             Observation::Matching,
             "the admitted folder in place"
         );
-        let during = intact(&data, held, |_, _| {
+        let during = intact(&data, held, Some(&writers), |_, _| {
             swap();
             MATCHING
         });
