@@ -152,16 +152,18 @@ pub(crate) fn legacy_history(db: &Path, session: &SessionLock) -> LegacyHistory 
             Ok(true) => LegacyHistory::KnownSchema,
             Ok(false) | Err(_) => LegacyHistory::Unverified,
         },
-        Err(ExistingError::Missing)
-            if ["-wal", "-shm", "-journal"]
-                .into_iter()
-                .all(|suffix| missing(&sidecar(db, suffix)))
-                && !Leftovers::of(db).exist() =>
-        {
-            LegacyHistory::Missing
-        }
+        Err(ExistingError::Missing) if left_nothing(db) => LegacyHistory::Missing,
         Err(_) => LegacyHistory::Unverified,
     }
+}
+
+/// Whether nothing a store or a purge leaves is beside `db`: no WAL, index or journal and no purge
+/// leftover. One that can't be checked counts as left.
+pub(crate) fn left_nothing(db: &Path) -> bool {
+    ["-wal", "-shm", "-journal"]
+        .into_iter()
+        .all(|suffix| missing(&sidecar(db, suffix)))
+        && !Leftovers::of(db).exist()
 }
 
 /// Every schema object's type, name, table and SQL.
@@ -216,7 +218,7 @@ fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
 }
 
 /// Whether `dir` is a folder itself, not a link or reparse point to one.
-fn folder(dir: &Path) -> bool {
+pub(crate) fn folder(dir: &Path) -> bool {
     fs::symlink_metadata(dir).is_ok_and(|metadata| {
         #[cfg(windows)]
         {
