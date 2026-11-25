@@ -49,6 +49,9 @@ url = "2"
 webbrowser = "1"
 xn = { version = "=0.2.13", default-features = false }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "=0.2.191"
+
 [target.'cfg(windows)'.dependencies]
 keyring.workspace = true
 windows = { version = "0.62", features = [
