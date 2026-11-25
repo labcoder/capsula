@@ -1,5 +1,15 @@
 # The pipes and the handshake
 
+The shell link resolves the sibling brain executable at preparation. On its background thread,
+`platform::connect_brain` then tries the Windows control pipe before starting the detached brain.
+A missing pipe can start the brain once, and a build mismatch lets it try starting again after
+that server exits. A busy pipe is retried and a foreign server is refused. The connector checks
+the server image before sending a greeting on either leg, opens the data leg only after Welcome,
+and writes the drawing-font startup frame before returning both pipes with their ordinary I/O
+timeouts restored. Those writes are not an acknowledgement that the brain accepted the data leg.
+The link retains parked Quit, reconnect state, and the decision to publish Connected. On Linux,
+link preparation still reports Unsupported without opening a transport or starting a process.
+
 ## Greeting authorization
 
 The existing pipe transport checks the capability in constant time before comparing the build,
@@ -1152,6 +1162,21 @@ If the user quits before publication, a fully authenticated queued pair sends he
 order (with no turns on that pair), then Quitting. It starts no session or playback, and it
 doesn't replay or settle microphone Stop debt. A partial or unauthenticated pair never carries
 these shutdown frames. Stock selection remains Legacy.
+
+## How a connection ends
+
+An accepted `Quitting` ends the connection as Quit. The brain applies controls accepted
+before Quit in order, even if a fatal cause arrives later. EOF is Lost, never Quit: the brain
+still reads control for the existing grace period so a Quit already in flight can be accepted.
+
+When the runtime observes a fatal cause before accepting Quit, it stops accepting work and
+discards queued controls. This also ends an in-progress grace period or drain; effects already
+applied do not roll back. An effect admitted just before a cause arrives can finish, but the
+next acceptance check stops dispatch. The core and grace loop check the retained values on
+every poll, so a stored cause wins even if its wake is delayed. One connection-scoped waiter
+relays watch notifications through a one-slot channel so unrelated input doesn't re-poll the
+watch waiters. Detached connections select a runtime path with the original reader send,
+core and grace arms, and control drain. It has no fatal checks, waiter or wake relay.
 
 ## Debugging
 

@@ -1,8 +1,8 @@
 # The GPUI platform patches
 
 Kumochi carries GPUI's Windows backend, `gpui-pre-windows` 0.3.10, in `vendor/gpui-pre-windows/`
-with three changes: an idle window no longer wakes on every vblank, a window opened hidden
-takes its requested size at once, and a single fast successful vsync wait doesn't skip a frame.
+with patches for demand-driven frame wakes, hidden-window sizing, fast successful vsync waits
+and primary work-area snapshots.
 `[patch.crates-io]` in
 `Cargo.toml` points the crate at the vendored copy, and `cargo xtask check-vendor` (run by CI)
 fails unless Cargo resolves the crate to that directory at the vendored version. Upstream tracking: zed-industries/zed#66221.
@@ -66,6 +66,14 @@ Two `#[cfg(any(test, feature = "test-support"))]` items (`window.rs`, `directx_r
 narrowed to the feature alone, so the crate's own tests build without GPUI's test support.
 Each modified file says so in its first line, as Apache-2.0 4(b) asks; the license text is
 `vendor/gpui-pre-windows/LICENSE-APACHE` and `THIRD-PARTY-NOTICES.md` lists the crate.
+
+## Primary work-area snapshots
+
+The connected shell needs physical work-area coordinates, but GPUI's public display trait exposes
+only logical visible bounds. The Windows backend also exposes the primary visible bounds with
+the exact scale used to derive them. Both paths share the same monitor and rectangle conversion.
+The snapshot skips display UUID and object creation, so a live drag can re-read it without
+allocating or caching the work area.
 
 ## Fast successful vsync waits
 

@@ -1,3 +1,4 @@
+// Modified for Kumochi: expose a primary work-area snapshot without constructing a display.
 use gpui_util::ResultExt;
 use itertools::Itertools;
 use smallvec::SmallVec;
@@ -60,14 +61,7 @@ impl WindowsDisplay {
                 ),
                 size: physical_size.to_pixels(scale_factor),
             },
-            visible_bounds: Bounds {
-                origin: logical_point(work_area.left as f32, work_area.top as f32, scale_factor),
-                size: size(
-                    (work_area.right - work_area.left) as f32 / scale_factor,
-                    (work_area.bottom - work_area.top) as f32 / scale_factor,
-                )
-                .map(gpui::px),
-            },
+            visible_bounds: visible_bounds(work_area, scale_factor),
             physical_bounds: Bounds {
                 origin: point(monitor_size.left.into(), monitor_size.top.into()),
                 size: physical_size,
@@ -81,17 +75,7 @@ impl WindowsDisplay {
     }
 
     pub fn primary_monitor() -> Option<Self> {
-        // https://devblogs.microsoft.com/oldnewthing/20070809-00/?p=25643
-        const POINT_ZERO: POINT = POINT { x: 0, y: 0 };
-        let monitor = unsafe { MonitorFromPoint(POINT_ZERO, MONITOR_DEFAULTTOPRIMARY) };
-        if monitor.is_invalid() {
-            log::error!(
-                "can not find the primary monitor: {}",
-                std::io::Error::last_os_error()
-            );
-            return None;
-        }
-        WindowsDisplay::new(Self::display_id_for_monitor(monitor))
+        Self::new(Self::display_id_for_monitor(primary_monitor_handle()?))
     }
 
     /// The DPI scale factor of this monitor, independent of whatever monitor
@@ -157,6 +141,40 @@ impl PlatformDisplay for WindowsDisplay {
             .log_err()
             .and_then(|info| refresh_interval_for_device(&info.szDevice))
     }
+}
+
+/// The primary display's logical visible bounds and the scale used to compute them.
+pub fn primary_visible_bounds() -> Option<(Bounds<Pixels>, f32)> {
+    let monitor = primary_monitor_handle()?;
+    let work_area = get_monitor_info(monitor).log_err()?.monitorInfo.rcWork;
+    let scale = get_scale_factor_for_monitor(monitor).log_err()?;
+    Some((visible_bounds(work_area, scale), scale))
+}
+
+fn visible_bounds(work_area: RECT, scale: f32) -> Bounds<Pixels> {
+    Bounds::new(
+        logical_point(work_area.left as f32, work_area.top as f32, scale),
+        size(
+            (work_area.right - work_area.left).into(),
+            (work_area.bottom - work_area.top).into(),
+        )
+        .to_pixels(scale),
+    )
+}
+
+fn primary_monitor_handle() -> Option<HMONITOR> {
+    // https://devblogs.microsoft.com/oldnewthing/20070809-00/?p=25643
+    const POINT_ZERO: POINT = POINT { x: 0, y: 0 };
+    // SAFETY: the monitor handle is only used for read-only display queries.
+    let monitor = unsafe { MonitorFromPoint(POINT_ZERO, MONITOR_DEFAULTTOPRIMARY) };
+    if monitor.is_invalid() {
+        log::error!(
+            "can not find the primary monitor: {}",
+            std::io::Error::last_os_error()
+        );
+        return None;
+    }
+    Some(monitor)
 }
 
 /// The refresh rate of the monitor's current mode. With variable refresh
@@ -239,6 +257,8 @@ fn get_scale_factor_for_monitor(monitor: HMONITOR) -> Result<f32> {
     let mut dpi_x = 0;
     let mut dpi_y = 0;
     unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }?;
-    assert_eq!(dpi_x, dpi_y);
+    if dpi_x == 0 || dpi_x != dpi_y {
+        return Err(Error::from(E_FAIL));
+    }
     Ok(dpi_x as f32 / USER_DEFAULT_SCREEN_DPI as f32)
 }
