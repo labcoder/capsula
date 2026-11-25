@@ -12,7 +12,7 @@ use crate::config::tuning::{OAuthTuning, TokenTuning};
 #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
 use crate::connections::model::text_observation::Observation;
 use crate::ipc::{self, Identity, Pipes};
-use crate::platform::{self, Job, SessionLock, native_workers};
+use crate::platform::{self, Job, Mode, SessionLock, native_workers};
 use crate::runtime::{Brain, Quit, Selected, account::Accounts};
 use crate::store::{self, SceneState, Store};
 use crate::{
@@ -56,12 +56,7 @@ pub(super) async fn run_admitted(
     starting();
     let lifecycle = Lifecycle::acquire(platform::session_id()?)?;
     let opened = open_state(mode, &lifecycle.exe)?;
-    let mut lifecycle = lifecycle.start(
-        opened,
-        accounts,
-        #[cfg(test)]
-        |_, _| Ok(()),
-    )?;
+    let mut lifecycle = lifecycle.start(Mode::Detached, opened, accounts, |_, _| Ok(()))?;
     let identity = lifecycle.publish_capability()?;
     tracing::info!(target: STARTUP_LOG_TARGET, incarnation = ?identity.incarnation, build = BUILD_ID, "listening");
     let brain = lifecycle.brain.as_mut().expect("started brain");
@@ -90,33 +85,36 @@ impl Lifecycle {
         })
     }
 
+    /// Each checkpoint admits the one unit after it; Detached passes a no-op.
     fn start(
         mut self,
+        mode: Mode,
         opened: OpenedState,
         accounts: impl FnOnce(
             OAuthTuning,
             TokenTuning,
             Arc<SessionLock>,
         ) -> Result<(Accounts, VaultHeld), BrainError>,
-        #[cfg(test)] mut checkpoint: impl FnMut(Checkpoint, &mut Self) -> Result<(), BrainError>,
+        mut checkpoint: impl FnMut(Checkpoint, &mut Self) -> Result<(), BrainError>,
     ) -> Result<Self, BrainError> {
         self.profile = Some(Arc::clone(&opened.profile));
         self.opened = Some(opened);
-        #[cfg(test)]
         checkpoint(Checkpoint::Open, &mut self)?;
         let opened = self.opened.as_mut().expect("opened state");
-        let claude_setting = native_workers::claude_setting(&opened.config);
+        let claude_setting = native_workers::claude_setting(&opened.config, mode);
         let (account, vault_held) = start_accounts(opened, accounts)?;
+        checkpoint(Checkpoint::Accounts, &mut self)?;
         self.brain = Some(build_brain(
             self.opened.take().expect("opened state"),
             account,
         )?);
-        #[cfg(test)]
         checkpoint(Checkpoint::Brain, &mut self)?;
-        let (jobs, workers) =
-            native_workers::prepare(self.brain.as_mut().expect("built brain"), claude_setting)?;
+        let (jobs, workers) = native_workers::prepare(
+            self.brain.as_mut().expect("built brain"),
+            claude_setting,
+            mode,
+        )?;
         self.jobs = Some(jobs);
-        #[cfg(test)]
         checkpoint(Checkpoint::Helpers, &mut self)?;
         let brain = self.brain.as_mut().expect("built brain");
         let jobs = self.jobs.as_ref().expect("started helpers");
@@ -169,10 +167,11 @@ impl Lifecycle {
     }
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// A boundary between startup units, named for the unit before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Checkpoint {
     Open,
+    Accounts,
     Brain,
     Helpers,
 }

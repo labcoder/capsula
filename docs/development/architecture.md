@@ -66,6 +66,14 @@ admitted lock target still refuse before opening a file, with no fallback locati
 Detached brain startup acquires both pipes before touching the store. It takes the profile's
 writer lock, then opens and recovers the store, loads settings, starts accounts, and builds the Brain. It retries any interrupted
 voice model removals before creating the helpers' Job Object, then starts the optional workers.
+The mode check before the removal pass and the Claude Code setting read the running mode, so a
+mode without containment removes nothing. Startup crosses four checkpoints: after the opened
+state, after accounts, after the Brain and after the Job. Detached passes a no-op at each. A
+parent-bound start, not wired yet, makes one commit claim and then passes a fence at each
+checkpoint. The watch thread latches the parent's loss in an atomic gate before it publishes,
+so a claim that comes after a loss fails, and a fence refuses once a loss or a closed watch is
+visible. Each passed checkpoint admits the one unit after it. A loss during a unit lets that
+unit finish, and the next fence refuses with the same unwind as an error there.
 Only then does it publish the instance capability and serve the shell. The lifecycle owner
 keeps the pipes alive through teardown. Before capability publication, a failure drops the
 resources that started without entering graceful shutdown. The store and credential workers
