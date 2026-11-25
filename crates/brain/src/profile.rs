@@ -238,6 +238,11 @@ mod tests {
                 "case {case}"
             );
         }
+        assert_eq!(
+            legacy(&present(), None, |_, _| Observation::Unverified),
+            Observation::Unverified,
+            "a present folder reads what the read in place finds"
+        );
     }
 
     const MATCHING: Legacy = Legacy {
