@@ -85,7 +85,7 @@ impl Lifecycle {
         })
     }
 
-    /// Each checkpoint admits the one unit after it; Detached passes a no-op.
+    /// Each checkpoint admits the work up to the next one; Detached passes a no-op.
     fn start(
         mut self,
         mode: Mode,
@@ -109,6 +109,8 @@ impl Lifecycle {
             account,
         )?);
         checkpoint(Checkpoint::Brain, &mut self)?;
+        // shortcut: a parent loss during the removal pass doesn't stop the Job from starting; fence
+        // the Job's creation when containment lands.
         let (jobs, workers) = native_workers::prepare(
             self.brain.as_mut().expect("built brain"),
             claude_setting,
@@ -116,6 +118,8 @@ impl Lifecycle {
         )?;
         self.jobs = Some(jobs);
         checkpoint(Checkpoint::Helpers, &mut self)?;
+        // shortcut: a parent loss after voice starts doesn't stop the Claude lane or the screen
+        // worker; fence each start when containment lands.
         let brain = self.brain.as_mut().expect("built brain");
         let jobs = self.jobs.as_ref().expect("started helpers");
         native_workers::start(workers, brain, vault_held, &self.exe, jobs);
