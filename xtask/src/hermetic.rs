@@ -1183,7 +1183,14 @@ mod tests {
         fs::create_dir(&linked).expect("an empty folder");
         kumochi_storage::set_junction(&linked, &elsewhere).expect("a junction");
         let through = format!("kumochi-gate-run {EARLIER_ID} {}\n", linked.display());
-        for (case, line, named) in [("outside", line, &elsewhere), ("linked", through, &linked)] {
+        let unmarked = dir.join("unmarked");
+        fs::create_dir(&unmarked).expect("a folder no run marked");
+        let unread = format!("kumochi-gate-run {EARLIER_ID} {}\n", unmarked.display());
+        for (case, line, named) in [
+            ("outside", line, &elsewhere),
+            ("outside-unmarked", unread, &unmarked),
+            ("linked", through, &linked),
+        ] {
             let mut store = Fake([HELD.to_owned()].into());
             let path = dir.join("run.lock");
             fs::write(&path, &line).expect("lock");
@@ -1275,29 +1282,22 @@ mod tests {
         (earlier, line)
     }
 
-    const UNMADE: &str = "which no gate run can be shown to have made";
-    const UNCHECKED: &str = "which isn't a checked gate run folder in RUNS";
-
     #[test]
     fn recovery_deletes_nothing_unless_the_whole_lock_and_the_folders_mark_agree() {
         type Spoil = fn(&Path, &mut String);
         // Each case, the bytes it cuts from the folder's name, and how it spoils the run.
-        let cases: [(&str, usize, &str, Spoil); 4] = [
-            ("no-newline", 0, UNMADE, |_, line| {
-                line.truncate(line.len() - 1);
-            }),
-            ("cut-path", 3, UNCHECKED, |_, line| {
-                line.truncate(line.len() - 4);
-            }),
-            ("unmarked", 0, UNMADE, |earlier, _| {
+        let cases: [(&str, usize, Spoil); 4] = [
+            ("no-newline", 0, |_, line| line.truncate(line.len() - 1)),
+            ("cut-path", 3, |_, line| line.truncate(line.len() - 4)),
+            ("unmarked", 0, |earlier, _| {
                 fs::remove_file(earlier.join(MARKER)).expect("no mark");
             }),
-            ("another-id", 0, UNMADE, |earlier, _| {
+            ("another-id", 0, |earlier, _| {
                 fs::write(earlier.join(MARKER), "fedcba9876543210fedcba9876543210")
                     .expect("another run's id");
             }),
         ];
-        for (case, cut, reason, spoil) in cases {
+        for (case, cut, spoil) in cases {
             let dir = scratch::local(&format!("gate-recovery-{case}"));
             let (earlier, mut line) = interrupted_run(&dir);
             spoil(&earlier, &mut line);
@@ -1313,9 +1313,9 @@ mod tests {
             assert_eq!(
                 format!("{error:#}"),
                 format!(
-                    "{} names {named}, {}, so nothing was deleted",
-                    path.display(),
-                    reason.replace("RUNS", &dir.display().to_string())
+                    "{} names {named}, which no gate run can be shown to have made, so nothing \
+                     was deleted",
+                    path.display()
                 ),
                 "{case}"
             );
