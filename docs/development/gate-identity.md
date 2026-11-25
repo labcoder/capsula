@@ -1,12 +1,20 @@
 # The gate identity
 
-The gate tools (`cold-start`, `gate-session`, `hover-gate`, `measure-gate`, `bench idle`,
-`slice2-gate` and `live anthropic-key`) start real
-Kumochi processes on the developer's machine. A throwaway `%LOCALAPPDATA%` isolates files only:
-anything named by the product identity (the pipes, the instance capability, Credential Manager
-names and the folder the system reports for Local AppData) follows the build, not the environment.
+The gate tools (`cold-start`, `gate-session`, `hover-gate`, `measure-gate`, `draw-timing`,
+`bench idle`, `slice2-gate` and `live anthropic-key`) start real
+Kumochi processes on the developer's machine. Separate folders isolate files only: anything named
+by the product identity (the pipes, the instance capability and Credential Manager names) follows
+the build, not the environment.
 So these tools run a third identity, `Kumochi Gate`, chosen when the binaries are built, and
 never the installed `Kumochi` or the developer's `Kumochi Dev`.
+
+A Gate build takes its folders only from the override pair, `KUMOCHI_GATE_LOCALAPPDATA` and
+`KUMOCHI_GATE_APPDATA`, both set to existing folders below the real Local AppData, or else from
+the Known Folders. Its Claude Code base and staging folder follow the same local root, so an
+overridden run writes nothing to the real `Kumochi Gate` folder. It refuses one variable alone,
+and a `LOCALAPPDATA` or `APPDATA` redirected without the pair, which is how a launcher from before
+the override would isolate it. Debug builds honour the same pair; release builds without the
+gate identity never read it. The resolver is described in [architecture](architecture.md).
 
 ## The three identities
 
@@ -42,6 +50,15 @@ fixture scripts.
 
 Without `--prebuilt`, a tool builds its own images in `<target>/gate/{debug,release}`.
 `bench idle --baseline <checkout>` builds older Gate source in `<target>/gate-baseline`.
+Every image a gate tool launches, built or prebuilt, must carry its startup marker, the Gate
+edition and both override names, `KUMOCHI_GATE_LOCALAPPDATA` and `KUMOCHI_GATE_APPDATA`. The
+edition, `kumochi-edition-gate`, is a field of the line the shell and the brain log at start, and
+only a Gate-identity build carries it: every build compiles the Gate service name for comparison,
+so that name can't tell a Gate image from an ordinary debug one. An image that names the Release
+service is refused too.
+An image from before the override would follow `LOCALAPPDATA`, which the tools no longer set, so
+it is refused before launch: a `--baseline` checkout can't predate the override. `slice2-gate`
+checks its brain this way, and its xtask copy by the gate identity it refuses to run without.
 These forms can start Cargo even on a warm cache; don't use them in a no-build timing hold.
 
 ### Prebuilt idle and cold-start
@@ -67,8 +84,8 @@ brain pins in that order, not hashes taken from a different build for this invoc
 The release Gate driver verifies both sibling executables before admitting the run. It then
 copies them into the run's own folder, verifies the copies, and launches only those copies
 with the same job and isolated app data as the built forms. At both points it checks the
-SHA-256 pins and looks for each app's startup marker and the Gate instance service in the
-image, rejecting the Release and Dev service names. Those strings catch accidental mix-ups,
+SHA-256 pins and looks for each app's startup marker, the Gate edition and both override names
+in the image, rejecting the Release service name. Those strings catch accidental mix-ups,
 but don't prove the build profile or attest an arbitrary binary. A debug Gate image may pass;
 use the recorded hashes from the intended release build. Missing, changed or mismatched images
 fail without a fallback build or launch. The receipt records `build_seconds=0.0`.
@@ -106,13 +123,22 @@ flowchart TD
 
 1. **One at a time, in a new folder.** A run holds an exclusive lock on
    `kumochi-gate-run.lock` in the system's Local AppData (beside, never inside, `Kumochi Gate`)
-   until it ends, and refuses while any `kumochi.exe` or `kumochid.exe` runs, of any identity. Two gate runs
+   until it ends. It holds every folder from the volume root down to Local AppData first, and
+   opens the lock without following a link: a link or a hard-linked file there is refused and left
+   as it is. The lock is two bytes far past the file's line, so a process the run starts can still
+   read the line: one the run holds from start to end, and one it takes only once it has written
+   its own line, after any recovery. A process the run starts is admitted only while that second
+   byte is held and the line names its root and run id. It checks the byte with a shared lock, so
+   two checks at once can't mistake each other for a published run. It refuses while any `kumochi.exe` or `kumochid.exe` runs, of any identity. Two gate runs
    would share the gate pipes, and the shell's hotkey, raw input and tray icon belong to the
    Windows session, not the identity.
 2. **Nothing outlives it.** The run puts itself in a kill-on-close job that forbids breakaway, so a
    shell a brain relaunches, or a brain a shell starts, ends with the run.
-3. **Its own folders.** Every launch gets its own `%LOCALAPPDATA%` and `%APPDATA%` under the run's
-   folder, and `%APPDATA%\Kumochi Gate\config.toml` says `[claude_code] enabled = false`, so the
+3. **Its own folders.** Every launch gets its own `local` and `roaming` folders under the run's
+   root, passed as `KUMOCHI_GATE_LOCALAPPDATA` and `KUMOCHI_GATE_APPDATA`. The tools leave
+   `LOCALAPPDATA` and `APPDATA` as xtask got them, and a Gate image ignores them once the pair is
+   set. Everything a launch writes lands there, its session lock, Claude Code lock, shell instance
+   lock and logs included, and `roaming\Kumochi Gate\config.toml` says `[claude_code] enabled = false`, so the
    brain runs no `claude.exe` and reads no Claude Code policy. It also says `onboarded = true`: a
    gate launch isn't a first-run test, and onboarding's window would take the foreground. The brain logs `Claude Code
    setting enabled=false` at start, so the run's own brain log shows it.
@@ -130,23 +156,36 @@ flowchart TD
      launch's folders. A failed run keeps its folders, with the product logs, until the next run.
      It never deletes by prefix or wildcard, and never an entry it can't match to its own run. A
      launch whose authority can't be read keeps its folders and entries, and the run fails naming it;
-   - deletes `capability-<session>.Kumochi Gate instance` by its exact name;
-   - deletes `Kumochi Gate` in the system's Local AppData, which holds the Claude Code lane's lock.
+   - deletes `capability-<session>.Kumochi Gate instance` by its exact name.
 
-A run creates its root folder, which must not exist yet, writes a new random run id into its
+   Nothing outside the run's root is deleted. Claude Code's lock and the speech staging folder
+   land in each launch's `local` folder, so a run makes no `Kumochi Gate` folder in the system's
+   Local AppData, and leaves one it finds there alone.
+
+A run creates its root folder, `<task>-<time>`, in `kumochi-gate-runs` in the system's Local
+AppData, beside the lock. It first holds every folder from the volume root down to Local AppData
+and admits `kumochi-gate-runs` under them: it is created owner-only when missing, and an existing
+one that is a link or that someone else may change is refused, never followed. The root itself is
+created owner-only and exclusively, so a folder already there is refused. The run keeps these
+handles until it ends, and every folder and file it writes is under that root. A run that keeps a
+transcript (`cold-start`, `gate-session`, `hover-gate`, `measure-gate`, `draw-timing`) keeps its evidence in the
+transcript's own new folder, and only the launches' data under the root. The run writes a new
+random run id into the root's
 `gate-run` file, and names both in the lock file, as one line ending in a newline, until it has
 cleaned up. If a run is interrupted (Ctrl-C, a killed xtask, a panic, or one of its processes
 still running after cleanup ended it), the next gate run cleans up that folder as above before it starts, so
-rerunning any gate tool clears an interrupted one. The instance entry and the real `Kumochi Gate`
-folder go at the end of that next run. Recovery starts only when the lock's line is whole and the
-folder's `gate-run` holds the same id. Anything else, such as a lock cut short or a folder without
-that id, is refused with a message naming the lock and the folder, and then nothing is deleted. A
+rerunning any gate tool clears an interrupted one. The instance entry goes at the end of that next
+run. Recovery starts only when the lock's line is whole, the folder it names sits directly in
+`kumochi-gate-runs` and passes the same checks, opened without following a link, and only then
+the folder's `gate-run` holds the same id; nothing is read at a folder before it passes. Anything else, such as a lock cut short, a folder without that id, or one
+outside `kumochi-gate-runs` or behind a link, is refused with a message naming the lock and the folder, and then nothing is deleted. A
 recovery that starts and then keeps a launch (its authority unreadable, or another identity's
 folder in it) has already deleted the other launches and every readable launch's entries, and
 names what it kept. To finish by hand: with no gate run on, any `Kumochi Gate/gen/...` entry in
 Credential Manager is a gate run's leftover and may be deleted. Delete the kept launch folder, then
 rerun without deleting the lock, which completes the recovery. Delete the lock only after a
-refusal that names a folder no gate run made.
+refusal that names a folder no gate run made, or one outside `kumochi-gate-runs` or behind a link;
+that folder is kept for you to check.
 
 The gate identity never signs in: the `live` checks refuse anything but the dev identity, and no
 gate tool has a path that stores a credential.
@@ -156,8 +195,7 @@ gate tool has a path that stores a credential.
 - The pipes and the instance capability are named by identity and Windows session and ignore the
   environment. A gate brain can't meet a dev or release brain there, but two gate runs would, which
   is why one runs at a time.
-- The `Kumochi Gate` folder in the system's Local AppData (the lane's lock, and staged speech
-  natives after a speech load), until the run deletes it.
+- `kumochi-gate-runs` and the run lock in the system's Local AppData, which hold only gate runs.
 - Credential Manager as a store, under the gate's own names only.
 - The installed `claude.exe` and the Claude Code policy reads, only if Claude Code were on; gate
   runs turn it off.

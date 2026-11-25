@@ -61,7 +61,7 @@ pub(crate) fn test_is_link(metadata: &std::fs::Metadata) -> bool {
 pub(crate) use connected_shell::connected_shell_pid;
 pub(super) use connected_shell::register_shell;
 #[cfg(not(target_os = "macos"))]
-pub(crate) const DATA_ROOT_ERROR: &str = "%LOCALAPPDATA% is not set to an absolute path";
+pub(crate) const DATA_ROOT_ERROR: &str = "the local application data folder is unavailable";
 #[cfg(target_os = "macos")]
 pub(crate) const DATA_ROOT_ERROR: &str = "macOS Application Support folder is unavailable";
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -83,7 +83,7 @@ pub(crate) use process::spawn_if;
 pub use process::{
     ChildPipes, Helper, Job, Launch, Spawned, Stdio, launch_detached, spawn, system_env,
 };
-pub(crate) use protected::Untrusted;
+pub(crate) use protected::{Untrusted, is_unsupported};
 #[cfg(not(windows))]
 pub(crate) use protected::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
@@ -165,6 +165,8 @@ pub(crate) mod sherpa;
 pub(crate) use windows::call_throwing_export;
 #[cfg(all(test, windows))]
 pub(crate) use windows::fake_claude::FAKE_CLAUDE;
+#[cfg(all(test, windows))]
+pub(crate) use windows::local_app_data;
 #[cfg(windows)]
 pub use windows::managed_presence;
 #[cfg(windows)]
@@ -193,9 +195,9 @@ pub(crate) use windows::{
 #[cfg(windows)]
 pub(crate) use windows::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_model_creation, local_app_data, mark, marker, model_file, model_final, open_model_write,
-    owner_only_dir, private_tree, profile_dir, publish_model, remove_model_tree, remove_tree,
-    unmark, validate_model_path,
+    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
+    private_tree, profile_dir, publish_model, remove_model_tree, remove_tree, unmark,
+    validate_model_path,
 };
 
 /// Whether this platform captures one window alone. No platform but Windows does yet.
@@ -299,7 +301,7 @@ fn missing_data_root_diagnostics_name_the_platform_source() {
     let expected = if cfg!(target_os = "macos") {
         "macOS Application Support folder is unavailable"
     } else {
-        "%LOCALAPPDATA% is not set to an absolute path"
+        "the local application data folder is unavailable"
     };
     assert_eq!(
         crate::store::StoreError::NoLocalAppData.to_string(),

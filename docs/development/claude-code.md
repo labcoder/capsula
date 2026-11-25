@@ -224,7 +224,10 @@ sequenceDiagram
   a native `.exe`, or that runs through `node_modules`, is `Unsupported::Shim` before anything is
   looked at. The version is `--version`'s first word, and it must have a reviewed row. That row
   pins the model alias Kumochi requests, not the backend the CLI resolves on an internal retry.
-- **Before every start.** The lane needs this brain's own lock on `claude-code.lock`, beside the
+- **Before every start.** Kumochi's `claude-code` folder sits in the brain's local root: the
+  Known Folder in an ordinary build, never `LOCALAPPDATA`, and the override pair's local half in
+  Gate and debug builds, so a gate run's lock and Claude Code folder land in that run's own
+  folder. The lane needs this brain's own lock on `claude-code.lock`, beside the
   vault's, and takes it on its first call only while the account worker reports the vault lock
   held. Before Version every managed-policy source must be absent; before Status the reviewed
   row's `may_launch` runs again. Kumochi's folders under `claude-code` are made owner-only and

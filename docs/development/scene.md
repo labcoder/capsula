@@ -610,7 +610,11 @@ uses `MissingField` for absent required fields and appends only an allowlisted
 field name to its path. `UnknownOp` denotes only an unknown record/op tag;
 unknown vocabulary values and invalid numeric values are `OutOfRange`.
 `StepError`'s `Display` and `Debug` contain only the path and code. `tool_text` may include a
-known step id when replying to its model, but never the rejected field value.
+known step id and a repair hint, but never the rejected field value. Dimension admission
+attaches a positive or nonnegative range using the shared coordinate cap. A nonpositive path
+scale instead names the cap on the composed transform, since parent and animation scales affect
+what is allowed. Decoder and other geometry errors do not guess a range. A refused
+continuation explains how to keep the current canvas.
 `Text`, `Source` and `WireId` expose lengths only; `Finite`, `Number`, `Rgb`, `Ms`, `Cell` and
 `Point` redact values, while `Step`, `Frame` and `FrameItem` summarize counts, hiding
 timings, repeat counts and word offsets along with drawing values. Do not trace records,

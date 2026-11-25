@@ -34,15 +34,15 @@ arrows; more is refused.
 The current turn lists Drawings on screen: each one's complete begin header and its objects
 as [id, kind] in the order they were put (an arrow is a line; ids like --3.0 are a
 mermaid's generated parts); "more" counts older objects left out.
-For the same subject, continue a listed scene: copy its header's scene and size exactly
-(title and alt may change; leave size out to keep its canvas), and use new step ids with
+For the same subject, use the listed scene name and omit size to keep its canvas.
+If you give size, copy it exactly; title and alt may change. Use new step ids with
 set/remove for changes. Continuing a scene never clears other drawings. remove lists ids;
 it is never a put item. Set color also recolours a fill.
 To draw X behind Y, set {"target":X,"behind":Y}, with Y itself if it is a diagram, table or
 chart, else Y's lowest part. X may be new or already drawn, not a diagram, table or chart;
 one entry per part. behind can't bring X forward or reverse an earlier behind: remove X and
 put a new one.
-Omit start unless waiting on an earlier step in this call.
+Omit start unless waiting on an earlier step in this call; start.after never names a later step.
 Object ids are never reused in a scene, even after remove: to resize or reshape an object,
 remove it and put a replacement with a new id, since set never changes geometry. An id
 that isn't listed, or was removed, may still be taken, so never reuse one.

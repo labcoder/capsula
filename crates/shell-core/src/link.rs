@@ -127,6 +127,10 @@ pub enum LinkEvent {
         view: SettingsView,
         answer: bool,
     },
+    SpokenRepliesDefaulted {
+        generation: u64,
+        view: SettingsView,
+    },
     Account {
         generation: u64,
         view: AccountView,
@@ -2183,6 +2187,7 @@ fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError> {
             | ControlToShell::ThreadDeleted { .. }
             | ControlToShell::TurnRefused { .. }
             | ControlToShell::Settings { .. }
+            | ControlToShell::SpokenRepliesDefaulted(_)
             | ControlToShell::Error(_)
             | ControlToShell::ScenesV1 { .. }
             | ControlToShell::NoVisual { .. }
@@ -2329,6 +2334,17 @@ fn watch(
                     return;
                 }
             }
+            Ok(Some(ControlToShell::SpokenRepliesDefaulted(view))) => {
+                if queued.is_none() || !shared.output.defer_spoken_replies(generation, &view) {
+                    return;
+                }
+                if events
+                    .send_blocking(LinkEvent::SpokenRepliesDefaulted { generation, view })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             Ok(Some(ControlToShell::Voice(view))) => {
                 if events
                     .send_blocking(LinkEvent::Voice { generation, view })
@@ -2463,6 +2479,14 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::Error(error))) => {
+                if queued.is_some()
+                    && matches!(
+                        error.key(),
+                        ErrorKey::SettingsRefused | ErrorKey::ConfigUnreadable
+                    )
+                {
+                    shared.output.refuse_talk_back(generation);
+                }
                 if events
                     .send_blocking(LinkEvent::Error { generation, error })
                     .is_err()

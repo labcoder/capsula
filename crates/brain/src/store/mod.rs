@@ -321,7 +321,7 @@ pub struct Store {
 /// The store's file, in the data folder.
 ///
 /// # Errors
-/// Fails without an absolute `%LOCALAPPDATA%` on Windows or an OS Application Support
+/// Fails without a local application data root on Windows or an OS Application Support
 /// candidate on macOS.
 /// Other builds without a data folder also fail.
 pub fn default_path() -> Result<PathBuf, StoreError> {

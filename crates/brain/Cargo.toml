@@ -74,6 +74,7 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
 
 [target.'cfg(windows)'.dependencies]
 keyring.workspace = true
+kumochi-storage = { path = "../storage" }
 windows = { version = "0.62", features = [
     "Foundation",
     "Media_Ocr",
@@ -140,3 +141,4 @@ rustix = { version = "1", features = ["fs"] }
 [target.'cfg(windows)'.dev-dependencies]
 # Lets tests read the access a handle was granted.
 windows-sys = { version = "0.61", features = ["Wdk_Foundation"] }
+kumochi-storage = { path = "../storage", features = ["test-support"] }

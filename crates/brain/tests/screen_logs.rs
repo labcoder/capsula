@@ -4,6 +4,7 @@
 
 #[cfg(test)]
 #[path = "../../../tests/support/scratch.rs"]
+#[expect(dead_code, reason = "the shared fixture serves several test binaries")]
 mod scratch;
 
 use std::path::PathBuf;
@@ -13,6 +14,10 @@ use std::time::{Duration, Instant};
 
 use kumochi_brain::platform::Job;
 use kumochi_brain::screen::{Generation, HoldClient, WorkerLost};
+use kumochi_protocol::constants::{
+    DATA_DIR, LOCAL_APPDATA_OVERRIDE, LOGS_DIR, ROAMING_APPDATA_OVERRIDE,
+};
+use windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData;
 
 const WORKER: &str = env!("CARGO_BIN_EXE_kumochid");
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -52,7 +57,11 @@ fn drain(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHand
     reason = "the only test this binary runs in-process, so no spawn overlaps it"
 )]
 fn panic_hook_and_environment_fault_are_exercised_in_child_processes() {
-    let dir = scratch::dir("screen-logs");
+    let local = kumochi_storage::known_folder(FOLDERID_LocalAppData).expect("local app data");
+    let dir = scratch::Scratch::under(&local, "screen-logs");
+    for half in ["local", "roaming"] {
+        std::fs::create_dir(dir.join(half)).expect("an override half");
+    }
     for (test, fault) in [
         ("panic_fixture", "panic"),
         ("environment_crash_fixture", "crash"),
@@ -61,7 +70,8 @@ fn panic_hook_and_environment_fault_are_exercised_in_child_processes() {
         let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args(["--exact", test, "--ignored", "--nocapture"])
             .env(kumochi_protocol::constants::SCREEN_FAULT_ENV, fault)
-            .env("LOCALAPPDATA", dir.path())
+            .env(LOCAL_APPDATA_OVERRIDE, dir.join("local"))
+            .env(ROAMING_APPDATA_OVERRIDE, dir.join("roaming"))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -100,7 +110,7 @@ fn panic_hook_and_environment_fault_are_exercised_in_child_processes() {
             .collect();
         assert_eq!(results, ["1 passed"], "{test}: wrong fixture count");
     }
-    let logs = std::fs::read_dir(dir.join(kumochi_protocol::constants::DATA_DIR).join("logs"))
+    let logs = std::fs::read_dir(dir.join("local").join(DATA_DIR).join(LOGS_DIR))
         .expect("logs")
         .map(|entry| std::fs::read_to_string(entry.expect("entry").path()).expect("log"))
         .collect::<String>();

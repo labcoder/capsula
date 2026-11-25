@@ -17,10 +17,8 @@ use crate::platform::{PipeClient, test_pair};
 /// How long a test waits for anything before it fails.
 pub(crate) const PATIENCE: Duration = Duration::from_secs(5);
 
-#[cfg(debug_assertions)]
 pub use crate::speaker::queued::{FixturePlayback, await_fake_disposal, serialize_playback};
 
-#[cfg(debug_assertions)]
 pub fn with_outbox_held(handle: &LinkHandle, session: &Session, run: impl FnOnce()) {
     with_link_locks_held(handle, session, Hold::Outbox, run);
 }
@@ -30,13 +28,12 @@ pub fn with_outbox_and_output_held(handle: &LinkHandle, session: &Session, run: 
     with_link_locks_held(handle, session, Hold::Both, run);
 }
 
-#[cfg(debug_assertions)]
 enum Hold {
     Outbox,
+    #[cfg(debug_assertions)]
     Both,
 }
 
-#[cfg(debug_assertions)]
 fn with_link_locks_held(handle: &LinkHandle, session: &Session, locks: Hold, run: impl FnOnce()) {
     let (ready, held) = mpsc::channel();
     let (release, done) = mpsc::channel();
@@ -60,6 +57,7 @@ fn with_link_locks_held(handle: &LinkHandle, session: &Session, locks: Hold, run
             };
             match locks {
                 Hold::Outbox => held(),
+                #[cfg(debug_assertions)]
                 Hold::Both => handle.shared.output.with_locked(held),
             }
         });
@@ -223,7 +221,6 @@ pub struct Attended {
     pub link: JoinHandle<bool>,
 }
 
-#[cfg(debug_assertions)]
 impl Attended {
     /// Reads one frame from the connected test peer with its existing timeout.
     ///
@@ -239,6 +236,7 @@ impl Attended {
     /// Checks the peer's exact shutdown frames, closes the peer and joins the link.
     /// # Panics
     /// Panics on an unexpected frame, pipe error or link failure.
+    #[cfg(debug_assertions)]
     pub fn verify_quit(self, expected: [kumochi_protocol::message::ControlToBrain; 3]) {
         use kumochi_protocol::frame::{self, FrameError, Pipe};
         use kumochi_protocol::message::ControlToBrain;

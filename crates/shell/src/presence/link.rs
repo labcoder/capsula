@@ -111,6 +111,9 @@ impl Presence {
                     gesture,
                     status,
                 } => self.voice_status(generation, gesture, status, cx),
+                LinkEvent::SpokenRepliesDefaulted { generation, view } => {
+                    self.settings_changed(generation, view, Update::SpokenRepliesDefaulted, cx);
+                }
                 LinkEvent::Voice { generation, view } => {
                     let current = self.session.as_ref().map(crate::link::Session::generation);
                     self.settings.update(cx, |state, cx| {

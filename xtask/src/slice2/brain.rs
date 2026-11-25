@@ -1,4 +1,4 @@
-//! The real brain, started from the gate's folder with its own `%LOCALAPPDATA%`, `%APPDATA%` and
+//! The real brain, started from the gate's folder with its own local and roaming folders and
 //! fixture.
 
 use std::fs;
@@ -26,24 +26,28 @@ pub(super) fn leftovers() -> Vec<Child> {
     std::mem::take(&mut *LEFTOVERS.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
-/// The folder under the gate's folder that holds the items' folders, which the run deletes.
-pub(super) const DATA: &str = "data";
-
-/// One gate item's folder: its fixture script, and the `%LOCALAPPDATA%` and `%APPDATA%` its
+/// One gate item's folder: its fixture script, and the local and roaming folders its
 /// brains share.
 #[derive(Debug)]
 pub(super) struct Case {
     bin: PathBuf,
     fixture: PathBuf,
-    /// What the brain sees as `%LOCALAPPDATA%` (its store and logs) and `%APPDATA%`.
+    /// The brain's local (its store and logs) and roaming folders, passed as the override pair.
     pub(super) folders: Folders,
 }
 
 impl Case {
-    pub(super) fn new(folder: &Path, name: &str, script: &str) -> Result<Self> {
-        let root = folder.join(DATA).join(name);
+    /// The item `name`'s folder under the run's `root`, playing `script` with the brain beside
+    /// this program.
+    pub(super) fn new(root: &Path, name: &str, script: &str) -> Result<Self> {
+        let root = root.join(name);
+        fs::create_dir(&root).with_context(|| format!("{name}'s folder must be new"))?;
+        let me = std::env::current_exe()?;
         let case = Self {
-            bin: folder.join("bin"),
+            bin: me
+                .parent()
+                .context("the gate runs from its folder")?
+                .to_owned(),
             fixture: root.join("fixture.txt"),
             folders: Folders::create(&root)?,
         };
