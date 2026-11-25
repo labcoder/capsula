@@ -75,8 +75,10 @@ async fn a_found_install_shows_by_its_sign_in_and_the_store() {
 
 #[test]
 fn warming_without_a_lane_refuses() {
-    let mut claude = Claude::default();
-    claude.view = READY;
+    let mut claude = Claude {
+        view: READY,
+        ..Claude::default()
+    };
     let snapshot = claude
         .snapshot(ThreadId(1), "claude-test".to_owned(), None, Offer::Nothing)
         .expect("ready view");
