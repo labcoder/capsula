@@ -1159,7 +1159,8 @@ applied do not roll back. An effect admitted just before a cause arrives can fin
 next acceptance check stops dispatch. The core and grace loop check the retained values on
 every poll, so a stored cause wins even if its wake is delayed. One connection-scoped waiter
 relays watch notifications through a one-slot channel so unrelated input doesn't re-poll the
-watch waiters. Detached connections do not supply fatal causes or allocate a waiter.
+watch waiters. Detached connections supply no fatal source: both selects disable the fatal
+arm, and no waiter is built or polled.
 
 ## Debugging
 

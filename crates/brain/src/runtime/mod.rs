@@ -29,6 +29,7 @@ mod voice;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::future::poll_fn;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::time::Duration;
@@ -761,6 +762,7 @@ impl Brain {
         C: AsyncRead + AsyncWrite + Unpin,
         D: AsyncRead + AsyncWrite + Unpin,
     {
+        let watch_fatal = terminal.is_some();
         let mut wake = pin!(terminal.clone().map(Terminal::wake_on_fatal));
         let fence = Fence::new(terminal);
         if let Some(cause) = fence.check() {
@@ -843,7 +845,10 @@ impl Brain {
             loop {
                 tokio::select! {
                     biased;
-                    cause = fence.fatal(wake.as_mut().as_pin_mut()) => {
+                    cause = poll_fn(|cx| fence.poll_fatal(
+                        wake.as_mut().as_pin_mut().expect("enabled fatal arm has a wake"),
+                        cx,
+                    )), if watch_fatal => {
                         ended = Ended::Fatal(cause);
                         break;
                     }
@@ -945,6 +950,7 @@ impl Brain {
         fence: &Fence,
         mut wake: Option<Pin<&mut impl Future<Output = ()>>>,
     ) -> Ended {
+        let watch_fatal = wake.is_some();
         let mut ticks = tokio::time::interval(PING_EVERY);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut ping_sent: Option<Instant> = None;
@@ -977,7 +983,10 @@ impl Brain {
             let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
             let input = tokio::select! {
                 biased;
-                cause = fence.fatal(wake.as_mut().map(Pin::as_mut)) => return Ended::Fatal(cause),
+                cause = poll_fn(|cx| fence.poll_fatal(
+                    wake.as_mut().map(Pin::as_mut).expect("enabled fatal arm has a wake"),
+                    cx,
+                )), if watch_fatal => return Ended::Fatal(cause),
                 () = tokio::time::sleep_until(barrier.deadline), if !described => continue,
                 Some((message, len)) = controls.recv() => {
                     match self.control_frame(message, len, &mut link, &mut ping_sent) {

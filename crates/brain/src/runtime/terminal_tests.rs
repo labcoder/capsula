@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::future::{pending, poll_fn};
 use std::io;
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll, Waker};
@@ -88,14 +89,14 @@ fn a_pinned_cause_refuses_every_quit_attempt() {
 #[test]
 fn an_accepted_quit_ignores_later_causes_and_never_wakes_as_fatal() {
     let (pair, parent, terminal) = cells();
-    let wake = terminal.clone().wake_on_fatal();
+    let mut wake = pin!(terminal.clone().wake_on_fatal());
     let fence = Fence::new(Some(terminal));
     assert_eq!(fence.accept_quit(), Ok(()));
     pair.send_replace(true);
     parent.send_replace(Verdict::Exited);
     assert_eq!(fence.check(), None);
     assert_eq!(
-        poll_once(pin!(fence.fatal(Some(pin!(wake))))),
+        poll_once(pin!(poll_fn(|cx| fence.poll_fatal(wake.as_mut(), cx)))),
         Poll::Pending
     );
 }
@@ -104,12 +105,12 @@ fn an_accepted_quit_ignores_later_causes_and_never_wakes_as_fatal() {
 async fn a_stored_cause_beats_ready_input_while_the_idle_wake_is_pending() {
     let (_pair, parent, terminal) = cells();
     let fence = Fence::new(Some(terminal));
-    let mut wake = pin!(std::future::pending());
+    let mut wake = pin!(pending());
     let (input, mut ready) = mpsc::channel(1);
     let mut acceptance = pin!(async {
         tokio::select! {
             biased;
-            cause = fence.fatal(Some(wake.as_mut())) => Err(cause),
+            cause = poll_fn(|cx| fence.poll_fatal(wake.as_mut(), cx)) => Err(cause),
             value = ready.recv() => Ok(value),
         }
     });

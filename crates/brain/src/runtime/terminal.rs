@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::future::{pending, poll_fn};
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
@@ -141,24 +140,20 @@ impl Fence {
         Ok(())
     }
 
-    pub(super) async fn fatal(&self, wake: Option<Pin<&mut impl Future<Output = ()>>>) -> Fatal {
-        let Some(mut wake) = wake else {
-            return pending().await;
-        };
-        poll_fn(|cx| {
-            if let Some(cause) = self.check() {
-                return Poll::Ready(cause);
-            }
-            if matches!(self.first.get(), Some(Disposition::Quit))
-                || wake.as_mut().poll(cx).is_pending()
-            {
-                return Poll::Pending;
-            }
-            Poll::Ready(
-                self.check()
-                    .expect("the idle wake observed a terminal cell"),
-            )
-        })
-        .await
+    pub(super) fn poll_fatal(
+        &self,
+        wake: Pin<&mut impl Future<Output = ()>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Fatal> {
+        if let Some(cause) = self.check() {
+            return Poll::Ready(cause);
+        }
+        if matches!(self.first.get(), Some(Disposition::Quit)) || wake.poll(cx).is_pending() {
+            return Poll::Pending;
+        }
+        Poll::Ready(
+            self.check()
+                .expect("the idle wake observed a terminal cell"),
+        )
     }
 }
