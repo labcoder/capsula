@@ -112,6 +112,50 @@ async fn each_capture_gets_a_fresh_key_and_a_higher_ticket_and_names_its_worker(
 }
 
 #[tokio::test]
+async fn hold_capture_ids_stop_at_exhaustion_without_wrapping_the_ticket() {
+    const POINT: PhysicalPoint = PhysicalPoint([1, 1]);
+    let mut rig = fixture::start::<Holds>();
+    let client = client(&rig);
+    client.admission.lock().unwrap().last_capture = u64::MAX - 1;
+    let last = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move {
+            client
+                .context(
+                    owner(7),
+                    POINT,
+                    CaptureDeadline::after(Duration::from_secs(5)),
+                )
+                .await
+        }
+    });
+    let (id, request) = rig.next().await;
+    let Request::Context { key, ticket, .. } = request else {
+        panic!("a hold capture");
+    };
+    assert_eq!(
+        (key.capture, ticket.capture(), ticket.generation()),
+        (CaptureId(u64::MAX), CaptureId(u64::MAX), u64::MAX)
+    );
+    rig.reply(id, &Reply::Acquired(key, meta(key.capture)))
+        .await;
+    rig.reply(id, &Reply::Complete(key)).await;
+    assert_eq!(last.await.unwrap().unwrap().key, key);
+    assert_eq!(
+        client
+            .context(
+                owner(8),
+                POINT,
+                CaptureDeadline::after(Duration::from_secs(5))
+            )
+            .await
+            .err(),
+        Some(Closed::Lost(WorkerLost::Lost))
+    );
+    rig.expect_idle(std::time::Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
 async fn a_retired_hold_never_reaches_the_worker_again_and_a_later_one_does() {
     let mut rig = fixture::start::<Holds>();
     let client = client(&rig);
