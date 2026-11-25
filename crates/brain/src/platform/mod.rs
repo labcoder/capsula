@@ -83,7 +83,8 @@ pub(crate) use protected::{
     hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
     private_tree, publish_model, remove_model_tree, remove_tree, unmark, validate_model_path,
 };
-pub use runtime_admission::require_native_runtime;
+pub use runtime_admission::{Mode, supports};
+pub(crate) use runtime_admission::{require_mode, serve_speech};
 pub use session_lock::{SessionLock, SessionLockError};
 pub(crate) use trust_roots::native_trust_supported;
 #[cfg(not(windows))]
