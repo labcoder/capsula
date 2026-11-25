@@ -4074,10 +4074,12 @@ dependencies = [
  "kumochi-protocol",
  "kumochi-scene",
  "kumochi-shell-core",
+ "kumochi-storage",
  "lyon",
  "raw-window-handle",
  "smallvec",
  "thiserror 2.0.21",
+ "time",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -4097,6 +4099,7 @@ dependencies = [
  "kumochi-brain",
  "kumochi-protocol",
  "kumochi-scene",
+ "kumochi-storage",
  "thiserror 2.0.21",
  "tracing",
  "tracing-appender",
@@ -4104,6 +4107,14 @@ dependencies = [
  "unic-langid",
  "windows 0.62.2",
  "zeroize",
+]
+
+[[package]]
+name = "kumochi-storage"
+version = "0.1.2"
+dependencies = [
+ "libc",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

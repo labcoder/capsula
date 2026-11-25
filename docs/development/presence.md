@@ -1,5 +1,24 @@
 # Presence and native surfaces
 
+On macOS the shell logs through the admitted storage owner, not a filesystem path. Startup
+takes the per-user instance lock first, then starts and installs the logger in that lock's
+storage. The logger and the lock travel together as one admission in the dock's app-wide
+custody, which the Quit action owns rather than the dock view: losing the view never drops
+the logger on the UI thread, and Quit still works without a window. Rollback and Quit must
+close and join the logger off the UI thread before releasing that lock: both run the one
+release, which drops the admission on the background executor (after the link finishes, once
+the dock opened) and only then removes the window and quits. Quits that AppKit starts itself
+(the Dock menu, logout) do not wait for this yet. The backend preserves terminal
+storage-admission refusals; ordinary I/O failures remain best effort. The Windows logger is
+unchanged.
+
+Known limits on macOS:
+
+- Refusals before the logger starts (a missing or unsafe support folder, a failed lock or
+  logger start) exit without a log line.
+- A second shell finds the lock held and exits before it would start logging, so it leaves
+  no log line either.
+
 Overlay hit testing belongs to the presenter's `OverlayOwner`, not to a view. The native
 `OverlayWindows` adapter binds the dock paint window and body proxy in the Dock layer,
 panels in Panels, and every newly created drawing host in Overlay before it can be shown.
@@ -35,16 +54,15 @@ one bounded, opaque normal GPUI window on the primary display, consumes the work
 initial Failed event before painting, and offers only Quit. GPUI delivers local button input;
 the button, app menu and native window close share the same one-time link teardown. This surface
 has no global keyboard, retry, capture or background link, and is not topmost or click-through.
-The ordinary macOS launcher selects this route but opens the window only after logging and
-instance admission. Those gates still refuse, so selecting the route does not enable startup.
+The ordinary macOS launcher selects this route and opens the window only after the instance
+lock is taken and logging has started in its storage.
 The local route also refuses connected diagnostic launch modes.
 
 If the admitted local dock cannot open, the launch callback records the error synchronously
-and releases its instance lock before requesting GPUI Quit. A successful open keeps the lock
-for the app lifetime and keeps the existing dock-owned Quit path. AppKit termination does not
-return a caller-selected process status through GPUI; a failure status after native termination
-requires a separately validated native boundary. This does not arm the dormant Mac logger or
-replace its future close-before-unlock requirement.
+and runs the same release as Quit, so the logger closes and the instance lock is released off
+the UI thread before GPUI quits. A successful open keeps the admission for the app lifetime.
+AppKit termination does not return a caller-selected process status through GPUI; a failure
+status after native termination requires a separately validated native boundary.
 
 The connected presence requires native desktop geometry before opening any of its windows.
 Its Win32 backend still supplies physical work area and client origin and moves, shows, and hides
