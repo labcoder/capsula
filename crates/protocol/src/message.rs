@@ -829,6 +829,8 @@ pub enum ControlToShell {
     QueuedAudioRegistered(OutputGeneration),
     /// The local account state when this build cannot use the account's network service.
     AccountUnsupported(AccountView),
+    /// First successful spoken-replies install saved On, but this queued pair stays silent.
+    SpokenRepliesDefaulted(SettingsView),
 }
 
 /// What a screen hold carried into its turn. It never says the window was sent: a run can end

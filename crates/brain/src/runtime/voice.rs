@@ -39,6 +39,7 @@ pub(crate) struct Voice {
     deletes: [Option<Deleting>; 2],
     /// What the coordinator was last told about spoken replies.
     spoken: bool,
+    pub(super) deferred_talk_back: bool,
 }
 
 impl std::fmt::Debug for Voice {
@@ -279,6 +280,7 @@ impl Brain {
             fetch: None,
             deletes: [None, None],
             spoken: false,
+            deferred_talk_back: false,
         });
         self.run(effects);
         self.voice_policy();
@@ -520,8 +522,9 @@ impl Brain {
                 SttUnload::Kept
             });
         }
-        let loaded =
-            voice.installer.ready(VoicePart::SpokenReplies) && self.config.view().talk_back;
+        let loaded = voice.installer.ready(VoicePart::SpokenReplies)
+            && self.config.view().talk_back
+            && !voice.deferred_talk_back;
         if loaded != voice.spoken {
             voice.spoken = loaded;
             self.offline(Input::SpokenReplies { loaded });

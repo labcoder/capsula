@@ -199,7 +199,12 @@ impl Brain {
         let Some(link) = link else {
             return Ok(());
         };
-        if link.queued_talk_back != Some(self.config.view().talk_back) {
+        if !self
+            .voice
+            .as_ref()
+            .is_some_and(|voice| voice.deferred_talk_back)
+            && link.queued_talk_back != Some(self.config.view().talk_back)
+        {
             link.queued_talk_back = None;
         }
         if epoch == self.epoch {
@@ -444,13 +449,30 @@ impl Brain {
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
         let input_was_enabled = self.config.view().hold_to_talk;
+        let mut defaulted = false;
         let outcome = match written {
             Ok((pending, Ok(()))) => {
                 let (screen_holds, show_screen) = {
                     let view = self.config.view();
                     (view.screen_holds, view.show_screen)
                 };
+                let first_spoken_install = matches!(
+                    voice,
+                    Some(VoiceWrite::Activate {
+                        part: VoicePart::SpokenReplies,
+                        ..
+                    })
+                ) && self.config.implicit_talk_back();
                 self.config.commit(pending);
+                defaulted = first_spoken_install
+                    && self.config.view().talk_back
+                    && link
+                        .as_ref()
+                        .is_some_and(|link| link.queued_talk_back == Some(false));
+                if let Some(voice) = &mut self.voice {
+                    voice.deferred_talk_back =
+                        self.config.view().talk_back && (voice.deferred_talk_back || defaulted);
+                }
                 self.voice_policy();
                 if screen_holds && !self.config.view().screen_holds {
                     self.screen_holds_off();
@@ -504,7 +526,15 @@ impl Brain {
             };
             self.voice_written(write, result, link.as_deref_mut())?;
         }
-        let answered = self.settled(epoch, outcome, link.as_deref_mut());
+        let answered = if defaulted {
+            link.as_deref_mut().map_or(Ok(()), |link| {
+                link.control(&ControlToShell::SpokenRepliesDefaulted(
+                    self.config.view().clone(),
+                ))
+            })
+        } else {
+            self.settled(epoch, outcome, link.as_deref_mut())
+        };
         let input_enabled = self.config.view().hold_to_talk;
         if input_enabled != input_was_enabled {
             let voice_link = if answered.is_ok() {

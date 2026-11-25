@@ -735,6 +735,13 @@ impl Brain {
             .checked_add(1)
             .expect("connection epochs never wrap");
         self.coordinator.begin_session();
+        if self
+            .voice
+            .as_mut()
+            .is_some_and(|voice| std::mem::take(&mut voice.deferred_talk_back))
+        {
+            self.voice_policy();
+        }
         self.holds.opened();
         self.account.connections.stage_session(Some(self.epoch));
         self.account.github_session(Some(self.epoch));

@@ -154,6 +154,7 @@ impl Tapped for ControlToShell {
             Self::SpeechDecisionTaken(..) => "SpeechDecisionTaken",
             Self::QueuedAudioRegistered(..) => "QueuedAudioRegistered",
             Self::AccountUnsupported(..) => "AccountUnsupported",
+            Self::SpokenRepliesDefaulted(..) => "SpokenRepliesDefaulted",
             Self::SpeechRevoked { .. } => "SpeechRevoked",
             Self::GitHub(_) => "GitHub",
             Self::ActionState { .. } => "ActionState",

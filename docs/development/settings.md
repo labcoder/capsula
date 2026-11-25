@@ -110,6 +110,13 @@ admission until the ordered answer. A changed answer for that save ends the pair
 reconnects without counting as a connection loss; Settings reads the next pair's saved value.
 Hiding or removing the exact active reply's thread ends its control side, but the pair still
 waits for the reply's data end and any speaking quiet receipt before allowing a change.
+When successful Spoken Replies setup supplies the default (On for an unset preference),
+a queued pair opened Off gets the tagged `SpokenRepliesDefaulted` snapshot instead of an
+ordinary Settings change. It still speaks no new replies until its next ordinary connection,
+while the setting shows what was saved. That snapshot doesn't answer any queued preference
+write. An explicit Off still saves normally and clears the difference without re-registering.
+The registered mode still governs hold release. An explicit On racing the default only
+reconnects if its own write succeeds; an On snapshot after a refusal reflects the default.
 
 The control reader forwards the whole `VoiceView` to the settings model with its connection
 generation. Each part's status comes only from that snapshot, not its saved preference. The
