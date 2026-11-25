@@ -241,9 +241,12 @@ returns, and the block can't return until they run: the app hangs with its windo
 A first native Mac launch hit exactly this. So `MacPlatform::termination_approval()` hands the
 app a `TerminationApproval` (weak, non-Send). Its `approve()` marks the state approved ahead:
 a request admitted from Idle then answers Now and enters Approved, with no delivery queued and no
-handler call. A queued decision keeps its own request, and disposal still refuses. Call it only
-after cleanup has finished and immediately before the app quits itself; native requests that
-arrive first stay on the deferred path above.
+handler call. A queued decision keeps its own request, and disposal still refuses. Call it as
+soon as cleanup has finished, before any other work. It returns whether a request is already in
+flight (Pending, or a queued yes): the app then answers that request and must not send its own
+`terminate:`, which would wait inside its block for a settlement queued behind it. A queued no
+is not in flight; its settlement was queued earlier, so the app's own quit runs after it and is
+answered Now.
 
 On run-loop return, disposal revokes approval and queues a negative settlement before
 the existing platform ivars are cleared. Its strong queued owner retains the original

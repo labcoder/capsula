@@ -77,11 +77,18 @@ impl TerminationApproval {
         }
     }
 
-    /// Lets every later request terminate at once.
-    pub fn approve(&self) {
-        if let Some(control) = self.control.upgrade() {
-            control.state.borrow_mut().approved_ahead = true;
-        }
+    /// Lets every later request terminate at once. Returns whether a request is already in
+    /// flight: admitted and still awaiting the app's answer, or with a yes queued. Once cleanup
+    /// has finished the app approves that request and it ends the app, so the app must not also
+    /// quit for that exit.
+    #[must_use]
+    pub fn approve(&self) -> bool {
+        let Some(control) = self.control.upgrade() else {
+            return false;
+        };
+        let mut state = control.state.borrow_mut();
+        state.approved_ahead = true;
+        matches!(state.phase, Phase::Pending(_) | Phase::Queued(_, true))
     }
 }
 

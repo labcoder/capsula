@@ -303,7 +303,10 @@ fn an_approved_quit_answers_now_without_a_queued_delivery() {
     let (control, jobs) = control(Box::new(move |_| {
         callback_calls.set(callback_calls.get() + 1)
     }));
-    TerminationApproval::new(&control).approve();
+    assert!(
+        !TerminationApproval::new(&control).approve(),
+        "no request is in flight"
+    );
     assert_eq!(control.admit(), NSApplicationTerminateReply::TerminateNow);
     assert_eq!(jobs.borrow().len(), 0, "nothing waits on the main queue");
     assert_eq!(calls.get(), 0);
@@ -330,7 +333,7 @@ fn approval_waits_for_a_queued_refusal_and_never_overrides_disposal() {
     );
 
     let (control, _) = control(Box::new(drop));
-    TerminationApproval::new(&control).approve();
+    assert!(!TerminationApproval::new(&control).approve());
     control.dispose();
     assert_eq!(control.admit(), NSApplicationTerminateReply::TerminateCancel);
 }
@@ -342,6 +345,61 @@ fn approval_does_not_keep_the_control_alive() {
     let weak = Rc::downgrade(&control);
     drop(control);
     assert!(weak.upgrade().is_none());
-    approval.approve();
+    assert!(!approval.approve());
     assert_eq!(format!("{approval:?}"), "TerminationApproval { .. }");
+}
+
+#[test]
+fn a_request_admitted_before_approval_is_in_flight_and_left_to_the_app() {
+    let slot = Rc::new(RefCell::new(None));
+    let recipient = Rc::clone(&slot);
+    let (control, jobs) = control(Box::new(move |request| {
+        *recipient.borrow_mut() = Some(request)
+    }));
+    assert_eq!(control.admit(), NSApplicationTerminateReply::TerminateLater);
+    let approval = TerminationApproval::new(&control);
+    assert!(approval.approve(), "the undelivered request will end the app");
+    assert_eq!(control.state.borrow().phase, Phase::Pending(1));
+    assert_eq!(
+        control.admit(),
+        NSApplicationTerminateReply::TerminateLater,
+        "a second terminate joins the request in flight"
+    );
+    run_one(&jobs);
+    slot.borrow_mut()
+        .take()
+        .expect("delivered token")
+        .reply(true);
+    assert_eq!(control.state.borrow().phase, Phase::Queued(1, true));
+    assert!(approval.approve(), "a queued yes still ends the app");
+}
+
+#[test]
+fn a_request_admitted_after_approval_answers_now() {
+    let calls = Rc::new(Cell::new(0));
+    let callback_calls = Rc::clone(&calls);
+    let (control, jobs) = control(Box::new(move |_| {
+        callback_calls.set(callback_calls.get() + 1)
+    }));
+    let approval = TerminationApproval::new(&control);
+    assert!(!approval.approve());
+    assert_eq!(control.admit(), NSApplicationTerminateReply::TerminateNow);
+    assert_eq!(jobs.borrow().len(), 0);
+    assert_eq!(calls.get(), 0);
+    assert!(
+        !approval.approve(),
+        "an earlier approval that did not end the app leaves the app's own quit to it"
+    );
+}
+
+#[test]
+fn a_queued_refusal_is_not_in_flight() {
+    let (control, jobs) = control(Box::new(drop));
+    control.admit();
+    run_one(&jobs);
+    assert_eq!(control.state.borrow().phase, Phase::Queued(1, false));
+    assert!(
+        !TerminationApproval::new(&control).approve(),
+        "a refusal never ends the app, so the app quits itself behind it"
+    );
 }
