@@ -63,37 +63,39 @@ pub struct ProductIdentity {
     pub object_prefix: &'static str,
     /// The shell's single-instance lock prefix.
     pub shell_lock: &'static str,
+    /// The new-format root slot's folder, beside [`Self::data_dir`] under the same anchor.
+    pub profile_root: &'static str,
+    /// The credential service of the edition's owner item, under [`PROFILE_OWNER_ACCOUNT`].
+    pub profile_service: &'static str,
+}
+
+/// Builds one edition's names from its display literal and its lowercase prefix, so each
+/// edition spells its name once.
+macro_rules! identity {
+    ($name:literal, $prefix:literal) => {
+        ProductIdentity {
+            data_dir: $name,
+            credential_service: $name,
+            instance_service: concat!($name, " instance"),
+            object_prefix: $prefix,
+            shell_lock: concat!($prefix, "-shell"),
+            profile_root: concat!($name, " Profile"),
+            profile_service: concat!($name, " Profile"),
+        }
+    };
 }
 
 impl ProductIdentity {
     /// Installed product namespaces, even when selected by debug-built tooling.
-    pub const RELEASE: Self = Self {
-        data_dir: "Kumochi",
-        credential_service: "Kumochi",
-        instance_service: "Kumochi instance",
-        object_prefix: "kumochi",
-        shell_lock: "kumochi-shell",
-    };
+    pub const RELEASE: Self = identity!("Kumochi", "kumochi");
 
     /// Isolated development namespaces.
-    pub const DEV: Self = Self {
-        data_dir: "Kumochi Dev",
-        credential_service: "Kumochi Dev",
-        instance_service: "Kumochi Dev instance",
-        object_prefix: "kumochi-dev",
-        shell_lock: "kumochi-dev-shell",
-    };
+    pub const DEV: Self = identity!("Kumochi Dev", "kumochi-dev");
 
     /// The gate tools' own namespaces (OSC-680), so a gate run never touches either real identity.
     /// Only the `gate-identity` feature selects them, and only a gate tool's command line enables
     /// it: never a manifest, a default or another crate.
-    pub const GATE: Self = Self {
-        data_dir: "Kumochi Gate",
-        credential_service: "Kumochi Gate",
-        instance_service: "Kumochi Gate instance",
-        object_prefix: "kumochi-gate",
-        shell_lock: "kumochi-gate-shell",
-    };
+    pub const GATE: Self = identity!("Kumochi Gate", "kumochi-gate");
 
     /// Names used by the running app, unchanged from the profile-dependent aliases.
     pub const ACTIVE: Self = if cfg!(feature = "gate-identity") {
@@ -169,6 +171,10 @@ pub const SHELL_LOCK: &str = ProductIdentity::ACTIVE.shell_lock;
 /// The Credential Manager account under [`INSTANCE_SERVICE`] holding the capability; the
 /// session id is appended, since each session runs its own brain.
 pub const INSTANCE_ACCOUNT: &str = "capability";
+
+/// The account of the edition's owner item under [`ProductIdentity::profile_service`], joined
+/// with [`account_target`]. Cut 7 only reads it; nothing writes it before the allocator.
+pub const PROFILE_OWNER_ACCOUNT: &str = "owner";
 
 /// The vault's maximum number of chunks in one record slot.
 pub const ACCOUNT_MAX_CHUNKS: usize = 64;

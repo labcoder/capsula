@@ -1,11 +1,12 @@
-//! Looking up this edition's product folder under a held, trusted anchor without creating
-//! anything, so a missing product folder is a definitive answer rather than any failure to open it.
+//! Looking up one of this edition's folders under a held, trusted anchor without creating
+//! anything, so a missing folder is a definitive answer rather than any failure to open it.
 
 use std::fs::File;
 use std::io;
 use std::path::Path;
 
-use kumochi_protocol::constants::DATA_DIR;
+use kumochi_protocol::constants::{DATA_DIR, ProductIdentity};
+use kumochi_protocol::profile::Root;
 use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_DIRECTORY,
@@ -13,13 +14,13 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use super::{Aces, Kind, Security, Trusted, Untrusted, attributes, check, hold_chain, open_native};
 
-/// The product folder under a trusted anchor.
+/// A named folder under a trusted anchor.
 #[derive(Debug)]
 pub enum Child {
-    /// The anchor's chain with the product folder last, every one held and trusted.
+    /// The anchor's chain with the named folder last, every one held and trusted.
     Held(Vec<File>),
-    /// The anchor's chain, held and trusted with no one untrusted able to add to it, and no
-    /// product folder in it.
+    /// The anchor's chain, held and trusted with no one untrusted able to add to it, and nothing
+    /// at the name in it.
     Missing(Vec<File>),
 }
 
@@ -28,6 +29,23 @@ pub enum Child {
 /// found no file; a missing or non-folder anchor, an anchor others may add to, a lost path, or
 /// anything at the name that isn't a trusted plain folder is refused.
 pub fn hold_product_folder(anchor: &Path) -> Result<Child, Untrusted> {
+    hold_named(anchor, DATA_DIR)
+}
+
+/// Reads this edition's new-format root slot under `anchor`, creating nothing. Only a missing
+/// slot is absent: before the allocator writes its record, a folder there is a footprint of
+/// unknown origin, and any refusal or failure proves nothing either.
+#[must_use]
+pub fn profile_root(anchor: &Path) -> Root {
+    match hold_named(anchor, ProductIdentity::ACTIVE.profile_root) {
+        Ok(Child::Missing(_)) => Root::Absent,
+        Ok(Child::Held(_)) | Err(_) => Root::Unverified,
+    }
+}
+
+/// The lookup behind both. `name` is always one of this edition's fixed folder names, never input,
+/// so Win32 name normalization and reserved device names can't make `Missing` describe another name.
+fn hold_named(anchor: &Path, name: &str) -> Result<Child, Untrusted> {
     let mut chain = hold_chain(anchor)?;
     let trusted = Trusted::new()?;
     let held = chain.last().ok_or(Untrusted::Io)?;
@@ -41,7 +59,7 @@ pub fn hold_product_folder(anchor: &Path) -> Result<Child, Untrusted> {
     )? {
         return Err(Untrusted::Unsafe);
     }
-    let path = anchor.join(DATA_DIR);
+    let path = anchor.join(name);
     let child = match open_native(&path, Kind::Folder, 0) {
         Ok(child) => child,
         Err(error) if absent(&error) => return Ok(Child::Missing(chain)),
@@ -55,7 +73,7 @@ pub fn hold_product_folder(anchor: &Path) -> Result<Child, Untrusted> {
     Ok(Child::Held(chain))
 }
 
-/// Only "file not found" from the product folder's own open is absence; a lost path or drive isn't.
+/// Only "file not found" from the folder's own open is absence; a lost path or drive isn't.
 fn absent(error: &io::Error) -> bool {
     error.raw_os_error() == ERROR_FILE_NOT_FOUND.try_into().ok()
 }
@@ -142,5 +160,24 @@ mod tests {
             Some(Untrusted::Unsafe),
             "others may add a folder"
         );
+    }
+
+    #[test]
+    fn only_a_missing_root_slot_is_absent_and_reading_it_creates_nothing() {
+        let (_scratch, anchor) = anchor("profile-root");
+        let slot = anchor.join(ProductIdentity::ACTIVE.profile_root);
+        assert_eq!(profile_root(&anchor), Root::Absent);
+        assert!(!slot.exists(), "reading created nothing");
+        assert_eq!(
+            profile_root(&anchor.join("absent")),
+            Root::Unverified,
+            "a missing anchor"
+        );
+        fs::create_dir(&slot).expect("a folder at the slot");
+        assert_eq!(profile_root(&anchor), Root::Unverified, "a folder");
+        fs::remove_dir(&slot).expect("the folder goes");
+        fs::write(&slot, b"sentinel").expect("a file at the slot");
+        assert_eq!(profile_root(&anchor), Root::Unverified, "a file");
+        assert_eq!(fs::read(&slot).expect("the file stays"), b"sentinel");
     }
 }
