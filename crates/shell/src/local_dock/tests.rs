@@ -18,7 +18,7 @@ impl Drop for Probe {
     }
 }
 
-fn admission(cx: &TestAppContext) -> (Admission, Weak<()>, Arc<Mutex<Option<bool>>>) {
+fn custody(cx: &TestAppContext) -> (Rc<Custody>, Weak<()>, Arc<Mutex<Option<bool>>>) {
     let alive = Arc::new(());
     let held = Arc::downgrade(&alive);
     let on_main = Arc::new(Mutex::new(None));
@@ -27,16 +27,16 @@ fn admission(cx: &TestAppContext) -> (Admission, Weak<()>, Arc<Mutex<Option<bool
         on_main: Arc::clone(&on_main),
         _alive: alive,
     };
-    (Rc::new(Cell::new(Some(Box::new(probe)))), held, on_main)
+    (Custody::new(probe), held, on_main)
 }
 
 #[gpui::test]
 fn failed_open_releases_admission_before_returning_to_the_quit_caller(cx: &mut TestAppContext) {
     let display = cx.read(|cx| cx.primary_display().expect("the test display").id());
     cx.simulate_display_removed(display);
-    let (admission, held, on_main) = admission(cx);
+    let (custody, held, on_main) = custody(cx);
 
-    let opened = cx.update(|cx| open_with_rollback(cx, &admission));
+    let opened = cx.update(|cx| open_with_rollback(cx, &custody));
     cx.run_until_parked();
 
     assert!(matches!(opened, Err(OpenError::Display)));
@@ -53,18 +53,19 @@ fn failed_open_releases_admission_before_returning_to_the_quit_caller(cx: &mut T
 }
 
 fn mount(cx: &mut TestAppContext) -> (AnyWindowHandle, WeakEntity<LocalDock>) {
-    mount_with(cx, Rc::default())
+    mount_with(cx, Custody::new(()))
 }
 
+/// Opens the dock and gives it the only strong custody, as `run` does.
 fn mount_with(
     cx: &mut TestAppContext,
-    admission: Admission,
+    custody: Rc<Custody>,
 ) -> (AnyWindowHandle, WeakEntity<LocalDock>) {
     let window = cx.update(|cx| {
         gpui_kit::init(cx);
         crate::theme::init(cx);
         cx.set_global(Strings::english());
-        open(cx, admission).expect("open the product dock on the test display")
+        open(cx, &custody).expect("open the product dock on the test display")
     });
     let owner = window
         .update(cx, |root, _, cx| {
@@ -84,8 +85,8 @@ fn mount_with(
 
 #[gpui::test]
 fn local_pointer_quits_only_when_the_rendered_button_is_clicked(cx: &mut TestAppContext) {
-    let (admission, held, on_main) = admission(cx);
-    let (window, owner) = mount_with(cx, Rc::clone(&admission));
+    let (custody, held, on_main) = custody(cx);
+    let (window, owner) = mount_with(cx, custody);
     let mut visual = VisualTestContext::from_window(window, cx);
     let status = visual
         .debug_bounds("local-dock-status Can't reach Kumochi's background process.")
@@ -105,7 +106,11 @@ fn local_pointer_quits_only_when_the_rendered_button_is_clicked(cx: &mut TestApp
             .upgrade()
             .expect("dock owner")
             .read(cx)
+            .custody
             .link
+            .borrow()
+            .as_ref()
+            .expect("the open dock's link")
             .is_quitting()
     }));
 
@@ -144,7 +149,11 @@ fn the_installed_app_menu_quits_once_without_window_focus(cx: &mut TestAppContex
                 .upgrade()
                 .expect("dock owner")
                 .read(cx)
+                .custody
                 .link
+                .borrow()
+                .as_ref()
+                .expect("the open dock's link")
                 .is_quitting()
         );
         cx.dispatch_action(action.as_ref());
@@ -173,7 +182,11 @@ fn native_window_close_defers_to_the_quit_owner(cx: &mut TestAppContext) {
             .upgrade()
             .expect("dock owner")
             .read(cx)
+            .custody
             .link
+            .borrow()
+            .as_ref()
+            .expect("the open dock's link")
             .is_quitting()
     }));
     assert_eq!(cx.windows(), [window]);
@@ -181,4 +194,37 @@ fn native_window_close_defers_to_the_quit_owner(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.windows().is_empty());
     assert!(owner.upgrade().is_none());
+}
+
+#[gpui::test]
+fn losing_the_view_keeps_the_admission_for_a_later_quit(cx: &mut TestAppContext) {
+    let (custody, held, on_main) = custody(cx);
+    let (window, owner) = mount_with(cx, custody);
+
+    window
+        .update(cx, |_, window, _| window.remove_window())
+        .expect("dock window is open");
+    cx.run_until_parked();
+    assert!(owner.upgrade().is_none(), "the view is gone");
+    assert!(
+        held.upgrade().is_some(),
+        "the app still holds the admission"
+    );
+    assert_eq!(
+        *on_main.lock().unwrap(),
+        None,
+        "nothing dropped it on the UI thread"
+    );
+
+    cx.update(|cx| cx.dispatch_action(&QuitLocalDock));
+    cx.run_until_parked();
+    assert!(
+        held.upgrade().is_none(),
+        "Quit without a window releases the admission"
+    );
+    assert_eq!(
+        *on_main.lock().unwrap(),
+        Some(false),
+        "the release runs off the UI thread"
+    );
 }

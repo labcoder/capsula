@@ -2,12 +2,15 @@
 
 On macOS the shell logs through the admitted storage owner, not a filesystem path. Startup
 takes the per-user instance lock first, then starts and installs the logger in that lock's
-storage. The logger and the lock travel together as the dock's admission. Rollback and Quit
-must close and join the logger off the UI thread before releasing that lock: both drop the
-admission on the background executor (after the link finishes, for Quit) and only then
-remove the window and quit. Quits that AppKit starts itself (the Dock menu, logout) do not
-wait for this yet. The backend preserves terminal storage-admission refusals; ordinary I/O failures
-remain best effort. The Windows logger is unchanged.
+storage. The logger and the lock travel together as one admission in the dock's app-wide
+custody, which the Quit action owns rather than the dock view: losing the view never drops
+the logger on the UI thread, and Quit still works without a window. Rollback and Quit must
+close and join the logger off the UI thread before releasing that lock: both run the one
+release, which drops the admission on the background executor (after the link finishes, once
+the dock opened) and only then removes the window and quits. Quits that AppKit starts itself
+(the Dock menu, logout) do not wait for this yet. The backend preserves terminal
+storage-admission refusals; ordinary I/O failures remain best effort. The Windows logger is
+unchanged.
 
 Known limits on macOS:
 

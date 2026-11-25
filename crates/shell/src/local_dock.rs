@@ -1,6 +1,10 @@
 //! The bounded shell surface for a platform without an admitted brain link.
 
-use std::{cell::Cell, process::ExitCode, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    process::ExitCode,
+    rc::Rc,
+};
 
 use gpui_kit::component::{ActiveTheme as _, button::Button};
 use gpui_kit::{
@@ -16,9 +20,37 @@ use crate::strings::{Strings, Text};
 
 gpui_kit::actions!(local_dock, [QuitLocalDock]);
 
-/// Startup admission (the instance lock and anything that must close before it) that the dock
-/// releases before requesting platform termination.
-pub type Admission = Rc<Cell<Option<Box<dyn Send>>>>;
+/// App-wide cleanup custody: the startup admission (the instance lock and anything that must
+/// close before it) and what has to finish before it is released. The app's Quit action owns
+/// it, not the dock view, so losing the view never drops the admission on the UI thread and
+/// Quit still works without a window.
+pub struct Custody {
+    admission: Cell<Option<Box<dyn Send>>>,
+    link: RefCell<Option<LinkHandle>>,
+    window: Cell<Option<AnyWindowHandle>>,
+    closing: Cell<bool>,
+}
+
+impl std::fmt::Debug for Custody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Custody")
+            .field("closing", &self.closing.get())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Custody {
+    /// Takes custody of an admitted startup state.
+    #[must_use]
+    pub fn new(admission: impl Send + 'static) -> Rc<Self> {
+        Rc::new(Self {
+            admission: Cell::new(Some(Box::new(admission))),
+            link: RefCell::default(),
+            window: Cell::default(),
+            closing: Cell::default(),
+        })
+    }
+}
 
 /// Runs the disconnected dock with the already admitted startup state.
 /// An open failure and Quit both release the admission off the UI thread, because its owners
@@ -28,14 +60,14 @@ pub fn run(
     admission: impl Send + 'static,
     initialize: impl FnOnce(&mut App) + 'static,
 ) -> ExitCode {
-    let admission: Admission = Rc::new(Cell::new(Some(Box::new(admission))));
+    let custody = Custody::new(admission);
     let opened = Rc::new(Cell::new(false));
     let startup = Rc::clone(&opened);
     gpui_kit::application()
         .with_assets(crate::assets::Assets)
         .run(move |cx| {
             initialize(cx);
-            if open_with_rollback(cx, &admission).is_ok() {
+            if open_with_rollback(cx, &custody).is_ok() {
                 startup.set(true);
             }
         });
@@ -46,21 +78,28 @@ pub fn run(
     }
 }
 
-fn open_with_rollback(cx: &mut App, admission: &Admission) -> Result<AnyWindowHandle, OpenError> {
-    open(cx, Rc::clone(admission)).inspect_err(|error| {
+fn open_with_rollback(cx: &mut App, custody: &Rc<Custody>) -> Result<AnyWindowHandle, OpenError> {
+    open(cx, custody).inspect_err(|error| {
         tracing::error!(%error, "can't open the disconnected dock");
-        release(cx, None, admission.take(), None);
+        close(custody, cx);
     })
 }
 
-/// Finishes the link and drops the admission off the UI thread, because the logger joins as it
-/// closes; then removes the window and quits on the UI thread once that has finished.
-fn release(
-    cx: &App,
-    link: Option<LinkHandle>,
-    admission: Option<Box<dyn Send>>,
-    window: Option<AnyWindowHandle>,
-) {
+/// Begins the one release: finishes the link (once the dock opened) and drops the admission off
+/// the UI thread, because the logger joins as it closes; then removes the window, if any, and
+/// quits on the UI thread once that has finished.
+fn close(custody: &Rc<Custody>, cx: &App) {
+    if custody.closing.replace(true) {
+        return;
+    }
+    let link = custody.link.borrow().clone();
+    if let Some(link) = &link
+        && !link.begin_quit()
+    {
+        return;
+    }
+    let admission = custody.admission.take();
+    let window = custody.window.get();
     let finished = cx.background_executor().spawn(async move {
         if let Some(link) = link {
             link.finish_quit();
@@ -104,7 +143,7 @@ pub enum OpenError {
 ///
 /// # Errors
 /// Refuses to open without a usable display or a delivered disconnected state.
-pub fn open(cx: &mut App, admission: Admission) -> Result<AnyWindowHandle, OpenError> {
+pub fn open(cx: &mut App, custody: &Rc<Custody>) -> Result<AnyWindowHandle, OpenError> {
     let display = cx.primary_display().ok_or(OpenError::Display)?;
     let visible = display.visible_bounds();
     if visible.size.width <= px(0.) || visible.size.height <= px(0.) {
@@ -136,25 +175,22 @@ pub fn open(cx: &mut App, admission: Admission) -> Result<AnyWindowHandle, OpenE
         ..WindowOptions::default()
     };
     let (window, dock) = gpui_kit::open_window(options, cx, |window, cx| {
-        let dock = cx.new(|_| LocalDock { link, admission });
-        let owner = dock.downgrade();
-        window.on_window_should_close(cx, move |window, cx| {
-            let Some(owner) = owner.upgrade() else {
-                return true;
-            };
-            owner.update(cx, |dock, cx| dock.request_quit(window.window_handle(), cx));
+        let closer = Rc::clone(custody);
+        window.on_window_should_close(cx, move |_, cx| {
+            close(&closer, cx);
             false
         });
-        dock
+        cx.new(|_| LocalDock {
+            custody: Rc::clone(custody),
+        })
     })
     .map_err(|_| OpenError::Window)?;
+    drop(dock);
+    *custody.link.borrow_mut() = Some(link);
+    custody.window.set(Some(window));
 
-    let owner = dock.downgrade();
-    cx.on_action(move |_: &QuitLocalDock, cx| {
-        if let Some(owner) = owner.upgrade() {
-            owner.update(cx, |dock, cx| dock.request_quit(window, cx));
-        }
-    });
+    let closer = Rc::clone(custody);
+    cx.on_action(move |_: &QuitLocalDock, cx| close(&closer, cx));
     let quit = cx.global::<Strings>().get(Text::Quit);
     // The local dock runs only on macOS, so its quit shortcut is the macOS one by design.
     cx.bind_keys([KeyBinding::new("cmd-q", QuitLocalDock, None)]);
@@ -163,22 +199,7 @@ pub fn open(cx: &mut App, admission: Admission) -> Result<AnyWindowHandle, OpenE
 }
 
 struct LocalDock {
-    link: LinkHandle,
-    admission: Admission,
-}
-
-impl LocalDock {
-    fn request_quit(&self, window: AnyWindowHandle, cx: &App) {
-        if !self.link.begin_quit() {
-            return;
-        }
-        release(
-            cx,
-            Some(self.link.clone()),
-            self.admission.take(),
-            Some(window),
-        );
-    }
+    custody: Rc<Custody>,
 }
 
 impl Render for LocalDock {
@@ -224,9 +245,7 @@ impl Render for LocalDock {
                     Button::new("local-dock-quit")
                         .label(quit)
                         .debug_selector(|| "local-dock-quit".into())
-                        .on_click(cx.listener(|dock, _, window, cx| {
-                            dock.request_quit(window.window_handle(), cx);
-                        })),
+                        .on_click(cx.listener(|dock, _, _, cx| close(&dock.custody, cx))),
                 ),
             )
     }
