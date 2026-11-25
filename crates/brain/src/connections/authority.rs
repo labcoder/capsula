@@ -3,6 +3,14 @@
 //! bytes, and nothing it returns changes what this file says, so a stale, resurrected or missing
 //! name can hide a credential but never authorize one.
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the existing-profile reader that calls it isn't landed yet"
+    )
+)]
+pub(crate) mod existing;
 pub(crate) mod io;
 #[cfg_attr(
     not(test),
