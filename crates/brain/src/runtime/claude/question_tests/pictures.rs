@@ -556,23 +556,31 @@ async fn a_bound_find_keeps_the_round_until_its_picture_settles_unsent() {
     brain.claude_done(Wake::Note(note), None).expect("bound");
     assert!(brain.claude.launches.last().expect("launch").bound);
     let ask = timeout(WAIT, brain.inputs.recv()).await.unwrap().unwrap();
-    brain.offline(ask);
-    let lease = LeaseId {
-        key: SendKey::Build(key),
-        send: 1,
+    let authorization = brain.handle(ask).expect("authorization effects");
+    let [Effect::Store(StoreOp::GrantScreen { lease: pending }), ..] = authorization.as_slice()
+    else {
+        panic!("no picture authorization");
     };
+    let pending = *pending;
+    assert_eq!(pending.key, SendKey::Build(key));
+    brain.apply(authorization, None).expect("authorize");
     let stored = timeout(WAIT, brain.inputs.recv())
         .await
         .expect("picture authorization in time");
     assert_eq!(
         stored,
         Some(Input::ScreenGrantStored {
-            lease,
+            lease: pending,
             result: Ok(()),
         })
     );
     let grants = brain.handle(stored.unwrap()).expect("grant effects");
-    assert!(grants.contains(&Effect::Grant(lease)));
+    let [Effect::Grant(lease), ..] = grants.as_slice() else {
+        panic!("no transport grant");
+    };
+    let lease = *lease;
+    assert_eq!(lease.key, pending.key);
+    assert_ne!(lease, pending);
     brain.apply(grants, None).expect("grant");
 
     let reached = |gate: Barrier| {
