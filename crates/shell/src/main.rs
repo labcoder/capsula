@@ -45,26 +45,18 @@ fn main() -> ExitCode {
     let Some(flags) = launch_with_logging(launch, || logging::init(constants::SHELL_LOG)) else {
         return ExitCode::FAILURE;
     };
-    let Some(data_dir) = platform::data_dir() else {
-        tracing::error!("can't find the data folder for the single-instance lock");
-        return ExitCode::FAILURE;
-    };
-    let session = match platform::session_id() {
-        Ok(session) => session,
-        Err(error) => {
-            tracing::error!(%error, "can't read the session for the single-instance lock");
-            return ExitCode::FAILURE;
-        }
-    };
-    let lock = data_dir.join(format!("{}-{session}.lock", constants::SHELL_LOCK));
-    let _instance = match instance::InstanceLock::try_acquire(&lock) {
+    let _instance = match instance::InstanceLock::try_acquire_current_session() {
         Ok(Some(lock)) => lock,
         Ok(None) => {
             tracing::info!("another shell is running in this session");
             return ExitCode::SUCCESS;
         }
-        Err(error) => {
-            tracing::error!(%error, "can't take the single-instance lock");
+        Err(failure) => {
+            if let Some(error) = std::error::Error::source(&failure) {
+                tracing::error!(%error, "{failure}");
+            } else {
+                tracing::error!("{failure}");
+            }
             return ExitCode::FAILURE;
         }
     };

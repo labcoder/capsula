@@ -84,8 +84,6 @@ pub(crate) mod work_area_fixture {
 mod windows;
 
 #[cfg(windows)]
-pub(crate) use kumochi_shell_core::platform::{data_dir, session_id};
-#[cfg(windows)]
 pub(crate) use windows::ScreenSources;
 #[cfg(windows)]
 pub(crate) use windows::{

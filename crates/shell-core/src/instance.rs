@@ -11,7 +11,33 @@ pub struct InstanceLock {
     _file: File,
 }
 
+/// Why the shell couldn't acquire its current session's lock.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionLockError {
+    /// The platform could not discover its application data folder.
+    #[error("can't find the data folder for the single-instance lock")]
+    DataDirectory,
+    /// The platform could not identify this session.
+    #[error("can't read the session for the single-instance lock")]
+    Session(#[source] io::Error),
+    /// The lock target could not be opened or locked.
+    #[error("can't take the single-instance lock")]
+    Lock(#[source] io::Error),
+    /// The platform has no admitted current-session lock target.
+    #[error("native single-instance admission is unsupported on this platform")]
+    Unsupported,
+}
+
 impl InstanceLock {
+    /// Acquires the shell's lock for this session, or returns `None` when already held.
+    ///
+    /// # Errors
+    /// Fails when the platform cannot supply a target or the lock cannot be taken.
+    pub fn try_acquire_current_session() -> Result<Option<Self>, SessionLockError> {
+        let path = crate::platform::instance_lock_path()?;
+        Self::try_acquire(&path).map_err(SessionLockError::Lock)
+    }
+
     /// Opens or creates the empty lock file at `path` and locks it without waiting, or returns
     /// `None` when another shell holds it.
     ///
@@ -42,6 +68,14 @@ mod tests {
 
     use super::InstanceLock;
     use crate::scratch;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unsupported_current_session_has_no_lock_target() {
+        let error = InstanceLock::try_acquire_current_session()
+            .expect_err("an unsupported session must not acquire a lock");
+        assert!(matches!(error, super::SessionLockError::Unsupported));
+    }
 
     #[test]
     fn a_second_shell_is_refused_until_the_first_drops_its_lock() {
