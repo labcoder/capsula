@@ -215,9 +215,12 @@ mod tests {
 
     #[test]
     fn the_store_meets_the_shared_contract() {
-        let limit = usize::try_from(CRED_MAX_CREDENTIAL_BLOB_SIZE).expect("blob limit");
-        conformance::refuses_invalid_input(&WindowsCredentialStore, limit, "test-only-target");
-        isolated(|target| conformance::round_trip(&WindowsCredentialStore, target, limit));
+        let nonce = getrandom::u64().expect("random test service");
+        let target = format!("{CREDENTIAL_SERVICE}-credential-test-{nonce:016x}");
+        let other = format!("{target}-other");
+        let _fixture = Fixture::new(vec![target.clone(), other.clone()]);
+        conformance::refuses_invalid_input(&WindowsCredentialStore, &target);
+        conformance::round_trip(&WindowsCredentialStore, &target, &other);
     }
 
     #[test]

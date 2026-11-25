@@ -13,45 +13,135 @@ use objc2_core_foundation::{
     CFBoolean, CFData, CFDictionary, CFIndex, CFRetained, CFString, CFType, kCFAllocatorNull,
 };
 use objc2_security::{
-    SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate, errSecAllocate,
-    errSecDuplicateItem, errSecItemNotFound, errSecSuccess, kSecAttrAccessible,
-    kSecAttrAccessibleWhenUnlockedThisDeviceOnly, kSecAttrAccount, kSecAttrService,
-    kSecAttrSynchronizable, kSecClass, kSecClassGenericPassword, kSecMatchLimit, kSecMatchLimitOne,
-    kSecReturnData, kSecUseAuthenticationContext, kSecUseDataProtectionKeychain, kSecValueData,
+    SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate, SecTask, errSecAllocate,
+    errSecDuplicateItem, errSecItemNotFound, errSecSuccess, kSecAttrAccessGroup,
+    kSecAttrAccessible, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, kSecAttrAccount,
+    kSecAttrService, kSecAttrSynchronizable, kSecClass, kSecClassGenericPassword, kSecMatchLimit,
+    kSecMatchLimitOne, kSecReturnData, kSecUseAuthenticationContext, kSecUseDataProtectionKeychain,
+    kSecValueData,
 };
 use zeroize::Zeroizing;
 
 use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
 
 /// Windows' generic credential blob limit, kept so both stores accept the same blobs.
-pub(crate) const MAX_BLOB: usize = 2_560;
+const MAX_BLOB: usize = 2_560;
 
 /// Windows' generic target limit in UTF-16 units, kept so both stores accept the same names.
 const MAX_TARGET: usize = 32_767;
 
+/// The provisioned App ID, which is also the process's private keychain access group.
+const APPLICATION_IDENTIFIER: &str = "com.apple.application-identifier";
+
 #[link(name = "LocalAuthentication", kind = "framework")]
 unsafe extern "C" {}
 
-/// The data protection keychain, never the file-based login keychain, with UI refused.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct MacCredentialStore;
+type Query = CFRetained<CFDictionary<CFString, CFType>>;
+
+/// The data protection keychain, never the file-based login keychain, pinned to one access
+/// group, with UI refused.
+#[derive(Debug, Clone)]
+pub(crate) struct MacCredentialStore {
+    group: String,
+}
+
+impl MacCredentialStore {
+    /// Pins this process's own provisioned application identifier as the only access group. A
+    /// host without that entitlement is refused before any Keychain call, so an unauthorized
+    /// read can never be mistaken for absence.
+    pub(crate) fn admitted() -> Result<Self, CredentialStoreError> {
+        // SAFETY: creates an owned task object for this process with the default allocator.
+        let task = unsafe { SecTask::from_self(None) }.ok_or(CredentialStoreError::Unsupported)?;
+        let name = CFString::from_static_str(APPLICATION_IDENTIFIER);
+        // SAFETY: a null error pointer is allowed; the result is an owned value or none.
+        let value = unsafe { task.value_for_entitlement(&name, ptr::null_mut()) }
+            .ok_or(CredentialStoreError::Unsupported)?;
+        let group = value
+            .downcast::<CFString>()
+            .map_err(|_| CredentialStoreError::Unsupported)?
+            .to_string();
+        if group.is_empty() {
+            return Err(CredentialStoreError::Unsupported);
+        }
+        Ok(Self { group })
+    }
+
+    /// One exact item's unique key in the pinned group, with a fresh no-UI context.
+    fn query(
+        &self,
+        target: &str,
+        extra: &[(&CFString, &CFType)],
+    ) -> Result<Query, CredentialStoreError> {
+        let keys = Keys::get();
+        let context = no_ui_context()?;
+        let context: *const AnyObject = &raw const *context;
+        // SAFETY: this LAContext is an NSObject, which CoreFoundation retains and releases as a
+        // CFType; the dictionary built below retains it before the owner above drops.
+        let context = unsafe { &*context.cast::<CFType>() };
+        let group = CFString::from_str(&self.group);
+        let service = CFString::from_str(CREDENTIAL_SERVICE);
+        let account = CFString::from_str(target);
+        let mut pairs = vec![
+            (keys.class, keys.generic_password.as_ref()),
+            (keys.group, group.as_ref()),
+            (keys.service, service.as_ref()),
+            (keys.account, account.as_ref()),
+            (keys.data_protection, CFBoolean::new(true).as_ref()),
+            (keys.synchronizable, CFBoolean::new(false).as_ref()),
+            (keys.context, context),
+        ];
+        pairs.extend_from_slice(extra);
+        let (keys, values): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        Ok(CFDictionary::from_slices(&keys, &values))
+    }
+
+    fn read_query(&self, target: &str) -> Result<Query, CredentialStoreError> {
+        let keys = Keys::get();
+        self.query(
+            target,
+            &[
+                (keys.return_data, CFBoolean::new(true)),
+                (keys.match_limit, keys.match_limit_one),
+            ],
+        )
+    }
+
+    fn add_attributes(&self, target: &str, data: &CFData) -> Result<Query, CredentialStoreError> {
+        let keys = Keys::get();
+        self.query(
+            target,
+            &[
+                (keys.accessible, keys.when_unlocked_this_device_only),
+                (keys.value_data, data),
+            ],
+        )
+    }
+
+    /// Adds, or on a duplicate replaces only the data, each call with its own context.
+    fn write(&self, target: &str, data: &CFData) -> Result<(), CredentialStoreError> {
+        let add = self.add_attributes(target, data)?;
+        // SAFETY: the attributes are a live CFString-keyed dictionary; no result is requested.
+        let status = unsafe { SecItemAdd(add.as_opaque(), ptr::null_mut()) };
+        if status != errSecDuplicateItem {
+            return succeeded(status, CredentialStoreError::Write);
+        }
+        let query = self.query(target, &[])?;
+        let update = update_attributes(data);
+        // SAFETY: the query and update are live CFString-keyed dictionaries for this call.
+        let status = unsafe { SecItemUpdate(query.as_opaque(), update.as_opaque()) };
+        succeeded(status, CredentialStoreError::Write)
+    }
+}
 
 impl CredentialStore for MacCredentialStore {
     fn get(&self, target: &str) -> Result<Option<SecretBytes>, CredentialStoreError> {
-        let item = Item::new(target)?;
-        let keys = Keys::get();
-        let query = item.query(&[
-            (keys.return_data, CFBoolean::new(true)),
-            (keys.match_limit, keys.match_limit_one),
-        ]);
+        validate(target)?;
+        let query = self.read_query(target)?;
         let mut result: *const CFType = ptr::null();
         // SAFETY: the query is a live CFString-keyed dictionary; result is a writable out pointer.
         let status = unsafe { SecItemCopyMatching(query.as_opaque(), &raw mut result) };
-        if status == errSecItemNotFound {
+        if !found(status)? {
             return Ok(None);
-        }
-        if status != errSecSuccess {
-            return Err(CredentialStoreError::Read(status));
         }
         let result = NonNull::new(result.cast_mut()).ok_or(CredentialStoreError::InvalidBlob)?;
         // SAFETY: a successful copy returns one owned reference, released once by this owner.
@@ -72,49 +162,33 @@ impl CredentialStore for MacCredentialStore {
         if bytes.len() > MAX_BLOB {
             return Err(CredentialStoreError::BlobTooLarge);
         }
-        let item = Item::new(target)?;
-        let keys = Keys::get();
-        let len = CFIndex::try_from(bytes.len()).expect("the bounded blob length fits CFIndex");
+        let backing = Zeroizing::new(bytes.to_vec());
+        let len = CFIndex::try_from(backing.len()).expect("the bounded blob length fits CFIndex");
         // SAFETY: reads an immutable CoreFoundation constant.
         let no_free = unsafe { kCFAllocatorNull };
-        // SAFETY: the view borrows the caller's live buffer only until it drops at the end of this
-        // call, and kCFAllocatorNull never frees those bytes.
-        let data = unsafe { CFData::with_bytes_no_copy(None, bytes.as_ptr(), len, no_free) }
+        // SAFETY: the view borrows `backing`, which is freed below only once no other reference to
+        // the view remains, and kCFAllocatorNull never frees those bytes itself.
+        let data = unsafe { CFData::with_bytes_no_copy(None, backing.as_ptr(), len, no_free) }
             .ok_or(CredentialStoreError::Write(errSecAllocate))?;
-        let add = item.query(&[
-            (keys.accessible, keys.when_unlocked_this_device_only),
-            (keys.value_data, &data),
-        ]);
-        // SAFETY: the attributes are a live CFString-keyed dictionary; no result is requested.
-        let status = unsafe { SecItemAdd(add.as_opaque(), ptr::null_mut()) };
-        if status != errSecDuplicateItem {
-            return if status == errSecSuccess {
-                Ok(())
-            } else {
-                Err(CredentialStoreError::Write(status))
-            };
+        let outcome = self.write(target, &data);
+        let shared = data.retain_count() != 1;
+        drop(data);
+        if shared {
+            // shortcut: leaks one bounded copy rather than free bytes the framework still holds.
+            std::mem::forget(backing);
         }
-        let query = item.query(&[]);
-        let update = CFDictionary::<CFString, CFType>::from_slices(&[keys.value_data], &[&data]);
-        // SAFETY: the query and update are live CFString-keyed dictionaries for this call.
-        let status = unsafe { SecItemUpdate(query.as_opaque(), update.as_opaque()) };
-        if status == errSecSuccess {
-            Ok(())
-        } else {
-            Err(CredentialStoreError::Write(status))
-        }
+        outcome
     }
 
     fn delete(&self, target: &str) -> Result<(), CredentialStoreError> {
-        let item = Item::new(target)?;
-        let query = item.query(&[]);
+        validate(target)?;
+        let query = self.query(target, &[])?;
         // SAFETY: the query is a live CFString-keyed dictionary that names one exact item.
         let status = unsafe { SecItemDelete(query.as_opaque()) };
-        if status == errSecSuccess || status == errSecItemNotFound {
-            Ok(())
-        } else {
-            Err(CredentialStoreError::Delete(status))
+        if status == errSecItemNotFound {
+            return Ok(());
         }
+        succeeded(status, CredentialStoreError::Delete)
     }
 }
 
@@ -125,41 +199,28 @@ fn validate(target: &str) -> Result<(), CredentialStoreError> {
     Ok(())
 }
 
-/// One exact item's unique key, with the fresh no-UI context every call carries.
-struct Item {
-    service: CFRetained<CFString>,
-    account: CFRetained<CFString>,
-    context: Retained<AnyObject>,
+/// Only not-found is absence; every other refusal stays a read error.
+fn found(status: i32) -> Result<bool, CredentialStoreError> {
+    if status == errSecItemNotFound {
+        return Ok(false);
+    }
+    succeeded(status, CredentialStoreError::Read).map(|()| true)
 }
 
-impl Item {
-    fn new(target: &str) -> Result<Self, CredentialStoreError> {
-        validate(target)?;
-        Ok(Self {
-            service: CFString::from_str(CREDENTIAL_SERVICE),
-            account: CFString::from_str(target),
-            context: no_ui_context()?,
-        })
+fn succeeded(
+    status: i32,
+    error: fn(i32) -> CredentialStoreError,
+) -> Result<(), CredentialStoreError> {
+    if status == errSecSuccess {
+        Ok(())
+    } else {
+        Err(error(status))
     }
+}
 
-    fn query(&self, extra: &[(&CFString, &CFType)]) -> CFRetained<CFDictionary<CFString, CFType>> {
-        let keys = Keys::get();
-        let context: *const AnyObject = &raw const *self.context;
-        // SAFETY: every Objective-C object is a valid CFTypeRef, and the context outlives the
-        // returned dictionary's use within the caller's operation.
-        let context = unsafe { &*context.cast::<CFType>() };
-        let mut pairs = vec![
-            (keys.class, keys.generic_password.as_ref()),
-            (keys.service, self.service.as_ref()),
-            (keys.account, self.account.as_ref()),
-            (keys.data_protection, CFBoolean::new(true).as_ref()),
-            (keys.synchronizable, CFBoolean::new(false).as_ref()),
-            (keys.context, context),
-        ];
-        pairs.extend_from_slice(extra);
-        let (keys, values): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-        CFDictionary::from_slices(&keys, &values)
-    }
+/// An update changes the data alone, never the item's key or protection.
+fn update_attributes(data: &CFData) -> Query {
+    CFDictionary::from_slices(&[Keys::get().value_data], &[data.as_ref()])
 }
 
 /// A fresh `LAContext` that refuses any authentication UI; refused setup refuses the operation.
@@ -170,17 +231,29 @@ fn no_ui_context() -> Result<Retained<AnyObject>, CredentialStoreError> {
     let context = context.ok_or(CredentialStoreError::Unsupported)?;
     // SAFETY: interactionNotAllowed is a BOOL property of LAContext since macOS 10.13.
     let () = unsafe { msg_send![&context, setInteractionNotAllowed: true] };
-    // SAFETY: reads the same BOOL property back.
-    let refused: bool = unsafe { msg_send![&context, interactionNotAllowed] };
-    refused
-        .then_some(context)
-        .ok_or(CredentialStoreError::Unsupported)
+    if !interaction_refused(&context) {
+        return Err(CredentialStoreError::Unsupported);
+    }
+    Ok(context)
+}
+
+fn interaction_refused(context: &AnyObject) -> bool {
+    // SAFETY: reads LAContext's BOOL interactionNotAllowed property.
+    unsafe { msg_send![context, interactionNotAllowed] }
+}
+
+macro_rules! constant {
+    ($name:ident) => {
+        // SAFETY: reads one immutable Security framework constant that the loader initialized.
+        unsafe { $name }
+    };
 }
 
 /// The Security framework's query keys and values.
 struct Keys {
     class: &'static CFString,
     generic_password: &'static CFString,
+    group: &'static CFString,
     service: &'static CFString,
     account: &'static CFString,
     data_protection: &'static CFString,
@@ -196,55 +269,24 @@ struct Keys {
 
 impl Keys {
     fn get() -> Self {
-        // SAFETY: reads immutable Security framework constants that the loader initialized.
-        unsafe {
-            Self {
-                class: kSecClass,
-                generic_password: kSecClassGenericPassword,
-                service: kSecAttrService,
-                account: kSecAttrAccount,
-                data_protection: kSecUseDataProtectionKeychain,
-                synchronizable: kSecAttrSynchronizable,
-                context: kSecUseAuthenticationContext,
-                accessible: kSecAttrAccessible,
-                when_unlocked_this_device_only: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-                value_data: kSecValueData,
-                return_data: kSecReturnData,
-                match_limit: kSecMatchLimit,
-                match_limit_one: kSecMatchLimitOne,
-            }
+        Self {
+            class: constant!(kSecClass),
+            generic_password: constant!(kSecClassGenericPassword),
+            group: constant!(kSecAttrAccessGroup),
+            service: constant!(kSecAttrService),
+            account: constant!(kSecAttrAccount),
+            data_protection: constant!(kSecUseDataProtectionKeychain),
+            synchronizable: constant!(kSecAttrSynchronizable),
+            context: constant!(kSecUseAuthenticationContext),
+            accessible: constant!(kSecAttrAccessible),
+            when_unlocked_this_device_only: constant!(kSecAttrAccessibleWhenUnlockedThisDeviceOnly),
+            value_data: constant!(kSecValueData),
+            return_data: constant!(kSecReturnData),
+            match_limit: constant!(kSecMatchLimit),
+            match_limit_one: constant!(kSecMatchLimitOne),
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::platform::credential::conformance;
-    use crate::platform::credential::fixture::Fixture;
-
-    use super::*;
-
-    #[test]
-    fn invalid_input_is_refused_before_the_keychain() {
-        conformance::refuses_invalid_input(&MacCredentialStore, MAX_BLOB, "test-only-target");
-    }
-
-    #[test]
-    fn a_no_ui_context_is_set_up_for_every_call() {
-        let first = no_ui_context().expect("LocalAuthentication is linked");
-        let second = no_ui_context().expect("a second context");
-        assert!(
-            !ptr::eq(&raw const *first, &raw const *second),
-            "each call gets its own context"
-        );
-    }
-
-    #[test]
-    #[ignore = "needs a test host signed and provisioned for the data protection keychain"]
-    fn a_signed_host_meets_the_shared_contract() {
-        let nonce = getrandom::u64().expect("random test name");
-        let target = format!("{CREDENTIAL_SERVICE}-credential-test-{nonce:016x}");
-        let _fixture = Fixture::with_store(MacCredentialStore, vec![target.clone()]);
-        conformance::round_trip(&MacCredentialStore, &target, MAX_BLOB);
-    }
-}
+mod tests;

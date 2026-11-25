@@ -151,6 +151,7 @@ objc2-security = { version = "=0.3.2", default-features = false, features = [
     "std",
     "SecBase",
     "SecItem",
+    "SecTask",
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]
