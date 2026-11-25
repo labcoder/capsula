@@ -1139,7 +1139,7 @@ async fn both_draft_offer_audits_reject_missing_and_extra_names() {
             [launch::Outcome::Audit(AuditFailed::Tools)]
         );
         assert_eq!(rig.base.0.join("seed.1").is_file(), seeded);
-        assert!(!control.may_call());
+        assert!(!control.gate().may_call());
         assert_eq!(rig.binds.len(), usize::from(seeded));
         rig.close().await;
     }
@@ -1864,16 +1864,16 @@ async fn the_gate_opens_only_after_inits_audit() {
     let (_, control) = rig.last();
     let mut played = play(&question);
     until("auditing", || rig.stdin().len() == 2).await;
-    assert!(!control.may_call(), "auditing");
+    assert!(!control.gate().may_call(), "auditing");
     rig.go("go");
     let ask = rig.drive(played.inputs.recv()).await;
     assert!(matches!(ask, Some(Input::SendReady { .. })), "an ask");
-    assert!(!control.may_call(), "bound, not seeded");
+    assert!(!control.gate().may_call(), "bound, not seeded");
     engines::answer(&played.asks, played.key, played.lease());
     until("seeded", || rig.stdin().iter().any(|line| line == "1 user")).await;
-    assert!(!control.may_call(), "seeded, before init's audit");
+    assert!(!control.gate().may_call(), "seeded, before init's audit");
     rig.go("init");
-    until("init's audit", || control.may_call()).await;
+    until("init's audit", || control.gate().may_call()).await;
     rig.go("answer");
     answered(&rig.drive(played.events()).await);
     rig.close().await;

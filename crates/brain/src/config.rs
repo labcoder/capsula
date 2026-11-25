@@ -30,7 +30,6 @@ const ONBOARDED: &str = "onboarded";
 const ONBOARDING_FROM: &str = "onboarding_from";
 const MAX_FRAME_RATE: &str = "max_frame_rate";
 const DEFAULT_MODEL: &str = "default_model";
-#[cfg(any(test, windows))]
 const CLAUDE_CODE: &str = "claude_code";
 const GITHUB: &str = "github";
 const DEFAULT_ACCOUNT: &str = "default_account";
@@ -265,7 +264,6 @@ impl Config {
 
     /// `[claude_code] enabled`: on unless it's `false`. Anything else there, or a file that
     /// couldn't be read, turns it off, because it may have said so.
-    #[cfg(any(test, windows))]
     pub(crate) fn claude_code_enabled(&self) -> bool {
         let Ok(table) = &self.table else {
             return false;
@@ -400,13 +398,11 @@ impl Config {
 
     /// The parts `[voice] removing` names, by their folder names: a removal that hasn't
     /// finished. A name this build doesn't know names nothing.
-    #[cfg(any(test, windows))]
     pub(crate) fn removing(&self) -> Vec<VoicePart> {
         self.listed(REMOVING)
     }
 
     /// The parts `[voice] installed` names and `removing` doesn't: a removal wins.
-    #[cfg(any(test, windows))]
     pub(crate) fn installed(&self) -> Vec<VoicePart> {
         let removing = self.removing();
         let mut installed = self.listed(INSTALLED);
@@ -414,7 +410,6 @@ impl Config {
         installed
     }
 
-    #[cfg(any(test, windows))]
     fn listed(&self, key: &str) -> Vec<VoicePart> {
         let names = self
             .table

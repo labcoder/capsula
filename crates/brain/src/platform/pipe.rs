@@ -11,7 +11,10 @@ pub enum Instance {
     Only,
 }
 
-#[cfg(windows)]
+#[cfg_attr(
+    not(windows),
+    expect(dead_code, reason = "only a native pipe can classify a peer")
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClientRefused {
     Exited,
@@ -30,8 +33,8 @@ mod unsupported {
 
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-    use super::Instance;
-    use crate::platform::ShellProcess;
+    use super::{ClientRefused, Instance};
+    use crate::platform::{Job, ShellProcess};
 
     /// A native server can't exist without a platform pipe adapter.
     #[derive(Debug)]
@@ -39,6 +42,10 @@ mod unsupported {
     pub(crate) type PipeClient = PipeServer;
 
     impl PipeServer {
+        pub(crate) fn disconnect(&self) -> io::Result<()> {
+            match *self {}
+        }
+
         pub(crate) fn connect(&self) -> Ready<io::Result<()>> {
             match *self {}
         }
@@ -88,6 +95,14 @@ mod unsupported {
         Err(io::ErrorKind::Unsupported.into())
     }
 
+    pub(crate) fn bridge_peer(
+        pipe: &PipeServer,
+        _: &Job,
+        _: &Path,
+    ) -> Result<std::convert::Infallible, ClientRefused> {
+        match *pipe {}
+    }
+
     pub(crate) fn client_image(pipe: &PipeServer) -> io::Result<PathBuf> {
         match *pipe {}
     }
@@ -132,6 +147,8 @@ mod unsupported {
 }
 
 #[cfg(not(windows))]
-pub(crate) use unsupported::{PipeClient, client_image, open_pipe, server_image, shell_connection};
+pub(crate) use unsupported::{
+    PipeClient, bridge_peer, client_image, open_pipe, server_image, shell_connection,
+};
 #[cfg(not(windows))]
 pub use unsupported::{PipeServer, create_owner_only, session_id};
