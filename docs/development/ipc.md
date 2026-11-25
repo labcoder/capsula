@@ -1153,6 +1153,21 @@ order (with no turns on that pair), then Quitting. It starts no session or playb
 doesn't replay or settle microphone Stop debt. A partial or unauthenticated pair never carries
 these shutdown frames. Stock selection remains Legacy.
 
+## How a connection ends
+
+An accepted `Quitting` ends the connection as Quit. The brain applies controls accepted
+before Quit in order, even if a fatal cause arrives later. EOF is Lost, never Quit: the brain
+still reads control for the existing grace period so a Quit already in flight can be accepted.
+
+When the runtime observes a fatal cause before accepting Quit, it stops accepting work and
+discards queued controls. This also ends an in-progress grace period or drain; effects already
+applied do not roll back. An effect admitted just before a cause arrives can finish, but the
+next acceptance check stops dispatch. The core and grace loop check the retained values on
+every poll, so a stored cause wins even if its wake is delayed. One connection-scoped waiter
+relays watch notifications through a one-slot channel so unrelated input doesn't re-poll the
+watch waiters. Detached connections select a runtime path with the original reader send,
+core and grace arms, and control drain. It has no fatal checks, waiter or wake relay.
+
 ## Debugging
 
 Two Windows diagnostics changed in shared code. The shell's `brain from another build`
