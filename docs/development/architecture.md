@@ -166,6 +166,17 @@ the exact step before any write. Uncertain or conflicting evidence leaves the da
 Windows and macOS use the same policy. No native observer or executable calls it yet, and its
 decisions do not authorize writes, reconnect a provider, or identify a person.
 
+On Windows the guard is a named mutex per user and edition in the global namespace, so every
+session of that user contends on one object and taking it writes nothing to disk
+(`kumochi_storage::acquire_setup_guard`). It's created with a medium label whose no-write-up,
+no-read-up and no-execute-up policy keeps lower-integrity code, the same user's included, from
+opening it to take it. An existing mutex is used only if its owner is trusted, it carries that
+label and policy and no one else may take, release or re-secure it; otherwise the guard is
+unavailable, never busy. Busy means another handle holds that verified object, not who holds
+it, so a caller only refuses or waits. A guard whose holder exited is taken, and the inspection
+under it judges what that holder left; taking it says nothing about whether setup finished.
+Older builds don't know the guard. Nothing takes it yet, and macOS has no guard yet.
+
 Tests that need files use the shared scratch guard in `tests/support/scratch.rs`. It creates
 a new child of Temp (or of an existing trusted root for fixtures that need one), skips
 occupied names, and removes its recorded child path on return or unwind. It does not

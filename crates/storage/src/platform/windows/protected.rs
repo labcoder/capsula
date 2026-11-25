@@ -26,7 +26,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-    ConvertStringSidToSidW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+    ConvertStringSidToSidW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SE_OBJECT_TYPE,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, GENERIC_MAPPING,
@@ -54,6 +54,9 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 use windows_sys::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
 use crate::platform::Untrusted;
+
+mod guard;
+pub use guard::{GuardError, SetupGuard, acquire_setup_guard};
 
 /// SYSTEM, Administrators and `TrustedInstaller`, which may change anything here; this user joins
 /// them at run time.
@@ -319,7 +322,9 @@ pub fn check(opened: &File, path: &Path, kind: Kind, trusted: &Trusted) -> Resul
 /// Whether `security` has a trusted owner, no label below medium, and no ACE that lets someone
 /// untrusted change the object.
 fn trusted_security(security: &Security, kind: Kind, trusted: &Trusted) -> Result<(), Untrusted> {
-    if !trusted.contains(security.owner) || security.writable_from_below()? {
+    if !trusted.contains(security.owner)
+        || security.open_from_below(SYSTEM_MANDATORY_LABEL_NO_WRITE_UP)?
+    {
         return Err(Untrusted::Unsafe);
     }
     let changes = match kind {
@@ -685,6 +690,11 @@ pub struct Security {
 impl Security {
     /// The owner, DACL and label of what `opened` is open on, read through the handle.
     pub fn read(opened: &File) -> Result<Self, Untrusted> {
+        Self::read_object(opened.as_raw_handle(), SE_FILE_OBJECT)
+    }
+
+    /// The security of the `kind` of object open at `handle`.
+    fn read_object(handle: HANDLE, kind: SE_OBJECT_TYPE) -> Result<Self, Untrusted> {
         let mut owner: PSID = std::ptr::null_mut();
         let mut dacl: *mut ACL = std::ptr::null_mut();
         let mut sacl: *mut ACL = std::ptr::null_mut();
@@ -693,8 +703,8 @@ impl Security {
         // `descriptor`, which is LocalAlloc'd and owned by the result.
         let status = unsafe {
             GetSecurityInfo(
-                opened.as_raw_handle(),
-                SE_FILE_OBJECT,
+                handle,
+                kind,
                 OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
                 &raw mut owner,
                 std::ptr::null_mut(),
@@ -773,20 +783,24 @@ impl Security {
         Ok(false)
     }
 
-    /// Whether lower-integrity code may write to this object: a label that applies to it is below
-    /// medium or lacks no-write-up. With no such label, Windows applies medium and no-write-up.
-    fn writable_from_below(&self) -> Result<bool, Untrusted> {
+    /// Whether lower-integrity code gets past this object's label: a label that applies to it is
+    /// below medium or lacks one of `fence`'s policies. With no such label, Windows applies medium
+    /// and no-write-up only.
+    fn open_from_below(&self, fence: u32) -> Result<bool, Untrusted> {
+        let unlabelled = fence & !SYSTEM_MANDATORY_LABEL_NO_WRITE_UP != 0;
         if self.sacl.is_null() {
-            return Ok(false);
+            return Ok(unlabelled);
         }
+        let mut labelled = false;
         for (header, ace) in aces(self.sacl)? {
             if u32::from(header.AceType) != SYSTEM_MANDATORY_LABEL_ACE_TYPE
                 || u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0
             {
                 continue;
             }
+            labelled = true;
             let (mask, sid) = mask_and_sid(ace);
-            if mask & SYSTEM_MANDATORY_LABEL_NO_WRITE_UP == 0 {
+            if mask & fence != fence {
                 return Ok(true);
             }
             // SAFETY: `sid` is a valid SID inside the live descriptor.
@@ -804,7 +818,7 @@ impl Security {
                 return Ok(true);
             }
         }
-        Ok(false)
+        Ok(!labelled && unlabelled)
     }
 }
 
