@@ -241,7 +241,7 @@ pub(super) fn listening(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     owner.update(cx, |owner, _| {
         owner.voice.state.status = Some(Text::HoldListening);
         if let Some(hold) = owner.voice.state.pending.as_mut() {
-            hold.collected = true;
+            hold.set_collected(true);
         }
     });
 }
@@ -770,7 +770,7 @@ fn a_hold_that_ends_before_its_release_stops_the_line_and_takes_no_lease(cx: &mu
                     .pending
                     .as_mut()
                     .expect("hold 1")
-                    .collected = false;
+                    .set_collected(false);
             });
             release(&ready.owner, 1, Some(DOWN), cx);
         },

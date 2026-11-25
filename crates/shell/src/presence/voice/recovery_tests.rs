@@ -88,7 +88,13 @@ fn stored(generation: u64, gesture: u32) -> LinkEvent {
 /// The hold was released and sent, and the brain started its run.
 fn thinking(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     owner.update(cx, |owner, _| {
-        owner.voice.state.pending.as_mut().expect("a hold").source = Source::Sent;
+        owner
+            .voice
+            .state
+            .pending
+            .as_mut()
+            .expect("a hold")
+            .set_source(Source::Sent);
     });
     deliver(
         owner,
