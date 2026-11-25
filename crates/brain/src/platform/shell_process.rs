@@ -257,12 +257,15 @@ impl ShellProcess {
     /// True when the loss came before any claim.
     #[cfg(test)]
     pub(crate) fn publish(&self, verdict: u8) -> bool {
-        let Owner::Fixture(ref state, ref gate) = *self.owner else {
-            panic!("only a fixture publishes on demand");
-        };
-        let first = gate.lose();
-        state.store(verdict, Ordering::Release);
-        first
+        match *self.owner {
+            Owner::Fixture(ref state, ref gate) => {
+                let first = gate.lose();
+                state.store(verdict, Ordering::Release);
+                first
+            }
+            #[cfg(any(windows, target_os = "macos"))]
+            _ => panic!("only a fixture publishes on demand"),
+        }
     }
 }
 
