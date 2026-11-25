@@ -18,7 +18,10 @@ descendants ended. The shared queue, deadline and refusal policy stays the same.
 ## The bridge
 
 Native bridge connections require the platform's owner-only pipe and peer process checks. The
-relay's in-memory tests exercise the same framing without standing in for those native checks.
+client opens the pipe and checks the server image in one platform call, preserving native I/O
+errors separately from an image mismatch. The listener holds an opaque peer guard through the
+session, so the relay never needs the native process handle. In-memory tests exercise the same
+framing without standing in for those native checks.
 
 `kumochid --mcp-bridge <launch>` is a stdio MCP server. Claude Code starts it, and it connects
 back to the brain on `\\.\pipe\<prefix>-<session>-claude-bridge-<launch>`, where `<launch>` is 32

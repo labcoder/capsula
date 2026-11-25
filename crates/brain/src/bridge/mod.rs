@@ -37,7 +37,7 @@ pub(crate) use self::wire::{CallKey, Method, ToBrain, ToBridge};
 use self::id::JsonRpcId;
 use self::stdio::{Body, Incoming, Line, LineReader, RpcError, classify, reply};
 use self::wire::{Reassembly, chunks};
-use crate::platform::{self, PipeClient};
+use crate::platform::{self, BridgeConnectError, PipeClient};
 
 /// The longest stdin line, newline excluded [guess: call arguments].
 pub(crate) const MAX_INCOMING: usize = 512 * 1024;
@@ -158,15 +158,10 @@ where
 /// Opens `name` and checks its server runs `expected`, so a process that took the name first
 /// gets nothing.
 fn connect(name: &str, expected: &std::path::Path) -> Result<PipeClient, BridgeError> {
-    let pipe = platform::open_pipe(name).map_err(BridgeError::Connect)?;
-    let server = platform::server_image(&pipe).map_err(BridgeError::Connect)?;
-    if !server
-        .as_os_str()
-        .eq_ignore_ascii_case(expected.as_os_str())
-    {
-        return Err(BridgeError::NotOurBrain);
-    }
-    Ok(pipe)
+    platform::open_bridge(name, expected).map_err(|error| match error {
+        BridgeConnectError::Io(source) => BridgeError::Connect(source),
+        BridgeConnectError::NotOurBrain => BridgeError::NotOurBrain,
+    })
 }
 
 /// One stdin event.
