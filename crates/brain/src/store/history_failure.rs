@@ -77,7 +77,7 @@ mod tests {
                 assert_eq!(decode(reason.as_bytes()), Some(failure));
             }
         }
-        assert_eq!(largest, MAX_REASON_BYTES as usize);
+        assert_eq!(largest, usize::try_from(MAX_REASON_BYTES).unwrap());
         for reason in [
             b"".as_slice(),
             b"engine",
