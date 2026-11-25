@@ -151,6 +151,16 @@ impl Drawing {
             }
     }
 
+    pub(crate) fn escape_scenes(&self) -> Option<[Option<SceneId>; MAX_VISIBLE_SCENES]> {
+        match &self.recovery {
+            Recovery::Awaiting { held } if !held.is_empty() => return None,
+            Recovery::Receiving { pending } if !pending.is_empty() => return None,
+            _ => {}
+        }
+        let mut ids = self.shown.keys().copied();
+        Some(std::array::from_fn(|_| ids.next()))
+    }
+
     /// The shown scenes, oldest first.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn shown(&self) -> impl Iterator<Item = (&SceneId, &Scene)> {

@@ -533,6 +533,18 @@ fn a_cut_for_a_scene_the_shell_no_longer_holds_is_dropped() {
 }
 
 #[test]
+fn a_runless_scene_begin_changes_the_plain_escape_membership() {
+    let (mut presenter, now) = live();
+    assert_eq!(presenter.escape_scenes(), Some([None; 4]));
+    let _effects = begin(&mut presenter, LIVE, now);
+    assert_eq!(
+        presenter.escape_scenes(),
+        Some([Some(LIVE), None, None, None])
+    );
+    assert_eq!(presenter.stoppable_run(), None);
+}
+
+#[test]
 fn clear_releases_every_scene_its_charge_and_its_running_work() {
     let (mut presenter, now, first) = preparing();
     let before = presenter.residency();
