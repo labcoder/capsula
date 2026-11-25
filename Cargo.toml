@@ -110,3 +110,4 @@ gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "99576
 # GPUI's Windows backend with the idle-wake fix (docs/development/gpui-patch.md). It must match
 # the gpui-pre version gpui-kit resolves; `cargo xtask check-vendor` fails CI when it stops applying.
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
