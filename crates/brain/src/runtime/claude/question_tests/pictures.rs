@@ -510,6 +510,23 @@ async fn a_bound_find_keeps_the_round_until_its_picture_settles_unsent() {
     let SendKey::Build(key) = request.key else {
         panic!("pictured build")
     };
+    assert!(
+        brain
+            .store
+            .as_ref()
+            .expect("store")
+            .send(StoreOp::BeginTurn {
+                thread: request.thread,
+                title: None,
+                run: request.run,
+                text: "words".into(),
+                screen: Some(kumochi_protocol::message::HeldScreen::Attached),
+            })
+    );
+    let stored = timeout(WAIT, brain.inputs.recv())
+        .await
+        .expect("turn stored in time");
+    assert_eq!(stored, Some(Input::TurnStored { run: request.run }));
     let choice = request.request.choice.clone().expect("run choice");
     let config = brain
         .config
@@ -539,11 +556,22 @@ async fn a_bound_find_keeps_the_round_until_its_picture_settles_unsent() {
     brain.claude_done(Wake::Note(note), None).expect("bound");
     assert!(brain.claude.launches.last().expect("launch").bound);
     let ask = timeout(WAIT, brain.inputs.recv()).await.unwrap().unwrap();
-    let grants = brain.handle(ask).expect("grant effects");
+    brain.offline(ask);
     let lease = LeaseId {
         key: SendKey::Build(key),
         send: 1,
     };
+    let stored = timeout(WAIT, brain.inputs.recv())
+        .await
+        .expect("picture authorization in time");
+    assert_eq!(
+        stored,
+        Some(Input::ScreenGrantStored {
+            lease,
+            result: Ok(()),
+        })
+    );
+    let grants = brain.handle(stored.unwrap()).expect("grant effects");
     assert!(grants.contains(&Effect::Grant(lease)));
     brain.apply(grants, None).expect("grant");
 
