@@ -1205,12 +1205,15 @@ fn chatgpt_jobs_without_a_matching_known_catalog_end_unsent() {
     ] {
         let mut core = reading();
         core.handle(chatgpt_catalog(tag, model, efforts)).unwrap();
-        assert_eq!(
-            core.handle(job_built_on(key(2), choice.clone())),
-            Ok(vec![compacts(3)]),
-        );
+        let title = core.handle(job_built_on(key(2), choice.clone()));
+        if tag == 0 {
+            assert_eq!(title, Ok(vec![compacts(3)]));
+            assert_eq!(core.handle(job_built_on(key(3), choice)), Ok(Vec::new()));
+        } else {
+            assert_eq!(title, Ok(Vec::new()), "the retired route can't read again");
+            assert_eq!(core.handle(job_built_on(key(3), choice)), Err(Stale));
+        }
         assert_eq!(core.handle(ready(key(2))), Ok(rebuild(key(2))));
-        assert_eq!(core.handle(job_built_on(key(3), choice)), Ok(Vec::new()),);
         assert_eq!(core.handle(ready(key(3))), Ok(rebuild(key(3))));
     }
 }
@@ -1301,8 +1304,8 @@ fn a_claude_code_job_follows_claude_codes_fences_and_not_chatgpts() {
     );
     assert_eq!(
         core.sending(SendKey::Job(key(9))),
-        Some(ConnectionTag(8)),
-        "ChatGPT's is ready for a ChatGPT job"
+        None,
+        "an unknown job can't take a ChatGPT bearer"
     );
     assert_eq!(
         core.handle(Input::SignedOut { generation: 1 }),
@@ -1382,4 +1385,60 @@ fn a_job_whose_sign_in_changed_is_dropped_at_its_grant() {
     let mut dropped = rebuild(key(2));
     dropped.push(Effect::CancelJob(key(2)));
     assert_eq!(core.handle(ready(key(2))), Ok(dropped));
+}
+
+#[test]
+fn an_obsolete_job_cannot_read_history_or_select_the_next_accounts_bearer() {
+    for thread in [T, MAIN] {
+        let mut core = reading();
+        let old = SendKey::Job(key(2));
+        assert_eq!(
+            core.handle(job_built(key(2), &[T])),
+            Ok(vec![start_job(key(2), R)])
+        );
+        assert_eq!(core.sending(old), Some(ConnectionTag(0)));
+
+        core.handle(Input::Turn {
+            turn: 2,
+            thread: Some(thread),
+            text: "Finish this on the original account".into(),
+        })
+        .unwrap();
+        admit(&mut core, R2);
+        core.handle(engine(
+            super::engine_key(&core, R2),
+            TurnEvent::Finished(Finish::Completed),
+        ))
+        .unwrap();
+        core.handle(Input::SignedIn { generation: 2 }).unwrap();
+        core.handle(chatgpt_catalog(7, "sparse", EffortSet::new([Effort::Low])))
+            .unwrap();
+        assert_eq!(
+            (core.sending(old), core.handle(Input::RunStored { run: R2 })),
+            (None, Ok(vec![state(R2, thread, Phase::Done), run_end(R2)])),
+            "neither bearer selection nor a late receipt can move A's job to B"
+        );
+
+        let run = RunId(R2.0 + 1);
+        let choice = chatgpt_choice(Effort::Low);
+        let effects = run_done_on(&mut core, Some(T), run, choice.clone());
+        let [Effect::Store(StoreOp::ReadJob(read)), ..] = effects.as_slice() else {
+            panic!("the current account must read for its own title job");
+        };
+        let key = read.key;
+        let current = SendKey::Job(key);
+        assert_eq!(read.kind, JobKind::Title);
+        assert_eq!(core.sending(current), None, "a read is not yet a send");
+        assert_eq!(
+            core.handle(job_built_on(key, Some(choice.clone()))),
+            Ok(vec![start_job_on(key, run, Some(choice))])
+        );
+        assert_eq!(
+            core.sending(old),
+            None,
+            "B's sending slot cannot lend its bearer"
+        );
+        assert_eq!(core.sending(current), Some(ConnectionTag(7)));
+        assert_eq!(core.handle(ready(key)), Ok(granted(lease(key, 1))));
+    }
 }

@@ -525,8 +525,8 @@ fn a_draw_the_request_didnt_offer_commits_nothing() {
 }
 
 /// A round takes the bearer of its run's connection only while that run is current: once Stop
-/// ends it, its late ask gets none, though the run stays bound while it ends. A job takes the
-/// ready connection's, and none signed out.
+/// ends it, its late ask gets none, though the run stays bound while it ends. An absent job
+/// cannot take the ready connection's bearer.
 #[test]
 fn a_send_takes_its_runs_connection_only_while_the_run_is_current() {
     let mut core = typed(Some(ready(7, &["m"])));
@@ -540,7 +540,7 @@ fn a_send_takes_its_runs_connection_only_while_the_run_is_current() {
     core.handle(built(Some("m"), Vec::new())).expect("current");
     assert_eq!(core.sending(round), Some(ConnectionTag(7)));
     assert_eq!(core.handle(ready(8, &["m"])).map(|_| ()), Ok(()));
-    assert_eq!(core.sending(job), Some(ConnectionTag(8)));
+    assert_eq!(core.sending(job), None);
     assert_eq!(
         core.sending(SendKey::Build(BuildKey {
             run: RunId(11),

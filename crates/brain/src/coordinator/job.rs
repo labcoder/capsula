@@ -6,10 +6,8 @@
 //! after every op sent before it, with its own exposure to deletes, so a delete of what it read
 //! voids it. It asks to send under its own [`SendKey::Job`], so a delete of what it read is held
 //! while its body goes out, and its write is conditional on the deletion generation it read. It
-//! answers on the route of the run that started it: a `ChatGPT` job only while an account is
-//! signed in, which a sign-out cancels before anything else, and another connection's only while
-//! that connection is ready under the run's sign-in. A job is never resumed or retried on its
-//! own: the next trigger starts a new one.
+//! answers only while the run's exact sign-in is ready. For `ChatGPT`, sign-out cancels the job
+//! before anything else. A job never resumes or retries on its own.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -133,6 +131,10 @@ enum Stage {
 }
 
 impl Job {
+    pub(super) fn is_sending(&self, key: JobKey) -> bool {
+        self.key == key && matches!(self.stage, Stage::Sending { .. })
+    }
+
     fn voided(&self, sources: &[ThreadId]) -> bool {
         sources.iter().any(|source| self.exposed.contains(source))
     }
@@ -180,10 +182,7 @@ impl Coordinator {
         self.job
             .as_ref()
             .filter(|job| {
-                job.key == key
-                    && job.run == request.run
-                    && key.thread == request.thread
-                    && matches!(job.stage, Stage::Sending { .. })
+                job.is_sending(key) && job.run == request.run && key.thread == request.thread
             })
             .map(|job| job.route)
     }
@@ -207,7 +206,7 @@ impl Coordinator {
         self.start_job(kind, thread, run, route, effects);
     }
 
-    /// Starts `kind` for `thread` on `route` in the slot, unless a run is current, the route can't
+    /// Starts `kind` for `thread` on `route` in the slot, unless a run is current, that exact route can't
     /// answer (for `ChatGPT`, no account is signed in) or sends failed closed. Its read stops it
     /// when there's nothing to do.
     fn start_job(
@@ -218,13 +217,11 @@ impl Coordinator {
         route: Route,
         effects: &mut Vec<Effect>,
     ) {
-        let ready = match route.kind {
-            ConnectionKind::ChatGpt => self.account.is_some(),
-            ConnectionKind::AnthropicKey | ConnectionKind::ClaudeCode => {
-                self.refusal(route).is_none()
-            }
-        };
-        if !ready || self.current.is_some() || self.transport_failed {
+        if self.current.is_some()
+            || self.transport_failed
+            || (route.kind == ConnectionKind::ChatGpt && self.account.is_none())
+            || self.refusal(route).is_some()
+        {
             return;
         }
         self.cancel_job(effects);
