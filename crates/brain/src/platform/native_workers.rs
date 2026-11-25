@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::{Arc, atomic::AtomicBool};
 
-use super::Job;
+use super::{Job, Mode};
 use crate::{BrainError, config::Config, runtime::Brain};
 
 use crate::engines::claude_code::lane::{Host, Lane};
@@ -13,7 +13,7 @@ pub(crate) enum ClaudeSetting {
 }
 
 pub(crate) fn claude_setting(config: &Config) -> ClaudeSetting {
-    if super::require_native_runtime().is_err() {
+    if !super::supports(Mode::Detached) {
         return ClaudeSetting::Disabled;
     }
     let enabled = config.claude_code_enabled();
@@ -31,7 +31,7 @@ pub(crate) fn start(
     exe: &Path,
     setting: ClaudeSetting,
 ) -> Result<Arc<Job>, BrainError> {
-    super::require_native_runtime().map_err(BrainError::Helpers)?;
+    super::require_mode(Mode::Detached).map_err(BrainError::Helpers)?;
     let models = super::data_dir().map(|data| data.join(kumochi_protocol::voice::MODELS_DIR));
     let stuck = models
         .as_deref()

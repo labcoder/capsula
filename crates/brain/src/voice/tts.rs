@@ -138,7 +138,7 @@ pub(crate) struct TtsHandle {
 
 impl TtsHandle {
     pub(crate) fn spawn(runtime: Handle, reports: Reports) -> io::Result<Self> {
-        crate::platform::require_native_runtime()?;
+        crate::platform::require_mode(crate::platform::Mode::Detached)?;
         Self::spawn_with(runtime, reports, phonon::Phonon::load)
     }
 
