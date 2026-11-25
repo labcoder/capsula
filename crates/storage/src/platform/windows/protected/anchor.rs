@@ -12,7 +12,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_DIRECTORY,
 };
 
-use super::{Aces, Kind, Security, Trusted, Untrusted, attributes, check, hold_chain, open_native};
+use super::{Aces, Kind, Security, Trusted, Untrusted, attributes, check, hold_chain, open_child};
 
 /// A named folder under a trusted anchor.
 #[derive(Debug)]
@@ -60,7 +60,7 @@ fn hold_named(anchor: &Path, name: &str) -> Result<Child, Untrusted> {
         return Err(Untrusted::Unsafe);
     }
     let path = anchor.join(name);
-    let child = match open_native(&path, Kind::Folder, 0) {
+    let child = match open_child(held, name) {
         Ok(child) => child,
         Err(error) if absent(&error) => return Ok(Child::Missing(chain)),
         Err(_) => return Err(Untrusted::Io),
@@ -160,6 +160,51 @@ mod tests {
             Some(Untrusted::Unsafe),
             "others may add a folder"
         );
+    }
+
+    #[test]
+    fn a_child_is_opened_in_the_held_folder_after_its_path_is_redirected() {
+        let (_scratch, anchor) = anchor("anchor-relative");
+        fs::create_dir(anchor.join("kept")).expect("a folder in the held anchor");
+        let held = hold_chain(&anchor)
+            .expect("the anchor chain")
+            .pop()
+            .expect("the anchor itself");
+        let moved = anchor.with_file_name("moved");
+        fs::rename(&anchor, &moved).expect("move the held anchor");
+        fs::create_dir_all(anchor.join("planted")).expect("a replacement holding another child");
+        let kept = open_child(&held, "kept").expect("the held folder's own child");
+        assert_eq!(
+            super::super::same_final_path(&kept, &moved.join("kept")),
+            Ok(true)
+        );
+        assert_eq!(
+            open_child(&held, "planted")
+                .map(drop)
+                .map_err(|error| error.raw_os_error()),
+            Err(ERROR_FILE_NOT_FOUND.try_into().ok()),
+            "the replacement's child isn't in the held folder"
+        );
+    }
+
+    #[test]
+    fn only_a_missing_name_is_absence() {
+        use windows_sys::Win32::Foundation::{
+            STATUS_ACCESS_DENIED, STATUS_NO_SUCH_FILE, STATUS_OBJECT_NAME_NOT_FOUND,
+            STATUS_OBJECTID_NOT_FOUND,
+        };
+        for (status, missing) in [
+            (STATUS_OBJECT_NAME_NOT_FOUND, true),
+            (STATUS_NO_SUCH_FILE, true),
+            (STATUS_OBJECTID_NOT_FOUND, false),
+            (STATUS_ACCESS_DENIED, false),
+        ] {
+            assert_eq!(
+                absent(&super::super::status_error(status)),
+                missing,
+                "{status:#x}"
+            );
+        }
     }
 
     #[test]

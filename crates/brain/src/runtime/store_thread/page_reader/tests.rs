@@ -680,15 +680,23 @@ fn a_build_that_arrived_while_chatgpt_was_refused_reads_nothing_for_it() {
         };
         blocked.arrived = crate::coordinator::Arrived::blocked();
         assert!(running.thread.send(StoreOp::BuildContext(blocked)));
-        let reply = running.ack();
-        let failed = matches!(
-            reply,
-            Input::ContextBuilt(ContextBuilt {
-                result: Err(Unbuilt::Failed),
-                ..
-            })
-        );
-        assert_eq!(failed, refused, "{kind:?}");
+        let Input::ContextBuilt(ContextBuilt { result, .. }) = running.ack() else {
+            panic!("a build answers with its context");
+        };
+        if refused {
+            assert!(matches!(result, Err(Unbuilt::Failed)), "{kind:?}");
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Ok(crate::context::Built {
+                        recovered_context: None,
+                        ..
+                    })
+                ),
+                "{kind:?}"
+            );
+        }
     }
     running.thread.close().blocking_recv().expect("closed");
 }

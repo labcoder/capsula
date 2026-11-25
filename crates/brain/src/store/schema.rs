@@ -8,6 +8,11 @@ use super::StoreError;
 pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
 const ORDINARY_VERSION: usize = MIGRATIONS.len();
 const RECOVERY_VERSION: usize = 12;
+// shortcut: an ordinary V12 would collide with recovery; store.md says how it moves past it.
+const _: () = assert!(
+    ORDINARY_VERSION < RECOVERY_VERSION,
+    "an ordinary migration reached the recovery version"
+);
 
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.

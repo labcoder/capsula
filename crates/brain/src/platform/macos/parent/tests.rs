@@ -240,6 +240,89 @@ async fn native_idle_exit_wakes_with_transport_still_open() {
     assert_eq!(*loss.borrow(), Verdict::Exited);
 }
 
+#[tokio::test]
+async fn the_watch_latches_its_loss_before_waking_so_a_later_claim_fails() {
+    for claim_first in [true, false] {
+        let mut child = OwnedChild::start();
+        let pid = child.0.id();
+        let (_, watch) = ParentWatch::arm_with(
+            || pid,
+            |armed, send| thread::Builder::new().spawn(move || armed.run(&send, || pid)),
+        )
+        .unwrap_or_else(|reason| panic!("owned child watch refused: {reason}"));
+        let shell = ShellProcess::parent(pid, watch);
+        let mut loss = shell.loss().expect("a parent watch has a receiver");
+        let claimed = claim_first.then(|| shell.claim_commit().is_some());
+        assert_eq!(shell.fence(), Ok(()));
+        drop(child.0.stdin.take());
+        assert_eq!(
+            tokio::time::timeout(BOUND, Verdict::wait(&mut loss)).await,
+            Ok(Verdict::Exited)
+        );
+        child.assert_success();
+        assert_eq!(claimed, claim_first.then_some(true));
+        assert!(
+            shell.claim_commit().is_none(),
+            "a claim after the published loss fails"
+        );
+        assert_eq!(shell.fence(), Err(Verdict::Exited));
+    }
+}
+
+#[test]
+fn the_loss_is_latched_while_its_publication_is_still_held() {
+    let mut child = OwnedChild::start();
+    let pid = child.0.id();
+    let (_, watch) = ParentWatch::arm_with(
+        || pid,
+        |armed, send| thread::Builder::new().spawn(move || armed.run(&send, || pid)),
+    )
+    .unwrap_or_else(|reason| panic!("owned child watch refused: {reason}"));
+    let gate = std::sync::Arc::clone(&watch.gate);
+    let shell = ShellProcess::parent(pid, watch);
+    let loss = shell.loss().expect("a parent watch has a receiver");
+    let held = loss.borrow();
+    drop(child.0.stdin.take());
+    let deadline = Instant::now() + BOUND;
+    while !gate.lost() {
+        assert!(
+            Instant::now() < deadline,
+            "the loss must be latched before the watch can publish"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(*held, Verdict::Watching, "publication is still held");
+    assert!(shell.claim_commit().is_none());
+    drop(held);
+    while *loss.borrow() == Verdict::Watching {
+        assert!(Instant::now() < deadline, "the held publication completes");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(*loss.borrow(), Verdict::Exited);
+    child.assert_success();
+}
+
+#[tokio::test]
+async fn a_watch_that_closed_while_watching_fails_the_fence_after_the_claim() {
+    let pid = std::process::id();
+    let (_, watch) = ParentWatch::arm_with(
+        || pid,
+        |armed, send| thread::Builder::new().spawn(move || drop((armed, send))),
+    )
+    .unwrap_or_else(|reason| panic!("own process watch refused: {reason}"));
+    let shell = ShellProcess::parent(pid, watch);
+    let mut loss = shell.loss().expect("a parent watch has a receiver");
+    assert_eq!(
+        tokio::time::timeout(BOUND, Verdict::wait(&mut loss)).await,
+        Ok(Verdict::Unconfirmed(Unconfirmed::Watch))
+    );
+    assert!(
+        shell.claim_commit().is_some(),
+        "a watch that never published latched no loss"
+    );
+    assert_eq!(shell.fence(), Err(Verdict::Unconfirmed(Unconfirmed::Watch)));
+}
+
 #[test]
 fn arm_refuses_invalid_lineage_and_thread_failure() {
     assert_eq!(

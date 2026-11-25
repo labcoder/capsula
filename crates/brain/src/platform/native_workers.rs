@@ -12,8 +12,8 @@ pub(crate) enum ClaudeSetting {
     Disabled,
 }
 
-pub(crate) fn claude_setting(config: &Config) -> ClaudeSetting {
-    if !super::supports(Mode::Detached) {
+pub(crate) fn claude_setting(config: &Config, mode: Mode) -> ClaudeSetting {
+    if !super::supports(mode) {
         return ClaudeSetting::Disabled;
     }
     let enabled = config.claude_code_enabled();
@@ -34,8 +34,10 @@ pub(crate) struct Prepared {
 pub(crate) fn prepare(
     brain: &mut Brain,
     setting: ClaudeSetting,
+    mode: Mode,
 ) -> Result<(Arc<Job>, Prepared), BrainError> {
-    super::require_mode(Mode::Detached).map_err(BrainError::Helpers)?;
+    // First, so a build without containment for this mode removes nothing.
+    super::require_mode(mode).map_err(BrainError::Helpers)?;
     let models = super::data_dir().map(|data| data.join(kumochi_protocol::voice::MODELS_DIR));
     let stuck = models
         .as_deref()
@@ -172,9 +174,37 @@ async fn requested_native_workers_refuse_without_containment() {
 
     let scratch = crate::test_support::Scratch::new("native-worker-refusal");
     let mut brain = crate::test_support::brain(&scratch, "");
-    let result = prepare(&mut brain, ClaudeSetting::Enabled);
+    let results = [Mode::Detached, Mode::ParentBound]
+        .map(|mode| prepare(&mut brain, ClaudeSetting::Enabled, mode));
+    brain.close().await;
+    for result in results {
+        assert!(
+            matches!(result, Err(BrainError::Helpers(error)) if error.kind() == ErrorKind::Unsupported)
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+#[tokio::test]
+async fn the_running_mode_decides_the_claude_setting_and_the_helpers() {
+    use kumochi_protocol::message::ThreadId;
+    use std::io::ErrorKind;
+
+    let scratch = crate::test_support::Scratch::new("native-worker-mode");
+    let config = Config::load(Some(scratch.dir().to_owned()), ThreadId(1));
+    assert!(matches!(
+        claude_setting(&config, Mode::Detached),
+        ClaudeSetting::Enabled
+    ));
+    assert!(matches!(
+        claude_setting(&config, Mode::ParentBound),
+        ClaudeSetting::Disabled
+    ));
+    let mut brain = crate::test_support::brain(&scratch, "");
+    let result = prepare(&mut brain, ClaudeSetting::Enabled, Mode::ParentBound);
     brain.close().await;
     assert!(
-        matches!(result, Err(BrainError::Helpers(error)) if error.kind() == ErrorKind::Unsupported)
+        matches!(result, Err(BrainError::Helpers(error)) if error.kind() == ErrorKind::Unsupported),
+        "a mode without containment refuses before the removal pass and the Job"
     );
 }
