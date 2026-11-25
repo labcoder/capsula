@@ -20,6 +20,11 @@ distinguish this by exit status 69. The shell's detached launcher doesn't observ
 this does not add a non-Windows shell launch path. The library's brain, bridge and screen entries
 return an unsupported error, while fixture tests still exercise shared policy.
 
+The brain's platform module assembles native workers. On Windows it retries pending voice-model
+removals before creating the brain Job, then attaches voice and Claude Code before shared startup
+starts the screen worker and publishes the capability. Without native containment, worker
+assembly refuses; it does not fall back to uncontained workers.
+
 The dormant Darwin parent watch supplies exit evidence for a future parent-bound session. It
 registers just the original parent, verifies the kernel's receipt and checks lineage again
 before arming. Only that registration's `NOTE_EXIT` proves exit. If lineage changes without
