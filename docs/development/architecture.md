@@ -148,7 +148,8 @@ folder there must pass the same private-folder checks. `Support::try_setup_guard
 nonblocking exclusive `flock` on a fresh open of the held folder. It is per user and coarser than
 the Windows guard, since every edition and anything else that locks Application Support contends
 for it. Closing the guard or its holder's exit releases it, and `Busy` says nothing about who
-holds it. Nothing calls these yet.
+holds it. `open_shell_storage` starts with `admit_support`; the product-folder lookup and the
+guard have no caller yet.
 
 Linux is a build and test host for `shell-core`, not a supported runtime. Its native
 IPC, process launch, credential storage, file logging, and audio entry points return
