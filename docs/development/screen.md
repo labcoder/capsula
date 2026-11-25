@@ -255,6 +255,34 @@ sequenceDiagram
   W-->>B: Acquired(FrameMeta), then Complete, or a refusal
 ```
 
+## macOS Screen Recording consent
+
+Dormant: `crates/shell/src/screen_access.rs` is built on macOS only and nothing constructs it.
+It is for the connected Mac shell, once that shell and its worker are admitted; the disconnected
+dock, Windows and the brain have no route to it.
+
+The view explains why access is needed, in Kumochi's own window, and asks macOS through
+`CGRequestScreenCaptureAccess` only from a separate press in the active window. An inactive
+press or GPUI's focusing click asks only for the app and window to come forward (`App::activate`,
+`Window::activate_window`), even if the window became active before mouse-up. Neither call
+confirms activation and nothing asks later on its own. One launch asks at most once: the state
+is a GPUI global, so re-rendering or reopening the view can't ask again. A false answer is not a
+denial, because macOS may still be
+showing its dialog or may apply the grant only after a relaunch. The view rechecks with the
+nonprompting `CGPreflightScreenCaptureAccess` when it opens and whenever its window becomes
+active, never per frame.
+
+While access isn't granted, the view offers **Open Screen Recording settings**, which opens the
+privacy pane's URL only when pressed. That URL is best effort, and `open_url` returns no receipt,
+so the manual path **System Settings → Privacy & Security → Screen & System Audio Recording**
+(or **Screen Recording** if that's the label shown) is always shown. macOS decides whether and
+where its dialog appears and when a grant takes effect, and only the person grants access. A grant
+here doesn't start or enable capture: the worker's own checks above still decide, and this view
+doesn't show that the packaged worker sees the grant the Kumochi window asked for.
+
+Before making the view reachable, verify that a queued action can't request access after the exact
+window loses key status. GPUI's active flag is a cached window event, not a live focus receipt.
+
 ## Masking and encoding
 
 The portable pixel path borrows a committed `RawFrame` through `sanitize`. It clips every

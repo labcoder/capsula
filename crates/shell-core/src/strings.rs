@@ -245,6 +245,14 @@ texts! {
     ScreenHistoryChanged => "screen-history-changed",
     ScreenNoteCant => "screen-note-cant",
     ScreenNoteCan => "screen-note-can",
+    ScreenAccessTitle => "screen-access-title",
+    ScreenAccessExplain => "screen-access-explain",
+    ScreenAccessRequest => "screen-access-request",
+    ScreenAccessForward => "screen-access-forward",
+    ScreenAccessPending => "screen-access-pending",
+    ScreenAccessOpenSettings => "screen-access-open-settings",
+    ScreenAccessPath => "screen-access-path",
+    ScreenAccessGranted => "screen-access-granted",
     MarksSkipped => "marks-skipped",
     VoiceRestartRequired => "voice-restart-required",
     VoiceInstalledFailed => "voice-installed-failed",
@@ -498,6 +506,13 @@ impl Strings {
         let mut args = FluentArgs::new();
         args.set("app", kumochi_protocol::constants::DISPLAY_NAME);
         self.format(help.id(), Some(&args))
+    }
+
+    /// A text that names the product, with the name from the constants file.
+    pub fn with_app(&self, text: Text) -> String {
+        let mut args = FluentArgs::new();
+        args.set("app", kumochi_protocol::constants::DISPLAY_NAME);
+        self.format(text.id(), Some(&args))
     }
 
     /// Loads the English catalog compiled into the binary.
@@ -759,6 +774,18 @@ mod tests {
             format!(
                 "Also show {} in the taskbar",
                 kumochi_protocol::constants::DISPLAY_NAME
+            )
+        );
+    }
+
+    #[test]
+    fn the_screen_access_texts_name_the_product() {
+        let strings = Strings::english();
+        let app = kumochi_protocol::constants::DISPLAY_NAME;
+        assert_eq!(
+            strings.with_app(Text::ScreenAccessPending),
+            format!(
+                "Screen capture stays off until you allow {app} in Screen Recording settings. If access still doesn't show after you allow it, quit and reopen {app}."
             )
         );
     }

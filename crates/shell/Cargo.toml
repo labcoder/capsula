@@ -31,6 +31,10 @@ zeroize.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-pre-macos = "=0.3.10"
 kumochi-storage = { path = "../storage" }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CGWindow",
+] }
 time = "0.3.55"
 tracing-subscriber.workspace = true
 
