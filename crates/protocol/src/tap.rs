@@ -169,6 +169,8 @@ impl Tapped for ControlToShell {
             Self::VoiceHoldStopAccepted { .. } => "VoiceHoldStopAccepted",
             Self::ScreenHolds(_) => "ScreenHolds",
             Self::HoldScreen { .. } => "HoldScreen",
+            Self::FixtureEngineActive => "FixtureEngineActive",
+            Self::ShellTuning { .. } => "ShellTuning",
         }
     }
 

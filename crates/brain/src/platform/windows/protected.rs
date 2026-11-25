@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStringExt as _;
-use std::os::windows::fs::OpenOptionsExt as _;
+use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 
@@ -32,7 +32,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::UI::Shell::FOLDERID_Profile;
 
-use crate::platform::Untrusted;
+use crate::platform::{FolderId, Untrusted};
 
 mod models;
 pub(crate) use models::{
@@ -245,6 +245,31 @@ fn listing(entry: &File, path: &Path, share: u32) -> Result<File, Untrusted> {
         return Err(Untrusted::Reparse);
     }
     Ok(listing)
+}
+
+/// The folder at `dir` itself, not a reparse point, by its volume and file ID. It opens with every
+/// share mode, so it never stands in another opener's way.
+pub(crate) fn folder_id(dir: &Path) -> Option<FolderId> {
+    let folder = File::options()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir)
+        .ok()?;
+    let metadata = folder.metadata().ok()?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return None;
+    }
+    held_folder_id(&folder)
+}
+
+/// The identity of what `held` is open on, by its volume and file ID, to compare with [`folder_id`].
+pub(crate) fn held_folder_id(held: &File) -> Option<FolderId> {
+    let (volume, file) = file_id(held).ok()?;
+    Some(FolderId {
+        volume,
+        file: u128::from_ne_bytes(file),
+    })
 }
 
 /// The volume and file ID of what `opened` is open on.

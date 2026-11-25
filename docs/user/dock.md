@@ -2,14 +2,16 @@
 
 The dock is a short line at the top center of your screen's work area. Move the pointer onto
 it to open the peek: Kumo beside a small status panel, which shows Starting, Ready,
-Reconnecting or Offline. Move away from both the dock and the peek to close it after a short
+Reconnecting or Offline. The space between the line and the open peek keeps it open as you
+move the pointer across. Move away from the dock, peek and gap to close it after a short
 grace period. Opening the peek doesn't take focus from your current app. Pressing the line
 does nothing for now.
 
 The peek's buttons are **Chat…**, which opens the typing panel in the peek's place,
 **Tasks…** and **Settings…**.
 
-Only a thin band around the line takes the pointer: clicks beside it reach the app underneath.
+The thin band around the line takes clicks. The gap keeps the peek open on hover but doesn't
+take clicks away from the app underneath.
 
 The line itself has no label. Its status, Offline, **Check settings** and **Settings not
 saved** show in the peek.

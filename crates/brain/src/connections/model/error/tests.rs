@@ -1,6 +1,6 @@
 use kumochi_protocol::message::{Action, ErrorKey, UserError};
 
-use super::{Code, Failure, Param, ProviderError};
+use super::{Code, Failure, Param, ProviderError, RejectionOrigin};
 
 macro_rules! fixture {
     ($name:literal) => {
@@ -114,7 +114,8 @@ fn each_ledger_code_maps_to_its_recovery_before_its_status() {
             ProviderError {
                 status,
                 code: Some(code),
-                param
+                param,
+                origin: RejectionOrigin::Unproven,
             }
         );
         // The same code inside the stream (200), or under the status with its own fallback
@@ -210,7 +211,8 @@ fn without_a_known_code_the_status_decides_and_never_ends_the_session() {
             ProviderError {
                 status,
                 code,
-                param: None
+                param: None,
+                origin: RejectionOrigin::Unproven,
             },
             "{status}"
         );

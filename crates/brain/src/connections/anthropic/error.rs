@@ -42,6 +42,7 @@ pub struct ProviderFailure {
     status: u16,
     kind: Kind,
     body: Secret<Zeroizing<Vec<u8>>>,
+    pub(crate) origin: model::error::RejectionOrigin,
 }
 
 impl ProviderFailure {
@@ -59,6 +60,7 @@ impl ProviderFailure {
             status,
             kind: classify(status, value.as_ref()),
             body,
+            origin: model::error::RejectionOrigin::Unproven,
         })
     }
 
@@ -188,6 +190,7 @@ impl Failure {
             status: 200,
             kind: classify(200, Some(event)),
             body: Secret::new(body),
+            origin: model::error::RejectionOrigin::Unproven,
         })
     }
 

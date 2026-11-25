@@ -1,7 +1,7 @@
 use super::pcm::{Format, Packetizer, Sample};
 use super::*;
 use async_channel::Sender;
-use kumochi_protocol::message::MAX_HOLD_CHUNKS;
+use kumochi_protocol::message::{HOLD_START_TIMEOUT_MS, MAX_HOLD_CHUNKS};
 
 #[test]
 fn dropping_an_owner_drains_its_committed_unforwarded_queue() {
@@ -318,7 +318,11 @@ fn prepared() -> (CollectionGate, MicOwner, Sender<MicPcm>, Instant) {
     let at = Instant::now();
     let generation = gate.arm_at(GestureId(7), at).unwrap();
     generation.advance(ARMED, OPENING).unwrap();
-    generation.startup.set(at).unwrap();
+    generation
+        .startup
+        .deadline
+        .set(at + ShellTuning::default().start())
+        .unwrap();
     let (_, running) = async_channel::bounded(1);
     let (_, completion) = async_channel::bounded(1);
     let (output, pcm) = async_channel::bounded(1);
@@ -471,14 +475,14 @@ fn startup_expires_until_ui_acceptance_and_never_releases_device_ownership() {
         assert_eq!(
             owner.generation.mode(
                 &owner.session,
-                at + Duration::from_millis(u64::from(HOLD_START_TIMEOUT_MS - 1))
+                at + Duration::from_millis(HOLD_START_TIMEOUT_MS - 1)
             ),
             Ok(Mode::Preparing)
         );
         assert_eq!(
             owner.generation.mode(
                 &owner.session,
-                at + Duration::from_millis(u64::from(HOLD_START_TIMEOUT_MS))
+                at + Duration::from_millis(HOLD_START_TIMEOUT_MS)
             ),
             Err(MicError::Deadline)
         );
@@ -496,10 +500,36 @@ fn startup_expires_until_ui_acceptance_and_never_releases_device_ownership() {
     assert_eq!(
         owner.generation.mode(
             &owner.session,
-            at + Duration::from_millis(u64::from(HOLD_START_TIMEOUT_MS))
+            at + Duration::from_millis(HOLD_START_TIMEOUT_MS)
         ),
         Ok(Mode::Collecting)
     );
+}
+
+#[test]
+fn tuned_start_budget_begins_at_the_single_reservation_not_at_key_down() {
+    let gate = CollectionGate::default();
+    let chord = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
+    let mic = gate.arm_at(GestureId(1), chord).unwrap();
+    let alive = AtomicBool::new(true);
+    let start = Instant::now();
+    let _reserved = mic
+        .reserve_with_tuning(ShellTuning::from_ms(2000, 500).unwrap())
+        .unwrap();
+    let reserved_by = Instant::now();
+    assert!(matches!(
+        mic.reserve_with_tuning(ShellTuning::default()),
+        Err(MicError::Stale)
+    ));
+    assert_eq!(
+        mic.mode(&alive, start + Duration::from_millis(1999)),
+        Ok(Mode::Preparing)
+    );
+    assert_eq!(
+        mic.mode(&alive, reserved_by + Duration::from_secs(2)),
+        Err(MicError::Deadline)
+    );
+    assert_eq!(gate.arm(GestureId(2)).unwrap_err(), MicError::Stale);
 }
 
 #[test]
@@ -828,9 +858,11 @@ fn outer_audio_carriers_redact_text_and_byte_list_sentinels() {
     assert!(!debug.contains(&format!("{marker:?}")));
 }
 
+const ACCEPTED_QPC: u64 = 100;
 const CLEAN: PacketStatus = PacketStatus {
     frames: 0,
     position: 0,
+    captured_qpc_100ns: ACCEPTED_QPC,
     discontinuity: false,
     timestamp_error: false,
 };
@@ -858,16 +890,21 @@ fn collect(packets: &[(bool, bool, &[i16], PacketStatus)]) -> Result<Vec<i16>, M
     boundary.started(start);
     let mut pcm = Vec::new();
     let mut position = 0;
-    for (index, &(live, drained, samples, flags)) in packets.iter().enumerate() {
+    for (index, &(live, after_acceptance, samples, flags)) in packets.iter().enumerate() {
         let frames = u32::try_from(samples.len()).unwrap();
         position += flags.position;
         let status = PacketStatus {
             frames,
             position,
+            captured_qpc_100ns: if after_acceptance {
+                ACCEPTED_QPC
+            } else {
+                ACCEPTED_QPC - 1
+            },
             ..flags
         };
         position += u64::from(frames);
-        if boundary.packet(live, drained, status)? {
+        if boundary.packet(live.then_some(ACCEPTED_QPC), status)? {
             boundary.kept(
                 status,
                 start + Duration::from_millis(u64::try_from(index).unwrap() * 10),
@@ -880,16 +917,38 @@ fn collect(packets: &[(bool, bool, &[i16], PacketStatus)]) -> Result<Vec<i16>, M
 }
 
 #[test]
+fn first_hold_after_idle_unload_keeps_the_first_buffer_after_acceptance() {
+    assert_eq!(
+        collect(&[
+            (false, false, &[91], CLEAN),
+            (true, false, &[92, 93], CLEAN),
+            (true, true, &[11, 12], CLEAN),
+            (true, true, &[21, 22], CLEAN),
+        ]),
+        Ok(vec![11, 12, 21, 22])
+    );
+}
+
+#[test]
 fn startup_discards_the_packet_that_may_straddle_collection_acceptance() {
     let mut boundary = PacketBoundary::default();
-    let mut packet =
-        |live, drained, frames| boundary.packet(live, drained, PacketStatus { frames, ..CLEAN });
-    assert_eq!(packet(false, false, 7), Ok(false));
-    assert_eq!(packet(true, false, 7), Ok(false));
-    assert_eq!(packet(true, true, 0), Ok(false));
-    assert_eq!(packet(true, true, 7), Ok(false));
-    assert_eq!(packet(true, true, 7), Ok(true));
-    assert_eq!(packet(false, true, 7), Ok(false));
+    let mut packet = |cutoff, captured_qpc_100ns, frames| {
+        boundary.packet(
+            cutoff,
+            PacketStatus {
+                frames,
+                captured_qpc_100ns,
+                ..CLEAN
+            },
+        )
+    };
+    let cutoff = Some(ACCEPTED_QPC);
+    assert_eq!(packet(None, ACCEPTED_QPC - 1, 7), Ok(false));
+    assert_eq!(packet(cutoff, ACCEPTED_QPC - 1, 7), Ok(false));
+    assert_eq!(packet(cutoff, ACCEPTED_QPC, 0), Ok(false));
+    assert_eq!(packet(cutoff, ACCEPTED_QPC, 7), Ok(true));
+    assert_eq!(packet(cutoff, ACCEPTED_QPC + 1, 7), Ok(true));
+    assert_eq!(packet(None, ACCEPTED_QPC + 1, 7), Ok(false));
 }
 
 #[test]
@@ -900,7 +959,7 @@ fn discarded_and_first_kept_discontinuities_preserve_every_later_packet() {
             (false, false, &[92], GAP),
             (true, false, &[93], GAP),
             (true, true, &[], GAP),
-            (true, true, &[11], GAP),
+            (true, false, &[11], GAP),
             (true, true, &[21, 22], GAP),
             (true, true, &[31], CLEAN),
             (true, true, &[41, 42], CLEAN),
@@ -917,7 +976,7 @@ fn first_kept_packet_can_be_flagged_after_a_clean_or_empty_startup() {
             packets.push((true, true, &[], CLEAN));
         }
         packets.extend_from_slice(&[
-            (true, true, &[11], CLEAN),
+            (true, false, &[11], CLEAN),
             (true, true, &[21], GAP),
             (true, true, &[31, 32], CLEAN),
             (true, true, &[41], CLEAN),
@@ -930,7 +989,7 @@ fn first_kept_packet_can_be_flagged_after_a_clean_or_empty_startup() {
 fn discontinuity_flags_without_lost_frames_keep_every_kept_packet() {
     for clean in [0, 1] {
         let mut packets: Vec<(bool, bool, &[i16], PacketStatus)> =
-            vec![(true, true, &[11], GAP), (true, true, &[21], CLEAN)];
+            vec![(true, false, &[11], GAP), (true, true, &[21], CLEAN)];
         for _ in 0..clean {
             packets.push((true, true, &[31], CLEAN));
         }
@@ -947,7 +1006,7 @@ fn discontinuity_flags_without_lost_frames_keep_every_kept_packet() {
 
     assert_eq!(
         collect(&[
-            (true, true, &[11], CLEAN),
+            (true, false, &[11], CLEAN),
             (true, true, &[21], CLEAN),
             (true, true, &[31], CLEAN),
             (true, true, &[41], GAP),
@@ -960,7 +1019,7 @@ fn discontinuity_flags_without_lost_frames_keep_every_kept_packet() {
 #[test]
 fn a_hold_mostly_lost_behind_rare_flags_is_discarded() {
     let mut packets: Vec<(bool, bool, &[i16], PacketStatus)> =
-        vec![(true, true, &[11], CLEAN), (true, true, &[21], CLEAN)];
+        vec![(true, false, &[11], CLEAN), (true, true, &[21], CLEAN)];
     for _ in 0..3 {
         packets.push((true, true, &[31], lost(83)));
         packets.extend(std::iter::repeat_n((true, true, &[41][..], CLEAN), 9));
@@ -1002,7 +1061,7 @@ fn timestamps_remain_fatal_before_during_and_after_the_boundary() {
 
 #[test]
 fn sparse_gaps_in_a_long_hold_do_not_accumulate_into_a_lifetime_limit() {
-    let mut packets: Vec<(bool, bool, &[i16], PacketStatus)> = vec![(true, true, &[11], CLEAN)];
+    let mut packets: Vec<(bool, bool, &[i16], PacketStatus)> = vec![(true, false, &[11], CLEAN)];
     packets.extend((0..3_000).map(|index| {
         (
             true,
@@ -1020,16 +1079,16 @@ fn lost_frames_pass_at_a_quarter_and_fail_one_frame_above() {
     let start = Instant::now();
     boundary.started(start);
     assert_eq!(
-        boundary.packet(false, false, PacketStatus { frames: 7, ..GAP }),
+        boundary.packet(None, PacketStatus { frames: 7, ..GAP }),
         Ok(false)
     );
     assert_eq!(
         boundary.packet(
-            true,
-            true,
+            Some(ACCEPTED_QPC),
             PacketStatus {
                 frames: 9,
                 position: 7,
+                captured_qpc_100ns: ACCEPTED_QPC - 1,
                 ..GAP
             }
         ),
@@ -1044,7 +1103,7 @@ fn lost_frames_pass_at_a_quarter_and_fail_one_frame_above() {
             position,
             ..flags
         };
-        assert_eq!(boundary.packet(true, true, packet), Ok(true));
+        assert_eq!(boundary.packet(Some(ACCEPTED_QPC), packet), Ok(true));
         boundary.kept(
             packet,
             start + Duration::from_millis(u64::try_from(index).unwrap() * 10),
@@ -1063,12 +1122,12 @@ fn lost_frames_pass_at_a_quarter_and_fail_one_frame_above() {
         position: 541,
         ..GAP
     };
-    assert_eq!(boundary.packet(true, true, packet), Ok(true));
+    assert_eq!(boundary.packet(Some(ACCEPTED_QPC), packet), Ok(true));
     boundary.kept(packet, start + Duration::from_millis(30));
     assert_eq!(boundary.missing_frames, 11);
     assert_eq!(boundary.finish(Ok(())), Err(MicError::Discontinuity));
     assert_eq!(
-        boundary.packet(true, true, CLEAN),
+        boundary.packet(Some(ACCEPTED_QPC), CLEAN),
         Err(MicError::Discontinuity)
     );
     assert_eq!(boundary.finish(Ok(())), Err(MicError::Discontinuity));
@@ -1079,13 +1138,12 @@ fn timestamp_and_native_source_failures_stay_failed_after_clean_input() {
     for reason in [MicError::Unavailable, MicError::Format] {
         let mut boundary = PacketBoundary::default();
         let packet = PacketStatus { frames: 3, ..CLEAN };
-        assert_eq!(boundary.packet(true, true, packet), Ok(false));
-        assert_eq!(boundary.packet(true, true, packet), Ok(true));
+        assert_eq!(boundary.packet(Some(ACCEPTED_QPC), packet), Ok(true));
         boundary.kept(packet, Instant::now());
         assert_eq!(boundary.kept_frames, 3);
         assert_eq!(boundary.finish(Err(reason)), Err(reason));
         assert_eq!(
-            boundary.packet(true, true, PacketStatus { frames: 1, ..CLEAN }),
+            boundary.packet(Some(ACCEPTED_QPC), PacketStatus { frames: 1, ..CLEAN }),
             Err(reason)
         );
         assert_eq!(boundary.finish(Ok(())), Err(reason));
@@ -1093,8 +1151,7 @@ fn timestamp_and_native_source_failures_stay_failed_after_clean_input() {
     let mut boundary = PacketBoundary::default();
     assert_eq!(
         boundary.packet(
-            true,
-            true,
+            Some(ACCEPTED_QPC),
             PacketStatus {
                 frames: 1,
                 discontinuity: true,
@@ -1104,19 +1161,60 @@ fn timestamp_and_native_source_failures_stay_failed_after_clean_input() {
         Err(MicError::Timestamp)
     );
     assert_eq!(
-        boundary.packet(true, true, PacketStatus { frames: 1, ..CLEAN }),
+        boundary.packet(Some(ACCEPTED_QPC), PacketStatus { frames: 1, ..CLEAN }),
         Err(MicError::Timestamp)
     );
     assert_eq!(boundary.finish(Ok(())), Err(MicError::Timestamp));
 }
 
 #[test]
+fn a_missing_capture_timestamp_does_not_admit_a_later_packet() {
+    let mut boundary = PacketBoundary::default();
+    let packet = PacketStatus { frames: 1, ..CLEAN };
+    assert_eq!(
+        boundary.packet(
+            Some(ACCEPTED_QPC),
+            PacketStatus {
+                captured_qpc_100ns: 0,
+                ..packet
+            }
+        ),
+        Err(MicError::Timestamp)
+    );
+    assert_eq!(
+        boundary.packet(Some(ACCEPTED_QPC), packet),
+        Err(MicError::Timestamp)
+    );
+}
+
+#[test]
+fn unconfirmed_teardown_outweighs_a_latched_timestamp_error() {
+    let mut boundary = PacketBoundary::default();
+    let packet = PacketStatus { frames: 1, ..CLEAN };
+    assert_eq!(
+        boundary.packet(
+            Some(ACCEPTED_QPC),
+            PacketStatus {
+                captured_qpc_100ns: 0,
+                ..packet
+            }
+        ),
+        Err(MicError::Timestamp)
+    );
+    assert_eq!(
+        boundary.finish(Err(MicError::Unconfirmed)),
+        Err(MicError::Unconfirmed)
+    );
+    assert_eq!(boundary.finish(Ok(())), Err(MicError::Unconfirmed));
+}
+
+#[test]
 fn revocation_does_not_reclassify_discarded_packets_as_before_listening() {
     let mut boundary = PacketBoundary::default();
     let packet = PacketStatus { frames: 3, ..CLEAN };
-    assert_eq!(boundary.packet(false, false, packet), Ok(false));
+    assert_eq!(boundary.packet(None, packet), Ok(false));
     boundary.observe(Mode::Collecting);
-    assert_eq!(boundary.packet(false, false, packet), Ok(false));
+    assert_eq!(boundary.packet(None, packet), Ok(false));
     assert_eq!(boundary.discarded_before_listening, 1);
     assert_eq!(boundary.kept_packets, 0);
     assert_eq!(boundary.kept_frames, 0);

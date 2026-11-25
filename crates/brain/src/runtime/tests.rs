@@ -759,6 +759,56 @@ fn outcome(state: &str, reason: &str) -> (String, Option<String>) {
     (state.to_owned(), Some(reason.to_owned()))
 }
 
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn only_the_debug_fixture_engine_is_announced_on_each_connection() {
+    use super::Selected;
+
+    let fixture = || Box::new(Fixture::parse("").unwrap());
+    let cases = [
+        (Selected::DevFixture(fixture()), 1),
+        (Selected::Fixture(fixture()), 0),
+        (
+            Selected::Account {
+                engine: fixture(),
+                asks: mpsc::unbounded_channel().1,
+            },
+            0,
+        ),
+        #[cfg(windows)]
+        (Selected::DrawReplay(fixture()), 0),
+    ];
+    let mut tap = Tap::from_env();
+    for (selected, expected) in cases {
+        let scratch = Scratch::new("fixture-engine-announcement");
+        let mut brain =
+            test_support::brain_on(&scratch, selected, test_support::accounts(&scratch));
+        for _ in 0..2 {
+            let ((control, data), mut shell) = duplex();
+            let client = async {
+                let mut announced = 0;
+                loop {
+                    match timeout(PATIENCE, shell.next_control())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                    {
+                        Some(ControlToShell::FixtureEngineActive) => announced += 1,
+                        Some(ControlToShell::Scenes { .. }) => break,
+                        Some(_) => {}
+                        None => panic!("connection closed before startup finished"),
+                    }
+                }
+                assert_eq!(announced, expected);
+                drop(shell);
+            };
+            let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+            assert_eq!(ended, Ended::Lost);
+        }
+        brain.close().await;
+    }
+}
+
 #[tokio::test]
 async fn submit_numbers_reach_refusals_and_only_the_first_run_state_in_fifo_order() {
     use kumochi_protocol::message::{RunOrigin, ScreenChoice};

@@ -17,6 +17,7 @@ use gpui_kit::{
 
 use super::{
     Presence,
+    escape::{PlainEscape, Presses},
     voice::{Gates, HoldBack, Stamp},
 };
 use crate::escape::{SpeechEscapeOwner, SpeechPress};
@@ -28,9 +29,7 @@ use crate::link::{InputCancel, LinkHandle};
 use crate::platform::{Deliver, EventTime, INPUT_COUNTER, cursor_position};
 use crate::strings::Text;
 use kumochi_protocol::geometry::PhysicalPoint;
-use kumochi_protocol::message::{GestureId, RunId, ThreadId};
-
-pub(super) type SpeechLease = Rc<Cell<Option<(u64, RunId, Instant)>>>;
+use kumochi_protocol::message::{GestureId, ThreadId};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum EscapeScope {
@@ -56,6 +55,7 @@ struct PendingGesture {
     /// An Esc press: every retirement waits until this delivery is decided.
     escape: Option<Rc<HoldBack>>,
     speech: Option<SpeechPress>,
+    plain: Option<PlainEscape>,
     collection: u64,
 }
 
@@ -141,7 +141,7 @@ pub(super) fn deliver(
     target: Rc<Cell<(Option<ThreadId>, u64)>>,
     paused: Rc<Cell<bool>>,
     gates: Gates,
-    (speech, escape_scope): (SpeechLease, Rc<Cell<EscapeScope>>),
+    escape_presses: Presses,
     cx: &mut App,
 ) -> Deliver {
     let (deferred, pending) = async_channel::unbounded::<Pending>();
@@ -167,6 +167,13 @@ pub(super) fn deliver(
                 CancelDispatch::Clear
             };
             if let Some(gesture) = gesture {
+                #[cfg(test)]
+                if gesture.plain.is_some()
+                    && let Some((arrived, resume)) = PLAIN_ESCAPE_BARRIER.take()
+                {
+                    arrived.try_send(()).expect("the test waits for the plain Esc");
+                    let _resume = resume.recv().await;
+                }
                 loop {
                     match apply(cx, dock, &owner, &gesture, cancel) {
                         Applied::Yes => break,
@@ -188,19 +195,20 @@ pub(super) fn deliver(
     let escaped = Cell::new(None);
     let escape_down = Cell::new(false);
     let recovered_hold = Cell::new(None);
+    let modifier_presses = Cell::new([None; 2]);
     let input = Rc::new(Cell::new((0_u64, 0_u64)));
     let gesture = Cell::new(Gesture::default());
     #[cfg(all(test, not(windows)))]
     let detached = cx.has_global::<super::test_fixture::WithoutDesktop>();
     let reduce: Rc<Reduce> = Rc::new(move |event, mut at| {
         let speech = if event == Event::Escape {
-            let scope = escape_scope.get();
+            let scope = escape_presses.escape_scope.get();
             let owner = if scope == EscapeScope::Pull {
                 SpeechEscapeOwner::Panel
             } else {
                 at.speech_escape_owner
             };
-            let press = SpeechPress::capture(speech.get(), at.instant, owner);
+            let press = SpeechPress::capture(escape_presses.speech.get(), at.instant, owner);
             if scope == EscapeScope::SpeechOnly && press.is_none() {
                 return gesture.get().deadline();
             }
@@ -220,6 +228,7 @@ pub(super) fn deliver(
         #[cfg(test)]
         let qpc = if FAIL_CLOCK.take() { None } else { qpc };
         let Some(qpc) = qpc else {
+            modifier_presses.set([None; 2]);
             tracing::warn!(stage = ?InputStage::Delivery, reason = ?InputReason::ClockUnavailable, "held speech input failed");
             input.set((serial.saturating_add(1), reset.saturating_add(1)));
             if let Some(cancel) = link.revoke_input_for_dispatch() {
@@ -249,6 +258,25 @@ pub(super) fn deliver(
             escaped.set(None);
             escape_down.set(false);
         }
+        let modifier = match event {
+            Event::Key {
+                key: Key::LeftControl,
+                edge,
+            } => Some((0, edge)),
+            Event::Key {
+                key: Key::LeftAlt,
+                edge,
+            } => Some((1, edge)),
+            _ => None,
+        };
+        let mut presses = modifier_presses.get();
+        if matches!(event, Event::Reset | Event::Escape) {
+            presses = [None; 2];
+        } else if let Some((key, Edge::Down)) = modifier
+            && !at.repeated_modifier
+        {
+            presses[key] = at.queued_press;
+        }
         let mut wire_cancel = None;
         if let Event::Key {
             key: Key::Escape(_),
@@ -275,18 +303,29 @@ pub(super) fn deliver(
         let mut state = gesture.get();
         let mut recovered = false;
         let session = link.link_generation();
-        let voice_paused = Cell::new(paused.get() || !link.can_start_voice_gesture(session));
         let delivery = fence.borrow_mut().reduce_with_keyboard_read(
             &mut state,
             event,
             at.instant,
-            &voice_paused,
+            at.queued_press.filter(|_| !at.repeated_modifier),
+            || {
+                (!paused.get()
+                    && link.can_start_voice_gesture(session)
+                    && presses[0]
+                        .zip(presses[1])
+                        .is_some_and(|(control, alt)| link.voice_ready_before(control.min(alt))))
+                .then_some(session)
+            },
             || {
                 let now = at.recovery_time()?;
                 recovered = true;
                 Some(now)
             },
         );
+        if let Some((key, Edge::Up)) = modifier {
+            presses[key] = None;
+        }
+        modifier_presses.set(presses);
         gesture.set(state);
         let mut cancellation = cancelled.is_some();
         for intent in delivery.intents.iter().flatten() {
@@ -301,12 +340,7 @@ pub(super) fn deliver(
                     if recovered {
                         recovered_hold.set(Some(*warm));
                     }
-                    gates.warm(
-                        link.output(),
-                        *warm,
-                        link.link_generation(),
-                        link.choice_revision(),
-                    );
+                    gates.warm(link.output(), *warm, session, link.choice_revision());
                 }
                 Intent::Recognized {
                     gesture,
@@ -395,6 +429,11 @@ pub(super) fn deliver(
             cancelled,
             escape: escape.then(|| gates.hold_back()),
             speech,
+            plain: if escape && cancelled.is_none() && speech.is_none() {
+                escape_presses.plain()
+            } else {
+                None
+            },
             collection: link.microphone_gate().latest(),
             stamp: Stamp {
                 target: target.get(),
@@ -519,6 +558,10 @@ fn stale_hold_escape(owner: &Presence, cancelled: Option<(GestureId, u64)>) -> b
 }
 
 /// Applies effects through a fallible borrow of the app.
+#[expect(
+    clippy::too_many_lines,
+    reason = "a delivery releases its Esc retirement hold only after ordered owner effects"
+)]
 fn apply(
     cx: &mut AsyncApp,
     dock: AnyWindowHandle,
@@ -566,6 +609,7 @@ fn apply(
             let input = pending.input.clone();
             let (escaping, cancelled, speech) =
                 (pending.escape.clone(), pending.cancelled, pending.speech);
+            let (plain, collection) = (pending.plain, pending.collection);
             let escape = escaping.is_some();
             let intents = move |app: &mut App| {
                 #[cfg(all(test, windows))]
@@ -604,11 +648,23 @@ fn apply(
                         }
                         this.voice_delivery(intent, stamp, qpc, pointer, release, cx);
                     }
-                    if escape
-                        && this
-                            .native_escape(cancelled.map(|(gesture, _)| gesture), speech, cx)
-                            .is_err()
+                    if !escape {
+                        return;
+                    }
+                    let result = if matches!(cancel, CancelDispatch::Inline)
+                        || cancelled.is_some()
+                        || speech.is_some()
                     {
+                        this.native_escape(cancelled.map(|(gesture, _)| gesture), speech, cx)
+                    } else if let Some(press) = &plain
+                        && stamp.session == this.link.link_generation()
+                        && collection == this.link.microphone_gate().latest()
+                    {
+                        this.native_plain_escape(press, cx)
+                    } else {
+                        return;
+                    };
+                    if result.is_err() {
                         tracing::error!("can't apply native Escape");
                     }
                 });
@@ -628,13 +684,14 @@ fn apply(
 }
 
 #[cfg(test)]
-type WireCancelBarrier = (async_channel::Sender<()>, async_channel::Receiver<()>);
+type DeliveryBarrier = (async_channel::Sender<()>, async_channel::Receiver<()>);
 
 #[cfg(test)]
 thread_local! {
     pub(super) static FAIL_CLOCK: Cell<bool> = const { Cell::new(false) };
     pub(super) static CLOSE_DELIVERY: Cell<bool> = const { Cell::new(false) };
-    static WIRE_CANCEL_BARRIER: Cell<Option<WireCancelBarrier>> = const { Cell::new(None) };
+    static WIRE_CANCEL_BARRIER: Cell<Option<DeliveryBarrier>> = const { Cell::new(None) };
+    static PLAIN_ESCAPE_BARRIER: Cell<Option<DeliveryBarrier>> = const { Cell::new(None) };
     #[cfg(windows)]
     static BEFORE_DEFERRED_RELEASE: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
 }
@@ -655,6 +712,24 @@ pub(super) fn wire_cancel_before_effects(
     cx.run_until_parked();
     assert_eq!(wire.try_recv(), Ok(()));
     drop(release);
+}
+
+#[cfg(test)]
+pub(super) fn pause_plain_escape(
+    cx: &mut gpui_kit::TestAppContext,
+    press: impl FnOnce(),
+) -> async_channel::Sender<()> {
+    let (arrived, queued) = async_channel::bounded(1);
+    let (release, resume) = async_channel::bounded(1);
+    assert!(
+        PLAIN_ESCAPE_BARRIER
+            .replace(Some((arrived, resume)))
+            .is_none()
+    );
+    cx.update(|_| press());
+    cx.run_until_parked();
+    assert_eq!(queued.try_recv(), Ok(()));
+    release
 }
 
 #[cfg(all(test, windows))]
@@ -695,6 +770,7 @@ pub(super) fn deliver_intent(
         cancelled: None,
         escape: None,
         speech: None,
+        plain: None,
         collection: 0,
     };
     matches!(

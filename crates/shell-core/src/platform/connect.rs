@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
-    AudioSession, ControlToBrain, ControlToShell, DataToBrain, Hello, IssueSession, TextMetricsV1,
+    AudioSession, ControlToBrain, ControlToShell, DataToBrain, Hello, IssueSession, ShellTuning,
+    TextMetricsV1,
 };
 
 use super::{PipeClient, launch_detached};
@@ -40,6 +41,8 @@ pub(crate) enum LinkError {
     Capability(#[from] CredentialError),
     #[error("the brain closed the connection during the handshake")]
     Rejected,
+    #[error("missing or invalid shell tuning")]
+    Tuning,
     #[error("the queued connection attempt expired")]
     ConnectExpired,
     #[error("the brain is from another build")]
@@ -59,6 +62,7 @@ pub(crate) struct Connection {
     pub(crate) data: Arc<PipeClient>,
     pub(crate) issue_origin: IssueSession,
     pub(crate) drawing_font_family: Option<Arc<str>>,
+    pub(crate) tuning: ShellTuning,
 }
 
 /// Connects, starting the brain once if none answers. Legacy uses the deadline for retries;
@@ -78,7 +82,6 @@ pub(crate) fn connect_brain(
     mut text_metrics: impl FnMut(Instant) -> DrawingText,
 ) -> Result<Connection, LinkError> {
     connect_with(
-        audio,
         deadline,
         quitting,
         quit_parked,
@@ -92,14 +95,13 @@ pub(crate) fn connect_brain(
 }
 
 pub(crate) fn connect_with(
-    audio: AudioSession,
     deadline: Instant,
     quitting: impl Fn() -> bool,
     quit_parked: impl Fn(&PipeClient),
     mut handshake: impl FnMut(Option<Instant>) -> Result<Connection, LinkError>,
     mut launch: impl FnMut() -> std::io::Result<()>,
 ) -> Result<Connection, LinkError> {
-    let attempt = (audio == AudioSession::QueuedRequired).then_some(deadline);
+    let attempt = Some(deadline);
     let mut launched = false;
     loop {
         check_attempt(attempt)?;
@@ -179,21 +181,23 @@ pub(crate) fn handshake_pair(
     drawing: DrawingText,
     open_data: impl FnOnce() -> Result<PipeClient, LinkError>,
 ) -> Result<Connection, LinkError> {
-    let mut handshake = HandshakeIo(&control, attempt);
+    let limit = Instant::now() + HANDSHAKE_TIMEOUT;
+    let deadline = Some(attempt.map_or(limit, |end| end.min(limit)));
+    let mut handshake = HandshakeIo(&control, deadline);
     write_control_hello(&mut handshake, hello.clone(), audio, repair_of)?;
     let issue_origin = welcome(&mut handshake)?;
-    check_attempt(attempt)?;
-    let data_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    let data_deadline = attempt.map_or(data_deadline, |deadline| deadline.min(data_deadline));
+    check_attempt(deadline)?;
     let data = open_data()?;
-    let mut handshake = HandshakeIo(&data, Some(data_deadline));
-    write_data_hello(&mut handshake, hello, audio, issue_origin)?;
+    let mut data_handshake = HandshakeIo(&data, deadline);
+    write_data_hello(&mut data_handshake, hello, audio, issue_origin)?;
     let profile = drawing.profile.filter(TextMetricsV1::valid);
     frame::write(
-        &mut handshake,
+        &mut data_handshake,
         &DataToBrain::TextMetrics(profile),
         Pipe::Data,
     )?;
+    let tuning = read_shell_tuning(&mut handshake, issue_origin)?;
+    check_attempt(deadline)?;
     data.set_timeout(None);
     control.set_timeout(None);
     Ok(Connection {
@@ -201,7 +205,22 @@ pub(crate) fn handshake_pair(
         data: Arc::new(data),
         issue_origin,
         drawing_font_family: drawing.font_family,
+        tuning,
     })
+}
+
+pub(crate) fn read_shell_tuning(
+    control: &mut impl Read,
+    origin: IssueSession,
+) -> Result<ShellTuning, LinkError> {
+    match frame::read(control, Pipe::Control)? {
+        Some(ControlToShell::ShellTuning { session, tuning })
+            if session == origin && tuning.valid() =>
+        {
+            Ok(tuning)
+        }
+        _ => Err(LinkError::Tuning),
+    }
 }
 
 fn write_control_hello(
@@ -311,6 +330,8 @@ pub(crate) fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError
             | ControlToShell::VoiceHoldStatus { .. }
             | ControlToShell::VoiceHoldStopAccepted { .. }
             | ControlToShell::ScreenHolds(_)
+            | ControlToShell::FixtureEngineActive
+            | ControlToShell::ShellTuning { .. }
             | ControlToShell::HoldScreen { .. }
             | ControlToShell::Voice(_),
         ) => Err(LinkError::Rejected),

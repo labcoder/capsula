@@ -20,8 +20,9 @@ on both control and data. A correct capability with a wrong control build still 
 zero bytes. The local transport selects the authorization method; a session-bound greeting must
 come from the authenticated pair's own reader, match the build, and carry only that zero
 placeholder on either leg. A nonzero placeholder is refused without capability fallback.
-The bound greeting type cannot be constructed on any platform yet, so neither shell startup
-nor brain admission selects session authorization.
+Only the macOS pair's greeting reads construct a bound greeting, from a frame they opened
+themselves; on other platforms the type has no values. Neither shell startup nor brain
+admission selects session authorization yet.
 
 ## Queued-required session mode (internal)
 
@@ -30,8 +31,9 @@ existing bytes. Both modes follow their data Hello with one drawing-font startup
 The internal queued-required selection instead sends the appended QueuedHello
 on both pipes. Its data Hello echoes this Welcome's incarnation and issue epoch. The brain
 checks the executable, matching build and capability on both legs and the existing same-process
-pairing. It refuses a mixed mode or a data Hello from another session. The queued second leg
-has one deadline for connecting and reading; refusal renews both pipe instances.
+pairing. It refuses a mixed mode or a data Hello from another session. In either mode, one
+absolute deadline covers startup through ShellTuning acceptance; refusal renews both pipe
+instances.
 
 After a deliberate Talk-back switch, the replacement's control greeting names the previous
 pair in `QueuedAudioReconnect`. Its data greeting still echoes the new Welcome. Only a match
@@ -151,8 +153,8 @@ keeps its authenticated process handle: a matching same-live-process receipt or 
 old-process exit can release it, not a timeout or connection replacement. A receipt whose
 process can't be checked stays unanswered, and the connection's existing 500 ms tick checks it
 again until it can answer, even with no run; it sends no ping and ends nothing while idle.
-The provisional 10-second startup and 2-second final-PCM drain bounds are unmeasured;
-expiry is terminal but never releases an unconfirmed device owner.
+The default 10-second startup and 2-second final-PCM drain bounds can be shortened by the
+connection's tuning. Expiry is terminal but never releases an unconfirmed device owner.
 
 `EventsChanged { thread }` (data tag 24) says a thread's stored events changed with no run frame,
 such as a held turn's picture marked sent. The brain sends it only on the hold's own connection,
@@ -233,6 +235,10 @@ the shell keeps a connection's last `ScreenHolds` until that connection ends, an
 `HoldScreen` that refuses the current hold's picture sets that hold's line, once; either one
 from another connection is dropped. Before `Welcome` the shell rejects either one and ends the connection.
 All three are payload-redacted in the pipe tap.
+
+A debug brain using the fixture engine sends the fieldless `FixtureEngineActive` control frame
+once after the pair opens. It doesn't change the handshake. A debug shell shows the Chat marker
+only for the current connection and clears it when the link changes.
 
 `ScreenHolds` speaks for the default model, but a turn's image goes to its run's model, which is
 the thread's own when it has one. So the shell sends `ScreenHoldRecognized` only when three
@@ -387,6 +393,22 @@ its descriptors 3 (control) and 4 (data); see [processes.md](processes.md), "The
 child". The sockets prove only that the two ends are connected; the session handshake on top of
 them authenticates.
 
+The brain's side lives in `platform/macos/pair.rs`, still dormant. `adopt` takes the two
+inherited descriptors and needs no runtime. It refuses unless each is a connected `AF_UNIX`
+stream with `SO_NOSIGPIPE` set and a stable identity: two `fstat` samples that agree and have a
+nonzero inode, because Darwin numbers a socket's inode lazily from zero. The two identities must
+differ, so one socket can't pose as both legs. Darwin doesn't answer `SO_ACCEPTCONN` for a Unix
+socket, so a listener is refused because it has no peer, and a TCP stream because its peer isn't
+`AF_UNIX`. `adopt` then sets close-on-exec and non-blocking. `respond` takes that checked pair
+and a session state the caller made before its first await, so the caller can wipe its copy of
+the secret. It hands both ends to tokio and runs the responder handshake by one deadline: control
+init and Finished, then data init and Finished, then Bind. It writes `BindAck` before it
+returns an `AuthenticatedPair`, and it refuses a proof that doesn't name both of the pair's own
+openers. Each greeting is read once, control first, through that leg's record reader. Each of
+these sets the pair cell, so the whole pair stays refused: a read out of order, a second read, a
+frame that isn't the greeting, a data greeting in the other mode, a missed deadline (checked
+again after ready I/O completes), or a greeting read that's dropped part way.
+
 ## Who may connect
 
 - The brain creates both pipes with a protected DACL that grants only the user who made them,
@@ -420,10 +442,11 @@ sequenceDiagram
   else build id differs
     B-->>S: BuildMismatch, then the brain exits
   else match
-    B-->>S: Welcome(incarnation)
+    B-->>S: Welcome(incarnation, epoch)
     S->>B: open data pipe, Hello again
     B->>B: validate both legs as one pair
     S->>B: TextMetrics (or explicit None)
+    B-->>S: ShellTuning(incarnation, epoch, timings)
   end
 ```
 
@@ -432,8 +455,8 @@ whether its build matches. A shell that meets a brain from another build waits f
 exit and starts the one beside itself.
 
 After authenticating both legs as one process, the brain reads that pair's single
-`TextMetrics` frame. Both Hello modes use one absolute deadline for connecting the data leg,
-reading its Hello and accepting its metrics. A completed frame at or after the deadline
+`TextMetrics` frame. Both Hello modes use one absolute deadline from the control handshake
+through the data Hello, metrics and tuning. A completed frame at or after the deadline
 doesn't start the session. The brain rejects a declared payload
 over 304 bytes before allocating or reading the body. The optional profile has 99 postcard
 `u16` values in 1/1024 em: advances for U+0020–U+007E in order, line height, then the CJK,
@@ -442,16 +465,29 @@ out-of-range value selects the complete built-in measure. Missing, malformed, re
 late frames are protocol failures. The Hello and mismatch bytes are unchanged; exact-build
 checking happens before either peer uses the new frame. No font name or text is sent.
 
+The brain sends `ShellTuning` only after the authenticated startup data is complete, before
+Settings and before queued registration. Before publishing Connected, the shell-core link
+stores the pair in the session's existing shared allocation, so session clones don't grow.
+It rejects missing, invalid or wrong-session tuning, and tears down the connection
+on a later duplicate. A reconnect must authenticate its own values. Both eligible raw modifier
+makes must be queued strictly after the current connection's readiness and any input-coverage
+boundary. A modifier known down at reset needs its own source's break; a first make with no
+prior evidence may be a repeat of an already-held key. The exact-chord read validates the
+recovered pair but supplies neither a make nor evidence of release. Closing
+or locally aborting the pair revokes native hold eligibility
+without waiting for the outbox. This doesn't block local Quit or cancellation.
+
 ### Who owns the greeting
 
 The brain's transport acquires each leg and reads its greeting. The shared greeting flow
-checks authorization and build, reserves the issue session for the control greeting's
-mode, and sends Welcome before it asks for the data leg. It checks the data greeting and
-any queued echo before the connection can be admitted.
+checks authorization and build, reserves the issue session, and sends Welcome before it asks
+for the data leg. It checks the data greeting and any queued echo before the connection can
+be admitted. The caller's one startup deadline covers every step. The pipe caller then sends
+`ShellTuning` by that deadline and installs the reserved session only after that send.
 
 On Windows, the pipe adapter still checks the client image before reading each Hello.
-The data accept, Hello, pairing and metrics keep their existing order and deadline. No
-transport on macOS is wired through this flow yet.
+The data accept, Hello, pairing and metrics keep their existing order. No transport on
+macOS is wired through this flow yet.
 
 ## After the handshake
 
@@ -777,6 +813,17 @@ block. Once connected, each pipe gets a writer thread and data gets a reader thr
 thread sends on bounded channels and never waits: with no connection or a full channel the send
 fails at once, so a typed turn shows it wasn't sent, and `Stop` or `ClearDrawing` is logged as
 unsent after its local effect already happened.
+
+`link/policy.rs` decides what the shell does with what arrives, and the shell applies it one
+event at a time in batch order. It drops events another pair sent, decides what a link state
+does first and whether the models come up on that pair or go down, accepts a run's `Focus` only
+from the current pair, and decides a scene frame's run disposition and freed membership. The
+pair is read again after anything that can end it, such as placing drawings. A stop or scene
+stop is sent before anything else; if the queue refuses it on an open pair, the run's queued
+playback stops and then the pair ends. Speaker stops are offered in order, ten times 1 ms apart
+to a busy owner, and only a stop the brain was told can end its pair when those run out.
+A Hold stop uses its own scenes rather than redirecting the stop to another run's drawing.
+The settings model classifies the notice and decides if a link error rolls back the dock.
 
 Each connection reaches the UI as `Connected` with a session that carries the shell's own
 connection generation, not the brain's incarnation, since the same brain may be reconnected to.

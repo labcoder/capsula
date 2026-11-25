@@ -849,6 +849,7 @@ async fn only_a_verifying_check_of_the_current_key_makes_its_picture_facts_fresh
             .as_ref()
             .expect("verified")
             .tag,
+        attempt: None,
     });
     assert!(
         !accounts.connections.fresh,
@@ -883,7 +884,7 @@ async fn a_check_waiting_on_its_load_cant_bring_a_refused_key_back() {
     let scratch = Scratch::new("key-refused-held-load");
     let peer = peer(EMPTY_CATALOG);
     let (mut accounts, tag) = ready_then_checking(&scratch, peer.clone()).await;
-    accounts.connection_event(ConnectionEvent::Refused { tag });
+    accounts.connection_event(ConnectionEvent::Refused { tag, attempt: None });
     while step(&mut accounts).await {}
     assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
     assert!(accounts.connections.verified.is_none());
@@ -915,7 +916,7 @@ async fn a_refusal_during_a_checks_catalog_read_drops_it_and_its_key() {
         accounts.connections.read.is_some(),
         "the catalog read is under way"
     );
-    accounts.connection_event(ConnectionEvent::Refused { tag });
+    accounts.connection_event(ConnectionEvent::Refused { tag, attempt: None });
     assert_eq!(retained_key(&accounts.connections), None);
     while step(&mut accounts).await {}
     assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
@@ -943,7 +944,7 @@ async fn a_check_ending_after_the_fence_closed_cant_bring_a_refused_key_back() {
         .revoke();
     assert!(step(&mut accounts).await, "the catalog read");
     assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
-    accounts.connection_event(ConnectionEvent::Refused { tag });
+    accounts.connection_event(ConnectionEvent::Refused { tag, attempt: None });
     assert_eq!(accounts.connections.view.anthropic, KeyView::Unconfirmed);
     assert!(accounts.connections.verified.is_none());
     accounts
@@ -958,13 +959,14 @@ async fn a_refusal_settles_a_waiting_reconcile_and_ignores_other_tags() {
     accounts.connections.check_request = Some((accounts.connections.generation, 7));
     assert_eq!(
         accounts.connection_event(ConnectionEvent::Refused {
-            tag: ConnectionTag(tag.0 ^ 1)
+            tag: ConnectionTag(tag.0 ^ 1),
+            attempt: None,
         }),
         []
     );
     assert!(accounts.connections.loading);
     assert_eq!(
-        accounts.connection_event(ConnectionEvent::Refused { tag }),
+        accounts.connection_event(ConnectionEvent::Refused { tag, attempt: None }),
         [
             ControlToShell::Connections(ConnectionsView {
                 anthropic: KeyView::Unconfirmed,
@@ -1006,7 +1008,7 @@ async fn a_reconnect_is_offered_the_catalog_a_send_is_still_granted_on() {
         );
         match case {
             "refused" => {
-                accounts.connection_event(ConnectionEvent::Refused { tag });
+                accounts.connection_event(ConnectionEvent::Refused { tag, attempt: None });
             }
             "fence closed" => accounts
                 .connections

@@ -1335,3 +1335,52 @@ fn native_setup_guard_is_busy_while_another_process_holds_it() {
     drop(holder);
     scratch.cleanup().expect("remove recorded fixture objects");
 }
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn a_lookup_in_a_held_anchor_is_not_redirected_by_a_rename() {
+    use crate::{AcquisitionError, admit_support};
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    let mut scratch = Scratch::new();
+    let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
+        .expect("an explicitly commissioned fixture parent");
+    let base =
+        std::path::PathBuf::from(parent).join(OsStr::from_bytes(scratch.residual.to_bytes()));
+    let (anchor, moved) = (base.join("anchor"), base.join("moved"));
+    let held_dir = scratch.directory(c"anchor");
+
+    let support = admit_support(&anchor).expect("admit the fixture anchor");
+    let guard = support.try_setup_guard().expect("an uncontended guard");
+    assert!(matches!(support.child("product"), Ok(None)));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(anchor.join("product"))
+        .expect("a private product folder");
+    assert!(matches!(support.child("product"), Ok(Some(_))));
+    std::fs::remove_dir(anchor.join("product")).expect("the product folder goes");
+
+    std::fs::rename(&anchor, &moved).expect("move the held anchor away");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(anchor.join("product"))
+        .expect("a planted anchor with a product folder");
+    assert_eq!(
+        support.child("product").err(),
+        Some(AcquisitionError::Admission(Untrusted::Unsafe)),
+        "the held anchor no longer at its name"
+    );
+    assert_eq!(
+        support.profile_root(),
+        kumochi_protocol::profile::Root::Unverified
+    );
+
+    std::fs::remove_dir(anchor.join("product")).expect("remove the planted product folder");
+    std::fs::remove_dir(&anchor).expect("remove the planted anchor");
+    std::fs::rename(&moved, &anchor).expect("restore the held anchor");
+    drop(guard);
+    drop(support);
+    drop(held_dir);
+    scratch.cleanup().expect("remove recorded fixture objects");
+}

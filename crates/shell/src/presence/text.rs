@@ -319,6 +319,7 @@ impl Presence {
         };
         let draft = text.input.read(cx).value();
         let result = typing::submit(&mut self.runs, &self.link, self.session.as_ref(), &draft);
+        self.publish_plain_escape(cx);
         let sent = result == Submission::Sent;
         diagnostics::record(cx, format_args!("submit sent={sent}"));
         let previous_error = self.error.clone();
@@ -371,9 +372,10 @@ impl Presence {
     /// Follows the input target and pushes its bounded live answer into the retained chat.
     pub(super) fn refresh_conversation(&mut self, cx: &mut Context<'_, Self>) {
         self.refresh_screen(cx);
-        self.voice
-            .target
-            .set((self.runs.thread(), self.runs.revision()));
+        let target = (self.runs.thread(), self.runs.revision());
+        if self.voice.target.replace(target) != target {
+            self.publish_plain_escape(cx);
+        }
         self.publish_offer(cx);
         if self.text.as_ref().is_some_and(|text| text.typing.visible) {
             self.chat.update(cx, |state, cx| {
@@ -545,7 +547,7 @@ impl TextView {
         let (context, back_label) = self.context(cx);
         let back_owner = self.owner.clone();
         let tasks_owner = self.owner.clone();
-        div()
+        let header = div()
             .p_3()
             .border_b_1()
             .border_color(cx.theme().border)
@@ -583,8 +585,16 @@ impl TextView {
                             });
                         }),
                 ),
-            )
-            .into_any_element()
+            );
+        #[cfg(debug_assertions)]
+        let header = header.children(self.model.read(cx).fixture_engine.then(|| {
+            div()
+                .text_sm()
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .debug_selector(|| "chat-fixture-engine".into())
+                .child(cx.global::<Strings>().get(Text::ChatFixtureEngine))
+        }));
+        header.into_any_element()
     }
 
     fn history_controls(&self, cx: &Context<'_, Self>) -> gpui_kit::AnyElement {
@@ -782,6 +792,42 @@ mod tests {
 
     const OFFLINE: &str = "typing-notice Kumo can't reach the brain.";
     const TOO_LONG: &str = "typing-notice That turn is too long.";
+
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    fn fixture_marker_follows_only_the_current_brain(cx: &mut TestAppContext) {
+        use crate::link::{Batch, LinkEvent, LinkState, Session};
+        use kumochi_protocol::message::Incarnation;
+
+        crate::presence::test_fixture::without_desktop(cx);
+        let owner = crate::presence::test_fixture::presence(cx);
+        let window = owner.read_with(cx, |owner, _| owner.text.as_ref().unwrap().window);
+        let local = |generation| LinkEvent::FixtureEngineActive { generation };
+        let connected =
+            |generation| LinkEvent::Connected(Session::detached(generation, Incarnation(1)));
+        for (events, visible) in [
+            (vec![connected(1)], false),
+            (vec![local(1)], true),
+            (
+                vec![LinkEvent::State(LinkState::Reconnecting), local(1)],
+                false,
+            ),
+            (vec![connected(2), local(1)], false),
+            (vec![local(2)], true),
+            (vec![connected(3)], false),
+        ] {
+            owner.update(cx, |owner, cx| {
+                owner.link_events(Batch::Plain(events), cx).unwrap();
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                VisualTestContext::from_window(window, cx)
+                    .debug_bounds("chat-fixture-engine")
+                    .is_some(),
+                visible
+            );
+        }
+    }
 
     #[gpui::test]
     fn history_controls_dispatch_the_focused_reader_without_touching_the_draft(

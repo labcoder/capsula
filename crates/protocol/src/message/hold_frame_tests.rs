@@ -100,6 +100,14 @@ fn spoken_replies_default_appends_a_redacted_settings_snapshot() {
 }
 
 #[test]
+fn fixture_engine_appends_a_fieldless_control_tag() {
+    let message = ControlToShell::FixtureEngineActive;
+    assert_eq!(postcard::to_allocvec(&message).unwrap(), [39]);
+    round_trip(&message, Pipe::Control, 1);
+    redacted(&message, Direction::ToShell, "FixtureEngineActive", 1);
+}
+
+#[test]
 fn screen_hold_states_append_a_redacted_control_tag() {
     let model =
         super::ModelName::new(&"\u{1F600}".repeat(super::MAX_MODEL_NAME_CHARS)).expect("valid");

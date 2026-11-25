@@ -261,8 +261,9 @@ the app, an explicit rejection before any answer or effect, and an answer that b
 History projects the typed values only onto that run's user event, keeping its held-screen
 metadata and any partial assistant reply. Older, unknown, and unproven outcomes, including
 crashes, stay generic; neither the generic mark nor the screen metadata proves delivery
-or a safe retry. The reason stores no provider text or payload. No schema migration or
-live provider change is needed. New page kinds follow the old wire tags; the
+or a safe retry. The reason stores no provider text or payload. The run end only supplies
+these facts when the [original attempt proves them](runs.md#availability). No schema migration
+is needed. New page kinds follow the old wire tags; the
 [paired build check](ipc.md#the-handshake) runs before any page can cross to another build.
 
 A read waits until the store thread has finished every op queued before it, failed and empty
@@ -544,15 +545,23 @@ created there, and a second hard link isn't detected.
 ### A legacy history store
 
 `store::existing::legacy_history` reads `kumochi.db` through that opener under the same held lock and
-returns `LegacyHistory`. Nothing calls it yet. Before it opens anything, the store's own folder
-must be a folder itself, not a link or reparse point, since the opener checks only the final
-file and could otherwise read a store through a redirected folder. A held, admitted product
-folder is still the caller's to establish.
+returns `LegacyHistory`. Nothing calls it yet. It reads inside `in_folder`: before anything is
+opened, the store's own folder must be a folder itself, not a link or reparse point, since the
+opener checks only the final file and could otherwise read a store through a redirected folder.
+Its identity (volume and file ID on Windows, device and inode on Unix) is taken then, and the
+same identity must read at the same path after every lookup, or the result is `Unverified`. So a
+lasting rename or replacement of the folder in between, which would make every name under the
+path read as not found and look like `Missing`, is refused. A swap restored before the second
+read isn't caught: the `SessionLock` holds only its own file, not the folder, so a stable path
+through the read is the caller's guarantee, which the existing-profile probes give by holding
+the product folder's chain. A held, admitted product folder is likewise the caller's to
+establish.
 
-- `KnownSchema`: the file's `user_version` is one this build knows (1 to the newest), and its
-  schema objects (type, name, table and SQL, from `sqlite_schema`) are exactly those the
-  migrations make at that version, built in memory to compare. The candidate's catalog is counted
-  first, then read once without sorting, each row using up a distinct entry of the small
+- `KnownSchema(version)`: the file's `user_version` is one this build knows (1 to the newest,
+  carried as `version`; below `CURRENT_HISTORY` it still needs a migration), and its schema
+  objects (type, name, table and SQL, from `sqlite_schema`) are exactly those the migrations make
+  at that version, built in memory to compare. The candidate's catalog is counted first, then
+  read once without sorting, each row using up a distinct entry of the small
   expected set, so neither Rust nor a SQLite sorter copies a large foreign catalog. This is schema
   evidence only. It reads no rows, product invariants (such as the `approval_mark` singleton),
   page integrity or binding, so it promises neither an intact store nor a successful open or
@@ -566,9 +575,14 @@ folder is still the caller's to establish.
   object, a schema ahead of its version, files the opener refuses, a missing or linked folder, a
   store missing beside something it left, and any failed read.
 
+The profile probe's legacy Matching builds on `KnownSchema(CURRENT_HISTORY)` and a validated
+authority and host, so it is schema-level evidence too. Runtime admission (cut 10) must revalidate
+the history's invariants before using the store.
+
 Tests cover every known version, a store the brain itself opened, a `VACUUM INTO` copy like a
-purge's, each refused change, each leftover, a missing folder, and a linked folder whether empty
-or holding a known store, and check that no file changes.
+purge's, each refused change, each leftover, a missing folder, a linked folder whether empty
+or holding a known store, and a folder renamed or replaced between the two identity reads, and
+check that no file changes.
 
 ## Recovery at start
 

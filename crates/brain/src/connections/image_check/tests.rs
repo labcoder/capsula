@@ -102,6 +102,7 @@ fn a_line_holds_counts_and_fixed_words_only() {
         status: 413,
         code: None,
         param: None,
+        origin: crate::connections::model::error::RejectionOrigin::Unproven,
     });
     assert_eq!(
         report(3, "ceiling", [7, 8], 3_000_000, 4_100_000, 5, Err(refused)),
@@ -112,6 +113,7 @@ fn a_line_holds_counts_and_fixed_words_only() {
         status: 400,
         code: Some(Code::Unsupported),
         param: Some(Param::Input),
+        origin: crate::connections::model::error::RejectionOrigin::Unproven,
     });
     assert_eq!(
         report(1, "small", [1, 2], 9, 10, 11, Err(unsupported)),

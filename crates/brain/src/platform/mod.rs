@@ -2,14 +2,19 @@
 
 pub mod credential;
 
-/// A greeting read by its own authenticated pair. No platform can produce one yet.
+/// A greeting read by its own authenticated pair. Only macOS has such a pair.
+#[cfg(not(target_os = "macos"))]
 pub(crate) enum BoundHello {}
 
+#[cfg(not(target_os = "macos"))]
 impl BoundHello {
     pub(crate) fn into_greeting(self) -> kumochi_protocol::message::Hello {
         match self {}
     }
 }
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos::pair::BoundHello;
 
 #[cfg(target_os = "macos")]
 pub(crate) use macos::capture::{display_at, screen_capturer};
@@ -28,6 +33,12 @@ mod model_files;
 pub(crate) mod native_workers;
 mod pipe;
 mod process;
+#[cfg(any(windows, target_os = "macos"))]
+#[expect(
+    dead_code,
+    reason = "cut 10's startup is the first caller of the native profile probes"
+)]
+pub(crate) mod profile;
 mod protected;
 mod runtime_admission;
 mod session_lock;
@@ -84,6 +95,17 @@ pub use process::{
     ChildPipes, Helper, Job, Launch, Spawned, Stdio, launch_detached, spawn, system_env,
 };
 pub(crate) use protected::{Untrusted, is_unsupported};
+
+/// A folder's identity, which a rename doesn't change: volume and file ID on Windows, device and
+/// inode on Unix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FolderId {
+    volume: u64,
+    file: u128,
+}
+
+#[cfg(not(windows))]
+pub(crate) use fs::folder_id;
 #[cfg(not(windows))]
 pub(crate) use protected::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
@@ -103,6 +125,8 @@ pub(crate) use trust_roots::{
 pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
 pub(crate) use windows::DumpExclusion;
+#[cfg(windows)]
+pub(crate) use windows::folder_id;
 #[cfg(windows)]
 pub(crate) use windows::{PipeClient, bridge_peer, open_bridge, shell_connection};
 

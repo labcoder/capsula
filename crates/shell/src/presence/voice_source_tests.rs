@@ -12,6 +12,7 @@ use crate::input::{Edge, Event, Key};
 use crate::link::{Batch, LinkEvent};
 use crate::platform::microphone::{MicError, Running};
 use crate::platform::{Deliver, EventTime};
+use crate::presence::test_fixture::without_desktop;
 
 #[derive(Clone, Default)]
 struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -343,7 +344,7 @@ pub(super) fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliv
             Rc::clone(&owner.voice.target),
             Rc::clone(&owner.voice.paused),
             owner.voice.gates.clone(),
-            (Rc::clone(&owner.speech), Rc::clone(&owner.escape_scope)),
+            owner.escape_presses(cx),
             cx,
         )
     })
@@ -374,7 +375,7 @@ fn an_expired_speech_only_hotkey_leaves_a_streaming_run_alone(cx: &mut TestAppCo
 
 pub(super) fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
     for key in [Key::LeftControl, Key::LeftAlt] {
-        let time = EventTime::new(at);
+        let time = EventTime::new(at).with_queued_press(u64::MAX);
         let time = if key == Key::LeftAlt && edge == Edge::Down {
             time.with_keyboard_read(Some)
         } else {
@@ -936,6 +937,7 @@ fn stale_deferred_escape_cannot_cancel_a_new_native_hold(cx: &mut TestAppContext
     reason = "the fixture selects loss alone or a replacement session"
 )]
 fn escape_after_session_loss(reconnect: bool, cx: &mut TestAppContext) {
+    without_desktop(cx);
     let (owner, _data, controls) = ready(cx);
     let deliver = native(&owner, cx);
     let at = Instant::now();
@@ -2041,7 +2043,7 @@ fn accepted(owner: &Entity<Presence>, gesture: u32, cx: &mut TestAppContext) {
 }
 
 pub(super) fn after(at: Instant, millis: u64) -> EventTime {
-    EventTime::new(at + Duration::from_millis(millis))
+    EventTime::new(at + Duration::from_millis(millis)).with_queued_press(u64::MAX)
 }
 
 pub(super) fn listen(
@@ -2430,6 +2432,158 @@ fn the_native_callback_reads_the_pointer_at_recognition_and_when_the_keys_come_u
 
 #[cfg(windows)]
 #[gpui::test]
+fn a_queued_modifier_from_before_readiness_cannot_arm_a_new_hold(cx: &mut TestAppContext) {
+    use crate::link::fixture;
+    use kumochi_shell_core::platform::keyboard_ticks;
+
+    let (owner, _data, _controls) = ready(cx);
+    let stale = keyboard_ticks();
+    let pipe = fixture::attended("queued-before-ready");
+    let events = fixture::patient(pipe.events.clone());
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| {
+        this.link = pipe.handle.clone();
+        this.session = Some(session);
+    });
+    let fresh = keyboard_ticks() + 1;
+    let send = crate::platform::with_raw_modifiers(native(&owner, cx));
+    let now = Instant::now();
+    let press = |key, tick, at| {
+        send(
+            Event::Key {
+                key,
+                edge: Edge::Down,
+            },
+            EventTime::new(at).with_queued_press(tick),
+        );
+    };
+    for (index, ctrl, alt) in [(1, stale, stale), (2, stale, fresh), (3, fresh, fresh)] {
+        let at = now + Duration::from_secs(u64::from(index));
+        press(Key::LeftControl, ctrl, at);
+        press(Key::LeftAlt, alt, at);
+        press(Key::LeftControl, fresh, at);
+        send(Event::Deadline, after(at, 301));
+        if index == 3 {
+            assert!(
+                pipe.handle.input_is(GestureId(index)),
+                "the fresh chord can arm"
+            );
+        } else {
+            assert_eq!(
+                pipe.handle.microphone_gate().latest(),
+                0,
+                "a stale make or its repeat cannot arm"
+            );
+        }
+        chord(&send, Edge::Up, after(at, 400).instant);
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn a_reconstructed_modifier_cannot_arm_with_one_fresh_press(cx: &mut TestAppContext) {
+    assert_eq!(mic_generation_after_reset(cx, &[Key::LeftAlt]), 0);
+}
+
+#[gpui::test]
+fn two_fresh_modifier_presses_can_arm_after_a_reset(cx: &mut TestAppContext) {
+    assert_eq!(
+        mic_generation_after_reset(cx, &[Key::LeftControl, Key::LeftAlt]),
+        1
+    );
+}
+
+#[gpui::test]
+fn a_raw_repeat_without_release_cannot_supply_post_reset_press_evidence(cx: &mut TestAppContext) {
+    assert_eq!(
+        mic_generation_after_raw_reset(cx, Some(Key::LeftControl)),
+        0
+    );
+}
+
+#[gpui::test]
+fn both_queued_makes_after_reset_arm_even_when_first_read_already_sees_both(
+    cx: &mut TestAppContext,
+) {
+    assert_eq!(mic_generation_after_raw_reset(cx, None), 1);
+}
+
+fn mic_generation_after_raw_reset(cx: &mut TestAppContext, initially_held: Option<Key>) -> u64 {
+    use crate::link::fixture;
+    use kumochi_shell_core::platform::keyboard_ticks;
+
+    let (owner, _data, _controls) = ready(cx);
+    let pipe = fixture::attended("raw-hold-after-reset");
+    let events = fixture::patient(pipe.events.clone());
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| {
+        this.link = pipe.handle.clone();
+        this.session = Some(session);
+    });
+    let send = crate::platform::with_raw_modifiers(native(&owner, cx));
+    let tick = keyboard_ticks() + 1;
+    let now = Instant::now();
+    let press = |key, at, read| {
+        send(
+            Event::Key {
+                key,
+                edge: Edge::Down,
+            },
+            EventTime::new(at)
+                .with_keyboard_read(read)
+                .with_queued_press(tick),
+        );
+    };
+    if let Some(key) = initially_held {
+        press(key, now, |_| None);
+    }
+    send(Event::Reset, after(now, 1));
+    let first_read: fn(Instant) -> Option<Instant> = if initially_held.is_some() {
+        |_| None
+    } else {
+        Some
+    };
+    press(Key::LeftControl, after(now, 2).instant, first_read);
+    press(Key::LeftAlt, after(now, 3).instant, Some);
+    send(Event::Deadline, after(now, 304));
+    pipe.handle.microphone_gate().latest()
+}
+
+fn mic_generation_after_reset(cx: &mut TestAppContext, presses: &[Key]) -> u64 {
+    use crate::link::fixture;
+    use kumochi_shell_core::platform::keyboard_ticks;
+
+    let (owner, _data, _controls) = ready(cx);
+    let pipe = fixture::attended("hold-after-physical-reset");
+    let events = fixture::patient(pipe.events.clone());
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| {
+        this.link = pipe.handle.clone();
+        this.session = Some(session);
+    });
+    let tick = keyboard_ticks() + 1;
+    let send = native(&owner, cx);
+    let now = Instant::now();
+    send(Event::Reset, EventTime::new(now));
+    for &key in presses {
+        let at = EventTime::new(now).with_queued_press(tick);
+        send(
+            Event::Key {
+                key,
+                edge: Edge::Down,
+            },
+            if key == Key::LeftAlt {
+                at.with_keyboard_read(Some)
+            } else {
+                at
+            },
+        );
+    }
+    send(Event::Deadline, after(now, 301));
+    pipe.handle.microphone_gate().latest()
+}
+
+#[gpui::test]
 fn superseding_native_hold_returns_before_outbox_release_and_sends_cancel_first(
     cx: &mut TestAppContext,
 ) {
@@ -2593,7 +2747,7 @@ fn check_native_cancel(cx: &mut TestAppContext, at: CancelAt) {
                     key: Key::LeftControl,
                     edge: Edge::Down,
                 },
-                EventTime::new(now),
+                EventTime::new(now).with_queued_press(u64::MAX),
             );
         }
         let gesture = GestureId(10);
@@ -2738,6 +2892,41 @@ fn native_review_plain_escape_cant_stop_a_turn_submitted_after_the_press(cx: &mu
         std::iter::from_fn(|| controls.try_recv().ok())
             .all(|message| !matches!(message, ControlToBrain::Stop { .. }))
     );
+}
+
+#[gpui::test]
+fn a_fresh_deferred_plain_esc_can_close_its_offline_text_panel(cx: &mut TestAppContext) {
+    without_desktop(cx);
+    let (owner, _data, controls) = ready(cx);
+    owner.update(cx, |owner, _| {
+        owner.session = None;
+        owner.runs.disconnected();
+        let text = owner.text.as_mut().expect("typing panel");
+        text.typing.open();
+        text.focused = true;
+    });
+    let deliver = native(&owner, cx);
+    let resume = crate::presence::gesture::pause_plain_escape(cx, || {
+        deliver(Event::Escape, EventTime::new(Instant::now()));
+    });
+    owner.update(cx, |owner, cx| {
+        let text = owner.text.as_mut().expect("typing panel");
+        assert!(text.typing.close(crate::presence::text::Hide::Dismiss));
+        assert!(text.typing.open());
+        owner.focus_changed(cx);
+    });
+    drop(resume);
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.text_focused(), "the replacement stays open");
+    });
+    cx.update(|_| {
+        deliver(Event::Escape, EventTime::new(Instant::now()));
+    });
+    owner.read_with(cx, |owner, _| assert!(owner.text_focused()));
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| assert!(!owner.text_open()));
+    assert!(controls.is_empty());
 }
 
 #[gpui::test]

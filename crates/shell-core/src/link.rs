@@ -11,7 +11,7 @@ use std::fmt;
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,8 @@ use kumochi_protocol::message::{
     AccountView, AudioSession, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
     DataToShell, Deleted, ErrorKey, GestureId, GitHubView, HoldStatus, Incarnation, IssueSession,
     MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor,
-    SceneDescriptorV1, SettingsOp, SettingsView, TextMetricsV1, ThreadId, ThreadOp, UserError,
+    SceneDescriptorV1, SettingsOp, SettingsView, ShellTuning, TextMetricsV1, ThreadId, ThreadOp,
+    UserError,
 };
 use kumochi_protocol::voice::VoicePart;
 
@@ -37,6 +38,7 @@ use crate::speaker;
 mod microphone;
 mod narrated;
 pub mod output;
+pub mod policy;
 mod queued;
 
 pub use narrated::Wake as NarrationWake;
@@ -112,6 +114,10 @@ pub enum LinkEvent {
     State(LinkState),
     /// A new connection, and the session the UI sends and grants credit through.
     Connected(Session),
+    #[cfg(debug_assertions)]
+    FixtureEngineActive {
+        generation: u64,
+    },
     /// Coalesced drawing evidence from the exact narrated pair and run.
     NarrationReady(NarrationWake),
     Settings {
@@ -319,6 +325,11 @@ pub struct Session {
 }
 
 impl Session {
+    /// The snapshot authenticated for this connection, never a later connection's values.
+    pub fn shell_tuning(&self) -> ShellTuning {
+        self.io.tuning
+    }
+
     pub fn alive(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.alive)
     }
@@ -326,6 +337,11 @@ impl Session {
     /// Refuses every later send on this connection at once, without waiting, while its end runs
     /// elsewhere.
     pub fn close(&self) {
+        if !self.io.queued
+            && let Some(shared) = self.io.link.upgrade()
+        {
+            shared.close_legacy_voice(self.generation);
+        }
         self.closing.store(true, Ordering::Release);
     }
 
@@ -448,6 +464,8 @@ impl SessionIo {
 /// One connection's send endpoints, weak so a session the UI holds keeps no writer alive.
 #[derive(Debug)]
 struct SessionIo {
+    link: Weak<Shared>,
+    tuning: ShellTuning,
     queued: bool,
     narrated: Option<Arc<narrated::Narrated>>,
     control: Option<WeakSender<ControlToBrain>>,
@@ -461,15 +479,16 @@ struct SessionIo {
 struct EndSession {
     alive: Arc<AtomicBool>,
     shared: Arc<Shared>,
-    queued: Option<u64>,
+    generation: u64,
+    queued: bool,
 }
 
 impl Drop for EndSession {
     fn drop(&mut self) {
-        if let Some(session) = self.queued {
-            self.shared.output.end(session);
+        if self.queued {
+            self.shared.output.end(self.generation);
         }
-        self.shared.lose(&self.alive);
+        self.shared.lose(self.generation, &self.alive);
     }
 }
 
@@ -620,6 +639,10 @@ struct Shared {
     audio: OnceLock<AudioSession>,
     /// The last connection's generation.
     generations: AtomicU64,
+    /// The live Legacy pair whose tuning was accepted, or zero.
+    legacy_voice: AtomicU64,
+    /// Native clock at the accepted tuning (Legacy) or registration acknowledgement (Queued).
+    voice_ready_at: AtomicU64,
     output: output::OutputOwner,
     narrated: bool,
     #[cfg(any(test, feature = "test-support"))]
@@ -644,8 +667,20 @@ struct Shared {
 }
 
 impl Shared {
+    fn close_legacy_voice(&self, generation: u64) {
+        let _previous =
+            self.legacy_voice
+                .compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    fn abort_connection(&self, generation: u64, control: &PipeClient) {
+        self.close_legacy_voice(generation);
+        control.abort();
+    }
+
     /// Ends a session's permit; the output owner sees it before any later acceptance.
-    fn lose(&self, alive: &AtomicBool) {
+    fn lose(&self, generation: u64, alive: &AtomicBool) {
+        self.close_legacy_voice(generation);
         alive.store(false, Ordering::Release);
         self.output.cancelled();
     }
@@ -821,7 +856,7 @@ impl Shared {
                 .try_send(ControlToBrain::GestureCancel { gesture })
                 .is_err()
         {
-            outbox.pipe.abort();
+            self.abort_connection(outbox.generation, &outbox.pipe);
             return false;
         }
         if !queue_deletes(outbox, &mut self.deletes())
@@ -894,19 +929,29 @@ impl LinkHandle {
             })
     }
 
-    // shortcut: A contended first edge refuses the press; if it shows in use, publish eligibility as one atomic word.
     pub fn can_start_voice_gesture(&self, generation: u64) -> bool {
-        if self.worker.is_none() {
+        if self.worker.is_none() || self.is_quitting() {
             return false;
         }
-        self.audio_session() == AudioSession::Legacy
-            || self.shared.outbox.try_lock().is_ok_and(|outbox| {
-                outbox.as_ref().is_some_and(|outbox| {
-                    outbox.generation == generation
-                        && outbox.queued_input.consent_answers == 0
-                        && self.shared.output.try_queued_hold_ready(generation)
-                })
+        if self.audio_session() == AudioSession::Legacy {
+            return generation != 0
+                && self.shared.legacy_voice.load(Ordering::Acquire) == generation;
+        }
+        self.shared.outbox.try_lock().is_ok_and(|outbox| {
+            outbox.as_ref().is_some_and(|outbox| {
+                outbox.generation == generation
+                    && !outbox.closing.load(Ordering::Acquire)
+                    && !outbox.pipe.is_aborted()
+                    && outbox.queued_input.consent_answers == 0
+                    && self.shared.output.try_queued_hold_ready(generation)
             })
+        })
+    }
+
+    /// A queued key-down needs a strictly older readiness stamp; equal ticks are ambiguous.
+    pub fn voice_ready_before(&self, press: u64) -> bool {
+        let ready = self.shared.voice_ready_at.load(Ordering::Acquire);
+        ready != 0 && press > ready
     }
 
     /// Checks the exact pair before presence changes voice panels or attempts the offer.
@@ -1062,7 +1107,8 @@ impl LinkHandle {
             }
             true
         } else {
-            outbox.pipe.abort();
+            self.shared
+                .abort_connection(outbox.generation, &outbox.pipe);
             false
         }
     }
@@ -1255,7 +1301,7 @@ impl LinkHandle {
         if let Some(recording) = &self.control_recording {
             let queued = send(recording, &mut QueuedInput::default());
             if !queued && mutation {
-                shared.lose(&session.alive);
+                shared.lose(session.generation, &session.alive);
             }
             return queued;
         }
@@ -1263,8 +1309,8 @@ impl LinkHandle {
             .outbox(session, |outbox| {
                 let queued = send(&outbox.control, &mut outbox.queued_input);
                 if !queued && mutation {
-                    shared.lose(&session.alive);
-                    outbox.pipe.abort();
+                    shared.lose(session.generation, &session.alive);
+                    shared.abort_connection(session.generation, &outbox.pipe);
                 }
                 queued
             })
@@ -1320,13 +1366,15 @@ impl LinkHandle {
         {
             recording.close();
         }
+        session.close();
         if session.io.queued {
-            session.close();
             session.alive.store(false, Ordering::Release);
         } else {
-            self.shared
-                .connection(session, |outbox| outbox.pipe.abort());
-            self.shared.lose(&session.alive);
+            self.shared.connection(session, |outbox| {
+                self.shared
+                    .abort_connection(session.generation, &outbox.pipe);
+            });
+            self.shared.lose(session.generation, &session.alive);
         }
         self.shared.output.end(session.generation);
     }
@@ -1377,8 +1425,9 @@ impl LinkHandle {
                     DataOut::Submit(DataToBrain::TextSubmit { .. } | DataToBrain::AskAbout { .. })
                 );
                 if turn && outbox.submits.load(Ordering::SeqCst) == u32::MAX {
-                    self.shared.lose(&session.alive);
-                    outbox.pipe.abort();
+                    self.shared.lose(session.generation, &session.alive);
+                    self.shared
+                        .abort_connection(session.generation, &outbox.pipe);
                     return false;
                 }
                 let enqueue = || outbox.data.try_send(out).is_ok();
@@ -1425,6 +1474,8 @@ impl LinkHandle {
         let mut link = Self::detached();
         link.recording = Some(recording);
         link.shared.generations.store(1, Ordering::Release);
+        link.shared.voice_ready_at.store(1, Ordering::Release);
+        link.shared.legacy_voice.store(1, Ordering::Release);
         // Session 1's output, as a normal launch has it: none, so a hold's claim can be granted.
         link.shared.output.begin_quiet(1);
         (link, requests)
@@ -1436,6 +1487,9 @@ impl LinkHandle {
             "only a recording can simulate link generations"
         );
         self.shared.generations.store(generation, Ordering::Release);
+        self.shared
+            .legacy_voice
+            .store(generation, Ordering::Release);
     }
 
     pub fn record_controls(&mut self) -> Receiver<ControlToBrain> {
@@ -1461,6 +1515,8 @@ impl Session {
             closing: Arc::default(),
             generation,
             io: Arc::new(SessionIo {
+                link: Weak::new(),
+                tuning: ShellTuning::default(),
                 queued: false,
                 narrated: None,
                 control: None,
@@ -1749,6 +1805,7 @@ impl Link {
             data,
             issue_origin,
             drawing_font_family,
+            tuning,
         } = connection;
         let queued = self.audio == AudioSession::QueuedRequired;
         if queued && let Some(refused) = self.queued_start_refusal(&control, events, reconnect_by) {
@@ -1756,6 +1813,7 @@ impl Link {
         }
         let (control_out, control_queue) = async_channel::bounded(CONTROL_QUEUE);
         let (data_out, data_queue) = async_channel::bounded(DATA_QUEUE);
+        self.shared.voice_ready_at.store(0, Ordering::Release);
         let Ok(previous) =
             self.shared
                 .generations
@@ -1770,11 +1828,14 @@ impl Link {
         let ended = EndSession {
             alive: Arc::new(AtomicBool::new(true)),
             shared: Arc::clone(&self.shared),
-            queued: queued.then_some(generation),
+            generation,
+            queued,
         };
         let narrated =
             (queued && self.shared.narrated).then(|| Arc::new(narrated::Narrated::new()));
         let credit = Arc::new(SessionIo {
+            link: Arc::downgrade(&self.shared),
+            tuning,
             queued,
             narrated,
             control: Some(control_out.downgrade()),
@@ -1881,9 +1942,26 @@ impl Link {
         self.shared.replay_microphone_stop();
         // Quit may have come while connecting, when there was no pipe to send it on; held
         // deletes go first. A full queue is retried by Quit's wait.
+        if !queued {
+            self.shared.output.begin_quiet(generation);
+        }
         if self.quitting() {
             control.set_timeout(Some(QUIT_TIMEOUT));
             let _told = self.shared.tell_quit();
+        } else if !queued {
+            let _outbox = self
+                .shared
+                .outbox
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if !control.is_aborted() {
+                self.shared
+                    .voice_ready_at
+                    .store(platform::keyboard_ticks(), Ordering::Release);
+                self.shared
+                    .legacy_voice
+                    .store(generation, Ordering::Release);
+            }
         }
         let spawned = (|| {
             if let Some((started, deadline)) = registration {
@@ -1922,10 +2000,6 @@ impl Link {
                 }
             })
         })();
-        // Before Connected, so nothing can claim the session's output before its owner knows it.
-        if !queued {
-            self.shared.output.begin_quiet(generation);
-        }
         let open = legacy_connected.is_none_or(|connected| events.send_blocking(connected).is_ok());
         let read = spawned.and_then(|()| {
             // Only now, so nothing from the brain reaches the UI before Connected.
@@ -1942,7 +2016,7 @@ impl Link {
                         &data,
                         || {
                             if !queued {
-                                control.abort();
+                                ended.shared.abort_connection(generation, &control);
                             }
                         },
                         &events,
@@ -1967,6 +2041,7 @@ impl Link {
             Ok(()) => {}
             Err(error) => tracing::error!(%error, "can't start the link's threads"),
         }
+        self.shared.close_legacy_voice(generation);
         self.shared.output.end(generation);
         drop(ended);
         *self
@@ -2040,6 +2115,9 @@ fn watch(
                 if queued.is_none() || !shared.output.acknowledge_queued(generation, output) {
                     return;
                 }
+                shared
+                    .voice_ready_at
+                    .store(platform::keyboard_ticks(), Ordering::Release);
             }
             Ok(Some(ControlToShell::Ping)) => {
                 if queued.is_some() && shared.output.run_end_overdue(generation, Instant::now()) {
@@ -2469,7 +2547,20 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::ThreadModelSet { .. } | ControlToShell::NoVisual { .. })) => {}
-            Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
+            Ok(Some(ControlToShell::FixtureEngineActive)) => {
+                #[cfg(debug_assertions)]
+                if events
+                    .send_blocking(LinkEvent::FixtureEngineActive { generation })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Some(
+                ControlToShell::Welcome { .. }
+                | ControlToShell::BuildMismatch { .. }
+                | ControlToShell::ShellTuning { .. },
+            )) => {
                 tracing::warn!("the brain repeated its handshake; ending the connection");
                 return;
             }

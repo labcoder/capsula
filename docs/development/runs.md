@@ -429,6 +429,14 @@ after every op and wake; while it's being found that's `Finding`, which reads as
   `ModelUnavailable` with Open Settings for another kind (`Coordinator::refusal`). A held ask for
   that run is answered `Rebuild`, and `send_ready`
   checks the route again before every `Grant`. Only a `ChatGPT` route takes a bearer.
+- **History keeps evidence about the original turn.** The run remembers its first user-turn
+  grant, separate from inline compaction. A closed connection failure and accepted answer
+  text prove a partial answer. Without text, a pre-seed sign-out or failed bearer admission
+  can prove the user-turn request never went out; a final HTTP rejection after its first upload proves it
+  wasn't accepted. An early response without a completed upload, a stream error without text,
+  an expired check, or a refusal belonging to a different
+  attempt makes no delivery claim. The existing terminal outcome carries these facts to the store
+  with the run's last events, without changing notices or starting a retry.
 - **A recovered `ChatGPT` connection keeps to its history cutoff** (`Input::RecoveredChatGpt`,
   which carries the [cutoff](store.md) the vault read back and matched). Every read for a route
   on that sign-in carries the cutoff: the run's builds, inline compaction, history calls, and title
@@ -586,9 +594,12 @@ keyed by id (OSC-56) need no rework.
 
 The runtime picks the engine once at start (`runtime::Selected`). A dev build with
 `KUMOCHI_FIXTURE` set plays that script for every run, ready with no account; a release build
-can't pick it. Otherwise the Responses engine answers once the account is ready (engines.md, "The
-Responses engine"). A script plays through `engines/fixture.rs`; `crates/brain/fixtures/default.txt`
-is a sample. One line per event: `<ms> text <words>`, `<ms> fill <bytes>`,
+can't pick it. The debug brain logs `fixture engine active` at INFO when it selects the fixture,
+and its connected Chat window shows **Fixture mode**. For a normal desk build, launch from a fresh
+terminal with `KUMOCHI_FIXTURE` unset, and quit any running fixture instance first: a running
+brain doesn't change engines. Without the fixture, the Responses engine answers once the account
+is ready (engines.md, "The Responses engine"). A script plays through `engines/fixture.rs`;
+`crates/brain/fixtures/default.txt` is a sample. One line per event: `<ms> text <words>`, `<ms> fill <bytes>`,
 `<ms> step <label>`, `<ms> fail`, and `late <label>`, a step the engine still sends after it's
 cancelled. Its round's pump has closed by then, so the late step reaches nobody; the coordinator
 and the store would refuse it too.

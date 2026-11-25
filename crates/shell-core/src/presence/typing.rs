@@ -28,6 +28,7 @@ pub struct Typing {
     /// Whether the surface is visible.
     pub visible: bool,
     active_seen: bool,
+    opening: u64,
 }
 
 impl Typing {
@@ -36,9 +37,15 @@ impl Typing {
         let opening = !self.visible;
         if opening {
             self.active_seen = false;
+            self.opening = self.opening.wrapping_add(1);
         }
         self.visible = true;
         opening
+    }
+
+    /// Distinguishes successive openings of a reused native window.
+    pub fn opening(self) -> u64 {
+        self.opening
     }
 
     /// Records that the visible window has been activated.

@@ -22,6 +22,7 @@ mod scenes;
 #[macro_use]
 mod settings;
 mod threads;
+mod tuning;
 mod voice;
 pub use account::{
     AccountEmail, AccountOp, AccountRecovery, AccountView, Cleanup, EmailError, MANAGE_USAGE_URL,
@@ -64,13 +65,14 @@ pub use threads::{
     MAX_SLUG_BYTES, MAX_TITLE_CHARS, ModelChoice, ModelInfo, ModelName, ModelSlug, SlugError,
     ThreadKind, ThreadOp, ThreadTitle, effective_effort,
 };
+pub use tuning::{HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, ShellTuning};
 pub use voice::{
-    Cursor, HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, HoldFailure, HoldStatus,
-    MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES, MAX_RATE, MAX_SAY_BYTES,
-    MAX_SEGMENT_SECONDS, MAX_SEGMENTS_PER_RUN, MAX_SPEECH_SAMPLES, MAX_TRANSCRIPT_BYTES,
-    MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, Narration, OutputGeneration, PROGRESS_INTERVAL_MS,
-    PartState, SegmentId, SegmentStart, SpeechDecision, SpeechDispatch, SpeechPcm, SpeechPromise,
-    SpeechRetirement, StepRef, Transcript, VoiceBound, VoiceView, check_rate,
+    Cursor, HoldFailure, HoldStatus, MAX_AHEAD_SEGMENTS, MAX_HOLD_CHUNKS, MAX_MIC_SAMPLES,
+    MAX_RATE, MAX_SAY_BYTES, MAX_SEGMENT_SECONDS, MAX_SEGMENTS_PER_RUN, MAX_SPEECH_SAMPLES,
+    MAX_TRANSCRIPT_BYTES, MAX_UNPLAYED_SECONDS, MIN_RATE, MicPcm, Narration, OutputGeneration,
+    PROGRESS_INTERVAL_MS, PartState, SegmentId, SegmentStart, SpeechDecision, SpeechDispatch,
+    SpeechPcm, SpeechPromise, SpeechRetirement, StepRef, Transcript, VoiceBound, VoiceView,
+    check_rate,
 };
 
 /// The most rows one page carries [guess].
@@ -831,6 +833,15 @@ pub enum ControlToShell {
     AccountUnsupported(AccountView),
     /// First successful spoken-replies install saved On, but this queued pair stays silent.
     SpokenRepliesDefaulted(SettingsView),
+    /// The debug brain selected the fixture engine. Sent once per authenticated connection.
+    FixtureEngineActive,
+    /// Required once after both pipes pair, before settings or any dependent work.
+    ShellTuning {
+        /// The authenticated connection from Welcome.
+        session: IssueSession,
+        /// Its immutable values.
+        tuning: ShellTuning,
+    },
 }
 
 /// What a screen hold carried into its turn. It never says the window was sent: a run can end
@@ -1404,6 +1415,31 @@ mod tests {
             frame::read(&mut bytes.as_slice(), Pipe::Control).unwrap(),
             Some(registered)
         );
+        let tuning = ControlToShell::ShellTuning {
+            session: super::IssueSession {
+                incarnation: Incarnation(5),
+                epoch: 6,
+            },
+            tuning: super::ShellTuning::from_ms(2000, 500).unwrap(),
+        };
+        assert_eq!(
+            postcard::to_allocvec(&tuning).unwrap(),
+            [40, 5, 6, 208, 15, 244, 3]
+        );
+        let bytes = frame::encode(&tuning, Pipe::Control).unwrap();
+        assert_eq!(
+            frame::read(&mut bytes.as_slice(), Pipe::Control).unwrap(),
+            Some(tuning)
+        );
+    }
+
+    #[test]
+    fn untuned_hold_budgets_match_the_legacy_limits() {
+        use std::time::Duration;
+
+        let tuning = super::ShellTuning::default();
+        assert_eq!(tuning.start(), Duration::from_millis(10_000));
+        assert_eq!(tuning.drain(), Duration::from_millis(2_000));
     }
 
     #[test]

@@ -20,8 +20,9 @@ use crate::connections::anthropic::{
     route::{Transport, Verified},
 };
 use crate::connections::http_client::HttpError;
+use crate::connections::model::error::RejectionOrigin;
 use crate::context::ConnectionTag;
-use crate::coordinator::{Availability, Input, Ready, SendKey, model_unavailable};
+use crate::coordinator::{Availability, Input, Ready, RefusedKey, SendKey, model_unavailable};
 use crate::engines::anthropic::live::Live;
 use crate::engines::{Engine, RunRequest};
 
@@ -54,6 +55,7 @@ pub(crate) enum ConnectionEvent {
     /// A Messages post on the authority tagged `tag` got a 401; its fence is already closed.
     Refused {
         tag: ConnectionTag,
+        attempt: Option<SendKey>,
     },
 }
 
@@ -177,7 +179,7 @@ pub(super) struct Connections {
     fresh: bool,
     unsent: bool,
     /// The tag of the authority a refusal just retired, for the coordinator to hear first.
-    refused: Option<ConnectionTag>,
+    refused: Option<RefusedKey>,
     read: Option<JoinHandle<()>>,
     loading: bool,
     /// A Remove is admitted but hasn't committed (design §5): every key op retries it.
@@ -288,8 +290,11 @@ impl Connections {
     }
 
     /// A refusal retires the key, and the account hears which connection it was.
-    fn refuse(&mut self) {
-        self.refused = self.verified.as_ref().map(|verified| verified.tag);
+    fn refuse(&mut self, attempt: Option<SendKey>) {
+        self.refused = self
+            .verified
+            .as_ref()
+            .map(|verified| RefusedKey(verified.tag, attempt));
         self.retire();
         self.models.clear();
     }
@@ -388,7 +393,7 @@ impl Connections {
             .is_some_and(|verified| verified.fence.open())
     }
 
-    pub(super) fn take_refused(&mut self) -> Option<ConnectionTag> {
+    pub(super) fn take_refused(&mut self) -> Option<RefusedKey> {
         self.refused.take()
     }
 
@@ -825,7 +830,7 @@ impl Accounts {
                     }
                     Err(CheckError::Rejected(reason)) => {
                         if self.connections.transport.is_some() {
-                            self.connections.refuse();
+                            self.connections.refuse(None);
                             self.connections.key = None;
                         }
                         self.connections.view.anthropic = KeyView::Rejected(reason);
@@ -840,7 +845,7 @@ impl Accounts {
                 self.connections.unsent = true;
                 None
             }
-            ConnectionEvent::Refused { tag } => {
+            ConnectionEvent::Refused { tag, attempt } => {
                 let Some(revision) = self
                     .connections
                     .verified
@@ -858,7 +863,7 @@ impl Accounts {
                         read: None,
                     }
                 });
-                self.connections.refuse();
+                self.connections.refuse(attempt);
                 // A Check already waiting on its load or its catalog read can't bring the key back.
                 self.connections.advance();
                 self.connections.loading = false;
@@ -901,11 +906,15 @@ impl Brain {
         let authority = Arc::clone(authority);
         let allowance = self.key_allowance.of(request.run)?;
         let account = self.account.reads_tx.clone();
+        let key = request.key;
         // Unbounded: one event per refused post, which can't follow on a closed fence, and a send
         // to an account that has gone only returns an error.
-        let transport = transport.telling(Arc::new(move |tag| {
+        let transport = transport.telling(Arc::new(move |tag, origin| {
             account
-                .send(Event::Connection(ConnectionEvent::Refused { tag }))
+                .send(Event::Connection(ConnectionEvent::Refused {
+                    tag,
+                    attempt: (origin == RejectionOrigin::AfterUpload).then_some(key),
+                }))
                 .ok();
         }));
         #[cfg(test)]

@@ -176,13 +176,13 @@ struct Presence {
     scene_timer: Option<Task<()>>,
     scene_deadline: Option<Instant>,
     /// Speaker stops a busy owner hasn't taken yet, oldest first, each with its tries left.
-    pending_stops:
-        std::collections::VecDeque<(Session, kumochi_protocol::message::RunId, u8, bool)>,
+    pending_stops: crate::link::policy::SpeakerStops<Session>,
     /// The next offer of the front pending stop, or the end of its session.
     stop_retry: Option<Task<()>>,
     /// The native speech lease last read: its session, run and when it runs out.
-    speech: gesture::SpeechLease,
+    speech: escape::SpeechLease,
     escape_scope: Rc<std::cell::Cell<gesture::EscapeScope>>,
+    plain_escape: escape::PlainEscapeCell,
     /// The next read of the speech lease, when it runs out or after a busy owner.
     speech_expiry: Option<Task<()>>,
     /// Busy reads of the speech lease in a row, which back its rereads off.
@@ -294,21 +294,38 @@ impl Presence {
             return Ok(());
         }
         self.pointer_settle = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(80))
-                .await;
-            let result = this.update(cx, |this, cx| {
-                let point = platform::cursor_position()?;
-                if !this.hovered(point, PanelVisibility::Visible) {
-                    let visibility = panels::left(this.panel_owner(cx));
-                    if !this.text_open() && visibility != this.panel_visibility {
-                        this.set_panel(visibility, cx)?;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(80))
+                    .await;
+                let result =
+                    this.update(cx, |this, cx| {
+                        let owner = this.panel_owner(cx);
+                        if this.panel_visibility == PanelVisibility::Hidden
+                            || owner != panels::Owner::Pointer
+                        {
+                            return Ok(true);
+                        }
+                        let point = platform::cursor_position()?;
+                        if this.hovered(point, PanelVisibility::Visible) {
+                            return Ok(true);
+                        }
+                        if this.line.accepted_frame().is_some_and(|frame| {
+                            panels::gap_contains(frame, this.layout.panel, point)
+                        }) {
+                            return Ok(false);
+                        }
+                        this.set_panel(panels::left(owner), cx)?;
+                        Ok::<_, OpenError>(true)
+                    });
+                match result {
+                    Ok(Ok(false)) => {}
+                    Ok(Err(error)) => {
+                        tracing::error!(%error, "can't dismiss the status panel");
+                        break;
                     }
+                    _ => break,
                 }
-                Ok::<_, OpenError>(())
-            });
-            if let Ok(Err(error)) = result {
-                tracing::error!(%error, "can't dismiss the status panel");
             }
         }));
         Ok(())
@@ -437,10 +454,13 @@ impl Presence {
         } else {
             EscapePanel::Closed
         };
+        let pull = self.kumo.read(cx).pull_generation();
+        let activity = Self::activity_at(&self.runs, panel, &self.presenter, now);
+        self.publish_plain_escape_for(activity, pull);
         let mut activity = Activity {
-            pulling: self.kumo.read(cx).pull_live(),
+            pulling: pull.is_some(),
             speaking: self.speaking(now),
-            ..Self::activity_at(&self.runs, panel, &self.presenter, now)
+            ..activity
         };
         activity.voice = self.voice_working();
         activity.working |= activity.voice;
@@ -456,6 +476,7 @@ impl Presence {
                 pulling: activity.pulling,
                 ..Self::activity_at(&self.runs, panel, &self.presenter, now)
             };
+            self.publish_plain_escape(cx);
             self.sync_escape_state(cx);
             return Err(error);
         }
@@ -1142,10 +1163,11 @@ pub(crate) fn open(
             paint_notice: Rc::default(),
             scene_timer: None,
             scene_deadline: None,
-            pending_stops: std::collections::VecDeque::new(),
+            pending_stops: crate::link::policy::SpeakerStops::default(),
             stop_retry: None,
             speech: Rc::default(),
             escape_scope: Rc::default(),
+            plain_escape: Rc::default(),
             speech_expiry: None,
             speech_busy: 0,
             escape_hold: EscapeHold::default(),
@@ -1177,14 +1199,14 @@ pub(crate) fn open(
     let position = flags.position();
     owner.update(cx, |this, cx| this.position(position, cx))?;
     owner.update(cx, |this, cx| this.observe(position, cx))?;
-    let (link, target, paused, gates, esc) = {
+    let (link, target, paused, gates, presses) = {
         let this = owner.read(cx);
         (
             this.link.clone(),
             Rc::clone(&this.voice.target),
             Rc::clone(&this.voice.paused),
             this.voice.gates.clone(),
-            (Rc::clone(&this.speech), Rc::clone(&this.escape_scope)),
+            this.escape_presses(cx),
         )
     };
     owner.update(cx, Presence::dispatcher);
@@ -1194,7 +1216,7 @@ pub(crate) fn open(
         target,
         paused,
         gates,
-        esc,
+        presses,
         cx,
     );
     owner.update(cx, |this, _| this.native.arm_keyboard(deliver))?;

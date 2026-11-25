@@ -12,7 +12,7 @@ use rusqlite::{Connection, OpenFlags};
 use super::StoreError;
 use super::purge::{Leftovers, missing, sidecar};
 use super::schema::{self, MIGRATIONS};
-use crate::platform::SessionLock;
+use crate::platform::{SessionLock, folder_id};
 
 /// SQLite's smallest page. A shorter main file can read as zero pages, and SQLite then deletes the
 /// WAL beside it.
@@ -110,6 +110,9 @@ pub(crate) fn open<'lock>(
     })
 }
 
+/// The history version this build's migrations end at.
+pub(crate) const CURRENT_HISTORY: usize = MIGRATIONS.len();
+
 /// What a legacy history store at `db` shows, read under `session`, the profile's writer lock.
 #[cfg_attr(
     not(test),
@@ -125,17 +128,15 @@ pub(crate) enum LegacyHistory {
     Missing,
     /// A schema version this build knows, with exactly the objects its migrations make at that
     /// version. Schema evidence only: no rows, product invariants, page integrity or binding are
-    /// read, so it promises neither an intact store nor a successful open.
-    KnownSchema,
+    /// read, so it promises neither an intact store nor a successful open. It carries that
+    /// version: one below [`CURRENT_HISTORY`] still needs a migration.
+    KnownSchema(usize),
     /// Anything else, including any failed read.
     Unverified,
 }
 
-/// Reads the legacy history store at `db` through [`open`], borrowing `session`.
-///
-/// A missing parent folder is `Unverified`, since every name under it reads as not found. So is one
-/// that is a link or reparse point, before anything is opened, since it could redirect the read to
-/// another folder's store.
+/// Reads the legacy history store at `db` through [`open`], borrowing `session`, inside
+/// [`in_folder`].
 #[cfg_attr(
     not(test),
     expect(
@@ -144,40 +145,69 @@ pub(crate) enum LegacyHistory {
     )
 )]
 pub(crate) fn legacy_history(db: &Path, session: &SessionLock) -> LegacyHistory {
-    if !db.parent().is_some_and(folder) {
-        return LegacyHistory::Unverified;
-    }
-    match open(db, session) {
+    in_folder(db, || match open(db, session) {
         Ok(read) => match known_schema(&read) {
-            Ok(true) => LegacyHistory::KnownSchema,
-            Ok(false) | Err(_) => LegacyHistory::Unverified,
+            Ok(Some(version)) => LegacyHistory::KnownSchema(version),
+            Ok(None) | Err(_) => LegacyHistory::Unverified,
         },
-        Err(ExistingError::Missing)
-            if ["-wal", "-shm", "-journal"]
-                .into_iter()
-                .all(|suffix| missing(&sidecar(db, suffix)))
-                && !Leftovers::of(db).exist() =>
-        {
-            LegacyHistory::Missing
-        }
+        Err(ExistingError::Missing) if left_nothing(db) => LegacyHistory::Missing,
         Err(_) => LegacyHistory::Unverified,
+    })
+    .unwrap_or(LegacyHistory::Unverified)
+}
+
+#[cfg(test)]
+thread_local! {
+    static BETWEEN: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `hook` once, in this thread's next [`in_folder`], after the folder's identity is taken
+/// and before `read` runs.
+#[cfg(test)]
+pub(crate) fn between_folder_checks(hook: impl FnOnce() + 'static) {
+    BETWEEN.set(Some(Box::new(hook)));
+}
+
+/// Runs `read` between taking the identity of `db`'s folder and confirming the same identity at
+/// the same path again, so a lasting rename or replacement of the folder meanwhile, which would
+/// make every name under the path read as not found, is refused. A swap restored before the second
+/// check isn't caught: a stable path through the read is the caller's to guarantee, by holding the
+/// product folder's chain. `None` when the folder is missing, a link or reparse point, or changed;
+/// a link could redirect the read to another folder's store.
+pub(crate) fn in_folder<T>(db: &Path, read: impl FnOnce() -> T) -> Option<T> {
+    let dir = db.parent()?;
+    let held = folder_id(dir)?;
+    #[cfg(test)]
+    if let Some(hook) = BETWEEN.take() {
+        hook();
     }
+    let read = read();
+    (folder_id(dir) == Some(held)).then_some(read)
+}
+
+/// Whether nothing a store or a purge leaves is beside `db`: no WAL, index or journal and no purge
+/// leftover. One that can't be checked counts as left.
+pub(crate) fn left_nothing(db: &Path) -> bool {
+    ["-wal", "-shm", "-journal"]
+        .into_iter()
+        .all(|suffix| missing(&sidecar(db, suffix)))
+        && !Leftovers::of(db).exist()
 }
 
 /// Every schema object's type, name, table and SQL.
 const CATALOG: &str = "SELECT type, name, tbl_name, sql FROM sqlite_schema";
 
-/// Whether `conn`'s objects are exactly those this build's migrations make at its `user_version`.
+/// That `user_version` when `conn`'s objects are exactly those this build's migrations make at it.
 /// The candidate's catalog is counted first, then each of its rows is read once, unsorted, and
 /// must use up a distinct entry of the small expected set, so Rust holds no copy of a candidate
 /// row and SQLite sorts nothing.
-fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
+fn known_schema(conn: &Connection) -> Result<Option<usize>, StoreError> {
     let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let Some(version) = usize::try_from(found)
         .ok()
         .filter(|version| (1..=MIGRATIONS.len()).contains(version))
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let mut built = Connection::open_in_memory()?;
     schema::migrate_to(&mut built, version)?;
@@ -189,7 +219,7 @@ fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
         .collect::<rusqlite::Result<Vec<Option<[Option<String>; 4]>>>>()?;
     let count: i64 = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))?;
     if usize::try_from(count).ok() != Some(expected.len()) {
-        return Ok(false);
+        return Ok(None);
     }
     let mut catalog = conn.prepare(CATALOG)?;
     let mut rows = catalog.query([])?;
@@ -197,7 +227,7 @@ fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
         let mut candidate = [None; 4];
         for (column, value) in candidate.iter_mut().enumerate() {
             let Ok(text) = row.get_ref(column)?.as_str_or_null() else {
-                return Ok(false);
+                return Ok(None);
             };
             *value = text;
         }
@@ -208,25 +238,11 @@ fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
                     .all(|(want, got)| want.as_deref() == got)
             })
         }) else {
-            return Ok(false);
+            return Ok(None);
         };
         *entry = None;
     }
-    Ok(expected.iter().all(Option::is_none))
-}
-
-/// Whether `dir` is a folder itself, not a link or reparse point to one.
-fn folder(dir: &Path) -> bool {
-    fs::symlink_metadata(dir).is_ok_and(|metadata| {
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-            metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
-        }
-        #[cfg(not(windows))]
-        metadata.is_dir()
-    })
+    Ok(expected.iter().all(Option::is_none).then_some(version))
 }
 
 /// Whether `metadata` is a regular file with one name.
@@ -262,7 +278,7 @@ fn uri(db: &Path) -> Result<String, ExistingError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -465,7 +481,7 @@ mod tests {
     }
 
     /// A cleanly closed WAL store in `dir`, migrated to `version`.
-    fn store_at(dir: &Path, version: usize) -> PathBuf {
+    pub(crate) fn store_at(dir: &Path, version: usize) -> PathBuf {
         fs::create_dir_all(dir).expect("store folder");
         let db = dir.join("x.db");
         let mut conn = Connection::open(&db).expect("store");
@@ -487,14 +503,17 @@ mod tests {
             let before = files(dir);
             assert_eq!(
                 legacy_history(&db, &lock),
-                LegacyHistory::KnownSchema,
+                LegacyHistory::KnownSchema(version),
                 "v{version}"
             );
             assert_eq!(files(dir), before, "v{version}");
         }
         let opened = scratch.dir().join("opened").join("x.db");
         drop(super::super::Store::open(&opened).expect("the brain's own open"));
-        assert_eq!(legacy_history(&opened, &lock), LegacyHistory::KnownSchema);
+        assert_eq!(
+            legacy_history(&opened, &lock),
+            LegacyHistory::KnownSchema(CURRENT_HISTORY)
+        );
         let copy = scratch.dir().join("copy");
         fs::create_dir(&copy).expect("copy folder");
         let source = Connection::open(scratch.dir().join("opened").join("x.db")).expect("source");
@@ -507,7 +526,7 @@ mod tests {
         drop(source);
         assert_eq!(
             legacy_history(&copy.join("x.db"), &lock),
-            LegacyHistory::KnownSchema
+            LegacyHistory::KnownSchema(CURRENT_HISTORY)
         );
     }
 
@@ -604,6 +623,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_folder_renamed_or_swapped_during_the_read_is_unverified() {
+        let (_held, lock) = session();
+        let scratch = Scratch::new("existing-history-moved");
+        for swap in [false, true] {
+            let dir = scratch.dir().join(format!("profile-{swap}"));
+            let moved = scratch.dir().join(format!("moved-{swap}"));
+            fs::create_dir_all(&dir).expect("profile folder");
+            let db = dir.join("x.db");
+            assert_eq!(legacy_history(&db, &lock), LegacyHistory::Missing, "{swap}");
+            let (from, to) = (dir.clone(), moved.clone());
+            between_folder_checks(move || {
+                fs::rename(&from, &to).expect("move the folder");
+                if swap {
+                    fs::create_dir(&from).expect("a new folder at the same path");
+                }
+            });
+            assert_eq!(
+                legacy_history(&db, &lock),
+                LegacyHistory::Unverified,
+                "{swap}"
+            );
+            assert!(files(&moved).is_empty(), "{swap}");
+            assert_eq!(dir.exists(), swap, "{swap}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_linked_folder_is_unverified_even_holding_a_known_store() {
@@ -611,7 +657,10 @@ mod tests {
         let (_held, lock) = session();
         let scratch = Scratch::new("existing-history-linked");
         let known = store_at(&scratch.dir().join("known"), MIGRATIONS.len());
-        assert_eq!(legacy_history(&known, &lock), LegacyHistory::KnownSchema);
+        assert_eq!(
+            legacy_history(&known, &lock),
+            LegacyHistory::KnownSchema(CURRENT_HISTORY)
+        );
         let target = known.parent().expect("store folder");
         symlink(target, scratch.dir().join("linked")).expect("folder link");
         let before = files(target);

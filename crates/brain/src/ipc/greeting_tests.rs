@@ -122,6 +122,10 @@ impl<C: AsyncRead + Unpin, D: AsyncRead + Unpin> Legs for Memory<C, D> {
     }
 }
 
+fn startup() -> Instant {
+    Instant::now() + HANDSHAKE_TIMEOUT
+}
+
 const SESSION: IssueSession = IssueSession {
     incarnation: Incarnation(3),
     epoch: 7,
@@ -191,15 +195,15 @@ async fn a_refused_control_greeting_reserves_nothing_and_never_opens_data() {
     for (index, (control, want)) in cases.into_iter().enumerate() {
         let data = ready_data(AudioSession::Legacy);
         let mut legs = Memory::new(control.as_slice(), data.as_slice());
-        let mut reserved = Vec::new();
-        let result = greet(&mut legs, &mut Tap::default(), |audio| {
-            reserved.push(audio);
+        let mut reserved = 0;
+        let result = greet(&mut legs, &mut Tap::default(), startup(), || {
+            reserved += 1;
             SESSION
         })
         .await;
         let error = result.err().expect("a refused greeting fails");
         assert!(want(&error), "case {index}: {error:?}");
-        assert_eq!(reserved, [], "case {index}");
+        assert_eq!(reserved, 0, "case {index}");
         assert_eq!(legs.written, [0_u8; 0], "case {index}");
         assert!(legs.opened.is_none() && !legs.bound, "case {index}");
     }
@@ -215,9 +219,9 @@ async fn a_build_mismatch_goes_only_to_the_capability_holder_and_reserves_nothin
         let control = control_frame(&control);
         let data = ready_data(AudioSession::Legacy);
         let mut legs = Memory::new(control.as_slice(), data.as_slice());
-        let mut reserved = Vec::new();
-        let result = greet(&mut legs, &mut Tap::default(), |audio| {
-            reserved.push(audio);
+        let mut reserved = 0;
+        let result = greet(&mut legs, &mut Tap::default(), startup(), || {
+            reserved += 1;
             SESSION
         })
         .await;
@@ -226,7 +230,7 @@ async fn a_build_mismatch_goes_only_to_the_capability_holder_and_reserves_nothin
             brain_build: BUILD_ID.to_owned(),
         };
         assert_eq!(legs.written, frame::encode(&reply, Pipe::Control).unwrap());
-        assert_eq!(reserved, []);
+        assert_eq!(reserved, 0);
         assert!(legs.opened.is_none() && !legs.bound);
     }
 }
@@ -241,9 +245,9 @@ async fn a_welcome_that_fails_to_send_never_opens_data() {
         let data = ready_data(mode);
         let mut legs = Memory::new(control.as_slice(), data.as_slice());
         legs.refuse_writes = true;
-        let mut reserved = Vec::new();
-        let result = greet(&mut legs, &mut Tap::default(), |audio| {
-            reserved.push(audio);
+        let mut reserved = 0;
+        let result = greet(&mut legs, &mut Tap::default(), startup(), || {
+            reserved += 1;
             SESSION
         })
         .await;
@@ -251,26 +255,46 @@ async fn a_welcome_that_fails_to_send_never_opens_data() {
             matches!(&result, Err(SessionError::Io(e)) if e.kind() == io::ErrorKind::BrokenPipe),
             "{mode:?}"
         );
-        assert_eq!(reserved, [mode], "the session is reserved before Welcome");
+        assert_eq!(reserved, 1, "the session is reserved before Welcome");
         assert!(legs.opened.is_none() && !legs.bound, "{mode:?}");
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_pending_welcome_does_not_open_data_or_spend_its_budget() {
+async fn a_pending_welcome_and_the_data_leg_share_the_startup_deadline() {
     let control = control_frame(&ControlToBrain::QueuedHello(hello(1, BUILD_ID)));
     let data = ready_data(AudioSession::QueuedRequired);
-    let mut legs = Memory::new(control.as_slice(), data.as_slice());
-    let start = Instant::now();
-    let welcome_written = start + HANDSHAKE_TIMEOUT + Duration::from_secs(1);
-    legs.write_at = Some(welcome_written);
-    legs.open_at = Some(welcome_written + Duration::from_secs(1));
-    let admitted = greet(&mut legs, &mut Tap::default(), |_| SESSION)
-        .await
-        .unwrap()
-        .expect("the data leg has a fresh budget after Welcome");
-    assert!(legs.opened.expect("data opened") >= welcome_written);
-    assert_eq!(admitted.session, SESSION);
+    let late = HANDSHAKE_TIMEOUT + Duration::from_secs(1);
+    for (welcome_at, open_at) in [(late, late), (Duration::from_secs(1), late)] {
+        let mut legs = Memory::new(control.as_slice(), data.as_slice());
+        let start = Instant::now();
+        legs.write_at = Some(start + welcome_at);
+        legs.open_at = Some(start + open_at);
+        let mut reserved = 0;
+        let result = greet(&mut legs, &mut Tap::default(), startup(), || {
+            reserved += 1;
+            SESSION
+        })
+        .await;
+        let case = format!("welcome at {welcome_at:?}");
+        assert!(matches!(result, Err(SessionError::Timeout)), "{case}");
+        assert!(
+            (HANDSHAKE_TIMEOUT..=HANDSHAKE_TIMEOUT + Duration::from_millis(2))
+                .contains(&start.elapsed()),
+            "{case}"
+        );
+        assert_eq!(reserved, 1, "{case}");
+        assert!(!legs.bound, "{case}");
+        if welcome_at == late {
+            assert!(legs.written.is_empty() && legs.opened.is_none(), "{case}");
+        } else {
+            assert_eq!(legs.written, welcome_frame(SESSION), "{case}");
+            assert!(
+                legs.opened.expect("data opened") >= start + welcome_at,
+                "{case}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -288,15 +312,15 @@ async fn both_modes_welcome_the_exact_reserved_session_and_admit_its_echo() {
         let control = control_frame(&control);
         let data = ready_data(mode);
         let mut legs = Memory::new(control.as_slice(), data.as_slice());
-        let mut reserved = Vec::new();
-        let admitted = greet(&mut legs, &mut Tap::default(), |audio| {
-            reserved.push(audio);
+        let mut reserved = 0;
+        let admitted = greet(&mut legs, &mut Tap::default(), startup(), || {
+            reserved += 1;
             SESSION
         })
         .await
         .unwrap()
         .expect("both legs pass");
-        assert_eq!(reserved, [mode]);
+        assert_eq!(reserved, 1);
         assert_eq!(legs.written, welcome_frame(SESSION), "{mode:?}");
         assert_eq!(admitted.audio, mode);
         assert_eq!(admitted.start, PairStart::Ordinary);
@@ -328,7 +352,7 @@ async fn a_data_greeting_from_another_welcome_or_mode_is_refused_before_binding(
         let control = control_frame(control);
         let data = data_frames(&[data, DataToBrain::TextMetrics(None)]);
         let mut legs = Memory::new(control.as_slice(), data.as_slice());
-        let result = greet(&mut legs, &mut Tap::default(), |_| SESSION).await;
+        let result = greet(&mut legs, &mut Tap::default(), startup(), || SESSION).await;
         assert!(
             matches!(
                 result,
@@ -346,10 +370,10 @@ async fn a_silent_control_leg_times_out_before_anything_is_reserved_or_opened() 
     let (control, _shell) = tokio::io::duplex(64);
     let data = ready_data(AudioSession::Legacy);
     let mut legs = Memory::new(control, data.as_slice());
-    let mut reserved = Vec::new();
+    let mut reserved = 0;
     let start = Instant::now();
-    let result = greet(&mut legs, &mut Tap::default(), |audio| {
-        reserved.push(audio);
+    let result = greet(&mut legs, &mut Tap::default(), startup(), || {
+        reserved += 1;
         SESSION
     })
     .await;
@@ -358,6 +382,6 @@ async fn a_silent_control_leg_times_out_before_anything_is_reserved_or_opened() 
         (HANDSHAKE_TIMEOUT..=HANDSHAKE_TIMEOUT + Duration::from_millis(2))
             .contains(&start.elapsed())
     );
-    assert_eq!(reserved, []);
+    assert_eq!(reserved, 0);
     assert!(legs.written.is_empty() && legs.opened.is_none() && !legs.bound);
 }

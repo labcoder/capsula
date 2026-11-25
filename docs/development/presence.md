@@ -153,8 +153,9 @@ The dock is a transparent `PopUp` overlay, sized to its slot. Its native styles 
 layered, transparent, no-activate and tool-window; app-window is removed. A separate native hit
 proxy owns exactly the line's trigger band and reports pointer entry and exit (see
 [The line and hit testing](#the-line-and-hit-testing)). The panel is interactive, nonactivating and excluded from the taskbar in the same way.
-The panel is created hidden at startup, so the first click doesn't create a window.
-The same panel is hidden and reused, never recreated for each click. The typing panel is the
+The panel is created hidden at startup and reused on each hover. While it is open, the
+leave timer rechecks the click-through gap between the painted line and the panel so crossing
+it keeps the peek open without enlarging the proxy. The typing panel is the
 one exception to never activating: it's a tool window without no-activate, created on the first
 double tap, activated only explicitly, and hidden rather than closed. While it's open, pointer
 events and dock clicks leave it alone and the status panel stays hidden. Shell Core's

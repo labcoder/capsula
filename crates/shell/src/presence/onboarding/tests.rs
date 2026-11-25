@@ -110,6 +110,7 @@ fn open_at(
         owner.set_onboarding(
             OnboardingPanel {
                 window,
+                escape_edit: std::rc::Rc::clone(&view.read(cx).escape_edit),
                 view,
                 bounds: [0; 4],
                 previous: None,
@@ -631,7 +632,7 @@ fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
             Rc::clone(&owner.voice.target),
             Rc::clone(&owner.voice.paused),
             owner.voice.gates.clone(),
-            (Rc::clone(&owner.speech), Rc::clone(&owner.escape_scope)),
+            owner.escape_presses(cx),
             cx,
         )
     })
@@ -639,12 +640,15 @@ fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
 
 fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
     for key in [Key::LeftControl, Key::LeftAlt] {
-        deliver(Event::Key { key, edge }, EventTime::new(at));
+        deliver(
+            Event::Key { key, edge },
+            EventTime::new(at).with_queued_press(u64::MAX),
+        );
     }
 }
 
 fn at_ms(at: Instant, millis: u64) -> EventTime {
-    EventTime::new(at + Duration::from_millis(millis))
+    EventTime::new(at + Duration::from_millis(millis)).with_queued_press(u64::MAX)
 }
 
 /// A whole hold: the chord, the 300 ms threshold through `threshold` (GPUI's scheduled timer

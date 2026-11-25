@@ -233,34 +233,10 @@ pub enum Failure {
     Budget,
     /// The engine failed.
     Engine,
+    /// A closed cause with proof from this run's original attempt.
+    Connection(HistoryFailure),
     /// The store refused a write.
     Store,
-}
-
-impl RunEnd {
-    fn columns(self) -> (&'static str, Option<&'static str>) {
-        match self {
-            Self::Done => ("done", None),
-            Self::Interrupted(why) => (
-                "interrupted",
-                Some(match why {
-                    Interruption::Stop => "stop",
-                    Interruption::Replaced => "replaced",
-                    Interruption::ShellLost => "shell_lost",
-                    Interruption::ViewStalled => "view_stalled",
-                    Interruption::Deleted => "deleted",
-                }),
-            ),
-            Self::Failed(why) => (
-                "failed",
-                Some(match why {
-                    Failure::Budget => "budget",
-                    Failure::Engine => "engine",
-                    Failure::Store => "store",
-                }),
-            ),
-        }
-    }
 }
 
 /// A thread's deletion generation. Work stamped with an older one is stale.
@@ -549,7 +525,25 @@ impl Store {
         events: &[NewEvent<'_>],
         end: RunEnd,
     ) -> Result<(), StoreError> {
-        let (state, reason) = end.columns();
+        let (state, reason) = match end {
+            RunEnd::Done => ("done", None),
+            RunEnd::Interrupted(why) => (
+                "interrupted",
+                Some(match why {
+                    Interruption::Stop => "stop",
+                    Interruption::Replaced => "replaced",
+                    Interruption::ShellLost => "shell_lost",
+                    Interruption::ViewStalled => "view_stalled",
+                    Interruption::Deleted => "deleted",
+                }),
+            ),
+            RunEnd::Failed(Failure::Budget) => ("failed", Some("budget")),
+            RunEnd::Failed(Failure::Engine) => ("failed", Some("engine")),
+            RunEnd::Failed(Failure::Store) => ("failed", Some("store")),
+            RunEnd::Failed(Failure::Connection(failure)) => {
+                return self.end_run_with_connection_failure(thread, run, events, failure);
+            }
+        };
         self.end_run_with_reason(thread, run, events, state, reason)
     }
 

@@ -3,8 +3,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use kumochi_protocol::{BUILD_ID, Secret};
+use tokio::time::{Instant, timeout};
 
-use super::{HANDSHAKE_TIMEOUT, Hello, Identity, Incarnation, Pipes, Session, Tap, timeout};
+use super::{HANDSHAKE_TIMEOUT, Hello, Identity, Incarnation, Pipes, Session, Tap};
 use crate::runtime::audio_fixture;
 use crate::scratch;
 
@@ -217,7 +218,14 @@ fn offline_peer(
                         .connect()
                         .await
                         .expect("fixture control client");
-                    pipes.session(&identity, &mut brain, &mut tap).await
+                    pipes
+                        .session(
+                            &identity,
+                            &mut brain,
+                            &mut tap,
+                            Instant::now() + HANDSHAKE_TIMEOUT,
+                        )
+                        .await
                 })
                 .await;
                 drop(pipes);

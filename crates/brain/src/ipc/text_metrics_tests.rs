@@ -122,7 +122,9 @@ async fn data_connect_hello_and_metrics_share_one_budget_in_both_modes() {
             let startup = async {
                 let mut legs = Memory::new([].as_slice(), &mut pipe);
                 legs.open_at = Some(start + tick * connect_at);
-                let result = read_startup_data(&mut legs, expected, &mut tap).await;
+                let result =
+                    read_startup_data(&mut legs, expected, &mut tap, start + HANDSHAKE_TIMEOUT)
+                        .await;
                 (result, Instant::now())
             };
             let peer = async {
