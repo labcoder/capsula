@@ -31,7 +31,7 @@ use crate::engines::claude_code::policy::{self, Reviewed, ReviewedModel};
 use crate::engines::claude_code::supervisor::{
     self, Control, Launch, LaunchRefused, MAX_LAUNCH, Question,
 };
-use crate::engines::{EngineFailure, Finish, RunRequest, TurnEvent};
+use crate::engines::{ClaudeSignOutStage, EngineFailure, Finish, RunRequest, TurnEvent};
 use crate::recall::control::Control as Lifetime;
 
 /// Where Claude Code's sign-in may be kept, which owner call 1 decided.
@@ -105,8 +105,8 @@ pub(crate) struct Claude {
     owed: Option<Vec<ModelInfo>>,
     /// The last job the lane couldn't take: `Unavailable` is then a full queue, not a stuck lane.
     full: bool,
-    /// The build whose question was asked last, and the generation its launch was admitted under.
-    asked: Option<(BuildKey, u64)>,
+    /// The build whose question was asked last, its generation, and its exact launch.
+    asked: Option<(BuildKey, u64, LaunchId)>,
     /// The picture grants of this generation's questions, closed when it ends.
     pictures: Vec<PictureGrant>,
     /// The generation moved since the brain last looked, so every picture held for Claude Code
@@ -129,6 +129,24 @@ struct StatusRecheck {
     key: SendKey,
     guard: Recheck,
     signed_out: oneshot::Sender<()>,
+}
+
+impl StatusRecheck {
+    fn finish(self) -> Option<(BuildKey, EngineFailure)> {
+        let failure = if self.guard.check().is_ok() {
+            self.signed_out.send(()).ok()?;
+            EngineFailure::ClaudeSignedOut {
+                stage: ClaudeSignOutStage::AfterSeed,
+                notice: open_settings(ErrorKey::ClaudeCodeSignedOut),
+            }
+        } else {
+            EngineFailure::Provider
+        };
+        match self.key {
+            SendKey::Build(key) => Some((key, failure)),
+            SendKey::Job(_) => None,
+        }
+    }
 }
 
 /// One admitted launch, as the core tracks it.
@@ -369,26 +387,21 @@ impl Claude {
         }
     }
 
-    /// A lane result: whether the view may have changed and a build to end as Provider
-    /// before publishing a late sign-out.
-    fn done(&mut self, Done { generation, result }: Done) -> (bool, Option<BuildKey>) {
+    /// A lane result and, for a failed question, its terminal before the sign-out is published.
+    fn done(
+        &mut self,
+        Done { generation, result }: Done,
+    ) -> (bool, Option<(BuildKey, EngineFailure)>) {
         if generation != self.generation || self.out.is_none() {
             return (false, None);
         }
         let recheck = self.recheck.take();
         let automatic = recheck.is_some();
-        let mut late = None;
-        if let Some(recheck) = recheck {
-            if !self.confirmed_sign_out(&result) {
-                self.out = None;
-                return (false, None);
-            }
-            if recheck.guard.check().is_ok() {
-                recheck.signed_out.send(()).ok();
-            } else if let SendKey::Build(key) = recheck.key {
-                late = Some(key);
-            }
+        if automatic && !self.confirmed_sign_out(&result) {
+            self.out = None;
+            return (false, None);
         }
+        let question = recheck.and_then(StatusRecheck::finish);
         if let Some(held) = &mut self.quarantine
             && self.out == Some(Work::Quarantine(held.version))
             && !matches!(
@@ -478,7 +491,7 @@ impl Claude {
         if self.out.is_none() && !matches!(self.view, ClaudeCodeView::Ready { .. }) {
             self.revoke_all();
         }
-        (true, late)
+        (true, question)
     }
 
     /// Queues a question launch behind whatever the lane is doing. Its deadline is fixed now.
@@ -625,8 +638,7 @@ impl Claude {
             | ClaudeCodeView::InUse
             | ClaudeCodeView::Ready { .. } => ErrorKey::ClaudeCodeUnsupported,
         };
-        UserError::new(key, Vec::new(), vec![Action::OpenSettings])
-            .expect("one action is within the limit")
+        open_settings(key)
     }
 
     /// The engine for one question on `request`'s Claude Code choice. A run's build offers the
@@ -636,7 +648,7 @@ impl Claude {
     ///
     /// # Errors
     /// [`LaunchRefused::NotReady`] unless a launch would be admitted and the choice is a Claude
-    /// Code one whose model and effort the row lists together; otherwise as [`take`](Self::take).
+    /// Code one whose model and effort the row lists together, or when no launch can be taken.
     pub(crate) fn question(
         &mut self,
         request: &RunRequest,
@@ -681,11 +693,11 @@ impl Claude {
             Some(effort.to_owned()),
             offer,
         )?;
-        let question = self.take(&snapshot)?;
-        if let SendKey::Build(build) = request.key {
-            self.asked = Some((build, snapshot.account));
-        }
-        Ok(question)
+        let build = match request.key {
+            SendKey::Build(key) => Some(key),
+            SendKey::Job(_) => None,
+        };
+        self.take_for(&snapshot, build)
     }
 
     /// Keeps `grant`, the picture grant for `key`'s send on `kind`, while that build's question
@@ -701,7 +713,7 @@ impl Claude {
             return;
         }
         match (key, self.asked) {
-            (SendKey::Build(build), Some((asked, generation)))
+            (SendKey::Build(build), Some((asked, generation, _)))
                 if asked == build && generation == self.generation =>
             {
                 self.pictures
@@ -806,9 +818,18 @@ impl Claude {
     ///
     /// # Errors
     /// As [`warm`](Self::warm).
+    #[cfg(all(test, windows))]
     pub(crate) fn take(
         &mut self,
         snapshot: &LaunchSnapshot,
+    ) -> Result<ClaudeQuestion, LaunchRefused> {
+        self.take_for(snapshot, None)
+    }
+
+    fn take_for(
+        &mut self,
+        snapshot: &LaunchSnapshot,
+        build: Option<BuildKey>,
     ) -> Result<ClaudeQuestion, LaunchRefused> {
         let now = self.clock.now();
         let attempt = match self.warm.take() {
@@ -827,6 +848,9 @@ impl Claude {
                 self.attempt(snapshot.clone(), None)?
             }
         };
+        if let Some(build) = build {
+            self.asked = Some((build, snapshot.account, attempt.id()));
+        }
         Ok(ClaudeQuestion::new(
             attempt,
             Arc::clone(&self.budget),
@@ -1026,7 +1050,13 @@ impl Claude {
         }: Refresh,
     ) {
         self.replaced(old);
-        reply.send(self.attempt(snapshot, None)).ok();
+        let fresh = self.attempt(snapshot, None);
+        if let (Some((_, _, id)), Ok(attempt)) = (&mut self.asked, &fresh)
+            && *id == old
+        {
+            *id = attempt.id();
+        }
+        reply.send(fresh).ok();
     }
 
     /// Revokes every launch; each one's teardown runs on the lane before its next call.
@@ -1133,6 +1163,11 @@ fn busy() -> UserError {
         .expect("one action is within the limit")
 }
 
+fn open_settings(key: ErrorKey) -> UserError {
+    UserError::new(key, Vec::new(), vec![Action::OpenSettings])
+        .expect("one action is within the limit")
+}
+
 /// The view a failure leaves.
 fn failed(failure: Failure) -> ClaudeCodeView {
     match failure {
@@ -1210,7 +1245,7 @@ impl Brain {
         wake: Wake,
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
-        let (changed, late) = match wake {
+        let (changed, question) = match wake {
             Wake::Call(call) => return self.mcp_call(call, link),
             Wake::Note(Note::Bind(bind)) => {
                 self.mcp_bind(bind);
@@ -1231,14 +1266,32 @@ impl Brain {
                     .recheck_failed(id, key, lifetime.map(|l| l.until(until)), signed_out);
                 (false, None)
             }
+            Wake::Note(Note::Ended {
+                id,
+                outcome: launch::Outcome::SignedOut,
+            }) => {
+                let changed = self.claude.wake(wake);
+                let question = self.claude.asked.and_then(|(key, generation, launch)| {
+                    (changed && generation == self.claude.generation && launch == id).then(|| {
+                        (
+                            key,
+                            EngineFailure::ClaudeSignedOut {
+                                stage: ClaudeSignOutStage::BeforeSeed,
+                                notice: self.claude.reason(),
+                            },
+                        )
+                    })
+                });
+                (changed, question)
+            }
             Wake::Lane(done) => self.claude.done(done),
             wake => (self.claude.wake(wake), None),
         };
         self.claude_generation_moved();
-        let terminal = if let Some(key) = late
+        let terminal = if let Some((key, failure)) = question
             && let Some(effects) = self.handle(Input::Engine {
                 key,
-                event: TurnEvent::Finished(Finish::Failed(EngineFailure::Provider)),
+                event: TurnEvent::Finished(Finish::Failed(failure)),
             }) {
             self.apply(effects, link.as_deref_mut())
         } else {

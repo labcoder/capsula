@@ -457,6 +457,22 @@ pub enum EngineFailure {
     ClaudeStream(ClaudeStreamFailure),
     /// Claude Code refused or failed the question for a reason the shell names.
     Claude(UserError),
+    /// This attempt confirmed Claude Code was signed out.
+    ClaudeSignedOut {
+        /// Which check confirmed the sign-out.
+        stage: ClaudeSignOutStage,
+        /// The existing sign-out notice.
+        notice: UserError,
+    },
+}
+
+/// Where Claude Code confirmed that it was signed out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaudeSignOutStage {
+    /// Its audit refused the launch before it seeded the question.
+    BeforeSeed,
+    /// A Status check confirmed sign-out after a seeded question failed.
+    AfterSeed,
 }
 
 /// How Claude Code's stdout broke its rules.

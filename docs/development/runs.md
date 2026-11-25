@@ -429,6 +429,14 @@ after every op and wake; while it's being found that's `Finding`, which reads as
   `ModelUnavailable` with Open Settings for another kind (`Coordinator::refusal`). A held ask for
   that run is answered `Rebuild`, and `send_ready`
   checks the route again before every `Grant`. Only a `ChatGPT` route takes a bearer.
+- **History keeps evidence about the original turn.** The run remembers its first user-turn
+  grant, separate from inline compaction. A closed connection failure and accepted answer
+  text prove a partial answer. Without text, a pre-seed sign-out or failed bearer admission
+  can prove the turn never went out; a final HTTP rejection after the first upload proves it
+  wasn't accepted. An early response without a completed upload, a stream error without text,
+  an expired check, or a refusal belonging to a different
+  attempt makes no delivery claim. The existing terminal outcome carries these facts to the store
+  with the run's last events, without changing notices or starting a retry.
 - **A recovered `ChatGPT` connection keeps to its history cutoff** (`Input::RecoveredChatGpt`,
   which carries the [cutoff](store.md) the vault read back and matched). Every read for a route
   on that sign-in carries the cutoff: the run's builds, inline compaction, history calls, and title

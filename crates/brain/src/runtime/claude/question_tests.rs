@@ -76,6 +76,11 @@ fn synthetic_signed_in() -> Script {
     }
 }
 
+fn recorded_signed_out() -> Script {
+    let account = lines(FACTS)[0]["response"]["response"]["account"].clone();
+    synthetic_signed_in().initialize(|body| body["account"] = account)
+}
+
 impl Script {
     /// The first `mcp_status` answer reads `pending` with no tools, as 2.1.306's does while
     /// Kumochi's server connects; `again` holds the answers to the asks after it.
@@ -436,6 +441,13 @@ fn claude_failed(key: ErrorKey) -> TurnEvent {
     TurnEvent::Finished(Finish::Failed(EngineFailure::Claude(key.into())))
 }
 
+fn claude_signed_out(stage: ClaudeSignOutStage) -> TurnEvent {
+    TurnEvent::Finished(Finish::Failed(EngineFailure::ClaudeSignedOut {
+        stage,
+        notice: ErrorKey::ClaudeCodeSignedOut.into(),
+    }))
+}
+
 /// The answer's text, then its usage, then Completed.
 fn answered(events: &[TurnEvent]) {
     let [
@@ -618,7 +630,7 @@ async fn a_provider_failed_question_checks_status_once_and_only_confirmed_sign_o
         (
             "out",
             Some(json!({"loggedIn": false})),
-            claude_failed(ErrorKey::ClaudeCodeSignedOut),
+            claude_signed_out(ClaudeSignOutStage::AfterSeed),
             ClaudeCodeView::SignedOut { version: V },
         ),
         (
@@ -1466,21 +1478,104 @@ async fn an_audit_failure_is_marked_before_the_brain_can_quit() {
 /// T8 and T4b's sign-out: nothing is seeded, the run fails signed out and so does the view.
 #[tokio::test]
 async fn a_signed_out_launch_fails_the_run_signed_out_before_any_user_line() {
-    let script = synthetic_signed_in().initialize(|body| {
-        body["account"] = json!({"tokenSource": "none", "apiProvider": "firstParty"});
-    });
-    let mut rig = Rig::new("question-signed-out", &script).await;
+    let mut rig = Rig::new("question-signed-out", &recorded_signed_out()).await;
     let question = rig.claude.take(&rig.snapshot()).expect("taken");
     let (id, _) = rig.last();
     let mut played = play(&question);
     assert_eq!(
         rig.drive(played.events()).await,
-        [claude_failed(ErrorKey::ClaudeCodeSignedOut)]
+        [claude_signed_out(ClaudeSignOutStage::BeforeSeed)]
     );
     assert_eq!(rig.reported(id).await, [launch::Outcome::SignedOut]);
     assert_eq!(rig.claude.view(), ClaudeCodeView::SignedOut { version: V });
     assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
     rig.close().await;
+}
+
+#[tokio::test]
+async fn a_signed_out_question_still_has_not_sent_history_after_restart() {
+    use kumochi_protocol::message::{
+        DeliveryProof, HistoryFailure, HistoryFailureCause, PageEventKind,
+    };
+
+    use super::super::Seen;
+    use crate::store::{Failure as RunFailure, RunEnd, Store};
+
+    let name = "question-signed-out-history";
+    let mut rig = Rig::new(name, &recorded_signed_out()).await;
+    let scratch = Scratch::new(name);
+    fs::write(
+        scratch
+            .db()
+            .with_file_name(kumochi_protocol::constants::CONFIG_FILE),
+        "default_model = { connection = \"ClaudeCode\", model = \"haiku\", effort = \"Low\" }\n",
+    )
+    .expect("settings");
+    let mut brain = brain_on(&mut rig, &scratch);
+    let mut observed = brain.observe();
+    brain.claude_reported(None).expect("no shell");
+    brain.offline(Input::Turn {
+        turn: 1,
+        thread: Some(ThreadId(1)),
+        text: "keep this question".into(),
+    });
+    timeout(WAIT, async {
+        loop {
+            let input = brain.inputs.recv().await.expect("store input");
+            let built = matches!(input, Input::ContextBuilt(_));
+            brain.offline(input);
+            if built {
+                break;
+            }
+        }
+        while !matches!(brain.claude.view(), ClaudeCodeView::SignedOut { .. }) {
+            let wake = brain.claude.next().await;
+            brain.claude_done(wake, None).expect("no shell");
+        }
+    })
+    .await
+    .expect("the sign-out report ends the question before the engine pump");
+    let outcome = timeout(WAIT, async {
+        loop {
+            if let Seen::StoreOpQueued(StoreOp::EndRun { end, .. }) =
+                observed.recv().await.expect("run's store op")
+            {
+                break end;
+            }
+        }
+    })
+    .await
+    .expect("one terminal write");
+    let failure = HistoryFailure {
+        cause: HistoryFailureCause::ClaudeCodeSignedOut,
+        delivery: DeliveryProof::NotSent,
+    };
+    assert_eq!(outcome, RunEnd::Failed(RunFailure::Connection(failure)));
+    assert_eq!(
+        brain.claude.view(),
+        ClaudeCodeView::SignedOut { version: V }
+    );
+    assert!(rig.stdin().iter().all(|line| !line.ends_with(" user")));
+    assert!(brain.claude.close(soon()).await);
+    brain.close().await;
+
+    let mut db = Store::open(&scratch.db()).expect("restart store");
+    assert_eq!(db.recover().expect("recovery").crashed_runs, 0);
+    let thread = db.main_thread().expect("main");
+    let (rows, next) = db.pages().events_page(thread, None, 10).expect("history");
+    assert_eq!(next, None);
+    let [turn] = rows.as_slice() else {
+        panic!("only the user's question is stored");
+    };
+    assert_eq!(turn.run, Some(RunId(1)));
+    assert_eq!(turn.text, "keep this question");
+    assert_eq!(
+        turn.kind,
+        PageEventKind::ConnectionFailed {
+            failure,
+            screen: None
+        }
+    );
 }
 
 /// T4c.

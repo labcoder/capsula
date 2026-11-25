@@ -304,6 +304,7 @@ fn local_and_reused_transport_failures_remain_closed() {
                 status: 401,
                 code: None,
                 param: None,
+                origin: model::error::RejectionOrigin::Unproven,
             }),
             Failure::Protocol,
         ),

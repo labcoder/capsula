@@ -2512,6 +2512,7 @@ fn a_digest_only_key_send_writes_only_while_its_digest_may_go() {
             Some(|core| {
                 core.handle(Input::KeyRefused(RefusedKey(
                     crate::context::ConnectionTag(5),
+                    None,
                 )))
                 .unwrap();
             }),
