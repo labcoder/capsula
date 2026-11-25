@@ -218,6 +218,8 @@ impl Read for &PipeClient {
             let need = ENVELOPE_LEN + announced.unwrap_or(0);
             if *filled < need {
                 let n = match (&client.stream).read(&mut record[*filled..need]) {
+                    // The pair refused while this read waited: report the refusal, not an end.
+                    _ if client.pair.refused() => continue,
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     // A timeout keeps the partial record, so the next read resumes it.
                     result => result?,

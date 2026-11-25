@@ -228,6 +228,7 @@ fn a_record_that_fails_to_authenticate_refuses_and_wakes_both_legs() {
     });
     let mut forged = vec![0, 32];
     forged.extend([0xAB; 32]);
+    let started = Instant::now();
     brain.control.write_all(&forged).expect("forged record");
     control.set_timeout(Some(BOUND));
     let refused = frame::read::<ControlToShell>(&mut &control, Pipe::Control).expect_err("forged");
@@ -235,24 +236,39 @@ fn a_record_that_fails_to_authenticate_refuses_and_wakes_both_legs() {
         matches!(refused, frame::FrameError::Io(ref error) if error.kind() == std::io::ErrorKind::InvalidData)
     );
     let woke = blocked.join().expect("the data reader returned");
-    assert!(!matches!(woke, Ok(1)), "the data leg delivered nothing");
+    assert!(
+        started.elapsed() < BOUND / 2,
+        "the refusal woke the data reader"
+    );
+    assert_eq!(
+        woke.expect_err("refused, not an end").kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
     assert!(control.is_aborted() && data.is_aborted(), "both legs");
 }
 
 #[test]
 fn the_stream_ending_inside_a_record_is_truncated_and_refuses() {
-    let (control, data, mut brain) = bound();
-    brain
-        .control
-        .write_all(&[0, 40, 1, 2, 3])
-        .expect("part of a record");
-    drop(brain);
-    control.set_timeout(Some(BOUND));
-    let refused = frame::read::<ControlToShell>(&mut &control, Pipe::Control).expect_err("cut off");
-    assert!(
-        matches!(refused, frame::FrameError::Io(ref error) if error.kind() == std::io::ErrorKind::InvalidData)
-    );
-    assert!(data.is_aborted(), "the pair refused");
+    // One byte of the envelope, and all of the record but its last byte.
+    for kept in [|_: usize| 1, |len: usize| len - 1] {
+        let (control, data, mut brain) = bound();
+        let wire = brain.sealed(
+            Pipe::Control,
+            &frame::encode(&ControlToShell::Ping, Pipe::Control).expect("encodes"),
+        );
+        brain
+            .control
+            .write_all(&wire[..kept(wire.len())])
+            .expect("part of a record");
+        drop(brain);
+        control.set_timeout(Some(BOUND));
+        let refused =
+            frame::read::<ControlToShell>(&mut &control, Pipe::Control).expect_err("cut off");
+        assert!(
+            matches!(refused, frame::FrameError::Io(ref error) if error.kind() == std::io::ErrorKind::InvalidData)
+        );
+        assert!(data.is_aborted(), "the pair refused");
+    }
 }
 
 #[test]
