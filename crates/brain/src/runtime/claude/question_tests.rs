@@ -1,6 +1,7 @@
 //! C5b-1b through the core, on the lane's fake in `replay` mode: the warm slot, `take`, the
 //! round, and each attempt's one report. Every positive fixture is synthetic (§8); no network, no
 //! account and no credential store.
+#![cfg(windows)]
 
 use std::fs;
 use std::future::Future;
