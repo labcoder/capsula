@@ -186,7 +186,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             ),
             scene_timer: None,
             scene_deadline: None,
-            pending_stops: std::collections::VecDeque::new(),
+            pending_stops: crate::link::policy::SpeakerStops::default(),
             stop_retry: None,
             speech: Rc::default(),
             escape_scope: Rc::default(),

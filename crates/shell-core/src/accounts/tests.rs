@@ -947,3 +947,49 @@ fn status_passes_complete_notice_copy_to_the_view_in_display_order() {
         )
     );
 }
+
+#[test]
+fn only_a_signed_in_supported_account_owing_nothing_reads_as_recovered() {
+    let mut accounts = Accounts::default();
+    let snapshot = |generation, view| LinkEvent::Account { generation, view };
+    assert_eq!(
+        accounts.receive_account(Some(7), snapshot(6, signed_in(PlanState::Enabled, None))),
+        super::Receipt::Stale
+    );
+    assert_eq!(accounts.view, None);
+    assert_eq!(
+        accounts.receive_account(
+            Some(7),
+            snapshot(
+                7,
+                signed_in(PlanState::Enabled, Some(AccountRecovery::Retry))
+            )
+        ),
+        super::Receipt::Accepted
+    );
+    assert_eq!(
+        accounts.receive_account(Some(7), snapshot(7, signed_out())),
+        super::Receipt::Accepted
+    );
+    assert_eq!(
+        accounts.receive_account(Some(7), snapshot(7, signed_in(PlanState::Enabled, None))),
+        super::Receipt::Recovered
+    );
+    accounts.error(&error(ErrorKey::RenewalUnconfirmed, Vec::new()));
+    assert_eq!(
+        accounts.receive_account(Some(7), snapshot(7, signed_in(PlanState::Enabled, None))),
+        super::Receipt::Accepted,
+        "an error still stands for the same view"
+    );
+    assert_eq!(
+        accounts.receive_account(
+            Some(7),
+            LinkEvent::AccountUnsupported {
+                generation: 7,
+                view: signed_in(PlanState::Enabled, None)
+            }
+        ),
+        super::Receipt::Accepted,
+        "unsupported"
+    );
+}
