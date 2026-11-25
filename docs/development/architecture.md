@@ -192,11 +192,18 @@ absent, while a folder, a file, an item or any refusal is unverified, because no
 the allocator's own from anything else. The owner probe drops the item's bytes unread. Nothing
 writes either name yet, so both stay cheap to change until cut 9 does.
 
-`brain::profile` reads a present legacy data folder in place under its existing `session.lock`,
-taken with `try_acquire_existing` and held through every read. It matches only with a known history
-schema and a matching authority and host. That last check isn't wired in yet
-(`authority_and_host` reads unverified), so a present legacy folder reads unverified for now.
-Nothing calls it yet.
+`brain::profile::NativeProbes` composes the real probes, still with no caller. Its guard is
+`acquire_setup_guard` on Windows and `Support::try_setup_guard` on the admitted Support anchor on
+macOS: only contention is `Busy`, and any other failure, an anchor that can't be found or admitted
+included, is `Unavailable`. Its anchors are the Local and Roaming AppData Known Folders on Windows
+and `application_support_dir` on macOS, never `LOCALAPPDATA`, `APPDATA` or the Gate override,
+whose admission creates the product folders. Each probe holds its anchors through its reads. Legacy
+is absent only when every legacy product folder (local data and, on Windows, roaming settings) is a
+definitive not-found under its verified anchor. A present local data folder is read in place under
+its existing `session.lock`, taken with `try_acquire_existing` and held through every read, and
+matches only with a known history schema and a matching authority and host. That last check isn't
+wired in yet (`authority_and_host` reads unverified), so a present legacy folder reads unverified
+for now. A roaming folder without local data and any failed lookup are unverified too.
 
 On Windows `kumochi_storage::hold_product_folder(anchor)` looks up only this edition's product
 folder (`DATA_DIR`) and `profile_root(anchor)` only its root slot, both through one private lookup

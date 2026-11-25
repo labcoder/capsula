@@ -1,15 +1,87 @@
-//! Read-only probes behind the shared profile observer.
+//! Read-only probes behind the shared profile observer, and their composition over this machine's
+//! own folders, setup guard and credential store.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants::{
     PROFILE_OWNER_ACCOUNT, ProductIdentity, SESSION_LOCK, STORE_FILE, account_target,
 };
-use kumochi_protocol::profile::Observation;
+use kumochi_protocol::profile::{Guard, Observation};
+#[cfg(any(windows, target_os = "macos"))]
+use kumochi_protocol::profile::{Probes, Root};
 
 use crate::platform::SessionLock;
 use crate::platform::credential::CredentialStore;
+#[cfg(any(windows, target_os = "macos"))]
+use crate::platform::{credential::NativeCredentialStore, profile as native};
 use crate::store::existing::{LegacyHistory, legacy_history};
+
+/// What the noncreating lookup found for one legacy product folder.
+pub(crate) enum Folder {
+    /// A definitive not-found of the exact name under its held, verified anchor.
+    Missing,
+    /// A trusted folder at this path, held.
+    Present(PathBuf),
+    /// No verified anchor, or anything else at the name.
+    Unknown,
+}
+
+/// The probes over this machine's Known Folders (Application Support on macOS), setup guard and
+/// credential store. Each probe holds its own anchors through its reads.
+#[cfg(any(windows, target_os = "macos"))]
+#[cfg_attr(
+    test,
+    expect(dead_code, reason = "tests never read the person's real profile")
+)]
+pub(crate) struct NativeProbes;
+
+#[cfg(any(windows, target_os = "macos"))]
+impl Probes for NativeProbes {
+    type Guard = native::HeldGuard;
+
+    fn guard(&self) -> Guard<Self::Guard> {
+        taken(native::setup_guard(), &native::GuardError::Busy)
+    }
+
+    fn legacy(&self, _: &Self::Guard) -> Observation {
+        let folders = native::legacy();
+        legacy(&folders.data, folders.roaming.as_ref(), |data| {
+            intact(data, authority_and_host)
+        })
+    }
+
+    fn root(&self, _: &Self::Guard) -> Root {
+        native::profile_root()
+    }
+
+    fn owner(&self, _: &Self::Guard) -> Observation {
+        owner(&NativeCredentialStore)
+    }
+}
+
+/// The guard as `observe` takes it: only contention is busy, and any other failure is unavailable.
+fn taken<G, E: PartialEq>(result: Result<G, E>, busy: &E) -> Guard<G> {
+    match result {
+        Ok(guard) => Guard::Held(guard),
+        Err(error) if error == *busy => Guard::Busy,
+        Err(_) => Guard::Unavailable,
+    }
+}
+
+/// Legacy footprints from the product folders' lookups. Absent only when each is a definitive
+/// not-found; read in place only when the local data folder is present and no lookup failed. A
+/// roaming folder without local data is a remnant.
+fn legacy(
+    data: &Folder,
+    roaming: Option<&Folder>,
+    intact: impl FnOnce(&Path) -> Observation,
+) -> Observation {
+    match (data, roaming) {
+        (Folder::Missing, None | Some(Folder::Missing)) => Observation::Absent,
+        (Folder::Present(data), None | Some(Folder::Missing | Folder::Present(_))) => intact(data),
+        _ => Observation::Unverified,
+    }
+}
 
 /// The legacy profile in the present folder `data`, read under its existing session lock, which
 /// stays held through every read. Matching only with a known history schema and `authority`'s
@@ -52,7 +124,6 @@ pub(crate) fn owner(store: &impl CredentialStore) -> Observation {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
 
     use kumochi_protocol::Secret;
     use zeroize::Zeroizing;
@@ -61,6 +132,69 @@ mod tests {
     use crate::connections::vault::fake::FakeStore;
     use crate::store::Store;
     use crate::test_support::{Scratch, files};
+
+    #[derive(Debug, PartialEq)]
+    enum Failure {
+        Busy,
+        Unavailable,
+        Io,
+    }
+
+    #[test]
+    fn only_contention_is_a_busy_guard() {
+        assert!(matches!(
+            taken(Ok::<_, Failure>(7), &Failure::Busy),
+            Guard::Held(7)
+        ));
+        assert!(matches!(
+            taken(Err::<(), _>(Failure::Busy), &Failure::Busy),
+            Guard::Busy
+        ));
+        for failure in [Failure::Unavailable, Failure::Io] {
+            assert!(matches!(
+                taken(Err::<(), _>(failure), &Failure::Busy),
+                Guard::Unavailable
+            ));
+        }
+    }
+
+    #[test]
+    fn legacy_is_absent_only_when_every_folder_is_missing() {
+        let present = || Folder::Present(PathBuf::from("data"));
+        let cases = [
+            (Folder::Missing, None, Observation::Absent),
+            (Folder::Missing, Some(Folder::Missing), Observation::Absent),
+            (Folder::Missing, Some(present()), Observation::Unverified),
+            (
+                Folder::Missing,
+                Some(Folder::Unknown),
+                Observation::Unverified,
+            ),
+            (Folder::Unknown, None, Observation::Unverified),
+            (
+                Folder::Unknown,
+                Some(Folder::Missing),
+                Observation::Unverified,
+            ),
+            (present(), None, Observation::Matching),
+            (present(), Some(Folder::Missing), Observation::Matching),
+            (present(), Some(present()), Observation::Matching),
+            (present(), Some(Folder::Unknown), Observation::Unverified),
+        ];
+        for (case, (data, roaming, expected)) in cases.into_iter().enumerate() {
+            let mut read = None;
+            let found = legacy(&data, roaming.as_ref(), |data| {
+                read = Some(data.to_owned());
+                Observation::Matching
+            });
+            assert_eq!(found, expected, "case {case}");
+            assert_eq!(
+                read.is_some(),
+                expected == Observation::Matching,
+                "case {case}"
+            );
+        }
+    }
 
     /// A legacy data folder with an empty session lock and a history store the brain opened.
     fn profile(scratch: &Scratch) -> PathBuf {
