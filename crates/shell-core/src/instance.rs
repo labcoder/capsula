@@ -1,4 +1,4 @@
-//! One shell per Windows session, through the standard library's file lock.
+//! One shell per Windows session or macOS user, through the standard library's file lock.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
@@ -8,7 +8,18 @@ use std::path::Path;
 #[derive(Debug)]
 #[must_use = "dropping the guard lets another shell start"]
 pub struct InstanceLock {
-    _file: File,
+    _held: Held,
+}
+
+#[derive(Debug)]
+enum Held {
+    File {
+        _file: File,
+    },
+    #[cfg(target_os = "macos")]
+    Admitted {
+        _lock: kumochi_storage::AdmittedLock,
+    },
 }
 
 /// Why the shell couldn't acquire its current session's lock.
@@ -26,6 +37,10 @@ pub enum SessionLockError {
     /// The platform has no admitted current-session lock target.
     #[error("native single-instance admission is unsupported on this platform")]
     Unsupported,
+    /// The protected macOS data folder or lock file was not admitted.
+    #[cfg(target_os = "macos")]
+    #[error("can't admit the single-instance lock")]
+    Admission(#[source] kumochi_storage::AcquisitionError),
 }
 
 impl InstanceLock {
@@ -34,8 +49,18 @@ impl InstanceLock {
     /// # Errors
     /// Fails when the platform cannot supply a target or the lock cannot be taken.
     pub fn try_acquire_current_session() -> Result<Option<Self>, SessionLockError> {
-        let path = crate::platform::instance_lock_path()?;
-        Self::try_acquire(&path).map_err(SessionLockError::Lock)
+        #[cfg(target_os = "macos")]
+        {
+            let lock = crate::platform::macos::try_acquire_instance_lock()?;
+            Ok(lock.map(|lock| Self {
+                _held: Held::Admitted { _lock: lock },
+            }))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let path = crate::platform::instance_lock_path()?;
+            Self::try_acquire(&path).map_err(SessionLockError::Lock)
+        }
     }
 
     /// Opens or creates the empty lock file at `path` and locks it without waiting, or returns
@@ -55,7 +80,9 @@ impl InstanceLock {
             .truncate(false)
             .open(path)?;
         match file.try_lock() {
-            Ok(()) => Ok(Some(Self { _file: file })),
+            Ok(()) => Ok(Some(Self {
+                _held: Held::File { _file: file },
+            })),
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(error)) => Err(error),
         }
@@ -69,7 +96,7 @@ mod tests {
     use super::InstanceLock;
     use crate::scratch;
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn unsupported_current_session_has_no_lock_target() {
         let error = InstanceLock::try_acquire_current_session()

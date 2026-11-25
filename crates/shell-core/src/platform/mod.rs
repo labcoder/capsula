@@ -34,6 +34,7 @@ pub(crate) use windows::{PipeClient, launch_detached};
 #[cfg(windows)]
 pub use windows::{data_dir, session_id};
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn instance_lock_path() -> Result<std::path::PathBuf, crate::instance::SessionLockError>
 {
     use crate::instance::SessionLockError;

@@ -130,7 +130,7 @@ pub const INSTANCE_SERVICE: &str = ProductIdentity::ACTIVE.instance_service;
 
 /// Base name of the shell's single-instance lock file in [`DATA_DIR`].
 /// Windows uses `<SHELL_LOCK>-<session id>.lock` under `%LOCALAPPDATA%`.
-/// The macOS design uses `<SHELL_LOCK>.lock` under `~/Library/Application Support`.
+/// macOS uses `<SHELL_LOCK>.lock` under `~/Library/Application Support`.
 pub const SHELL_LOCK: &str = ProductIdentity::ACTIVE.shell_lock;
 
 /// The Credential Manager account under [`INSTANCE_SERVICE`] holding the capability; the

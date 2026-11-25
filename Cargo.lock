@@ -4015,6 +4015,7 @@ dependencies = [
  "kumochi-brain",
  "kumochi-protocol",
  "kumochi-scene",
+ "kumochi-storage",
  "thiserror 2.0.21",
  "tracing",
  "tracing-appender",
