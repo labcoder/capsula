@@ -18,6 +18,9 @@ mod recovery;
 mod screen_gate;
 mod settings;
 mod store_thread;
+mod terminal;
+#[cfg(test)]
+mod terminal_tests;
 #[cfg(test)]
 pub(crate) use store_thread::{Attempt, Schedule};
 #[cfg(test)]
@@ -26,6 +29,7 @@ mod voice;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -70,6 +74,7 @@ use recovery::Recovery;
 pub(crate) use store_thread::StoreThread;
 #[cfg(not(test))]
 use store_thread::StoreThread;
+use terminal::{Fatal, Fence, Terminal};
 
 /// Control frames queued for the shell (architecture v1 §3.2) [guess]. A full queue ends the
 /// connection: a deliberate overload policy, not proof that the shell hung.
@@ -129,6 +134,8 @@ pub(crate) enum Ended {
     },
     /// The shell went away or stopped answering.
     Lost,
+    /// The connection cannot accept any more input.
+    Fatal(Fatal),
     /// The shell broke the protocol after the handshake.
     Broken(&'static str),
     /// The visible set didn't settle in time, so no `Scenes` was sent; the shell reconnects.
@@ -719,7 +726,7 @@ impl Brain {
         C: AsyncRead + AsyncWrite + Unpin,
         D: AsyncRead + AsyncWrite + Unpin,
     {
-        self.serve_with_profile(control, data, tap, audio, None)
+        self.serve_with_profile(control, data, tap, audio, None, None)
             .await
     }
 
@@ -737,6 +744,10 @@ impl Brain {
         self.filing.report_live_block();
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps connection cleanup and disposition in order"
+    )]
     pub(crate) async fn serve_with_profile<C, D>(
         &mut self,
         control: C,
@@ -744,11 +755,17 @@ impl Brain {
         tap: &mut Tap,
         audio: AudioSession,
         text_metrics: Option<TextMetricsV1>,
+        terminal: Option<Terminal>,
     ) -> Ended
     where
         C: AsyncRead + AsyncWrite + Unpin,
         D: AsyncRead + AsyncWrite + Unpin,
     {
+        let mut wake = pin!(terminal.clone().map(Terminal::wake_on_fatal));
+        let fence = Fence::new(terminal);
+        if let Some(cause) = fence.check() {
+            return Ended::Fatal(cause);
+        }
         self.begin_pair();
         let (mut control_in, mut control_out) = tokio::io::split(control);
         let (mut data_in, mut data_out) = tokio::io::split(data);
@@ -765,10 +782,10 @@ impl Brain {
             (audio == AudioSession::QueuedRequired).then_some(Cell::new(Registration::Awaiting));
         let registration = registration.as_ref();
 
-        let control_reader = read_control(&mut control_in, &controls_tx, &quit);
+        let control_reader = read_control(&mut control_in, &controls_tx, &quit, &fence);
         tokio::pin!(control_reader);
         let mut reading = true;
-        let ended = {
+        let mut ended = {
             let data_reader = read_data(
                 &mut data_in,
                 &turns_tx,
@@ -778,13 +795,22 @@ impl Brain {
                 self.epoch,
                 Some(&pcm),
                 registration,
+                &fence,
             );
             let control_writer = write_control(&mut control_out, &mut out);
             let data_writer = write_data(&mut data_out, &queue, &ready, &room);
             let mut link = Link::new(&out_tx, &queue, &ready, &mut *tap);
             link.registration = registration;
             link.text_metrics = text_metrics;
-            let core = self.core(&mut controls, &mut turns, &mut pages, &room, link);
+            let core = self.core(
+                &mut controls,
+                &mut turns,
+                &mut pages,
+                &room,
+                link,
+                &fence,
+                wake.as_mut().as_pin_mut(),
+            );
             tokio::select! {
                 ended = &mut control_reader => {
                     reading = false;
@@ -796,6 +822,9 @@ impl Brain {
                 ended = core => ended,
             }
         };
+        if let Some(cause) = fence.check() {
+            ended = Ended::Fatal(cause);
+        }
         if let Some(reaccount) = &self.drawing_reaccount {
             reaccount.cancel();
         }
@@ -806,7 +835,7 @@ impl Brain {
         self.holds.lost();
         self.filing.cancel();
         queue.borrow_mut().end_reads();
-        if reading && !quitting {
+        if reading && !quitting && !matches!(ended, Ended::Fatal(_)) {
             #[cfg(test)]
             self.observer.send(Seen::Grace).ok();
             let grace = tokio::time::sleep(QUIT_GRACE);
@@ -814,6 +843,10 @@ impl Brain {
             loop {
                 tokio::select! {
                     biased;
+                    cause = fence.fatal(wake.as_mut().as_pin_mut()) => {
+                        ended = Ended::Fatal(cause);
+                        break;
+                    }
                     Some((message, len)) = controls.recv() => {
                         self.control_after_loss(message, len, tap, audio);
                     }
@@ -821,12 +854,22 @@ impl Brain {
                     () = &mut grace => break,
                 }
             }
+            if let Some(cause) = fence.check() {
+                ended = Ended::Fatal(cause);
+            }
         }
         if !quitting && quit.get().is_some() {
             self.claude.stop();
         }
         // The reader may have forwarded controls in the same poll that saw the pipe end.
-        while let Ok((message, len)) = controls.try_recv() {
+        while !matches!(ended, Ended::Fatal(_)) {
+            let Ok((message, len)) = controls.try_recv() else {
+                break;
+            };
+            if let Some(cause) = fence.check() {
+                ended = Ended::Fatal(cause);
+                break;
+            }
             #[cfg(test)]
             self.observer.send(Seen::ControlDrained).ok();
             self.control_after_loss(message, len, tap, audio);
@@ -888,6 +931,10 @@ impl Brain {
     /// re-accounting uses the same deadline but doesn't hold up a settled scene past it.
     /// After `Scenes`, snapshots go out a chunk at a time, ahead of engine events.
     #[expect(clippy::too_many_lines, reason = "one arm per source the loop serves")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one connection owns the ingress and terminal state"
+    )]
     async fn core(
         &mut self,
         controls: &mut mpsc::Receiver<(ControlToBrain, usize)>,
@@ -895,6 +942,8 @@ impl Brain {
         pages: &mut mpsc::Receiver<Input>,
         room: &Notify,
         mut link: Link<'_, '_>,
+        fence: &Fence,
+        mut wake: Option<Pin<&mut impl Future<Output = ()>>>,
     ) -> Ended {
         let mut ticks = tokio::time::interval(PING_EVERY);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -928,6 +977,7 @@ impl Brain {
             let feed = take_engine && link.recovery.as_ref().is_some_and(Recovery::pending);
             let input = tokio::select! {
                 biased;
+                cause = fence.fatal(wake.as_mut().map(Pin::as_mut)) => return Ended::Fatal(cause),
                 () = tokio::time::sleep_until(barrier.deadline), if !described => continue,
                 Some((message, len)) = controls.recv() => {
                     match self.control_frame(message, len, &mut link, &mut ping_sent) {
@@ -1652,6 +1702,10 @@ fn take(turns: &mpsc::Sender<Turn>, turn: Turn) -> Option<Ended> {
 /// Reads the data pipe. Credit is applied here, so it never waits behind turns the core
 /// isn't taking yet.
 #[expect(
+    clippy::too_many_lines,
+    reason = "one flat arm per frame with one acceptance check"
+)]
+#[expect(
     clippy::too_many_arguments,
     reason = "the reader borrows per-connection ingress"
 )]
@@ -1664,19 +1718,32 @@ async fn read_data(
     epoch: u64,
     pcm: Option<&hold::Ingress>,
     registration: Option<&Cell<Registration>>,
+    fence: &Fence,
 ) -> Ended {
     #[cfg(all(windows, debug_assertions, feature = "test-support"))]
     let probe = audio_fixture::probe();
     loop {
-        match ipc::read::<DataToBrain>(pipe, Pipe::Data).await {
+        let message = ipc::read::<DataToBrain>(pipe, Pipe::Data).await;
+        let fatal = fence.check();
+        if let Some(cause) = fatal
+            && !matches!(message, Ok(Some(DataToBrain::MicPcm(_))))
+        {
+            return Ended::Fatal(cause);
+        }
+        match message {
             Ok(Some(Hello(_) | QueuedHello(..) | TextMetrics(_))) => {
                 return Ended::Broken("startup frame on live data pipe");
             }
             Ok(Some(DataToBrain::MicPcm(mut chunk))) => {
-                if let Some(pcm) = pcm.filter(|_| Registration::admits(registration)) {
+                if let Some(pcm) =
+                    pcm.filter(|_| fatal.is_none() && Registration::admits(registration))
+                {
                     pcm.push(chunk);
                 } else {
                     zeroize::Zeroize::zeroize(&mut chunk.samples);
+                }
+                if let Some(cause) = fatal {
+                    return Ended::Fatal(cause);
                 }
             }
             Ok(Some(message @ DataToBrain::IssueEdit { .. })) => {

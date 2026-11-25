@@ -307,12 +307,20 @@ impl Pipes {
         tracing::info!("shell connected");
         Ok(
             match brain
-                .serve_with_profile(&mut self.control, &mut self.data, tap, audio, text_metrics)
+                .serve_with_profile(
+                    &mut self.control,
+                    &mut self.data,
+                    tap,
+                    audio,
+                    text_metrics,
+                    None,
+                )
                 .await
             {
                 Ended::Quit { deadline } => Session::Quit { deadline },
                 Ended::Lost => Session::ShellLost,
                 Ended::Broken(reason) => return Err(SessionError::Protocol(reason)),
+                Ended::Fatal(_) => return Err(SessionError::Protocol("connection refused")),
                 // The shell is still there and reconnects, so it isn't relaunched.
                 Ended::Unavailable => return Err(SessionError::Unavailable),
             },

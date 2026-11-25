@@ -10,7 +10,7 @@ use kumochi_protocol::message::GestureId;
 
 pub(in crate::runtime) mod screen_hold;
 
-const KEY: HoldKey = HoldKey {
+pub(in crate::runtime) const KEY: HoldKey = HoldKey {
     epoch: 0,
     gesture: GestureId(9),
 };
@@ -594,7 +594,7 @@ async fn expired_hold_key_up_after_stop_does_not_extend_the_deadline() {
     .await;
 }
 
-fn recording(brain: &mut Brain) {
+pub(in crate::runtime) fn recording(brain: &mut Brain) {
     let cancel = Arc::new(AtomicBool::new(false));
     let StoreOp::ReadHold(read) = brain
         .coordinator
@@ -1380,6 +1380,7 @@ async fn saturated_audio_still_reads_credit_behind_a_full_turn_queue() {
     assert_eq!(queue.borrow_mut().pop(std::time::Instant::now()), None);
     let ready = Notify::new();
     let (mut reader, mut writer) = tokio::io::duplex(32);
+    let fence = crate::runtime::Fence::new(None);
     let read = super::super::read_data(
         &mut reader,
         &turns,
@@ -1389,6 +1390,7 @@ async fn saturated_audio_still_reads_credit_behind_a_full_turn_queue() {
         0,
         Some(&ingress),
         None,
+        &fence,
     );
     let write = async {
         for seq in 0..9 {

@@ -1978,7 +1978,16 @@ async fn first_pcm_with_full_fifo(at: AtFirstPcm) {
         assert!(queue.bytes() >= DATA_CAP);
     }
     {
-        let core = brain.core(&mut controls, &mut turns, &mut pages, &room, link);
+        let fence = crate::runtime::Fence::new(None);
+        let core = brain.core(
+            &mut controls,
+            &mut turns,
+            &mut pages,
+            &room,
+            link,
+            &fence,
+            None::<std::pin::Pin<&mut std::future::Pending<()>>>,
+        );
         tokio::pin!(core);
         assert!(poll_fn(|cx| Poll::Ready(core.as_mut().poll(cx).is_pending())).await);
         tokio::time::advance(due - tokio::time::Instant::now() + Duration::from_millis(1)).await;
