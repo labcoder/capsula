@@ -217,16 +217,17 @@ fn capture_cutoff_100ns(ticks: i64, frequency: i64) -> Result<u64, MicError> {
     if frequency == 0 || ticks == 0 {
         return Err(MicError::Timestamp);
     }
-    // One tick is ambiguous across threads; require two, then round toward the future.
-    u64::try_from(((u128::from(ticks) + 2) * 10_000_000).div_ceil(u128::from(frequency)))
-        .map_err(|_| MicError::Timestamp)
+    // A cross-thread reading one tick ahead is ambiguous even if WASAPI rounds it up.
+    let last_ambiguous = ((u128::from(ticks) + 1) * 10_000_000).div_ceil(u128::from(frequency));
+    u64::try_from(last_ambiguous + 1).map_err(|_| MicError::Timestamp)
 }
 
 #[cfg(test)]
 #[test]
 fn collection_cutoff_excludes_the_ambiguous_tick_and_rounds_forward() {
     assert_eq!(capture_cutoff_100ns(100, 10_000_000), Ok(102));
-    assert_eq!(capture_cutoff_100ns(2, 3_000_000), Ok(14));
+    assert_eq!(capture_cutoff_100ns(3, 3_000_000), Ok(15));
+    assert_eq!(capture_cutoff_100ns(10, 24_000_000), Ok(6));
     assert_eq!(
         capture_cutoff_100ns(0, 10_000_000),
         Err(MicError::Timestamp)
