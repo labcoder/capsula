@@ -81,9 +81,13 @@ The ordinary open migrates through version 11. A separate, explicit ChatGPT repa
 can establish a version 12 cutoff only with a still-locked replacement binding. The upgrade and
 immutable tag row commit together, taking the last issued thread and run IDs from SQLite's
 sequences, including deleted IDs. A ceiling below a surviving ID or a missing sequence for
-existing rows refuses establishment. History keeps one writer: the vault is bound once, when it
-is built, to the owner of the store ordinary startup opens, and Establish, its Check and every
-later confirmation are requests that owner serves on that store in order. No call takes a store,
+existing rows refuses establishment. History keeps one writer: the vault's link is bound once,
+when the store thread starts, to the owner of the store ordinary startup opens, and Establish,
+its Check and every later confirmation are requests that owner serves on that store in order.
+Startup builds the vault before that thread runs, so until then the link refuses every request.
+Shutdown releases the link before the store closes, since the store thread ends only once nothing
+can queue for it. What the link already queued is still served, and a released link never binds
+again. No call takes a store,
 path or earlier result. Because the cutoff commits on the writer's own connection, a purge copy
 taken before it is stale and isn't swapped in. The purge's `VACUUM INTO` copy keeps every table,
 so the cutoff row (a tag and two IDs, no conversation content) carries over, and after a swap the
@@ -92,8 +96,7 @@ or a connection still inside a transaction. Ordinary open never creates a cutoff
 unlock a replacement. The binding is spent once a commit is attempted, or when the writer's
 answer is lost, so a lost row is never reseeded. Establish returns a receipt of the exact row it
 wrote. The credential authority marks the context established only when a fresh Check reads
-exactly that row, and each confirmation reads the row again. The production vault isn't bound
-to the store thread yet, so every request is refused there. The history and authority files
+exactly that row, and each confirmation reads the row again. The history and authority files
 share no installation binding, so nothing here compares one; that belongs to the local profile
 work. A byte-identical copy of the right file put in its place by a process running as the same
 user is outside this design's trust model and isn't detected.
@@ -106,6 +109,13 @@ recovered connection and sends only bodies read to it ([runs](runs.md#availabili
 requests take no page-read stamp, but the vault learns the cutoff only after it commits, so a read
 sent once the coordinator knows it always finds the row. Nothing reports a recovered connection
 at startup yet, so the replacement stays unavailable.
+
+The recovery version sits one past the ordinary ones, and a compile-time assert keeps it there.
+The next ordinary migration can't simply take version 12, because a recovered file is already
+at 12 and would read as current while missing it. That migration instead makes the cutoff table
+ordinary: every file is migrated to it with the table empty, a recovered file is recognized by
+its table at version 12 and moved on from there, and a recovered connection is told by its row
+rather than by the version. New ordinary migrations then follow as usual.
 
 **Scenes** are events, so they need no migration. A run's first step writes `scene_begin`, whose
 event id is the `SceneId`; `AUTOINCREMENT` keeps it unique even after a deletion, and a

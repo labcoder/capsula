@@ -1327,3 +1327,79 @@ async fn measure_first_step_latency() {
         );
     }
 }
+
+/// The brain binds the vault's history link once its store thread runs, and releases it before
+/// that store closes, on close and on quit alike, so a link the vault still holds never keeps the
+/// store thread running.
+#[tokio::test]
+async fn the_vault_history_link_reaches_the_store_only_until_it_closes() {
+    for quit in [false, true] {
+        let scratch = Scratch::new(if quit {
+            "history-link-quit"
+        } else {
+            "history-link-close"
+        });
+        let mut store = Store::open(&scratch.db()).expect("store");
+        store.recover().expect("recover");
+        let main_thread = store.main_thread().expect("main thread");
+        let high_water = store.high_water().expect("high water");
+        let scenes = store.scenes().expect("scenes");
+        let custody = test_support::custody(&store);
+        let writer = std::sync::Arc::downgrade(&custody);
+        let mut accounts = test_support::accounts(&scratch);
+        let (link, binding) = crate::connections::vault::HistoryLink::pending();
+        accounts.history = binding;
+        let mut brain = Brain::new(
+            store,
+            custody,
+            main_thread,
+            high_water,
+            scenes,
+            crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("script"))),
+            scratch.config(),
+            accounts,
+        )
+        .expect("brain");
+        let mut seen = brain.seen.take().expect("observer");
+        let checking = link.clone();
+        let checked = tokio::task::spawn_blocking(move || checking.check(1));
+        loop {
+            let event = timeout(PATIENCE, seen.recv())
+                .await
+                .expect("the check reaches the store thread")
+                .expect("observer");
+            if matches!(
+                event,
+                super::Seen::StoreOpStarted(crate::coordinator::StoreOp::Cutoff(_))
+            ) {
+                break;
+            }
+        }
+        assert!(
+            checked.await.expect("check").is_err(),
+            "no cutoff was written"
+        );
+        // Unreleased, the store thread outlives the store's whole close wait (PATIENCE here).
+        let closing = std::time::Instant::now();
+        if quit {
+            brain.quit(tokio::time::Instant::now() + PATIENCE).await;
+        } else {
+            brain.close().await;
+        }
+        assert!(
+            closing.elapsed() < PATIENCE / 2,
+            "the store closed without waiting out its close wait"
+        );
+        let ended = timeout(Duration::from_secs(10), async {
+            while writer.strong_count() > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            ended.is_ok(),
+            "the store thread ended with the link still held"
+        );
+        drop(link);
+    }
+}

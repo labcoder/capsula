@@ -974,7 +974,8 @@ can count as a binding only if the transaction has ended and the exact binding r
 This transaction does not open history, establish a context, or authorize use. A later history
 cutoff and exact Check are required. The still-locked binding is also the one-shot proof for the
 separate [history cutoff](store.md), written only by the profile's one history writer, which
-the vault is bound to when it is built. Only that cutoff's receipt, matched by the writer's
+the vault's link is bound to once the store thread runs and which shutdown releases before the
+store closes. Only that cutoff's receipt, matched by the writer's
 fresh Check, marks the context established, recording its tag and thread/run bounds beside the
 successor. Confirming it later has the writer re-read the row, which a history purge carries
 over; a missing, changed or unreadable row leaves the successor locked, and nothing mints a

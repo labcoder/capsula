@@ -327,18 +327,18 @@ fn accounts(
     if !platform::native_trust_supported() {
         return Err(platform::TrustRootsError::Unsupported.into());
     }
-    let worker = Worker::system(Arc::new(SystemClock), profile);
+    let (history, binding) = connections::vault::HistoryLink::pending();
+    let worker = Worker::system(Arc::new(SystemClock), profile, history);
     let net = runtime::account::Net {
         http: Arc::new(|| http_client::build().map(SharedHttp::new)),
         launcher: Arc::new(SystemBrowser),
         clock: Arc::new(SystemClock),
     };
     let held = worker.held();
-    Ok((
-        runtime::account::Accounts::spawn(worker, net, oauth, tokens)
-            .map_err(BrainError::Accounts)?,
-        held,
-    ))
+    let mut accounts = runtime::account::Accounts::spawn(worker, net, oauth, tokens)
+        .map_err(BrainError::Accounts)?;
+    accounts.history = binding;
+    Ok((accounts, held))
 }
 
 #[cfg(all(
