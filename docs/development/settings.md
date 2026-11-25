@@ -49,7 +49,8 @@ follow-up decisions; the host executes the native effects, such as revoking scre
 a save or following the microphone choice after a successful enqueue. `presence/settings/window.rs`
 owns the window; `presence/settings/mod.rs` owns the shared view frame, retained Kit inputs and
 subscriptions. `general.rs` and `accounts.rs` compose their tabs from Core's choice rows and account
-status lines without another settings entity. The shell's UI thread never waits for a save.
+status lines without another settings entity. Name-save status sits on the label row, so
+waiting for an answer does not move either input or the rows below. The UI thread never waits.
 The Hold to talk checkbox calls Presence before updating its local notice. This leaves the
 Settings view free for Presence to refresh Stop synchronously when cancelling a live hold.
 The plain model also retains the brain notice across reconnects and fences incoming settings

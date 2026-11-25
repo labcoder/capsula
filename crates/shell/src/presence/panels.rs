@@ -3,7 +3,7 @@
 use gpui_kit::App;
 
 use super::kumo_view::{KumoView, PullChanged, WantsFrames};
-use super::{Activity, Context, OpenError, Presence, geometry::PanelVisibility};
+use super::{Activity, Context, LineFrame, OpenError, Presence, geometry::PanelVisibility};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Owner {
@@ -66,6 +66,7 @@ impl Presence {
         self.kumo.update(cx, KumoView::close);
         self.end_carry(cx);
         self.activity.pulling = false;
+        self.publish_plain_escape(cx);
         if let Err(error) = self.sync_escape(cx) {
             tracing::warn!(%error, "can't give back Esc at Quit");
         }
@@ -81,6 +82,7 @@ impl Presence {
             self.line.pull_started();
             self.want_pull_frames(cx);
         }
+        self.publish_plain_escape(cx);
         if activity != self.activity {
             self.activity = activity;
             self.sync_escape(cx)?;
@@ -107,11 +109,58 @@ pub(super) fn left(owner: Owner) -> PanelVisibility {
     pointer(PanelVisibility::Hidden, owner)
 }
 
+pub(super) fn gap_contains(
+    line: LineFrame,
+    [panel_x, panel_y, panel_width, panel_height]: [i32; 4],
+    [x, y]: [i32; 2],
+) -> bool {
+    let [_, line_y, _, line_height] = line.paint;
+    (panel_x..panel_x + panel_width).contains(&x)
+        && ((line_y + line_height..panel_y).contains(&y)
+            || (panel_y + panel_height..line_y).contains(&y))
+}
+
 #[cfg(test)]
 mod tests {
     use super::Owner::{Onboarding, Pointer, Pull, Settings, Stop, Typing};
     use super::PanelVisibility::{Hidden, Visible};
-    use super::{left, over_line, pointer};
+    use super::{LineFrame, gap_contains, left, over_line, pointer};
+
+    #[test]
+    fn the_hover_gap_spans_the_panel_width_above_or_below_the_painted_line() {
+        let line = LineFrame {
+            paint: [20, 30, 40, 10],
+            hit: [20, 22, 40, 26],
+        };
+        let below = [0, 42, 80, 20];
+        assert!(gap_contains(line, below, [0, 40]));
+        assert!(gap_contains(line, below, [79, 41]));
+        assert!(!gap_contains(line, below, [80, 41]));
+        assert!(!gap_contains(line, below, [30, 39]));
+        assert!(!gap_contains(line, below, [30, 42]));
+
+        let above = [0, 8, 80, 20];
+        assert!(gap_contains(line, above, [0, 28]));
+        assert!(gap_contains(line, above, [79, 29]));
+        assert!(!gap_contains(line, above, [30, 27]));
+        assert!(!gap_contains(line, above, [30, 30]));
+        assert!(!gap_contains(line, [0, 40, 80, 20], [30, 40]));
+    }
+
+    #[test]
+    fn the_peek_covers_the_gap_to_the_side_of_the_native_hit_band() {
+        use crate::presence::{PEEK_HEIGHT, Position, line, scaled};
+
+        let layout = Position::TopLeft.layout(
+            [0, 0, 1024, 768],
+            line::slot(1.0),
+            [380, scaled(PEEK_HEIGHT, 1.0)],
+            0,
+        );
+        let frame = LineFrame::in_slot(layout.dock, 1.0);
+        assert!(gap_contains(frame, layout.panel, [60, 16]));
+        assert!(!gap_contains(frame, layout.panel, [380, 16]));
+    }
 
     #[test]
     fn settings_typing_and_onboarding_keep_the_peek_closed_even_over_the_line() {

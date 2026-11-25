@@ -680,59 +680,52 @@ async fn a_title_takes_the_last_attempt_and_its_compaction_is_refused_unsent() {
     reason = "one real shell session per status through a refused ask and the next one"
 )]
 async fn a_refused_post_leaves_the_key_unconfirmed_and_the_next_ask_unsent() {
-    for (status, kind, view, starts, next) in [
+    use kumochi_protocol::message::{
+        DeliveryProof, HistoryFailure, HistoryFailureCause, PageEventKind,
+    };
+
+    for (status, body, view, starts, first, next, cause) in [
         (
             401,
-            "authentication_error",
+            include_str!("../../fixtures/anthropic/authentication-error.json"),
             KeyView::Unconfirmed,
             2,
+            ErrorKey::AnthropicKeyRejected,
             ErrorKey::ModelUnavailable,
+            Some(HistoryFailureCause::AnthropicKeyRejected),
         ),
         (
             403,
-            "permission_error",
+            r#"{"type":"error","error":{"type":"permission_error","message":"synthetic"}}"#,
             KeyView::Ready,
             3,
             ErrorKey::AnthropicKeyRejected,
+            ErrorKey::AnthropicKeyRejected,
+            None,
+        ),
+        (
+            402,
+            include_str!("../../fixtures/anthropic/billing-error.json"),
+            KeyView::Ready,
+            3,
+            ErrorKey::AnthropicCredit,
+            ErrorKey::AnthropicCredit,
+            Some(HistoryFailureCause::AnthropicCredit),
         ),
     ] {
         let scratch = Scratch::new(&format!("offline-key-refused-post-{status}"));
-        let store = FakeStore::default();
-        let lock = scratch.db().with_file_name("offline-key-runtime.lock");
-        Vault::with_service(store.clone(), "offline-key-runtime", &lock)
-            .expect("fake vault")
-            .save_anthropic_key(KEY.as_bytes())
-            .expect("synthetic key");
-        std::fs::write(
-        scratch.db().with_file_name(kumochi_protocol::constants::CONFIG_FILE),
-        format!("default_model = {{ connection = \"AnthropicKey\", model = \"{MODEL}\", effort = \"Medium\" }}\n"),
-    ).expect("settings");
+        let store = seed_key(&scratch);
         let catalog = json!({"data":[{"type":"model","id":MODEL,"display_name":"Synthetic model"}],"has_more":false});
-        let body = json!({"type":"error","error":{"type":kind,"message":"synthetic"}}).to_string();
         let refused = format!(
         "HTTP/1.1 {status} Refused\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )
     .into_bytes();
         let peer = Scripted(Arc::new(Mutex::new(Script {
-            responses: [
-                http("application/json", &catalog.to_string()),
-                refused.clone(),
-                refused,
-            ]
-            .into(),
+            responses: [http("application/json", &catalog.to_string())].into(),
             ..Script::default()
         })));
-        let worker = Worker::new(
-            Box::new(move || Vault::with_service(store.clone(), "offline-key-runtime", &lock)),
-            Arc::new(FixedClock(0)),
-        );
-        let mut accounts =
-            Accounts::spawn_unconfigured(worker, test_support::net()).expect("worker");
-        accounts
-            .connections
-            .use_test_transport(Transport::offline(peer.clone(), 1, 2));
-        let mut brain = test_support::brain_with(&scratch, "", accounts);
+        let mut brain = replay_brain(&scratch, store, peer.clone(), 2);
         let ((control, data), mut shell) = duplex();
         let mut tap = Tap::from_env();
         let client = async {
@@ -748,14 +741,36 @@ async fn a_refused_post_leaves_the_key_unconfirmed_and_the_next_ask_unsent() {
             };
             let mut ended = Vec::new();
             for turn in 1..=2 {
+                let response = (turn == 1 || status != 401).then(|| {
+                    let (reader, writer) = tokio::io::duplex(refused.len());
+                    peer.0.lock().expect("peer").reader = Some(Box::new(reader));
+                    writer
+                });
                 let message = DataToBrain::TextSubmit {
                     turn,
                     screen: ScreenChoice::None,
-                    thread: None,
+                    thread: Some(ThreadId(1)),
                     text: "ask".into(),
                 };
                 let frame = frame::encode(&message, Pipe::Data).expect("encodes");
                 shell.data_out.write_all(&frame).await.expect("submitted");
+                if let Some(mut writer) = response {
+                    let index = usize::try_from(turn).expect("small turn");
+                    while !peer
+                        .0
+                        .lock()
+                        .expect("peer")
+                        .requests
+                        .get(index)
+                        .is_some_and(|request| request.ends_with(b"}"))
+                    {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    writer
+                        .write_all(&refused)
+                        .await
+                        .expect("the peer rejected the uploaded request");
+                }
                 loop {
                     let (_, phase, error) = shell.notice().await;
                     if !matches!(phase, Phase::Thinking | Phase::Answering) {
@@ -778,16 +793,36 @@ async fn a_refused_post_leaves_the_key_unconfirmed_and_the_next_ask_unsent() {
         assert_eq!(
             outcomes,
             [
-                (
-                    Phase::Failed,
-                    Some((ErrorKey::AnthropicKeyRejected, open.clone()))
-                ),
+                (Phase::Failed, Some((first, open.clone()))),
                 (Phase::Failed, Some((next, open))),
             ],
             "{status}: the refused ask, then the next one"
         );
         assert_eq!(brain.account.connections.anthropic(), view, "{status}");
         brain.close().await;
+        let db = Store::open(&scratch.db()).expect("reopen durable history");
+        let thread = db.main_thread().expect("main");
+        let (rows, next) = db.pages().events_page(thread, None, 10).expect("history");
+        let kind = cause.map_or(PageEventKind::FailedUser, |cause| {
+            PageEventKind::ConnectionFailed {
+                failure: HistoryFailure {
+                    cause,
+                    delivery: DeliveryProof::NotAccepted,
+                },
+                screen: None,
+            }
+        });
+        assert_eq!(next, None);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].kind, kind);
+        assert_eq!(
+            rows[0].kind,
+            if status == 402 {
+                kind
+            } else {
+                PageEventKind::FailedUser
+            }
+        );
         let script = peer.0.lock().expect("peer");
         assert_eq!(
             script.starts, starts,

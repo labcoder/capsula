@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 
 use super::budget::Budget;
 use super::conn::{Connect, MAX_WIRE_BYTES, ModelClient, POOL_IDLE};
-use super::error::{Code, Failure, Param, ProviderError};
+use super::error::{Code, Failure, Param, ProviderError, RejectionOrigin};
 use super::sse::SseEvent;
 use super::{Events, ResponsesBody, stream, wire};
 use crate::connections::http_client::MAX_BODY_BYTES;
@@ -710,6 +710,7 @@ async fn an_early_400_stops_the_upload_without_the_server_closing() {
             status: 400,
             code: Some(Code::Unsupported),
             param: Some(Param::Tools),
+            origin: RejectionOrigin::Unproven,
         }))
     );
     assert_eq!(harness.seen(), (vec![], vec![0]));
@@ -779,7 +780,14 @@ async fn a_final_head_waiting_before_any_write_settles_unsent() {
     harness.grant(1);
     assert!(matches!(
         poll(&mut call),
-        Poll::Ready((Err(Failure::Provider(ProviderError { status: 400, .. })), _))
+        Poll::Ready((
+            Err(Failure::Provider(ProviderError {
+                status: 400,
+                origin: RejectionOrigin::Unproven,
+                ..
+            })),
+            _
+        ))
     ));
     assert_eq!(received(&mut harness.accept()), (Vec::new(), true));
     assert_eq!(harness.settled(), settled_once(true));
@@ -1440,11 +1448,11 @@ async fn answers_that_arent_an_event_stream_fail_closed() {
     let cases: [(Vec<u8>, Result<(), Failure>); 7] = [
         (
             refused(401, DETAIL),
-            Err(Failure::Provider(ProviderError { status: 401, code: None, param: None })),
+            Err(Failure::Provider(ProviderError { status: 401, code: None, param: None, origin: RejectionOrigin::AfterUpload })),
         ),
         (
             refused(400, &exact),
-            Err(Failure::Provider(ProviderError { status: 400, code: None, param: None })),
+            Err(Failure::Provider(ProviderError { status: 400, code: None, param: None, origin: RejectionOrigin::AfterUpload })),
         ),
         (refused(400, &over), Err(Failure::Protocol)),
         (refused(302, b""), Err(Failure::Protocol)),

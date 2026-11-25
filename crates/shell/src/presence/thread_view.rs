@@ -1,5 +1,6 @@
 //! The two virtualized lists in the threads surface.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -193,7 +194,7 @@ pub(super) struct ThreadsView {
     owner: WeakEntity<Presence>,
     events: async_channel::Sender<PresenceEvent>,
     messages: Entity<Messages>,
-    rename: Option<ThreadId>,
+    pub(super) rename: super::escape::RenameEdit,
     rename_error: Option<Text>,
     rename_input: Entity<InputState>,
     _rename_events: Subscription,
@@ -228,8 +229,12 @@ impl ThreadsView {
         let messages = cx.new(|cx| Messages::new(model.clone(), owner.clone(), window, cx));
         let watch = cx.observe(&model, |view, _, cx| {
             let state = view.model.read(cx);
-            if view.rename.is_some_and(|thread| state.open != Some(thread)) {
-                view.rename = None;
+            if view
+                .rename
+                .get()
+                .is_some_and(|thread| state.open != Some(thread))
+            {
+                view.rename.set(None);
                 view.rename_error = None;
             }
             cx.notify();
@@ -243,7 +248,7 @@ impl ThreadsView {
             owner,
             events,
             messages,
-            rename: None,
+            rename: Rc::default(),
             rename_error: None,
             rename_input,
             _rename_events: rename_events,
@@ -254,18 +259,18 @@ impl ThreadsView {
 
 impl ThreadsView {
     pub(super) fn editing(&self) -> bool {
-        self.rename.is_some()
+        self.rename.get().is_some()
     }
 
     pub(super) fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.rename = None;
+        self.rename.set(None);
         self.rename_error = None;
         self.list.update(cx, |list, cx| list.focus(window, cx));
         cx.notify();
     }
 
     fn save_rename(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let Some(thread) = self.rename else {
+        let Some(thread) = self.rename.get() else {
             return;
         };
         let message = match self
@@ -501,7 +506,7 @@ impl ThreadsView {
         let row = state.row(state.open?)?.clone();
         let title = row_label(&row, state.settings.as_ref());
         let disabled = !state.can_rename(row.id);
-        if self.rename.is_some() {
+        if self.editing() {
             return Some(self.rename_editor(row.id, cx));
         }
         let strings = cx.global::<Strings>();
@@ -545,7 +550,7 @@ impl ThreadsView {
                                 .disabled(disabled)
                                 .label(rename_label)
                                 .on_click(cx.listener(move |view, _, window, cx| {
-                                    view.rename = Some(thread);
+                                    view.rename.set(Some(thread));
                                     view.rename_error = None;
                                     view.rename_input.update(cx, |input, cx| {
                                         input.set_value(edit_title.clone(), window, cx);
@@ -801,7 +806,11 @@ mod tests {
                     let state = view.model.read(cx);
                     assert_eq!(state.open, Some(second));
                     assert!(state.rows.iter().any(|row| row.id == first));
-                    assert_eq!(view.rename, Some(first), "observer hasn't refreshed yet");
+                    assert_eq!(
+                        view.rename.get(),
+                        Some(first),
+                        "observer hasn't refreshed yet"
+                    );
                     view.save_rename(window, cx);
                     assert!(!view.editing(), "the save closes the stale editor");
                     assert_eq!(view.rename_error, None);
@@ -815,7 +824,7 @@ mod tests {
         window
             .update(cx, |_, window, cx| {
                 let state = view.read(cx);
-                assert_eq!(state.rename, Some(second));
+                assert_eq!(state.rename.get(), Some(second));
                 state.rename_input.clone().update(cx, |input, cx| {
                     input.set_value("Current edit", window, cx);
                 });

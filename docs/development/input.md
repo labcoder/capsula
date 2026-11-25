@@ -292,12 +292,31 @@ matching local audio is stopped.
 For a moving run the shell fences it and offers the brain its Stop before the speaker stop.
 If the control queue refuses, the shell signals the exact local worker before sealing the
 pair, without waiting for the output owner or background teardown.
+Shell-core's `escape.rs` decides which effects the shell applies: a published
+press's owners and how a press that waited still matches them, the marked-answer exception,
+the order of a press's local effects, the target of an ordinary stop or clear, and where a
+speech press goes and which stop it gets.
 
 Held voice additionally owns global Esc through preparation and pre-answer work. A raw Escape
 revokes collection before deferred UI; its hotkey delivery consumes one marker so that the
 same press cannot also dismiss typing. Cleanup debt alone does not capture Esc from newer
 ordinary work. If registration is refused,
 the status panel shows Stop instead, and the refusal is logged without key or text content.
+
+A plain native Esc that has to wait for the shell owner carries the work it saw at the native
+callback, even when there was no held gesture or speaking run. A newer submitted turn counts
+before the brain names it. At dispatch, a changed connection, turn, drawing membership or local
+owner retires the press instead of stopping or clearing current work. Indeterminate drawing
+recovery also declines a deferred plain press; a fresh press can act on what is there now.
+The publisher uses panel-owned edit state without reading a view that may already be handling an
+event. Reopening the same window or restarting the same edit gives it a new identity. An edit
+identifies the target only when Esc would cancel it or dismiss that panel, so a fresh Esc after
+entering Rename can still clear the same idle drawing first.
+When the screen wake takes a press's marks first, that press can still cancel the same pull or
+selection and stop the marked answer if no other owner changed. A later press sees only the
+drawing that remains. A canceled microphone's outstanding
+cleanup does not own Clear, and a new collection still invalidates the deferred press.
+
 An ignored fixture,
 `cargo test -p kumochi-shell -- --ignored escape_hold`, registers Esc on a hidden window, sees a
 second registration refused with Stop shown, and sees Esc released. It holds the desktop's Esc

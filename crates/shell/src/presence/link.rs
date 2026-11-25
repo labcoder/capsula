@@ -80,6 +80,19 @@ impl Presence {
                     self.session = Some(session);
                     self.link_state(LinkState::Connected, cx);
                 }
+                #[cfg(debug_assertions)]
+                LinkEvent::FixtureEngineActive { generation } => {
+                    if self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.generation() == generation && session.open())
+                    {
+                        self.chat.update(cx, |chat, cx| {
+                            chat.fixture_engine = true;
+                            cx.notify();
+                        });
+                    }
+                }
                 LinkEvent::NarrationReady(wake) => {
                     if !self
                         .session

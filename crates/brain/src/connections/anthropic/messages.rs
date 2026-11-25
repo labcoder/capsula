@@ -119,7 +119,9 @@ pub async fn stream<C: AnthropicConnect, L: Lease>(
         .await
         .map_err(|_| Failure::Transport)??;
     if head.status != 200 {
-        return Err(Failure::Provider(refusal(conn, head, tuning).await?));
+        let mut error = refusal(conn, head, tuning).await?;
+        error.origin = crate::connections::model::error::RejectionOrigin::AfterUpload;
+        return Err(Failure::Provider(error));
     }
     if head.media != Media::EventStream {
         return Err(Failure::Protocol);

@@ -35,6 +35,36 @@ pub(in crate::runtime) const READY: ClaudeCodeView = ClaudeCodeView::Ready {
     analytics_on: false,
 };
 
+#[test]
+fn pre_seed_history_evidence_requires_the_current_launch_and_generation() {
+    let mut claude = Claude::default();
+    let key = BuildKey {
+        run: kumochi_protocol::message::RunId(1),
+        round: 1,
+        attempt: 1,
+    };
+    let launch = LaunchId(123_456);
+    let stage = ClaudeSignOutStage::before_seed(launch);
+    let notice = open_settings(ErrorKey::ClaudeCodeSignedOut);
+    let confirmed = TurnEvent::Finished(Finish::Failed(EngineFailure::ClaudeSignedOut {
+        stage,
+        notice: notice.clone(),
+    }));
+    let generic = TurnEvent::Finished(Finish::Failed(EngineFailure::Claude(notice)));
+    claude.asked = Some((key, claude.generation, launch));
+    assert_eq!(claude.history_event(key, confirmed.clone()), confirmed);
+    assert_eq!(format!("{stage:?}"), "BeforeSeed");
+    assert_eq!(
+        claude.history_event(BuildKey { attempt: 2, ..key }, confirmed.clone()),
+        generic
+    );
+    claude.asked = Some((key, claude.generation, LaunchId(123_457)));
+    assert_eq!(claude.history_event(key, confirmed.clone()), generic);
+    claude.asked = Some((key, claude.generation, launch));
+    claude.generation += 1;
+    assert_eq!(claude.history_event(key, confirmed), generic);
+}
+
 /// Runs the lane's results through the connection until no job is out.
 #[cfg(windows)]
 async fn settle(claude: &mut Claude) {

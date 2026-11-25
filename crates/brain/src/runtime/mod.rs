@@ -172,7 +172,9 @@ pub(crate) enum Quit {
 #[derive(Debug)]
 pub(crate) enum Selected {
     /// The dev fixture answers every run, with no account; a release build can't pick it.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(debug_assertions)]
+    DevFixture(Box<dyn Engine>),
+    #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
     Fixture(Box<dyn Engine>),
     #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
     DrawReplay(Box<dyn Engine>),
@@ -195,6 +197,8 @@ pub(crate) struct Brain {
     /// The dev fixture was picked, so runs never wait on the account.
     #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
     fixture: Option<Ready>,
+    #[cfg(debug_assertions)]
+    fixture_engine: bool,
     /// Store replies, never paused.
     inputs_tx: mpsc::UnboundedSender<Input>,
     inputs: mpsc::UnboundedReceiver<Input>,
@@ -322,9 +326,16 @@ impl Brain {
         account.github.tuning = config.github_tuning();
         let connections = &mut account.connections;
         connections.configure_transport(config.model_tuning());
+        #[cfg(debug_assertions)]
+        let mut fixture_engine = false;
         #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
         let (engine, access, fixture) = match engine {
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(debug_assertions)]
+            Selected::DevFixture(engine) => {
+                fixture_engine = true;
+                (engine, mpsc::unbounded_channel().1, Some(Ready::fixture()))
+            }
+            #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
             Selected::Fixture(engine) => {
                 (engine, mpsc::unbounded_channel().1, Some(Ready::fixture()))
             }
@@ -370,6 +381,8 @@ impl Brain {
             engine,
             #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
             fixture,
+            #[cfg(debug_assertions)]
+            fixture_engine,
             inputs_tx,
             inputs,
             engine_tx,
@@ -702,9 +715,16 @@ impl Brain {
 
     fn handle(&mut self, input: Input) -> Option<Vec<Effect>> {
         self.hold_fence(&input);
-        if let Input::IssueWritten { serial, reply } = input {
-            return Some(self.issue_written(serial, reply));
-        }
+        let input = match input {
+            Input::IssueWritten { serial, reply } => {
+                return Some(self.issue_written(serial, reply));
+            }
+            Input::Engine { key, event } => Input::Engine {
+                key,
+                event: self.claude.history_event(key, event),
+            },
+            other => other,
+        };
         if matches!(input, Input::ShellLost) {
             self.filing.cancel();
         }
@@ -1247,6 +1267,11 @@ impl Brain {
         self.voice_opened(link).map_err(|Full| Ended::Lost)?;
         self.screen_holds_changed(link)
             .map_err(|Full| Ended::Lost)?;
+        #[cfg(debug_assertions)]
+        if self.fixture_engine {
+            link.control(&ControlToShell::FixtureEngineActive)
+                .map_err(|Full| Ended::Lost)?;
+        }
         if let Some(models) = self.account.connections.models_unsent() {
             link.data(&models).map_err(|Full| Ended::Lost)?;
         }

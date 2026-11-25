@@ -33,6 +33,7 @@ use kumochi_protocol::message::{RunId, ThreadId, UserError};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
+use crate::bridge::LaunchId;
 use crate::context::compact::clean_summary;
 use crate::context::{ModelRequest, Origin};
 use crate::coordinator::{
@@ -457,6 +458,39 @@ pub enum EngineFailure {
     ClaudeStream(ClaudeStreamFailure),
     /// Claude Code refused or failed the question for a reason the shell names.
     Claude(UserError),
+    /// This attempt confirmed Claude Code was signed out.
+    ClaudeSignedOut {
+        /// Which check confirmed the sign-out.
+        stage: ClaudeSignOutStage,
+        /// The existing sign-out notice.
+        notice: UserError,
+    },
+}
+
+/// Where Claude Code confirmed that it was signed out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ClaudeSignOutStage(Option<LaunchId>);
+
+impl ClaudeSignOutStage {
+    pub(crate) const AFTER_SEED: Self = Self(None);
+
+    pub(crate) fn before_seed(launch: LaunchId) -> Self {
+        Self(Some(launch))
+    }
+
+    pub(crate) fn audit_launch(self) -> Option<LaunchId> {
+        self.0
+    }
+}
+
+impl fmt::Debug for ClaudeSignOutStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "BeforeSeed"
+        } else {
+            "AfterSeed"
+        })
+    }
 }
 
 /// How Claude Code's stdout broke its rules.

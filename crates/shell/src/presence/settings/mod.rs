@@ -11,6 +11,8 @@ mod window;
 
 pub(super) use window::SettingsPanel;
 
+use std::rc::Rc;
+
 use super::{Presence, PresenceEvent};
 use crate::settings::{Field, Settings};
 use crate::strings::{Strings, Text};
@@ -74,7 +76,7 @@ pub(super) struct SettingsView {
     focus: FocusHandle,
     voice_scroll: ScrollHandle,
     voice_focus: [FocusHandle; 5],
-    editing: Option<Field>,
+    pub(super) editing: super::escape::NameEdit,
     tab: SettingsTab,
     dock_notice: Option<Text>,
     taskbar_notice: Option<Text>,
@@ -179,7 +181,7 @@ impl SettingsView {
             focus: cx.focus_handle().tab_stop(true),
             voice_scroll: ScrollHandle::new(),
             voice_focus,
-            editing: None,
+            editing: Rc::default(),
             tab: SettingsTab::General,
             dock_notice: None,
             taskbar_notice: None,
@@ -210,7 +212,7 @@ impl SettingsView {
     }
 
     pub(super) fn editing(&self) -> Option<Field> {
-        self.editing
+        self.editing.get()
     }
 
     fn name_input(
@@ -225,7 +227,7 @@ impl SettingsView {
             field,
             input,
             event,
-            &mut self.editing,
+            &self.editing,
             &self.focus,
             &self.model,
             &self.owner,
@@ -280,13 +282,14 @@ impl SettingsView {
         self.confirmation = None;
         crate::confirmation::retire_in(window, cx);
         window.close_all_dialogs(cx);
-        self.editing = None;
+        self.editing.set(None);
         window.focus(&self.focus, cx);
         cx.notify();
     }
 
     pub(super) fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if let Some(field) = self.editing.take() {
+        if let Some(field) = self.editing.get() {
+            self.editing.set(None);
             self.model.update(cx, |state, cx| {
                 state.cancel(field);
                 cx.notify();
@@ -307,7 +310,7 @@ pub(in crate::presence) fn name_input_event(
     field: Field,
     input: &Entity<InputState>,
     event: &InputEvent,
-    editing: &mut Option<Field>,
+    editing: &super::escape::EditSlot<Field>,
     after_enter: &FocusHandle,
     model: &Entity<Settings>,
     owner: &WeakEntity<Presence>,
@@ -315,7 +318,7 @@ pub(in crate::presence) fn name_input_event(
     cx: &mut App,
 ) {
     match event {
-        InputEvent::Focus => *editing = Some(field),
+        InputEvent::Focus => editing.set(Some(field)),
         InputEvent::Change => {
             let value = input.read(cx).value();
             model.update(cx, |state, cx| {
@@ -324,8 +327,8 @@ pub(in crate::presence) fn name_input_event(
             });
         }
         InputEvent::PressEnter { shift: false, .. } | InputEvent::Blur => {
-            if *editing == Some(field) {
-                *editing = None;
+            if editing.get() == Some(field) {
+                editing.set(None);
             }
             let _gone = owner.update(cx, |owner, cx| owner.save_setting(field, cx));
             if matches!(event, InputEvent::PressEnter { .. }) {

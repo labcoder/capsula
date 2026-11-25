@@ -48,6 +48,7 @@ fn a_close_that_fails_keeps_the_window_and_the_pause_and_a_later_close_removes_i
         owner.set_onboarding(
             OnboardingPanel {
                 window,
+                escape_edit: std::rc::Rc::clone(&view.read(cx).escape_edit),
                 view,
                 bounds: [0; 4],
                 previous: None,

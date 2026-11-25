@@ -872,7 +872,7 @@ fn a_refused_key_ends_the_run_sending_on_it_with_the_rejected_key_notice() {
                 Anthropic::Provider(refused),
             ))),
         );
-        let told = Input::KeyRefused(RefusedKey(ConnectionTag(5)));
+        let told = Input::KeyRefused(RefusedKey(ConnectionTag(5), None));
         let steps = if engine_first {
             [
                 (post, rejected()),
@@ -901,7 +901,7 @@ fn a_refused_key_ends_the_run_sending_on_it_with_the_rejected_key_notice() {
     );
     assert!(started(&effects));
     assert_eq!(
-        core.handle(Input::KeyRefused(RefusedKey(ConnectionTag(5)))),
+        core.handle(Input::KeyRefused(RefusedKey(ConnectionTag(5), None))),
         Ok(Vec::new())
     );
     assert_eq!(core.handle(gone()), Ok(Vec::new()));
@@ -910,7 +910,7 @@ fn a_refused_key_ends_the_run_sending_on_it_with_the_rejected_key_notice() {
     let (mut core, effects) = turn_on(key, vec![chatgpt_signed_out(), kind_ready(key, 6)]);
     assert!(started(&effects));
     assert_eq!(
-        core.handle(Input::KeyRefused(RefusedKey(ConnectionTag(5)))),
+        core.handle(Input::KeyRefused(RefusedKey(ConnectionTag(5), None))),
         Ok(Vec::new())
     );
     assert_eq!(

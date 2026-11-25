@@ -831,6 +831,8 @@ pub enum ControlToShell {
     AccountUnsupported(AccountView),
     /// First successful spoken-replies install saved On, but this queued pair stays silent.
     SpokenRepliesDefaulted(SettingsView),
+    /// The debug brain selected the fixture engine. Sent once per authenticated connection.
+    FixtureEngineActive,
 }
 
 /// What a screen hold carried into its turn. It never says the window was sent: a run can end

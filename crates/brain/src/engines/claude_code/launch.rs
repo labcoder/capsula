@@ -29,8 +29,8 @@ use crate::connections::model::budget::Budget;
 use crate::context::{InputItem, Origin, ToolSchema};
 use crate::coordinator::{BuildKey, Input as CoordinatorInput, SendKey};
 use crate::engines::{
-    Answer, ClaudeStreamFailure, Engine, EngineFailure, Finish, PictureReceipt, Round, RunRequest,
-    SendGate, ToolName, TurnEvent,
+    Answer, ClaudeSignOutStage, ClaudeStreamFailure, Engine, EngineFailure, Finish, PictureReceipt,
+    Round, RunRequest, SendGate, ToolName, TurnEvent,
 };
 
 /// How long a warm launch waits for its question [guess, the design's 30 s].
@@ -539,7 +539,7 @@ impl Question<'_> {
     async fn play(&mut self, mut attempt: Attempt, request: &RunRequest) -> Option<Finish> {
         let mut warmed = match attempt.ready().await {
             Ok(warmed) => warmed,
-            Err(outcome) => return Some(failed(outcome)),
+            Err(outcome) => return Some(failed(outcome, attempt.id())),
         };
         if attempt
             .expires
@@ -552,7 +552,7 @@ impl Question<'_> {
             attempt = fresh;
             warmed = match attempt.ready().await {
                 Ok(warmed) => warmed,
-                Err(outcome) => return Some(failed(outcome)),
+                Err(outcome) => return Some(failed(outcome, attempt.id())),
             };
         }
         let Warmed {
@@ -633,7 +633,7 @@ impl Question<'_> {
                 logged(outcome, "after the seed");
                 launch.lease().revoke();
                 report.report(outcome);
-                Some(failed(outcome))
+                Some(failed(outcome, launch.id()))
             }
         }
     }
@@ -676,7 +676,7 @@ impl Question<'_> {
                 tokio::time::timeout_at(until.into(), report.recheck(key, until)).await,
                 Ok(Ok(()))
             ) {
-                return Some(claude(ErrorKey::ClaudeCodeSignedOut));
+                return Some(claude_signed_out(ClaudeSignOutStage::AFTER_SEED));
             }
         }
         Some(finish)
@@ -809,19 +809,26 @@ fn claude(key: ErrorKey) -> Finish {
     Finish::Failed(EngineFailure::Claude(key.into()))
 }
 
+fn claude_signed_out(stage: ClaudeSignOutStage) -> Finish {
+    Finish::Failed(EngineFailure::ClaudeSignedOut {
+        stage,
+        notice: ErrorKey::ClaudeCodeSignedOut.into(),
+    })
+}
+
 /// The question's deadline passed before the seed was queued: the launch goes and the attempt
 /// reports `Deadline`.
 fn expired(launch: &Launch, report: Report) -> Finish {
     launch.lease().revoke();
     report.report(Outcome::Deadline);
-    failed(Outcome::Deadline)
+    failed(Outcome::Deadline, launch.id())
 }
 
 /// How a round ends on `outcome`.
-fn failed(outcome: Outcome) -> Finish {
+fn failed(outcome: Outcome, launch: LaunchId) -> Finish {
     match outcome {
         Outcome::Audit(_) => claude(ErrorKey::ClaudeCodeAuditFailed),
-        Outcome::SignedOut => claude(ErrorKey::ClaudeCodeSignedOut),
+        Outcome::SignedOut => claude_signed_out(ClaudeSignOutStage::before_seed(launch)),
         // A stuck or closing lane: the reason the stuck view gives (Unavailable).
         Outcome::Refused => Finish::Failed(EngineFailure::Claude(
             UserError::new(
