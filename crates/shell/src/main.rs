@@ -12,21 +12,18 @@ mod allocation;
 #[path = "../../../tests/support/scratch.rs"]
 mod scratch;
 
-mod assets;
-
 mod confirmation;
 #[cfg(test)]
 mod github_link_tests;
 mod platform;
 mod presence;
 mod presenter;
-mod strings;
-mod theme;
 
 use std::process::ExitCode;
 
 use kumochi_protocol::constants;
 use kumochi_protocol::message::AudioSession;
+use kumochi_shell::{assets, strings, theme};
 use kumochi_shell_core::{
     accounts, chat_notice, claude_accounts, drawing, escape, input, instance, link, logging,
     onboarding, runs, settings, sign_in_mark, threads,

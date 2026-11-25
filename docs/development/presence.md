@@ -30,6 +30,13 @@ and the keyboard is armed before the brain link starts connecting; [input.md](in
 the shortcut, the typing panel and Esc. A link failure shows in the status panel; Retry never sends
 the previous input again.
 
+The shared disconnected dock is staged separately from the connected presence owner. It opens
+one bounded, opaque normal GPUI window on the primary display, consumes the workerless link's
+initial Failed event before painting, and offers only Quit. GPUI delivers local button input;
+the button, app menu and native window close share the same one-time link teardown. This surface
+has no global keyboard, retry, capture or background link, and is not topmost or click-through.
+The ordinary macOS launcher does not use it until bootstrap and process termination are admitted.
+
 The shell and its offline fixtures register `shell::assets::Assets`: GPUI Kit's default
 component bundle plus the `Monitor` icon used for a held picture in history and screen notes.
 An `IconName` supplies a path, not its SVG bytes; icons outside the default bundle must be
