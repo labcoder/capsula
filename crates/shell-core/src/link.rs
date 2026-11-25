@@ -4,25 +4,24 @@
 //! thread, so no read waits behind a write and the UI never waits on the brain. Everything the
 //! brain sends reaches the UI thread as [`LinkEvent`]s on one channel.
 //!
-//! Connecting starts the brain when no brain pipe answers, authenticates with the capability
-//! from Credential Manager, and checks that the pipe's server is the brain beside the shell.
+//! The shell's platform connector finds or starts the brain, then checks each pipe's server
+//! image before sending that leg's greeting. The link starts attendance after the handshake.
 
 use std::fmt;
 use std::io::{BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender, WeakSender};
-use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, AudioSession, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
-    DataToShell, Deleted, ErrorKey, GestureId, GitHubView, Hello, HoldStatus, Incarnation,
-    IssueSession, MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor,
+    DataToShell, Deleted, ErrorKey, GestureId, GitHubView, HoldStatus, Incarnation, IssueSession,
+    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor,
     SceneDescriptorV1, SettingsOp, SettingsView, TextMetricsV1, ThreadId, ThreadOp, UserError,
 };
 use kumochi_protocol::voice::VoicePart;
@@ -30,9 +29,8 @@ use kumochi_protocol::voice::VoicePart;
 use kumochi_scene::deferred::Deferred;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::credential::{self, CredentialError};
 use crate::platform::microphone::CollectionGate;
-use crate::platform::{self, PipeClient};
+use crate::platform::{self, Connection, HANDSHAKE_TIMEOUT, PipeClient, RETRY_DELAY};
 #[cfg(any(test, feature = "test-support"))]
 use crate::speaker;
 
@@ -45,12 +43,6 @@ pub use narrated::Wake as NarrationWake;
 
 /// How long one connection attempt may take, starting the brain included.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Pause between tries while the brain starts or rotates its capability.
-const RETRY_DELAY: Duration = Duration::from_millis(50);
-/// How long each handshake read or write may take.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-/// `ERROR_PIPE_BUSY`: the pipe exists but another client holds it.
-const PIPE_BUSY: i32 = 231;
 /// How long Quit waits for the brain to take `Quitting` and close the pipe.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 /// A second brain loss within this long needs the user's Retry [guess, v1 §2.3].
@@ -454,42 +446,6 @@ impl Drop for EndSession {
         }
         self.shared.lose(&self.alive);
     }
-}
-
-/// Why a connection attempt failed.
-#[derive(Debug, thiserror::Error)]
-enum LinkError {
-    #[error("no brain pipe")]
-    NoBrain,
-    #[error("the brain pipe is busy")]
-    Busy,
-    #[error("can't start the brain")]
-    Launch(#[source] std::io::Error),
-    #[error("the pipe isn't served by the brain beside the shell")]
-    NotOurBrain,
-    #[error("no capability yet")]
-    Capability(#[from] CredentialError),
-    #[error("the brain closed the connection during the handshake")]
-    Rejected,
-    #[error("the queued connection attempt expired")]
-    ConnectExpired,
-    #[error("the brain is from another build")]
-    BuildMismatch,
-    #[error("quitting")]
-    Quitting,
-    #[error(transparent)]
-    Frame(#[from] FrameError),
-    #[error(transparent)]
-    Io(std::io::Error),
-}
-
-/// An authenticated connection. Dropping it closes both pipes.
-#[derive(Debug)]
-struct Connection {
-    control: Arc<PipeClient>,
-    data: Arc<PipeClient>,
-    issue_origin: IssueSession,
-    drawing_font_family: Option<Arc<str>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1624,9 +1580,16 @@ impl Link {
                 return;
             }
             let reconnect_by = Instant::now() + CONNECT_TIMEOUT;
-            let connection = match self.connect_with(reconnect_by, |attempt| {
-                self.handshake(attempt, repair_of, || text_metrics(reconnect_by))
-            }) {
+            let connection = match platform::connect_brain(
+                &self.brain,
+                self.session,
+                self.audio,
+                repair_of,
+                reconnect_by,
+                || self.quitting(),
+                |control| self.quit_parked(control),
+                &mut text_metrics,
+            ) {
                 Ok(connection) => connection,
                 Err(_) if self.quitting() => return,
                 Err(error) => {
@@ -1998,239 +1961,6 @@ impl Link {
         }
         if open { attendance } else { Attendance::Ended }
     }
-
-    /// Connects, starting the brain once if none answers, until [`CONNECT_TIMEOUT`].
-    fn connect_with(
-        &self,
-        deadline: Instant,
-        mut handshake: impl FnMut(Option<Instant>) -> Result<Connection, LinkError>,
-    ) -> Result<Connection, LinkError> {
-        let attempt = (self.audio == AudioSession::QueuedRequired).then_some(deadline);
-        let mut launched = false;
-        loop {
-            check_attempt(attempt)?;
-            let error = match handshake(attempt) {
-                Ok(connection) if check_attempt(attempt).is_err() => {
-                    if self.quitting() {
-                        self.quit_parked(&connection.control);
-                    }
-                    return Err(LinkError::ConnectExpired);
-                }
-                Ok(connection) => return Ok(connection),
-                Err(LinkError::NoBrain) if self.quitting() && !launched => {
-                    return Err(LinkError::Quitting);
-                }
-                Err(LinkError::NoBrain) if !launched => {
-                    check_attempt(attempt)?;
-                    platform::launch_detached(&self.brain).map_err(LinkError::Launch)?;
-                    launched = true;
-                    continue;
-                }
-                // That brain exits by itself; start ours once its pipe is gone.
-                Err(LinkError::BuildMismatch) => {
-                    launched = false;
-                    LinkError::BuildMismatch
-                }
-                Err(error @ LinkError::NotOurBrain) => {
-                    return Err(error);
-                }
-                Err(error) => error,
-            };
-            // A brain we started is kept so it can be told to quit; otherwise nothing waits on us.
-            if self.quitting() && !launched {
-                return Err(LinkError::Quitting);
-            }
-            if Instant::now() >= deadline {
-                return Err(error);
-            }
-            tracing::debug!(%error, "retrying");
-            thread::sleep(attempt.map_or(RETRY_DELAY, |end| {
-                RETRY_DELAY.min(end.saturating_duration_since(Instant::now()))
-            }));
-        }
-    }
-
-    fn handshake(
-        &self,
-        attempt: Option<Instant>,
-        repair_of: Option<IssueSession>,
-        text_metrics: impl FnOnce() -> DrawingText,
-    ) -> Result<Connection, LinkError> {
-        let control = open(&Pipe::Control.name(self.session), &self.brain, attempt)?;
-        // A brain that hangs mid-handshake must not hang the shell with it.
-        control.set_timeout(Some(HANDSHAKE_TIMEOUT));
-        let hello = Hello {
-            build_id: BUILD_ID.to_owned(),
-            capability: credential::read(self.session)?,
-        };
-        handshake_pair(
-            control,
-            hello,
-            self.audio,
-            repair_of,
-            attempt,
-            text_metrics(),
-            || open(&Pipe::Data.name(self.session), &self.brain, attempt),
-        )
-    }
-}
-
-fn handshake_pair(
-    control: PipeClient,
-    hello: Hello,
-    audio: AudioSession,
-    repair_of: Option<IssueSession>,
-    attempt: Option<Instant>,
-    drawing: DrawingText,
-    open_data: impl FnOnce() -> Result<PipeClient, LinkError>,
-) -> Result<Connection, LinkError> {
-    let mut handshake = HandshakeIo(&control, attempt);
-    write_control_hello(&mut handshake, hello.clone(), audio, repair_of)?;
-    let issue_origin = welcome(&mut handshake)?;
-    check_attempt(attempt)?;
-    let data_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    let data_deadline = attempt.map_or(data_deadline, |deadline| deadline.min(data_deadline));
-    let data = open_data()?;
-    let mut handshake = HandshakeIo(&data, Some(data_deadline));
-    write_data_hello(&mut handshake, hello, audio, issue_origin)?;
-    let profile = drawing.profile.filter(TextMetricsV1::valid);
-    frame::write(
-        &mut handshake,
-        &DataToBrain::TextMetrics(profile),
-        Pipe::Data,
-    )?;
-    data.set_timeout(None);
-    control.set_timeout(None);
-    Ok(Connection {
-        control: Arc::new(control),
-        data: Arc::new(data),
-        issue_origin,
-        drawing_font_family: drawing.font_family,
-    })
-}
-
-fn write_control_hello(
-    writer: &mut impl Write,
-    hello: Hello,
-    audio: AudioSession,
-    repair_of: Option<IssueSession>,
-) -> Result<(), FrameError> {
-    let greeting = match (audio, repair_of) {
-        (AudioSession::Legacy, _) => ControlToBrain::Hello(hello),
-        (AudioSession::QueuedRequired, None) => ControlToBrain::QueuedHello(hello),
-        (AudioSession::QueuedRequired, Some(previous)) => {
-            ControlToBrain::QueuedAudioReconnect(Box::new(hello), previous)
-        }
-    };
-    frame::write(writer, &greeting, Pipe::Control)
-}
-
-fn write_data_hello(
-    writer: &mut impl Write,
-    hello: Hello,
-    audio: AudioSession,
-    issue_origin: IssueSession,
-) -> Result<(), FrameError> {
-    let greeting = match audio {
-        AudioSession::Legacy => DataToBrain::Hello(hello),
-        AudioSession::QueuedRequired => DataToBrain::QueuedHello(hello, issue_origin),
-    };
-    frame::write(writer, &greeting, Pipe::Data)
-}
-
-fn check_attempt(attempt: Option<Instant>) -> Result<(), LinkError> {
-    if attempt.is_some_and(|end| Instant::now() >= end) {
-        return Err(LinkError::ConnectExpired);
-    }
-    Ok(())
-}
-
-struct HandshakeIo<'a>(&'a PipeClient, Option<Instant>);
-
-impl<'a> HandshakeIo<'a> {
-    fn bounded(&self) -> std::io::Result<&'a PipeClient> {
-        if let Some(end) = self.1 {
-            let remaining = end.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(std::io::ErrorKind::TimedOut.into());
-            }
-            self.0.set_timeout(Some(remaining.min(HANDSHAKE_TIMEOUT)));
-        }
-        Ok(self.0)
-    }
-}
-
-impl Read for HandshakeIo<'_> {
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        self.bounded()?.read(bytes)
-    }
-}
-
-impl Write for HandshakeIo<'_> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.bounded()?.write(bytes)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// The brain's answer to Hello: its issue session, or why this brain can't be used.
-fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError> {
-    match frame::read::<ControlToShell>(control, Pipe::Control)? {
-        None
-        | Some(
-            ControlToShell::RunState { .. }
-            | ControlToShell::Ping
-            | ControlToShell::Scenes { .. }
-            | ControlToShell::ThreadDeleted { .. }
-            | ControlToShell::TurnRefused { .. }
-            | ControlToShell::Settings { .. }
-            | ControlToShell::SpokenRepliesDefaulted(_)
-            | ControlToShell::Error(_)
-            | ControlToShell::ScenesV1 { .. }
-            | ControlToShell::NoVisual { .. }
-            | ControlToShell::Account(_)
-            | ControlToShell::AccountUnsupported(_)
-            | ControlToShell::ThreadsChanged
-            | ControlToShell::Focus { .. }
-            | ControlToShell::CaptureDone { .. }
-            | ControlToShell::CaptureFailed { .. }
-            | ControlToShell::ThreadModelSet { .. }
-            | ControlToShell::GitHub(_)
-            | ControlToShell::GitHubError(_)
-            | ControlToShell::DrawingReplacementFailed { .. }
-            | ControlToShell::DrawingNotReturned { .. }
-            | ControlToShell::ActionState { .. }
-            | ControlToShell::IssueRefused { .. }
-            | ControlToShell::IssueUnavailable { .. }
-            | ControlToShell::Connections(_)
-            | ControlToShell::AnthropicKeyStage { .. }
-            | ControlToShell::AnthropicKeyStageDone { .. }
-            | ControlToShell::AnthropicKeyRemoved { .. }
-            | ControlToShell::AnthropicKeyReconciled { .. }
-            | ControlToShell::SpeechRevoked { .. }
-            | ControlToShell::SpeechDecisionTaken(..)
-            | ControlToShell::QueuedAudioRegistered(..)
-            | ControlToShell::VoiceHoldStatus { .. }
-            | ControlToShell::VoiceHoldStopAccepted { .. }
-            | ControlToShell::ScreenHolds(_)
-            | ControlToShell::HoldScreen { .. }
-            | ControlToShell::Voice(_),
-        ) => Err(LinkError::Rejected),
-        Some(ControlToShell::BuildMismatch { .. }) => {
-            tracing::warn!(shell_build = BUILD_ID, "brain from another build");
-            Err(LinkError::BuildMismatch)
-        }
-        Some(ControlToShell::Welcome {
-            incarnation,
-            issue_epoch,
-        }) => Ok(IssueSession {
-            incarnation,
-            epoch: issue_epoch,
-        }),
-    }
 }
 
 fn spawn_helper(
@@ -2248,23 +1978,6 @@ fn wait_for_retry(events: &Sender<LinkEvent>, retries: &Receiver<()>) -> bool {
         .send_blocking(LinkEvent::State(LinkState::Failed))
         .is_ok()
         && retries.recv_blocking().is_ok()
-}
-
-/// Opens a pipe and checks that the brain beside the shell serves it.
-fn open(name: &str, brain: &Path, attempt: Option<Instant>) -> Result<PipeClient, LinkError> {
-    check_attempt(attempt)?;
-    let pipe = PipeClient::open(name).map_err(|error| match error.raw_os_error() {
-        _ if error.kind() == std::io::ErrorKind::NotFound => LinkError::NoBrain,
-        Some(PIPE_BUSY) => LinkError::Busy,
-        _ => LinkError::Io(error),
-    })?;
-    check_attempt(attempt)?;
-    let server = pipe.server_image().map_err(LinkError::Io)?;
-    if !server.as_os_str().eq_ignore_ascii_case(brain.as_os_str()) {
-        return Err(LinkError::NotOurBrain);
-    }
-    check_attempt(attempt)?;
-    Ok(pipe)
 }
 
 /// Reads the control pipe until the connection ends: answers pings and passes run states and
@@ -2950,14 +2663,6 @@ mod disconnected_tests;
 #[cfg(test)]
 #[path = "link_delete_tests.rs"]
 mod delete_tests;
-
-#[cfg(test)]
-#[path = "link_diagnostics_tests.rs"]
-mod diagnostics_tests;
-
-#[cfg(test)]
-#[path = "link_greeting_tests.rs"]
-mod greeting_tests;
 
 #[cfg(all(test, windows))]
 #[path = "link_measure_tests.rs"]

@@ -65,6 +65,11 @@ mod tests {
     fn native_ipc_credentials_and_logging_refuse_without_a_backend() {
         let unsupported = io::ErrorKind::Unsupported;
         assert_eq!(session_id().unwrap_err().kind(), unsupported);
+        let (events, _) = async_channel::unbounded();
+        assert!(matches!(
+            crate::link::prepare(events, kumochi_protocol::message::AudioSession::Legacy),
+            Err(error) if error.kind() == unsupported
+        ));
         assert_eq!(PipeClient::open("unused").unwrap_err().kind(), unsupported);
         assert_eq!(
             launch_detached(Path::new("unused")).unwrap_err().kind(),
