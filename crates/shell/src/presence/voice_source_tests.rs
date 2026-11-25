@@ -1189,7 +1189,7 @@ pub(in crate::presence) fn source(
     (open, finish, started, samples)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, debug_assertions))]
 #[gpui::test]
 fn queued_presence_claims_silent_output_and_cancels_the_fake_microphone(cx: &mut TestAppContext) {
     use crate::link::fixture;

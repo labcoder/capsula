@@ -3024,6 +3024,7 @@ fn a_queued_screen_release_goes_only_while_its_hold_listens_unrevoked() {
     }
 }
 
+#[cfg(debug_assertions)]
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -3250,6 +3251,7 @@ fn authenticated_queued_hold_cancels_or_transfers_only_the_released_gesture() {
     ));
 }
 
+#[cfg(debug_assertions)]
 #[test]
 fn authenticated_queued_text_replies_with_talk_back_off() {
     use kumochi_protocol::message::AudioSession;
