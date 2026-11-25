@@ -1077,3 +1077,43 @@ back or resurrect names, so those cases run offline.
 The vault reads and writes every record through the authority. It runs one sweep pass of 16
 generations (`SWEEP`) when it opens and after each commit or removal. Generations past a
 pass's 16, and any whose names come back, stay owed to later passes and opens.
+
+### Reading a legacy authority
+
+`connections::authority::existing::legacy` looks at a legacy profile's `credentials.db` and the
+host it commits, for the existing-profile observer. Nothing calls it yet. It takes the caller's
+`SessionLock` and opens the file only through [`store::existing::open`](store.md#reading-an-existing-database),
+after checking that the file's own folder is a folder and not a link or reparse point. It
+creates, migrates, checkpoints, retires and sweeps nothing, and it never writes or deletes a
+credential name. It returns two `Observation`s from one snapshot:
+
+| | `Matching` | `Absent` | `Unverified` |
+|---|---|---|---|
+| authority | `check` passes | the folder holds no `credentials.db`, `-wal`, `-shm`, `-journal` or purge leftover | anything else |
+| host | the Active `host` generation's names, read by exact name under `CREDENTIAL_SERVICE`, are all present at their committed lengths and decode to a valid host | a `Matching` authority with no Active host, or an `Absent` authority | a missing, short or refused chunk, or a malformed host |
+
+An `Absent` authority isn't an absent profile: the folder is still a footprint.
+
+`authority::existing::check` is the side-effect-free validator a live open can share. It isn't
+the repair rule: a missing account chunk is repair's business, and a missing host chunk here is
+simply `Unverified`. How each `user_version` maps:
+
+| Version | Verdict | Why |
+|---|---|---|
+| 0 | `Unverified` | `Authority::open` would initialize it |
+| 1, 2 | `Unverified` | `Authority::open` would migrate it; after that migration it reads like a fresh v3 |
+| 3 | checked | the current version |
+| 4 | `Unverified` | an account repair is in progress, under OSC-1065's recovery lifecycle |
+| 5 and newer | `Unverified` | written by a newer build |
+
+At version 3 the file must have exactly as many schema objects as a fresh authority, then the
+same tables, strictness, columns (name, type, not-null, default, key) and index SQL, compared
+row by row with one built in memory from the open's own SQL. Table SQL isn't compared, since a
+migrated file's differs in text. Then `integrity_check` must pass, there must be no foreign-key
+orphan, the `control` row must exist, and every ordinary head must read with a valid Active
+layout. CHECK clauses are neither compared nor re-verified, because `integrity_check` skips them
+on a read-only connection. A Pending row is allowed, since the next open retires it. The host's
+bytes are held only as a zeroizing secret inside the check and dropped; they're never logged,
+compared elsewhere or returned. Tests use the fake store and scratch folders: fresh and migrated
+files, every other version, each changed shape or bad row, each host failure, each leftover, a
+missing folder and a linked one, each checking that no file or credential changed.

@@ -728,7 +728,7 @@ pub(super) fn decode<T: DeserializeOwned>(
     serde_json::from_slice(bytes.expose()).map_err(|_| VaultError::Unreadable)
 }
 
-fn valid_host(host: &str) -> bool {
+pub(super) fn valid_host(host: &str) -> bool {
     host.len() == 45
         && host.starts_with("urn:uuid:")
         && host.bytes().enumerate().skip(9).all(|(index, byte)| {
