@@ -32,6 +32,23 @@ pub(crate) use windows::{PipeClient, launch_detached};
 #[cfg(windows)]
 pub use windows::{data_dir, session_id};
 
+pub(crate) fn instance_lock_path() -> Result<std::path::PathBuf, crate::instance::SessionLockError>
+{
+    use crate::instance::SessionLockError;
+
+    #[cfg(windows)]
+    {
+        let data_dir = data_dir().ok_or(SessionLockError::DataDirectory)?;
+        let session = session_id().map_err(SessionLockError::Session)?;
+        let name = kumochi_protocol::constants::SHELL_LOCK;
+        Ok(data_dir.join(format!("{name}-{session}.lock")))
+    }
+    #[cfg(not(windows))]
+    {
+        Err(SessionLockError::Unsupported)
+    }
+}
+
 pub(crate) fn logging_data_dir() -> Result<std::path::PathBuf, crate::logging::LoggingError> {
     #[cfg(windows)]
     {

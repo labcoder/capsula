@@ -22,6 +22,7 @@ use kumochi_protocol::constants::LIVE_CHATGPT_TEXT_ENV;
 #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
 use kumochi_protocol::constants::ProductIdentity;
 use kumochi_protocol::constants::{INPUT_SESSION_MARKER, OBSERVER_REPAINT_MESSAGE};
+use kumochi_shell::QpcClock;
 
 #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
 use draw_timing::DrawFixture;
@@ -384,6 +385,7 @@ impl Shared {
 /// The observer, kept as a GPUI global only with `--gate-observer`.
 #[derive(Debug)]
 pub(crate) struct Observer {
+    clock: QpcClock,
     shared: Rc<Shared>,
     #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
     draw_fixture: DrawFixture,
@@ -422,7 +424,8 @@ impl Observer {
     /// before GPUI starts, so the UI thread never touches the disk.
     ///
     /// # Errors
-    /// Fails when the file can't be created or the thread can't start.
+    /// Fails when the native clock is unavailable, the file can't be created, or the thread
+    /// can't start.
     pub(crate) fn prepare(launch: &Launch) -> io::Result<Option<Self>> {
         let mode = std::env::var(LIVE_CHATGPT_TEXT_ENV).ok();
         #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
@@ -438,6 +441,7 @@ impl Observer {
         let Some(path) = launch.observer.as_deref() else {
             return Ok(None);
         };
+        let clock = platform::diagnostic_clock()?;
         let file = File::create_new(path)?;
         let (sender, receiver) = async_channel::bounded(QUEUE);
         let (returns, spares) = async_channel::bounded(QUEUE);
@@ -457,6 +461,7 @@ impl Observer {
             shared.draw_timing = Some(Box::default());
         }
         Ok(Some(Self {
+            clock,
             shared: Rc::new(shared),
             #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
             draw_fixture,
@@ -509,7 +514,7 @@ pub(super) fn start(
         startup,
         pid: std::process::id(),
         proxy_hwnd: proxy.value(),
-        qpc_frequency: platform::performance_frequency(),
+        qpc_frequency: observer.clock.frequency(),
     });
 }
 
@@ -519,7 +524,7 @@ pub(super) fn begin(cx: &App) -> i64 {
     if !cx.has_global::<Observer>() {
         return 0;
     }
-    platform::performance_counter()
+    cx.global::<Observer>().clock.stamp()
 }
 
 /// Records one mask upload of `proposal`, or of an empty mask when it's `None`, into the proxy at `proxy`, begun at `begin_qpc` from
@@ -535,8 +540,8 @@ pub(super) fn commit(
     if !cx.has_global::<Observer>() {
         return Drawn::default();
     }
-    let qpc = platform::performance_counter();
     let observer = cx.global_mut::<Observer>();
+    let qpc = observer.clock.stamp();
     let result = Commit::of(update);
     observer.scratch.fill(proposal);
     let (new, id, drawn) = observer.ledger.commit(&observer.scratch, result);
@@ -574,8 +579,8 @@ pub(super) fn painted(cx: &mut App, surface: Surface, drawn: Drawn) {
     if !cx.has_global::<Observer>() {
         return;
     }
-    let qpc = platform::performance_counter();
     let observer = cx.global_mut::<Observer>();
+    let qpc = observer.clock.stamp();
     observer.totals.frames += 1;
     let frame = observer.totals.frames;
     let hover = match surface {
@@ -632,8 +637,8 @@ pub(super) fn hover(cx: &mut App, visibility: PanelVisibility, trigger_qpc: Opti
     if !cx.has_global::<Observer>() {
         return;
     }
-    let qpc = platform::performance_counter();
     let observer = cx.global_mut::<Observer>();
+    let qpc = observer.clock.stamp();
     observer.hover += 1;
     let id = observer.hover;
     observer.shared.send(Record::Hover {
@@ -651,7 +656,7 @@ pub(super) fn target(window: &Window, cx: &mut App, bounds: Bounds<Pixels>) {
     if !cx.has_global::<Observer>() {
         return;
     }
-    let qpc = platform::performance_counter();
+    let qpc = cx.global::<Observer>().clock.stamp();
     let [origin_x, origin_y] = match platform::client_origin(window) {
         Ok(origin) => origin,
         Err(error) => {
@@ -1248,10 +1253,12 @@ mod tests {
             ..super::Launch::default()
         });
         let kept = std::fs::read(&path).unwrap();
-        assert_eq!(
-            result.unwrap_err().kind(),
+        let expected = if cfg!(windows) {
             std::io::ErrorKind::AlreadyExists
-        );
+        } else {
+            std::io::ErrorKind::Unsupported
+        };
+        assert_eq!(result.unwrap_err().kind(), expected);
         assert_eq!(kept, b"old evidence");
     }
 }

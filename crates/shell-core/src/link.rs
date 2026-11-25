@@ -865,13 +865,18 @@ impl InputCancel {
 #[derive(Clone, Debug)]
 pub struct LinkHandle {
     shared: Arc<Shared>,
-    retry: Sender<()>,
-    /// Closes when the link thread ends.
-    done: Receiver<()>,
+    worker: Option<LinkWorker>,
     #[cfg(any(test, feature = "test-support"))]
     recording: Option<Sender<DataToBrain>>,
     #[cfg(any(test, feature = "test-support"))]
     control_recording: Option<Sender<ControlToBrain>>,
+}
+
+#[derive(Clone, Debug)]
+struct LinkWorker {
+    retry: Sender<()>,
+    /// Closes when the link thread ends.
+    done: Receiver<()>,
 }
 
 impl LinkHandle {
@@ -884,6 +889,9 @@ impl LinkHandle {
     }
 
     pub fn admits_text(&self, session: Option<&Session>) -> bool {
+        if self.worker.is_none() {
+            return false;
+        }
         self.audio_session() == AudioSession::Legacy
             || session.is_some_and(|session| {
                 self.shared
@@ -900,6 +908,9 @@ impl LinkHandle {
 
     // shortcut: A contended first edge refuses the press; if it shows in use, publish eligibility as one atomic word.
     pub fn can_start_voice_gesture(&self, generation: u64) -> bool {
+        if self.worker.is_none() {
+            return false;
+        }
         self.audio_session() == AudioSession::Legacy
             || self.shared.outbox.try_lock().is_ok_and(|outbox| {
                 outbox.as_ref().is_some_and(|outbox| {
@@ -912,6 +923,9 @@ impl LinkHandle {
 
     /// Checks the exact pair before presence changes voice panels or attempts the offer.
     pub fn admits_voice(&self, generation: u64) -> bool {
+        if self.worker.is_none() {
+            return false;
+        }
         self.audio_session() == AudioSession::Legacy
             || self
                 .shared
@@ -1072,7 +1086,9 @@ impl LinkHandle {
         let first = self.shared.input.fetch_or(QUIT_INPUT, Ordering::SeqCst) & QUIT_INPUT == 0;
         self.shared.microphone.cancel_current();
         // Wakes a link waiting for Retry, so it sees Quit and ends.
-        let _woken = self.retry.try_send(());
+        if let Some(worker) = &self.worker {
+            let _woken = worker.retry.try_send(());
+        }
         first
     }
 
@@ -1088,11 +1104,14 @@ impl LinkHandle {
     /// [`QUIT_TIMEOUT`], so call it off the UI thread; if the brain never takes them, the
     /// deletes and Quit aren't sent.
     pub fn finish_quit(&self) {
+        let Some(worker) = &self.worker else {
+            return;
+        };
         let deadline = Instant::now() + CONNECT_TIMEOUT + QUIT_TIMEOUT;
         let mut told = false;
         // shortcut: polls for the link's end; a joinable handle would avoid it, once Quit
         // needs more than this one wait.
-        while !self.done.is_closed() && Instant::now() < deadline {
+        while !worker.done.is_closed() && Instant::now() < deadline {
             if !told {
                 let control = self
                     .shared
@@ -1111,7 +1130,7 @@ impl LinkHandle {
         if !told && !self.shared.quit_sent.load(Ordering::Acquire) {
             tracing::warn!("couldn't tell the brain about Quit");
         }
-        if !self.done.is_closed() {
+        if !worker.done.is_closed() {
             tracing::warn!("the brain didn't close the pipe after Quit");
         }
     }
@@ -1142,10 +1161,17 @@ impl LinkHandle {
         self.shared.deletes().retain(|held| held.thread != thread);
     }
 
-    /// Tries to reach the brain again after `Failed`.
-    pub fn retry(&self) {
-        if self.retry.try_send(()).is_err() {
-            tracing::debug!("a retry is already pending");
+    /// Requests another attempt after `Failed`, or returns false if there is no retry listener.
+    pub fn retry(&self) -> bool {
+        let Some(worker) = &self.worker else {
+            return false;
+        };
+        match worker.retry.try_send(()) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::debug!("a retry is already pending");
+                error.is_full()
+            }
         }
     }
 
@@ -1153,13 +1179,14 @@ impl LinkHandle {
     /// mailbox refused. Stop, drawing clears and queued scene refusals don't take the outbox lock.
     /// shortcut: control Debug prints physical points for assertions; use only redacted kinds if adding diagnostics here.
     pub fn send_control(&self, session: &Session, message: ControlToBrain) -> bool {
-        if session.io.queued
-            && matches!(
-                &message,
-                ControlToBrain::HoldRecognized { .. }
-                    | ControlToBrain::Warm { .. }
-                    | ControlToBrain::Settings(SettingsOp::SetTalkBack(_))
-            )
+        if self.worker.is_none()
+            || session.io.queued
+                && matches!(
+                    &message,
+                    ControlToBrain::HoldRecognized { .. }
+                        | ControlToBrain::Warm { .. }
+                        | ControlToBrain::Settings(SettingsOp::SetTalkBack(_))
+                )
         {
             return false;
         }
@@ -1294,6 +1321,9 @@ impl LinkHandle {
     /// output owner's mutex. On return the output owner holds no command sender for that
     /// generation's speaker, however late the link thread's teardown is.
     pub fn end(&self, session: &Session) {
+        if self.worker.is_none() {
+            return;
+        }
         #[cfg(any(test, feature = "test-support"))]
         if let Some(recording) = &self.control_recording
             && recording.capacity().is_some()
@@ -1394,8 +1424,7 @@ impl LinkHandle {
         let (_alive, done) = async_channel::bounded(1);
         Self {
             shared: Arc::new(Shared::default()),
-            retry,
-            done,
+            worker: Some(LinkWorker { retry, done }),
             recording: None,
             control_recording: None,
         }
@@ -1506,14 +1535,34 @@ pub fn prepare(
     Ok(start(link, events))
 }
 
+/// Prepares the shell's link when the platform has no admitted brain transport.
+/// Reports `Failed` immediately and leaves Retry unavailable. There is no worker or session.
+/// # Errors
+/// Returns `BrokenPipe` if the event receiver is closed or `WouldBlock` if its queue is full.
+pub fn prepare_disconnected(events: &Sender<LinkEvent>) -> std::io::Result<LinkHandle> {
+    events
+        .try_send(LinkEvent::State(LinkState::Failed))
+        .map_err(|error| match error {
+            async_channel::TrySendError::Closed(_) => std::io::ErrorKind::BrokenPipe,
+            async_channel::TrySendError::Full(_) => std::io::ErrorKind::WouldBlock,
+        })?;
+    Ok(LinkHandle {
+        shared: Arc::new(Shared::default()),
+        worker: None,
+        #[cfg(any(test, feature = "test-support"))]
+        recording: None,
+        #[cfg(any(test, feature = "test-support"))]
+        control_recording: None,
+    })
+}
+
 fn start(link: Link, events: Sender<LinkEvent>) -> (LinkHandle, LinkStart) {
     let (retry, retries) = async_channel::bounded(1);
     let (alive, done) = async_channel::bounded::<()>(1);
     link.shared.audio.get_or_init(|| link.audio);
     let handle = LinkHandle {
         shared: Arc::clone(&link.shared),
-        retry,
-        done,
+        worker: Some(LinkWorker { retry, done }),
         #[cfg(any(test, feature = "test-support"))]
         recording: None,
         #[cfg(any(test, feature = "test-support"))]
@@ -2838,6 +2887,9 @@ pub mod fixture;
 #[cfg(all(test, windows))]
 #[path = "link_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod disconnected_tests;
 
 #[cfg(test)]
 #[path = "link_delete_tests.rs"]

@@ -12,23 +12,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::presence::{PresenceError, hwnd_of, performance_counter, signed_words};
+pub(crate) use crate::platform::{Observe, ProxyNote};
 
 /// Posted by the dock's paint to the proxy with the frame id; private to the shell.
 const FRAME_DRAWN: u32 = WM_APP + 0x11;
-
-/// What the proxy saw, stamped with the performance counter when it dispatched it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProxyNote {
-    /// A frame's `FRAME_DRAWN`, dispatched after the draw that posted it returned.
-    Drawn { frame: u64, qpc: i64 },
-    /// A left press carrying the session marker, at its physical screen point.
-    Click { qpc: i64, point: [i32; 2] },
-    /// The harness asked for one repaint.
-    Repaint { qpc: i64 },
-}
-
-/// Receives the proxy's notes on the UI thread.
-pub(crate) type Observe = Box<dyn Fn(ProxyNote)>;
 
 /// The proxy, for posting frame ids to; only the UI thread holds it.
 #[derive(Clone, Copy, Debug)]

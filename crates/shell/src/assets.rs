@@ -5,7 +5,9 @@ use gpui_kit::{AssetSource, Result, SharedString};
 
 icon_assets!(ExtraIcons, [Monitor]);
 
-pub(crate) struct Assets;
+/// The shell's component icons and its additional bundled assets.
+#[derive(Debug)]
+pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {

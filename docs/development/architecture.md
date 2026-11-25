@@ -53,6 +53,11 @@ folder, so missing, empty or relative values never put logs or brain data under 
 directory. They read the variables directly, so the slice 2 gate's per-item `LOCALAPPDATA` is
 respected. The brain's session lock uses the same local data root.
 
+The ordinary shell asks its instance-lock owner to acquire the lock for the current session.
+On Windows the owner uses the existing data folder and session ID and keeps the lock until
+the shell exits. Other platforms without an admitted lock target refuse before opening a file;
+they never fall back to another folder or a made-up session.
+
 ## Crates
 
 ```mermaid

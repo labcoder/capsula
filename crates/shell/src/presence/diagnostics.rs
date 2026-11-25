@@ -8,6 +8,7 @@ use std::io::Write as _;
 use std::time::Duration;
 
 use gpui_kit::{App, Global};
+use kumochi_shell::QpcClock;
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 
 use crate::platform;
@@ -15,6 +16,7 @@ use crate::platform;
 /// The diagnostics writer, kept as a GPUI global only in diagnostic runs. Its worker thread
 /// writes and flushes each batch, so the UI thread only queues lines.
 pub(crate) struct Diagnostics {
+    clock: QpcClock,
     writer: NonBlocking,
     guard: Option<WorkerGuard>,
     /// `--settle-after-ms=<n>`: when the settled interval starts, counted from launch.
@@ -32,7 +34,7 @@ impl Diagnostics {
     /// writer thread. Called before GPUI starts, so the UI thread never touches the disk.
     ///
     /// # Errors
-    /// Fails when the file can't be created.
+    /// Fails when the native clock is unavailable or the file can't be created.
     pub(crate) fn prepare() -> std::io::Result<Option<Self>> {
         let Some(path) = std::env::args().find_map(|arg| {
             arg.strip_prefix("--input-diagnostics=")
@@ -43,8 +45,10 @@ impl Diagnostics {
         let settle = std::env::args()
             .find_map(|arg| arg.strip_prefix("--settle-after-ms=")?.parse().ok())
             .map(Duration::from_millis);
+        let clock = platform::diagnostic_clock()?;
         let (writer, guard) = tracing_appender::non_blocking(File::create(path)?);
         Ok(Some(Self {
+            clock,
             writer,
             guard: Some(guard),
             settle,
@@ -60,12 +64,9 @@ pub(super) fn record(cx: &mut App, line: Arguments<'_>) {
     if !cx.has_global::<Diagnostics>() {
         return;
     }
-    let line = format!("qpc={} {line}\n", platform::performance_counter());
-    if let Err(error) = cx
-        .global_mut::<Diagnostics>()
-        .writer
-        .write_all(line.as_bytes())
-    {
+    let diagnostics = cx.global_mut::<Diagnostics>();
+    let line = format!("qpc={} {line}\n", diagnostics.clock.stamp());
+    if let Err(error) = diagnostics.writer.write_all(line.as_bytes()) {
         tracing::warn!(%error, "can't queue input diagnostics");
     }
 }

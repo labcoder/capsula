@@ -30,6 +30,38 @@ and the keyboard is armed before the brain link starts connecting; [input.md](in
 the shortcut, the typing panel and Esc. A link failure shows in the status panel; Retry never sends
 the previous input again.
 
+The shared disconnected dock is staged separately from the connected presence owner. It opens
+one bounded, opaque normal GPUI window on the primary display, consumes the workerless link's
+initial Failed event before painting, and offers only Quit. GPUI delivers local button input;
+the button, app menu and native window close share the same one-time link teardown. This surface
+has no global keyboard, retry, capture or background link, and is not topmost or click-through.
+The ordinary macOS launcher selects this route but opens the window only after logging and
+instance admission. Those gates still refuse, so selecting the route does not enable startup.
+The local route also refuses connected diagnostic launch modes.
+
+If the admitted local dock cannot open, the launch callback records the error synchronously
+and releases its instance lock before requesting GPUI Quit. A successful open keeps the lock
+for the app lifetime and keeps the existing dock-owned Quit path. AppKit termination does not
+return a caller-selected process status through GPUI; a failure status after native termination
+requires a separately validated native boundary. This does not arm the dormant Mac logger or
+replace its future close-before-unlock requirement.
+
+The connected presence requires native desktop geometry before opening any of its windows.
+Its Win32 backend still supplies physical work area and client origin and moves, shows, and hides
+windows without activation. Platforms without that backend refuse these operations; the local
+disconnected window uses GPUI's logical visible bounds and does not cross this boundary.
+Connected overlay bindings also require an admitted native owner before allocating windows.
+The local route never constructs that owner and does not bind overlay hit regions.
+Legacy panel activation similarly requires a native foreground backend; there is no placeholder
+receipt for restoring focus. The local window follows GPUI's ordinary focus behavior.
+The tray, proxy, global keys, host watch, and capture exclusion require the connected native
+backend. The disconnected route installs none of them. Shared input dispatch uses the native
+counter when available and rejects a held-screen release without it, before acquiring exclusion.
+
+The optional gate observer and input diagnostics require the Windows QPC backend before
+opening an output file. A normal launch requests neither, and an unsupported target cannot
+substitute a portable clock or emit native timing receipts.
+
 The shell and its offline fixtures register `shell::assets::Assets`: GPUI Kit's default
 component bundle plus the `Monitor` icon used for a held picture in history and screen notes.
 An `IconName` supplies a path, not its SVG bytes; icons outside the default bundle must be

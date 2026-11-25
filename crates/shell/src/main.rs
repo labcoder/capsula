@@ -12,21 +12,19 @@ mod allocation;
 #[path = "../../../tests/support/scratch.rs"]
 mod scratch;
 
-mod assets;
-
 mod confirmation;
 #[cfg(test)]
 mod github_link_tests;
 mod platform;
 mod presence;
 mod presenter;
-mod strings;
-mod theme;
 
 use std::process::ExitCode;
 
 use kumochi_protocol::constants;
 use kumochi_protocol::message::AudioSession;
+use kumochi_shell::presence_platform::{Frontend, select_frontend};
+use kumochi_shell::{assets, strings, theme};
 use kumochi_shell_core::{
     accounts, chat_notice, claude_accounts, drawing, escape, input, instance, link, logging,
     onboarding, runs, settings, sign_in_mark, threads,
@@ -34,7 +32,11 @@ use kumochi_shell_core::{
 use strings::Strings;
 
 fn main() -> ExitCode {
-    let launch = presence::Launch::parse(std::env::args().skip(1));
+    let mut arguments = std::env::args().skip(1).peekable();
+    let Ok(frontend) = select_frontend(&mut arguments) else {
+        return ExitCode::FAILURE;
+    };
+    let launch = presence::Launch::parse(arguments);
     #[cfg(debug_assertions)]
     if let Ok(flags) = &launch
         && let Some(state) = flags.accounts_fixture
@@ -48,26 +50,18 @@ fn main() -> ExitCode {
     let Some(flags) = launch_with_logging(launch, || logging::init(constants::SHELL_LOG)) else {
         return ExitCode::FAILURE;
     };
-    let Some(data_dir) = platform::data_dir() else {
-        tracing::error!("can't find the data folder for the single-instance lock");
-        return ExitCode::FAILURE;
-    };
-    let session = match platform::session_id() {
-        Ok(session) => session,
-        Err(error) => {
-            tracing::error!(%error, "can't read the session for the single-instance lock");
-            return ExitCode::FAILURE;
-        }
-    };
-    let lock = data_dir.join(format!("{}-{session}.lock", constants::SHELL_LOCK));
-    let _instance = match instance::InstanceLock::try_acquire(&lock) {
+    let instance = match instance::InstanceLock::try_acquire_current_session() {
         Ok(Some(lock)) => lock,
         Ok(None) => {
             tracing::info!("another shell is running in this session");
             return ExitCode::SUCCESS;
         }
-        Err(error) => {
-            tracing::error!(%error, "can't take the single-instance lock");
+        Err(failure) => {
+            if let Some(error) = std::error::Error::source(&failure) {
+                tracing::error!(%error, "{failure}");
+            } else {
+                tracing::error!("{failure}");
+            }
             return ExitCode::FAILURE;
         }
     };
@@ -76,6 +70,22 @@ fn main() -> ExitCode {
         identity = constants::DATA_DIR,
         "shell started"
     );
+    match frontend {
+        Frontend::Connected => {
+            let _instance = instance;
+            run_connected(flags)
+        }
+        Frontend::Local => kumochi_shell::run_local_dock(instance, initialize_gpui),
+    }
+}
+
+fn initialize_gpui(cx: &mut gpui_kit::App) {
+    gpui_kit::init(cx);
+    crate::theme::init(cx);
+    cx.set_global(Strings::english());
+}
+
+fn run_connected(flags: presence::Launch) -> ExitCode {
     let (events, link_events) = async_channel::unbounded();
     let (link, start) = match link::prepare(events, AudioSession::Legacy) {
         Ok(prepared) => prepared,
@@ -103,9 +113,7 @@ fn main() -> ExitCode {
     gpui_kit::Application::with_platform(platform)
         .with_assets(crate::assets::Assets)
         .run(move |cx| {
-            gpui_kit::init(cx);
-            crate::theme::init(cx);
-            cx.set_global(Strings::english());
+            initialize_gpui(cx);
             // The keyboard is armed inside `open`, so the link starts only afterwards (v1 §2.2).
             let started =
                 presence::open(link_events, link.clone(), &flags, diagnostics, observer, cx)
