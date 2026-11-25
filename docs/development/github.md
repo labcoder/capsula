@@ -54,8 +54,8 @@ Offline controls leave no reply owed to a replacement session. Full or closed
 control output ends the live connection instead of retrying the refusal.
 
 The Settings section uses this same model for commands, repository selection and
-the fixed verification-page Link. Browser activation rechecks the current session,
-origin and code deadline. Fixture windows never open a browser. Verified numeric
+the fixed verification-page Link. Copy is explicit; it and browser activation both
+recheck the current session, origin and code deadline. Fixture windows never open a browser. Verified numeric
 account authority and Store admission remain prerequisites for a future issue
 consent receiver; a login in a snapshot is not that authority.
 

@@ -200,6 +200,7 @@ github-empty-repositories = No repositories are available. Refresh to check the 
 github-unlisted-repositories = Repositories haven't been listed yet. Select Refresh to check.
 github-truncated-repositories = This list is incomplete. Refresh before choosing a default repository.
 github-verification = Open GitHub verification
+github-copy-code = Copy code
 github-code-expired = This code is no longer available. Cancel and connect again for a new code.
 github-canceling = Canceling GitHub sign-in…
 github-refreshing = Refreshing repositories…

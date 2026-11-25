@@ -8,8 +8,8 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::select::Select;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, IndexPath};
 use gpui_kit::{
-    App, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    Styled as _, Window, div,
+    App, ClipboardItem, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, Styled as _, Window, div,
 };
 use kumochi_protocol::message::{GitHubOp, GitHubView, RepoName, VERIFICATION_URI};
 
@@ -220,13 +220,44 @@ impl SettingsView {
         let strings = cx.global::<Strings>();
         let mut block = div().flex().flex_col().gap_2();
         if let Some(code) = code {
+            let text = code.as_str().to_owned();
+            let clipboard = text.clone();
+            let is_current = move |cx: &App| {
+                let Some(owner) = owner.upgrade() else {
+                    return false;
+                };
+                let current = owner.read(cx).session.as_ref().map(Session::generation);
+                let state = &model.read(cx).github;
+                state.is_current(current, generation, &origin)
+                    && state.code(current, Instant::now()).map(|(code, _)| code) == Some(&code)
+            };
+            let allow_copy = is_current.clone();
             block = block
                 .child(
                     div()
-                        .debug_selector(|| "github-code".into())
-                        .text_lg()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .child(code.as_str().to_owned()),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .debug_selector(|| "github-code".into())
+                                .text_lg()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .child(text),
+                        )
+                        .child(
+                            Button::new("github-copy-code")
+                                .debug_selector(|| "github-copy-code".into())
+                                .outline()
+                                .label(strings.get(Text::GitHubCopyCode))
+                                .on_click(move |_, _, cx| {
+                                    if allow_copy(cx) {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            clipboard.clone(),
+                                        ));
+                                    }
+                                }),
+                        ),
                 )
                 .child(
                     Link::new("github-verification")
@@ -236,17 +267,7 @@ impl SettingsView {
                         .text_color(cx.theme().link)
                         .underline()
                         .open_with(move |_, _, _, cx| {
-                            let Some(owner) = owner.upgrade() else {
-                                return;
-                            };
-                            let current = owner.read(cx).session.as_ref().map(Session::generation);
-                            let state = &model.read(cx).github;
-                            if !state.is_current(current, generation, &origin)
-                                || state
-                                    .code(current, Instant::now())
-                                    .map(|(current, _)| current)
-                                    != Some(&code)
-                            {
+                            if !is_current(cx) {
                                 return;
                             }
                             #[cfg(any(test, debug_assertions))]
