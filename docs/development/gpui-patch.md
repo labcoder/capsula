@@ -1,4 +1,4 @@
-# The GPUI Windows patch
+# The GPUI platform patches
 
 Kumochi carries GPUI's Windows backend, `gpui-pre-windows` 0.3.10, in `vendor/gpui-pre-windows/`
 with three changes: an idle window no longer wakes on every vblank, a window opened hidden
@@ -6,7 +6,8 @@ takes its requested size at once, and a single fast successful vsync wait doesn'
 `[patch.crates-io]` in
 `Cargo.toml` points the crate at the vendored copy, and `cargo xtask check-vendor` (run by CI)
 fails unless Cargo resolves the crate to that directory at the vendored version. Upstream tracking: zed-industries/zed#66221.
-The core crate, `gpui-pre`, is not vendored.
+The core crate, `gpui-pre`, is not vendored. The separate macOS opt-in termination patch
+is described below; it changes no Windows scheduling or rendering behavior.
 
 ## Why
 
@@ -146,9 +147,9 @@ and `show` only decides whether to order it front.
 ## Re-vendoring on a GPUI bump
 
 1. Check whether upstream fixed #66221. If it did, delete `vendor/gpui-pre-windows`, its
-   `[patch.crates-io]` line, its `THIRD-PARTY-NOTICES.md` entry, `xtask/src/vendor.rs` with
-   its `check-vendor` task and CI step, and `exclude = ["vendor"]`; let Cargo update the lock,
-   and stop.
+   `[patch.crates-io]` line and its `THIRD-PARTY-NOTICES.md` entry. Keep `xtask/src/vendor.rs`,
+   its `check-vendor` task/CI step and `exclude = ["vendor"]` while any other vendor package
+   remains. Let Cargo update the lock; retire only the corresponding patch/checks.
 2. Bump `gpui-pre`/`gpui-pre-windows` (and gpui-kit's rev) as usual; `check-vendor` now fails.
 3. Replace `vendor/gpui-pre-windows` with the new release's `.crate` contents, unchanged, minus
    `.cargo-ok`, and commit that alone; `diff -r` it against the registry source first.
@@ -169,3 +170,141 @@ and `show` only decides whether to order it front.
    [the gate identity](gate-identity.md)); the baseline checkout must include the gate identity,
    and both sides run with Claude Code off, and
    repeat the OSC-132 hand checks.
+
+## Dormant macOS termination negotiation
+
+`vendor/gpui-pre-macos/` is the unchanged published 0.3.10 package followed by a separate
+semantic patch. Archive SHA256:
+`7e07a5e5c84f0b2160c194a1c852cc89d1942db66867938ceabcd7f763cb4386`.
+Its manifest records Zed `08cbb88a152c3751a43e853425a70e9f631a5918`, upstream crate
+`gpui_macos`, Apache-2.0. The import preserves all 15 supplied files, including
+`LICENSE-APACHE`, both manifests and its package lockfile; no NOTICE was supplied.
+Modified files carry an Apache 4(b) marker. Never edit the registry cache.
+
+The root path patch changes only source resolution. Versions, features, Kit revision,
+core, Platform trait, Windows vendor and renderers are unchanged. `check-vendor` already
+enumerates every vendor package. Locked resolution/features/duplicates still require a
+later admitted Cargo run; editing a lock entry is not resolution validation.
+
+### Opt-in only
+
+`MacPlatform::new(headless)` still allocates the original GPUI delegate, which has no
+`applicationShouldTerminate:` selector. The new
+`MacPlatform::new_with_termination_handler(headless, Box<dyn FnMut(TerminationRequest)>)`
+selects a GPUI-owned subclass at the initial delegate allocation, inheriting the existing
+ivar, launch and WillTerminate handlers. It does not replace an installed delegate,
+swizzle a class or use private API. `TerminationRequest` is opaque, must-use, non-Clone,
+non-Send/non-Sync; consuming `reply(self, allow: bool)` and Drop queue settlement, never
+call AppKit inline. The product must use graphical (`headless = false`) mode. The existing
+CFRunLoop-only headless path is not a graphical negotiation implementation.
+
+The public AppKit return is `NSApplicationTerminateReply` (NSUInteger), not BOOL or i32.
+The retained original NSApplication and Control belong to the platform's graphical
+lifetime, independently of Presence. Delivery/settlement jobs also retain Control.
+The selector validates original application identity before admitting an epoch.
+Its borrowed sender uses objc2's raw object-argument ABI: nil is rejected and the address
+is compared with that retained application, never dereferenced, made static or taken into ownership.
+
+```mermaid
+stateDiagram-v2
+    Idle --> Approved: request after the app's quit / Now
+    Idle --> Pending: first request / Later
+    Pending --> Pending: repeat / Later
+    Pending --> Queued: reply or Drop
+    Queued --> Queued: repeat / Later
+    Queued --> Rejecting: NO, disposal or missing application
+    Rejecting --> Idle: native NO returns
+    Rejecting --> Disposed: disposing and NO returns
+    Queued --> Approved: before native YES
+    Approved --> Approved: repeat / Now
+```
+
+Rejecting/Disposed return Cancel. Epochs increment with checked arithmetic: the final
+epoch may finish, but the next request refuses instead of wrapping. A queued decision
+reserves its epoch until settlement; stale delivery/reply jobs cannot answer a newer
+request. Disposal overrides queued YES. No native identity or epoch is recycled.
+
+Delivery uses a cloned ForegroundExecutor after releasing MacPlatformState. It takes
+FnMut out, calls without state/handler borrows, then restores it. While a handler is on
+the stack, replies are reserved but settlement is withheld, including nested main-loop
+delivery. A scope guard ends that interval and rejects on producer unwind. There is no
+production catch_unwind. Missing recipients must drop the token; an absent handler does
+the same. AppKit is called with no state/application/handler borrow: Approved is set
+before YES; Rejecting remains until NO returns. No callback runs under a lock or App borrow.
+
+### The app's own quit
+
+GPUI's `quit()` sends `terminate:` from a block on the main dispatch queue. AppKit answers
+Later by waiting for `replyToApplicationShouldTerminate:` inside that call, so inside that block.
+Delivery and settlement are jobs on the same serial queue, so they can't run until the block
+returns, and the block can't return until they run: the app hangs with its window already gone.
+A first native Mac launch hit exactly this. So an app with a termination handler quits through
+`MacPlatform::app_quit()` instead, an `AppQuit` (weak, non-Send) whose `quit()` the app calls
+once, after its cleanup has finished. The platform then decides whether a `terminate:` is needed:
+
+- `quit()` approves every later request ahead of time, so one admitted from Idle answers Now
+  and enters Approved, with no delivery and no handler call.
+- It sends `terminate:` itself from a later main-queue job, outside the caller's borrows, and only
+  while Idle or Approved, where the answer is Now.
+- A request already in flight (Pending, or a queued yes) is left to end the app; no second
+  `terminate:` is sent behind it.
+- A yes that settles, or a request answered Now, consumes the pending quit, so a quit job queued
+  before it sends nothing afterwards, whichever ran first. If AppKit then cancels that
+  termination, the app stays up until a fresh `quit()`, which sends from Approved.
+- The app calls `quit()` only for its own quit. A request the app has answered yes ends the app
+  by itself.
+- A queued no settles first. The quit stays wanted, and once that no has returned and the phase
+  is Idle, the platform queues the quit again.
+- Disposal never sends one.
+
+On run-loop return, disposal revokes approval and queues a negative settlement before
+the existing platform ivars are cleared. Its strong queued owner retains the original
+application until that settlement returns; old tokens cannot approve. This boundary is
+already **after the native loop has gone**: the queue may no longer progress, so it is
+not a proved negative reply or graceful-cleanup guarantee. While the graphical loop is
+live, Control cannot disappear with a weak token: the platform holds it, and queued
+negative work survives recipient loss. Force Quit/SIGKILL, panic=abort, bypassed callbacks,
+OS deadlines and loop shutdown can prevent completion. Local epochs cannot observe an
+independent OS cancellation. Native Later/modal/session liveness remains unverified.
+
+### Required caller contract (not activated here)
+
+Bootstrap must retain the UI token slot outside any Presence entity or cancelable UI task,
+before opening windows. Missing/pre-open recipients reject rather than strand Later.
+Keep UI tokens off Send worker messages. AppKit does not supply Dock/session intent.
+Retain **explicit app-owned Quit intent separately** from the native token: absence,
+loss or rejection of a native token does not manufacture that intent or a fresh cx.quit.
+
+Shared shutdown policy stops producers and registrations, then joins link/helpers and
+the logger off UI, releases all file/namespace/instance owners and publishes actual
+Closed. Stuck I/O retains custody. Only Closed authorizes a live token's YES. On native
+cancel/loss, keep Closing/Closed and its completion receipt; never reopen logging, discard
+custody or automatically retry app Quit. Call cx.quit without a native token only for
+an explicit app-owned request, and never over an unresolved Later/rejection. Later new
+native requests or explicit app requests reuse Closed, not another cleanup. WillTerminate,
+on_app_quit, timeout, flush or dropped JoinHandle are not last-owner retirement receipts.
+
+Windows shares that resource policy, not AppKit's Later/reply protocol. Its WM_QUIT and
+WM_QUERYENDSESSION/WM_ENDSESSION behavior is unchanged; no indefinitely deferred session
+shutdown is promised. No shell constructor/caller uses the new seam in this increment.
+
+### Re-vendoring and evidence
+
+On a GPUI bump, inspect upstream for an equivalent opt-in API. Import the new cached or
+separately admitted package unchanged in its own commit, verify archive checksum and
+manifest provenance, then reapply only `platform.rs`, `gpui_macos.rs` and
+`platform/termination{.rs,/tests.rs}` in another. Preserve license/copyright and refresh
+modification markers/notices. Retire the Mac path/notice only when its callers have an
+equivalent reviewed replacement; keep the vendor checker while Windows or any package
+remains. Do not upgrade Kit/core/features to accommodate this patch silently.
+
+Offline authored tests cover coalescing, epoch reservation/staleness/exhaustion, queued
+and reentrant rejection, disposal overriding YES, deferred token Drop/owner lifetime,
+missing recipients/application and handler unwind. They exercise real policy/control
+with an in-memory main-job queue; no test creates NSApplication or simulates native success.
+Later admitted gates must include compilation, locked path/features/duplicates, tests and
+distinguishing mutations, ordinary/opt-in selector checks, native Later/modal/session
+progress, pre-open/reentrant/lost-delivery/disposal flows and last-owner cleanup before YES,
+plus applicable Mac/Windows regression and resource/performance checks. No authored
+assertion is an execution result. The SDK source reviewed is 14.4; other OS versions,
+architectures/displays/input/session states and all native behavior remain unmeasured.
