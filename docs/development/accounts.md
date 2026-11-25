@@ -195,8 +195,8 @@ Each edition reserves one owner item for the new-format profile: service
 Profile`) and account `PROFILE_OWNER_ACCOUNT` (`owner`), joined like the vault's raw names by
 `account_target`, as in `Kumochi Profile/owner`. It is outside every legacy and generation name.
 The brain's owner probe only reads it (OSC-1085 cut 7): not found is absent, while an item that
-is there, or any failed read, is unverified, and its bytes are dropped unread, never logged,
-compared or copied. Nothing writes it before the allocator (cut 9), so the name stays cheap to
+is there, or any failed read, is unverified. Its bytes are dropped unread: the store's read
+buffer is wiped, and nothing logs, compares or keeps them. Nothing writes it before the allocator (cut 9), so the name stays cheap to
 change until then. macOS and Linux have no native store yet, so they read it as unverified until
 a noninteractive Keychain read lands.
 

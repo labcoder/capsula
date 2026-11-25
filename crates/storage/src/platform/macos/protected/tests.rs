@@ -1200,12 +1200,12 @@ fn native_root_slot_is_absent_only_when_missing_and_reading_it_creates_nothing()
 
     let (mut scratch, support) = fixture();
     let root = scratch.root.try_clone().expect("retain fixture parent");
-    std::fs::write(support.join(name), b"").expect("a fixture file at the slot");
+    std::fs::write(support.join(name), b"sentinel").expect("a fixture file at the slot");
     scratch.record(&root, &slot).expect("record the file");
     assert_eq!(read(&support), Root::Unverified, "a file");
     assert_eq!(
         std::fs::read(support.join(name)).expect("the file stays"),
-        b""
+        b"sentinel"
     );
     drop(root);
     scratch.cleanup().expect("remove recorded fixture objects");
