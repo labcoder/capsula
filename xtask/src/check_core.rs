@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result, ensure};
 
 /// The crates the core may depend on directly, dev-dependencies included. A change that gives
 /// the core a dependency adds it here, so the new line is reviewed.
-const DEPENDENCIES: [&str; 15] = [
+const DEPENDENCIES: [&str; 16] = [
     "async-channel",
     "cpal",
     "fluent-bundle",
@@ -20,6 +20,7 @@ const DEPENDENCIES: [&str; 15] = [
     "kumochi-brain",
     "kumochi-protocol",
     "kumochi-scene",
+    "kumochi-storage",
     "thiserror",
     "tracing",
     "tracing-appender",
