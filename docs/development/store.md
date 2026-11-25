@@ -4,9 +4,10 @@ The brain keeps threads, their events and runs in one SQLite file,
 `%LOCALAPPDATA%\<product>\kumochi.db`, through `rusqlite` with SQLite and FTS5 built in. Only the
 brain opens it. The code is `crates/brain/src/store/`.
 
-On macOS the default path is `$HOME/Library/Application Support/<product>/kumochi.db`,
-beside the configuration file, if `HOME` is absolute. Computing it doesn't open the database
-or create the folder. The native runtime and direct file-logging startup remain refused.
+On macOS the default path is `<Application Support>/<product>/kumochi.db`, beside the
+configuration file. The shared OS lookup ignores `HOME` and refuses if it can't provide an
+absolute path. Computing it doesn't open the database or create the folder. The native
+runtime and direct file-logging startup remain refused.
 
 Linux and macOS unit tests use the shared purge swap at an explicit scratch path. The macOS
 root must be private, sandbox-confined and single-writer. The adapter uses the same file
