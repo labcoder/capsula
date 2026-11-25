@@ -136,7 +136,7 @@ impl std::fmt::Debug for RawFrame {
     }
 }
 
-fn byte_len([width, height]: [u32; 2]) -> Option<usize> {
+pub(crate) fn byte_len([width, height]: [u32; 2]) -> Option<usize> {
     if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
         return None;
     }

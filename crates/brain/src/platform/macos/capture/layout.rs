@@ -22,6 +22,7 @@ pub(super) struct Screen {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Display {
     pub(super) id: u32,
+    pub(super) origin: [i32; 2],
     pub(super) points: [u32; 2],
     pub(super) bounds: PhysicalRect,
     pub(super) dpi: u32,
@@ -38,12 +39,16 @@ pub(super) fn display_at(screens: &[Screen], point: PhysicalPoint) -> Result<Dis
         .ok_or(Refusal::Layout)
 }
 
-/// The bounds and DPI of the display that has exactly `bounds` now, for the seal's check.
-pub(super) fn covering(screens: &[Screen], bounds: PhysicalRect) -> Option<(PhysicalRect, u32)> {
+/// The bounds and DPI of display `id` when it still has exactly `bounds`, for the seal's check.
+pub(super) fn covering(
+    screens: &[Screen],
+    id: u32,
+    bounds: PhysicalRect,
+) -> Option<(PhysicalRect, u32)> {
     map(screens)
         .ok()?
         .into_iter()
-        .find(|display| display.bounds == bounds)
+        .find(|display| display.id == id && display.bounds == bounds)
         .map(|display| (display.bounds, display.dpi))
 }
 
@@ -90,14 +95,15 @@ fn mapped(screen: &Screen) -> Option<Display> {
         return None;
     }
     let factor = i32::try_from(scale).ok()?;
-    let [x, y] = screen
-        .origin
-        .map(|side| i32::try_from(whole(side)?).ok()?.checked_mul(factor));
+    let [x, y] = screen.origin.map(|side| i32::try_from(whole(side)?).ok());
+    let origin = [x?, y?];
+    let [left, top] = origin.map(|side| side.checked_mul(factor));
     Some(Display {
         id: screen.id,
+        origin,
         points: [width, height],
         bounds: PhysicalRect {
-            origin: [x?, y?],
+            origin: [left?, top?],
             size,
         },
         dpi: POINT_DPI.checked_mul(scale)?,
@@ -110,7 +116,7 @@ fn mapped(screen: &Screen) -> Option<Display> {
     clippy::float_cmp,
     reason = "only a whole value inside i32's range is converted, so nothing is lost"
 )]
-fn whole(value: f64) -> Option<i64> {
+pub(super) fn whole(value: f64) -> Option<i64> {
     (value.trunc() == value && value.abs() <= f64::from(i32::MAX)).then_some(value as i64)
 }
 

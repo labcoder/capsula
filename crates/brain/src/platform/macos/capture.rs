@@ -4,13 +4,13 @@
 
 use std::ffi::CStr;
 use std::ptr::NonNull;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
 use objc2::runtime::{AnyClass, Sel};
 
-use crate::screen::{Acquired, Capturer, Deadline, Failure, RawFrame, Refusal};
+use crate::screen::{Acquired, Capturer, Deadline, Failure, RawFrame, Refusal, byte_len};
 
 mod chain;
 mod layout;
@@ -21,6 +21,10 @@ use native::{Domain, Native};
 
 /// How long a stopped or late chain gets to show it finished before the worker retires.
 const GRACE: Duration = Duration::from_millis(200);
+
+/// The display the last successful capture sampled and its bounds, so the seal accepts that
+/// display alone and not another that moved into its place.
+static CAPTURED: Mutex<Option<(u32, PhysicalRect)>> = Mutex::new(None);
 
 /// The first macOS major version with `SCScreenshotManager`.
 const FIRST_MAJOR: u32 = 14;
@@ -56,8 +60,7 @@ const REQUIRED: &[(&CStr, bool, &CStr)] = &[
     (c"SCShareableContent", false, c"displays"),
     (c"SCShareableContent", false, c"applications"),
     (c"SCDisplay", false, c"displayID"),
-    (c"SCDisplay", false, c"width"),
-    (c"SCDisplay", false, c"height"),
+    (c"SCDisplay", false, c"frame"),
     (c"SCRunningApplication", false, c"processID"),
 ];
 
@@ -70,9 +73,10 @@ struct ScreenCaptureKit<S> {
 
 impl<S: Sck> Capturer for ScreenCaptureKit<S> {
     /// The order the design fixed: the stamp's zero check, the layout and the size, the shell's
-    /// identity, then the deadline and the grant on both sides of each other before any request.
-    /// The chain checks again inside the framework's callback, and the deadline is checked once
-    /// more before the image is drawn.
+    /// identity, then the deadline and the grant, with the last deadline check inside the query's
+    /// submission. The callback checks again and matches the display's frame, the result is
+    /// checked against the deadline on receipt, and the same display must still be under the
+    /// point, unmoved, before the image is drawn.
     fn capture_display(
         &mut self,
         point: PhysicalPoint,
@@ -81,14 +85,16 @@ impl<S: Sck> Capturer for ScreenCaptureKit<S> {
         deadline: Deadline,
         frame: &mut RawFrame,
     ) -> Result<(Acquired, PhysicalRect), Failure> {
+        if let Ok(mut captured) = CAPTURED.lock() {
+            *captured = None;
+        }
         frame.fill(|frame| {
             if excluded == 0 {
                 return Err(Refusal::Expired.into());
             }
             let display = layout::display_at(&self.sck.displays()?, point)?;
             let size = display.bounds.size;
-            // Sizing the buffer now refuses an oversized display before any request.
-            frame.begin(size[0], size[1])?;
+            byte_len(size).ok_or(Refusal::Invalid)?;
             if shell == 0 {
                 return Err(Refusal::Excluded.into());
             }
@@ -98,18 +104,23 @@ impl<S: Sck> Capturer for ScreenCaptureKit<S> {
             if !self.sck.preflight() {
                 return Err(Refusal::NotPermitted.into());
             }
-            let deadline = live(deadline)?;
             let request = Request {
                 display: display.id,
+                origin: display.origin,
                 points: display.points,
                 size,
                 shell,
             };
             let image = chain::run(&self.sck, deadline, request, self.clock)?;
-            live(deadline)?;
             let arrived = Instant::now();
+            if layout::display_at(&self.sck.displays()?, point)? != display {
+                return Err(Refusal::DisplayChanged.into());
+            }
             self.sck
                 .draw(&image, size, frame.begin(size[0], size[1])?)?;
+            if let Ok(mut captured) = CAPTURED.lock() {
+                *captured = Some((display.id, display.bounds));
+            }
             Ok((
                 Acquired {
                     arrived,
@@ -139,9 +150,14 @@ pub(crate) fn screen_capturer() -> Result<Box<dyn Capturer>, Failure> {
     }))
 }
 
-/// The bounds and DPI of the display that has exactly `bounds` now, if the arrangement still maps.
+/// The bounds and DPI of the last captured display when it still has exactly `bounds` and the
+/// arrangement still maps.
 pub(crate) fn display_at(bounds: PhysicalRect) -> Option<(PhysicalRect, u32)> {
-    layout::covering(&native::displays().ok()?, bounds)
+    let (id, captured) = (*CAPTURED.lock().ok()?)?;
+    if captured != bounds {
+        return None;
+    }
+    layout::covering(&native::displays().ok()?, id, bounds)
 }
 
 /// The OS version decides first, so an older system never loads the framework.

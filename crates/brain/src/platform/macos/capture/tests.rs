@@ -75,6 +75,10 @@ enum Query {
     /// Answers only after the capture thread tried to stop the chain.
     AfterStop,
     Never,
+    /// The stamp is spent while the query is prepared, before its admission.
+    SpendBeforeAdmit,
+    /// The query is submitted, then the stamp is spent and the callback never comes.
+    SpendThenSilent,
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -94,6 +98,10 @@ enum Shoot {
     Never,
     /// Completes inside the call, then holds the call open until the test lets go.
     InlineThenHold,
+    /// The stamp is spent while the screenshot is prepared, before its commit.
+    SpendBeforeCommit,
+    /// The screenshot is submitted, then the stamp is spent before its image arrives.
+    SpendThenImage,
 }
 
 #[derive(Default)]
@@ -107,6 +115,9 @@ struct Fake {
     /// The callback's preflight spends the stamp.
     preflight_spends: bool,
     screens: Vec<Screen>,
+    /// What every read after the first sees, when set.
+    moved: Option<Vec<Screen>>,
+    reads: AtomicUsize,
     preflights: AtomicUsize,
     queries: AtomicUsize,
     prepares: AtomicUsize,
@@ -132,6 +143,7 @@ type Held = (
 /// The request every fake capture makes; another one fails the fake.
 const EXPECTED: Request = Request {
     display: 5,
+    origin: [0, 0],
     points: [4, 3],
     size: [8, 6],
     shell: 9,
@@ -185,7 +197,11 @@ impl Sck for Fake {
     type Image = Image;
 
     fn displays(&self) -> Result<Vec<Screen>, Failure> {
-        Ok(self.screens.clone())
+        let later = self.reads.fetch_add(1, Ordering::SeqCst) > 0;
+        Ok(match &self.moved {
+            Some(moved) if later => moved.clone(),
+            _ => self.screens.clone(),
+        })
     }
 
     fn preflight(&self) -> bool {
@@ -196,11 +212,20 @@ impl Sck for Fake {
         self.grants.lock().unwrap().pop_front().unwrap_or(true)
     }
 
-    fn query(&self, ready: chain::Done<()>) {
+    fn query(&self, admit: &dyn Fn() -> bool, ready: chain::Done<()>) -> Result<(), Ended> {
+        if self.query == Query::SpendBeforeAdmit {
+            self.spend();
+        }
+        if !admit() {
+            return Err(Ended::Stopped);
+        }
         self.queries.fetch_add(1, Ordering::SeqCst);
-        if self.query == Query::Never {
+        if self.query == Query::SpendThenSilent {
+            self.spend();
+        }
+        if matches!(self.query, Query::Never | Query::SpendThenSilent) {
             std::mem::forget(ready);
-            return;
+            return Ok(());
         }
         let stopped = (self.query == Query::AfterStop).then(|| Arc::clone(&self.stopped));
         std::thread::spawn(move || {
@@ -209,6 +234,7 @@ impl Sck for Fake {
             }
             ready(Ok(()));
         });
+        Ok(())
     }
 
     fn prepare(&self, (): (), request: &Request) -> Result<(), Ended> {
@@ -227,10 +253,25 @@ impl Sck for Fake {
         Ok(())
     }
 
-    fn shoot(&self, (): (), done: chain::Done<Image>) {
+    fn shoot(
+        &self,
+        (): (),
+        commit: &dyn Fn() -> bool,
+        done: chain::Done<Image>,
+    ) -> Result<(), Ended> {
+        if self.shoot == Shoot::SpendBeforeCommit {
+            self.spend();
+        }
+        if !commit() {
+            return Err(Ended::Stopped);
+        }
         self.shots.fetch_add(1, Ordering::SeqCst);
         match self.shoot {
-            Shoot::Image => done(Ok(self.image())),
+            Shoot::Image | Shoot::SpendBeforeCommit => done(Ok(self.image())),
+            Shoot::SpendThenImage => {
+                self.spend();
+                done(Ok(self.image()));
+            }
             Shoot::Fail(ended) => done(Err(ended)),
             Shoot::AfterStop => {
                 self.after_stop();
@@ -244,6 +285,7 @@ impl Sck for Fake {
                 gate.lock().unwrap().take().unwrap().recv().unwrap();
             }
         }
+        Ok(())
     }
 
     fn draw(&self, _: &Image, size: [u32; 2], frame: &mut [u8]) -> Result<(), Failure> {
@@ -282,11 +324,29 @@ fn shot_with(
     shell: u32,
     excluded: u64,
 ) -> Result<(Acquired, PhysicalRect), Failure> {
+    shot_on(
+        fake,
+        until,
+        grace,
+        shell,
+        excluded,
+        crate::platform::macos::clock::counter,
+    )
+}
+
+fn shot_on(
+    fake: &Arc<Fake>,
+    until: Duration,
+    grace: Duration,
+    shell: u32,
+    excluded: u64,
+    continuous: fn() -> Option<u64>,
+) -> Result<(Acquired, PhysicalRect), Failure> {
     let mut capturer = ScreenCaptureKit {
         sck: Arc::clone(fake),
         clock: Clock {
             now: frozen,
-            continuous: crate::platform::macos::clock::counter,
+            continuous,
             grace,
         },
     };
@@ -462,4 +522,85 @@ fn framework_errors_map_by_domain_and_code_only() {
         assert_eq!(shot(&fake, LONG, LONG), Err(failure));
         assert_eq!(fake.released.load(Ordering::SeqCst), 0);
     }
+}
+
+#[test]
+fn expiry_during_native_preparation_submits_nothing() {
+    let mut query = Fake::new();
+    query.query = Query::SpendBeforeAdmit;
+    let query = Arc::new(query);
+    assert_eq!(shot(&query, LONG, LONG), Err(Refusal::Expired.into()));
+    assert_eq!(query.counts(), [1, 0, 0, 0]);
+
+    let mut screenshot = Fake::new();
+    screenshot.shoot = Shoot::SpendBeforeCommit;
+    let screenshot = Arc::new(screenshot);
+    assert_eq!(shot(&screenshot, LONG, LONG), Err(Refusal::Expired.into()));
+    assert_eq!(screenshot.counts(), [2, 1, 1, 0]);
+}
+
+#[test]
+fn a_stamp_spent_while_the_callback_is_silent_stops_the_chain_within_a_slice() {
+    let mut fake = Fake::new();
+    fake.query = Query::SpendThenSilent;
+    let fake = Arc::new(fake);
+    let start = Instant::now();
+    assert_eq!(shot(&fake, LONG, SHORT), Err(Failure::Retire(UNFINISHED)));
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(fake.counts(), [1, 1, 0, 0]);
+}
+
+/// A continuous clock that reads the same twice, then jumps ten seconds, as across a sleep.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "it stands in for the clock's signature"
+)]
+fn jumping() -> Option<u64> {
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    let jumped = READS.fetch_add(1, Ordering::SeqCst) >= 2;
+    Some(if jumped { 10_000_000_000 } else { 1_000 })
+}
+
+#[test]
+fn a_result_received_after_the_continuous_grace_retires() {
+    let mut fake = Fake::new();
+    fake.shoot = Shoot::AfterStop;
+    let fake = Arc::new(fake);
+    assert_eq!(
+        shot_on(&fake, SHORT, Duration::from_secs(5), 9, 3, jumping),
+        Err(Failure::Retire(UNFINISHED))
+    );
+    assert_eq!(fake.counts(), [2, 1, 1, 1]);
+    assert_eq!(fake.released.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_same_size_display_that_takes_the_place_refuses_display_changed() {
+    let mut fake = Fake::new();
+    let first = fake.screens[0];
+    let mut second = first;
+    second.id = 6;
+    second.origin = [4.0, 0.0];
+    fake.screens.push(second);
+    let (mut a, mut b) = (first, second);
+    (a.origin, b.origin) = (second.origin, first.origin);
+    fake.moved = Some(vec![a, b]);
+    let fake = Arc::new(fake);
+    assert_eq!(shot(&fake, LONG, LONG), Err(Refusal::DisplayChanged.into()));
+    assert_eq!(fake.counts(), [2, 1, 1, 1]);
+    assert_eq!(fake.released.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn an_image_that_arrives_after_the_stamp_is_spent_is_released_unused() {
+    let mut fake = Fake::new();
+    fake.shoot = Shoot::SpendThenImage;
+    let fake = Arc::new(fake);
+    assert_eq!(shot(&fake, LONG, LONG), Err(Refusal::Expired.into()));
+    assert_eq!(fake.counts(), [2, 1, 1, 1]);
+    assert_eq!(fake.released.load(Ordering::SeqCst), 1);
 }

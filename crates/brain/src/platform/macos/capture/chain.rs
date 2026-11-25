@@ -18,12 +18,16 @@ const STOPPED: u8 = 2;
 const USER_DECLINED: isize = -3801;
 /// The chain didn't show it finished within the grace, so native work may still be running.
 pub(super) const UNFINISHED: i32 = -3;
+/// The longest the capture thread sleeps between deadline checks, so a stamp spent while the
+/// wake clock was paused by sleep is seen soon after waking.
+const SLICE: Duration = Duration::from_millis(20);
 
-/// What one screenshot asks for: the display, its size in points and pixels, and the shell's
-/// process, whose application the filter leaves out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What one screenshot asks for: the display, its frame in points, its size in pixels, and the
+/// shell's process, whose application the filter leaves out. No `Debug`: it holds a process.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Request {
     pub(super) display: u32,
+    pub(super) origin: [i32; 2],
     pub(super) points: [u32; 2],
     pub(super) size: [u32; 2],
     pub(super) shell: u32,
@@ -56,16 +60,31 @@ pub(super) trait Sck: Send + Sync + 'static {
     fn displays(&self) -> Result<Vec<Screen>, Failure>;
     /// Whether screen capture is granted, asked without prompting.
     fn preflight(&self) -> bool;
-    /// Starts the content query; `ready` runs at most once, on the framework's context.
-    fn query(&self, ready: Done<Self::Content>);
+    /// Prepares the content query, calls `admit` as the last step before submitting it, and
+    /// submits only when that says yes. `ready` runs at most once, on the framework's context,
+    /// and never when this returns an error.
+    ///
+    /// # Errors
+    /// `Stopped` when `admit` said no, or a numeric code when the query couldn't be prepared.
+    fn query(&self, admit: &dyn Fn() -> bool, ready: Done<Self::Content>) -> Result<(), Ended>;
     /// Builds the filter and configuration for `request` from the content, which it drops.
     ///
     /// # Errors
-    /// `DisplayChanged` when the display isn't there at the same size, `Excluded` unless exactly
-    /// one application has the shell's process, or a numeric code.
+    /// `DisplayChanged` when the display isn't there with the same frame, `Excluded` unless an
+    /// exact filter on the one application with the shell's process can be built, or a code.
     fn prepare(&self, content: Self::Content, request: &Request) -> Result<Self::Shot, Ended>;
-    /// Submits the screenshot and drops the shot; `done` runs at most once, maybe inline.
-    fn shoot(&self, shot: Self::Shot, done: Done<Self::Image>);
+    /// Prepares the screenshot, calls `commit` as the last step before submitting it, and
+    /// submits only when that says yes; it drops the shot either way. `done` runs at most once,
+    /// maybe inline, and never when this returns an error.
+    ///
+    /// # Errors
+    /// `Stopped` when `commit` said no, or a numeric code when it couldn't be prepared.
+    fn shoot(
+        &self,
+        shot: Self::Shot,
+        commit: &dyn Fn() -> bool,
+        done: Done<Self::Image>,
+    ) -> Result<(), Ended>;
     /// Draws `image` over all of `frame` after checking it matches `size`.
     ///
     /// # Errors
@@ -130,8 +149,8 @@ impl<I> Chain<I> {
     }
 }
 
-/// The content callback: the stop check, the filter, then the grant, the stamp and the commit,
-/// with no native call between the stamp read and the screenshot.
+/// The content callback: the stop check, the filter, the grant, then the stamp and the commit
+/// inside `shoot`, after its native preparation and right before its submission.
 fn on_content<S: Sck>(
     sck: &S,
     chain: &Arc<Chain<S::Image>>,
@@ -147,19 +166,19 @@ fn on_content<S: Sck>(
         if !sck.preflight() {
             return Err(Ended::Refused(Refusal::NotPermitted));
         }
-        if !chain.live() {
-            return Err(Ended::Stopped);
-        }
-        chain
-            .phase
-            .compare_exchange(LIVE, COMMITTED, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| Ended::Stopped)?;
+        let commit = || {
+            chain.live()
+                && chain
+                    .phase
+                    .compare_exchange(LIVE, COMMITTED, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+        };
         let shooting = Arc::clone(chain);
         sck.shoot(
             shot,
+            &commit,
             Box::new(move |result| shooting.finish(1, Some(result))),
-        );
-        Ok(())
+        )
     })();
     match submitted {
         Ok(()) => chain.finish(1, None),
@@ -167,12 +186,14 @@ fn on_content<S: Sck>(
     }
 }
 
-/// Runs one chain and waits for its result until the local deadline. At expiry it stops the
-/// chain if nothing is committed yet, then waits the grace for the chain to show it finished.
+/// Runs one chain, admitting its query on the deadline right before submission, and waits for
+/// its result in short slices, checking the deadline after each slice and on every result. At
+/// expiry it stops the chain if nothing is committed yet, then waits the grace for the chain to
+/// show it finished.
 ///
 /// # Errors
-/// `Expired` for a stopped or late chain, the chain's refusal or code, or `Retire` when it
-/// didn't finish within the grace.
+/// `Expired` for an unadmitted, stopped or late chain, the chain's refusal or code, or
+/// `Retire` when it didn't finish within the grace.
 pub(super) fn run<S: Sck>(
     sck: &Arc<S>,
     deadline: Deadline,
@@ -191,36 +212,48 @@ pub(super) fn run<S: Sck>(
         }),
     });
     let (native, called) = (Arc::clone(sck), Arc::clone(&chain));
-    sck.query(Box::new(move |content| {
-        on_content(&*native, &called, &request, content);
-    }));
-    match results.recv_timeout(deadline.until.saturating_duration_since(Instant::now())) {
-        Ok(result) => result.map_err(failure),
-        Err(RecvTimeoutError::Timeout) => {
-            // Losing means a screenshot is in flight; either way the chain's end is awaited.
-            let _stopped =
-                chain
-                    .phase
-                    .compare_exchange(LIVE, STOPPED, Ordering::AcqRel, Ordering::Acquire);
-            sck.expired();
-            match grace(&results, clock) {
-                Some(_late) => Err(Refusal::Expired.into()),
-                None => Err(Failure::Retire(UNFINISHED)),
-            }
+    let admit = || deadline.tighten(Instant::now()).is_some();
+    sck.query(
+        &admit,
+        Box::new(move |content| {
+            on_content(&*native, &called, &request, content);
+        }),
+    )
+    .map_err(failure)?;
+    loop {
+        match results.recv_timeout(SLICE) {
+            Ok(result) if admit() => return result.map_err(failure),
+            Ok(_late) => return Err(Refusal::Expired.into()),
+            Err(RecvTimeoutError::Timeout) if admit() => {}
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => return Err(Failure::Retire(UNFINISHED)),
         }
-        Err(RecvTimeoutError::Disconnected) => Err(Failure::Retire(UNFINISHED)),
+    }
+    // Losing means a screenshot is in flight; either way the chain's end is awaited.
+    let _stopped = chain
+        .phase
+        .compare_exchange(LIVE, STOPPED, Ordering::AcqRel, Ordering::Acquire);
+    sck.expired();
+    match grace(&results, clock) {
+        Some(_late) => Err(Refusal::Expired.into()),
+        None => Err(Failure::Retire(UNFINISHED)),
     }
 }
 
-/// Waits out the grace on the continuous clock; `None` when it ran out or the clock is unreadable.
+/// Waits out the grace on the continuous clock in short slices, and takes a result only when the
+/// clock still reads inside the grace on receipt; `None` when it ran out or the clock is
+/// unreadable.
 fn grace<T>(results: &Receiver<T>, clock: Clock) -> Option<T> {
     let start = (clock.continuous)()?;
-    loop {
+    let left = || {
         let spent = Duration::from_nanos((clock.continuous)()?.checked_sub(start)?);
-        let left = clock.grace.saturating_sub(spent);
-        match results.recv_timeout(left) {
-            Ok(result) => return Some(result),
-            Err(RecvTimeoutError::Timeout) if !left.is_zero() => {}
+        clock.grace.checked_sub(spent)
+    };
+    loop {
+        let wait = left()?;
+        match results.recv_timeout(SLICE.min(wait)) {
+            Ok(result) => return left().map(|_| result),
+            Err(RecvTimeoutError::Timeout) if !wait.is_zero() => {}
             Err(_) => return None,
         }
     }

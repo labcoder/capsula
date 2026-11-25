@@ -30,6 +30,7 @@ fn one_uniform_scale_maps_points_to_pixels_including_negative_origins() {
         display_at(&screens, PhysicalPoint([-1, -400])),
         Ok(Display {
             id: 2,
+            origin: [-1280, -200],
             points: [1280, 800],
             bounds: rect([-2560, -400], [2560, 1600]),
             dpi: 192,
@@ -83,9 +84,15 @@ fn a_point_on_no_display_including_the_far_edge_refuses_layout() {
 fn the_seal_finds_the_same_display_only_while_the_arrangement_holds() {
     let bounds = rect([0, 0], [2880, 1800]);
     let screens = [screen(1, [0.0, 0.0], [1440.0, 900.0], 2)];
-    assert_eq!(covering(&screens, bounds), Some((bounds, 192)));
+    assert_eq!(covering(&screens, 1, bounds), Some((bounds, 192)));
     let moved = [screen(1, [0.0, 0.0], [1280.0, 800.0], 2)];
-    assert_eq!(covering(&moved, bounds), None);
+    assert_eq!(covering(&moved, 1, bounds), None);
     let mixed = [screens[0], screen(2, [3000.0, 0.0], [1920.0, 1080.0], 1)];
-    assert_eq!(covering(&mixed, bounds), None);
+    assert_eq!(covering(&mixed, 1, bounds), None);
+    let swapped = [
+        screen(2, [0.0, 0.0], [1440.0, 900.0], 2),
+        screen(1, [1440.0, 0.0], [1440.0, 900.0], 2),
+    ];
+    assert_eq!(covering(&swapped, 1, bounds), None);
+    assert_eq!(covering(&swapped, 2, bounds), Some((bounds, 192)));
 }

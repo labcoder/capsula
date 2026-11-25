@@ -50,6 +50,8 @@ pub(crate) use elements::{
 pub(crate) use encode::JPEG_CAP;
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) use frame::RawFrame;
+#[cfg(target_os = "macos")]
+pub(crate) use frame::byte_len;
 pub(crate) use ink::InkBounds;
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use mask::MaskSet;

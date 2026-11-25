@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use block2::RcBlock;
 use objc2::msg_send;
-use objc2::rc::{Allocated, Retained};
+use objc2::rc::{Allocated, Retained, autoreleasepool};
 use objc2::runtime::{AnyClass, AnyObject, Bool};
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
@@ -18,7 +18,7 @@ use objc2_core_graphics::{
 };
 
 use super::chain::{Done, Ended, Request, Sck};
-use super::layout::Screen;
+use super::layout::{Screen, whole};
 use crate::screen::{Failure, Refusal};
 
 /// `kCVPixelFormatType_32BGRA`.
@@ -79,64 +79,82 @@ impl Sck for Native {
         CGPreflightScreenCaptureAccess()
     }
 
-    fn query(&self, ready: Done<Retained<AnyObject>>) {
-        let Some(class) = AnyClass::get(c"SCShareableContent") else {
-            return ready(Err(missing()));
-        };
+    fn query(
+        &self,
+        admit: &dyn Fn() -> bool,
+        ready: Done<Retained<AnyObject>>,
+    ) -> Result<(), Ended> {
+        let class = class(c"SCShareableContent")?;
         let domain = self.domain;
         let ready = Mutex::new(Some(ready));
         let block = RcBlock::new(move |content: *mut AnyObject, error: *mut AnyObject| {
-            let Some(ready) = ready.lock().ok().and_then(|mut ready| ready.take()) else {
-                return;
-            };
-            // SAFETY: The framework passes this call's content or nil.
-            let content = unsafe { Retained::retain(content) };
-            ready(content.ok_or_else(|| ended(error, domain)));
+            autoreleasepool(|_| {
+                let Some(ready) = ready.lock().ok().and_then(|mut ready| ready.take()) else {
+                    return;
+                };
+                // SAFETY: The framework passes this call's content or nil.
+                let content = unsafe { Retained::retain(content) };
+                ready(content.ok_or_else(|| ended(error, domain)));
+            });
         });
-        // SAFETY: The class method takes two BOOLs and a block of (content, error).
-        unsafe {
-            let () = msg_send![
-                class,
-                getShareableContentExcludingDesktopWindows: Bool::YES,
-                onScreenWindowsOnly: Bool::YES,
-                completionHandler: &*block
-            ];
+        if !admit() {
+            return Err(Ended::Stopped);
         }
+        autoreleasepool(|_| {
+            // SAFETY: The class method takes two BOOLs and a block of (content, error).
+            unsafe {
+                let () = msg_send![
+                    class,
+                    getShareableContentExcludingDesktopWindows: Bool::YES,
+                    onScreenWindowsOnly: Bool::YES,
+                    completionHandler: &*block
+                ];
+            }
+        });
+        Ok(())
     }
 
     fn prepare(&self, content: Retained<AnyObject>, request: &Request) -> Result<Shot, Ended> {
+        let changed = Ended::Refused(Refusal::DisplayChanged);
+        let excluded = Ended::Refused(Refusal::Excluded);
         // SAFETY: `displays` is the content's NSArray of `SCDisplay`.
         let displays = objects(unsafe { msg_send![&*content, displays] })?;
         // SAFETY: `applications` is the content's NSArray of `SCRunningApplication`.
-        let apps = objects(unsafe { msg_send![&*content, applications] })?;
+        let apps = objects(unsafe { msg_send![&*content, applications] }).map_err(|_| excluded)?;
         drop(content);
         let display = the_one(displays.into_iter().filter(|display| {
             // SAFETY: `SCDisplay`'s `displayID` is a CGDirectDisplayID.
             let id: CGDirectDisplayID = unsafe { msg_send![&**display, displayID] };
             id == request.display
         }))
-        .ok_or(Ended::Refused(Refusal::DisplayChanged))?;
-        // SAFETY: `SCDisplay`'s `width` is an NSInteger in points.
-        let width: isize = unsafe { msg_send![&*display, width] };
-        // SAFETY: `SCDisplay`'s `height` is an NSInteger in points.
-        let height: isize = unsafe { msg_send![&*display, height] };
-        let points = request.points.map(|side| isize::try_from(side).ok());
-        if points != [Some(width), Some(height)] {
-            return Err(Ended::Refused(Refusal::DisplayChanged));
+        .ok_or(changed)?;
+        // SAFETY: `SCDisplay`'s `frame` is its CGRect in global points.
+        let frame: CGRect = unsafe { msg_send![&*display, frame] };
+        let at = [
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+        ]
+        .map(whole);
+        let [x, y] = request.origin.map(|side| Some(i64::from(side)));
+        let [width, height] = request.points.map(|side| Some(i64::from(side)));
+        if at != [x, y, width, height] {
+            return Err(changed);
         }
         let shell = the_one(apps.into_iter().filter(|app| {
             // SAFETY: `SCRunningApplication`'s `processID` is a pid_t.
             let pid: libc::pid_t = unsafe { msg_send![&**app, processID] };
             u32::try_from(pid).is_ok_and(|pid| pid == request.shell)
         }))
-        .ok_or(Ended::Refused(Refusal::Excluded))?;
+        .ok_or(excluded)?;
         let array = class(c"NSArray")?;
         // SAFETY: `arrayWithObject:` makes an array of one object.
-        let excluded: Option<Retained<AnyObject>> =
+        let leave_out: Option<Retained<AnyObject>> =
             unsafe { msg_send![array, arrayWithObject: &*shell] };
         // SAFETY: `array` makes an empty array.
         let none: Option<Retained<AnyObject>> = unsafe { msg_send![array, array] };
-        let (excluded, none) = (excluded.ok_or_else(missing)?, none.ok_or_else(missing)?);
+        let (leave_out, none) = (leave_out.ok_or(excluded)?, none.ok_or(excluded)?);
         // SAFETY: Allocates a filter for the initializer below.
         let filter: Allocated<AnyObject> = unsafe { msg_send![class(c"SCContentFilter")?, alloc] };
         // SAFETY: The initializer takes a display, the applications to leave out and the windows
@@ -145,14 +163,15 @@ impl Sck for Native {
             msg_send![
                 filter,
                 initWithDisplay: &*display,
-                excludingApplications: &*excluded,
+                excludingApplications: &*leave_out,
                 exceptingWindows: &*none
             ]
         };
+        let filter = filter.ok_or(excluded)?;
         // SAFETY: `new` makes a default stream configuration.
         let config: Option<Retained<AnyObject>> =
             unsafe { msg_send![class(c"SCStreamConfiguration")?, new] };
-        let (filter, config) = (filter.ok_or_else(missing)?, config.ok_or_else(missing)?);
+        let config = config.ok_or_else(missing)?;
         let [wide, high] = request.size.map(|side| usize::try_from(side).ok());
         let (wide, high) = (wide.ok_or_else(missing)?, high.ok_or_else(missing)?);
         // SAFETY: `setWidth:` takes the output width in pixels as size_t.
@@ -166,31 +185,43 @@ impl Sck for Native {
         Ok(Shot { filter, config })
     }
 
-    fn shoot(&self, shot: Shot, done: Done<CFRetained<CGImage>>) {
-        let Some(class) = AnyClass::get(c"SCScreenshotManager") else {
-            return done(Err(missing()));
-        };
+    fn shoot(
+        &self,
+        shot: Shot,
+        commit: &dyn Fn() -> bool,
+        done: Done<CFRetained<CGImage>>,
+    ) -> Result<(), Ended> {
+        let class = class(c"SCScreenshotManager")?;
         let domain = self.domain;
         let done = Mutex::new(Some(done));
         let block = RcBlock::new(move |image: *mut c_void, error: *mut AnyObject| {
-            let Some(done) = done.lock().ok().and_then(|mut done| done.take()) else {
-                return;
-            };
-            done(match NonNull::new(image.cast::<CGImage>()) {
-                // SAFETY: The framework lends this call's image; retaining keeps it past the call.
-                Some(image) => Ok(unsafe { CFRetained::retain(image) }),
-                None => Err(ended(error, domain)),
+            autoreleasepool(|_| {
+                let Some(done) = done.lock().ok().and_then(|mut done| done.take()) else {
+                    return;
+                };
+                done(match NonNull::new(image.cast::<CGImage>()) {
+                    // SAFETY: The framework lends this call's image; retaining keeps it.
+                    Some(image) => Ok(unsafe { CFRetained::retain(image) }),
+                    None => Err(ended(error, domain)),
+                });
             });
         });
-        // SAFETY: The class method takes a filter, a configuration and a block of (image, error).
-        unsafe {
-            let () = msg_send![
-                class,
-                captureImageWithFilter: &*shot.filter,
-                configuration: &*shot.config,
-                completionHandler: &*block
-            ];
+        if !commit() {
+            return Err(Ended::Stopped);
         }
+        autoreleasepool(|_| {
+            // SAFETY: The class method takes a filter, a configuration and a block of
+            // (image, error).
+            unsafe {
+                let () = msg_send![
+                    class,
+                    captureImageWithFilter: &*shot.filter,
+                    configuration: &*shot.config,
+                    completionHandler: &*block
+                ];
+            }
+        });
+        Ok(())
     }
 
     fn draw(
