@@ -51,7 +51,6 @@ use tokio::time::Instant;
 use crate::config::Config;
 use crate::connections::account::Input as AccountInput;
 use crate::context::{ConnectionTag, Origin, RunSnapshot};
-#[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
 use crate::coordinator::{Availability, Ready};
 use crate::coordinator::{
     BuildContext, BuildKey, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, SendKey, StoreOp,
