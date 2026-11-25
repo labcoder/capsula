@@ -31,7 +31,7 @@ pub use crate::supervise::{Generation, WorkerLost};
 pub use actor::serve;
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) use capture::Capturer;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) use capture::{Acquired, Deadline};
 pub(crate) use capture::{Failure, Target};
 pub use client::HoldClient;
@@ -48,8 +48,10 @@ pub(crate) use elements::{
     excluded_image,
 };
 pub(crate) use encode::JPEG_CAP;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) use frame::RawFrame;
+#[cfg(target_os = "macos")]
+pub(crate) use frame::byte_len;
 pub(crate) use ink::InkBounds;
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use mask::MaskSet;

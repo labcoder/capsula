@@ -202,11 +202,37 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   first, then ScreenCaptureKit, loaded at runtime with a handle kept for the process's life, then
   the classes and selectors its captures use. Anything missing refuses `Unsupported`. The brain
   doesn't link ScreenCaptureKit, so it still launches on older systems. Opening reads no grant and
-  captures nothing: display and window capture (`SCScreenshotManager`) aren't built yet, so its
-  captures refuse with the trait's defaults, and the Mac worker route stays unavailable. Other
+  captures nothing. Display capture is built but not active, because the Mac worker route stays
+  unavailable; window capture isn't built, so it refuses with the trait's defaults. Other
   platforms refuse every capture as `Unsupported`.
+- **macOS display capture.** It maps every active display onto physical pixels as Quartz points
+  times one integer scale, so DPI is 96 times that scale. Mirroring, a fractional or mixed scale,
+  a fractional rectangle, overlapping displays, or a point on no display refuses `Layout`. In
+  order, it checks the nonzero stamp, the display's size (`Invalid` over 8,192 pixels, before
+  anything is allocated), the shell's process (`Excluded` when it's unknown), then the deadline
+  and the grant (`CGPreflightScreenCaptureAccess`, which never prompts; `NotPermitted` when it
+  says no). The query for shareable content is prepared first and admitted on the deadline right
+  before it's sent. All ScreenCaptureKit work happens inside that query's callback: a stop check,
+  the display matched by ID and its whole frame in points, an exact filter leaving out the one
+  application with the shell's process (`Excluded` when it can't be built), then the grant. The
+  screenshot is prepared, and only then do the deadline check and the `Live` to `Committed`
+  exchange run, right before `captureImage`. That orders Kumochi's own steps; it can't control
+  when the system runs the request. Native work on each side runs inside an autorelease pool.
+  The screenshot's completion and the content callback each finish one phase, and only the
+  second sends the capture thread its one result: an owned `CGImage` or a numeric code.
+  ScreenCaptureKit's user-declined error, matched on its domain and code, refuses
+  `NotPermitted`; no error text is kept. The capture thread waits in slices of at most 20 ms,
+  checking the deadline, whose stamp keeps counting through sleep, after each slice and on
+  every result. At expiry it moves `Live` to `Stopped` if nothing is committed, then waits up to
+  200 ms on the continuous clock for the chain to finish, and takes a result only while that
+  clock still reads inside the grace. Otherwise it answers `Retire`. After the image arrives,
+  the same display must still be under the point with the same bounds, or it refuses
+  `DisplayChanged`, and the deadline is checked once more right before drawing. The image is checked for size and format, then the frame is cleared and the
+  image copied over all of it as premultiplied BGRA. Drawing reports no failure, so only those
+  checks can refuse. The seal accepts only the display that capture sampled, still at the same
+  bounds and DPI, so a same-sized display moved into its place doesn't pass.
 - **Keeping Kumochi out of a display frame differs by platform.** On Windows the frame must be
-  drawn after the exclusion stamp, as described under "Display under a point". On macOS (planned,
+  drawn after the exclusion stamp, as described under "Display under a point". On macOS (built,
   not active) the stamp only has to be nonzero, and the frame comes through a content filter that
   excludes exactly the application whose process is the connected shell's. When that process can't
   be identified or the filter can't be built exactly, the capture refuses `Excluded` before any

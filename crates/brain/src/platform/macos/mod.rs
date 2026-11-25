@@ -1,6 +1,6 @@
 #[expect(
     unsafe_code,
-    reason = "loads ScreenCaptureKit and reads the OS version"
+    reason = "loads ScreenCaptureKit, reads the OS version and calls the capture APIs"
 )]
 pub(super) mod capture;
 pub(super) mod clock;
