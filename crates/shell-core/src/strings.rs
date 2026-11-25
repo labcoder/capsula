@@ -67,6 +67,7 @@ texts! {
     DismissNotice => "dismiss-notice",
     ChatLiveCut => "chat-live-cut",
     ChatEmpty => "chat-empty",
+    ChatFixtureEngine => "chat-fixture-engine",
     ChatLoading => "chat-loading",
     ChatHistoryFailed => "chat-history-failed",
     TurnBusy => "turn-busy",

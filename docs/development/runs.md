@@ -594,9 +594,12 @@ keyed by id (OSC-56) need no rework.
 
 The runtime picks the engine once at start (`runtime::Selected`). A dev build with
 `KUMOCHI_FIXTURE` set plays that script for every run, ready with no account; a release build
-can't pick it. Otherwise the Responses engine answers once the account is ready (engines.md, "The
-Responses engine"). A script plays through `engines/fixture.rs`; `crates/brain/fixtures/default.txt`
-is a sample. One line per event: `<ms> text <words>`, `<ms> fill <bytes>`,
+can't pick it. The debug brain logs `fixture engine active` at INFO when it selects the fixture,
+and its connected Chat window shows **Fixture mode**. For a normal desk build, launch from a fresh
+terminal with `KUMOCHI_FIXTURE` unset, and quit any running fixture instance first: a running
+brain doesn't change engines. Without the fixture, the Responses engine answers once the account
+is ready (engines.md, "The Responses engine"). A script plays through `engines/fixture.rs`;
+`crates/brain/fixtures/default.txt` is a sample. One line per event: `<ms> text <words>`, `<ms> fill <bytes>`,
 `<ms> step <label>`, `<ms> fail`, and `late <label>`, a step the engine still sends after it's
 cancelled. Its round's pump has closed by then, so the late step reaches nobody; the coordinator
 and the store would refuse it too.

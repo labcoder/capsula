@@ -112,6 +112,10 @@ pub enum LinkEvent {
     State(LinkState),
     /// A new connection, and the session the UI sends and grants credit through.
     Connected(Session),
+    #[cfg(debug_assertions)]
+    FixtureEngineActive {
+        generation: u64,
+    },
     /// Coalesced drawing evidence from the exact narrated pair and run.
     NarrationReady(NarrationWake),
     Settings {
@@ -2469,6 +2473,15 @@ fn watch(
                 }
             }
             Ok(Some(ControlToShell::ThreadModelSet { .. } | ControlToShell::NoVisual { .. })) => {}
+            Ok(Some(ControlToShell::FixtureEngineActive)) => {
+                #[cfg(debug_assertions)]
+                if events
+                    .send_blocking(LinkEvent::FixtureEngineActive { generation })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             Ok(Some(ControlToShell::Welcome { .. } | ControlToShell::BuildMismatch { .. })) => {
                 tracing::warn!("the brain repeated its handshake; ending the connection");
                 return;
