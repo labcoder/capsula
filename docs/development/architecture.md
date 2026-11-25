@@ -51,7 +51,8 @@ Each crate resolves its data folder behind its own `platform` interface. The Win
 implementations read `LOCALAPPDATA` and require an absolute path before appending the product
 folder, so missing, empty or relative values never put logs or brain data under the working
 directory. They read the variables directly, so the slice 2 gate's per-item `LOCALAPPDATA` is
-respected. The brain's session lock uses the same local data root.
+respected. The brain's session lock uses the same local data root. It is the profile's one
+writer lock: the brain takes it before it opens the store and holds it for its whole run.
 
 The ordinary shell asks its instance-lock owner to acquire the lock. Windows holds one lock
 per session until exit, named `<SHELL_LOCK>-<session id>.lock` in the existing data folder.
@@ -62,12 +63,14 @@ The file is mode `0600` and is locked exclusively without waiting. The file stay
 closing the lock handle or exiting the process releases the lock. Platforms without an
 admitted lock target still refuse before opening a file, with no fallback location.
 
-Detached brain startup acquires both pipes before touching the store. It opens and recovers
-the store, loads settings, starts accounts, and builds the Brain. It retries any interrupted
+Detached brain startup acquires both pipes before touching the store. It takes the profile's
+writer lock, then opens and recovers the store, loads settings, starts accounts, and builds the Brain. It retries any interrupted
 voice model removals before creating the helpers' Job Object, then starts the optional workers.
 Only then does it publish the instance capability and serve the shell. The lifecycle owner
 keeps the pipes alive through teardown. Before capability publication, a failure drops the
-resources that started without entering graceful shutdown. After serving, it quits or closes
+resources that started without entering graceful shutdown. The store and credential workers
+each keep a reference to the writer lock until they finish, so neither a failed start nor a
+close that stopped waiting releases it while a writer still runs. After serving, it quits or closes
 the Brain, shuts down the Job off the async thread, and deletes the capability in that order.
 Detached keeps the result of serving as its exit status; an incomplete Quit or capability
 deletion warning does not change that status.

@@ -103,6 +103,12 @@ pub enum BrainError {
     /// Credential Manager refused the capability.
     #[error(transparent)]
     Credential(#[from] credential::CredentialError),
+    /// Another brain of this user, in another session, holds the profile's writer lock.
+    #[error("another session is using this profile")]
+    ProfileBusy,
+    /// The profile's writer lock couldn't be created or taken.
+    #[error("can't take the profile's writer lock")]
+    ProfileLock(#[source] io::Error),
     /// The store couldn't be opened or recovered.
     #[error("can't open the store")]
     Store(#[from] store::StoreError),
@@ -142,6 +148,8 @@ impl BrainError {
             Self::Ipc(IpcError::Accept(error)) => ("ipc_accept", raw(error)),
             Self::Random(error) => ("random", error.raw_os_error().map(i64::from)),
             Self::Credential(error) => ("credential", error.raw_os_error().map(i64::from)),
+            Self::ProfileBusy => ("profile_busy", None),
+            Self::ProfileLock(error) => ("profile_lock", raw(error)),
             Self::Store(StoreError::Folder(error) | StoreError::Purge(error)) => {
                 ("store", raw(error))
             }
@@ -274,11 +282,34 @@ fn start_screen(brain: &mut Brain, exe: PathBuf, jobs: io::Result<std::sync::Arc
     }
 }
 
+/// Takes the profile's writer lock beside the store at `path`, then opens the store, so a brain
+/// refused the lock never opens or creates it.
+fn open_profile(
+    path: &std::path::Path,
+) -> Result<(std::sync::Arc<platform::SessionLock>, store::Store), BrainError> {
+    let profile = profile_lock(&path.with_file_name(kumochi_protocol::constants::SESSION_LOCK))?;
+    Ok((profile, store::Store::open(path)?))
+}
+
+/// Takes the profile's writer lock at `path` without waiting. Only contention is
+/// [`BrainError::ProfileBusy`].
+fn profile_lock(
+    path: &std::path::Path,
+) -> Result<std::sync::Arc<platform::SessionLock>, BrainError> {
+    platform::SessionLock::try_acquire(path)
+        .map(std::sync::Arc::new)
+        .map_err(|error| match error {
+            platform::SessionLockError::Busy => BrainError::ProfileBusy,
+            platform::SessionLockError::Io(error) => BrainError::ProfileLock(error),
+        })
+}
+
 /// The account system on the real credential store, browser, clock and network, and the fact that
 /// its worker holds the session lock.
 fn accounts(
     oauth: config::tuning::OAuthTuning,
     tokens: config::tuning::TokenTuning,
+    profile: std::sync::Arc<platform::SessionLock>,
 ) -> Result<
     (
         runtime::account::Accounts,
@@ -296,7 +327,7 @@ fn accounts(
     if !platform::native_trust_supported() {
         return Err(platform::TrustRootsError::Unsupported.into());
     }
-    let worker = Worker::system(Arc::new(SystemClock));
+    let worker = Worker::system(Arc::new(SystemClock), profile);
     let net = runtime::account::Net {
         http: Arc::new(|| http_client::build().map(SharedHttp::new)),
         launcher: Arc::new(SystemBrowser),
@@ -368,6 +399,43 @@ fn draw_engine() -> Result<Selected, BrainError> {
     let replay =
         engines::responses::replay::Replay::new(observation).map_err(BrainError::Fixture)?;
     Ok(Selected::DrawReplay(Box::new(replay)))
+}
+
+#[test]
+fn a_profile_another_brain_holds_is_busy_and_any_other_failure_is_not() {
+    let scratch = test_support::Scratch::new("profile-lock");
+    std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
+    let path = scratch
+        .dir()
+        .join(kumochi_protocol::constants::SESSION_LOCK);
+    let first = profile_lock(&path).expect("the first brain takes the profile");
+    assert!(matches!(profile_lock(&path), Err(BrainError::ProfileBusy)));
+    drop(first);
+    drop(profile_lock(&path).expect("released when the first brain ends"));
+    assert!(matches!(
+        profile_lock(scratch.dir()),
+        Err(BrainError::ProfileLock(_))
+    ));
+}
+
+#[test]
+fn a_brain_refused_the_profile_never_opens_the_store() {
+    let scratch = test_support::Scratch::new("profile-store");
+    std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
+    let held = profile_lock(
+        &scratch
+            .db()
+            .with_file_name(kumochi_protocol::constants::SESSION_LOCK),
+    )
+    .expect("another brain holds the profile");
+    assert!(matches!(
+        open_profile(&scratch.db()),
+        Err(BrainError::ProfileBusy)
+    ));
+    assert!(!scratch.db().exists(), "a refused brain created the store");
+    drop(held);
+    let (_profile, _store) = open_profile(&scratch.db()).expect("opens once the profile is free");
+    assert!(scratch.db().exists());
 }
 
 #[cfg(all(test, windows, debug_assertions))]

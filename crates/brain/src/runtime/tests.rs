@@ -718,8 +718,10 @@ fn patient_brain_with(scratch: &Scratch, engine: Box<dyn Engine>) -> Brain {
         .busy_timeout(PATIENCE)
         .expect("busy timeout");
     let scenes = store.scenes().expect("scenes");
+    let custody = crate::test_support::custody(&store);
     Brain::new(
         store,
+        custody,
         main_thread,
         high_water,
         scenes,

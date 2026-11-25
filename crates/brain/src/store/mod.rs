@@ -331,6 +331,11 @@ pub fn default_path() -> Result<PathBuf, StoreError> {
 }
 
 impl Store {
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     /// Opens or creates the store at `path` and brings its schema up to date.
     ///
     /// # Errors
