@@ -182,9 +182,9 @@ A gate image is the shipped code apart from its names: the same profile, configu
 
 ## Other systems
 
-The gate tools are Windows-only today. A macOS port needs every stored name (the Application
-Support folder, Keychain services, socket and lock names) taken from `ProductIdentity::ACTIVE`,
-with the trusted root from the account record rather than `$HOME`; a per-launch data-root
-override, since macOS has no `LOCALAPPDATA` and moving `HOME` would move the trusted root; and,
-for the run itself, a Keychain delete by service and account, a process check, a kill-on-exit
-process group and the lock.
+The gate tools are Windows-only today. On macOS, changing `HOME` cannot isolate a gate run:
+folder discovery still uses the OS account's Application Support candidate. A macOS gate needs
+a separately admitted per-launch fixture root, without changing the ordinary folder lookup.
+It also needs the stored names (the product folder, Keychain services, socket and lock names)
+from `ProductIdentity::ACTIVE`, and, for the run itself, a Keychain delete by service and
+account, a process check, a kill-on-exit process group and the lock.

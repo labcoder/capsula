@@ -29,18 +29,6 @@ fn direct_logging_child_fixture() {
     let home = std::env::current_dir().unwrap().join("home");
     assert_eq!(std::env::var_os("HOME").as_deref(), Some(home.as_os_str()));
     assert!(!home.exists());
-    #[cfg(target_os = "macos")]
-    {
-        use kumochi_brain::{platform, store};
-        use kumochi_protocol::constants::{ProductIdentity, STORE_FILE};
-
-        let expected = home
-            .join("Library/Application Support")
-            .join(ProductIdentity::ACTIVE.data_dir);
-        assert_eq!(platform::data_dir().as_ref(), Some(&expected));
-        assert_eq!(platform::config_dir().as_ref(), Some(&expected));
-        assert_eq!(store::default_path().unwrap(), expected.join(STORE_FILE));
-    }
     let error = init("refused-entry").expect_err("native logging should refuse");
     assert!(matches!(
         &error,

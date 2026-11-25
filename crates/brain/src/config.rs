@@ -48,8 +48,15 @@ const REMOVING: &str = "removing";
 /// Why a settings change was refused.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
-    /// `%APPDATA%` isn't an absolute path, so the settings have no home.
-    #[error("%APPDATA% is not set to an absolute path")]
+    /// The platform did not supply a settings folder candidate.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        error("%APPDATA% is not set to an absolute path")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error("macOS Application Support folder is unavailable")
+    )]
     NoHome,
     /// The file exists but can't be read or parsed; it's never overwritten.
     #[error("config.toml can't be read or parsed")]
