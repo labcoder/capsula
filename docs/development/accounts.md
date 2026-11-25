@@ -1015,6 +1015,17 @@ replacement cutoff. A refused establishment COMMIT is rolled back, and confirmat
 only committed authority state, so a connection still inside a transaction is never established. Only scripted tests
 call this path; ordinary startup still refuses version 4 and there is no browser or runtime ingress.
 
+The attempt's live owner can stop it without the vault's lock. The bind claims the attempt just
+before its COMMIT, and the context's establishment claims it again just before its own. A claim
+only lets that commit settle; it proves nothing, and a claim whose commit fails is spent. A stop
+before the bind's claim makes the bind refuse, leaving the predecessor fenced and any staged bytes
+inactive. A stop after it lets the bind settle, but the binding then mints no cutoff and its
+context never establishes, even from a cutoff already written. The durable cancel finds nothing
+there to undo, so the binding stays locked until a sign-out clears it. Dropping the attempt after
+its bind doesn't stop it. The brain stops the attempt its pair owns as soon as that pair ends or
+quits, before the grace for its last controls, and again when it quits or closes; dropping its
+hold stops it too. Nothing holds an attempt at runtime yet.
+
 Every sign-in is proved before `ChatGPT` is ready. Each time the account's connection changes
 (load, sign-in, sign-out; a refresh keeps it), `runtime::Accounts` asks the credential thread
 what that connection may read, under a fresh epoch. It asks only once the store thread has bound

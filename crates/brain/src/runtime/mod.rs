@@ -543,6 +543,7 @@ impl Brain {
     /// complete quit; otherwise the scenes, or a thread whose delete didn't commit, come back at
     /// the next start, as after a crash.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
+        self.account.stop_repair();
         self.claude.stop();
         self.offline(Input::ShellLost);
         self.voice_quit();
@@ -621,6 +622,7 @@ impl Brain {
     /// closes. At the next start, runs still active in the store become `failed(crash)`;
     /// committed outcomes stay, and uncommitted work may be lost.
     pub(crate) async fn close(mut self) {
+        self.account.stop_repair();
         let deadline = Instant::now() + close_wait();
         self.voice_quit();
         self.pump_settings_offline();
@@ -935,6 +937,8 @@ impl Brain {
                 ended = core => ended,
             }
         };
+        // The pair is gone or quitting: its repair attempt stops before any grace or drain.
+        self.account.stop_repair();
         if WATCH_FATAL && let Some(cause) = fence.and_then(Fence::check) {
             ended = Ended::Fatal(cause);
         }

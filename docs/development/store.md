@@ -96,7 +96,9 @@ Check reads the replacement file. A Check refuses an absent or invalid row for t
 or a connection still inside a transaction. Ordinary open never creates a cutoff or uses one to
 unlock a replacement. The binding is spent once a commit is attempted, or when the writer's
 answer is lost, so a lost row is never reseeded. Establish returns a receipt of the exact row it
-wrote. The credential authority marks the context established only when a fresh Check reads
+wrote. The vault refuses to queue it once the repair attempt is stopped, but a stop that lands
+after that check can still leave a written row; its context is then refused at the
+establishment's own claim, so the writer doesn't check for a stop itself. The credential authority marks the context established only when a fresh Check reads
 exactly that row, and each confirmation reads the row again. The history and authority files
 share no installation binding, so nothing here compares one; that belongs to the local profile
 work. A byte-identical copy of the right file put in its place by a process running as the same

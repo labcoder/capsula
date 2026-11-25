@@ -3543,3 +3543,43 @@ async fn a_recovered_answer_scopes_builds_until_the_account_stops_being_ready() 
         brain.close().await;
     }
 }
+
+/// A pair lost while its repair bind blocks stops that attempt at the loss, before the grace
+/// for its last controls, so the bind refuses with the brain still serving rather than closed.
+#[tokio::test]
+async fn a_lost_pair_stops_its_blocked_repair_bind_before_the_grace() {
+    let blocked =
+        crate::connections::vault::tests::repair::promotion::blocked_bind("pair-loss-repair").await;
+    let scratch = Scratch::new("account-pair-loss-repair");
+    let mut brain = test_support::brain(&scratch, "");
+    brain.account.hold_repair(blocked.stop.clone());
+    let mut seen = brain.observe();
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        assert!(matches!(
+            shell.frame().await,
+            ControlToShell::Settings { .. }
+        ));
+        let Shell {
+            control_in,
+            control_out,
+            data_in,
+            data_out,
+            ..
+        } = shell;
+        drop((data_in, data_out));
+        while seen.recv().await != Some(Seen::Grace) {}
+        let bound = blocked.release();
+        drop((control_in, control_out));
+        bound
+    };
+    let (ended, bound) = timeout(PATIENCE * 2, async {
+        tokio::join!(brain.serve(control, data, &mut tap), client)
+    })
+    .await
+    .expect("in time");
+    assert_eq!(ended, Ended::Lost);
+    assert!(matches!(bound, Err(VaultError::Authority)));
+    brain.close().await;
+}
