@@ -266,6 +266,8 @@ texts! {
     SettingsUnavailable => "settings-unavailable",
     SettingsNotSaved => "settings-not-saved",
     SettingsSaveHelp => "settings-save-help",
+    SettingsFieldSaved => "settings-field-saved",
+    SettingsFieldUnsaved => "settings-field-unsaved",
     SettingsVersion => "settings-version",
     SettingsCopyBuild => "settings-copy-build",
     SettingsPositionUnavailable => "settings-position-unavailable",
