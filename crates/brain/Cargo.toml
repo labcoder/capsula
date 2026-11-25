@@ -138,10 +138,6 @@ test-support = []
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["test-util"] }
 
-<<<<<<< HEAD
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
-rustix = { version = "1", features = ["fs"] }
-
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
     "std",
@@ -158,8 +154,6 @@ objc2-security = { version = "=0.3.2", default-features = false, features = [
     "SecTask",
 ] }
 
-=======
->>>>>>> 6e5097d05918200caae59c67696add5c7083ba7c
 [target.'cfg(windows)'.dev-dependencies]
 # Lets tests read the access a handle was granted.
 windows-sys = { version = "0.61", features = ["Wdk_Foundation"] }
