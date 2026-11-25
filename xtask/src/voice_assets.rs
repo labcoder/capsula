@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use kumochi_protocol::constants::DATA_DIR;
+use kumochi_protocol::constants::{
+    DATA_DIR, HONOURS_APPDATA_OVERRIDE, LOCAL_APPDATA_OVERRIDE, ROAMING_APPDATA_OVERRIDE,
+};
 use kumochi_protocol::voice::{MODEL_FILES, MODELS_DIR, ModelFile, NATIVE_FILES, VoicePart};
 
 use crate::platform::gate_capture::{file_sha256, sha256_through};
@@ -88,9 +90,24 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
 // shortcut: links for the xtask's own build profile (debug: "Kumochi Dev"), so a release brain
 // looks under "Kumochi"; add a profile flag when a release measurement needs linked models.
 fn models_root() -> Result<PathBuf> {
+    if HONOURS_APPDATA_OVERRIDE {
+        refuse_override(|name| std::env::var_os(name))?;
+    }
     let local = kumochi_storage::local_app_data(kumochi_storage::Today::Environment)
         .context("resolving the local application data folder the brain uses")?;
     Ok(local.join(DATA_DIR).join(MODELS_DIR))
+}
+
+/// Refuses while either half of the folder override is set, in a build that honours it: the brain
+/// admits its models folder under an override profile at start, and this copy doesn't, so it links
+/// only into the everyday dev folder.
+fn refuse_override(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<()> {
+    ensure!(
+        var(LOCAL_APPDATA_OVERRIDE).is_none() && var(ROAMING_APPDATA_OVERRIDE).is_none(),
+        "voice-assets links only into the everyday dev folder: unset {LOCAL_APPDATA_OVERRIDE} and \
+         {ROAMING_APPDATA_OVERRIDE}"
+    );
+    Ok(())
 }
 
 fn s5_path(file: &ModelFile) -> Result<&'static str> {
@@ -242,8 +259,24 @@ mod tests {
 
     use kumochi_protocol::voice::MODEL_FILES;
 
-    use super::{Placement, S5_LAYOUT, install, link, publish, s5_path, verify};
+    use super::{Placement, S5_LAYOUT, install, link, publish, refuse_override, s5_path, verify};
     use crate::scratch::Scratch;
+
+    #[test]
+    fn a_debug_xtask_refuses_to_link_under_any_half_of_the_override() {
+        let refusal = "voice-assets links only into the everyday dev folder: unset \
+                       KUMOCHI_GATE_LOCALAPPDATA and KUMOCHI_GATE_APPDATA";
+        for set in [
+            &["KUMOCHI_GATE_LOCALAPPDATA", "KUMOCHI_GATE_APPDATA"][..],
+            &["KUMOCHI_GATE_LOCALAPPDATA"],
+            &["KUMOCHI_GATE_APPDATA"],
+        ] {
+            let var = |name: &str| set.contains(&name).then(|| r"C:\profile".into());
+            let error = refuse_override(var).expect_err("an override is set");
+            assert_eq!(error.to_string(), refusal, "{set:?}");
+        }
+        refuse_override(|_| None).expect("no override");
+    }
 
     fn scratch(name: &str) -> Scratch {
         crate::scratch::dir(&format!("voice-assets-{name}"))

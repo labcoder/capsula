@@ -531,9 +531,8 @@ cargo xtask voice-assets link <user-models-dir> <user-native-library-dir>
 Supply your own model directory and the directory containing the native runtime DLLs described
 in [voice-natives.md](voice-natives.md).
 The task checks every source's size and SHA-256 before it copies anything, then copies the
-models into the dev models folder (`Kumochi Dev`, under the local root a dev brain resolves: the
-Known Folder, or the override pair's local half when both override variables are set) and the
-DLLs beside
+models into the dev models folder (`Kumochi Dev`, under the local root a dev brain resolves
+without the override pair) and the DLLs beside
 `target\debug\kumochid.exe` and `target\release\kumochid.exe`, checking each copy's size
 and SHA-256 as it writes it. Each file is written under a temporary name beside its destination,
 then linked to its final name, which never replaces an existing file. It doesn't hardlink the
@@ -546,6 +545,11 @@ copies nothing, changes nothing and names the file, to be moved aside by hand. A
 leaves nothing at its final name, and files already placed stay. A leftover
 `*.voice-assets-*.tmp` in the models folder, from a run that was stopped, is safe to delete by
 hand. Run it again after `cargo clean`.
+
+The task refuses while either half of the override pair (`KUMOCHI_GATE_LOCALAPPDATA`,
+`KUMOCHI_GATE_APPDATA`) is set. A brain admits its models folder inside an override profile when
+it starts, and this copy doesn't, so it links only into the everyday dev folder; that refusal is
+the smallest safe answer. Unset both to run it.
 
 ### Vendored worker-startup tests
 
