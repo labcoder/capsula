@@ -7,7 +7,6 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::Path;
 
-use kumochi_protocol::profile::Observation;
 use rusqlite::{Connection, OpenFlags};
 
 use super::StoreError;
@@ -111,12 +110,7 @@ pub(crate) fn open<'lock>(
     })
 }
 
-/// What the history store at `db` reads as under `session`, the profile's writer lock.
-///
-/// `Matching` is a schema version this build knows, with exactly the objects its migrations make
-/// at that version, so the brain would open it and migrate it if it's older. `Absent` is no store
-/// and nothing beside it that a store or a purge leaves. Everything else is `Unverified`: a newer
-/// or foreign schema, any other object, any file `open` refuses, or any failed read.
+/// What a legacy history store at `db` shows, read under `session`, the profile's writer lock.
 #[cfg_attr(
     not(test),
     expect(
@@ -124,25 +118,55 @@ pub(crate) fn open<'lock>(
         reason = "the existing-profile reader that calls it isn't landed yet"
     )
 )]
-pub(crate) fn history(db: &Path, session: &SessionLock) -> Observation {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LegacyHistory {
+    /// No store and nothing a store or a purge leaves beside one, in a folder that exists. The
+    /// folder itself is still a footprint, so this isn't an absent profile.
+    Missing,
+    /// A schema version this build knows, with exactly the objects its migrations make at that
+    /// version. Schema evidence only: no rows, product invariants, page integrity or binding are
+    /// read, so it promises neither an intact store nor a successful open.
+    KnownSchema,
+    /// Anything else, including any failed read.
+    Unverified,
+}
+
+/// Reads the legacy history store at `db` through [`open`], borrowing `session`.
+///
+/// A missing parent folder, or one that is a link or reparse point, is `Unverified`, since every
+/// name under it then reads as not found.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the existing-profile reader that calls it isn't landed yet"
+    )
+)]
+pub(crate) fn legacy_history(db: &Path, session: &SessionLock) -> LegacyHistory {
     match open(db, session) {
         Ok(read) => match known_schema(&read) {
-            Ok(true) => Observation::Matching,
-            Ok(false) | Err(_) => Observation::Unverified,
+            Ok(true) => LegacyHistory::KnownSchema,
+            Ok(false) | Err(_) => LegacyHistory::Unverified,
         },
         Err(ExistingError::Missing)
-            if ["-wal", "-shm", "-journal"]
-                .into_iter()
-                .all(|suffix| missing(&sidecar(db, suffix)))
+            if db.parent().is_some_and(folder)
+                && ["-wal", "-shm", "-journal"]
+                    .into_iter()
+                    .all(|suffix| missing(&sidecar(db, suffix)))
                 && !Leftovers::of(db).exist() =>
         {
-            Observation::Absent
+            LegacyHistory::Missing
         }
-        Err(_) => Observation::Unverified,
+        Err(_) => LegacyHistory::Unverified,
     }
 }
 
+/// The catalog query, in a fixed order.
+const CATALOG: &str = "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name";
+
 /// Whether `conn`'s objects are exactly those this build's migrations make at its `user_version`.
+/// The candidate's catalog is counted first and then compared row by row against the expected
+/// one, so a large foreign catalog is never copied.
 fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
     let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let Some(version) = usize::try_from(found)
@@ -151,18 +175,45 @@ fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
     else {
         return Ok(false);
     };
-    let mut expected = Connection::open_in_memory()?;
-    schema::migrate_to(&mut expected, version)?;
-    Ok(objects(conn)? == objects(&expected)?)
-}
-
-/// Every schema object's type, name, table and SQL, in a fixed order.
-fn objects(conn: &Connection) -> rusqlite::Result<Vec<[Option<String>; 4]>> {
-    conn.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")?
+    let mut built = Connection::open_in_memory()?;
+    schema::migrate_to(&mut built, version)?;
+    let expected = built
+        .prepare(CATALOG)?
         .query_map([], |row| {
             Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?])
         })?
-        .collect()
+        .collect::<rusqlite::Result<Vec<[Option<String>; 4]>>>()?;
+    let count: i64 = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))?;
+    if usize::try_from(count).ok() != Some(expected.len()) {
+        return Ok(false);
+    }
+    let mut catalog = conn.prepare(CATALOG)?;
+    let mut rows = catalog.query([])?;
+    for want in &expected {
+        let Some(row) = rows.next()? else {
+            return Ok(false);
+        };
+        for (column, want) in want.iter().enumerate() {
+            if row.get_ref(column)?.as_str_or_null().ok() != Some(want.as_deref()) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(rows.next()?.is_none())
+}
+
+/// Whether `dir` is a folder itself, not a link or reparse point to one.
+fn folder(dir: &Path) -> bool {
+    fs::symlink_metadata(dir).is_ok_and(|metadata| {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        }
+        #[cfg(not(windows))]
+        metadata.is_dir()
+    })
 }
 
 /// Whether `metadata` is a regular file with one name.
@@ -414,19 +465,23 @@ mod tests {
     }
 
     #[test]
-    fn a_store_at_any_known_version_matches_and_keeps_its_files() {
+    fn a_store_at_any_known_version_has_a_known_schema_and_keeps_its_files() {
         let (_held, lock) = session();
         let scratch = Scratch::new("existing-history");
         for version in 1..=MIGRATIONS.len() {
             let db = store_at(&scratch.dir().join(format!("v{version}")), version);
             let dir = db.parent().expect("store folder");
             let before = files(dir);
-            assert_eq!(history(&db, &lock), Observation::Matching, "v{version}");
+            assert_eq!(
+                legacy_history(&db, &lock),
+                LegacyHistory::KnownSchema,
+                "v{version}"
+            );
             assert_eq!(files(dir), before, "v{version}");
         }
         let opened = scratch.dir().join("opened").join("x.db");
         drop(super::super::Store::open(&opened).expect("the brain's own open"));
-        assert_eq!(history(&opened, &lock), Observation::Matching);
+        assert_eq!(legacy_history(&opened, &lock), LegacyHistory::KnownSchema);
         let copy = scratch.dir().join("copy");
         fs::create_dir(&copy).expect("copy folder");
         let source = Connection::open(scratch.dir().join("opened").join("x.db")).expect("source");
@@ -437,7 +492,10 @@ mod tests {
             )
             .expect("a purge's kind of copy");
         drop(source);
-        assert_eq!(history(&copy.join("x.db"), &lock), Observation::Matching);
+        assert_eq!(
+            legacy_history(&copy.join("x.db"), &lock),
+            LegacyHistory::KnownSchema
+        );
     }
 
     #[test]
@@ -447,13 +505,17 @@ mod tests {
         let known = MIGRATIONS.len();
         let newer = i64::try_from(known + 1).expect("small");
         let older = i64::try_from(known - 1).expect("small");
-        let cases: [(&str, String); 5] = [
+        let cases: [(&str, String); 6] = [
             ("newer", format!("PRAGMA user_version = {newer}")),
             ("unversioned", "PRAGMA user_version = 0".into()),
             ("extra-table", "CREATE TABLE extra (x INTEGER)".into()),
             (
                 "extra-index",
                 "CREATE INDEX extra ON threads (title)".into(),
+            ),
+            (
+                "changed-table",
+                "ALTER TABLE threads ADD COLUMN extra INTEGER".into(),
             ),
             (
                 "ahead-of-its-version",
@@ -467,23 +529,49 @@ mod tests {
                 .expect("change the store");
             let dir = db.parent().expect("store folder");
             let before = files(dir);
-            assert_eq!(history(&db, &lock), Observation::Unverified, "{case}");
+            assert_eq!(
+                legacy_history(&db, &lock),
+                LegacyHistory::Unverified,
+                "{case}"
+            );
             assert_eq!(files(dir), before, "{case}");
         }
         let foreign = scratch.dir().join("foreign");
         let (db, conn) = writer(&foreign);
         drop(conn);
-        assert_eq!(history(&db, &lock), Observation::Unverified, "foreign");
+        assert_eq!(
+            legacy_history(&db, &lock),
+            LegacyHistory::Unverified,
+            "foreign"
+        );
     }
 
     #[test]
-    fn a_missing_store_is_absent_only_with_nothing_beside_it() {
+    fn a_missing_store_is_missing_only_in_its_own_folder_with_nothing_beside_it() {
         let (_held, lock) = session();
         let scratch = Scratch::new("existing-history-missing");
         let bare = scratch.dir().join("bare");
         fs::create_dir_all(&bare).expect("bare folder");
-        assert_eq!(history(&bare.join("x.db"), &lock), Observation::Absent);
+        assert_eq!(
+            legacy_history(&bare.join("x.db"), &lock),
+            LegacyHistory::Missing
+        );
         assert!(files(&bare).is_empty());
+        assert_eq!(
+            legacy_history(&scratch.dir().join("gone").join("x.db"), &lock),
+            LegacyHistory::Unverified,
+            "a missing folder"
+        );
+        assert!(!scratch.dir().join("gone").exists());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&bare, scratch.dir().join("linked")).expect("folder link");
+            assert_eq!(
+                legacy_history(&scratch.dir().join("linked").join("x.db"), &lock),
+                LegacyHistory::Unverified,
+                "a linked folder"
+            );
+        }
         for left in [
             "x.db-wal",
             "x.db-shm",
@@ -497,14 +585,18 @@ mod tests {
             fs::write(dir.join(left), b"left").expect("left file");
             let before = files(&dir);
             assert_eq!(
-                history(&dir.join("x.db"), &lock),
-                Observation::Unverified,
+                legacy_history(&dir.join("x.db"), &lock),
+                LegacyHistory::Unverified,
                 "{left}"
             );
             assert_eq!(files(&dir), before, "{left}");
         }
         let refused = store_at(&scratch.dir().join("refused"), MIGRATIONS.len());
         fs::write(refused.with_file_name("x.db-wal"), b"").expect("empty WAL");
-        assert_eq!(history(&refused, &lock), Observation::Unverified, "refused");
+        assert_eq!(
+            legacy_history(&refused, &lock),
+            LegacyHistory::Unverified,
+            "refused"
+        );
     }
 }

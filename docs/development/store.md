@@ -527,25 +527,30 @@ refused case, and on Unix the linked cases. On Windows the VFS also honours `rea
 opens the index with `OPEN_ALWAYS`, so an index removed between the check and the open would be
 created there, and a second hard link isn't detected.
 
-### The history store's verdict
+### A legacy history store
 
-`store::existing::history` turns that read into the profile classifier's `Observation` for
-`kumochi.db`, under the same held lock. Nothing calls it yet.
+`store::existing::legacy_history` reads `kumochi.db` through that opener under the same held lock and
+returns `LegacyHistory`. Nothing calls it yet.
 
-- `Matching`: the file's `user_version` is one this build knows (1 to the newest), and its
+- `KnownSchema`: the file's `user_version` is one this build knows (1 to the newest), and its
   schema objects (type, name, table and SQL, from `sqlite_schema`) are exactly those the
-  migrations make at that version, built in memory to compare. An older version matches, since
-  the brain would migrate it at start.
-- `Absent`: no main file, no `-wal`, `-shm` or `-journal`, and none of the files a purge
-  leaves (`.purge-old`, the snapshot and the clean copy with their sidecars).
+  migrations make at that version, built in memory to compare. The candidate's catalog is counted
+  first and compared row by row, so a large foreign catalog is never copied. This is schema
+  evidence only. It reads no rows, product invariants (such as the `approval_mark` singleton),
+  page integrity or binding, so it promises neither an intact store nor a successful open or
+  migration, and it isn't the new-format history fact. `quick_check` wouldn't change that: it
+  scans the whole file and still passes a store missing a required row.
+- `Missing`: the store's own folder exists as a folder, not a link or reparse point, and holds no
+  main file, no `-wal`, `-shm` or `-journal`, and none of the files a purge leaves (`.purge-old`,
+  the snapshot and the clean copy with their sidecars). The folder itself is still a footprint,
+  so this isn't an absent profile.
 - `Unverified`: everything else. That covers a newer or unversioned schema, any extra or missing
-  object, a schema ahead of its version, files the opener refuses, a store missing beside
-  something it left, and any failed read.
+  object, a schema ahead of its version, files the opener refuses, a missing or linked folder, a
+  store missing beside something it left, and any failed read.
 
-It doesn't read rows, run `quick_check` or look for a binding: a legacy store has none, and the
-new-format binding comes with the new layout. Tests cover every known version, a store the brain
-itself opened, a `VACUUM INTO` copy like a purge's, each refused change, and each leftover, and
-check that no file changes.
+Tests cover every known version, a store the brain itself opened, a `VACUUM INTO` copy like a
+purge's, each refused change, each leftover, and a missing and a linked folder, and check that no
+file changes.
 
 ## Recovery at start
 
