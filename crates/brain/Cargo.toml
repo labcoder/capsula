@@ -52,6 +52,7 @@ xn = { version = "=0.2.13", default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 kumochi-storage = { path = "../storage" }
 libc = "=0.2.191"
+objc2 = "=0.6.5"
 
 [target.'cfg(windows)'.dependencies]
 keyring.workspace = true

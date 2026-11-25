@@ -12,6 +12,8 @@ impl BoundHello {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) use macos::capture::screen_capturer;
+#[cfg(target_os = "macos")]
 pub(crate) use macos::clock::{qpc_at, qpc_left};
 
 #[cfg(all(windows, feature = "test-support"))]

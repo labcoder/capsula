@@ -165,7 +165,7 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   Windows uses QPC ticks. macOS uses continuous nanoseconds
   (`clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`), so native and Rosetta processes do not exchange
   architecture-dependent ticks. A suspend spends the grant. This supports only the ticket clock;
-  macOS still refuses native capture and doesn't read shell input age. Verify suspend and resume
+  macOS doesn't capture yet and doesn't read shell input age. Verify suspend and resume
   before enabling capture. The producer passes the original stamp and its reader with the local
   bound to both adapter methods. Windows uses the conservative projection on its QPC-backed
   `Instant` for the start and wait checks, without changing the draw/exclusion clock. Each retry
@@ -198,8 +198,23 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   answers `Fault` and exits, so no capture can keep running. A lost device
   (`DXGI_ERROR_DEVICE_REMOVED`, `_RESET` or `_HUNG`) retires the worker the same way, so the next
   ticket gets a fresh device. Foreign failures are HRESULT codes.
-- **macOS.** `SCScreenshotManager` with `desktopIndependentWindow`, not built yet; other platforms
-  refuse every capture as `Unsupported`.
+- **macOS.** The capturer opens on macOS 14 and later, after capability checks only: the OS version
+  first, then ScreenCaptureKit, loaded at runtime with a handle kept for the process's life, then
+  the classes and selectors its captures use. Anything missing refuses `Unsupported`. The brain
+  doesn't link ScreenCaptureKit, so it still launches on older systems. Opening reads no grant and
+  captures nothing: display and window capture (`SCScreenshotManager`) aren't built yet, so its
+  captures refuse with the trait's defaults, and the Mac worker route stays unavailable. Other
+  platforms refuse every capture as `Unsupported`.
+- **Keeping Kumochi out of a display frame differs by platform.** On Windows the frame must be
+  drawn after the exclusion stamp, as described under "Display under a point". On macOS (planned,
+  not active) the stamp only has to be nonzero, and the frame comes through a content filter that
+  excludes exactly the application whose process is the connected shell's. When that process can't
+  be identified or the filter can't be built exactly, the capture refuses `Excluded` before any
+  screenshot. The screenshot is requested only after the stamp, but Apple's documentation for
+  `captureImage(contentFilter:configuration:completionHandler:)` says only that it captures a
+  single frame from a stream as an image. It doesn't say when the frame is sampled, so request
+  order alone doesn't prove the frame was composed after the stamp; the native gate has to check
+  that.
 
 ```mermaid
 sequenceDiagram
@@ -652,7 +667,7 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 
 | Class | Worker answers |
 |---|---|
-| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition or release too old for its lease, a refused release, or still `Waiting` or `Armed` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
+| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `NotPermitted` and `Layout` (which don't, since a grant or a display change can come later), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition or release too old for its lease, a refused release, or still `Waiting` or `Armed` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
 | `NothingThere` | `NoWindow` |
 | `CantShare` | `Minimized`, `Cloaked`, `Elevated`, `Protected`, `Excluded` |
 | `Unreadable` | `Ambiguous`, and `Unmasked`, which no worker sends now |
