@@ -580,7 +580,7 @@ pub(crate) fn pictured_run(
 #[cfg(windows)]
 pub(crate) fn pictured_claude_run(
     available: Availability,
-    jpeg: crate::context::Jpeg,
+    screen: crate::context::Screen,
 ) -> (Coordinator, Vec<Effect>) {
     let choice = choice(CLAUDE, "haiku");
     let (mut core, hold) = held(
@@ -589,12 +589,8 @@ pub(crate) fn pictured_claude_run(
         Some(ThreadId(1)),
     );
     core.set_pictures(crate::coordinator::PictureRoutes::new(false, true));
-    core.submit_hold(
-        hold,
-        "words".into(),
-        Some(crate::context::Screen::Image(jpeg)),
-    )
-    .expect("admitted");
+    core.submit_hold(hold, "words".into(), Some(screen))
+        .expect("admitted");
     core.handle(Input::TurnStored { run: R }).expect("current");
     let Input::ContextBuilt(mut built) = built_for(key(), &choice) else {
         unreachable!("built fixture");
