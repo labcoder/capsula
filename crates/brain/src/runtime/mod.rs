@@ -735,13 +735,6 @@ impl Brain {
             .checked_add(1)
             .expect("connection epochs never wrap");
         self.coordinator.begin_session();
-        if self
-            .voice
-            .as_mut()
-            .is_some_and(|voice| std::mem::take(&mut voice.deferred_talk_back))
-        {
-            self.voice_policy();
-        }
         self.holds.opened();
         self.account.connections.stage_session(Some(self.epoch));
         self.account.github_session(Some(self.epoch));
@@ -918,6 +911,12 @@ impl Brain {
             deadline: Instant::now() + scenes_wait(),
             settled: false,
         };
+        if tokio::time::timeout_at(barrier.deadline, self.settle_deferred_talk_back())
+            .await
+            .is_err()
+        {
+            return Ended::Unavailable;
+        }
         if let Err(ended) = self.open(&mut link) {
             return ended;
         }
@@ -1109,6 +1108,13 @@ impl Brain {
     /// A connection's first frames: the settings and the account, then anything owed from while
     /// no shell was connected.
     fn open(&mut self, link: &mut Link<'_, '_>) -> Result<(), Ended> {
+        if self
+            .voice
+            .as_mut()
+            .is_some_and(|voice| std::mem::take(&mut voice.deferred_talk_back))
+        {
+            self.voice_policy();
+        }
         link.queued_talk_back = link.registration.map(|_| self.config.view().talk_back);
         self.settings_now(link).map_err(|Full| Ended::Lost)?;
         self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;

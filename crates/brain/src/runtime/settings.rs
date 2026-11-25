@@ -581,6 +581,25 @@ impl Brain {
         debug_assert!(pumped.is_ok(), "settling without a shell can't fail");
     }
 
+    /// A replacement pair must not advertise the saved default before a pending Off settles.
+    pub(super) async fn settle_deferred_talk_back(&mut self) {
+        let off = SettingsOp::SetTalkBack(false);
+        while self
+            .voice
+            .as_ref()
+            .is_some_and(|voice| voice.deferred_talk_back)
+            && self.turning_off(&off)
+        {
+            self.pump_settings_offline();
+            if self.config_write.is_none() {
+                break;
+            }
+            let done = written(&mut self.config_write).await;
+            let settled = self.settings_done(done, None);
+            debug_assert!(settled.is_ok(), "settling without a shell can't fail");
+        }
+    }
+
     /// Writes every waiting settings change, one after another, with no shell to tell.
     pub(super) async fn drain_settings(&mut self) {
         self.pump_settings_offline();

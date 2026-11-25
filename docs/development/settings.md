@@ -117,6 +117,8 @@ while the setting shows what was saved. That snapshot doesn't answer any queued 
 write. An explicit Off still saves normally and clears the difference without re-registering.
 The registered mode still governs hold release. An explicit On racing the default only
 reconnects if its own write succeeds; an On snapshot after a refusal reflects the default.
+If the pair drops with an Off save pending, its replacement waits for that save before
+advertising a playback mode. If the opening deadline expires first, the pair never registers.
 
 The control reader forwards the whole `VoiceView` to the settings model with its connection
 generation. Each part's status comes only from that snapshot, not its saved preference. The
