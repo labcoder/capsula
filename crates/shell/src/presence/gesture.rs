@@ -633,7 +633,8 @@ pub(super) fn before_deferred_release(advance: impl FnOnce() + 'static) {
     assert!(
         BEFORE_DEFERRED_RELEASE
             .replace(Some(Box::new(advance)))
-            .is_none()
+            .is_none(),
+        "the deferred release hook is already installed"
     );
 }
 
