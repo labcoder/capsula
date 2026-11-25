@@ -4,6 +4,7 @@ use crate::test_support::Scratch;
 
 mod diagnostics;
 mod read;
+mod recovery;
 mod search;
 mod tasks;
 

@@ -40,6 +40,11 @@ impl std::fmt::Debug for Audio {
 }
 
 impl Audio {
+    #[cfg(test)]
+    pub(super) fn has_samples(&self) -> bool {
+        !self.samples.is_empty()
+    }
+
     pub(super) fn new() -> Self {
         Self {
             signal: Signal::Quiet,

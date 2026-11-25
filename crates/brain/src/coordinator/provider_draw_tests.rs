@@ -3648,6 +3648,7 @@ fn a_standalone_key_inline_rewrite_succeeds_and_keeps_continuation_guard() {
                     JobAsk {
                         generation: crate::store::Generation(1),
                         built: Built {
+                            recovered_context: None,
                             request: ModelRequest {
                                 choice: Some(model.clone()),
                                 instructions: String::new(),

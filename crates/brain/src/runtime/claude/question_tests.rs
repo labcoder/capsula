@@ -2579,6 +2579,7 @@ fn admit_provider_build(brain: &mut Brain, run: RunId) -> Vec<crate::coordinator
             key,
             snapshot: Some(snapshot),
             result: Ok(Built {
+                recovered_context: None,
                 request,
                 sources: Vec::new(),
             }),
@@ -2867,6 +2868,7 @@ async fn an_admitted_foreground_offer_binds_before_seeding() {
             key,
             snapshot: Some(snapshot),
             result: Ok(Built {
+                recovered_context: None,
                 request,
                 sources: Vec::new(),
             }),

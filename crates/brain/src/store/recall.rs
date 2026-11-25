@@ -83,7 +83,7 @@ fn prefix(text: &str, fits: impl Fn(&str) -> bool) -> usize {
 
 impl Snapshot<'_> {
     fn live_task(&self, task: u64, origin: Origin) -> Result<bool, Error> {
-        if own(origin).is_some_and(|own| own != task) {
+        if !self.permits_history(ThreadId(task)) || own(origin).is_some_and(|own| own != task) {
             return Err(Error::NotHere);
         }
         let source = self.source(ThreadId(task)).map_err(|_| Error::Read)?;
@@ -144,6 +144,7 @@ impl Snapshot<'_> {
                      JOIN threads t ON t.id=e.thread WHERE events_fts MATCH ?1
                      AND (?2 IS NULL OR e.thread=?2) AND (?3 IS NULL OR e.thread=?3)
                      AND t.state='live' AND t.kind='thread' AND e.kind IN ('user','assistant_text')
+                     AND e.thread > ?5
                      ORDER BY bm25(events_fts),e.id DESC LIMIT ?4",
                 ))?;
                 let rows = sql(statement.query_map(
@@ -151,7 +152,8 @@ impl Snapshot<'_> {
                         words(query)?,
                         task.map(key).transpose()?,
                         reach(origin)?,
-                        i64::try_from(SEARCH_HITS + 1).map_err(|_| Error::Invalid)?
+                        i64::try_from(SEARCH_HITS + 1).map_err(|_| Error::Invalid)?,
+                        self.history_thread_floor(),
                     ],
                     |row| {
                         Ok(Hit {
@@ -225,11 +227,14 @@ impl Snapshot<'_> {
         }
         let mut statement = sql(self.0.prepare(
             "SELECT id FROM threads
-             WHERE kind='thread' AND state='live'
+             WHERE kind='thread' AND state='live' AND id > ?2
              ORDER BY updated_ms DESC,id DESC LIMIT ?1",
         ))?;
         let rows = sql(statement.query_map(
-            [i64::try_from(TASKS + 1).map_err(|_| Error::Invalid)?],
+            params![
+                i64::try_from(TASKS + 1).map_err(|_| Error::Invalid)?,
+                self.history_thread_floor()
+            ],
             |row| row.get::<_, i64>(0).map(row_id),
         ))?;
         let mut tasks: Vec<u64> = sql(rows.collect())?;

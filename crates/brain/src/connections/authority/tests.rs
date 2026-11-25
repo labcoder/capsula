@@ -760,6 +760,8 @@ fn the_marker_never_defaults_and_commits_with_its_transition() {
     let authority = Authority {
         conn: setup.raw(),
         lifetime: 1,
+        account_fenced: false,
+        refuse_rollback: false,
     };
     assert!(matches!(authority.marker(), Err(AuthorityError::Corrupt)));
 }

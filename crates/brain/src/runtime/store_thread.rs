@@ -18,7 +18,8 @@ use kumochi_protocol::message::{ConnectionKind, Deleted, RunId, SceneId, ThreadI
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::coordinator::{Input, StoreOp};
+use crate::connections::vault::HistoryLink;
+use crate::coordinator::{CutoffSlot, Input, StoreOp};
 use crate::dispatch::Committed;
 use crate::platform::SessionLock;
 use crate::store::{
@@ -457,8 +458,11 @@ impl StoreThread {
                                     gates.remove(at).release.recv().ok();
                                 }
                             }
+                            let counted = !matches!(op, StoreOp::Cutoff(_));
                             serve_op(&mut store, &mut purger, &acks, op);
-                            exit.barrier.complete();
+                            if counted {
+                                exit.barrier.complete();
+                            }
                             exit.checkpoints.raise();
                             #[cfg(test)]
                             if let Some(observed) = &purger.schedule.observed {
@@ -527,6 +531,16 @@ impl StoreThread {
             self.accepted.fetch_add(1, Ordering::Relaxed);
         }
         sent
+    }
+
+    /// A vault's binding to this thread's store, the profile's one history writer.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "reconnect admission has no production ingress")
+    )]
+    pub(crate) fn history_link(&self) -> HistoryLink {
+        let ops = self.ops.clone();
+        HistoryLink::new(move |request| ops.send(StoreOp::Cutoff(CutoffSlot::new(request))).is_ok())
     }
 
     #[cfg(all(test, windows))]
@@ -599,6 +613,18 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
         | StoreOp::ReadJob(_)
         | StoreOp::CompactContext(_) => {
             unreachable!("StoreThread::send hands reads to the reader")
+        }
+        StoreOp::Cutoff(slot) => {
+            let Some(request) = slot.take() else {
+                return;
+            };
+            if request.establishes() {
+                purger.op_arriving();
+                store.serve_cutoff(request);
+                purger.op_arrived(store);
+            } else {
+                store.serve_cutoff(request);
+            }
         }
         StoreOp::ClearScenes { scenes } => {
             purger.op_arriving();

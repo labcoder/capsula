@@ -54,6 +54,9 @@ pub struct ReadJob {
     /// The uncovered backlog, in estimated tokens, that compaction waits for; the runtime
     /// fills it in.
     pub(crate) compact_at: u64,
+    /// The established history cutoff this read must find unchanged and keep to; unset until
+    /// reconnect admission sets it.
+    pub(crate) require_recovery: Option<crate::store::Boundary>,
 }
 
 impl PartialEq for ReadJob {
@@ -63,6 +66,7 @@ impl PartialEq for ReadJob {
             && self.origin == other.origin
             && self.snapshot == other.snapshot
             && self.compact_at == other.compact_at
+            && self.require_recovery == other.require_recovery
     }
 }
 impl Eq for ReadJob {}
@@ -122,6 +126,8 @@ pub(super) struct Job {
 enum Stage {
     Reading,
     Sending {
+        /// The cutoff its body was read to.
+        recovered_context: Option<crate::store::Boundary>,
         generation: Generation,
         sources: Vec<ThreadId>,
         covers: Option<(EventId, EventId)>,
@@ -133,6 +139,16 @@ enum Stage {
 impl Job {
     pub(super) fn is_sending(&self, key: JobKey) -> bool {
         self.key == key && matches!(self.stage, Stage::Sending { .. })
+    }
+
+    /// The cutoff the sending body was read to.
+    pub(super) fn recovered_context(&self) -> Option<crate::store::Boundary> {
+        match self.stage {
+            Stage::Sending {
+                recovered_context, ..
+            } => recovered_context,
+            Stage::Reading | Stage::Writing => None,
+        }
     }
 
     fn voided(&self, sources: &[ThreadId]) -> bool {
@@ -243,6 +259,7 @@ impl Coordinator {
             stage: Stage::Reading,
         });
         effects.push(Effect::Store(StoreOp::ReadJob(ReadJob {
+            require_recovery: self.required_recovery(route),
             control,
             key,
             kind,
@@ -321,7 +338,10 @@ impl Coordinator {
             .as_ref()
             .map_or(ConnectionKind::ChatGpt, |choice| choice.connection)
             != job.route.kind;
-        if elsewhere || job.voided(&ask.built.sources) {
+        if elsewhere
+            || job.voided(&ask.built.sources)
+            || ask.built.recovered_context != self.required_recovery(job.route)
+        {
             self.job_ended(effects);
             return Ok(());
         }
@@ -341,6 +361,7 @@ impl Coordinator {
         let (key, kind, run) = (job.key, job.kind, job.run);
         let origin = origin(key.thread, self.main_thread);
         job.stage = Stage::Sending {
+            recovered_context: ask.built.recovered_context,
             generation: ask.generation,
             sources: ask.built.sources,
             covers: ask.covers,
@@ -380,8 +401,14 @@ impl Coordinator {
             .filter(|job| job.key == key)
             .filter(|job| self.refusal(job.route).is_none())
             .and_then(|job| match &job.stage {
-                Stage::Sending { sources, model, .. }
-                    if !job.voided(sources) && self.offered(job.route, model.as_deref()) =>
+                Stage::Sending {
+                    sources,
+                    model,
+                    recovered_context,
+                    ..
+                } if !job.voided(sources)
+                    && self.offered(job.route, model.as_deref())
+                    && *recovered_context == self.required_recovery(job.route) =>
                 {
                     Some(sources.clone())
                 }

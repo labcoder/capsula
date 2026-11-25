@@ -537,6 +537,17 @@ async fn nothing_the_client_sent_reaches_debug_or_an_answer() {
 
 #[cfg(windows)]
 #[tokio::test]
+async fn a_listener_without_a_connected_peer_refuses_query() {
+    let fixture = fixture();
+    let listener = Listener::create(unique_launch(9)).expect("listener");
+    assert_eq!(
+        platform::bridge_peer(&listener.server, &fixture.job, &fixture.exe).err(),
+        Some(ClientRefused::Query)
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn the_name_takes_one_instance_and_one_client() {
     let listener = Listener::create(unique_launch(1)).expect("listener");
     let code = |result: io::Result<_>| result.err().and_then(|error| error.raw_os_error());

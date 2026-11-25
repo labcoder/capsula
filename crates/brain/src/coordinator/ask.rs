@@ -35,6 +35,9 @@ impl Coordinator {
             return;
         };
         let run = self.turn(turn, Some(thread), text, effects);
+        if let Some(current) = self.current.as_mut() {
+            current.asked = true;
+        }
         effects.push(Effect::Control(ControlToShell::Focus { run, thread }));
     }
 }

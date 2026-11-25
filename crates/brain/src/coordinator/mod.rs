@@ -60,7 +60,7 @@ pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
 pub use lease::{LeaseId, MAX_HOLD, SEND_DEADLINE, SendKey};
 pub(crate) use lease::{PictureGrant, PictureWrite};
 pub use speech::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
-pub use store_op::{ReplyText, StoreOp, SummaryText};
+pub use store_op::{CutoffSlot, ReplyText, StoreOp, SummaryText};
 pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};
 mod page;
 pub use page::PageKey;
@@ -330,6 +330,13 @@ pub enum Input {
     ThreadOp(ThreadOp),
     /// Whether runs on a connection kind can be answered changed.
     Engines(kumochi_protocol::message::ConnectionKind, Availability),
+    /// `ChatGPT` is ready on a recovered connection whose reads must keep to its cutoff.
+    RecoveredChatGpt {
+        /// The ready sign-in.
+        ready: Ready,
+        /// The cutoff its account's established context matched.
+        boundary: crate::store::Boundary,
+    },
     /// A Messages post or a Check found the Anthropic key under this tag refused; its route change
     /// follows.
     KeyRefused(RefusedKey),
@@ -644,6 +651,8 @@ struct Run {
     snapshot: Option<crate::context::RunSnapshot>,
     /// Resolved once before the first send; the raw snapshot still fences held input.
     effective_effort: Option<kumochi_protocol::message::Effort>,
+    /// Whether the turn is an ask's: a drawing's own text, carried as a new turn in its thread.
+    asked: bool,
     hold: Option<HoldSnapshot>,
     /// The hold's screen, which every request of the run carries.
     screen: Option<crate::context::Screen>,
@@ -824,6 +833,18 @@ pub struct Coordinator {
     transport_failed: bool,
     /// Whether `ChatGPT` runs can be answered, and on which sign-in.
     availability: Availability,
+    /// Each recovered `ChatGPT` sign-in's first cutoff, which its routes' reads and sends
+    /// require; no report about another sign-in replaces or removes one.
+    recovered_chatgpt: Vec<crate::store::Boundary>,
+    /// The `ChatGPT` sign-ins whose recovery report was inconsistent, each unavailable until a
+    /// consistent report of its own.
+    refused_recovery: Vec<crate::context::ConnectionTag>,
+    /// Whether `ChatGPT`'s current state is such a refusal, until it is ready again.
+    chatgpt_blocked: bool,
+    /// The `ChatGPT` sign-in last ready, and the earlier ones another replaced: a sign-in's tag is
+    /// never issued again, so a recovery report naming a retired one is late and changes nothing.
+    last_chatgpt: Option<crate::context::ConnectionTag>,
+    chatgpt_retired: Vec<crate::context::ConnectionTag>,
     /// The other connections, which no engine answers yet, so they stay unavailable.
     anthropic_key: Availability,
     claude_code: Availability,
@@ -898,6 +919,11 @@ impl Coordinator {
             sends: 0,
             transport_failed: false,
             availability: Availability::Unavailable(availability::sign_in_needed()),
+            recovered_chatgpt: Vec::new(),
+            refused_recovery: Vec::new(),
+            chatgpt_blocked: false,
+            last_chatgpt: None,
+            chatgpt_retired: Vec::new(),
             anthropic_key: Availability::Unavailable(availability::model_unavailable()),
             claude_code: Availability::Unavailable(availability::model_unavailable()),
             pictures: availability::PictureRoutes::SHIPPED,
@@ -1163,6 +1189,9 @@ impl Coordinator {
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
             Input::Engines(kind, now) => self.available(kind, now, &mut effects),
+            Input::RecoveredChatGpt { ready, boundary } => {
+                self.recovered_chatgpt(ready, boundary, &mut effects);
+            }
             Input::KeyRefused(RefusedKey(tag)) => self.key_refused(tag, &mut effects),
             Input::ReadFinished(done) => self.read_finished(done, &mut effects)?,
             Input::CallCommitted { key, outcome, then } => match outcome {
@@ -1414,6 +1443,7 @@ impl Coordinator {
             held: VecDeque::new(),
             snapshot: hold.as_ref().map(|hold| hold.defaults.clone()),
             effective_effort: None,
+            asked: false,
             untold,
             hold,
             pictured: matches!(screen, Some(crate::context::Screen::Picture(..))),

@@ -453,6 +453,7 @@ fn a_held_runs_screen_goes_with_its_request_or_fails_the_run() {
             unreachable!()
         };
         done.result = Ok(Built {
+            recovered_context: None,
             request: ModelRequest {
                 choice: Some(ModelChoice {
                     connection,
@@ -526,6 +527,7 @@ fn a_held_runs_image_stays_out_of_inline_compaction_and_follows_its_turn_after()
                 JobAsk {
                     generation: Generation(5),
                     built: Built {
+                        recovered_context: None,
                         request: request(summary.clone()),
                         sources: vec![T],
                     },
@@ -562,6 +564,7 @@ fn a_held_runs_image_stays_out_of_inline_compaction_and_follows_its_turn_after()
             key: rebuilt,
             snapshot: None,
             result: Ok(Built {
+                recovered_context: None,
                 request: request(vec![note.clone(), user.clone()]),
                 sources: vec![T],
             }),
@@ -588,6 +591,7 @@ fn screened(key: BuildKey, sources: &[ThreadId]) -> Input {
         key,
         snapshot: None,
         result: Ok(Built {
+            recovered_context: None,
             request: ModelRequest {
                 choice: Some(choice("captured", Effort::High)),
                 instructions: String::new(),
@@ -1466,6 +1470,7 @@ fn an_inline_compaction_s_grant_leaves_a_held_image_untold() {
                     JobAsk {
                         generation: Generation(5),
                         built: crate::context::Built {
+                            recovered_context: None,
                             request: request(),
                             sources: vec![T],
                         },
@@ -1576,4 +1581,95 @@ fn a_set_model_that_cancels_a_held_run_fails_its_launchs_gate_at_once() {
     }))
     .unwrap();
     assert!(!gate.may_call());
+}
+
+/// A pending hold fails on any recovery report but the installed cutoff on its own unchanged
+/// sign-in, and after a refused report no refresh lets a hold on that sign-in prepare again.
+#[test]
+fn a_pending_hold_fails_on_inconsistent_recovery_and_no_refresh_revives_it() {
+    let ready = |tag| Ready {
+        connection: ConnectionTag(tag),
+        ..Ready::fixture()
+    };
+    let cut = crate::store::Boundary::fixture(7, 3, 9);
+    let mut core = fresh();
+    for tag in [7, 8] {
+        core.handle(Input::Engines(
+            ConnectionKind::ChatGpt,
+            Availability::Ready(ready(tag)),
+        ))
+        .unwrap();
+    }
+    assert!(
+        !core.hold_recovery_changes(&ready(7), cut, None),
+        "a late report for a retired sign-in"
+    );
+    let mut core = fresh();
+    core.handle(Input::RecoveredChatGpt {
+        ready: ready(7),
+        boundary: cut,
+    })
+    .unwrap();
+    assert!(
+        !core.hold_recovery_changes(&ready(7), cut, None),
+        "the same report"
+    );
+    for (tag, boundary) in [(7, crate::store::Boundary::fixture(7, 3, 10)), (8, cut)] {
+        assert!(core.hold_recovery_changes(&ready(tag), boundary, None));
+    }
+
+    let mut core = fresh();
+    core.handle(Input::Engines(
+        ConnectionKind::ChatGpt,
+        Availability::Ready(ready(8)),
+    ))
+    .unwrap();
+    core.recovered_chatgpt = vec![cut];
+    assert!(
+        core.hold_recovery_changes(&ready(8), cut, None),
+        "both unchanged, but the cutoff names another sign-in"
+    );
+    core.handle(Input::RecoveredChatGpt {
+        ready: ready(8),
+        boundary: cut,
+    })
+    .unwrap();
+    core.handle(Input::Engines(
+        ConnectionKind::ChatGpt,
+        Availability::Ready(ready(8)),
+    ))
+    .unwrap();
+    assert_eq!(
+        core.prepare_hold(KEY, None, 12, defaults(), Arc::new(AtomicBool::new(false))),
+        Err(())
+    );
+
+    let mut core = fresh();
+    let snapshot = prepared(&core, Some(T));
+    let cancel = Arc::clone(&snapshot.cancel);
+    core.submit_hold(snapshot, "words".into(), None).unwrap();
+    core.handle(Input::TurnStored { run: R }).unwrap();
+    core.handle(built(R, 1, &[T])).unwrap();
+    let key = engine_key(&core, R);
+    core.handle(Input::RecoveredChatGpt {
+        ready: ready(0),
+        boundary: cut,
+    })
+    .unwrap();
+    assert!(cancel.load(Ordering::SeqCst), "the held run's hold fails");
+    core.handle(Input::Engines(
+        ConnectionKind::ChatGpt,
+        Availability::Ready(ready(0)),
+    ))
+    .unwrap();
+    assert!(
+        !core
+            .handle(Input::SendReady {
+                key: SendKey::Build(key),
+                hold: None
+            })
+            .unwrap()
+            .iter()
+            .any(|effect| matches!(effect, Effect::Grant(_)))
+    );
 }

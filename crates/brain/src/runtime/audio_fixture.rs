@@ -680,7 +680,15 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
     let lock = dir.join(SESSION_LOCK);
     let held = Arc::clone(&profile);
     let worker = Worker::new(
-        Box::new(move || Vault::with_lock(Offline, "test-accounts", Arc::clone(&held), &lock)),
+        Box::new(move || {
+            Vault::with_lock(
+                Offline,
+                "test-accounts",
+                Arc::clone(&held),
+                &lock,
+                crate::connections::vault::HistoryLink::unbound(),
+            )
+        }),
         Arc::clone(&clock),
     );
     let accounts = Accounts::spawn_unconfigured(

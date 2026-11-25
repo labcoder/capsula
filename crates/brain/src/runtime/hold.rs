@@ -436,6 +436,15 @@ impl Brain {
             {
                 Some(HoldStatus::Failed(HoldFailure::ChoiceChanged))
             }
+            Input::RecoveredChatGpt { ready, boundary }
+                if self.coordinator.hold_recovery_changes(
+                    ready,
+                    *boundary,
+                    hold.snapshot.as_ref(),
+                ) =>
+            {
+                Some(HoldStatus::Failed(HoldFailure::ChoiceChanged))
+            }
             _ => None,
         };
         if let Some(status) = status {
@@ -793,6 +802,10 @@ impl Brain {
         let Some(hold) = &mut self.holds.pending else {
             return Ok(());
         };
+        #[cfg(test)]
+        if hold.audio.as_ref().is_some_and(audio::Audio::has_samples) {
+            self.observer.send(super::Seen::HoldPcmBuffered).ok();
+        }
         if self.holds.gate.overflow.load(Ordering::SeqCst) == hold.key.gesture.0 {
             return self.hold_end(HoldStatus::Failed(HoldFailure::InvalidAudio), link);
         }

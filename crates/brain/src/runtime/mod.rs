@@ -19,6 +19,8 @@ mod screen_gate;
 mod settings;
 mod store_thread;
 #[cfg(test)]
+pub(crate) use store_thread::{Attempt, Schedule};
+#[cfg(test)]
 mod tests;
 mod voice;
 
@@ -64,6 +66,9 @@ use account::Accounts;
 use controls::{Registration, read_control};
 use data::{DataQueue, Owner};
 use recovery::Recovery;
+#[cfg(test)]
+pub(crate) use store_thread::StoreThread;
+#[cfg(not(test))]
 use store_thread::StoreThread;
 
 /// Control frames queued for the shell (architecture v1 §3.2) [guess]. A full queue ends the
@@ -249,6 +254,7 @@ pub(crate) enum Seen {
     /// The brain handled a control input and applied its effects.
     ControlApplied,
     FirstPcmExpired,
+    HoldPcmBuffered,
     /// A page reply landed while the data queue was full and waits for room.
     PageHeld,
     /// Another pipe ended first, and the control reader's grace began.
