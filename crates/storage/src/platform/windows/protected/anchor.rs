@@ -3,7 +3,7 @@
 
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use kumochi_protocol::constants::ProductIdentity;
 use kumochi_protocol::profile::Root;
@@ -27,8 +27,15 @@ pub enum Child {
 /// Holds the chain of the absolute folder `anchor`, then looks up the folder `name` in it, such as
 /// the product folder (`DATA_DIR`). Missing means only that the open of that name under the held
 /// anchor folder found no file; a missing or non-folder anchor, an anchor others may add to, a lost
-/// path, or anything at the name that isn't a trusted plain folder is refused.
+/// path, anything at the name that isn't a trusted plain folder, or a `name` that isn't one plain
+/// path component is refused.
 pub fn hold_product_folder(anchor: &Path, name: &str) -> Result<Child, Untrusted> {
+    let mut parts = Path::new(name).components();
+    if name.contains(':')
+        || !matches!((parts.next(), parts.next()), (Some(Component::Normal(part)), None) if part == name)
+    {
+        return Err(Untrusted::Unsafe);
+    }
     let mut chain = hold_chain(anchor)?;
     let trusted = Trusted::new()?;
     let held = chain.last().ok_or(Untrusted::Io)?;
@@ -120,6 +127,18 @@ mod tests {
             Some(Untrusted::Missing),
             "a missing anchor is refused, not a missing product folder"
         );
+    }
+
+    #[test]
+    fn a_name_that_is_not_one_plain_component_is_refused() {
+        let (_scratch, anchor) = anchor("anchor-names");
+        for name in ["", ".", "..", r"a\b", "a/b", r"a\", r"C:\x", "x:stream"] {
+            assert_eq!(
+                hold_product_folder(&anchor, name).err(),
+                Some(Untrusted::Unsafe),
+                "{name:?}"
+            );
+        }
     }
 
     #[test]
