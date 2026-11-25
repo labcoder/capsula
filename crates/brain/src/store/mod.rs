@@ -27,6 +27,7 @@ mod heard_tests;
 mod held;
 #[cfg(test)]
 mod held_tests;
+mod history_failure;
 #[cfg(test)]
 mod issue_scope_tests;
 mod pages;
@@ -52,7 +53,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kumochi_protocol::constants;
-use kumochi_protocol::message::{Deleted, HeldScreen, RunId, ThreadId};
+use kumochi_protocol::message::{Deleted, HeldScreen, HistoryFailure, RunId, ThreadId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 
 pub use drawing::DrawingRecovery;
@@ -548,6 +549,34 @@ impl Store {
         events: &[NewEvent<'_>],
         end: RunEnd,
     ) -> Result<(), StoreError> {
+        let (state, reason) = end.columns();
+        self.end_run_with_reason(thread, run, events, state, reason)
+    }
+
+    /// Ends a run with a closed connection failure and proven delivery disposition, atomically
+    /// with its last events. Callers without proof use the generic failure in [`Self::end_run`].
+    ///
+    /// # Errors
+    /// Fails under the same conditions as [`Self::end_run`].
+    pub fn end_run_with_connection_failure(
+        &mut self,
+        thread: ThreadId,
+        run: RunId,
+        events: &[NewEvent<'_>],
+        failure: HistoryFailure,
+    ) -> Result<(), StoreError> {
+        let reason = history_failure::encode(failure);
+        self.end_run_with_reason(thread, run, events, "failed", Some(&reason))
+    }
+
+    fn end_run_with_reason(
+        &mut self,
+        thread: ThreadId,
+        run: RunId,
+        events: &[NewEvent<'_>],
+        state: &str,
+        reason: Option<&str>,
+    ) -> Result<(), StoreError> {
         let (thread, run) = (
             sql_id(thread.0, StoreError::NoThread)?,
             sql_id(run.0, StoreError::NoRun)?,
@@ -557,7 +586,6 @@ impl Store {
         if !events.is_empty() {
             insert_events(&tx, thread, run, events, now)?;
         }
-        let (state, reason) = end.columns();
         let ended = tx.execute(
             "UPDATE runs SET state = ?3, reason = ?4, ended_ms = ?5
              WHERE id = ?1 AND thread = ?2 AND state = 'active'",

@@ -19,3 +19,8 @@ pub(super) mod credential;
     expect(dead_code, reason = "parent-bound admission is not wired yet")
 )]
 pub(super) mod parent;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the pair adapter is not wired yet")
+)]
+pub(super) mod stream;
