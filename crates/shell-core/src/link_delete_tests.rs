@@ -1,5 +1,6 @@
 //! Held deletes: when each is queued, and whether it says it's a resend.
 
+#[cfg(windows)]
 use std::sync::Arc;
 
 use async_channel::{Receiver, bounded};
@@ -7,18 +8,10 @@ use async_channel::{Receiver, bounded};
 use kumochi_protocol::message::GestureId;
 use kumochi_protocol::message::{ControlToBrain, ThreadId};
 
-use super::{LinkHandle, Shared, queue_on};
+use super::{LinkHandle, queue_on};
 
 fn handle() -> LinkHandle {
-    let (retry, _retries) = bounded(1);
-    let (_alive, done) = bounded(1);
-    LinkHandle {
-        shared: Arc::new(Shared::default()),
-        retry,
-        done,
-        recording: None,
-        control_recording: None,
-    }
+    LinkHandle::detached()
 }
 
 #[test]

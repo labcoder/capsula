@@ -1101,6 +1101,12 @@ do not feed reserialized storage JSON back through the model-record byte cap in 
 
 ## Starting and reconnecting
 
+When no brain transport is admitted, the disconnected link entry sends `Failed` on the
+same event channel without starting a worker or acquiring a session. It refuses text and
+voice admission. Retry reports unavailable and cannot start an attempt, and Quit uses
+the shared one-shot guard without waiting for a worker. The Windows connection entry
+does not use this mode.
+
 One shell runs per Windows session. It holds an exclusive `std::fs::File::try_lock` on the empty
 file `<SHELL_LOCK>-<session id>.lock` in the data folder for its whole life, and a second shell
 that finds it held exits. The OS releases the lock when the shell exits, even after a crash, and
