@@ -345,15 +345,26 @@ pub(crate) fn file_identity(opened: &std::fs::File) -> Result<(u32, u64)> {
     ))
 }
 
-/// Takes one of the gate-run lock's bytes on `file` without waiting: an exclusive lock on byte
-/// `byte` of a range far past any line the file holds, so other processes can still read that
-/// line. False while another handle holds it; closing the handle releases it.
-pub(crate) fn try_lock_run(file: &std::fs::File, byte: u32) -> Result<bool> {
+/// How [`try_lock_run`] takes its byte: a writer exclusively, an observer shared.
+#[derive(Clone, Copy)]
+pub(crate) enum Share {
+    Exclusive,
+    Shared,
+}
+
+/// Takes one of the gate-run lock's bytes on `file` without waiting: a lock on byte `byte` of a
+/// range far past any line the file holds, so other processes can still read that line. False
+/// while another handle holds it in a conflicting way; closing the handle releases it.
+pub(crate) fn try_lock_run(file: &std::fs::File, byte: u32, share: Share) -> Result<bool> {
     use windows::Win32::Foundation::ERROR_LOCK_VIOLATION;
     use windows::Win32::Storage::FileSystem::{
-        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+        LOCK_FILE_FLAGS, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
     };
     use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
+    let mode = match share {
+        Share::Exclusive => LOCKFILE_EXCLUSIVE_LOCK,
+        Share::Shared => LOCK_FILE_FLAGS(0),
+    };
     let mut at = OVERLAPPED {
         Anonymous: OVERLAPPED_0 {
             Anonymous: OVERLAPPED_0_0 {
@@ -367,7 +378,7 @@ pub(crate) fn try_lock_run(file: &std::fs::File, byte: u32) -> Result<bool> {
     let locked = unsafe {
         LockFileEx(
             HANDLE(file.as_raw_handle()),
-            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            mode | LOCKFILE_FAIL_IMMEDIATELY,
             None,
             1,
             0,

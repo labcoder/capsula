@@ -124,7 +124,8 @@ flowchart TD
    as it is. The lock is two bytes far past the file's line, so a process the run starts can still
    read the line: one the run holds from start to end, and one it takes only once it has written
    its own line, after any recovery. A process the run starts is admitted only while that second
-   byte is held and the line names its root and run id. It refuses while any `kumochi.exe` or `kumochid.exe` runs, of any identity. Two gate runs
+   byte is held and the line names its root and run id. It checks the byte with a shared lock, so
+   two checks at once can't mistake each other for a published run. It refuses while any `kumochi.exe` or `kumochid.exe` runs, of any identity. Two gate runs
    would share the gate pipes, and the shell's hotkey, raw input and tray icon belong to the
    Windows session, not the identity.
 2. **Nothing outlives it.** The run puts itself in a kill-on-close job that forbids breakaway, so a

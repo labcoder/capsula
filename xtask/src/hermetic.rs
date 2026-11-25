@@ -21,6 +21,7 @@ use kumochi_storage::checked::{Kind, Trusted, open_checked};
 use rusqlite::{Connection, OpenFlags};
 use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 
+use crate::platform::Share;
 use crate::{live, platform};
 
 /// How a gate tool is started; the feature is named nowhere else.
@@ -445,7 +446,7 @@ fn take(path: &Path) -> Result<File> {
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
     ensure!(
-        platform::try_lock_run(&lock, EXCLUSIVE)?,
+        platform::try_lock_run(&lock, EXCLUSIVE, Share::Exclusive)?,
         "another gate run is on; one runs at a time"
     );
     Ok(lock)
@@ -515,7 +516,7 @@ fn publish(lock: &mut File, id: &str, root: &str) -> Result<()> {
     lock.rewind()?;
     lock.write_all(format!("{LOCK_LINE}{id} {root}\n").as_bytes())?;
     ensure!(
-        platform::try_lock_run(lock, PUBLISHED)?,
+        platform::try_lock_run(lock, PUBLISHED, Share::Exclusive)?,
         "another process holds this gate run's published lock"
     );
     Ok(())
@@ -539,7 +540,7 @@ pub(crate) fn admit_root(runs: &Path, lock: &Path, root: &Path, id: &str) -> Res
     );
     let lock = File::open(lock).context("no gate run is on")?;
     ensure!(
-        !platform::try_lock_run(&lock, PUBLISHED)?,
+        !platform::try_lock_run(&lock, PUBLISHED, Share::Shared)?,
         "no gate run is on"
     );
     let mut line = String::new();
@@ -1272,6 +1273,14 @@ mod tests {
             format!("{} isn't this gate run's folder", live.display())
         );
         assert_eq!(refused(&old, EARLIER_ID), "no gate run is on");
+        let observer = File::open(&lock).expect("another observer");
+        assert!(platform::try_lock_run(&observer, PUBLISHED, Share::Shared).expect("a probe"));
+        assert_eq!(
+            refused(&old, EARLIER_ID),
+            "no gate run is on",
+            "while another observer probes"
+        );
+        drop(observer);
         let mut held = take(&lock).expect("the next run's lock");
         assert_eq!(
             refused(&old, EARLIER_ID),
