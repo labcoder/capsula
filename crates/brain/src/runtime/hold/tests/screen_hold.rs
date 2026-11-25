@@ -36,6 +36,7 @@ pub(in crate::runtime) fn seeing(
 ) -> crate::supervise::fixture::Rig<crate::screen::Holds> {
     let (rig, _sol, _luna) = sees_on_sol(brain);
     brain.holds.window_capture = true;
+    brain.holds.display_capture = true;
     brain.holds.stamp_age = AGE;
     set(brain, SettingsOp::SetShowScreen(true));
     let (out, _output) = mpsc::channel(4);
@@ -202,6 +203,68 @@ async fn a_screen_hold_arms_at_recognition_and_captures_the_display_at_release()
     assert_eq!((point, excluded, ink.0), (PhysicalPoint([5, 5]), 200, path));
     brain.holds.lost();
     crate::screen::release_next(&mut rig, KEY).await;
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn display_capture_alone_captures_the_display_under_its_checks_and_never_a_window() {
+    use kumochi_protocol::message::{ModelSlug, ScreenHolds, ScreenOff};
+    let scratch = Scratch::new("screen-hold-display-only");
+    let (mut brain, mut rig, _keep) = desk(&scratch).await;
+    brain.holds.window_capture = false;
+    brain.holds.display_capture = true;
+    let sol = brain.config.view().default_model.clone().unwrap();
+    let luna = ModelChoice {
+        model: ModelSlug::new("gpt-6-luna").unwrap(),
+        ..sol.clone()
+    };
+    let off = ScreenHolds::Off;
+    assert_eq!(brain.screen_gate(Some(&sol)), off(ScreenOff::Unsupported));
+    assert_eq!(
+        brain.display_gate(Some(&luna)),
+        off(ScreenOff::ModelCantSee)
+    );
+    set(&mut brain, SettingsOp::SetShowScreen(false));
+    assert_eq!(brain.display_gate(Some(&sol)), off(ScreenOff::TurnedOff));
+    set(&mut brain, SettingsOp::SetShowScreen(true));
+    let client = brain.holds.screen.take();
+    assert_eq!(brain.display_gate(Some(&sol)), off(ScreenOff::Unsupported));
+    brain.holds.screen = client;
+    let (out, mut output) = mpsc::channel(64);
+    let queue = RefCell::new(DataQueue::new(crate::runtime::window()));
+    let ready_notify = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready_notify, &mut tap);
+    assert!(
+        brain
+            .hold_control(&recognized(KEY.gesture), &mut link)
+            .unwrap()
+    );
+    assert!(matches!(part(&brain), ScreenPart::Armed));
+    prepared(&mut brain);
+    assert!(
+        brain
+            .hold_control(&release(KEY.gesture, 100, 200, 2), &mut link)
+            .unwrap()
+    );
+    assert!(controls(&mut output).is_empty());
+    let (_id, request) = rig.next().await;
+    assert!(
+        matches!(request, Request::Display { .. }),
+        "not the display: {request:?}"
+    );
+    brain.holds.lost();
+    crate::screen::release_next(&mut rig, KEY).await;
+    held(&mut brain, Kind::Window, ScreenPart::None);
+    assert!(!brain.holds.start_screen(
+        KEY,
+        PhysicalPoint([5, 5]),
+        LEASE,
+        CaptureDeadline::after(MAX_TTL),
+        (sol.connection, sol.model)
+    ));
+    assert!(matches!(part(&brain), ScreenPart::None));
+    brain.holds.lost();
     brain.close().await;
 }
 
