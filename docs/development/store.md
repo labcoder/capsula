@@ -530,17 +530,21 @@ created there, and a second hard link isn't detected.
 ### A legacy history store
 
 `store::existing::legacy_history` reads `kumochi.db` through that opener under the same held lock and
-returns `LegacyHistory`. Nothing calls it yet.
+returns `LegacyHistory`. Nothing calls it yet. Before it opens anything, the store's own folder
+must be a folder itself, not a link or reparse point, since the opener checks only the final
+file and could otherwise read a store through a redirected folder. A held, admitted product
+folder is still the caller's to establish.
 
 - `KnownSchema`: the file's `user_version` is one this build knows (1 to the newest), and its
   schema objects (type, name, table and SQL, from `sqlite_schema`) are exactly those the
   migrations make at that version, built in memory to compare. The candidate's catalog is counted
-  first and compared row by row, so a large foreign catalog is never copied. This is schema
+  first, then read once without sorting, each row using up a distinct entry of the small
+  expected set, so neither Rust nor a SQLite sorter copies a large foreign catalog. This is schema
   evidence only. It reads no rows, product invariants (such as the `approval_mark` singleton),
   page integrity or binding, so it promises neither an intact store nor a successful open or
   migration, and it isn't the new-format history fact. `quick_check` wouldn't change that: it
   scans the whole file and still passes a store missing a required row.
-- `Missing`: the store's own folder exists as a folder, not a link or reparse point, and holds no
+- `Missing`: the store's own folder exists as a folder and holds no
   main file, no `-wal`, `-shm` or `-journal`, and none of the files a purge leaves (`.purge-old`,
   the snapshot and the clean copy with their sidecars). The folder itself is still a footprint,
   so this isn't an absent profile.
@@ -549,8 +553,8 @@ returns `LegacyHistory`. Nothing calls it yet.
   store missing beside something it left, and any failed read.
 
 Tests cover every known version, a store the brain itself opened, a `VACUUM INTO` copy like a
-purge's, each refused change, each leftover, and a missing and a linked folder, and check that no
-file changes.
+purge's, each refused change, each leftover, a missing folder, and a linked folder whether empty
+or holding a known store, and check that no file changes.
 
 ## Recovery at start
 

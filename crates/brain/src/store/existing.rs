@@ -143,16 +143,18 @@ pub(crate) enum LegacyHistory {
     )
 )]
 pub(crate) fn legacy_history(db: &Path, session: &SessionLock) -> LegacyHistory {
+    if !db.parent().is_some_and(folder) {
+        return LegacyHistory::Unverified;
+    }
     match open(db, session) {
         Ok(read) => match known_schema(&read) {
             Ok(true) => LegacyHistory::KnownSchema,
             Ok(false) | Err(_) => LegacyHistory::Unverified,
         },
         Err(ExistingError::Missing)
-            if db.parent().is_some_and(folder)
-                && ["-wal", "-shm", "-journal"]
-                    .into_iter()
-                    .all(|suffix| missing(&sidecar(db, suffix)))
+            if ["-wal", "-shm", "-journal"]
+                .into_iter()
+                .all(|suffix| missing(&sidecar(db, suffix)))
                 && !Leftovers::of(db).exist() =>
         {
             LegacyHistory::Missing
@@ -161,12 +163,13 @@ pub(crate) fn legacy_history(db: &Path, session: &SessionLock) -> LegacyHistory 
     }
 }
 
-/// The catalog query, in a fixed order.
-const CATALOG: &str = "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name";
+/// Every schema object's type, name, table and SQL.
+const CATALOG: &str = "SELECT type, name, tbl_name, sql FROM sqlite_schema";
 
 /// Whether `conn`'s objects are exactly those this build's migrations make at its `user_version`.
-/// The candidate's catalog is counted first and then compared row by row against the expected
-/// one, so a large foreign catalog is never copied.
+/// The candidate's catalog is counted first, then each of its rows is read once, unsorted, and
+/// must use up a distinct entry of the small expected set, so Rust holds no copy of a candidate
+/// row and SQLite sorts nothing.
 fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
     let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let Some(version) = usize::try_from(found)
@@ -177,29 +180,38 @@ fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
     };
     let mut built = Connection::open_in_memory()?;
     schema::migrate_to(&mut built, version)?;
-    let expected = built
+    let mut expected = built
         .prepare(CATALOG)?
         .query_map([], |row| {
-            Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?])
+            Ok(Some([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?]))
         })?
-        .collect::<rusqlite::Result<Vec<[Option<String>; 4]>>>()?;
+        .collect::<rusqlite::Result<Vec<Option<[Option<String>; 4]>>>>()?;
     let count: i64 = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))?;
     if usize::try_from(count).ok() != Some(expected.len()) {
         return Ok(false);
     }
     let mut catalog = conn.prepare(CATALOG)?;
     let mut rows = catalog.query([])?;
-    for want in &expected {
-        let Some(row) = rows.next()? else {
+    while let Some(row) = rows.next()? {
+        let mut candidate = [None; 4];
+        for (column, value) in candidate.iter_mut().enumerate() {
+            let Ok(text) = row.get_ref(column)?.as_str_or_null() else {
+                return Ok(false);
+            };
+            *value = text;
+        }
+        let Some(entry) = expected.iter_mut().find(|entry| {
+            entry.as_ref().is_some_and(|want| {
+                want.iter()
+                    .zip(candidate)
+                    .all(|(want, got)| want.as_deref() == got)
+            })
+        }) else {
             return Ok(false);
         };
-        for (column, want) in want.iter().enumerate() {
-            if row.get_ref(column)?.as_str_or_null().ok() != Some(want.as_deref()) {
-                return Ok(false);
-            }
-        }
+        *entry = None;
     }
-    Ok(rows.next()?.is_none())
+    Ok(expected.iter().all(Option::is_none))
 }
 
 /// Whether `dir` is a folder itself, not a link or reparse point to one.
@@ -563,15 +575,6 @@ mod tests {
             "a missing folder"
         );
         assert!(!scratch.dir().join("gone").exists());
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&bare, scratch.dir().join("linked")).expect("folder link");
-            assert_eq!(
-                legacy_history(&scratch.dir().join("linked").join("x.db"), &lock),
-                LegacyHistory::Unverified,
-                "a linked folder"
-            );
-        }
         for left in [
             "x.db-wal",
             "x.db-shm",
@@ -597,6 +600,33 @@ mod tests {
             legacy_history(&refused, &lock),
             LegacyHistory::Unverified,
             "refused"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_folder_is_unverified_even_holding_a_known_store() {
+        use std::os::unix::fs::symlink;
+        let (_held, lock) = session();
+        let scratch = Scratch::new("existing-history-linked");
+        let known = store_at(&scratch.dir().join("known"), MIGRATIONS.len());
+        assert_eq!(legacy_history(&known, &lock), LegacyHistory::KnownSchema);
+        let target = known.parent().expect("store folder");
+        symlink(target, scratch.dir().join("linked")).expect("folder link");
+        let before = files(target);
+        assert_eq!(
+            legacy_history(&scratch.dir().join("linked").join("x.db"), &lock),
+            LegacyHistory::Unverified,
+            "a linked folder holding a known store"
+        );
+        assert_eq!(files(target), before);
+        let empty = scratch.dir().join("empty");
+        fs::create_dir(&empty).expect("empty folder");
+        symlink(&empty, scratch.dir().join("linked-empty")).expect("folder link");
+        assert_eq!(
+            legacy_history(&scratch.dir().join("linked-empty").join("x.db"), &lock),
+            LegacyHistory::Unverified,
+            "a linked empty folder"
         );
     }
 }
