@@ -172,7 +172,9 @@ pub(crate) enum Quit {
 #[derive(Debug)]
 pub(crate) enum Selected {
     /// The dev fixture answers every run, with no account; a release build can't pick it.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(debug_assertions)]
+    DevFixture(Box<dyn Engine>),
+    #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
     Fixture(Box<dyn Engine>),
     #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
     DrawReplay(Box<dyn Engine>),
@@ -325,10 +327,15 @@ impl Brain {
         let connections = &mut account.connections;
         connections.configure_transport(config.model_tuning());
         #[cfg(debug_assertions)]
-        let fixture_engine = matches!(&engine, Selected::Fixture(_));
+        let mut fixture_engine = false;
         #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
         let (engine, access, fixture) = match engine {
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(debug_assertions)]
+            Selected::DevFixture(engine) => {
+                fixture_engine = true;
+                (engine, mpsc::unbounded_channel().1, Some(Ready::fixture()))
+            }
+            #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
             Selected::Fixture(engine) => {
                 (engine, mpsc::unbounded_channel().1, Some(Ready::fixture()))
             }

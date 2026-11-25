@@ -468,7 +468,6 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                 Ok(Some(
                     ControlToShell::Account(_)
                     | ControlToShell::Connections(_)
-                    | ControlToShell::FixtureEngineActive
                     | ControlToShell::ScreenHolds(_),
                 )) => {}
                 other => return other.map_err(std::io::Error::other),
@@ -551,7 +550,6 @@ impl<S: AsyncRead + AsyncWrite> Shell<S> {
                 ControlToShell::Settings { view, .. } => self.views.push(view),
                 ControlToShell::Account(_)
                 | ControlToShell::Connections(_)
-                | ControlToShell::FixtureEngineActive
                 | ControlToShell::ScreenHolds(_) => {}
                 other => panic!("unexpected {other:?}"),
             }
@@ -768,7 +766,8 @@ async fn only_the_debug_fixture_engine_is_announced_on_each_connection() {
 
     let fixture = || Box::new(Fixture::parse("").unwrap());
     let cases = [
-        (Selected::Fixture(fixture()), 1),
+        (Selected::DevFixture(fixture()), 1),
+        (Selected::Fixture(fixture()), 0),
         (
             Selected::Account {
                 engine: fixture(),
