@@ -449,7 +449,7 @@ fn connection_failure_survives_reopen_on_its_user_event_only() {
         delivery: DeliveryProof::NotAccepted,
     };
     let broke_off = HistoryFailure {
-        cause: HistoryFailureCause::AnthropicCredit,
+        cause: HistoryFailureCause::AnthropicKeyRejected,
         delivery: DeliveryProof::PartialAnswer,
     };
     let partial = [NewEvent {
@@ -899,8 +899,9 @@ fn oversized_unicode_event_is_cut_to_the_full_frame_budget_and_can_continue() {
         .expect("refined outcome");
     let mut reply = events(&store, thread, None);
     let debug = format!("{reply:?}");
+    let marker_bytes = format!("{:?}", marker.as_bytes());
     assert!(!debug.contains(marker));
-    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+    assert!(!debug.contains(&marker_bytes[1..marker_bytes.len() - 1]));
     let DataToShell::Page {
         request,
         events: rows,
