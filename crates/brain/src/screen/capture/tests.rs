@@ -106,7 +106,7 @@ impl Rig {
         };
         let acquired = self
             .fake
-            .capture_window(&target, expires, &mut self.screen.frame)?;
+            .capture_window(&target, expires.until, &mut self.screen.frame)?;
         let surface = target.top.rect;
         self.screen.acquired(
             &ticket,
@@ -213,6 +213,38 @@ fn a_ticket_whose_deadline_cant_be_read_is_refused_and_spent() {
     assert_eq!(rig.take(1, [4, 3], 0), Err(Refusal::Reused.into()));
     assert_eq!(rig.knobs.calls.get(), 0);
     assert_eq!(rig.take(2, [4, 3], 0), Ok(meta(2, [4, 3], 0)));
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn real_clock_admission_refuses_zero_and_due_stamps_but_accepts_a_future_one() {
+    let mut screen = Screen::default();
+    let now = Instant::now;
+    for (index, (stamp, admitted)) in [
+        (0, false),
+        (crate::platform::qpc_at(Duration::ZERO).unwrap(), false),
+        (
+            crate::platform::qpc_at(Duration::from_secs(60)).unwrap(),
+            true,
+        ),
+        (u64::MAX, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let received = now();
+        let ticket = ticket(u64::try_from(index + 1).unwrap(), stamp);
+        match screen.admit(&ticket, received, &now) {
+            Ok(deadline) => {
+                assert!(admitted, "admitted a due or absent stamp");
+                assert_eq!(deadline.until, received + Duration::from_millis(TTL.into()));
+            }
+            Err(error) => {
+                assert!(!admitted, "refused the future stamp: {error:?}");
+                assert_eq!(error, Refusal::Expired.into());
+            }
+        }
+    }
 }
 
 #[test]

@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use super::*;
 use crate::coordinator::{Availability, StoreOp};
 use crate::runtime::data::DataQueue;
-use crate::screen::MAX_TTL;
+use crate::screen::{CaptureDeadline, MAX_TTL};
 use crate::tap::Tap;
 use crate::test_support::{self, Scratch};
 use kumochi_protocol::message::GestureId;
@@ -14,6 +14,10 @@ const KEY: HoldKey = HoldKey {
     epoch: 0,
     gesture: GestureId(9),
 };
+
+fn screen_deadline() -> CaptureDeadline {
+    CaptureDeadline::after(Duration::from_secs(60))
+}
 
 #[test]
 fn failed_hold_status_logs_only_closed_reason_without_identifiers() {
@@ -1972,6 +1976,7 @@ async fn only_a_waiting_parts_own_worker_finishes_it() {
     let event = |generation, outcome| ScreenEvent {
         key: KEY,
         generation: Some(Generation(generation)),
+        deadline: screen_deadline(),
         outcome,
     };
     let sealed = || Outcome::Sealed(crate::screen::ScreenContext::fixture(JPEG));
@@ -2027,6 +2032,7 @@ async fn a_frame_held_after_its_part_closed_is_retired_on_the_worker_that_holds_
     brain.holds.screen_event(ScreenEvent {
         key: KEY,
         generation: Some(crate::screen::Generation(1)),
+        deadline: screen_deadline(),
         outcome: Outcome::Held,
     });
     // Only a retire naming worker 1 ends worker 0 when worker 0 answers it.
@@ -2051,13 +2057,17 @@ async fn a_part_closed_during_its_capture_retires_the_frame_without_a_walk() {
         KEY,
         point,
         LEASE,
-        Instant::now() + MAX_TTL,
+        CaptureDeadline::after(MAX_TTL),
         recipient.clone()
     ));
     assert!(
-        !brain
-            .holds
-            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL, recipient),
+        !brain.holds.start_screen(
+            KEY,
+            point,
+            LEASE,
+            CaptureDeadline::after(MAX_TTL),
+            recipient
+        ),
         "one part per hold"
     );
     let (id, capture) = rig.next().await;
@@ -2343,6 +2353,7 @@ async fn a_system_that_cant_capture_ends_the_hold_not_ready_and_holds_stay_unsup
     let unsupported = || ScreenEvent {
         key: KEY,
         generation: None,
+        deadline: screen_deadline(),
         outcome: screen::ending(Closed::Refused(Refusal::Unsupported)),
     };
     brain.hold_screen_event(unsupported(), &mut link).unwrap();
@@ -2389,6 +2400,7 @@ async fn each_part_logs_one_line_with_the_cause_that_closed_it() {
     let event = |generation, outcome| ScreenEvent {
         key: KEY,
         generation,
+        deadline: screen_deadline(),
         outcome,
     };
     screen_hold(
@@ -2440,11 +2452,13 @@ async fn a_capture_the_system_refuses_comes_back_from_the_task_as_unsupported() 
     let recipient = (sol.connection, sol.model);
     screen_hold(&mut brain, KEY, ScreenPart::None);
     let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
-    assert!(
-        brain
-            .holds
-            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL, recipient)
-    );
+    assert!(brain.holds.start_screen(
+        KEY,
+        point,
+        LEASE,
+        CaptureDeadline::after(MAX_TTL),
+        recipient
+    ));
     let (id, _capture) = rig.next().await;
     rig.reply(id, &Reply::Refused(Refusal::Unsupported)).await;
     let Event::Screen(answer) = super::next(&mut brain.holds).await else {
@@ -2467,11 +2481,13 @@ async fn a_hold_asks_for_its_picture_without_a_walk_that_could_be_cut_short() {
     let recipient = (sol.connection, sol.model);
     screen_hold(&mut brain, KEY, ScreenPart::None);
     let point = kumochi_protocol::geometry::PhysicalPoint([5, 5]);
-    assert!(
-        brain
-            .holds
-            .start_screen(KEY, point, LEASE, Instant::now() + MAX_TTL, recipient)
-    );
+    assert!(brain.holds.start_screen(
+        KEY,
+        point,
+        LEASE,
+        CaptureDeadline::after(MAX_TTL),
+        recipient
+    ));
     let (id, capture) = rig.next().await;
     crate::screen::hold_frame(&rig, id, capture).await;
     let Event::Screen(held) = super::next(&mut brain.holds).await else {
@@ -2497,6 +2513,134 @@ async fn a_hold_asks_for_its_picture_without_a_walk_that_could_be_cut_short() {
         brain.holds.pending.as_ref().unwrap().screen,
         ScreenPart::Ready(_)
     ));
+    brain.holds.lost();
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_queued_picture_is_accepted_only_while_its_stamp_is_live() {
+    use crate::context::ScreenClass;
+    type HoldProtocol = crate::screen::Holds;
+    type Request = <HoldProtocol as crate::supervise::Kind>::Request;
+    type Reply = <HoldProtocol as crate::supervise::Kind>::Reply;
+    thread_local! {
+        static LEFT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    }
+    for (left, accepts) in [
+        (Some(Duration::from_millis(1)), true),
+        (Some(Duration::ZERO), false),
+        (None, false),
+    ] {
+        LEFT.set(Some(MAX_TTL));
+        let scratch = Scratch::new("hold-screen-stamp");
+        let mut brain = test_support::brain(&scratch, "");
+        let mut rig = attach_capture_fixture(&mut brain);
+        brain.holds.screen_time_left = |_| LEFT.get();
+        screen_hold(&mut brain, KEY, ScreenPart::None);
+        let deadline = screen_deadline();
+        assert!(brain.holds.start_screen(
+            KEY,
+            kumochi_protocol::geometry::PhysicalPoint([5, 5]),
+            LEASE,
+            deadline,
+            (
+                ConnectionKind::ChatGpt,
+                ModelSlug::new("gpt-6-sol").unwrap()
+            ),
+        ));
+        let (id, capture) = rig.next().await;
+        crate::screen::hold_frame(&rig, id, capture).await;
+        let held = tokio::time::timeout(Duration::from_secs(5), brain.holds.screen_answers.recv())
+            .await
+            .expect("held event arrived")
+            .expect("held event");
+        brain.holds.screen_event(held);
+        let (id, request) = rig.next().await;
+        let Request::Seal(key) = request else {
+            panic!("the worker must be asked to seal");
+        };
+        rig.reply(
+            id,
+            &Reply::Sealed(key, crate::screen::ScreenContext::fixture(JPEG)),
+        )
+        .await;
+        let sealed =
+            tokio::time::timeout(Duration::from_secs(5), brain.holds.screen_answers.recv())
+                .await
+                .expect("seal event arrived")
+                .expect("queued seal");
+        assert!(matches!(sealed.outcome, Outcome::Sealed(_)));
+
+        LEFT.set(left);
+        assert!(
+            Instant::now() < deadline.until,
+            "the wake timer is still live"
+        );
+        brain.holds.screen_event(sealed);
+        if accepts {
+            LEFT.set(None);
+            let ScreenPart::Ready(context) = &brain.holds.pending.as_ref().unwrap().screen else {
+                panic!("the previously accepted picture must stay ready");
+            };
+            assert_eq!(context, &crate::screen::ScreenContext::fixture(JPEG));
+        } else {
+            assert!(matches!(
+                brain.holds.pending.as_ref().unwrap().screen,
+                ScreenPart::Closed(ScreenClass::NotReady)
+            ));
+            crate::screen::release_next(&mut rig, KEY).await;
+            LEFT.set(Some(MAX_TTL));
+            brain.holds.screen_event(ScreenEvent {
+                key: KEY,
+                generation: Some(crate::screen::Generation(0)),
+                deadline,
+                outcome: Outcome::Sealed(crate::screen::ScreenContext::fixture(JPEG)),
+            });
+            assert!(matches!(
+                brain.holds.pending.as_ref().unwrap().screen,
+                ScreenPart::Closed(ScreenClass::NotReady)
+            ));
+        }
+        brain.holds.lost();
+        brain.close().await;
+    }
+}
+
+#[tokio::test]
+async fn an_expired_held_reply_releases_the_lease_as_failed_and_retires_its_worker() {
+    use crate::context::ScreenClass;
+    use crate::screen::Generation;
+    use kumochi_protocol::message::{CaptureFailure, CaptureFor};
+
+    let scratch = Scratch::new("hold-screen-held-expired");
+    let mut brain = test_support::brain(&scratch, "");
+    let mut rig = attach_capture_fixture(&mut brain);
+    brain.holds.screen_time_left = |_| None;
+    screen_hold(&mut brain, KEY, unanswered());
+    let (out, mut output) = mpsc::channel(4);
+    let queue = RefCell::new(DataQueue::new(super::super::window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    let event = ScreenEvent {
+        key: KEY,
+        generation: Some(Generation(0)),
+        deadline: screen_deadline(),
+        outcome: Outcome::Held,
+    };
+    brain.hold_screen_event(event, &mut link).unwrap();
+    assert_eq!(
+        control(&mut output),
+        ControlToShell::CaptureFailed {
+            capture_for: CaptureFor::Gesture(KEY.gesture),
+            reason: CaptureFailure::Unavailable,
+        }
+    );
+    assert!(matches!(
+        brain.holds.pending.as_ref().unwrap().screen,
+        ScreenPart::Closed(ScreenClass::NotReady)
+    ));
+    crate::screen::release_next(&mut rig, KEY).await;
     brain.holds.lost();
     brain.close().await;
 }
@@ -2573,6 +2717,7 @@ async fn a_capture_fault_ends_the_hold_not_ready_and_leaves_screen_holds_on() {
     let event = ScreenEvent {
         key: KEY,
         generation: None,
+        deadline: screen_deadline(),
         outcome: screen::ending(Closed::Fault(0x8000_4001_u32.cast_signed())),
     };
     brain.hold_screen_event(event, &mut link).unwrap();
@@ -2843,6 +2988,7 @@ async fn the_end_of_a_capture_releases_the_lease_on_its_own_connection() {
         Event::Screen(ScreenEvent {
             key,
             generation,
+            deadline: screen_deadline(),
             outcome,
         })
     };

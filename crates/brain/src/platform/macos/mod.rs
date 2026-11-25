@@ -1,3 +1,4 @@
+pub(super) mod clock;
 #[expect(
     unsafe_code,
     reason = "the parent watch owns Darwin process and kqueue calls"

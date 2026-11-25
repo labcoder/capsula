@@ -6,9 +6,10 @@ use std::time::Instant;
 use kumochi_protocol::geometry::PhysicalPoint;
 
 use super::actor::Key;
-use super::capture::{Acquired, Capturer, Failure, Shown};
+use super::capture::{Acquired, Capturer, Deadline, Failure, Shown};
 use super::elements::Wake;
 use super::frame::RawFrame;
+use super::wire::Refusal;
 
 /// What a job captures at its point.
 pub(super) enum Aim {
@@ -25,7 +26,7 @@ pub(super) struct Job {
     pub(super) frame: RawFrame,
     pub(super) point: PhysicalPoint,
     pub(super) aim: Aim,
-    pub(super) until: Instant,
+    pub(super) deadline: Deadline,
 }
 
 /// The frame comes back on every outcome; a success names what it shows.
@@ -55,15 +56,21 @@ impl CaptureThread {
                                 Some(capturer) => capturer,
                                 None => capturer.insert(open()?),
                             };
+                            let until = || {
+                                job.deadline
+                                    .tighten(Instant::now())
+                                    .map(|deadline| deadline.until)
+                                    .ok_or(Refusal::Expired)
+                            };
                             match job.aim {
                                 Aim::Window { shell } => {
                                     let target = capturer.pointer_window(job.point, shell)?;
                                     capturer
-                                        .capture_window(&target, job.until, &mut job.frame)
+                                        .capture_window(&target, until()?, &mut job.frame)
                                         .map(|acquired| (acquired, Shown::Window(target)))
                                 }
                                 Aim::Display { excluded } => capturer
-                                    .capture_display(job.point, excluded, job.until, &mut job.frame)
+                                    .capture_display(job.point, excluded, until()?, &mut job.frame)
                                     .map(|(acquired, bounds)| {
                                         let dpi = acquired.dpi;
                                         (acquired, Shown::Display { bounds, dpi })

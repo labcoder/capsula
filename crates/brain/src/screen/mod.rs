@@ -33,7 +33,7 @@ pub use actor::serve;
 pub(crate) use capture::{Acquired, Capturer};
 pub(crate) use capture::{Failure, Target};
 pub use client::HoldClient;
-pub(crate) use client::{Closed, MAX_TTL};
+pub(crate) use client::{CaptureDeadline, Closed, MAX_TTL};
 #[cfg(test)]
 pub(crate) use client::{Holds, hold_frame, release_next};
 pub(crate) use context::ScreenContext;

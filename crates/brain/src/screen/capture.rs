@@ -170,6 +170,39 @@ struct Held {
     ink: Vec<PhysicalPoint>,
 }
 
+/// The earlier of the local ticket limit and the stamped grant. Only the local bound wakes waits.
+#[derive(Clone, Copy)]
+pub(super) struct Deadline {
+    pub(super) until: Instant,
+    stamp: u64,
+    left_until: fn(u64) -> Option<Duration>,
+}
+
+impl Deadline {
+    pub(super) fn new(until: Instant, stamp: u64, left_until: fn(u64) -> Option<Duration>) -> Self {
+        Self {
+            until,
+            stamp,
+            left_until,
+        }
+    }
+
+    pub(super) fn tighten(self, now: Instant) -> Option<Self> {
+        if now >= self.until {
+            return None;
+        }
+        // Read the stamp's clock after the wake clock, so the local bound never extends the grant.
+        let left = (self.left_until)(self.stamp)?;
+        if left.is_zero() {
+            return None;
+        }
+        Some(Self {
+            until: now + left.min(self.until.duration_since(now)),
+            ..self
+        })
+    }
+}
+
 /// The capture state one worker owns on its serve thread.
 pub(super) struct Screen {
     book: TicketBook,
@@ -208,22 +241,20 @@ impl Screen {
         ticket: &TicketWire,
         received: Instant,
         now: &dyn Fn() -> Instant,
-    ) -> Result<Instant, Failure> {
+    ) -> Result<Deadline, Failure> {
         self.frame.invalidate();
         self.held = None;
         self.masks = Arc::new(Mutex::new(MaskSet::new(ticket.capture())));
         self.book.spend(ticket.generation())?;
-        let expires = received + Duration::from_millis(ticket.ttl_ms().into());
-        // Now is read before the counter, so the brain's deadline can only come sooner here.
-        let at = now();
-        let left = (self.left_until)(ticket.deadline_qpc()).ok_or(Refusal::Expired)?;
-        let expires = at
-            .checked_add(left)
-            .map_or(expires, |deadline| deadline.min(expires));
-        if now() >= expires {
-            return Err(Refusal::Expired.into());
-        }
-        Ok(expires)
+        let deadline = Deadline::new(
+            received + Duration::from_millis(ticket.ttl_ms().into()),
+            ticket.deadline_qpc(),
+            self.left_until,
+        );
+        deadline
+            .tighten(now())
+            .filter(|deadline| now() < deadline.until)
+            .ok_or_else(|| Refusal::Expired.into())
     }
 
     /// Commits the frame of `surface`: a display, or the window the walk resolved.
@@ -232,15 +263,18 @@ impl Screen {
         ticket: &TicketWire,
         surface: PhysicalRect,
         received: Instant,
-        expires: Instant,
+        deadline: Deadline,
         now: Instant,
         result: (Acquired, Option<TopWindow>),
     ) -> Result<FrameMeta, Failure> {
         let (acquired, foreground) = result;
-        if acquired.arrived >= expires || now >= expires {
+        let Some(deadline) = deadline
+            .tighten(now)
+            .filter(|cap| acquired.arrived < cap.until)
+        else {
             self.frame.invalidate();
             return Err(Refusal::Expired.into());
-        }
+        };
         let meta = FrameMeta {
             capture: ticket.capture(),
             display: surface,
@@ -256,7 +290,7 @@ impl Screen {
         self.frame.commit(meta)?;
         self.held = Some(Held {
             capture: meta.capture,
-            expires,
+            expires: deadline.until,
             walk_by: acquired.arrived + WALK_WINDOW,
             foreground,
             spent: false,
