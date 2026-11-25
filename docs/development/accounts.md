@@ -817,13 +817,14 @@ On macOS, `platform::macos::credential::MacCredentialStore` is dormant: only tes
 and the native store stays `Unsupported`. It uses the data protection keychain, never the
 file-based login keychain: one generic password per exact target, as the account under
 `CREDENTIAL_SERVICE`, not synchronizable, readable only while unlocked on this device. Every query
-pins one access group, the process's own provisioned `com.apple.application-identifier`;
-`MacCredentialStore::admitted` refuses a host without that entitlement before any Keychain call,
-so an unauthorized read can't pass for absence. Every SecItem call carries its own `LAContext`
+pins one access group, the `com.apple.application-identifier` the process claims;
+`MacCredentialStore::admitted` refuses a process that claims none before any Keychain call.
+Whether the OS honors that claim (validated provisioning) is proved only by a signed run. Every SecItem call carries its own `LAContext`
 with interaction not allowed, so the adapter requests no UI; if that context can't be set up, the
 call is refused. A write adds, or on a duplicate updates only the data. It hands the framework a
-no-copy view of a zeroizing copy, freed only when nothing else holds the view (the framework may
-still make its own copies, and a read's returned data can't be wiped). It keeps Windows' name and
+no-copy view of a zeroizing copy that the view owns: CoreFoundation wipes and frees it when the
+view's last reference goes (the framework may still make its own copies, and a read's returned
+data can't be wiped). It keeps Windows' name and
 2,560-byte limits. Measured once on macOS 26.5.1 arm64 with an ad-hoc-signed test build and a
 scratch name: a missing read came back not-found, a delete returned `errSecMissingEntitlement`
 (-34018), and nothing was written; signed CRUD, locked-store and UI behavior are Apple's documented

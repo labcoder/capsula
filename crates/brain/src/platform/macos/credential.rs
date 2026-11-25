@@ -2,6 +2,7 @@
 //!
 //! Dormant: only tests construct it, until a signed, provisioned brain can be admitted to it.
 
+use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 
 use kumochi_protocol::Secret;
@@ -10,7 +11,8 @@ use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2_core_foundation::{
-    CFBoolean, CFData, CFDictionary, CFIndex, CFRetained, CFString, CFType, kCFAllocatorNull,
+    CFAllocator, CFAllocatorContext, CFBoolean, CFData, CFDictionary, CFIndex, CFOptionFlags,
+    CFRetained, CFString, CFType,
 };
 use objc2_security::{
     SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate, SecTask, errSecAllocate,
@@ -46,9 +48,9 @@ pub(crate) struct MacCredentialStore {
 }
 
 impl MacCredentialStore {
-    /// Pins this process's own provisioned application identifier as the only access group. A
-    /// host without that entitlement is refused before any Keychain call, so an unauthorized
-    /// read can never be mistaken for absence.
+    /// Pins the application identifier this process claims as its only access group, and refuses
+    /// a process that claims none before any Keychain call. Whether the OS honors the claim
+    /// (validated provisioning) is proved only by a signed run, never by this check.
     pub(crate) fn admitted() -> Result<Self, CredentialStoreError> {
         // SAFETY: creates an owned task object for this process with the default allocator.
         let task = unsafe { SecTask::from_self(None) }.ok_or(CredentialStoreError::Unsupported)?;
@@ -162,22 +164,8 @@ impl CredentialStore for MacCredentialStore {
         if bytes.len() > MAX_BLOB {
             return Err(CredentialStoreError::BlobTooLarge);
         }
-        let backing = Zeroizing::new(bytes.to_vec());
-        let len = CFIndex::try_from(backing.len()).expect("the bounded blob length fits CFIndex");
-        // SAFETY: reads an immutable CoreFoundation constant.
-        let no_free = unsafe { kCFAllocatorNull };
-        // SAFETY: the view borrows `backing`, which is freed below only once no other reference to
-        // the view remains, and kCFAllocatorNull never frees those bytes itself.
-        let data = unsafe { CFData::with_bytes_no_copy(None, backing.as_ptr(), len, no_free) }
-            .ok_or(CredentialStoreError::Write(errSecAllocate))?;
-        let outcome = self.write(target, &data);
-        let shared = data.retain_count() != 1;
-        drop(data);
-        if shared {
-            // shortcut: leaks one bounded copy rather than free bytes the framework still holds.
-            std::mem::forget(backing);
-        }
-        outcome
+        let data = owned_view(bytes)?;
+        self.write(target, &data)
     }
 
     fn delete(&self, target: &str) -> Result<(), CredentialStoreError> {
@@ -217,6 +205,55 @@ fn succeeded(
         Err(error(status))
     }
 }
+
+/// A zeroizing copy of `bytes` owned by the returned view: CoreFoundation releases the view's
+/// allocator only after the last reference to the view, and that release wipes and frees it.
+fn owned_view(bytes: &[u8]) -> Result<CFRetained<CFData>, CredentialStoreError> {
+    let backing = Box::new(Zeroizing::new(bytes.to_vec()));
+    let start = backing.as_ptr();
+    let len = CFIndex::try_from(backing.len()).expect("the bounded blob length fits CFIndex");
+    let info = Box::into_raw(backing);
+    let mut context = CFAllocatorContext {
+        version: 0,
+        info: info.cast(),
+        retain: None,
+        release: Some(release_backing),
+        copyDescription: None,
+        allocate: Some(allocate_nothing),
+        reallocate: None,
+        deallocate: Some(deallocate_nothing),
+        preferredSize: None,
+    };
+    // SAFETY: the context is fully initialized; the allocator copies it and owns `info`, which
+    // its release callback frees once.
+    let Some(owner) = (unsafe { CFAllocator::new(None, &raw mut context) }) else {
+        // SAFETY: no allocator was created, so `info` is still this function's Box.
+        drop(unsafe { Box::from_raw(info) });
+        return Err(CredentialStoreError::Write(errSecAllocate));
+    };
+    // SAFETY: the bytes live until `owner` is released, and the view retains `owner` for as long
+    // as the view exists.
+    unsafe { CFData::with_bytes_no_copy(None, start, len, Some(&owner)) }
+        .ok_or(CredentialStoreError::Write(errSecAllocate))
+}
+
+/// Frees the view's backing when its allocator is released: the only owner of that Box.
+unsafe extern "C-unwind" fn release_backing(info: *const c_void) {
+    // SAFETY: `info` is the Box `owned_view` gave this allocator, released exactly once.
+    drop(unsafe { Box::from_raw(info.cast_mut().cast::<Zeroizing<Vec<u8>>>()) });
+}
+
+/// The view's allocator never allocates; it only owns the backing.
+unsafe extern "C-unwind" fn allocate_nothing(
+    _: CFIndex,
+    _: CFOptionFlags,
+    _: *mut c_void,
+) -> *mut c_void {
+    ptr::null_mut()
+}
+
+/// The backing is freed by the release callback, not per deallocation.
+unsafe extern "C-unwind" fn deallocate_nothing(_: *mut c_void, _: *mut c_void) {}
 
 /// An update changes the data alone, never the item's key or protection.
 fn update_attributes(data: &CFData) -> Query {

@@ -35,7 +35,7 @@ fn flag(query: &Query, key: &CFString) -> Option<bool> {
 /// The context's address, after checking it refuses interaction.
 fn no_ui_context_in(query: &Query) -> *const AnyObject {
     let context = query
-        .get(Keys::get().context)
+        .get(constant!(kSecUseAuthenticationContext))
         .expect("every query carries a context");
     let object: *const CFType = &raw const *context;
     // SAFETY: the only value under this key is the LAContext the query builder placed there,
@@ -45,47 +45,61 @@ fn no_ui_context_in(query: &Query) -> *const AnyObject {
     ptr::from_ref(object)
 }
 
+/// Checked against the SDK's own constants, not the production key table.
 fn assert_names_one_item(query: &Query, target: &str) {
-    let keys = Keys::get();
     assert_eq!(
-        text(query, keys.class),
-        Some(keys.generic_password.to_string())
+        text(query, constant!(kSecClass)),
+        Some(constant!(kSecClassGenericPassword).to_string())
     );
-    assert_eq!(text(query, keys.group).as_deref(), Some(GROUP));
     assert_eq!(
-        text(query, keys.service).as_deref(),
+        text(query, constant!(kSecAttrAccessGroup)).as_deref(),
+        Some(GROUP)
+    );
+    assert_eq!(
+        text(query, constant!(kSecAttrService)).as_deref(),
         Some(CREDENTIAL_SERVICE)
     );
-    assert_eq!(text(query, keys.account).as_deref(), Some(target));
-    assert_eq!(flag(query, keys.data_protection), Some(true));
-    assert_eq!(flag(query, keys.synchronizable), Some(false));
+    assert_eq!(
+        text(query, constant!(kSecAttrAccount)).as_deref(),
+        Some(target)
+    );
+    assert_eq!(
+        flag(query, constant!(kSecUseDataProtectionKeychain)),
+        Some(true)
+    );
+    assert_eq!(flag(query, constant!(kSecAttrSynchronizable)), Some(false));
 }
 
 #[test]
 fn every_query_names_one_item_in_the_pinned_group_without_ui() {
-    let keys = Keys::get();
     let store = store();
     let target = "test-only-target";
     let data = CFData::from_bytes(b"test-only-data");
 
     let read = store.read_query(target).expect("read query");
     assert_names_one_item(&read, target);
-    assert_eq!(flag(&read, keys.return_data), Some(true));
+    assert_eq!(flag(&read, constant!(kSecReturnData)), Some(true));
     assert_eq!(
-        text(&read, keys.match_limit),
-        Some(keys.match_limit_one.to_string())
+        text(&read, constant!(kSecMatchLimit)),
+        Some(constant!(kSecMatchLimitOne).to_string())
     );
-    assert!(!read.contains_key(keys.value_data), "a read sends no data");
+    assert!(
+        !read.contains_key(constant!(kSecValueData)),
+        "a read sends no data"
+    );
 
     let add = store.add_attributes(target, &data).expect("add attributes");
     assert_names_one_item(&add, target);
     assert_eq!(
-        text(&add, keys.accessible),
-        Some(keys.when_unlocked_this_device_only.to_string())
+        text(&add, constant!(kSecAttrAccessible)),
+        Some(constant!(kSecAttrAccessibleWhenUnlockedThisDeviceOnly).to_string())
     );
-    assert!(add.contains_key(keys.value_data), "an add carries the data");
     assert!(
-        !add.contains_key(keys.return_data),
+        add.contains_key(constant!(kSecValueData)),
+        "an add carries the data"
+    );
+    assert!(
+        !add.contains_key(constant!(kSecReturnData)),
         "an add returns nothing"
     );
 
@@ -100,7 +114,7 @@ fn every_query_names_one_item_in_the_pinned_group_without_ui() {
     let update = update_attributes(&data);
     assert_eq!(update.len(), 1, "an update changes only the data");
     assert!(
-        update.contains_key(keys.value_data),
+        update.contains_key(constant!(kSecValueData)),
         "an update carries the data"
     );
 
@@ -109,6 +123,17 @@ fn every_query_names_one_item_in_the_pinned_group_without_ui() {
         contexts[0] != contexts[1] && contexts[1] != contexts[2] && contexts[0] != contexts[2],
         "every call gets its own context"
     );
+}
+
+#[test]
+fn a_write_view_holds_an_exact_copy_of_the_bytes() {
+    let view = owned_view(b"test-only-view-sentinel").expect("owned view");
+    assert!(
+        view.to_vec() == b"test-only-view-sentinel",
+        "the view reads the copied bytes"
+    );
+    let empty = owned_view(&[]).expect("empty view");
+    assert_eq!(empty.length(), 0);
 }
 
 #[test]
