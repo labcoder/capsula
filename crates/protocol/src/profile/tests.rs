@@ -162,3 +162,137 @@ fn resume_requires_the_exact_durable_prefix_and_never_reissues_an_uncertain_writ
         assert_eq!(Inspection::Held(facts).classify(), Decision::Blocked);
     }
 }
+
+struct Fake {
+    guard: fn() -> Guard<()>,
+    legacy: Observation,
+    root: Root,
+    owner: Observation,
+    log: std::cell::RefCell<Vec<&'static str>>,
+}
+
+struct Held<'a>(&'a std::cell::RefCell<Vec<&'static str>>);
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.0.borrow_mut().push("release");
+    }
+}
+
+impl<'a> Probes for &'a Fake {
+    type Guard = Held<'a>;
+
+    fn guard(&self) -> Guard<Held<'a>> {
+        self.log.borrow_mut().push("guard");
+        match (self.guard)() {
+            Guard::Held(()) => Guard::Held(Held(&self.log)),
+            Guard::Busy => Guard::Busy,
+            Guard::Unavailable => Guard::Unavailable,
+        }
+    }
+
+    fn legacy(&self, _: &Held<'a>) -> Observation {
+        self.log.borrow_mut().push("legacy");
+        self.legacy
+    }
+
+    fn root(&self, _: &Held<'a>) -> Root {
+        self.log.borrow_mut().push("root");
+        self.root
+    }
+
+    fn owner(&self, _: &Held<'a>) -> Observation {
+        self.log.borrow_mut().push("owner");
+        self.owner
+    }
+}
+
+fn fake(legacy: Observation, root: Root, owner: Observation) -> Fake {
+    Fake {
+        guard: || Guard::Held(()),
+        legacy,
+        root,
+        owner,
+        log: std::cell::RefCell::default(),
+    }
+}
+
+#[test]
+fn a_guard_not_taken_samples_nothing() {
+    let busy: fn() -> Guard<()> = || Guard::Busy;
+    for (guard, expected) in [
+        (busy, Decision::Busy),
+        (|| Guard::Unavailable, Decision::Blocked),
+    ] {
+        let probes = Fake {
+            guard,
+            ..fake(Matching, Root::Absent, Absent)
+        };
+        let inspection = observe(&&probes);
+        assert!(!matches!(inspection, Inspection::Held(_)));
+        assert_eq!(inspection.classify(), expected);
+        assert_eq!(*probes.log.borrow(), ["guard"]);
+    }
+}
+
+#[test]
+fn every_fact_is_sampled_while_the_guard_is_held() {
+    let probes = fake(Matching, Root::Absent, Absent);
+    observe(&&probes);
+    assert_eq!(
+        *probes.log.borrow(),
+        ["guard", "legacy", "root", "owner", "release"]
+    );
+}
+
+#[test]
+fn objects_inside_the_root_are_absent_only_with_the_root() {
+    for (root, inside) in [
+        (Root::Absent, Absent),
+        (Root::Unverified, Unverified),
+        (Root::Ready, Unverified),
+        (Root::Pending(Step::Lock, Intent::Issued), Unverified),
+    ] {
+        let Inspection::Held(facts) = observe(&&fake(Absent, root, Absent)) else {
+            panic!("the guard was held");
+        };
+        assert_eq!(facts.root, root);
+        assert_eq!(
+            [facts.lock, facts.authority, facts.host, facts.history],
+            [inside; 4]
+        );
+        assert_eq!(facts.fresh_root, Destination::Unverified);
+        assert_eq!(facts.fresh_namespace, Destination::Unverified);
+    }
+}
+
+#[test]
+fn only_an_intact_legacy_installation_with_nothing_new_reopens() {
+    assert_eq!(
+        observe(&&fake(Matching, Root::Absent, Absent)).classify(),
+        Decision::OpenExisting
+    );
+    for (legacy, root, owner) in [
+        (Absent, Root::Absent, Absent),
+        (Unverified, Root::Absent, Absent),
+        (Matching, Root::Unverified, Absent),
+        (Matching, Root::Absent, Unverified),
+        (Matching, Root::Absent, Matching),
+        (Absent, Root::Ready, Matching),
+    ] {
+        assert_eq!(
+            observe(&&fake(legacy, root, owner)).classify(),
+            Decision::Blocked
+        );
+    }
+}
+
+#[test]
+fn legacy_and_owner_evidence_pass_through_unchanged() {
+    for evidence in [Absent, Matching, Unverified] {
+        let Inspection::Held(facts) = observe(&&fake(evidence, Root::Absent, evidence)) else {
+            panic!("the guard was held");
+        };
+        assert_eq!([facts.legacy, facts.owner], [evidence; 2]);
+    }
+}
