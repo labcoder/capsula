@@ -139,6 +139,7 @@ pub(super) const CAPTURE_BUFFER: Duration = Duration::from_millis(100);
 )]
 const MISSING_SHARE_DIVISOR: u64 = 4;
 
+#[derive(Default)]
 #[cfg_attr(
     all(not(windows), not(test)),
     expect(
@@ -160,26 +161,6 @@ pub(super) struct PacketBoundary {
     #[cfg(windows)]
     queue_high_water: usize,
     discarded_before_listening: u32,
-}
-
-impl Default for PacketBoundary {
-    fn default() -> Self {
-        Self {
-            listening: false,
-            failed: None,
-            started: None,
-            discontinuities: 0,
-            first_discontinuity_packet: 0,
-            first_discontinuity_ms: 0,
-            kept_packets: 0,
-            kept_frames: 0,
-            missing_frames: 0,
-            next_position: None,
-            #[cfg(windows)]
-            queue_high_water: 0,
-            discarded_before_listening: 0,
-        }
-    }
 }
 
 #[cfg_attr(
@@ -251,7 +232,7 @@ impl PacketBoundary {
     }
 
     pub(super) fn finish(&mut self, source: Result<(), MicError>) -> Result<(), MicError> {
-        if self.failed.is_none() {
+        if source == Err(MicError::Unconfirmed) || self.failed.is_none() {
             self.failed = source.err();
         }
         if let Some(error) = self.failed {

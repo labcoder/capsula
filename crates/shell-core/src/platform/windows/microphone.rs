@@ -208,14 +208,31 @@ pub(in crate::platform) fn collection_start() -> Result<u64, MicError> {
     let mut ticks = 0;
     // SAFETY: the output is writable and stays alive through the call.
     unsafe { QueryPerformanceCounter(&raw mut ticks) }.map_err(|_| MicError::Timestamp)?;
-    let scale = u64::try_from(frequency).map_err(|_| MicError::Timestamp)?;
+    capture_cutoff_100ns(ticks, frequency)
+}
+
+fn capture_cutoff_100ns(ticks: i64, frequency: i64) -> Result<u64, MicError> {
+    let frequency = u64::try_from(frequency).map_err(|_| MicError::Timestamp)?;
     let ticks = u64::try_from(ticks).map_err(|_| MicError::Timestamp)?;
-    if scale == 0 || ticks == 0 {
+    if frequency == 0 || ticks == 0 {
         return Err(MicError::Timestamp);
     }
-    // GetBuffer uses QPC in 100 ns units; round the admission edge later, never earlier.
-    u64::try_from((u128::from(ticks) * 10_000_000).div_ceil(u128::from(scale)))
+    // One tick is ambiguous across threads; require two, then round toward the future.
+    u64::try_from(((u128::from(ticks) + 2) * 10_000_000).div_ceil(u128::from(frequency)))
         .map_err(|_| MicError::Timestamp)
+}
+
+#[cfg(test)]
+#[test]
+fn collection_cutoff_excludes_the_ambiguous_tick_and_rounds_forward() {
+    assert_eq!(capture_cutoff_100ns(100, 10_000_000), Ok(102));
+    assert_eq!(capture_cutoff_100ns(2, 3_000_000), Ok(14));
+    assert_eq!(
+        capture_cutoff_100ns(0, 10_000_000),
+        Err(MicError::Timestamp)
+    );
+    assert_eq!(capture_cutoff_100ns(100, 0), Err(MicError::Timestamp));
+    assert_eq!(capture_cutoff_100ns(i64::MAX, 1), Err(MicError::Timestamp));
 }
 
 pub(crate) fn capture(

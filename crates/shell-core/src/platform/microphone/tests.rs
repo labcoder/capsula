@@ -1158,6 +1158,27 @@ fn a_missing_capture_timestamp_does_not_admit_a_later_packet() {
 }
 
 #[test]
+fn unconfirmed_teardown_outweighs_a_latched_timestamp_error() {
+    let mut boundary = PacketBoundary::default();
+    let packet = PacketStatus { frames: 1, ..CLEAN };
+    assert_eq!(
+        boundary.packet(
+            Some(ACCEPTED_QPC),
+            PacketStatus {
+                captured_qpc_100ns: 0,
+                ..packet
+            }
+        ),
+        Err(MicError::Timestamp)
+    );
+    assert_eq!(
+        boundary.finish(Err(MicError::Unconfirmed)),
+        Err(MicError::Unconfirmed)
+    );
+    assert_eq!(boundary.finish(Ok(())), Err(MicError::Unconfirmed));
+}
+
+#[test]
 fn revocation_does_not_reclassify_discarded_packets_as_before_listening() {
     let mut boundary = PacketBoundary::default();
     let packet = PacketStatus { frames: 3, ..CLEAN };
