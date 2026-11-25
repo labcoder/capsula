@@ -117,15 +117,12 @@ fn same_shape(conn: &Connection, built: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// Reads the legacy authority at `db` through [`existing::open`] under `session`, then the host it
-/// commits under the fixed service. `Absent` only when the authority's own folder holds no file
-/// and nothing a store or a purge leaves, as for the history store; the folder is still a
-/// footprint. A missing or linked folder, or any authority but a current one, is `Unverified`
-/// for both.
+/// commits under the fixed service, inside [`existing::in_folder`]. `Absent` only when the
+/// authority's own folder holds no file and nothing a store or a purge leaves, as for the history
+/// store; the folder is still a footprint. A missing, linked or moved folder, or any authority but
+/// a current one, is `Unverified` for both.
 pub(crate) fn legacy(db: &Path, session: &SessionLock, store: &impl CredentialStore) -> Legacy {
-    if !db.parent().is_some_and(existing::folder) {
-        return UNVERIFIED;
-    }
-    match existing::open(db, session) {
+    existing::in_folder(db, || match existing::open(db, session) {
         Ok(read) if check(&read).is_ok() => Legacy {
             authority: Observation::Matching,
             host: host(&read, store),
@@ -135,7 +132,8 @@ pub(crate) fn legacy(db: &Path, session: &SessionLock, store: &impl CredentialSt
             host: Observation::Absent,
         },
         _ => UNVERIFIED,
-    }
+    })
+    .unwrap_or(UNVERIFIED)
 }
 
 /// The host `conn` commits, read whole by its exact names and checked as a host, then dropped. No
@@ -399,6 +397,28 @@ mod tests {
             fs::write(fixture.scratch.dir().join(format!("{FILE}{left}")), b"left")
                 .expect("left file");
             assert_eq!(fixture.read(), UNVERIFIED, "{left}");
+        }
+    }
+
+    #[test]
+    fn a_folder_renamed_or_swapped_during_the_read_is_unverified() {
+        for swap in [false, true] {
+            let fixture = Fixture::new(&format!("legacy-authority-moved-{swap}"));
+            let dir = fixture.scratch.dir().to_owned();
+            let moved = dir.with_file_name(format!("legacy-authority-moved-{swap}-away"));
+            let (from, to) = (dir.clone(), moved.clone());
+            existing::between_folder_checks(move || {
+                fs::rename(&from, &to).expect("move the folder");
+                if swap {
+                    fs::create_dir(&from).expect("a new folder at the same path");
+                }
+            });
+            assert_eq!(
+                legacy(&fixture.db(), &fixture.lock, &fixture.store),
+                UNVERIFIED,
+                "{swap}"
+            );
+            assert!(files(&moved).is_empty(), "{swap}");
         }
     }
 
