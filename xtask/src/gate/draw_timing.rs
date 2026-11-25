@@ -15,7 +15,7 @@ use kumochi_protocol::constants::{
 };
 
 use super::{observation, retained_run};
-use crate::hermetic::{self, Folders, Prebuilt, Run};
+use crate::hermetic::{self, Folders, Prebuilt, Profile, Run};
 use crate::platform::{self, gate_capture, input_session::WindowKind};
 use crate::session;
 
@@ -105,8 +105,8 @@ fn stage_debug(images: &Path, bin: &Path, hashes: [&str; 2]) -> Result<()> {
             "prebuilt {name} SHA-256 does not match its pin; no launch"
         );
     }
-    hermetic::require_compatible(&bin.join(SHELL_EXE), hermetic::SHELL_ROLE)?;
-    hermetic::require_compatible(&bin.join(BRAIN_EXE), hermetic::BRAIN_ROLE)
+    hermetic::require_compatible(&bin.join(SHELL_EXE), hermetic::SHELL_ROLE, Profile::Debug)?;
+    hermetic::require_compatible(&bin.join(BRAIN_EXE), hermetic::BRAIN_ROLE, Profile::Debug)
 }
 
 fn trial(output: &Path, shell: &Path, stamps: &Path, folders: &Folders) -> Result<()> {

@@ -51,7 +51,9 @@ fixture scripts.
 Without `--prebuilt`, a tool builds its own images in `<target>/gate/{debug,release}`.
 `bench idle --baseline <checkout>` builds older Gate source in `<target>/gate-baseline`.
 Every image a gate tool launches, built or prebuilt, must carry its startup marker, the Gate
-instance service and both override names, `KUMOCHI_GATE_LOCALAPPDATA` and `KUMOCHI_GATE_APPDATA`.
+instance service and both override names, `KUMOCHI_GATE_LOCALAPPDATA` and `KUMOCHI_GATE_APPDATA`,
+and never the Release service name. A release image mustn't carry the Dev service name either; a
+debug image does, because every debug build links the Dev identity.
 An image from before the override would follow `LOCALAPPDATA`, which the tools no longer set, so
 it is refused before launch: a `--baseline` checkout can't predate the override. `slice2-gate`
 checks its brain this way, and its xtask copy by the gate identity it refuses to run without.

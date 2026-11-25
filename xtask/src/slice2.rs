@@ -153,7 +153,7 @@ fn end_leftovers(brains: Vec<Child>) -> Vec<String> {
 /// `bin` is in.
 fn gate(bin: &Path, root: &Path, id: &str, only: Option<&str>) -> Result<()> {
     let folder = bin.parent().context("the gate runs from its folder")?;
-    hermetic::require_compatible(&bin.join(BRAIN_EXE), hermetic::BRAIN_ROLE)?;
+    hermetic::require_compatible(&bin.join(BRAIN_EXE), hermetic::BRAIN_ROLE, Profile::Debug)?;
     let _held = hermetic::admit_root(
         &hermetic::runs_path()?,
         &hermetic::gate_file("run.lock")?,

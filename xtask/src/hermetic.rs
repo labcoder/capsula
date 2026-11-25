@@ -50,9 +50,10 @@ pub(crate) const SHELL_ROLE: &str = "shell started";
 pub(crate) const BRAIN_ROLE: &str = "brain started";
 
 /// Refuses the image `exe` unless it carries the Gate identity, `role` and both folder override
-/// names, and neither other identity. An image from before the override would follow the
-/// launch's `LOCALAPPDATA`, which a gate tool no longer sets, so it never launches.
-pub(crate) fn require_compatible(exe: &Path, role: &str) -> Result<()> {
+/// names, and not the release identity; a `Release` image mustn't carry the dev identity either,
+/// which every debug build links. An image from before the override would follow the launch's
+/// `LOCALAPPDATA`, which a gate tool no longer sets, so it never launches.
+pub(crate) fn require_compatible(exe: &Path, role: &str, profile: Profile) -> Result<()> {
     let name = exe.file_name().unwrap_or(exe.as_os_str()).display();
     let bytes = fs::read(exe).with_context(|| format!("{name} is unavailable"))?;
     let contains = |marker: &str| {
@@ -67,7 +68,7 @@ pub(crate) fn require_compatible(exe: &Path, role: &str) -> Result<()> {
             && contains(LOCAL_APPDATA_OVERRIDE)
             && contains(ROAMING_APPDATA_OVERRIDE)
             && !contains(ProductIdentity::RELEASE.instance_service)
-            && !contains(ProductIdentity::DEV.instance_service),
+            && (profile == Profile::Debug || !contains(ProductIdentity::DEV.instance_service)),
         "{name} does not have the expected Gate identity, role and folder override; rebuild it"
     );
     Ok(())
@@ -149,7 +150,7 @@ impl Prebuilt {
                 actual == *expected,
                 "prebuilt {name} SHA-256 differs from its pin"
             );
-            require_compatible(&dir.join(name), role)?;
+            require_compatible(&dir.join(name), role, Profile::Release)?;
         }
         Ok(())
     }
@@ -206,23 +207,24 @@ pub(crate) fn build(
         .arg(checkout.unwrap_or(workspace).join("Cargo.toml"));
     let built = live::run_bounded(cargo, BUILD_LIMIT, "the gate build")?;
     ensure!(built.success(), "the gate build failed ({built})");
-    let profile = target.join(match profile {
+    let folder = target.join(match profile {
         Profile::Debug => "debug",
         Profile::Release => "release",
     });
-    require_built(&profile, packages)?;
-    Ok((profile, started.elapsed()))
+    require_built(&folder, profile, packages)?;
+    Ok((folder, started.elapsed()))
 }
 
-/// Refuses the images `packages` built into `profile` unless each is compatible with its role.
-fn require_built(profile: &Path, packages: &[&str]) -> Result<()> {
+/// Refuses the images `packages` built with `profile` into `folder` unless each is compatible with
+/// its role.
+fn require_built(folder: &Path, profile: Profile, packages: &[&str]) -> Result<()> {
     for package in packages {
         let (exe, role) = match *package {
             "kumochi-shell" => (SHELL_EXE, SHELL_ROLE),
             "kumochi-brain" => (BRAIN_EXE, BRAIN_ROLE),
             other => bail!("{other} is not a Gate image"),
         };
-        require_compatible(&profile.join(exe), role)?;
+        require_compatible(&folder.join(exe), role, profile)?;
     }
     Ok(())
 }
@@ -832,12 +834,28 @@ mod tests {
         let dir = scratch::dir("gate-image");
         let exe = dir.join(BRAIN_EXE);
         fs::write(&exe, image("brain started", ProductIdentity::GATE)).expect("image");
-        require_compatible(&exe, BRAIN_ROLE).expect("a current brain");
+        for profile in [Profile::Debug, Profile::Release] {
+            require_compatible(&exe, BRAIN_ROLE, profile).expect("a current brain");
+        }
         let refusal = format!(
             "{BRAIN_EXE} does not have the expected Gate identity, role and folder override; \
              rebuild it"
         );
+        let with = |identity: ProductIdentity| {
+            format!(
+                "{}|{}",
+                image("brain started", ProductIdentity::GATE),
+                identity.instance_service
+            )
+        };
+        fs::write(&exe, with(ProductIdentity::DEV)).expect("image");
+        require_compatible(&exe, BRAIN_ROLE, Profile::Debug)
+            .expect("a debug Gate image links the dev identity");
+        let error = require_compatible(&exe, BRAIN_ROLE, Profile::Release)
+            .expect_err("a release image never carries the dev identity");
+        assert_eq!(format!("{error:#}"), refusal);
         for (case, bytes) in [
+            ("release identity", with(ProductIdentity::RELEASE)),
             ("old", "brain started|Kumochi Gate instance".to_owned()),
             (
                 "no roaming name",
@@ -851,8 +869,10 @@ mod tests {
             ("dev identity", image("brain started", ProductIdentity::DEV)),
         ] {
             fs::write(&exe, bytes).expect("image");
-            let error = require_compatible(&exe, BRAIN_ROLE).expect_err(case);
-            assert_eq!(format!("{error:#}"), refusal, "{case}");
+            for profile in [Profile::Debug, Profile::Release] {
+                let error = require_compatible(&exe, BRAIN_ROLE, profile).expect_err(case);
+                assert_eq!(format!("{error:#}"), refusal, "{case} {profile:?}");
+            }
         }
     }
 
@@ -864,23 +884,47 @@ mod tests {
             image("brain started", ProductIdentity::GATE),
         )
         .expect("brain");
-        require_built(&profile, &["kumochi-brain"]).expect("slice2's brain alone");
-        let error = require_built(&profile, &["kumochi-shell", "kumochi-brain"])
-            .expect_err("no shell was built");
+        require_built(&profile, Profile::Release, &["kumochi-brain"])
+            .expect("slice2's brain alone");
+        let error = require_built(
+            &profile,
+            Profile::Release,
+            &["kumochi-shell", "kumochi-brain"],
+        )
+        .expect_err("no shell was built");
         assert_eq!(error.to_string(), format!("{SHELL_EXE} is unavailable"));
         fs::write(
             profile.join(SHELL_EXE),
             image("shell started", ProductIdentity::GATE),
         )
         .expect("shell");
-        require_built(&profile, &["kumochi-shell", "kumochi-brain"]).expect("the current pair");
+        require_built(
+            &profile,
+            Profile::Release,
+            &["kumochi-shell", "kumochi-brain"],
+        )
+        .expect("the current pair");
+        fs::write(
+            profile.join(BRAIN_EXE),
+            format!(
+                "{}|{}",
+                image("brain started", ProductIdentity::GATE),
+                ProductIdentity::DEV.instance_service
+            ),
+        )
+        .expect("a debug brain");
+        require_built(&profile, Profile::Debug, &["kumochi-brain"])
+            .expect("a debug brain links the dev identity");
+        require_built(&profile, Profile::Release, &["kumochi-brain"])
+            .expect_err("a release brain never does");
         fs::write(
             profile.join(BRAIN_EXE),
             "brain started|Kumochi Gate instance",
         )
         .expect("a baseline brain from before the override");
         for packages in [&["kumochi-brain"][..], &["kumochi-shell", "kumochi-brain"]] {
-            let error = require_built(&profile, packages).expect_err("an old brain");
+            let error =
+                require_built(&profile, Profile::Release, packages).expect_err("an old brain");
             assert_eq!(
                 format!("{error:#}"),
                 format!(
