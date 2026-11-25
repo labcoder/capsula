@@ -77,7 +77,8 @@ pub(crate) trait Capturer {
     }
 
     /// Fills `frame` through [`RawFrame::begin`] with one frame of `target` alone, which
-    /// leaves out whatever is stacked above it. It starts nothing at or after `until`.
+    /// leaves out whatever is stacked above it. Check `deadline` before sampling and while
+    /// waiting; a wake clock that pauses during sleep cannot stand in for its stamp.
     ///
     /// # Errors
     /// `WindowChanged` when the window's identity, frame or DPI moved or it closed, another
@@ -85,7 +86,7 @@ pub(crate) trait Capturer {
     fn capture_window(
         &mut self,
         _target: &Target,
-        _until: Instant,
+        _deadline: Deadline,
         _frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
         Err(Failure::Fault(NO_WINDOW_CAPTURE))
@@ -94,17 +95,17 @@ pub(crate) trait Capturer {
     /// Fills `frame` through [`RawFrame::begin`] with one frame of the monitor nearest `point`,
     /// pointer included, drawn at least one compositor redraw after `excluded`: the
     /// performance-counter stamp taken once Kumochi's windows were kept out of capture. It
-    /// starts nothing at or after `until`, and returns the monitor's physical bounds.
+    /// uses the same deadline checks as a window capture and returns the monitor's physical bounds.
     ///
     /// # Errors
-    /// `Expired` for a zero stamp or when no frame drawn late enough arrived by `until`,
+    /// `Expired` for a zero exclusion stamp or when no frame drawn late enough arrived in time,
     /// `DisplayChanged` when the monitor's geometry moved, a numeric fault, or `Retire` when it
     /// can't show its capture stopped.
     fn capture_display(
         &mut self,
         _point: PhysicalPoint,
         _excluded: u64,
-        _until: Instant,
+        _deadline: Deadline,
         _frame: &mut RawFrame,
     ) -> Result<(Acquired, PhysicalRect), Failure> {
         Err(Failure::Fault(NO_WINDOW_CAPTURE))
@@ -172,14 +173,14 @@ struct Held {
 
 /// The earlier of the local ticket limit and the stamped grant. Only the local bound wakes waits.
 #[derive(Clone, Copy)]
-pub(super) struct Deadline {
-    pub(super) until: Instant,
+pub(crate) struct Deadline {
+    pub(crate) until: Instant,
     stamp: u64,
     left_until: fn(u64) -> Option<Duration>,
 }
 
 impl Deadline {
-    pub(super) fn new(until: Instant, stamp: u64, left_until: fn(u64) -> Option<Duration>) -> Self {
+    pub(crate) fn new(until: Instant, stamp: u64, left_until: fn(u64) -> Option<Duration>) -> Self {
         Self {
             until,
             stamp,
@@ -187,7 +188,7 @@ impl Deadline {
         }
     }
 
-    pub(super) fn tighten(self, now: Instant) -> Option<Self> {
+    pub(crate) fn tighten(self, now: Instant) -> Option<Self> {
         if now >= self.until {
             return None;
         }

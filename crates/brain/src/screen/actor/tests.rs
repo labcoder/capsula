@@ -92,6 +92,7 @@ impl Read for Input {
 struct Output {
     send: mpsc::Sender<(u64, Reply)>,
     bytes: Vec<u8>,
+    on_pong: Option<Box<dyn FnOnce()>>,
 }
 
 impl Write for Output {
@@ -103,6 +104,11 @@ impl Write for Output {
         let reply = read_request::<Reply>(&mut self.bytes.as_slice(), Kind::MAX_REPLY)
             .expect("whole reply")
             .expect("one reply");
+        if matches!(reply.1, Reply::Pong)
+            && let Some(on_pong) = self.on_pong.take()
+        {
+            on_pong();
+        }
         self.send
             .send(reply)
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
@@ -169,7 +175,7 @@ impl Capturer for Fake {
     fn capture_window(
         &mut self,
         _: &Target,
-        _: Instant,
+        _: Deadline,
         frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
         frame.audit(self.audit.clone());
@@ -190,7 +196,7 @@ impl Capturer for Fake {
         &mut self,
         point: PhysicalPoint,
         _: u64,
-        _: Instant,
+        _: Deadline,
         frame: &mut RawFrame,
     ) -> Result<(Acquired, PhysicalRect), Failure> {
         frame.audit(self.audit.clone());
@@ -292,7 +298,7 @@ enum Clock {
 
 static STAMP_ELAPSED_MS: AtomicU64 = AtomicU64::new(0);
 thread_local! {
-    static SEAL_EXPIRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static STAMP_EXPIRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl Rig {
@@ -335,6 +341,7 @@ impl Rig {
                 &mut Output {
                     send: output,
                     bytes: Vec::new(),
+                    on_pong: None,
                 },
                 move || {
                     opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -360,7 +367,7 @@ impl Rig {
                     let mut screen = Screen::default();
                     screen.unchanged = if matches!(clock_mode, Clock::ExpireOnSeal) {
                         |target| {
-                            SEAL_EXPIRED.set(true);
+                            STAMP_EXPIRED.set(true);
                             unchanged(target)
                         }
                     } else {
@@ -374,7 +381,7 @@ impl Rig {
                             (left > 0).then(|| Duration::from_millis(left))
                         },
                         Clock::ExpireOnSeal => |stamp| {
-                            if SEAL_EXPIRED.get() {
+                            if STAMP_EXPIRED.get() {
                                 None
                             } else {
                                 MILLIS_LEFT(stamp)
@@ -473,6 +480,66 @@ fn a_stamp_that_expires_inside_seal_never_publishes_the_encoded_image() {
     rig.send(3, &Request::Seal(key(1)));
     assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Stale)));
     rig.finish();
+}
+
+#[test]
+fn a_stamp_that_expires_inside_pong_beats_a_current_nonfatal_completion() {
+    for failure in [Failure::Refused(Refusal::NoWindow), Failure::Fault(-5)] {
+        let now = Instant::now();
+        let clock = Arc::new(Mutex::new(now));
+        let (capture, entered, release) = gate();
+        let mut capture = Some(capture);
+        let (audit, _) = mpsc::channel();
+        let (sampled, _sample) = mpsc::channel();
+        let (wake, completion_queued) = mpsc::channel();
+        let native = CaptureThread::open(
+            move || {
+                Ok(Box::new(Fake {
+                    clock: Arc::clone(&clock),
+                    foreground: None,
+                    capture: capture.take(),
+                    audit: audit.clone(),
+                    completion: Some(failure),
+                    sampled: sampled.clone(),
+                    _local: Rc::new(()),
+                }))
+            },
+            Box::new(move || wake.send(()).is_ok()),
+        )
+        .unwrap();
+        let (inbox, events) = mpsc::channel();
+        inbox.send(Event::Request(1, context(1), now)).unwrap();
+        inbox.send(Event::Request(2, Request::Ping, now)).unwrap();
+        inbox.send(Event::End(Ok(()))).unwrap();
+        let (send, replies) = mpsc::channel();
+        STAMP_EXPIRED.set(false);
+        let mut screen = Screen::default();
+        screen.left_until = |stamp| (!STAMP_EXPIRED.get()).then(|| Duration::from_millis(stamp));
+        run(
+            &events,
+            &mut Output {
+                send,
+                bytes: Vec::new(),
+                on_pong: Some(Box::new(move || {
+                    entered.recv_timeout(PATIENCE).unwrap();
+                    release.send(()).unwrap();
+                    completion_queued.recv_timeout(PATIENCE).unwrap();
+                    STAMP_EXPIRED.set(true);
+                })),
+            },
+            native,
+            screen,
+            &|| now,
+        )
+        .unwrap();
+        assert_eq!(replies.try_recv(), Ok((2, Reply::Pong)));
+        let (id, reply) = replies.try_recv().unwrap();
+        assert_eq!(id, 1);
+        assert!(
+            matches!(reply, Reply::Refused(Refusal::Expired)),
+            "the completion {failure:?} overtook expiry"
+        );
+    }
 }
 
 #[test]
