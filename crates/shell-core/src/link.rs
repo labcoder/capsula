@@ -638,6 +638,9 @@ struct Shared {
     /// Locked only after `outbox`, so a delete and a turn are counted in the order they're
     /// queued.
     deletes: Mutex<Vec<Held>>,
+    /// Orders Quit against an owned brain child's spawn.
+    #[cfg(target_os = "macos")]
+    spawn: Arc<platform::SpawnWord>,
 }
 
 impl Shared {
@@ -1069,6 +1072,8 @@ impl LinkHandle {
     /// Returns false when Quit was already under way.
     pub fn begin_quit(&self) -> bool {
         let first = self.shared.input.fetch_or(QUIT_INPUT, Ordering::SeqCst) & QUIT_INPUT == 0;
+        #[cfg(target_os = "macos")]
+        self.shared.spawn.quit();
         self.shared.microphone.cancel_current();
         // Wakes a link waiting for Retry, so it sees Quit and ends.
         if let Some(worker) = &self.worker {
