@@ -779,6 +779,8 @@ pair is read again after anything that can end it, such as placing drawings. A s
 stop is sent before anything else; if the queue refuses it on an open pair, the run's queued
 playback stops and then the pair ends. Speaker stops are offered in order, ten times 1 ms apart
 to a busy owner, and only a stop the brain was told can end its pair when those run out.
+A Hold stop uses its own scenes rather than redirecting the stop to another run's drawing.
+The settings model classifies the notice and decides if a link error rolls back the dock.
 
 Each connection reaches the UI as `Connected` with a session that carries the shell's own
 connection generation, not the brain's incarnation, since the same brain may be reconnected to.

@@ -9,7 +9,7 @@ use super::{Context, OpenError, Presence, Session, diagnostics};
 use crate::accounts::Receipt;
 use crate::chat_notice::Source;
 use crate::drawing::{Broken, Chunk, Effect};
-use crate::link::policy::{self, GitHub, Models, Offered, STOP_RETRY, Sent, Told};
+use crate::link::policy::{self, GitHub, Models, Offered, RunStop, STOP_RETRY, Sent, Told};
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{
@@ -359,17 +359,13 @@ impl Presence {
             self.show_error(&error, Source::Run(run), cx);
         }
         if let Some(stop) = applied.stop.take() {
-            match (origin, stop) {
-                (Some(RunOrigin::Hold { .. }), ControlToBrain::Stop { run, revealed }) => {
-                    let effects = crate::link::policy::hold_run_stop(
-                        &mut self.presenter,
-                        run,
-                        revealed,
-                        Instant::now(),
-                    );
+            match RunStop::owed(origin, stop) {
+                RunStop::Hold { run, revealed } => {
+                    let effects =
+                        policy::hold_run_stop(&mut self.presenter, run, revealed, Instant::now());
                     self.scene_effects(effects, cx);
                 }
-                (_, stop) => self.stop_run(stop, cx),
+                RunStop::Ordinary(stop) => self.stop_run(stop, cx),
             }
         }
         self.grant(applied.credit);
@@ -643,26 +639,11 @@ impl Presence {
     /// Shows the brain's error in both panels and on the connected dock.
     fn show_error(&mut self, error: &UserError, source: Source, cx: &mut Context<'_, Self>) {
         self.chatgpt_sign_in_failed(error);
-        let (field, dock_restore) = self.settings.update(cx, |state, cx| {
-            state.accounts.error(error);
-            let outcome = if source == Source::Account {
-                state.error_and_restore_dock(error.clone())
-            } else {
-                (state.error(error.clone()), None)
-            };
+        let (source, dock_restore) = self.settings.update(cx, |state, cx| {
+            let outcome = state.link_error(error, source);
             cx.notify();
             outcome
         });
-        let source = if matches!(
-            error.key(),
-            kumochi_protocol::message::ErrorKey::SettingsRefused
-                | kumochi_protocol::message::ErrorKey::ConfigUnreadable
-                | kumochi_protocol::message::ErrorKey::HoldToTalkOff
-        ) {
-            Source::Settings(field)
-        } else {
-            source
-        };
         self.chat_notice.present(error.clone(), source);
         self.sync_settings_notice(cx);
         self.sync_taskbar(cx);

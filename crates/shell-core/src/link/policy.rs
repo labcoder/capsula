@@ -2,10 +2,11 @@
 //! The shell applies the views and schedules the waits; the order lives here.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{
-    AudioSession, ControlToBrain, DataToShell, Phase, RunId, ThreadId,
+    AudioSession, ControlToBrain, DataToShell, Phase, RunId, RunOrigin, ThreadId,
 };
 
 use super::output::Denied;
@@ -47,12 +48,21 @@ pub struct Lead {
 }
 
 /// How the shell's models follow a link state, read after its [`Lead`] applied.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub enum Models<'a, S> {
     /// Connected to this pair: runs, presenter and histories meet it.
     Up(&'a S),
     /// Down: every model disconnects, and GitHub shows which way.
     Down(GitHub),
+}
+
+impl<S> fmt::Debug for Models<'_, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Up(_) => f.write_str("Up"),
+            Self::Down(github) => f.debug_tuple("Down").field(github).finish(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,7 +168,7 @@ impl<S> Default for SpeakerStops<S> {
 }
 
 /// What follows the owner's answer to the front stop.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub enum Offered<'a, S> {
     /// The stop is done with; offer the next one now.
     Next,
@@ -167,6 +177,17 @@ pub enum Offered<'a, S> {
     Retry { playback: Option<(&'a S, RunId)> },
     /// A brain-told stop ran out of tries or its owner is lost: end that pair, then go on.
     End(&'a S),
+}
+
+impl<S> fmt::Debug for Offered<'_, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Next => "Next",
+            Self::Retry { playback: Some(_) } => "RetryPlayback",
+            Self::Retry { playback: None } => "Retry",
+            Self::End(_) => "End",
+        })
+    }
 }
 
 impl<S> SpeakerStops<S> {
@@ -276,6 +297,23 @@ impl Sent {
     }
 }
 
+/// A refused or cancelled run's stop, resolved at the point where it is applied.
+pub enum RunStop {
+    Hold { run: RunId, revealed: Vec<u32> },
+    Ordinary(ControlToBrain),
+}
+
+impl RunStop {
+    pub fn owed(origin: Option<RunOrigin>, message: ControlToBrain) -> Self {
+        match (origin, message) {
+            (Some(RunOrigin::Hold { .. }), ControlToBrain::Stop { run, revealed }) => {
+                Self::Hold { run, revealed }
+            }
+            (_, message) => Self::Ordinary(message),
+        }
+    }
+}
+
 /// A hold run's owed stop: its scenes' `StopScenes` when that cuts anything, else the run's
 /// `Stop` in its place, so the brain hears one of them.
 pub fn hold_run_stop(
@@ -303,14 +341,13 @@ pub fn hold_run_stop(
 mod tests {
     use std::cell::RefCell;
 
-    use kumochi_protocol::message::{AudioSession, ControlToBrain, RunId};
-
     use kumochi_protocol::message::{
-        DataToShell, Incarnation, Phase, RunOrigin, SceneId, ThreadId,
+        AudioSession, ControlToBrain, DataToShell, GestureId, Incarnation, Phase, RunId, RunOrigin,
+        SceneId, ThreadId,
     };
 
     use super::{
-        GitHub, Lead, Models, Offered, STOP_TRIES, Sent, SpeakerStops, Told, focus,
+        GitHub, Lead, Models, Offered, RunStop, STOP_TRIES, Sent, SpeakerStops, Told, focus,
         scene_disposition, settles,
     };
     use crate::link::output::Denied;
@@ -453,6 +490,44 @@ mod tests {
     }
 
     const RUN: RunId = RunId(5);
+
+    #[test]
+    fn link_decisions_never_format_the_pair() {
+        let marker = "pair-payload-sentinel";
+        let mut stops = SpeakerStops::default();
+        stops.push(marker, RUN, Told::SpeakerOnly);
+        let retry = stops.offered(Err(Denied::Busy), no_audio);
+        let end = Offered::End(&marker);
+        let up = LinkState::Connected.models(Some(&marker));
+        for output in [format!("{retry:?}"), format!("{end:?}"), format!("{up:?}")] {
+            assert!(!output.contains(marker));
+            assert!(!output.contains(&format!("{:?}", marker.as_bytes())));
+        }
+    }
+
+    #[test]
+    fn only_a_hold_run_stop_uses_its_own_scene_stop_path() {
+        let stop = || ControlToBrain::Stop {
+            run: RUN,
+            revealed: vec![2],
+        };
+        let hold = Some(RunOrigin::Hold {
+            gesture: GestureId(1),
+        });
+        let RunStop::Hold { run, revealed } = RunStop::owed(hold, stop()) else {
+            panic!("a Hold must not stop a newer drawing");
+        };
+        assert_eq!((run, revealed), (RUN, vec![2]));
+        let typed = Some(RunOrigin::Typed { turn: 1 });
+        let RunStop::Ordinary(message) = RunStop::owed(typed, stop()) else {
+            panic!("a typed stop uses the ordinary path");
+        };
+        assert_eq!(message, stop());
+        assert!(matches!(
+            RunStop::owed(hold, ControlToBrain::Pong),
+            RunStop::Ordinary(ControlToBrain::Pong)
+        ));
+    }
 
     fn no_audio() -> AudioSession {
         unreachable!("only a lost owner of a brain-told stop reads the audio session")

@@ -9,6 +9,7 @@ use kumochi_protocol::message::{
 };
 use kumochi_protocol::voice::VoicePart;
 
+use crate::chat_notice::Source;
 use crate::strings::{Strings, Text};
 
 mod dock;
@@ -622,6 +623,27 @@ impl Settings {
             reset_draft: matches!(draft, Draft::Reset),
         });
         true
+    }
+
+    /// Apply a link error and return its notice source and any dock rollback.
+    pub fn link_error(
+        &mut self,
+        error: &UserError,
+        source: Source,
+    ) -> (Source, Option<DockPosition>) {
+        self.accounts.error(error);
+        let (field, restore) = if source == Source::Account {
+            self.error_and_restore_dock(error.clone())
+        } else {
+            (self.error(error.clone()), None)
+        };
+        let source = match error.key() {
+            ErrorKey::SettingsRefused | ErrorKey::ConfigUnreadable | ErrorKey::HoldToTalkOff => {
+                Source::Settings(field)
+            }
+            _ => source,
+        };
+        (source, restore)
     }
 
     pub fn error(&mut self, error: UserError) -> Option<Field> {
