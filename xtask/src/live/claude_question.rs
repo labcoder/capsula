@@ -266,7 +266,7 @@ fn run(out: &mut impl Write) -> Result<(), Stopped> {
     let places = Places::find().at(Step::Start)?;
     let brain = Brain::start(0, asked).at(Step::Start)?;
     let pid = brain.child.id();
-    let Ok(mut client) = Client::connect() else {
+    let Ok(mut client) = Client::connect(pid) else {
         let error = joined(anyhow!("the brain didn't accept the client"), brain.stop());
         return Err(Stopped {
             step: Step::Start,

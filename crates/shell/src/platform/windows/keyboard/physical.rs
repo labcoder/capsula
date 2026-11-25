@@ -9,11 +9,12 @@ const ALT: u16 = 0x38;
 struct Device {
     handle: Option<HANDLE>,
     down: [u64; 8],
+    needs_break: [bool; 2],
 }
 
 impl Device {
     fn neutral(&self) -> bool {
-        self.down == [0; 8]
+        self.down == [0; 8] && self.needs_break == [false; 2]
     }
 
     fn held(&self, slot: u16) -> bool {
@@ -35,12 +36,61 @@ impl Device {
 #[derive(Default)]
 pub(super) struct Physical {
     devices: [Device; 2],
+    excess: [Excess; 2],
+}
+
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
+enum Excess {
+    #[default]
+    None,
+    Held(HANDLE),
+    Saturated,
+}
+
+impl Excess {
+    fn hold(&mut self, handle: HANDLE) {
+        match *self {
+            Self::None => *self = Self::Held(handle),
+            Self::Held(owner) if owner != handle => *self = Self::Saturated,
+            Self::Held(_) | Self::Saturated => {}
+        }
+    }
+
+    fn release(&mut self, handle: HANDLE) {
+        if *self == Self::Held(handle) {
+            *self = Self::None;
+        }
+    }
 }
 
 impl Physical {
-    pub(super) fn lose(&mut self) -> Event {
-        *self = Self::default();
+    pub(super) fn reset(&mut self) -> Event {
+        for device in &mut self.devices {
+            for (index, slot) in [CONTROL, ALT].into_iter().enumerate() {
+                device.needs_break[index] |= device.held(slot);
+            }
+        }
         Event::Reset
+    }
+
+    pub(super) fn lose(&mut self) -> Event {
+        let reset = self.reset();
+        for device in &mut self.devices {
+            device.down = [0; 8];
+        }
+        reset
+    }
+
+    pub(super) fn device_changed(&mut self, removed: Option<HANDLE>) -> Event {
+        if let Some(removed) = removed {
+            for excess in &mut self.excess {
+                excess.release(removed);
+            }
+            if let Some(device) = self.devices.iter_mut().find(|d| d.handle == Some(removed)) {
+                *device = Device::default();
+            }
+        }
+        self.reset()
     }
 
     pub(super) fn key(
@@ -48,30 +98,77 @@ impl Physical {
         handle: HANDLE,
         slot: u16,
         event: Event,
-    ) -> (Event, Option<PhysicalKey>, bool) {
-        let reset = |this: &mut Self| (this.lose(), None, false);
+        queued_press: Option<u64>,
+        covered_after: Option<u64>,
+    ) -> Option<(Event, Option<PhysicalKey>, bool)> {
+        let reset = |this: &mut Self| Some((this.lose(), None, false));
         let Event::Key { key, edge } = event else {
             return reset(self);
         };
         if handle == INVALID_HANDLE_VALUE {
             return reset(self);
         }
+        let modifier = match key {
+            Key::LeftControl => Some(0),
+            Key::LeftAlt => Some(1),
+            _ => None,
+        };
+        if let (Some(index), Edge::Up) = (modifier, edge) {
+            self.excess[index].release(handle);
+        }
         let handle = Some(handle);
-        let Some(bank) = self
+        let known = self.devices.iter().position(|d| d.handle == handle);
+        let free = self
             .devices
             .iter()
-            .position(|d| d.handle == handle)
+            .position(|device| device.handle.is_none());
+        if known.or(free).is_none() && modifier.is_none() && edge == Edge::Up {
+            return None;
+        }
+        let Some(bank) = known
+            .or(free)
             .or_else(|| self.devices.iter().position(Device::neutral))
         else {
-            return reset(self);
+            let reset = self.lose();
+            if let (Some(index), Edge::Down, Some(owner)) = (modifier, edge, handle) {
+                if let Some(device) = self.devices.iter_mut().find(|device| device.neutral()) {
+                    *device = Device {
+                        handle,
+                        ..Device::default()
+                    };
+                    device.needs_break[index] = true;
+                } else {
+                    self.excess[index].hold(owner);
+                }
+            }
+            return Some((reset, None, false));
         };
         let other_held = self.devices[1 - bank].held(slot);
         let device = &mut self.devices[bank];
-        device.handle = handle;
+        if device.handle != handle {
+            *device = Device {
+                handle,
+                ..Device::default()
+            };
+        }
         let repeated = device.apply(slot, edge);
-        let modifier = matches!(key, Key::LeftControl | Key::LeftAlt);
-        if modifier && other_held && (edge == Edge::Down || !repeated) {
+        if let (Some(index), Edge::Up) = (modifier, edge) {
+            device.needs_break[index] = false;
+        }
+        if modifier.is_some() && other_held && (edge == Edge::Down || !repeated) {
             return reset(self);
+        }
+        if let Some(index) = modifier {
+            if edge == Edge::Down
+                && (self.excess[index] != Excess::None
+                    || covered_after
+                        .is_some_and(|boundary| queued_press.is_none_or(|at| at <= boundary)))
+            {
+                device.needs_break[index] = true;
+            }
+            if edge == Edge::Down && device.needs_break[index] {
+                return Some((event, None, true));
+            }
         }
         let id = identity(bank, slot);
         let key = match key {
@@ -79,18 +176,20 @@ impl Physical {
             Key::Other(_) => Key::Other(id),
             _ => key,
         };
-        (
+        Some((
             Event::Key { key, edge },
-            modifier.then_some(id),
-            modifier && repeated && edge == Edge::Down,
-        )
+            modifier.map(|_| id),
+            modifier.is_some() && repeated && edge == Edge::Down,
+        ))
     }
 
     pub(super) fn held(&self) -> TalkHeld {
         let down = |slot| {
             self.devices
                 .iter()
-                .position(|device| device.held(slot))
+                .position(|device| {
+                    device.held(slot) && !device.needs_break[usize::from(slot == ALT)]
+                })
                 .map(|bank| identity(bank, slot))
         };
         TalkHeld([down(CONTROL), down(ALT)])

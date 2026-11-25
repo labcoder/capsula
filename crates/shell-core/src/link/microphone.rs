@@ -64,7 +64,7 @@ impl Shared {
             && let Some(stop) = pending.as_mut()
             && !stop.queue(&outbox.control, outbox.generation)
         {
-            outbox.pipe.abort();
+            self.abort_connection(outbox.generation, &outbox.pipe);
         }
     }
 
@@ -168,7 +168,8 @@ impl LinkHandle {
             && !outbox.closing.load(Ordering::Acquire)
             && !stop.queue(&outbox.control, outbox.generation)
         {
-            outbox.pipe.abort();
+            self.shared
+                .abort_connection(outbox.generation, &outbox.pipe);
         }
         Some(true)
     }

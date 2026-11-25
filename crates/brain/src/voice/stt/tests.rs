@@ -36,7 +36,7 @@ fn admitted_use_is_current_ready_not_busy_and_refreshes_the_existing_idle_clock(
             .unwrap();
     });
     let admitted_at = Instant::now();
-    assert_eq!(harness.handle.admit_use(), Ok(1));
+    assert_eq!(harness.handle.admit_use().map(|(ask, _)| ask), Ok(1));
     assert!(harness.handle.control.lock().idle_since >= admitted_at);
     assert!(harness.handle.current_use(1));
     assert!(!harness.handle.current_use(2));
@@ -83,7 +83,7 @@ fn admitted_use_is_current_ready_not_busy_and_refreshes_the_existing_idle_clock(
         .update(|state| state.decode_cut = None);
     let audio = Duration::from_millis(u64::from(MAX_HOLD_CHUNKS) * 20);
     let entire_hold = audio
-        + Duration::from_millis(u64::from(HOLD_START_TIMEOUT_MS + HOLD_DRAIN_TIMEOUT_MS))
+        + Duration::from_millis(HOLD_START_TIMEOUT_MS + HOLD_DRAIN_TIMEOUT_MS)
         + crate::speech::DEADLINES.decode
         + audio * crate::speech::DEADLINES.decode_per_mille / 1000;
     assert!(entire_hold < Duration::from_mins(15));
