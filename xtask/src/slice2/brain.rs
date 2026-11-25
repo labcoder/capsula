@@ -41,6 +41,7 @@ impl Case {
     /// this program.
     pub(super) fn new(root: &Path, name: &str, script: &str) -> Result<Self> {
         let root = root.join(name);
+        fs::create_dir(&root).with_context(|| format!("{name}'s folder must be new"))?;
         let me = std::env::current_exe()?;
         let case = Self {
             bin: me

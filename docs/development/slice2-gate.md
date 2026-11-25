@@ -48,9 +48,11 @@ flowchart LR
 - It prints a table of verdicts and numbers and writes it to `report.md` in the gate's folder.
   `slice2-gate <words>` runs only the items whose names contain them.
 - `slice2-gate --inner` is internal: it is how the copy runs the items, and it starts brains
-  without the run lock, the process check or the cleanup. The outer gate passes it the run's root,
-  and it uses that root only once it holds every folder from the volume root down to it, the same
-  check the outer run made. Never run it by hand.
+  without the run lock, the process check or the cleanup. The outer gate passes it the run's root
+  and run id. Before it writes anything, the copy refuses a brain beside it that isn't a Gate image,
+  and admits the root only when it sits directly in `kumochi-gate-runs`, every folder from the
+  volume root down to it holds, its `gate-run` file carries that run id, and a gate run holds the
+  lock. Each item's folder is created new, never reused. Never run it by hand.
 
 ## The items
 
