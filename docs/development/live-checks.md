@@ -607,7 +607,7 @@ Runs Anthropic API key chat end to end on two keys the owner enters, A and B. Un
 cargo run --release --package xtask --features kumochi-protocol/gate-identity -- live anthropic-key
 ```
 
-Run it only with the owner present and their approval for that run, at a head where the key row and the key route are on. It builds debug gate images of the shell and the brain, because the transport's budget variables bind only in a debug build. All three launches share one folder set under `target/live/anthropic-key/<time>/key`, and the default model is set to `claude-haiku-5-5` at low effort.
+Run it only with the owner present and their approval for that run, at a head where the key row and the key route are on. It builds debug gate images of the shell and the brain, because the transport's budget variables bind only in a debug build. All three launches share one folder set, `key`, under the gate run's root `anthropic-key-<time>` (see [the gate identity](gate-identity.md)), and the default model is set to `claude-haiku-5-5` at low effort.
 
 | Launch | Allowance | Steps |
 | --- | --- | --- |

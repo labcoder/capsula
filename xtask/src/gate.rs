@@ -226,16 +226,19 @@ fn retained_run(
     body: impl FnOnce(&Path, &Run) -> Result<()>,
 ) -> Result<()> {
     let (transcript, output) = retained_output(args)?;
-    let run = Run::begin(output.join("data"))?;
-    let result = fs::write(
-        output.join("transcript.txt"),
-        format!(
-            "path={}\nstdout_and_stderr_verified=true\ncreate_new_redirection_required=true\n",
-            transcript.display()
-        ),
-    )
-    .map_err(anyhow::Error::from)
-    .and_then(|()| body(&output, &run));
+    let run = Run::begin("gate")?;
+    let result = fs::create_dir(&output)
+        .and_then(|()| {
+            fs::write(
+                output.join("transcript.txt"),
+                format!(
+                    "path={}\nstdout_and_stderr_verified=true\ncreate_new_redirection_required=true\n",
+                    transcript.display()
+                ),
+            )
+        })
+        .map_err(anyhow::Error::from)
+        .and_then(|()| body(&output, &run));
     finish(run, result)
 }
 

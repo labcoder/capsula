@@ -85,7 +85,8 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     match args.next() {
         Some(inner) if inner == INNER => {
             let folder = args.next().context("the inner gate needs its folder")?;
-            gate(Path::new(&folder), args.next().as_deref())
+            let root = args.next().context("the inner gate needs its run's root")?;
+            gate(Path::new(&folder), Path::new(&root), args.next().as_deref())
         }
         only => {
             ensure!(
@@ -108,7 +109,7 @@ fn prepare(only: Option<&str>) -> Result<()> {
         .context("the profile folder has a parent")?
         .join("slice2-gate")
         .join(stamp.to_string());
-    let run = Run::begin(folder.join(brain::DATA))?;
+    let run = Run::begin("slice2")?;
     let ran = (|| {
         let (debug, took) = hermetic::build(&["kumochi-brain"], Profile::Debug, None)?;
         println!("build_seconds={:.1}", took.as_secs_f64());
@@ -118,7 +119,10 @@ fn prepare(only: Option<&str>) -> Result<()> {
         fs::copy(&me, bin.join(SHELL_EXE)).context("copying the client")?;
         println!("slice 2 gate in {}", folder.display());
         let mut gate = Command::new(bin.join(SHELL_EXE));
-        gate.args(["slice2-gate", INNER]).arg(&folder).args(only);
+        gate.args(["slice2-gate", INNER])
+            .arg(&folder)
+            .arg(run.root())
+            .args(only);
         let ran = live::run_bounded(gate, GATE_LIMIT, "the gate")?;
         ensure!(ran.success(), "the gate failed");
         Ok(())
@@ -142,7 +146,10 @@ fn end_leftovers(brains: Vec<Child>) -> Vec<String> {
         .collect()
 }
 
-fn gate(folder: &Path, only: Option<&str>) -> Result<()> {
+/// Runs the items with their folders under `root`, the run's root the outer gate admitted, once
+/// its chain holds; the report goes to `folder`.
+fn gate(folder: &Path, root: &Path, only: Option<&str>) -> Result<()> {
+    let _held = kumochi_storage::hold_chain(root).context("holding the run's root")?;
     let items: [(&'static str, Item); 7] = [
         ("Esc against a non-reading shell", stop::not_reading),
         ("Esc against a saturated data writer", stop::saturated),
@@ -161,7 +168,7 @@ fn gate(folder: &Path, only: Option<&str>) -> Result<()> {
             continue;
         }
         println!("running: {name}");
-        let row = item(folder).unwrap_or_else(|error| Row {
+        let row = item(root).unwrap_or_else(|error| Row {
             item: name,
             verdict: Verdict::Fail,
             detail: format!("{error:#}"),
@@ -289,6 +296,7 @@ mod tests {
         let folder = crate::scratch::dir("slice2-refused");
         let inner = [
             INNER,
+            folder.to_str().expect("Unicode"),
             folder.to_str().expect("Unicode"),
             "no item is named this",
         ];

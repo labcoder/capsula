@@ -24,8 +24,8 @@ flowchart LR
   copies the brain and itself, renamed `kumochi.exe`, into a fresh folder and runs the scripted
   client from that copy. The client reads the instance capability from Credential Manager and
   sends `Hello` on both pipes, as the shell does.
-- Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%` folders, under the gate folder's `data`,
-  with Claude Code off, and its own fixture script (`KUMOCHI_FIXTURE`, debug builds only), so items
+- Each item gets its own `%LOCALAPPDATA%` and `%APPDATA%` folders, under the gate run's root
+  `slice2-<time>` (see [the gate identity](gate-identity.md)), with Claude Code off, and its own fixture script (`KUMOCHI_FIXTURE`, debug builds only), so items
   never share a store or settings. A brain still names its pipes, its instance capability, its
   Credential Manager entries and its Claude Code lane folder by identity rather than by the
   environment, which is why the gate runs as `Kumochi Gate`, one gate run at a time, and deletes
@@ -47,7 +47,9 @@ flowchart LR
 - It prints a table of verdicts and numbers and writes it to `report.md` in the gate's folder.
   `slice2-gate <words>` runs only the items whose names contain them.
 - `slice2-gate --inner` is internal: it is how the copy runs the items, and it starts brains
-  without the run lock, the process check or the cleanup. Never run it by hand.
+  without the run lock, the process check or the cleanup. The outer gate passes it the run's root,
+  and it uses that root only once it holds every folder from the volume root down to it, the same
+  check the outer run made. Never run it by hand.
 
 ## The items
 

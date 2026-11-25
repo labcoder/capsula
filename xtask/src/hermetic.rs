@@ -8,7 +8,7 @@ use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
@@ -258,6 +258,8 @@ pub(crate) fn gate_file(name: &str) -> Result<PathBuf> {
 #[derive(Debug)]
 pub(crate) struct Run {
     root: PathBuf,
+    /// The chain from the volume root down to the run root, held until the run ends.
+    _held: Vec<File>,
     /// Held until the run ends, so another run fails to take it; it names this run's root until
     /// the run has cleaned up, so the next run can clean up after an interrupted one.
     alone: File,
@@ -268,8 +270,9 @@ pub(crate) struct Run {
 impl Run {
     /// Refuses unless this is the gate identity, no other gate run is on and no product process
     /// runs; puts this process in a kill-on-close job, so nothing it starts outlives it or breaks
-    /// away from it; cleans up after an interrupted run; and creates `root`, which must be new.
-    pub(crate) fn begin(root: PathBuf) -> Result<Self> {
+    /// away from it; cleans up after an interrupted run; and creates the new root
+    /// `<real LocalAppData>\kumochi-gate-runs\<label>-<stamp>` under a held chain.
+    pub(crate) fn begin(label: &str) -> Result<Self> {
         require_gate(ProductIdentity::ACTIVE)?;
         let lock = gate_file("run.lock")?;
         let mut alone = take(&lock)?;
@@ -277,8 +280,21 @@ impl Run {
         let job = platform::Job::kill_on_close()
             .and_then(platform::Job::hold_self)
             .context("putting the run in a job")?;
-        claim(&mut alone, &lock, &root, &mut CredentialManager)?;
-        Ok(Self { root, alone, job })
+        let (runs, mut held) = runs_folder(&platform::local_app_data()?)?;
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = runs.join(format!("{label}-{stamp}"));
+        held.push(claim(&mut alone, &lock, &root, &mut CredentialManager)?);
+        Ok(Self {
+            root,
+            _held: held,
+            alone,
+            job,
+        })
+    }
+
+    /// The run's root, which holds its launch folders.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     /// The job this run holds itself and everything it starts in.
@@ -363,6 +379,16 @@ fn end(
     crate::session::combine([result, entries, released])
 }
 
+/// Holds the chain of `anchor`, the real `LocalAppData`, and admits the gate's runs folder in it:
+/// an existing one is used only if it passes the checks, and a link there is refused.
+fn runs_folder(anchor: &Path) -> Result<(PathBuf, Vec<File>)> {
+    let mut held =
+        kumochi_storage::hold_chain(anchor).context("holding the local application data folder")?;
+    let runs = anchor.join(format!("{}-runs", GATE.object_prefix));
+    held.push(kumochi_storage::owner_only_dir(&runs).context("admitting the gate's runs folder")?);
+    Ok((runs, held))
+}
+
 /// Takes the gate-run lock at `path`, or refuses while another run holds it.
 fn take(path: &Path) -> Result<File> {
     let lock = OpenOptions::new()
@@ -380,9 +406,9 @@ fn take(path: &Path) -> Result<File> {
 }
 
 /// Cleans up the earlier run the held `lock` (at `path`) names, if it didn't finish, then creates
-/// `root`, which must be new, so that every folder under it is this run's; marks it with a new run
-/// id; and names both in the lock.
-fn claim(lock: &mut File, path: &Path, root: &Path, store: &mut impl Credentials) -> Result<()> {
+/// `root` under its held parent, which must be new, so that every folder under it is this run's;
+/// marks it with a new run id; names both in the lock; and returns the root's checked handle.
+fn claim(lock: &mut File, path: &Path, root: &Path, store: &mut impl Credentials) -> Result<File> {
     ensure!(
         !root.try_exists()?,
         "{} already exists; a gate run takes a new folder",
@@ -410,16 +436,13 @@ fn claim(lock: &mut File, path: &Path, root: &Path, store: &mut impl Credentials
         })?;
         lock.set_len(0)?;
     }
-    if let Some(parent) = root.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::create_dir(root)?;
+    let held = kumochi_storage::new_owner_only_dir(root).context("creating the run's folder")?;
     let id = run_id();
     fs::write(root.join(MARKER), &id)?;
     lock.set_len(0)?;
     lock.rewind()?;
     lock.write_all(format!("{LOCK_LINE}{id} {named}\n").as_bytes())?;
-    Ok(())
+    Ok(held)
 }
 
 /// The folder a gate run's lock `line` names, only when the line is whole and that folder holds
@@ -624,11 +647,11 @@ mod tests {
 
     pub(crate) fn assert_claim_after_refusal(dir: &Path, body: impl FnOnce(&Path) -> Result<()>) {
         let path = dir.join("run.lock");
-        let first = dir.join("first/data");
+        let first = dir.join("first");
         let mut lock = take(&path).unwrap();
         let mut store = Fake(BTreeSet::new());
         claim(&mut lock, &path, &first, &mut store).unwrap();
-        let error = body(first.parent().unwrap()).expect_err("the first run must be refused");
+        let error = body(&first).expect_err("the first run must be refused");
         let expected = format!("{error:#}");
         let error = end(&first, &lock, Err(error), &mut store, Keep::Nothing).unwrap_err();
         assert_eq!(error.to_string(), expected);
@@ -639,7 +662,7 @@ mod tests {
         drop(lock);
 
         let mut lock = take(&path).unwrap();
-        let next = dir.join("next/data");
+        let next = dir.join("next");
         claim(&mut lock, &path, &next, &mut store).expect("next gate run can claim and recover");
         assert!(!first.exists());
         end(&next, &lock, Ok(()), &mut store, Keep::Nothing).unwrap();
@@ -669,11 +692,30 @@ mod tests {
             assert_eq!(format!("{error:#}"), REFUSAL);
         }
         require_gate(ProductIdentity::GATE).expect("the gate identity runs");
-        let dir = scratch::dir("gate-refused");
-        let root = dir.join("run");
-        let error = Run::begin(root.clone()).expect_err("a test build is never the gate identity");
+        let error = Run::begin("refused").expect_err("a test build is never the gate identity");
         assert_eq!(format!("{error:#}"), REFUSAL);
-        assert!(!root.exists());
+    }
+
+    #[test]
+    fn the_runs_folder_is_admitted_once_made_and_refused_as_a_link() {
+        let anchor = scratch::dir("gate-runs");
+        let (runs, held) = runs_folder(&anchor).expect("a new runs folder");
+        assert_eq!(runs, anchor.join("kumochi-gate-runs"));
+        drop(held);
+        runs_folder(&anchor).expect("the same folder, admitted again");
+
+        let anchor = scratch::dir("gate-runs-linked");
+        let target = scratch::dir("gate-runs-target");
+        let link = anchor.join("kumochi-gate-runs");
+        fs::create_dir(&link).expect("an empty folder");
+        kumochi_storage::set_junction(&link, &target).expect("a junction");
+        let error = runs_folder(&anchor).expect_err("a linked runs folder");
+        assert_eq!(
+            format!("{error:#}"),
+            "admitting the gate's runs folder: a path component is a reparse point or resolves \
+             elsewhere"
+        );
+        assert_eq!(fs::read_dir(&target).expect("target").count(), 0);
     }
 
     #[test]

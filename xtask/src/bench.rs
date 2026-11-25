@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::thread::sleep;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use kumochi_protocol::constants::SHELL_EXE;
@@ -182,14 +182,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         }
         Images::Build(baseline) => (baseline, None),
     };
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let root = std::env::current_exe()?
-        .parent()
-        .and_then(Path::parent)
-        .context("xtask is not in a Cargo profile folder")?
-        .join("bench")
-        .join(stamp.to_string());
-    let run = Run::begin(root)?;
+    let run = Run::begin("bench")?;
     let measured = (|| {
         let folders = run.folders("app")?;
         let paints = paint_check.then(|| folders.local.with_file_name("dock-paints.txt"));

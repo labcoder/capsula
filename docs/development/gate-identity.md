@@ -141,7 +141,15 @@ flowchart TD
    - deletes `capability-<session>.Kumochi Gate instance` by its exact name;
    - deletes `Kumochi Gate` in the system's Local AppData, which holds the Claude Code lane's lock.
 
-A run creates its root folder, which must not exist yet, writes a new random run id into its
+A run creates its root folder, `<task>-<time>`, in `kumochi-gate-runs` in the system's Local
+AppData, beside the lock. It first holds every folder from the volume root down to Local AppData
+and admits `kumochi-gate-runs` under them: it is created owner-only when missing, and an existing
+one that is a link or that someone else may change is refused, never followed. The root itself is
+created owner-only and exclusively, so a folder already there is refused. The run keeps these
+handles until it ends, and every folder and file it writes is under that root. A run that keeps a
+transcript (`cold-start`, `gate-session`, `hover-gate`, `measure-gate`, `draw-timing`) keeps its evidence in the
+transcript's own new folder, and only the launches' data under the root. The run writes a new
+random run id into the root's
 `gate-run` file, and names both in the lock file, as one line ending in a newline, until it has
 cleaned up. If a run is interrupted (Ctrl-C, a killed xtask, a panic, or one of its processes
 still running after cleanup ended it), the next gate run cleans up that folder as above before it starts, so

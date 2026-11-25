@@ -19,12 +19,11 @@ use std::io::{BufReader, ErrorKind, Write as _};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
-    BRAIN_EXE, LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV, LIVE_RUNS_DIR,
-    PIPE_TAP_ENV, SHELL_EXE,
+    BRAIN_EXE, LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV, PIPE_TAP_ENV, SHELL_EXE,
 };
 use kumochi_protocol::frame::{Pipe, decode};
 use kumochi_protocol::message::{ConnectionsView, ControlToShell, KeyView, Phase, RunId, ThreadId};
@@ -197,13 +196,7 @@ pub(super) fn quiet() -> Result<()> {
 }
 
 fn run_plan(plan: &[Launch]) -> Result<()> {
-    let live = std::env::current_exe()?
-        .parent()
-        .and_then(Path::parent)
-        .context("xtask is not in a Cargo profile folder")?
-        .join(LIVE_RUNS_DIR);
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let run = Run::begin(live.join("anthropic-key").join(stamp.to_string()))?;
+    let run = Run::begin("anthropic-key")?;
     let checked = (|| {
         let (debug, took) =
             hermetic::build(&["kumochi-shell", "kumochi-brain"], Profile::Debug, None)?;

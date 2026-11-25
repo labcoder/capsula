@@ -26,9 +26,6 @@ pub(super) fn leftovers() -> Vec<Child> {
     std::mem::take(&mut *LEFTOVERS.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
-/// The folder under the gate's folder that holds the items' folders, which the run deletes.
-pub(super) const DATA: &str = "data";
-
 /// One gate item's folder: its fixture script, and the `%LOCALAPPDATA%` and `%APPDATA%` its
 /// brains share.
 #[derive(Debug)]
@@ -40,10 +37,16 @@ pub(super) struct Case {
 }
 
 impl Case {
-    pub(super) fn new(folder: &Path, name: &str, script: &str) -> Result<Self> {
-        let root = folder.join(DATA).join(name);
+    /// The item `name`'s folder under the run's `root`, playing `script` with the brain beside
+    /// this program.
+    pub(super) fn new(root: &Path, name: &str, script: &str) -> Result<Self> {
+        let root = root.join(name);
+        let me = std::env::current_exe()?;
         let case = Self {
-            bin: folder.join("bin"),
+            bin: me
+                .parent()
+                .context("the gate runs from its folder")?
+                .to_owned(),
             fixture: root.join("fixture.txt"),
             folders: Folders::create(&root)?,
         };

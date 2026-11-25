@@ -47,11 +47,12 @@ pub(super) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     retained_run(
         std::iter::once(transcript),
         Run::finish_discard,
-        |output, _| {
-            let (folders, shell, stamps) = if release_mode {
-                prepare(output, |bin| pins.stage_into(&images, bin))?
+        |output, run| {
+            let folders = run.folders("app")?;
+            let (shell, stamps) = if release_mode {
+                prepare(&folders, |bin| pins.stage_into(&images, bin))?
             } else {
-                prepare(output, |bin| {
+                prepare(&folders, |bin| {
                     stage_debug(&images, bin, [&pins.shell_sha256, &pins.brain_sha256])
                 })?
             };
@@ -72,19 +73,23 @@ pub(super) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     )
 }
 
+/// Sets up the launch `folders` for the draw replay and stages its images; returns the shell and
+/// the stamps file.
 fn prepare(
-    output: &Path,
+    folders: &Folders,
     stage: impl FnOnce(&Path) -> Result<()>,
-) -> Result<(Folders, PathBuf, PathBuf)> {
-    let app = output.join("data/app");
-    let folders = Folders::create(&app)?;
+) -> Result<(PathBuf, PathBuf)> {
     folders.choose_model("ChatGpt", "draw-replay")?;
-    let launch = app.join(LIVE_RUNS_DIR).join("1");
+    let launch = folders
+        .local
+        .parent()
+        .context("a launch folder has a parent")?
+        .join(LIVE_RUNS_DIR)
+        .join("1");
     let bin = launch.join(LIVE_RUN_BIN_DIR);
     fs::create_dir_all(&launch)?;
     stage(&bin)?;
     Ok((
-        folders,
         bin.join(SHELL_EXE),
         launch.join(LIVE_CHATGPT_TEXT_STAMPS_FILE),
     ))
@@ -182,10 +187,10 @@ fn release_draw_stages_the_pinned_pair_in_the_owned_live_layout() {
         .into_iter()
         .map(|name| gate_capture::file_sha256(&images.join(name)).unwrap());
     let pins = Prebuilt::parse(&mut hashes).unwrap();
-    let (folders, staged, stamps) = prepare(&dir, |bin| pins.stage_into(&images, bin)).unwrap();
-    let app = dir.join("data/app");
+    let app = dir.join("app");
+    let folders = Folders::create(&app).unwrap();
+    let (staged, stamps) = prepare(&folders, |bin| pins.stage_into(&images, bin)).unwrap();
     let launch = app.join(LIVE_RUNS_DIR).join("1");
-    assert_eq!(folders.local, app.join("local"));
     assert_eq!(staged, launch.join(LIVE_RUN_BIN_DIR).join(SHELL_EXE));
     assert_eq!(stamps, launch.join(LIVE_CHATGPT_TEXT_STAMPS_FILE));
     assert!(!stamps.exists());
@@ -210,7 +215,8 @@ fn draw_trial_a_broken_or_missing_pin_does_not_poison_the_next_claim() {
             fs::write(images.join(BRAIN_EXE), b"fake brain").unwrap();
         }
         hermetic::assert_claim_after_refusal(&dir, |output| {
-            let error = prepare(output, |bin| {
+            let folders = Folders::create(&output.join("app")).unwrap();
+            let error = prepare(&folders, |bin| {
                 stage_debug(&images, bin, [&shell_pin, &"0".repeat(64)])
             })
             .unwrap_err();
@@ -222,7 +228,7 @@ fn draw_trial_a_broken_or_missing_pin_does_not_poison_the_next_claim() {
                     format!("prebuilt {BRAIN_EXE} SHA-256 does not match its pin; no launch")
                 }
             );
-            let local = output.join("data/app/local");
+            let local = output.join("app/local");
             assert!(
                 local.is_dir(),
                 "pin failure leaves a cleanable launch folder"
