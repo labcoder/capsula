@@ -12,7 +12,7 @@ use crate::platform::credential::CredentialStore;
 
 pub(super) mod exchange;
 pub(super) mod promotion;
-pub(crate) use promotion::{CutoffRequest, HistoryBinding, HistoryLink, Work};
+pub(crate) use promotion::{CutoffRequest, HistoryBinding, HistoryLink, Proof, Work};
 
 const ARMED: u8 = 0;
 const DISPATCHED: u8 = 1;

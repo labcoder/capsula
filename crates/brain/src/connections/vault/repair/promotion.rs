@@ -37,6 +37,15 @@ pub(in crate::connections) struct VerifiedReplacement {
     window: Range<u64>,
 }
 
+/// What a sign-in's history may be read as: the whole of it, only up to its recovered cutoff,
+/// or none of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Proof {
+    Ordinary,
+    Recovered(Boundary),
+    Unproved,
+}
+
 type Queue = Arc<dyn Fn(CutoffRequest) -> bool + Send + Sync>;
 
 /// Where a [`HistoryLink`] queues: nowhere yet, the writer, or nowhere ever again.
@@ -426,6 +435,24 @@ impl<S: CredentialStore> Vault<S> {
         match self.history.check(tag) {
             Ok(boundary) if boundary.bounds() == bounds => Ok(boundary),
             _ => Err(VaultError::Fenced),
+        }
+    }
+
+    /// What `connection`'s sign-in is: ordinary only at the ordinary schema, recovered only as
+    /// the established replacement under exactly that connection while it isn't signing out,
+    /// and unproved otherwise, a repaired account no row explains included.
+    pub(crate) fn proof(&self, connection: u64) -> Proof {
+        match self.authority.ordinary_account() {
+            Ok(true) => return Proof::Ordinary,
+            Ok(false) => {}
+            Err(_) => return Proof::Unproved,
+        }
+        match (
+            self.authority.recovered_signing_out(),
+            self.established_repair_context(),
+        ) {
+            (Ok(false), Ok(cut)) if cut.tag() == connection => Proof::Recovered(cut),
+            _ => Proof::Unproved,
         }
     }
 }

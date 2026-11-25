@@ -1026,3 +1026,63 @@ fn a_pending_link_queues_only_while_bound_to_its_first_writer() {
         assert_eq!((heard(&first), heard(&second)), (2, 0));
     }
 }
+
+/// A sign-in is recovered only as the exact established replacement under its own connection
+/// while it isn't signing out. The ordinary schema is ordinary; every other repaired state,
+/// a fenced predecessor whose admission was cancelled included, proves nothing.
+#[tokio::test]
+async fn a_sign_in_is_recovered_only_as_the_exact_established_replacement() {
+    use crate::connections::marker::{Disposition, Phase, SignOut};
+    use crate::connections::vault::Proof;
+
+    let (_scratch, path, service, store) = setup("repair-proof");
+    let history = path.with_file_name(kumochi_protocol::constants::STORE_FILE);
+    let owner = HistoryOwner::open(&history);
+    let mut vault = bound(&store, &service, &path, &owner);
+    assert_eq!(vault.proof(7), Proof::Ordinary, "the ordinary schema");
+    let (_, cancelled) = admitted(&mut vault, &store);
+    assert_eq!(vault.proof(7), Proof::Unproved, "an admitted repair");
+    vault.cancel_repair_admission(&cancelled).unwrap();
+    assert_eq!(vault.proof(7), Proof::Unproved, "a fenced predecessor");
+    drop(cancelled);
+    drop(vault);
+
+    let (_scratch, path, service, store) = setup("repair-proof-established");
+    let history = path.with_file_name(kumochi_protocol::constants::STORE_FILE);
+    let owner = HistoryOwner::open(&history);
+    let mut vault = bound(&store, &service, &path, &owner);
+    let (attempt, verified) = bound_replacement(&mut vault, &store).await;
+    owner.run(plant_history);
+    let pending = vault
+        .bind_repair_replacement(&attempt, verified, &FixedClock(NOW))
+        .unwrap();
+    let (_, tag) = pending.binding();
+    assert_eq!(vault.proof(tag), Proof::Unproved, "bound, no cutoff yet");
+    let receipt = vault.establish_history_cutoff(pending).unwrap();
+    let cut = owner.check(tag).unwrap();
+    assert_eq!(
+        vault.proof(tag),
+        Proof::Unproved,
+        "cutoff written, not established"
+    );
+    vault.establish_repair_context(receipt).unwrap();
+    assert_eq!(vault.proof(tag), Proof::Recovered(cut));
+    assert_eq!(vault.proof(tag + 1), Proof::Unproved, "another connection");
+    raw(&path)
+        .execute("UPDATE chatgpt_repair SET recovered_sign_out=1", [])
+        .unwrap();
+    assert_eq!(vault.proof(tag), Proof::Unproved, "its row is signing out");
+    raw(&path)
+        .execute("UPDATE chatgpt_repair SET recovered_sign_out=0", [])
+        .unwrap();
+    assert_eq!(vault.proof(tag), Proof::Recovered(cut));
+    let mut marker = vault.authority.marker().unwrap();
+    marker.sign_out = Some(SignOut {
+        disposition: Disposition::Keep,
+        phase: Phase::Revoking,
+    });
+    vault.authority.set_marker(marker).unwrap();
+    assert_eq!(vault.proof(tag), Proof::Unproved, "a sign-out is pending");
+    drop(attempt);
+    drop(vault);
+}

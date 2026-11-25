@@ -122,6 +122,11 @@ async fn a_recovered_saved_sign_in_loads_models_only_on_explicit_request() {
             ..
         })],
     ));
+    let proof = tokio::time::timeout(Duration::from_secs(5), accounts.next())
+        .await
+        .unwrap();
+    assert!(matches!(proof, Event::Proof { .. }));
+    assert!(accounts.handle(proof).is_empty());
     accounts.handle(Input::Connected);
     assert!(
         accounts.catalog.read.is_none(),

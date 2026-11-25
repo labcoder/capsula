@@ -51,7 +51,6 @@ use tokio::time::Instant;
 use crate::config::Config;
 use crate::connections::account::Input as AccountInput;
 use crate::context::{ConnectionTag, Origin, RunSnapshot};
-#[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
 use crate::coordinator::{Availability, Ready};
 use crate::coordinator::{
     BuildContext, BuildKey, Coordinator, Effect, Input, JobKey, JobKind, LeaseId, SendKey, StoreOp,
@@ -376,7 +375,7 @@ impl Brain {
         coordinator.configure_drawing(config.drawing_tuning());
         let recovery_clears = coordinator.restore_drawings(drawing_scenes);
         let store = StoreThread::spawn(store, profile, inputs_tx.clone(), schedule)?;
-        account.history.bind(&store.history_link());
+        account.bind_history(&store.history_link());
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         let mut brain = Self {
             crashes: crate::relaunch::Crashes::default(),
@@ -450,22 +449,45 @@ impl Brain {
     }
 
     /// Tells the coordinator whether runs can be answered now; the same answer again changes
-    /// nothing.
+    /// nothing. `ChatGPT` is ready only once its sign-in is proved: an ordinary one plainly, a
+    /// recovered one with its cutoff. Until then a turn that arrives reads no history for it.
     fn availability_changed(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
         #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
-        let now = self
-            .fixture
-            .clone()
-            .map_or_else(|| self.account.availability(), Availability::Ready);
+        let fixture = self.fixture.clone();
         #[cfg(not(any(test, debug_assertions, all(windows, feature = "gate-draw-replay"))))]
-        let now = self.account.availability();
-        let input = Input::Engines(kumochi_protocol::message::ConnectionKind::ChatGpt, now);
+        let fixture: Option<Ready> = None;
+        let chatgpt = kumochi_protocol::message::ConnectionKind::ChatGpt;
+        let input = if let Some(ready) = fixture {
+            Input::Engines(chatgpt, Availability::Ready(ready))
+        } else {
+            match (self.account.availability(), self.account.recovered()) {
+                (Availability::Ready(ready), Some(boundary)) => {
+                    Input::RecoveredChatGpt { ready, boundary }
+                }
+                (now, _) => Input::Engines(chatgpt, now),
+            }
+        };
         self.hold_fence(&input);
         let effects = self
             .coordinator
             .handle(input)
             .expect("availability is never stale");
+        self.fence_chatgpt_reads();
         self.apply(effects, link)
+    }
+
+    /// Tells the coordinator whether the account's sign-in keeps `ChatGPT`'s history from a turn
+    /// that arrives now. The dev fixture answers without the account.
+    fn fence_chatgpt_reads(&mut self) {
+        #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
+        let fixture = self.fixture.is_some();
+        #[cfg(not(any(test, debug_assertions, all(windows, feature = "gate-draw-replay"))))]
+        let fixture = false;
+        if !fixture && self.account.reads_fenced() {
+            self.coordinator.fence_chatgpt_reads();
+        } else {
+            self.coordinator.lift_chatgpt_fence();
+        }
     }
 
     /// Holds the next store op `matches` accepts before it runs, until the returned sender
