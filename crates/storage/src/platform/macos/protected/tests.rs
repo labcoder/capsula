@@ -1161,3 +1161,99 @@ fn native_product_lookup_creates_nothing_and_the_setup_guard_excludes_other_open
     drop(root);
     scratch.cleanup().expect("remove recorded fixture objects");
 }
+
+const GUARD_HOLDER: &str = "STORAGE_GUARD_HOLDER_ANCHOR";
+
+/// Kills and reaps the holder process if the test ends early.
+struct Holder(std::process::Child);
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        if self.0.kill().is_ok() {
+            self.0.wait().ok();
+        }
+    }
+}
+
+/// The child half of the cross-process guard test, spawned only by it with the anchor in
+/// `GUARD_HOLDER`; without it there is nothing to hold. Holds the guard until killed.
+#[test]
+#[ignore = "spawned by native_setup_guard_is_busy_while_another_process_holds_it"]
+fn native_setup_guard_holder() {
+    let Some(support) = std::env::var_os(GUARD_HOLDER) else {
+        return;
+    };
+    let anchor = crate::admit_support(Path::new(&support)).expect("admit the fixture anchor");
+    let _guard = anchor
+        .try_setup_guard()
+        .expect("the holder takes the guard");
+    // The test harness has already written this test's name without ending the line.
+    let mut out = io::stdout();
+    out.write_all(b"\nguard-held\n")
+        .and_then(|()| out.flush())
+        .expect("report holding");
+    io::stdin()
+        .read_to_end(&mut Vec::new())
+        .expect("wait until the parent ends");
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_setup_guard_is_busy_while_another_process_holds_it() {
+    use crate::{GuardError, admit_support};
+    use std::io::BufRead as _;
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::{Command, Stdio};
+
+    let scratch = Scratch::new();
+    let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
+        .expect("an explicitly commissioned fixture parent");
+    let support =
+        std::path::PathBuf::from(parent).join(OsStr::from_bytes(scratch.residual.to_bytes()));
+    let anchor = admit_support(&support).expect("admit the fixture anchor");
+    let mut holder = Holder(
+        Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--exact",
+                "platform::macos::protected::tests::native_setup_guard_holder",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(GUARD_HOLDER, &support)
+            .env_remove("STORAGE_ADMISSION_FIXTURE_PARENT")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the holder"),
+    );
+    let output = holder.0.stdout.take().expect("the holder's piped output");
+    assert!(
+        io::BufReader::new(output)
+            .lines()
+            .map_while(Result::ok)
+            .any(|line| line == "guard-held"),
+        "the holder took the guard"
+    );
+    assert_eq!(
+        anchor.try_setup_guard().err(),
+        Some(GuardError::Busy),
+        "another process holds it"
+    );
+    holder.0.kill().expect("kill the holder without releasing");
+    let status = holder.0.wait().expect("reap the holder");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "the holder was killed"
+    );
+    drop(
+        anchor
+            .try_setup_guard()
+            .expect("the holder's exit released it"),
+    );
+    drop(holder);
+    drop(anchor);
+    scratch.cleanup().expect("remove recorded fixture objects");
+}
