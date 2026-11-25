@@ -42,6 +42,10 @@ Its Win32 backend still supplies physical work area and client origin and moves,
 windows without activation. Platforms without that backend refuse these operations; the local
 disconnected window uses GPUI's logical visible bounds and does not cross this boundary.
 
+The optional gate observer and input diagnostics require the Windows QPC backend before
+opening an output file. A normal launch requests neither, and an unsupported target cannot
+substitute a portable clock or emit native timing receipts.
+
 The shell and its offline fixtures register `shell::assets::Assets`: GPUI Kit's default
 component bundle plus the `Monitor` icon used for a held picture in history and screen notes.
 An `IconName` supplies a path, not its SVG bytes; icons outside the default bundle must be

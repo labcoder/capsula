@@ -5,8 +5,11 @@ pub mod assets;
 mod local_dock;
 #[path = "platform/presence_platform.rs"]
 pub mod presence_platform;
+#[path = "platform/qpc.rs"]
+mod qpc;
 pub mod strings;
 /// The shell's product palette.
 pub mod theme;
 
 pub use local_dock::{OpenError as LocalDockOpenError, open as open_local_dock};
+pub use qpc::QpcClock;

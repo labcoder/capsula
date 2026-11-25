@@ -102,4 +102,15 @@ pub(crate) use windows::{
 #[cfg(all(test, windows))]
 pub(crate) use windows::{with_raw_keys, with_raw_modifiers};
 
+pub(crate) fn diagnostic_clock() -> std::io::Result<kumochi_shell::QpcClock> {
+    #[cfg(windows)]
+    let backend = Some(kumochi_shell::QpcClock::windows(
+        performance_counter,
+        performance_frequency,
+    ));
+    #[cfg(not(windows))]
+    let backend = None;
+    kumochi_shell::QpcClock::require(backend)
+}
+
 pub(crate) use crate::presence::line::machine::{ROW_SPANS, RowSpans};
