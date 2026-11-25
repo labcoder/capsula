@@ -47,7 +47,7 @@ impl Capturer for Captures {
     fn capture_window(
         &mut self,
         target: &Target,
-        _: Instant,
+        _: Deadline,
         frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
         let display = target.top.rect;
@@ -121,6 +121,7 @@ impl Replacement {
             let armed = Arc::clone(&pause);
             let mut output = Replies {
                 output: Output {
+                    on_pong: None,
                     send,
                     bytes: Vec::new(),
                 },

@@ -53,10 +53,14 @@ folder, so missing, empty or relative values never put logs or brain data under 
 directory. They read the variables directly, so the slice 2 gate's per-item `LOCALAPPDATA` is
 respected. The brain's session lock uses the same local data root.
 
-The ordinary shell asks its instance-lock owner to acquire the lock for the current session.
-On Windows the owner uses the existing data folder and session ID and keeps the lock until
-the shell exits. Other platforms without an admitted lock target refuse before opening a file;
-they never fall back to another folder or a made-up session.
+The ordinary shell asks its instance-lock owner to acquire the lock. Windows holds one lock
+per session until exit, named `<SHELL_LOCK>-<session id>.lock` in the existing data folder.
+
+macOS has no Windows-style session ID. Its lock is per user and product identity:
+`~/Library/Application Support/<DATA_DIR>/<SHELL_LOCK>.lock` (`kumochi-dev-shell.lock` for Dev).
+The file is mode `0600` and is locked exclusively without waiting. The file stays in place:
+closing the lock handle or exiting the process releases the lock. Platforms without an
+admitted lock target still refuse before opening a file, with no fallback location.
 
 ## Crates
 
@@ -87,6 +91,10 @@ GPUI; the shell is the crate that does. `cargo xtask check-core` holds that in C
 direct dependencies are a list in `xtask/src/check_core.rs`, so a new one is a reviewed line,
 and the whole tree is searched for a framework's name.
 
+On macOS, shell-core can derive an Application Support candidate from an absolute `HOME`.
+It neither opens nor creates the directory, and does not append the product name. The shell's
+storage owner must admit the candidate and select the product folder before any writes.
+
 Linux is a build and test host for `shell-core`, not a supported runtime. Its native
 IPC, process launch, credential storage, file logging, and audio entry points return
 `Unsupported`. The shared tests use scripted audio and need ALSA development headers
@@ -101,6 +109,16 @@ workspace. One build is outside its reach: `cargo build --all-targets` resolves 
 once for the whole command, so the `kumochi.exe` it writes carries the core's test support.
 That has to fail safe, so test support only ever takes something away: a device becomes a
 stub that reports itself unavailable, never the other way round.
+
+The shared, read-only `protocol::profile` classifier describes a local installation, not a
+Kumochi account. First open can be a background setup candidate only with positive evidence
+for a disjoint protected root and credential namespace, and definite absence of all known
+profile footprints. An intact installation can reopen. `ResumeSetup` permits reinspection
+only: even a pending, unstarted owner reservation can receive this result while its credential
+namespace is unverified. A writer must reacquire the guard and revalidate that namespace and
+the exact step before any write. Uncertain or conflicting evidence leaves the data untouched.
+Windows and macOS use the same policy. No native observer or executable calls it yet, and its
+decisions do not authorize writes, reconnect a provider, or identify a person.
 
 Tests that need files use the shared scratch guard in `tests/support/scratch.rs`. It creates
 a new child of Temp (or of an existing trusted root for fixtures that need one), skips

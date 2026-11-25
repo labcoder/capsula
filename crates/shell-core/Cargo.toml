@@ -23,6 +23,9 @@ zeroize.workspace = true
 cpal = { version = "=0.18.2", default-features = false }
 kumochi-audio.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+kumochi-storage = { path = "../storage" }
+
 [target.'cfg(windows)'.dependencies]
 keyring.workspace = true
 windows = { version = "0.62", features = [

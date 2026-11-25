@@ -15,6 +15,7 @@ mod fs;
 mod macos;
 #[cfg(any(test, windows))]
 mod model_files;
+pub(crate) mod native_workers;
 mod pipe;
 mod process;
 mod protected;

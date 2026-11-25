@@ -17,6 +17,29 @@ the test process before reopen or alias cleanup. Windows sharing-mode tests stay
 No non-Windows production store startup, swap or capacity fallback is enabled.
 On Linux, direct file-logging startup returns `NativeRuntime` before resolving a data path.
 
+## macOS shell-file admission
+
+On macOS the shell's instance lock and file logger use these primitives: startup takes the lock
+in the admitted product folder, then starts the logger in the same storage.
+
+The macOS shell-file primitives admit an OS-discovered Support candidate without
+creating its ancestors. The read-only anchor walk independently requires local, ownership-enforced
+APFS volumes; product/log directories and private files cannot cross the Support volume. Legacy
+`hold_chain` still refuses every device crossing. Private directories require current UID/0700;
+regular files require current UID/0600, one link, the same ACL/identity inspection, and checked
+no-follow/nontruncating relative acquisition. Opaque lock/log owners retain their admitted
+ancestors, expose no file/descriptor/path escape, and logs support shared-reference append writes.
+Creation/open I/O errors are distinct from failed privacy/type/ACL/identity admission.
+
+Retention consumes at most 256 total entries, isolates an exact prefix/date namespace, excludes
+the supplied current log by identity, and reports skips/removals/incomplete scans. It checks
+each Darwin record's bounds before reading its name and terminator from the held stream.
+Ancestor admission failures propagate separately from candidate skips in both retention phases.
+Concurrent missing/busy/unsafe/replaced candidates are skipped, without a rotation lock or mandatory new
+Darwin unlink flags. Held-directory deletion remains name-based with a check-to-unlink race under
+the trusted OS/owning-UID boundary. Neither seven-file retention nor latency is guaranteed.
+These primitives do not certify the real anchor or native races, make kernel operations cancelable, or establish a deployment floor or durable flush guarantee.
+
 ## Settings
 
 | Pragma | Why |
@@ -427,6 +450,43 @@ with its live rows kept, which a plain move of the snapshot would fail.
 Beyond what deleting rows can reach: SSD wear levelling, the disk clusters a removed or
 truncated file frees (`purge-old`, the snapshot, the WAL), Volume Shadow Copy restore points,
 backups and the pagefile.
+
+## Reading an existing database
+
+`store::existing::open` reads a database that must already exist without creating, changing or
+removing any of its files, and without migrating or checkpointing. A plain read-only open does
+change them: SQLite creates `-wal` and `-shm` beside a cleanly closed WAL database and rewrites
+an existing `-shm`. So the opener looks at the files first and picks one mode or refuses:
+
+| Files beside a main file of at least 512 bytes | Mode |
+|---|---|
+| none | `immutable`: reads only the main file and takes no SQLite lock |
+| nonempty `-wal` and `-shm`, no `-journal` | `readonly_shm`: reads the WAL's commits through read-only index handles |
+| anything else | `Uncertain`, nothing opened |
+
+A missing main file is `Missing`. Everything else is `Uncertain`, because SQLite would change a
+file or read the wrong one:
+
+- a main file shorter than SQLite's smallest page reads as zero pages, and SQLite then deletes
+  the WAL beside it;
+- an empty WAL or index has its permissions reset to the main file's when SQLite opens it;
+- a journal would be replayed, and a WAL or index alone would be created or rebuilt;
+- a main file or sidecar that is a link, a reparse point or not a regular file, or on Unix has a
+  second hard link, may not be the file SQLite reads, and `immutable` through a link skips the
+  target's WAL.
+
+The path goes to SQLite as a `file:` URI with every byte but unreserved ones percent-encoded, so
+separators, drive colons and UNC prefixes reach the VFS unchanged.
+
+Nothing calls it yet. A caller must already exclude writers, because `immutable` takes no lock and
+the file check happens before the open, not atomically with it: a WAL removed in between is
+created again as an empty file. No other connection to that database may be open in the same
+process, since SQLite shares one index handle per process. SQLite run as root re-owns the WAL and index to the main
+file's owner; Kumochi doesn't run as root. Unit tests compare each file's name, bytes,
+permissions and owner before and after: a closed database, a copy left with a live WAL, every
+refused case, and on Unix the linked cases. On Windows the VFS also honours `readonly_shm`, but
+opens the index with `OPEN_ALWAYS`, so an index removed between the check and the open would be
+created there, and a second hard link isn't detected.
 
 ## Recovery at start
 

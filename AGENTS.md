@@ -20,6 +20,7 @@ crates/scene/      the drawing format, validator and layout
 crates/brain/      bin kumochid: the headless process
 crates/shell-core/ what the shell knows and decides; no UI framework in its tree
 crates/shell/      bin kumochi: the GPUI app
+crates/session/    the Mac shell-brain session: Noise handshake and records, no I/O
 xtask/             dev tasks in Rust; no scripts in other languages
 docs/development/  how Kumochi works inside
 docs/user/         how people use Kumochi

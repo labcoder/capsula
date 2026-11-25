@@ -1,4 +1,11 @@
-//! The operating system behind small, safe functions. Windows only for now.
+//! The operating system behind small, safe functions. The live shell uses Windows.
+
+#[cfg(target_os = "macos")]
+pub(crate) mod logging;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::logging::Admitted;
 
 pub(crate) use kumochi_shell::presence_platform::{PresenceError, require_connected_geometry};
 #[cfg(not(windows))]
