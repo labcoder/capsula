@@ -14,11 +14,25 @@ Without a native process adapter, containment and every native launch request re
 exercise its request and retirement policy without a native child. No unmanaged child or
 inherited environment is a fallback.
 
-Without native runtime composition, `kumochid` exits before handling flags, initializing logs,
-creating a runtime, or touching app data. CLI callers and parents that wait for the child can
-distinguish this by exit status 69. The shell's detached launcher doesn't observe that status;
-this does not add a non-Windows shell launch path. The library's brain, bridge and screen entries
-return an unsupported error, while fixture tests still exercise shared policy.
+The brain's launch mode is a lifetime contract. Windows supports **Detached**, in which the brain
+outlives its shell. **ParentBound** means the shell starts the brain with an inherited pair and
+owns its lifetime; no platform supports it yet, including under Gate identity. macOS and Linux
+support neither mode. The executable and the library's brain, parent-bound, bridge, screen and
+speech entries check the same platform support table before starting anything. The executable
+exits 69 for an unsupported mode without initializing logs, creating a runtime or touching app
+data. The detached launcher doesn't observe that status.
+
+Only a first argument of `--parent-bound` selects ParentBound. It must be the only argument;
+anything after it, even an empty or non-Unicode value, exits 64 before the support check. In
+Detached, the first argument selects the worker or diagnostic; no flag or an unknown flag starts
+the normal brain. The bridge consumes one launch argument and ignores the rest; a missing or
+invalid launch fails rather than starting the brain. The other workers and diagnostics ignore the
+entire tail. Recognized debug diagnostics still exit 10 on a supported release build.
+
+Argument matching uses OS strings without logging them. Non-Unicode input no longer panics: a
+non-Unicode first argument falls through like an unknown flag; a non-Unicode bridge launch is
+treated as an invalid launch (exit 1 on Windows); and any non-Unicode argument in a tail that was
+already ignored is still ignored. The executable name isn't parsed.
 
 The brain's platform module assembles native workers. On Windows it retries pending voice-model
 removals before creating the brain Job, then attaches voice and Claude Code before shared startup

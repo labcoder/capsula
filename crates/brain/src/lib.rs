@@ -82,6 +82,9 @@ pub const SPEECH_WORKER: &str = "--speech";
 /// The argument that starts `kumochid` as Claude Code's MCP bridge, before the launch value.
 pub const MCP_BRIDGE: &str = "--mcp-bridge";
 
+/// The sole argument for a brain launched under the shell's lifetime.
+pub const PARENT_BOUND: &str = "--parent-bound";
+
 /// Why the brain stopped with an error.
 #[derive(Debug, thiserror::Error)]
 pub enum BrainError {
@@ -191,7 +194,7 @@ fn end_runtime(
 pub fn run() -> impl Future<Output = Result<(), BrainError>> {
     use kumochi_protocol::constants::{LIVE_CHATGPT_TEXT_ENV, ProductIdentity};
 
-    let admission = platform::require_native_runtime()
+    let admission = platform::require_mode(platform::Mode::Detached)
         .map_err(BrainError::NativeRuntime)
         .and_then(|()| {
             let mode = std::env::var(LIVE_CHATGPT_TEXT_ENV).ok();
@@ -202,6 +205,15 @@ pub fn run() -> impl Future<Output = Result<(), BrainError>> {
         #[cfg(test)]
         || {},
     )
+}
+
+/// Refuses parent-bound startup before opening any resources.
+///
+/// # Errors
+/// This build always returns `Unsupported`, including under Gate identity.
+pub fn run_parent_bound() -> Result<(), BrainError> {
+    platform::require_mode(platform::Mode::ParentBound).map_err(BrainError::NativeRuntime)?;
+    Err(BrainError::NativeRuntime(io::ErrorKind::Unsupported.into()))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -478,10 +490,22 @@ async fn native_library_entries_return_unsupported() {
         bridge::serve("not a launch id"),
         Err(bridge::BridgeError::NativeRuntime(error)) if error.kind() == io::ErrorKind::Unsupported
     ));
+    for serve in [screen::serve, speech::serve] {
+        assert!(matches!(
+            serve(),
+            Err(kumochi_protocol::frame::FrameError::Io(error))
+                if error.kind() == io::ErrorKind::Unsupported
+        ));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn parent_bound_library_entry_always_refuses() {
+    assert!(!platform::supports(platform::Mode::ParentBound));
     assert!(matches!(
-        screen::serve(),
-        Err(kumochi_protocol::frame::FrameError::Io(error))
-            if error.kind() == io::ErrorKind::Unsupported
+        run_parent_bound(),
+        Err(BrainError::NativeRuntime(error)) if error.kind() == io::ErrorKind::Unsupported
     ));
 }
 

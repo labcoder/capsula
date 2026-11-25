@@ -135,7 +135,7 @@ struct Capture {
 /// # Errors
 /// Returns an unsupported-runtime, framing or transport failure, never request contents.
 pub fn serve() -> Result<(), frame::FrameError> {
-    crate::platform::require_native_runtime()?;
+    crate::platform::require_mode(crate::platform::Mode::Detached)?;
     serve_on(
         std::io::stdin(),
         &mut crate::platform::raw_stdout()?,
