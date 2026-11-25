@@ -109,6 +109,21 @@ impl<K: Kind> Rig<K> {
         value
     }
 
+    pub(crate) async fn expect_idle(&mut self, timeout: Duration) {
+        let channel = self.requests.take().expect("request channel");
+        self.requests = Some(
+            tokio::task::spawn_blocking(move || {
+                assert!(matches!(
+                    channel.recv_timeout(timeout),
+                    Err(blocking::RecvTimeoutError::Timeout)
+                ));
+                channel
+            })
+            .await
+            .expect("idle worker observation"),
+        );
+    }
+
     pub(crate) async fn held(&mut self) {
         let (value, channel) =
             receive_request(self.waiting.take().expect("confirmation channel")).await;
