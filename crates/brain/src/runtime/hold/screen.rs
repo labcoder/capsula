@@ -169,8 +169,8 @@ impl super::Holds {
     }
 
     /// Starts the pending hold `key`'s screen part on `aim`: a window from no part, a display
-    /// from `Armed`. A hold that isn't pending, has another part, or has no worker client gets
-    /// none.
+    /// from `Armed`. A hold that isn't pending, has another part, has no worker client, or whose
+    /// aim this platform can't capture gets none.
     pub(super) fn start(
         &mut self,
         key: HoldKey,
@@ -182,8 +182,8 @@ impl super::Holds {
             return false;
         };
         let from = match aim {
-            Aim::Window(_) => matches!(hold.screen, ScreenPart::None),
-            Aim::Display { .. } => matches!(hold.screen, ScreenPart::Armed),
+            Aim::Window(_) => self.window_capture && matches!(hold.screen, ScreenPart::None),
+            Aim::Display { .. } => self.display_capture && matches!(hold.screen, ScreenPart::Armed),
         };
         if hold.key != key || !from {
             return false;
@@ -541,10 +541,13 @@ impl crate::runtime::Brain {
         Ok(())
     }
 
-    /// Whether a screen hold on `choice` may show the model the screen now, or why not. The
-    /// display capture runs on the platforms that capture a window.
+    /// Whether a screen hold on `choice` may show the model the screen now, or why not.
     pub(super) fn display_gate(&self, choice: Option<&ModelChoice>) -> ScreenHolds {
-        self.picture_gate(choice, self.show_screen_enabled())
+        self.picture_gate(
+            choice,
+            self.holds.can_capture_display(),
+            self.show_screen_enabled(),
+        )
     }
 }
 

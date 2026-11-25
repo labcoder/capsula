@@ -575,9 +575,12 @@ worker that can't start doesn't stop the brain: screen holds get no client, so t
 `Unsupported` for the session, and voice holds go on as before. Only a screen hold's task calls
 the client. It speaks to the worker through the
 shared supervisor as its own kind, `Holds`, with the screen worker's argument and caps, the
-actor's messages and the zeroing reply reader. The image gate takes the platform's
-`WINDOW_CAPTURE` as well as the client, so off Windows it reads `Unsupported` even though the
-client starts.
+actor's messages and the zeroing reply reader. The image gate also takes what the platform
+captures, one flag per kind of hold: a window for a window hold, a display for a screen hold.
+Both default to the platform's `WINDOW_CAPTURE`, so Windows offers both and every other platform
+reads `Unsupported`. A platform given display capture alone offers
+screen holds under the same model and user checks, while the window gate stays `Unsupported` and
+the hold's task refuses a window aim.
 
 The gate itself is `runtime/screen_gate.rs`, one for every route. `ChatGPT` reads its
 account's catalog. The direct Anthropic key route ships with its picture switch on, but the
@@ -592,8 +595,8 @@ already finished can still complete normally (engines.md, "A held run's screen")
 Whether this system can capture a window is the worker's answer, not the brain's. The worker
 asks when it opens its capturer, on a hold's first capture, and a no comes back as the
 `Unsupported` refusal. That hold ends `NotReady`, with no image and no line beyond what
-`NotReady` gives. The brain then clears its window capture flag until the brain restarts, across
-shell reconnects, and sends the gate once as `Off(Unsupported)`. Nothing turns the flag back on,
+`NotReady` gives. The brain then clears both capture flags until the brain restarts, across
+shell reconnects, and sends the gate once as `Off(Unsupported)`. Nothing turns a flag back on,
 so a settings write, a catalog change or a worker restart leaves it off. Until that first hold
 the gate reads `On` on a system that can't capture. The brain doesn't ask itself because its
 start-up runs on the process's main thread (a current-thread runtime under `block_on`): a WinRT
