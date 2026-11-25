@@ -133,8 +133,9 @@ pub(crate) enum LegacyHistory {
 
 /// Reads the legacy history store at `db` through [`open`], borrowing `session`.
 ///
-/// A missing parent folder, or one that is a link or reparse point, is `Unverified`, since every
-/// name under it then reads as not found.
+/// A missing parent folder is `Unverified`, since every name under it reads as not found. So is one
+/// that is a link or reparse point, before anything is opened, since it could redirect the read to
+/// another folder's store.
 #[cfg_attr(
     not(test),
     expect(
