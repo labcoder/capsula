@@ -8,7 +8,7 @@ use kumochi_protocol::message::{
     Content, GestureId, MAX_TRANSCRIPT_BYTES, NoticeRevision, Phase, RunId, RunOrigin, ThreadId,
 };
 
-use crate::link::Session;
+use crate::link::{InputCancel, Session};
 use crate::platform::microphone::Generation;
 use crate::runs::{Applied, RunTail};
 use crate::strings::Text;
@@ -133,6 +133,13 @@ pub struct Ended {
     pub notice: Text,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cancel {
+    End,
+    Refresh,
+    Idle,
+}
+
 /// A native Esc press that revoked a hold's input, until that hold's marks and cancel apply.
 #[must_use]
 pub struct Revoked {
@@ -179,11 +186,46 @@ impl State {
             .map(|hold| hold.token.gesture())
     }
 
-    /// Whether a hold's keys are down: recognized, and neither released nor ended.
-    pub fn held(&self) -> bool {
+    pub fn owns(&self, gesture: GestureId) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|hold| hold.token.gesture() == gesture)
+    }
+
+    /// Records the notice and says whether the chord still follows a held key.
+    pub fn notice(&mut self, text: Text) -> bool {
+        self.status = Some(text);
+        if text == Text::HoldUnavailable {
+            self.lost = None;
+        }
         self.pending
             .as_ref()
             .is_some_and(|hold| hold.released.is_none() && hold.terminal.is_none())
+    }
+
+    pub fn cancel(
+        &mut self,
+        revoke: impl FnOnce() -> Option<InputCancel>,
+    ) -> (Cancel, Option<InputCancel>) {
+        self.forget_recovery();
+        let queued = revoke();
+        let action = if self.pending.is_some() {
+            Cancel::End
+        } else if self.status.take().is_some() {
+            Cancel::Refresh
+        } else {
+            Cancel::Idle
+        };
+        (action, queued)
+    }
+
+    pub fn quit(&mut self, drop_views: impl FnOnce()) -> Option<Hold> {
+        self.forget_recovery();
+        self.status = None;
+        drop_views();
+        self.pending
+            .take()
+            .filter(|hold| matches!(hold.source, Source::Waiting))
     }
 
     /// The admitted hold begins waiting for its source, with its words kept for a lost brain.
@@ -382,6 +424,14 @@ impl State {
         {
             self.recovery = None;
         }
+    }
+
+    pub fn forget_recovery(&mut self) {
+        self.recovery = None;
+    }
+
+    pub fn forget_ended(&mut self) {
+        self.ended = None;
     }
 
     /// The brain was lost with a hold's turn unstored. Words its Esc didn't revoke go to

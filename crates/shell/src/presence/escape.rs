@@ -282,7 +282,7 @@ impl Presence {
             }
             return self.runs_changed(cx);
         }
-        self.voice.state.ended = None;
+        self.voice.state.forget_ended();
         // Marks that are up go at this press, and `escape` takes them before it ends a hold.
         // A hold is still pending here when its first mark came before its run's `Answering`.
         if self.presenter.marks_shown().is_some() || mark.is_some() {
@@ -417,7 +417,7 @@ impl Presence {
         // answer too, whatever else it does here.
         let press = escape::Press::new(speech, self.presenter.marks_shown().or(mark), &self.runs);
         self.marks_changed(cx);
-        self.voice.state.recovery = None;
+        self.voice.state.forget_recovery();
         match press.lead(self.voice_escape_owner(), self.presenter.input.selection()) {
             Lead::CancelHold => {
                 self.cancel_voice(cx);

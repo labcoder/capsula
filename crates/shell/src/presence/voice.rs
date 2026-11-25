@@ -12,7 +12,7 @@ use gpui_kit::Window;
 use kumochi_shell_core::link::InputCancel;
 use kumochi_shell_core::presence::teardown::{cancel_tracked_input, drain_hold_cancel};
 pub(super) use kumochi_shell_core::voice::Stamp;
-use kumochi_shell_core::voice::{Hold, RunStep, Source, State};
+use kumochi_shell_core::voice::{Cancel, Hold, RunStep, Source, State};
 
 use super::gesture::ReleaseInput;
 use super::ink::Sampler;
@@ -136,11 +136,6 @@ impl Presence {
         self.voice.state.escape_owner()
     }
 
-    /// Whether a hold's keys are down: recognized, and neither released nor ended.
-    fn voice_held(&self) -> bool {
-        self.voice.state.held()
-    }
-
     pub(super) fn voice_run(
         &mut self,
         run: RunId,
@@ -192,13 +187,8 @@ impl Presence {
 
     pub(super) fn voice_notice(&mut self, text: Text, cx: &mut Context<'_, Self>) {
         tracing::debug!(stage = ?FailureStage::Notice, reason = ?text, "held speech input notice");
-        self.voice.state.status = Some(text);
-        // A microphone that may still be open matters more than the lost brain's notice.
-        if text == Text::HoldUnavailable {
-            self.voice.state.lost = None;
-        }
         // Every change to the pending hold ends in a notice, so the chord follows its keys here.
-        if !self.voice_held() {
+        if !self.voice.state.notice(text) {
             self.talk_escape.release();
         }
         self.refresh_dock(cx);
@@ -278,13 +268,14 @@ impl Presence {
     }
 
     pub(super) fn cancel_voice(&mut self, cx: &mut Context<'_, Self>) {
-        self.voice.state.recovery = None;
-        let queued = cancel_tracked_input(&self.link);
-        if self.voice.state.pending.is_some() {
-            self.end_voice_after_cancel(Text::HoldCancelled, queued.as_ref(), cx);
-        } else if self.voice.state.status.take().is_some() {
-            self.refresh_dock(cx);
-            self.refresh_conversation(cx);
+        let (action, queued) = self.voice.state.cancel(|| cancel_tracked_input(&self.link));
+        match action {
+            Cancel::End => self.end_voice_after_cancel(Text::HoldCancelled, queued.as_ref(), cx),
+            Cancel::Refresh => {
+                self.refresh_dock(cx);
+                self.refresh_conversation(cx);
+            }
+            Cancel::Idle => {}
         }
         self.drain_voice_cancel(queued.as_ref());
     }
@@ -292,13 +283,11 @@ impl Presence {
     pub(super) fn stop_voice_for_quit(&mut self) {
         self.voice.paused.set(true);
         self.voice.gates.follow(false);
-        self.voice.state.recovery = None;
-        self.voice.state.status = None;
-        self.voice.watched = None;
-        drop(self.ink.borrow_mut().take());
-        if let Some(hold) = self.voice.state.pending.take()
-            && matches!(hold.source, Source::Waiting)
-        {
+        let unused = self.voice.state.quit(|| {
+            self.voice.watched = None;
+            drop(self.ink.borrow_mut().take());
+        });
+        if let Some(hold) = unused {
             self.unused_voice(hold.token(), None);
         }
         self.talk_escape.release();
@@ -312,12 +301,7 @@ impl Presence {
         gesture: GestureId,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        let pending = self
-            .voice
-            .state
-            .pending
-            .as_ref()
-            .is_some_and(|hold| hold.token().gesture() == gesture);
+        let pending = self.voice.state.owns(gesture);
         if pending {
             self.end_voice(Text::HoldCancelled, cx);
         }

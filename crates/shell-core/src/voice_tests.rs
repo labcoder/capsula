@@ -5,7 +5,7 @@ use kumochi_protocol::message::{
     Content, GestureId, Incarnation, Phase, RunId, RunOrigin, ThreadId,
 };
 
-use super::{RunStep, Source, Stamp, State};
+use super::{Cancel, RunStep, Source, Stamp, State};
 use crate::link::Session;
 use crate::platform::microphone::CollectionGate;
 use crate::runs::Applied;
@@ -68,6 +68,43 @@ fn an_unstarted_hold_is_handed_back_to_discard_once() {
     assert!(state.pending.is_none() && state.recovery.is_none());
     assert_eq!(state.ended.map(|(gesture, _)| gesture), Some(GestureId(1)));
     assert!(state.end(Text::HoldFailed).unused.is_none());
+}
+
+#[test]
+fn a_cancel_ends_a_pending_hold_or_clears_a_notice_without_one() {
+    let (mut state, _gate) = holding(Source::Waiting);
+    assert!(state.notice(Text::HoldPreparing));
+    assert!(!state.owns(GestureId(2)));
+    assert!(state.owns(GestureId(1)));
+    let (action, _) = state.cancel(|| None);
+    assert_eq!(action, Cancel::End);
+    assert_eq!(state.status, Some(Text::HoldPreparing));
+    assert!(state.recovery.is_none());
+    state.end(Text::HoldCancelled);
+    let (action, _) = state.cancel(|| None);
+    assert_eq!(action, Cancel::Refresh);
+    assert_eq!(state.status, None);
+    let (action, _) = state.cancel(|| None);
+    assert_eq!(action, Cancel::Idle);
+}
+
+#[test]
+fn quitting_hands_back_only_a_waiting_source_and_unavailable_hides_lost_words_notice() {
+    let (mut state, _gate) = holding(Source::Waiting);
+    state.lost = Some(Text::HoldLost);
+    state.notice(Text::HoldPreparing);
+    assert_eq!(state.lost, Some(Text::HoldLost));
+    state.notice(Text::HoldUnavailable);
+    assert_eq!(state.lost, None);
+    assert_eq!(
+        state.quit(|| {}).map(|hold| hold.token().gesture()),
+        Some(GestureId(1))
+    );
+    assert!(state.status.is_none() && state.recovery.is_none());
+    assert!(state.quit(|| {}).is_none());
+    let (mut state, _gate) = holding(Source::Recording);
+    assert!(state.quit(|| {}).is_none());
+    assert!(state.pending.is_none());
 }
 
 #[test]
