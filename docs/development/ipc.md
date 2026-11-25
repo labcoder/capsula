@@ -771,6 +771,15 @@ thread sends on bounded channels and never waits: with no connection or a full c
 fails at once, so a typed turn shows it wasn't sent, and `Stop` or `ClearDrawing` is logged as
 unsent after its local effect already happened.
 
+`link/policy.rs` decides what the shell does with what arrives, and the shell applies it one
+event at a time in batch order. It drops events another pair sent, decides what a link state
+does first and whether the models come up on that pair or go down, accepts a run's `Focus` only
+from the current pair, and decides a scene frame's run disposition and freed membership. The
+pair is read again after anything that can end it, such as placing drawings. A stop or scene
+stop is sent before anything else; if the queue refuses it on an open pair, the run's queued
+playback stops and then the pair ends. Speaker stops are offered in order, ten times 1 ms apart
+to a busy owner, and only a stop the brain was told can end its pair when those run out.
+
 Each connection reaches the UI as `Connected` with a session that carries the shell's own
 connection generation, not the brain's incarnation, since the same brain may be reconnected to.
 Sends and grants go through that session, and data events carry its generation, so a turn,

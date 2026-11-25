@@ -176,8 +176,7 @@ struct Presence {
     scene_timer: Option<Task<()>>,
     scene_deadline: Option<Instant>,
     /// Speaker stops a busy owner hasn't taken yet, oldest first, each with its tries left.
-    pending_stops:
-        std::collections::VecDeque<(Session, kumochi_protocol::message::RunId, u8, bool)>,
+    pending_stops: crate::link::policy::SpeakerStops<Session>,
     /// The next offer of the front pending stop, or the end of its session.
     stop_retry: Option<Task<()>>,
     /// The native speech lease last read: its session, run and when it runs out.
@@ -1164,7 +1163,7 @@ pub(crate) fn open(
             paint_notice: Rc::default(),
             scene_timer: None,
             scene_deadline: None,
-            pending_stops: std::collections::VecDeque::new(),
+            pending_stops: crate::link::policy::SpeakerStops::default(),
             stop_retry: None,
             speech: Rc::default(),
             escape_scope: Rc::default(),

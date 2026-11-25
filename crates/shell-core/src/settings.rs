@@ -322,6 +322,17 @@ impl Settings {
         self.notice_slot = None;
     }
 
+    /// A recovered account answers a renewal that couldn't be confirmed: that notice goes.
+    /// Returns whether it went.
+    pub fn clear_renewal_notice(&mut self) -> bool {
+        let renewal =
+            self.notice.as_ref().map(UserError::key) == Some(ErrorKey::RenewalUnconfirmed);
+        if renewal {
+            self.clear_notice();
+        }
+        renewal
+    }
+
     pub fn field(&self, field: Field) -> &FieldState {
         match field {
             Field::Assistant => &self.assistant,

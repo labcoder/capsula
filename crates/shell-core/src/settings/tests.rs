@@ -818,3 +818,20 @@ fn a_name_refusal_ahead_of_a_frame_rate_stays_on_the_name() {
         "the frame rate's answer keeps the name's notice"
     );
 }
+
+#[test]
+fn only_an_unconfirmed_renewal_notice_goes_when_the_account_recovers() {
+    let mut settings = Settings::default();
+    settings.error(ErrorKey::AccountRefused.into());
+    assert!(!settings.clear_renewal_notice());
+    assert_eq!(
+        settings
+            .notice()
+            .map(kumochi_protocol::message::UserError::key),
+        Some(ErrorKey::AccountRefused)
+    );
+    settings.error(ErrorKey::RenewalUnconfirmed.into());
+    assert!(settings.clear_renewal_notice());
+    assert_eq!(settings.notice(), None);
+    assert!(!settings.clear_renewal_notice(), "already gone");
+}

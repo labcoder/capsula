@@ -6,23 +6,18 @@ mod dock_tests;
 mod github_tests;
 
 use super::{Context, OpenError, Presence, Session, diagnostics};
+use crate::accounts::Receipt;
 use crate::chat_notice::Source;
 use crate::drawing::{Broken, Chunk, Effect};
+use crate::link::policy::{self, GitHub, Models, Offered, STOP_RETRY, Sent, Told};
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{
-    AccountView, AudioSession, ConnectionsView, ControlToBrain, DataToShell, HeldScreen, Phase,
-    RunId, RunOrigin, ScreenHolds, ScreenOff, SettingsView, ThreadId, UserError,
+    ConnectionsView, ControlToBrain, DataToShell, HeldScreen, Phase, RunId, RunOrigin, ScreenHolds,
+    ScreenOff, SettingsView, ThreadId, UserError,
 };
 use kumochi_scene::deferred::Deferred;
-use kumochi_shell_core::link::output::Denied;
-use std::time::{Duration, Instant};
-
-/// How many times a speaker `Stop` is offered to a busy owner before its session ends: a
-/// policy, not a measured bound.
-const STOP_TRIES: u8 = 10;
-/// The wait between those offers.
-const STOP_RETRY: Duration = Duration::from_millis(1);
+use std::time::Instant;
 
 impl Presence {
     /// Applies what the link reported, in order, then follows the runs once. Each event leaves
@@ -38,19 +33,7 @@ impl Presence {
     ) -> Result<(), OpenError> {
         let mut applied = false;
         for event in events.drain(..) {
-            if let LinkEvent::RunState { generation, .. }
-            | LinkEvent::TurnRefused { generation, .. }
-            | LinkEvent::VoiceHold { generation, .. }
-            | LinkEvent::CaptureDone { generation, .. }
-            | LinkEvent::ScreenHolds { generation, .. }
-            | LinkEvent::HoldScreen { generation, .. }
-            | LinkEvent::DrawingNotice { generation, .. }
-            | LinkEvent::CaptureFailed { generation, .. } = &event
-                && self
-                    .session
-                    .as_ref()
-                    .is_none_or(|session| session.generation() != *generation)
-            {
+            if event.stale(self.session.as_ref().map(Session::generation)) {
                 continue;
             }
             match event {
@@ -356,11 +339,11 @@ impl Presence {
         origin: Option<RunOrigin>,
         cx: &mut Context<'_, Self>,
     ) {
-        let (applied, notice) = self.runs.apply_run_state(run, thread, phase, error, origin);
+        let (mut applied, notice) = self.runs.apply_run_state(run, thread, phase, error, origin);
         self.marks_run(run, origin, &applied, cx);
         self.voice_run(run, thread, origin, phase, &applied, cx);
         diagnostics::record(cx, format_args!("run phase={phase:?}"));
-        if let Some(restore) = applied.restore
+        if let Some(restore) = applied.restore.take()
             && let Some(text) = &self.text
             && text
                 .window
@@ -375,47 +358,22 @@ impl Presence {
         if let Some(error) = notice {
             self.show_error(&error, Source::Run(run), cx);
         }
-        if let Some(stop) = applied.stop {
+        if let Some(stop) = applied.stop.take() {
             match (origin, stop) {
                 (Some(RunOrigin::Hold { .. }), ControlToBrain::Stop { run, revealed }) => {
-                    let effects =
-                        self.presenter
-                            .stop_owned(run, Instant::now())
-                            .map(|mut effects| {
-                                let cut = effects.iter().any(|effect| match effect {
-                                    crate::presenter::Effect::Control(
-                                        ControlToBrain::StopScenes { cuts, .. },
-                                    ) => !cuts.is_empty(),
-                                    _ => false,
-                                });
-                                if !cut {
-                                    effects.retain(|effect| {
-                                        !matches!(
-                                            effect,
-                                            crate::presenter::Effect::Control(
-                                                ControlToBrain::StopScenes { .. }
-                                            )
-                                        )
-                                    });
-                                    effects.push(crate::presenter::Effect::Control(
-                                        ControlToBrain::Stop { run, revealed },
-                                    ));
-                                }
-                                effects
-                            });
+                    let effects = crate::link::policy::hold_run_stop(
+                        &mut self.presenter,
+                        run,
+                        revealed,
+                        Instant::now(),
+                    );
                     self.scene_effects(effects, cx);
                 }
                 (_, stop) => self.stop_run(stop, cx),
             }
         }
         self.grant(applied.credit);
-        if phase == Phase::Done
-            && applied.visible
-            && self
-                .runs
-                .shown()
-                .is_some_and(|shown| shown.run == run && shown.done)
-        {
+        if policy::settles(&self.runs, run, phase, &applied) {
             self.chat.update(cx, |state, _| state.settled(thread, run));
         }
         for model in [&self.threads, &self.chat] {
@@ -431,11 +389,8 @@ impl Presence {
     /// A run asked to move the typed input: it moves, and the task shows, only when the current
     /// connection sent it and the runs still agree.
     fn focus(&mut self, generation: u64, run: RunId, thread: ThreadId, cx: &mut Context<'_, Self>) {
-        let current = self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.generation() == generation);
-        if current && self.runs.focus(run, thread) {
+        let current = self.session.as_ref().map(Session::generation);
+        if policy::focus(&mut self.runs, current, (generation, run, thread)) {
             self.select_thread(Some(thread), cx);
             self.refresh_conversation(cx);
         }
@@ -460,29 +415,22 @@ impl Presence {
     ) {
         let current = self.session.as_ref().map(crate::link::Session::generation);
         let previous = self.settings.read(cx).accounts.generation;
-        let (accepted, recovered) = self.settings.update(cx, |state, cx| {
-            if state.accounts.receive_snapshot(current, snapshot) {
+        let receipt = self.settings.update(cx, |state, cx| {
+            let receipt = state.accounts.receive_account(current, snapshot);
+            if receipt != Receipt::Stale {
                 cx.notify();
-                return (
-                    true,
-                    matches!(
-                        state.accounts.view,
-                        Some(AccountView::SignedIn { recovery: None, .. })
-                    ) && !state.accounts.unsupported
-                        && state.accounts.error.is_none(),
-                );
             }
-            (false, false)
+            receipt
         });
-        if accepted {
+        if receipt != Receipt::Stale {
             self.account_seen(generation, previous, cx);
         }
-        if recovered {
+        if receipt == Receipt::Recovered {
             self.chat_notice.recovered();
-            if self.settings.read(cx).notice().is_some_and(|error| {
-                error.key() == kumochi_protocol::message::ErrorKey::RenewalUnconfirmed
-            }) {
-                self.settings.update(cx, |state, _| state.clear_notice());
+            if self
+                .settings
+                .update(cx, |state, _| state.clear_renewal_notice())
+            {
                 self.sync_settings_notice(cx);
             }
         }
@@ -520,33 +468,15 @@ impl Presence {
         bytes: u32,
         cx: &mut Context<'_, Self>,
     ) {
-        let disposition = if self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.generation() == generation)
-            && let DataToShell::SceneStepCommit { run, .. } = &*frame
-        {
-            self.runs.owned_disposition(*run)
-        } else {
-            crate::runs::RunDisposition::Live
-        };
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.generation() == generation)
-        {
+        let current = self.session.as_ref().map(Session::generation);
+        let disposition = policy::scene_disposition(&self.runs, current, generation, &frame);
+        if current == Some(generation) {
             self.place_drawings(cx.weak_entity(), cx);
         }
-        if let DataToShell::ScenesRemoved { scenes } | DataToShell::ScenesReplaced { scenes, .. } =
-            &*frame
-            && self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.generation() == generation)
-        {
-            let credit = self.runs.remove_scenes(scenes);
-            self.grant(credit);
-        }
+        // Placing can end the pair, so membership reads it again.
+        let current = self.session.as_ref().map(Session::generation);
+        let credit = policy::removed_scenes(&mut self.runs, current, generation, &frame);
+        self.grant(credit);
         let effects = self.presenter.data_with_disposition(
             generation,
             frame,
@@ -748,29 +678,28 @@ impl Presence {
         message: ControlToBrain,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        let run = match &message {
-            ControlToBrain::Stop { run, .. } | ControlToBrain::StopScenes { run, .. } => Some(*run),
-            _ => None,
-        };
-        let sent = self.link.send_control(session, message);
-        // A control the brain wasn't told can't be undone locally, so that session ends; one
-        // already ending isn't ended again.
-        if !sent && session.open() {
-            if let Some(run) = run {
-                session.stop_playback(run);
+        let sent = Sent::send(
+            message,
+            |message| self.link.send_control(session, message),
+            || session.open(),
+        );
+        match sent {
+            Sent::Seal(playback) => {
+                if let Some(run) = playback {
+                    session.stop_playback(run);
+                }
+                let end = self.end_session(session, cx);
+                let held = self.voice.gates.hold_back();
+                cx.spawn(async move |_, _| {
+                    end.await;
+                    drop(held);
+                })
+                .detach();
             }
-            let end = self.end_session(session, cx);
-            let held = self.voice.gates.hold_back();
-            cx.spawn(async move |_, _| {
-                end.await;
-                drop(held);
-            })
-            .detach();
+            Sent::StopSpeaker(run) => self.stop_speaker(session.clone(), run, cx),
+            Sent::Told | Sent::Refused => {}
         }
-        if sent && let Some(run) = run {
-            self.stop_speaker(session.clone(), run, cx);
-        }
-        sent
+        sent.told()
     }
 
     pub(super) fn stop_speaker(
@@ -779,8 +708,7 @@ impl Presence {
         run: RunId,
         cx: &mut Context<'_, Self>,
     ) {
-        self.pending_stops
-            .push_back((session, run, STOP_TRIES, false));
+        self.pending_stops.push(session, run, Told::Brain);
         if self.stop_retry.is_none() {
             self.drain_stops(cx);
         }
@@ -793,56 +721,40 @@ impl Presence {
         run: RunId,
         cx: &mut Context<'_, Self>,
     ) {
-        self.pending_stops
-            .push_back((session, run, STOP_TRIES, true));
+        self.pending_stops.push(session, run, Told::SpeakerOnly);
         if self.stop_retry.is_none() {
             self.drain_stops(cx);
         }
     }
 
-    /// Offers the pending speaker stops to the owner in order. A busy owner is offered the front
-    /// one again after [`STOP_RETRY`], with later ones behind it. Only a brain-told stop can end
-    /// the pair when its tries run out.
+    /// Offers the pending speaker stops to the owner in the order `SpeakerStops` keeps, waiting
+    /// [`STOP_RETRY`] for a busy owner or for a pair's end.
     pub(super) fn drain_stops(&mut self, cx: &mut Context<'_, Self>) {
-        while let Some((session, run, tries, local)) = self.pending_stops.front_mut() {
+        while let Some((session, run, told)) = self.pending_stops.front() {
             let output = self.link.output();
-            let stopped = if *local {
-                output.stop_locally(session.generation(), *run)
-            } else {
-                output.stop(session.generation(), *run)
+            let stopped = match told {
+                Told::SpeakerOnly => output.stop_locally(session.generation(), run),
+                Told::Brain => output.stop(session.generation(), run),
             };
-            let task = match stopped {
-                Err(Denied::Busy) if *tries > 1 => {
-                    if *local {
-                        session.stop_playback(*run);
+            let link = &self.link;
+            let task = match self.pending_stops.offered(stopped, || link.audio_session()) {
+                Offered::Next => continue,
+                Offered::Retry { playback } => {
+                    if let Some((session, run)) = playback {
+                        session.stop_playback(run);
                     }
-                    *tries -= 1;
                     cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(STOP_RETRY).await;
                         Self::after_stop(&this, cx);
                     })
                 }
-                Err(_) if *local => {
-                    self.pending_stops.pop_front();
-                    continue;
-                }
-                Err(reason)
-                    if reason == Denied::Busy
-                        || reason == Denied::Lost
-                            && self.link.audio_session() == AudioSession::QueuedRequired =>
-                {
-                    *tries = 0;
+                Offered::End(session) => {
                     let session = session.clone();
                     let end = self.end_session(&session, cx);
                     cx.spawn(async move |this, cx| {
                         end.await;
                         Self::after_stop(&this, cx);
                     })
-                }
-                // Queued, or its session is gone or ending already.
-                Ok(()) | Err(_) => {
-                    self.pending_stops.pop_front();
-                    continue;
                 }
             };
             self.stop_retry = Some(task);
@@ -870,13 +782,7 @@ impl Presence {
     fn after_stop(this: &gpui_kit::WeakEntity<Self>, cx: &mut gpui_kit::AsyncApp) {
         let updated = this.update(cx, |this, cx| {
             this.stop_retry = None;
-            if this
-                .pending_stops
-                .front()
-                .is_some_and(|(_, _, tries, _)| *tries == 0)
-            {
-                this.pending_stops.pop_front();
-            }
+            this.pending_stops.resume();
             this.drain_stops(cx);
         });
         if updated.is_err() {
@@ -921,19 +827,17 @@ impl Presence {
     fn link_state(&mut self, state: LinkState, cx: &mut Context<'_, Self>) {
         self.chat_notice.clear();
         self.end_selection(crate::presenter::overlay_input::ExitCause::BrainLost, cx);
-        if state == LinkState::Connected {
+        let lead = state.lead();
+        if lead.clears_refusal {
             self.clear_refusal(cx);
         }
-        if state == LinkState::Failed {
+        if lead.retry {
             self.native.enable_retry();
         } else {
             self.native.disable_retry();
         }
-        if let Some(session) = self
-            .session
-            .as_ref()
-            .filter(|_| state == LinkState::Connected)
-        {
+        let models = state.models(self.session.as_ref());
+        if let Models::Up(session) = models {
             self.runs.met(session.incarnation());
             self.runs.connected(session.generation());
             self.presenter.connected(session.generation());
@@ -957,7 +861,7 @@ impl Presence {
             self.settings.update(cx, |model, cx| {
                 model.accounts.disconnected();
                 model.claude.disconnected();
-                if state == LinkState::Connecting {
+                if let Models::Down(GitHub::Connecting) = models {
                     model.github.connecting();
                 } else {
                     model.github.disconnected();
