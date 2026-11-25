@@ -156,6 +156,19 @@ against a scripted child; macOS supplies the system calls (`platform/macos/child
 `posix_spawn` with an empty environment, an exact-pid `waitpid(WNOHANG)`, SIGKILL, and a read of
 SIGCHLD's disposition. Nothing starts a child yet, and Windows has none.
 
+- **What the child inherits.** `start_brain` makes the two socket pairs (`platform/macos/pair.rs`)
+  and spawns the brain with `--parent-bound` as its only argument, an empty environment and
+  `POSIX_SPAWN_CLOEXEC_DEFAULT`, so the child gets only what the file actions name: the control
+  end on descriptor 3, the data end on 4 and `/dev/null` on 0 to 2. Both ends first move above
+  4 and then down, so they land right even when they start on 3 and 4 swapped; a move that
+  wouldn't fit under the open-descriptor limit refuses the spawn. The shell's copies of the
+  child's ends close as soon as the spawn returns, whether or not it made a child, so the
+  shell sees EOF when the brain exits. Rust marks a new socket close-on-exec only after
+  creating it, and Darwin has no flag to do it at creation, so a process started elsewhere in
+  the shell at that instant could inherit an end. It would see lengths and timing, not content:
+  the session handshake needs the instance secret.
+- **Retirement waits** are the link's Quit timeout, 3 s, before the kill and again after it.
+
 - **One owner.** A `ChildOwner` thread exists before the spawn, spawns on itself and is the only
   code in the shell that waits on, signals or reaps the brain. The UI never blocks on it. It polls
   every 20 ms; that's a poll period, not a scheduling bound, so each deadline is acted on at the
@@ -178,7 +191,8 @@ SIGCHLD's disposition. Nothing starts a child yet, and Windows has none.
   ignored and `SA_NOCLDWAIT` isn't set, and refuses otherwise. It never changes a process-wide
   disposition, and nothing else in the shell may wait on children (`wait`, `waitpid(-1)`,
   `waitid(P_ALL)`); review enforces that, since a check can't exclude a change racing it.
-- **A clean Quit** is the link having sent `Quitting` and the child reaped with exit code 0.
+- **A clean Quit** is the link having sent `Quitting` and the child reaped with exit code 0
+  (`Settled::is_clean` is the child's half).
 
 ```mermaid
 stateDiagram-v2

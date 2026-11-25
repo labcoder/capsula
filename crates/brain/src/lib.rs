@@ -82,8 +82,7 @@ pub const SPEECH_WORKER: &str = "--speech";
 /// The argument that starts `kumochid` as Claude Code's MCP bridge, before the launch value.
 pub const MCP_BRIDGE: &str = "--mcp-bridge";
 
-/// The sole argument for a brain launched under the shell's lifetime.
-pub const PARENT_BOUND: &str = "--parent-bound";
+pub use kumochi_protocol::constants::PARENT_BOUND;
 
 /// Why the brain stopped with an error.
 #[derive(Debug, thiserror::Error)]

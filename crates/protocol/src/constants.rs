@@ -148,6 +148,9 @@ pub const SHELL_LOG: &str = "kumochi-shell";
 /// it: the prologue's channel byte keeps their sessions apart.
 pub const SESSION_LABEL: &str = "Kumochi session";
 
+/// The sole argument for a brain the shell starts under its own lifetime.
+pub const PARENT_BOUND: &str = "--parent-bound";
+
 /// The pipe Claude Code's MCP bridge connects back on, after [`OBJECT_PREFIX`], the session and a
 /// dash, and before the launch's value.
 pub const BRIDGE_PIPE: &str = "claude-bridge";
