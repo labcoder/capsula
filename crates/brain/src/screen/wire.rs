@@ -34,7 +34,7 @@ pub(crate) struct TicketWire {
     generation: u64,
     nonce: [u8; 16],
     ttl_ms: u32,
-    /// The brain's deadline as a performance-counter stamp, which the worker's expiry never passes.
+    /// The brain's deadline on the platform's shared monotonic clock, in opaque units.
     deadline_qpc: u64,
     shell_pid: u32,
 }
