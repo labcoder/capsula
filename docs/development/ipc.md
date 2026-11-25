@@ -5,8 +5,8 @@ The shell link resolves the sibling brain executable at preparation. On its back
 A missing pipe can start the brain once, and a build mismatch lets it try starting again after
 that server exits. A busy pipe is retried and a foreign server is refused. The connector checks
 the server image before sending a greeting on either leg, opens the data leg only after Welcome,
-and sends the drawing-font startup frame before returning both pipes with their ordinary I/O
-timeouts restored.
+and writes the drawing-font startup frame before returning both pipes with their ordinary I/O
+timeouts restored. Those writes are not an acknowledgement that the brain accepted the data leg.
 The link retains parked Quit, reconnect state, and the decision to publish Connected. On Linux,
 link preparation still reports Unsupported without opening a transport or starting a process.
 
