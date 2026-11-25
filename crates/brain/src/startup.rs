@@ -109,7 +109,8 @@ impl Lifecycle {
             account,
         )?);
         checkpoint(Checkpoint::Brain, &mut self)?;
-        // shortcut: Job::new follows the removal pass unfenced (F2b); fence it with I1d-2 or R2.
+        // shortcut: a parent loss during the removal pass doesn't stop the Job from starting; fence
+        // the Job's creation when containment lands.
         let (jobs, workers) = native_workers::prepare(
             self.brain.as_mut().expect("built brain"),
             claude_setting,
@@ -117,8 +118,8 @@ impl Lifecycle {
         )?;
         self.jobs = Some(jobs);
         checkpoint(Checkpoint::Helpers, &mut self)?;
-        // shortcut: the Claude lane and the screen worker follow voice unfenced (F3b, F3c); fence
-        // them with I1d-2 or R2.
+        // shortcut: a parent loss after voice starts doesn't stop the Claude lane or the screen
+        // worker; fence each start when containment lands.
         let brain = self.brain.as_mut().expect("built brain");
         let jobs = self.jobs.as_ref().expect("started helpers");
         native_workers::start(workers, brain, vault_held, &self.exe, jobs);
