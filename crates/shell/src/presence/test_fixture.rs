@@ -12,7 +12,7 @@ use kumochi_scene::theme::Theme;
 use super::{
     Activity, Context, Dock, Drawn, EscapeHold, FrameLoop, KumoView, Layout, Line, LinkHandle,
     LinkState, Panel, PanelVisibility, Presence, PresenceNative, Runs, Settings, Strings,
-    TalkEscape, TextPanel, Threads, Window, platform, presence_labels, pull_dock,
+    TalkEscape, TextPanel, Threads, Window, platform, pull_dock,
 };
 use crate::presenter::Presenter;
 
@@ -26,8 +26,12 @@ impl Render for Blank {
 }
 
 pub(super) struct WithoutDesktop {
+    #[cfg(windows)]
     _work_area: platform::work_area_fixture::Guard,
+    #[cfg(windows)]
     _cursor: platform::cursor_fixture::Guard,
+    #[cfg(not(windows))]
+    _inputs: platform::DetachedInputs,
 }
 
 impl gpui_kit::Global for WithoutDesktop {}
@@ -36,10 +40,54 @@ pub(super) fn without_desktop(cx: &mut TestAppContext) {
     cx.update(|cx| {
         assert!(!cx.has_global::<WithoutDesktop>());
         cx.set_global(WithoutDesktop {
+            #[cfg(windows)]
             _work_area: platform::work_area_fixture::set([0, 0, 2560, 1400]),
+            #[cfg(windows)]
             _cursor: platform::cursor_fixture::scoped([4096, 4096]),
+            #[cfg(not(windows))]
+            _inputs: platform::DetachedInputs::new(),
         });
     });
+}
+
+#[cfg(not(windows))]
+#[test]
+fn detached_defaults_do_not_replace_or_restore_expired_overrides() {
+    let mut app = TestAppContext::single();
+    let event = platform::EventTime::new(std::time::Instant::now());
+    {
+        let _area = platform::work_area_fixture::set([20, 30, 600, 400]);
+        let _cursor = platform::cursor_fixture::scoped([100, 100]);
+        assert!(
+            !event.layout_current(),
+            "an area alone is not a keyboard fixture"
+        );
+        without_desktop(&mut app);
+        assert_eq!(platform::work_area().unwrap(), [20, 30, 600, 400]);
+        assert_eq!(platform::cursor_position().unwrap(), [100, 100]);
+    }
+    assert!(event.layout_current());
+    assert_eq!(platform::work_area().unwrap(), [0, 0, 2560, 1400]);
+    assert_eq!(platform::cursor_position().unwrap(), [4096, 4096]);
+    platform::cursor_fixture::set(None);
+    assert!(matches!(
+        platform::cursor_position(),
+        Err(platform::PresenceError::BindingsUnavailable)
+    ));
+    app.quit();
+    drop(app);
+    assert!(!event.layout_current());
+    assert!(matches!(
+        platform::work_area(),
+        Err(platform::PresenceError::GeometryUnavailable)
+    ));
+    assert!(matches!(
+        platform::cursor_position(),
+        Err(platform::PresenceError::BindingsUnavailable)
+    ));
+    let mut next = TestAppContext::single();
+    without_desktop(&mut next);
+    assert_eq!(platform::cursor_position().unwrap(), [4096, 4096]);
 }
 
 /// Presence as `open` builds it, minus every native surface, with its typing panel created and
@@ -49,17 +97,24 @@ pub(super) fn without_desktop(cx: &mut TestAppContext) {
     reason = "one line per Presence field, as `open` builds it"
 )]
 pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
+    #[cfg(not(windows))]
+    if !cx.update(|cx| cx.has_global::<WithoutDesktop>()) {
+        without_desktop(cx);
+    }
     cx.update(|cx| {
         gpui_kit::init(cx);
         cx.set_global(Strings::english());
         kumochi_scene::deferred::start().expect("the dropper starts before intake");
         let (events, events_in) = async_channel::unbounded();
+        #[cfg(windows)]
         let native = PresenceNative::detached(
-            presence_labels(cx),
+            super::presence_labels(cx),
             events.clone(),
             !cx.has_global::<WithoutDesktop>(),
         )
         .expect("detached presence");
+        #[cfg(not(windows))]
+        let native = PresenceNative::detached();
         let mut blank = || {
             gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| cx.new(|_| Blank))
                 .expect("a GPUI test window opens")

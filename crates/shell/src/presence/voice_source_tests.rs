@@ -2283,6 +2283,7 @@ fn the_native_callback_reads_the_pointer_at_recognition_and_when_the_keys_come_u
     }
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn superseding_native_hold_returns_before_outbox_release_and_sends_cancel_first(
     cx: &mut TestAppContext,
@@ -2338,6 +2339,7 @@ fn superseding_native_hold_returns_before_outbox_release_and_sends_cancel_first(
     ));
 }
 
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug)]
 enum CancelAt {
     RawEscape,
@@ -2348,6 +2350,7 @@ enum CancelAt {
     ClosedQueue,
 }
 
+#[cfg(windows)]
 impl CancelAt {
     fn deliver(self, send: &Deliver, now: Instant) {
         use crate::presence::gesture::{CLOSE_DELIVERY, FAIL_CLOCK};
@@ -2391,6 +2394,7 @@ impl CancelAt {
     }
 }
 
+#[cfg(windows)]
 fn check_native_cancel(cx: &mut TestAppContext, at: CancelAt) {
     use crate::link::fixture;
 
@@ -2480,36 +2484,43 @@ fn check_native_cancel(cx: &mut TestAppContext, at: CancelAt) {
     }
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_on_raw_escape(cx: &mut TestAppContext) {
     check_native_cancel(cx, CancelAt::RawEscape);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_on_hotkey_escape(cx: &mut TestAppContext) {
     check_native_cancel(cx, CancelAt::HotkeyEscape);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_on_cancelled_end(cx: &mut TestAppContext) {
     check_native_cancel(cx, CancelAt::End);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_on_open_input(cx: &mut TestAppContext) {
     check_native_cancel(cx, CancelAt::OpenInput);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_on_clock_failure(cx: &mut TestAppContext) {
     check_native_cancel(cx, CancelAt::ClockFailure);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_on_closed_queue(cx: &mut TestAppContext) {
     check_native_cancel(cx, CancelAt::ClosedQueue);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn native_cancel_never_waits_or_offers_a_replacement_after_a_stale_cancel(cx: &mut TestAppContext) {
     use crate::link::fixture;

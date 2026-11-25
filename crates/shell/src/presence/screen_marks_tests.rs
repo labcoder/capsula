@@ -30,7 +30,9 @@ use super::tests::{after, chord, listen, native, source, until};
 use crate::input::{Edge, Event, Key, TalkHeld};
 use crate::link::{LinkEvent, LinkState};
 use crate::platform::input::{Button, input};
-use crate::platform::{Deliver, PresenceEvent, with_raw_keys, with_raw_modifiers};
+use crate::platform::{Deliver, PresenceEvent};
+#[cfg(windows)]
+use crate::platform::{with_raw_keys, with_raw_modifiers};
 use crate::presence::kumo::{Motion, v2};
 use crate::presence::pulling::{Grab, PullSpace};
 use crate::strings::Text;
@@ -521,6 +523,7 @@ fn the_dock_says_marks_were_skipped_only_beside_their_own_answer(cx: &mut TestAp
     assert_eq!(line(&watching.ready, cx), Some((Text::MarksSkipped, None)));
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn the_native_callback_hands_over_the_talk_key_still_down(cx: &mut TestAppContext) {
     let watching = watch(true, cx);
@@ -609,22 +612,26 @@ fn a_reset_before_recognition_delivery_retires_only_that_unstarted_generation(
     });
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn overflow_refuses_unconfirmed_chords_then_accepts_a_clean_read(cx: &mut TestAppContext) {
     needs_neutral(NeutralLoss::Overflow, cx);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn registered_escape_requires_a_clean_read_even_with_no_known_key(cx: &mut TestAppContext) {
     needs_neutral(NeutralLoss::Escape, cx);
     needs_neutral(NeutralLoss::NeutralEscape, cx);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn a_repeat_after_reset_cannot_rearm_but_the_first_clean_read_works(cx: &mut TestAppContext) {
     needs_neutral(NeutralLoss::Reset, cx);
 }
 
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug)]
 enum NeutralLoss {
     Overflow,
@@ -633,6 +640,7 @@ enum NeutralLoss {
     Reset,
 }
 
+#[cfg(windows)]
 fn needs_neutral(loss: NeutralLoss, cx: &mut TestAppContext) {
     let watching = watch(true, cx);
     let deliver = native(&watching.ready.owner, cx);
@@ -719,6 +727,7 @@ fn needs_neutral(loss: NeutralLoss, cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn stale_releases_cannot_arm_or_send_at_either_delivery_boundary(cx: &mut TestAppContext) {
     for second in [false, true] {

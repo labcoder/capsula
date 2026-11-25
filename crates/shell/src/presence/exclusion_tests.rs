@@ -154,9 +154,15 @@ fn detached_native_affinity_is_not_the_positive_presence_adapter(
 ) {
     let owner = super::super::test_fixture::presence(cx);
     owner.update(cx, |this, cx| {
+        #[cfg(windows)]
         assert!(matches!(
             this.native.affinity(),
             Err(platform::PresenceError::NotWin32)
+        ));
+        #[cfg(not(windows))]
+        assert!(matches!(
+            this.native.affinity(),
+            Err(platform::PresenceError::BindingsUnavailable)
         ));
         let session = crate::link::Session::detached(9, kumochi_protocol::message::Incarnation(1));
         this.session = Some(session.clone());

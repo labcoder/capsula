@@ -40,6 +40,11 @@ impl EventTime {
     #[cfg(not(windows))]
     pub(crate) fn layout_current(self) -> bool {
         let _ = self;
+        #[cfg(test)]
+        {
+            super::DetachedInputs::active()
+        }
+        #[cfg(not(test))]
         false
     }
 
