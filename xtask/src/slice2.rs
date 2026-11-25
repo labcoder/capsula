@@ -84,18 +84,11 @@ pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     hermetic::require_gate(ProductIdentity::ACTIVE)?;
     match args.next() {
         Some(inner) if inner == INNER => {
-            let folder = args.next().context("the inner gate needs its folder")?;
             let root = args.next().context("the inner gate needs its run's root")?;
             let id = args.next().context("the inner gate needs its run's id")?;
             let me = std::env::current_exe()?;
             let bin = me.parent().context("the gate runs from its folder")?;
-            gate(
-                Path::new(&folder),
-                bin,
-                Path::new(&root),
-                &id,
-                args.next().as_deref(),
-            )
+            gate(bin, Path::new(&root), &id, args.next().as_deref())
         }
         only => {
             ensure!(
@@ -129,7 +122,6 @@ fn prepare(only: Option<&str>) -> Result<()> {
         println!("slice 2 gate in {}", folder.display());
         let mut gate = Command::new(bin.join(SHELL_EXE));
         gate.args(["slice2-gate", INNER])
-            .arg(&folder)
             .arg(run.root())
             .arg(run.id())
             .args(only);
@@ -157,8 +149,10 @@ fn end_leftovers(brains: Vec<Child>) -> Vec<String> {
 }
 
 /// Runs the items with their folders under `root`, once the brain staged in `bin` is a current
-/// Gate image and `root` is the live run's own, marked with `id`; the report goes to `folder`.
-fn gate(folder: &Path, bin: &Path, root: &Path, id: &str, only: Option<&str>) -> Result<()> {
+/// Gate image and `root` is the live run's own, marked with `id`; the report goes to the folder
+/// `bin` is in.
+fn gate(bin: &Path, root: &Path, id: &str, only: Option<&str>) -> Result<()> {
+    let folder = bin.parent().context("the gate runs from its folder")?;
     hermetic::require_compatible(&bin.join(BRAIN_EXE), hermetic::BRAIN_ROLE)?;
     let _held = hermetic::admit_root(
         &hermetic::runs_path()?,
@@ -315,7 +309,6 @@ mod tests {
         let inner = [
             INNER,
             folder.to_str().expect("Unicode"),
-            folder.to_str().expect("Unicode"),
             "0123456789abcdef0123456789abcdef",
             "no item is named this",
         ];
@@ -363,7 +356,7 @@ mod tests {
             assert_eq!(names, ["gate-run"], "nothing was written in the root");
             assert_eq!(std::fs::read_dir(&dir).expect("lists").count(), 2);
         };
-        let run = |id| gate(&dir, &bin, &root, id, None).expect_err("refused");
+        let run = |id| gate(&bin, &root, id, None).expect_err("refused");
         std::fs::write(bin.join(BRAIN_EXE), "brain started|Kumochi Gate instance")
             .expect("a brain from before the folder override");
         assert_eq!(

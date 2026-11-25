@@ -121,7 +121,8 @@ flowchart TD
    `kumochi-gate-run.lock` in the system's Local AppData (beside, never inside, `Kumochi Gate`)
    until it ends. It holds every folder from the volume root down to Local AppData first, and
    opens the lock without following a link: a link or a hard-linked file there is refused and left
-   as it is. It refuses while any `kumochi.exe` or `kumochid.exe` runs, of any identity. Two gate runs
+   as it is. The lock covers one byte far past the file's line, so a process the run starts can
+   still read the line. It refuses while any `kumochi.exe` or `kumochid.exe` runs, of any identity. Two gate runs
    would share the gate pipes, and the shell's hotkey, raw input and tray icon belong to the
    Windows session, not the identity.
 2. **Nothing outlives it.** The run puts itself in a kill-on-close job that forbids breakaway, so a
@@ -167,9 +168,9 @@ random run id into the root's
 cleaned up. If a run is interrupted (Ctrl-C, a killed xtask, a panic, or one of its processes
 still running after cleanup ended it), the next gate run cleans up that folder as above before it starts, so
 rerunning any gate tool clears an interrupted one. The instance entry goes at the end of that next
-run. Recovery starts only when the lock's line is whole, the folder's `gate-run` holds the same id,
-and the folder sits directly in `kumochi-gate-runs` and passes the same checks, opened without
-following a link. Anything else, such as a lock cut short, a folder without that id, or one
+run. Recovery starts only when the lock's line is whole, the folder it names sits directly in
+`kumochi-gate-runs` and passes the same checks, opened without following a link, and only then
+the folder's `gate-run` holds the same id; nothing is read at a folder before it passes. Anything else, such as a lock cut short, a folder without that id, or one
 outside `kumochi-gate-runs` or behind a link, is refused with a message naming the lock and the folder, and then nothing is deleted. A
 recovery that starts and then keeps a launch (its authority unreadable, or another identity's
 folder in it) has already deleted the other launches and every readable launch's entries, and

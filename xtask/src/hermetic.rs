@@ -3,7 +3,7 @@
 //! own with Claude Code off. It runs alone and deletes what its brains left at the end. See
 //! `docs/development/gate-identity.md`.
 
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io::{Read as _, Seek as _, Write as _};
 use std::os::windows::fs::OpenOptionsExt as _;
@@ -440,11 +440,11 @@ fn take(path: &Path) -> Result<File> {
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
-    match lock.try_lock() {
-        Ok(()) => Ok(lock),
-        Err(TryLockError::WouldBlock) => bail!("another gate run is on; one runs at a time"),
-        Err(TryLockError::Error(error)) => Err(error.into()),
-    }
+    ensure!(
+        platform::try_lock_run(&lock)?,
+        "another gate run is on; one runs at a time"
+    );
+    Ok(lock)
 }
 
 /// Cleans up the earlier run the held `lock` (at `path`) names, if it didn't finish and its root
@@ -470,13 +470,14 @@ fn claim(
     if !earlier.is_empty() {
         let line = earlier.trim_end();
         let folder = line.splitn(3, ' ').nth(2).unwrap_or(line);
-        let earlier = interrupted(&earlier).with_context(|| {
+        let unmade = || {
             format!(
                 "{} names {folder}, which no gate run can be shown to have made, so nothing was \
                  deleted",
                 path.display()
             )
-        })?;
+        };
+        let (id, earlier) = lock_line(&earlier).with_context(unmade)?;
         let _earlier = recorded(runs, &earlier).with_context(|| {
             format!(
                 "{} names {folder}, which isn't a checked gate run folder in {}, so nothing was \
@@ -485,6 +486,9 @@ fn claim(
                 runs.display()
             )
         })?;
+        if fs::read_to_string(earlier.join(MARKER)).ok().as_deref() != Some(id) {
+            bail!(unmade());
+        }
         remove_entries(&earlier, store, Keep::Nothing).with_context(|| {
             format!(
                 "cleaning up after the interrupted gate run in {folder}, which {} names",
@@ -504,8 +508,8 @@ fn claim(
 
 /// Admits `root` for a process a gate run started, such as slice2's inner copy: it must be a
 /// folder directly in `runs` whose chain holds, its marker must carry `id`, and a live run must
-/// hold the gate-run lock at `lock`. Returns the held chain. A stale or foreign root is refused
-/// before anything is written in it.
+/// hold the gate-run lock at `lock` with a line naming exactly `id` and `root`. Returns the held
+/// chain. A stale or foreign root is refused before anything is written in it.
 pub(crate) fn admit_root(runs: &Path, lock: &Path, root: &Path, id: &str) -> Result<Vec<File>> {
     ensure!(
         root.parent() == Some(runs),
@@ -519,9 +523,13 @@ pub(crate) fn admit_root(runs: &Path, lock: &Path, root: &Path, id: &str) -> Res
         root.display()
     );
     let lock = File::open(lock).context("no gate run is on")?;
+    ensure!(!platform::try_lock_run(&lock)?, "no gate run is on");
+    let mut line = String::new();
+    (&lock).take(4096).read_to_string(&mut line)?;
     ensure!(
-        matches!(lock.try_lock(), Err(TryLockError::WouldBlock)),
-        "no gate run is on"
+        lock_line(&line) == Some((id, root.to_path_buf())),
+        "{} isn't the live gate run's folder",
+        root.display()
     );
     Ok(held)
 }
@@ -531,10 +539,9 @@ pub(crate) fn runs_path() -> Result<PathBuf> {
     gate_file("runs")
 }
 
-/// The folder a gate run's lock `line` names, only when the line is whole and that folder holds
-/// the same run id in its marker: a truncated line, a stale or foreign one, or a folder no gate run
-/// marked never names anything to delete.
-fn interrupted(line: &str) -> Option<PathBuf> {
+/// The run id and folder a gate run's lock `line` names, only when the line is whole: a truncated
+/// or malformed line names nothing. Nothing is read at the folder.
+fn lock_line(line: &str) -> Option<(&str, PathBuf)> {
     let (id, root) = line
         .strip_prefix(LOCK_LINE)?
         .strip_suffix('\n')?
@@ -543,7 +550,7 @@ fn interrupted(line: &str) -> Option<PathBuf> {
         return None;
     }
     let root = PathBuf::from(root);
-    (root.is_absolute() && fs::read_to_string(root.join(MARKER)).ok()? == id).then_some(root)
+    root.is_absolute().then_some((id, root))
 }
 
 /// The recorded root of an earlier run, opened without following a link, only when it's a folder
@@ -1212,11 +1219,14 @@ mod tests {
     fn a_started_process_admits_only_the_live_runs_own_root() {
         let dir = scratch::local("gate-admit-root");
         let runs = dir.join("runs");
-        let root = runs.join("run");
-        fs::create_dir_all(&root).expect("a run root");
-        fs::write(root.join(MARKER), EARLIER_ID).expect("its marker");
+        let (old, live) = (runs.join("a"), runs.join("b"));
+        for (root, id) in [(&old, EARLIER_ID), (&live, LIVE_ID)] {
+            fs::create_dir_all(root).expect("a run root");
+            fs::write(root.join(MARKER), id).expect("its marker");
+        }
         let lock = dir.join("run.lock");
-        fs::write(&lock, "").expect("a lock");
+        fs::write(&lock, format!("{LOCK_LINE}{LIVE_ID} {}\n", live.display()))
+            .expect("the live run's line");
         let other = dir.join("other");
         fs::create_dir(&other).expect("a folder elsewhere");
         fs::write(other.join(MARKER), EARLIER_ID).expect("a marker");
@@ -1230,20 +1240,28 @@ mod tests {
             format!("{} isn't a gate run's folder", other.display())
         );
         assert_eq!(
-            refused(&root, "fedcba9876543210fedcba9876543210"),
-            format!("{} isn't this gate run's folder", root.display())
+            refused(&live, EARLIER_ID),
+            format!("{} isn't this gate run's folder", live.display())
         );
-        assert_eq!(refused(&root, EARLIER_ID), "no gate run is on");
+        assert_eq!(refused(&live, LIVE_ID), "no gate run is on");
         let held = take(&lock).expect("the live run's lock");
-        admit_root(&runs, &lock, &root, EARLIER_ID).expect("the live run's own root");
+        assert_eq!(
+            refused(&old, EARLIER_ID),
+            format!("{} isn't the live gate run's folder", old.display())
+        );
+        admit_root(&runs, &lock, &live, LIVE_ID).expect("the live run's own root");
         drop(held);
-        let mut names: Vec<_> = fs::read_dir(&root)
-            .expect("lists")
-            .map(|entry| entry.expect("entry").file_name())
-            .collect();
-        names.sort();
-        assert_eq!(names, [MARKER], "nothing was written in the root");
+        for root in [&old, &live] {
+            let mut names: Vec<_> = fs::read_dir(root)
+                .expect("lists")
+                .map(|entry| entry.expect("entry").file_name())
+                .collect();
+            names.sort();
+            assert_eq!(names, [MARKER], "nothing was written in {}", root.display());
+        }
     }
+
+    const LIVE_ID: &str = "fedcba9876543210fedcba9876543210";
 
     const HELD: &str = "Kumochi Gate/gen/host/07070707070707070707070707070707/0";
     const EARLIER_ID: &str = "0123456789abcdef0123456789abcdef";
@@ -1257,22 +1275,29 @@ mod tests {
         (earlier, line)
     }
 
+    const UNMADE: &str = "which no gate run can be shown to have made";
+    const UNCHECKED: &str = "which isn't a checked gate run folder in RUNS";
+
     #[test]
     fn recovery_deletes_nothing_unless_the_whole_lock_and_the_folders_mark_agree() {
         type Spoil = fn(&Path, &mut String);
         // Each case, the bytes it cuts from the folder's name, and how it spoils the run.
-        let cases: [(&str, usize, Spoil); 4] = [
-            ("no-newline", 0, |_, line| line.truncate(line.len() - 1)),
-            ("cut-path", 3, |_, line| line.truncate(line.len() - 4)),
-            ("unmarked", 0, |earlier, _| {
+        let cases: [(&str, usize, &str, Spoil); 4] = [
+            ("no-newline", 0, UNMADE, |_, line| {
+                line.truncate(line.len() - 1);
+            }),
+            ("cut-path", 3, UNCHECKED, |_, line| {
+                line.truncate(line.len() - 4);
+            }),
+            ("unmarked", 0, UNMADE, |earlier, _| {
                 fs::remove_file(earlier.join(MARKER)).expect("no mark");
             }),
-            ("another-id", 0, |earlier, _| {
+            ("another-id", 0, UNMADE, |earlier, _| {
                 fs::write(earlier.join(MARKER), "fedcba9876543210fedcba9876543210")
                     .expect("another run's id");
             }),
         ];
-        for (case, cut, spoil) in cases {
+        for (case, cut, reason, spoil) in cases {
             let dir = scratch::local(&format!("gate-recovery-{case}"));
             let (earlier, mut line) = interrupted_run(&dir);
             spoil(&earlier, &mut line);
@@ -1288,9 +1313,9 @@ mod tests {
             assert_eq!(
                 format!("{error:#}"),
                 format!(
-                    "{} names {named}, which no gate run can be shown to have made, so nothing \
-                     was deleted",
-                    path.display()
+                    "{} names {named}, {}, so nothing was deleted",
+                    path.display(),
+                    reason.replace("RUNS", &dir.display().to_string())
                 ),
                 "{case}"
             );

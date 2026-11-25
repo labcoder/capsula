@@ -345,6 +345,42 @@ pub(crate) fn file_identity(opened: &std::fs::File) -> Result<(u32, u64)> {
     ))
 }
 
+/// Takes the gate-run lock on `file` without waiting: an exclusive lock on one byte far past any
+/// line the file holds, so other processes can still read that line. False while another handle
+/// holds it; closing the handle releases it.
+pub(crate) fn try_lock_run(file: &std::fs::File) -> Result<bool> {
+    use windows::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    };
+    use windows::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
+    let mut at = OVERLAPPED {
+        Anonymous: OVERLAPPED_0 {
+            Anonymous: OVERLAPPED_0_0 {
+                Offset: 0,
+                OffsetHigh: 0x7fff_ffff,
+            },
+        },
+        ..OVERLAPPED::default()
+    };
+    // SAFETY: `file` is a live synchronous handle and `at` outlives the call, which returns at once.
+    let locked = unsafe {
+        LockFileEx(
+            HANDLE(file.as_raw_handle()),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            None,
+            1,
+            0,
+            &raw mut at,
+        )
+    };
+    match locked {
+        Ok(()) => Ok(true),
+        Err(error) if error.code() == ERROR_LOCK_VIOLATION.to_hresult() => Ok(false),
+        Err(error) => Err(error).context("taking the gate-run lock"),
+    }
+}
+
 /// The command that force-ends `pid` and every process it started. std can end one child, not
 /// its descendants (cargo's rustc, a run's brain), so this is the platform's own tool.
 pub(crate) fn kill_tree(pid: u32) -> Result<Command> {
