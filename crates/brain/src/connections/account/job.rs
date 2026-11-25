@@ -185,10 +185,17 @@ impl<S: CredentialStore> fmt::Debug for Worker<S> {
 
 impl Worker<NativeCredentialStore> {
     /// The worker on the real credential store: the only way the brain reaches it outside tests.
-    /// Its vault opens under `profile`, the lock the brain holds for its whole run.
-    pub fn system(clock: Arc<dyn Clock>, profile: Arc<SessionLock>) -> Self {
+    /// Its vault opens under `profile`, the lock the brain holds for its whole run, linked to the
+    /// history writer by `history`.
+    pub(crate) fn system(
+        clock: Arc<dyn Clock>,
+        profile: Arc<SessionLock>,
+        history: crate::connections::vault::HistoryLink,
+    ) -> Self {
         Self::new(
-            Box::new(move || Vault::open_held(NativeCredentialStore, Arc::clone(&profile))),
+            Box::new(move || {
+                Vault::open_held(NativeCredentialStore, Arc::clone(&profile), history.clone())
+            }),
             clock,
         )
     }

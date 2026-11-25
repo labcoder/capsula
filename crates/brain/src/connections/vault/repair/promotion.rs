@@ -1,7 +1,7 @@
+use std::fmt;
 use std::ops::Range;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 
 use kumochi_protocol::Secret;
 use zeroize::Zeroizing;
@@ -37,31 +37,103 @@ pub(in crate::connections) struct VerifiedReplacement {
     window: Range<u64>,
 }
 
-/// The vault's binding, made once at construction, to the profile's one history writer: the
-/// store thread's store, which ordinary startup opens and purge guards. The writer serves each
-/// request as one of its operations, so a purge sees the cutoff write. Unbound, every request is
-/// refused.
-pub(crate) struct HistoryLink(Option<Box<dyn Fn(CutoffRequest) -> bool + Send>>);
+type Queue = Arc<dyn Fn(CutoffRequest) -> bool + Send + Sync>;
+
+/// Where a [`HistoryLink`] queues: nowhere yet, the writer, or nowhere ever again.
+enum Writer {
+    Waiting,
+    Bound(Queue),
+    Closed,
+}
+
+/// The vault's binding to the profile's one history writer: the store thread's store, which
+/// ordinary startup opens and purge guards. The writer serves each request as one of its
+/// operations, so a purge sees the cutoff write. It is bound at most once, to that writer only,
+/// and once released never again; while it isn't bound, every request is refused.
+#[derive(Clone)]
+pub(crate) struct HistoryLink(Arc<Mutex<Writer>>);
+
+/// The brain's side of a link from [`HistoryLink::pending`]: it binds the link once the store
+/// thread runs, and releases it before the store closes, because that thread ends only once
+/// nothing can queue for it. Dropping it releases too.
+pub(crate) struct HistoryBinding(Arc<Mutex<Writer>>);
 
 impl HistoryLink {
     /// `send` queues a request for the writer; false when the writer has gone.
-    pub(crate) fn new(send: impl Fn(CutoffRequest) -> bool + Send + 'static) -> Self {
-        Self(Some(Box::new(send)))
+    pub(crate) fn new(send: impl Fn(CutoffRequest) -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Writer::Bound(Arc::new(send)))))
     }
 
     pub(crate) fn unbound() -> Self {
-        Self(None)
+        Self(Arc::new(Mutex::new(Writer::Closed)))
+    }
+
+    /// A link no writer serves yet, and the binding that gives it one.
+    pub(crate) fn pending() -> (Self, HistoryBinding) {
+        let writer = Arc::new(Mutex::new(Writer::Waiting));
+        (Self(Arc::clone(&writer)), HistoryBinding(writer))
+    }
+
+    /// Queues the request `make` builds while bound: `None` builds nothing, since nothing is
+    /// bound, and `Some(false)` means the writer has gone.
+    fn queue(&self, make: impl FnOnce() -> CutoffRequest) -> Option<bool> {
+        match &*lock(&self.0) {
+            Writer::Bound(queue) => Some(queue(make())),
+            Writer::Waiting | Writer::Closed => None,
+        }
     }
 
     /// The committed cutoff for `tag`, read again by the writer.
     pub(crate) fn check(&self, tag: u64) -> Result<Boundary, StoreError> {
-        let send = self.0.as_ref().ok_or(StoreError::RecoveryContext)?;
         let (reply, answer) = mpsc::sync_channel(1);
-        if !send(CutoffRequest(Ask::Check(tag, reply))) {
+        if self.queue(|| CutoffRequest(Ask::Check(tag, reply))) != Some(true) {
             return Err(StoreError::RecoveryContext);
         }
         answer.recv().unwrap_or(Err(StoreError::RecoveryContext))
     }
+}
+
+impl HistoryBinding {
+    /// Binds the link to `writer`'s queue, when the link still waits and `writer` is bound.
+    pub(crate) fn bind(&self, writer: &HistoryLink) {
+        let queue = match &*lock(&writer.0) {
+            Writer::Bound(queue) => Arc::clone(queue),
+            Writer::Waiting | Writer::Closed => return,
+        };
+        let mut link = lock(&self.0);
+        if matches!(*link, Writer::Waiting) {
+            *link = Writer::Bound(queue);
+        }
+    }
+
+    /// Ends the link for good. What it already queued is still served; nothing more queues.
+    pub(crate) fn release(&self) {
+        *lock(&self.0) = Writer::Closed;
+    }
+}
+
+/// A binding with no link, for an account system whose vault has none.
+impl Default for HistoryBinding {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(Writer::Closed)))
+    }
+}
+
+impl Drop for HistoryBinding {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl fmt::Debug for HistoryBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HistoryBinding")
+    }
+}
+
+/// Every write to a `Writer` is a single assignment, so even a poisoned lock holds a whole one.
+fn lock(writer: &Mutex<Writer>) -> MutexGuard<'_, Writer> {
+    writer.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// One request for the history writer. Only a bound replacement can ask for a write, and the
@@ -305,24 +377,23 @@ impl<S: CredentialStore> Vault<S> {
         &self,
         pending: PendingReplacement,
     ) -> Result<CutoffReceipt, CutoffRefused> {
-        let send = match &self.history.0 {
-            Some(send) if Arc::ptr_eq(&pending.issuer, &self.incarnation) => send,
-            _ => {
-                return Err(CutoffRefused {
-                    pending: Some(pending),
-                    error: StoreError::RecoveryContext,
-                });
-            }
-        };
-        let (reply, answer) = mpsc::sync_channel(1);
-        let lost = || CutoffRefused {
-            pending: None,
+        let refused = |pending| CutoffRefused {
+            pending,
             error: StoreError::RecoveryContext,
         };
-        if !send(CutoffRequest(Ask::Establish(pending, reply))) {
-            return Err(lost());
+        if !Arc::ptr_eq(&pending.issuer, &self.incarnation) {
+            return Err(refused(Some(pending)));
         }
-        answer.recv().unwrap_or_else(|_| Err(lost()))
+        let (reply, answer) = mpsc::sync_channel(1);
+        let mut pending = Some(pending);
+        match self
+            .history
+            .queue(|| CutoffRequest(Ask::Establish(pending.take().expect("queued once"), reply)))
+        {
+            None => Err(refused(pending)),
+            Some(false) => Err(refused(None)),
+            Some(true) => answer.recv().unwrap_or_else(|_| Err(refused(None))),
+        }
     }
 
     /// Marks the bound replacement's context established only when the history writer's fresh

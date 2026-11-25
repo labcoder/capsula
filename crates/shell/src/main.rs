@@ -18,6 +18,12 @@ mod github_link_tests;
 mod platform;
 mod presence;
 mod presenter;
+#[cfg(target_os = "macos")]
+#[expect(
+    dead_code,
+    reason = "dormant until the connected Mac shell admits screen capture"
+)]
+mod screen_access;
 
 use std::process::ExitCode;
 

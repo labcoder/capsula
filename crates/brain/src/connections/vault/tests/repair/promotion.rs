@@ -988,3 +988,41 @@ fn assert_escrow_unchanged(
     assert_eq!(revision, i64::try_from(old.revision).unwrap());
     assert_eq!(generation_target(service, "repair", &repair, 0), escrow);
 }
+
+/// A pending link queues nothing until it's bound, then only to the first writer it was bound to,
+/// through every clone. Once released, by its binding or by dropping that binding, it queues
+/// nothing again, and a later bind changes nothing.
+#[test]
+fn a_pending_link_queues_only_while_bound_to_its_first_writer() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let writer = |heard: &Arc<AtomicUsize>| {
+        let heard = Arc::clone(heard);
+        HistoryLink::new(move |request| {
+            drop(request);
+            heard.fetch_add(1, Ordering::SeqCst);
+            true
+        })
+    };
+    let heard = |count: &Arc<AtomicUsize>| count.load(Ordering::SeqCst);
+    let refused = |link: &HistoryLink| matches!(link.check(7), Err(StoreError::RecoveryContext));
+    for drop_binding in [false, true] {
+        let (first, second) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (link, binding) = HistoryLink::pending();
+        assert!(refused(&link));
+        assert_eq!((heard(&first), heard(&second)), (0, 0));
+        binding.bind(&writer(&first));
+        binding.bind(&writer(&second));
+        assert!(refused(&link), "a dropped request is answered as refused");
+        assert!(refused(&link.clone()));
+        assert_eq!((heard(&first), heard(&second)), (2, 0));
+        if drop_binding {
+            drop(binding);
+        } else {
+            binding.release();
+            binding.bind(&writer(&second));
+        }
+        assert!(refused(&link));
+        assert_eq!((heard(&first), heard(&second)), (2, 0));
+    }
+}

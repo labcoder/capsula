@@ -278,6 +278,15 @@ screen-history-changed = Screen not included: it changed while the screenshot wa
 screen-note-cant = Hold to talk can't include a screenshot right now.
 screen-note-can = At this point, holding to talk could send a screenshot to { $model }.
 marks-skipped = Marks skipped: your screen changed
+# macOS Screen Recording access, asked for only from a press in the app's own window.
+screen-access-title = Screen Recording
+screen-access-explain = When you ask to share your screen, { $app } can include one screenshot with your request. macOS needs your permission first.
+screen-access-request = Request Screen Recording access
+screen-access-forward = This window needs to be in front first. Press the button again once it is.
+screen-access-pending = Screen capture stays off until you allow { $app } in Screen Recording settings. If access still doesn't show after you allow it, quit and reopen { $app }.
+screen-access-open-settings = Open Screen Recording settings
+screen-access-path = System Settings → Privacy & Security → Screen & System Audio Recording (or Screen Recording if that's the label shown)
+screen-access-granted = macOS allows Screen Recording for this app.
 show-screen-history = A screenshot of your screen may have been sent with this message. { $app } does not save the image in chat history.
 voice-restart-required = Speech input unavailable. Restart the app.
 voice-installed-failed = Installed · speech input unavailable
