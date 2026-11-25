@@ -35,11 +35,11 @@ fn wide_text(step: &str, x: u16, glyphs: usize) -> String {
 }
 
 fn geometry_error(step: &str) -> CallError {
-    CallError::Step(StepError {
-        step: Some(wire(step)),
-        path: kumochi_scene::FieldPath::default(),
-        code: ErrorCode::OutOfRange,
-    })
+    CallError::Step(StepError::in_step(
+        &wire(step),
+        kumochi_scene::FieldPath::default(),
+        ErrorCode::OutOfRange,
+    ))
 }
 
 #[test]

@@ -161,7 +161,8 @@ impl CallEnd {
         self.error.is_none()
     }
 
-    /// The tool result for the model: step ids, a field path and a code, never field values.
+    /// The tool result for the model: step ids, a field path, a code and any known constraint,
+    /// never rejected field values.
     /// It carries the model's ids, so it's never logged.
     pub fn tool_text(&self) -> String {
         let drawn: Vec<&str> = self.drawn.iter().map(WireId::as_str).collect();
@@ -1232,9 +1233,5 @@ fn envelope(args: &[u8]) -> Result<(Vec<Vec<u8>>, bool), TokenError> {
 }
 
 fn in_step(step: &Step, code: ErrorCode) -> StepError {
-    StepError {
-        step: Some(step.id.clone()),
-        path: FieldPath::default(),
-        code,
-    }
+    StepError::in_step(&step.id, FieldPath::default(), code)
 }

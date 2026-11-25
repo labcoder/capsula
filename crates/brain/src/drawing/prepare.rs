@@ -225,11 +225,8 @@ impl Drawing {
         if let Pend::Held { scene, .. } = &step.scene
             && self.live(*scene).is_none()
         {
-            let error = StepError {
-                step: Some(step.step.id.clone()),
-                path: FieldPath::default(),
-                code: ErrorCode::SceneCleared,
-            };
+            let error =
+                StepError::in_step(&step.step.id, FieldPath::default(), ErrorCode::SceneCleared);
             self.fail(at, CallError::Step(error), out);
             return Ok(());
         }
@@ -245,11 +242,11 @@ impl Drawing {
             Prepared::Geometry => {
                 self.fail(
                     at,
-                    CallError::Step(StepError {
-                        step: Some(step.step.id.clone()),
-                        path: FieldPath::default(),
-                        code: ErrorCode::OutOfRange,
-                    }),
+                    CallError::Step(StepError::in_step(
+                        &step.step.id,
+                        FieldPath::default(),
+                        ErrorCode::OutOfRange,
+                    )),
                     out,
                 );
                 return Ok(());
