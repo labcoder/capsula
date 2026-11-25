@@ -205,6 +205,6 @@ async fn the_running_mode_decides_the_claude_setting_and_the_helpers() {
     brain.close().await;
     assert!(
         matches!(result, Err(BrainError::Helpers(error)) if error.kind() == ErrorKind::Unsupported),
-        "a mode without containment refuses before the removal pass and the Job"
+        "a mode without containment refuses"
     );
 }
