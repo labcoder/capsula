@@ -255,7 +255,11 @@ finish, then closes the reader, the helper and the store, in that order, so the 
 connection is the last to close; nothing blocks the caller meanwhile. It releases its own
 acknowledgement sender before signalling close completion, so that worker cannot keep a reply
 receiver open during subsequent purge-file cleanup. Close still does not wait for that cleanup,
-and other producers can keep a shared input channel open. If the store thread
+and other producers can keep a shared input channel open. The store thread holds a reference to
+the profile's writer lock (see [accounts](accounts.md)) until that cleanup ends, so a close the
+brain stopped waiting for, or a start that failed after the thread began, never releases the lock
+while the thread still has work on the store or its purge files. A test holds the thread after
+close and finds the lock still Busy with no other reference left. If the store thread
 panics, waiting reads fail and both side connections close for good.
 
 ## Deleting a thread
@@ -501,7 +505,8 @@ tests capture those warnings and isolate a corrupt scene from the other three. T
 32 MiB body limit is tested at exactly the limit and one byte over with individually valid
 bodies below 8 MiB, independently of the per-body limit.
 
-The brain opens the store and runs the recovery scan before it serves any shell:
+The brain opens the store only after it holds the profile's writer lock (see
+[accounts](accounts.md)), and runs the recovery scan before it serves any shell:
 
 - threads left `deleting` by a crash between the two transactions finish deleting. One that fails
   again is logged by id, stays hidden, and is retried at the next start, so it can't stop the brain;

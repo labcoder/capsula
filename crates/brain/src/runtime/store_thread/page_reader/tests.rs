@@ -104,8 +104,9 @@ fn run_with(
         after_close: None,
         pauses,
     };
+    let custody = crate::test_support::custody(&store);
     Running {
-        thread: StoreThread::spawn(store, acks, schedule).expect("thread"),
+        thread: StoreThread::spawn(store, custody, acks, schedule).expect("thread"),
         acks: forward(replies),
         seen: forward(seen),
         gates,

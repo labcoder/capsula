@@ -404,7 +404,7 @@ vault and its session lock; the listener and the exchange are tokio tasks; every
 on one channel the core loop polls. The startup load runs there too, and the brain waits for it
 before it stores the instance capability or serves anything. On
 quit or close, a refresh already out runs to its end and its save, for up to `REFRESH_WAIT`
-(5 s [guess]), with the session lock still held; past that the lock is released and the token
+(5 s [guess]), with the session lock still held; past that the vault is dropped and the token
 stays marked as sent, so the next start never sends it again. Then it waits for the job already dispatched, past the quit deadline if it must, before the instance
 capability is deleted. The runtime delivers exactly one `Vault` result per dispatched job (the
 credentials thread sends one per job it runs) and one `Exchanged` per sent request (the exchange
@@ -513,7 +513,8 @@ recorded unknown instead, so the next sign-out's notice is unconfirmed.
 - A refused registration or pending-flag write ends the attempt and offers a new sign-in, since
   Retry would have nothing to rerun.
 - A Busy session lock at startup is retried 5 times, 250 ms apart [guess]; after that, on each
-  op and each connection.
+  op and each connection. Only a vault that takes its own lock, such as a dev diagnostic's,
+  can meet Busy: the brain's credentials thread uses the lock the brain already holds.
 - A list entry stamped on a clock before 1970 gets `added_at = u64::MAX`, so age-out never
   evicts it early.
 
@@ -825,7 +826,23 @@ it is dropped.
 
 `platform::SessionLock` guards the empty `%LOCALAPPDATA%\<DATA_DIR>\session.lock` using
 `File::try_lock`; only contention returns typed `Busy`, and dropping the guard releases it.
-`platform::session_lock_path()` uses the Dev data folder in debug builds. Startup wiring is separate.
+`platform::session_lock_path()` uses the Dev data folder in debug builds.
+
+The lock is the profile's one writer lock, for the store (`kumochi.db`) and the credential
+authority alike. The brain takes it after its pipes and before it opens the store, and holds it
+for its whole run. The store thread and the credentials thread each keep a reference to that same
+lock: the store thread until its last close and purge cleanup end, past any wait the brain gave up
+on, and the credentials thread by opening its vault under it (`Vault::open_held`) instead of
+taking its own. So a second brain of the same Windows user in
+another session, whose pipes don't collide, stops at the lock before it touches the store. It
+tries to take the lock before it opens or creates the store and, refused, logs only that another
+session is using the profile and exits with code 75. Only brains with this lock are excluded: an earlier build opens
+the store before it takes any lock. The shell starts a brain that doesn't answer once per
+connection attempt (it starts another within the attempt only after a brain of a different build
+exits), and gives up after `CONNECT_TIMEOUT` (10 s), then waits for Retry, so a refused brain is
+never restarted in a loop; it shows the same can't-reach-the-brain
+state as any other failed start. Dev diagnostics run as their own processes and still take
+their own lock, so they're Busy while a brain runs.
 `SessionLock::try_acquire_existing` locks an existing empty session file without creating it or
 its parent, and only contention is Busy. On Windows it opens the leaf itself, never a reparse
 target, sharing read and write so a stock opener still meets the lock, but not delete, so the name

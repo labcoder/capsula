@@ -20,6 +20,7 @@ use tokio::sync::oneshot;
 
 use crate::coordinator::{Input, StoreOp};
 use crate::dispatch::Committed;
+use crate::platform::SessionLock;
 use crate::store::{
     Cancel, Copied, Deletion, EventKind, NewEvent, Side, Store, StoreError, Swap, cleared_body,
 };
@@ -386,8 +387,11 @@ pub(crate) struct StoreThread {
 }
 
 impl StoreThread {
+    /// Starts the thread that owns `store`. It keeps `custody`, the profile's writer lock, until
+    /// its last helper ends: past close's acknowledgement and any caller's wait that timed out.
     pub(crate) fn spawn(
         mut store: Store,
+        custody: Arc<SessionLock>,
         acks: UnboundedSender<Input>,
         #[cfg_attr(not(test), expect(unused_mut, reason = "tests take the read gates"))]
         mut schedule: Schedule,
@@ -486,6 +490,7 @@ impl StoreThread {
                 if job.is_some_and(|job| !job.join()) {
                     tracing::error!("the purge's helper panicked");
                 }
+                drop(custody);
             })?;
         Ok(Self {
             card_side,

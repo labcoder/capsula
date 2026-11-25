@@ -45,6 +45,15 @@ use crate::test_support::{self, Captured, Scratch};
 #[path = "account_tests/typed_replay.rs"]
 mod typed_replay;
 
+/// A profile lock the brain would hold, in a scratch folder.
+#[cfg(not(windows))]
+fn profile() -> (Scratch, Arc<crate::platform::SessionLock>) {
+    let scratch = Scratch::new("account-profile");
+    let lock = crate::platform::SessionLock::try_acquire(&scratch.dir().join(SESSION_LOCK))
+        .expect("profile lock");
+    (scratch, Arc::new(lock))
+}
+
 const SIGNED_OUT: AccountView = AccountView::SignedOut {
     revocation_unconfirmed: false,
 };
@@ -52,8 +61,9 @@ const SIGNED_OUT: AccountView = AccountView::SignedOut {
 #[cfg(not(windows))]
 #[test]
 fn native_account_subsystem_refuses_before_starting_without_a_trust_adapter() {
+    let (_scratch, profile) = profile();
     assert!(matches!(
-        crate::accounts(OAuthTuning::default(), TokenTuning::default()),
+        crate::accounts(OAuthTuning::default(), TokenTuning::default(), profile),
         Err(crate::BrainError::NativeTrust(
             crate::platform::TrustRootsError::Unsupported
         ))
@@ -68,7 +78,8 @@ async fn native_account_startup_refuses_unsupported_without_publishing_retry() {
     let captured = Captured::default();
     let _logs = captured.install();
     let net = test_support::net();
-    let worker = Worker::system(Arc::clone(&net.clock));
+    let (_scratch, profile) = profile();
+    let worker = Worker::system(Arc::clone(&net.clock), profile);
     let held = worker.held();
 
     let refusal = Accounts::spawn(worker, net, OAuthTuning::default(), TokenTuning::default())

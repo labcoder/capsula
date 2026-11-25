@@ -2,6 +2,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -85,6 +86,17 @@ impl Scratch {
     }
 }
 
+/// A writer lock of its own beside `store`, for a brain or store thread under test. Each name is
+/// new, so it never meets a profile lock the test takes or a store thread still ending.
+pub(crate) fn custody(store: &Store) -> Arc<crate::platform::SessionLock> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let name = format!("custody-{}.lock", NEXT.fetch_add(1, Ordering::Relaxed));
+    Arc::new(
+        crate::platform::SessionLock::try_acquire(&store.path().with_file_name(name))
+            .expect("custody lock"),
+    )
+}
+
 pub(crate) fn has_picture_marker(bytes: &[u8], jpeg: &[u8]) -> bool {
     let marker = &jpeg[3..jpeg.len() - 2];
     let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|part| part == needle);
@@ -166,8 +178,10 @@ pub(crate) fn brain_on(
     let high_water = store.high_water().expect("high water");
     let scenes = store.scenes().expect("scenes");
     let config = Config::load(Some(scratch.case.clone()), main_thread);
+    let custody = crate::test_support::custody(&store);
     Brain::new(
         store,
+        custody,
         main_thread,
         high_water,
         scenes,
@@ -184,6 +198,24 @@ pub(crate) fn accounts(scratch: &Scratch) -> Accounts {
     let lock = scratch.dir().join(constants::SESSION_LOCK);
     let worker = Worker::new(
         Box::new(move || Vault::with_service(store.clone(), "test-accounts", &lock)),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    Accounts::spawn_unconfigured(worker, net()).expect("credential thread")
+}
+
+/// [`accounts`] under a profile lock the caller already holds, as the brain's credential thread
+/// opens its vault.
+#[cfg(windows)]
+pub(crate) fn held_accounts(
+    scratch: &Scratch,
+    profile: Arc<crate::platform::SessionLock>,
+) -> Accounts {
+    let store = FakeStore::default();
+    let lock = scratch.dir().join(constants::SESSION_LOCK);
+    let worker = Worker::new(
+        Box::new(move || {
+            Vault::with_lock(store.clone(), "test-accounts", Arc::clone(&profile), &lock)
+        }),
         Arc::new(FixedClock(1_800_000_000)),
     );
     Accounts::spawn_unconfigured(worker, net()).expect("credential thread")
