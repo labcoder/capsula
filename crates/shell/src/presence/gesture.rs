@@ -19,7 +19,7 @@ use super::{
     Presence,
     voice::{Gates, HoldBack, Stamp},
 };
-use crate::escape::SpeechPress;
+use crate::escape::{SpeechEscapeOwner, SpeechPress};
 use crate::input::{
     Edge, Effect, Event, Gesture, Key, TalkHeld,
     hold::{Delivery, Fence, InputReason, InputStage, Intent},
@@ -29,6 +29,16 @@ use crate::platform::{Deliver, EventTime, INPUT_COUNTER, cursor_position};
 use crate::strings::Text;
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{GestureId, RunId, ThreadId};
+
+pub(super) type SpeechLease = Rc<Cell<Option<(u64, RunId, Instant)>>>;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum EscapeScope {
+    #[default]
+    Ordinary,
+    Pull,
+    SpeechOnly,
+}
 
 struct Pending {
     cancel: Option<InputCancel>,
@@ -131,7 +141,7 @@ pub(super) fn deliver(
     target: Rc<Cell<(Option<ThreadId>, u64)>>,
     paused: Rc<Cell<bool>>,
     gates: Gates,
-    speech: Rc<Cell<Option<(u64, RunId, Instant)>>>,
+    (speech, escape_scope): (SpeechLease, Rc<Cell<EscapeScope>>),
     cx: &mut App,
 ) -> Deliver {
     let (deferred, pending) = async_channel::unbounded::<Pending>();
@@ -183,6 +193,21 @@ pub(super) fn deliver(
     #[cfg(all(test, not(windows)))]
     let detached = cx.has_global::<super::test_fixture::WithoutDesktop>();
     let reduce: Rc<Reduce> = Rc::new(move |event, mut at| {
+        let speech = if event == Event::Escape {
+            let scope = escape_scope.get();
+            let owner = if scope == EscapeScope::Pull {
+                SpeechEscapeOwner::Panel
+            } else {
+                at.speech_escape_owner
+            };
+            let press = SpeechPress::capture(speech.get(), at.instant, owner);
+            if scope == EscapeScope::SpeechOnly && press.is_none() {
+                return gesture.get().deadline();
+            }
+            press
+        } else {
+            None
+        };
         let (serial, reset) = input.get();
         if matches!(event, Event::Reset | Event::Escape) {
             input.set((serial.saturating_add(1), reset.saturating_add(1)));
@@ -369,11 +394,7 @@ pub(super) fn deliver(
             },
             cancelled,
             escape: escape.then(|| gates.hold_back()),
-            speech: if escape {
-                SpeechPress::capture(speech.get(), at.instant, at.speech_escape_owner)
-            } else {
-                None
-            },
+            speech,
             collection: link.microphone_gate().latest(),
             stamp: Stamp {
                 target: target.get(),

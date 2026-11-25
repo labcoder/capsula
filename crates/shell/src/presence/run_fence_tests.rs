@@ -1250,23 +1250,28 @@ fn queued_escape_stops_audio_before_teardown_when_the_control_queue_is_full(
     assert!(!playback.stopped());
     let full = full(&owner, cx);
     assert_eq!(Some(full.len()), full.capacity());
-    owner.update(cx, |owner, cx| {
-        owner.native_escape(None, press, cx).expect("Esc");
+    let press = press.unwrap();
+    pipe.handle.output().while_locked(|| {
+        assert_eq!(session.playback_stop_requested(press.run), Some(false));
+        owner.update(cx, |owner, cx| {
+            owner.native_escape(None, Some(press), cx).expect("Esc");
+        });
+        assert_eq!(
+            session.playback_stop_requested(press.run),
+            Some(true),
+            "the exact worker is signalled while teardown cannot take the output lock"
+        );
     });
     assert!(!session.open(), "the failed enqueue seals the pair");
     let alive = session.alive();
     let deadline = Instant::now() + Duration::from_secs(3);
     while !playback.stopped() {
         assert!(
-            alive.load(Ordering::Acquire) && Instant::now() < deadline,
-            "the speaker must take Stop before background session teardown"
+            Instant::now() < deadline,
+            "the worker retires the fake playback route"
         );
         std::thread::sleep(Duration::from_millis(2));
     }
-    assert!(
-        alive.load(Ordering::Acquire),
-        "background teardown hasn't run"
-    );
     assert_eq!(probe.stop(), RunId(0), "no Stop reached the brain");
     cx.run_until_parked();
     assert!(!alive.load(Ordering::Acquire));

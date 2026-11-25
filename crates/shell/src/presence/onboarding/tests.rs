@@ -631,7 +631,7 @@ fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
             Rc::clone(&owner.voice.target),
             Rc::clone(&owner.voice.paused),
             owner.voice.gates.clone(),
-            Rc::clone(&owner.speech),
+            (Rc::clone(&owner.speech), Rc::clone(&owner.escape_scope)),
             cx,
         )
     })

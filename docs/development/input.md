@@ -285,11 +285,13 @@ open status panel alone never does.
 A queued reply also holds global Esc while the native output route has a live speech lease and
 Kumochi's typing, Tasks and Settings panels aren't focused. The pressed pair and run travel
 with the event. An outside press stops that reply without taking focus; a focused-panel
-press stops the reply and leaves the panel open. A stale press can't stop a replacement
-run. If the brain already sent a terminal state, only its matching local audio is stopped.
+press stops the reply and leaves the panel open. A live pull still takes Esc, even when
+another app has focus. A stale press can't stop a replacement run, and an expired speech-only
+hotkey doesn't become an ordinary stop. If the brain already sent a terminal state, only its
+matching local audio is stopped.
 For a moving run the shell fences it and offers the brain its Stop before the speaker stop.
-If the control queue refuses, the shell offers the exact local stop before sealing the pair;
-if the output owner is busy, background pair teardown still retires it.
+If the control queue refuses, the shell signals the exact local worker before sealing the
+pair, without waiting for the output owner or background teardown.
 
 Held voice additionally owns global Esc through preparation and pre-answer work. A raw Escape
 revokes collection before deferred UI; its hotkey delivery consumes one marker so that the

@@ -743,15 +743,8 @@ impl Presence {
         // A control the brain wasn't told can't be undone locally, so that session ends; one
         // already ending isn't ended again.
         if !sent && session.open() {
-            if let Some(run) = run
-                && self.link.audio_session() == AudioSession::QueuedRequired
-                && self
-                    .link
-                    .output()
-                    .stop_locally(session.generation(), run)
-                    .is_err()
-            {
-                tracing::debug!("the speaker owner is busy; ending the pair stops it");
+            if let Some(run) = run {
+                session.stop_playback(run);
             }
             let end = self.end_session(session, cx);
             let held = self.voice.gates.hold_back();
@@ -807,6 +800,9 @@ impl Presence {
             };
             let task = match stopped {
                 Err(Denied::Busy) if *tries > 1 => {
+                    if *local {
+                        session.stop_playback(*run);
+                    }
                     *tries -= 1;
                     cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(STOP_RETRY).await;

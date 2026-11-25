@@ -181,7 +181,8 @@ struct Presence {
     /// The next offer of the front pending stop, or the end of its session.
     stop_retry: Option<Task<()>>,
     /// The native speech lease last read: its session, run and when it runs out.
-    speech: Rc<std::cell::Cell<Option<(u64, kumochi_protocol::message::RunId, Instant)>>>,
+    speech: gesture::SpeechLease,
+    escape_scope: Rc<std::cell::Cell<gesture::EscapeScope>>,
     /// The next read of the speech lease, when it runs out or after a busy owner.
     speech_expiry: Option<Task<()>>,
     /// Busy reads of the speech lease in a row, which back its rereads off.
@@ -525,8 +526,15 @@ impl Presence {
     }
 
     fn sync_escape_state(&mut self, cx: &mut Context<'_, Self>) -> bool {
-        let wanted =
-            self.activity.holds_global_escape() || self.voice_working() || self.escape_fixture;
+        let ordinary = self.activity.drawing || self.voice_working() || self.escape_fixture;
+        let wanted = self.activity.holds_global_escape() || ordinary;
+        self.escape_scope.set(if self.activity.pulling {
+            gesture::EscapeScope::Pull
+        } else if self.activity.speaking && !ordinary {
+            gesture::EscapeScope::SpeechOnly
+        } else {
+            gesture::EscapeScope::Ordinary
+        });
         if wanted {
             let native = &self.native;
             self.escape_hold.acquire(|| native.register_escape());
@@ -1137,6 +1145,7 @@ pub(crate) fn open(
             pending_stops: std::collections::VecDeque::new(),
             stop_retry: None,
             speech: Rc::default(),
+            escape_scope: Rc::default(),
             speech_expiry: None,
             speech_busy: 0,
             escape_hold: EscapeHold::default(),
@@ -1168,14 +1177,14 @@ pub(crate) fn open(
     let position = flags.position();
     owner.update(cx, |this, cx| this.position(position, cx))?;
     owner.update(cx, |this, cx| this.observe(position, cx))?;
-    let (link, target, paused, gates, speech) = {
+    let (link, target, paused, gates, esc) = {
         let this = owner.read(cx);
         (
             this.link.clone(),
             Rc::clone(&this.voice.target),
             Rc::clone(&this.voice.paused),
             this.voice.gates.clone(),
-            Rc::clone(&this.speech),
+            (Rc::clone(&this.speech), Rc::clone(&this.escape_scope)),
         )
     };
     owner.update(cx, Presence::dispatcher);
@@ -1185,7 +1194,7 @@ pub(crate) fn open(
         target,
         paused,
         gates,
-        speech,
+        esc,
         cx,
     );
     owner.update(cx, |this, _| this.native.arm_keyboard(deliver))?;

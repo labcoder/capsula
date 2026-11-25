@@ -1418,7 +1418,7 @@ fn a_stale_speech_press_leaves_newer_marks_up(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_focused_panel_keeps_pull_and_mark_priority_when_speech_is_live(cx: &mut TestAppContext) {
+fn a_native_escape_over_another_app_cancels_the_pull_before_speech(cx: &mut TestAppContext) {
     let watching = marks_up(cx);
     pull(&watching, cx);
     let owner = &watching.ready.owner;
@@ -1426,21 +1426,19 @@ fn a_focused_panel_keeps_pull_and_mark_priority_when_speech_is_live(cx: &mut Tes
     owner.update(cx, |owner, cx| {
         let text = owner.text.as_mut().expect("typing panel");
         text.typing.open();
-        text.focused = true;
+        text.focused = false;
         let session = owner.session.as_ref().expect("connected").generation();
         owner
             .speech
             .set(Some((session, RunId(RUN), at + Duration::from_secs(1))));
         owner.focus_changed(cx);
-        assert!(!owner.activity.speaking);
+        assert!(owner.activity.speaking);
         assert!(
             owner.activity.holds_global_escape(),
             "the pull owns the hotkey"
         );
     });
-    let mut time = after(at, 0);
-    time.speech_escape_owner = crate::escape::SpeechEscapeOwner::Panel;
-    native(owner, cx)(Event::Escape, time);
+    native(owner, cx)(Event::Escape, after(at, 0));
     cx.run_until_parked();
     owner.read_with(cx, |owner, cx| {
         assert!(
@@ -1448,10 +1446,7 @@ fn a_focused_panel_keeps_pull_and_mark_priority_when_speech_is_live(cx: &mut Tes
             "the same Esc cancelled the pull"
         );
         assert_eq!(owner.presenter.marks_shown(), None);
-        assert!(
-            owner.text_focused(),
-            "the press did not also dismiss typing"
-        );
+        assert!(owner.text_open(), "the press did not also dismiss typing");
     });
     assert_eq!(told(&watching), taken());
 }

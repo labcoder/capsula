@@ -20,7 +20,7 @@ use crate::speaker::{Command, FAULT, RELEASED, Tail};
 use super::{HANDSHAKE_TIMEOUT, RETRY_DELAY};
 
 mod queued;
-pub(super) use queued::{NarratedReservation, Queued, RefusedTail};
+pub(super) use queued::{NarratedReservation, PlaybackStop, Queued, RefusedTail};
 
 #[cfg(test)]
 #[path = "output_tests.rs"]
@@ -774,6 +774,12 @@ impl OutputOwner {
     #[cfg(any(test, feature = "test-support"))]
     pub fn refuse(&self, calls: u32) {
         self.refusals.store(calls, Ordering::Release);
+    }
+
+    #[cfg(all(windows, debug_assertions, feature = "test-support"))]
+    pub fn while_locked(&self, test: impl FnOnce()) {
+        let _state = self.lock();
+        test();
     }
 
     /// Talk-back off ends the queued pair. Legacy is already silent.

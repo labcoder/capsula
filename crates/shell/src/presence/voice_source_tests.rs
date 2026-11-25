@@ -343,10 +343,33 @@ pub(super) fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliv
             Rc::clone(&owner.voice.target),
             Rc::clone(&owner.voice.paused),
             owner.voice.gates.clone(),
-            Rc::clone(&owner.speech),
+            (Rc::clone(&owner.speech), Rc::clone(&owner.escape_scope)),
             cx,
         )
     })
+}
+
+#[gpui::test]
+fn an_expired_speech_only_hotkey_leaves_a_streaming_run_alone(cx: &mut TestAppContext) {
+    let (owner, _audio, controls) = crate::presence::voice_wiring_tests::ready(cx);
+    let at = Instant::now();
+    let run = RunId(1);
+    owner.update(cx, |owner, cx| {
+        owner
+            .runs
+            .apply_state(run, ThreadId(1), Phase::Answering, None);
+        owner
+            .speech
+            .set(Some((1, run, at + Duration::from_secs(1))));
+        owner.focus_changed(cx);
+    });
+    native(&owner, cx)(Event::Escape, after(at, 1000));
+    cx.run_until_parked();
+    assert_eq!(
+        owner.read_with(cx, |owner, _| owner.runs.stoppable()),
+        Some(run)
+    );
+    assert!(controls.is_empty(), "the expired hotkey didn't send a Stop");
 }
 
 pub(super) fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
