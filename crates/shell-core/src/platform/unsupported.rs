@@ -1,45 +1,55 @@
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::io;
+use std::path::Path;
 
-#[derive(Debug)]
-pub(crate) enum PipeClient {}
+#[cfg(not(target_os = "macos"))]
+pub(crate) use pipe::PipeClient;
 
-impl PipeClient {
-    pub(crate) fn open(_: &str) -> io::Result<Self> {
-        Err(io::ErrorKind::Unsupported.into())
+/// No named pipes here. macOS has its own `PipeClient` over the brain child's pair.
+#[cfg(not(target_os = "macos"))]
+mod pipe {
+    use std::io::{self, Read, Write};
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    #[derive(Debug)]
+    pub(crate) enum PipeClient {}
+
+    impl PipeClient {
+        pub(crate) fn open(_: &str) -> io::Result<Self> {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+
+        pub(crate) fn server_image(&self) -> io::Result<PathBuf> {
+            match *self {}
+        }
+
+        pub(crate) fn abort(&self) {
+            match *self {}
+        }
+
+        pub(crate) fn is_aborted(&self) -> bool {
+            match *self {}
+        }
+
+        pub(crate) fn set_timeout(&self, _: Option<Duration>) {
+            match *self {}
+        }
     }
 
-    pub(crate) fn server_image(&self) -> io::Result<PathBuf> {
-        match *self {}
+    impl Read for &PipeClient {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            match **self {}
+        }
     }
 
-    pub(crate) fn abort(&self) {
-        match *self {}
-    }
+    impl Write for &PipeClient {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            match **self {}
+        }
 
-    pub(crate) fn is_aborted(&self) -> bool {
-        match *self {}
-    }
-
-    pub(crate) fn set_timeout(&self, _: Option<Duration>) {
-        match *self {}
-    }
-}
-
-impl Read for &PipeClient {
-    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-        match **self {}
-    }
-}
-
-impl Write for &PipeClient {
-    fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-        match **self {}
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        match **self {}
+        fn flush(&mut self) -> io::Result<()> {
+            match **self {}
+        }
     }
 }
 
@@ -70,6 +80,7 @@ mod tests {
             crate::link::prepare(events, kumochi_protocol::message::AudioSession::Legacy),
             Err(error) if error.kind() == unsupported
         ));
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(PipeClient::open("unused").unwrap_err().kind(), unsupported);
         assert_eq!(
             launch_detached(Path::new("unused")).unwrap_err().kind(),

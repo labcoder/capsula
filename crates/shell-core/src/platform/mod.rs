@@ -43,7 +43,9 @@ pub(crate) use connect::{Connection, HANDSHAKE_TIMEOUT, RETRY_DELAY, connect_bra
 #[cfg(debug_assertions)]
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use connect::{handshake_pair, open};
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub(crate) use macos::PipeClient;
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) use unsupported::PipeClient;
 #[cfg(not(windows))]
 use unsupported::launch_detached;
