@@ -806,11 +806,10 @@ mod tests {
             };
             let end = Instant::now() + HANDSHAKE_TIMEOUT;
             let serve = pipes.session(&id, &mut brain, &mut tap, end);
-            let (result, ()) = timeout(std::time::Duration::from_secs(7), async {
+            let exchange = timeout(std::time::Duration::from_secs(7), async {
                 tokio::join!(serve, peer)
-            })
-            .await
-            .unwrap();
+            });
+            let (result, ()) = Box::pin(exchange).await.unwrap();
             match index {
                 0 | 5 => assert!(matches!(result, Ok(Session::Quit { .. }))),
                 3 => assert!(matches!(result, Err(SessionError::WrongCapability))),
