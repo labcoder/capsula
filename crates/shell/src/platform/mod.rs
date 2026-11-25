@@ -6,6 +6,8 @@ pub(crate) mod logging;
 mod macos;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::logging::Admitted;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::screen_access;
 
 pub(crate) use kumochi_shell::presence_platform::{PresenceError, require_connected_geometry};
 #[cfg(all(not(windows), not(test)))]

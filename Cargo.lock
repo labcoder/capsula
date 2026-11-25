@@ -4083,6 +4083,7 @@ dependencies = [
  "kumochi-shell-core",
  "kumochi-storage",
  "lyon",
+ "objc2-core-graphics",
  "raw-window-handle",
  "smallvec",
  "thiserror 2.0.21",
