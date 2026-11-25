@@ -18,6 +18,7 @@ fn fake() -> (Worker, Input, Port, Receiver<Request>, SyncSender<Reply>) {
     (
         Worker {
             engine: Engine::new(RUN, OUTPUT),
+            origin: Instant::now(),
             physical: None,
             job: None,
             pending_packet: None,
@@ -27,6 +28,7 @@ fn fake() -> (Worker, Input, Port, Receiver<Request>, SyncSender<Reply>) {
             retired_route: None,
             virtual_route: false,
             drawing: None,
+            speech: Speech::new(async_channel::bounded(1).0),
         },
         Input {
             worker: thread::current(),
@@ -62,7 +64,7 @@ pub(in crate::speaker::queued) fn open_actor(
     let (worker, mut input, port, requests, replies) = fake();
     let (exit, done) = mpsc::sync_channel(1);
     let owner = thread::spawn(move || {
-        worker.serve(&port, Instant::now(), |_| {}, report, None::<fn(bool)>);
+        worker.serve(&port, |_| {}, report, None::<fn(bool)>);
         exit.send(()).unwrap();
     });
     input.worker = owner.thread().clone();
@@ -97,8 +99,28 @@ fn stage_receipts(
     replies: &SyncSender<Reply>,
     occupied: &'static AtomicBool,
 ) -> (FakePlayback, Arc<Control>) {
+    stage_packet(
+        worker,
+        input,
+        port,
+        requests,
+        replies,
+        occupied,
+        packet(7, 0, 480, Some(480)),
+    )
+}
+
+fn stage_packet(
+    worker: &mut Worker,
+    input: &Input,
+    port: &Port,
+    requests: &Receiver<Request>,
+    replies: &SyncSender<Reply>,
+    occupied: &'static AtomicBool,
+    pcm: Packet,
+) -> (FakePlayback, Arc<Control>) {
     input.command(Command::Expect).unwrap();
-    input.submit(packet(7, 0, 480, Some(480))).unwrap();
+    input.submit(pcm).unwrap();
     worker
         .step(port, &mut [0; 480], &mut |_| {}, INSTANT)
         .unwrap();
@@ -115,6 +137,313 @@ fn stage_receipts(
         .step(port, &mut [0; 480], &mut |_| {}, INSTANT)
         .unwrap();
     (playback, control)
+}
+
+#[test]
+fn speech_lease_starts_at_due_nonzero_pcm_and_silence_does_not_extend_it() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, input, port, requests, replies) = fake();
+    let origin = Instant::now()
+        .checked_sub(Duration::from_millis(100))
+        .unwrap();
+    worker.origin = origin;
+    let mut pcm = packet(7, 0, 480, Some(480));
+    pcm.pcm.samples.fill(0);
+    pcm.pcm.samples[48] = 16_384;
+    pcm.pcm.samples[95] = -16_384;
+    let (mut playback, _) = stage_packet(
+        &mut worker,
+        &input,
+        &port,
+        &requests,
+        &replies,
+        &OCCUPIED,
+        pcm,
+    );
+    let ms = Duration::from_millis;
+    let step = |worker: &mut Worker, now| {
+        worker.step(&port, &mut [0; 480], &mut |_| {}, now).unwrap();
+    };
+
+    let mut leading = [99.0; 24];
+    let ((), activity) = crate::allocation::activity(|| playback.fill(&mut leading, INSTANT));
+    assert_eq!(activity, [0, 0]);
+    step(&mut worker, ms(1));
+    assert_eq!(leading.map(f32::to_bits), [0; 24]);
+    assert_eq!(
+        worker.engine.progress.heard, 24,
+        "silent PCM still advances receipts"
+    );
+    assert_eq!(
+        worker.speech.until(),
+        None,
+        "leading silence never takes Esc"
+    );
+
+    let mut scheduled = [0.0; 96];
+    let ((), activity) = crate::allocation::activity(|| playback.fill(&mut scheduled, ms(20)));
+    assert_eq!(activity, [0, 0]);
+    assert_eq!(scheduled[24].to_bits(), 0.5_f32.to_bits());
+    assert_eq!(scheduled[71].to_bits(), (-0.5_f32).to_bits());
+    let onset = ms(21);
+    let not_yet = onset.checked_sub(Duration::from_nanos(1)).unwrap();
+    let last_nonzero = ms(20) + Duration::from_nanos(71 * 1_000_000_000 / 24_000);
+    step(&mut worker, not_yet);
+    assert_eq!(worker.speech.until(), None, "scheduled PCM is not due yet");
+    assert_eq!(worker.deadline(not_yet), Some(onset));
+    step(&mut worker, onset);
+    let first = worker
+        .speech
+        .until()
+        .expect("the first nonzero frame is due");
+    step(&mut worker, last_nonzero);
+    let last = worker
+        .speech
+        .until()
+        .expect("the last nonzero frame is due");
+    assert_eq!(first, origin + onset + ms(500));
+    assert_eq!(last, origin + last_nonzero + ms(500));
+
+    let mut trailing = [99.0; 360];
+    playback.fill(&mut trailing, ms(600));
+    step(&mut worker, ms(620));
+    assert_eq!(trailing.map(f32::to_bits), [0; 360]);
+    assert_eq!(worker.engine.progress.heard, 480);
+    assert_eq!(
+        worker.speech.until(),
+        Some(last),
+        "only the last nonzero frame sets expiry"
+    );
+    assert_eq!(
+        worker.speech.until_at(last),
+        None,
+        "silence cannot keep Esc past expiry"
+    );
+}
+
+fn long_callback(nonzero: &[usize], prefilled: usize, occupied: &'static AtomicBool) -> Physical {
+    use crate::platform::speaker_cpal::Presented;
+
+    let (mut transport, mut playback) = FakePlayback::open(Arc::default(), occupied);
+    let source = Source {
+        run: RUN,
+        generation: 1,
+        segment: SegmentId(0),
+        at: 0,
+    };
+    for at in 0..prefilled {
+        transport
+            .submit(
+                &[16_384],
+                PacketKind::More,
+                Source {
+                    at: u64::try_from(at).unwrap(),
+                    ..source
+                },
+            )
+            .unwrap();
+        playback.fill(&mut [0.0], INSTANT);
+        assert_eq!(
+            transport.presentation().unwrap().through,
+            u64::try_from(at + 1).unwrap()
+        );
+    }
+    let source = Source {
+        at: u64::try_from(prefilled).unwrap(),
+        ..source
+    };
+    let mut input = vec![0; 17_280];
+    for &frame in nonzero {
+        input[frame] = 16_384;
+    }
+    let (packets, tail) = input.as_chunks::<480>();
+    assert!(tail.is_empty());
+    let mut packets = packets.iter().enumerate().peekable();
+    let mut refill = || {
+        while let Some(&(index, samples)) = packets.peek() {
+            match transport.submit(
+                samples,
+                PacketKind::More,
+                Source {
+                    at: source.at + u64::try_from(index * 480).unwrap(),
+                    ..source
+                },
+            ) {
+                Ok(()) => {
+                    packets.next();
+                }
+                Err(OutputError::Full) => break,
+                Err(error) => panic!("staging failed: {error}"),
+            }
+        }
+    };
+    refill();
+    let mut pcm = vec![99.0; input.len()];
+    let ((), activity) =
+        crate::allocation::activity(|| playback.fill_with_refill(&mut pcm, INSTANT, refill));
+    assert_eq!(activity, [0, 0]);
+    assert!(packets.next().is_none());
+    let copied = pcm
+        .iter()
+        .enumerate()
+        .filter(|(_, sample)| sample.to_bits() != 0)
+        .map(|(frame, sample)| (frame, sample.to_bits()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        copied,
+        nonzero
+            .iter()
+            .map(|&frame| (frame, 0.5_f32.to_bits()))
+            .collect::<Vec<_>>()
+    );
+    let through = source.at + 17_280;
+    assert_eq!(playback.handed(), through);
+    assert_eq!(
+        transport.presentation(),
+        Some(Presented {
+            source,
+            first: source.at,
+            through,
+            at: Some(Duration::from_nanos(719_958_333)),
+        })
+    );
+    assert_eq!(transport.presentation(), None);
+
+    Physical {
+        generation: source.generation,
+        transport,
+        flushed: None,
+        power: Power::Playing,
+        retire_deadline: None,
+        watchdog: None,
+        pending_sound: Vec::with_capacity(PRESENTATION_SLOTS * 2),
+    }
+}
+
+#[test]
+fn intermediate_nonzero_pcm_keeps_esc_during_one_long_callback() {
+    static OCCUPIED: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
+    let ms = Duration::from_millis;
+    let ns = Duration::from_nanos;
+
+    for (occupied, (frame, checkpoint, last, expiry)) in OCCUPIED.iter().zip([
+        (16_800, ms(600), ms(700), ms(1200)),
+        (12_000, ns(499_999_999), ms(500), ms(1000)),
+    ]) {
+        let mut route = long_callback(&[0, 11_760, frame], 0, occupied);
+        let speech = Speech::new(async_channel::bounded(1).0);
+        let origin = Instant::now().checked_sub(ms(720)).unwrap();
+
+        route.observe_sound(&speech, origin, checkpoint);
+        assert_eq!(
+            speech.until_at(origin + checkpoint),
+            Some(origin + ms(990)),
+            "the due 490 ms frame keeps Esc, not the future frame"
+        );
+        route.observe_sound(&speech, origin, last);
+        let expiry = origin + expiry;
+        assert_eq!(
+            speech.until_at(expiry.checked_sub(ns(1)).unwrap()),
+            Some(expiry)
+        );
+        assert_eq!(speech.until_at(expiry), None);
+    }
+}
+
+#[test]
+fn a_real_long_silent_gap_releases_esc_until_the_next_nonzero_frame() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let mut route = long_callback(&[0, 16_801], 0, &OCCUPIED);
+    let speech = Speech::new(async_channel::bounded(1).0);
+    let ms = Duration::from_millis;
+    let origin = Instant::now().checked_sub(ms(720)).unwrap();
+    let onset = Duration::from_nanos(700_041_666);
+
+    route.observe_sound(&speech, origin, ms(600));
+    assert_eq!(speech.until_at(origin + ms(600)), None);
+    let before_onset = onset.checked_sub(Duration::from_nanos(1)).unwrap();
+    route.observe_sound(&speech, origin, before_onset);
+    assert_eq!(speech.until_at(origin + ms(700)), None);
+    route.observe_sound(&speech, origin, onset);
+    let expiry = origin + onset + ms(500);
+    assert_eq!(
+        speech.until_at(expiry.checked_sub(Duration::from_nanos(1)).unwrap()),
+        Some(expiry)
+    );
+    assert_eq!(speech.until_at(expiry), None);
+}
+
+#[test]
+fn a_full_optional_ring_can_drop_long_callback_evidence_without_extending_esc() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let mut route = long_callback(&[0, 11_760, 16_800], PRESENTATION_SLOTS - 1, &OCCUPIED);
+    let speech = Speech::new(async_channel::bounded(1).0);
+    let ms = Duration::from_millis;
+    let origin = Instant::now().checked_sub(ms(720)).unwrap();
+
+    let ((), activity) =
+        crate::allocation::activity(|| route.observe_sound(&speech, origin, ms(720)));
+    assert_eq!(activity, [0, 0]);
+    assert_eq!(speech.until_at(origin + ms(989)), Some(origin + ms(990)));
+    assert_eq!(
+        speech.until_at(origin + ms(990)),
+        None,
+        "dropping the 700 ms frame can miss Esc, not extend ownership"
+    );
+}
+
+#[test]
+fn late_worker_publication_does_not_revive_expired_speech() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, input, port, requests, replies) = fake();
+    let (wake, woken) = async_channel::bounded(1);
+    worker.speech = Speech::new(wake);
+    worker.origin = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+    let (mut playback, _) =
+        stage_receipts(&mut worker, &input, &port, &requests, &replies, &OCCUPIED);
+    playback.fill(&mut [0.0], INSTANT);
+    worker
+        .step(&port, &mut [0; 480], &mut |_| {}, INSTANT)
+        .unwrap();
+    assert_eq!(
+        worker.speech.until(),
+        None,
+        "the frame expired after the worker sampled time"
+    );
+    assert_eq!(woken.try_recv(), Err(async_channel::TryRecvError::Empty));
+    assert_eq!(worker.engine.progress.heard, 1);
+}
+
+#[test]
+fn lost_output_cannot_turn_a_scheduled_nonzero_frame_into_speech() {
+    static OCCUPIED: AtomicBool = AtomicBool::new(false);
+    let (mut worker, input, port, requests, replies) = fake();
+    let (mut playback, control) =
+        stage_receipts(&mut worker, &input, &port, &requests, &replies, &OCCUPIED);
+    let when = Duration::from_millis(30);
+    playback.fill(&mut [0.0; 24], when);
+    worker
+        .step(&port, &mut [0; 480], &mut |_| {}, INSTANT)
+        .unwrap();
+    assert_eq!(worker.speech.until(), None, "predicted PCM cannot take Esc");
+    playback.lose();
+    worker
+        .step(&port, &mut [0; 480], &mut |_| {}, when)
+        .unwrap();
+    assert!(control.stopped());
+    worker
+        .step(
+            &port,
+            &mut [0; 480],
+            &mut |_| {},
+            when + Duration::from_millis(2),
+        )
+        .unwrap();
+    assert_eq!(
+        worker.speech.until(),
+        None,
+        "the retired route cannot arm Esc"
+    );
 }
 
 #[test]
@@ -179,6 +508,7 @@ fn a_stop_deadline_does_not_discard_the_in_flight_fade() {
             "the exact callback still owns its copy"
         );
         assert!(!worker.engine.final_at(deadline));
+        assert_eq!(worker.speech.until(), None, "Stop cleared the speech lease");
     });
     assert!(
         samples[..60]
@@ -197,6 +527,11 @@ fn a_stop_deadline_does_not_discard_the_in_flight_fade() {
         .step(&port, &mut [0; 480], &mut |_| {}, deadline)
         .unwrap();
     assert!(matches!(requests.try_recv(), Ok(Request::Retire(1))));
+    assert_eq!(
+        worker.speech.until(),
+        None,
+        "the drain after Stop never re-arms the lease"
+    );
     let mut reports = Vec::new();
     assert!(
         Receipts::default().publish(&worker.engine, deadline, &mut |report| {
@@ -225,7 +560,6 @@ fn stop_is_processed_while_the_open_and_ingress_mailboxes_are_busy() {
     let owner = thread::spawn(move || {
         worker.serve(
             &port,
-            Instant::now(),
             |credit| {
                 credits.send(credit).unwrap();
             },
@@ -349,6 +683,7 @@ fn dropping_input_keeps_a_worker_alive_until_its_known_quiet_deadline() {
     drop(input);
 
     let origin = Instant::now();
+    worker.origin = origin;
     playback.fill(&mut [0.0; 128], Duration::from_millis(200));
     let TailAck::At(quiet_at) = control.tail() else {
         panic!("the fake proved quiet")
@@ -357,7 +692,6 @@ fn dropping_input_keeps_a_worker_alive_until_its_known_quiet_deadline() {
     let mut reports = Vec::new();
     worker.serve(
         &port,
-        origin,
         |_| {},
         |message| {
             reports.push((origin.elapsed(), message));
@@ -602,7 +936,6 @@ fn malformed_input_reports_disconnected_instead_of_staying_full() {
     let owner = thread::spawn(move || {
         worker.serve(
             &port,
-            Instant::now(),
             |_| {
                 panic!("malformed ingress does not earn credit");
             },

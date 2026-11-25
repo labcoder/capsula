@@ -336,12 +336,14 @@ impl Pipes {
                     audio,
                     text_metrics,
                     start,
+                    None,
                 )
                 .await
             {
                 Ended::Quit { deadline } => Session::Quit { deadline },
                 Ended::Lost => Session::ShellLost,
                 Ended::Broken(reason) => return Err(SessionError::Protocol(reason)),
+                Ended::Fatal(_) => return Err(SessionError::Protocol("connection refused")),
                 // The shell is still there and reconnects, so it isn't relaunched.
                 Ended::Unavailable => return Err(SessionError::Unavailable),
             },

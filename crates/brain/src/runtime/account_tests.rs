@@ -1984,7 +1984,8 @@ async fn idle_talk_back_repair_does_not_retry_the_account_catalog() {
                     &mut tap,
                     AudioSession::QueuedRequired,
                     None,
-                    start
+                    start,
+                    None
                 ),
                 client
             )

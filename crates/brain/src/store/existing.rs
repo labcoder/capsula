@@ -3,11 +3,14 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
+use std::marker::PhantomData;
+use std::ops::Deref;
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags};
 
 use super::purge::sidecar;
+use crate::platform::SessionLock;
 
 /// SQLite's smallest page. A shorter main file can read as zero pages, and SQLite then deletes the
 /// WAL beside it.
@@ -34,12 +37,35 @@ pub(crate) enum ExistingError {
     Sqlite(#[from] rusqlite::Error),
 }
 
+/// A read-only connection to an existing database that can't outlive the session lock it was
+/// opened under.
+#[derive(Debug)]
+pub(crate) struct Existing<'lock> {
+    conn: Connection,
+    _session: PhantomData<&'lock SessionLock>,
+}
+
+/// Keeps the lock borrowed until the connection has closed, not just until its last use.
+impl Drop for Existing<'_> {
+    fn drop(&mut self) {}
+}
+
+impl Deref for Existing<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
 /// Opens `db` read-only in the one mode that leaves its files as they are, or refuses.
 ///
 /// Every file must be a regular file under one name, not a link or reparse point, so SQLite reads
 /// the files that were checked. With no WAL, `immutable` reads only the main file and takes no
-/// SQLite lock, so the caller must already exclude writers, as the session lock does for the
-/// authority. With a nonempty WAL and index, `readonly_shm` reads both through read-only handles.
+/// SQLite lock, so every writer of `db` must be one that takes `session`: the connection
+/// borrows it, so the lock is held through SQLite's last use. Today that covers the credential
+/// authority, not the history store, whose writer opens it before taking the lock. With a nonempty
+/// WAL and index, `readonly_shm` reads both through read-only handles.
 /// Anything else that SQLite would create, replay, re-permission or remove is uncertain: a
 /// journal, a WAL or index without the other or empty, a main file shorter than a page. No other
 /// connection to `db` may be open in this process, since SQLite shares one index handle per
@@ -51,7 +77,10 @@ pub(crate) enum ExistingError {
         reason = "the existing-profile reader that calls it isn't landed yet"
     )
 )]
-pub(crate) fn open(db: &Path) -> Result<Connection, ExistingError> {
+pub(crate) fn open<'lock>(
+    db: &Path,
+    _session: &'lock SessionLock,
+) -> Result<Existing<'lock>, ExistingError> {
     let present = |suffix| match fs::symlink_metadata(sidecar(db, suffix)) {
         Ok(metadata) if plain(&metadata) => Ok(Some(metadata.len())),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -68,12 +97,15 @@ pub(crate) fn open(db: &Path) -> Result<Connection, ExistingError> {
         (Some(MIN_PAGE..), Some(1..), Some(1..), None) => "readonly_shm",
         _ => return Err(ExistingError::Uncertain),
     };
-    Ok(Connection::open_with_flags(
-        format!("{}?mode=ro&{mode}=1", uri(db)?),
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?)
+    Ok(Existing {
+        conn: Connection::open_with_flags(
+            format!("{}?mode=ro&{mode}=1", uri(db)?),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?,
+        _session: PhantomData,
+    })
 }
 
 /// Whether `metadata` is a regular file with one name.
@@ -149,6 +181,15 @@ mod tests {
         dir.join("x.db")
     }
 
+    /// The session lock a reader holds, in its own scratch folder so the database folders keep
+    /// only their own files.
+    fn session() -> (Scratch, SessionLock) {
+        let scratch = Scratch::new("existing-session");
+        fs::create_dir_all(scratch.dir()).expect("lock folder");
+        let lock = SessionLock::try_acquire(&scratch.dir().join("session.lock")).expect("lock");
+        (scratch, lock)
+    }
+
     fn rows(conn: &Connection) -> i64 {
         conn.query_row("SELECT sum(v) FROM t", [], |row| row.get(0))
             .expect("fixture rows read")
@@ -156,13 +197,14 @@ mod tests {
 
     #[test]
     fn a_closed_wal_database_reads_and_keeps_its_files() {
+        let (_held, lock) = session();
         let scratch = Scratch::new("existing-closed");
         let (db, conn) = writer(&scratch.dir().join("50% #1 é"));
         drop(conn);
         let dir = db.parent().expect("fixture folder");
         let before = files(dir);
         assert_eq!(before.len(), 1, "a clean close leaves only the main file");
-        let read = open(&db).expect("existing database");
+        let read = open(&db, &lock).expect("existing database");
         assert_eq!(rows(&read), 3);
         drop(read);
         assert_eq!(files(dir), before);
@@ -170,6 +212,7 @@ mod tests {
 
     #[test]
     fn a_left_wal_reads_its_commits_and_keeps_every_file() {
+        let (_held, lock) = session();
         let scratch = Scratch::new("existing-left-wal");
         let (live, conn) = writer(&scratch.dir().join("live"));
         let dir = scratch.dir().join("left");
@@ -177,7 +220,7 @@ mod tests {
         drop(conn);
         let before = files(&dir);
         assert!(!before[&OsString::from("x.db-wal")].bytes.is_empty());
-        let read = open(&db).expect("existing database");
+        let read = open(&db, &lock).expect("existing database");
         assert_eq!(rows(&read), 3, "the WAL's commit is read");
         drop(read);
         assert_eq!(files(&dir), before);
@@ -185,10 +228,11 @@ mod tests {
 
     #[test]
     fn a_missing_database_stays_missing() {
+        let (_held, lock) = session();
         let scratch = Scratch::new("existing-missing");
         fs::create_dir_all(scratch.dir()).expect("scratch folder");
         assert!(matches!(
-            open(&scratch.dir().join("x.db")),
+            open(&scratch.dir().join("x.db"), &lock),
             Err(ExistingError::Missing)
         ));
         assert!(files(scratch.dir()).is_empty());
@@ -196,6 +240,7 @@ mod tests {
 
     #[test]
     fn files_sqlite_would_change_are_uncertain_and_kept() {
+        let (_held, lock) = session();
         let scratch = Scratch::new("existing-uncertain");
         let (live, conn) = writer(&scratch.dir().join("live"));
         let cases: [(&str, Change); 6] = [
@@ -230,7 +275,10 @@ mod tests {
             let db = left(&live, &dir);
             change(&dir);
             let before = files(&dir);
-            assert!(matches!(open(&db), Err(ExistingError::Uncertain)), "{case}");
+            assert!(
+                matches!(open(&db, &lock), Err(ExistingError::Uncertain)),
+                "{case}"
+            );
             assert_eq!(files(&dir), before, "{case}");
         }
         drop(conn);
@@ -238,7 +286,7 @@ mod tests {
         fs::create_dir(&empty).expect("empty folder");
         fs::write(empty.join("x.db"), b"").expect("empty file");
         assert!(matches!(
-            open(&empty.join("x.db")),
+            open(&empty.join("x.db"), &lock),
             Err(ExistingError::Uncertain)
         ));
         assert_eq!(files(&empty).len(), 1);
@@ -248,6 +296,7 @@ mod tests {
     #[test]
     fn a_linked_main_file_or_sidecar_is_uncertain_and_kept() {
         use std::os::unix::fs::symlink;
+        let (_held, lock) = session();
         let scratch = Scratch::new("existing-linked");
         let (live, conn) = writer(&scratch.dir().join("live"));
         let long = "t".repeat(200);
@@ -285,7 +334,10 @@ mod tests {
             link(&target, &db);
             let target_dir = target.parent().expect("target folder");
             let before = (files(&dir), files(target_dir));
-            assert!(matches!(open(&db), Err(ExistingError::Uncertain)), "{case}");
+            assert!(
+                matches!(open(&db, &lock), Err(ExistingError::Uncertain)),
+                "{case}"
+            );
             assert_eq!((files(&dir), files(target_dir)), before, "{case}");
             fs::remove_dir_all(&dir).expect("case cleanup");
         }

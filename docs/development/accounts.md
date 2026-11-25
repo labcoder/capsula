@@ -867,8 +867,9 @@ their own lock, so they're Busy while a brain runs.
 `SessionLock::try_acquire_existing` locks an existing empty session file without creating it or
 its parent, and only contention is Busy. On Windows it opens the leaf itself, never a reparse
 target, sharing read and write so a stock opener still meets the lock, but not delete, so the name
-can't be renamed or deleted while held. Elsewhere a pathname check precedes the open and isn't
-atomic with it. It doesn't validate the parent, and nothing calls it yet.
+can't be renamed or deleted while held. Elsewhere it opens the leaf without following a link,
+nonblocking, and checks and locks that descriptor, so a link or FIFO there is refused rather than
+followed or waited on. It doesn't validate the parent, and nothing calls it yet.
 
 On builds without a native credential adapter, exact-name reads, writes, and deletes return
 `Unsupported`. The production vault also refuses before opening the session lock or
