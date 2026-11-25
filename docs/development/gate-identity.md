@@ -121,8 +121,10 @@ flowchart TD
    `kumochi-gate-run.lock` in the system's Local AppData (beside, never inside, `Kumochi Gate`)
    until it ends. It holds every folder from the volume root down to Local AppData first, and
    opens the lock without following a link: a link or a hard-linked file there is refused and left
-   as it is. The lock covers one byte far past the file's line, so a process the run starts can
-   still read the line. It refuses while any `kumochi.exe` or `kumochid.exe` runs, of any identity. Two gate runs
+   as it is. The lock is two bytes far past the file's line, so a process the run starts can still
+   read the line: one the run holds from start to end, and one it takes only once it has written
+   its own line, after any recovery. A process the run starts is admitted only while that second
+   byte is held and the line names its root and run id. It refuses while any `kumochi.exe` or `kumochid.exe` runs, of any identity. Two gate runs
    would share the gate pipes, and the shell's hotkey, raw input and tray icon belong to the
    Windows session, not the identity.
 2. **Nothing outlives it.** The run puts itself in a kill-on-close job that forbids breakaway, so a

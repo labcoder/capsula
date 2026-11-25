@@ -51,9 +51,9 @@ flowchart LR
   without the run lock, the process check or the cleanup. The outer gate passes it the run's root
   and run id. Before it writes anything, the copy refuses a brain beside it that isn't a Gate image,
   and admits the root only when it sits directly in `kumochi-gate-runs`, every folder from the
-  volume root down to it holds, its `gate-run` file carries that run id, and a gate run holds the
-  lock with a line naming exactly that root and id, so an older run's root is refused while
-  another run is on. Each item's folder is created new, never reused, and the report goes to the
+  volume root down to it holds, its `gate-run` file carries that run id, and a gate run has
+  published a line naming exactly that root and id and holds its published lock, so an older
+  run's root is refused while another run is on, even while that run recovers it. Each item's folder is created new, never reused, and the report goes to the
   folder the copy runs from. Never run it by hand.
 
 ## The items

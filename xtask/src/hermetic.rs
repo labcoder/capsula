@@ -29,6 +29,10 @@ const COMMAND: &str =
 const GATE: ProductIdentity = ProductIdentity::GATE;
 /// The file in a run's root that holds its run id, so recovery deletes only a gate run's folder.
 const MARKER: &str = "gate-run";
+/// The lock byte a run holds from start to end, so one runs at a time.
+const EXCLUSIVE: u32 = 0;
+/// The lock byte a run holds once its own line is written, until it ends.
+const PUBLISHED: u32 = 1;
 /// The lock's one line: this, the run id, a space, the run's root and a newline.
 const LOCK_LINE: &str = "kumochi-gate-run ";
 /// Onboarding finished, so no shell opens the onboarding window and takes the foreground; and
@@ -441,7 +445,7 @@ fn take(path: &Path) -> Result<File> {
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
     ensure!(
-        platform::try_lock_run(&lock)?,
+        platform::try_lock_run(&lock, EXCLUSIVE)?,
         "another gate run is on; one runs at a time"
     );
     Ok(lock)
@@ -500,16 +504,27 @@ fn claim(
     let held = kumochi_storage::new_owner_only_dir(root).context("creating the run's folder")?;
     let id = run_id();
     fs::write(root.join(MARKER), &id)?;
+    publish(lock, &id, named)?;
+    Ok((held, id))
+}
+
+/// Names the run `id` in `root` as the held `lock`'s line, then takes its published byte, which
+/// it keeps until the run ends: only then may a process the run started be admitted.
+fn publish(lock: &mut File, id: &str, root: &str) -> Result<()> {
     lock.set_len(0)?;
     lock.rewind()?;
-    lock.write_all(format!("{LOCK_LINE}{id} {named}\n").as_bytes())?;
-    Ok((held, id))
+    lock.write_all(format!("{LOCK_LINE}{id} {root}\n").as_bytes())?;
+    ensure!(
+        platform::try_lock_run(lock, PUBLISHED)?,
+        "another process holds this gate run's published lock"
+    );
+    Ok(())
 }
 
 /// Admits `root` for a process a gate run started, such as slice2's inner copy: it must be a
 /// folder directly in `runs` whose chain holds, its marker must carry `id`, and a live run must
-/// hold the gate-run lock at `lock` with a line naming exactly `id` and `root`. Returns the held
-/// chain. A stale or foreign root is refused before anything is written in it.
+/// hold the gate-run lock at `lock` and have published a line naming exactly `id` and `root`, so a
+/// run still recovering an earlier one admits nothing. Returns the held chain. A stale or foreign root is refused before anything is written in it.
 pub(crate) fn admit_root(runs: &Path, lock: &Path, root: &Path, id: &str) -> Result<Vec<File>> {
     ensure!(
         root.parent() == Some(runs),
@@ -523,7 +538,10 @@ pub(crate) fn admit_root(runs: &Path, lock: &Path, root: &Path, id: &str) -> Res
         root.display()
     );
     let lock = File::open(lock).context("no gate run is on")?;
-    ensure!(!platform::try_lock_run(&lock)?, "no gate run is on");
+    ensure!(
+        !platform::try_lock_run(&lock, PUBLISHED)?,
+        "no gate run is on"
+    );
     let mut line = String::new();
     (&lock).take(4096).read_to_string(&mut line)?;
     ensure!(
@@ -1232,8 +1250,11 @@ mod tests {
             fs::write(root.join(MARKER), id).expect("its marker");
         }
         let lock = dir.join("run.lock");
-        fs::write(&lock, format!("{LOCK_LINE}{LIVE_ID} {}\n", live.display()))
-            .expect("the live run's line");
+        fs::write(
+            &lock,
+            format!("{LOCK_LINE}{EARLIER_ID} {}\n", old.display()),
+        )
+        .expect("the interrupted run's line");
         let other = dir.join("other");
         fs::create_dir(&other).expect("a folder elsewhere");
         fs::write(other.join(MARKER), EARLIER_ID).expect("a marker");
@@ -1250,14 +1271,21 @@ mod tests {
             refused(&live, EARLIER_ID),
             format!("{} isn't this gate run's folder", live.display())
         );
-        assert_eq!(refused(&live, LIVE_ID), "no gate run is on");
-        let held = take(&lock).expect("the live run's lock");
+        assert_eq!(refused(&old, EARLIER_ID), "no gate run is on");
+        let mut held = take(&lock).expect("the next run's lock");
+        assert_eq!(
+            refused(&old, EARLIER_ID),
+            "no gate run is on",
+            "while the next run may still be recovering it"
+        );
+        publish(&mut held, LIVE_ID, live.to_str().expect("Unicode")).expect("published");
         assert_eq!(
             refused(&old, EARLIER_ID),
             format!("{} isn't the live gate run's folder", old.display())
         );
         admit_root(&runs, &lock, &live, LIVE_ID).expect("the live run's own root");
         drop(held);
+        assert_eq!(refused(&live, LIVE_ID), "no gate run is on");
         for root in [&old, &live] {
             let mut names: Vec<_> = fs::read_dir(root)
                 .expect("lists")

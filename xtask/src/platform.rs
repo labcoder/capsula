@@ -345,10 +345,10 @@ pub(crate) fn file_identity(opened: &std::fs::File) -> Result<(u32, u64)> {
     ))
 }
 
-/// Takes the gate-run lock on `file` without waiting: an exclusive lock on one byte far past any
-/// line the file holds, so other processes can still read that line. False while another handle
-/// holds it; closing the handle releases it.
-pub(crate) fn try_lock_run(file: &std::fs::File) -> Result<bool> {
+/// Takes one of the gate-run lock's bytes on `file` without waiting: an exclusive lock on byte
+/// `byte` of a range far past any line the file holds, so other processes can still read that
+/// line. False while another handle holds it; closing the handle releases it.
+pub(crate) fn try_lock_run(file: &std::fs::File, byte: u32) -> Result<bool> {
     use windows::Win32::Foundation::ERROR_LOCK_VIOLATION;
     use windows::Win32::Storage::FileSystem::{
         LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
@@ -357,7 +357,7 @@ pub(crate) fn try_lock_run(file: &std::fs::File) -> Result<bool> {
     let mut at = OVERLAPPED {
         Anonymous: OVERLAPPED_0 {
             Anonymous: OVERLAPPED_0_0 {
-                Offset: 0,
+                Offset: byte,
                 OffsetHigh: 0x7fff_ffff,
             },
         },

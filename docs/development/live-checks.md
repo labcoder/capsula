@@ -295,7 +295,8 @@ in the profile, so another eligible profile can't stand in for the approved one.
 it check the cleanup marker, refuse a linked or hard-linked database or SQLite side file
 (`-wal`, `-shm`, `-journal`; a missing one is fine) before either database opens, and read the
 metadata through the held folders, and it compares the
-plan before taking its claim or spawning a brain. It then requires the brain to report
+plan before taking its claim or spawning a brain. Those read-only opens can create ordinary
+`-wal` and `-shm` files beside a database inside the admitted disposable profile. It then requires the brain to report
 ChatGPT already signed in, with plan use enabled and no recovery required.
 
 An ordinary Dev start still opens the user-level Dev credential service and sweeps
