@@ -3462,7 +3462,7 @@ async fn a_locally_checked_sign_in_is_fenced_until_its_check_answers() {
 /// From the producer to the build: a current recovered answer gives the first build its exact
 /// cutoff; after the vault's own later answer for that check is dropped and an ordinary refresh
 /// rotates the set, the build still keeps to it; and once that account can't be ready, the next
-/// build reads no `ChatGPT` history at all.
+/// build reads no `ChatGPT` history at all, while a ready Claude Code still arrives.
 #[tokio::test]
 async fn a_recovered_answer_scopes_builds_until_the_account_stops_being_ready() {
     use crate::connections::vault::Proof;
@@ -3506,10 +3506,35 @@ async fn a_recovered_answer_scopes_builds_until_the_account_stops_being_ready() 
                 .account_input(Input::PlanUnavailable, None)
                 .expect("no shell");
         }
+        #[cfg(windows)]
+        let claude = if arm == "unavailable" {
+            let base =
+                crate::engines::claude_code::lane::tests::Base::new("account-proof-recovered");
+            brain.attach_claude(ready_claude(&base).await);
+            let Availability::Ready(ready) = brain.claude.availability() else {
+                panic!("Claude Code is ready");
+            };
+            Some(ready.connection)
+        } else {
+            None
+        };
         let build = first_build(&mut brain);
         if arm == "unavailable" {
             assert!(build.arrived.chatgpt_blocked());
             assert_eq!(build.require_recovery, None);
+            #[cfg(windows)]
+            {
+                let choice = ModelChoice {
+                    model: ModelSlug::new("haiku").expect("valid"),
+                    effort: Effort::Low,
+                    connection: ConnectionKind::ClaudeCode,
+                };
+                assert_eq!(
+                    Some(build.arrived.replay(Some(&choice))),
+                    claude,
+                    "Claude Code still arrives ready"
+                );
+            }
         } else {
             assert!(!build.arrived.chatgpt_blocked(), "{arm}");
             assert_eq!(build.arrived.recovered(), Some(cut), "{arm}");
