@@ -10,13 +10,18 @@ use kumochi_protocol::message::{
 use crate::coordinator::{Availability, PictureRoutes};
 
 impl super::Brain {
-    /// The gate for a hold on `choice`, with `enabled` the user's switch for that kind of hold.
+    /// The gate for a hold on `choice`, with `capture` whether this platform and its worker can
+    /// capture that kind of hold and `enabled` the user's switch for it.
     #[expect(
         clippy::fn_params_excessive_bools,
-        reason = "the user's switch for that kind of hold"
+        reason = "the platform's capture and the user's switch for that kind of hold"
     )]
-    pub(super) fn picture_gate(&self, choice: Option<&ModelChoice>, enabled: bool) -> ScreenHolds {
-        let capture = self.holds.can_capture();
+    pub(super) fn picture_gate(
+        &self,
+        choice: Option<&ModelChoice>,
+        capture: bool,
+        enabled: bool,
+    ) -> ScreenHolds {
         match choice {
             Some(choice) if choice.connection != ConnectionKind::ChatGpt => claude(
                 self.coordinator.availability_of(choice.connection),
