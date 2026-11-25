@@ -7,9 +7,12 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::path::Path;
 
+use kumochi_protocol::profile::Observation;
 use rusqlite::{Connection, OpenFlags};
 
-use super::purge::sidecar;
+use super::StoreError;
+use super::purge::{Leftovers, missing, sidecar};
+use super::schema::{self, MIGRATIONS};
 use crate::platform::SessionLock;
 
 /// SQLite's smallest page. A shorter main file can read as zero pages, and SQLite then deletes the
@@ -63,9 +66,9 @@ impl Deref for Existing<'_> {
 /// Every file must be a regular file under one name, not a link or reparse point, so SQLite reads
 /// the files that were checked. With no WAL, `immutable` reads only the main file and takes no
 /// SQLite lock, so every writer of `db` must be one that takes `session`: the connection
-/// borrows it, so the lock is held through SQLite's last use. Today that covers the credential
-/// authority, not the history store, whose writer opens it before taking the lock. With a nonempty
-/// WAL and index, `readonly_shm` reads both through read-only handles.
+/// borrows it, so the lock is held through SQLite's last use. The brain writes the credential
+/// authority and the history store only under it. With a nonempty WAL and index, `readonly_shm`
+/// reads both through read-only handles.
 /// Anything else that SQLite would create, replay, re-permission or remove is uncertain: a
 /// journal, a WAL or index without the other or empty, a main file shorter than a page. No other
 /// connection to `db` may be open in this process, since SQLite shares one index handle per
@@ -106,6 +109,60 @@ pub(crate) fn open<'lock>(
         )?,
         _session: PhantomData,
     })
+}
+
+/// What the history store at `db` reads as under `session`, the profile's writer lock.
+///
+/// `Matching` is a schema version this build knows, with exactly the objects its migrations make
+/// at that version, so the brain would open it and migrate it if it's older. `Absent` is no store
+/// and nothing beside it that a store or a purge leaves. Everything else is `Unverified`: a newer
+/// or foreign schema, any other object, any file `open` refuses, or any failed read.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the existing-profile reader that calls it isn't landed yet"
+    )
+)]
+pub(crate) fn history(db: &Path, session: &SessionLock) -> Observation {
+    match open(db, session) {
+        Ok(read) => match known_schema(&read) {
+            Ok(true) => Observation::Matching,
+            Ok(false) | Err(_) => Observation::Unverified,
+        },
+        Err(ExistingError::Missing)
+            if ["-wal", "-shm", "-journal"]
+                .into_iter()
+                .all(|suffix| missing(&sidecar(db, suffix)))
+                && !Leftovers::of(db).exist() =>
+        {
+            Observation::Absent
+        }
+        Err(_) => Observation::Unverified,
+    }
+}
+
+/// Whether `conn`'s objects are exactly those this build's migrations make at its `user_version`.
+fn known_schema(conn: &Connection) -> Result<bool, StoreError> {
+    let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let Some(version) = usize::try_from(found)
+        .ok()
+        .filter(|version| (1..=MIGRATIONS.len()).contains(version))
+    else {
+        return Ok(false);
+    };
+    let mut expected = Connection::open_in_memory()?;
+    schema::migrate_to(&mut expected, version)?;
+    Ok(objects(conn)? == objects(&expected)?)
+}
+
+/// Every schema object's type, name, table and SQL, in a fixed order.
+fn objects(conn: &Connection) -> rusqlite::Result<Vec<[Option<String>; 4]>> {
+    conn.prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")?
+        .query_map([], |row| {
+            Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?])
+        })?
+        .collect()
 }
 
 /// Whether `metadata` is a regular file with one name.
@@ -341,5 +398,113 @@ mod tests {
             assert_eq!((files(&dir), files(target_dir)), before, "{case}");
             fs::remove_dir_all(&dir).expect("case cleanup");
         }
+    }
+
+    /// A cleanly closed WAL store in `dir`, migrated to `version`.
+    fn store_at(dir: &Path, version: usize) -> PathBuf {
+        fs::create_dir_all(dir).expect("store folder");
+        let db = dir.join("x.db");
+        let mut conn = Connection::open(&db).expect("store");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .expect("WAL");
+        assert_eq!(mode, "wal");
+        schema::migrate_to(&mut conn, version).expect("migrations");
+        db
+    }
+
+    #[test]
+    fn a_store_at_any_known_version_matches_and_keeps_its_files() {
+        let (_held, lock) = session();
+        let scratch = Scratch::new("existing-history");
+        for version in 1..=MIGRATIONS.len() {
+            let db = store_at(&scratch.dir().join(format!("v{version}")), version);
+            let dir = db.parent().expect("store folder");
+            let before = files(dir);
+            assert_eq!(history(&db, &lock), Observation::Matching, "v{version}");
+            assert_eq!(files(dir), before, "v{version}");
+        }
+        let opened = scratch.dir().join("opened").join("x.db");
+        drop(super::super::Store::open(&opened).expect("the brain's own open"));
+        assert_eq!(history(&opened, &lock), Observation::Matching);
+        let copy = scratch.dir().join("copy");
+        fs::create_dir(&copy).expect("copy folder");
+        let source = Connection::open(scratch.dir().join("opened").join("x.db")).expect("source");
+        source
+            .execute(
+                "VACUUM INTO ?1",
+                [copy.join("x.db").to_str().expect("UTF-8 path")],
+            )
+            .expect("a purge's kind of copy");
+        drop(source);
+        assert_eq!(history(&copy.join("x.db"), &lock), Observation::Matching);
+    }
+
+    #[test]
+    fn a_newer_foreign_or_changed_schema_is_unverified_and_kept() {
+        let (_held, lock) = session();
+        let scratch = Scratch::new("existing-history-changed");
+        let known = MIGRATIONS.len();
+        let newer = i64::try_from(known + 1).expect("small");
+        let older = i64::try_from(known - 1).expect("small");
+        let cases: [(&str, String); 5] = [
+            ("newer", format!("PRAGMA user_version = {newer}")),
+            ("unversioned", "PRAGMA user_version = 0".into()),
+            ("extra-table", "CREATE TABLE extra (x INTEGER)".into()),
+            (
+                "extra-index",
+                "CREATE INDEX extra ON threads (title)".into(),
+            ),
+            (
+                "ahead-of-its-version",
+                format!("PRAGMA user_version = {older}"),
+            ),
+        ];
+        for (case, change) in cases {
+            let db = store_at(&scratch.dir().join(case), known);
+            Connection::open(&db)
+                .and_then(|conn| conn.execute_batch(&change))
+                .expect("change the store");
+            let dir = db.parent().expect("store folder");
+            let before = files(dir);
+            assert_eq!(history(&db, &lock), Observation::Unverified, "{case}");
+            assert_eq!(files(dir), before, "{case}");
+        }
+        let foreign = scratch.dir().join("foreign");
+        let (db, conn) = writer(&foreign);
+        drop(conn);
+        assert_eq!(history(&db, &lock), Observation::Unverified, "foreign");
+    }
+
+    #[test]
+    fn a_missing_store_is_absent_only_with_nothing_beside_it() {
+        let (_held, lock) = session();
+        let scratch = Scratch::new("existing-history-missing");
+        let bare = scratch.dir().join("bare");
+        fs::create_dir_all(&bare).expect("bare folder");
+        assert_eq!(history(&bare.join("x.db"), &lock), Observation::Absent);
+        assert!(files(&bare).is_empty());
+        for left in [
+            "x.db-wal",
+            "x.db-shm",
+            "x.db-journal",
+            "x.db.purge-old",
+            "x.db.purge-snapshot",
+            "x.db.purge-clean-wal",
+        ] {
+            let dir = scratch.dir().join(left);
+            fs::create_dir_all(&dir).expect("case folder");
+            fs::write(dir.join(left), b"left").expect("left file");
+            let before = files(&dir);
+            assert_eq!(
+                history(&dir.join("x.db"), &lock),
+                Observation::Unverified,
+                "{left}"
+            );
+            assert_eq!(files(&dir), before, "{left}");
+        }
+        let refused = store_at(&scratch.dir().join("refused"), MIGRATIONS.len());
+        fs::write(refused.with_file_name("x.db-wal"), b"").expect("empty WAL");
+        assert_eq!(history(&refused, &lock), Observation::Unverified, "refused");
     }
 }

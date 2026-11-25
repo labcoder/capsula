@@ -517,15 +517,35 @@ separators, drive colons and UNC prefixes reach the VFS unchanged.
 Nothing calls it yet. It takes the caller's `SessionLock` and returns a connection borrowed from
 it, so the lock stays held through SQLite's last use. That excludes only writers that take the
 same lock, and `immutable` takes none of its own while the file check happens before the open,
-not atomically with it: a WAL removed in between is created again as an empty file. The
-credential authority is only written under that lock. The history store isn't yet, since the
-brain opens it before taking the lock, so it isn't read through this opener. No other connection to that database may be open in the same
-process, since SQLite shares one index handle per process. SQLite run as root re-owns the WAL and index to the main
+not atomically with it: a WAL removed in between is created again as an empty file. The brain
+writes the credential authority and the history store only under that lock, the profile's
+writer lock, which it takes before it opens the store. No other connection to that database may
+be open in the same process, since SQLite shares one index handle per process. SQLite run as root re-owns the WAL and index to the main
 file's owner; Kumochi doesn't run as root. Unit tests compare each file's name, bytes,
 permissions and owner before and after: a closed database, a copy left with a live WAL, every
 refused case, and on Unix the linked cases. On Windows the VFS also honours `readonly_shm`, but
 opens the index with `OPEN_ALWAYS`, so an index removed between the check and the open would be
 created there, and a second hard link isn't detected.
+
+### The history store's verdict
+
+`store::existing::history` turns that read into the profile classifier's `Observation` for
+`kumochi.db`, under the same held lock. Nothing calls it yet.
+
+- `Matching`: the file's `user_version` is one this build knows (1 to the newest), and its
+  schema objects (type, name, table and SQL, from `sqlite_schema`) are exactly those the
+  migrations make at that version, built in memory to compare. An older version matches, since
+  the brain would migrate it at start.
+- `Absent`: no main file, no `-wal`, `-shm` or `-journal`, and none of the files a purge
+  leaves (`.purge-old`, the snapshot and the clean copy with their sidecars).
+- `Unverified`: everything else. That covers a newer or unversioned schema, any extra or missing
+  object, a schema ahead of its version, files the opener refuses, a store missing beside
+  something it left, and any failed read.
+
+It doesn't read rows, run `quick_check` or look for a binding: a legacy store has none, and the
+new-format binding comes with the new layout. Tests cover every known version, a store the brain
+itself opened, a `VACUUM INTO` copy like a purge's, each refused change, and each leftover, and
+check that no file changes.
 
 ## Recovery at start
 
