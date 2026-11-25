@@ -214,7 +214,13 @@ pub(crate) fn held_accounts(
     let lock = scratch.dir().join(constants::SESSION_LOCK);
     let worker = Worker::new(
         Box::new(move || {
-            Vault::with_lock(store.clone(), "test-accounts", Arc::clone(&profile), &lock)
+            Vault::with_lock(
+                store.clone(),
+                "test-accounts",
+                Arc::clone(&profile),
+                &lock,
+                crate::connections::vault::HistoryLink::unbound(),
+            )
         }),
         Arc::new(FixedClock(1_800_000_000)),
     );

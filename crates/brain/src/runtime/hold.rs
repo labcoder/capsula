@@ -436,6 +436,15 @@ impl Brain {
             {
                 Some(HoldStatus::Failed(HoldFailure::ChoiceChanged))
             }
+            Input::RecoveredChatGpt { ready, boundary }
+                if self.coordinator.hold_recovery_changes(
+                    ready,
+                    *boundary,
+                    hold.snapshot.as_ref(),
+                ) =>
+            {
+                Some(HoldStatus::Failed(HoldFailure::ChoiceChanged))
+            }
             _ => None,
         };
         if let Some(status) = status {
@@ -793,6 +802,10 @@ impl Brain {
         let Some(hold) = &mut self.holds.pending else {
             return Ok(());
         };
+        #[cfg(test)]
+        if hold.audio.as_ref().is_some_and(audio::Audio::has_samples) {
+            self.observer.send(super::Seen::HoldPcmBuffered).ok();
+        }
         if self.holds.gate.overflow.load(Ordering::SeqCst) == hold.key.gesture.0 {
             return self.hold_end(HoldStatus::Failed(HoldFailure::InvalidAudio), link);
         }
@@ -988,7 +1001,10 @@ impl Brain {
 
     /// The user turned showing the screen off: a pending screen hold goes on as voice with no
     /// line, and every run's screen picture is withdrawn.
-    pub(super) fn show_screen_off(&mut self) {
+    pub(super) fn show_screen_off(
+        &mut self,
+        link: Option<&mut Link<'_, '_>>,
+    ) -> Result<(), super::Ended> {
         if self
             .holds
             .pending
@@ -997,7 +1013,10 @@ impl Brain {
         {
             self.holds.close_screen_as(None);
         }
-        self.offline(Input::ShowScreenOff);
+        if let Some(effects) = self.handle(Input::ShowScreenOff) {
+            self.apply(effects, link)?;
+        }
+        Ok(())
     }
 
     /// Claude Code's generation moved: every picture held for it that wasn't granted is lost, so

@@ -518,7 +518,12 @@ impl Drop for Mapping<'_> {
 }
 
 impl Capturer for Wgc {
-    fn pointer_window(&mut self, point: PhysicalPoint, shell: u32) -> Result<Target, Refusal> {
+    fn pointer_window(
+        &mut self,
+        point: PhysicalPoint,
+        shell: u32,
+        _: Deadline,
+    ) -> Result<Target, Refusal> {
         super::window::pointer_window(point, shell)
     }
 
@@ -542,6 +547,7 @@ impl Capturer for Wgc {
     fn capture_display(
         &mut self,
         point: PhysicalPoint,
+        _: u32,
         excluded: u64,
         deadline: Deadline,
         frame: &mut RawFrame,

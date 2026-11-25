@@ -648,6 +648,10 @@ async fn attach_hold_input(brain: &mut Brain, dir: &Path, probe: Arc<AudioProbe>
         .expect("record offline recognizer state");
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the offline fixture brain is assembled in one place, part by part"
+)]
 pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain {
     let (profile, mut store) = crate::open_profile(&dir.join("store.db"))
         .expect("take the profile and open the test store");
@@ -680,7 +684,15 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
     let lock = dir.join(SESSION_LOCK);
     let held = Arc::clone(&profile);
     let worker = Worker::new(
-        Box::new(move || Vault::with_lock(Offline, "test-accounts", Arc::clone(&held), &lock)),
+        Box::new(move || {
+            Vault::with_lock(
+                Offline,
+                "test-accounts",
+                Arc::clone(&held),
+                &lock,
+                crate::connections::vault::HistoryLink::unbound(),
+            )
+        }),
         Arc::clone(&clock),
     );
     let accounts = Accounts::spawn_unconfigured(

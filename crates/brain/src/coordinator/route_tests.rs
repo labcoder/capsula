@@ -105,6 +105,7 @@ fn built(choice: Option<ModelChoice>) -> Input {
         key: key(),
         snapshot: Some(defaults(choice)),
         result: Ok(Built {
+            recovered_context: None,
             request: ModelRequest {
                 choice: None,
                 instructions: String::new(),
@@ -514,6 +515,7 @@ pub(crate) fn built_for(key: BuildKey, choice: &ModelChoice) -> Input {
         key,
         snapshot: (key.attempt == 1).then(|| defaults(Some(choice.clone()))),
         result: Ok(Built {
+            recovered_context: None,
             request: ModelRequest {
                 choice: Some(choice.clone()),
                 instructions: String::new(),
@@ -578,7 +580,7 @@ pub(crate) fn pictured_run(
 #[cfg(windows)]
 pub(crate) fn pictured_claude_run(
     available: Availability,
-    jpeg: crate::context::Jpeg,
+    screen: crate::context::Screen,
 ) -> (Coordinator, Vec<Effect>) {
     let choice = choice(CLAUDE, "haiku");
     let (mut core, hold) = held(
@@ -587,12 +589,8 @@ pub(crate) fn pictured_claude_run(
         Some(ThreadId(1)),
     );
     core.set_pictures(crate::coordinator::PictureRoutes::new(false, true));
-    core.submit_hold(
-        hold,
-        "words".into(),
-        Some(crate::context::Screen::Image(jpeg)),
-    )
-    .expect("admitted");
+    core.submit_hold(hold, "words".into(), Some(screen))
+        .expect("admitted");
     core.handle(Input::TurnStored { run: R }).expect("current");
     let Input::ContextBuilt(mut built) = built_for(key(), &choice) else {
         unreachable!("built fixture");
@@ -1285,6 +1283,7 @@ fn a_written_picture_lost_stops_every_later_send_of_its_run() {
                 JobAsk {
                     generation: Generation(5),
                     built: Built {
+                        recovered_context: None,
                         request: ModelRequest {
                             choice: Some(choice(kind, "m")),
                             instructions: String::new(),

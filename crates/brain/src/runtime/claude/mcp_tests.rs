@@ -115,6 +115,7 @@ fn running(brain: &mut Brain) -> BuildKey {
             key,
             snapshot: None,
             result: Ok(Built {
+                recovered_context: None,
                 request: ModelRequest {
                     choice: None,
                     instructions: "built".to_owned(),

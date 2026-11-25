@@ -12,6 +12,8 @@ impl BoundHello {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) use macos::capture::{display_at, screen_capturer};
+#[cfg(target_os = "macos")]
 pub(crate) use macos::clock::{qpc_at, qpc_left};
 
 #[cfg(all(windows, feature = "test-support"))]
@@ -71,12 +73,10 @@ pub use fs::{free_space, links_unsupported, replace_file};
 mod folders;
 #[cfg(target_os = "macos")]
 pub use folders::{config_dir, data_dir};
-pub(crate) use pipe::ClientRefused;
 pub use pipe::Instance;
+pub(crate) use pipe::{BridgeConnectError, ClientRefused};
 #[cfg(not(windows))]
-pub(crate) use pipe::{
-    PipeClient, bridge_peer, client_image, open_pipe, server_image, shell_connection,
-};
+pub(crate) use pipe::{PipeClient, bridge_peer, client_image, open_bridge, shell_connection};
 #[cfg(not(windows))]
 pub use pipe::{PipeServer, create_owner_only, session_id};
 pub(crate) use process::spawn_if;
@@ -104,7 +104,7 @@ pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
 pub(crate) use windows::DumpExclusion;
 #[cfg(windows)]
-pub(crate) use windows::{PipeClient, bridge_peer, open_pipe, shell_connection};
+pub(crate) use windows::{PipeClient, bridge_peer, open_bridge, shell_connection};
 
 #[cfg(windows)]
 #[expect(
@@ -238,10 +238,9 @@ pub(crate) fn window_unchanged(_target: &crate::screen::Target) -> bool {
     false
 }
 
-/// The monitor that covers a captured display's bounds now. No platform but Windows captures a
-/// display yet, so there's none.
-// shortcut: macOS will read its display here.
-#[cfg(not(windows))]
+/// The monitor that covers a captured display's bounds now. Only Windows and macOS capture a
+/// display, so there's none.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn display_at(
     _bounds: kumochi_protocol::geometry::PhysicalRect,
 ) -> Option<(kumochi_protocol::geometry::PhysicalRect, u32)> {

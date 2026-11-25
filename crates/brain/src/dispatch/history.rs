@@ -39,6 +39,9 @@ pub struct ReadCall {
     pub(crate) origin: Origin,
     pub(crate) query: Query,
     pub(crate) control: Control,
+    /// The established history cutoff this read must find unchanged and keep to; unset until
+    /// reconnect admission sets it.
+    pub(crate) require_recovery: Option<crate::store::Boundary>,
 }
 
 impl fmt::Debug for ReadCall {
@@ -60,6 +63,7 @@ impl PartialEq for ReadCall {
             && self.hash == other.hash
             && self.origin == other.origin
             && self.query == other.query
+            && self.require_recovery == other.require_recovery
     }
 }
 impl Eq for ReadCall {}

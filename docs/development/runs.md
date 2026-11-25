@@ -429,6 +429,20 @@ after every op and wake; while it's being found that's `Finding`, which reads as
   `ModelUnavailable` with Open Settings for another kind (`Coordinator::refusal`). A held ask for
   that run is answered `Rebuild`, and `send_ready`
   checks the route again before every `Grant`. Only a `ChatGPT` route takes a bearer.
+- **A recovered `ChatGPT` connection keeps to its history cutoff** (`Input::RecoveredChatGpt`,
+  which carries the [cutoff](store.md) the vault read back and matched). Every read for a route
+  on that sign-in carries the cutoff: the run's builds, inline compaction, history calls, and title
+  and compaction jobs. A build, compaction or job read to any other cutoff, or to none, fails the
+  run on the store or ends the job unsent, and the bearer, the `Grant` and a job's grant each
+  check the body's cutoff again. A first cutoff on the ready sign-in cancels a `ChatGPT` job and
+  ends a run on it, as another sign-in would; the same report again changes nothing. A cutoff
+  naming another sign-in, or one that differs from the cutoff its sign-in already has, installs
+  nothing: it cancels the `ChatGPT` job, fails a pending hold and leaves `ChatGPT`
+  `SignInNeeded` until a consistent report, which an ordinary refresh of that sign-in doesn't
+  stand in for. A turn that arrives meanwhile is marked, so a build answering on `ChatGPT` reads
+  no history at all. Each sign-in keeps its own first cutoff and refusal, and a report naming a
+  sign-in another has replaced is late and changes nothing. An ask about a part in a thread from before the cutoff fails on the store, since
+  its turn is that old drawing's own text. Nothing reports a recovered connection at startup yet.
 - **A typed turn while Claude Code is being found waits** (OSC-753). A turn that arrives while
   Claude Code reports `Finding` records that. Until its first build the newest Claude Code
   report wins: `Finding` keeps it (forgetting a sign-in found before), Ready records that

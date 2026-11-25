@@ -316,6 +316,7 @@ mod tests {
             },
             snapshot: None,
             result: Ok(Built {
+                recovered_context: None,
                 request: request().request,
                 sources: vec![ThreadId(1)],
             }),

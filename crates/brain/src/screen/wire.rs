@@ -127,6 +127,12 @@ pub(crate) enum Refusal {
     TooLarge,
     /// The system said it can't capture a window when the capturer opened. Appended.
     Unsupported,
+    /// The system hasn't granted Kumochi screen capture, or the user declined it. Unlike
+    /// `Unsupported`, a grant can come later. Appended.
+    NotPermitted,
+    /// The displays' arrangement can't be mapped to physical pixels exactly, such as mixed
+    /// scales or mirroring. Appended.
+    Layout,
 }
 
 /// A complete, valid frame's description; the pixels stay in the worker.

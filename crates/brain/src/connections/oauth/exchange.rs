@@ -2,6 +2,8 @@
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::{Scripted, authorization, tokens};
 
 use kumochi_protocol::Secret;
 use serde::Deserialize;
@@ -169,6 +171,16 @@ pub async fn exchange(
     http: &impl Http,
     authorization: &Authorization,
 ) -> Result<TokenSet, ExchangeError> {
+    prepare_exchange(authorization)?.send(http).await
+}
+
+#[derive(Debug)]
+#[must_use]
+pub(in crate::connections) struct ExchangeRequest(Request);
+
+pub(in crate::connections) fn prepare_exchange(
+    authorization: &Authorization,
+) -> Result<ExchangeRequest, ExchangeError> {
     let client = authorization.client_id.expose();
     let code = authorization.code.expose();
     let verifier = authorization.verifier.expose();
@@ -208,19 +220,26 @@ pub async fn exchange(
     .into_iter()
     .map(|(key, value)| (key, Secret::new(Zeroizing::new(value.to_owned()))))
     .collect();
-    let response = http
-        .execute(Request {
-            endpoint: Endpoint::Token,
-            fields,
-        })
-        .await?;
-    let tokens = parse_response(&response)?;
-    if tokens.id_token.is_none() {
-        return Err(ExchangeError::Unusable {
-            refresh_token: tokens.refresh_token,
-        });
+    Ok(ExchangeRequest(Request {
+        endpoint: Endpoint::Token,
+        fields,
+    }))
+}
+
+impl ExchangeRequest {
+    pub(in crate::connections) async fn send(
+        self,
+        http: &impl Http,
+    ) -> Result<TokenSet, ExchangeError> {
+        let response = http.execute(self.0).await?;
+        let tokens = parse_response(&response)?;
+        if tokens.id_token.is_none() {
+            return Err(ExchangeError::Unusable {
+                refresh_token: tokens.refresh_token,
+            });
+        }
+        Ok(tokens)
     }
-    Ok(tokens)
 }
 
 pub(crate) fn parse_response(response: &Response) -> Result<TokenSet, ExchangeError> {

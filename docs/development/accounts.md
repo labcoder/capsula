@@ -743,7 +743,10 @@ describes the recorded shape behind both decoders.
 
 `runtime::Accounts` owns the catalog, in memory only. It reads when the account becomes usable
 (`SignedIn`, plan `Enabled`, no recovery but Retry), and again on `Retry` or a new connection
-while no read has succeeded. One read runs at a time. The catalog has an epoch that moves when the
+while no read has succeeded. A queued audio re-pair for a Talk-back change only replays the
+ChatGPT account view and the cached catalog or its last failure. It doesn't reload a Busy vault
+or start discovery, so the user can still Retry without the audio switch doing it for them.
+One read runs at a time. The catalog has an epoch that moves when the
 account stops being usable: the read out is cancelled, whether it waits for the bearer, builds
 its client or awaits the answer, and the list is cleared; the shell then hears an empty
 `Models`. Closing cancels it too. Cancelling drops only its bearer wait, never a refresh that
@@ -949,6 +952,35 @@ The owner can remove stray entries matching those exact test patterns in Windows
 Manager; there is no automatic enumeration or cleanup of other test runs.
 
 ## Credential authority
+
+The dormant ChatGPT repair transaction admits only the exact current registration with a
+missing chunk, a readable existing host, and no outstanding sign-out, sweep, or revocation
+work. The account worker's vault lock spans the generation re-read and admission. An explicit
+claim moves the authority to version 4, fences the old account, and records the attempt
+without replacing the saved registration or writing any credential names. Cancelling that
+exact attempt clears its unspent slot, not the fence; a stale Cancel cannot clear a newer
+attempt. A confirmed attempt can charge one exchange only after the request passes local
+validation and the issued client reads back under a dedicated repair generation. Dropping
+the vault or attempt before the dispatch claim suppresses the call. Cancelling after dispatch
+seals the attempt against promotion, but the same vault and attempt can still drain its receipt.
+If either owner goes away after the claim, the persisted charge is unresolved and stays fenced.
+The drain can settle once: a known refresh handle is escrowed even if the response is
+unusable, while a missing receipt or a refused write keeps the attempt fenced. No retry or
+ordinary account save follows. A still-live, settled receipt can be verified against the
+issued client and nonce using the standard signed-identity verifier. The authority checks
+the same escrow, predecessor, host, and staged successor before it atomically retires the
+predecessor and escrow and records the exact successor/tag as locked Pending. A failed commit
+can count as a binding only if the transaction has ended and the exact binding reads back.
+This transaction does not open history, establish a context, or authorize use. A later history
+cutoff and exact Check are required. The still-locked binding is also the one-shot proof for the
+separate [history cutoff](store.md), written only by the profile's one history writer, which
+the vault is bound to when it is built. Only that cutoff's receipt, matched by the writer's
+fresh Check, marks the context established, recording its tag and thread/run bounds beside the
+successor. Confirming it later has the writer re-read the row, which a history purge carries
+over; a missing, changed or unreadable row leaves the successor locked, and nothing mints a
+replacement cutoff. A refused establishment COMMIT is rolled back, and confirmation reads
+only committed authority state, so a connection still inside a transaction is never established. Only scripted tests
+call this path; ordinary startup still refuses version 4 and there is no browser or runtime ingress.
 
 `connections::authority` (OSC-233) decides which credential bytes count. On Rez, with two
 processes writing, Credential Manager hid a fresh write for 120 ms and brought back a confirmed

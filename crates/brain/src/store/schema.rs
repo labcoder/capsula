@@ -1,11 +1,13 @@
 //! The schema, as forward-only migrations numbered by `PRAGMA user_version`.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
 pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
+const ORDINARY_VERSION: usize = MIGRATIONS.len();
+const RECOVERY_VERSION: usize = 12;
 
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
 /// cascade, so deletion names every table and fails loudly if one is missed.
@@ -195,20 +197,46 @@ const V11: &str = "
 ALTER TABLE actions ADD COLUMN repo_id INTEGER CHECK (repo_id IS NULL OR repo_id >= 1);
 ";
 
-/// Applies every migration past the file's version, each in its own transaction.
+const V12: &str = "
+CREATE TABLE chatgpt_recovery_context (
+    tag BLOB PRIMARY KEY CHECK (length(tag) = 8),
+    last_thread INTEGER NOT NULL CHECK (last_thread > 0),
+    last_run INTEGER NOT NULL CHECK (last_run >= 0)
+) STRICT;
+";
+
+/// Applies ordinary migrations only; existing recovery history stays at v12.
 pub(super) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
-    migrate_to(conn, MIGRATIONS.len())
+    migrate_to(conn, ORDINARY_VERSION)
 }
 
-/// Applies the migrations up to `target`, at most the known version; tests build older files.
+pub(super) fn has_recovery_context(conn: &Connection) -> Result<bool, StoreError> {
+    Ok(version(conn)? == RECOVERY_VERSION)
+}
+
+pub(super) fn migrate_recovery_context(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    match version(tx)? {
+        ORDINARY_VERSION => {
+            tx.execute_batch(V12)?;
+            tx.pragma_update(
+                None,
+                "user_version",
+                i64::try_from(RECOVERY_VERSION).expect("the schema version fits SQLite"),
+            )?;
+        }
+        RECOVERY_VERSION => {}
+        _ => return Err(StoreError::RecoveryContext),
+    }
+    Ok(())
+}
+
+/// Applies ordinary migrations up to `target`; tests build older files.
 pub(super) fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), StoreError> {
-    let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let known = MIGRATIONS.len();
-    debug_assert!(target <= known, "no migration past the known ones");
-    let applied = usize::try_from(found)
-        .ok()
-        .filter(|&applied| applied <= known)
-        .ok_or(StoreError::NewerSchema { found, known })?;
+    let applied = version(conn)?;
+    debug_assert!(
+        target <= ORDINARY_VERSION,
+        "no ordinary migration past the known ones"
+    );
     for (version, sql) in (1_i64..).zip(&MIGRATIONS[..target]).skip(applied) {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
@@ -216,4 +244,13 @@ pub(super) fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), Sto
         tx.commit()?;
     }
     Ok(())
+}
+
+fn version(conn: &Connection) -> Result<usize, StoreError> {
+    let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let known = RECOVERY_VERSION;
+    usize::try_from(found)
+        .ok()
+        .filter(|&applied| applied <= known)
+        .ok_or(StoreError::NewerSchema { found, known })
 }

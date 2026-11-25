@@ -410,6 +410,7 @@ impl Rig {
                 JobAsk {
                     generation: Generation(1),
                     built: Built {
+                        recovered_context: None,
                         request: ModelRequest {
                             choice: Some(choice(CHATGPT, "m")),
                             instructions: String::new(),

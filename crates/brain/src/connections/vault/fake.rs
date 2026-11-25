@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use kumochi_protocol::Secret;
+
 use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
 
 #[derive(Debug, Clone, Copy)]
@@ -17,6 +19,14 @@ pub(crate) enum Fault {
 pub(crate) enum Mutation {
     Set(String),
     Delete(String),
+}
+
+#[derive(Debug, Default)]
+enum ChangeReadback {
+    #[default]
+    None,
+    NextWrite,
+    AfterRead(String),
 }
 
 #[derive(Debug, Default)]
@@ -39,6 +49,7 @@ pub(crate) struct FakeState {
     /// While set, each mutation first notes the marker the authority file there holds, so a
     /// trace shows which control state every store mutation ran under.
     pub(crate) note_markers: Option<(PathBuf, Vec<String>)>,
+    change_readback: ChangeReadback,
     written: BTreeSet<String>,
 }
 
@@ -90,6 +101,10 @@ impl FakeStore {
         state.fault = Some((index, fault));
     }
 
+    pub(crate) fn change_after_next_write_readback(&self) {
+        self.0.lock().expect("fake lock").change_readback = ChangeReadback::NextWrite;
+    }
+
     #[expect(
         clippy::panic_in_result_fn,
         reason = "fault injection deliberately models process death after a durable mutation"
@@ -133,6 +148,9 @@ impl FakeStore {
                         clock.fetch_add(seconds, Ordering::SeqCst);
                     }
                     state.values.insert(target.to_owned(), value.clone());
+                    if matches!(state.change_readback, ChangeReadback::NextWrite) {
+                        state.change_readback = ChangeReadback::AfterRead(target.to_owned());
+                    }
                 } else if state.sticky_deletes > 0 && state.values.contains_key(target) {
                     state.sticky_deletes -= 1;
                 } else {
@@ -163,6 +181,14 @@ impl CredentialStore for FakeStore {
         if value.is_some() && state.missed_reads > 0 {
             state.missed_reads -= 1;
             return Ok(None);
+        }
+        if matches!(&state.change_readback, ChangeReadback::AfterRead(name) if name == target)
+            && let Some(original) = &value
+        {
+            let mut changed = original.expose().clone();
+            changed[0] ^= 1;
+            state.values.insert(target.to_owned(), Secret::new(changed));
+            state.change_readback = ChangeReadback::None;
         }
         Ok(value)
     }

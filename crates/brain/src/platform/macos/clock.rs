@@ -8,7 +8,7 @@ unsafe extern "C" {
     fn clock_gettime_nsec_np(clock_id: std::ffi::c_uint) -> u64;
 }
 
-fn counter() -> Option<u64> {
+pub(super) fn counter() -> Option<u64> {
     // SAFETY: This clock id is valid on Darwin; the call takes no pointers.
     let now = unsafe { clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) };
     read_sample(now)

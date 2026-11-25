@@ -817,7 +817,10 @@ fn pixel(frame: &RawFrame, target: &Target, [x, y]: [i32; 2]) -> [u8; 3] {
 
 fn at(capturer: &mut Box<dyn Capturer>, point: PhysicalPoint) -> (Result<Target, Refusal>, u128) {
     let start = Instant::now();
-    let target = capturer.pointer_window(point, 0);
+    let deadline = Deadline::new(start + Duration::from_secs(2), 1, |_| {
+        Some(Duration::from_secs(2))
+    });
+    let target = capturer.pointer_window(point, 0, deadline);
     (target, start.elapsed().as_millis())
 }
 
