@@ -1,5 +1,15 @@
 # The pipes and the handshake
 
+The shell link resolves the sibling brain executable at preparation. On its background thread,
+`platform::connect_brain` then tries the Windows control pipe before starting the detached brain.
+A missing pipe can start the brain once, and a build mismatch lets it try starting again after
+that server exits. A busy pipe is retried and a foreign server is refused. The connector checks
+the server image before sending a greeting on either leg, opens the data leg only after Welcome,
+and sends the drawing-font startup frame before returning both pipes with their ordinary I/O
+timeouts restored.
+The link retains parked Quit, reconnect state, and the decision to publish Connected. On Linux,
+link preparation still reports Unsupported without opening a transport or starting a process.
+
 ## Greeting authorization
 
 The existing pipe transport checks the capability in constant time before comparing the build,
