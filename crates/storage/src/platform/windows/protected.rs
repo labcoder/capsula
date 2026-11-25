@@ -55,6 +55,9 @@ use windows_sys::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
 use crate::platform::Untrusted;
 
+mod anchor;
+pub use anchor::{Child, hold_product_folder};
+
 /// SYSTEM, Administrators and `TrustedInstaller`, which may change anything here; this user joins
 /// them at run time.
 const SYSTEM_SIDS: [&str; 3] = [
@@ -292,6 +295,14 @@ pub fn open_checked(path: &Path, kind: Kind, trusted: &Trusted) -> Result<File, 
 
 /// Opens `path` without following a reparse point, with `extra` rights beside those a check needs.
 pub fn open(path: &Path, kind: Kind, extra: u32) -> Result<File, Untrusted> {
+    open_native(path, kind, extra).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => Untrusted::Missing,
+        _ => Untrusted::Io,
+    })
+}
+
+/// Opens `path` like `open`, keeping the native error.
+fn open_native(path: &Path, kind: Kind, extra: u32) -> io::Result<File> {
     let (access, share) = match kind {
         Kind::Folder => (0, FILE_SHARE_READ | FILE_SHARE_WRITE),
         Kind::File => (FILE_READ_DATA | SYNCHRONIZE, FILE_SHARE_READ),
@@ -301,10 +312,6 @@ pub fn open(path: &Path, kind: Kind, extra: u32) -> Result<File, Untrusted> {
         .share_mode(share)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
-        .map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => Untrusted::Missing,
-            _ => Untrusted::Io,
-        })
 }
 
 /// Checks what `opened` holds: no reparse point, the object `path` names, and trusted security.
