@@ -21,6 +21,15 @@ use crate::runtime::account::{Accounts, Net};
 use crate::scratch;
 use crate::store::Store;
 
+pub(crate) const SCRATCH_PUBLICATION_UNCERTAIN: i32 = 78;
+
+/// Keep the parent's scratch guard from deleting a child's uncertain publication.
+pub(crate) fn propagate_scratch_publication(status: std::process::ExitStatus) {
+    if status.code() == Some(SCRATCH_PUBLICATION_UNCERTAIN) {
+        std::process::exit(SCRATCH_PUBLICATION_UNCERTAIN);
+    }
+}
+
 /// A store file in its own temp folder, removed afterwards.
 pub(crate) struct Scratch {
     // Teardown uses the pathname shortcut documented in tests/support/scratch.rs.

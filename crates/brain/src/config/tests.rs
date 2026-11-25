@@ -816,6 +816,34 @@ fn the_max_frame_rate_persists_and_automatic_removes_the_key() {
 }
 
 #[test]
+fn first_save_and_replacement_ignore_an_abandoned_temp() {
+    let scratch = Scratch::new("config-stale-temp");
+    let dir = dir(&scratch);
+    let temp = dir.join(format!("{CONFIG_FILE}.tmp"));
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    for name_after_save in ["Nimbus", "Cirrus"] {
+        std::fs::write(&temp, b"assistant_name = \"Abandoned\"\n").expect("stale temp");
+        assert_eq!(
+            Config::load(Some(dir.clone()), ThreadId(1))
+                .view()
+                .assistant_name,
+            config.view().assistant_name
+        );
+        apply(
+            &mut config,
+            SettingsOp::SetAssistantName(name(name_after_save)),
+        );
+        assert_eq!(
+            Config::load(Some(dir.clone()), ThreadId(1))
+                .view()
+                .assistant_name
+                .as_str(),
+            name_after_save
+        );
+    }
+}
+
+#[test]
 fn a_failed_write_changes_neither_the_file_nor_the_settings() {
     let scratch = Scratch::new("config-failed");
     let dir = dir(&scratch);

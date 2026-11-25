@@ -8,11 +8,13 @@ On macOS the default path is `$HOME/Library/Application Support/<product>/kumoch
 beside the configuration file, if `HOME` is absolute. Computing it doesn't open the database
 or create the folder. The native runtime and direct file-logging startup remain refused.
 
-Linux unit tests open the store at an explicit scratch path. The test adapter uses same-directory
-rename and directory sync for purge swaps, and uses the OS's available-block count for the
-purger's capacity check. Failure to sync a completed rename exits the test process, even when
-the swap ran on a worker. Windows sharing-mode tests stay Windows-only. No non-Windows
-production store startup, swap or capacity fallback is enabled.
+Linux and macOS unit tests use the shared purge swap at an explicit scratch path. The macOS
+root must be private, sandbox-confined and single-writer. The adapter uses the same file
+publication barrier as [settings](settings.md) and the OS's caller-available blocks for the
+purger's capacity check. Darwin's `statfs` supplies wide counters; only its two explicit
+unsupported-link errors permit the direct replacement fallback. An uncertain publication stops
+the test process before reopen or alias cleanup. Windows sharing-mode tests stay Windows-only.
+No non-Windows production store startup, swap or capacity fallback is enabled.
 On Linux, direct file-logging startup returns `NativeRuntime` before resolving a data path.
 
 ## Settings

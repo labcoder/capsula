@@ -13,10 +13,14 @@ Windows roots, `HOME` must be absolute. A missing, empty or relative value gives
 The lookup neither opens nor creates the directory and doesn't establish that it's writable.
 The macOS brain still refuses to start, and folder discovery doesn't enable settings writes.
 
-Linux unit tests can supply an explicit scratch directory. They atomically rename a synced
-sibling file and sync the directory. If the directory sync fails after the rename, the test
-process exits rather than letting the worker report an ordinary write failure. This is a fixture
-path, not a Linux settings root or a production write adapter.
+Linux and macOS unit tests use the same settings writer with an explicit scratch directory. Run
+the macOS tests only in a private, sandbox-confined, single-writer scratch root. The adapter
+renames a synced sibling, then syncs the existing directory entry. macOS uses plain directory
+`fsync` followed by a full sync of the retained file; Rust's `File::sync_all` requests a full
+sync, not plain `fsync`, on Darwin. A rename I/O error or a failed post-rename barrier stops
+the test process rather than acknowledging either success or an unchanged file. A reader
+already holding the old file can still read it after the name points to the new file.
+This is a fixture path, not a production write adapter.
 
 ## Shell editor
 
