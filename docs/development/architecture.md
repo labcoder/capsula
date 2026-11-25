@@ -87,6 +87,10 @@ GPUI; the shell is the crate that does. `cargo xtask check-core` holds that in C
 direct dependencies are a list in `xtask/src/check_core.rs`, so a new one is a reviewed line,
 and the whole tree is searched for a framework's name.
 
+On macOS, shell-core can derive an Application Support candidate from an absolute `HOME`.
+It neither opens nor creates the directory, and does not append the product name. The shell's
+storage owner must admit the candidate and select the product folder before any writes.
+
 Linux is a build and test host for `shell-core`, not a supported runtime. Its native
 IPC, process launch, credential storage, file logging, and audio entry points return
 `Unsupported`. The shared tests use scripted audio and need ALSA development headers

@@ -5,6 +5,8 @@ pub mod clipboard;
 pub mod credential;
 pub mod host;
 pub mod input;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod microphone;
 pub mod screen_watch;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
