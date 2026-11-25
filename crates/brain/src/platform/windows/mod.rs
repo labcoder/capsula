@@ -46,7 +46,7 @@ pub(super) use library::{
 };
 #[cfg(test)]
 pub(crate) use pipe::test_pair;
-pub(crate) use pipe::{PipeClient, bridge_peer, open_pipe, shell_connection};
+pub(crate) use pipe::{PipeClient, bridge_peer, open_bridge, shell_connection};
 pub use pipe::{
     PipeServer, client_image, client_process, create_owner_only, has_exited, process_image,
     server_image, session_id,

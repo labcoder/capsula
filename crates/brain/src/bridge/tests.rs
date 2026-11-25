@@ -395,6 +395,26 @@ async fn the_deadline_fails_the_call_in_flight_and_ends_the_bridge() {
 
 #[cfg(windows)]
 #[tokio::test]
+async fn a_missing_pipe_preserves_the_native_connection_error_source() {
+    let name = format!(
+        r"\\.\pipe\{}-test-{}-bridge-missing-server",
+        kumochi_protocol::constants::OBJECT_PREFIX,
+        std::process::id()
+    );
+    let own = std::env::current_exe().expect("test executable");
+    let error = connect(&name, &own).expect_err("no server owns this pipe");
+    assert!(matches!(error, BridgeError::Connect(_)));
+    let source = std::error::Error::source(&error)
+        .expect("connection error retains its source")
+        .downcast_ref::<std::io::Error>()
+        .expect("source is the native I/O error");
+    assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(source.raw_os_error(), Some(2));
+    assert_eq!(error.to_string(), "can't connect to the brain");
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn a_pipe_served_by_another_executable_is_refused() {
     let name = format!(
         r"\\.\pipe\{}-test-{}-bridge-server",
