@@ -10,6 +10,7 @@ fn state() -> State {
         last_epoch: 0,
         disposing: false,
         delivering: false,
+        approved_ahead: false,
     }
 }
 
@@ -293,4 +294,54 @@ fn panicking_handler_cannot_leave_delivery_active_or_a_queued_yes() {
     assert_eq!(jobs.borrow().len(), 1);
     run_one(&jobs);
     assert_eq!(control.state.borrow().phase, Phase::Disposed);
+}
+
+#[test]
+fn an_approved_quit_answers_now_without_a_queued_delivery() {
+    let calls = Rc::new(Cell::new(0));
+    let callback_calls = Rc::clone(&calls);
+    let (control, jobs) = control(Box::new(move |_| {
+        callback_calls.set(callback_calls.get() + 1)
+    }));
+    TerminationApproval::new(&control).approve();
+    assert_eq!(control.admit(), NSApplicationTerminateReply::TerminateNow);
+    assert_eq!(jobs.borrow().len(), 0, "nothing waits on the main queue");
+    assert_eq!(calls.get(), 0);
+    assert_eq!(control.state.borrow().phase, Phase::Approved);
+}
+
+#[test]
+fn approval_waits_for_a_queued_refusal_and_never_overrides_disposal() {
+    let mut state = state();
+    state.admit();
+    assert!(state.queue_reply(1, false));
+    state.approved_ahead = true;
+    assert_eq!(
+        state.admit(),
+        (NSApplicationTerminateReply::TerminateLater, None),
+        "the queued refusal keeps its request"
+    );
+    assert_eq!(state.begin_settlement(1, true), Some(false));
+    state.finish_settlement(1);
+    assert_eq!(state.phase, Phase::Idle);
+    assert_eq!(
+        state.admit(),
+        (NSApplicationTerminateReply::TerminateNow, None)
+    );
+
+    let (control, _) = control(Box::new(drop));
+    TerminationApproval::new(&control).approve();
+    control.dispose();
+    assert_eq!(control.admit(), NSApplicationTerminateReply::TerminateCancel);
+}
+
+#[test]
+fn approval_does_not_keep_the_control_alive() {
+    let (control, _) = control(Box::new(drop));
+    let approval = TerminationApproval::new(&control);
+    let weak = Rc::downgrade(&control);
+    drop(control);
+    assert!(weak.upgrade().is_none());
+    approval.approve();
+    assert_eq!(format!("{approval:?}"), "TerminationApproval { .. }");
 }

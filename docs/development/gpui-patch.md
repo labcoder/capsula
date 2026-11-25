@@ -207,6 +207,7 @@ is compared with that retained application, never dereferenced, made static or t
 
 ```mermaid
 stateDiagram-v2
+    Idle --> Approved: request after approval ahead / Now
     Idle --> Pending: first request / Later
     Pending --> Pending: repeat / Later
     Pending --> Queued: reply or Drop
@@ -230,6 +231,19 @@ delivery. A scope guard ends that interval and rejects on producer unwind. There
 production catch_unwind. Missing recipients must drop the token; an absent handler does
 the same. AppKit is called with no state/application/handler borrow: Approved is set
 before YES; Rejecting remains until NO returns. No callback runs under a lock or App borrow.
+
+### Approving the app's own quit ahead of time
+
+GPUI's `quit()` sends `terminate:` from a block on the main dispatch queue. AppKit answers
+Later by waiting for `replyToApplicationShouldTerminate:` inside that call, so inside that block.
+Delivery and settlement are jobs on the same serial queue, so they can't run until the block
+returns, and the block can't return until they run: the app hangs with its window already gone.
+A first native Mac launch hit exactly this. So `MacPlatform::termination_approval()` hands the
+app a `TerminationApproval` (weak, non-Send). Its `approve()` marks the state approved ahead:
+a request admitted from Idle then answers Now and enters Approved, with no delivery queued and no
+handler call. A queued decision keeps its own request, and disposal still refuses. Call it only
+after cleanup has finished and immediately before the app quits itself; native requests that
+arrive first stay on the deferred path above.
 
 On run-loop return, disposal revokes approval and queues a negative settlement before
 the existing platform ivars are cleared. Its strong queued owner retains the original

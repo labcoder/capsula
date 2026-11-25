@@ -53,6 +53,38 @@ impl Drop for TerminationRequest {
     }
 }
 
+/// Approves the app's own termination ahead of time, once its cleanup has finished.
+///
+/// A later request then answers Now with no queued delivery. GPUI's `quit()` sends
+/// `terminate:` from a main-queue block, and AppKit waits for a Later reply inside that block,
+/// so a reply delivered by a later job on the same serial queue never arrives. Requests already
+/// pending keep their own answer, and disposal still refuses.
+#[derive(Clone)]
+pub struct TerminationApproval {
+    control: Weak<Control>,
+}
+
+impl fmt::Debug for TerminationApproval {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("TerminationApproval { .. }")
+    }
+}
+
+impl TerminationApproval {
+    pub(super) fn new(control: &Rc<Control>) -> Self {
+        Self {
+            control: Rc::downgrade(control),
+        }
+    }
+
+    /// Lets every later request terminate at once.
+    pub fn approve(&self) {
+        if let Some(control) = self.control.upgrade() {
+            control.state.borrow_mut().approved_ahead = true;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Phase {
     Idle,
@@ -68,11 +100,16 @@ struct State {
     last_epoch: u64,
     disposing: bool,
     delivering: bool,
+    approved_ahead: bool,
 }
 
 impl State {
     fn admit(&mut self) -> (NSApplicationTerminateReply, Option<u64>) {
         match self.phase {
+            Phase::Idle if !self.disposing && self.approved_ahead => {
+                self.phase = Phase::Approved;
+                (NSApplicationTerminateReply::TerminateNow, None)
+            }
             Phase::Idle if !self.disposing => {
                 let Some(epoch) = self.last_epoch.checked_add(1) else {
                     return (NSApplicationTerminateReply::TerminateCancel, None);
@@ -159,6 +196,7 @@ impl Control {
                 last_epoch: 0,
                 disposing: false,
                 delivering: false,
+                approved_ahead: false,
             }),
             handler: RefCell::new(Some(handler)),
             application: RefCell::new(None),
