@@ -121,6 +121,7 @@ pub fn open(cx: &mut App) -> Result<AnyWindowHandle, OpenError> {
         }
     });
     let quit = cx.global::<Strings>().get(Text::Quit);
+    // The local dock runs only on macOS, so its quit shortcut is the macOS one by design.
     cx.bind_keys([KeyBinding::new("cmd-q", QuitLocalDock, None)]);
     cx.set_menus([Menu::new(DISPLAY_NAME).items([MenuItem::action(quit, QuitLocalDock)])]);
     Ok(window)
