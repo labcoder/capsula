@@ -230,7 +230,7 @@ Core tests drive `decide` with a host gone in the first drain and in the final o
 
 ## The native bridge
 
-A pull needs to tell its own button's release from capture being taken away, and GPUI reports only the release. So the presence windows' subclass (`platform/windows/presence.rs`) adds what Windows knows, through `Input` in `crates/shell-core/src/platform/input.rs`, which is plain state with no operating-system calls, so macOS's event handling can make the same calls later.
+A pull needs to tell its own button's release from capture being taken away, and GPUI reports only the release. So the presence windows' subclass (`platform/windows/presence/window.rs`) adds what Windows knows, through `Input` in `crates/shell-core/src/platform/input.rs`, which is plain state with no operating-system calls, so macOS's event handling can make the same calls later.
 
 - **One sequence.** Each forwarded button press is stamped with the next value of one UI-thread sequence, and so is each capture loss, where it's produced and never when it's drained. The press handler reads the press's stamp with `pressed` while the press is being forwarded. A press forwarded inside another gets its own stamp and gives the outer one back when it returns.
 - **Releases have a scope.** Each `WM_*BUTTONUP` is forwarded inside `release`, which names its button for that forward only, as a depth so nesting is safe. A `WM_CAPTURECHANGED` during it is `CaptureLost { released: Some(button) }`; at any other time it's `None`. `WM_CANCELMODE` is always `None`, so always involuntary, and it's still forwarded to the default handling.
