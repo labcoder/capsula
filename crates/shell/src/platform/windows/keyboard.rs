@@ -161,6 +161,9 @@ impl Keys {
         let mut id = None;
         let event = match message {
             _ if self.plain_escape(message, wparam) => {
+                if !hwnd.is_invalid() && super::presence::foreground_owns_escape() {
+                    at.speech_escape_owner = crate::escape::SpeechEscapeOwner::Panel;
+                }
                 self.physical.borrow_mut().lose();
                 Event::Escape
             }

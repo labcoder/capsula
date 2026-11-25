@@ -2,15 +2,30 @@
 
 use super::drag::Event;
 use super::{Activity, Context, Escape, EscapePanel, OpenError, Presence, Session, diagnostics};
-use crate::escape;
+use crate::escape::{self, SpeechEscapeOwner, SpeechPress};
 use kumochi_protocol::message::{GestureId, RunId};
 
 impl Presence {
     pub(super) fn native_escape(
         &mut self,
         gesture: Option<GestureId>,
+        speech: Option<SpeechPress>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
+        if gesture.is_none()
+            && let Some(press) = speech
+        {
+            if press.owner == SpeechEscapeOwner::Outside {
+                return if self.stop_speech(press, cx) {
+                    self.runs_changed(cx)
+                } else {
+                    Ok(())
+                };
+            }
+            if self.speech_session(press).is_none() {
+                return Ok(());
+            }
+        }
         self.voice.gates.forget_runs();
         // This press revoked the input of a hold that is already torn down: by its cancelled
         // `End`, in this delivery or at the raw Esc-down before it, or by the brain's reply or
@@ -33,7 +48,7 @@ impl Presence {
                 return if self.voice_working() {
                     Ok(())
                 } else {
-                    self.escape(cx)
+                    self.escape_with_speech(speech, cx)
                 };
             };
             self.discard_voice_recovery(gesture);
@@ -73,12 +88,33 @@ impl Presence {
         // Marks that are up go at this press, and `escape` takes them before it ends a hold.
         // A hold is still pending here when its first mark came before its run's `Answering`.
         if self.presenter.marks_shown().is_some() {
-            return self.escape(cx);
+            return self.escape_with_speech(speech, cx);
         }
         if self.voice_working() {
             return Ok(());
         }
-        self.escape(cx)
+        self.escape_with_speech(speech, cx)
+    }
+
+    pub(super) fn speech_session(&self, press: SpeechPress) -> Option<&Session> {
+        self.session
+            .as_ref()
+            .filter(|session| session.open() && session.generation() == press.session)
+    }
+
+    /// Stops the press's exact run. Returns whether the run view needs refreshing.
+    fn stop_speech(&mut self, press: SpeechPress, cx: &mut Context<'_, Self>) -> bool {
+        let Some(current) = self.speech_session(press).cloned() else {
+            return false;
+        };
+        // Done comes on control before RunEnd on data, so an ended run can still speak.
+        if press.speaker_only(&self.runs, self.moving_run(std::time::Instant::now())) {
+            // The lease observer follows the quiet, so no refresh here can fail the pair.
+            self.stop_speech_locally(current, press.run, cx);
+            return false;
+        }
+        self.fence_spoken(press.run, &current, cx);
+        true
     }
 
     /// Stops `run`, which was speaking when a hold's keys went down, before that hold starts:
@@ -164,19 +200,38 @@ impl Presence {
 
     /// One Esc press, from the hotkey, the typing panel or Stop. The local effect happens here,
     /// and only then is `Stop` or `ClearDrawing` queued for the brain, which nothing waits on.
+    #[cfg(test)]
+    pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+        self.escape_with_speech(
+            SpeechPress::capture(
+                self.speech.get(),
+                std::time::Instant::now(),
+                SpeechEscapeOwner::Panel,
+            ),
+            cx,
+        )
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one Esc press keeps its local decision and every effect of it in order"
     )]
-    pub(super) fn escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
+    pub(super) fn escape_with_speech(
+        &mut self,
+        speech: Option<SpeechPress>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        if speech.is_some_and(|press| self.speech_session(press).is_none()) {
+            return Ok(());
+        }
         self.voice.gates.forget_runs();
         // Esc is a key like any other to screen marks: they go at the first press, whatever
         // else that press stops. When they are a running answer's, the same press stops that
         // answer too, whatever else it does here.
-        let answer = self
-            .presenter
-            .marks_shown()
-            .filter(|run| self.runs.stoppable() == Some(*run));
+        let answer = self.presenter.marks_shown().filter(|run| {
+            self.runs.stoppable() == Some(*run)
+                && speech.is_none_or(|press| press.run == *run && !self.runs.state_ended(*run))
+        });
         self.marks_changed(cx);
         self.voice.recovery = None;
         if self.voice_working() {
@@ -221,16 +276,34 @@ impl Presence {
         } else {
             EscapePanel::Closed
         };
-        let action = local_decision(self.activity, panel, &self.presenter);
+        let action = local_decision(
+            Activity {
+                speaking: speech.is_some(),
+                ..self.activity
+            },
+            panel,
+            &self.presenter,
+        );
         let tell = match action {
             Escape::CancelPull => {
                 self.kumo
                     .update(cx, |kumo, cx| kumo.pull_event(Event::Escape, cx));
                 // The answer whose marks this press took is stopped after the pull's cancel.
-                answer.and_then(|_| self.runs.stop())
+                if let Some(press) = speech {
+                    if answer.is_some() {
+                        self.stop_speech(press, cx);
+                    }
+                    None
+                } else {
+                    answer.and_then(|_| self.runs.stop())
+                }
             }
             Escape::Stop => {
-                self.stop_moving(cx);
+                if let Some(press) = speech {
+                    self.stop_speech(press, cx);
+                } else {
+                    self.stop_moving(cx);
+                }
                 None
             }
             Escape::Clear => {
@@ -285,6 +358,7 @@ impl Presence {
         };
         self.activity = Activity {
             pulling: self.kumo.read(cx).pull_live(),
+            speaking: self.speaking(std::time::Instant::now()),
             ..Self::activity(&self.runs, panel, &self.presenter)
         };
         self.refresh_conversation(cx);

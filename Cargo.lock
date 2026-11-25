@@ -4098,6 +4098,7 @@ dependencies = [
 name = "kumochi-shell-core"
 version = "0.1.2"
 dependencies = [
+ "arc-swap",
  "async-channel",
  "cpal",
  "fluent-bundle",

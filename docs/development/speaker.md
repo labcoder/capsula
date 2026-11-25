@@ -178,4 +178,7 @@ delaying PCM, receipts, or Stop. This does not change which route ordinary launc
 
 Once the brain's Stop has been queued, a queued stop closes admission immediately. If the
 owner is busy, Presence can offer the same stop again; an undeliverable stop ends the pair.
+If the brain's queue refuses the Stop, Presence signals the matching local worker before
+closing the pair. The signal bypasses the output owner lock and cannot stop a replacement run.
+Esc on a terminal run's audible tail needs only the local stop, not another brain message.
 Talk-back off also ends a queued pair. The link closes run input before aborting both pipes.
