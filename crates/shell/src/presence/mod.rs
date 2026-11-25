@@ -659,12 +659,8 @@ impl Presence {
             PresenceEvent::Repaint => self.dock.update(cx, |_, cx| cx.notify()),
             // The wake says nothing itself: the presenter reads its watch's bit.
             PresenceEvent::ScreenWoke => {
-                let marks = self.presenter.marks_owner();
                 let effects = self.presenter.source_woke(Instant::now());
                 self.scene_effects(effects, cx);
-                if marks != self.presenter.marks_owner() {
-                    self.publish_plain_escape(cx);
-                }
             }
             event @ (PresenceEvent::CaptureLost { .. } | PresenceEvent::Reconcile) => {
                 let effects = match event {

@@ -108,6 +108,7 @@ impl Presence {
             match effect {
                 Effect::Credit(bytes) => self.grant(bytes),
                 Effect::Control(message) => {
+                    let cleared = matches!(&message, ControlToBrain::ClearDrawing { .. });
                     let sent = self
                         .session
                         .clone()
@@ -117,6 +118,9 @@ impl Presence {
                         tracing::warn!("scene control queue unavailable; ending the connection");
                         self.forget_scene_connection(cx);
                         return self.draw_changed_at(now, cx);
+                    }
+                    if cleared {
+                        self.publish_plain_escape(cx);
                     }
                 }
                 Effect::Prepare(job) => {

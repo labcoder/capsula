@@ -1869,44 +1869,51 @@ fn a_deferred_plain_esc_clears_its_unchanged_idle_drawing(cx: &mut TestAppContex
 #[gpui::test]
 fn a_fresh_deferred_esc_clears_the_drawing_left_by_a_mark_wake(cx: &mut TestAppContext) {
     without_desktop(cx);
-    let watching = watch(true, cx);
-    drawn(&watching, cx);
-    let_go(&watching, cx);
-    mark_up(&watching, true, cx);
-    state(&watching, RUN, Phase::Done, None, cx);
-    end(&watching, RUN, cx);
-    let owner = &watching.ready.owner;
-    owner.update(cx, |owner, cx| {
-        let effects = owner.presenter.stop_owned(RunId(RUN), Instant::now());
-        owner.scene_effects(effects, cx);
-        owner.runs_changed(cx).unwrap();
-    });
-    assert_eq!(told(&watching), [stopped(vec![cut(MARKS)])]);
-    owner.read_with(cx, |owner, _| {
-        assert!(owner.activity.drawing && !owner.activity.working);
-        assert_eq!(owner.presenter.marks_shown(), Some(RunId(RUN)));
-        assert_eq!(scene_ids(&owner.presenter), [MARKS, DRAWN]);
-    });
-    let deliver = native(owner, cx);
-    assert!(watching.bit.borrow().as_ref().unwrap().set());
-    owner.update(cx, |owner, cx| {
-        owner.on_event(PresenceEvent::ScreenWoke, cx).expect("wake");
-    });
-    assert_eq!(told(&watching), gone());
-    owner.read_with(cx, |owner, _| {
-        assert!(owner.activity.drawing && !owner.activity.working);
-        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
-    });
-    cx.update(|_| {
-        deliver(Event::Escape, after(Instant::now(), 0));
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        told(&watching),
-        [Told::Sent(ControlToBrain::ClearDrawing {
-            scene_ids: vec![DRAWN]
-        })]
-    );
+    for draw_first in [true, false] {
+        let watching = watch(true, cx);
+        drawn(&watching, cx);
+        let_go(&watching, cx);
+        mark_up(&watching, true, cx);
+        state(&watching, RUN, Phase::Done, None, cx);
+        end(&watching, RUN, cx);
+        let owner = &watching.ready.owner;
+        owner.update(cx, |owner, cx| {
+            let effects = owner.presenter.stop_owned(RunId(RUN), Instant::now());
+            owner.scene_effects(effects, cx);
+            owner.runs_changed(cx).unwrap();
+        });
+        assert_eq!(told(&watching), [stopped(vec![cut(MARKS)])]);
+        owner.read_with(cx, |owner, _| {
+            assert!(owner.activity.drawing && !owner.activity.working);
+            assert_eq!(owner.presenter.marks_shown(), Some(RunId(RUN)));
+            assert_eq!(scene_ids(&owner.presenter), [MARKS, DRAWN]);
+        });
+        let deliver = native(owner, cx);
+        assert!(watching.bit.borrow().as_ref().unwrap().set());
+        owner.update(cx, |owner, cx| {
+            if draw_first {
+                owner.draw_changed(cx);
+                assert!(owner.presenter.marks_shown().is_none());
+            }
+            owner.on_event(PresenceEvent::ScreenWoke, cx).expect("wake");
+        });
+        assert_eq!(told(&watching), gone());
+        owner.read_with(cx, |owner, _| {
+            assert!(owner.activity.drawing && !owner.activity.working);
+            assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+        });
+        cx.update(|_| {
+            deliver(Event::Escape, after(Instant::now(), 0));
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            told(&watching),
+            [Told::Sent(ControlToBrain::ClearDrawing {
+                scene_ids: vec![DRAWN]
+            })],
+            "a fresh press reaches the remaining drawing (drawing frame first: {draw_first})"
+        );
+    }
 }
 
 #[gpui::test]
