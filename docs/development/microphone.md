@@ -151,6 +151,14 @@ An offline barrier also pauses the actual batch copy/commit helper after its
 authorization check, revokes release/cancel/session/cutoff, then resumes and
 asserts zero admitted bytes and scrubbed scratch.
 
+The brain's serve-loop fixture buffers a synthetic marker before data loss,
+refuses a replacement hold while the old owner is live or unconfirmed, and
+checks that confirmed exit lets only the new marker reach speech recognition
+and the mock provider, even when the new connection reuses the gesture number.
+An owned headless child checks the retained Windows handle's exit witness
+separately. The Darwin parent watch has its own native tests; the Mac runtime
+does not yet bind a microphone session to that witness.
+
 Compilation, native permissions/device/rate/stop behavior and hot-path allocation,
 latency and memory measurements still require their separately approved checks.
 Windows 11 x64 is the initial target, not a measured support claim. Other Windows

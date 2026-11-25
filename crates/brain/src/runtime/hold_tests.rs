@@ -1438,6 +1438,89 @@ async fn data_eof_fences_before_grace_and_only_the_old_authenticated_stop_clears
 }
 
 #[tokio::test]
+async fn capture_owner_exit_admits_only_the_new_recording_with_the_same_gesture() {
+    use crate::platform::ShellProcess;
+    use std::sync::atomic::AtomicU8;
+
+    const A: [i16; 2] = [410, -860];
+    const B: [i16; 2] = [790, -1240];
+    const TRANSCRIPT: &str = "marker B";
+
+    let scratch = Scratch::new("hold-crash-markers");
+    let (mut brain, release, mut decoded, fetch) = input(&scratch, B.to_vec(), TRANSCRIPT).await;
+    let mut observed = brain.observe();
+    let (sent, mut requests) = mpsc::unbounded_channel();
+    brain.engine = Box::new(Requested(sent));
+    let old = Arc::new(AtomicU8::new(0));
+    let replacement = ShellProcess::fixture(20, Arc::new(AtomicU8::new(0)));
+    let mut tap = Tap::from_env();
+
+    tokio::time::timeout(super::PATIENCE, async {
+        brain.connected_shell(ShellProcess::fixture(10, Arc::clone(&old)));
+        let ((control, data), mut shell) = duplex();
+        let client = async {
+            opened(&mut shell).await;
+            recognize(&mut shell).await;
+            packet(&mut shell, 16_000, 0, true, A.to_vec()).await;
+            while observed.recv().await.expect("hold observation") != Seen::HoldPcmBuffered {}
+            shell.data_out.shutdown().await.unwrap();
+            while observed.recv().await.expect("loss observation") != Seen::Grace {}
+            drop(shell);
+        };
+        let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        assert_eq!(ended, Ended::Lost);
+
+        for verdict in [0, 2] {
+            old.store(verdict, Ordering::Release);
+            brain.connected_shell(replacement.clone());
+            let ((control, data), mut shell) = duplex();
+            let client = async {
+                opened(&mut shell).await;
+                recognize_for(&mut shell, G).await;
+                status(&mut shell, HoldStatus::Failed(HoldFailure::Unavailable)).await;
+                drop(shell);
+            };
+            let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+            assert_eq!(ended, Ended::Lost);
+        }
+
+        old.store(1, Ordering::Release);
+        brain.connected_shell(replacement);
+        let ((control, data), mut shell) = duplex();
+        let client = async {
+            opened(&mut shell).await;
+            recognize(&mut shell).await;
+            assert!(decoded.is_empty(), "exit did not decode the old hold");
+            assert!(requests.is_empty(), "exit did not submit the old hold");
+            packet(&mut shell, 16_000, 0, true, B.to_vec()).await;
+            release_source(&mut shell, 1).await;
+            status(&mut shell, HoldStatus::Transcribing).await;
+            assert_eq!(decoded.recv().await, Some(()));
+            release.send(()).unwrap();
+            let (run, _) = shell.state().await;
+            shell.held(G, TRANSCRIPT).await;
+            shell.read_to_end(run).await;
+            drop(shell);
+        };
+        let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+        assert_eq!(ended, Ended::Lost);
+    })
+    .await
+    .expect("the synthetic hand-over completes");
+
+    let request = requests.try_recv().unwrap();
+    assert!(matches!(
+        sent_users(&request).as_slice(),
+        [user] if user.split_once("\n\nLocal time: ").map(|(words, _)| words) == Some(TRANSCRIPT)
+    ));
+    assert!(requests.is_empty(), "only one mock provider request");
+    assert!(decoded.is_empty(), "only one fake speech decode");
+    assert_eq!(fetch.begun.load(Ordering::SeqCst), 0);
+    brain.close().await;
+    assert_eq!(users(&scratch), [TRANSCRIPT]);
+}
+
+#[tokio::test]
 async fn held_words_go_out_up_to_their_bound_and_are_never_cut() {
     use kumochi_protocol::message::MAX_TRANSCRIPT_BYTES;
     for len in [MAX_TRANSCRIPT_BYTES, MAX_TRANSCRIPT_BYTES + 1] {
