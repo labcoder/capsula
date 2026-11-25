@@ -1948,6 +1948,8 @@ fn every_worker_answer_closes_a_part_with_its_class() {
         (Closed::Lost(WorkerLost::Lost), NotReady),
         (refused(Refusal::Expired), NotReady),
         (refused(Refusal::Unsupported), NotReady),
+        (refused(Refusal::NotPermitted), NotReady),
+        (refused(Refusal::Layout), NotReady),
         (refused(Refusal::NoWindow), NothingThere),
         (refused(Refusal::Minimized), CantShare),
         (refused(Refusal::Cloaked), CantShare),

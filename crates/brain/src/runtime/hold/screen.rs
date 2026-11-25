@@ -663,7 +663,9 @@ pub(super) fn class(closed: Closed) -> ScreenClass {
         Closed::Refused(refusal) => refusal,
     };
     match refusal {
-        Refusal::Expired | Refusal::Unsupported => ScreenClass::NotReady,
+        Refusal::Expired | Refusal::Unsupported | Refusal::NotPermitted | Refusal::Layout => {
+            ScreenClass::NotReady
+        }
         Refusal::Reused => {
             debug_assert!(false, "a hold's ticket or walk was spent twice");
             ScreenClass::NotReady

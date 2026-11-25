@@ -152,7 +152,12 @@ struct Fake {
 }
 impl Capturer for Fake {
     /// Resolves the walk's window; a point left of the display has none.
-    fn pointer_window(&mut self, point: PhysicalPoint, _: u32) -> Result<Target, Refusal> {
+    fn pointer_window(
+        &mut self,
+        point: PhysicalPoint,
+        _: u32,
+        _: Deadline,
+    ) -> Result<Target, Refusal> {
         if let Some(gate) = self.foreground.take() {
             gate.wait();
         }
@@ -195,6 +200,7 @@ impl Capturer for Fake {
     fn capture_display(
         &mut self,
         point: PhysicalPoint,
+        _: u32,
         _: u64,
         _: Deadline,
         frame: &mut RawFrame,

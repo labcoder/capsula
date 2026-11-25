@@ -12,6 +12,8 @@ impl BoundHello {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) use macos::capture::{display_at, screen_capturer};
+#[cfg(target_os = "macos")]
 pub(crate) use macos::clock::{qpc_at, qpc_left};
 
 #[cfg(all(windows, feature = "test-support"))]
@@ -236,10 +238,9 @@ pub(crate) fn window_unchanged(_target: &crate::screen::Target) -> bool {
     false
 }
 
-/// The monitor that covers a captured display's bounds now. No platform but Windows captures a
-/// display yet, so there's none.
-// shortcut: macOS will read its display here.
-#[cfg(not(windows))]
+/// The monitor that covers a captured display's bounds now. Only Windows and macOS capture a
+/// display, so there's none.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn display_at(
     _bounds: kumochi_protocol::geometry::PhysicalRect,
 ) -> Option<(kumochi_protocol::geometry::PhysicalRect, u32)> {

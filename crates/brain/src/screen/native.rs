@@ -16,8 +16,10 @@ pub(super) enum Aim {
     /// The window under it, then one frame of it alone. `shell` is the connected shell's process,
     /// which the walk counts as Kumochi's.
     Window { shell: u32 },
-    /// One frame of the monitor nearest it, drawn after `excluded`, the shell's exclusion stamp.
-    Display { excluded: u64 },
+    /// One frame of the monitor nearest it, with Kumochi kept out as [`Capturer::capture_display`]
+    /// requires on each platform: `excluded` is the shell's exclusion stamp and `shell` the
+    /// connected shell's process.
+    Display { shell: u32, excluded: u64 },
 }
 
 /// One hold's capture.
@@ -65,13 +67,20 @@ impl CaptureThread {
                             let deadline = live(deadline)?;
                             match job.aim {
                                 Aim::Window { shell } => {
-                                    let target = capturer.pointer_window(job.point, shell)?;
+                                    let target =
+                                        capturer.pointer_window(job.point, shell, deadline)?;
                                     capturer
                                         .capture_window(&target, live(deadline)?, &mut job.frame)
                                         .map(|acquired| (acquired, Shown::Window(target)))
                                 }
-                                Aim::Display { excluded } => capturer
-                                    .capture_display(job.point, excluded, deadline, &mut job.frame)
+                                Aim::Display { shell, excluded } => capturer
+                                    .capture_display(
+                                        job.point,
+                                        shell,
+                                        excluded,
+                                        deadline,
+                                        &mut job.frame,
+                                    )
                                     .map(|(acquired, bounds)| {
                                         let dpi = acquired.dpi;
                                         (acquired, Shown::Display { bounds, dpi })
