@@ -578,7 +578,7 @@ shared supervisor as its own kind, `Holds`, with the screen worker's argument an
 actor's messages and the zeroing reply reader. The image gate also takes what the platform
 captures, one flag per kind of hold: a window for a window hold, a display for a screen hold.
 Both default to the platform's `WINDOW_CAPTURE`, so Windows offers both and every other platform
-reads `Unsupported` even though the client starts. A platform given display capture alone offers
+reads `Unsupported`. A platform given display capture alone offers
 screen holds under the same model and user checks, while the window gate stays `Unsupported` and
 the hold's task refuses a window aim.
 
