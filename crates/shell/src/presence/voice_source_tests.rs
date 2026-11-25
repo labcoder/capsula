@@ -2720,3 +2720,76 @@ fn a_fenced_first_state_ends_transcribing_and_releases_escape(cx: &mut TestAppCo
         }]
     );
 }
+
+/// One run's state, as the brain tells it.
+fn run_state(
+    owner: &Entity<Presence>,
+    run: u64,
+    phase: Phase,
+    origin: Option<RunOrigin>,
+    cx: &mut TestAppContext,
+) {
+    let event = LinkEvent::RunState {
+        generation: 1,
+        run: RunId(run),
+        thread: ThreadId(1),
+        phase,
+        error: None,
+        origin,
+    };
+    owner.update(cx, |owner, cx| {
+        owner.link_events(Batch::Plain(vec![event]), cx).unwrap();
+    });
+}
+
+/// Whether Esc is wanted system-wide: tests have no window to register it, so Stop shows.
+fn esc_held(owner: &Entity<Presence>, cx: &mut TestAppContext) -> bool {
+    owner.read_with(cx, |owner, _| owner.escape_hold.shows_stop())
+}
+
+/// Global Esc follows the hold itself, not the runs it folds into: a hold takes Esc beside a run
+/// that already works.
+#[gpui::test]
+fn a_hold_takes_global_esc_beside_a_working_run(cx: &mut TestAppContext) {
+    super::super::test_fixture::without_desktop(cx);
+    let (owner, _data, _controls) = ready(cx);
+    run_state(&owner, 3, Phase::Thinking, None, cx);
+    assert!(
+        !esc_held(&owner, cx),
+        "a thinking run alone leaves Esc to other apps"
+    );
+    hold(&owner, 1, cx);
+    assert!(
+        esc_held(&owner, cx),
+        "the hold takes Esc beside the working run"
+    );
+}
+
+/// A hold gives global Esc back once its own run answers, though that run still works.
+#[gpui::test]
+fn a_hold_gives_global_esc_back_once_its_run_answers(cx: &mut TestAppContext) {
+    super::super::test_fixture::without_desktop(cx);
+    let (owner, _data, _controls) = ready(cx);
+    // The brain described no scenes, so the answer's open panel shows no drawing Esc clears.
+    owner.update(cx, |owner, _| {
+        owner.runs.apply_scenes(&[]).unwrap();
+    });
+    hold(&owner, 1, cx);
+    assert!(esc_held(&owner, cx), "the hold takes Esc");
+    owner.update(cx, |owner, _| {
+        owner.voice.pending.as_mut().expect("the hold").source = Source::Sent;
+    });
+    let origin = Some(RunOrigin::Hold {
+        gesture: GestureId(1),
+    });
+    run_state(&owner, 1, Phase::Thinking, origin, cx);
+    assert!(
+        esc_held(&owner, cx),
+        "the hold's question is still being taken"
+    );
+    run_state(&owner, 1, Phase::Answering, None, cx);
+    assert!(
+        !esc_held(&owner, cx),
+        "the hold's own answer gives Esc back"
+    );
+}

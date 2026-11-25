@@ -400,6 +400,7 @@ impl Presence {
             speaking: false,
             drawing: (runs.drawing() && matches!(panel, EscapePanel::Open)) || presenter.drawn(),
             pulling: false,
+            voice: false,
         }
     }
 
@@ -424,7 +425,8 @@ impl Presence {
             pulling: self.kumo.read(cx).pull_live(),
             ..Self::activity_at(&self.runs, panel, &self.presenter, now)
         };
-        activity.working |= self.voice_working();
+        activity.voice = self.voice_working();
+        activity.working |= activity.voice;
         if activity == self.activity {
             return Ok(());
         }

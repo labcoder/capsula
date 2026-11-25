@@ -1358,6 +1358,7 @@ fn press(runs: &mut Runs) -> (Escape, Option<ControlToBrain>) {
         speaking: false,
         drawing: runs.drawing(),
         pulling: false,
+        voice: false,
     };
     let action = decide(activity, Panel::Open);
     let message = match action {
