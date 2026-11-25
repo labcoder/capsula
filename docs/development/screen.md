@@ -657,7 +657,7 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 
 | Class | Worker answers |
 |---|---|
-| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition or release too old for its lease, a refused release, or still `Waiting` or `Armed` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
+| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `NotPermitted` and `Layout` (which don't, since a grant or a display change can come later), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition or release too old for its lease, a refused release, or still `Waiting` or `Armed` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
 | `NothingThere` | `NoWindow` |
 | `CantShare` | `Minimized`, `Cloaked`, `Elevated`, `Protected`, `Excluded` |
 | `Unreadable` | `Ambiguous`, and `Unmasked`, which no worker sends now |

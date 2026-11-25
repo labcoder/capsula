@@ -24,7 +24,7 @@ struct Local {
 }
 
 impl Capturer for Local {
-    fn pointer_window(&mut self, _: PhysicalPoint, _: u32) -> Result<Target, Refusal> {
+    fn pointer_window(&mut self, _: PhysicalPoint, _: u32, _: Deadline) -> Result<Target, Refusal> {
         Ok(Target {
             top: TopWindow {
                 window: kumochi_protocol::geometry::WindowRef(7),

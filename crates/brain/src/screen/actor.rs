@@ -263,7 +263,13 @@ fn run(
                                 point,
                                 excluded,
                                 ink,
-                            } => (key, ticket, point, Aim::Display { excluded }, Some(ink)),
+                            } => {
+                                let aim = Aim::Display {
+                                    shell: ticket.shell_pid(),
+                                    excluded,
+                                };
+                                (key, ticket, point, aim, Some(ink))
+                            }
                             _ => unreachable!(),
                         };
                         if current.is_some_and(|held: Key| held.owner != key.owner) {

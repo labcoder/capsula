@@ -67,12 +67,19 @@ impl std::fmt::Debug for Target {
 /// `desktopIndependentWindow` for a window.
 pub(crate) trait Capturer {
     /// The window a click at `point` would land on, Kumochi's own aside, after the checks that
-    /// refuse it before any pixels. `shell` is the connected shell's process.
+    /// refuse it before any pixels. `shell` is the connected shell's process. A walk that asks
+    /// the system for its grant or window list checks `deadline` around each ask; Windows's walk
+    /// reads neither and ignores it.
     ///
     /// # Errors
     /// `NoWindow` when only Kumochi or the desktop is there, `Ambiguous` when a drawn layered
-    /// window is there and where a click lands can't be told, or a preflight refusal.
-    fn pointer_window(&mut self, _point: PhysicalPoint, _shell: u32) -> Result<Target, Refusal> {
+    /// window is there and where a click lands can't be told, `Expired`, or a preflight refusal.
+    fn pointer_window(
+        &mut self,
+        _point: PhysicalPoint,
+        _shell: u32,
+        _deadline: Deadline,
+    ) -> Result<Target, Refusal> {
         Err(Refusal::NoWindow)
     }
 
@@ -96,6 +103,8 @@ pub(crate) trait Capturer {
     /// pointer included, drawn at least one compositor redraw after `excluded`: the
     /// performance-counter stamp taken once Kumochi's windows were kept out of capture. It
     /// uses the same deadline checks as a window capture and returns the monitor's physical bounds.
+    /// `shell` is the connected shell's process, for a platform that keeps Kumochi out by
+    /// filtering its process; Windows excludes through the stamp and ignores it.
     ///
     /// # Errors
     /// `Expired` for a zero exclusion stamp or when no frame drawn late enough arrived in time,
@@ -104,6 +113,7 @@ pub(crate) trait Capturer {
     fn capture_display(
         &mut self,
         _point: PhysicalPoint,
+        _shell: u32,
         _excluded: u64,
         _deadline: Deadline,
         _frame: &mut RawFrame,
