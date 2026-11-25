@@ -136,7 +136,7 @@ impl StatusRecheck {
         let failure = if self.guard.check().is_ok() {
             self.signed_out.send(()).ok()?;
             EngineFailure::ClaudeSignedOut {
-                stage: ClaudeSignOutStage::AfterSeed,
+                stage: ClaudeSignOutStage::AFTER_SEED,
                 notice: open_settings(ErrorKey::ClaudeCodeSignedOut),
             }
         } else {
@@ -729,6 +729,21 @@ impl Claude {
         std::mem::take(&mut self.picture_loss)
     }
 
+    pub(super) fn history_event(&self, key: BuildKey, event: TurnEvent) -> TurnEvent {
+        match event {
+            TurnEvent::Finished(Finish::Failed(EngineFailure::ClaudeSignedOut {
+                stage,
+                notice,
+            })) if stage
+                .audit_launch()
+                .is_some_and(|launch| self.asked != Some((key, self.generation, launch))) =>
+            {
+                TurnEvent::Finished(Finish::Failed(EngineFailure::Claude(notice)))
+            }
+            other => other,
+        }
+    }
+
     /// Claude Code's half of the brain's repair of `default_model`, while a launch would be
     /// admitted: the reviewed row's own default at `Low` when `current` is unset or a Claude Code
     /// alias the row doesn't list. A choice on another connection is never moved.
@@ -1276,7 +1291,7 @@ impl Brain {
                         (
                             key,
                             EngineFailure::ClaudeSignedOut {
-                                stage: ClaudeSignOutStage::BeforeSeed,
+                                stage: ClaudeSignOutStage::before_seed(id),
                                 notice: self.claude.reason(),
                             },
                         )

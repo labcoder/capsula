@@ -581,7 +581,8 @@ Saved history uses the Responses error code or HTTP 401, and the Anthropic Messa
 authentication and billing categories, instead of deriving a cause from the notice text.
 The Messages 401 keeps the post's exact send key as it retires the credential. Claude Code
 distinguishes a signed-out audit before the seed from a confirmed Status result after the seed.
-Both carry the current launch or build identity when the account report ends the turn first.
+The runtime checks the audit's launch, build and generation whether the audit report or the
+engine's finish arrives first. A stale audit can keep its existing notice, but not its proof.
 
 A dev build caps its requests with `KUMOCHI_LIVE_BUDGET` (`Budget::from_env`); a release build
 has no cap. Each round is one start; the coordinator's tool loop starts the next (runs.md, "The

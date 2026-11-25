@@ -93,7 +93,7 @@ fn ambiguous_delivery_after_a_grant_never_becomes_not_sent() {
             200,
             USAGE_LIMIT,
         ))),
-        claude_sign_out(ClaudeSignOutStage::AfterSeed),
+        claude_sign_out(ClaudeSignOutStage::AFTER_SEED),
         session_ended.clone(),
     ] {
         let mut core = started();

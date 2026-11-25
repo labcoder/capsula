@@ -4,7 +4,7 @@ use crate::connections::{
     anthropic::error::{Failure as Anthropic, Kind},
     model::error::{Code, Failure as Responses, RejectionOrigin},
 };
-use crate::engines::{ClaudeSignOutStage, EngineFailure, Finish};
+use crate::engines::{EngineFailure, Finish};
 use crate::store::Failure;
 
 use super::{BuildKey, Run};
@@ -46,7 +46,10 @@ pub(super) fn from_finish(key: BuildKey, run: &Run, finish: &Finish) -> Failure 
         }
         EngineFailure::ClaudeSignedOut { stage, .. } => (
             HistoryFailureCause::ClaudeCodeSignedOut,
-            (*stage == ClaudeSignOutStage::BeforeSeed).then_some(DeliveryProof::NotSent),
+            stage
+                .audit_launch()
+                .is_some()
+                .then_some(DeliveryProof::NotSent),
         ),
         _ => return Failure::Engine,
     };
