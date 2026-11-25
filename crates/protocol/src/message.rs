@@ -47,8 +47,8 @@ pub use issues::{
     StateVersion,
 };
 pub use pages::{
-    EventId, PageEvent, PageEventKind, PageOf, TaskFact, TaskRun, TaskRunOutcome, TaskState,
-    ThreadCursor, ThreadRow,
+    DeliveryProof, EventId, HistoryFailure, HistoryFailureCause, PageEvent, PageEventKind, PageOf,
+    TaskFact, TaskRun, TaskRunOutcome, TaskState, ThreadCursor, ThreadRow,
 };
 pub use scenes::{
     MAX_SCENE_LOG_ENTRIES, MAX_SCENE_SNAPSHOT_BYTES, MAX_SCENE_STAGING_BYTES, SceneCut, SceneCuts,

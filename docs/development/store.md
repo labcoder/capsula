@@ -245,11 +245,15 @@ of the stored thread update, run start and real terminal time; the time written 
 is excluded. These reads do not update storage or affect the list's ordering keys.
 
 A page marks a user event as failed only if that event's own run is stored as failed.
-Its held-screen metadata and any partial assistant reply stay on the page. A crash also
-sets this bit, so it indicates neither failed delivery nor a safe retry. The query reads
-the existing run state without exposing its reason or changing the schema. The new page
-kinds follow the old wire tags; the [paired build check](ipc.md#the-handshake) runs before
-any page can cross to another build.
+The existing run-end transaction can save a closed connection cause and delivery proof
+in `runs.reason` along with the last events. It distinguishes a request that never left
+the app, an explicit rejection before any answer or effect, and an answer that broke off.
+History projects the typed values only onto that run's user event, keeping its held-screen
+metadata and any partial assistant reply. Older, unknown, and unproven outcomes, including
+crashes, stay generic; neither the generic mark nor the screen metadata proves delivery
+or a safe retry. The reason stores no provider text or payload. No schema migration or
+live provider change is needed. New page kinds follow the old wire tags; the
+[paired build check](ipc.md#the-handshake) runs before any page can cross to another build.
 
 A read waits until the store thread has finished every op queued before it, failed and empty
 ones included, so it sees the thread a turn just created. Ops queued after it may show too: a
