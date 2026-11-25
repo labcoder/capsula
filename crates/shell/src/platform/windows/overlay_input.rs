@@ -28,6 +28,10 @@ pub(crate) struct OverlayWindows {
 // shortcut: slice 5 and B3b bind regional and selection surfaces.
 #[expect(dead_code, reason = "slice 5 and B3b bind additional surfaces")]
 impl OverlayWindows {
+    pub(crate) fn bind_proxy(&mut self, native: &super::PresenceNative) {
+        self.proxy(native.input_proxy());
+    }
+
     pub(crate) fn proxy(&mut self, proxy: super::observer::ProxyHandle) {
         self.layers.entry(Layer::Dock).or_default().push(proxy.0);
         self.applied = None;

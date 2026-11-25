@@ -33,7 +33,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::presence::{PresenceError, struct_size};
 use crate::input::hold::{InputReason, InputStage};
-use crate::input::{Edge, Event, Key, PhysicalKey, TalkHeld};
+use crate::input::{Edge, Event, Key, PhysicalKey};
+use crate::platform::{Deliver, EventTime};
 
 mod physical;
 use physical::Physical;
@@ -56,49 +57,6 @@ thread_local! {
     static PROXY: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
     static NEXT_ESCAPE: Cell<i32> = const { Cell::new(0) };
 }
-
-/// When the native callback that carried an event began, for gesture timing.
-#[derive(Clone, Copy)]
-pub(crate) struct EventTime {
-    pub(crate) instant: Instant,
-    pub(crate) held: TalkHeld,
-    pub(crate) repeated_modifier: bool,
-    pub(crate) defer_terminal: bool,
-    read_chord: Option<fn(Instant) -> Option<Instant>>,
-    layout: Option<HKL>,
-}
-
-impl EventTime {
-    pub(crate) fn new(instant: Instant) -> Self {
-        Self {
-            instant,
-            held: TalkHeld::default(),
-            repeated_modifier: false,
-            defer_terminal: false,
-            read_chord: None,
-            layout: None,
-        }
-    }
-
-    pub(crate) fn layout_current(self) -> bool {
-        self.layout
-            .is_none_or(|layout| foreground_layout() == Some(layout))
-    }
-
-    pub(crate) fn recovery_time(self) -> Option<Instant> {
-        let now = self.read_chord?(self.instant)?;
-        self.layout_current().then_some(now)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_keyboard_read(mut self, read: fn(Instant) -> Option<Instant>) -> Self {
-        self.read_chord = Some(read);
-        self
-    }
-}
-
-/// Reduces one gesture event at its callback time and returns the next deadline to arm.
-pub(crate) type Deliver = Box<dyn Fn(Event, EventTime) -> Option<Instant>>;
 
 #[cfg(test)]
 pub(crate) fn with_raw_modifiers(deliver: Deliver) -> Deliver {
@@ -628,7 +586,7 @@ unsafe extern "system" fn desktop_switched(
     }
 }
 
-fn foreground_layout() -> Option<HKL> {
+pub(in crate::platform) fn foreground_layout() -> Option<HKL> {
     // SAFETY: a read-only query of the current foreground.
     let window = unsafe { GetForegroundWindow() };
     // SAFETY: no output pointer; an invalid window returns zero.

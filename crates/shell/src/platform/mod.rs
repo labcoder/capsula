@@ -5,6 +5,21 @@ pub(crate) use kumochi_shell::presence_platform::{PresenceError, require_connect
 pub(crate) use kumochi_shell::presence_platform::{
     client_origin, hide_presence_window, place_presence_window, work_area,
 };
+
+mod connected_events;
+mod connected_keyboard;
+pub(crate) use connected_events::{
+    MaskUpdate, Observe, PresenceEvent, PresenceLabels, PresenceSurface, ProxyNote,
+};
+pub(crate) use connected_keyboard::{Deliver, EventTime};
+#[cfg(not(windows))]
+mod connected_desktop;
+#[cfg(not(windows))]
+pub(crate) use connected_desktop::{
+    Affinity, EscapeHotkey, Foreground, HostWatch, OverlayWindows, PresenceNative, ProxyHandle,
+    activate_presence_window, configure_presence_window, cursor_position, exclude_window, host_at,
+    restore_foreground, restore_window_affinity, watch_host, window_affinity, window_handle,
+};
 pub(crate) use kumochi_shell_core::platform::{host, input, microphone};
 
 /// Where a test says the pointer is. A test that sets it never reads the real one, which is
@@ -92,8 +107,7 @@ mod windows;
 pub(crate) use windows::ScreenSources;
 #[cfg(windows)]
 pub(crate) use windows::{
-    Affinity, Deliver, EscapeHotkey, EventTime, Foreground, HostWatch, MaskUpdate, OverlayWindows,
-    PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface, ProxyHandle, ProxyNote,
+    Affinity, EscapeHotkey, Foreground, HostWatch, OverlayWindows, PresenceNative, ProxyHandle,
     activate_presence_window, client_origin, configure_presence_window, cursor_position,
     exclude_window, hide_presence_window, host_at, performance_counter, performance_frequency,
     place_presence_window, restore_foreground, restore_window_affinity, watch_host,
@@ -101,6 +115,11 @@ pub(crate) use windows::{
 };
 #[cfg(all(test, windows))]
 pub(crate) use windows::{with_raw_keys, with_raw_modifiers};
+
+#[cfg(windows)]
+pub(crate) const INPUT_COUNTER: Option<fn() -> i64> = Some(performance_counter);
+#[cfg(not(windows))]
+pub(crate) const INPUT_COUNTER: Option<fn() -> i64> = None;
 
 pub(crate) fn diagnostic_clock() -> std::io::Result<kumochi_shell::QpcClock> {
     #[cfg(windows)]
@@ -113,4 +132,14 @@ pub(crate) fn diagnostic_clock() -> std::io::Result<kumochi_shell::QpcClock> {
     kumochi_shell::QpcClock::require(backend)
 }
 
-pub(crate) use crate::presence::line::machine::{ROW_SPANS, RowSpans};
+pub(crate) use crate::presence::line::machine::ROW_SPANS;
+#[cfg(windows)]
+pub(crate) use crate::presence::line::machine::RowSpans;
+
+pub(crate) fn connected_overlay_windows() -> Result<OverlayWindows, PresenceError> {
+    #[cfg(windows)]
+    let windows = Some(OverlayWindows::default());
+    #[cfg(not(windows))]
+    let windows = None;
+    windows.ok_or(PresenceError::BindingsUnavailable)
+}

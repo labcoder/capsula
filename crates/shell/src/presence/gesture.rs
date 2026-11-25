@@ -24,7 +24,7 @@ use crate::input::{
     hold::{Delivery, Fence, InputReason, InputStage, Intent},
 };
 use crate::link::{InputCancel, LinkHandle};
-use crate::platform::{Deliver, EventTime, cursor_position, performance_counter};
+use crate::platform::{Deliver, EventTime, INPUT_COUNTER, cursor_position};
 use crate::strings::Text;
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{GestureId, ThreadId};
@@ -185,10 +185,10 @@ pub(super) fn deliver(
         } else if matches!(event, Event::Key { .. }) && !at.repeated_modifier {
             input.set((serial.saturating_add(1), reset));
         }
-        let qpc = performance_counter();
+        let qpc = INPUT_COUNTER.and_then(|read| u64::try_from(read()).ok());
         #[cfg(test)]
-        let qpc = if FAIL_CLOCK.take() { -1 } else { qpc };
-        let Ok(qpc) = u64::try_from(qpc) else {
+        let qpc = if FAIL_CLOCK.take() { None } else { qpc };
+        let Some(qpc) = qpc else {
             tracing::warn!(stage = ?InputStage::Delivery, reason = ?InputReason::ClockUnavailable, "held speech input failed");
             input.set((serial.saturating_add(1), reset.saturating_add(1)));
             if let Some(cancel) = link.revoke_input_for_dispatch() {

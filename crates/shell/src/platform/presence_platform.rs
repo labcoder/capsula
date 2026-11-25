@@ -9,6 +9,13 @@ pub enum PresenceError {
     /// The connected presence needs absolute physical placement and native visibility control.
     #[error("native connected-window geometry is unavailable on this platform")]
     GeometryUnavailable,
+    /// No native owner can bind the connected presence's windows.
+    #[error("native connected window binding is unavailable on this platform")]
+    BindingsUnavailable,
+    /// No native receipt can restore a connected panel's previous foreground.
+    #[cfg(not(windows))]
+    #[error("native connected foreground ownership is unavailable on this platform")]
+    ForegroundUnavailable,
     /// GPUI gave no Win32 handle.
     #[cfg(windows)]
     #[error("no Win32 window handle")]
@@ -63,6 +70,34 @@ pub enum PresenceError {
     #[cfg(windows)]
     #[error("can't watch the host window")]
     HostWatch,
+}
+
+/// The ordinary frontend selected by the platform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Frontend {
+    /// The existing connected presence with its native input surfaces.
+    Connected,
+    /// The local disconnected window, without a native input owner.
+    Local,
+}
+
+/// Select the frontend before any native fixture or window can start.
+///
+/// # Errors
+/// The local window doesn't run the connected shell's command-line fixtures.
+pub fn select_frontend(
+    arguments: &mut std::iter::Peekable<impl Iterator>,
+) -> std::io::Result<Frontend> {
+    if !cfg!(target_os = "macos") {
+        return Ok(Frontend::Connected);
+    }
+    if arguments.peek().is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the disconnected shell does not run connected launch modes",
+        ));
+    }
+    Ok(Frontend::Local)
 }
 
 /// Require the native geometry backend before opening the connected presence's windows.
@@ -121,6 +156,21 @@ mod tests {
     use raw_window_handle::{HandleError, WindowHandle};
 
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_mac_launch_selects_local_and_refuses_fixture_arguments() {
+        assert_eq!(
+            select_frontend(&mut std::iter::empty::<&str>().peekable()).unwrap(),
+            Frontend::Local
+        );
+        assert_eq!(
+            select_frontend(&mut std::iter::once("--esc-fixture").peekable())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Unsupported
+        );
+    }
 
     struct UnreadHandle;
 

@@ -443,8 +443,8 @@ impl Presence {
         Ok(())
     }
 
-    /// Holds or releases global Esc to match what's moving, showing Stop at once if Windows
-    /// refuses, in the status panel and in an open typing panel.
+    /// Holds or releases global Esc to match what's moving, showing Stop at once when global
+    /// Esc is unavailable, in the status panel and in an open typing panel.
     fn sync_escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
         let changed = self.sync_escape_state(cx);
         if changed
@@ -958,6 +958,7 @@ pub(crate) fn open(
     cx: &mut App,
 ) -> Result<(), OpenError> {
     platform::require_connected_geometry()?;
+    let mut input_windows = platform::connected_overlay_windows()?;
     if let Some(diagnostics) = diagnostics {
         cx.set_global(diagnostics);
     }
@@ -971,7 +972,6 @@ pub(crate) fn open(
         cx.new(|_| Dock::new())
     })
     .map_err(|error| OpenError::Gpui(error.into()))?;
-    let mut input_windows = platform::OverlayWindows::default();
     let input = crate::presenter::overlay_input::OverlayOwner::default();
     let scale = dock_window
         .update(cx, |_, window, cx| {
@@ -981,7 +981,7 @@ pub(crate) fn open(
         .map_err(|error| OpenError::Gpui(error.into()))??;
     let mask = pull_picture::largest_area(line::slot(scale), scale);
     let native = PresenceNative::new(presence_labels(cx), events.clone(), mask)?;
-    input_windows.proxy(native.input_proxy());
+    input_windows.bind_proxy(&native);
     let kumo = cx.new(|_| KumoView::new());
     let (panel_window, panel) = status_window(&events, kumo.clone(), &mut input_windows, cx)?;
     let default_canvas = kumochi_scene::layout::DEFAULT_CANVAS;

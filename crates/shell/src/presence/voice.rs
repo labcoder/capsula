@@ -78,6 +78,7 @@ enum FailureReason {
     ReleaseSend,
     StaleReceipt,
     PointerUnread,
+    CaptureClockUnavailable,
     ScreenReleaseSend,
 }
 
@@ -724,13 +725,20 @@ impl Presence {
             self.runs.hold_screen_refused(gesture);
             return;
         };
-        #[cfg(test)]
-        let read = {
-            let fixture = self.counter_fixture.clone();
-            move || fixture.map_or_else(crate::platform::performance_counter, |read| read())
-        };
+        let counter = crate::platform::INPUT_COUNTER;
         #[cfg(not(test))]
-        let read = crate::platform::performance_counter;
+        let read = counter;
+        #[cfg(test)]
+        let fixture = self.counter_fixture.clone();
+        #[cfg(test)]
+        let read = fixture
+            .as_deref()
+            .or(counter.as_ref().map(|read| -> &dyn Fn() -> i64 { read }));
+        let Some(read) = read else {
+            tracing::debug!(stage = ?FailureStage::Release, reason = ?FailureReason::CaptureClockUnavailable, "screen release refused; voice only");
+            self.runs.hold_screen_refused(gesture);
+            return;
+        };
         let stamped = self.acquire_stamped(session, CaptureFor::Gesture(gesture), read, cx);
         let (lease, excluded_qpc) = match stamped {
             Ok(stamped) => stamped,

@@ -23,6 +23,7 @@ use std::process::ExitCode;
 
 use kumochi_protocol::constants;
 use kumochi_protocol::message::AudioSession;
+use kumochi_shell::presence_platform::{Frontend, select_frontend};
 use kumochi_shell::{assets, strings, theme};
 use kumochi_shell_core::{
     accounts, chat_notice, claude_accounts, drawing, escape, input, instance, link, logging,
@@ -31,7 +32,11 @@ use kumochi_shell_core::{
 use strings::Strings;
 
 fn main() -> ExitCode {
-    let launch = presence::Launch::parse(std::env::args().skip(1));
+    let mut arguments = std::env::args().skip(1).peekable();
+    let Ok(frontend) = select_frontend(&mut arguments) else {
+        return ExitCode::FAILURE;
+    };
+    let launch = presence::Launch::parse(arguments);
     #[cfg(debug_assertions)]
     if let Ok(flags) = &launch
         && let Some(state) = flags.accounts_fixture
@@ -65,6 +70,35 @@ fn main() -> ExitCode {
         identity = constants::DATA_DIR,
         "shell started"
     );
+    match frontend {
+        Frontend::Connected => run_connected(flags),
+        Frontend::Local => run_local(),
+    }
+}
+
+fn initialize_gpui(cx: &mut gpui_kit::App) {
+    gpui_kit::init(cx);
+    crate::theme::init(cx);
+    cx.set_global(Strings::english());
+}
+
+fn run_local() -> ExitCode {
+    let exit = std::rc::Rc::new(std::cell::Cell::new(ExitCode::SUCCESS));
+    let result = std::rc::Rc::clone(&exit);
+    gpui_kit::application()
+        .with_assets(crate::assets::Assets)
+        .run(move |cx| {
+            initialize_gpui(cx);
+            if let Err(error) = kumochi_shell::open_local_dock(cx) {
+                tracing::error!(%error, "can't open the disconnected dock");
+                result.set(ExitCode::FAILURE);
+                cx.quit();
+            }
+        });
+    exit.get()
+}
+
+fn run_connected(flags: presence::Launch) -> ExitCode {
     let (events, link_events) = async_channel::unbounded();
     let (link, start) = match link::prepare(events, AudioSession::Legacy) {
         Ok(prepared) => prepared,
@@ -92,9 +126,7 @@ fn main() -> ExitCode {
     gpui_kit::Application::with_platform(platform)
         .with_assets(crate::assets::Assets)
         .run(move |cx| {
-            gpui_kit::init(cx);
-            crate::theme::init(cx);
-            cx.set_global(Strings::english());
+            initialize_gpui(cx);
             // The keyboard is armed inside `open`, so the link starts only afterwards (v1 §2.2).
             let started =
                 presence::open(link_events, link.clone(), &flags, diagnostics, observer, cx)
