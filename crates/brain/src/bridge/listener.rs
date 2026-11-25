@@ -42,6 +42,7 @@ const ENDED: &str = "This call ended before it finished.";
 /// The launch's one pipe instance, created before its name is published.
 pub(crate) struct Listener {
     launch: LaunchId,
+    #[cfg(all(test, windows))]
     name: String,
     server: PipeServer,
 }
@@ -56,13 +57,14 @@ impl Listener {
         let server = platform::create_owner_only(&name, Instance::Only)?;
         Ok(Self {
             launch,
+            #[cfg(all(test, windows))]
             name,
             server,
         })
     }
 
-    /// The pipe's name, for `mcp.json` and the bridge's argv.
-    pub(crate) fn name(&self) -> &str {
+    #[cfg(all(test, windows))]
+    fn name(&self) -> &str {
         &self.name
     }
 
