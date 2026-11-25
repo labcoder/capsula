@@ -1027,9 +1027,11 @@ overflow terminally fails the matching gesture while credit still progresses.
 The source independently limits collection to 60 seconds. The Shell schedules
 one status warning five seconds before that same deadline, only for the current
 gesture while the source is collecting. The warning doesn't change collection
-or release. Brain permits the
-10-second startup allowance plus collection, then two seconds for remaining
-frames after both final count and physical stop. Neither deadline proves stop.
+or release. The shell starts `start_ms` at its one microphone reservation. The brain allows
+that same budget plus 60 seconds from the STT grant, before allocating audio buffers.
+It allows `drain_ms` for remaining frames after both final count and physical stop.
+The shell's drain watcher retains its existing
+origin when the source leaves preparation or collection. These deadlines never prove stop.
 Exact finalization moves nonempty PCM once to the existing STT owner. Nonblank
 text becomes ordinary deletable user history with Hold origin, not a typed/Ask
 watermark; blank results create no turn. No held-input path requests a screen.
@@ -1065,6 +1067,29 @@ described, outgoing data must be below its cap, and ending-run/cleanup debt must
 have room. A closed gate ends that hold once as Busy without storing words or
 starting a provider. PCM ingress, control processing and credit remain live;
 there is no second queue of recognized words waiting for capacity.
+
+### Where a hold is decided
+
+`shell-core`'s `voice.rs` owns the pending Hold once: its generation, stamp, session, terminal
+notice and the run it became, the last ended Hold, the notice and the words kept for a lost
+brain. A run state, an end and a lost brain each go through one method there,
+which returns the step for the shell to apply. A native Esc press that revoked a Hold's input
+takes that Hold's run from it, and after the shell applies its marks and cancel the same value
+names the run to stop, only while it is still the one moving.
+
+The shell (`presence/voice.rs`) samples windows, settings and the link, applies each step, and
+reads the state again after anything that changes it. Brain statuses, capture admission,
+release, the screen release, the source's acceptance and its receipt still run in the shell and move the Hold's
+source, collection, release, screen ask and retirement wait; the capture inhibit's gates below
+are a shell adapter.
+
+```mermaid
+flowchart LR
+  in["run state<br/>end, lost brain<br/>Esc press"] --> shell["presence/voice.rs<br/>samples facts"]
+  shell --> core["shell-core voice::State<br/>decides"]
+  core -->|"step"| shell
+  shell --> apply["microphone gate, link,<br/>runs, dock, marks"]
+```
 
 ### The capture inhibit
 
@@ -1136,7 +1161,7 @@ sequenceDiagram
   on as before. The coordinator turns `TurnStored` for a held run into a receipt that names
   the hold's key, and the runtime sends `HoldStored` only when that key's connection epoch is
   the live one. `StoreFailed` and Thinking never send it.
-- **The shell** keeps one slot (`presence/voice.rs`): the session, gesture, target, whether
+- **The shell** keeps one slot (`shell-core`'s `voice.rs`, held by `presence/voice.rs`): the session, gesture, target, whether
   the hold asked for a picture, and the words. See [Presence](presence.md#held-words-after-a-lost-brain).
 - A hold whose input was revoked after recognition (Esc, a choice change, or a Show Screen change
   on a queued pair) never gives its words back: the link remembers whether the copy's own gesture

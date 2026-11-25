@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use kumochi_protocol::message::{ControlToBrain, DataToBrain, HOLD_DRAIN_TIMEOUT_MS};
+use kumochi_protocol::message::{ControlToBrain, DataToBrain};
 use kumochi_shell_core::link::output::Denied;
 use zeroize::Zeroize as _;
 
@@ -17,8 +17,8 @@ impl Presence {
     )]
     /// Starts the admitted hold's microphone on the start its waiter reserved and checked.
     pub(super) fn open_microphone(&mut self, reserved: Reserved, cx: &mut Context<'_, Self>) {
-        let hold = self.voice.pending.as_ref().expect("admitted hold");
-        let (token, session, stamp) = (hold.token.clone(), hold.session.clone(), hold.stamp);
+        let hold = self.voice.state.pending.as_ref().expect("admitted hold");
+        let (token, session, stamp) = (hold.token().clone(), hold.session().clone(), hold.stamp());
         #[cfg(test)]
         let source = if let Some(start) = self.voice.start.take() {
             start(reserved, session.alive())
@@ -39,9 +39,15 @@ impl Presence {
                 return;
             }
         };
-        self.voice.pending.as_mut().expect("admitted hold").source = Source::Recording;
+        self.voice
+            .state
+            .pending
+            .as_mut()
+            .expect("admitted hold")
+            .source = Source::Recording;
         let (link, gates) = (self.link.clone(), self.voice.gates.clone());
         let (watch, alive) = (token.clone(), session.alive());
+        let drain = session.shell_tuning().drain();
         let warning = cx.spawn({
             let (watch, alive) = (watch.clone(), session.alive());
             async move |this, cx| {
@@ -54,7 +60,7 @@ impl Presence {
                 let _applied = this.update(cx, |this, cx| {
                     let now = cx.background_executor().now();
                     if now < limit
-                        && this.voice.status == Some(Text::HoldListening)
+                        && this.voice.state.status == Some(Text::HoldListening)
                         && this.voice_current(stamp)
                         && this.link.input_is(watch.gesture())
                         && watch.mode(&alive, now) == Ok(Mode::Collecting)
@@ -73,13 +79,11 @@ impl Presence {
                     watch.mode(&alive, cx.background_executor().now()),
                     Ok(Mode::Preparing | Mode::Collecting)
                 ) {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(u64::from(HOLD_DRAIN_TIMEOUT_MS)))
-                        .await;
+                    cx.background_executor().timer(drain).await;
                     let _applied = this.update(cx, |this, cx| {
                         if !watch.retired()
-                            && this.voice.pending.as_ref().is_some_and(|hold| {
-                                hold.token.gesture() == watch.gesture()
+                            && this.voice.state.pending.as_ref().is_some_and(|hold| {
+                                hold.token().gesture() == watch.gesture()
                                     && matches!(hold.source, Source::Recording)
                             })
                         {
@@ -107,15 +111,15 @@ impl Presence {
                         if !accepted {
                             gates.claimed(gesture, |claim| output.accept(claim, &mic, running))?;
                             accepted = true;
-                            let hold = this.voice.pending.as_mut().ok_or(Denied::Stale)?;
+                            let hold = this.voice.state.pending.as_mut().ok_or(Denied::Stale)?;
                             hold.collected = true;
                             #[cfg(test)]
                             if let Some(publish) = this.voice.publish.as_mut() {
                                 publish();
                             }
                             this.voice_notice(Text::HoldListening, cx);
-                        } else if this.voice.pending.as_ref().is_none_or(|hold| {
-                            hold.released.is_some() || hold.terminal.is_some()
+                        } else if this.voice.state.pending.as_ref().is_none_or(|hold| {
+                            hold.released.is_some() || hold.terminal().is_some()
                         }) {
                             // A release or an end while the copies waited wins: none open.
                             return Err(Denied::Stale);
@@ -136,9 +140,10 @@ impl Presence {
                 let _applied = this.update(cx, |this, cx| {
                     if this
                         .voice
+                        .state
                         .pending
                         .as_ref()
-                        .is_some_and(|hold| hold.token.gesture() == token.gesture())
+                        .is_some_and(|hold| hold.token().gesture() == token.gesture())
                     {
                         this.end_voice(Text::HoldCancelled, cx);
                     }
@@ -190,9 +195,10 @@ impl Presence {
             let _applied = this.update(cx, |this, cx| {
                 let Some(hold) = this
                     .voice
+                    .state
                     .pending
                     .as_mut()
-                    .filter(|h| h.token.gesture() == gesture)
+                    .filter(|h| h.token().gesture() == gesture)
                 else {
                     tracing::debug!(stage = ?FailureStage::CaptureReceipt, reason = ?FailureReason::StaleReceipt, "held speech input refused");
                     return;
@@ -220,7 +226,7 @@ impl Presence {
                             _ => Text::HoldFailed,
                         };
                         hold.source = Source::Sent;
-                        if let Some(terminal) = hold.terminal {
+                        if let Some(terminal) = hold.terminal() {
                             this.end_voice(
                                 if terminal == Text::HoldUnavailable {
                                     notice

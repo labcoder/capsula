@@ -161,8 +161,8 @@ fn a_refused_brain_stop_never_stops_the_speaker_and_opens_no_hold(cx: &mut TestA
             TalkHeld::default(),
             cx,
         );
-        assert!(owner.voice.pending.is_none(), "no hold");
-        assert_eq!(owner.voice.status, Some(Text::HoldFailed));
+        assert!(owner.voice.state.pending.is_none(), "no hold");
+        assert_eq!(owner.voice.state.status, Some(Text::HoldFailed));
     });
     assert_eq!(stops(&commands), [], "the speaker wasn't stopped");
 }

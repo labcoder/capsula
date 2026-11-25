@@ -65,7 +65,7 @@ impl Presence {
         let held = self.runs.deleting().contains(&thread);
         let credit = self.runs.deleted(thread, outcome, last_run);
         if held && outcome != Deleted::NotHidden {
-            self.voice_thread_deleted(thread);
+            self.voice.state.thread_deleted(thread);
         }
         self.grant(credit);
         self.link.settle_delete(thread);

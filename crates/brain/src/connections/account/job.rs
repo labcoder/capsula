@@ -202,6 +202,15 @@ impl Worker<NativeCredentialStore> {
 }
 
 impl<S: CredentialStore> Worker<S> {
+    /// What `connection`'s sign-in is; unproved while no vault is open.
+    pub(crate) fn proof(&self, connection: u64) -> crate::connections::vault::Proof {
+        self.vault
+            .as_ref()
+            .map_or(crate::connections::vault::Proof::Unproved, |vault| {
+                vault.proof(connection)
+            })
+    }
+
     pub(crate) fn github(
         &mut self,
         job: crate::connections::github::lane::Job,

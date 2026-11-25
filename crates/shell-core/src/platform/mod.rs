@@ -33,7 +33,9 @@ mod windows;
 
 #[cfg(all(test, windows))]
 pub(crate) mod connect_test {
-    pub(crate) use super::connect::{LinkError, connect_with, handshake_pair, welcome};
+    pub(crate) use super::connect::{
+        LinkError, connect_with, handshake_pair, read_shell_tuning, welcome,
+    };
 }
 
 #[cfg(target_os = "macos")]
@@ -59,7 +61,12 @@ use windows::launch_detached;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use windows::pipe::test_pair;
 #[cfg(windows)]
-pub use windows::{data_dir, session_id};
+pub use windows::{data_dir, keyboard_ticks, session_id};
+
+#[cfg(not(windows))]
+pub(crate) const fn keyboard_ticks() -> u64 {
+    0
+}
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn instance_lock_path() -> Result<std::path::PathBuf, crate::instance::SessionLockError>

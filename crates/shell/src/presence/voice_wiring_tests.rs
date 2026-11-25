@@ -170,8 +170,8 @@ pub(super) fn hold(
             TalkHeld::default(),
             cx,
         );
-        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
-        assert!(owner.voice.pending.is_some());
+        assert_eq!(owner.voice.state.status, Some(Text::HoldPreparing));
+        assert!(owner.voice.state.pending.is_some());
         (token, stamp)
     })
 }
@@ -205,8 +205,8 @@ fn a_pre_run_failure_clears_only_its_matching_hold(cx: &mut TestAppContext) {
     status(&owner, 1, 1, HoldStatus::Failed(HoldFailure::Busy), cx);
     cx.run_until_parked();
     owner.update(cx, |owner, cx| {
-        assert!(owner.voice.pending.is_none());
-        assert_eq!(owner.voice.status, Some(Text::TurnBusy));
+        assert!(owner.voice.state.pending.is_none());
+        assert_eq!(owner.voice.state.status, Some(Text::TurnBusy));
         assert!(!owner.dock.read(cx).listening);
         assert!(!owner.link.input_is(GestureId(1)));
         assert!(token.retired());
@@ -253,8 +253,8 @@ fn not_loaded_distinguishes_missing_and_unloaded_without_opening_microphone(
         });
         status(&owner, 1, 1, HoldStatus::Failed(HoldFailure::NotLoaded), cx);
         owner.read_with(cx, |owner, _| {
-            assert_eq!(owner.voice.status, Some(expected));
-            assert!(owner.voice.pending.is_none());
+            assert_eq!(owner.voice.state.status, Some(expected));
+            assert!(owner.voice.state.pending.is_none());
         });
         assert_eq!(starts.get(), 0);
         assert!(data.is_empty());
@@ -269,13 +269,13 @@ fn stale_session_and_gesture_status_cannot_retarget_or_finish_input(cx: &mut Tes
     status(&owner, 1, 2, HoldStatus::Cancelled, cx);
     status(&owner, 1, 1, HoldStatus::Loading, cx);
     owner.update(cx, |owner, cx| {
-        assert_eq!(owner.voice.status, Some(Text::VoiceLoading));
+        assert_eq!(owner.voice.state.status, Some(Text::VoiceLoading));
         assert_eq!(owner.voice.target.get(), (Some(ThreadId(1)), 1));
         assert_eq!(
             (owner.runs.thread(), owner.runs.revision()),
             (Some(ThreadId(1)), 1)
         );
-        assert!(owner.voice.pending.is_some());
+        assert!(owner.voice.state.pending.is_some());
         assert!(owner.link.input_is(GestureId(1)));
         assert!(!owner.dock.read(cx).listening);
         assert_eq!(
@@ -317,7 +317,7 @@ fn a_captured_target_or_session_cannot_be_rebound_at_delivery(cx: &mut TestAppCo
                 TalkHeld::default(),
                 cx,
             );
-            assert!(owner.voice.pending.is_none());
+            assert!(owner.voice.state.pending.is_none());
             token
         });
         cx.run_until_parked();
@@ -361,8 +361,8 @@ fn late_status_and_release_cannot_cancel_a_newer_held_input(cx: &mut TestAppCont
     });
     status(&owner, 1, 1, HoldStatus::Empty, cx);
     owner.update(cx, |owner, cx| {
-        assert_eq!(owner.voice.status, Some(Text::HoldPreparing));
-        assert!(owner.voice.pending.is_some());
+        assert_eq!(owner.voice.state.status, Some(Text::HoldPreparing));
+        assert!(owner.voice.state.pending.is_some());
         assert!(owner.link.input_is(GestureId(2)));
         assert!(!owner.dock.read(cx).listening);
         assert_eq!(
@@ -389,7 +389,7 @@ fn one_typed_send_cancels_and_drains_a_hold_before_submitting(cx: &mut TestAppCo
             })
             .expect("typing window");
         owner.submit(cx).expect("one Send");
-        assert!(owner.voice.pending.is_none());
+        assert!(owner.voice.state.pending.is_none());
         assert_eq!(owner.runs.take_hold_cancel(), None);
     });
     cx.run_until_parked();
@@ -430,7 +430,7 @@ fn escape_consumes_the_native_input_marker_without_dismissing_typing(cx: &mut Te
         owner
             .native_escape(Some(GestureId(1)), None, cx)
             .expect("cancel voice only");
-        assert!(owner.voice.pending.is_none());
+        assert!(owner.voice.state.pending.is_none());
         assert!(owner.text_open());
         owner
             .native_escape(Some(GestureId(1)), None, cx)

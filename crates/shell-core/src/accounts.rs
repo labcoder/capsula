@@ -28,6 +28,17 @@ pub enum StatusLine<'a> {
     SendFailed(Text),
 }
 
+/// What an account snapshot did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Receipt {
+    /// Another pair's, or not an account snapshot: nothing changed.
+    Stale,
+    Accepted,
+    /// Accepted, and the account works again: signed in, owing no recovery, supported and with
+    /// no error.
+    Recovered,
+}
+
 #[derive(Default)]
 pub struct Accounts {
     pub generation: Option<u64>,
@@ -65,6 +76,22 @@ impl Accounts {
         self.waiting = None;
         self.send_failed = false;
         true
+    }
+
+    /// Takes an account snapshot and says what it did.
+    pub fn receive_account(&mut self, current: Option<u64>, snapshot: LinkEvent) -> Receipt {
+        if !self.receive_snapshot(current, snapshot) {
+            Receipt::Stale
+        } else if matches!(
+            self.view,
+            Some(AccountView::SignedIn { recovery: None, .. })
+        ) && !self.unsupported
+            && self.error.is_none()
+        {
+            Receipt::Recovered
+        } else {
+            Receipt::Accepted
+        }
     }
 
     pub fn disconnected(&mut self) {

@@ -25,10 +25,11 @@ use windows::Win32::UI::Input::{
     RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEKEYBOARD, RegisterRawInputDevices,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EVENT_SYSTEM_DESKTOPSWITCH, GetForegroundWindow, GetQueueStatus, GetWindowThreadProcessId,
-    KillTimer, PBT_APMSUSPEND, PostMessageW, QS_ALLINPUT, RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1,
-    SetTimer, WINEVENT_OUTOFCONTEXT, WM_APP, WM_HOTKEY, WM_INPUT, WM_INPUT_DEVICE_CHANGE,
-    WM_INPUTLANGCHANGE, WM_NCDESTROY, WM_POWERBROADCAST, WM_TIMER, WM_WTSSESSION_CHANGE,
+    EVENT_SYSTEM_DESKTOPSWITCH, GIDC_REMOVAL, GetForegroundWindow, GetMessageTime, GetQueueStatus,
+    GetWindowThreadProcessId, KillTimer, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, PostMessageW,
+    QS_ALLINPUT, RI_KEY_BREAK, RI_KEY_E0, RI_KEY_E1, SetTimer, WINEVENT_OUTOFCONTEXT, WM_APP,
+    WM_HOTKEY, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_INPUTLANGCHANGE, WM_NCDESTROY,
+    WM_POWERBROADCAST, WM_TIMER, WM_WTSSESSION_CHANGE,
 };
 
 use super::presence::{PresenceError, struct_size};
@@ -91,7 +92,10 @@ pub(crate) fn with_raw_modifiers(deliver: Deliver) -> Deliver {
                     },
                 )))
             }
-            Event::Reset => Err(()),
+            Event::Reset | Event::Escape => {
+                keys.physical.borrow_mut().reset();
+                return deliver(event, at);
+            }
             _ => return deliver(event, at),
         };
         let (event, _) = keys.input(raw, &mut at, || {
@@ -133,6 +137,7 @@ pub(crate) fn with_raw_keys(deliver: &Deliver) -> impl Fn(usize, u16, Edge, Even
 #[derive(Default)]
 pub(super) struct Keys {
     deliver: OnceCell<Deliver>,
+    covered_after: Cell<Option<u64>>,
     /// The deadline the timer is armed for, if any.
     deadline: Cell<Option<Instant>>,
     /// The overdue deadline whose message queue was already logged.
@@ -164,17 +169,26 @@ impl Keys {
                 if !hwnd.is_invalid() && super::presence::foreground_owns_escape() {
                     at.speech_escape_owner = crate::escape::SpeechEscapeOwner::Panel;
                 }
-                self.physical.borrow_mut().lose();
+                self.physical.borrow_mut().reset();
                 Event::Escape
             }
             _ if hotkey(message, wparam, self.escapes.talk.get()) => {
-                self.physical.borrow_mut().lose()
+                self.physical.borrow_mut().reset()
             }
             WM_INPUT => {
                 at.read_chord = Some(read_chord);
-                let Some((event, physical)) =
-                    self.input(read_key(lparam), &mut at, foreground_layout)
-                else {
+                let raw = read_key(lparam);
+                if let Ok(Some((_, raw))) = &raw
+                    && matches!(raw.MakeCode, 0x1D | 0x38)
+                    && u32::from(raw.Flags) & (RI_KEY_BREAK | RI_KEY_E0 | RI_KEY_E1) == 0
+                {
+                    // SAFETY: this thread is dispatching the queued WM_INPUT message.
+                    let queued = unsafe { GetMessageTime() }.cast_unsigned();
+                    let now = kumochi_shell_core::platform::keyboard_ticks();
+                    let low = u32::try_from(now & u64::from(u32::MAX)).expect("low clock word");
+                    at.queued_press = Some(now.saturating_sub(u64::from(low.wrapping_sub(queued))));
+                }
+                let Some((event, physical)) = self.input(raw, &mut at, foreground_layout) else {
                     return false;
                 };
                 id = physical;
@@ -187,12 +201,30 @@ impl Keys {
                 self.disarm(hwnd);
                 Event::Deadline
             }
-            WM_INPUT_DEVICE_CHANGE => self.physical.borrow_mut().lose(),
-            WM_INPUTLANGCHANGE | WM_WTSSESSION_CHANGE | DESKTOP_SWITCHED | WM_NCDESTROY => {
+            WM_INPUT_DEVICE_CHANGE => {
+                let removed = (u32::try_from(wparam.0) == Ok(GIDC_REMOVAL)).then(|| {
+                    HANDLE(std::ptr::with_exposed_provenance_mut(
+                        lparam.0.cast_unsigned(),
+                    ))
+                });
+                self.physical.borrow_mut().device_changed(removed)
+            }
+            WM_INPUTLANGCHANGE => {
                 self.layout.set(None);
+                self.physical.borrow_mut().reset()
+            }
+            WM_WTSSESSION_CHANGE | DESKTOP_SWITCHED | WM_NCDESTROY => {
+                self.layout.set(None);
+                self.mark_coverage_boundary();
                 self.physical.borrow_mut().lose()
             }
-            WM_POWERBROADCAST if wparam.0 == usize::try_from(PBT_APMSUSPEND).unwrap_or(0) => {
+            WM_POWERBROADCAST
+                if matches!(
+                    u32::try_from(wparam.0),
+                    Ok(PBT_APMSUSPEND | PBT_APMRESUMEAUTOMATIC)
+                ) =>
+            {
+                self.mark_coverage_boundary();
                 self.physical.borrow_mut().lose()
             }
             _ => return false,
@@ -223,8 +255,11 @@ impl Keys {
             0
         };
         at.defer_terminal = retiring != 0;
-        // The screen watch hears what the gesture hears: a talk key or another key, or a reset.
+        // A rejected gesture make can still signal a foreign edit to the screen watch.
         super::screen_watch::heard(event, id);
+        if at.repeated_modifier && id.is_none() {
+            return;
+        }
         if self.overdue(event, at.instant) {
             // SAFETY: reads only this thread's own message queue state.
             let queue = unsafe { GetQueueStatus(QS_ALLINPUT) };
@@ -250,12 +285,18 @@ impl Keys {
         if retiring != 0 {
             self.escapes.release_native(hwnd, retiring);
             if !self.escape_trusted() && !matches!(event, Event::Reset | Event::Escape) {
+                self.mark_coverage_boundary();
                 let reset = self.physical.borrow_mut().lose();
                 super::screen_watch::heard(reset, None);
                 deadline = deliver.and_then(|deliver| deliver(reset, at));
             }
         }
         self.arm(hwnd, deadline, Instant::now());
+    }
+
+    fn mark_coverage_boundary(&self) {
+        self.covered_after
+            .set(Some(kumochi_shell_core::platform::keyboard_ticks()));
     }
 
     fn input(
@@ -265,16 +306,25 @@ impl Keys {
         layout: impl FnOnce() -> Option<HKL>,
     ) -> Option<(Event, Option<PhysicalKey>)> {
         let mut physical = self.physical.borrow_mut();
-        let (device, raw) = match raw {
-            Ok(raw) => raw?,
-            Err(()) => return Some((physical.lose(), None)),
-        };
-        if !self.escape_trusted() {
+        let Ok(raw) = raw else {
+            self.mark_coverage_boundary();
             return Some((physical.lose(), None));
-        }
+        };
+        let (device, raw) = raw?;
         let event = key_event(raw.MakeCode, raw.Flags);
         let slot = raw.MakeCode | (u16::from(u32::from(raw.Flags) & RI_KEY_E0 != 0) << 8);
-        if matches!(
+        let classified = physical.key(
+            device,
+            slot,
+            event,
+            at.queued_press,
+            self.covered_after.get(),
+        );
+        if !self.escape_trusted() {
+            self.mark_coverage_boundary();
+            return Some((physical.lose(), None));
+        }
+        let layout_changed = if matches!(
             event,
             Event::Key {
                 key: Key::LeftControl | Key::LeftAlt,
@@ -283,18 +333,39 @@ impl Keys {
         ) {
             let layout = layout();
             let previous = self.layout.replace(layout);
-            if layout.is_none() || previous.is_some_and(|old| Some(old) != layout) {
+            if layout.is_none() {
+                self.mark_coverage_boundary();
                 return Some((physical.lose(), None));
             }
             at.layout = layout;
+            previous.is_some_and(|old| Some(old) != layout)
+        } else {
+            false
+        };
+        let (event, id, repeated) = classified?;
+        if event == Event::Reset {
+            self.mark_coverage_boundary();
         }
-        let (event, id, repeated) = physical.key(device, slot, event);
+        if layout_changed {
+            return Some((physical.reset(), None));
+        }
         if id.is_some() && matches!(event, Event::Key { edge: Edge::Up, .. }) {
             at.held = physical.held();
         }
         at.repeated_modifier = repeated;
         if repeated {
             at.read_chord = None;
+        }
+        if repeated
+            || !matches!(
+                event,
+                Event::Key {
+                    key: Key::LeftControl | Key::LeftAlt,
+                    edge: Edge::Down
+                }
+            )
+        {
+            at.queued_press = None;
         }
         Some((event, id))
     }
@@ -369,6 +440,7 @@ pub(super) fn arm(hwnd: HWND, keys: &Keys, deliver: Deliver) -> Result<(), Prese
         disarm(hwnd, keys);
         return Err(error);
     }
+    keys.mark_coverage_boundary();
     let armed = keys
         .deliver
         .set(deliver)
@@ -1000,7 +1072,32 @@ mod tests {
         flags: u32,
         layout: usize,
     ) -> Option<(Event, super::EventTime)> {
-        let mut time = super::EventTime::new(std::time::Instant::now());
+        raw_at(keys, device, make, flags, layout, u64::MAX)
+    }
+
+    fn raw_at(
+        keys: &super::Keys,
+        device: usize,
+        make: u16,
+        flags: u32,
+        layout: usize,
+        queued: u64,
+    ) -> Option<(Event, super::EventTime)> {
+        raw_with_layout(keys, device, make, flags, queued, || {
+            Some(super::HKL(std::ptr::without_provenance_mut(layout)))
+        })
+        .map(|(event, _, time)| (event, time))
+    }
+
+    fn raw_with_layout(
+        keys: &super::Keys,
+        device: usize,
+        make: u16,
+        flags: u32,
+        queued: u64,
+        layout: impl FnOnce() -> Option<super::HKL>,
+    ) -> Option<(Event, Option<crate::input::PhysicalKey>, super::EventTime)> {
+        let mut time = super::EventTime::new(std::time::Instant::now()).with_queued_press(queued);
         keys.input(
             Ok(Some((
                 super::HANDLE(std::ptr::without_provenance_mut(device)),
@@ -1011,9 +1108,143 @@ mod tests {
                 },
             ))),
             &mut time,
-            || Some(super::HKL(std::ptr::without_provenance_mut(layout))),
+            layout,
         )
-        .map(|(event, _)| (event, time))
+        .map(|(event, identity)| (event, identity, time))
+    }
+
+    #[test]
+    fn a_decoded_down_without_layout_still_needs_its_own_break() {
+        let keys = super::Keys::default();
+        let (event, _, _) = raw_with_layout(&keys, 1, 0x1D, 0, u64::MAX, || None).unwrap();
+        assert_eq!(event, Event::Reset);
+        assert_eq!(generation_after_pair(&keys, 1), 0);
+        assert!(raw(&keys, 1, 0x1D, super::RI_KEY_BREAK).is_some());
+        assert!(raw(&keys, 1, 0x38, super::RI_KEY_BREAK).is_some());
+        assert_eq!(generation_after_pair(&keys, 1), 1);
+    }
+
+    #[test]
+    fn a_decoded_down_at_bank_capacity_still_needs_its_own_break() {
+        for scans in [[0x25, 0x24], [0x1D, 0x38]] {
+            let keys = super::Keys::default();
+            for (index, scan) in scans.into_iter().enumerate() {
+                assert!(raw(&keys, index + 1, scan, 0).is_some());
+            }
+            assert_eq!(raw(&keys, 3, 0x1D, 0).unwrap().0, Event::Reset);
+            if scans == [0x1D, 0x38] {
+                assert!(raw(&keys, 1, 0x1D, super::RI_KEY_BREAK).is_some());
+                assert!(raw(&keys, 2, 0x38, super::RI_KEY_BREAK).is_some());
+            }
+            assert_eq!(generation_after_pair(&keys, 3), 0);
+            assert!(raw(&keys, 3, 0x1D, super::RI_KEY_BREAK).is_some());
+            assert!(raw(&keys, 3, 0x38, super::RI_KEY_BREAK).is_some());
+            assert_eq!(generation_after_pair(&keys, 3), 1);
+        }
+    }
+
+    fn generation_after_pair(keys: &super::Keys, source: usize) -> u64 {
+        use std::time::{Duration, Instant};
+
+        use crate::input::Gesture;
+        use crate::input::hold::Fence;
+        use crate::platform::microphone::CollectionGate;
+
+        let gate = CollectionGate::default();
+        let mut fence = Fence::new(gate.clone());
+        let mut state = Gesture::default();
+        let now = Instant::now();
+        fence.reduce_with_keyboard_read(&mut state, Event::Reset, now, None, || Some(1), || None);
+        for make in [0x1D, 0x38] {
+            if let Some((event, time)) = raw(keys, source, make, 0) {
+                fence.reduce_with_keyboard_read(
+                    &mut state,
+                    event,
+                    now,
+                    time.queued_press,
+                    || Some(1),
+                    || Some(now),
+                );
+            }
+        }
+        fence.reduce_with_keyboard_read(
+            &mut state,
+            Event::Deadline,
+            now + Duration::from_millis(300),
+            None,
+            || Some(1),
+            || None,
+        );
+        gate.latest()
+    }
+
+    #[test]
+    fn the_owner_break_survives_a_second_devices_live_hold() {
+        let keys = super::Keys::default();
+        assert!(raw(&keys, 1, 0x1D, 0).is_some());
+        unreadable_reset(&keys);
+        assert!(raw(&keys, 2, 0x1D, 0).is_some());
+        assert_eq!(
+            raw(&keys, 1, 0x1D, super::RI_KEY_BREAK).unwrap().0,
+            Event::Reset
+        );
+        assert!(raw(&keys, 2, 0x1D, 0).unwrap().1.repeated_modifier);
+        assert!(raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).is_some());
+        assert_eq!(generation_after_pair(&keys, 1), 1);
+    }
+
+    #[test]
+    fn a_stale_startup_make_cannot_count_as_a_typing_tap() {
+        use std::time::{Duration, Instant};
+
+        use crate::input::{Effect, Gesture};
+
+        let keys = super::Keys::default();
+        keys.mark_coverage_boundary();
+        let boundary = keys.covered_after.get().unwrap();
+        let state = Rc::new(RefCell::new(Gesture::default()));
+        let opened = Rc::new(std::cell::Cell::new(0));
+        let (state_copy, opened_copy) = (Rc::clone(&state), Rc::clone(&opened));
+        assert!(
+            keys.deliver
+                .set(Box::new(move |event, time| {
+                    if state_copy
+                        .borrow_mut()
+                        .handle(event, time.instant)
+                        .contains(&Some(Effect::OpenInput))
+                    {
+                        opened_copy.set(opened_copy.get() + 1);
+                    }
+                    None
+                }))
+                .is_ok()
+        );
+        let now = Instant::now();
+        for (tap, control) in [boundary, boundary + 10, boundary + 20]
+            .into_iter()
+            .enumerate()
+        {
+            for (offset, (make, flags, queued)) in [
+                (0x1D, 0, control),
+                (0x38, 0, control + 1),
+                (0x1D, super::RI_KEY_BREAK, control + 2),
+                (0x38, super::RI_KEY_BREAK, control + 2),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if let Some((event, id, mut time)) =
+                    raw_with_layout(&keys, 1, make, flags, queued, || {
+                        Some(super::HKL(std::ptr::without_provenance_mut(1)))
+                    })
+                {
+                    time.instant =
+                        now + Duration::from_millis(u64::try_from(tap * 50 + offset).unwrap());
+                    keys.forward(HWND::default(), event, id, time);
+                }
+            }
+            assert_eq!(opened.get(), u32::from(tap == 2));
+        }
     }
 
     #[test]
@@ -1046,7 +1277,214 @@ mod tests {
     }
 
     #[test]
-    fn lost_raw_input_clears_live_repeat_identity() {
+    fn reset_boundary_known_hold_is_not_cleared_by_another_device() {
+        let keys = super::Keys::default();
+        assert!(!raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
+        unreadable_reset(&keys);
+        assert!(raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).is_some());
+        assert!(
+            raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier,
+            "a different device's break cannot prove this make is fresh"
+        );
+        assert!(raw(&keys, 1, 0x1D, super::RI_KEY_BREAK).is_some());
+        assert!(!raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
+    }
+
+    #[test]
+    fn reset_boundary_an_unknown_source_does_not_need_a_break_or_a_state_read() {
+        let keys = super::Keys::default();
+        unreadable_reset(&keys);
+        assert!(!raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
+    }
+
+    #[test]
+    fn reset_boundary_a_removed_device_cannot_strand_its_replacement() {
+        let keys = super::Keys::default();
+        assert!(raw(&keys, 1, 0x1D, 0).is_some());
+        assert!(raw(&keys, 2, 0x38, 0).is_some());
+        keys.on_message(
+            HWND::default(),
+            super::WM_INPUT_DEVICE_CHANGE,
+            WPARAM(usize::try_from(super::GIDC_REMOVAL).unwrap()),
+            LPARAM(1),
+        );
+        assert_eq!(
+            raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).unwrap().0,
+            Event::Key {
+                key: super::Key::LeftControl,
+                edge: super::Edge::Up,
+            }
+        );
+        assert!(!raw(&keys, 2, 0x1D, 0).unwrap().1.repeated_modifier);
+        assert!(raw(&keys, 2, 0x38, 0).unwrap().1.repeated_modifier);
+    }
+
+    #[test]
+    fn reset_boundary_an_already_queued_clean_pair_is_not_a_pair_of_repeats() {
+        use std::time::{Duration, Instant};
+
+        use crate::input::Gesture;
+        use crate::input::hold::{Fence, Intent};
+        use crate::platform::microphone::CollectionGate;
+        use kumochi_protocol::message::GestureId;
+
+        let keys = super::Keys::default();
+        for slot in [0x1D, 0x38] {
+            assert!(raw(&keys, 1, slot, super::RI_KEY_BREAK).is_some());
+        }
+        keys.on_message(
+            HWND::default(),
+            super::WM_INPUTLANGCHANGE,
+            WPARAM(0),
+            LPARAM(0),
+        );
+        let mut gesture = Gesture::default();
+        let mut fence = Fence::new(CollectionGate::default());
+        let now = Instant::now();
+        fence.reduce_with_keyboard_read(&mut gesture, Event::Reset, now, None, || Some(1), || None);
+        for (index, slot) in [0x1D, 0x38].into_iter().enumerate() {
+            let (event, time) = raw(&keys, 1, slot, 0).unwrap();
+            let out = fence.reduce_with_keyboard_read(
+                &mut gesture,
+                event,
+                now,
+                (!time.repeated_modifier).then_some(1),
+                || Some(1),
+                || Some(now),
+            );
+            if index == 0 {
+                assert!(out.intents.iter().all(Option::is_none));
+            }
+        }
+        let out = fence.reduce_with_keyboard_read(
+            &mut gesture,
+            Event::Deadline,
+            now + Duration::from_millis(300),
+            None,
+            || Some(1),
+            || None,
+        );
+        assert!(matches!(
+            out.intents[0],
+            Some(Intent::Recognized {
+                gesture: GestureId(1),
+                generation: Ok(_)
+            })
+        ));
+    }
+
+    fn unreadable_reset(keys: &super::Keys) {
+        let mut time = super::EventTime::new(std::time::Instant::now());
+        assert_eq!(
+            keys.input(Err(()), &mut time, || unreachable!()),
+            Some((Event::Reset, None))
+        );
+    }
+
+    #[test]
+    fn rule_a_arms_the_first_pair_and_only_uses_eligible_post_boundary_makes() {
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+
+        use crate::input::Gesture;
+        use crate::input::hold::{Fence, Intent};
+        use crate::platform::microphone::CollectionGate;
+        use kumochi_protocol::message::GestureId;
+
+        for (sample, known, gap, timestamp, revoke, warms, generation) in [
+            ("first after arm", 0, false, Some(1), false, true, 1),
+            ("one unseen held key", 0, true, Some(1), false, true, 1),
+            ("only Alt repeats", 0, true, None, false, false, 0),
+            ("foreign break", 1, true, Some(1), false, false, 0),
+            ("two known held keys", 2, true, Some(1), false, false, 0),
+            ("stale Ctrl", 0, true, Some(-1), false, false, 0),
+            ("equal Ctrl", 0, true, Some(0), false, false, 0),
+            ("revoked chord", 0, true, Some(1), true, true, 0),
+        ] {
+            let keys = super::Keys::default();
+            for scan in [0x1D, 0x38].into_iter().take(known) {
+                assert!(raw(&keys, 1, scan, 0).is_some());
+            }
+            let now = Instant::now();
+            let gate = CollectionGate::default();
+            let mut gesture = Gesture::default();
+            let mut fence = Fence::new(gate.clone());
+            let session = Cell::new(Some(1));
+            if gap {
+                unreadable_reset(&keys);
+                fence.reduce_with_keyboard_read(
+                    &mut gesture,
+                    Event::Reset,
+                    now,
+                    None,
+                    || session.get(),
+                    || None,
+                );
+            } else {
+                keys.mark_coverage_boundary();
+            }
+            if known == 1 {
+                assert!(raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).is_some());
+            }
+            let boundary = keys.covered_after.get().unwrap();
+            let ctrl = timestamp.map(|offset| (0x1D, boundary.checked_add_signed(offset).unwrap()));
+            let repeat = match timestamp {
+                None => Some((0x38, boundary + 4)),
+                Some(..=0) => Some((0x1D, boundary + 4)),
+                Some(_) => None,
+            };
+            let presses = ctrl.into_iter().chain([(0x38, boundary + 3)]).chain(repeat);
+            for (index, (scan, queued)) in presses.enumerate() {
+                let (event, time) = raw_at(&keys, 1, scan, 0, 1, queued).unwrap();
+                if queued == boundary + 4 {
+                    assert!(
+                        time.repeated_modifier && time.queued_press.is_none(),
+                        "{sample}"
+                    );
+                }
+                let delivery = fence.reduce_with_keyboard_read(
+                    &mut gesture,
+                    event,
+                    now,
+                    time.queued_press,
+                    || session.get(),
+                    || Some(now),
+                );
+                assert_eq!(
+                    matches!(delivery.intents[0], Some(Intent::Warm(GestureId(1)))),
+                    index == 1 && warms,
+                    "{sample}"
+                );
+                assert_eq!(gate.latest(), 0, "{sample}: no generation on either make");
+            }
+            if revoke {
+                session.set(None);
+            }
+            let delivery = fence.reduce_with_keyboard_read(
+                &mut gesture,
+                Event::Deadline,
+                now + Duration::from_millis(300),
+                None,
+                || session.get(),
+                || None,
+            );
+            assert_eq!(gate.latest(), generation, "{sample}");
+            assert_eq!(
+                matches!(
+                    delivery.intents[0],
+                    Some(Intent::Recognized {
+                        gesture: GestureId(1),
+                        generation: Ok(_)
+                    })
+                ),
+                generation == 1,
+                "{sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn lost_raw_input_preserves_uncertainty_until_the_owning_key_releases() {
         let keys = super::Keys::default();
         let mut time = super::EventTime::new(std::time::Instant::now());
         assert!(raw(&keys, 1, 0x1D, 0).is_some());
@@ -1060,8 +1498,11 @@ mod tests {
             Some((Event::Reset, None))
         );
 
-        assert!(!raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
         assert!(raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
+        assert!(raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).is_some());
+        assert!(raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
+        assert!(raw(&keys, 1, 0x1D, super::RI_KEY_BREAK).is_some());
+        assert!(!raw(&keys, 1, 0x1D, 0).unwrap().1.repeated_modifier);
     }
 
     #[test]
@@ -1088,6 +1529,12 @@ mod tests {
             let keys = super::Keys::default();
             assert!(raw(&keys, 1, 0x1D, 0).is_some());
             assert_eq!(raw(&keys, 2, 0x1D, flags).unwrap().0, Event::Reset);
+            assert!(raw(&keys, 1, 0x1D, super::RI_KEY_BREAK).is_some());
+            if flags == 0 {
+                assert!(raw(&keys, 2, 0x1D, 0).unwrap().1.repeated_modifier);
+            }
+            assert!(raw(&keys, 2, 0x1D, super::RI_KEY_BREAK).is_some());
+            assert!(!raw(&keys, 2, 0x1D, 0).unwrap().1.repeated_modifier);
         }
     }
 
@@ -1325,7 +1772,8 @@ mod tests {
                         gesture,
                         event,
                         at.instant,
-                        &Cell::new(false),
+                        (!at.repeated_modifier).then_some(0),
+                        || Some(0),
                         || {
                             (!at.repeated_modifier
                                 && super::exact_chord(|key| match key {
@@ -1447,18 +1895,18 @@ mod tests {
             reads.set((true, true, 0));
             input(device, 0x1D, 0, 2_200);
             input(device, 0x38, 0, 2_201);
-            send(Event::Deadline, 2_500);
+            send(Event::Deadline, 2_501);
             let results = results.borrow();
             assert!(
-                matches!(
-                    results[results.len() - 3].intents[0],
-                    Some(Intent::Warm(GestureId(1)))
-                ),
-                "loss {loss} must admit the same edge as its successful read"
+                ineligible(&results[results.len() - 3]),
+                "loss {loss} cannot start the hold before the second raw make"
             );
             assert!(
-                ineligible(&results[results.len() - 2]),
-                "the queued mate must not start the hold again"
+                matches!(
+                    results[results.len() - 2].intents[0],
+                    Some(Intent::Warm(GestureId(1)))
+                ),
+                "loss {loss} must admit the first clean pair of raw makes"
             );
             assert!(matches!(
                 results[results.len() - 1].intents[0],

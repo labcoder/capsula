@@ -21,6 +21,27 @@ fn view(position: DockPosition) -> SettingsView {
 }
 
 #[test]
+fn a_link_error_restores_the_dock_only_for_account_source() {
+    let refusal = ErrorKey::SettingsRefused.into();
+    for (source, expected) in [
+        (Source::Account, Some(DockPosition::TopCenter)),
+        (Source::Run(kumochi_protocol::message::RunId(5)), None),
+    ] {
+        let mut state = Settings::default();
+        state.set_view(view(DockPosition::TopCenter), Update::Unsolicited);
+        assert!(state.send_dock_position(DockPosition::BottomRight, |_| true));
+        let (notice, restore) = state.link_error(&refusal, source);
+        assert!(matches!(notice, Source::Settings(None)));
+        assert_eq!(restore, expected);
+    }
+    let mut state = Settings::default();
+    let run = Source::Run(kumochi_protocol::message::RunId(5));
+    let (notice, restore) = state.link_error(&ErrorKey::VoiceUnavailable.into(), run);
+    assert!(notice == run);
+    assert_eq!(restore, None);
+}
+
+#[test]
 fn offline_picks_coalesce_and_flush_once_after_admission() {
     let mut state = Settings::default();
     assert_eq!(state.dock_position_choice(), None);

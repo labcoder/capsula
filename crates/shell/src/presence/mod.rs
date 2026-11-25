@@ -176,8 +176,7 @@ struct Presence {
     scene_timer: Option<Task<()>>,
     scene_deadline: Option<Instant>,
     /// Speaker stops a busy owner hasn't taken yet, oldest first, each with its tries left.
-    pending_stops:
-        std::collections::VecDeque<(Session, kumochi_protocol::message::RunId, u8, bool)>,
+    pending_stops: crate::link::policy::SpeakerStops<Session>,
     /// The next offer of the front pending stop, or the end of its session.
     stop_retry: Option<Task<()>>,
     /// The native speech lease last read: its session, run and when it runs out.
@@ -352,7 +351,7 @@ impl Presence {
     // shortcut: the line carries no notice, so the offline and settings notices show only in the status panel; B2b's peek shows them by the line.
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
         let listening = matches!(
-            self.voice.status,
+            self.voice.state.status,
             Some(Text::HoldListening | Text::HoldNearLimit)
         );
         let was_listening = self.dock.update(cx, |dock, cx| {
@@ -377,7 +376,7 @@ impl Presence {
                 *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
             })
             .or(self.settings.read(cx).native_taskbar_notice);
-        let voice = self.voice.lost.or(self.voice.status);
+        let voice = self.voice.state.lost.or(self.voice.state.status);
         self.panel.update(cx, |panel, cx| {
             if panel.notice != notice || panel.voice != voice {
                 panel.notice = notice;
@@ -1164,7 +1163,7 @@ pub(crate) fn open(
             paint_notice: Rc::default(),
             scene_timer: None,
             scene_deadline: None,
-            pending_stops: std::collections::VecDeque::new(),
+            pending_stops: crate::link::policy::SpeakerStops::default(),
             stop_retry: None,
             speech: Rc::default(),
             escape_scope: Rc::default(),

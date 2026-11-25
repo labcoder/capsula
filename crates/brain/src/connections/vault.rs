@@ -30,7 +30,7 @@ mod github;
 mod repair;
 pub(crate) mod staging;
 
-pub(crate) use repair::{CutoffRequest, HistoryBinding, HistoryLink, Work};
+pub(crate) use repair::{CutoffRequest, HistoryBinding, HistoryLink, Proof, Work};
 
 /// Removed generations one sweep pass visits [guess]; the rest wait for the next pass.
 const SWEEP: usize = 16;

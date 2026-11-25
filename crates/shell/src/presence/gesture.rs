@@ -195,6 +195,7 @@ pub(super) fn deliver(
     let escaped = Cell::new(None);
     let escape_down = Cell::new(false);
     let recovered_hold = Cell::new(None);
+    let modifier_presses = Cell::new([None; 2]);
     let input = Rc::new(Cell::new((0_u64, 0_u64)));
     let gesture = Cell::new(Gesture::default());
     #[cfg(all(test, not(windows)))]
@@ -227,6 +228,7 @@ pub(super) fn deliver(
         #[cfg(test)]
         let qpc = if FAIL_CLOCK.take() { None } else { qpc };
         let Some(qpc) = qpc else {
+            modifier_presses.set([None; 2]);
             tracing::warn!(stage = ?InputStage::Delivery, reason = ?InputReason::ClockUnavailable, "held speech input failed");
             input.set((serial.saturating_add(1), reset.saturating_add(1)));
             if let Some(cancel) = link.revoke_input_for_dispatch() {
@@ -256,6 +258,25 @@ pub(super) fn deliver(
             escaped.set(None);
             escape_down.set(false);
         }
+        let modifier = match event {
+            Event::Key {
+                key: Key::LeftControl,
+                edge,
+            } => Some((0, edge)),
+            Event::Key {
+                key: Key::LeftAlt,
+                edge,
+            } => Some((1, edge)),
+            _ => None,
+        };
+        let mut presses = modifier_presses.get();
+        if matches!(event, Event::Reset | Event::Escape) {
+            presses = [None; 2];
+        } else if let Some((key, Edge::Down)) = modifier
+            && !at.repeated_modifier
+        {
+            presses[key] = at.queued_press;
+        }
         let mut wire_cancel = None;
         if let Event::Key {
             key: Key::Escape(_),
@@ -282,18 +303,29 @@ pub(super) fn deliver(
         let mut state = gesture.get();
         let mut recovered = false;
         let session = link.link_generation();
-        let voice_paused = Cell::new(paused.get() || !link.can_start_voice_gesture(session));
         let delivery = fence.borrow_mut().reduce_with_keyboard_read(
             &mut state,
             event,
             at.instant,
-            &voice_paused,
+            at.queued_press.filter(|_| !at.repeated_modifier),
+            || {
+                (!paused.get()
+                    && link.can_start_voice_gesture(session)
+                    && presses[0]
+                        .zip(presses[1])
+                        .is_some_and(|(control, alt)| link.voice_ready_before(control.min(alt))))
+                .then_some(session)
+            },
             || {
                 let now = at.recovery_time()?;
                 recovered = true;
                 Some(now)
             },
         );
+        if let Some((key, Edge::Up)) = modifier {
+            presses[key] = None;
+        }
+        modifier_presses.set(presses);
         gesture.set(state);
         let mut cancellation = cancelled.is_some();
         for intent in delivery.intents.iter().flatten() {
@@ -308,12 +340,7 @@ pub(super) fn deliver(
                     if recovered {
                         recovered_hold.set(Some(*warm));
                     }
-                    gates.warm(
-                        link.output(),
-                        *warm,
-                        link.link_generation(),
-                        link.choice_revision(),
-                    );
+                    gates.warm(link.output(), *warm, session, link.choice_revision());
                 }
                 Intent::Recognized {
                     gesture,
@@ -556,7 +583,7 @@ fn apply(
         let applied = owner.update(app, |this, cx| {
             if pending.escape.is_some()
                 && matches!(cancel, CancelDispatch::Inline)
-                && this.voice.pending.is_some()
+                && this.voice.state.pending.is_some()
             {
                 return None;
             }
@@ -612,7 +639,7 @@ fn apply(
                                         && this.link.input_is(gesture);
                                     this.link.clear_input(gesture);
                                     if refused {
-                                        this.voice.lost = None;
+                                        this.voice.state.lost = None;
                                         this.voice_notice(Text::HoldFailed, cx);
                                     }
                                 }

@@ -79,8 +79,11 @@ sequenceDiagram
   records with a null Raw Input device handle, as can occur with injected input, share one
   source distinct from every non-null handle. They follow the same shortcut and recovery
   rules as any keyboard. A second source sending a make or break for a left modifier still
-  held by another source makes its identity ambiguous and resets input. If both banks are
-  occupied, another source invalidates coverage rather than growing a list.
+  held by another source makes its identity ambiguous and resets input. An owner's decoded
+  break still clears that owner's hold before the reset. If both banks are occupied, another
+  source invalidates coverage. A decoded talk modifier still needs its owner's break even if
+  its layout was unavailable or it couldn't fit in a bank. One overflow owner per modifier can
+  be remembered; if that also fills, the modifier is refused until restart rather than guessing.
   The reducer doesn't decode Windows scan codes; diagnostics don't print devices, slots,
   layout identifiers or edge values.
 - **Same callback.** The gesture lives in an `Rc<Cell<Gesture>>` shared by the native callback
@@ -123,13 +126,21 @@ sequenceDiagram
   foreground thread, if it can identify one. The deferred release checks sample again,
   so a layout change that changes back between samples can escape detection. The decoded
   tracker uses fixed storage; that doesn't bound the cost of the native queries. After coverage loss,
-  overflow or registered Escape, shell-core clears the remembered keys and blocks recognition.
-  An eligible new modifier make can try once. Windows reads left Ctrl and left Alt before and
+  overflow or registered Escape, shell-core cancels the chord. A modifier known down at reset
+  needs a decoded break from that same source before its next make counts. Removing a device
+  retires only its ledger. A source with no evidence starts eligible: its first make may be a
+  repeat of a key held before coverage, since Raw Input cannot distinguish the two. After a
+  coverage gap, a make queued at or before the boundary cannot count or make its later repeats
+  eligible. Rejected makes are kept out of tap and hold timing, but still reach the screen
+  watch. A logical reset retains the ordered ledger without inventing a coverage gap.
+  The reducer needs two eligible raw modifier makes. On the second recovery make, Windows
+  reads left Ctrl and left Alt before and
   after a bounded `GetAsyncKeyState` sweep, using only the down bit; another down keyboard VK
   vetoes that attempt. Aggregate Ctrl/Alt aliases, mouse buttons and toggle state do not count.
-  The same attempt starts a fresh hold if Windows' observable virtual-key state agreed with
-  this chord. A failed read leaves the next attempt eligible; time, another reset and an empty
-  ledger cannot rearm. The scan isn't atomic: a key can go down after its slot was read,
+  The second make can start a fresh hold if the observable keyboard state agrees. A current
+  state read never substitutes for a queued make, and a failed read can only be retried on a
+  later eligible raw pair. Time and OS state alone cannot rearm or prove a modifier neutral. The scan isn't
+  atomic: a key can go down after its slot was read,
   access can change mid-sweep (zero means up or failure), two physical keys can share one VK,
   and firmware-only keys without a VK aren't visible. A stuck or remapped extra key vetoes for
   as long as Windows reports it down. The scan and behavior with elevated foreground windows,

@@ -557,10 +557,11 @@ through the read is the caller's guarantee, which the existing-profile probes gi
 the product folder's chain. A held, admitted product folder is likewise the caller's to
 establish.
 
-- `KnownSchema`: the file's `user_version` is one this build knows (1 to the newest), and its
-  schema objects (type, name, table and SQL, from `sqlite_schema`) are exactly those the
-  migrations make at that version, built in memory to compare. The candidate's catalog is counted
-  first, then read once without sorting, each row using up a distinct entry of the small
+- `KnownSchema(version)`: the file's `user_version` is one this build knows (1 to the newest,
+  carried as `version`; below `CURRENT_HISTORY` it still needs a migration), and its schema
+  objects (type, name, table and SQL, from `sqlite_schema`) are exactly those the migrations make
+  at that version, built in memory to compare. The candidate's catalog is counted first, then
+  read once without sorting, each row using up a distinct entry of the small
   expected set, so neither Rust nor a SQLite sorter copies a large foreign catalog. This is schema
   evidence only. It reads no rows, product invariants (such as the `approval_mark` singleton),
   page integrity or binding, so it promises neither an intact store nor a successful open or
@@ -573,6 +574,10 @@ establish.
 - `Unverified`: everything else. That covers a newer or unversioned schema, any extra or missing
   object, a schema ahead of its version, files the opener refuses, a missing or linked folder, a
   store missing beside something it left, and any failed read.
+
+The profile probe's legacy Matching builds on `KnownSchema(CURRENT_HISTORY)` and a validated
+authority and host, so it is schema-level evidence too. Runtime admission (cut 10) must revalidate
+the history's invariants before using the store.
 
 Tests cover every known version, a store the brain itself opened, a `VACUUM INTO` copy like a
 purge's, each refused change, each leftover, a missing folder, a linked folder whether empty

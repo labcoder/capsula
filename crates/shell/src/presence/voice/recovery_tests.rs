@@ -88,7 +88,7 @@ fn stored(generation: u64, gesture: u32) -> LinkEvent {
 /// The hold was released and sent, and the brain started its run.
 fn thinking(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     owner.update(cx, |owner, _| {
-        owner.voice.pending.as_mut().expect("a hold").source = Source::Sent;
+        owner.voice.state.pending.as_mut().expect("a hold").source = Source::Sent;
     });
     deliver(
         owner,
@@ -139,7 +139,7 @@ fn granted(owner: &Entity<Presence>, cx: &mut TestAppContext) -> u32 {
 }
 
 fn lost(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Option<Text> {
-    owner.read_with(cx, |owner, _| owner.voice.lost)
+    owner.read_with(cx, |owner, _| owner.voice.state.lost)
 }
 
 #[gpui::test]
@@ -151,14 +151,17 @@ fn a_brain_lost_before_the_receipt_restores_the_words_once_and_keeps_the_notice(
     deliver(&owner, words(1, 1, SENTINEL, 40), cx);
     thinking(&owner, cx);
     let shown = owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.recovery.is_some(), "Thinking keeps the copy");
+        assert!(
+            owner.voice.state.recovery.is_some(),
+            "Thinking keeps the copy"
+        );
         owner.text.as_ref().expect("typing fixture").typing.visible
     });
     deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
     assert_eq!(draft(&owner, cx), SENTINEL);
     assert_eq!(lost(&owner, cx), Some(Text::HoldLostRestored));
     owner.read_with(cx, |owner, cx| {
-        assert!(owner.voice.recovery.is_none());
+        assert!(owner.voice.state.recovery.is_none());
         assert_eq!(
             owner.text.as_ref().expect("typing fixture").typing.visible,
             shown
@@ -228,7 +231,7 @@ fn the_stored_receipt_consumes_the_copy_and_a_later_loss_restores_nothing(cx: &m
     let before = granted(&owner, cx);
     deliver(&owner, stored(1, 1), cx);
     assert_eq!(granted(&owner, cx), before + 6);
-    owner.read_with(cx, |owner, _| assert!(owner.voice.recovery.is_none()));
+    owner.read_with(cx, |owner, _| assert!(owner.voice.state.recovery.is_none()));
     deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
     assert_eq!(draft(&owner, cx), "");
     assert_eq!(lost(&owner, cx), None);
@@ -249,7 +252,7 @@ fn words_after_a_terminal_status_or_from_another_hold_are_refused_with_their_cre
         let before = granted(&owner, cx);
         deliver(&owner, words(1, 1, SENTINEL, 40), cx);
         assert_eq!(granted(&owner, cx), before + 40);
-        owner.read_with(cx, |owner, _| assert!(owner.voice.recovery.is_none()));
+        owner.read_with(cx, |owner, _| assert!(owner.voice.state.recovery.is_none()));
         deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
         assert_eq!(draft(&owner, cx), "");
         assert_eq!(lost(&owner, cx), None);
@@ -268,7 +271,12 @@ fn words_after_a_terminal_status_or_from_another_hold_are_refused_with_their_cre
     deliver(&owner, stored(0, 1), cx);
     deliver(&owner, stored(1, 2), cx);
     owner.read_with(cx, |owner, _| {
-        let slot = owner.voice.recovery.as_ref().expect("the live hold's slot");
+        let slot = owner
+            .voice
+            .state
+            .recovery
+            .as_ref()
+            .expect("the live hold's slot");
         assert!(slot.words.is_none(), "another connection's or hold's words");
     });
     deliver(&owner, words(1, 1, SENTINEL, 40), cx);
@@ -290,10 +298,10 @@ fn a_failed_or_stopped_held_run_drops_its_words(cx: &mut TestAppContext) {
         thinking(&owner, cx);
         if answered {
             deliver(&owner, run_state(Phase::Answering), cx);
-            owner.read_with(cx, |owner, _| assert!(owner.voice.pending.is_none()));
+            owner.read_with(cx, |owner, _| assert!(owner.voice.state.pending.is_none()));
         }
         deliver(&owner, run_state(phase), cx);
-        owner.read_with(cx, |owner, _| assert!(owner.voice.recovery.is_none()));
+        owner.read_with(cx, |owner, _| assert!(owner.voice.state.recovery.is_none()));
         let before = granted(&owner, cx);
         deliver(&owner, words(1, 1, SENTINEL, 40), cx);
         assert_eq!(granted(&owner, cx), before + 40);
@@ -307,7 +315,7 @@ fn a_failed_or_stopped_held_run_drops_its_words(cx: &mut TestAppContext) {
     deliver(&owner, run_state(Phase::Answering), cx);
     owner.update(cx, |owner, _| {
         // A newer hold's slot, with words and no run yet.
-        owner.voice.recovery = Some(Recovery {
+        owner.voice.state.recovery = Some(Recovery {
             session: 1,
             gesture: GestureId(2),
             run: None,
@@ -351,7 +359,7 @@ fn a_newer_attempt_or_a_stuck_microphone_replaces_the_lost_notice(cx: &mut TestA
             TalkHeld::default(),
             cx,
         );
-        assert!(owner.voice.pending.is_none(), "refused at admission");
+        assert!(owner.voice.state.pending.is_none(), "refused at admission");
     });
     assert_eq!(
         shown(&owner, cx),
@@ -381,12 +389,12 @@ fn esc_discards_the_copy_before_late_words_arrive(cx: &mut TestAppContext) {
     hold(&owner, 1, cx);
     owner.update(cx, |owner, cx| {
         owner.escape(cx).expect("esc");
-        assert!(owner.voice.recovery.is_none());
+        assert!(owner.voice.state.recovery.is_none());
     });
     deliver(&owner, words(1, 1, SENTINEL, 40), cx);
     deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
     assert_eq!(draft(&owner, cx), "");
-    owner.read_with(cx, |owner, _| assert!(owner.voice.recovery.is_none()));
+    owner.read_with(cx, |owner, _| assert!(owner.voice.state.recovery.is_none()));
 
     let (owner, _data, _controls) = ready(cx);
     hold(&owner, 1, cx);
@@ -405,10 +413,13 @@ fn esc_discards_the_copy_before_late_words_arrive(cx: &mut TestAppContext) {
         cx,
     );
     owner.update(cx, |owner, cx| {
-        assert!(owner.voice.pending.is_none(), "the answer ended the hold");
-        assert!(owner.voice.recovery.is_some(), "but not its copy");
+        assert!(
+            owner.voice.state.pending.is_none(),
+            "the answer ended the hold"
+        );
+        assert!(owner.voice.state.recovery.is_some(), "but not its copy");
         owner.escape(cx).expect("esc");
-        assert!(owner.voice.recovery.is_none());
+        assert!(owner.voice.state.recovery.is_none());
     });
     deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
     assert_eq!(draft(&owner, cx), "");
@@ -427,13 +438,13 @@ fn a_captured_answer_escape_discards_its_words_before_loss(cx: &mut TestAppConte
     });
     deliver(&owner, run_state(Phase::Answering), cx);
     owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.pending.is_none());
-        assert!(owner.voice.recovery.is_some());
+        assert!(owner.voice.state.pending.is_none());
+        assert!(owner.voice.state.recovery.is_some());
     });
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
         assert!(
-            owner.voice.recovery.is_none(),
+            owner.voice.state.recovery.is_none(),
             "the captured stop spent its copy"
         );
     });
@@ -455,11 +466,11 @@ fn an_old_receipt_keeps_a_newer_hold_s_words_recoverable(cx: &mut TestAppContext
     hold(&owner, 2, cx);
     deliver(&owner, words(1, 2, SENTINEL, 40), cx);
     owner.update(cx, |owner, cx| {
-        assert_eq!(owner.voice.ended, Some((GestureId(1), None)));
+        assert_eq!(owner.voice.state.ended, Some((GestureId(1), None)));
         owner
             .native_escape(Some(GestureId(1)), None, cx)
             .expect("old press");
-        let copy = owner.voice.recovery.as_ref().expect("hold 2's copy");
+        let copy = owner.voice.state.recovery.as_ref().expect("hold 2's copy");
         assert_eq!(copy.gesture, GestureId(2));
     });
     deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
@@ -476,7 +487,7 @@ fn an_occupied_composer_keeps_its_draft_and_gets_the_plain_notice(cx: &mut TestA
     deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
     assert_eq!(draft(&owner, cx), "typed draft");
     assert_eq!(lost(&owner, cx), Some(Text::HoldLost));
-    owner.read_with(cx, |owner, _| assert!(owner.voice.recovery.is_none()));
+    owner.read_with(cx, |owner, _| assert!(owner.voice.state.recovery.is_none()));
 }
 
 #[gpui::test]
@@ -488,7 +499,7 @@ fn a_hidden_composer_takes_the_words_without_showing(cx: &mut TestAppContext) {
         let (owner, _data, _controls) = ready(cx);
         hold(&owner, 1, cx);
         owner.update(cx, |owner, _| {
-            owner.voice.recovery.as_mut().expect("slot").picture = picture;
+            owner.voice.state.recovery.as_mut().expect("slot").picture = picture;
         });
         deliver(&owner, words(1, 1, SENTINEL, 40), cx);
         deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
@@ -515,7 +526,7 @@ fn words_go_back_only_to_the_holds_own_thread_and_selection(cx: &mut TestAppCont
         let (owner, _data, _controls) = ready(cx);
         hold(&owner, 1, cx);
         owner.update(cx, |owner, _| {
-            let slot = owner.voice.recovery.as_mut().expect("slot");
+            let slot = owner.voice.state.recovery.as_mut().expect("slot");
             assert_eq!(slot.target.0, Some(ThreadId(1)), "the main thread");
             match change {
                 0 => slot.target.0 = Some(ThreadId(2)),
@@ -538,7 +549,7 @@ fn with_no_composer_yet_the_plain_notice_shows(cx: &mut TestAppContext) {
     owner.update(cx, |owner, _| owner.text = None);
     deliver(&owner, LinkEvent::State(LinkState::Reconnecting), cx);
     assert_eq!(lost(&owner, cx), Some(Text::HoldLost));
-    owner.read_with(cx, |owner, _| assert!(owner.voice.recovery.is_none()));
+    owner.read_with(cx, |owner, _| assert!(owner.voice.state.recovery.is_none()));
 }
 
 #[gpui::test]
@@ -550,7 +561,16 @@ fn held_words_are_kept_up_to_their_bound_and_never_printed(cx: &mut TestAppConte
     deliver(&owner, words(1, 1, &over, 16_400), cx);
     assert_eq!(granted(&owner, cx), before + 16_400);
     owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.recovery.as_ref().expect("slot").words.is_none());
+        assert!(
+            owner
+                .voice
+                .state
+                .recovery
+                .as_ref()
+                .expect("slot")
+                .words
+                .is_none()
+        );
     });
     let exact = format!(
         "{SENTINEL}{}",
@@ -565,7 +585,7 @@ fn held_words_are_kept_up_to_their_bound_and_never_printed(cx: &mut TestAppConte
     }
     deliver(&owner, event, cx);
     owner.read_with(cx, |owner, _| {
-        let slot = owner.voice.recovery.as_ref().expect("slot");
+        let slot = owner.voice.state.recovery.as_ref().expect("slot");
         assert_eq!(slot.words.as_deref(), Some(exact.as_str()));
         assert_redacted(&format!("{slot:?}"));
     });

@@ -2036,9 +2036,9 @@ fn queued_pre_ack_send_preserves_the_composer_and_older_recovery(cx: &mut TestAp
         let (queued, _not_started) = crate::link::prepare(events, AudioSession::QueuedRequired)
             .expect("prepare without opening IPC");
         owner.link = queued;
-        owner.voice.lost = Some(Text::VoiceRestartRequired);
+        owner.voice.state.lost = Some(Text::VoiceRestartRequired);
         owner.submit(cx).expect("early intent is ignored");
-        assert_eq!(owner.voice.lost, Some(Text::VoiceRestartRequired));
+        assert_eq!(owner.voice.state.lost, Some(Text::VoiceRestartRequired));
         assert_eq!(owner.runs.kept(), [5]);
         assert_eq!(
             owner.text.as_ref().unwrap().input.read(cx).value().as_ref(),

@@ -15,7 +15,7 @@ use crate::presenter::{Broken, Effect};
 use crate::strings::Text;
 
 /// The hold whose release the watch was last told of, until that watch is dropped or the next
-/// release takes its place. Kept apart from `voice.pending`, which is gone by `Answering`
+/// release takes its place. Kept apart from `voice.state.pending`, which is gone by `Answering`
 /// while the brain's word on the screenshot can still come.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Watched {

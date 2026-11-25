@@ -85,6 +85,26 @@ impl RepairAttempt {
 }
 
 impl Authority {
+    /// Whether `ChatGPT`'s account can only be an ordinary one: the authority is at the ordinary
+    /// schema, which no repair has reached. A repaired schema is never ordinary, whatever its row
+    /// says, and a connection still inside a transaction answers nothing.
+    pub(in crate::connections) fn ordinary_account(&self) -> Result<bool, AuthorityError> {
+        if !self.conn.is_autocommit() {
+            return Err(AuthorityError::Conflict);
+        }
+        Ok(schema_version(&self.conn)? == VERSION)
+    }
+
+    /// Whether the recovered account is signing out, by its own row or a pending sign-out.
+    pub(in crate::connections) fn recovered_signing_out(&self) -> Result<bool, AuthorityError> {
+        let row: i64 = self.conn.query_row(
+            "SELECT recovered_sign_out FROM chatgpt_repair WHERE id=1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(row != 0 || read_marker(&self.conn)?.sign_out.is_some())
+    }
+
     pub(in crate::connections) fn repair_predecessor(&self) -> Result<Current, AuthorityError> {
         predecessor(&self.conn)
     }

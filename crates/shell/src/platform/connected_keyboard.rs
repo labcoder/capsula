@@ -13,6 +13,7 @@ pub(crate) struct EventTime {
     pub(crate) held: TalkHeld,
     pub(crate) repeated_modifier: bool,
     pub(crate) defer_terminal: bool,
+    pub(crate) queued_press: Option<u64>,
     pub(crate) speech_escape_owner: crate::escape::SpeechEscapeOwner,
     pub(super) read_chord: Option<fn(Instant) -> Option<Instant>>,
     #[cfg(windows)]
@@ -26,6 +27,7 @@ impl EventTime {
             held: TalkHeld::default(),
             repeated_modifier: false,
             defer_terminal: false,
+            queued_press: None,
             speech_escape_owner: crate::escape::SpeechEscapeOwner::Outside,
             read_chord: None,
             #[cfg(windows)]
@@ -58,6 +60,12 @@ impl EventTime {
     #[cfg(test)]
     pub(crate) fn with_keyboard_read(mut self, read: fn(Instant) -> Option<Instant>) -> Self {
         self.read_chord = Some(read);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_queued_press(mut self, at: u64) -> Self {
+        self.queued_press = Some(at);
         self
     }
 }
