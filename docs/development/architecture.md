@@ -98,6 +98,15 @@ admitted lock target still refuse before opening a file, with no fallback locati
 Detached brain startup acquires both pipes before touching the store. It takes the profile's
 writer lock, then opens and recovers the store, loads settings, starts accounts, and builds the Brain. It retries any interrupted
 voice model removals before creating the helpers' Job Object, then starts the optional workers.
+The mode check before the removal pass and the Claude Code setting read the running mode, so a
+mode without containment removes nothing. Startup crosses four checkpoints: after the opened
+state, after accounts, after the Brain and after the Job. Detached passes a no-op at each. A
+parent-bound start, not wired yet, makes one commit claim and then passes a fence at each
+checkpoint. The watch thread latches the parent's loss in an atomic gate before it publishes,
+so a claim that comes after a loss fails, and a fence refuses once a loss or a closed watch is
+visible. Each passed checkpoint admits the work up to the next one; the fences owed inside the
+helpers' Job and worker starts come with containment. A loss during admitted work lets it
+finish, and the next fence refuses with the same unwind as an error there.
 Only then does it publish the instance capability and serve the shell. The lifecycle owner
 keeps the pipes alive through teardown. Before capability publication, a failure drops the
 resources that started without entering graceful shutdown. The store and credential workers
@@ -194,10 +203,11 @@ writes either name yet, so both stay cheap to change until cut 9 does.
 
 On Windows `kumochi_storage::hold_product_folder(anchor)` looks up only this edition's product
 folder (`DATA_DIR`) and `profile_root(anchor)` only its root slot, both through one private lookup
-under a held, trusted anchor folder that creates nothing. Only "file not found" from that exact
-open, under an anchor no one untrusted may add to, counts as missing; a missing or non-folder
-anchor, a lost path, a file at the name or an untrusted folder is refused. Nothing calls either
-yet.
+under a held, trusted anchor folder that creates nothing. The name is opened relative to the held
+anchor handle (`NtCreateFile` with a root directory), not by path, so renaming the anchor after its
+check can't redirect the open to a replacement. Only "file not found" from that exact open, under
+an anchor no one untrusted may add to, counts as missing; a missing or non-folder anchor, a lost
+path, a file at the name or an untrusted folder is refused. Nothing calls either yet.
 
 On Windows the guard is a named mutex per user and edition in the global namespace, so every
 session of that user contends on one object and taking it writes nothing to disk

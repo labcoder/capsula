@@ -261,8 +261,9 @@ the app, an explicit rejection before any answer or effect, and an answer that b
 History projects the typed values only onto that run's user event, keeping its held-screen
 metadata and any partial assistant reply. Older, unknown, and unproven outcomes, including
 crashes, stay generic; neither the generic mark nor the screen metadata proves delivery
-or a safe retry. The reason stores no provider text or payload. No schema migration or
-live provider change is needed. New page kinds follow the old wire tags; the
+or a safe retry. The reason stores no provider text or payload. The run end only supplies
+these facts when the [original attempt proves them](runs.md#availability). No schema migration
+is needed. New page kinds follow the old wire tags; the
 [paired build check](ipc.md#the-handshake) runs before any page can cross to another build.
 
 A read waits until the store thread has finished every op queued before it, failed and empty

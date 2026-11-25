@@ -1,5 +1,7 @@
 //! Lifetime, focus, and page requests for the anchored threads surface.
 
+use std::rc::Rc;
+
 use gpui_kit::{AnyWindowHandle, AppContext as _, Context, Entity, Subscription, Window};
 use kumochi_protocol::message::{ThreadId, ThreadRow};
 
@@ -17,6 +19,7 @@ pub(super) const PANEL_REMS: [f32; 2] = [48.0, 34.0];
 pub(super) struct ThreadsPanel {
     pub(super) window: AnyWindowHandle,
     pub(super) view: Entity<ThreadsView>,
+    pub(super) rename: super::escape::RenameEdit,
     pub(super) typing: Typing,
     pub(super) focused: bool,
     pub(super) bounds: [i32; 4],
@@ -41,6 +44,7 @@ impl ThreadsPanel {
             .expect("a GPUI test window opens");
         Self {
             window,
+            rename: Rc::clone(&view.read(cx).rename),
             view,
             typing: Typing::default(),
             focused: false,
@@ -195,6 +199,7 @@ impl Presence {
         });
         self.place_drawings(cx.weak_entity(), cx);
         self.request_pages(cx);
+        self.publish_plain_escape(cx);
         Ok(())
     }
 
@@ -233,6 +238,7 @@ impl Presence {
         });
         Ok(ThreadsPanel {
             window,
+            rename: Rc::clone(&view.read(cx).rename),
             view,
             typing: Typing::default(),
             focused: false,
@@ -307,6 +313,7 @@ impl Presence {
         });
         self.place_drawings(cx.weak_entity(), cx);
         self.request_pages(cx);
+        self.publish_plain_escape(cx);
         self.pointer_changed(cx)
     }
 }

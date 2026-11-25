@@ -380,6 +380,13 @@ Windows adapter, opening or creating a native pipe is unsupported. Shared frame 
 can use in-memory streams, but those streams don't authenticate clients or serve as a runtime
 transport.
 
+On macOS a parent-bound brain will use two connected Unix stream pairs instead of the pipes
+(dormant: nothing starts one yet). The shell makes both pairs, sets `SO_NOSIGPIPE` on all four
+ends, keeps one end of each and starts the brain with `--parent-bound` and the other ends on
+its descriptors 3 (control) and 4 (data); see [processes.md](processes.md), "The shell's brain
+child". The sockets prove only that the two ends are connected; the session handshake on top of
+them authenticates.
+
 ## Who may connect
 
 - The brain creates both pipes with a protected DACL that grants only the user who made them,

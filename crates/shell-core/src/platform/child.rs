@@ -117,6 +117,14 @@ pub(crate) enum Settled {
     Unsettled,
 }
 
+impl Settled {
+    /// The child's half of a clean Quit: reaped with exit code 0. The link's half is that it
+    /// sent `Quitting`; without both, the Quit isn't clean.
+    pub(crate) fn is_clean(self) -> bool {
+        self == Self::Reaped(Exit::Code(0))
+    }
+}
+
 /// The link's side of one owner thread. Dropping it retires a live child, as [`Self::retire`]
 /// does.
 #[derive(Debug)]
@@ -148,6 +156,16 @@ impl ChildOwner {
         let _settled = self.retire.send(());
     }
 
+    /// The spawn report, which the owner sends right after its single spawn attempt.
+    ///
+    /// # Errors
+    /// `Timeout` when none came by `by`: the outcome is pending, and a child may still start.
+    /// `Disconnected` when the thread died before reporting.
+    pub(crate) fn spawned(&self, by: Instant) -> Result<Report, RecvTimeoutError> {
+        self.reports
+            .recv_timeout(by.saturating_duration_since(Instant::now()))
+    }
+
     /// The next report, or None when none arrives by `by`.
     pub(crate) fn next(&self, by: Instant) -> Option<Report> {
         self.reports
@@ -175,6 +193,8 @@ fn own(
 ) {
     // A link that's gone doesn't end custody, so a closed report channel is ignored throughout.
     if let Err(refusal) = spawn(&mut os, word) {
+        // Whatever the child would have inherited is closed before the refusal is heard.
+        drop(os);
         let _unheard = report.send(Report::NotSpawned(refusal));
         return;
     }
@@ -269,7 +289,7 @@ mod tests {
 
     /// A scripted child. It runs (or stays stopped) until `exits` comes due, a successful kill
     /// ends it with SIGKILL when `killable`, and `lost` makes every wait fail. A gate holds the
-    /// next call of its kind at two barrier waits: entered, then released.
+    /// next call of its kind until the test has seen it enter and released it.
     #[derive(Default)]
     #[expect(
         clippy::struct_excessive_bools,
@@ -283,15 +303,64 @@ mod tests {
         killable: bool,
         kill_fails: bool,
         lost: bool,
-        spawn_gate: Option<Arc<Barrier>>,
-        poll_gate: Option<Arc<Barrier>>,
-        kill_gate: Option<Arc<Barrier>>,
+        spawn_gate: Option<Gate>,
+        poll_gate: Option<Gate>,
+        kill_gate: Option<Gate>,
         spawns: u32,
         kills: u32,
         killed_at: Option<Instant>,
         reaped: bool,
         /// Polls after the reap, and signals after a reap or a loss.
         forbidden: u32,
+    }
+
+    /// The fake's side of a gate. Every wait is bounded, and a test that fails releases it.
+    struct Gate {
+        entered: mpsc::Sender<()>,
+        release: Receiver<()>,
+    }
+
+    /// The test's side of a gate.
+    struct Held {
+        entered: Receiver<()>,
+        release: Sender<()>,
+    }
+
+    fn gate() -> (Gate, Held) {
+        let (entered, entered_seen) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        (
+            Gate {
+                entered,
+                release: released,
+            },
+            Held {
+                entered: entered_seen,
+                release,
+            },
+        )
+    }
+
+    impl Gate {
+        fn pass(self) {
+            let _unwatched = self.entered.send(());
+            match self.release.recv_timeout(BOUND) {
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => {}
+                Err(RecvTimeoutError::Timeout) => panic!("the test released the gate in time"),
+            }
+        }
+    }
+
+    impl Held {
+        fn entered(&self) {
+            self.entered
+                .recv_timeout(BOUND)
+                .expect("the gated call came within the bound");
+        }
+
+        fn release(self) {
+            let _released = self.release.send(());
+        }
     }
 
     #[derive(Clone, Default)]
@@ -308,10 +377,9 @@ mod tests {
             self.0.lock().unwrap_or_else(PoisonError::into_inner)
         }
 
-        fn pass(gate: Option<Arc<Barrier>>) {
+        fn pass(gate: Option<Gate>) {
             if let Some(gate) = gate {
-                gate.wait();
-                gate.wait();
+                gate.pass();
             }
         }
 
@@ -424,15 +492,15 @@ mod tests {
     #[test]
     fn a_quit_after_the_claim_retires_the_child_it_spawned() {
         let word = Arc::new(SpawnWord::default());
-        let gate = Arc::new(Barrier::new(2));
+        let (gate, held) = gate();
         let fake = Fake::with(|s| {
             s.killable = true;
-            s.spawn_gate = Some(Arc::clone(&gate));
+            s.spawn_gate = Some(gate);
         });
         let owner = ChildOwner::start(fake.clone(), Arc::clone(&word), WAIT).expect("owner");
-        gate.wait();
+        held.entered();
         word.quit();
-        gate.wait();
+        held.release();
         assert!(matches!(next(&owner), Report::Spawned));
         assert!(matches!(
             next(&owner),
@@ -583,15 +651,15 @@ mod tests {
     #[test]
     fn the_grace_starts_when_quit_is_seen_not_when_a_slow_poll_began() {
         let word = Arc::new(SpawnWord::default());
-        let gate = Arc::new(Barrier::new(2));
+        let (gate, held) = gate();
         let fake = Fake::with(|s| s.killable = true);
         let owner = started(&fake, &word);
-        fake.script().poll_gate = Some(Arc::clone(&gate));
-        gate.wait();
+        fake.script().poll_gate = Some(gate);
+        held.entered();
         thread::sleep(WAIT * 2);
         let quit_at = Instant::now();
         word.quit();
-        gate.wait();
+        held.release();
         assert!(matches!(
             next(&owner),
             Report::Settled(Settled::Reaped(Exit::Signal(9)))
@@ -603,17 +671,17 @@ mod tests {
     #[test]
     fn the_wait_after_a_slow_kill_starts_when_the_kill_returns() {
         let word = Arc::new(SpawnWord::default());
-        let gate = Arc::new(Barrier::new(2));
+        let (gate, held) = gate();
         let fake = Fake::with(|s| {
             s.kill_fails = true;
-            s.kill_gate = Some(Arc::clone(&gate));
+            s.kill_gate = Some(gate);
         });
         let owner = started(&fake, &word);
         owner.retire();
-        gate.wait();
+        held.entered();
         thread::sleep(WAIT * 2);
         let returned_at = Instant::now();
-        gate.wait();
+        held.release();
         assert!(matches!(next(&owner), Report::Settled(Settled::Unsettled)));
         assert!(
             Instant::now() >= returned_at + WAIT,
@@ -703,5 +771,90 @@ mod tests {
             (1, 0),
             "killed once at the deadline"
         );
+    }
+
+    #[test]
+    fn only_a_reap_with_exit_code_0_is_clean() {
+        assert!(Settled::Reaped(Exit::Code(0)).is_clean(), "exit 0");
+        for settled in [
+            Settled::Reaped(Exit::Code(3)),
+            Settled::Reaped(Exit::Signal(9)),
+            Settled::Lost,
+            Settled::Unsettled,
+        ] {
+            assert!(!settled.is_clean(), "{settled:?}");
+        }
+    }
+
+    #[test]
+    fn a_spawn_late_past_the_wait_is_pending_and_its_child_is_retired() {
+        let word = Arc::new(SpawnWord::default());
+        let (gate, held) = gate();
+        let fake = Fake::with(|s| {
+            s.killable = true;
+            s.spawn_gate = Some(gate);
+        });
+        let owner = ChildOwner::start(fake.clone(), Arc::clone(&word), WAIT).expect("owner");
+        held.entered();
+        let by = Instant::now() + WAIT;
+        assert!(matches!(owner.spawned(by), Err(RecvTimeoutError::Timeout)));
+        assert!(Instant::now() >= by, "waited until the deadline");
+        drop(owner);
+        held.release();
+        assert!(!word.claim(), "the late child holds the claim");
+        fake.until(|s| s.reaped);
+        let script = fake.script();
+        assert_eq!((script.spawns, script.kills, script.forbidden), (1, 1, 0));
+    }
+
+    /// Delegates to a fake, and is slow to drop, so a refusal heard before the drop shows.
+    struct SlowDrop(Fake, Arc<std::sync::atomic::AtomicBool>);
+
+    impl Os for SlowDrop {
+        fn auto_reaps(&self) -> bool {
+            self.0.auto_reaps()
+        }
+        fn spawn(&mut self) -> io::Result<()> {
+            self.0.spawn()
+        }
+        fn poll(&mut self) -> Observation {
+            self.0.poll()
+        }
+        fn kill(&mut self) -> io::Result<()> {
+            self.0.kill()
+        }
+    }
+
+    impl Drop for SlowDrop {
+        fn drop(&mut self) {
+            thread::sleep(WAIT);
+            self.1.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_refusal_is_heard_only_after_the_adapter_is_gone() {
+        for refusal in ["quit", "claimed", "auto-reap"] {
+            let word = Arc::new(SpawnWord::default());
+            let _holder = (refusal == "claimed").then(|| started(&Fake::default(), &word));
+            if refusal == "quit" {
+                word.quit();
+            }
+            let fake = Fake::with(|s| s.auto_reaps = refusal == "auto-reap");
+            let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let os = SlowDrop(fake, Arc::clone(&dropped));
+            let owner = ChildOwner::start(os, Arc::clone(&word), WAIT).expect("owner");
+            assert!(
+                matches!(
+                    owner.spawned(Instant::now() + BOUND),
+                    Ok(Report::NotSpawned(_))
+                ),
+                "{refusal}"
+            );
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "{refusal}: dropped before the report"
+            );
+        }
     }
 }

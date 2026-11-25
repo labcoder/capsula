@@ -413,6 +413,7 @@ fn a_failed_response_after_text_fails_the_round_with_its_code() {
         status: 200,
         code: Some(Code::UsageLimit),
         param: None,
+        origin: crate::connections::model::error::RejectionOrigin::Unproven,
     };
     assert_eq!(
         play(FAILED, FAILED.len()),

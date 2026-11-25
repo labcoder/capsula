@@ -44,7 +44,7 @@ pub use narrated::Wake as NarrationWake;
 /// How long one connection attempt may take, starting the brain included.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long Quit waits for the brain to take `Quitting` and close the pipe.
-const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 /// A second brain loss within this long needs the user's Retry [guess, v1 §2.3].
 const REPEAT_WINDOW: Duration = Duration::from_secs(60);
 /// Control messages waiting for the brain to read them before a send fails [guess]. The shell

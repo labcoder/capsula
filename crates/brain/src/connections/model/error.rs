@@ -79,6 +79,15 @@ impl Param {
     }
 }
 
+/// Whether the refusal answered a completed upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectionOrigin {
+    /// A response before upload completed, or an error inside an event stream.
+    Unproven,
+    /// A final HTTP rejection read after the request was flushed.
+    AfterUpload,
+}
+
 /// A provider's refusal: its status, and its code and parameter when this build knows them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderError {
@@ -88,6 +97,8 @@ pub struct ProviderError {
     pub code: Option<Code>,
     /// `error.param`, when there is one.
     pub param: Option<Param>,
+    /// What the HTTP transport proved about this request's upload.
+    pub origin: RejectionOrigin,
 }
 
 impl ProviderError {
@@ -111,6 +122,7 @@ impl ProviderError {
             status,
             code: error["code"].as_str().map(Code::parse),
             param: error["param"].as_str().map(Param::parse),
+            origin: RejectionOrigin::Unproven,
         }
     }
 

@@ -190,6 +190,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             stop_retry: None,
             speech: Rc::default(),
             escape_scope: Rc::default(),
+            plain_escape: Rc::default(),
             speech_expiry: None,
             speech_busy: 0,
             escape_hold: EscapeHold::default(),

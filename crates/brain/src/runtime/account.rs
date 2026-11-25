@@ -43,7 +43,7 @@ use crate::platform::credential::{CredentialStore, CredentialStoreError};
 
 use super::connections::{ConnectionEvent, Connections};
 use super::{Brain, Full, Link, settings};
-use crate::coordinator::{Input as CoreInput, RefusedKey};
+use crate::coordinator::Input as CoreInput;
 
 pub(super) mod github;
 #[cfg(test)]
@@ -1021,7 +1021,7 @@ impl Brain {
             .account
             .connections
             .take_refused()
-            .and_then(|tag| self.handle(CoreInput::KeyRefused(RefusedKey(tag))))
+            .and_then(|refused| self.handle(CoreInput::KeyRefused(refused)))
         {
             self.apply(effects, link.as_deref_mut()).map_err(|_| Full)?;
         }

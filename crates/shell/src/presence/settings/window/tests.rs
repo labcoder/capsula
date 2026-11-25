@@ -26,6 +26,8 @@ fn detached_settings(
     .expect("headless settings window");
     owner.settings_panel = Some(SettingsPanel {
         window,
+        editing: std::rc::Rc::clone(&view.read(cx).editing),
+        opening: 0,
         view: view.clone(),
         visible: false,
         focused: false,
@@ -64,7 +66,7 @@ fn a_failed_settings_hide_preserves_the_edit_and_defers_close_effects(cx: &mut T
     window
         .update(cx, |_, window, cx| {
             view.update(cx, |view, cx| {
-                view.editing = Some(Field::Assistant);
+                view.editing.set(Some(Field::Assistant));
                 view.hold_notice = Some(Text::SettingsUnavailable);
                 view.inputs[0].update(cx, |input, cx| {
                     input.set_value("Cirrus", window, cx);
@@ -302,6 +304,81 @@ fn cancelling_a_loading_speech_model_ends_the_waiting_hold_and_keeps_settings_fo
         .update(|window, cx| assert!(view.read(cx).focus.is_focused(window)));
 }
 
+#[gpui::test]
+fn disabling_hold_to_talk_in_focused_settings_finishes_existing_cleanup(cx: &mut TestAppContext) {
+    use crate::presence::voice::tests::{source, until};
+    use crate::presence::voice_wiring_tests::{hold, ready, status};
+    use crate::strings::Text;
+    use kumochi_protocol::message::{GestureId, HoldStatus, SettingsOp};
+    use std::time::Duration;
+
+    test_fixture::without_desktop(cx);
+    let (owner, data, controls) = ready(cx);
+    let (open, finish, started, samples) = source(&owner, cx, None);
+    let (token, _) = hold(&owner, 1, cx);
+    assert_eq!(
+        controls.try_recv().unwrap(),
+        ControlToBrain::VoiceHoldRecognized {
+            gesture: GestureId(1),
+            thread: Some(kumochi_protocol::message::ThreadId(1)),
+            selection: 1,
+        }
+    );
+    status(&owner, 1, 1, HoldStatus::Admitted, cx);
+    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    open.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| {
+            owner.voice.status == Some(Text::HoldListening)
+        })
+    });
+    samples.recv_timeout(Duration::from_secs(3)).unwrap();
+    let (window, before) = owner.update(cx, |owner, cx| {
+        owner.cancel_voice(cx);
+        assert_eq!(owner.voice.status, Some(Text::HoldStopping));
+        assert!(owner.voice.pending.is_some());
+        assert!(!token.retired());
+        let (window, view) = detached_settings(owner, cx);
+        let panel = owner.settings_panel.as_mut().unwrap();
+        panel.visible = true;
+        panel.focused = true;
+        view.update(cx, |view, _| view.tab = SettingsTab::Voice);
+        (window, owner.activity)
+    });
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::GestureCancel {
+            gesture: GestureId(1)
+        }]
+    );
+    VisualTestContext::from_window(window, cx).simulate_resize(size(px(768.), px(1600.)));
+    click_github(window, "hold-to-talk", cx);
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::Settings(SettingsOp::SetHoldToTalk(false))]
+    );
+    owner.read_with(cx, |owner, cx| {
+        assert_eq!(owner.activity, before);
+        assert_eq!(owner.voice.status, Some(Text::HoldStopping));
+        assert!(owner.voice.pending.is_some());
+        assert!(owner.settings.read(cx).hold_to_talk_pending());
+    });
+    assert!(!token.retired());
+
+    finish.send(()).unwrap();
+    until(cx, |cx| {
+        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+    });
+    assert!(token.retired());
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::VoiceHoldStopped {
+            gesture: GestureId(1)
+        }]
+    );
+    assert!(data.is_empty());
+}
+
 fn github_panel(
     cx: &mut TestAppContext,
 ) -> (
@@ -321,6 +398,8 @@ fn github_panel(
             owner.session = Some(Session::detached(7, Incarnation(1)));
             owner.settings_panel = Some(SettingsPanel {
                 window,
+                editing: std::rc::Rc::clone(&view.editing),
+                opening: 0,
                 view: settings_view.clone(),
                 visible: true,
                 focused: true,
@@ -889,6 +968,8 @@ fn rejected_speech_input_keeps_the_settings_panel_open(cx: &mut TestAppContext) 
         .unwrap();
         owner.settings_panel = Some(SettingsPanel {
             window,
+            editing: std::rc::Rc::clone(&view.read(cx).editing),
+            opening: 0,
             view,
             visible: true,
             focused: true,
@@ -1152,6 +1233,8 @@ fn open_settings_in_the_chat_recovery_swaps_the_chat_for_settings(cx: &mut TestA
     let chat = owner.update(cx, |owner, cx| {
         owner.settings_panel = Some(SettingsPanel {
             window,
+            editing: std::rc::Rc::clone(&view.read(cx).editing),
+            opening: 0,
             view: view.clone(),
             visible: false,
             focused: false,
@@ -2033,6 +2116,8 @@ fn a_hold_that_closes_settings_cancels_its_sign_in(cx: &mut TestAppContext) {
         .unwrap();
         owner.settings_panel = Some(SettingsPanel {
             window,
+            editing: std::rc::Rc::clone(&view.read(cx).editing),
+            opening: 0,
             view,
             visible: true,
             focused: true,

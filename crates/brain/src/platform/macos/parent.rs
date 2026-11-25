@@ -1,10 +1,11 @@
 use std::io::{self, PipeReader, PipeWriter};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::ptr;
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use tokio::sync::watch;
 
-use super::super::shell_process::{Unconfirmed, Verdict};
+use super::super::shell_process::{CommitGate, Unconfirmed, Verdict};
 
 const TICK: libc::timespec = libc::timespec {
     tv_sec: 1,
@@ -17,6 +18,7 @@ const NOW: libc::timespec = libc::timespec {
 
 pub(in crate::platform) struct ParentWatch {
     verdict: watch::Receiver<Verdict>,
+    gate: Arc<CommitGate>,
     stop: Option<(PipeWriter, JoinHandle<()>)>,
 }
 
@@ -24,6 +26,7 @@ struct Armed {
     pid: u32,
     queue: OwnedFd,
     stop: PipeReader,
+    gate: Arc<CommitGate>,
 }
 
 impl ParentWatch {
@@ -58,12 +61,20 @@ impl ParentWatch {
         let read = change(stop_ident(&stop), libc::EVFILT_READ, 0);
         receipt(&queue, &read).map_err(|_| Unconfirmed::Watch)?;
         let (send, verdict) = watch::channel(Verdict::Watching);
-        let worker = start(Armed { pid, queue, stop }, send)
-            .map_err(|error| Unconfirmed::Thread(error.raw_os_error()))?;
+        let gate = Arc::new(CommitGate::new());
+        let armed = Armed {
+            pid,
+            queue,
+            stop,
+            gate: Arc::clone(&gate),
+        };
+        let worker =
+            start(armed, send).map_err(|error| Unconfirmed::Thread(error.raw_os_error()))?;
         Ok((
             pid,
             Self {
                 verdict,
+                gate,
                 stop: Some((write, worker)),
             },
         ))
@@ -71,6 +82,10 @@ impl ParentWatch {
 
     pub(in crate::platform) fn loss(&self) -> watch::Receiver<Verdict> {
         self.verdict.clone()
+    }
+
+    pub(in crate::platform) fn gate(&self) -> &CommitGate {
+        &self.gate
     }
 
     pub(in crate::platform) fn snapshot(&self) -> Verdict {
@@ -99,6 +114,8 @@ impl Armed {
             |timeout| poll(&self.queue, None, timeout),
             parent,
         ) {
+            // Latch first, wake second: a claim that lost to this loss never commits.
+            self.gate.lose();
             verdict.send_replace(terminal);
         }
     }

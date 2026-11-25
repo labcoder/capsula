@@ -714,9 +714,16 @@ impl Brain {
 
     fn handle(&mut self, input: Input) -> Option<Vec<Effect>> {
         self.hold_fence(&input);
-        if let Input::IssueWritten { serial, reply } = input {
-            return Some(self.issue_written(serial, reply));
-        }
+        let input = match input {
+            Input::IssueWritten { serial, reply } => {
+                return Some(self.issue_written(serial, reply));
+            }
+            Input::Engine { key, event } => Input::Engine {
+                key,
+                event: self.claude.history_event(key, event),
+            },
+            other => other,
+        };
         if matches!(input, Input::ShellLost) {
             self.filing.cancel();
         }

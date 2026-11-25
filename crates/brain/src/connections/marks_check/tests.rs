@@ -241,6 +241,7 @@ fn only_a_refusal_of_the_account_stops_the_run() {
             status,
             code,
             param: None,
+            origin: crate::connections::model::error::RejectionOrigin::Unproven,
         };
         assert_eq!(account_refusal(error), stops, "{status} {code:?}");
     }

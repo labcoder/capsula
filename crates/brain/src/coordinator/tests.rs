@@ -30,6 +30,8 @@ mod draw_tool;
 mod drawing;
 #[path = "engine_tests.rs"]
 mod engines;
+#[path = "history_failure_tests.rs"]
+mod history_failure;
 #[path = "hold_tests.rs"]
 mod hold;
 #[path = "inline_tests.rs"]

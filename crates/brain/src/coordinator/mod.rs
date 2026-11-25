@@ -16,6 +16,7 @@ mod calls;
 mod cards;
 mod delete;
 mod drawing;
+mod history_failure;
 mod hold;
 mod inline;
 mod job;
@@ -634,7 +635,7 @@ struct Run {
     answering: bool,
     /// Streamed text not yet stored; it's stored with the next step or the outcome.
     unstored: ReplyText,
-    text_bytes: usize,
+    progress: TurnProgress,
     /// Steps the run produced, and how many the store acknowledged, in order.
     steps: u32,
     acked: u32,
@@ -711,6 +712,13 @@ struct Run {
     ending: Option<Ending>,
     /// The run's speech, when it was admitted with spoken replies loaded and an output device.
     reply: Option<crate::voice::reply::Reply>,
+}
+
+#[derive(Debug, Default)]
+struct TurnProgress {
+    text_bytes: usize,
+    /// The first grant that could have sent the user's turn, not an inline compaction.
+    first_grant: Option<BuildKey>,
 }
 
 /// How an ended run is being written.
@@ -1192,7 +1200,7 @@ impl Coordinator {
             Input::RecoveredChatGpt { ready, boundary } => {
                 self.recovered_chatgpt(ready, boundary, &mut effects);
             }
-            Input::KeyRefused(RefusedKey(tag)) => self.key_refused(tag, &mut effects),
+            Input::KeyRefused(refused) => self.key_refused(refused, &mut effects),
             Input::ReadFinished(done) => self.read_finished(done, &mut effects)?,
             Input::CallCommitted { key, outcome, then } => match outcome {
                 crate::dispatch::Committed::Done => {
@@ -1434,7 +1442,7 @@ impl Coordinator {
             begin: Some(begin),
             answering: false,
             unstored: ReplyText::default(),
-            text_bytes: 0,
+            progress: TurnProgress::default(),
             steps: 0,
             acked: 0,
             scene: None,
@@ -1620,9 +1628,7 @@ impl Coordinator {
             ) => crate::drawing::Loss::Drop,
             RunEnd::Done
             | RunEnd::Interrupted(Interruption::ShellLost | Interruption::ViewStalled)
-            | RunEnd::Failed(Failure::Budget | Failure::Engine | Failure::Store) => {
-                crate::drawing::Loss::Tell
-            }
+            | RunEnd::Failed(_) => crate::drawing::Loss::Tell,
         };
         self.drawing_closed(run.id, loss, effects);
         run.tools.drop_round();
