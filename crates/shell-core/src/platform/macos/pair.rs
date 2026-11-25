@@ -166,8 +166,10 @@ mod tests {
     #[test]
     fn staging_at_or_over_the_descriptor_limit_is_refused() {
         assert!(plan(10, 11, 14).is_ok(), "13 fits under 14");
-        let over = plan(10, 11, 13).unwrap_err();
-        assert_eq!(over.raw_os_error(), Some(libc::EMFILE));
+        for limit in [13, 12] {
+            let refused = plan(10, 11, limit).unwrap_err();
+            assert_eq!(refused.raw_os_error(), Some(libc::EMFILE), "limit {limit}");
+        }
     }
 
     #[test]
@@ -184,13 +186,26 @@ mod tests {
                 "SO_NOSIGPIPE on {fd}"
             );
         }
-        let mut child_control = UnixStream::from(child.control);
-        (&shell.control).write_all(b"c").expect("write");
-        let mut byte = [0];
-        child_control.read_exact(&mut byte).expect("read");
-        assert_eq!(&byte, b"c");
-        drop(child_control);
-        // A spawn in another test can hold a copy of the end for an instant, so retry until the
+        let bound = Some(std::time::Duration::from_secs(5));
+        let child_legs = [
+            UnixStream::from(child.control),
+            UnixStream::from(child.data),
+        ];
+        for (mut shell_leg, mut child_leg, byte) in [
+            (&shell.control, &child_legs[0], b'c'),
+            (&shell.data, &child_legs[1], b'd'),
+        ] {
+            shell_leg.set_write_timeout(bound).expect("timeout");
+            child_leg.set_read_timeout(bound).expect("timeout");
+            shell_leg.write_all(&[byte]).expect("write");
+            let mut read = [0];
+            child_leg
+                .read_exact(&mut read)
+                .expect("read within the bound");
+            assert_eq!(read, [byte], "each shell end reaches its own child end");
+        }
+        drop(child_legs);
+        // A spawn in another test can hold a copy of an end for an instant, so retry until the
         // close is seen.
         let by = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let error = loop {

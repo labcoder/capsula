@@ -9,27 +9,38 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants::PARENT_BOUND;
 
 use super::pair::{self, Action, ChildEnds, ShellEnds};
-use crate::platform::child::{ChildOwner, Exit, Observation, Os, SpawnWord};
+use crate::platform::child::{ChildOwner, Exit, Observation, Os, Refusal, Report, SpawnWord};
+
+/// How long `start_brain` waits for the owner's spawn report. The spawn is one system call, so
+/// this only bounds a stuck kernel.
+const SPAWN_REPORT: Duration = Duration::from_secs(5);
 
 /// Starts a parent-bound brain as the shell's child, with the control leg on its descriptor 3 and
-/// the data leg on 4. Retirement waits the link's Quit timeout before the kill, and again after.
+/// the data leg on 4, and hands out the shell's ends only once the child exists. Retirement
+/// waits the link's Quit timeout before the kill, and again after. Blocks until the spawn is
+/// reported, so call it off the UI thread.
 ///
 /// # Errors
-/// Fails when the sockets, the path or the owner thread can't be made; nothing is left open.
+/// The owner's refusal, or `Spawn` when the sockets, the path or the owner thread can't be made
+/// or no report arrives in time. All four ends are closed by then.
 pub(crate) fn start_brain(
     brain: &Path,
     word: Arc<SpawnWord>,
-) -> io::Result<(ChildOwner, ShellEnds)> {
-    let (shell, child) = pair::pairs()?;
-    let os = Darwin::new(brain, &[OsStr::new(PARENT_BOUND)], child)?;
-    Ok((
-        ChildOwner::start(os, word, crate::link::QUIT_TIMEOUT)?,
-        shell,
-    ))
+) -> Result<(ChildOwner, ShellEnds), Refusal> {
+    let (shell, child) = pair::pairs().map_err(Refusal::Spawn)?;
+    let os = Darwin::new(brain, &[OsStr::new(PARENT_BOUND)], child).map_err(Refusal::Spawn)?;
+    let owner = ChildOwner::start(os, word, crate::link::QUIT_TIMEOUT).map_err(Refusal::Spawn)?;
+    match owner.next(Instant::now() + SPAWN_REPORT) {
+        Some(Report::Spawned) => Ok((owner, shell)),
+        Some(Report::NotSpawned(refusal)) => Err(refusal),
+        // Dropping the owner retires whatever the spawn may still produce.
+        Some(Report::Settled(_)) | None => Err(Refusal::Spawn(io::ErrorKind::TimedOut.into())),
+    }
 }
 
 /// A child to start with `posix_spawn`: an absolute program, its arguments, an empty
@@ -302,10 +313,9 @@ fn null_terminated(strings: &[CString]) -> Vec<*mut libc::c_char> {
 mod tests {
     use std::io::Read as _;
     use std::os::fd::{FromRawFd as _, OwnedFd};
-    use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::platform::child::{Refusal, Report, Settled};
+    use crate::platform::child::Settled;
 
     const BOUND: Duration = Duration::from_secs(10);
 
@@ -491,58 +501,97 @@ mod tests {
         assert_eq!(child.poll(), Observation::Lost);
     }
 
-    #[test]
-    fn the_legs_reach_the_child_on_3_and_4_and_nothing_else_is_inherited() {
-        // An inheritable descriptor well above 4, so it can't be one the child is meant to have.
+    /// An inheritable descriptor above every slot the spawn uses for `ends`, so only
+    /// `POSIX_SPAWN_CLOEXEC_DEFAULT` can keep it from the child.
+    fn foreign_above(ends: &ChildEnds) -> OwnedFd {
+        let above = ends.control.as_raw_fd().max(ends.data.as_raw_fd()).max(4) + 3;
         // SAFETY: duplicating standard error is a plain call; F_DUPFD leaves the copy inheritable.
-        let raw = unsafe { libc::fcntl(2, libc::F_DUPFD, 64) };
-        assert!(raw >= 64, "a foreign descriptor");
+        let raw = unsafe { libc::fcntl(2, libc::F_DUPFD, above) };
+        assert!(raw >= above, "a foreign descriptor");
         // SAFETY: fcntl just returned this descriptor, and nothing else owns it.
-        let foreign = unsafe { OwnedFd::from_raw_fd(raw) };
+        unsafe { OwnedFd::from_raw_fd(raw) }
+    }
+
+    fn reap(child: &mut Darwin) -> Observation {
+        let by = Instant::now() + BOUND;
+        loop {
+            match child.poll() {
+                Observation::Running if Instant::now() < by => {}
+                observed => return observed,
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn the_child_gets_its_legs_on_3_and_4_and_nothing_else() {
         let (shell, child) = pair::pairs().expect("pairs");
-        let script = format!("printf c >&3; printf d >&4; [ -e /dev/fd/{raw} ] && exit 7; exit 0");
-        let os = Darwin::new(
+        let staged = child.control.as_raw_fd().max(child.data.as_raw_fd()).max(4) + 1;
+        let foreign = foreign_above(&child);
+        let script = format!(
+            "printf c >&3; printf d >&4; for fd in {staged} {} {}; do [ -e /dev/fd/$fd ] && exit 7; done; exit 0",
+            staged + 1,
+            foreign.as_raw_fd()
+        );
+        let mut os = Darwin::new(
             Path::new("/bin/sh"),
             &[OsStr::new("-c"), OsStr::new(&script)],
             child,
         )
         .expect("launch");
-        let owner = ChildOwner::start(os, Arc::new(SpawnWord::default()), BOUND).expect("owner");
-        assert!(matches!(next(&owner), Report::Spawned));
-        assert!(matches!(
-            next(&owner),
-            Report::Settled(Settled::Reaped(Exit::Code(0)))
-        ));
-        // EOF also shows the shell dropped its copies of the child's ends after the spawn.
+        os.spawn().expect("spawn");
+        // The adapter is still alive here, so EOF shows it closed the child's ends at the spawn.
         assert_eq!(read_to_eof(&shell.control), b"c");
         assert_eq!(read_to_eof(&shell.data), b"d");
+        assert_eq!(reap(&mut os), Observation::Reaped(Exit::Code(0)));
         drop(foreign);
     }
 
     #[test]
-    fn a_failed_spawn_closes_the_childs_ends() {
+    fn a_failed_spawn_closes_the_childs_ends_at_once() {
         let (shell, child) = pair::pairs().expect("pairs");
-        let missing = Darwin::new(Path::new("/nonexistent/kumochid"), &[], child).expect("launch");
-        let owner =
-            ChildOwner::start(missing, Arc::new(SpawnWord::default()), BOUND).expect("owner");
-        assert!(matches!(
-            next(&owner),
-            Report::NotSpawned(Refusal::Spawn(_))
-        ));
+        let mut missing =
+            Darwin::new(Path::new("/nonexistent/kumochid"), &[], child).expect("launch");
+        assert_eq!(missing.spawn().unwrap_err().kind(), io::ErrorKind::NotFound);
         assert_eq!(read_to_eof(&shell.control), b"");
         assert_eq!(read_to_eof(&shell.data), b"");
+        drop(missing);
     }
 
     #[test]
-    fn start_brain_passes_exactly_one_argument() {
-        // `test` exits 0 for exactly one non-empty argument, 1 for none and 2 for two.
-        let test = Path::new("/bin/test");
-        let (owner, shell) = start_brain(test, Arc::new(SpawnWord::default())).expect("start");
-        assert!(matches!(next(&owner), Report::Spawned));
+    fn start_brain_passes_only_the_parent_bound_argument() {
+        let dir = crate::scratch::dir("brain-argv");
+        let brain = dir.join("kumochid");
+        std::fs::write(
+            &brain,
+            format!("#!/bin/sh\n[ $# -eq 1 ] && [ \"$1\" = {PARENT_BOUND} ] && exit 0\nexit 1\n"),
+        )
+        .expect("fixture");
+        std::fs::set_permissions(&brain, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .expect("executable");
+        let (owner, shell) = start_brain(&brain, Arc::new(SpawnWord::default())).expect("start");
         assert!(matches!(
             next(&owner),
             Report::Settled(Settled::Reaped(Exit::Code(0)))
         ));
         assert_eq!(read_to_eof(&shell.control), b"");
+    }
+
+    #[test]
+    fn start_brain_hands_out_no_ends_when_the_spawn_fails() {
+        let refused = start_brain(
+            Path::new("/nonexistent/kumochid"),
+            Arc::new(SpawnWord::default()),
+        );
+        assert!(matches!(
+            refused,
+            Err(Refusal::Spawn(error)) if error.kind() == io::ErrorKind::NotFound
+        ));
+        let word = Arc::new(SpawnWord::default());
+        word.quit();
+        assert!(matches!(
+            start_brain(Path::new("/bin/test"), word),
+            Err(Refusal::Quitting)
+        ));
     }
 }
