@@ -286,3 +286,13 @@ fn only_an_intact_legacy_installation_with_nothing_new_reopens() {
         );
     }
 }
+
+#[test]
+fn legacy_and_owner_evidence_pass_through_unchanged() {
+    for evidence in [Absent, Matching, Unverified] {
+        let Inspection::Held(facts) = observe(&&fake(evidence, Root::Absent, evidence)) else {
+            panic!("the guard was held");
+        };
+        assert_eq!([facts.legacy, facts.owner], [evidence; 2]);
+    }
+}
