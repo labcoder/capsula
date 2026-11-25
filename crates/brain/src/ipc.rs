@@ -607,12 +607,8 @@ mod tests {
                     register_queued_output(&mut peer_control, welcomed).await;
                 }
                 if index == 0 || index == 5 {
-                    peer_control
-                        .write_all(
-                            &frame::encode(&ControlToBrain::Quitting, Pipe::Control).unwrap(),
-                        )
-                        .await
-                        .unwrap();
+                    let quit = frame::encode(&ControlToBrain::Quitting, Pipe::Control).unwrap();
+                    peer_control.write_all(&quit).await.unwrap();
                 }
             };
             let (result, ()) = timeout(std::time::Duration::from_secs(7), async {
@@ -627,6 +623,9 @@ mod tests {
                     result,
                     Err(SessionError::Protocol("data hello does not match control"))
                 )),
+            }
+            if index == 1 {
+                assert_eq!(brain.issue_session(), None);
             }
         }
         brain.close().await;
@@ -689,11 +688,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result.unwrap(), Session::ShellLost);
+        assert_eq!(old.epoch, 1);
+        assert_eq!(brain.issue_session(), None);
 
         let reconnect = async {
             let (welcome, mut control, mut data) = connect(session, Some(old)).await;
             assert_eq!(welcome.incarnation, old.incarnation);
-            assert_eq!(welcome.epoch, old.epoch + 1);
+            assert_eq!(welcome.epoch, 2);
             assert_eq!(
                 super::read::<ControlToShell>(&mut control, Pipe::Control)
                     .await
@@ -710,7 +711,7 @@ mod tests {
             );
             let (renewed, mut control, _data) = connect(session, None).await;
             assert_eq!(renewed.incarnation, old.incarnation);
-            assert_eq!(renewed.epoch, old.epoch + 2);
+            assert_eq!(renewed.epoch, 3);
             assert!(matches!(
                 super::read::<ControlToShell>(&mut control, Pipe::Control)
                     .await
@@ -731,6 +732,7 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(result.unwrap(), Session::Quit { .. }));
+        assert_eq!(brain.issue_session(), None);
         brain.close().await;
     }
 

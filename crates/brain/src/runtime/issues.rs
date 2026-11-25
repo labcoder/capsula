@@ -33,10 +33,25 @@ use transport::{BoundedHttp, Control};
 #[path = "issues/owner_tests.rs"]
 mod owner_tests;
 
+#[derive(Debug, Default)]
+pub(super) struct IssueEpochs(u64);
+
+impl IssueEpochs {
+    fn reserve(&mut self, incarnation: Incarnation) -> IssueSession {
+        self.0 = self
+            .0
+            .checked_add(1)
+            .expect("issue session identities never wrap");
+        IssueSession {
+            incarnation,
+            epoch: self.0,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Filing {
     next: u64,
-    next_session: u64,
     pub(super) session: Option<IssueSession>,
     last_request: Option<(IssueSession, u64)>,
     offers: Vec<Offered>,
@@ -280,18 +295,10 @@ impl Brain {
     }
 
     pub(crate) fn reserve_issue_session(&mut self, incarnation: Incarnation) -> IssueSession {
-        self.filing.next_session = self
-            .filing
-            .next_session
-            .checked_add(1)
-            .expect("issue session identities never wrap");
-        IssueSession {
-            incarnation,
-            epoch: self.filing.next_session,
-        }
+        self.issue_epochs.reserve(incarnation)
     }
 
-    pub(super) fn issue_session(&self) -> Option<IssueSession> {
+    pub(crate) fn issue_session(&self) -> Option<IssueSession> {
         self.filing.session
     }
 
