@@ -50,7 +50,7 @@ fn main() -> ExitCode {
     let Some(flags) = launch_with_logging(launch, || logging::init(constants::SHELL_LOG)) else {
         return ExitCode::FAILURE;
     };
-    let _instance = match instance::InstanceLock::try_acquire_current_session() {
+    let instance = match instance::InstanceLock::try_acquire_current_session() {
         Ok(Some(lock)) => lock,
         Ok(None) => {
             tracing::info!("another shell is running in this session");
@@ -71,8 +71,11 @@ fn main() -> ExitCode {
         "shell started"
     );
     match frontend {
-        Frontend::Connected => run_connected(flags),
-        Frontend::Local => run_local(),
+        Frontend::Connected => {
+            let _instance = instance;
+            run_connected(flags)
+        }
+        Frontend::Local => kumochi_shell::run_local_dock(instance, initialize_gpui),
     }
 }
 
@@ -80,22 +83,6 @@ fn initialize_gpui(cx: &mut gpui_kit::App) {
     gpui_kit::init(cx);
     crate::theme::init(cx);
     cx.set_global(Strings::english());
-}
-
-fn run_local() -> ExitCode {
-    let exit = std::rc::Rc::new(std::cell::Cell::new(ExitCode::SUCCESS));
-    let result = std::rc::Rc::clone(&exit);
-    gpui_kit::application()
-        .with_assets(crate::assets::Assets)
-        .run(move |cx| {
-            initialize_gpui(cx);
-            if let Err(error) = kumochi_shell::open_local_dock(cx) {
-                tracing::error!(%error, "can't open the disconnected dock");
-                result.set(ExitCode::FAILURE);
-                cx.quit();
-            }
-        });
-    exit.get()
 }
 
 fn run_connected(flags: presence::Launch) -> ExitCode {

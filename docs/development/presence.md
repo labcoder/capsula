@@ -39,6 +39,13 @@ The ordinary macOS launcher selects this route but opens the window only after l
 instance admission. Those gates still refuse, so selecting the route does not enable startup.
 The local route also refuses connected diagnostic launch modes.
 
+If the admitted local dock cannot open, the launch callback records the error synchronously
+and releases its instance lock before requesting GPUI Quit. A successful open keeps the lock
+for the app lifetime and keeps the existing dock-owned Quit path. AppKit termination does not
+return a caller-selected process status through GPUI; a failure status after native termination
+requires a separately validated native boundary. This does not arm the dormant Mac logger or
+replace its future close-before-unlock requirement.
+
 The connected presence requires native desktop geometry before opening any of its windows.
 Its Win32 backend still supplies physical work area and client origin and moves, shows, and hides
 windows without activation. Platforms without that backend refuse these operations; the local

@@ -11,5 +11,7 @@ pub mod strings;
 /// The shell's product palette.
 pub mod theme;
 
-pub use local_dock::{OpenError as LocalDockOpenError, open as open_local_dock};
+pub use local_dock::{
+    OpenError as LocalDockOpenError, open as open_local_dock, run as run_local_dock,
+};
 pub use qpc::QpcClock;

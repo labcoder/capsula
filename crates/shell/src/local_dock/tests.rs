@@ -3,6 +3,24 @@ use gpui_kit::{Modifiers, OwnedMenuItem, TestAppContext, VisualTestContext, Weak
 
 use super::*;
 
+#[gpui::test]
+fn failed_open_releases_admission_before_returning_to_the_quit_caller(cx: &mut TestAppContext) {
+    let display = cx.read(|cx| cx.primary_display().expect("the test display").id());
+    cx.simulate_display_removed(display);
+    let guard = Rc::new(());
+    let held = Rc::downgrade(&guard);
+    let admission = Cell::new(Some(guard));
+
+    let opened = cx.update(|cx| open_with_rollback(cx, &admission));
+
+    assert!(matches!(opened, Err(OpenError::Display)));
+    assert!(
+        held.upgrade().is_none(),
+        "the failure hands back no live lock"
+    );
+    assert!(cx.windows().is_empty());
+}
+
 fn mount(cx: &mut TestAppContext) -> (AnyWindowHandle, WeakEntity<LocalDock>) {
     let window = cx.update(|cx| {
         gpui_kit::init(cx);

@@ -1,5 +1,7 @@
 //! The bounded shell surface for a platform without an admitted brain link.
 
+use std::{cell::Cell, process::ExitCode, rc::Rc};
+
 use gpui_kit::component::{ActiveTheme as _, button::Button};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement,
@@ -8,11 +10,43 @@ use gpui_kit::{
     WindowOptions, div, px, size,
 };
 use kumochi_protocol::constants::DISPLAY_NAME;
+use kumochi_shell_core::instance::InstanceLock;
 use kumochi_shell_core::link::{self, LinkEvent, LinkHandle, LinkState};
 
 use crate::strings::{Strings, Text};
 
 gpui_kit::actions!(local_dock, [QuitLocalDock]);
+
+/// Runs the disconnected dock with the already admitted session lock.
+/// Records and rolls back an open failure before requesting platform termination.
+/// The returned status applies only to backends whose event loop returns.
+pub fn run(instance: InstanceLock, initialize: impl FnOnce(&mut App) + 'static) -> ExitCode {
+    let admission = Rc::new(Cell::new(Some(instance)));
+    let startup = Rc::clone(&admission);
+    gpui_kit::application()
+        .with_assets(crate::assets::Assets)
+        .run(move |cx| {
+            initialize(cx);
+            if open_with_rollback(cx, &startup).is_err() {
+                cx.quit();
+            }
+        });
+    if admission.take().is_some() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn open_with_rollback<G>(
+    cx: &mut App,
+    admission: &Cell<Option<G>>,
+) -> Result<AnyWindowHandle, OpenError> {
+    open(cx).inspect_err(|error| {
+        tracing::error!(%error, "can't open the disconnected dock");
+        drop(admission.take());
+    })
+}
 
 /// Why the ordinary disconnected window could not be opened.
 #[derive(Debug, thiserror::Error)]
