@@ -109,9 +109,10 @@ fn legacy(
 /// The legacy profile in the present folder `data`, read under its existing session lock, which
 /// stays held through every read. Nothing is opened without `writers`, or unless the folder at
 /// `data` is the admitted one, `held`, which it must still be after the last read. Matching only
-/// with the current history schema and an authority and committed host that both match. Anything
-/// else is unverified: an absent authority or host too, since the folder is there, and an older
-/// known schema, whose migration waits on the owner's call on legacy schema updates.
+/// with the current history schema and an authority and committed host that both match: schema
+/// evidence, not the history's invariants, which runtime admission revalidates before use.
+/// Anything else is unverified: an absent authority or host too, since the folder is there, and an
+/// older known schema, whose migration waits on the owner's call on legacy schema updates.
 fn intact(
     data: &Path,
     held: FolderId,

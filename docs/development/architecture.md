@@ -217,6 +217,19 @@ known schema needs a migration, so it reads unverified until the owner decides h
 updates are explained. A roaming folder without local data and any failed lookup are unverified
 too.
 
+The lookup carries the identity of the held product folder (volume and file ID on Windows, device
+and inode on macOS), and the folder at that path must have it before the lock is taken and again
+after the last read, so the lock and both databases are the admitted folder's. Nothing in a
+present folder is read without `WritersExcluded`, evidence that history writers older than the
+session lock, which don't take it, are excluded from outside. Nothing can make that token yet
+(owner decision 4), so a present legacy folder reads unverified unread. On macOS the guard keeps
+the Support anchor it locks, and the root and legacy lookups open their children relative to it
+(`Support::child`), so a renamed path can't leave the guard on one folder and the lookup on
+another. On Windows the guard is a named mutex, so each probe holds its own anchor chain. Legacy
+Matching is schema-level evidence: the current history schema and a validated authority and host.
+It proves no history invariant, such as the `approval_mark` row, so runtime admission (cut 10)
+revalidates those before use.
+
 On Windows `kumochi_storage::hold_product_folder(anchor)` looks up only this edition's product
 folder (`DATA_DIR`) and `profile_root(anchor)` only its root slot, both through one private lookup
 under a held, trusted anchor folder that creates nothing. The name is opened relative to the held

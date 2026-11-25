@@ -575,6 +575,10 @@ establish.
   object, a schema ahead of its version, files the opener refuses, a missing or linked folder, a
   store missing beside something it left, and any failed read.
 
+The profile probe's legacy Matching builds on `KnownSchema(CURRENT_HISTORY)` and a validated
+authority and host, so it is schema-level evidence too. Runtime admission (cut 10) must revalidate
+the history's invariants before using the store.
+
 Tests cover every known version, a store the brain itself opened, a `VACUUM INTO` copy like a
 purge's, each refused change, each leftover, a missing folder, a linked folder whether empty
 or holding a known store, and a folder renamed or replaced between the two identity reads, and
