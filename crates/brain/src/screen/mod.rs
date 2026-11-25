@@ -29,8 +29,10 @@ mod wire;
 
 pub use crate::supervise::{Generation, WorkerLost};
 pub use actor::serve;
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) use capture::Capturer;
 #[cfg(windows)]
-pub(crate) use capture::{Acquired, Capturer, Deadline};
+pub(crate) use capture::{Acquired, Deadline};
 pub(crate) use capture::{Failure, Target};
 pub use client::HoldClient;
 pub(crate) use client::{CaptureDeadline, Closed, MAX_TTL};

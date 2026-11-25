@@ -562,14 +562,13 @@ fn trigger(
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn open() -> Result<Box<dyn Capturer>, Failure> {
     crate::platform::screen_capturer()
 }
 
-/// No platform but Windows captures yet, so every capture is refused as `Unsupported`.
-// shortcut: macOS will open ScreenCaptureKit here.
-#[cfg(not(windows))]
+/// No other platform captures, so every capture is refused as `Unsupported`.
+#[cfg(not(any(windows, target_os = "macos")))]
 fn open() -> Result<Box<dyn Capturer>, Failure> {
     Err(Refusal::Unsupported.into())
 }

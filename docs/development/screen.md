@@ -165,7 +165,7 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   Windows uses QPC ticks. macOS uses continuous nanoseconds
   (`clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`), so native and Rosetta processes do not exchange
   architecture-dependent ticks. A suspend spends the grant. This supports only the ticket clock;
-  macOS still refuses native capture and doesn't read shell input age. Verify suspend and resume
+  macOS doesn't capture yet and doesn't read shell input age. Verify suspend and resume
   before enabling capture. The producer passes the original stamp and its reader with the local
   bound to both adapter methods. Windows uses the conservative projection on its QPC-backed
   `Instant` for the start and wait checks, without changing the draw/exclusion clock. Each retry
@@ -198,8 +198,13 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   answers `Fault` and exits, so no capture can keep running. A lost device
   (`DXGI_ERROR_DEVICE_REMOVED`, `_RESET` or `_HUNG`) retires the worker the same way, so the next
   ticket gets a fresh device. Foreign failures are HRESULT codes.
-- **macOS.** `SCScreenshotManager` with `desktopIndependentWindow`, not built yet; other platforms
-  refuse every capture as `Unsupported`.
+- **macOS.** The capturer opens on macOS 14 and later, after capability checks only: the OS version
+  first, then ScreenCaptureKit, loaded at runtime with a handle kept for the process's life, then
+  the classes and selectors its captures use. Anything missing refuses `Unsupported`. The brain
+  doesn't link ScreenCaptureKit, so it still launches on older systems. Opening reads no grant and
+  captures nothing: display and window capture (`SCScreenshotManager`) aren't built yet, so its
+  captures refuse with the trait's defaults, and the Mac worker route stays unavailable. Other
+  platforms refuse every capture as `Unsupported`.
 
 ```mermaid
 sequenceDiagram
