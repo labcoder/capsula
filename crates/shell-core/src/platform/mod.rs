@@ -1,6 +1,14 @@
 //! The operating system behind the models: the plain host and input types, and the calls the
 //! models make themselves (folders, the credential store, the microphone). Windows only for now.
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the Mac connection starts its brain child from I1e-2"
+    )
+)]
+mod child;
 pub mod clipboard;
 mod connect;
 pub mod credential;
@@ -28,6 +36,8 @@ pub(crate) mod connect_test {
     pub(crate) use super::connect::{LinkError, connect_with, handshake_pair, welcome};
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) use child::SpawnWord;
 pub(crate) use connect::{Connection, HANDSHAKE_TIMEOUT, RETRY_DELAY, connect_brain};
 #[cfg(windows)]
 #[cfg(debug_assertions)]

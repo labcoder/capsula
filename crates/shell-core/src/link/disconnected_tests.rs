@@ -34,6 +34,16 @@ fn unavailable_transport_reports_failed_without_retry_or_quit_work() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn quit_refuses_every_later_brain_child_claim() {
+    let link = LinkHandle::detached();
+    assert!(link.begin_quit());
+    assert!(!link.shared.spawn.claim());
+    assert!(!link.begin_quit());
+    assert!(!link.shared.spawn.claim());
+}
+
+#[test]
 fn unavailable_transport_does_not_hide_an_undelivered_initial_state() {
     let (events, states) = bounded(1);
     events
