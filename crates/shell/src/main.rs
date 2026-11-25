@@ -80,6 +80,7 @@ fn main() -> ExitCode {
     tracing::info!(
         build = kumochi_protocol::BUILD_ID,
         identity = constants::DATA_DIR,
+        edition = constants::EDITION,
         "shell started"
     );
     match frontend {

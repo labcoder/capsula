@@ -105,6 +105,18 @@ impl ProductIdentity {
     };
 }
 
+/// What only a Gate-identity build of the shell and the brain carries, in the line each logs at
+/// start, so a gate tool can tell its images from any other build, which compiles the Gate names
+/// for comparison too.
+pub const GATE_EDITION: &str = "kumochi-edition-gate";
+
+/// The edition this build logs at start: [`GATE_EDITION`] only in a Gate-identity build.
+pub const EDITION: &str = if cfg!(feature = "gate-identity") {
+    GATE_EDITION
+} else {
+    "kumochi-edition-other"
+};
+
 /// The log folder, in the [`DATA_DIR`] folder in the local application data root.
 pub const LOGS_DIR: &str = "logs";
 
@@ -368,9 +380,14 @@ mod identity_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        BRAIN_LOG, CREDENTIAL_GENERATION_SEGMENT, CREDENTIAL_SERVICE, SCREEN_LOG, SHELL_LOG,
-        SPEECH_LOG, account_targets, generation_target,
+        BRAIN_LOG, CREDENTIAL_GENERATION_SEGMENT, CREDENTIAL_SERVICE, EDITION, GATE_EDITION,
+        SCREEN_LOG, SHELL_LOG, SPEECH_LOG, account_targets, generation_target,
     };
+
+    #[test]
+    fn only_a_gate_identity_build_logs_the_gate_edition() {
+        assert_eq!(EDITION == GATE_EDITION, cfg!(feature = "gate-identity"));
+    }
 
     #[test]
     fn github_registration_matches_the_build_profile() {

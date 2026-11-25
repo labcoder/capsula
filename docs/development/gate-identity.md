@@ -51,9 +51,11 @@ fixture scripts.
 Without `--prebuilt`, a tool builds its own images in `<target>/gate/{debug,release}`.
 `bench idle --baseline <checkout>` builds older Gate source in `<target>/gate-baseline`.
 Every image a gate tool launches, built or prebuilt, must carry its startup marker, the Gate
-instance service and both override names, `KUMOCHI_GATE_LOCALAPPDATA` and `KUMOCHI_GATE_APPDATA`,
-and never the Release service name. A release image mustn't carry the Dev service name either; a
-debug image does, because every debug build links the Dev identity.
+edition and both override names, `KUMOCHI_GATE_LOCALAPPDATA` and `KUMOCHI_GATE_APPDATA`. The
+edition, `kumochi-edition-gate`, is a field of the line the shell and the brain log at start, and
+only a Gate-identity build carries it: every build compiles the Gate service name for comparison,
+so that name can't tell a Gate image from an ordinary debug one. An image that names the Release
+service is refused too.
 An image from before the override would follow `LOCALAPPDATA`, which the tools no longer set, so
 it is refused before launch: a `--baseline` checkout can't predate the override. `slice2-gate`
 checks its brain this way, and its xtask copy by the gate identity it refuses to run without.
@@ -82,8 +84,8 @@ brain pins in that order, not hashes taken from a different build for this invoc
 The release Gate driver verifies both sibling executables before admitting the run. It then
 copies them into the run's own folder, verifies the copies, and launches only those copies
 with the same job and isolated app data as the built forms. At both points it checks the
-SHA-256 pins and looks for each app's startup marker, the Gate instance service and both
-override names in the image, rejecting the Release and Dev service names. Those strings catch accidental mix-ups,
+SHA-256 pins and looks for each app's startup marker, the Gate edition and both override names
+in the image, rejecting the Release service name. Those strings catch accidental mix-ups,
 but don't prove the build profile or attest an arbitrary binary. A debug Gate image may pass;
 use the recorded hashes from the intended release build. Missing, changed or mismatched images
 fail without a fallback build or launch. The receipt records `build_seconds=0.0`.
