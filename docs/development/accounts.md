@@ -512,7 +512,308 @@ recorded unknown instead, so the next sign-out's notice is unconfirmed.
   Host, vault-open and revocation prerequisites still block sign-in on their own paths.
 - A refused registration or pending-flag write ends the attempt and offers a new sign-in, since
   Retry would have nothing to rerun.
-- A Busy session lock at startup is retried 5 times, 250 ms apart [guess]; after that, on eacOn macOS, `platform::macos::credential::MacCredentialStore` is dormant: only tests construct it,
+- A Busy session lock at startup is retried 5 times, 250 ms apart [guess]; after that, on each
+  op and each connection. Only a vault that takes its own lock, such as a dev diagnostic's,
+  can meet Busy: the brain's credentials thread uses the lock the brain already holds.
+- A list entry stamped on a clock before 1970 gets `added_at = u64::MAX`, so age-out never
+  evicts it early.
+
+**Revocation outside a sign-out.** A pass revokes every listed entry, the account's first, then
+rewrites the list without the ones an empty 200 confirmed. Passes run at startup, when an entry
+is added and on `Retry`, never on a timer, one at a time: a request during a pass becomes one more
+pass after it. None runs while the lock is Busy or a sign-out is pending. When the list empties,
+the empty list is saved, then removed, and `sweep` clears. A pass that a sign-out overtook only
+saves the shorter list: the sign-out's Delete removes it. Each save and removal is one authority
+commit, so a crash or refusal at any step leaves the list as it was or as it became, and the next
+start or Retry finishes the job.
+
+`oauth::revoke` discovers `revocation_endpoint` (the document's issuer must match, and the URL
+passes the same checks as `jwks_uri`), then POSTs `token`, `token_type_hint=refresh_token` and
+`client_id`. Only an empty 200 confirms. A transport failure or a `5xx` is tried three times in
+all, 0.5 s then 1 s apart by default. The whole pass keeps one deadline, including discovery
+and backoff, set by `[tuning.oauth] revoke_s` (10 s by default). A discovery
+document that fails a check sends no token anywhere.
+
+**Age-out.** An entry leaves the list unrevoked once `now ≥ added_at + 32 days`: the documented
+30-day refresh-token lifetime plus a 2-day margin [local policy]. It's checked at startup, and
+when a full list would refuse a sign-in, so a full list frees what expired since, except entries
+stamped `u64::MAX`, which never age out. While the brain runs, wall time moving more than an hour
+[local policy] further than monotonic time is a clock jump: age-out waits for the next start. An
+entry is stamped no earlier than the brain's start time plus its monotonic run time, so a clock
+set back while it's listed only delays its age-out.
+
+**Refresh** (`account::refresh`, design §3 rule 3). The bearer is handed out only through
+`Accounts::access`, which answers on a oneshot. Each call checks the wall clock: a set with no more
+time left than `[tuning.tokens] chatgpt_refresh_lead_s` (default 60 s, range 30–60 s), or with no
+wall time, is refreshed first; there's no timer. The refresh is one flight on the token lane,
+from the request until the rotated set is committed and its identity token verified. Callers
+that arrive meanwhile join it and get the same answer. The request and the identity check run
+as tokio tasks the brain never aborts, so a caller
+that drops its receiver ends only its own wait. Each is supervised: one that ends without
+reporting, as a panic does in a debug build (a release build aborts on panic), reports a
+content-free failure instead. A refresh's outcome is then unknown, so the session ends and its
+token stays marked; a check's set stays pending for the next use.
+
+```mermaid
+sequenceDiagram
+    participant C as caller
+    participant M as account machine
+    participant V as credentials thread
+    participant P as provider
+    C->>M: access()
+    M->>V: write request_pending
+    M->>V: mark the refresh token sent
+    M->>P: refresh_token grant (30 s by default, shortened by tuning.oauth refresh_s)
+    P-->>M: rotated set
+    M->>V: save it unmarked, pending_identity_validation set, request_pending cleared
+    M->>P: discovery and JWKS, verify against the saved subject
+    P-->>M: verified
+    M->>V: save it, pending_identity_validation cleared
+    M-->>C: bearer, or one renewal first if it's due by now
+```
+
+- The refresh token is marked as sent (`refresh_sent`, in the account record) after
+  `request_pending` is written and before the request goes out. The successor's save replaces the
+  whole set, so the mark clears in the same commit that makes the successor durable. A typed
+  refusal, a local error or a connection that never opened (`HttpError::Connect`, which includes
+  a connection or TLS handshake past its 15 s deadline, though reqwest also calls that a timeout) issued nothing:
+  the mark is cleared and the token may go again. Any other ending may have consumed it, and so
+  may a refresh a start finds still marked: the session ends with `SessionEnded` and Sign in, and
+  the token stays for sign-out to revoke but is never sent again. An answer that names a
+  successor Kumochi can't keep lists that successor and ends the session the same way. No reuse
+  grace for a rotated token is documented, so a new sign-in is the safe recovery.
+- The rotated set is saved before any further network work. A refused lane save holds its set
+  in memory and tells waiting callers `CredentialsUnavailable`. The next `access` saves any held
+  set again first, and never asks for another token for a rotated set that's held or being saved,
+  Retry's included. A committed rotated set moves the generation, so a check or a refresh still
+  meant for the set it replaced is dropped, and a check never verifies a set it didn't check.
+- The identity check's save and an ended session's save run off the lane. They never clear the
+  lane's pending flag, and one queued for a generation that has since moved is dropped, so it
+  can't overwrite a newer sign-in. A check's flight lasts until its save ends, after a Retry with
+  no caller too, so `access` joins that save instead of checking again. The check's save is
+  built when it's dispatched, from the account as it is then with only the verification added,
+  so it can never undo a sent mark saved after the check began.
+- `pending_identity_validation` is durable, so a set left pending by a crash is checked before
+  its first use after the restart. A failed check leaves it pending and blocks access; the next
+  `access` checks again without a second refresh, and joins a check already out. A refresh that
+  leaves out the identity token or the refresh token keeps the saved one and isn't pending.
+- Once a verified or held set is saved, its expiry is checked again against the wall time the save
+  ended. A bearer that's due is renewed first, once per flight. So is one a provider refused:
+  a model round or catalog read that gets a 401 sends `Refused { generation }` with the
+  generation its bearer came from, and while that's still the account's set, the next `access`
+  renews it however long it has left. A good renewal lets the user's Retry through; a refused one
+  takes the usual Sign in again path. A renewal that is already expired
+  (a zero lifetime, say) is neither handed out nor renewed again: callers get `SignInFailed` with
+  Retry, and the newest refresh token stays saved for the next `access`.
+- `verify_refreshed` binds the token to the subject this account already verified, with no
+  nonce and no expiry check. That's a local continuity policy and never applies to a sign-in.
+  Another subject or an invalid token, like a pending set with nothing to check, ends the session
+  and leaves the set in `chatgpt`, still pending so it's never used, with nothing written.
+  Network, status, discovery, bounds and clock failures, and a key still missing after its
+  refetch, leave the set pending, since a captive
+  portal's page can fail discovery's parse or a document's size bound. The rejected set's token
+  leaves `chatgpt` only through the next sign-in's Commit or the sign-out's Prepare, which own it
+  first; a restart checks the set again and rejects it again, writing nothing.
+- Ending a session (a `SignInAgain` code or a rejected set) keeps the registration and display
+  email, answers `SessionEnded` with Sign in, and moves the generation. The view is
+  `SignedIn { recovery: SignInAgain }` until the next sign-in or sign-out. After a `SignInAgain`
+  code the tokens are gone, so that lasts in this process only: after a restart it's `SignedOut`.
+  A rejected set stays pending and is rejected again, and a token kept because it may be consumed
+  keeps its mark, so `SignInAgain` outlasts a restart.
+- A result that arrives under an old generation never becomes the account: during a sign-out its
+  rotated token replaces the listed `Account` entry, so the successor is what gets revoked. One
+  that didn't rotate leaves the old token in place, so nothing is unknown.
+- An unusable answer that names a refresh token lists it as an exchange's would be, when an
+  exchange slot is free and its entry fits, and that list save ends its request; otherwise its
+  outcome is unknown. Either way the session ends, since the token it replaced was consumed, and
+  that token stays in `chatgpt`, marked as sent, so it's never sent again.
+- A refresh queued behind a sign-out or a sign-in is never sent, and a check that lands after a
+  sign-out saves nothing.
+
+| Provider answer | Recovery | Shown |
+| --- | --- | --- |
+| `invalid_grant`, `invalid_refresh_token`, `token_expired`, `refresh_token_expired`, `refresh_token_invalidated`, `refresh_token_reused` on a 4xx | sign in again | `SessionEnded`, Sign in |
+| `subscription_sharing_usage_unavailable`, `subscription_sharing_user_unavailable` on a 4xx, any other code on a 429 | retry later | `AccountOffline`, Retry |
+| `subscription_sharing_user_not_eligible` on a 4xx | unavailable | `PlanUnavailable` |
+| `invalid_client`, `chatpass_v2_scope_not_authorized`, `chatpass_v2_invalid_authorization_context` on a 4xx | fix the request | `AccountMisconfigured` |
+| any other code on a 4xx other than 429 | unknown | `outcome_unknown` set, `RenewalUnconfirmed`, Sign in |
+| connection never opened | nothing sent | `AccountOffline`, Retry |
+| timeout, transport failure, a panicked refresh task | unknown | `outcome_unknown` set, `RenewalUnconfirmed`, Sign in |
+| any 5xx, typed or not; a malformed, oversized or untyped 4xx | unknown | `outcome_unknown` set, `RenewalUnconfirmed`, Sign in |
+
+The refresh parser reads an OAuth code only from a 4xx, so every 5xx is an unknown outcome here,
+even though a plan request's 5xx asks for a retry. Only the first row deletes credentials: the
+registration-only save happens only when the provider names the session as ended. The unknown
+rows keep the set exactly as it was, marked as sent, so it's never sent again and stays for a
+sign-in's Commit or the sign-out to revoke; an unlisted code isn't evidence that nothing was
+issued. `RenewalUnconfirmed` ends the session like `SessionEnded`, but says the renewal may have
+gone through unconfirmed rather than that ChatGPT ended it. The account keeps that reason with
+the generation it ended, so a run's failure and the next task's refusal say the same, and it
+sends the shell that error once before the view, since the view alone only says to sign in
+again and a catalog read that asked may be cancelled; after a
+restart, a set still marked as sent reads as `RenewalUnconfirmed`. A listed refusal or a
+connection that never opened issued nothing, so it clears the pending flag without setting
+`outcome_unknown`, and clears the sent mark.
+
+**Sign-out** (`account::sign_out`, design §3 rule 5). `SignOut` with a signed-in account stops use
+at once: the attempt moves, the listener closes, the account leaves memory, and the view is
+`SigningOut { cleanup: Running, revocation_unconfirmed: true }`. A save the current attempt already
+dispatched still lands behind that fence: no later op replaces the sign-out, the view stays
+`SigningOut`, and Prepare adopts what it saved. One marker write then promotes the sign-out
+(`sign_out: Keep/Revoking`, `sweep`, `notice`) before any token-bearing write or delete. If that's
+refused, the view is `NotDurable` with `SignOutNotDurable` and Retry, and use stays fenced in this
+process only: a restart loads the account again. Every later step is safe to repeat, and a restart
+or Retry enters at the first step of the persisted phase:
+
+1. **Settle.** The lane's outstanding request runs to its end, and a running revocation pass ends
+   first. A queued code is never sent. A stale set gets its own list entry through the lane's own
+   save, an ambiguous ending sets `outcome_unknown`, and a refused save holds the set (`Refused`)
+   until Retry; after a crash its `request_pending` keeps the warning.
+2. **Prepare.** `chatgpt`'s refresh token becomes the `Account` entry unless one is listed (that
+   token or its successor) or the same client and token are, so a replay never duplicates or
+   overwrites it. A record whose data is damaged persists `outcome_unknown` first; a damaged list
+   isn't rewritten, but the account token is still revoked. So is a list the account token can
+   never fit (`Bounds`): `outcome_unknown` is persisted first, the list stays as it was, and the
+   token is revoked from memory; if that marker write is refused, the step is `Refused`. A refused read decides nothing: the step is `Refused` and Retry reruns it.
+3. **Revoke.** One run over the list, inside the tunable setup and network budget (10 s by default).
+4. **Checkpoint.** The confirmed entries leave the list (a refused rewrite leaves them listed, which
+   counts as unconfirmed), then one marker write enters `Deleting` and decides the notice: clear
+   only when the saved list is empty and `request_pending` and `outcome_unknown` are clear. With
+   `outcome_unknown` persisted, an absent list isn't checked against the account, so a damaged
+   account still reaches Delete. If it's refused, the phase stays `Revoking` and nothing is deleted.
+5. **Delete**, driven by the marker alone. Keep rewrites a readable account to its registration, a
+   fresh generation. An account with no record, or with damaged data, is removed, as Erase does;
+   a refused read removes nothing: the step is `Refused` and Retry reruns it. Then `revoke` is
+   removed. Each removal is one authority commit; the removed names are swept after it, and a
+   name the store keeps waits for the next start's sweep.
+6. **Finish.** Only once the authority holds neither record current (Keep: only a registration),
+   the marker becomes notice-only or empty. Use stays fenced until the vault is read again, so the next sign-in
+   reuses the kept registration; then the view becomes `SignedOut { revocation_unconfirmed: notice }`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Promote: SignOut
+    Promote --> Promote: refused, NotDurable; Retry
+    Promote --> Settle: marker Revoking, notice set
+    state "phase Revoking (a start resumes at Settle)" as Revoking {
+        Settle --> Prepare: lane free, no pass running
+        Prepare --> Revoke: entries listed
+        Prepare --> Checkpoint: nothing listed
+        Revoke --> Checkpoint: confirmed entries
+        Prepare --> Settle: refused; Retry or restart
+        Checkpoint --> Settle: refused; Retry or restart
+    }
+    Checkpoint --> Delete: marker Deleting, notice decided
+    state "phase Deleting (a start resumes at Delete)" as Deleting {
+        Delete --> Finish: every name gone
+        Delete --> Delete: refused; Retry or restart
+        Finish --> Delete: refused; Retry or restart
+    }
+    Finish --> [*]: SignedOut, notice-only marker or none
+```
+
+While signing out, `SignIn`, `EnablePlan`, `CancelSignIn` and `SignOut` start nothing and are
+answered with the view; `Retry` reruns a refused step. A live sign-out keeps the registration
+(`Keep`), unless the catalog found the account's plan unavailable: then it erases it (`Erase`,
+pick 2). `Erase` also comes from a persisted marker, a damaged one included (it reads as
+`Erase`/`Revoking`). A refused marker read at startup
+decides nothing: use stays fenced as `SigningOut { cleanup: Refused }`, and so does a lock error on
+the load after Finish; Retry or the next start reads it again and resumes the phase it finds, or finds no sign-out. Fixtures crash after, and refuse, each of the store mutations a
+whole sign-out makes, for Keep and Erase.
+
+## Model catalog
+
+`connections::catalog::read` sends one bearer GET to `/v1/models`. The response must be an
+object with one `models` array of objects; positional forms fail the read. Listable rows have
+`visibility: "list"`, a valid `ModelSlug`, and a one-line `ModelName` (1–80 characters).
+A sendable row must also advertise at least one exact known `supported_reasoning_levels[].effort`
+value: `low`, `medium`, `high`, `xhigh`, or `max`. Other shapes and names confer no
+support, and the provider's default field does not add support. The first sendable row for
+each slug supplies its effort and image capabilities; at most 200 sendable rows go to the shell,
+in server order. Listable slugs without known support don't use those slots. The account retains
+up to 200 distinct slugs outside the final offer, including supported rows beyond the offer cap.
+They're for default repair only and authorize neither a request nor image capture. If a
+further distinct slug doesn't fit, the account can't prove a saved choice disappeared, so it
+doesn't repair that choice.
+An admitted row takes images only if its own `input_modalities` array names `"image"`. Those
+slugs go to the coordinator with the account's availability, the only fact a `ChatGPT` send's
+picture is granted on; no read, or a cleared list, lists none.
+The catalog's [capture provenance](../../crates/brain/src/connections/catalog/README.md)
+describes the recorded shape behind both decoders.
+
+`runtime::Accounts` owns the catalog, in memory only. It reads when the account becomes usable
+(`SignedIn`, plan `Enabled`, no recovery but Retry), and again on `Retry` or a new connection
+while no read has succeeded. A queued audio re-pair for a Talk-back change only replays the
+ChatGPT account view and the cached catalog or its last failure. It doesn't reload a Busy vault
+or start discovery, so the user can still Retry without the audio switch doing it for them.
+One read runs at a time. The catalog has an epoch that moves when the
+account stops being usable: the read out is cancelled, whether it waits for the bearer, builds
+its client or awaits the answer, and the list is cleared; the shell then hears an empty
+`Models`. Closing cancels it too. Cancelling drops only its bearer wait, never a refresh that
+wait started. It's keyed by that epoch rather than the machine's
+generation, which moves on every rotation and would clear the list hourly.
+
+| Answer | Shown |
+| --- | --- |
+| 200 with sendable models, or a genuinely empty/hidden list | `Models` on the data pipe, once per change and per connection |
+| 200 with listable models but no known support, 200 that isn't a model list, a failed request, 401, 429, 5xx whatever its code | `AccountOffline`, Retry |
+| 403 `subscription_sharing_user_not_eligible`, and only that | `PlanUnavailable`; the account shows `PlanState::Unavailable` |
+| No native TLS adapter | `AccountUnsupported` carries the local account view on every snapshot, including reconnect. No network Retry or Sign In; local sign-out and cleanup remain available. |
+| `subscription_sharing_user_not_eligible` on another 4xx | `AccountMisconfigured` |
+| other codes | as the refresh table above maps them |
+
+`Unavailable` lasts in memory until the account moves, and that account's sign-out erases the
+registration. A 401 offers Retry and marks the bearer's set as due, so the Retry renews it first.
+
+A read that finds `default_model` unset or proves its choice is no longer listed sets it as the
+brain's own settings change: `gpt-6-luna` at `Low` if it offers Low, otherwise the first sendable
+model at its lowest advertised effort. A listed choice is never overwritten, even if it can't send, and
+an empty list changes nothing. Explicit non-ChatGPT or invalid saved intent is never repaired
+from this catalog. Repairs recompute at the serialized settings write
+boundary rather than applying the choice captured when the catalog arrived
+(see [settings](settings.md#config-keys)).
+
+Claude Code has a half of its own. While `ChatGPT` has no account at all (`AccountView::SignedOut`)
+and a Claude Code launch would be admitted, an unset `default_model`, or a Claude Code one the
+reviewed row doesn't list, becomes the row's own default, `haiku` at `Low`; it's queued after
+every Claude Code report. A `ChatGPT` account whose session ended, or that is signing in or out,
+keeps `ChatGPT`'s half, so a session that lapses for a while never moves anyone to Claude Code. A
+queued repair whose recompute at the write would land on the other connection's half writes
+nothing.
+
+## Credential storage
+
+Store access must be serialized: Rez's clean-store reproduction with two and four concurrent
+workers still missed cross-thread reads after successful writes to disjoint names, even with
+a barrier before reads and no deletes until all reads finished. A successful parallel delete
+also left an entry, so tests verify cleanup by exact name. Production reads and writes all run on the
+account system's one credentials thread, through the vault's one store handle. The
+[credential authority](#credential-authority) decides what is current, so the store's answers
+never change it: a save writes fresh names and reads them back within its settle budget, a read
+of a current name that comes back absent is `Unsettled`, and a delete is only cleanup. Each
+cleanup pass covers at most 16 removed generations; the rest, and any whose names come back,
+stay owed to later passes and opens, so a sign-out's names may outlive the session that removed
+them. Whether a concurrent write from another process (the shell, another app) causes the same
+misses is untested. The shell's `keyring` read of the instance capability needs no retry of its
+own: a failed read fails that handshake, and the link tries the whole handshake again every
+50 ms for 10 s. A native Credential Manager call that never returns holds the credentials thread, so later
+credential work and shutdown wait behind it. Removal stays safe, because jobs run in order and
+the runtime generation guard drops stale worker replies, but nothing bounds that wait.
+`Worker::system` is the only way outside tests to
+reach the real store: `Vault::open` is private to `connections`, and `WindowsCredentialStore`
+to the crate.
+
+The brain's `platform::credential::CredentialStore` reads, writes and deletes one generic
+credential by exact target name. Windows uses `CredWriteW` with
+`CRED_PERSIST_LOCAL_MACHINE`: entries survive process exit and sign-in on this machine,
+but don't roam to another PC. `keyring` 3.6.3, the version used here, hard-codes enterprise
+persistence; it remains on the separate instance-capability path, unchanged. The newer
+keyring-core 1.x stack's `windows-native-keyring-store` 1.1.0 supports local persistence.
+We chose not to add that second keyring stack: our store is small and reviewed, returns
+zeroizing bytes, and its guard wipes the validated native read blob and frees the allocation
+on every exit, including panic unwinding. `CredentialStore` is the seam for a macOS Keychain store.
+
+On macOS, `platform::macos::credential::MacCredentialStore` is dormant: only tests construct it,
 and the native store stays `Unsupported`. It uses the data protection keychain, never the
 file-based login keychain: one generic password per exact target, as the account under
 `CREDENTIAL_SERVICE`, not synchronizable, readable only while unlocked on this device. Every query
@@ -527,4 +828,238 @@ still make its own copies, and a read's returned data can't be wiped). It keeps 
 scratch name: a missing read came back not-found, a delete returned `errSecMissingEntitlement`
 (-34018), and nothing was written; signed CRUD, locked-store and UI behavior are Apple's documented
 expectations, not measured. The native contract test is ignored until a signed test host exists.
-h
+`platform::credential::conformance` holds the exact-name contract both stores' tests run.
+
+Credential Manager protects entries per Windows user, not per process. Any process running
+as the same Windows user can read these entries. The session lock coordinates cooperating
+brain instances; it does not provide isolation from other processes running as that user.
+
+Account targets belong under `CREDENTIAL_SERVICE` (`Kumochi Dev` in debug builds), never
+`INSTANCE_SERVICE`. A caller supplies the full target; the store doesn't rewrite it or
+enumerate credentials. Secret bytes are held as `Secret<Zeroizing<Vec<u8>>>`; temporary
+copies are bounded and wiped, and debug/error output contains no credential data.
+
+The credentials thread is the production caller. Callers must run these synchronous operations
+off the core loop and retain the vault, including its session lock, until all blocking work
+ends, even if an async waiter is cancelled or shutdown begins. The vault owns the guard until
+it is dropped.
+
+`platform::SessionLock` guards the empty `%LOCALAPPDATA%\<DATA_DIR>\session.lock` using
+`File::try_lock`; only contention returns typed `Busy`, and dropping the guard releases it.
+`platform::session_lock_path()` uses the Dev data folder in debug builds.
+
+The lock is the profile's one writer lock, for the store (`kumochi.db`) and the credential
+authority alike. The brain takes it after its pipes and before it opens the store, and holds it
+for its whole run. The store thread and the credentials thread each keep a reference to that same
+lock: the store thread until its last close and purge cleanup end, past any wait the brain gave up
+on, and the credentials thread by opening its vault under it (`Vault::open_held`) instead of
+taking its own. So a second brain of the same Windows user in
+another session, whose pipes don't collide, stops at the lock before it touches the store. It
+tries to take the lock before it opens or creates the store and, refused, logs only that another
+session is using the profile and exits with code 75. Only brains with this lock are excluded: an earlier build opens
+the store before it takes any lock. The shell starts a brain that doesn't answer once per
+connection attempt (it starts another within the attempt only after a brain of a different build
+exits), and gives up after `CONNECT_TIMEOUT` (10 s), then waits for Retry, so a refused brain is
+never restarted in a loop; it shows the same can't-reach-the-brain
+state as any other failed start. Dev diagnostics run as their own processes and still take
+their own lock, so they're Busy while a brain runs.
+`SessionLock::try_acquire_existing` locks an existing empty session file without creating it or
+its parent, and only contention is Busy. On Windows it opens the leaf itself, never a reparse
+target, sharing read and write so a stock opener still meets the lock, but not delete, so the name
+can't be renamed or deleted while held. Elsewhere a pathname check precedes the open and isn't
+atomic with it. It doesn't validate the parent, and nothing calls it yet.
+
+On builds without a native credential adapter, exact-name reads, writes, and deletes return
+`Unsupported`. The production vault also refuses before opening the session lock or
+`credentials.db`; it never substitutes a file-backed or in-memory credential store. Native
+account startup stops at this refusal before loading other credentials or publishing account
+state. It neither reports damaged data nor offers Retry. Temporary Windows failures keep their
+existing recovery behavior.
+
+Native account assembly also refuses when there's no native trust adapter. At the service
+boundary, a permanent trust refusal fences further requests rather than asking the user to
+repair a trust store. ChatGPT preserves unconfirmed revocation debt and uses the same refusal
+for bearer waiters and reconnecting shells, even if only the revocation pass failed. Anthropic
+uses its permanent refusal in both the connection view and an unserved run, without suggesting
+opening Settings. GitHub replays its scoped refusal before the local GitHub view on each
+connection and keeps local sign-out and cleanup separate from network actions.
+
+## Vault records
+
+`connections::vault::Vault` keeps each record as an authority kind, whose current generation's
+chunks live in Credential Manager under `CREDENTIAL_SERVICE`:
+
+| Record | Layout |
+| --- | --- |
+| `host` | A JSON UUIDv4 URN, generated from `getrandom` when no generation is current. |
+| `chatgpt` | JSON holds `client_id`, optional `subject` and `email`, `plan_enabled`, and optional nested `tokens` (`access_token`, `refresh_token`, optional `id_token`, `scope`, `expires_at`, `pending_identity_validation`, `refresh_sent`, which reads as false when absent). Registration-only JSON contains just `client_id` and `subject`. |
+| `revoke` | JSON holds `entries`, each with its own `client_id`, `refresh_token`, `added_at` Unix seconds, and `origin` (`Account` or `Exchange`). At most four exchanges and one account entry. |
+| sign-out marker | Not in Credential Manager: `control.marker` in credentials.db, token-free compact JSON: `{v:1,sign_out,sweep,request_pending,outcome_unknown,notice}`. `sign_out` is null or `{disposition,phase}`, with `Keep`/`Erase` and `Revoking`/`Deleting`. Unknown fields, versions, enums or malformed data fail closed to an Erase/Revoking marker with uncertainty and notice set. |
+
+A generation holds 1 to 25 chunks of at most 2,000 bytes. Both serialized JSON records are
+capped at 48 KiB, including escaping. Access
+and identity tokens are at most 16 KiB each, refresh tokens 8 KiB, client and subject 256
+bytes, scope 1 KiB, and email 254 bytes. Fields are zeroizing strings; returned records and
+serialized bytes are wrapped in `Secret`, and record Debug implementations redact all data.
+Serialization uses a bounded, preallocated zeroizing buffer, so growing JSON never leaves
+an older secret allocation behind. This doesn't wipe serde_json's internal scratch buffer
+(used for strings with escapes) or discarded parsing-error text. Those temporary library
+allocations remain an explicit limit of the current zeroization boundary.
+
+A save begins a fresh generation, writes its chunks and reads them back, then commits it as
+current in one authority transaction, which also retires the one it replaces. Before that
+commit the old value remains current; afterwards the new one is, and `SaveResult::Committed`
+says so even when the replaced generation's cleanup is still owed. Reads never fall back to an
+older generation.
+An unreadable `chatgpt` record is erased by sign-out's Delete, which fails closed. An unreadable `host` fails closed: sign-in is refused as `CredentialsUnavailable` and Retry
+reads it again, but nothing replaces it, so a damaged host id blocks sign-in until it's fixed. This layer does not silently replace either record.
+
+```mermaid
+flowchart LR
+    A["A current"] --> B["begin B: Pending row"]
+    B --> C["Write and read back B's chunks"]
+    C --> D["activate B, retire A<br/>commit point"]
+    B -. refusal .-> N["NotCommitted<br/>A remains current"]
+    C -. refusal .-> N
+    D -. refusal .-> N
+    D --> E["Sweep removed names,<br/>at most 16 generations a pass"]
+    E --> F["Committed<br/>leftovers stay owed"]
+```
+
+Marker updates merge the current persisted state, not a default or queued snapshot. A late
+sweep cannot undo a sign-out promotion. The checkpoint atomically enters `Deleting`, decides
+the notice, and folds uncertainty flags; repeating it cannot change that decision. Deletes
+are fenced until the checkpoint and never change the marker; `delete_for_sign_out` runs the
+whole Delete step from the marker's disposition. Finish checks that the authority holds
+neither record current (Keep: only a registration) before clearing sign-out state, and never
+waits for Credential Manager to forget a name. A cleared marker is stored as the empty JSON. Notice-only state
+can survive local deletion without retaining tokens. `SignInCommitted` clears an old notice
+only after a new token-bearing account commit, without resetting other control facts.
+The instance capability is untouched.
+
+```mermaid
+stateDiagram-v2
+    state "No pending sign-out" as NoSignOut
+    [*] --> NoSignOut
+    NoSignOut --> Revoking: promote and set notice
+    Revoking --> Revoking: checkpoint refused; no deletes
+    Revoking --> Deleting: checkpoint decides notice
+    Deleting --> Deleting: cleanup or Finish refused
+    Deleting --> NoSignOut: Finish leaves notice-only or absent state
+```
+
+Ordinary `load_account` reads return no usable account while a sign-out is pending.
+`load_for_sign_out` is available only during that pending sign-out, so Prepare can adopt
+the refresh token and Keep-Delete can read the registration. The existing account writer
+allows only registration-only replacements during Keep/Deleting. Outside sign-out, revoke
+deletion requires an empty list, or malformed data with persisted `outcome_unknown`;
+OS read failures remain errors.
+
+This module provides storage operations, not the startup/restart state machine, token lane,
+request handling, age-out policy or revocation networking. Callers must serialize vault work
+and revalidate queued ownership immediately before dispatch. They must supply the checkpoint's
+evidence from durably saved revocation results before deletion, never infer confirmation from
+the later absence of records, and resume sign-out according to its persisted phase.
+
+The real Windows persistence tests run on every `cargo test`, under isolated random names:
+`<CREDENTIAL_SERVICE>-credential-test-<nonce>` and
+`<CREDENTIAL_SERVICE>-vault-test-<nonce>/...`. Cleanup follows assertions and panic unwinding,
+but a terminated process can leave persistent test-only entries containing fixture strings.
+The owner can remove stray entries matching those exact test patterns in Windows Credential
+Manager; there is no automatic enumeration or cleanup of other test runs.
+
+## Credential authority
+
+The dormant ChatGPT repair transaction admits only the exact current registration with a
+missing chunk, a readable existing host, and no outstanding sign-out, sweep, or revocation
+work. The account worker's vault lock spans the generation re-read and admission. An explicit
+claim moves the authority to version 4, fences the old account, and records the attempt
+without replacing the saved registration or writing any credential names. Cancelling that
+exact attempt clears its unspent slot, not the fence; a stale Cancel cannot clear a newer
+attempt. A confirmed attempt can charge one exchange only after the request passes local
+validation and the issued client reads back under a dedicated repair generation. Dropping
+the vault or attempt before the dispatch claim suppresses the call. Cancelling after dispatch
+seals the attempt against promotion, but the same vault and attempt can still drain its receipt.
+If either owner goes away after the claim, the persisted charge is unresolved and stays fenced.
+The drain can settle once: a known refresh handle is escrowed even if the response is
+unusable, while a missing receipt or a refused write keeps the attempt fenced. No retry or
+ordinary account save follows. A still-live, settled receipt can be verified against the
+issued client and nonce using the standard signed-identity verifier. The authority checks
+the same escrow, predecessor, host, and staged successor before it atomically retires the
+predecessor and escrow and records the exact successor/tag as locked Pending. A failed commit
+can count as a binding only if the transaction has ended and the exact binding reads back.
+This transaction does not open history, establish a context, or authorize use. A later history
+cutoff and exact Check are required. The still-locked binding is also the one-shot proof for the
+separate [history cutoff](store.md), written only by the profile's one history writer, which
+the vault is bound to when it is built. Only that cutoff's receipt, matched by the writer's
+fresh Check, marks the context established, recording its tag and thread/run bounds beside the
+successor. Confirming it later has the writer re-read the row, which a history purge carries
+over; a missing, changed or unreadable row leaves the successor locked, and nothing mints a
+replacement cutoff. A refused establishment COMMIT is rolled back, and confirmation reads
+only committed authority state, so a connection still inside a transaction is never established. Only scripted tests
+call this path; ordinary startup still refuses version 4 and there is no browser or runtime ingress.
+
+`connections::authority` (OSC-233) decides which credential bytes count. On Rez, with two
+processes writing, Credential Manager hid a fresh write for 120 ms and brought back a confirmed
+delete 11.5 ms later, so the store alone can't say what is current. The authority is a SQLite
+file, `credentials.db` in the data folder, apart from the history store so no purge touches it.
+It holds no secret bytes. Those stay in Credential Manager under write-once names
+`<CREDENTIAL_SERVICE>/gen/<kind>/<generation>/<index>`, where the generation is a random
+128-bit id in hex. No legacy name starts with that prefix; a test checks all 262 of them.
+
+Per kind (`host`, `chatgpt`, `revoke`, `anthropic`, `github`) it owns a head revision that every change
+bumps, the one Active generation, at most one Pending candidate (unique indexes enforce both),
+and each generation's layout: its chunk count (1 to 64) and byte length (at most 48 KiB). It
+also owns the sign-out marker, which fails closed when malformed. `Authority::open` takes the
+`SessionLock`, so only the session owner opens it. It runs in WAL mode with
+`synchronous = FULL` and refuses a file from a newer build.
+
+Whoever can write credentials.db decides which Credential Manager bytes count. The file holds
+no secret, but a rewrite can make a removed generation current again while its bytes survive,
+or clear a pending sign-out. So the file, its WAL and its folder need the same protection as
+the user's credentials, and removal isn't tamper-proof against anyone who can rewrite them.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: begin, head revision matches
+    Pending --> Active: write read back, activate, head unchanged
+    Pending --> Removed: newer begin, remove, or the next open
+    Active --> Removed: a successor activates, or remove
+    Removed --> Removed: sweep finds a name, or first clean sweep
+    Removed --> Swept: clean sweep in a later open than its last delete
+```
+
+- **Save.** `begin` checks the head revision the caller expects and commits a Pending row for a
+  fresh generation. Then `io::write` writes each name once and reads each back. It waits out
+  absence within one 2 s budget for all the chunks together (`SETTLE`, a guess at about 16 times
+  the 120 ms miss), polling every 10 ms and never sleeping past the deadline. A name first seen
+  at or after the deadline doesn't count. Waiting is safe because a write-once name can only
+  hold those bytes or nothing. Different bytes fail at once as `Unsettled`. Only a full read-back yields `Verified`. `activate` takes that, checks that
+  the candidate is still Pending and that the head hasn't moved, and then, in one transaction,
+  makes it Active, retires its predecessor, bumps the revision and, optionally, sets the marker.
+- **Read.** The Active generation's names are read once, each at its exact length. Other
+  consumers still treat absent and wrong-length chunks alike as `Unsettled`; the saved ChatGPT
+  sign-in distinguishes them. There's no retry and no fallback to another generation, and
+  nothing the store returns changes the authority. A stale or resurrected name can hide a
+  credential, but it can never make one current.
+- **Remove.** `remove` retires every Active and Pending generation of the given kinds and bumps
+  their heads, with the marker in the same transaction. It reads nothing from the store first,
+  so an unsettled store can't block sign-out.
+- **Sweep.** `retired(limit)` lists at most `limit` Removed generations that this open hasn't
+  deleted yet, never-attempted ones first, then the longest waiting, so each pass is bounded,
+  the next pass reaches the ones after, and failures that never clear can't hold back the rest
+  across opens. A failed or returning name waits for the next open, which lists
+  every generation still owed. `io::sweep` deletes each name and reads it once, and `observed` records the result. A
+  generation becomes Swept, and loses its layout, only after a clean sweep in a later open than
+  its last delete. That way, a delete that comes back is caught by the next open's sweep.
+
+Crash recovery rests on SQLite commits alone. `begin` commits its row before the first store
+write, so no generation name exists without a row. A crash before `activate` leaves a Pending
+row. The next `open` retires every Pending row, so a candidate from an earlier process is never
+activated, and its names are swept like any other. `activate` and `remove` each commit
+everything in one transaction or nothing. The test fake store can be write-once, and it can roll
+back or resurrect names, so those cases run offline.
+
+The vault reads and writes every record through the authority. It runs one sweep pass of 16
+generations (`SWEEP`) when it opens and after each commit or removal. Generations past a
+pass's 16, and any whose names come back, stay owed to later passes and opens.
