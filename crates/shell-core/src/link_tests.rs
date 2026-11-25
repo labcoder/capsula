@@ -10,13 +10,31 @@ use kumochi_protocol::message::{
 };
 
 use super::fixture::*;
-use super::{Attendance, Connection, Link, LinkEvent, LinkHandle, Session, Shared, start, welcome};
-use crate::platform::PipeClient;
+use super::{Attendance, Link, LinkEvent, LinkHandle, Session, Shared, start};
+use crate::platform::connect_test::{LinkError, connect_with, handshake_pair, welcome};
+use crate::platform::{Connection, HANDSHAKE_TIMEOUT, PipeClient, RETRY_DELAY};
 use crate::runs::{Refused, Runs, Shown};
 use crate::threads::Threads;
 use kumochi_protocol::message::{
     EventId, PageEvent, PageEventKind, PageOf, ThreadCursor, ThreadKind, ThreadRow,
 };
+
+impl Link {
+    fn connect_with(
+        &self,
+        deadline: Instant,
+        handshake: impl FnMut(Option<Instant>) -> Result<Connection, LinkError>,
+    ) -> Result<Connection, LinkError> {
+        connect_with(
+            self.audio,
+            deadline,
+            || self.quitting(),
+            |control| self.quit_parked(control),
+            handshake,
+            || Err(std::io::Error::other("fixture connector cannot launch")),
+        )
+    }
+}
 
 #[test]
 fn correlation_keys_cross_real_control_frames_into_the_runs_owner() {
@@ -990,7 +1008,7 @@ fn real_handshake_writer_preserves_hellos_and_sends_one_text_profile() {
                 };
                 let attempt =
                     (mode == AudioSession::QueuedRequired).then(|| Instant::now() + PATIENCE);
-                super::handshake_pair(
+                handshake_pair(
                     control,
                     hello,
                     mode,
@@ -1321,7 +1339,7 @@ fn no_visual_cannot_replace_the_authenticated_welcome() {
     .expect("unexpected first frame");
     assert!(matches!(
         welcome(&mut &shell_control),
-        Err(super::LinkError::Rejected)
+        Err(LinkError::Rejected)
     ));
 }
 
@@ -1581,7 +1599,7 @@ fn a_github_error_cannot_replace_the_initial_welcome() {
     .unwrap();
     assert!(matches!(
         welcome(&mut &shell_control),
-        Err(super::LinkError::Rejected)
+        Err(LinkError::Rejected)
     ));
 }
 
@@ -4502,7 +4520,7 @@ fn queued_reconnect_rejects_a_successful_late_handshake_or_late_attendance() {
             );
             if at_connector {
                 assert!(
-                    matches!(connection, Err(super::LinkError::ConnectExpired)),
+                    matches!(connection, Err(LinkError::ConnectExpired)),
                     "the real connector did not refuse a successful late handshake: {connection:?}"
                 );
                 return Attendance::Retry;
@@ -4564,7 +4582,7 @@ fn queued_reconnect_cuts_off_a_stalled_real_welcome_payload() {
             assert!(
                 matches!(
                     &result,
-                    Err(super::LinkError::Frame(frame::FrameError::Io(error)))
+                    Err(LinkError::Frame(frame::FrameError::Io(error)))
                         if error.raw_os_error() == Some(ERROR_TIMEOUT.to_hresult().0)
                 ),
                 "the actual blocked pipe transfer timed out: {result:?}"
@@ -4583,7 +4601,7 @@ fn queued_reconnect_cuts_off_a_stalled_real_welcome_payload() {
     assert!(
         matches!(
             outcome.recv_timeout(Duration::from_secs(2)),
-            Ok(Err(super::LinkError::Quitting))
+            Ok(Err(LinkError::Quitting))
         ),
         "the stalled leg must not consume a fresh five-second timeout"
     );
@@ -4608,17 +4626,17 @@ fn queued_reconnect_does_not_start_a_handshake_at_or_after_the_deadline() {
     };
     assert!(matches!(
         link.connect_with(Instant::now(), |_| panic!("the attempt is already expired")),
-        Err(super::LinkError::ConnectExpired)
+        Err(LinkError::ConnectExpired)
     ));
-    let end = Instant::now() + super::RETRY_DELAY;
+    let end = Instant::now() + RETRY_DELAY;
     let mut calls = 0;
     let result = link.connect_with(end, |attempt| {
         assert_eq!(attempt, Some(end));
         calls += 1;
         assert_eq!(calls, 1, "the retry delay has used the remaining budget");
-        Err(super::LinkError::Busy)
+        Err(LinkError::Busy)
     });
-    assert!(matches!(result, Err(super::LinkError::ConnectExpired)));
+    assert!(matches!(result, Err(LinkError::ConnectExpired)));
 }
 
 #[test]
@@ -4803,7 +4821,7 @@ fn queued_reconnect_does_not_send_shutdown_to_unknown_or_partial_pairs() {
                 end,
                 queued_fixture_connector(shell_control, None, || {
                     drop(shell_data);
-                    let refused = super::LinkError::NotOurBrain;
+                    let refused = LinkError::NotOurBrain;
                     assert_eq!(
                         refused.to_string(),
                         "the pipe isn't served by the brain beside the shell"
@@ -4841,12 +4859,12 @@ fn queued_reconnect_does_not_send_shutdown_to_unknown_or_partial_pairs() {
 fn queued_fixture_connector(
     control: PipeClient,
     wait_through: Option<Instant>,
-    open_data: impl FnOnce() -> Result<PipeClient, super::LinkError>,
-) -> impl FnMut(Option<Instant>) -> Result<Connection, super::LinkError> {
+    open_data: impl FnOnce() -> Result<PipeClient, LinkError>,
+) -> impl FnMut(Option<Instant>) -> Result<Connection, LinkError> {
     let mut opening = Some((control, open_data));
     move |attempt| {
         let (control, open_data) = opening.take().expect("one fixture attempt");
-        let connection = super::handshake_pair(
+        let connection = handshake_pair(
             control,
             queued_fixture_hello(),
             super::AudioSession::QueuedRequired,
@@ -5293,7 +5311,7 @@ fn a_narrated_pair_whose_run_end_never_comes_is_torn_down() {
         Some(RunOrigin::Typed { turn: 1 }),
     );
     frame::write(&mut &link.control, &interrupted, Pipe::Control).expect("terminal control");
-    let by = Instant::now() + super::HANDSHAKE_TIMEOUT + PATIENCE;
+    let by = Instant::now() + HANDSHAKE_TIMEOUT + PATIENCE;
     while frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control).is_ok() {
         match frame::read::<ControlToBrain>(&mut &link.control, Pipe::Control) {
             Ok(Some(ControlToBrain::Pong)) => {}
@@ -5330,7 +5348,7 @@ fn a_decoded_run_end_outlasts_the_bound_while_the_bridge_is_busy() {
     holding.recv().expect("the bridge is held");
     let end = DataToShell::RunEnd { run: RunId(7) };
     frame::write(&mut &*link.data, &end, Pipe::Data).expect("the exact end");
-    let by = Instant::now() + super::HANDSHAKE_TIMEOUT + Duration::from_secs(1);
+    let by = Instant::now() + HANDSHAKE_TIMEOUT + Duration::from_secs(1);
     while Instant::now() < by {
         frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control)
             .expect("the pair stays open");

@@ -4,6 +4,12 @@
 )]
 pub(super) mod capture;
 pub(super) mod clock;
+#[cfg(test)]
+#[expect(
+    unsafe_code,
+    reason = "the dormant Keychain store calls Security and LocalAuthentication"
+)]
+pub(super) mod credential;
 #[expect(
     unsafe_code,
     reason = "the parent watch owns Darwin process and kqueue calls"
