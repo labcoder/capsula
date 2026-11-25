@@ -6,6 +6,6 @@ mod platform;
 
 pub use platform::Untrusted;
 pub use platform::macos::{
-    AcquisitionError, AdmittedLock, AdmittedLog, Retention, ShellStorage, hold_chain,
-    open_shell_storage,
+    AcquisitionError, AdmittedLock, AdmittedLog, ApplicationSupportError, Retention, ShellStorage,
+    application_support_dir, hold_chain, open_shell_storage,
 };

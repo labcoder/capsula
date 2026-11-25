@@ -68,7 +68,7 @@ pub use threads::TitleSource;
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     /// No absolute data root: `%LOCALAPPDATA%` on Windows, `HOME` on macOS.
-    #[error("{} is not set to an absolute path", crate::platform::DATA_ROOT)]
+    #[error("{}", crate::platform::DATA_ROOT_ERROR)]
     NoLocalAppData,
     /// The store's folder couldn't be created.
     #[error("can't create the store's folder")]
