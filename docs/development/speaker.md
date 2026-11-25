@@ -168,6 +168,14 @@ the session, output key and token before the microphone starts or collects. Endi
 session cancels its bound microphone but keeps the inhibit until the owner sees proof of
 retirement. See [the capture inhibit](voice.md#the-capture-inhibit) for the input lifecycle.
 
+The worker exposes a short-lived speech lease for the exact queued session and run. It takes
+positive evidence only from nonzero samples whose presentation time is due. The lease is
+not a quiet receipt and never authorizes capture. The callback normally reports one
+first/last nonzero pair on a separate optional ring. If extending a pair would reach
+500 ms, it keeps that pair and starts another at the current copy's actual timestamps.
+It reports at most eight pairs after copying; capacity loss drops speech evidence without
+delaying PCM, receipts, or Stop. This does not change which route ordinary launch selects.
+
 Once the brain's Stop has been queued, a queued stop closes admission immediately. If the
 owner is busy, Presence can offer the same stop again; an undeliverable stop ends the pair.
 Talk-back off also ends a queued pair. The link closes run input before aborting both pipes.
