@@ -8,8 +8,11 @@ use std::sync::atomic::AtomicUsize;
 use std::task::{Context, Poll, Waker};
 
 use kumochi_protocol::Secret;
-use kumochi_protocol::message::{ErrorKey, HeldScreen, PageEventKind, PageOf, Phase, SettingsOp};
-use serde_json::json;
+use kumochi_protocol::message::{
+    ConnectionKind, DeliveryProof, Effort, ErrorKey, HeldScreen, HistoryFailure,
+    HistoryFailureCause, ModelChoice, ModelSlug, PageEventKind, PageOf, Phase, SettingsOp,
+    ThreadOp,
+};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use zeroize::Zeroizing;
 
@@ -17,7 +20,7 @@ use super::*;
 use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::{Connect, ModelClient};
 use crate::connections::model::{ResponsesBody, stream};
-use crate::coordinator::{Effect, HoldKey};
+use crate::coordinator::{Effect, HoldKey, StoreOp};
 use crate::engines::{Answer, EngineFailure, Finish, TurnEvent};
 use crate::runtime::Link;
 use crate::runtime::data::DataQueue;
@@ -40,6 +43,16 @@ enum Wire {
     /// The round attempts a write and keeps its lease until the test lets it go, so the user's
     /// Stop lands before the send settles.
     Kept,
+    /// The lease proves unsent after the terminal row is durable.
+    KeptUnsent,
+    /// Both immediate corrections fail; the next independent write runs after storage recovers.
+    KeptUnsentRecovered,
+    /// Wait for the disk grant; then attempt the write and get an authentication rejection.
+    GrantCommitted,
+    /// Stop while authorization is still held by the store.
+    GrantCancelled,
+    /// The authorization UPDATE fails on disk.
+    GrantFailed,
 }
 
 struct Scripted {
@@ -139,6 +152,7 @@ impl Stall {
 
 const REFUSAL: &[u8] =
     b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+const AUTH_REFUSAL: &[u8] = b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":{\"code\":\"subscription_sharing_invalid_user\"}}";
 
 impl AsyncRead for ScriptedIo {
     fn poll_read(
@@ -152,7 +166,11 @@ impl AsyncRead for ScriptedIo {
         }
         if !this.answered {
             this.answered = true;
-            buf.put_slice(REFUSAL);
+            buf.put_slice(if this.wire == Wire::GrantCommitted {
+                AUTH_REFUSAL
+            } else {
+                REFUSAL
+            });
         }
         Poll::Ready(Ok(()))
     }
@@ -212,14 +230,16 @@ impl std::fmt::Debug for Transported {
 impl crate::engines::Engine for Transported {
     fn start(
         &self,
-        _: crate::engines::RunRequest,
+        request: crate::engines::RunRequest,
         events: mpsc::Sender<TurnEvent>,
         gate: crate::engines::SendGate,
     ) -> crate::engines::Round {
         let (client, budget) = (Arc::clone(&self.client), Arc::clone(&self.budget));
         Box::pin(async move {
-            let body = ResponsesBody::new(&json!({"model": "m", "store": false, "stream": true}))
-                .expect("a valid body");
+            let mut json =
+                crate::engines::responses::body(&request.request).expect("a pictured request");
+            let body = ResponsesBody::new(&json).expect("a valid body");
+            crate::engines::responses::wipe_images(&mut json);
             let bearer = Secret::new(Zeroizing::new("bearer".to_owned()));
             let ask = async {
                 match gate.ask().await {
@@ -237,9 +257,8 @@ impl crate::engines::Engine for Transported {
     }
 }
 
-/// A round that takes its grant, says a write was attempted, and hands its lease to the test, so
-/// its settlement waits for the test however the round ends.
-struct Kept(mpsc::UnboundedSender<crate::engines::SendLease>);
+/// A round that hands its lease to the test so its settlement can follow the terminal row.
+struct Kept(mpsc::UnboundedSender<crate::engines::SendLease>, Wire);
 
 impl std::fmt::Debug for Kept {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -255,9 +274,12 @@ impl crate::engines::Engine for Kept {
         gate: crate::engines::SendGate,
     ) -> crate::engines::Round {
         let kept = self.0.clone();
+        let wire = self.1;
         Box::pin(async move {
             if let Answer::Grant(mut lease) = gate.ask().await {
-                crate::connections::model::Lease::wrote(&mut lease);
+                if wire == Wire::Kept {
+                    crate::connections::model::Lease::wrote(&mut lease);
+                }
                 kept.send(lease).ok();
             }
             let _open = events;
@@ -286,10 +308,16 @@ async fn page_turn(
             request: 7, events, ..
         } = shell.data().await
         {
-            return events
-                .iter()
-                .map(|event| event.kind)
-                .find(|kind| matches!(kind, PageEventKind::User | PageEventKind::HeldTurn { .. }));
+            return events.iter().map(|event| event.kind).find(|kind| {
+                matches!(
+                    kind,
+                    PageEventKind::User
+                        | PageEventKind::HeldTurn { .. }
+                        | PageEventKind::FailedUser
+                        | PageEventKind::FailedHeldTurn { .. }
+                        | PageEventKind::ConnectionFailed { .. }
+                )
+            });
         }
     }
 }
@@ -343,6 +371,50 @@ async fn play(
     let scratch = Scratch::new(&format!("hold-screen-sent-{wire:?}"));
     let (mut brain, release, mut decoded, _fetch) =
         input(&scratch, vec![105, -5], "words and a picture").await;
+    let file = rusqlite::Connection::open(scratch.db()).unwrap();
+    let late_unsent = matches!(wire, Wire::KeptUnsent | Wire::KeptUnsentRecovered);
+    if wire == Wire::GrantFailed {
+        file.execute_batch(
+            "CREATE TRIGGER refuse_screen_authorization BEFORE UPDATE OF screen ON runs
+             WHEN new.screen = 'granted_screen' BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
+        )
+        .unwrap();
+    }
+    if wire == Wire::GrantCancelled {
+        file.execute_batch(
+            "CREATE TRIGGER refuse_nonatomic_clear BEFORE UPDATE OF screen ON runs
+             WHEN old.screen = 'granted_screen' AND new.screen IS NULL AND old.state = new.state
+             BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
+        )
+        .unwrap();
+    }
+    if late_unsent {
+        let failures = if wire == Wire::KeptUnsent { 1 } else { 2 };
+        file.execute_batch(
+            "CREATE TABLE correction_fault (hits INTEGER NOT NULL, fail_count INTEGER NOT NULL);
+             CREATE TRIGGER disrupt_late_clear BEFORE UPDATE OF screen ON runs
+             WHEN old.state = 'interrupted' AND old.screen = 'granted_screen' AND new.screen IS NULL
+             AND (SELECT hits < fail_count FROM correction_fault)
+             BEGIN UPDATE correction_fault SET hits = hits + 1; SELECT RAISE(FAIL, 'fixture'); END;",
+        )
+        .unwrap();
+        file.execute("INSERT INTO correction_fault VALUES (0, ?1)", [failures])
+            .unwrap();
+    }
+    let stored = |run: RunId| -> Option<String> {
+        file.query_row(
+            "SELECT screen FROM runs WHERE id = ?1",
+            [i64::try_from(run.0).unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let disk_gate = matches!(
+        wire,
+        Wire::GrantCommitted | Wire::GrantCancelled | Wire::GrantFailed
+    )
+    .then(|| brain.hold_store(|op| matches!(op, StoreOp::GrantScreen { .. })));
+    let (stall, mut reached) = Stall::new(At::Write);
     let mut rig = seeing(&mut brain);
     brain.fixture = Some(crate::coordinator::Ready {
         images: vec![kumochi_protocol::message::ModelSlug::new("gpt-6-sol").unwrap()],
@@ -351,14 +423,14 @@ async fn play(
     let mut observed = brain.observe();
     let (wrote, mut writes) = mpsc::unbounded_channel();
     let (keep, mut kept) = mpsc::unbounded_channel();
-    brain.engine = if wire == Wire::Kept {
-        Box::new(Kept(keep))
+    brain.engine = if wire == Wire::Kept || late_unsent {
+        Box::new(Kept(keep, wire))
     } else {
         Box::new(Transported {
             client: Arc::new(ModelClient::new(Scripted {
                 wire,
                 wrote,
-                stall: None,
+                stall: (wire == Wire::GrantCommitted).then(|| Arc::clone(&stall)),
             })),
             budget: Arc::new(Budget::limited((wire == Wire::Spent).then_some(0))),
         })
@@ -395,11 +467,37 @@ async fn play(
         let (run, _) = shell.state().await;
         assert!(matches!(shell.data().await, DataToShell::Models { .. }));
         shell.held(G, "words and a picture").await;
+        if let Some(disk_gate) = disk_gate {
+            while !matches!(
+                observed.recv().await,
+                Some(Seen::StoreOpStarted(StoreOp::GrantScreen { .. }))
+            ) {}
+            assert_eq!(stored(run).as_deref(), Some("pending_screen"));
+            assert_eq!(writes.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+            if wire == Wire::GrantCancelled {
+                shell.stop(run).await;
+                while !matches!(
+                    observed.recv().await,
+                    Some(Seen::StoreOpQueued(StoreOp::EndRun { run: ended, .. })) if ended == run
+                ) {}
+            }
+            disk_gate.send(()).unwrap();
+            if wire == Wire::GrantCommitted {
+                assert_eq!(reached.recv().await, Some(At::Write));
+                assert_eq!(stored(run).as_deref(), Some("granted_screen"));
+                let thread = shell.thread.unwrap();
+                assert_eq!(
+                    page_turn(&mut shell, thread).await,
+                    Some(PageEventKind::User)
+                );
+                stall.release();
+            }
+        }
         if wire == Wire::FlushHeld {
             assert_eq!(writes.recv().await, Some(()));
             shell.stop(run).await;
         }
-        let lease = if wire == Wire::Kept {
+        let lease = if wire == Wire::Kept || late_unsent {
             let lease = kept.recv().await.expect("a granted send");
             shell.stop(run).await;
             Some(lease)
@@ -419,7 +517,93 @@ async fn play(
             }
         }
         if let Some(lease) = lease {
-            repaired = read_then_settle(&mut shell, lease, &mut told).await;
+            if late_unsent {
+                let thread = shell.thread.unwrap();
+                assert_eq!(
+                    page_turn(&mut shell, thread).await,
+                    Some(PageEventKind::HeldTurn {
+                        screen: HeldScreen::Screen
+                    })
+                );
+                drop(lease);
+                while shell.data().await != (DataToShell::EventsChanged { thread }) {}
+                repaired = page_turn(&mut shell, thread).await;
+                let faults: i64 = file
+                    .query_row("SELECT hits FROM correction_fault", [], |row| row.get(0))
+                    .unwrap();
+                if wire == Wire::KeptUnsentRecovered {
+                    assert_eq!(faults, 2);
+                    assert_eq!(
+                        repaired,
+                        Some(PageEventKind::HeldTurn {
+                            screen: HeldScreen::Screen
+                        })
+                    );
+                    file.execute_batch("DROP TRIGGER disrupt_late_clear")
+                        .unwrap();
+                    let choice = ModelChoice {
+                        connection: ConnectionKind::ChatGpt,
+                        effort: Effort::Low,
+                        model: ModelSlug::new("gpt-6-sol").unwrap(),
+                    };
+                    shell
+                        .send(&ControlToBrain::ThreadOp(ThreadOp::SetModel {
+                            thread,
+                            choice: choice.clone(),
+                        }))
+                        .await;
+                    loop {
+                        if let ControlToShell::ThreadModelSet {
+                            thread: actual,
+                            choice: model,
+                            applied,
+                        } = shell.control().await.expect("the model write answers")
+                        {
+                            assert_eq!((actual, model, applied), (thread, choice, true));
+                            break;
+                        }
+                    }
+                    let barrier = DataToBrain::PageRequest {
+                        request: 8,
+                        page: PageOf::Threads {
+                            search: None,
+                            after: None,
+                        },
+                    };
+                    let frame = frame::encode(&barrier, Pipe::Data).expect("encodes");
+                    shell.data_out.write_all(&frame).await.expect("sent");
+                    loop {
+                        match shell.data().await {
+                            DataToShell::EventsChanged { thread: actual } => {
+                                assert_eq!(actual, thread);
+                                break;
+                            }
+                            DataToShell::ThreadList { request: 8, .. }
+                            | DataToShell::PageFailed { request: 8 } => {
+                                panic!("the deferred repair did not invalidate the open history");
+                            }
+                            _ => {}
+                        }
+                    }
+                    repaired = page_turn(&mut shell, thread).await;
+                } else {
+                    assert_eq!(faults, 1);
+                }
+            } else {
+                repaired = read_then_settle(&mut shell, lease, &mut told).await;
+            }
+        } else if matches!(
+            wire,
+            Wire::GrantCommitted | Wire::GrantCancelled | Wire::GrantFailed
+        ) {
+            let thread = shell.thread.unwrap();
+            repaired = page_turn(&mut shell, thread).await;
+            if wire != Wire::GrantCommitted {
+                assert!(matches!(
+                    writes.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
+                ));
+            }
         }
         drop(shell);
     };
@@ -470,6 +654,57 @@ async fn a_hold_whose_send_wrote_nothing_stores_and_tells_no_picture() {
             "{wire:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn disk_authorization_fences_the_first_picture_write_and_the_rejection_keeps_its_mark() {
+    assert_eq!(
+        Box::pin(play(Wire::GrantCommitted)).await,
+        (
+            vec![ControlToShell::HoldScreen {
+                gesture: G,
+                outcome: HeldScreen::Screen
+            }],
+            vec![Some("screen".to_owned())],
+            Some(PageEventKind::ConnectionFailed {
+                failure: HistoryFailure {
+                    cause: HistoryFailureCause::ChatGptSignIn,
+                    delivery: DeliveryProof::NotAccepted,
+                },
+                screen: Some(HeldScreen::Screen),
+            }),
+        )
+    );
+}
+
+#[tokio::test]
+async fn cancelling_or_failing_the_disk_authorization_never_releases_the_picture() {
+    for (wire, kind) in [
+        (Wire::GrantCancelled, PageEventKind::User),
+        (Wire::GrantFailed, PageEventKind::FailedUser),
+    ] {
+        assert_eq!(
+            Box::pin(play(wire)).await,
+            (Vec::new(), vec![None], Some(kind))
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_proven_unsent_picture_repairs_terminal_history_after_a_transient_write_failure() {
+    assert_eq!(
+        Box::pin(play(Wire::KeptUnsent)).await,
+        (Vec::new(), vec![None], Some(PageEventKind::User))
+    );
+}
+
+#[tokio::test]
+async fn a_proven_unsent_picture_repairs_terminal_history_on_the_next_write_after_storage_recovers()
+{
+    assert_eq!(
+        Box::pin(play(Wire::KeptUnsentRecovered)).await,
+        (Vec::new(), vec![None], Some(PageEventKind::User))
+    );
 }
 
 #[tokio::test]

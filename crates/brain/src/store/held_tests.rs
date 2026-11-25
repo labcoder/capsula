@@ -1,7 +1,7 @@
 use kumochi_protocol::message::{HeldScreen, PageEventKind, RunId, ScreenClass, ThreadId};
 use rusqlite::Connection;
 
-use super::{EventKind, NewEvent, RunEnd, Store, schema};
+use super::{EventKind, Failure, Interruption, NewEvent, RunEnd, Store, UnsentScreen, schema};
 use crate::test_support::Scratch;
 
 fn screen(store: &Store, run: RunId) -> Option<String> {
@@ -122,7 +122,9 @@ fn a_withdrawal_marks_only_an_attached_turn() {
         Some("pending_attached")
     );
     for run in [attached, closed, plain] {
-        store.withdraw_screen(run).expect("withdrawn");
+        store
+            .unsent_screen(run, UnsentScreen::Withdrawn)
+            .expect("withdrawn");
     }
     assert_eq!(screen(&store, attached).as_deref(), Some("withdrawn"));
     assert_eq!(screen(&store, closed).as_deref(), Some("not_ready"));
@@ -149,8 +151,11 @@ fn an_unsent_picture_is_cleared_and_every_other_value_kept() {
     );
     let (_, withdrawn) = held_run(&mut store, Some(HeldScreen::Withdrawn));
     let (_, sent) = held_run(&mut store, Some(HeldScreen::Attached));
+    assert!(store.grant_screen(sent).expect("authorized"));
     store.sent_screen(sent).expect("sent");
-    store.forget_screen(attached).expect("cleared");
+    store
+        .unsent_screen(attached, UnsentScreen::Clear)
+        .expect("cleared");
     assert_eq!(screen(&store, attached), None);
     assert_eq!(screen(&store, picture).as_deref(), Some("pending_screen"));
     assert_eq!(
@@ -158,8 +163,16 @@ fn an_unsent_picture_is_cleared_and_every_other_value_kept() {
         Some("pending_attached")
     );
     for run in [picture, closed, withdrawn, sent] {
-        store.forget_screen(run).expect("cleared");
+        store
+            .unsent_screen(run, UnsentScreen::Clear)
+            .expect("cleared");
     }
+    store
+        .unsent_screen(sent, UnsentScreen::Withdrawn)
+        .expect("withdrawal cannot clear a mark");
+    store
+        .unsent_screen(sent, UnsentScreen::ModelCantSee)
+        .expect("model loss cannot clear a mark");
     assert_eq!(screen(&store, attached), None);
     assert_eq!(screen(&store, picture), None);
     assert_eq!(
@@ -185,7 +198,9 @@ fn a_screen_row_is_withdrawn_like_an_attached_one() {
     let scratch = Scratch::new("held-screen-withdrawn");
     let mut store = Store::open(&scratch.db()).expect("store");
     let (thread, run) = held_run(&mut store, Some(HeldScreen::Screen));
-    store.withdraw_screen(run).expect("withdrawn");
+    store
+        .unsent_screen(run, UnsentScreen::Withdrawn)
+        .expect("withdrawn");
     assert_eq!(screen(&store, run).as_deref(), Some("withdrawn"));
     assert_eq!(
         kinds(&store, thread),
@@ -206,12 +221,27 @@ fn reopened(scratch: &Scratch) -> Store {
 fn a_pending_picture_reads_as_a_plain_turn_until_a_send_may_have_written_it() {
     let scratch = Scratch::new("held-pending");
     let mut store = Store::open(&scratch.db()).expect("store");
-    for (held, pending, sent) in [
-        (HeldScreen::Attached, "pending_attached", "attached"),
-        (HeldScreen::Screen, "pending_screen", "screen"),
+    for (held, pending, granted, sent) in [
+        (
+            HeldScreen::Attached,
+            "pending_attached",
+            "granted_attached",
+            "attached",
+        ),
+        (
+            HeldScreen::Screen,
+            "pending_screen",
+            "granted_screen",
+            "screen",
+        ),
     ] {
         let (thread, run) = held_run(&mut store, Some(held));
         assert_eq!(screen(&store, run).as_deref(), Some(pending));
+        assert_eq!(kinds(&store, thread), [PageEventKind::User]);
+        store.sent_screen(run).expect("ungranted cannot settle");
+        assert_eq!(screen(&store, run).as_deref(), Some(pending));
+        assert!(store.grant_screen(run).expect("authorized"));
+        assert_eq!(screen(&store, run).as_deref(), Some(granted));
         assert_eq!(kinds(&store, thread), [PageEventKind::User]);
         store.sent_screen(run).expect("sent");
         store.sent_screen(run).expect("sent again");
@@ -241,6 +271,8 @@ fn a_pending_picture_reads_as_a_plain_turn_until_a_send_may_have_written_it() {
         Some(HeldScreen::NotIncluded(ScreenClass::ModelCantSee)),
     );
     let (_, plain) = held_run(&mut store, None);
+    assert!(!store.grant_screen(closed).expect("no picture pending"));
+    assert!(!store.grant_screen(plain).expect("no held picture"));
     store.sent_screen(closed).expect("nothing pending");
     store.sent_screen(plain).expect("nothing pending");
     assert_eq!(screen(&store, closed).as_deref(), Some("model_cant_see"));
@@ -254,16 +286,57 @@ fn a_pending_picture_reads_as_a_plain_turn_until_a_send_may_have_written_it() {
 }
 
 #[test]
-fn a_picture_still_pending_at_a_crash_is_recovered_as_sent() {
-    let scratch = Scratch::new("held-pending-crash");
+fn an_active_picture_can_be_authorized_again_if_the_unsent_restore_fails() {
+    let scratch = Scratch::new("held-restore-failure");
+    let mut store = Store::open(&scratch.db()).unwrap();
+    let (thread, run) = held_run(&mut store, Some(HeldScreen::Screen));
+    assert!(store.grant_screen(run).unwrap());
+    store
+        .conn
+        .execute_batch(
+            "CREATE TRIGGER refuse_active_restore BEFORE UPDATE OF screen ON runs
+         WHEN new.screen = 'pending_screen' BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
+        )
+        .unwrap();
+    assert!(matches!(
+        store.restore_screen(run),
+        Err(super::StoreError::Sql(_))
+    ));
+    assert_eq!(screen(&store, run).as_deref(), Some("granted_screen"));
+    assert_eq!(kinds(&store, thread), [PageEventKind::User]);
+    assert!(store.grant_screen(run).unwrap());
+    store.sent_screen(run).unwrap();
+    assert_eq!(
+        kinds(&store, thread),
+        [PageEventKind::HeldTurn {
+            screen: HeldScreen::Screen
+        }]
+    );
+}
+
+#[test]
+fn only_a_committed_authorization_is_recovered_as_sent() {
+    let scratch = Scratch::new("held-grant-crash");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let (live, _) = held_run(&mut store, Some(HeldScreen::Attached));
+    let (pending, pending_run) = held_run(&mut store, Some(HeldScreen::Attached));
+    let (live, live_run) = held_run(&mut store, Some(HeldScreen::Attached));
     let (ended, run) = held_run(&mut store, Some(HeldScreen::Screen));
+    assert!(store.grant_screen(live_run).expect("authorized"));
+    assert!(store.grant_screen(run).expect("authorized"));
     store
         .end_run(ended, run, &[], RunEnd::Done)
         .expect("ended with its send unsettled");
+    assert_eq!(screen(&store, run).as_deref(), Some("granted_screen"));
+    assert_eq!(
+        kinds(&store, ended),
+        [PageEventKind::HeldTurn {
+            screen: HeldScreen::Screen
+        }]
+    );
     drop(store);
     let store = reopened(&scratch);
+    assert_eq!(screen(&store, pending_run), None);
+    assert_eq!(kinds(&store, pending), [PageEventKind::FailedUser]);
     assert_eq!(
         kinds(&store, live),
         [PageEventKind::FailedHeldTurn {
@@ -283,12 +356,23 @@ fn a_picture_cleared_after_an_unsent_send_is_not_recovered_as_sent() {
     let scratch = Scratch::new("held-unsent-crash");
     let mut store = Store::open(&scratch.db()).expect("store");
     let (forgotten, run) = held_run(&mut store, Some(HeldScreen::Attached));
-    store.forget_screen(run).expect("cleared");
+    assert!(store.grant_screen(run).expect("authorized"));
+    store.restore_screen(run).expect("proved unsent");
+    assert_eq!(screen(&store, run).as_deref(), Some("pending_attached"));
+    let (cleared, run) = held_run(&mut store, Some(HeldScreen::Attached));
+    assert!(store.grant_screen(run).expect("authorized"));
+    store
+        .unsent_screen(run, UnsentScreen::Clear)
+        .expect("cleared");
     let (withdrawn, run) = held_run(&mut store, Some(HeldScreen::Screen));
-    store.withdraw_screen(run).expect("withdrawn");
+    assert!(store.grant_screen(run).expect("authorized"));
+    store
+        .unsent_screen(run, UnsentScreen::Withdrawn)
+        .expect("withdrawn");
     drop(store);
     let store = reopened(&scratch);
     assert_eq!(kinds(&store, forgotten), [PageEventKind::FailedUser]);
+    assert_eq!(kinds(&store, cleared), [PageEventKind::FailedUser]);
     assert_eq!(
         kinds(&store, withdrawn),
         [PageEventKind::FailedHeldTurn {
@@ -298,24 +382,34 @@ fn a_picture_cleared_after_an_unsent_send_is_not_recovered_as_sent() {
 }
 
 #[test]
-fn a_pending_picture_reads_as_sent_once_its_run_has_ended_and_its_value_stays_pending() {
+fn a_pending_picture_never_reads_as_sent_even_before_its_clear() {
     let scratch = Scratch::new("held-pending-ended");
     let mut store = Store::open(&scratch.db()).expect("store");
-    let (active, _) = held_run(&mut store, Some(HeldScreen::Screen));
-    let (ended, run) = held_run(&mut store, Some(HeldScreen::Attached));
-    store.end_run(ended, run, &[], RunEnd::Done).expect("ended");
-    let (cleared, cleared_run) = held_run(&mut store, Some(HeldScreen::Attached));
-    store.forget_screen(cleared_run).expect("cleared");
-    store
-        .end_run(cleared, cleared_run, &[], RunEnd::Done)
-        .expect("ended");
-    assert_eq!(kinds(&store, active), [PageEventKind::User]);
-    assert_eq!(
-        kinds(&store, ended),
-        [PageEventKind::HeldTurn {
-            screen: HeldScreen::Attached
-        }]
-    );
-    assert_eq!(kinds(&store, cleared), [PageEventKind::User]);
-    assert_eq!(screen(&store, run).as_deref(), Some("pending_attached"));
+    let ended = [
+        (RunEnd::Failed(Failure::Engine), PageEventKind::FailedUser),
+        (RunEnd::Interrupted(Interruption::Stop), PageEventKind::User),
+        (
+            RunEnd::Interrupted(Interruption::Replaced),
+            PageEventKind::User,
+        ),
+    ]
+    .map(|(end, kind)| {
+        let (thread, run) = held_run(&mut store, Some(HeldScreen::Attached));
+        store.end_run(thread, run, &[], end).expect("ended");
+        assert!(!store.grant_screen(run).expect("too late to authorize"));
+        assert_eq!(screen(&store, run).as_deref(), Some("pending_attached"));
+        assert_eq!(kinds(&store, thread), [kind]);
+        (thread, run, kind)
+    });
+    drop(store);
+    let store = Store::open(&scratch.db()).expect("reopened before recovery");
+    for (thread, _, kind) in ended {
+        assert_eq!(kinds(&store, thread), [kind]);
+    }
+    drop(store);
+    let store = reopened(&scratch);
+    for (thread, run, kind) in ended {
+        assert_eq!(kinds(&store, thread), [kind]);
+        assert_eq!(screen(&store, run), None);
+    }
 }

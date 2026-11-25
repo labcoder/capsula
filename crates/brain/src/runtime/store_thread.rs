@@ -6,6 +6,7 @@
 
 mod page_reader;
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -19,11 +20,12 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::connections::vault::HistoryLink;
-use crate::coordinator::{CutoffSlot, Input, StoreOp};
+use crate::coordinator::{CutoffSlot, Input, ScreenGrantRefusal, StoreOp};
 use crate::dispatch::Committed;
 use crate::platform::SessionLock;
 use crate::store::{
-    Cancel, Copied, Deletion, EventKind, NewEvent, Side, Store, StoreError, Swap, cleared_body,
+    Cancel, Copied, Deletion, EventKind, NewEvent, Side, Store, StoreError, Swap, UnsentScreen,
+    cleared_body,
 };
 use page_reader::{Barrier, Checkpoints, Exit, Read};
 
@@ -436,6 +438,9 @@ impl StoreThread {
                 #[cfg(test)]
                 let after_close = schedule.after_close.take();
                 let mut purger = Purger::new(schedule, &store);
+                // shortcut: Quit before the correction commits leaves crash uncertainty; persist
+                // no retry state unless this must survive a restart.
+                let mut screen_repairs = BTreeMap::new();
                 #[cfg(test)]
                 let mut gates: Vec<Gate> = Vec::new();
                 loop {
@@ -459,7 +464,7 @@ impl StoreThread {
                                 }
                             }
                             let counted = !matches!(op, StoreOp::Cutoff(_));
-                            serve_op(&mut store, &mut purger, &acks, op);
+                            serve_op(&mut store, &mut purger, &acks, &mut screen_repairs, op);
                             if counted {
                                 exit.barrier.complete();
                             }
@@ -555,7 +560,30 @@ impl StoreThread {
 }
 
 #[expect(clippy::too_many_lines, reason = "one short arm per store op")]
-fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input>, op: StoreOp) {
+fn serve_op(
+    store: &mut Store,
+    purger: &mut Purger,
+    acks: &UnboundedSender<Input>,
+    screen_repairs: &mut BTreeMap<RunId, UnsentScreen>,
+    op: StoreOp,
+) {
+    if !screen_repairs.is_empty() {
+        purger.op_arriving();
+        if store.reconnect().is_ok() {
+            screen_repairs.retain(
+                |run, correction| match store.repair_screen(*run, *correction) {
+                    Ok(thread) => {
+                        if let Some(thread) = thread {
+                            answer(acks, Input::ScreenRepaired { thread });
+                        }
+                        false
+                    }
+                    Err(_) => true,
+                },
+            );
+        }
+        purger.op_arrived(store);
+    }
     match op {
         StoreOp::Issue {
             serial,
@@ -742,36 +770,60 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             }
             purger.op_arrived(store);
         }
-        StoreOp::WithdrawScreen { run } => {
+        StoreOp::GrantScreen { lease } => {
+            let crate::coordinator::SendKey::Build(key) = lease.key else {
+                unreachable!("only a build can authorize a held picture");
+            };
+            // With an old correction still owed, no new picture can add to the in-flight cohort.
+            let stored = screen_repairs.is_empty() && {
+                purger.op_arriving();
+                let stored = store
+                    .reconnect()
+                    .and_then(|()| store.grant_screen(key.run))
+                    .inspect_err(|_| tracing::warn!("a picture authorization wasn't stored"));
+                purger.op_arrived(store);
+                matches!(stored, Ok(true))
+            };
+            answer(
+                acks,
+                Input::ScreenGrantStored {
+                    lease,
+                    result: stored.then_some(()).ok_or(ScreenGrantRefusal::Store),
+                },
+            );
+        }
+        StoreOp::RestoreScreen { run } => {
             purger.op_arriving();
             if store
                 .reconnect()
-                .and_then(|()| store.withdraw_screen(run))
+                .and_then(|()| store.restore_screen(run))
                 .is_err()
             {
-                tracing::warn!("a withdrawn screen wasn't stored");
+                tracing::warn!("an unsent picture's authorization wasn't cleared");
             }
             purger.op_arrived(store);
         }
-        StoreOp::ForgetScreen { run } => {
+        op @ (StoreOp::RepairScreen { run, .. }
+        | StoreOp::WithdrawScreen { run }
+        | StoreOp::CantSeeScreen { run }) => {
+            let (correction, retain) = match op {
+                StoreOp::RepairScreen { correction, .. } => (correction, true),
+                StoreOp::WithdrawScreen { .. } => (UnsentScreen::Withdrawn, false),
+                _ => (UnsentScreen::ModelCantSee, false),
+            };
             purger.op_arriving();
-            if store
-                .reconnect()
-                .and_then(|()| store.forget_screen(run))
-                .is_err()
-            {
-                tracing::warn!("an unsent screen wasn't cleared");
-            }
-            purger.op_arrived(store);
-        }
-        StoreOp::CantSeeScreen { run } => {
-            purger.op_arriving();
-            if store
-                .reconnect()
-                .and_then(|()| store.cant_see_screen(run))
-                .is_err()
-            {
-                tracing::warn!("an unsent screen's omission wasn't stored");
+            let mut correct = || {
+                store
+                    .reconnect()
+                    .and_then(|()| store.unsent_screen(run, correction))
+            };
+            if correct().or_else(|_| correct()).is_err() {
+                if retain {
+                    screen_repairs.insert(run, correction);
+                }
+                tracing::warn!("an unsent screen's correction wasn't stored");
+            } else {
+                screen_repairs.remove(&run);
             }
             purger.op_arrived(store);
         }
@@ -852,6 +904,7 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
             revealed,
             clear,
             end,
+            screen,
         } => write(store, purger, acks, run, "outcome", |store| {
             let revealed = revealed.map(|steps| serde_json::json!(steps).to_string());
             let clear = clear.map(cleared_body);
@@ -872,9 +925,16 @@ fn serve_op(store: &mut Store, purger: &mut Purger, acks: &UnboundedSender<Input
                     body: Some(clear.as_str()),
                 });
             }
-            store
-                .end_run(thread, run, &events, end)
-                .map(|()| Input::RunStored { run })
+            let result = store.end_run_with_screen(thread, run, &events, end, screen);
+            let result = if result.is_err() && screen.is_some() {
+                store.end_run_with_screen(thread, run, &events, end, screen)
+            } else {
+                result
+            };
+            if result.is_ok() && screen.is_some() {
+                screen_repairs.remove(&run);
+            }
+            result.map(|()| Input::RunStored { run })
         }),
     }
 }

@@ -159,6 +159,11 @@ sequenceDiagram
     participant C as Coordinator
     participant S as Store
     R->>C: SendReady { key }
+    opt First grant carrying the held picture
+        C->>S: Commit the picture's authorization class
+        S-->>C: ScreenGrantStored
+        C->>C: Recheck admission and cancellation
+    end
     C-->>R: Grant(SendLease) or Rebuild
     Note over C: Delete(B) arrives while a lease carries B
     C->>C: hold the delete, no writer op
@@ -171,6 +176,11 @@ sequenceDiagram
   again, after the delete's answer when it's still pending. An ask from an ended run gets
   `Rebuild` and nothing is built. A job's ask is granted only while it holds the job slot under
   its account (see [Background jobs](#background-jobs)).
+  The first grant that carries the held picture also waits for a committed authorization class
+  (no image or recipient data). The coordinator then rechecks the build, its sources and
+  authority. No transport lease exists during this wait, so a refusal, cancellation or timeout
+  leaves no send or delete fence to settle. A held sender keeps its original deadline, including
+  time spent waiting for the store. Digest-only and text-only sends skip the write.
 - **Lease.** Each grant is a `LeaseId { key, send }` with its sources. Leases belong to send
   attempts, not runs, so Stop, a replacement and a lost shell keep them.
 - **Settle.** The `SendLease` guard travels inside the grant. Dropping it, wherever it is (a lost
@@ -231,9 +241,15 @@ sequenceDiagram
   unbound, runs on. A Claude Code grant for any build other than the one asked under the
   current generation is closed as it's issued, before its engine is answered; a key route's
   grant is never Claude Code's to touch.
-- **The picture's settlement.** A lease carrying a hold's picture settles it once: unsent, the run is as if never
-  granted (a later grant carries the picture again, or the run's end clears the mark); otherwise
-  the shell is told `HoldScreen`. A failed lease's late settlement settles only the picture.
+- **The picture's settlement.** A lease carrying a hold's picture settles it once. Proof of no
+  write restores pending for the same held picture or clears the authorization when the run
+  can no longer send it. A write attempt records the mark and tells the shell `HoldScreen`.
+  A failed lease's late settlement settles only the picture. A terminal outcome records a
+  known-unsent correction with the run; a correction that arrives after the outcome gets one
+  immediate writer retry. The writer keeps a failed correction by run and retries it before
+  later writes. If repair still fails, new picture authorizations are refused, so only pictures
+  already in flight can add repairs. A deferred retry that changes a live row invalidates that
+  thread's open history after the commit.
   Whenever the settlement changes the turn's stored row, marking it sent or clearing it after
   the run has gone, the shell is told its thread's events changed, unless that thread is being
   deleted.
@@ -454,17 +470,10 @@ attempt, not for proof that it succeeded. What the hold carried goes in the run'
 with its turn (store.md, `runs.screen`), and the shell hears it once as `HoldScreen`: an image
 when a send carrying it settles after attempting a write ("The send lease"), anything else when
 the run's first request starts. An inline compaction's send carries only text, so it doesn't
-count. An image goes in pending: history doesn't show it as sent while its run is active, and
-shows it as sent once the run has ended, the rule recovery applies. The settlement that tells the
-shell also marks it sent. The row is written first on purpose: the first build starts only after
-`TurnStored`, and a failed turn write fails the run before anything is built. Recovery at the
-next start marks a picture still pending sent, because if Kumochi exits before the send outcome
-is recorded it can't tell whether a write was attempted. That covers a crash, and an orderly Quit
-whose run end is acknowledged before the aborted engine task's unsent settlement. So the recovered
-record can over-report a screen but never miss one that may have left the machine. An open
-thread's loaded rows can lag it: while a run is active a loaded turn stays plain until history is
-read again, and a late unsent settlement after the run ended leaves a loaded row saying sent until
-a re-read. Turning screen holds off
+count. The first build starts only after `TurnStored`, and a failed turn write fails the run
+before anything is built. Pending pictures never show a mark. A committed authorization
+without a known outcome shows a conservative mark only after the run ends or at recovery.
+A late unsent settlement clears it and asks the shell to reread the row. Turning screen holds off
 withdraws every run's window image once the change is saved. Turning show-screen off withdraws
 every run's screen picture as soon as the brain takes the change, before its save, so a slow or
 refused save keeps no send going; a refused save leaves show-screen on, and neither it nor a
@@ -484,11 +493,9 @@ the turn's. Known limits:
 - **A granted send can't be recalled.** Turning screen holds off refuses a request's send that
   hasn't been granted yet; a body already granted may still go with its image. A `ChatGPT` or
   Anthropic key upload stops at its next write poll, though bytes already admitted may continue.
-- **History can show a window that never left.** A write that was attempted marks the screen
-  sent even if no byte was accepted. Kumochi exiting before the send outcome is recorded while the picture is pending, including after a
-  send proved unsent while its run could still send again, and a failed write of the mark or of
-  its clear, leave it pending, and recovery marks it sent. Either way its history shows a window
-  for a turn whose image may never have been sent.
+- **The mark isn't proof of receipt.** It covers a write attempt even if no byte was accepted.
+  If Kumochi exits between committing the authorization and committing its outcome, it
+  conservatively keeps the mark because the write attempt is unknown.
 - **Every round resends the image.** Each tool round is a new stateless request, so the image's
   input tokens are charged again every round against the plan's usage, bounded by the round cap,
   and the body is uploaded again. At the 2 MiB image cap that's about 2.8 MB a round under the

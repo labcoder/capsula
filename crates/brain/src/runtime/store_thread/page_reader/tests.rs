@@ -849,6 +849,7 @@ fn failed_and_empty_ops_count_toward_a_reads_wait() {
     let running = run(Store::open(&scratch.db()).expect("store"), None);
     for op in [
         StoreOp::EndRun {
+            screen: None,
             thread: ThreadId(9),
             run: RunId(9),
             text: None,

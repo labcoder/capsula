@@ -14,7 +14,7 @@ use super::availability::Arrived;
 use super::{Coordinator, Effect, Input, StoreOp, admission};
 use crate::context::{Origin, RunSnapshot, Screen};
 use crate::recall::control::{Control, READ_TIME};
-use crate::store::Generation;
+use crate::store::{Generation, UnsentScreen};
 
 /// A gesture is unique only within its shell connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,12 +101,14 @@ impl super::Run {
         }
     }
 
-    /// At a granted send carrying the hold's image: the image still to be told goes with the
-    /// send, which tells the shell once it may have written any of it.
-    pub(super) fn carried(&mut self) -> Option<super::lease::Carried> {
+    /// The picture still to be told, if this run has a held picture to authorize for a send.
+    pub(super) fn carried(&self) -> Option<super::lease::Carried> {
         let hold = self.hold.as_ref()?.key;
         let outcome = self.screen.as_ref()?.held();
-        self.untold.take()?;
+        self.untold?;
+        if !matches!(outcome, HeldScreen::Attached | HeldScreen::Screen) {
+            return None;
+        }
         Some(super::lease::Carried {
             run: self.id,
             hold,
@@ -148,6 +150,7 @@ impl super::Run {
             _ => return,
         };
         self.screen = Some(screen);
+        self.progress.unsent_screen = Some(UnsentScreen::ModelCantSee);
         match &mut self.begin {
             Some(StoreOp::BeginTurn { screen, .. }) => {
                 *screen = Some(HeldScreen::NotIncluded(ScreenClass::ModelCantSee));
@@ -189,6 +192,7 @@ impl Coordinator {
             if run.untold.take().is_none() {
                 continue;
             }
+            run.progress.unsent_screen = Some(UnsentScreen::Withdrawn);
             match &mut run.begin {
                 Some(StoreOp::BeginTurn { screen, .. }) => {
                     *screen = Some(kumochi_protocol::message::HeldScreen::Withdrawn);

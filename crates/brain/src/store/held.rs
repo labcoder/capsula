@@ -1,8 +1,33 @@
 //! What a screen hold carried into its turn, for its history line (docs/development/store.md).
 
-use kumochi_protocol::message::{HeldScreen, RunId, ScreenClass};
+use kumochi_protocol::message::{HeldScreen, RunId, ScreenClass, ThreadId};
+use rusqlite::OptionalExtension as _;
 
 use super::StoreError;
+
+const CORRECT_SCREEN: &str = "UPDATE runs SET screen = ?2 WHERE id = ?1
+    AND screen IN ('pending_attached', 'pending_screen', 'granted_attached', 'granted_screen')";
+
+/// A held picture proved unsent, and what should replace its pending or authorized class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsentScreen {
+    /// No picture line remains.
+    Clear,
+    /// The user withdrew the picture.
+    Withdrawn,
+    /// Its chosen model stopped taking pictures.
+    ModelCantSee,
+}
+
+impl UnsentScreen {
+    pub(super) fn column(self) -> Option<&'static str> {
+        match self {
+            Self::Clear => None,
+            Self::Withdrawn => Some(column(HeldScreen::Withdrawn)),
+            Self::ModelCantSee => Some(column(HeldScreen::NotIncluded(ScreenClass::ModelCantSee))),
+        }
+    }
+}
 
 /// Every value the `screen` column takes; `read` knows only these.
 const ALL: [HeldScreen; 10] = [
@@ -35,50 +60,90 @@ pub(super) fn column(screen: HeldScreen) -> &'static str {
 }
 
 impl super::Store {
-    /// Marks `run`'s screen `withdrawn` while its picture is pending: the user withdrew
-    /// the image before any send carrying it was granted.
-    ///
-    /// # Errors
-    /// When the run's id doesn't fit SQL, or the write fails.
-    pub(crate) fn withdraw_screen(&mut self, run: RunId) -> Result<(), StoreError> {
-        self.unsent_screen(run, Some(column(HeldScreen::Withdrawn)))
+    /// Commits the authorization before releasing the first transport grant for this picture.
+    /// A failed restore can leave the same class already durable. The coordinator only asks
+    /// again once it knows the previous authorization did not produce a write.
+    pub(crate) fn grant_screen(&mut self, run: RunId) -> Result<bool, StoreError> {
+        let run = super::sql_id(run.0, StoreError::NoRun)?;
+        Ok(self.conn.execute(
+            "UPDATE runs SET screen = CASE WHEN screen IN ('pending_attached', 'granted_attached')
+                                           THEN 'granted_attached' ELSE 'granted_screen' END
+             WHERE id = ?1 AND state = 'active'
+             AND screen IN ('pending_attached', 'pending_screen', 'granted_attached', 'granted_screen')",
+            [run],
+        )? == 1)
     }
 
-    /// Clears `run`'s screen while its picture is pending: the run ended before any send
-    /// carrying the image was granted.
-    ///
-    /// # Errors
-    /// When the run's id doesn't fit SQL, or the write fails.
-    pub(crate) fn forget_screen(&mut self, run: RunId) -> Result<(), StoreError> {
-        self.unsent_screen(run, None)
+    /// Restores a never-written authorization to pending so the same picture can try again.
+    pub(crate) fn restore_screen(&mut self, run: RunId) -> Result<(), StoreError> {
+        let run = super::sql_id(run.0, StoreError::NoRun)?;
+        self.conn.execute(
+            "UPDATE runs SET screen = CASE screen WHEN 'granted_attached' THEN 'pending_attached'
+                                                   ELSE 'pending_screen' END
+             WHERE id = ?1 AND screen IN ('granted_attached', 'granted_screen')",
+            [run],
+        )?;
+        Ok(())
     }
 
-    /// Marks `run`'s screen `model_cant_see` while its picture is pending: its model
-    /// stopped taking pictures before any send carrying the image was granted.
-    ///
-    /// # Errors
-    /// When the run's id doesn't fit SQL, or the write fails.
-    pub(crate) fn cant_see_screen(&mut self, run: RunId) -> Result<(), StoreError> {
-        let to = column(HeldScreen::NotIncluded(ScreenClass::ModelCantSee));
-        self.unsent_screen(run, Some(to))
-    }
-
-    /// Marks `run`'s pending picture sent: a send carrying it may have written some of it.
+    /// Marks an authorized picture sent: its transport may have attempted a write.
     ///
     /// # Errors
     /// When the run's id doesn't fit SQL, or the write fails.
     pub(crate) fn sent_screen(&mut self, run: RunId) -> Result<(), StoreError> {
-        sent(&self.conn, Some(super::sql_id(run.0, StoreError::NoRun)?))?;
+        let run = super::sql_id(run.0, StoreError::NoRun)?;
+        self.conn.execute(
+            "UPDATE runs SET screen = CASE screen WHEN 'granted_attached' THEN 'attached'
+                                                   ELSE 'screen' END
+             WHERE id = ?1 AND screen IN ('granted_attached', 'granted_screen')",
+            [run],
+        )?;
         Ok(())
     }
 
-    fn unsent_screen(&mut self, run: RunId, to: Option<&str>) -> Result<(), StoreError> {
+    /// Records a transport write attempt for an offline history fixture.
+    ///
+    /// # Errors
+    /// Returns an error if the run cannot authorize a picture or the store write fails.
+    #[cfg(feature = "test-support")]
+    pub fn record_sent_screen_for_tests(&mut self, run: RunId) -> Result<(), StoreError> {
+        if !self.grant_screen(run)? {
+            return Err(StoreError::NoRun);
+        }
+        self.sent_screen(run)
+    }
+
+    /// Corrects a known-unsent picture. An already corrected or absent row is a success.
+    pub(crate) fn unsent_screen(&mut self, run: RunId, to: UnsentScreen) -> Result<(), StoreError> {
         let run = super::sql_id(run.0, StoreError::NoRun)?;
-        self.conn.execute(
-            "UPDATE runs SET screen = ?2 WHERE id = ?1 AND screen IN (?3, ?4)",
-            rusqlite::params![run, to, PENDING_ATTACHED, PENDING_SCREEN],
-        )?;
+        self.conn
+            .execute(CORRECT_SCREEN, rusqlite::params![run, to.column()])?;
         Ok(())
+    }
+
+    /// Repairs a deferred correction and returns the live thread only if its row changed.
+    pub(crate) fn repair_screen(
+        &mut self,
+        run: RunId,
+        to: UnsentScreen,
+    ) -> Result<Option<ThreadId>, StoreError> {
+        let run = super::sql_id(run.0, StoreError::NoRun)?;
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(CORRECT_SCREEN, rusqlite::params![run, to.column()])?;
+        let thread = if changed == 0 {
+            None
+        } else {
+            tx.query_row(
+                "SELECT r.thread FROM runs r JOIN threads t ON r.thread = t.id
+                 WHERE r.id = ?1 AND t.state = 'live'",
+                [run],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(|id| ThreadId(super::row_id(id)))
+        };
+        tx.commit()?;
+        Ok(thread)
     }
 }
 
@@ -86,43 +151,28 @@ impl super::Store {
 /// settlement or recovery resolves it.
 pub(super) fn begun(screen: HeldScreen) -> &'static str {
     match screen {
-        HeldScreen::Attached => PENDING_ATTACHED,
-        HeldScreen::Screen => PENDING_SCREEN,
+        HeldScreen::Attached => "pending_attached",
+        HeldScreen::Screen => "pending_screen",
         other => column(other),
     }
 }
 
-const PENDING_ATTACHED: &str = "pending_attached";
-const PENDING_SCREEN: &str = "pending_screen";
-
-/// Turns `run`'s pending picture, or every run's when `run` is `None`, into the mark that says
-/// it was sent.
-pub(super) fn sent(conn: &rusqlite::Connection, run: Option<i64>) -> rusqlite::Result<usize> {
+/// No transport is left to settle an authorization. Only a durable grant may have written.
+pub(super) fn recover(conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
     conn.execute(
-        "UPDATE runs SET screen = CASE screen WHEN ?2 THEN ?3 ELSE ?5 END
-         WHERE (?1 IS NULL OR id = ?1) AND screen IN (?2, ?4)",
-        rusqlite::params![
-            run,
-            PENDING_ATTACHED,
-            column(HeldScreen::Attached),
-            PENDING_SCREEN,
-            column(HeldScreen::Screen)
-        ],
+        "UPDATE runs SET screen = CASE screen WHEN 'granted_attached' THEN 'attached'
+                                               WHEN 'granted_screen' THEN 'screen' END
+         WHERE screen IN ('pending_attached', 'pending_screen', 'granted_attached', 'granted_screen')",
+        [],
     )
 }
 
-/// What history shows for the stored value: a pending picture reads as sent once its run isn't
-/// `active`, as recovery would record it, and as none while it is.
+/// A pending picture never reads as sent. An unsettled authorization reads conservatively
+/// once the run ends, as it would after recovery.
 pub(super) fn shown(column_text: &str, active: Option<bool>) -> Option<HeldScreen> {
     match column_text {
-        PENDING_ATTACHED if active == Some(false) => Some(HeldScreen::Attached),
-        PENDING_SCREEN if active == Some(false) => Some(HeldScreen::Screen),
-        other => read(other),
+        "granted_attached" if active == Some(false) => Some(HeldScreen::Attached),
+        "granted_screen" if active == Some(false) => Some(HeldScreen::Screen),
+        other => ALL.into_iter().find(|&screen| column(screen) == other),
     }
-}
-
-/// The stored value; one this build doesn't know reads as none, so no line claims a window.
-pub(super) fn read(column_text: &str) -> Option<HeldScreen> {
-    ALL.into_iter()
-        .find(|&screen| column(screen) == column_text)
 }

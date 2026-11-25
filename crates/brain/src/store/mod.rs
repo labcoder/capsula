@@ -57,6 +57,7 @@ use kumochi_protocol::message::{Deleted, HeldScreen, HistoryFailure, RunId, Thre
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 
 pub use drawing::DrawingRecovery;
+pub use held::UnsentScreen;
 #[cfg(test)]
 pub(crate) use pages::Pages;
 pub use purge::{Cancel, Copied, Leftovers, Owed, Swap};
@@ -412,8 +413,7 @@ impl Store {
              AND thread IN (SELECT id FROM threads WHERE state = 'live')",
             params![now_ms()],
         )?;
-        // No send is left to settle a pending picture, and whether one attempted a write is lost.
-        held::sent(&self.conn, None)?;
+        held::recover(&self.conn)?;
         (recovered.failed_sends, recovered.unknown_sends) = self.recover_sends()?;
         self.create_main()?;
         recovered.purge_pending = self.purge_pending;
@@ -525,6 +525,18 @@ impl Store {
         events: &[NewEvent<'_>],
         end: RunEnd,
     ) -> Result<(), StoreError> {
+        self.end_run_with_screen(thread, run, events, end, None)
+    }
+
+    pub(crate) fn end_run_with_screen(
+        &mut self,
+        thread: ThreadId,
+        run: RunId,
+        events: &[NewEvent<'_>],
+        end: RunEnd,
+        screen: Option<held::UnsentScreen>,
+    ) -> Result<(), StoreError> {
+        let connection_reason;
         let (state, reason) = match end {
             RunEnd::Done => ("done", None),
             RunEnd::Interrupted(why) => (
@@ -541,10 +553,11 @@ impl Store {
             RunEnd::Failed(Failure::Engine) => ("failed", Some("engine")),
             RunEnd::Failed(Failure::Store) => ("failed", Some("store")),
             RunEnd::Failed(Failure::Connection(failure)) => {
-                return self.end_run_with_connection_failure(thread, run, events, failure);
+                connection_reason = history_failure::encode(failure);
+                ("failed", Some(connection_reason.as_str()))
             }
         };
-        self.end_run_with_reason(thread, run, events, state, reason)
+        self.end_run_with_reason(thread, run, events, state, reason, screen)
     }
 
     /// Ends a run with a closed connection failure and proven delivery disposition, atomically
@@ -559,8 +572,12 @@ impl Store {
         events: &[NewEvent<'_>],
         failure: HistoryFailure,
     ) -> Result<(), StoreError> {
-        let reason = history_failure::encode(failure);
-        self.end_run_with_reason(thread, run, events, "failed", Some(&reason))
+        self.end_run(
+            thread,
+            run,
+            events,
+            RunEnd::Failed(Failure::Connection(failure)),
+        )
     }
 
     fn end_run_with_reason(
@@ -570,6 +587,7 @@ impl Store {
         events: &[NewEvent<'_>],
         state: &str,
         reason: Option<&str>,
+        screen: Option<held::UnsentScreen>,
     ) -> Result<(), StoreError> {
         let (thread, run) = (
             sql_id(thread.0, StoreError::NoThread)?,
@@ -581,9 +599,20 @@ impl Store {
             insert_events(&tx, thread, run, events, now)?;
         }
         let ended = tx.execute(
-            "UPDATE runs SET state = ?3, reason = ?4, ended_ms = ?5
+            "UPDATE runs SET state = ?3, reason = ?4, ended_ms = ?5,
+             screen = CASE WHEN ?6 AND screen IN (
+                 'pending_attached', 'pending_screen', 'granted_attached', 'granted_screen'
+             ) THEN ?7 ELSE screen END
              WHERE id = ?1 AND thread = ?2 AND state = 'active'",
-            params![run, thread, state, reason, now],
+            params![
+                run,
+                thread,
+                state,
+                reason,
+                now,
+                screen.is_some(),
+                screen.and_then(held::UnsentScreen::column)
+            ],
         )?;
         if ended == 0 {
             return Err(StoreError::NoRun);

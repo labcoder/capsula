@@ -1,8 +1,8 @@
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
-    DataToShell, EventId, MAX_PAGE_BYTES, MAX_PAGE_ROWS, PageEvent, PageEventKind, PageOf, RunId,
-    SceneId, TaskFact, TaskRun, TaskRunOutcome, TaskState, ThreadCursor, ThreadId, ThreadKind,
-    ThreadRow,
+    DataToShell, DeliveryProof, EventId, HeldScreen, MAX_PAGE_BYTES, MAX_PAGE_ROWS, PageEvent,
+    PageEventKind, PageOf, RunId, SceneId, TaskFact, TaskRun, TaskRunOutcome, TaskState,
+    ThreadCursor, ThreadId, ThreadKind, ThreadRow,
 };
 use rusqlite::{Connection, Row, params};
 
@@ -545,7 +545,12 @@ fn user_event_kind(row: &Row<'_>) -> rusqlite::Result<PageEventKind> {
         .as_deref()
         .and_then(|screen| super::held::shown(screen, active));
     let failure = match row.get_ref(10)? {
-        rusqlite::types::ValueRef::Text(reason) => super::history_failure::decode(reason),
+        rusqlite::types::ValueRef::Text(reason) => {
+            super::history_failure::decode(reason).filter(|failure| {
+                failure.delivery != DeliveryProof::NotSent
+                    || !matches!(screen, Some(HeldScreen::Attached | HeldScreen::Screen))
+            })
+        }
         _ => None,
     };
     Ok(match (failed, failure, screen) {

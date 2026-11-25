@@ -65,16 +65,17 @@ impl Granted {
             }
         );
         let id = LeaseId { key, send: 1 };
-        assert_eq!(
-            core.handle(ready),
-            Ok(vec![
-                Effect::Grant(id),
-                Effect::ArmSendDeadline {
-                    lease: id,
-                    after: Duration::from_secs(165),
-                },
-            ])
-        );
+        let before = tokio::time::Instant::now() + Duration::from_secs(165);
+        let effects = core.handle(ready).unwrap();
+        let [
+            Effect::Grant(granted),
+            Effect::ArmSendDeadlineAt { lease, at },
+        ] = effects.as_slice()
+        else {
+            panic!("held grant: {effects:?}")
+        };
+        assert_eq!((*granted, *lease), (id, id));
+        assert!((before..=tokio::time::Instant::now() + Duration::from_secs(165)).contains(at));
         engines::answer(&asks, key, Answer::Grant(SendLease::new(id, inputs_tx)));
         let Answer::Grant(lease) = asked.await.expect("the ask ends") else {
             panic!("refused");
