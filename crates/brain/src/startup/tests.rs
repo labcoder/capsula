@@ -3,7 +3,10 @@ use std::time::Duration;
 
 use super::*;
 use crate::engines::fixture::Fixture;
-use crate::test_support::{Scratch, accounts};
+use kumochi_protocol::constants::SESSION_LOCK;
+
+use crate::platform::SessionLockError;
+use crate::test_support::{Scratch, held_accounts};
 
 #[tokio::test]
 async fn an_error_after_open_state_drops_the_store_and_pipes() {
@@ -27,6 +30,7 @@ async fn assert_unwind(stop: Checkpoint, slot: u32) {
         jobs: None,
         brain: None,
         opened: None,
+        profile: None,
         exe: std::env::current_exe().expect("current test executable"),
         pipes,
         session: 0,
@@ -45,8 +49,8 @@ async fn assert_unwind(stop: Checkpoint, slot: u32) {
     let mut job = None;
     let Err(error) = lifecycle.start(
         opened,
-        |_, _| {
-            let mut account = accounts(&scratch);
+        |_, _, profile| {
+            let mut account = held_accounts(&scratch, profile);
             vault = account.take_release_receipt();
             Ok((account, Arc::default()))
         },
@@ -88,6 +92,17 @@ async fn assert_unwind(stop: Checkpoint, slot: u32) {
         side.upgrade().is_none(),
         "no owner retains the opened store"
     );
+    let lock = scratch.dir().join(SESSION_LOCK);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match SessionLock::try_acquire(&lock) {
+            Ok(_) => break,
+            Err(SessionLockError::Busy) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(error) => panic!("the unwind kept the profile lock: {error}"),
+        }
+    }
     if stop == Checkpoint::Helpers {
         let mut job = job.expect("helper Job started");
         let job = Arc::get_mut(&mut job).expect("startup released its Job reference");

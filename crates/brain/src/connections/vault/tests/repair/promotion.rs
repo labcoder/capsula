@@ -388,6 +388,10 @@ async fn a_refused_history_commit_spends_the_binding() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one cutoff scenario through the real store thread, kept in order"
+)]
 async fn the_store_thread_writes_the_cutoff_and_its_purge_carries_it() {
     let (_scratch, path, service, store) = setup("repair-cutoff-store-thread");
     let history = path.with_file_name(kumochi_protocol::constants::STORE_FILE);
@@ -403,8 +407,10 @@ async fn the_store_thread_writes_the_cutoff_and_its_purge_carries_it() {
     }
     let (acks, mut replies) = tokio::sync::mpsc::unbounded_channel();
     let (heard, attempts) = mpsc::channel();
+    let custody = crate::test_support::custody(&writer);
     let thread = StoreThread::spawn(
         writer,
+        custody,
         acks,
         Schedule {
             quiet: Duration::from_millis(1),

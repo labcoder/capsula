@@ -221,8 +221,10 @@ fn brain_with_github_owner(scratch: &Scratch, account: crate::runtime::account::
     let main = store.main_thread().unwrap();
     let high = store.high_water().unwrap();
     let scenes = store.scenes().unwrap();
+    let custody = crate::test_support::custody(&store);
     Brain::new(
         store,
+        custody,
         main,
         high,
         scenes,
