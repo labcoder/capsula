@@ -319,6 +319,7 @@ impl Presence {
         };
         let draft = text.input.read(cx).value();
         let result = typing::submit(&mut self.runs, &self.link, self.session.as_ref(), &draft);
+        self.publish_plain_escape(cx);
         let sent = result == Submission::Sent;
         diagnostics::record(cx, format_args!("submit sent={sent}"));
         let previous_error = self.error.clone();
@@ -371,9 +372,10 @@ impl Presence {
     /// Follows the input target and pushes its bounded live answer into the retained chat.
     pub(super) fn refresh_conversation(&mut self, cx: &mut Context<'_, Self>) {
         self.refresh_screen(cx);
-        self.voice
-            .target
-            .set((self.runs.thread(), self.runs.revision()));
+        let target = (self.runs.thread(), self.runs.revision());
+        if self.voice.target.replace(target) != target {
+            self.publish_plain_escape(cx);
+        }
         self.publish_offer(cx);
         if self.text.as_ref().is_some_and(|text| text.typing.visible) {
             self.chat.update(cx, |state, cx| {
