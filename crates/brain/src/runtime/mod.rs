@@ -135,6 +135,12 @@ pub(crate) enum Ended {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PairStart {
+    Ordinary,
+    AudioRepair,
+}
+
 /// Whether a Quit's last clear committed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Quit {
@@ -724,7 +730,7 @@ impl Brain {
         C: AsyncRead + AsyncWrite + Unpin,
         D: AsyncRead + AsyncWrite + Unpin,
     {
-        self.serve_with_profile(control, data, tap, audio, None)
+        self.serve_with_profile(control, data, tap, audio, None, PairStart::Ordinary)
             .await
     }
 
@@ -749,6 +755,7 @@ impl Brain {
         tap: &mut Tap,
         audio: AudioSession,
         text_metrics: Option<TextMetricsV1>,
+        start: PairStart,
     ) -> Ended
     where
         C: AsyncRead + AsyncWrite + Unpin,
@@ -789,6 +796,7 @@ impl Brain {
             let mut link = Link::new(&out_tx, &queue, &ready, &mut *tap);
             link.registration = registration;
             link.text_metrics = text_metrics;
+            link.start = start;
             let core = self.core(&mut controls, &mut turns, &mut pages, &room, link);
             tokio::select! {
                 ended = &mut control_reader => {
@@ -1102,7 +1110,11 @@ impl Brain {
         link.queued_talk_back = link.registration.map(|_| self.config.view().talk_back);
         self.settings_now(link).map_err(|Full| Ended::Lost)?;
         self.pump_settings(Some(link)).map_err(|Full| Ended::Lost)?;
-        self.account_input(AccountInput::Connected, Some(link))
+        let connected = match link.start {
+            PairStart::Ordinary => AccountInput::Connected.into(),
+            PairStart::AudioRepair => account::Event::AudioRepaired,
+        };
+        self.account_input(connected, Some(link))
             .map_err(|Full| Ended::Lost)?;
         for frame in self.account.github_opened() {
             link.control(&frame).map_err(|Full| Ended::Lost)?;
@@ -1879,6 +1891,7 @@ struct Link<'a, 't> {
     ready: &'a Notify,
     tap: &'t mut Tap,
     registration: Option<&'a Cell<Registration>>,
+    start: PairStart,
     /// The pair's opening Talk-back choice, until its first change in either direction.
     queued_talk_back: Option<bool>,
     text_metrics: Option<TextMetricsV1>,
@@ -1901,6 +1914,7 @@ impl<'a, 't> Link<'a, 't> {
             ready,
             tap,
             registration: None,
+            start: PairStart::Ordinary,
             queued_talk_back: None,
             text_metrics: None,
             recovery: None,
