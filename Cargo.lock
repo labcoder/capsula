@@ -4117,6 +4117,7 @@ dependencies = [
 name = "kumochi-storage"
 version = "0.1.2"
 dependencies = [
+ "kumochi-protocol",
  "libc",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",

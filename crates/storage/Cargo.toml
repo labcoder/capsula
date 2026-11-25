@@ -12,6 +12,7 @@ thiserror.workspace = true
 libc = "0.2.191"
 
 [target.'cfg(windows)'.dependencies]
+kumochi-protocol.workspace = true
 thiserror.workspace = true
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

@@ -1,9 +1,17 @@
-//! Protected filesystem operations: Windows' folder chain check, and dormant macOS shell-file
-//! primitives.
+//! Protected filesystem operations: Windows' application data roots and folder chain check, and
+//! dormant macOS shell-file primitives.
 
 #![cfg(any(target_os = "macos", windows))]
 
 mod platform;
+#[cfg(all(test, windows))]
+#[path = "../../../tests/support/scratch.rs"]
+#[expect(
+    dead_code,
+    clippy::print_stderr,
+    reason = "the shared fixture serves several crates and reports cleanup failures during unwind"
+)]
+mod scratch;
 
 pub use platform::Untrusted;
 #[cfg(target_os = "macos")]
@@ -11,10 +19,13 @@ pub use platform::macos::{
     AcquisitionError, AdmittedLock, AdmittedLog, ApplicationSupportError, Retention, ShellStorage,
     application_support_dir, hold_chain, open_shell_storage,
 };
+#[cfg(windows)]
+pub use platform::windows::{
+    AppDataError, Today, hold_chain, known_folder, local_app_data, new_owner_only_dir,
+    owner_only_dir, roaming_app_data, user_sid,
+};
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub use platform::windows::{DaclEntry, dacl_entries, dacl_sddl, set_dacl};
-#[cfg(windows)]
-pub use platform::windows::{hold_chain, known_folder, owner_only_dir, user_sid};
 
 /// The checks [`hold_chain`] is built from, for the brain's own protected operations.
 #[cfg(windows)]

@@ -137,6 +137,24 @@ pub fn hold_chain(path: &Path) -> Result<Vec<File>, Untrusted> {
 /// could change is refused, never re-secured, because a new DACL doesn't take back rights already
 /// granted to open handles. Its parent must be held.
 pub fn owner_only_dir(path: &Path) -> Result<File, Untrusted> {
+    owner_only(path, Existing::Use)
+}
+
+/// Creates `path` as a new owner-only folder like [`owner_only_dir`], then opens and checks it.
+/// Anything already at `path` is refused, so a run never reuses a folder it didn't make. Its
+/// parent must be held.
+pub fn new_owner_only_dir(path: &Path) -> Result<File, Untrusted> {
+    owner_only(path, Existing::Refuse)
+}
+
+/// What [`owner_only`] does with a folder already at its path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Existing {
+    Use,
+    Refuse,
+}
+
+fn owner_only(path: &Path, existing: Existing) -> Result<File, Untrusted> {
     let user = user_sid().map_err(|_| Untrusted::Io)?;
     let descriptor = Descriptor::new(&format!("D:P(A;OICI;FA;;;{user})"))?;
     let attributes = SECURITY_ATTRIBUTES {
@@ -147,7 +165,9 @@ pub fn owner_only_dir(path: &Path) -> Result<File, Untrusted> {
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: `wide` is NUL-terminated and `attributes` points to a live descriptor.
     if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0
-        && io::Error::last_os_error().raw_os_error() != Some(ERROR_ALREADY_EXISTS.cast_signed())
+        && (existing == Existing::Refuse
+            || io::Error::last_os_error().raw_os_error()
+                != Some(ERROR_ALREADY_EXISTS.cast_signed()))
     {
         return Err(Untrusted::Io);
     }
@@ -757,7 +777,29 @@ fn mapped(mut mask: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, Security, Trusted, Untrusted, trusted_security, user_sid};
+    use windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData;
+
+    use super::{
+        Kind, Security, Trusted, Untrusted, hold_chain, known_folder, new_owner_only_dir,
+        owner_only_dir, trusted_security, user_sid,
+    };
+    use crate::scratch::Scratch;
+
+    #[test]
+    fn an_exclusive_create_refuses_a_folder_already_there() {
+        let local = known_folder(FOLDERID_LocalAppData).expect("local app data");
+        let scratch = Scratch::under(&local, "exclusive-create");
+        let _held = hold_chain(&scratch).expect("the scratch chain");
+        let run = scratch.join("run");
+        drop(new_owner_only_dir(&run).expect("a new folder"));
+        assert_eq!(new_owner_only_dir(&run).err(), Some(Untrusted::Io));
+        drop(owner_only_dir(&run).expect("the open-or-create variant takes it"));
+        assert_eq!(
+            std::fs::read_dir(&run).expect("the folder lists").count(),
+            0,
+            "nothing was made inside it"
+        );
+    }
 
     #[test]
     fn only_an_owner_in_the_trusted_set_is_trusted() {
