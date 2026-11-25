@@ -1769,22 +1769,18 @@ fn a_failure_after_success_is_drained_before_any_paint_acknowledgement(
     });
 }
 
-#[gpui::test]
-fn the_real_busy_notification_reaches_consumption_and_the_first_canvas_paint(
-    cx: &mut gpui_kit::TestAppContext,
-) {
-    use crate::{link::Session, presenter::Effect};
-    use kumochi_protocol::message::{ControlToBrain, DataToShell, Incarnation, RunId, SceneId};
+fn offer_canvas_tail(
+    presenter: &mut crate::presenter::Presenter,
+    now: std::time::Instant,
+) -> Vec<crate::presenter::Effect> {
+    use kumochi_protocol::message::{DataToShell, RunId, SceneId};
     use kumochi_scene::{Record, deferred::Deferred, parse_record};
-    use std::time::Instant;
-    let mut presenter = super::ready_canvas();
     let Record::Step(step) =
         parse_record(br#"{"step":{"id":"tail","start":"now"}}"#).expect("tail")
     else {
         panic!("step");
     };
-    let now = Instant::now();
-    let effects = presenter
+    presenter
         .data(
             1,
             Deferred::new(
@@ -1800,7 +1796,19 @@ fn the_real_busy_notification_reaches_consumption_and_the_first_canvas_paint(
             100,
             now,
         )
-        .expect("real admission lane");
+        .expect("real admission lane")
+}
+
+#[gpui::test]
+fn the_real_busy_notification_reaches_consumption_and_the_first_canvas_paint(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use crate::{link::Session, presenter::Effect};
+    use kumochi_protocol::message::{ControlToBrain, Incarnation, RunId, SceneId};
+    use std::time::Instant;
+    let mut presenter = super::ready_canvas();
+    let now = Instant::now();
+    let effects = offer_canvas_tail(&mut presenter, now);
     let mut jobs = effects.into_iter().filter_map(|effect| match effect {
         Effect::Admit(job) => Some(job),
         _ => None,
@@ -1855,6 +1863,122 @@ fn the_real_busy_notification_reaches_consumption_and_the_first_canvas_paint(
             .expect("close fixture host");
         this.overlay = crate::presence::overlay_visibility::Visibility::Closed;
     });
+}
+
+#[gpui::test]
+fn the_admission_worker_only_delivers_to_a_live_presence(cx: &mut gpui_kit::TestAppContext) {
+    use crate::{link::Session, presenter::Effect};
+    use kumochi_protocol::message::Incarnation;
+    use std::time::Instant;
+
+    let shown = [
+        Step(Operation::Configure, Outcome::Success),
+        Step(Operation::Show, Outcome::Success),
+    ];
+    for live in [false, true] {
+        let owner = crate::presence::test_fixture::presence(cx);
+        let session = Session::detached(1, Incarnation(1));
+        let script = HostGuard::install(if live { &shown } else { &[] });
+        owner.update(cx, |this, cx| {
+            this.presenter = super::ready_canvas();
+            let now = Instant::now() + std::time::Duration::from_secs(60);
+            let effects = offer_canvas_tail(&mut this.presenter, now);
+            assert!(matches!(effects.as_slice(), [Effect::Admit(_)]));
+            this.session = Some(session.clone());
+            this.scene_effects(Ok(effects), cx);
+            assert!(this.overlay.window().is_none());
+        });
+        assert_eq!(session.granted(), 0, "credit waits for the worker");
+        let weak = owner.downgrade();
+        let owner = live.then_some(owner);
+        cx.update(|_| ());
+        assert_eq!(weak.upgrade().is_some(), live);
+        let mut settled = false;
+        for _ in 0..32 {
+            if (live && session.granted() != 0) || !cx.background_executor.tick() {
+                settled = true;
+                break;
+            }
+        }
+        assert!(settled, "admission must settle within 32 runnable tasks");
+        assert_eq!(session.granted(), if live { 100 } else { 0 });
+        script.finish();
+        if let Some(owner) = owner {
+            assert!(owner.read_with(cx, |this, _| this.overlay.window().is_some()));
+            close_callback_scene(&owner, cx);
+        } else {
+            assert!(weak.upgrade().is_none());
+        }
+    }
+}
+
+#[gpui::test]
+#[ignore = "release timing sample; run on a quiet machine"]
+fn measure_policy_a_timeout_tail(cx: &mut gpui_kit::TestAppContext) {
+    use crate::presenter::Effect;
+    use kumochi_protocol::message::{ControlToBrain, RunId, SceneId};
+    use std::{
+        io::{self, Write},
+        time::{Duration, Instant},
+    };
+
+    let (owner, window, controls) = super::owned_static_canvas(cx);
+    let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::StepShown {
+            run: RunId(6),
+            scene: SceneId(1),
+            index: 0,
+        })
+    );
+    assert!(kumochi_scene::deferred::running());
+    let now = Instant::now();
+    let deadline = now + Duration::from_millis(250);
+    let (job, session) = owner.update(&mut visual, |this, _| {
+        let mut effects = offer_canvas_tail(&mut this.presenter, now);
+        let Some(Effect::Admit(job)) = effects.pop() else {
+            panic!("one dispatched admission");
+        };
+        assert!(effects.is_empty());
+        assert!(this.presenter.holds_scenes());
+        assert_eq!(this.presenter.deadline(), Some(deadline));
+        let session = this.session.clone().expect("fixture connection");
+        assert_eq!(session.granted(), 0);
+        (job, session)
+    });
+    let host = HostGuard::install(&[Step(Operation::Hide, Outcome::Success)]);
+    let start = Instant::now();
+    let moving = owner.update(&mut visual, |this, cx| {
+        let effects = this.presenter.tick(deadline);
+        this.scene_effects_at(effects, deadline, cx)
+    });
+    let elapsed = start.elapsed();
+    host.finish();
+    assert!(!moving);
+    assert!(cx.update(|app| window.update(app, |_, _, _| ())).is_err());
+    owner.update(cx, |this, _| {
+        assert!(!this.presenter.holds_scenes());
+        assert!(this.overlay.window().is_none());
+        let late = offer_canvas_tail(&mut this.presenter, deadline);
+        assert!(matches!(late.as_slice(), [Effect::Credit(100)]));
+    });
+    assert_eq!(session.granted(), 100);
+    assert_eq!(
+        controls.try_recv(),
+        Ok(ControlToBrain::SceneFailed { scene: SceneId(1) })
+    );
+    assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
+    drop(job);
+    close_callback_scene(&owner, cx);
+    writeln!(
+        io::stdout().lock(),
+        "policy_a_timeout_tail_nanos={}",
+        elapsed.as_nanos()
+    )
+    .expect("record the timing sample");
+    assert!(elapsed <= Duration::from_millis(2), "{elapsed:?}");
 }
 
 #[gpui::test]

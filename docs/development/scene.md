@@ -1955,8 +1955,9 @@ worker/answer leases, including cancelled workers and answers awaiting delivery.
 The lane's one 250 ms deadline begins when its frame reaches the head, including worker-slot
 waiting. Tick and completion reject at the same exact boundary. An admission timeout clears
 only the affected scene, including any recovered rest, and releases only its previously
-mirrored semantic usage. Its durable tombstone and ordinary ClearDrawing resend intent
-survive failed delivery and reconnect. Late answers, commits and cut acknowledgements
+mirrored semantic usage. The shell immediately sends `SceneFailed`. The tombstone
+survives failed delivery; if the scene is still in the next connection's membership,
+the shell sends `ClearDrawing` then. Late answers, commits and cut acknowledgements
 cannot restore that scene or release its charge twice. A timely current validation or
 apply error still ends the connection; it is not converted into this timeout policy.
 
