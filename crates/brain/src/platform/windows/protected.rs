@@ -30,7 +30,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, READ_CONTROL,
     SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
 };
-use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_Profile};
+use windows_sys::Win32::UI::Shell::FOLDERID_Profile;
 
 use crate::platform::Untrusted;
 
@@ -44,9 +44,11 @@ pub(crate) use models::{
 /// The rights that read what's in a file or folder.
 const READS: u32 = FILE_READ_DATA | FILE_READ_EA;
 
-/// The local application data folder as the shell knows it, not as the environment says.
+/// The local application data folder as the shell knows it, for path-sensitive test scratch.
+/// Product code takes its folders from kumochi-storage's resolver.
+#[cfg(test)]
 pub(crate) fn local_app_data() -> io::Result<PathBuf> {
-    known_folder(FOLDERID_LocalAppData)
+    known_folder(windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData)
 }
 
 /// The user's profile folder as the shell knows it, not as `USERPROFILE` says.

@@ -2,11 +2,19 @@
 
 The gate tools (`cold-start`, `gate-session`, `hover-gate`, `measure-gate`, `bench idle`,
 `slice2-gate` and `live anthropic-key`) start real
-Kumochi processes on the developer's machine. A throwaway `%LOCALAPPDATA%` isolates files only:
-anything named by the product identity (the pipes, the instance capability, Credential Manager
-names and the folder the system reports for Local AppData) follows the build, not the environment.
+Kumochi processes on the developer's machine. Separate folders isolate files only: anything named
+by the product identity (the pipes, the instance capability and Credential Manager names) follows
+the build, not the environment.
 So these tools run a third identity, `Kumochi Gate`, chosen when the binaries are built, and
 never the installed `Kumochi` or the developer's `Kumochi Dev`.
+
+A Gate build takes its folders only from the override pair, `KUMOCHI_GATE_LOCALAPPDATA` and
+`KUMOCHI_GATE_APPDATA`, both set to existing folders below the real Local AppData, or else from
+the Known Folders. Its Claude Code base and staging folder follow the same local root, so an
+overridden run writes nothing to the real `Kumochi Gate` folder. It refuses one variable alone,
+and a `LOCALAPPDATA` or `APPDATA` redirected without the pair, which is how a launcher from before
+the override would isolate it. Debug builds honour the same pair; release builds without the
+gate identity never read it. The resolver is described in [architecture](architecture.md).
 
 ## The three identities
 

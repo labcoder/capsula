@@ -14,6 +14,7 @@ use kumochi_protocol::constants::{
 };
 use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_RoamingAppData};
 
+use super::admit::admitted;
 use super::known_folder;
 
 /// Why a per-user folder can't be resolved. It carries no path.
@@ -85,7 +86,8 @@ pub(crate) struct Pair {
     pub(crate) roaming: PathBuf,
 }
 
-/// The local application data root for a row whose ordinary route is `today`.
+/// The local application data root for a row whose ordinary route is `today`. Under an
+/// override, the first call in a process admits the pair before it returns either root.
 ///
 /// # Errors
 /// `Unavailable` when the row's folder isn't known, and in Gate and debug builds
@@ -132,7 +134,7 @@ fn resolve(today: Today, half: Half) -> Result<PathBuf, AppDataError> {
     };
     match choose(BUILD, today, half, &inputs)? {
         Root::Plain(path) => Ok(path),
-        Root::Override(pair) => Ok(match half {
+        Root::Override(pair) => admitted(&pair).map(|()| match half {
             Half::Local => pair.local,
             Half::Roaming => pair.roaming,
         }),

@@ -123,13 +123,18 @@ fn claude_host(vault_held: Arc<AtomicBool>, jobs: &Arc<Job>, brain_exe: &Path) -
     use crate::engines::claude_code::install::{FindError, locate};
     use crate::engines::claude_code::lane::Program;
 
-    let base = match super::local_app_data() {
-        Ok(local) => local.join(kumochi_protocol::constants::DATA_DIR),
+    let root = match kumochi_storage::local_app_data(kumochi_storage::Today::KnownFolder) {
+        Ok(root) => root,
         Err(error) => {
-            tracing::warn!(target: env!("CARGO_CRATE_NAME"), kind = ?error.kind(), "no local data folder for Claude Code");
+            tracing::warn!(target: env!("CARGO_CRATE_NAME"), kind = ?error, "no local data folder for Claude Code");
             return None;
         }
     };
+    let Ok(_root) = super::hold_chain(&root) else {
+        tracing::warn!(target: env!("CARGO_CRATE_NAME"), "the local data root for Claude Code isn't trusted");
+        return None;
+    };
+    let base = root.join(kumochi_protocol::constants::DATA_DIR);
     if let Err(error) = std::fs::create_dir(&base)
         && error.kind() != std::io::ErrorKind::AlreadyExists
     {

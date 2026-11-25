@@ -105,6 +105,9 @@ impl ProductIdentity {
     };
 }
 
+/// The log folder, in the [`DATA_DIR`] folder in the local application data root.
+pub const LOGS_DIR: &str = "logs";
+
 /// The brain's SQLite store, in the [`DATA_DIR`] folder under `%LOCALAPPDATA%`.
 pub const STORE_FILE: &str = "kumochi.db";
 

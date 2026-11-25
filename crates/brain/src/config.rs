@@ -51,7 +51,7 @@ pub(crate) enum ConfigError {
     /// The platform did not supply a settings folder candidate.
     #[cfg_attr(
         not(target_os = "macos"),
-        error("%APPDATA% is not set to an absolute path")
+        error("the roaming application data folder is unavailable")
     )]
     #[cfg_attr(
         target_os = "macos",
@@ -140,7 +140,7 @@ impl Config {
     /// failure refuses every change until the user repairs or removes the file and restarts.
     pub(crate) fn load(dir: Option<PathBuf>, main_thread: ThreadId) -> Self {
         let Some(path) = dir.map(|dir| dir.join(CONFIG_FILE)) else {
-            tracing::warn!("%APPDATA% isn't an absolute path; settings won't be saved");
+            tracing::warn!("no settings folder; settings won't be saved");
             return Self::refusing(None, Refusal::NoHome, main_thread);
         };
         let table = match std::fs::read_to_string(&path) {

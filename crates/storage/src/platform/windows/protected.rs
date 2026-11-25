@@ -35,13 +35,14 @@ use windows_sys::Win32::Security::{
     PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-    FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_NAME_NORMALIZED,
+    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, FileAttributeTagInfo,
-    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, READ_CONTROL, SYNCHRONIZE,
-    VOLUME_NAME_DOS, WRITE_DAC, WRITE_OWNER,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_DOS, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::SystemServices::{
@@ -255,6 +256,33 @@ pub enum Kind {
     File,
 }
 
+/// Checks the file a writer is about to open at `path`, without following it: nothing there is
+/// fine, and something there must be a plain file with no other name and no reparse point. Its
+/// parent must be held.
+pub fn check_leaf(path: &Path) -> Result<(), Untrusted> {
+    let leaf = match File::options()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+    {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        opened => opened.map_err(|_| Untrusted::Io)?,
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `info` is writable and the handle is open for the call.
+    if unsafe { GetFileInformationByHandle(leaf.as_raw_handle(), &raw mut info) } == 0 {
+        return Err(Untrusted::Io);
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(Untrusted::Reparse);
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 || info.nNumberOfLinks != 1 {
+        return Err(Untrusted::Unsafe);
+    }
+    Ok(())
+}
+
 /// Opens `path` without following a reparse point and checks it through that handle.
 pub fn open_checked(path: &Path, kind: Kind, trusted: &Trusted) -> Result<File, Untrusted> {
     let opened = open(path, kind, 0)?;
@@ -464,6 +492,56 @@ pub fn dacl_entries(path: &Path) -> Vec<DaclEntry> {
             }
         })
         .collect()
+}
+
+/// Makes the empty folder `dir` a junction to `target`, for tests to plant a link.
+///
+/// # Errors
+/// When the folder can't be opened or the reparse point can't be set.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_junction(dir: &Path, target: &Path) -> io::Result<()> {
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+    use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
+
+    let folder = File::options()
+        .access_mode(FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(dir)?;
+    let substitute: Vec<u16> = format!(r"\??\{}", target.display())
+        .encode_utf16()
+        .collect();
+    let name = u16::try_from(substitute.len() * 2).map_err(|_| io::ErrorKind::InvalidInput)?;
+    let mut buffer = Vec::new();
+    buffer.extend(IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    for field in [8 + name + 4, 0, 0, name, name + 2, 0] {
+        buffer.extend(field.to_le_bytes());
+    }
+    for unit in substitute {
+        buffer.extend(unit.to_le_bytes());
+    }
+    buffer.extend([0; 4]);
+    let size = u32::try_from(buffer.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
+    let mut returned = 0;
+    // SAFETY: `buffer` is a complete mount-point REPARSE_DATA_BUFFER of `size` bytes, the handle
+    // is open, and no output buffer or overlapped I/O is used.
+    let set = unsafe {
+        DeviceIoControl(
+            folder.as_raw_handle(),
+            FSCTL_SET_REPARSE_POINT,
+            buffer.as_ptr().cast(),
+            size,
+            std::ptr::null_mut(),
+            0,
+            &raw mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if set == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Replaces the folder at `path`'s DACL with the protected one in `sddl`, which gets this user's
