@@ -5,8 +5,8 @@ use std::path::Path;
 
 use kumochi_protocol::constants::CREDENTIAL_SERVICE;
 use kumochi_protocol::profile::Observation;
-use rusqlite::Connection;
 use rusqlite::types::{Value, ValueRef};
+use rusqlite::{Connection, OptionalExtension as _};
 use zeroize::Zeroizing;
 
 use super::{AuthorityError, GENERATIONS, Kind, SCHEMA, VERSION, current, io};
@@ -15,15 +15,24 @@ use crate::platform::SessionLock;
 use crate::platform::credential::CredentialStore;
 use crate::store::existing::{self, ExistingError};
 
-/// Every table's columns and keys, and every other object's SQL, in one order. Table SQL isn't
-/// compared, since a file migrated to the current version differs in text from a fresh one.
+/// Every table's columns, foreign keys and index keys, and every other object's SQL, unsorted.
+/// Table SQL isn't compared, since a file migrated to the current version differs in text from a
+/// fresh one.
 const SHAPE: &str = "
-SELECT t.name, t.strict, c.cid, c.name, c.type, c.\"notnull\", c.dflt_value, c.pk
+SELECT 'column', t.name, t.strict, c.cid, c.name, c.type, c.\"notnull\", c.dflt_value, c.pk
 FROM pragma_table_list t, pragma_table_xinfo(t.name) c
 WHERE t.schema = 'main' AND t.type = 'table'
 UNION ALL
-SELECT tbl_name, NULL, NULL, name, type, NULL, sql, NULL FROM sqlite_schema WHERE type <> 'table'
-ORDER BY 1, 3, 4";
+SELECT 'object', tbl_name, type, name, sql, NULL, NULL, NULL, NULL
+FROM sqlite_schema WHERE type <> 'table'
+UNION ALL
+SELECT 'reference', m.name, f.id, f.seq, f.\"table\", f.\"from\", f.\"to\",
+    f.on_update || ' ' || f.on_delete, f.match
+FROM sqlite_schema m, pragma_foreign_key_list(m.name) f WHERE m.type = 'table'
+UNION ALL
+SELECT 'key', m.name, i.name, i.\"unique\", i.origin, i.partial, k.seqno, k.name, NULL
+FROM sqlite_schema m, pragma_index_list(m.name) i, pragma_index_info(i.name) k
+WHERE m.type = 'table'";
 
 /// The ordinary kinds, whose heads every current authority holds.
 const HEADS: [Kind; 5] = [
@@ -50,7 +59,8 @@ const UNVERIFIED: Legacy = Legacy {
 /// the rows its open and reads need. It only reads, so a live open can share it. Repair's rules,
 /// such as a missing account chunk, stay in repair. A file its open would migrate (versions 1
 /// and 2) or one in repair (version 4) isn't current. CHECK clauses are neither compared nor
-/// re-verified: SQLite's `integrity_check` skips them on a read-only connection.
+/// re-verified, since SQLite's `integrity_check` skips them on a read-only connection, so the
+/// `control` row's key and its lifetime, which the next open increments, are checked here.
 ///
 /// # Errors
 /// Corrupt for an older version, a different shape or a bad row; `NewerSchema` for a newer
@@ -64,13 +74,7 @@ pub(crate) fn check(conn: &Connection) -> Result<(), AuthorityError> {
             AuthorityError::Corrupt
         });
     }
-    let built = Connection::open_in_memory()?;
-    built.execute_batch(SCHEMA)?;
-    built.execute_batch(GENERATIONS)?;
-    let objects = |conn: &Connection| -> rusqlite::Result<i64> {
-        conn.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
-    };
-    if objects(conn)? != objects(&built)? || !same_shape(conn, &built)? {
+    if !same_shape(conn)? {
         return Err(AuthorityError::Corrupt);
     }
     let integrity: String = conn.query_row("PRAGMA integrity_check(1)", [], |row| row.get(0))?;
@@ -78,8 +82,17 @@ pub(crate) fn check(conn: &Connection) -> Result<(), AuthorityError> {
         conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
             row.get(0)
         })?;
-    let control: i64 = conn.query_row("SELECT count(*) FROM control", [], |row| row.get(0))?;
-    if integrity != "ok" || orphans != 0 || control != 1 {
+    let lifetime: Option<i64> = conn
+        .query_row(
+            "SELECT lifetime FROM control WHERE id = 1 AND (SELECT count(*) FROM control) = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if integrity != "ok"
+        || orphans != 0
+        || !lifetime.is_some_and(|lifetime| (0..i64::MAX).contains(&lifetime))
+    {
         return Err(AuthorityError::Corrupt);
     }
     for kind in HEADS {
@@ -88,44 +101,54 @@ pub(crate) fn check(conn: &Connection) -> Result<(), AuthorityError> {
     Ok(())
 }
 
-/// Whether `conn`'s shape is `built`'s, reading `conn`'s rows one at a time. Its object count
-/// already matched, so the sort and the read stay small.
-fn same_shape(conn: &Connection, built: &Connection) -> rusqlite::Result<bool> {
+/// Whether `conn`'s shape is exactly a fresh authority's, built in memory from the open's own SQL.
+/// The candidate's rows are read once, unsorted, and each must use up a distinct entry of the small
+/// expected set, so Rust holds no copy of one, SQLite sorts nothing, and at most one row past the
+/// expected count is read.
+fn same_shape(conn: &Connection) -> rusqlite::Result<bool> {
+    let built = Connection::open_in_memory()?;
+    built.execute_batch(SCHEMA)?;
+    built.execute_batch(GENERATIONS)?;
     let mut statement = built.prepare(SHAPE)?;
     let width = statement.column_count();
-    let expected = statement
+    let mut expected = statement
         .query_map([], |row| {
             (0..width)
                 .map(|column| row.get(column))
                 .collect::<rusqlite::Result<Vec<Value>>>()
+                .map(Some)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut statement = conn.prepare(SHAPE)?;
     let mut rows = statement.query([])?;
-    let mut expected = expected.iter();
     while let Some(row) = rows.next()? {
-        let Some(want) = expected.next() else {
-            return Ok(false);
-        };
-        for (column, want) in want.iter().enumerate() {
-            if row.get_ref(column)? != ValueRef::from(want) {
-                return Ok(false);
+        let mut matched = None;
+        for (index, entry) in expected.iter().enumerate() {
+            let Some(want) = entry else { continue };
+            let mut same = true;
+            for (column, want) in want.iter().enumerate() {
+                same &= row.get_ref(column)? == ValueRef::from(want);
+            }
+            if same {
+                matched = Some(index);
+                break;
             }
         }
+        let Some(index) = matched else {
+            return Ok(false);
+        };
+        expected[index] = None;
     }
-    Ok(expected.next().is_none())
+    Ok(expected.iter().all(Option::is_none))
 }
 
 /// Reads the legacy authority at `db` through [`existing::open`] under `session`, then the host it
-/// commits under the fixed service. `Absent` only when the authority's own folder holds no file
-/// and nothing a store or a purge leaves, as for the history store; the folder is still a
-/// footprint. A missing or linked folder, or any authority but a current one, is `Unverified`
-/// for both.
+/// commits under the fixed service, inside [`existing::in_folder`]. `Absent` only when the
+/// authority's own folder holds no file and nothing a store or a purge leaves, as for the history
+/// store; the folder is still a footprint. A missing, linked or moved folder, or any authority but
+/// a current one, is `Unverified` for both.
 pub(crate) fn legacy(db: &Path, session: &SessionLock, store: &impl CredentialStore) -> Legacy {
-    if !db.parent().is_some_and(existing::folder) {
-        return UNVERIFIED;
-    }
-    match existing::open(db, session) {
+    existing::in_folder(db, || match existing::open(db, session) {
         Ok(read) if check(&read).is_ok() => Legacy {
             authority: Observation::Matching,
             host: host(&read, store),
@@ -135,11 +158,13 @@ pub(crate) fn legacy(db: &Path, session: &SessionLock, store: &impl CredentialSt
             host: Observation::Absent,
         },
         _ => UNVERIFIED,
-    }
+    })
+    .unwrap_or(UNVERIFIED)
 }
 
-/// The host `conn` commits, read whole by its exact names and checked as a host, then dropped. No
-/// committed host is `Absent`; a missing, short or unreadable chunk or a malformed host is not.
+/// The host `conn` commits, its chunks read by their exact names into one zeroizing buffer, decoded
+/// into a zeroizing string and checked as a host, then dropped. No committed host is `Absent`; a
+/// missing, short or unreadable chunk or a malformed host is not.
 fn host(conn: &Connection, store: &impl CredentialStore) -> Observation {
     let Ok(head) = current(conn, Kind::Host) else {
         return Observation::Unverified;
@@ -290,6 +315,41 @@ mod tests {
 
     #[test]
     fn a_changed_shape_or_a_bad_row_is_unverified() {
+        let without_host = [
+            (
+                "no-reference",
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_schema SET sql = replace(sql, ' REFERENCES heads (kind)', '')
+                 WHERE name = 'generations';",
+            ),
+            (
+                "moved-unique",
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_schema SET sql = replace(replace(sql,
+                     'generation BLOB NOT NULL UNIQUE', 'generation BLOB NOT NULL'),
+                     'kind TEXT NOT NULL REFERENCES', 'kind TEXT NOT NULL UNIQUE REFERENCES')
+                 WHERE name = 'generations';",
+            ),
+            (
+                "wrong-control-id",
+                "PRAGMA ignore_check_constraints = 1; UPDATE control SET id = 2;",
+            ),
+            (
+                "second-control-row",
+                "PRAGMA ignore_check_constraints = 1;
+                 INSERT INTO control (id, lifetime, marker) SELECT 2, lifetime, marker FROM control;",
+            ),
+            (
+                "spent-lifetime",
+                "UPDATE control SET lifetime = 9223372036854775807",
+            ),
+        ];
+        for (case, sql) in without_host {
+            let fixture = Fixture::new(&format!("legacy-authority-{case}"));
+            fixture.authority(None);
+            fixture.raw(sql);
+            assert_eq!(fixture.read(), UNVERIFIED, "{case}");
+        }
         for (case, sql) in [
             ("extra-table", "CREATE TABLE extra (x INTEGER)"),
             ("extra-index", "CREATE INDEX extra ON generations (kind)"),
@@ -399,6 +459,28 @@ mod tests {
             fs::write(fixture.scratch.dir().join(format!("{FILE}{left}")), b"left")
                 .expect("left file");
             assert_eq!(fixture.read(), UNVERIFIED, "{left}");
+        }
+    }
+
+    #[test]
+    fn a_folder_renamed_or_swapped_during_the_read_is_unverified() {
+        for swap in [false, true] {
+            let fixture = Fixture::new(&format!("legacy-authority-moved-{swap}"));
+            let dir = fixture.scratch.dir().to_owned();
+            let moved = dir.with_file_name(format!("legacy-authority-moved-{swap}-away"));
+            let (from, to) = (dir.clone(), moved.clone());
+            existing::between_folder_checks(move || {
+                fs::rename(&from, &to).expect("move the folder");
+                if swap {
+                    fs::create_dir(&from).expect("a new folder at the same path");
+                }
+            });
+            assert_eq!(
+                legacy(&fixture.db(), &fixture.lock, &fixture.store),
+                UNVERIFIED,
+                "{swap}"
+            );
+            assert!(files(&moved).is_empty(), "{swap}");
         }
     }
 

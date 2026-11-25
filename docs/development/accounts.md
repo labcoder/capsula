@@ -1084,8 +1084,9 @@ pass's 16, and any whose names come back, stay owed to later passes and opens.
 `connections::authority::existing::legacy` looks at a legacy profile's `credentials.db` and the
 host it commits, for the existing-profile observer. Nothing calls it yet. It takes the caller's
 `SessionLock` and opens the file only through [`store::existing::open`](store.md#reading-an-existing-database),
-after checking that the file's own folder is a folder and not a link or reparse point. It
-creates, migrates, checkpoints, retires and sweeps nothing, and it never writes or deletes a
+inside `store::existing::in_folder`, as the [legacy history read](store.md#a-legacy-history-store)
+does: the folder's identity is taken first and must read the same at the same path afterwards.
+It creates, migrates, checkpoints, retires and sweeps nothing, and it never writes or deletes a
 credential name. It returns two `Observation`s from one snapshot:
 
 | | `Matching` | `Absent` | `Unverified` |
@@ -1107,14 +1108,19 @@ simply `Unverified`. How each `user_version` maps:
 | 4 | `Unverified` | an account repair is in progress, under OSC-1065's recovery lifecycle |
 | 5 and newer | `Unverified` | written by a newer build |
 
-At version 3 the file must have exactly as many schema objects as a fresh authority, then the
-same tables, strictness, columns (name, type, not-null, default, key) and index SQL, compared
-row by row with one built in memory from the open's own SQL. Table SQL isn't compared, since a
-migrated file's differs in text. Then `integrity_check` must pass, there must be no foreign-key
-orphan, the `control` row must exist, and every ordinary head must read with a valid Active
-layout. CHECK clauses are neither compared nor re-verified, because `integrity_check` skips them
-on a read-only connection. A Pending row is allowed, since the next open retires it. The host's
-bytes are held only as a zeroizing secret inside the check and dropped; they're never logged,
-compared elsewhere or returned. Tests use the fake store and scratch folders: fresh and migrated
-files, every other version, each changed shape or bad row, each host failure, each leftover, a
-missing folder and a linked one, each checking that no file or credential changed.
+At version 3 the file's shape must be exactly that of one built in memory from the open's own
+SQL: the same tables, strictness and columns (name, type, not-null, default, key), the same
+foreign keys (table, columns, actions), the same index keys (unique, origin, partial, columns)
+and the same index SQL. The candidate's rows are read once, unsorted, each using up a distinct
+entry of the small expected set, so SQLite sorts nothing and at most one row past that set is
+read. Table SQL isn't compared, since a migrated file's differs in text. Then `integrity_check`
+must pass and there must be no foreign-key orphan. CHECK clauses are neither compared nor
+re-verified, because `integrity_check` skips them on a read-only connection, so the check reads
+what the open relies on itself: exactly one `control` row, keyed 1, with a lifetime from 0 to
+one below the largest integer, since the next open increments it; and every ordinary head with
+a valid Active layout. A Pending row is allowed, since the next open retires it. The host's
+chunks are read into one zeroizing buffer and decoded into a zeroizing string inside the check,
+then dropped; neither is logged, compared elsewhere or returned. Tests use the fake store and
+scratch folders: fresh and migrated files, every other version, each changed shape or bad row,
+each host failure, each leftover, a missing, linked, renamed or swapped folder, each checking
+that no file or credential changed.
