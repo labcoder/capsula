@@ -178,6 +178,7 @@ mod tests {
 
     use kumochi_protocol::constants::CREDENTIAL_SERVICE;
 
+    use crate::platform::credential::conformance;
     use crate::platform::credential::fixture::Fixture;
 
     use super::*;
@@ -210,6 +211,13 @@ mod tests {
                 "persisted secret matches"
             );
         });
+    }
+
+    #[test]
+    fn the_store_meets_the_shared_contract() {
+        let limit = usize::try_from(CRED_MAX_CREDENTIAL_BLOB_SIZE).expect("blob limit");
+        conformance::refuses_invalid_input(&WindowsCredentialStore, limit, "test-only-target");
+        isolated(|target| conformance::round_trip(&WindowsCredentialStore, target, limit));
     }
 
     #[test]

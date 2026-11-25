@@ -813,6 +813,19 @@ We chose not to add that second keyring stack: our store is small and reviewed, 
 zeroizing bytes, and its guard wipes the validated native read blob and frees the allocation
 on every exit, including panic unwinding. `CredentialStore` is the seam for a macOS Keychain store.
 
+On macOS, `platform::macos::credential::MacCredentialStore` is dormant: only tests construct it,
+and the native store stays `Unsupported`. It uses the data protection keychain, never the
+file-based login keychain: one generic password per exact target, as the account under
+`CREDENTIAL_SERVICE`, not synchronizable, readable only while unlocked on this device. Every call
+carries a fresh `LAContext` with interaction not allowed, so the Keychain never shows UI; if that
+context can't be set up, the call is refused. A write adds, or on a duplicate updates only the
+data; the written bytes are a no-copy view of the caller's zeroizing buffer. It keeps Windows'
+name and 2,560-byte limits. The data protection keychain needs a signed, provisioned host: an
+unsigned build reads a missing item as absent but is refused writes and deletes with
+`errSecMissingEntitlement` (-34018), so the native contract test is ignored until a signed test
+host exists, and admission must prove that entitlement before trusting an absent read.
+`platform::credential::conformance` holds the exact-name contract both stores' tests run.
+
 Credential Manager protects entries per Windows user, not per process. Any process running
 as the same Windows user can read these entries. The session lock coordinates cooperating
 brain instances; it does not provide isolation from other processes running as that user.
