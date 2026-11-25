@@ -450,6 +450,14 @@ fn run(
                         };
                     send(pending.id, Reply::Refused(why))?;
                 } else {
+                    let deadline = expires.expect("a live capture has a deadline");
+                    let result = result.map_err(|error| {
+                        if deadline.tighten(now()).is_some() {
+                            error
+                        } else {
+                            Refusal::Expired.into()
+                        }
+                    });
                     let result = result.and_then(|(acquired, shown)| {
                         let (surface, foreground) = match &shown {
                             Shown::Window(target) => (target.top.rect, Some(target.top.clone())),
@@ -459,7 +467,7 @@ fn run(
                             &pending.ticket,
                             surface,
                             pending.received,
-                            expires.expect("a live capture has a deadline"),
+                            deadline,
                             now(),
                             (acquired, foreground),
                         )?;

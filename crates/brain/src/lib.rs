@@ -66,6 +66,7 @@ use crate::engines::fixture::Fixture;
 use crate::engines::responses::{AccessHandle, Responses};
 use crate::ipc::{Identity, Pipes, Session};
 use crate::platform::Job;
+use crate::platform::native_workers;
 use crate::runtime::{Brain, Selected};
 
 /// How long a relaunched shell the brain can't watch gets to connect: past the shell's own
@@ -252,10 +253,6 @@ fn draw_admission(
     })
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "keeps the startup and shutdown order of the admitted brain's resources in one place"
-)]
 async fn run_admitted(
     admission: Result<StartMode, BrainError>,
     #[cfg(test)] starting: impl FnOnce(),
@@ -296,10 +293,7 @@ async fn run_admitted(
     let mut config = config::Config::load(platform::config_dir(), main_thread);
     #[cfg(all(windows, feature = "gate-draw-replay", not(debug_assertions)))]
     require_draw_model(&config)?;
-    #[cfg(windows)]
-    let claude_on = config.claude_code_enabled();
-    #[cfg(windows)]
-    tracing::info!(enabled = claude_on, "Claude Code setting");
+    let claude_setting = native_workers::claude_setting(&config);
     // Before the capability is stored, so its write never overlaps the vault's first reads.
     let (account, vault_held) = accounts(config.oauth_tuning(), config.token_tuning())?;
     config.count_in_use(&account.view(), high_water.1);
@@ -316,30 +310,7 @@ async fn run_admitted(
         account,
     )
     .map_err(BrainError::StoreThread)?;
-    #[cfg(windows)]
-    let models = platform::data_dir().map(|data| data.join(kumochi_protocol::voice::MODELS_DIR));
-    #[cfg(windows)]
-    let stuck = models
-        .as_deref()
-        .map(|models| brain.finish_removals(models))
-        .unwrap_or_default();
-    let jobs = std::sync::Arc::new(Job::new().map_err(BrainError::Helpers)?);
-    #[cfg(windows)]
-    {
-        if let Some(models) = models {
-            start_voice(&mut brain, models, &stuck, &exe, &jobs);
-        }
-        let lane = claude_lane(vault_held, &jobs, &exe);
-        brain.attach_claude(match lane {
-            Some(lane) if claude_on => {
-                runtime::claude::Claude::start(lane, runtime::claude::SIGN_IN)
-            }
-            None if claude_on => runtime::claude::Claude::default(),
-            lane => runtime::claude::Claude::turned_off(lane),
-        });
-    }
-    #[cfg(not(windows))]
-    drop(vault_held);
+    let jobs = native_workers::start(&mut brain, vault_held, &exe, claude_setting)?;
     start_screen(&mut brain, exe.clone(), Ok(std::sync::Arc::clone(&jobs)));
     let mut bytes = [0; CAPABILITY_LEN];
     getrandom::fill(&mut bytes)?;
@@ -369,38 +340,6 @@ async fn run_admitted(
         tracing::warn!(%error, "couldn't delete the instance capability");
     }
     ended.map(|_| ()).map_err(BrainError::from)
-}
-
-/// Starts speech input's worker and spoken replies' thread, then voice. A handle that can't start
-/// leaves its part unavailable for the session.
-#[cfg(windows)]
-fn start_voice(
-    brain: &mut Brain,
-    models: PathBuf,
-    stuck: &[(kumochi_protocol::voice::VoicePart, voice::installer::Folder)],
-    exe: &std::path::Path,
-    jobs: &std::sync::Arc<Job>,
-) {
-    use voice::Reports;
-    use voice::stt::SttHandle;
-    use voice::tts::TtsHandle;
-
-    let runtime = tokio::runtime::Handle::current();
-    let natives = exe
-        .parent()
-        .expect("the brain's path names a file in a folder")
-        .to_path_buf();
-    let (stt_reports, stt_heard) = Reports::new();
-    let stt = speech::SpeechSupervisor::start(exe.to_path_buf(), std::sync::Arc::clone(jobs))
-        .and_then(|speech| SttHandle::spawn(runtime.clone(), speech, natives, stt_reports))
-        .inspect_err(|error| tracing::warn!(kind = ?error.kind(), "speech input can't start"))
-        .ok();
-    let (tts_reports, tts_heard) = Reports::new();
-    let tts = TtsHandle::spawn(runtime, tts_reports)
-        .inspect_err(|error| tracing::warn!(kind = ?error.kind(), "spoken replies can't start"))
-        .ok();
-    let fetcher = std::sync::Arc::new(voice::download::Online(models.clone()));
-    brain.attach_voice(models, stuck, (stt, tts), [stt_heard, tts_heard], fetcher);
 }
 
 /// Gives screen holds the brain's one screen worker. One that can't start leaves screen holds
@@ -446,53 +385,6 @@ fn accounts(
             .map_err(BrainError::Accounts)?,
         held,
     ))
-}
-
-/// Claude Code's lane on the installed `claude.exe`; none when it can't start.
-#[cfg(windows)]
-fn claude_lane(
-    vault_held: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    jobs: &std::sync::Arc<Job>,
-    brain_exe: &std::path::Path,
-) -> Option<engines::claude_code::lane::Lane> {
-    use engines::claude_code::install::{FindError, locate};
-    use engines::claude_code::lane::{Host, Lane, Program};
-
-    let base = match platform::local_app_data() {
-        Ok(local) => local.join(kumochi_protocol::constants::DATA_DIR),
-        Err(error) => {
-            tracing::warn!(kind = ?error.kind(), "no local data folder for Claude Code");
-            return None;
-        }
-    };
-    if let Err(error) = std::fs::create_dir(&base)
-        && error.kind() != io::ErrorKind::AlreadyExists
-    {
-        tracing::warn!(kind = ?error.kind(), "couldn't make the local data folder for Claude Code");
-        return None;
-    }
-    let host = Host {
-        find: Box::new(|| {
-            let profile = platform::profile_dir().map_err(|_| FindError::NotFound)?;
-            locate(&profile).map(|exe| Program {
-                exe,
-                prefix: Vec::new(),
-            })
-        }),
-        base,
-        vault_held,
-        managed: Box::new(platform::managed_presence),
-        brain_job: std::sync::Arc::clone(jobs),
-        console: platform::Stdio::Console,
-        terminate: Job::terminate,
-        brain_exe: brain_exe.to_owned(),
-        runtime: tokio::runtime::Handle::current(),
-    };
-    Lane::start(host)
-        .inspect_err(
-            |error| tracing::warn!(kind = ?error.kind(), "Claude Code's lane didn't start"),
-        )
-        .ok()
 }
 
 #[cfg(all(

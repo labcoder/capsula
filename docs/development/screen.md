@@ -154,19 +154,27 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   capture task is queued. The worker starts the ticket's `ttl_ms` at receipt on its wake clock,
   capped by `deadline_qpc`, the authoritative deadline on the platform's shared monotonic clock.
   A stamp that can't be read or isn't later than now is refused at admission. After admission, the
-  worker rechecks the stamp on waking, before calling the native capture, and before accepting a
-  frame or returning a tree or sealed image. The brain rechecks before acting on a held frame and
-  before installing a sealed image; a late reply retires the holder and drops any JPEG through
-  its zero-on-drop owner. Once accepted, an image doesn't expire. Local waits can end sooner, but
-  must not renew the grant or let a pause in the wake clock extend it.
+  worker rechecks the stamp on waking, before dispatching native capture, and before accepting a
+  frame or returning a tree or sealed image. Expiry takes precedence over a still-current
+  nonfatal capture result, but does not replace an explicit Drop, Retire or supersession or
+  keep a worker alive when native cleanup cannot be proven. The brain rechecks before acting on a
+  held frame and before installing a sealed image; a late reply retires the holder and drops any
+  JPEG through its zero-on-drop owner. Once accepted, an image doesn't expire. Local waits can
+  end sooner, but must not renew the grant or let a pause in the wake clock extend it.
 
   Windows uses QPC ticks. macOS uses continuous nanoseconds
   (`clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`), so native and Rosetta processes do not exchange
   architecture-dependent ticks. A suspend spends the grant. This supports only the ticket clock;
   macOS still refuses native capture and doesn't read shell input age. Verify suspend and resume
-  before enabling capture. A native capturer whose wake clock pauses during sleep must receive
-  the stamp at its own start and wait boundaries. Linux has no shared deadline clock and leaves
-  the stamp zero.
+  before enabling capture. The producer passes the original stamp and its reader with the local
+  bound to both adapter methods. Windows uses the conservative projection on its QPC-backed
+  `Instant` for the start and wait checks, without changing the draw/exclusion clock. Each retry
+  sleeps for 1 ms and may wake later due to scheduling. An expired wake does not issue another
+  probe, and a result that crosses the deadline during a probe is released. The deadline does not
+  bound wake-up, an in-flight call, or teardown time. An adapter whose wake clock pauses during
+  sleep must recheck the stamp before issuing native sampling and at its waits, including after
+  wake, and stop or retire if it can't establish cleanup. Linux has no shared deadline clock and
+  leaves the stamp zero.
 - **Spent generations.** Every generation at or below the highest one this worker has seen is
   refused (`Reused` when equal, `Stale` when lower), and a failed or refused capture still spends
   its generation. A respawned worker starts empty; the brain's single-use tickets guard across

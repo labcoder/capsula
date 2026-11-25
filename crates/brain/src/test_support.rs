@@ -254,3 +254,46 @@ impl Write for Captured {
 
 /// A label no log line, tap record or error may carry.
 pub(crate) const SENTINEL: &str = "zqxsentinellabel";
+
+/// One folder entry as a test witness sees it, without following a link.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Entry {
+    /// A file's bytes, or a link's target.
+    pub(crate) bytes: Vec<u8>,
+    permissions: std::fs::Permissions,
+    owner: Option<(u32, u32)>,
+}
+
+/// Every entry in `dir` by name: its bytes or link target, permissions and owner.
+pub(crate) fn files(dir: &Path) -> std::collections::BTreeMap<std::ffi::OsString, Entry> {
+    std::fs::read_dir(dir)
+        .expect("scratch listing")
+        .map(|entry| {
+            let path = entry.expect("scratch entry").path();
+            let metadata = std::fs::symlink_metadata(&path).expect("scratch metadata");
+            let bytes = if metadata.is_symlink() {
+                let target = std::fs::read_link(&path).expect("scratch link");
+                target.into_os_string().into_encoded_bytes()
+            } else {
+                std::fs::read(&path).expect("scratch file")
+            };
+            #[cfg(unix)]
+            let owner = {
+                use std::os::unix::fs::MetadataExt;
+                Some((metadata.uid(), metadata.gid()))
+            };
+            #[cfg(not(unix))]
+            let owner = None;
+            let name = path.file_name().expect("scratch name").to_owned();
+            let permissions = metadata.permissions();
+            (
+                name,
+                Entry {
+                    bytes,
+                    permissions,
+                    owner,
+                },
+            )
+        })
+        .collect()
+}

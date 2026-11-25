@@ -115,6 +115,10 @@ pub const BRIDGE_LOG: &str = "kumochi-bridge";
 /// See [`BRAIN_LOG`].
 pub const SHELL_LOG: &str = "kumochi-shell";
 
+/// The label at the start of every session prologue (`Kumochi session`). Release and Dev share
+/// it: the prologue's channel byte keeps their sessions apart.
+pub const SESSION_LABEL: &str = "Kumochi session";
+
 /// The pipe Claude Code's MCP bridge connects back on, after [`OBJECT_PREFIX`], the session and a
 /// dash, and before the launch's value.
 pub const BRIDGE_PIPE: &str = "claude-bridge";
