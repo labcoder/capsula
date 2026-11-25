@@ -2519,11 +2519,13 @@ fn a_queued_modifier_from_before_readiness_cannot_arm_a_new_hold(cx: &mut TestAp
     }
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn a_reconstructed_modifier_cannot_arm_with_one_fresh_press(cx: &mut TestAppContext) {
     assert_eq!(mic_generation_after_reset(cx, &[Key::LeftAlt]), 0);
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn two_fresh_modifier_presses_can_arm_after_a_reset(cx: &mut TestAppContext) {
     assert_eq!(
@@ -2532,6 +2534,7 @@ fn two_fresh_modifier_presses_can_arm_after_a_reset(cx: &mut TestAppContext) {
     );
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn a_raw_repeat_without_release_cannot_supply_post_reset_press_evidence(cx: &mut TestAppContext) {
     assert_eq!(
@@ -2540,6 +2543,7 @@ fn a_raw_repeat_without_release_cannot_supply_post_reset_press_evidence(cx: &mut
     );
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn both_queued_makes_after_reset_arm_even_when_first_read_already_sees_both(
     cx: &mut TestAppContext,
@@ -2547,6 +2551,7 @@ fn both_queued_makes_after_reset_arm_even_when_first_read_already_sees_both(
     assert_eq!(mic_generation_after_raw_reset(cx, None), 1);
 }
 
+#[cfg(windows)]
 fn mic_generation_after_raw_reset(cx: &mut TestAppContext, initially_held: Option<Key>) -> u64 {
     use crate::link::fixture;
     use kumochi_shell_core::platform::keyboard_ticks;
@@ -2588,6 +2593,7 @@ fn mic_generation_after_raw_reset(cx: &mut TestAppContext, initially_held: Optio
     pipe.handle.microphone_gate().latest()
 }
 
+#[cfg(windows)]
 fn mic_generation_after_reset(cx: &mut TestAppContext, presses: &[Key]) -> u64 {
     use crate::link::fixture;
     use kumochi_shell_core::platform::keyboard_ticks;
@@ -2622,6 +2628,7 @@ fn mic_generation_after_reset(cx: &mut TestAppContext, presses: &[Key]) -> u64 {
     pipe.handle.microphone_gate().latest()
 }
 
+#[cfg(windows)]
 #[gpui::test]
 fn superseding_native_hold_returns_before_outbox_release_and_sends_cancel_first(
     cx: &mut TestAppContext,
