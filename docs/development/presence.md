@@ -37,6 +37,11 @@ the button, app menu and native window close share the same one-time link teardo
 has no global keyboard, retry, capture or background link, and is not topmost or click-through.
 The ordinary macOS launcher does not use it until bootstrap and process termination are admitted.
 
+The connected presence requires native desktop geometry before opening any of its windows.
+Its Win32 backend still supplies physical work area and client origin and moves, shows, and hides
+windows without activation. Platforms without that backend refuse these operations; the local
+disconnected window uses GPUI's logical visible bounds and does not cross this boundary.
+
 The shell and its offline fixtures register `shell::assets::Assets`: GPUI Kit's default
 component bundle plus the `Monitor` icon used for a held picture in history and screen notes.
 An `IconName` supplies a path, not its SVG bytes; icons outside the default bundle must be

@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use async_channel::Sender;
 use kumochi_protocol::constants::{FOCUS_INPUT_MARKER, OBJECT_PREFIX};
-use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
@@ -56,6 +56,7 @@ use windows::core::{HSTRING, PCWSTR, w};
 use super::hit_mask::{HitMask, MaskUpdate};
 use super::keyboard::{self, Deliver, EscapeHotkey, Keys};
 use super::observer::{self, Observe, ProxyHandle};
+pub(crate) use crate::platform::PresenceError;
 use crate::platform::host::{HostChange, WatchGen};
 use crate::platform::input::{self, Button};
 
@@ -126,51 +127,6 @@ pub(crate) struct PresenceLabels {
     pub(crate) retry: String,
     /// The Quit item.
     pub(crate) quit: String,
-}
-
-/// Why a presence surface couldn't be set up or moved.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum PresenceError {
-    /// GPUI gave no Win32 handle.
-    #[error("no Win32 window handle")]
-    NoHandle(#[from] HandleError),
-    /// The handle wasn't a Win32 one.
-    #[error("not a Win32 window")]
-    NotWin32,
-    /// A Win32 call failed.
-    #[error("a Win32 call failed")]
-    Os(#[from] windows::core::Error),
-    /// The hover subclass couldn't be installed.
-    #[error("can't subclass the window")]
-    Subclass,
-    /// The shell refused the tray icon.
-    #[error("the tray refused the icon")]
-    Tray,
-    /// Raw Input was started twice.
-    #[error("the keyboard is already armed")]
-    KeyboardArmed,
-    #[error("the Escape lease is unavailable")]
-    EscapeLease,
-    /// Session changes can't be watched, so a lock could leave keys held.
-    #[error("can't watch session changes")]
-    SessionWatch(#[source] windows::core::Error),
-    /// Desktop switches can't be watched, so the secure desktop could leave keys held.
-    #[error("can't watch desktop switches")]
-    DesktopWatch,
-    /// Windows kept the current foreground window.
-    #[error("Windows refused to activate the window")]
-    Activate,
-    /// The hit mask was empty, couldn't be allocated, or was smaller than the proxy.
-    #[error("the hit mask doesn't fit the proxy")]
-    MaskSize,
-    /// A frame id didn't fit a message parameter.
-    #[error("the frame id doesn't fit a message")]
-    FrameId,
-    #[error("no selection surface is bound")]
-    SelectionSurface,
-    /// A perch host's watch couldn't be installed, or two are already alive.
-    #[error("can't watch the host window")]
-    HostWatch,
 }
 
 /// Turns pointer moves into one `PointerChanged` per enter and per leave.

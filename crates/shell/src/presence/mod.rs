@@ -957,6 +957,7 @@ pub(crate) fn open(
     observer: Option<Observer>,
     cx: &mut App,
 ) -> Result<(), OpenError> {
+    platform::require_connected_geometry()?;
     if let Some(diagnostics) = diagnostics {
         cx.set_global(diagnostics);
     }

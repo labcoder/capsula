@@ -1,5 +1,10 @@
 //! The operating system behind small, safe functions. Windows only for now.
 
+pub(crate) use kumochi_shell::presence_platform::{PresenceError, require_connected_geometry};
+#[cfg(not(windows))]
+pub(crate) use kumochi_shell::presence_platform::{
+    client_origin, hide_presence_window, place_presence_window, work_area,
+};
 pub(crate) use kumochi_shell_core::platform::{host, input, microphone};
 
 /// Where a test says the pointer is. A test that sets it never reads the real one, which is
@@ -88,8 +93,8 @@ pub(crate) use windows::ScreenSources;
 #[cfg(windows)]
 pub(crate) use windows::{
     Affinity, Deliver, EscapeHotkey, EventTime, Foreground, HostWatch, MaskUpdate, OverlayWindows,
-    PresenceError, PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface, ProxyHandle,
-    ProxyNote, activate_presence_window, client_origin, configure_presence_window, cursor_position,
+    PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface, ProxyHandle, ProxyNote,
+    activate_presence_window, client_origin, configure_presence_window, cursor_position,
     exclude_window, hide_presence_window, host_at, performance_counter, performance_frequency,
     place_presence_window, restore_foreground, restore_window_affinity, watch_host,
     window_affinity, window_handle, work_area,

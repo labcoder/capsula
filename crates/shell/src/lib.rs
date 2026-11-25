@@ -3,6 +3,8 @@
 /// Assets bundled with the shell.
 pub mod assets;
 mod local_dock;
+#[path = "platform/presence_platform.rs"]
+pub mod presence_platform;
 pub mod strings;
 /// The shell's product palette.
 pub mod theme;

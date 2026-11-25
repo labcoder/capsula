@@ -19,9 +19,9 @@ pub(crate) use observer::{
 };
 pub(crate) use overlay_input::OverlayWindows;
 pub(crate) use presence::{
-    Affinity, Foreground, PresenceError, PresenceEvent, PresenceLabels, PresenceNative,
-    PresenceSurface, activate_presence_window, configure_presence_window, cursor_position,
-    exclude_window, hide_presence_window, performance_counter, place_presence_window,
-    restore_foreground, restore_window_affinity, window_affinity, work_area,
+    Affinity, Foreground, PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface,
+    activate_presence_window, configure_presence_window, cursor_position, exclude_window,
+    hide_presence_window, performance_counter, place_presence_window, restore_foreground,
+    restore_window_affinity, window_affinity, work_area,
 };
 pub(crate) use screen_watch::ScreenSources;
