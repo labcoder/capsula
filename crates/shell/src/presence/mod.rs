@@ -351,7 +351,7 @@ impl Presence {
     // shortcut: the line carries no notice, so the offline and settings notices show only in the status panel; B2b's peek shows them by the line.
     fn refresh_dock(&self, cx: &mut Context<'_, Self>) {
         let listening = matches!(
-            self.voice.status,
+            self.voice.state.status,
             Some(Text::HoldListening | Text::HoldNearLimit)
         );
         let was_listening = self.dock.update(cx, |dock, cx| {
@@ -376,7 +376,7 @@ impl Presence {
                 *notice == Text::SettingsNotSaved || self.state == LinkState::Connected
             })
             .or(self.settings.read(cx).native_taskbar_notice);
-        let voice = self.voice.lost.or(self.voice.status);
+        let voice = self.voice.state.lost.or(self.voice.state.status);
         self.panel.update(cx, |panel, cx| {
             if panel.notice != notice || panel.voice != voice {
                 panel.notice = notice;

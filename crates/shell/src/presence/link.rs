@@ -496,7 +496,7 @@ impl Presence {
             .is_some_and(|session| session.generation() == generation)
         {
             if let DataToShell::RunEnd { run } = &message {
-                self.voice_input_ended(*run);
+                self.voice.state.input_ended(*run);
             }
             let credit = match message {
                 DataToShell::IssueReview { request, card } => {
@@ -529,11 +529,11 @@ impl Presence {
                     credit
                 }
                 DataToShell::HoldWords { gesture, words } => {
-                    self.hold_words(generation, gesture, words);
+                    self.voice.state.words(generation, gesture, words);
                     bytes
                 }
                 DataToShell::HoldStored { gesture } => {
-                    self.hold_stored(generation, gesture);
+                    self.voice.state.stored(generation, gesture);
                     bytes
                 }
                 DataToShell::EventsChanged { thread } => {
@@ -836,7 +836,7 @@ impl Presence {
             self.presenter.disconnected();
             // The watch went with the session, so no hold is watched.
             self.voice.watched = None;
-            self.voice.ended = None;
+            self.voice.state.forget_ended();
             self.scene_timer = None;
             self.scene_deadline = None;
             self.settings.update(cx, |model, cx| {

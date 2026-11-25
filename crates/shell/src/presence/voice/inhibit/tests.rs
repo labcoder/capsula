@@ -334,7 +334,7 @@ fn a_skipped_recognition_after_transfer_exhaustion_leaves_collection_reusable(
     deliver(Event::Reset, at(next, 302));
     finish.send(()).unwrap();
     until(cx, |cx| {
-        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+        owner.read_with(cx, |owner, _| owner.voice.state.pending.is_none())
     });
 }
 
@@ -358,7 +358,7 @@ fn a_press_while_a_microphone_is_bound_is_refused_and_keeps_the_hold(cx: &mut Te
                 gesture: G2,
                 generation: Err(MicError::Stale),
             },
-            owner.voice.pending.as_ref().expect("hold 1").stamp,
+            owner.voice.state.pending.as_ref().expect("hold 1").stamp(),
             0,
             None,
             TalkHeld::default(),
@@ -367,8 +367,8 @@ fn a_press_while_a_microphone_is_bound_is_refused_and_keeps_the_hold(cx: &mut Te
     });
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
-        let pending = owner.voice.pending.as_ref().expect("hold 1 stays");
-        assert_eq!(pending.token.gesture(), G1);
+        let pending = owner.voice.state.pending.as_ref().expect("hold 1 stays");
+        assert_eq!(pending.token().gesture(), G1);
         assert_eq!(owner.voice.gates.held(G1), Some(true));
     });
     assert_eq!(heard(&commands), [Command::Pause(1)], "no resume");
@@ -436,7 +436,7 @@ fn a_failed_start_retires_through_the_gate(cx: &mut TestAppContext) {
         });
         status(&owner, 1, 1, HoldStatus::Admitted, cx);
         until(cx, |cx| {
-            owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+            owner.read_with(cx, |owner, _| owner.voice.state.pending.is_none())
         });
         until(cx, |_| token.retired());
         cx.run_until_parked();
@@ -466,7 +466,7 @@ fn listening(
     open.send(()).expect("opens");
     until(cx, |cx| {
         owner.read_with(cx, |owner, _| {
-            owner.voice.status == Some(Text::HoldListening)
+            owner.voice.state.status == Some(Text::HoldListening)
         })
     });
     (finish, token)
@@ -575,7 +575,7 @@ fn an_unconfirmed_microphone_keeps_speech_paused_and_says_so(cx: &mut TestAppCon
     finish.send(()).expect("finishes");
     until(cx, |cx| {
         owner.read_with(cx, |owner, _| {
-            owner.voice.status == Some(Text::HoldUnavailable)
+            owner.voice.state.status == Some(Text::HoldUnavailable)
         })
     });
     // Every later wake retries the refused proof, and none resumes.
@@ -639,7 +639,7 @@ fn answering(owner: &Entity<Presence>, cx: &mut TestAppContext) -> (Receiver<Com
 /// Hold 1's `End` and Esc, in one delivery.
 fn end_and_escape(owner: &Entity<Presence>, refused: u32, cx: &mut TestAppContext) {
     owner.update(cx, |owner, cx| {
-        let stamp = owner.voice.pending.as_ref().expect("hold 1").stamp;
+        let stamp = owner.voice.state.pending.as_ref().expect("hold 1").stamp();
         owner.voice_intent(
             Intent::End {
                 gesture: G1,
@@ -815,8 +815,8 @@ fn a_busy_owner_gets_three_rechecks_and_wakes_never_refill_them(cx: &mut TestApp
         assert_eq!(started.get(), expected, "{refused} busy reads");
         if expected == 0 {
             owner.read_with(cx, |owner, _| {
-                assert!(owner.voice.pending.is_none(), "denied");
-                assert_eq!(owner.voice.status, Some(Text::TurnBusy));
+                assert!(owner.voice.state.pending.is_none(), "denied");
+                assert_eq!(owner.voice.state.status, Some(Text::TurnBusy));
             });
         }
     }
@@ -833,8 +833,8 @@ fn the_quiet_deadline_expires_when_reached_exactly(cx: &mut TestAppContext) {
     cx.background_executor.advance_clock(super::QUIET_WAIT);
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.pending.is_none(), "expired");
-        assert_eq!(owner.voice.status, Some(Text::HoldCancelled));
+        assert!(owner.voice.state.pending.is_none(), "expired");
+        assert_eq!(owner.voice.state.status, Some(Text::HoldCancelled));
     });
     quiet(&tail, 1);
     wake(&owner, cx);
@@ -849,8 +849,8 @@ fn a_recording_outlives_the_quiet_deadline(cx: &mut TestAppContext) {
         .advance_clock(super::QUIET_WAIT + Duration::from_secs(1));
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.pending.is_some(), "still recording");
-        assert_eq!(owner.voice.status, Some(Text::HoldListening));
+        assert!(owner.voice.state.pending.is_some(), "still recording");
+        assert_eq!(owner.voice.state.status, Some(Text::HoldListening));
     });
 }
 
@@ -868,10 +868,10 @@ fn an_output_change_before_running_drains_the_worker_and_starts_no_other(cx: &mu
     open.send(()).expect("opens");
     finish.send(()).expect("drains");
     until(cx, |cx| {
-        owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+        owner.read_with(cx, |owner, _| owner.voice.state.pending.is_none())
     });
     owner.read_with(cx, |owner, _| {
-        assert_ne!(owner.voice.status, Some(Text::HoldListening));
+        assert_ne!(owner.voice.state.status, Some(Text::HoldListening));
     });
     assert!(started.try_recv().is_err(), "no second start");
     assert!(data.is_empty(), "nothing collected");
@@ -912,13 +912,14 @@ fn a_proof_taken_on_a_lost_session_is_owed_to_the_next_connection(cx: &mut TestA
         assert_eq!(
             owner
                 .voice
+                .state
                 .pending
                 .as_ref()
-                .map(|hold| hold.token.gesture()),
+                .map(|hold| hold.token().gesture()),
             Some(G2),
             "a new hold is admitted"
         );
-        assert_ne!(owner.voice.status, Some(Text::TurnBusy));
+        assert_ne!(owner.voice.state.status, Some(Text::TurnBusy));
     });
 }
 
@@ -954,7 +955,7 @@ fn an_esc_waiting_for_a_busy_owner_holds_the_resume_until_it_is_decided(cx: &mut
         let deliver = native(&owner, cx);
         hold(&owner, 1, cx);
         owner.update(cx, |owner, cx| {
-            let stamp = owner.voice.pending.as_ref().expect("hold 1").stamp;
+            let stamp = owner.voice.state.pending.as_ref().expect("hold 1").stamp();
             owner.voice_intent(
                 Intent::End {
                     gesture: G1,
@@ -998,7 +999,14 @@ fn a_release_before_the_owner_accepts_collection_is_a_cancel(cx: &mut TestAppCon
     let (open, finish, started, samples) = source(owner, cx, None);
     recognize(owner, 1, cx);
     let token = owner.read_with(cx, |owner, _| {
-        owner.voice.pending.as_ref().expect("hold 1").token.clone()
+        owner
+            .voice
+            .state
+            .pending
+            .as_ref()
+            .expect("hold 1")
+            .token()
+            .clone()
     });
     status(owner, 1, 1, HoldStatus::Admitted, cx);
     started
@@ -1011,7 +1019,7 @@ fn a_release_before_the_owner_accepts_collection_is_a_cancel(cx: &mut TestAppCon
     });
     owner.read_with(cx, |owner, _| {
         assert_eq!(
-            owner.voice.status,
+            owner.voice.state.status,
             Some(Text::HoldPreparing),
             "not listening while collection is barred"
         );
@@ -1037,7 +1045,7 @@ fn a_release_before_the_owner_accepts_collection_is_a_cancel(cx: &mut TestAppCon
     );
     owner.read_with(cx, |owner, _| {
         assert!(owner.voice.watched.is_none(), "no watch");
-        assert!(owner.voice.pending.is_none(), "cancelled");
+        assert!(owner.voice.state.pending.is_none(), "cancelled");
         assert_eq!(owner.voice.gates.held(G1), None, "retired");
     });
     assert!(samples.try_recv().is_err(), "no PCM");
@@ -1150,9 +1158,10 @@ fn a_stale_press_dropped_while_acquiring_leaves_the_next_press_usable(cx: &mut T
             assert_eq!(
                 owner
                     .voice
+                    .state
                     .pending
                     .as_ref()
-                    .map(|hold| hold.token.gesture()),
+                    .map(|hold| hold.token().gesture()),
                 Some(G2)
             );
         });
@@ -1208,7 +1217,7 @@ fn copies_open_only_once_listening_is_published(cx: &mut TestAppContext) {
     assert_eq!(early.get(), Some(false), "nothing copied before Listening");
     until(cx, |cx| {
         owner.read_with(cx, |owner, _| {
-            owner.voice.status == Some(Text::HoldListening)
+            owner.voice.state.status == Some(Text::HoldListening)
         })
     });
     samples
@@ -1237,8 +1246,8 @@ fn a_release_while_the_copies_wait_wins_and_copies_nothing(cx: &mut TestAppConte
         owner.read_with(cx, |owner, _| owner.voice.gates.rechecks(G1) == Some(2))
     });
     owner.update(cx, |owner, cx| {
-        assert_eq!(owner.voice.status, Some(Text::HoldListening));
-        let stamp = owner.voice.pending.as_ref().expect("hold 1").stamp;
+        assert_eq!(owner.voice.state.status, Some(Text::HoldListening));
+        let stamp = owner.voice.state.pending.as_ref().expect("hold 1").stamp();
         owner.voice_intent(
             Intent::End {
                 gesture: G1,
@@ -1257,7 +1266,7 @@ fn a_release_while_the_copies_wait_wins_and_copies_nothing(cx: &mut TestAppConte
     cx.run_until_parked();
     assert!(samples.try_recv().is_err(), "no sample copied");
     owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.pending.is_none(), "ended");
+        assert!(owner.voice.state.pending.is_none(), "ended");
         assert_eq!(owner.voice.gates.held(G1), None, "retired");
     });
 }
@@ -1281,8 +1290,8 @@ fn a_cancel_while_the_copies_wait_copies_nothing(cx: &mut TestAppContext) {
         owner.read_with(cx, |owner, _| owner.voice.gates.rechecks(G1) == Some(2))
     });
     owner.update(cx, |owner, cx| {
-        assert_eq!(owner.voice.status, Some(Text::HoldListening));
-        let stamp = owner.voice.pending.as_ref().expect("hold 1").stamp;
+        assert_eq!(owner.voice.state.status, Some(Text::HoldListening));
+        let stamp = owner.voice.state.pending.as_ref().expect("hold 1").stamp();
         owner.voice_intent(
             Intent::End {
                 gesture: G1,
@@ -1298,9 +1307,9 @@ fn a_cancel_while_the_copies_wait_copies_nothing(cx: &mut TestAppContext) {
     cx.background_executor.advance_clock(super::RECHECK);
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
-        let hold = owner.voice.pending.as_ref().expect("draining");
-        assert_eq!(hold.terminal, Some(Text::HoldCancelled), "cancelled");
-        assert_eq!(owner.voice.status, Some(Text::HoldStopping));
+        let hold = owner.voice.state.pending.as_ref().expect("draining");
+        assert_eq!(hold.terminal(), Some(Text::HoldCancelled), "cancelled");
+        assert_eq!(owner.voice.state.status, Some(Text::HoldStopping));
     });
     assert_eq!(
         token.mode(&std::sync::atomic::AtomicBool::new(true), Instant::now()),
@@ -1313,7 +1322,7 @@ fn a_cancel_while_the_copies_wait_copies_nothing(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(samples.try_recv().is_err(), "no sample copied");
     owner.read_with(cx, |owner, _| {
-        assert!(owner.voice.pending.is_none(), "ended");
+        assert!(owner.voice.state.pending.is_none(), "ended");
         assert_eq!(owner.voice.gates.held(G1), None, "retired");
     });
 }
@@ -1369,7 +1378,11 @@ fn a_key_up_native_input_took_before_acceptance_releases_nothing(cx: &mut TestAp
         .expect("the receipt follows the key-up");
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.voice.status, Some(Text::HoldStopping), "no Listening");
+        assert_eq!(
+            owner.voice.state.status,
+            Some(Text::HoldStopping),
+            "no Listening"
+        );
     });
     // The key-up's delayed delivery comes at a valid point.
     release(owner, 1, Some(DOWN), cx);
@@ -1392,7 +1405,7 @@ fn a_key_up_native_input_took_before_acceptance_releases_nothing(cx: &mut TestAp
         "no copy"
     );
     let deadline = Instant::now() + Duration::from_secs(3);
-    while owner.read_with(cx, |owner, _| owner.voice.status) != Some(Text::HoldCancelled)
+    while owner.read_with(cx, |owner, _| owner.voice.state.status) != Some(Text::HoldCancelled)
         && Instant::now() < deadline
     {
         std::thread::park_timeout(Duration::from_millis(1));
@@ -1400,7 +1413,7 @@ fn a_key_up_native_input_took_before_acceptance_releases_nothing(cx: &mut TestAp
     }
     owner.read_with(cx, |owner, _| {
         assert_eq!(
-            owner.voice.status,
+            owner.voice.state.status,
             Some(Text::HoldCancelled),
             "the discarded capture ends the hold"
         );
@@ -1423,7 +1436,10 @@ fn a_lost_screen_hold_owes_its_stop_to_the_next_connection(cx: &mut TestAppConte
     );
     status(owner, 1, 1, HoldStatus::Admitted, cx);
     owner.update(cx, |owner, cx| {
-        assert!(owner.voice.pending.is_some(), "admitted, waiting for quiet");
+        assert!(
+            owner.voice.state.pending.is_some(),
+            "admitted, waiting for quiet"
+        );
         // The connection is lost, as the link's state event tears it down.
         let lost = owner.session.take().expect("connected");
         lost.close();
@@ -1456,9 +1472,10 @@ fn a_lost_screen_hold_owes_its_stop_to_the_next_connection(cx: &mut TestAppConte
         assert_eq!(
             owner
                 .voice
+                .state
                 .pending
                 .as_ref()
-                .map(|hold| hold.token.gesture()),
+                .map(|hold| hold.token().gesture()),
             Some(G2),
             "the next hold is admitted"
         );
@@ -1471,7 +1488,7 @@ fn a_refused_brain_stop_keeps_the_speaker_from_resuming(cx: &mut TestAppContext)
     let (commands, _tail) = answering(&owner, cx);
     hold(&owner, 1, cx);
     let _full = owner.update(cx, |owner, cx| {
-        let stamp = owner.voice.pending.as_ref().expect("hold 1").stamp;
+        let stamp = owner.voice.state.pending.as_ref().expect("hold 1").stamp();
         owner.voice_intent(
             Intent::End {
                 gesture: G1,
@@ -1557,7 +1574,7 @@ fn successor_works(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     quiet(&tail, 0);
     hold(owner, 2, cx);
     owner.update(cx, |owner, cx| {
-        let stamp = owner.voice.pending.as_ref().expect("hold 2").stamp;
+        let stamp = owner.voice.state.pending.as_ref().expect("hold 2").stamp();
         owner.voice_intent(
             Intent::End {
                 gesture: G2,

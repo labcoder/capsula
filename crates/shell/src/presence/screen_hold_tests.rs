@@ -239,8 +239,8 @@ pub(super) fn recognize(owner: &Entity<Presence>, id: u32, cx: &mut TestAppConte
 /// The hold hears the microphone open, as far as its release can tell.
 pub(super) fn listening(owner: &Entity<Presence>, cx: &mut TestAppContext) {
     owner.update(cx, |owner, _| {
-        owner.voice.status = Some(Text::HoldListening);
-        if let Some(hold) = owner.voice.pending.as_mut() {
+        owner.voice.state.status = Some(Text::HoldListening);
+        if let Some(hold) = owner.voice.state.pending.as_mut() {
             hold.collected = true;
         }
     });
@@ -697,7 +697,7 @@ fn a_hold_or_a_release_the_brain_never_got_leaves_no_line_and_no_lease(cx: &mut 
     tick(ACROSS, cx);
     assert_eq!(sampled(&ready, cx), None);
     ready.owner.read_with(cx, |owner, _| {
-        assert_eq!(owner.voice.status, Some(Text::HoldFailed));
+        assert_eq!(owner.voice.state.status, Some(Text::HoldFailed));
     });
 
     // The release can't be sent: its lease is given back at once, and that is no lapse.
@@ -763,8 +763,14 @@ fn a_hold_that_ends_before_its_release_stops_the_line_and_takes_no_lease(cx: &mu
         // The keys come up before the hold is listening.
         |ready, cx| {
             ready.owner.update(cx, |owner, _| {
-                owner.voice.status = Some(Text::HoldPreparing);
-                owner.voice.pending.as_mut().expect("hold 1").collected = false;
+                owner.voice.state.status = Some(Text::HoldPreparing);
+                owner
+                    .voice
+                    .state
+                    .pending
+                    .as_mut()
+                    .expect("hold 1")
+                    .collected = false;
             });
             release(&ready.owner, 1, Some(DOWN), cx);
         },
@@ -808,7 +814,7 @@ fn a_hold_that_ends_before_its_release_stops_the_line_and_takes_no_lease(cx: &mu
     held(&ready, 1, cx);
     tick(ACROSS, cx);
     ready.owner.update(cx, |owner, _| {
-        owner.voice.pending = None;
+        owner.voice.state.pending = None;
     });
     assert_eq!(sampled(&ready, cx), Some(2));
     tick(DOWN, cx);
