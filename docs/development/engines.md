@@ -282,9 +282,9 @@ stateDiagram-v2
     Sending --> Idle: a new run, a delete, its connection's fence, a lease deadline, failure
 ```
 
-- **When.** Every stored `Done` of a run in a task, never Kumo's, starts a title job while the
-  run's route can answer (for `ChatGPT`, while an account is signed in), no run is current and
-  sends haven't failed closed. The read finds nothing
+- **When.** A stored `Done` starts a task's title job or Kumo's compaction only while the run's
+  exact sign-in is ready, no run is current, and sends haven't failed closed. For `ChatGPT`, an
+  account must also be signed in. The read finds nothing
   once the title isn't first words (a user's rename or an earlier model title), so the trigger
   keeps no state of its own: a failed job, or a first run that didn't end `Done`, tries again at
   the next `Done`. A job never retries on its own, and a job whose request went out but wrote
@@ -294,8 +294,9 @@ stateDiagram-v2
   repeats. An input for any other key is stale.
 - **Route.** A job answers on the route of the run whose `Done` started it, and the compaction
   that follows a title keeps it. Its read must name the same connection: a read whose choice names
-  another, because the thread's choice changed since the run, ends the job unsent. Its grant checks
-  the route as `send_ready` does, and `sending` gives a `ChatGPT` bearer only to a `ChatGPT` job.
+  another, because the thread's choice changed since the run, ends the job unsent. Before any
+  `ChatGPT` lookup or refresh, `sending` requires the exact current Sending job and its matching
+  ready sign-in. The final send grant still independently checks that route.
   The runtime starts its request through `Brain::owned_engine`, as it does a round's, so a Claude
   Code job is one `Claude::question` on the row's alias with no tools
   ([claude-code](claude-code.md#a-question)).

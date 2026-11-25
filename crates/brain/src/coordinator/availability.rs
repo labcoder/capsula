@@ -472,8 +472,8 @@ impl Coordinator {
     }
 
     /// The `ChatGPT` sign-in a send under `key` may take the bearer of: a round's, only while its
-    /// run is current and bound to `ChatGPT`, and the ready one for a job, unless the job in the
-    /// slot answers on another connection.
+    /// run is current and bound to `ChatGPT`, or a job's, only while that exact job is sending on
+    /// its ready sign-in.
     pub(crate) fn sending(&self, key: SendKey) -> Option<ConnectionTag> {
         match key {
             SendKey::Build(key) => self
@@ -486,9 +486,8 @@ impl Coordinator {
             SendKey::Job(key) => self
                 .job
                 .as_ref()
-                .is_none_or(|job| job.key != key || job.route.kind == ConnectionKind::ChatGpt)
-                .then(|| self.connection())
-                .flatten(),
+                .filter(|job| job.is_sending(key) && job.route.kind == ConnectionKind::ChatGpt)
+                .and_then(|job| self.connection().filter(|tag| *tag == job.route.tag)),
         }
     }
 
