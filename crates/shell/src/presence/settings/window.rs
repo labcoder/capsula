@@ -3,6 +3,8 @@
 #[cfg(test)]
 mod tests;
 
+use std::rc::Rc;
+
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::{AnyWindowHandle, AppContext as _, Context, Entity, Subscription};
 use kumochi_protocol::message::{AccountOp, AssistantName, ControlToBrain, MaxFrameRate};
@@ -17,6 +19,7 @@ use crate::strings::{Strings, Text};
 pub(in crate::presence) struct SettingsPanel {
     pub(in crate::presence) window: AnyWindowHandle,
     pub(in crate::presence) view: Entity<SettingsView>,
+    pub(in crate::presence) editing: super::super::escape::NameEdit,
     visible: bool,
     focused: bool,
     pub(in crate::presence) bounds: [i32; 4],
@@ -331,6 +334,7 @@ impl Presence {
         });
         Ok(SettingsPanel {
             window,
+            editing: Rc::clone(&view.read(cx).editing),
             view,
             visible: false,
             focused: false,

@@ -17,6 +17,7 @@ use gpui_kit::{
 
 use super::{
     Presence,
+    escape::{PlainEscape, Presses},
     voice::{Gates, HoldBack, Stamp},
 };
 use crate::escape::{SpeechEscapeOwner, SpeechPress};
@@ -28,9 +29,7 @@ use crate::link::{InputCancel, LinkHandle};
 use crate::platform::{Deliver, EventTime, INPUT_COUNTER, cursor_position};
 use crate::strings::Text;
 use kumochi_protocol::geometry::PhysicalPoint;
-use kumochi_protocol::message::{GestureId, RunId, ThreadId};
-
-pub(super) type SpeechLease = Rc<Cell<Option<(u64, RunId, Instant)>>>;
+use kumochi_protocol::message::{GestureId, ThreadId};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum EscapeScope {
@@ -56,6 +55,7 @@ struct PendingGesture {
     /// An Esc press: every retirement waits until this delivery is decided.
     escape: Option<Rc<HoldBack>>,
     speech: Option<SpeechPress>,
+    plain: Option<PlainEscape>,
     collection: u64,
 }
 
@@ -141,7 +141,7 @@ pub(super) fn deliver(
     target: Rc<Cell<(Option<ThreadId>, u64)>>,
     paused: Rc<Cell<bool>>,
     gates: Gates,
-    (speech, escape_scope): (SpeechLease, Rc<Cell<EscapeScope>>),
+    escape_presses: Presses,
     cx: &mut App,
 ) -> Deliver {
     let (deferred, pending) = async_channel::unbounded::<Pending>();
@@ -167,6 +167,13 @@ pub(super) fn deliver(
                 CancelDispatch::Clear
             };
             if let Some(gesture) = gesture {
+                #[cfg(test)]
+                if gesture.plain.is_some()
+                    && let Some((arrived, resume)) = PLAIN_ESCAPE_BARRIER.take()
+                {
+                    arrived.try_send(()).expect("the test waits for the plain Esc");
+                    let _resume = resume.recv().await;
+                }
                 loop {
                     match apply(cx, dock, &owner, &gesture, cancel) {
                         Applied::Yes => break,
@@ -194,13 +201,13 @@ pub(super) fn deliver(
     let detached = cx.has_global::<super::test_fixture::WithoutDesktop>();
     let reduce: Rc<Reduce> = Rc::new(move |event, mut at| {
         let speech = if event == Event::Escape {
-            let scope = escape_scope.get();
+            let scope = escape_presses.escape_scope.get();
             let owner = if scope == EscapeScope::Pull {
                 SpeechEscapeOwner::Panel
             } else {
                 at.speech_escape_owner
             };
-            let press = SpeechPress::capture(speech.get(), at.instant, owner);
+            let press = SpeechPress::capture(escape_presses.speech.get(), at.instant, owner);
             if scope == EscapeScope::SpeechOnly && press.is_none() {
                 return gesture.get().deadline();
             }
@@ -395,6 +402,11 @@ pub(super) fn deliver(
             cancelled,
             escape: escape.then(|| gates.hold_back()),
             speech,
+            plain: if escape && cancelled.is_none() && speech.is_none() {
+                escape_presses.plain()
+            } else {
+                None
+            },
             collection: link.microphone_gate().latest(),
             stamp: Stamp {
                 target: target.get(),
@@ -519,6 +531,10 @@ fn stale_hold_escape(owner: &Presence, cancelled: Option<(GestureId, u64)>) -> b
 }
 
 /// Applies effects through a fallible borrow of the app.
+#[expect(
+    clippy::too_many_lines,
+    reason = "a delivery releases its Esc retirement hold only after ordered owner effects"
+)]
 fn apply(
     cx: &mut AsyncApp,
     dock: AnyWindowHandle,
@@ -566,6 +582,7 @@ fn apply(
             let input = pending.input.clone();
             let (escaping, cancelled, speech) =
                 (pending.escape.clone(), pending.cancelled, pending.speech);
+            let (plain, collection) = (pending.plain, pending.collection);
             let escape = escaping.is_some();
             let intents = move |app: &mut App| {
                 #[cfg(all(test, windows))]
@@ -604,7 +621,18 @@ fn apply(
                         }
                         this.voice_delivery(intent, stamp, qpc, pointer, release, cx);
                     }
+                    let current = matches!(cancel, CancelDispatch::Inline)
+                        || cancelled.is_some()
+                        || speech.is_some()
+                        || plain.as_ref().is_some_and(|press| {
+                            stamp.session == this.link.link_generation()
+                                && collection == this.link.microphone_gate().latest()
+                                && this
+                                    .plain_escape_at(cx)
+                                    .is_some_and(|live| press.still_owns(&live))
+                        });
                     if escape
+                        && current
                         && this
                             .native_escape(cancelled.map(|(gesture, _)| gesture), speech, cx)
                             .is_err()
@@ -628,13 +656,14 @@ fn apply(
 }
 
 #[cfg(test)]
-type WireCancelBarrier = (async_channel::Sender<()>, async_channel::Receiver<()>);
+type DeliveryBarrier = (async_channel::Sender<()>, async_channel::Receiver<()>);
 
 #[cfg(test)]
 thread_local! {
     pub(super) static FAIL_CLOCK: Cell<bool> = const { Cell::new(false) };
     pub(super) static CLOSE_DELIVERY: Cell<bool> = const { Cell::new(false) };
-    static WIRE_CANCEL_BARRIER: Cell<Option<WireCancelBarrier>> = const { Cell::new(None) };
+    static WIRE_CANCEL_BARRIER: Cell<Option<DeliveryBarrier>> = const { Cell::new(None) };
+    static PLAIN_ESCAPE_BARRIER: Cell<Option<DeliveryBarrier>> = const { Cell::new(None) };
     #[cfg(windows)]
     static BEFORE_DEFERRED_RELEASE: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
 }
@@ -655,6 +684,24 @@ pub(super) fn wire_cancel_before_effects(
     cx.run_until_parked();
     assert_eq!(wire.try_recv(), Ok(()));
     drop(release);
+}
+
+#[cfg(test)]
+pub(super) fn pause_plain_escape(
+    cx: &mut gpui_kit::TestAppContext,
+    press: impl FnOnce(),
+) -> async_channel::Sender<()> {
+    let (arrived, queued) = async_channel::bounded(1);
+    let (release, resume) = async_channel::bounded(1);
+    assert!(
+        PLAIN_ESCAPE_BARRIER
+            .replace(Some((arrived, resume)))
+            .is_none()
+    );
+    cx.update(|_| press());
+    cx.run_until_parked();
+    assert_eq!(queued.try_recv(), Ok(()));
+    release
 }
 
 #[cfg(all(test, windows))]
@@ -695,6 +742,7 @@ pub(super) fn deliver_intent(
         cancelled: None,
         escape: None,
         speech: None,
+        plain: None,
         collection: 0,
     };
     matches!(

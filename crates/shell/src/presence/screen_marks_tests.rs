@@ -35,6 +35,7 @@ use crate::platform::{Deliver, PresenceEvent};
 use crate::platform::{with_raw_keys, with_raw_modifiers};
 use crate::presence::kumo::{Motion, v2};
 use crate::presence::pulling::{Grab, PullSpace};
+use crate::presence::test_fixture::without_desktop;
 use crate::strings::Text;
 use kumochi_shell_core::presenter::fixture::{scene_ids, select};
 
@@ -1299,6 +1300,194 @@ fn gone() -> [Told; 2] {
     ]
 }
 
+fn wake_marked_answer(watching: &Watching, cx: &mut TestAppContext) {
+    watching.ready.owner.update(cx, |owner, cx| {
+        owner
+            .on_event(PresenceEvent::ScreenWoke, cx)
+            .expect("a wake");
+        assert!(owner.presenter.marks_shown().is_none());
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN)));
+    });
+}
+
+#[gpui::test]
+fn a_deferred_plain_esc_stops_its_marked_answer_after_the_screen_wake(cx: &mut TestAppContext) {
+    without_desktop(cx);
+    for wakes_first in [true, false] {
+        let watching = marks_up(cx);
+        let owner = &watching.ready.owner;
+        owner.read_with(cx, |owner, _| {
+            assert!(owner.voice.pending.is_none());
+            assert!(!owner.link.input_is(GestureId(1)));
+            assert_eq!(owner.presenter.marks_shown(), Some(RunId(RUN)));
+        });
+        let deliver = native(owner, cx);
+        assert!(watching.bit.borrow().as_ref().unwrap().set());
+        let resume = super::super::gesture::pause_plain_escape(cx, || {
+            deliver(Event::Escape, after(Instant::now(), 0));
+        });
+        if wakes_first {
+            wake_marked_answer(&watching, cx);
+            assert_eq!(told(&watching), gone());
+        }
+        drop(resume);
+        cx.run_until_parked();
+        if !wakes_first {
+            owner.update(cx, |owner, cx| {
+                owner
+                    .on_event(PresenceEvent::ScreenWoke, cx)
+                    .expect("a wake");
+            });
+        }
+        let expected = taken();
+        let expected = if wakes_first {
+            &expected[2..]
+        } else {
+            &expected
+        };
+        assert_eq!(told(&watching).as_slice(), expected);
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.runs.stoppable(), None);
+            assert!(owner.presenter.marks_shown().is_none());
+        });
+    }
+}
+
+#[cfg(debug_assertions)]
+#[gpui::test]
+fn marked_answer_esc_does_not_follow_new_work_after_the_screen_wake(cx: &mut TestAppContext) {
+    use super::super::run_fence_tests::submit_draft;
+
+    without_desktop(cx);
+    for new_turn in [true, false] {
+        let watching = marks_up(cx);
+        let owner = &watching.ready.owner;
+        let deliver = native(owner, cx);
+        assert!(watching.bit.borrow().as_ref().unwrap().set());
+        let resume = super::super::gesture::pause_plain_escape(cx, || {
+            deliver(Event::Escape, after(Instant::now(), 0));
+        });
+        wake_marked_answer(&watching, cx);
+        assert_eq!(told(&watching), gone());
+        if new_turn {
+            submit_draft(owner, "an accepted but unnamed successor", cx);
+            owner.read_with(cx, |owner, _| assert_eq!(owner.runs.newest_submission(), 1));
+        } else {
+            let Ok(Record::Begin(begin)) =
+                parse_record(br#"{"begin":{"v":1,"scene":"s31","surface":"overlay","alt":""}}"#)
+            else {
+                panic!("an ordinary scene begin");
+            };
+            receive(
+                owner,
+                LinkEvent::SceneData {
+                    generation: 1,
+                    frame: Deferred::new(
+                        DataToShell::SceneBegin {
+                            scene: OTHER,
+                            header: SceneHeader {
+                                begin,
+                                layout_version: 2,
+                            },
+                        },
+                        0,
+                    ),
+                    bytes: 0,
+                },
+                cx,
+            );
+            owner.read_with(cx, |owner, _| {
+                assert_eq!(
+                    owner.presenter.escape_scenes(),
+                    Some([Some(OTHER), None, None, None])
+                );
+                assert_eq!(owner.presenter.stoppable_run(), None);
+            });
+        }
+        drop(told(&watching));
+        drop(resume);
+        cx.run_until_parked();
+        assert_eq!(told(&watching), []);
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.runs.stoppable(), Some(RunId(RUN)));
+            let expected: &[SceneId] = if new_turn { &[] } else { &[OTHER] };
+            assert_eq!(scene_ids(&owner.presenter).as_slice(), expected);
+        });
+    }
+}
+
+#[gpui::test]
+fn terminal_microphone_receipt_does_not_take_the_drawing_s_deferred_clear(cx: &mut TestAppContext) {
+    use super::super::voice_wiring_tests::hold as begin_hold;
+
+    without_desktop(cx);
+    for changed_drawing in [false, true] {
+        let watching = watch(true, cx);
+        drawn(&watching, cx);
+        let owner = &watching.ready.owner;
+        let (open, finish, started, samples) = source(owner, cx, None);
+        let (token, _) = begin_hold(owner, 1, cx);
+        status(owner, 1, 1, HoldStatus::Admitted, cx);
+        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        open.send(()).unwrap();
+        until(cx, |cx| {
+            owner.read_with(cx, |owner, _| {
+                owner.voice.status == Some(Text::HoldListening)
+            })
+        });
+        samples.recv_timeout(Duration::from_secs(3)).unwrap();
+        owner.update(cx, |owner, cx| {
+            owner.cancel_voice(cx);
+            assert_eq!(owner.voice.status, Some(Text::HoldStopping));
+            assert!(!owner.voice_working());
+            assert!(owner.voice.pending.is_some());
+            assert!(!owner.link.input_is(GestureId(1)));
+            assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+        });
+        drop(told(&watching));
+        let deliver = native(owner, cx);
+        let resume = super::super::gesture::pause_plain_escape(cx, || {
+            deliver(Event::Escape, after(Instant::now(), 0));
+        });
+        finish.send(()).unwrap();
+        until(cx, |cx| {
+            owner.read_with(cx, |owner, _| owner.voice.pending.is_none())
+        });
+        assert_eq!(
+            told(&watching),
+            [Told::Sent(ControlToBrain::VoiceHoldStopped {
+                gesture: GestureId(1)
+            })]
+        );
+        if changed_drawing {
+            draw(&watching, 4, OTHER, cx);
+            owner.read_with(cx, |owner, _| {
+                assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN]);
+            });
+            drop(told(&watching));
+        }
+        drop(resume);
+        cx.run_until_parked();
+        if changed_drawing {
+            assert_eq!(told(&watching), []);
+            owner.read_with(cx, |owner, _| {
+                assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN]);
+            });
+        } else {
+            assert_eq!(
+                told(&watching),
+                [Told::Sent(ControlToBrain::ClearDrawing {
+                    scene_ids: vec![DRAWN]
+                })]
+            );
+            owner.read_with(cx, |owner, _| {
+                assert!(scene_ids(&owner.presenter).is_empty());
+            });
+        }
+        assert!(token.retired());
+    }
+}
+
 /// The pending hold is gone and its run is fenced off.
 fn ended(watching: &Watching, cx: &mut TestAppContext) {
     watching.ready.owner.read_with(cx, |owner, _| {
@@ -1581,6 +1770,214 @@ fn drawn(watching: &Watching, cx: &mut TestAppContext) {
         assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
         assert!(owner.activity.drawing);
         assert!(!owner.activity.working);
+    });
+}
+
+#[cfg(debug_assertions)]
+#[gpui::test]
+fn a_deferred_plain_esc_does_not_stop_a_new_typed_turn(cx: &mut TestAppContext) {
+    use super::super::run_fence_tests::submit_draft;
+    use kumochi_protocol::message::RunOrigin::Typed;
+
+    without_desktop(cx);
+    for named_before_delivery in [true, false] {
+        let watching = watch(true, cx);
+        drawn(&watching, cx);
+        let owner = &watching.ready.owner;
+        let deliver = native(owner, cx);
+        cx.update(|_| {
+            deliver(Event::Escape, after(Instant::now(), 0));
+        });
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(scene_ids(&owner.presenter), [DRAWN], "Esc is deferred");
+            assert!(owner.activity.holds_global_escape());
+        });
+        assert!(told(&watching).is_empty(), "the dispatcher hasn't acted");
+
+        submit_draft(owner, "a new typed turn", cx);
+        owner.read_with(cx, |owner, _| assert!(owner.runs.working()));
+        if named_before_delivery {
+            state(&watching, 4, Phase::Thinking, Some(Typed { turn: 1 }), cx);
+        }
+        cx.run_until_parked();
+        if !named_before_delivery {
+            state(&watching, 4, Phase::Thinking, Some(Typed { turn: 1 }), cx);
+            cx.run_until_parked();
+        }
+        assert_eq!(told(&watching), [], "the old press sends no control");
+        owner.read_with(cx, |owner, _| {
+            assert_eq!(owner.runs.stoppable(), Some(RunId(4)));
+            assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+        });
+    }
+}
+
+#[gpui::test]
+fn a_deferred_plain_esc_clears_its_unchanged_idle_drawing(cx: &mut TestAppContext) {
+    without_desktop(cx);
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let deliver = native(&watching.ready.owner, cx);
+    cx.update(|_| {
+        deliver(Event::Escape, after(Instant::now(), 0));
+    });
+    assert!(told(&watching).is_empty());
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching),
+        [Told::Sent(ControlToBrain::ClearDrawing {
+            scene_ids: vec![DRAWN],
+        })]
+    );
+    watching.ready.owner.read_with(cx, |owner, _| {
+        assert!(scene_ids(&owner.presenter).is_empty());
+    });
+}
+
+#[gpui::test]
+fn a_fresh_deferred_plain_esc_clears_the_drawing_after_entering_rename(cx: &mut TestAppContext) {
+    use gpui_kit::{VisualTestContext, px, size};
+    use kumochi_protocol::message::{DataToBrain, PageOf, ThreadKind, ThreadRow};
+
+    without_desktop(cx);
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let owner = &watching.ready.owner;
+    let window = owner.update(cx, |owner, cx| {
+        let thread = ThreadId(7);
+        owner.threads.update(cx, |model, _| {
+            model.connected();
+            model.show_for(Some(thread));
+            let request = model
+                .requests()
+                .into_iter()
+                .find_map(|request| match request {
+                    DataToBrain::PageRequest {
+                        request,
+                        page: PageOf::Threads { .. },
+                    } => Some(request),
+                    _ => None,
+                })
+                .expect("thread list request");
+            model.apply_for_tests(DataToShell::ThreadList {
+                request,
+                threads: vec![ThreadRow {
+                    id: thread,
+                    title: "Existing thread".into(),
+                    kind: ThreadKind::Thread,
+                    updated_ms: 0,
+                    choice: None,
+                    task: None,
+                }],
+                next: None,
+            });
+        });
+        let mut panel = super::super::threads::ThreadsPanel::detached(owner.threads.clone(), cx);
+        panel.focused = true;
+        panel.typing.open();
+        let window = panel.window;
+        owner.thread_panel = Some(panel);
+        window
+    });
+    let deliver = native(owner, cx);
+    let mut frame = VisualTestContext::from_window(window, cx);
+    frame.simulate_resize(size(px(880.), px(768.)));
+    frame.update(|window, cx| window.draw(cx).clear(cx));
+    let rename = frame.debug_bounds("rename-task").expect("rename control");
+    frame.simulate_click(rename.center(), gpui_kit::Modifiers::default());
+    owner.read_with(cx, |owner, cx| {
+        assert!(owner.thread_panel.as_ref().unwrap().view.read(cx).editing());
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+    });
+    cx.update(|_| {
+        deliver(Event::Escape, after(Instant::now(), 0));
+    });
+    assert!(told(&watching).is_empty());
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching),
+        [Told::Sent(ControlToBrain::ClearDrawing {
+            scene_ids: vec![DRAWN]
+        })]
+    );
+    owner.read_with(cx, |owner, cx| {
+        assert!(owner.thread_panel.as_ref().unwrap().view.read(cx).editing());
+        assert!(scene_ids(&owner.presenter).is_empty());
+    });
+}
+
+#[cfg(debug_assertions)]
+#[gpui::test]
+fn a_deferred_plain_esc_cannot_stop_a_successor_while_activity_stays_working(
+    cx: &mut TestAppContext,
+) {
+    use super::super::run_fence_tests::submit_draft;
+
+    without_desktop(cx);
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    state(&watching, 4, Phase::Thinking, None, cx);
+    let owner = &watching.ready.owner;
+    let deliver = native(owner, cx);
+    cx.update(|_| {
+        deliver(Event::Escape, after(Instant::now(), 0));
+    });
+    submit_draft(owner, "a successor while the first run is moving", cx);
+    cx.run_until_parked();
+    assert_eq!(told(&watching), []);
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), Some(RunId(4)));
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+    });
+    state(
+        &watching,
+        5,
+        Phase::Thinking,
+        Some(RunOrigin::Typed { turn: 1 }),
+        cx,
+    );
+    cx.run_until_parked();
+    assert!(told(&watching).is_empty());
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), Some(RunId(5)));
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+    });
+}
+
+#[gpui::test]
+fn deferred_plain_esc_keeps_selection_and_focused_text_priority(cx: &mut TestAppContext) {
+    without_desktop(cx);
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    state(&watching, RUN, Phase::Thinking, None, cx);
+    let owner = &watching.ready.owner;
+    let selected = GestureId(5);
+    owner.update(cx, |owner, _| {
+        let text = owner.text.as_mut().expect("typing panel");
+        text.typing.open();
+        text.focused = true;
+        select(&mut owner.presenter.input, selected);
+    });
+    let deliver = native(owner, cx);
+    cx.update(|_| {
+        deliver(Event::Escape, after(Instant::now(), 0));
+    });
+    cx.run_until_parked();
+    assert!(told(&watching).is_empty());
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.presenter.input.selection(), None);
+        assert_eq!(owner.runs.stoppable(), Some(RunId(RUN)));
+        assert!(owner.text_focused());
+    });
+    cx.update(|_| {
+        deliver(Event::Escape, after(Instant::now(), 0));
+    });
+    cx.run_until_parked();
+    assert_eq!(told(&watching), [stopped(Vec::new())]);
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.runs.stoppable(), None);
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+        assert!(owner.text_focused());
     });
 }
 

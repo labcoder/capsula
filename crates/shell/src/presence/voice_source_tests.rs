@@ -12,6 +12,7 @@ use crate::input::{Edge, Event, Key};
 use crate::link::{Batch, LinkEvent};
 use crate::platform::microphone::{MicError, Running};
 use crate::platform::{Deliver, EventTime};
+use crate::presence::test_fixture::without_desktop;
 
 #[derive(Clone, Default)]
 struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -343,7 +344,7 @@ pub(super) fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliv
             Rc::clone(&owner.voice.target),
             Rc::clone(&owner.voice.paused),
             owner.voice.gates.clone(),
-            (Rc::clone(&owner.speech), Rc::clone(&owner.escape_scope)),
+            owner.escape_presses(cx),
             cx,
         )
     })
@@ -936,6 +937,7 @@ fn stale_deferred_escape_cannot_cancel_a_new_native_hold(cx: &mut TestAppContext
     reason = "the fixture selects loss alone or a replacement session"
 )]
 fn escape_after_session_loss(reconnect: bool, cx: &mut TestAppContext) {
+    without_desktop(cx);
     let (owner, _data, controls) = ready(cx);
     let deliver = native(&owner, cx);
     let at = Instant::now();
@@ -2738,6 +2740,27 @@ fn native_review_plain_escape_cant_stop_a_turn_submitted_after_the_press(cx: &mu
         std::iter::from_fn(|| controls.try_recv().ok())
             .all(|message| !matches!(message, ControlToBrain::Stop { .. }))
     );
+}
+
+#[gpui::test]
+fn a_fresh_deferred_plain_esc_can_close_its_offline_text_panel(cx: &mut TestAppContext) {
+    without_desktop(cx);
+    let (owner, _data, controls) = ready(cx);
+    owner.update(cx, |owner, _| {
+        owner.session = None;
+        owner.runs.disconnected();
+        let text = owner.text.as_mut().expect("typing panel");
+        text.typing.open();
+        text.focused = true;
+    });
+    let deliver = native(&owner, cx);
+    cx.update(|_| {
+        deliver(Event::Escape, EventTime::new(Instant::now()));
+    });
+    owner.read_with(cx, |owner, _| assert!(owner.text_focused()));
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| assert!(!owner.text_open()));
+    assert!(controls.is_empty());
 }
 
 #[gpui::test]

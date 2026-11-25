@@ -115,7 +115,7 @@ impl Presence {
                     if !sent {
                         // A refused control already ended the session (`send_stop`), off this thread.
                         tracing::warn!("scene control queue unavailable; ending the connection");
-                        self.forget_scene_connection();
+                        self.forget_scene_connection(cx);
                         return self.draw_changed_at(now, cx);
                     }
                 }
@@ -230,15 +230,16 @@ impl Presence {
                 self.link.end(session);
             }
         }
-        self.forget_scene_connection();
+        self.forget_scene_connection(cx);
     }
 
     /// Forgets the session and its drawings at once, without ending it.
-    fn forget_scene_connection(&mut self) {
+    fn forget_scene_connection(&mut self, cx: &gpui_kit::App) {
         self.session = None;
         self.presenter.disconnected();
         self.scene_timer = None;
         self.scene_deadline = None;
+        self.publish_plain_escape(cx);
     }
 
     pub(super) fn stop_run(&mut self, message: ControlToBrain, cx: &mut Context<'_, Self>) {
