@@ -53,6 +53,7 @@ xn = { version = "=0.2.13", default-features = false }
 rustix = { version = "1", features = ["fs"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+kumochi-session = { path = "../session" }
 kumochi-storage = { path = "../storage" }
 libc = "=0.2.191"
 block2 = "=0.6.2"

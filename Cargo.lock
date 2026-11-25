@@ -3995,6 +3995,7 @@ dependencies = [
  "kumochi-audio",
  "kumochi-protocol",
  "kumochi-scene",
+ "kumochi-session",
  "kumochi-storage",
  "libc",
  "objc2 0.6.5",
