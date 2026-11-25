@@ -1,5 +1,11 @@
 # Presence and native surfaces
 
+The dormant macOS logger takes the admitted storage owner, not a filesystem path. Before
+starting or publishing it, startup must hold the admitted lock for the graphical session.
+Rollback and Quit must close and join the logger off the UI thread before releasing that
+lock. The backend preserves terminal storage-admission refusals; ordinary I/O failures
+remain best effort. This source does not enable logging or change the Windows logger.
+
 Overlay hit testing belongs to the presenter's `OverlayOwner`, not to a view. The native
 `OverlayWindows` adapter binds the dock paint window and body proxy in the Dock layer,
 panels in Panels, and every newly created drawing host in Overlay before it can be shown.

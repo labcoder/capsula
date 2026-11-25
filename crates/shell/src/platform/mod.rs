@@ -1,4 +1,13 @@
-//! The operating system behind small, safe functions. Windows only for now.
+//! The operating system behind small, safe functions. The live shell uses Windows.
+
+#[cfg(target_os = "macos")]
+#[expect(
+    dead_code,
+    reason = "dormant logger owner awaits coordinated startup and Quit integration"
+)]
+pub(crate) mod logging;
+#[cfg(target_os = "macos")]
+mod macos;
 
 pub(crate) use kumochi_shell::presence_platform::{PresenceError, require_connected_geometry};
 #[cfg(not(windows))]
