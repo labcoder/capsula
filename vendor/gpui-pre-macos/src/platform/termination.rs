@@ -118,6 +118,7 @@ impl State {
         match self.phase {
             Phase::Idle if !self.disposing && self.approved_ahead => {
                 self.phase = Phase::Approved;
+                self.quit_wanted = false;
                 (NSApplicationTerminateReply::TerminateNow, None)
             }
             Phase::Idle if !self.disposing => {
@@ -131,7 +132,10 @@ impl State {
             Phase::Pending(_) | Phase::Queued(_, _) => {
                 (NSApplicationTerminateReply::TerminateLater, None)
             }
-            Phase::Approved => (NSApplicationTerminateReply::TerminateNow, None),
+            Phase::Approved => {
+                self.quit_wanted = false;
+                (NSApplicationTerminateReply::TerminateNow, None)
+            }
             _ => (NSApplicationTerminateReply::TerminateCancel, None),
         }
     }
@@ -153,6 +157,8 @@ impl State {
         }
         self.disposing |= !has_application;
         let allow = allow && !self.disposing;
+        // A yes ends the app, so an app quit already queued must not send after it returns.
+        self.quit_wanted &= !allow;
         self.phase = if allow {
             Phase::Approved
         } else {

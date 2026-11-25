@@ -297,9 +297,9 @@ fn panicking_handler_cannot_leave_delivery_active_or_a_queued_yes() {
     assert_eq!(control.state.borrow().phase, Phase::Disposed);
 }
 
-/// Whether the app's own quit has sent `terminate:`: it clears its intent only when it does.
-fn quit_sent(control: &Control) -> bool {
-    !control.state.borrow().quit_wanted
+/// Whether the app's own quit is still waiting to send `terminate:`.
+fn quit_pending(control: &Control) -> bool {
+    control.state.borrow().quit_wanted
 }
 
 #[test]
@@ -310,9 +310,9 @@ fn the_app_quit_from_idle_answers_now_without_a_queued_delivery() {
         callback_calls.set(callback_calls.get() + 1)
     }));
     AppQuit::new(&control).quit();
-    assert!(!quit_sent(&control), "the quit waits for its own main-queue job");
+    assert!(quit_pending(&control), "the quit waits for its own main-queue job");
     run_one(&jobs);
-    assert!(quit_sent(&control));
+    assert!(!quit_pending(&control), "sent from Idle");
     assert_eq!(
         control.admit(),
         NSApplicationTerminateReply::TerminateNow,
@@ -339,7 +339,7 @@ fn a_request_admitted_before_the_release_finishes_ends_the_app_alone() {
     assert_eq!(jobs.borrow().len(), 2, "the quit job, then the yes settlement");
     run_one(&jobs);
     assert!(
-        !quit_sent(&control),
+        quit_pending(&control),
         "no terminate: while the yes is queued behind the quit job"
     );
 }
@@ -361,7 +361,7 @@ fn a_request_admitted_after_the_release_but_before_the_quit_ends_the_app_alone()
         .reply(true);
     run_one(&jobs);
     assert!(
-        !quit_sent(&control),
+        quit_pending(&control),
         "no terminate: while the delivered request's yes is queued"
     );
     assert_eq!(control.state.borrow().phase, Phase::Queued(1, true));
@@ -376,9 +376,12 @@ fn a_request_admitted_after_the_quit_answers_now() {
     }));
     AppQuit::new(&control).quit();
     assert_eq!(control.admit(), NSApplicationTerminateReply::TerminateNow);
+    assert!(
+        !quit_pending(&control),
+        "the request answered Now satisfies the app's quit"
+    );
     assert_eq!(jobs.borrow().len(), 1, "only the quit job, no delivery");
     run_one(&jobs);
-    assert!(quit_sent(&control), "Approved answers its terminate Now too");
     assert_eq!(calls.get(), 0);
 }
 
@@ -406,7 +409,6 @@ fn the_app_quit_never_sends_terminate_while_disposing() {
     AppQuit::new(&control).quit();
     control.dispose();
     run_one(&jobs);
-    assert!(!quit_sent(&control));
     assert_eq!(control.admit(), NSApplicationTerminateReply::TerminateCancel);
 }
 
@@ -420,4 +422,41 @@ fn the_app_quit_does_not_keep_the_control_alive() {
     quit.quit();
     assert_eq!(jobs.borrow().len(), 0);
     assert_eq!(format!("{quit:?}"), "AppQuit { .. }");
+}
+
+#[test]
+fn a_yes_settled_before_the_quit_job_leaves_a_surviving_app_alone_until_it_quits_again() {
+    let mut state = state();
+    state.admit();
+    assert!(state.queue_reply(1, true));
+    state.approved_ahead = true;
+    state.quit_wanted = true;
+    assert_eq!(state.begin_settlement(1, true), Some(true));
+    assert!(!state.finish_settlement(1));
+    assert!(
+        !state.take_quit(),
+        "AppKit cancelled the approved termination: the queued quit job sends nothing"
+    );
+
+    state.quit_wanted = true;
+    assert!(state.take_quit(), "a fresh quit sends once");
+    assert!(!state.take_quit());
+}
+
+#[test]
+fn a_request_answered_now_consumes_a_quit_job_still_queued() {
+    let mut state = state();
+    state.approved_ahead = true;
+    state.quit_wanted = true;
+    assert_eq!(
+        state.admit(),
+        (NSApplicationTerminateReply::TerminateNow, None)
+    );
+    assert!(!state.take_quit(), "the older quit job sends nothing");
+    state.quit_wanted = true;
+    assert_eq!(
+        state.admit(),
+        (NSApplicationTerminateReply::TerminateNow, None)
+    );
+    assert!(!state.take_quit(), "nor after a repeated Now");
 }

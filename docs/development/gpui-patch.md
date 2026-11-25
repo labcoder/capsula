@@ -248,6 +248,11 @@ once, after its cleanup has finished. The platform then decides whether a `termi
   while Idle or Approved, where the answer is Now.
 - A request already in flight (Pending, or a queued yes) is left to end the app; no second
   `terminate:` is sent behind it.
+- A yes that settles, or a request answered Now, consumes the pending quit, so a quit job queued
+  before it sends nothing afterwards, whichever ran first. If AppKit then cancels that
+  termination, the app stays up until a fresh `quit()`, which sends from Approved.
+- The app calls `quit()` only for its own quit. A request the app has answered yes ends the app
+  by itself.
 - A queued no settles first. The quit stays wanted, and once that no has returned and the phase
   is Idle, the platform queues the quit again.
 - Disposal never sends one.
