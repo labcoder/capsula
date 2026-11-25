@@ -15,9 +15,9 @@ use windows::Win32::UI::Shell::{
     DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetWindowLongPtrW, HWND_TOPMOST, MA_NOACTIVATE,
-    SWP_FRAMECHANGED, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, WINDOW_EX_STYLE, WM_CANCELMODE,
+    GWL_EXSTYLE, GWL_STYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, HWND_TOPMOST,
+    MA_NOACTIVATE, SWP_FRAMECHANGED, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, WINDOW_EX_STYLE, WM_CANCELMODE,
     WM_CAPTURECHANGED, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
     WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN,
     WM_XBUTTONUP, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     XBUTTON1, XBUTTON2,
 };
 
-use super::super::screen_watch;
+use super::super::{overlay_input, screen_watch};
 use super::{
     PresenceError, PresenceEvent, PresenceSurface, performance_counter, send, struct_size,
 };
@@ -178,6 +178,31 @@ pub(super) fn subclass_hover(
         return Err(PresenceError::Subclass);
     }
     Ok(())
+}
+
+pub(in crate::platform::windows) fn foreground_owns_escape() -> bool {
+    // SAFETY: reads the foreground window without taking ownership.
+    let foreground = unsafe { GetForegroundWindow() };
+    if !overlay_input::owned(foreground) {
+        return false;
+    }
+    let mut data = 0;
+    // SAFETY: the handle is on this UI thread; only this module installs this callback and id.
+    if !unsafe {
+        GetWindowSubclass(
+            foreground,
+            Some(hover_subclass),
+            HOVER_SUBCLASS_ID,
+            Some(&raw mut data),
+        )
+    }
+    .as_bool()
+    {
+        return false;
+    }
+    let hover = std::ptr::with_exposed_provenance::<Hover>(data);
+    // SAFETY: the subclass owns the Hover until this UI thread dispatches WM_NCDESTROY.
+    unsafe { hover.as_ref() }.is_some_and(|hover| !hover.pointer)
 }
 
 /// Moves a presence window to `[x, y, width, height]` in physical pixels, topmost, and shows

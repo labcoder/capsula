@@ -329,6 +329,30 @@ impl Session {
         self.closing.store(true, Ordering::Release);
     }
 
+    /// Signals the matching queued worker without waiting on the output owner.
+    pub fn stop_playback(&self, run: RunId) {
+        if let Some((_, stop)) = self
+            .io
+            .playback_stop
+            .load()
+            .as_deref()
+            .filter(|(id, _)| *id == run)
+        {
+            stop.request();
+        }
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn playback_stop_requested(&self, run: RunId) -> Option<bool> {
+        self.io
+            .playback_stop
+            .load()
+            .as_deref()
+            .filter(|(id, _)| *id == run)
+            .map(|(_, stop)| stop.requested())
+    }
+
     /// Alive and not closing: what sends and capture admission require.
     pub fn open(&self) -> bool {
         self.alive.load(Ordering::Acquire) && !self.closing.load(Ordering::Acquire)
@@ -427,6 +451,7 @@ struct SessionIo {
     queued: bool,
     narrated: Option<Arc<narrated::Narrated>>,
     control: Option<WeakSender<ControlToBrain>>,
+    playback_stop: Arc<output::PlaybackStop>,
     bytes: AtomicU32,
     wake: WeakSender<DataOut>,
     drawing_font_family: Option<Arc<str>>,
@@ -1439,6 +1464,7 @@ impl Session {
                 queued: false,
                 narrated: None,
                 control: None,
+                playback_stop: Arc::default(),
                 bytes: AtomicU32::new(0),
                 wake: wake.downgrade(),
                 drawing_font_family: None,
@@ -1752,6 +1778,7 @@ impl Link {
             queued,
             narrated,
             control: Some(control_out.downgrade()),
+            playback_stop: Arc::default(),
             bytes: AtomicU32::new(0),
             wake: data_out.downgrade(),
             drawing_font_family,
@@ -1795,7 +1822,7 @@ impl Link {
                         deadline,
                         ack,
                         Arc::clone(reader),
-                        Arc::clone(&closing),
+                        (Arc::clone(&closing), Arc::clone(&credit.playback_stop)),
                         credit.narrated.clone(),
                     )
                 },

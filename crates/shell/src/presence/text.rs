@@ -31,6 +31,8 @@ pub(super) struct TextPanel {
     pub(super) window: AnyWindowHandle,
     pub(super) view: Entity<TextView>,
     pub(super) typing: Typing,
+    /// Its window is active, so it keeps Esc from speech.
+    pub(super) focused: bool,
     pub(super) bounds: [i32; 4],
     pub(super) input: Entity<InputState>,
     /// The window in front before the panel took focus, given back when it closes.
@@ -63,6 +65,7 @@ impl TextPanel {
             window,
             view,
             typing: Typing::default(),
+            focused: false,
             bounds: [0; 4],
             input,
             previous: None,
@@ -196,10 +199,15 @@ impl Presence {
             let result = window.update(cx, |_, window, cx| {
                 owner.update(cx, |this, cx| {
                     let activation = cx.observe_window_activation(window, |this, window, cx| {
-                        if window.is_window_active() {
-                            if let Some(text) = &mut this.text {
+                        let active = window.is_window_active();
+                        if let Some(text) = &mut this.text {
+                            text.focused = active;
+                            if active {
                                 text.typing.activated();
                             }
+                        }
+                        this.focus_changed(cx);
+                        if active {
                             return;
                         }
                         let owner = cx.weak_entity();
@@ -212,7 +220,8 @@ impl Presence {
                         });
                     });
                     if let Some(text) = &mut this.text {
-                        if window.is_window_active() {
+                        text.focused = window.is_window_active();
+                        if text.focused {
                             text.typing.activated();
                         }
                         text.activation = Some(activation);
@@ -234,6 +243,7 @@ impl Presence {
         Ok(TextPanel {
             window,
             typing: Typing::default(),
+            focused: false,
             bounds: [0; 4],
             input,
             view,
@@ -656,13 +666,15 @@ impl TextView {
 impl Render for TextView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let events = self.events.clone();
+        let escape_owner = self.owner.clone();
         let notice = self.notice.clone();
         let recovery = self.recovery(cx);
         let stop = self.stop.then(|| {
             let events = self.events.clone();
+            let owner = self.owner.clone();
             Button::new("stop")
                 .label(cx.global::<Strings>().get(Text::Stop))
-                .on_click(move |_, _, _| send(&events, PresenceEvent::Escape))
+                .on_click(move |_, _, cx| super::send_escape(&events, Some(&owner), cx))
         });
         let failed = self.model.read(cx).failed;
         let empty = self.messages.read(cx).is_empty().then(|| {
@@ -685,7 +697,9 @@ impl Render for TextView {
             .flex()
             .flex_col()
             .key_context("ChatPanel")
-            .on_action(move |_: &EscapeKey, _, _| send(&events, PresenceEvent::Escape))
+            .on_action(move |_: &EscapeKey, _, cx| {
+                super::send_escape(&events, Some(&escape_owner), cx);
+            })
             .child(self.header(cx))
             .child(
                 div()

@@ -53,6 +53,25 @@ pub(crate) struct Input {
     closed: Arc<AtomicBool>,
 }
 
+#[derive(Debug)]
+pub(crate) struct StopSignal {
+    worker: Thread,
+    stop: Arc<AtomicBool>,
+}
+
+impl StopSignal {
+    pub(crate) fn request(&self) {
+        self.stop.store(true, Ordering::Release);
+        self.worker.unpark();
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn requested(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) struct FakeOutput {
     pub(crate) sender: SyncSender<super::FixturePlayback>,
@@ -67,6 +86,13 @@ enum FixtureStart {
 }
 
 impl Input {
+    pub(crate) fn stop_signal(&self) -> StopSignal {
+        StopSignal {
+            worker: self.worker.clone(),
+            stop: Arc::clone(&self.stop),
+        }
+    }
+
     pub(super) fn wake(&self) {
         self.worker.unpark();
     }

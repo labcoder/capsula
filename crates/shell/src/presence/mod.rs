@@ -82,7 +82,9 @@ use gpui_kit::{
 use kumochi_protocol::constants;
 use kumochi_shell_core::presence::{frame_rate, geometry, kumo, perch, pulling, thread_selection};
 
-use crate::escape::{Activity, Escape, EscapeHold, Panel as EscapePanel, TalkEscape};
+use crate::escape::{
+    Activity, Escape, EscapeHold, Panel as EscapePanel, SpeechEscapeOwner, SpeechPress, TalkEscape,
+};
 use crate::input::Effect;
 use crate::link::{LinkEvent, LinkHandle, LinkState, Session};
 use crate::platform::input::{Input, input};
@@ -174,9 +176,17 @@ struct Presence {
     scene_timer: Option<Task<()>>,
     scene_deadline: Option<Instant>,
     /// Speaker stops a busy owner hasn't taken yet, oldest first, each with its tries left.
-    pending_stops: std::collections::VecDeque<(Session, kumochi_protocol::message::RunId, u8)>,
+    pending_stops:
+        std::collections::VecDeque<(Session, kumochi_protocol::message::RunId, u8, bool)>,
     /// The next offer of the front pending stop, or the end of its session.
     stop_retry: Option<Task<()>>,
+    /// The native speech lease last read: its session, run and when it runs out.
+    speech: gesture::SpeechLease,
+    escape_scope: Rc<std::cell::Cell<gesture::EscapeScope>>,
+    /// The next read of the speech lease, when it runs out or after a busy owner.
+    speech_expiry: Option<Task<()>>,
+    /// Busy reads of the speech lease in a row, which back its rereads off.
+    speech_busy: u32,
     escape_hold: EscapeHold<EscapeHotkey>,
     /// Esc with the talk keys down, held only while a hold's keys are.
     talk_escape: TalkEscape<EscapeHotkey>,
@@ -308,6 +318,12 @@ impl Presence {
         self.text.as_ref().is_some_and(|text| text.typing.visible)
     }
 
+    fn text_focused(&self) -> bool {
+        self.text
+            .as_ref()
+            .is_some_and(|text| text.typing.visible && text.focused)
+    }
+
     /// Whether the pointer is over the line's band, where the hit proxy takes it, or over the
     /// panel when it's shown.
     fn hovered(&self, point: [i32; 2], panel: PanelVisibility) -> bool {
@@ -423,6 +439,7 @@ impl Presence {
         };
         let mut activity = Activity {
             pulling: self.kumo.read(cx).pull_live(),
+            speaking: self.speaking(now),
             ..Self::activity_at(&self.runs, panel, &self.presenter, now)
         };
         activity.voice = self.voice_working();
@@ -445,6 +462,57 @@ impl Presence {
         Ok(())
     }
 
+    fn speaking(&self, now: Instant) -> bool {
+        self.speech.get().is_some_and(|(.., until)| until > now)
+            && !(self.settings_focused() || self.threads_focused() || self.text_focused())
+    }
+
+    pub(super) fn focus_changed(&mut self, cx: &mut Context<'_, Self>) {
+        if let Err(error) = self.runs_changed_at(Instant::now(), cx) {
+            tracing::error!(%error, "can't follow focus for Esc");
+        }
+    }
+
+    /// A busy owner preserves only a lease that is still live for this pair.
+    pub(super) fn refresh_speech(&mut self, cx: &mut Context<'_, Self>) {
+        let now = Instant::now();
+        let session = self.session.as_ref().map(Session::generation);
+        let read = session.map(|session| {
+            self.link
+                .output()
+                .speech(session)
+                .map(|lease| lease.map(|(run, until)| (session, run, until)))
+        });
+        let lease = match read {
+            Some(Ok(lease)) => lease,
+            Some(Err(_)) => self
+                .speech
+                .get()
+                .filter(|(held, _, until)| Some(*held) == session && *until > now),
+            None => None,
+        };
+        self.speech.set(lease);
+        let next = if matches!(read, Some(Err(_))) {
+            let delay = SPEECH_RETRY * 2_u32.pow(self.speech_busy);
+            self.speech_busy = (self.speech_busy + 1).min(3);
+            Some(now + delay)
+        } else {
+            self.speech_busy = 0;
+            lease.map(|(.., until)| until)
+        };
+        self.speech_expiry = next.map(|at| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(at.saturating_duration_since(Instant::now()))
+                    .await;
+                let _gone = this.update(cx, Self::refresh_speech);
+            })
+        });
+        if let Err(error) = self.runs_changed_at(now, cx) {
+            tracing::error!(%error, "can't follow speech for Esc");
+        }
+    }
+
     /// Holds or releases global Esc to match what's moving, showing Stop at once when global
     /// Esc is unavailable, in the status panel and in an open typing panel.
     fn sync_escape(&mut self, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
@@ -458,8 +526,15 @@ impl Presence {
     }
 
     fn sync_escape_state(&mut self, cx: &mut Context<'_, Self>) -> bool {
-        let wanted =
-            self.activity.holds_global_escape() || self.voice_working() || self.escape_fixture;
+        let ordinary = self.activity.drawing || self.voice_working() || self.escape_fixture;
+        let wanted = self.activity.holds_global_escape() || ordinary;
+        self.escape_scope.set(if self.activity.pulling {
+            gesture::EscapeScope::Pull
+        } else if self.activity.speaking && !ordinary {
+            gesture::EscapeScope::SpeechOnly
+        } else {
+            gesture::EscapeScope::Ordinary
+        });
         if wanted {
             let native = &self.native;
             self.escape_hold.acquire(|| native.register_escape());
@@ -573,7 +648,8 @@ impl Presence {
             }
             PresenceEvent::DismissPanel if self.text_open() => self.dismiss_text(cx)?,
             PresenceEvent::DismissPanel => self.set_panel(PanelVisibility::Hidden, cx)?,
-            PresenceEvent::Escape => self.escape(cx)?,
+            PresenceEvent::Escape => self.escape_with_speech(None, cx)?,
+            PresenceEvent::EscapeSpeech(press) => self.escape_with_speech(Some(press), cx)?,
             PresenceEvent::Quit => self.quit(cx),
             PresenceEvent::Repaint => self.dock.update(cx, |_, cx| cx.notify()),
             // The wake says nothing itself: the presenter reads its watch's bit.
@@ -706,11 +782,12 @@ impl Render for Panel {
         });
         let stop = self.stop.then(|| {
             let events = self.events.clone();
+            let owner = self.threads.clone();
             let button = Button::new("stop")
                 .small()
                 .label(strings.get(Text::Stop))
-                .on_click(move |_, _, _| {
-                    send(&events, PresenceEvent::Escape);
+                .on_click(move |_, _, cx| {
+                    send_escape(&events, owner.as_ref(), cx);
                 })
                 .debug_selector(|| "presence-stop".into());
             Target(button.into_element())
@@ -836,6 +913,20 @@ fn send(events: &Sender<PresenceEvent>, event: PresenceEvent) {
     if events.try_send(event).is_err() {
         tracing::error!("presence event receiver closed");
     }
+}
+
+fn send_escape(events: &Sender<PresenceEvent>, owner: Option<&WeakEntity<Presence>>, cx: &App) {
+    let press = owner.and_then(WeakEntity::upgrade).and_then(|owner| {
+        SpeechPress::capture(
+            owner.read(cx).speech.get(),
+            Instant::now(),
+            SpeechEscapeOwner::Panel,
+        )
+    });
+    send(
+        events,
+        press.map_or(PresenceEvent::Escape, PresenceEvent::EscapeSpeech),
+    );
 }
 
 fn status_text(state: LinkState) -> Text {
@@ -1053,6 +1144,10 @@ pub(crate) fn open(
             scene_deadline: None,
             pending_stops: std::collections::VecDeque::new(),
             stop_retry: None,
+            speech: Rc::default(),
+            escape_scope: Rc::default(),
+            speech_expiry: None,
+            speech_busy: 0,
             escape_hold: EscapeHold::default(),
             talk_escape: TalkEscape::default(),
             escape_fixture: flags.escape_fixture,
@@ -1082,23 +1177,24 @@ pub(crate) fn open(
     let position = flags.position();
     owner.update(cx, |this, cx| this.position(position, cx))?;
     owner.update(cx, |this, cx| this.observe(position, cx))?;
-    let (link, target, paused, gates) = {
+    let (link, target, paused, gates, esc) = {
         let this = owner.read(cx);
         (
             this.link.clone(),
             Rc::clone(&this.voice.target),
             Rc::clone(&this.voice.paused),
             this.voice.gates.clone(),
+            (Rc::clone(&this.speech), Rc::clone(&this.escape_scope)),
         )
     };
     owner.update(cx, Presence::dispatcher);
     let deliver = gesture::deliver(
-        dock_window,
-        owner.downgrade(),
+        (dock_window, owner.downgrade()),
         link,
         target,
         paused,
         gates,
+        esc,
         cx,
     );
     owner.update(cx, |this, _| this.native.arm_keyboard(deliver))?;
@@ -1142,6 +1238,8 @@ fn schedule_diagnostic_launch(owner: &Entity<Presence>, flags: &Launch, cx: &mut
 
 /// The peek's height in logical pixels: Kumo's row, one row of actions and the insets.
 const PEEK_HEIGHT: f32 = 124.0;
+/// How soon a busy output owner's speech lease is read again, doubling up to 80 ms.
+const SPEECH_RETRY: Duration = Duration::from_millis(10);
 
 fn listen(
     states: Receiver<LinkEvent>,

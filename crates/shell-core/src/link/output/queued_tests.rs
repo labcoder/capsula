@@ -24,7 +24,7 @@ fn speaking(deadline: Instant) -> Queued {
         deadline,
         ack,
         Arc::new(OnceLock::new()),
-        Arc::new(AtomicBool::new(false)),
+        (Arc::new(AtomicBool::new(false)), Arc::default()),
         None,
     );
     owner.ack = None;
