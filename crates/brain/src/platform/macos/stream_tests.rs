@@ -11,8 +11,8 @@ use kumochi_session::{
     SessionError, ShellAwaitsReply,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf, duplex};
-use tokio::net::UnixStream;
 use tokio::sync::watch;
+use tokio::time::{Instant, timeout, timeout_at};
 
 use super::{RecordReader, RecordWriter, Refusal};
 use crate::ipc;
@@ -385,35 +385,62 @@ async fn dropping_a_pending_frame_refuses_both_legs_immediately() {
         let (pair, refused) = cell();
         let (to_shell, mut at_shell) = duplex(taken);
         let (mut raw_control, at_brain_control) = duplex(64);
+        let (to_shell_control, mut at_shell_control) = duplex(8);
         let mut writer = RecordWriter::new(to_shell, brain.data.sealer, Pipe::Data, pair.clone());
-        let mut control_in = RecordReader::new(at_brain_control, brain.control.opener, pair);
-        {
-            let write = writer.write_frame(&big);
-            tokio::pin!(write);
-            assert!(
-                poll_once(write.as_mut()).await.is_pending(),
-                "{taken}: the transport is full"
-            );
-        }
-        assert!(
-            *refused.borrow(),
-            "{taken}: dropping an unfinished frame latches refusal"
+        let mut control_out = RecordWriter::new(
+            to_shell_control,
+            brain.control.sealer,
+            Pipe::Control,
+            pair.clone(),
         );
-
+        let mut control_in = RecordReader::new(at_brain_control, brain.control.opener, pair);
         let control = frame(HEADER_LEN + 2);
         raw_control
             .write_all(&records(&mut shell.control.sealer, &control))
             .await
             .expect("sent");
+        control_in.read_exact(&mut [0; 1]).await.expect("prefix");
+        {
+            let other_write = control_out.write_frame(&small);
+            tokio::pin!(other_write);
+            assert!(poll_once(other_write.as_mut()).await.is_pending());
+            {
+                let write = writer.write_frame(&big);
+                tokio::pin!(write);
+                assert!(
+                    poll_once(write.as_mut()).await.is_pending(),
+                    "{taken}: the transport is full"
+                );
+            }
+            assert!(
+                *refused.borrow(),
+                "{taken}: dropping an unfinished frame latches refusal"
+            );
+            at_shell_control
+                .read_exact(&mut [0; 8])
+                .await
+                .expect("the partial control write");
+            let Poll::Ready(Err(error)) = poll_once(other_write.as_mut()).await else {
+                panic!("{taken}: the pending control write must refuse when repolled");
+            };
+            assert_eq!(refusal(&error), Some(Refusal::PairRefused), "{taken}");
+        }
+        drop(control_out);
+        {
+            let mut byte = [0; 1];
+            assert_eq!(at_shell_control.read(&mut byte).await.expect("closed"), 0);
+        }
+        let mut untouched = [0xFF; HEADER_LEN];
         let error = control_in
-            .read(&mut [0; HEADER_LEN])
+            .read(&mut untouched)
             .await
-            .expect_err("the other leg cannot read its ready record");
+            .expect_err("the other leg cannot deliver its buffered plaintext");
         assert_eq!(
             refusal(&error),
             Some(Refusal::PairRefused),
             "{taken}: refusal precedes control delivery"
         );
+        assert_eq!(untouched, [0xFF; HEADER_LEN]);
 
         let again = writer.write_frame(&small).await.expect_err("never resumed");
         assert_eq!(refusal(&again), Some(Refusal::PairRefused), "{taken}");
@@ -500,12 +527,12 @@ async fn debug_output_carries_no_plaintext() {
 #[tokio::test]
 async fn control_round_trips_while_data_is_stuck_mid_frame() {
     const FRAMES: usize = 3;
+    let deadline = Instant::now() + Duration::from_secs(5);
     let (shell, brain) = established();
     let (pair, refused) = cell();
-    let (brain_control, shell_control) = UnixStream::pair().expect("control sockets");
-    let (brain_data, shell_data) = UnixStream::pair().expect("data sockets");
-    let (control_in, control_out) = brain_control.into_split();
-    let (_data_in, data_out) = brain_data.into_split();
+    let (brain_control, shell_control) = duplex(8 * 1024);
+    let (data_out, shell_data_in) = duplex(8 * 1024);
+    let (control_in, control_out) = tokio::io::split(brain_control);
     let mut control_in = RecordReader::new(control_in, brain.control.opener, pair.clone());
     let mut control_out = RecordWriter::new(
         control_out,
@@ -514,8 +541,7 @@ async fn control_round_trips_while_data_is_stuck_mid_frame() {
         pair.clone(),
     );
     let mut data_out = RecordWriter::new(data_out, brain.data.sealer, Pipe::Data, pair);
-    let (shell_control_in, shell_control_out) = shell_control.into_split();
-    let (shell_data_in, _shell_data_out) = shell_data.into_split();
+    let (shell_control_in, shell_control_out) = tokio::io::split(shell_control);
     let (shell_pair, _) = cell();
     let mut shell_control_in =
         RecordReader::new(shell_control_in, shell.control.opener, shell_pair.clone());
@@ -541,7 +567,9 @@ async fn control_round_trips_while_data_is_stuck_mid_frame() {
     tokio::select! {
         biased;
         () = &mut data => panic!("every frame went out before the shell read them"),
-        read = shell_data_in.read_exact(prefix) => { read.expect("the shell reads into frame two"); }
+        read = timeout_at(deadline, shell_data_in.read_exact(prefix)) => {
+            read.expect("prefix deadline").expect("the shell reads into frame two");
+        }
     }
 
     let stop = ControlToBrain::Stop {
@@ -566,7 +594,7 @@ async fn control_round_trips_while_data_is_stuck_mid_frame() {
     tokio::select! {
         biased;
         () = &mut data => panic!("the data writer finished while the shell's data reader stalled"),
-        done = tokio::time::timeout(Duration::from_secs(1), control) => done.expect("control within 1 s"),
+        done = timeout(Duration::from_secs(1), control) => done.expect("control within 1 s"),
     }
     assert_eq!(
         written.get(),
@@ -574,7 +602,11 @@ async fn control_round_trips_while_data_is_stuck_mid_frame() {
         "the data writer is still inside frame two"
     );
 
-    let ((), read) = tokio::join!(data, shell_data_in.read_exact(rest));
+    let ((), read) = timeout_at(deadline, async {
+        tokio::join!(data, shell_data_in.read_exact(rest))
+    })
+    .await
+    .expect("drain deadline");
     read.expect("the shell reads the rest");
     assert_eq!(
         received,
