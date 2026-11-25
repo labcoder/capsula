@@ -1,16 +1,23 @@
-//! What a held-key voice turn's lifecycle decides, apart from the windows, tasks and microphone
-//! that apply it: what each run state, end and lost brain does to the pending
-//! hold, which notice it leaves, and which run a native Esc press may still stop. The shell
+//! What a held-key voice turn decides, apart from the windows, tasks and microphone that apply
+//! it: what each admission, brain status, release, run state, physical receipt, end and lost
+//! brain does to the pending hold, which notice it leaves, and which run a native Esc press may
+//! still stop. The shell
 //! samples its owners, applies each returned step, and reads this state again after anything
 //! that changes it.
 
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
+
+use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{
-    Content, GestureId, MAX_TRANSCRIPT_BYTES, NoticeRevision, Phase, RunId, RunOrigin, ThreadId,
+    AudioSession, Content, ControlToBrain, GestureId, HoldFailure, HoldStatus,
+    MAX_TRANSCRIPT_BYTES, NoticeRevision, Phase, RunId, RunOrigin, ThreadId,
 };
 
+use crate::link::output::Denied;
 use crate::link::{InputCancel, Session};
-use crate::platform::microphone::Generation;
-use crate::runs::{Applied, RunTail};
+use crate::platform::microphone::{Finalization, Generation, MicError, Mode};
+use crate::runs::{Applied, Refused as RunRefused, RunTail};
 use crate::strings::Text;
 
 /// The target, connection and choice a hold's key-down was seen under.
@@ -19,6 +26,20 @@ pub struct Stamp {
     pub target: (Option<ThreadId>, u64),
     pub session: u64,
     pub choice: u64,
+}
+
+impl Stamp {
+    /// Whether the target, choice and open connection are still the ones it was seen under.
+    pub fn current(
+        self,
+        target: (Option<ThreadId>, u64),
+        choice: u64,
+        session: Option<&Session>,
+    ) -> bool {
+        self.target == target
+            && self.choice == choice
+            && session.is_some_and(|s| s.generation() == self.session && s.open())
+    }
 }
 
 /// The screen offer a hold's first input is seen under: the brain's revision, bound to the
@@ -41,19 +62,18 @@ pub enum Source {
     Sent,
 }
 
-/// The pending hold. Its identity, run and terminal notice change only here; the capture
-/// adapter moves its source, collection, release, screen ask and retirement wait.
+/// The pending hold. Every field changes only here.
 pub struct Hold {
     token: Generation,
     stamp: Stamp,
     session: Session,
-    pub source: Source,
+    source: Source,
     /// The owner accepted this hold's collection: only then can its release send words.
-    pub collected: bool,
-    pub released: Option<u64>,
+    collected: bool,
+    released: Option<u64>,
     /// A hold the brain was told shows the screen, until it asks for that release: once, when
     /// the keys come up or when the notice stops being `On` before they do.
-    pub screen: bool,
+    screen: bool,
     /// The offer such a hold's first input was seen under; its release needs it still current.
     offer: Option<Offer>,
     terminal: Option<Text>,
@@ -61,7 +81,7 @@ pub struct Hold {
     run: Option<RunTail>,
     /// A speaking queued hold's release waits for its own inhibit's retirement: its reply can
     /// start before then.
-    pub unretired: bool,
+    unretired: bool,
 }
 
 impl Hold {
@@ -87,6 +107,57 @@ impl Hold {
 
     pub fn run(&self) -> Option<RunTail> {
         self.run
+    }
+
+    pub fn source(&self) -> Source {
+        self.source
+    }
+
+    pub fn collected(&self) -> bool {
+        self.collected
+    }
+
+    pub fn released(&self) -> Option<u64> {
+        self.released
+    }
+
+    pub fn unretired(&self) -> bool {
+        self.unretired
+    }
+
+    /// The release that sends the hold's words: once its keys came up, its source joined every
+    /// packet it forwarded, and its own inhibit retired.
+    fn key_up(&self) -> Option<ControlToBrain> {
+        let (Source::Joined(chunks), Some(t_qpc), false) =
+            (self.source, self.released, self.unretired)
+        else {
+            return None;
+        };
+        Some(ControlToBrain::KeyUp {
+            gesture: self.token.gesture(),
+            t_qpc,
+            chunks,
+        })
+    }
+}
+
+/// Fixtures that put a hold where a test needs it without driving its capture.
+#[cfg(any(test, feature = "test-support"))]
+impl Hold {
+    pub fn set_source(&mut self, source: Source) {
+        self.source = source;
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "a fixture sets the collection either way"
+    )]
+    pub fn set_collected(&mut self, collected: bool) {
+        self.collected = collected;
+    }
+
+    pub fn set_released(&mut self, qpc: u64) {
+        self.released = Some(qpc);
     }
 }
 
@@ -155,6 +226,138 @@ impl Revoked {
         self.tail.filter(|tail| moving == Some(tail.run))
     }
 }
+
+/// Why a hold step was refused, named as the shell's diagnostics name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    PendingHold,
+    StaleContext,
+    InputFence,
+    GenerationNotPreparing,
+    EscapeLease,
+    NoPendingHold,
+    StaleStatus,
+    TerminalStatus,
+    PointerUnread,
+}
+
+/// A recognition's first refusal in its fixed order, and whether it still fences the spoken run.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Admission {
+    pub refused: Option<Refused>,
+    /// A valid recognition still stops the earlier spoken run if Windows refused its Esc
+    /// hotkey; any other refusal leaves it alone.
+    pub fence: bool,
+}
+
+pub struct Recognition<'a> {
+    pub screen: bool,
+    pub notice: Text,
+    pub unsent: Unsent<'a>,
+}
+
+pub enum Unsent<'a> {
+    DiscardRun,
+    StopOn(&'a Session),
+}
+
+impl<'a> Recognition<'a> {
+    pub fn new(session: &'a Session, request: &Result<ControlToBrain, RunRefused>) -> Self {
+        let (notice, unsent) = match request {
+            Ok(_) => (Text::HoldFailed, Unsent::DiscardRun),
+            Err(RunRefused::Busy) => (Text::TurnBusy, Unsent::StopOn(session)),
+            Err(_) => (Text::HoldFailed, Unsent::StopOn(session)),
+        };
+        Self {
+            screen: matches!(request, Ok(ControlToBrain::ScreenHoldRecognized { .. })),
+            notice,
+            unsent,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Collection {
+    Complete,
+    Retry,
+    Cancel,
+}
+
+impl Collection {
+    pub fn after(result: Result<(), Denied>) -> Self {
+        match result {
+            Ok(()) => Self::Complete,
+            Err(Denied::Busy) => Self::Retry,
+            Err(_) => Self::Cancel,
+        }
+    }
+}
+
+/// What a brain status does to the hold it names.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StatusStep {
+    Refused(Refused),
+    Ignored,
+    /// Install the admitted hold's waiter, then check it at once.
+    Admit,
+    Notice(Text),
+    End(Text),
+    /// The brain failed the hold for `reason`: it ends with the notice.
+    Failed(HoldFailure, Text),
+}
+
+/// What a release delivery does.
+pub enum Release {
+    Refused(Refused),
+    /// Anything but an accepted collection's first release cancels.
+    Cancel,
+    /// The release is stamped. A hold that shows the screen asks once on its own session, with
+    /// release authority only when it was recognized under the delivery's stamp.
+    Released {
+        screen: Option<(Session, bool)>,
+    },
+}
+
+/// Why a screen release goes voice only.
+#[derive(Debug, PartialEq, Eq)]
+pub enum VoiceOnly {
+    TurnedOff,
+    Refused(Refused),
+}
+
+/// What the physical receipt of a hold's worker does to the hold.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReceiptStep {
+    /// The hold is gone: the gate took its proof already, and no notice is published.
+    Stale,
+    End(Text),
+    /// Every forwarded packet joined: its release can send the words.
+    Finish,
+}
+
+/// What discarding an unused generation leaves to apply once no gate took it.
+pub enum Discard<'a> {
+    Nothing,
+    /// A start already claimed it and no session waits: its microphone gate cancels it.
+    Cancel,
+    /// Its session hears that the hold stopped.
+    Stop(&'a Session),
+}
+
+/// Discards `token` unstarted where no gate holds it, the gate being the one authority while it
+/// does. With `session`, a generation discarded now or already retired tells it the hold stopped.
+pub fn discard<'a>(token: &Generation, session: Option<&'a Session>) -> Discard<'a> {
+    let discarded = token.discard_unstarted().is_ok();
+    match session {
+        None if discarded => Discard::Nothing,
+        None => Discard::Cancel,
+        Some(session) if discarded || token.retired() => Discard::Stop(session),
+        Some(_) => Discard::Nothing,
+    }
+}
+
+/// A hold's target: the thread and its revision.
+type Target = (Option<ThreadId>, u64);
 
 #[derive(Default)]
 pub struct State {
@@ -472,6 +675,319 @@ impl State {
         let tail = ended.or(pending)?;
         self.discard_recovery(gesture);
         Some(Revoked { gesture, tail })
+    }
+
+    /// Whether `gesture` is the pending hold and has no terminal notice.
+    pub fn live(&self, gesture: GestureId) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|hold| hold.token.gesture() == gesture && hold.terminal.is_none())
+    }
+
+    /// Whether `gesture` is the pending hold and its source still records.
+    pub fn recording(&self, gesture: GestureId) -> bool {
+        self.pending.as_ref().is_some_and(|hold| {
+            hold.token.gesture() == gesture && matches!(hold.source, Source::Recording)
+        })
+    }
+
+    /// Whether `gesture`'s screen release may still go, read fresh at its release, after the
+    /// display shows and after the screen watch is told: continuous, trusted input on its own
+    /// fence first, then the live hold and its original stamp, then the capture lease.
+    pub fn permits<'a>(
+        &self,
+        gesture: GestureId,
+        input: impl FnOnce() -> bool,
+        current: impl FnOnce() -> (Target, u64, Option<&'a Session>),
+        lease: impl FnOnce() -> bool,
+    ) -> bool {
+        input()
+            && self.pending.as_ref().is_some_and(|hold| {
+                if hold.token.gesture() != gesture || hold.terminal.is_some() {
+                    return false;
+                }
+                let (target, choice, session) = current();
+                hold.stamp.current(target, choice, session) && lease()
+            })
+    }
+
+    /// Samples queued consent before settings, then a stop still owed only if neither refused.
+    pub fn held_back(
+        audio: AudioSession,
+        consent: impl FnOnce() -> bool,
+        off: impl FnOnce() -> Option<Text>,
+        stop_owed: impl FnOnce() -> bool,
+    ) -> Option<Text> {
+        let consent_pending = audio == AudioSession::QueuedRequired && !consent();
+        off().or_else(|| (consent_pending || stop_owed()).then_some(Text::TurnBusy))
+    }
+
+    pub fn admission_refused(&mut self, notice: Text) {
+        self.status = Some(notice);
+    }
+
+    pub fn no_inhibit(&self, off: impl FnOnce() -> Option<Text>) -> Option<Text> {
+        self.pending
+            .is_none()
+            .then(|| off().unwrap_or(Text::TurnBusy))
+    }
+
+    pub fn replace_hold(&self) -> Option<Text> {
+        self.pending.as_ref().map(|_| Text::HoldCancelled)
+    }
+
+    /// The warning a listening hold gets near `token`'s deadline: still before it, its notice
+    /// still Listening, still under its own stamp and input (`current`), and still collecting.
+    pub fn near_limit(
+        &self,
+        token: &Generation,
+        alive: &AtomicBool,
+        now: Instant,
+        current: impl FnOnce() -> bool,
+    ) -> Option<Text> {
+        (now < token.hold_deadline()
+            && self.status == Some(Text::HoldListening)
+            && current()
+            && token.mode(alive, now) == Ok(Mode::Collecting))
+        .then_some(Text::HoldNearLimit)
+    }
+
+    /// A recognition that brought no generation: busy, unless a microphone may still be open.
+    pub fn unarmed_notice(&self) -> Text {
+        if self.status == Some(Text::HoldUnavailable) {
+            Text::HoldUnavailable
+        } else {
+            Text::TurnBusy
+        }
+    }
+
+    /// A recognition's refusals in order, each fact read only when nothing before it refused:
+    /// the stamp still current, the input fence still its gesture's, the generation still
+    /// preparing, and the Esc hotkey leased last.
+    pub fn admission(
+        &self,
+        current: impl FnOnce() -> bool,
+        input: impl FnOnce() -> bool,
+        preparing: impl FnOnce() -> bool,
+        lease: impl FnOnce() -> bool,
+    ) -> Admission {
+        let refused = if self.pending.is_some() {
+            Some(Refused::PendingHold)
+        } else if !current() {
+            Some(Refused::StaleContext)
+        } else if !input() {
+            Some(Refused::InputFence)
+        } else if !preparing() {
+            Some(Refused::GenerationNotPreparing)
+        } else if !lease() {
+            Some(Refused::EscapeLease)
+        } else {
+            None
+        };
+        let fence = matches!(refused, None | Some(Refused::EscapeLease));
+        Admission { refused, fence }
+    }
+
+    /// What the brain's `status` for the hold of `generation` and `gesture` does. `speech`
+    /// reads speech input's state, only for a model that wasn't loaded.
+    pub fn status(
+        &self,
+        generation: u64,
+        gesture: GestureId,
+        status: HoldStatus,
+        speech: impl FnOnce() -> Text,
+    ) -> StatusStep {
+        let Some(hold) = self
+            .pending
+            .as_ref()
+            .filter(|h| h.stamp.session == generation && h.token.gesture() == gesture)
+        else {
+            return StatusStep::Refused(Refused::StaleStatus);
+        };
+        if hold.terminal.is_some() {
+            return StatusStep::Refused(Refused::TerminalStatus);
+        }
+        match status {
+            HoldStatus::Admitted if matches!(hold.source, Source::Waiting) => StatusStep::Admit,
+            HoldStatus::Admitted => StatusStep::Ignored,
+            HoldStatus::Loading => StatusStep::Notice(Text::VoiceLoading),
+            HoldStatus::Transcribing => StatusStep::Notice(Text::HoldTranscribing),
+            HoldStatus::Empty => StatusStep::End(Text::HoldEmpty),
+            HoldStatus::Cancelled => StatusStep::End(Text::HoldCancelled),
+            HoldStatus::Failed(reason) => StatusStep::Failed(
+                reason,
+                match reason {
+                    HoldFailure::NotLoaded => match speech() {
+                        text @ (Text::VoiceNotInstalled | Text::VoiceUnloaded) => text,
+                        _ => Text::VoiceStatusUnknown,
+                    },
+                    HoldFailure::Busy => Text::TurnBusy,
+                    _ => Text::HoldFailed,
+                },
+            ),
+        }
+    }
+
+    /// The pending hold's source started: its microphone now records.
+    pub fn record(&mut self) {
+        if let Some(hold) = self.pending.as_mut() {
+            hold.source = Source::Recording;
+        }
+    }
+
+    /// Accepts this source once. Publish the returned notice before opening its copies.
+    pub fn collecting(
+        &mut self,
+        gesture: GestureId,
+        accept: impl FnOnce() -> Result<(), Denied>,
+    ) -> Result<Option<Text>, Denied> {
+        let hold = self
+            .pending
+            .as_mut()
+            .filter(|hold| {
+                hold.token.gesture() == gesture && matches!(hold.source, Source::Recording)
+            })
+            .ok_or(Denied::Stale)?;
+        if hold.collected {
+            return if hold.released.is_some() || hold.terminal.is_some() {
+                Err(Denied::Stale)
+            } else {
+                Ok(None)
+            };
+        }
+        accept()?;
+        hold.collected = true;
+        Ok(Some(Text::HoldListening))
+    }
+
+    /// The keys of `gesture` came up at `qpc`, or its gesture was cancelled.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "a cancelled End is the gesture's own fact, beside its release time"
+    )]
+    pub fn release(
+        &mut self,
+        gesture: GestureId,
+        cancelled: bool,
+        qpc: u64,
+        stamp: Stamp,
+    ) -> Release {
+        let Some(hold) = self.pending.as_mut().filter(|hold| {
+            hold.token.gesture() == gesture
+                && hold.terminal.is_none()
+                && (cancelled || hold.released.is_none())
+        }) else {
+            return Release::Refused(Refused::NoPendingHold);
+        };
+        // A terminal hold keeps its notice: only a cancel still ends it.
+        if hold.terminal.is_some() && !cancelled {
+            return Release::Refused(Refused::TerminalStatus);
+        }
+        // Only an accepted collection releases, and only once; anything else cancels.
+        if cancelled || !hold.collected || hold.released.is_some() {
+            return Release::Cancel;
+        }
+        hold.released = Some(qpc);
+        let screen =
+            std::mem::take(&mut hold.screen).then(|| (hold.session.clone(), hold.stamp == stamp));
+        Release::Released { screen }
+    }
+
+    /// The screen notice stopped being `On` while a hold that shows it had its keys down: that
+    /// refusal is the gesture's one ask, so its release sends no screen even if it comes back.
+    pub fn take_screen(&mut self) -> Option<GestureId> {
+        let hold = self.pending.as_mut()?;
+        std::mem::take(&mut hold.screen).then(|| hold.token.gesture())
+    }
+
+    /// Whether a release the runs model still asks to show the screen goes on, checked in order
+    /// before any lease is taken: the show-screen choice not turned off since, under the offer
+    /// its first input was seen under and `publish` still publishes, and with a pointer to pick
+    /// the display.
+    pub fn screen_release(
+        &self,
+        show: Option<bool>,
+        publish: impl FnOnce() -> Option<Offer>,
+        pointer: Option<PhysicalPoint>,
+    ) -> Result<PhysicalPoint, VoiceOnly> {
+        // shortcut: the pending Off veto is local to offers and release; revisit save ordering if pictures are ever granted earlier.
+        if show == Some(false) {
+            return Err(VoiceOnly::TurnedOff);
+        }
+        let offer = self.pending.as_ref().and_then(|hold| hold.offer);
+        if offer.is_none() || offer != publish() {
+            return Err(VoiceOnly::Refused(Refused::StaleContext));
+        }
+        // The pointer picks the display, so a release that couldn't read it shows none.
+        pointer.ok_or(VoiceOnly::Refused(Refused::PointerUnread))
+    }
+
+    /// `gesture`'s own inhibit retired: a speaking queued hold's release may go now. False when
+    /// it isn't the pending hold.
+    pub fn retired(&mut self, gesture: GestureId) -> bool {
+        let Some(hold) = self
+            .pending
+            .as_mut()
+            .filter(|hold| hold.token.gesture() == gesture)
+        else {
+            return false;
+        };
+        hold.unretired = false;
+        true
+    }
+
+    /// Sends the pending hold's words through `send` once its release is due. The hold whose
+    /// release couldn't be sent comes back, for its connection's end.
+    pub fn finish(&mut self, send: impl FnOnce(&Session, ControlToBrain) -> bool) -> Option<&Hold> {
+        let hold = self.pending.as_mut()?;
+        let message = hold.key_up()?;
+        if send(&hold.session, message) {
+            hold.source = Source::Sent;
+            return None;
+        }
+        Some(hold)
+    }
+
+    /// The physical receipt of `gesture`'s worker, after `count` packets were forwarded. Only the
+    /// hold still pending takes it; a recorded end beats a clean receipt.
+    pub fn receipt(
+        &mut self,
+        gesture: GestureId,
+        receipt: Result<Finalization, MicError>,
+        count: u32,
+    ) -> ReceiptStep {
+        let Some(hold) = self
+            .pending
+            .as_mut()
+            .filter(|h| h.token.gesture() == gesture)
+        else {
+            return ReceiptStep::Stale;
+        };
+        let Ok(finalization) = receipt else {
+            return ReceiptStep::End(Text::HoldUnavailable);
+        };
+        let notice = match finalization {
+            Finalization::Discarded(MicError::Cancelled | MicError::SessionLost) => {
+                Text::HoldCancelled
+            }
+            Finalization::Discarded(MicError::Unavailable | MicError::Format) => {
+                Text::HoldMicrophoneUnavailable
+            }
+            _ => Text::HoldFailed,
+        };
+        hold.source = Source::Sent;
+        if let Some(terminal) = hold.terminal {
+            return ReceiptStep::End(if terminal == Text::HoldUnavailable {
+                notice
+            } else {
+                terminal
+            });
+        }
+        if finalization == (Finalization::Released { packets: count }) {
+            hold.source = Source::Joined(count);
+            return ReceiptStep::Finish;
+        }
+        ReceiptStep::End(notice)
     }
 }
 

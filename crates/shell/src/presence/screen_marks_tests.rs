@@ -183,7 +183,13 @@ fn let_go(watching: &Watching, cx: &mut TestAppContext) {
         ]
     );
     watching.ready.owner.update(cx, |owner, _| {
-        owner.voice.state.pending.as_mut().expect("the hold").source = Source::Sent;
+        owner
+            .voice
+            .state
+            .pending
+            .as_mut()
+            .expect("the hold")
+            .set_source(Source::Sent);
     });
 }
 
@@ -471,7 +477,13 @@ fn a_release_with_no_sources_does_none_of_the_watch_s_work(cx: &mut TestAppConte
     assert_eq!(watchdog(&watching, cx), None, "no limit to keep");
     watching.ready.owner.update(cx, |owner, _| {
         assert!(owner.voice.watched.is_none());
-        owner.voice.state.pending.as_mut().expect("the hold").source = Source::Sent;
+        owner
+            .voice
+            .state
+            .pending
+            .as_mut()
+            .expect("the hold")
+            .set_source(Source::Sent);
     });
     // A screen scene that arrives all the same finds no watch and is skipped.
     state(&watching, RUN, Phase::Thinking, HOLD, cx);
@@ -603,7 +615,7 @@ fn a_reset_before_recognition_delivery_retires_only_that_unstarted_generation(
                 .state
                 .pending
                 .as_ref()
-                .is_some_and(|hold| hold.token().gesture() == GestureId(2) && hold.collected)
+                .is_some_and(|hold| hold.token().gesture() == GestureId(2) && hold.collected())
         })
     });
     samples.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -1563,7 +1575,7 @@ fn natively_pending(watching: &Watching, cx: &mut TestAppContext) -> (Deliver, I
     until(cx, |cx| {
         owner.read_with(cx, |owner, _| {
             let hold = owner.voice.state.pending.as_ref();
-            hold.is_some_and(|hold| matches!(hold.source, Source::Sent))
+            hold.is_some_and(|hold| matches!(hold.source(), Source::Sent))
         })
     });
     told(watching);
@@ -2196,7 +2208,7 @@ fn ended_by_esc_down(watching: &Watching, cx: &mut TestAppContext) -> (Deliver, 
     cx.run_until_parked();
     owner.read_with(cx, |owner, _| {
         let hold = owner.voice.state.pending.as_ref().expect("the hold");
-        assert!(matches!(hold.source, Source::Waiting));
+        assert!(matches!(hold.source(), Source::Waiting));
     });
     let (key, edge) = (
         Key::Escape(crate::input::PhysicalKey::new(1).unwrap()),
@@ -2342,7 +2354,7 @@ fn measure_captured_stop_and_raw_intake(cx: &mut TestAppContext) {
                     hold.token()
                         .discard_unstarted()
                         .expect("the fixture never starts a source");
-                    hold.source = Source::Sent;
+                    hold.set_source(Source::Sent);
                 });
                 let run = 6 + u64::from(gesture);
                 let cancel = |cx: &mut TestAppContext| {
@@ -2633,7 +2645,7 @@ fn automatic_hold_stop_keeps_newer_voice_ownership_and_folds_a_prebind_raw_end(
             .as_mut()
             .expect("newer pending hold");
         hold.token().discard_unstarted().expect("no source started");
-        hold.source = Source::Sent;
+        hold.set_source(Source::Sent);
         assert_eq!(hold.token().gesture(), GestureId(2));
         assert_eq!(hold.run(), None);
         assert_eq!(owner.voice.state.ended, None);
