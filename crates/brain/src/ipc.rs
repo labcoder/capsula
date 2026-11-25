@@ -114,7 +114,7 @@ enum SessionError {
 /// Authorization selected by the local transport, not by the greeting's contents.
 pub(crate) enum PeerAuth<'a> {
     Capability {
-        hello: &'a Hello,
+        hello: Hello,
         expected: &'a Capability,
     },
     #[expect(
@@ -133,7 +133,6 @@ pub(crate) enum Refusal {
 
 /// Checks authorization before disclosing a build mismatch. Mode and epoch are checked separately.
 pub(crate) fn check_hello(auth: PeerAuth<'_>) -> Result<(), Refusal> {
-    let bound_greeting;
     let hello = match auth {
         PeerAuth::Capability { hello, expected } => {
             if !bool::from(hello.capability.expose().ct_eq(expected.expose())) {
@@ -142,9 +141,9 @@ pub(crate) fn check_hello(auth: PeerAuth<'_>) -> Result<(), Refusal> {
             hello
         }
         PeerAuth::SessionBound(bound) => {
-            bound_greeting = bound.into_greeting();
-            require_session_placeholder(&bound_greeting.capability)?;
-            &bound_greeting
+            let hello = bound.into_greeting();
+            require_session_placeholder(&hello.capability)?;
+            hello
         }
     };
     if hello.build_id != BUILD_ID {
@@ -323,8 +322,6 @@ impl Pipes {
 /// Negotiation and authorization stay in [`greet`], so every transport runs the same checks in the
 /// same order. A greeting comes from the transport's own reader; shared code never assembles one.
 trait Legs {
-    /// A greeting as the transport's reader produced it: a plain `Hello` on the pipes.
-    type Greeting;
     /// The one process both legs were bound to.
     type Peer;
     /// The data leg, read after its greeting.
@@ -335,9 +332,7 @@ trait Legs {
     async fn control_greeting(
         &mut self,
         tap: &mut Tap,
-    ) -> Result<Option<(Self::Greeting, AudioSession, PairStart)>, SessionError>;
-    /// The one check of a greeting, by the method this transport selects.
-    fn authorize(&self, greeting: Self::Greeting) -> Result<(), Refusal>;
+    ) -> Result<Option<(PeerAuth<'_>, AudioSession, PairStart)>, SessionError>;
     /// Writes one whole control frame.
     async fn write_control(&mut self, frame: &[u8]) -> io::Result<()>;
     /// Acquires the data leg and checks who opened it.
@@ -347,7 +342,7 @@ trait Legs {
     async fn data_greeting(
         &mut self,
         tap: &mut Tap,
-    ) -> Result<Option<(Self::Greeting, Option<IssueSession>)>, SessionError>;
+    ) -> Result<Option<(PeerAuth<'_>, Option<IssueSession>)>, SessionError>;
     /// Binds both legs to one process.
     fn bind(&mut self) -> Result<Self::Peer, SessionError>;
     fn data(&mut self) -> &mut Self::Data;
@@ -361,28 +356,25 @@ struct PipeLegs<'a> {
 }
 
 impl Legs for PipeLegs<'_> {
-    type Greeting = Hello;
     type Peer = platform::ShellProcess;
     type Data = PipeServer;
 
     async fn control_greeting(
         &mut self,
         tap: &mut Tap,
-    ) -> Result<Option<(Hello, AudioSession, PairStart)>, SessionError> {
+    ) -> Result<Option<(PeerAuth<'_>, AudioSession, PairStart)>, SessionError> {
         let Some((first, len)) =
             read_sized::<ControlToBrain>(&mut self.pipes.control, Pipe::Control).await?
         else {
             return Ok(None);
         };
         tap.record(Pipe::Control, Direction::ToBrain, &first, len);
-        startup_hello(first, self.pipes.last_queued).map(Some)
-    }
-
-    fn authorize(&self, hello: Hello) -> Result<(), Refusal> {
-        check_hello(PeerAuth::Capability {
-            hello: &hello,
+        let (hello, audio, start) = startup_hello(first, self.pipes.last_queued)?;
+        let auth = PeerAuth::Capability {
+            hello,
             expected: &self.identity.capability,
-        })
+        };
+        Ok(Some((auth, audio, start)))
     }
 
     async fn write_control(&mut self, frame: &[u8]) -> io::Result<()> {
@@ -397,18 +389,23 @@ impl Legs for PipeLegs<'_> {
     async fn data_greeting(
         &mut self,
         tap: &mut Tap,
-    ) -> Result<Option<(Hello, Option<IssueSession>)>, SessionError> {
+    ) -> Result<Option<(PeerAuth<'_>, Option<IssueSession>)>, SessionError> {
         let Some((first, len)) =
             read_sized::<DataToBrain>(&mut self.pipes.data, Pipe::Data).await?
         else {
             return Ok(None);
         };
         tap.record(Pipe::Data, Direction::ToBrain, &first, len);
-        match first {
-            DataToBrain::Hello(hello) => Ok(Some((hello, None))),
-            DataToBrain::QueuedHello(hello, session) => Ok(Some((hello, Some(session)))),
-            _ => Err(SessionError::ClosedEarly),
-        }
+        let (hello, session) = match first {
+            DataToBrain::Hello(hello) => (hello, None),
+            DataToBrain::QueuedHello(hello, session) => (hello, Some(session)),
+            _ => return Err(SessionError::ClosedEarly),
+        };
+        let auth = PeerAuth::Capability {
+            hello,
+            expected: &self.identity.capability,
+        };
+        Ok(Some((auth, session)))
     }
 
     fn bind(&mut self) -> Result<platform::ShellProcess, SessionError> {
@@ -450,7 +447,7 @@ async fn greet<L: Legs>(
     let Some((greeting, audio, start)) = first else {
         return Err(SessionError::ClosedEarly);
     };
-    match legs.authorize(greeting) {
+    match check_hello(greeting) {
         Err(Refusal::WrongCapability) => return Err(SessionError::WrongCapability),
         Err(Refusal::BuildMismatch) => {
             tracing::warn!("build mismatch");
@@ -501,8 +498,7 @@ async fn read_startup_data<L: Legs>(
     let Some((greeting, paired)) = first else {
         return Err(SessionError::ClosedEarly);
     };
-    legs.authorize(greeting)
-        .map_err(|_| SessionError::WrongCapability)?;
+    check_hello(greeting).map_err(|_| SessionError::WrongCapability)?;
     if paired != expected {
         return Err(SessionError::Protocol("data hello does not match control"));
     }
@@ -810,7 +806,9 @@ mod tests {
             (3, queued, queued, 2),
             (4, queued, queued, 1),
             (5, legacy, legacy, 1),
+            (6, queued, queued, 1),
         ] {
+            let installed_before = brain.issue_session();
             let (control, mut peer_control) =
                 crate::platform::test_pair(&format!("queued-hello-c-{index}"))
                     .await
@@ -829,10 +827,10 @@ mod tests {
                 let welcomed = request_audio(&mut peer_control, control_mode).await;
                 let echo = if index == 4 { first.unwrap() } else { welcomed };
                 first.get_or_insert(welcomed);
-                let hello = hello(secret, BUILD_ID);
+                let greeting = hello(secret, BUILD_ID);
                 let message = match data_mode {
-                    AudioSession::Legacy => DataToBrain::Hello(hello),
-                    AudioSession::QueuedRequired => DataToBrain::QueuedHello(hello, echo),
+                    AudioSession::Legacy => DataToBrain::Hello(greeting),
+                    AudioSession::QueuedRequired => DataToBrain::QueuedHello(greeting, echo),
                 };
                 peer_data
                     .write_all(&frame::encode(&message, Pipe::Data).unwrap())
@@ -852,6 +850,13 @@ mod tests {
                         Some(ControlToShell::Settings { .. })
                     ));
                 }
+                if index == 6 {
+                    let not_metrics = DataToBrain::Hello(hello(1, BUILD_ID));
+                    peer_data
+                        .write_all(&frame::encode(&not_metrics, Pipe::Data).unwrap())
+                        .await
+                        .unwrap();
+                }
                 if index == 0 {
                     register_queued_output(&mut peer_control, welcomed).await;
                 }
@@ -868,6 +873,10 @@ mod tests {
             match index {
                 0 | 5 => assert!(matches!(result, Ok(Session::Quit { .. }))),
                 3 => assert!(matches!(result, Err(SessionError::WrongCapability))),
+                6 => assert!(matches!(
+                    result,
+                    Err(SessionError::Protocol("expected startup TextMetrics"))
+                )),
                 _ => assert!(matches!(
                     result,
                     Err(SessionError::Protocol("data hello does not match control"))
@@ -875,6 +884,9 @@ mod tests {
             }
             if index == 1 {
                 assert_eq!(brain.issue_session(), None);
+            }
+            if index == 6 {
+                assert_eq!(brain.issue_session(), installed_before);
             }
         }
         brain.close().await;
@@ -1032,21 +1044,21 @@ mod tests {
     #[test]
     fn hello_needs_the_capability_before_anything_else() {
         let id = identity();
-        let check = |hello: &Hello| {
+        let check = |hello: Hello| {
             check_hello(PeerAuth::Capability {
                 hello,
                 expected: &id.capability,
             })
         };
-        assert_eq!(check(&hello(1, BUILD_ID)), Ok(()));
+        assert_eq!(check(hello(1, BUILD_ID)), Ok(()));
         assert_eq!(
-            check(&Hello::session(BUILD_ID.to_owned())),
+            check(Hello::session(BUILD_ID.to_owned())),
             Err(Refusal::WrongCapability)
         );
-        assert_eq!(check(&hello(2, BUILD_ID)), Err(Refusal::WrongCapability));
-        assert_eq!(check(&hello(1, "0.0.0+other")), Err(Refusal::BuildMismatch));
+        assert_eq!(check(hello(2, BUILD_ID)), Err(Refusal::WrongCapability));
+        assert_eq!(check(hello(1, "0.0.0+other")), Err(Refusal::BuildMismatch));
         assert_eq!(
-            check(&hello(2, "0.0.0+other")),
+            check(hello(2, "0.0.0+other")),
             Err(Refusal::WrongCapability),
             "a client without the capability doesn't learn it has the wrong build",
         );
@@ -1056,7 +1068,7 @@ mod tests {
             build_id: BUILD_ID.to_owned(),
             capability: Secret::new(one_byte_off),
         };
-        assert_eq!(check(&near), Err(Refusal::WrongCapability));
+        assert_eq!(check(near), Err(Refusal::WrongCapability));
     }
 
     #[test]

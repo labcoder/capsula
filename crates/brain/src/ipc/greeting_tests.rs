@@ -2,6 +2,7 @@
 //! with what the flow reserved, wrote, acquired and bound kept for the assertions.
 
 use std::io;
+use std::time::Duration;
 
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
@@ -14,7 +15,7 @@ use tokio::io::AsyncRead;
 use tokio::time::{Instant, sleep_until};
 
 use super::{
-    Legs, PeerAuth, Refusal, SessionError, Tap, check_hello, greet, read_sized, startup_hello,
+    HANDSHAKE_TIMEOUT, Legs, PeerAuth, SessionError, Tap, greet, read_sized, startup_hello,
 };
 use crate::runtime::PairStart;
 
@@ -24,10 +25,11 @@ pub(super) struct Memory<C, D> {
     control: C,
     data: D,
     pub(super) open_at: Option<Instant>,
+    write_at: Option<Instant>,
     /// Fails every control write, as a pipe the shell already closed.
     pub(super) refuse_writes: bool,
     pub(super) written: Vec<u8>,
-    pub(super) opened: bool,
+    opened: Option<Instant>,
     pub(super) bound: bool,
 }
 
@@ -39,51 +41,50 @@ impl<C, D> Memory<C, D> {
             control,
             data,
             open_at: None,
+            write_at: None,
             refuse_writes: false,
             written: Vec::new(),
-            opened: false,
+            opened: None,
             bound: false,
         }
     }
 }
 
 impl<C: AsyncRead + Unpin, D: AsyncRead + Unpin> Legs for Memory<C, D> {
-    type Greeting = Hello;
     type Peer = ();
     type Data = D;
 
     async fn control_greeting(
         &mut self,
         tap: &mut Tap,
-    ) -> Result<Option<(Hello, AudioSession, PairStart)>, SessionError> {
+    ) -> Result<Option<(PeerAuth<'_>, AudioSession, PairStart)>, SessionError> {
         let Some((first, len)) =
             read_sized::<ControlToBrain>(&mut self.control, Pipe::Control).await?
         else {
             return Ok(None);
         };
         tap.record(Pipe::Control, Direction::ToBrain, &first, len);
-        startup_hello(first, None).map(Some)
-    }
-
-    fn authorize(&self, hello: Hello) -> Result<(), Refusal> {
-        check_hello(PeerAuth::Capability {
-            hello: &hello,
+        let (hello, audio, start) = startup_hello(first, None)?;
+        let auth = PeerAuth::Capability {
+            hello,
             expected: &self.capability,
-        })
+        };
+        Ok(Some((auth, audio, start)))
     }
 
-    fn write_control(&mut self, frame: &[u8]) -> impl Future<Output = io::Result<()>> {
-        let written = if self.refuse_writes {
-            Err(io::ErrorKind::BrokenPipe.into())
-        } else {
-            self.written.extend_from_slice(frame);
-            Ok(())
-        };
-        std::future::ready(written)
+    async fn write_control(&mut self, frame: &[u8]) -> io::Result<()> {
+        if self.refuse_writes {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        if let Some(at) = self.write_at {
+            sleep_until(at).await;
+        }
+        self.written.extend_from_slice(frame);
+        Ok(())
     }
 
     async fn open_data(&mut self) -> Result<(), SessionError> {
-        self.opened = true;
+        self.opened = Some(Instant::now());
         if let Some(at) = self.open_at {
             sleep_until(at).await;
         }
@@ -93,17 +94,22 @@ impl<C: AsyncRead + Unpin, D: AsyncRead + Unpin> Legs for Memory<C, D> {
     async fn data_greeting(
         &mut self,
         tap: &mut Tap,
-    ) -> Result<Option<(Hello, Option<IssueSession>)>, SessionError> {
+    ) -> Result<Option<(PeerAuth<'_>, Option<IssueSession>)>, SessionError> {
         let Some((first, len)) = read_sized::<DataToBrain>(&mut self.data, Pipe::Data).await?
         else {
             return Ok(None);
         };
         tap.record(Pipe::Data, Direction::ToBrain, &first, len);
-        match first {
-            DataToBrain::Hello(hello) => Ok(Some((hello, None))),
-            DataToBrain::QueuedHello(hello, session) => Ok(Some((hello, Some(session)))),
-            _ => Err(SessionError::ClosedEarly),
-        }
+        let (hello, session) = match first {
+            DataToBrain::Hello(hello) => (hello, None),
+            DataToBrain::QueuedHello(hello, session) => (hello, Some(session)),
+            _ => return Err(SessionError::ClosedEarly),
+        };
+        let auth = PeerAuth::Capability {
+            hello,
+            expected: &self.capability,
+        };
+        Ok(Some((auth, session)))
     }
 
     fn bind(&mut self) -> Result<(), SessionError> {
@@ -195,7 +201,7 @@ async fn a_refused_control_greeting_reserves_nothing_and_never_opens_data() {
         assert!(want(&error), "case {index}: {error:?}");
         assert_eq!(reserved, [], "case {index}");
         assert_eq!(legs.written, [0_u8; 0], "case {index}");
-        assert!(!legs.opened && !legs.bound, "case {index}");
+        assert!(legs.opened.is_none() && !legs.bound, "case {index}");
     }
 }
 
@@ -221,7 +227,7 @@ async fn a_build_mismatch_goes_only_to_the_capability_holder_and_reserves_nothin
         };
         assert_eq!(legs.written, frame::encode(&reply, Pipe::Control).unwrap());
         assert_eq!(reserved, []);
-        assert!(!legs.opened && !legs.bound);
+        assert!(legs.opened.is_none() && !legs.bound);
     }
 }
 
@@ -246,8 +252,25 @@ async fn a_welcome_that_fails_to_send_never_opens_data() {
             "{mode:?}"
         );
         assert_eq!(reserved, [mode], "the session is reserved before Welcome");
-        assert!(!legs.opened && !legs.bound, "{mode:?}");
+        assert!(legs.opened.is_none() && !legs.bound, "{mode:?}");
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pending_welcome_does_not_open_data_or_spend_its_budget() {
+    let control = control_frame(&ControlToBrain::QueuedHello(hello(1, BUILD_ID)));
+    let data = ready_data(AudioSession::QueuedRequired);
+    let mut legs = Memory::new(control.as_slice(), data.as_slice());
+    let start = Instant::now();
+    let welcome_written = start + HANDSHAKE_TIMEOUT + Duration::from_secs(1);
+    legs.write_at = Some(welcome_written);
+    legs.open_at = Some(welcome_written + Duration::from_secs(1));
+    let admitted = greet(&mut legs, &mut Tap::default(), |_| SESSION)
+        .await
+        .unwrap()
+        .expect("the data leg has a fresh budget after Welcome");
+    assert!(legs.opened.expect("data opened") >= welcome_written);
+    assert_eq!(admitted.session, SESSION);
 }
 
 #[tokio::test]
@@ -279,7 +302,7 @@ async fn both_modes_welcome_the_exact_reserved_session_and_admit_its_echo() {
         assert_eq!(admitted.start, PairStart::Ordinary);
         assert_eq!(admitted.session, SESSION);
         assert_eq!(admitted.text_metrics, None);
-        assert!(legs.opened && legs.bound, "{mode:?}");
+        assert!(legs.opened.is_some() && legs.bound, "{mode:?}");
     }
 }
 
@@ -314,7 +337,7 @@ async fn a_data_greeting_from_another_welcome_or_mode_is_refused_before_binding(
             "case {index}"
         );
         assert_eq!(legs.written, welcome_frame(SESSION), "case {index}");
-        assert!(legs.opened && !legs.bound, "case {index}");
+        assert!(legs.opened.is_some() && !legs.bound, "case {index}");
     }
 }
 
@@ -324,12 +347,17 @@ async fn a_silent_control_leg_times_out_before_anything_is_reserved_or_opened() 
     let data = ready_data(AudioSession::Legacy);
     let mut legs = Memory::new(control, data.as_slice());
     let mut reserved = Vec::new();
+    let start = Instant::now();
     let result = greet(&mut legs, &mut Tap::default(), |audio| {
         reserved.push(audio);
         SESSION
     })
     .await;
     assert!(matches!(result, Err(SessionError::Timeout)));
+    assert!(
+        (HANDSHAKE_TIMEOUT..=HANDSHAKE_TIMEOUT + Duration::from_millis(2))
+            .contains(&start.elapsed())
+    );
     assert_eq!(reserved, []);
-    assert!(legs.written.is_empty() && !legs.opened && !legs.bound);
+    assert!(legs.written.is_empty() && legs.opened.is_none() && !legs.bound);
 }
