@@ -1,12 +1,16 @@
 # Settings
 
 The brain owns the user's settings and keeps them in `config.toml`, in the `Kumochi` folder
-under `%APPDATA%` (`Kumochi Dev` for debug builds, so a dev build never touches an install).
+in the roaming application data root (`Kumochi Dev` for debug builds, so a dev build never
+touches an install).
 The shell shows them and asks for changes; it never reads the file.
 
-On Windows, `platform::config_dir` reads `APPDATA` and requires an absolute path, just as
-the local data folder requires an absolute `LOCALAPPDATA`. Missing, empty or relative roots
-never fall back to the working directory.
+On Windows, `platform::config_dir` asks the shared resolver for the roaming root. A release
+build reads `APPDATA` and requires an absolute path, just as the local data folder requires an
+absolute `LOCALAPPDATA`; missing, empty or relative roots never fall back to the working
+directory, and only mean settings can't be saved. Gate and debug builds take
+`KUMOCHI_GATE_APPDATA` with its local half, or the Known Folder, and admit `config.toml` before
+the brain reads it (see [architecture](architecture.md)).
 
 On macOS both config and data use `<Application Support>/<product>`, where the shared lookup
 asks Darwin for the current user's Application Support folder. It never falls back to `HOME`,
@@ -475,8 +479,9 @@ no shell is connected, and Quit and close write what's left before they end.
   until the user sets it.
 - **Unreadable or not TOML:** the brain runs on the defaults and refuses every change, so the file
   is never overwritten. Repair or delete it, then restart Kumochi. `onboarded` reads `true`
-  here, and with no absolute `%APPDATA%`, so a file Kumochi can't save never asks for onboarding.
-- **No absolute `%APPDATA%`:** the defaults, and changes are refused.
+  here, and with no roaming root, so a file Kumochi can't save never asks for onboarding.
+- **No roaming root** (a release build's `APPDATA` missing or relative): the defaults, and changes
+  are refused.
 
 ## Tuning
 

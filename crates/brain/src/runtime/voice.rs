@@ -191,7 +191,7 @@ pub(super) fn delete(models: &Path, part: VoicePart) -> Folder {
         Ok(()) => Folder::Missing,
         Err(error) => {
             tracing::warn!(?part, ?error, "a removed voice part wasn't deleted");
-            Folder::Refused(if Untrusted::is_unsupported(error) {
+            Folder::Refused(if platform::is_unsupported(error) {
                 ErrorKey::UnsupportedPlatform
             } else {
                 ErrorKey::VoiceStorage
@@ -209,7 +209,7 @@ fn whole(models: &Path, part: VoicePart) -> Result<bool, ErrorKey> {
         Ok(held) => held,
         Err(Untrusted::Missing) => return Ok(false),
         Err(Untrusted::Reparse | Untrusted::Unsafe) => return Err(ErrorKey::VoiceModelPath),
-        Err(error) if Untrusted::is_unsupported(error) => {
+        Err(error) if platform::is_unsupported(error) => {
             return Err(ErrorKey::UnsupportedPlatform);
         }
         Err(_) => return Err(ErrorKey::VoiceStorage),
@@ -474,7 +474,7 @@ impl Brain {
             .and_then(|()| platform::hold_chain(&voice.models.join(part.dir())))
         {
             Err(Untrusted::Missing) => Folder::Missing,
-            Err(error) if Untrusted::is_unsupported(error) => {
+            Err(error) if platform::is_unsupported(error) => {
                 Folder::Refused(ErrorKey::UnsupportedPlatform)
             }
             Ok(_) | Err(_) => Folder::Present,

@@ -1,7 +1,8 @@
 # The store
 
 The brain keeps threads, their events and runs in one SQLite file,
-`%LOCALAPPDATA%\<product>\kumochi.db`, through `rusqlite` with SQLite and FTS5 built in. Only the
+`<product>\kumochi.db` in the local application data root (`LOCALAPPDATA` in a release build, the
+admitted override or the Known Folder in Gate and debug builds; see [architecture](architecture.md)), through `rusqlite` with SQLite and FTS5 built in. Only the
 brain opens it. The code is `crates/brain/src/store/`.
 
 On macOS the default path is `<Application Support>/<product>/kumochi.db`, beside the

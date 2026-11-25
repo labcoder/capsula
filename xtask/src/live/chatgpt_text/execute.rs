@@ -8,7 +8,7 @@ use std::io::Read as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use super::{PLAN, plan};
+use super::{PAIR, PLAN, profile};
 use crate::slice2::client::{Client, Frame, Seen};
 use anyhow::{Result, anyhow, bail, ensure};
 use kumochi_protocol::constants::{
@@ -28,9 +28,11 @@ const CLAIM: &str = "chatgpt-text.started";
 pub(in crate::live) fn run(budget: u32) -> Result<()> {
     let exe = std::env::current_exe().map_err(|_| anyhow!("no copied executable"))?;
     let folder = run_folder(&exe).ok_or_else(|| anyhow!("run the prepared Dev copy"))?;
+    let profile = profile()?;
     claim_checked(
         folder,
-        || plan(budget),
+        profile.pair,
+        || profile.plan(budget),
         || {
             let mut outcomes = Outcomes::default();
             let result = observe(folder, budget, &mut outcomes);
@@ -43,13 +45,22 @@ pub(in crate::live) fn run(budget: u32) -> Result<()> {
     )
 }
 
+/// Runs `claimed` once the held profile's identities `pair` match the prepared ones, checked
+/// before `inspect` reads anything in it, and the plan `inspect` makes matches the prepared one.
 fn claim_checked<T>(
     folder: &Path,
+    pair: [u8; 24],
     inspect: impl FnOnce() -> Result<String>,
     claimed: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     let claim = folder.join(CLAIM);
     ensure!(!claim.exists(), "run folder was already claimed");
+    let prepared =
+        std::fs::read(folder.join(PAIR)).map_err(|_| anyhow!("missing prepared pair"))?;
+    ensure!(
+        prepared == pair,
+        "the profile folders differ from the prepared ones"
+    );
     let plan = std::fs::File::open(folder.join(PLAN))
         .and_then(|file| std::io::read_to_string(file.take(256)))
         .map_err(|_| anyhow!("missing prepared plan"))?;
