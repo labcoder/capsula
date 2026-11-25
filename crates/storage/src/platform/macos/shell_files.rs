@@ -99,6 +99,10 @@ pub struct Product {
     _held: Directories,
 }
 
+/// A folder in a held anchor, admitted like a product folder and held, with the anchor kept.
+#[must_use = "dropping the folder releases its descriptor"]
+pub struct HeldFolder(Directory);
+
 /// Why the setup guard wasn't taken. It carries no path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GuardError {
@@ -150,6 +154,22 @@ impl fmt::Debug for Support {
 impl fmt::Debug for Product {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Product").finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for HeldFolder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HeldFolder").finish_non_exhaustive()
+    }
+}
+
+impl HeldFolder {
+    /// The held folder's metadata, read from its descriptor rather than a path.
+    ///
+    /// # Errors
+    /// The descriptor's `fstat` failure.
+    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        self.0.file.metadata()
     }
 }
 
@@ -319,14 +339,38 @@ impl Support {
         Ok(ProductFolder::Held(Product { _held: directories }))
     }
 
-    /// Reads this edition's new-format root slot in this anchor, creating nothing, and releases
-    /// the anchor. Only a missing slot is absent: before the allocator writes its record, a folder
+    /// Looks up the folder `name` in this anchor like [`Support::product_folder`], keeping the
+    /// anchor: the admitted folder, held, or `None` only for `ENOENT` from opening that exact name
+    /// in the held folder. The open is relative to the held anchor, so a rename of its path can't
+    /// redirect it, and an anchor moved from its name fails the re-inspection.
+    ///
+    /// # Errors
+    /// As [`Support::product_folder`].
+    pub fn child(&self, name: &str) -> Result<Option<HeldFolder>, AcquisitionError> {
+        let name = basename(name)?;
+        self.0.check()?;
+        let parent = &self.0.held.last().ok_or(Untrusted::Io)?.file;
+        let file = match open_at(parent.as_raw_fd(), &name, DIRECTORY_FLAGS, 0) {
+            Ok(file) => file,
+            Err(AcquisitionError::Open(io::ErrorKind::NotFound)) => {
+                self.0.check()?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let child = self.0.private(file, name)?;
+        self.0.check()?;
+        Ok(Some(HeldFolder(child)))
+    }
+
+    /// Reads this edition's new-format root slot in this anchor, creating nothing and keeping the
+    /// anchor. Only a missing slot is absent: before the allocator writes its record, a folder
     /// there is a footprint of unknown origin, and any refusal or failure proves nothing either.
     #[must_use]
-    pub fn profile_root(self) -> Root {
-        match self.product_folder(ProductIdentity::ACTIVE.profile_root) {
-            Ok(ProductFolder::Missing(_)) => Root::Absent,
-            Ok(ProductFolder::Held(_)) | Err(_) => Root::Unverified,
+    pub fn profile_root(&self) -> Root {
+        match self.child(ProductIdentity::ACTIVE.profile_root) {
+            Ok(None) => Root::Absent,
+            Ok(Some(_)) | Err(_) => Root::Unverified,
         }
     }
 }
@@ -544,6 +588,14 @@ impl Directories {
     /// Admits `file`, just opened as `name` in the last held folder, as a private folder on the
     /// anchor's volume and holds it.
     fn push_private(&mut self, file: File, name: CString) -> Result<(), AcquisitionError> {
+        let child = self.private(file, name)?;
+        self.held.push(child);
+        Ok(())
+    }
+
+    /// Admits `file`, just opened as `name` in the last held folder, as a private folder on the
+    /// anchor's volume.
+    fn private(&self, file: File, name: CString) -> Result<Directory, AcquisitionError> {
         let child = directory(file, name, self.user)?;
         private_directory(&child.identity, self.user)?;
         if child.volume != self.held[self.private_start - 1].volume {
@@ -551,8 +603,7 @@ impl Directories {
         }
         let parent = &self.held.last().ok_or(Untrusted::Io)?.file;
         named(parent, &child.name, &child.identity)?;
-        self.held.push(child);
-        Ok(())
+        Ok(child)
     }
 
     fn check(&self) -> Result<(), AcquisitionError> {
