@@ -368,8 +368,10 @@ frame bounds, which are the frame's origin and size. Capture creates a `Graphics
 the window, checks the same identity again, and requires the item's size to equal the frame
 bounds. The window closing, being minimised, cloaked or capture-protected, or any change to its
 identity, frame or DPI before the pixels are read, refuses with `WindowChanged`; so does an item
-that can't be created for a window that has since changed. Every failed capture zeroes and frees
-the frame before it returns (`RawFrame::fill`).
+that can't be created for a window that has since changed. The worker always attempts to remove the
+window's close handler after a capture attempt. Failure to remove it retires the worker and doesn't
+replace an earlier terminal capture failure. Every failed capture zeroes and frees the frame
+before it returns (`RawFrame::fill`).
 
 `platform::windows::window::tests::native_window_probe` is an ignored native check over sentinel
 windows owned by a second test process (the worker's own windows count as Kumochi's). It covers
