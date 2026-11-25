@@ -442,6 +442,17 @@ out-of-range value selects the complete built-in measure. Missing, malformed, re
 late frames are protocol failures. The Hello and mismatch bytes are unchanged; exact-build
 checking happens before either peer uses the new frame. No font name or text is sent.
 
+### Who owns the greeting
+
+The brain's transport acquires each leg and reads its greeting. The shared greeting flow
+checks authorization and build, reserves the issue session for the control greeting's
+mode, and sends Welcome before it asks for the data leg. It checks the data greeting and
+any queued echo before the connection can be admitted.
+
+On Windows, the pipe adapter still checks the client image before reading each Hello.
+The data accept, Hello, pairing and metrics keep their existing order and deadline. No
+transport on macOS is wired through this flow yet.
+
 ## After the handshake
 
 Each pipe has its own reader and writer, all polled together in one task with the core loop

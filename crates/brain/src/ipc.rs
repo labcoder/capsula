@@ -269,57 +269,25 @@ impl Pipes {
         tap: &mut Tap,
     ) -> Result<Session, SessionError> {
         check_client(&self.control, &identity.shell_image)?;
-        let first = timeout(
-            HANDSHAKE_TIMEOUT,
-            read_sized::<ControlToBrain>(&mut self.control, Pipe::Control),
-        )
-        .await
-        .map_err(|_| SessionError::Timeout)??;
-        let Some((first, len)) = first else {
-            return Err(SessionError::ClosedEarly);
+        let mut legs = PipeLegs {
+            pipes: self,
+            identity,
         };
-        tap.record(Pipe::Control, Direction::ToBrain, &first, len);
-        let (hello, audio, start) = startup_hello(first, self.last_queued)?;
-        match check_hello(PeerAuth::Capability {
-            hello: &hello,
-            expected: &identity.capability,
-        }) {
-            Err(Refusal::WrongCapability) => return Err(SessionError::WrongCapability),
-            Err(Refusal::BuildMismatch) => {
-                tracing::warn!("build mismatch");
-                let reply = ControlToShell::BuildMismatch {
-                    brain_build: BUILD_ID.to_owned(),
-                };
-                send(&mut self.control, &reply, tap).await?;
-                return Ok(Session::BuildMismatch);
-            }
-            Ok(()) => {}
-        }
-        let session = match audio {
+        let greeted = greet(&mut legs, tap, |audio| match audio {
             AudioSession::Legacy => brain.prepare_issue_session(identity.incarnation),
             AudioSession::QueuedRequired => brain.reserve_issue_session(identity.incarnation),
-        };
-        let welcome = ControlToShell::Welcome {
-            incarnation: identity.incarnation,
-            issue_epoch: session.epoch,
-        };
-        send(&mut self.control, &welcome, tap).await?;
-
-        let (process, text_metrics) = read_startup_data(
-            identity,
-            (audio == AudioSession::QueuedRequired).then_some(session),
-            tap,
-            async {
-                self.data.connect().await?;
-                check_client(&self.data, &identity.shell_image)?;
-                Ok(&mut self.data)
-            },
-            |data| {
-                platform::shell_connection(&self.control, data, &identity.shell_image)
-                    .map_err(SessionError::from)
-            },
-        )
+        })
         .await?;
+        let Some(Admitted {
+            peer: process,
+            audio,
+            start,
+            session,
+            text_metrics,
+        }) = greeted
+        else {
+            return Ok(Session::BuildMismatch);
+        };
         if audio == AudioSession::QueuedRequired {
             brain.install_issue_session(session);
         }
@@ -351,40 +319,196 @@ impl Pipes {
     }
 }
 
-async fn read_startup_data<R: AsyncRead + Unpin, P>(
-    identity: &Identity,
-    expected: Option<IssueSession>,
+/// One transport's part of the greeting: acquiring, reading, writing and binding its two legs.
+/// Negotiation and authorization stay in [`greet`], so every transport runs the same checks in the
+/// same order. A greeting comes from the transport's own reader; shared code never assembles one.
+trait Legs {
+    /// A greeting as the transport's reader produced it: a plain `Hello` on the pipes.
+    type Greeting;
+    /// The one process both legs were bound to.
+    type Peer;
+    /// The data leg, read after its greeting.
+    type Data: AsyncRead + Unpin;
+
+    /// Reads the control greeting, recording it on the tap, with the mode its variant selects.
+    /// `None` means the client closed first.
+    async fn control_greeting(
+        &mut self,
+        tap: &mut Tap,
+    ) -> Result<Option<(Self::Greeting, AudioSession, PairStart)>, SessionError>;
+    /// The one check of a greeting, by the method this transport selects.
+    fn authorize(&self, greeting: Self::Greeting) -> Result<(), Refusal>;
+    /// Writes one whole control frame.
+    async fn write_control(&mut self, frame: &[u8]) -> io::Result<()>;
+    /// Acquires the data leg and checks who opened it.
+    async fn open_data(&mut self) -> Result<(), SessionError>;
+    /// Reads the data greeting, recording it on the tap, with its Queued echo.
+    /// `None` means the client closed first.
+    async fn data_greeting(
+        &mut self,
+        tap: &mut Tap,
+    ) -> Result<Option<(Self::Greeting, Option<IssueSession>)>, SessionError>;
+    /// Binds both legs to one process.
+    fn bind(&mut self) -> Result<Self::Peer, SessionError>;
+    fn data(&mut self) -> &mut Self::Data;
+}
+
+/// The pipes: the data instance is accepted only after Welcome, and the OS names each client's
+/// executable and process.
+struct PipeLegs<'a> {
+    pipes: &'a mut Pipes,
+    identity: &'a Identity,
+}
+
+impl Legs for PipeLegs<'_> {
+    type Greeting = Hello;
+    type Peer = platform::ShellProcess;
+    type Data = PipeServer;
+
+    async fn control_greeting(
+        &mut self,
+        tap: &mut Tap,
+    ) -> Result<Option<(Hello, AudioSession, PairStart)>, SessionError> {
+        let Some((first, len)) =
+            read_sized::<ControlToBrain>(&mut self.pipes.control, Pipe::Control).await?
+        else {
+            return Ok(None);
+        };
+        tap.record(Pipe::Control, Direction::ToBrain, &first, len);
+        startup_hello(first, self.pipes.last_queued).map(Some)
+    }
+
+    fn authorize(&self, hello: Hello) -> Result<(), Refusal> {
+        check_hello(PeerAuth::Capability {
+            hello: &hello,
+            expected: &self.identity.capability,
+        })
+    }
+
+    async fn write_control(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.pipes.control.write_all(frame).await
+    }
+
+    async fn open_data(&mut self) -> Result<(), SessionError> {
+        self.pipes.data.connect().await?;
+        check_client(&self.pipes.data, &self.identity.shell_image)
+    }
+
+    async fn data_greeting(
+        &mut self,
+        tap: &mut Tap,
+    ) -> Result<Option<(Hello, Option<IssueSession>)>, SessionError> {
+        let Some((first, len)) =
+            read_sized::<DataToBrain>(&mut self.pipes.data, Pipe::Data).await?
+        else {
+            return Ok(None);
+        };
+        tap.record(Pipe::Data, Direction::ToBrain, &first, len);
+        match first {
+            DataToBrain::Hello(hello) => Ok(Some((hello, None))),
+            DataToBrain::QueuedHello(hello, session) => Ok(Some((hello, Some(session)))),
+            _ => Err(SessionError::ClosedEarly),
+        }
+    }
+
+    fn bind(&mut self) -> Result<platform::ShellProcess, SessionError> {
+        platform::shell_connection(
+            &self.pipes.control,
+            &self.pipes.data,
+            &self.identity.shell_image,
+        )
+        .map_err(SessionError::from)
+    }
+
+    fn data(&mut self) -> &mut PipeServer {
+        &mut self.pipes.data
+    }
+}
+
+/// A greeting both legs passed, ready to serve.
+struct Admitted<P> {
+    peer: P,
+    audio: AudioSession,
+    start: PairStart,
+    /// The reserved session Welcome carried.
+    session: IssueSession,
+    text_metrics: Option<TextMetricsV1>,
+}
+
+/// Greets a shell over `legs`: the control greeting is authorized before a build mismatch is
+/// disclosed or a session reserved, and nothing on the data leg is touched before Welcome.
+/// `reserve` picks the issue session for the selected mode. `None`: a shell from another build
+/// was told so.
+async fn greet<L: Legs>(
+    legs: &mut L,
     tap: &mut Tap,
-    connect: impl Future<Output = Result<R, SessionError>>,
-    check_connection: impl FnOnce(&R) -> Result<P, SessionError>,
-) -> Result<(P, Option<TextMetricsV1>), SessionError> {
-    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    let mut data = timeout_at(deadline, connect)
+    reserve: impl FnOnce(AudioSession) -> IssueSession,
+) -> Result<Option<Admitted<L::Peer>>, SessionError> {
+    let first = timeout(HANDSHAKE_TIMEOUT, legs.control_greeting(tap))
         .await
         .map_err(|_| SessionError::Timeout)??;
-    let first = timeout_at(deadline, read_sized::<DataToBrain>(&mut data, Pipe::Data))
-        .await
-        .map_err(|_| SessionError::Timeout)??;
-    let Some((first, len)) = first else {
+    let Some((greeting, audio, start)) = first else {
         return Err(SessionError::ClosedEarly);
     };
-    tap.record(Pipe::Data, Direction::ToBrain, &first, len);
-    let (hello, paired) = match first {
-        DataToBrain::Hello(hello) => (hello, None),
-        DataToBrain::QueuedHello(hello, session) => (hello, Some(session)),
-        _ => return Err(SessionError::ClosedEarly),
+    match legs.authorize(greeting) {
+        Err(Refusal::WrongCapability) => return Err(SessionError::WrongCapability),
+        Err(Refusal::BuildMismatch) => {
+            tracing::warn!("build mismatch");
+            let reply = ControlToShell::BuildMismatch {
+                brain_build: BUILD_ID.to_owned(),
+            };
+            send(legs, &reply, tap).await?;
+            return Ok(None);
+        }
+        Ok(()) => {}
+    }
+    let session = reserve(audio);
+    let welcome = ControlToShell::Welcome {
+        incarnation: session.incarnation,
+        issue_epoch: session.epoch,
     };
-    check_hello(PeerAuth::Capability {
-        hello: &hello,
-        expected: &identity.capability,
-    })
-    .map_err(|_| SessionError::WrongCapability)?;
+    send(legs, &welcome, tap).await?;
+
+    let (peer, text_metrics) = read_startup_data(
+        legs,
+        (audio == AudioSession::QueuedRequired).then_some(session),
+        tap,
+    )
+    .await?;
+    Ok(Some(Admitted {
+        peer,
+        audio,
+        start,
+        session,
+        text_metrics,
+    }))
+}
+
+/// The data leg after Welcome: acquiring it, its greeting and the drawing-font frame share one
+/// deadline, and the greeting is authorized before its echo is compared or the legs are bound.
+async fn read_startup_data<L: Legs>(
+    legs: &mut L,
+    expected: Option<IssueSession>,
+    tap: &mut Tap,
+) -> Result<(L::Peer, Option<TextMetricsV1>), SessionError> {
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    timeout_at(deadline, legs.open_data())
+        .await
+        .map_err(|_| SessionError::Timeout)??;
+    let first = timeout_at(deadline, legs.data_greeting(tap))
+        .await
+        .map_err(|_| SessionError::Timeout)??;
+    let Some((greeting, paired)) = first else {
+        return Err(SessionError::ClosedEarly);
+    };
+    legs.authorize(greeting)
+        .map_err(|_| SessionError::WrongCapability)?;
     if paired != expected {
         return Err(SessionError::Protocol("data hello does not match control"));
     }
-    let process = check_connection(&data)?;
-    let text_metrics = read_text_metrics(&mut data, deadline).await?;
-    Ok((process, text_metrics))
+    let peer = legs.bind()?;
+    let text_metrics = read_text_metrics(legs.data(), deadline).await?;
+    Ok((peer, text_metrics))
 }
 
 /// Resolves when the relaunched shell has ended, or when the relaunch dropped its sender
@@ -421,7 +545,7 @@ fn check_client_image(image: &Path, shell_image: &Path) -> Result<(), SessionErr
 }
 
 async fn send(
-    pipe: &mut PipeServer,
+    legs: &mut impl Legs,
     message: &ControlToShell,
     tap: &mut Tap,
 ) -> Result<(), SessionError> {
@@ -432,7 +556,7 @@ async fn send(
         message,
         frame.len() - HEADER_LEN,
     );
-    pipe.write_all(&frame).await?;
+    legs.write_control(&frame).await?;
     Ok(())
 }
 
@@ -512,6 +636,10 @@ async fn read_capped<T: DeserializeOwned>(
     pipe.read_exact(&mut payload).await.map_err(truncated)?;
     frame::decode(&payload).map(|message| Some((message, len)))
 }
+
+#[cfg(test)]
+#[path = "ipc/greeting_tests.rs"]
+mod greeting_tests;
 
 #[cfg(test)]
 #[path = "ipc/text_metrics_tests.rs"]
@@ -962,17 +1090,12 @@ mod tests {
         for greeting in [hello(2, BUILD_ID), hello(1, "0.0.0+other")] {
             let bytes =
                 frame::encode(&DataToBrain::QueuedHello(greeting, stale), Pipe::Data).unwrap();
-            let result = super::read_startup_data(
-                &identity,
-                Some(expected),
-                &mut super::Tap::default(),
-                async { Ok(bytes.as_slice()) },
-                |_| -> Result<(), super::SessionError> {
-                    panic!("a refused greeting must not bind a peer")
-                },
-            )
-            .await;
+            let mut legs = super::greeting_tests::Memory::new([].as_slice(), bytes.as_slice());
+            let result =
+                super::read_startup_data(&mut legs, Some(expected), &mut super::Tap::default())
+                    .await;
             assert!(matches!(result, Err(super::SessionError::WrongCapability)));
+            assert!(!legs.bound, "a refused greeting must not bind a peer");
         }
     }
 
