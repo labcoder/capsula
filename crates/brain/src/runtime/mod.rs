@@ -249,6 +249,7 @@ pub(crate) enum Seen {
     /// The brain handled a control input and applied its effects.
     ControlApplied,
     FirstPcmExpired,
+    HoldPcmBuffered,
     /// A page reply landed while the data queue was full and waits for room.
     PageHeld,
     /// Another pipe ended first, and the control reader's grace began.
