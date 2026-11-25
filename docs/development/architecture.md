@@ -102,6 +102,14 @@ once for the whole command, so the `kumochi.exe` it writes carries the core's te
 That has to fail safe, so test support only ever takes something away: a device becomes a
 stub that reports itself unavailable, never the other way round.
 
+The shared, read-only `protocol::profile` classifier describes a local installation, not a
+Kumochi account. First open can be a background setup candidate only with positive evidence
+for a disjoint protected root and credential namespace, and definite absence of all known
+profile footprints. An intact installation reopens; an identifiable pending setup may resume
+only at its verified step. Uncertain or conflicting evidence leaves the data untouched.
+Windows and macOS use the same policy. No native observer or executable calls it yet, and its
+decisions do not authorize writes, reconnect a provider, or identify a person.
+
 Tests that need files use the shared scratch guard in `tests/support/scratch.rs`. It creates
 a new child of Temp (or of an existing trusted root for fixtures that need one), skips
 occupied names, and removes its recorded child path on return or unwind. It does not
