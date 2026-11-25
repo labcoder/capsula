@@ -517,7 +517,7 @@ fn connection_failure_survives_reopen_on_its_user_event_only() {
     assert_eq!(rows[4].run, Some(RunId(1)));
     assert_eq!(rows[4].kind, PageEventKind::User);
     assert_eq!(
-        task_rows(&store, Some("connection history"), 151)[0].task,
+        task_rows(&store, Some("typed"), 151)[0].task,
         Some(TaskFact {
             latest_run: Some(TaskRun {
                 id: RunId(5),
