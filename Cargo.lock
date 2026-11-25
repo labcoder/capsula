@@ -2894,8 +2894,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-macos"
 version = "0.3.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e07a5e5c84f0b2160c194a1c852cc89d1942db66867938ceabcd7f763cb4386"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -4074,10 +4072,12 @@ dependencies = [
  "kumochi-protocol",
  "kumochi-scene",
  "kumochi-shell-core",
+ "kumochi-storage",
  "lyon",
  "raw-window-handle",
  "smallvec",
  "thiserror 2.0.21",
+ "time",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -4097,6 +4097,7 @@ dependencies = [
  "kumochi-brain",
  "kumochi-protocol",
  "kumochi-scene",
+ "kumochi-storage",
  "thiserror 2.0.21",
  "tracing",
  "tracing-appender",
@@ -4104,6 +4105,14 @@ dependencies = [
  "unic-langid",
  "windows 0.62.2",
  "zeroize",
+]
+
+[[package]]
+name = "kumochi-storage"
+version = "0.1.2"
+dependencies = [
+ "libc",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
