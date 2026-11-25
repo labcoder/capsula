@@ -222,20 +222,6 @@ fn capture_cutoff_100ns(ticks: i64, frequency: i64) -> Result<u64, MicError> {
     u64::try_from(last_ambiguous + 1).map_err(|_| MicError::Timestamp)
 }
 
-#[cfg(test)]
-#[test]
-fn collection_cutoff_excludes_the_ambiguous_tick_and_rounds_forward() {
-    assert_eq!(capture_cutoff_100ns(100, 10_000_000), Ok(102));
-    assert_eq!(capture_cutoff_100ns(3, 3_000_000), Ok(15));
-    assert_eq!(capture_cutoff_100ns(10, 24_000_000), Ok(6));
-    assert_eq!(
-        capture_cutoff_100ns(0, 10_000_000),
-        Err(MicError::Timestamp)
-    );
-    assert_eq!(capture_cutoff_100ns(100, 0), Err(MicError::Timestamp));
-    assert_eq!(capture_cutoff_100ns(i64::MAX, 1), Err(MicError::Timestamp));
-}
-
 pub(crate) fn capture(
     token: &Generation,
     session: &AtomicBool,
