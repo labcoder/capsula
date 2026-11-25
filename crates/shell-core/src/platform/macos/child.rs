@@ -9,25 +9,21 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use kumochi_protocol::constants::PARENT_BOUND;
 
 use super::pair::{self, Action, ChildEnds, ShellEnds};
 use crate::platform::child::{ChildOwner, Exit, Observation, Os, Refusal, Report, SpawnWord};
 
-/// How long `start_brain` waits for the owner's spawn report. The spawn is one system call, so
-/// this only bounds a stuck kernel.
-const SPAWN_REPORT: Duration = Duration::from_secs(5);
-
 /// Starts a parent-bound brain as the shell's child, with the control leg on its descriptor 3 and
 /// the data leg on 4, and hands out the shell's ends only once the child exists. Retirement
-/// waits the link's Quit timeout before the kill, and again after. Blocks until the spawn is
-/// reported, so call it off the UI thread.
+/// waits the link's Quit timeout before the kill, and again after. Blocks until the owner reports
+/// its one spawn attempt, which follows a single `posix_spawn` call; there's no deadline,
+/// because a timeout couldn't tell a refused spawn from a late one. Call it off the UI thread.
 ///
 /// # Errors
 /// The owner's refusal, or `Spawn` when the sockets, the path or the owner thread can't be made
-/// or no report arrives in time. All four ends are closed by then.
+/// or the thread died before reporting. All four ends are closed by then.
 pub(crate) fn start_brain(
     brain: &Path,
     word: Arc<SpawnWord>,
@@ -35,11 +31,10 @@ pub(crate) fn start_brain(
     let (shell, child) = pair::pairs().map_err(Refusal::Spawn)?;
     let os = Darwin::new(brain, &[OsStr::new(PARENT_BOUND)], child).map_err(Refusal::Spawn)?;
     let owner = ChildOwner::start(os, word, crate::link::QUIT_TIMEOUT).map_err(Refusal::Spawn)?;
-    match owner.next(Instant::now() + SPAWN_REPORT) {
+    match owner.spawned() {
         Some(Report::Spawned) => Ok((owner, shell)),
         Some(Report::NotSpawned(refusal)) => Err(refusal),
-        // Dropping the owner retires whatever the spawn may still produce.
-        Some(Report::Settled(_)) | None => Err(Refusal::Spawn(io::ErrorKind::TimedOut.into())),
+        Some(Report::Settled(_)) | None => Err(Refusal::Spawn(io::ErrorKind::BrokenPipe.into())),
     }
 }
 
@@ -313,6 +308,7 @@ fn null_terminated(strings: &[CString]) -> Vec<*mut libc::c_char> {
 mod tests {
     use std::io::Read as _;
     use std::os::fd::{FromRawFd as _, OwnedFd};
+    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::platform::child::Settled;

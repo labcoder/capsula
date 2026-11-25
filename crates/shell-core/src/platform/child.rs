@@ -156,6 +156,12 @@ impl ChildOwner {
         let _settled = self.retire.send(());
     }
 
+    /// The spawn report, waiting for it: the owner sends one right after its single spawn
+    /// attempt, or the channel closes if the thread died first. None only in that second case.
+    pub(crate) fn spawned(&self) -> Option<Report> {
+        self.reports.recv().ok()
+    }
+
     /// The next report, or None when none arrives by `by`.
     pub(crate) fn next(&self, by: Instant) -> Option<Report> {
         self.reports
@@ -183,6 +189,8 @@ fn own(
 ) {
     // A link that's gone doesn't end custody, so a closed report channel is ignored throughout.
     if let Err(refusal) = spawn(&mut os, word) {
+        // Whatever the child would have inherited is closed before the refusal is heard.
+        drop(os);
         let _unheard = report.send(Report::NotSpawned(refusal));
         return;
     }
@@ -771,6 +779,54 @@ mod tests {
             Settled::Unsettled,
         ] {
             assert!(!settled.is_clean(), "{settled:?}");
+        }
+    }
+
+    /// Delegates to a fake, and is slow to drop, so a refusal heard before the drop shows.
+    struct SlowDrop(Fake, Arc<std::sync::atomic::AtomicBool>);
+
+    impl Os for SlowDrop {
+        fn auto_reaps(&self) -> bool {
+            self.0.auto_reaps()
+        }
+        fn spawn(&mut self) -> io::Result<()> {
+            self.0.spawn()
+        }
+        fn poll(&mut self) -> Observation {
+            self.0.poll()
+        }
+        fn kill(&mut self) -> io::Result<()> {
+            self.0.kill()
+        }
+    }
+
+    impl Drop for SlowDrop {
+        fn drop(&mut self) {
+            thread::sleep(WAIT);
+            self.1.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_refusal_is_heard_only_after_the_adapter_is_gone() {
+        for refusal in ["quit", "claimed", "auto-reap"] {
+            let word = Arc::new(SpawnWord::default());
+            let _holder = (refusal == "claimed").then(|| started(&Fake::default(), &word));
+            if refusal == "quit" {
+                word.quit();
+            }
+            let fake = Fake::with(|s| s.auto_reaps = refusal == "auto-reap");
+            let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let os = SlowDrop(fake, Arc::clone(&dropped));
+            let owner = ChildOwner::start(os, Arc::clone(&word), WAIT).expect("owner");
+            assert!(
+                matches!(owner.spawned(), Some(Report::NotSpawned(_))),
+                "{refusal}"
+            );
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "{refusal}: dropped before the report"
+            );
         }
     }
 }
