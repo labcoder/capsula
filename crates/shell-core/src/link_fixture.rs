@@ -182,6 +182,7 @@ fn authenticated_with_output(
             control,
             hello,
             mode,
+            None,
             attempt,
             super::DrawingText::default(),
             || open(Pipe::Data),
