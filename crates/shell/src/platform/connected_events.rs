@@ -30,6 +30,8 @@ pub(crate) enum PresenceEvent {
     DismissPanel,
     /// Esc reached Kumochi: the global hotkey, a focused panel, or the Stop fallback.
     Escape,
+    /// The local action observed speech on this exact pair and run.
+    EscapeSpeech(crate::escape::SpeechPress),
     /// The user picked Quit in the tray menu.
     Quit,
     /// `--gate-observer` only: the harness asked for one dock repaint.

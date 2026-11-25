@@ -243,7 +243,7 @@ Shell-core exposes the ownership facts an Esc press can capture: the audio pair 
 the latest submitted turn (even before the brain names it), and the drawing and
 selection owners. A run that already sent a terminal state can still have an audible
 tail; that tail is a local speaker stop, not permission to stop another brain run.
-These facts don't register a key or change which session ordinary launch selects.
+The speech route uses the audio facts below; ordinary launch still selects Legacy.
 
 An Esc captured by an admitted voice gesture consumes only that gesture's receipt and held
 words. It takes screen marks, then compares the receipt's run with the ordinary effective
@@ -280,8 +280,17 @@ The local effect always happens first, and nothing waits on the brain:
 Esc is held system-wide with `RegisterHotKey` while held voice is active or a drawing is shown:
 the overlay is showing scene frames (`Presenter::drawn`), or run steps show in the open typing
 panel. Mirrored, preparing and recovering scenes that aren't painted yet don't hold it, and an
-open status panel alone never does. Spoken replies don't hold it yet; `Activity::speaking` is
-always false.
+open status panel alone never does.
+
+A queued reply also holds global Esc while the native output route has a live speech lease and
+Kumochi's typing, Tasks and Settings panels aren't focused. The pressed pair and run travel
+with the event. An outside press stops that reply without taking focus; a focused-panel
+press stops the reply and leaves the panel open. A stale press can't stop a replacement
+run. If the brain already sent a terminal state, only its matching local audio is stopped.
+For a moving run the shell fences it and offers the brain its Stop before the speaker stop.
+If the control queue refuses, the shell offers the exact local stop before sealing the pair;
+if the output owner is busy, background pair teardown still retires it.
+
 Held voice additionally owns global Esc through preparation and pre-answer work. A raw Escape
 revokes collection before deferred UI; its hotkey delivery consumes one marker so that the
 same press cannot also dismiss typing. Cleanup debt alone does not capture Esc from newer

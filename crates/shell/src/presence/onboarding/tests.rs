@@ -626,12 +626,12 @@ fn native(owner: &Entity<Presence>, cx: &mut TestAppContext) -> Deliver {
     let weak = owner.downgrade();
     owner.update(cx, |owner, cx| {
         crate::presence::gesture::deliver(
-            owner.dock_window,
-            weak,
+            (owner.dock_window, weak),
             owner.link.clone(),
             Rc::clone(&owner.voice.target),
             Rc::clone(&owner.voice.paused),
             owner.voice.gates.clone(),
+            Rc::clone(&owner.speech),
             cx,
         )
     })

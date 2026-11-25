@@ -27,7 +27,7 @@ use super::kumo_view::{SIZE, still};
 use super::settings::name_input_event;
 use super::{
     Foreground, LinkState, OpenError, PanelVisibility, Presence, PresenceEvent, PresenceSurface,
-    configure_surface, options, platform, send, status_text,
+    configure_surface, options, platform, status_text,
 };
 use crate::onboarding::{Exit, Landing, Leave, Next, Onboarding, Step, ThisRun};
 use crate::settings::{Field, Settings};
@@ -396,6 +396,7 @@ impl Render for OnboardingView {
         let body = self.body(cx);
         let events = self.events.clone();
         let close = self.owner.clone();
+        let escape_owner = self.owner.clone();
         div()
             .size_full()
             .flex()
@@ -413,7 +414,9 @@ impl Render for OnboardingView {
             .text_color(cx.theme().popover_foreground)
             .key_context("OnboardingPanel")
             .track_focus(&self.focus)
-            .on_action(move |_: &Escape, _, _| send(&events, PresenceEvent::Escape))
+            .on_action(move |_: &Escape, _, cx| {
+                super::send_escape(&events, Some(&escape_owner), cx);
+            })
             .child(
                 div()
                     .flex()

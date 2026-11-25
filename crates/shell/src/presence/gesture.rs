@@ -19,6 +19,7 @@ use super::{
     Presence,
     voice::{Gates, HoldBack, Stamp},
 };
+use crate::escape::SpeechPress;
 use crate::input::{
     Edge, Effect, Event, Gesture, Key, TalkHeld,
     hold::{Delivery, Fence, InputReason, InputStage, Intent},
@@ -27,7 +28,7 @@ use crate::link::{InputCancel, LinkHandle};
 use crate::platform::{Deliver, EventTime, INPUT_COUNTER, cursor_position};
 use crate::strings::Text;
 use kumochi_protocol::geometry::PhysicalPoint;
-use kumochi_protocol::message::{GestureId, ThreadId};
+use kumochi_protocol::message::{GestureId, RunId, ThreadId};
 
 struct Pending {
     cancel: Option<InputCancel>,
@@ -44,6 +45,7 @@ struct PendingGesture {
     cancelled: Option<(GestureId, u64)>,
     /// An Esc press: every retirement waits until this delivery is decided.
     escape: Option<Rc<HoldBack>>,
+    speech: Option<SpeechPress>,
     collection: u64,
 }
 
@@ -124,12 +126,12 @@ enum CancelDispatch {
     reason = "native revocation and ordered deferred delivery share one owner"
 )]
 pub(super) fn deliver(
-    dock: AnyWindowHandle,
-    owner: WeakEntity<Presence>,
+    (dock, owner): (AnyWindowHandle, WeakEntity<Presence>),
     link: LinkHandle,
     target: Rc<Cell<(Option<ThreadId>, u64)>>,
     paused: Rc<Cell<bool>>,
     gates: Gates,
+    speech: Rc<Cell<Option<(u64, RunId, Instant)>>>,
     cx: &mut App,
 ) -> Deliver {
     let (deferred, pending) = async_channel::unbounded::<Pending>();
@@ -367,6 +369,11 @@ pub(super) fn deliver(
             },
             cancelled,
             escape: escape.then(|| gates.hold_back()),
+            speech: if escape {
+                SpeechPress::capture(speech.get(), at.instant, at.speech_escape_owner)
+            } else {
+                None
+            },
             collection: link.microphone_gate().latest(),
             stamp: Stamp {
                 target: target.get(),
@@ -536,7 +543,8 @@ fn apply(
             let (owner, intents) = (owner.clone(), pending.delivery.intents.clone());
             let (stamp, qpc, pointer) = (pending.stamp, pending.qpc, pending.pointer);
             let input = pending.input.clone();
-            let (escaping, cancelled) = (pending.escape.clone(), pending.cancelled);
+            let (escaping, cancelled, speech) =
+                (pending.escape.clone(), pending.cancelled, pending.speech);
             let escape = escaping.is_some();
             let intents = move |app: &mut App| {
                 #[cfg(all(test, windows))]
@@ -577,7 +585,7 @@ fn apply(
                     }
                     if escape
                         && this
-                            .native_escape(cancelled.map(|(gesture, _)| gesture), cx)
+                            .native_escape(cancelled.map(|(gesture, _)| gesture), speech, cx)
                             .is_err()
                     {
                         tracing::error!("can't apply native Escape");
@@ -665,6 +673,7 @@ pub(super) fn deliver_intent(
         input: ReleaseInput::fixture(held),
         cancelled: None,
         escape: None,
+        speech: None,
         collection: 0,
     };
     matches!(
