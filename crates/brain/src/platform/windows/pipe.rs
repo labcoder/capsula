@@ -31,15 +31,27 @@ use windows_sys::Win32::System::Threading::{
     QueryFullProcessImageNameW, WaitForSingleObject,
 };
 
-use crate::platform::{ClientRefused, Instance, Job};
+use crate::platform::{BridgeConnectError, ClientRefused, Instance, Job};
 
 /// The brain's end of a pipe.
 pub type PipeServer = NamedPipeServer;
 
 pub(crate) type PipeClient = NamedPipeClient;
 
-pub(crate) fn open_pipe(name: &str) -> io::Result<PipeClient> {
-    ClientOptions::new().open(name)
+pub(crate) fn open_bridge(name: &str, expected: &Path) -> Result<PipeClient, BridgeConnectError> {
+    let pipe = ClientOptions::new().open(name)?;
+    let server = server_image(&pipe)?;
+    if !server
+        .as_os_str()
+        .eq_ignore_ascii_case(expected.as_os_str())
+    {
+        return Err(BridgeConnectError::NotOurBrain);
+    }
+    Ok(pipe)
+}
+
+pub(crate) struct BridgePeer {
+    _process: OwnedHandle,
 }
 
 /// Holds the checked client process for the lifetime of its bridge session.
@@ -47,7 +59,7 @@ pub(crate) fn bridge_peer(
     server: &PipeServer,
     job: &Job,
     expected: &Path,
-) -> Result<OwnedHandle, ClientRefused> {
+) -> Result<BridgePeer, ClientRefused> {
     let query = |_| ClientRefused::Query;
     let process = client_process(server).map_err(query)?;
     if has_exited(process.as_handle()).map_err(query)? {
@@ -60,7 +72,7 @@ pub(crate) fn bridge_peer(
     if !job.contains(process.as_handle()).map_err(query)? {
         return Err(ClientRefused::NotInJob);
     }
-    Ok(process)
+    Ok(BridgePeer { _process: process })
 }
 
 /// A connected owner-only pipe and its client, under a name no running brain uses, for tests
@@ -525,5 +537,58 @@ mod tests {
         assert_eq!(crate::platform::connected_shell_pid(), std::process::id());
         drop(registration);
         assert_eq!(crate::platform::connected_shell_pid(), 0);
+    }
+
+    const CAPTURE_OWNER_ARGS: [&str; 4] = [
+        "--exact",
+        "platform::windows::pipe::tests::capture_owner_entry",
+        "--ignored",
+        "--test-threads=1",
+    ];
+    const CAPTURE_OWNER_EXIT: i32 = 17;
+
+    #[test]
+    fn retained_capture_owner_handle_reports_that_exact_childs_exit() {
+        use crate::platform::{Job, Launch, ShellProcess, Stdio, spawn};
+        use crate::test_support::Scratch;
+        use std::time::Duration;
+
+        let scratch = Scratch::new("hold-exit-witness");
+        std::fs::create_dir(scratch.dir()).expect("create the child's scratch folder");
+        let job = Job::new().expect("contain the owned child");
+        let mut child = spawn(&Launch {
+            exe: &std::env::current_exe().unwrap(),
+            args: &CAPTURE_OWNER_ARGS.map(Into::into),
+            cwd: scratch.dir(),
+            env: &[],
+            stdio: Stdio::Piped,
+            jobs: &[&job],
+        })
+        .expect("start the synthetic capture owner");
+        let pid = child.process.pid();
+        let handle = super::open_process(
+            pid,
+            super::PROCESS_QUERY_LIMITED_INFORMATION | super::PROCESS_SYNCHRONIZE,
+        )
+        .expect("retain the live child's waitable handle");
+        let owner = ShellProcess::new(pid, handle);
+        assert!(!owner.exited().unwrap(), "the exact owner is still alive");
+        drop(child.stdin.take().unwrap());
+        assert!(child.process.exits_within(Duration::from_secs(5)).unwrap());
+        assert_eq!(
+            child.process.exit_code().unwrap(),
+            CAPTURE_OWNER_EXIT.cast_unsigned()
+        );
+        assert!(owner.exited().unwrap(), "the retained owner witnessed exit");
+    }
+
+    #[test]
+    #[ignore = "entry for the owned child; not a standalone test"]
+    fn capture_owner_entry() {
+        if std::env::args_os().skip(1).eq(CAPTURE_OWNER_ARGS) {
+            use std::io::Read as _;
+            assert_eq!(std::io::stdin().read(&mut [0]).unwrap(), 0);
+            std::process::exit(CAPTURE_OWNER_EXIT);
+        }
     }
 }

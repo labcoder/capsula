@@ -4,42 +4,31 @@
 //! Disconnect's marker stands, the folder is deleted before anything starts, or nothing does.
 //! Questions run here too, one at a time like every other call ([`supervisor`](super::supervisor)).
 
-#[cfg(windows)]
 use std::ffi::OsString;
-#[cfg(windows)]
 use std::fs::File;
-#[cfg(any(test, windows))]
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc as std_mpsc};
-#[cfg(any(test, windows))]
 use std::time::Duration;
-#[cfg(windows)]
 use std::time::Instant;
 
 use kumochi_protocol::constants::CLAUDE_CODE_QUARANTINE;
-#[cfg(windows)]
 use kumochi_protocol::constants::{
     CLAUDE_CODE_DELETING, CLAUDE_CODE_DIR, CLAUDE_CODE_LOCK, ENGINE_DIR,
 };
 use kumochi_protocol::message::{ClaudeVersion, PolicyFailed, Unsupported};
 use tokio::sync::{Notify, mpsc, oneshot};
 
-#[cfg(windows)]
 use super::auth;
 use super::auth::StatusFailure;
-#[cfg(windows)]
 use super::install;
 use super::install::FindError;
 use super::launch::Clock;
-#[cfg(windows)]
 use super::policy::{self, EntryPoint, LaunchPolicy, OwnedFolders};
 use super::supervisor::Start;
-#[cfg(windows)]
 use super::supervisor::{self, Ready, Teardown};
 use crate::platform;
-#[cfg(windows)]
 use crate::platform::{Job, Launch, ManagedPresence, Presence, SessionLock, Stdio};
 use crate::recall::{Error as ControlError, control::Control};
 
@@ -51,34 +40,25 @@ pub(crate) fn mark_quarantined(base: &Path, version: ClaudeVersion) -> Result<()
 }
 
 /// Jobs the lane holds before it refuses more; the core keeps one discovery out at a time.
-#[cfg(any(test, windows))]
 pub(crate) const LANE_QUEUE: usize = 4;
 /// `--version`'s output cap.
-#[cfg(any(test, windows))]
 pub(crate) const VERSION_CAP: usize = 4 * 1024;
 /// `auth status --json`'s output cap.
-#[cfg(windows)]
 pub(crate) const STATUS_CAP: usize = 64 * 1024;
 /// stderr is read and dropped, up to this.
-#[cfg(windows)]
 pub(crate) const STDERR_CAP: usize = 64 * 1024;
 /// How long a call may run before it's ended [guess]. Ending it then takes up to the job's own
 /// bound to confirm empty, and up to [`PIPE_GRACE`] for each pipe.
-#[cfg(windows)]
 pub(crate) const DEADLINE: Duration = Duration::from_secs(10);
 /// How long Claude Code's own sign-in may hold the lane.
-#[cfg(windows)]
 pub(crate) const LOGIN_DEADLINE: Duration = Duration::from_mins(5);
 /// How often a running call looks at its deadline and at closing.
-#[cfg(any(test, windows))]
 pub(super) const POLL: Duration = Duration::from_millis(20);
 /// How long the pipes get to end once the call's job is empty.
-#[cfg(windows)]
 pub(super) const PIPE_GRACE: Duration = Duration::from_secs(1);
 
 /// What the lane starts. `prefix` comes before the entry point's own arguments; only the tests'
 /// fake has one.
-#[cfg(windows)]
 #[derive(Clone)]
 pub(crate) struct Program {
     pub(crate) exe: PathBuf,
@@ -86,7 +66,6 @@ pub(crate) struct Program {
 }
 
 /// Everything the lane reads from outside it.
-#[cfg(windows)]
 pub(crate) struct Host {
     /// Finds the install; the brain's looks only in `CLAUDE_CODE_PATHS`.
     pub(crate) find: Box<dyn Fn() -> Result<Program, FindError> + Send>,
@@ -130,13 +109,6 @@ pub(crate) enum Work {
 
 /// What a call found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(windows),
-    expect(
-        dead_code,
-        reason = "shared completion reducer matches outcomes only the native worker produces"
-    )
-)]
 pub(crate) enum Outcome {
     Version(ClaudeVersion),
     Status {
@@ -151,13 +123,6 @@ pub(crate) enum Outcome {
 
 /// Why a call gave nothing. It carries nothing Claude Code printed and no path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(windows),
-    expect(
-        dead_code,
-        reason = "shared refusal mapping includes failures only the native worker produces"
-    )
-)]
 pub(crate) enum Failure {
     /// The lane is stuck or closing, and nothing more starts: this or an earlier call's
     /// processes weren't confirmed ended, or it was told to close.
@@ -216,13 +181,6 @@ impl Recheck {
 }
 
 /// What the lane's queue holds.
-#[cfg_attr(
-    not(windows),
-    expect(
-        dead_code,
-        reason = "the shared handle keeps the queue payload; only the native worker dequeues it"
-    )
-)]
 enum Queued {
     Call(u64, Work, Option<Recheck>),
     Launch(Box<Start>),
@@ -246,7 +204,6 @@ impl Lane {
     ///
     /// # Errors
     /// Fails when the thread can't start.
-    #[cfg(windows)]
     pub(crate) fn start(host: Host) -> io::Result<Self> {
         let (jobs, queued) = std_mpsc::sync_channel(LANE_QUEUE);
         let (done_tx, done) = mpsc::unbounded_channel();
@@ -390,7 +347,6 @@ impl std::fmt::Debug for Lane {
     }
 }
 
-#[cfg(windows)]
 struct Worker {
     host: Host,
     /// Held from the first call until the lane ends, and never let go while a call's processes
@@ -405,13 +361,11 @@ struct Worker {
 }
 
 /// The owned folders and the handles that keep their names from being rebound.
-#[cfg(windows)]
 pub(super) struct Folders {
     pub(super) paths: OwnedFolders,
     pub(super) held: Vec<File>,
 }
 
-#[cfg(windows)]
 impl Worker {
     fn run(
         &mut self,
@@ -749,7 +703,6 @@ impl Worker {
 }
 
 /// How one call runs.
-#[cfg(windows)]
 #[derive(Clone, Copy)]
 struct Call<'a> {
     /// The generation it runs for; a newer one ends it.
@@ -762,7 +715,6 @@ struct Call<'a> {
 }
 
 /// The reviewed row's policy for `version`, which every call after `--version` needs.
-#[cfg(windows)]
 fn policy_of(version: ClaudeVersion) -> Result<LaunchPolicy, Failure> {
     policy::reviewed(version)
         .map(|reviewed| reviewed.policy)
@@ -771,7 +723,6 @@ fn policy_of(version: ClaudeVersion) -> Result<LaunchPolicy, Failure> {
 
 /// Kumochi's Claude Code folder and the folders in it, each owner-only, made if missing and
 /// held, under `base` held from the volume root.
-#[cfg(windows)]
 fn owned_folders(base: &Path) -> Result<Folders, platform::Untrusted> {
     let mut held = platform::hold_chain(base)?;
     let root = base.join(CLAUDE_CODE_DIR);
@@ -801,7 +752,6 @@ fn owned_folders(base: &Path) -> Result<Folders, platform::Untrusted> {
 
 /// A pipe read to its end: the first `cap` bytes, whether there were more, and whether a read
 /// failed before the end.
-#[cfg(any(test, windows))]
 #[derive(Default)]
 struct Drained {
     bytes: Vec<u8>,
@@ -810,7 +760,6 @@ struct Drained {
 }
 
 /// stdout's bytes, when both pipes reached their end, unbroken and within their caps.
-#[cfg(any(test, windows))]
 fn output(stdout: Option<Drained>, stderr: Option<Drained>) -> Result<Vec<u8>, Failure> {
     let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
         return Err(Failure::Deadline);
@@ -826,7 +775,6 @@ fn output(stdout: Option<Drained>, stderr: Option<Drained>) -> Result<Vec<u8>, F
 
 /// Reads `pipe` to its end on a thread, keeping at most `cap` bytes; the receiver gets them once
 /// it has ended.
-#[cfg(any(test, windows))]
 fn drain(mut pipe: impl Read + Send + 'static, cap: usize) -> std_mpsc::Receiver<Drained> {
     let (done, drained) = std_mpsc::channel();
     let spawned = std::thread::Builder::new()
@@ -885,5 +833,4 @@ fn quarantine_refuses_without_creating_a_marker_on_an_unsupported_host() {
 }
 
 #[cfg(test)]
-#[cfg(windows)]
 pub(crate) mod tests;

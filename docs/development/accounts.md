@@ -282,9 +282,11 @@ sequenceDiagram
 
 ### Checked HTTP and roots
 
-`connections::http_client::build()` is the only production constructor. It loads the current
-user's public Windows ROOT store through `platform::trust_roots`, which includes machine-supplied
-roots. The loader keeps only time-valid roots allowed for server authentication or all uses.
+`connections::http_client::build()` is the account client's only production constructor.
+It gets its TLS config from `platform::native_client_tls`, the factory shared with the direct
+model connectors and voice downloader. On Windows the factory still loads the current user's
+public ROOT store through `platform::trust_roots`, including machine-supplied roots. The loader
+keeps only time-valid roots allowed for server authentication or all uses.
 An unrestricted-use result requires a successful EKU call, zero identifiers and immediately
 captured `CRYPT_E_NOT_FOUND`; unreadable usage isn't treated as unrestricted. Enumeration owns
 one context at a time and transfers that ownership back to the next Win32 enumeration call.
@@ -824,6 +826,11 @@ it is dropped.
 `platform::SessionLock` guards the empty `%LOCALAPPDATA%\<DATA_DIR>\session.lock` using
 `File::try_lock`; only contention returns typed `Busy`, and dropping the guard releases it.
 `platform::session_lock_path()` uses the Dev data folder in debug builds. Startup wiring is separate.
+`SessionLock::try_acquire_existing` locks an existing empty session file without creating it or
+its parent, and only contention is Busy. On Windows it opens the leaf itself, never a reparse
+target, sharing read and write so a stock opener still meets the lock, but not delete, so the name
+can't be renamed or deleted while held. Elsewhere a pathname check precedes the open and isn't
+atomic with it. It doesn't validate the parent, and nothing calls it yet.
 
 On builds without a native credential adapter, exact-name reads, writes, and deletes return
 `Unsupported`. The production vault also refuses before opening the session lock or

@@ -29,7 +29,12 @@ impl Drop for Captures {
 
 impl Capturer for Captures {
     /// The point names the window's size, so each hold can ask for its own.
-    fn pointer_window(&mut self, point: PhysicalPoint, _: u32) -> Result<Target, Refusal> {
+    fn pointer_window(
+        &mut self,
+        point: PhysicalPoint,
+        _: u32,
+        _: Deadline,
+    ) -> Result<Target, Refusal> {
         let [width, height] = point.0.map(|side| u32::try_from(side).unwrap());
         Ok(Target {
             top: TopWindow {
@@ -47,7 +52,7 @@ impl Capturer for Captures {
     fn capture_window(
         &mut self,
         target: &Target,
-        _: Instant,
+        _: Deadline,
         frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
         let display = target.top.rect;
@@ -121,6 +126,7 @@ impl Replacement {
             let armed = Arc::clone(&pause);
             let mut output = Replies {
                 output: Output {
+                    on_pong: None,
                     send,
                     bytes: Vec::new(),
                 },

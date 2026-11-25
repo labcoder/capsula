@@ -28,6 +28,12 @@ tracing.workspace = true
 tracing-appender.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui-pre-macos = "=0.3.10"
+kumochi-storage = { path = "../storage" }
+time = "0.3.55"
+tracing-subscriber.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",

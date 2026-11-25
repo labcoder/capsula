@@ -1,5 +1,6 @@
 use std::io::{self, Cursor, Read, Write};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -91,6 +92,7 @@ impl Read for Input {
 struct Output {
     send: mpsc::Sender<(u64, Reply)>,
     bytes: Vec<u8>,
+    on_pong: Option<Box<dyn FnOnce()>>,
 }
 
 impl Write for Output {
@@ -102,6 +104,11 @@ impl Write for Output {
         let reply = read_request::<Reply>(&mut self.bytes.as_slice(), Kind::MAX_REPLY)
             .expect("whole reply")
             .expect("one reply");
+        if matches!(reply.1, Reply::Pong)
+            && let Some(on_pong) = self.on_pong.take()
+        {
+            on_pong();
+        }
         self.send
             .send(reply)
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
@@ -145,7 +152,12 @@ struct Fake {
 }
 impl Capturer for Fake {
     /// Resolves the walk's window; a point left of the display has none.
-    fn pointer_window(&mut self, point: PhysicalPoint, _: u32) -> Result<Target, Refusal> {
+    fn pointer_window(
+        &mut self,
+        point: PhysicalPoint,
+        _: u32,
+        _: Deadline,
+    ) -> Result<Target, Refusal> {
         if let Some(gate) = self.foreground.take() {
             gate.wait();
         }
@@ -168,7 +180,7 @@ impl Capturer for Fake {
     fn capture_window(
         &mut self,
         _: &Target,
-        _: Instant,
+        _: Deadline,
         frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
         frame.audit(self.audit.clone());
@@ -188,8 +200,9 @@ impl Capturer for Fake {
     fn capture_display(
         &mut self,
         point: PhysicalPoint,
+        _: u32,
         _: u64,
-        _: Instant,
+        _: Deadline,
         frame: &mut RawFrame,
     ) -> Result<(Acquired, PhysicalRect), Failure> {
         frame.audit(self.audit.clone());
@@ -285,6 +298,13 @@ struct Rig {
 enum Clock {
     Manual,
     Realtime,
+    StampOnly,
+    ExpireOnSeal,
+}
+
+static STAMP_ELAPSED_MS: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static STAMP_EXPIRED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl Rig {
@@ -327,6 +347,7 @@ impl Rig {
                 &mut Output {
                     send: output,
                     bytes: Vec::new(),
+                    on_pong: None,
                 },
                 move || {
                     opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -350,9 +371,30 @@ impl Rig {
                 },
                 {
                     let mut screen = Screen::default();
-                    screen.unchanged = unchanged;
+                    screen.unchanged = if matches!(clock_mode, Clock::ExpireOnSeal) {
+                        |target| {
+                            STAMP_EXPIRED.set(true);
+                            unchanged(target)
+                        }
+                    } else {
+                        unchanged
+                    };
                     screen.display_at = |bounds| (bounds == DISPLAY).then_some((DISPLAY, 120));
-                    screen.left_until = MILLIS_LEFT;
+                    screen.left_until = match clock_mode {
+                        Clock::StampOnly => |stamp| {
+                            let left =
+                                stamp.checked_sub(STAMP_ELAPSED_MS.load(Ordering::SeqCst))?;
+                            (left > 0).then(|| Duration::from_millis(left))
+                        },
+                        Clock::ExpireOnSeal => |stamp| {
+                            if STAMP_EXPIRED.get() {
+                                None
+                            } else {
+                                MILLIS_LEFT(stamp)
+                            }
+                        },
+                        Clock::Manual | Clock::Realtime => MILLIS_LEFT,
+                    };
                     screen
                 },
             )
@@ -403,6 +445,106 @@ impl Rig {
     fn finish(self) {
         drop(self.requests);
         self.done.join().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn stamp_expiry_without_local_time_passing_refuses_start_and_discards_a_late_frame() {
+    for during_capture in [false, true] {
+        STAMP_ELAPSED_MS.store(0, Ordering::SeqCst);
+        let (gate, entered, release) = gate();
+        let (foreground, capture) = if during_capture {
+            (None, Some(gate))
+        } else {
+            (Some(gate), None)
+        };
+        let rig = Rig::create(foreground, capture, None, Clock::StampOnly, None);
+        rig.send(1, &context(1));
+        entered.recv_timeout(PATIENCE).unwrap();
+        STAMP_ELAPSED_MS.store(FAR, Ordering::SeqCst);
+        release.send(()).unwrap();
+        assert_eq!(rig.reply(), (1, Reply::Refused(Refusal::Expired)));
+        if during_capture {
+            rig.scrubbed();
+        } else {
+            assert_eq!(rig.scrubbed.try_recv(), Err(mpsc::TryRecvError::Empty));
+        }
+        rig.send(2, &Request::Seal(key(1)));
+        assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Stale)));
+        rig.finish();
+    }
+}
+
+#[test]
+fn a_stamp_that_expires_inside_seal_never_publishes_the_encoded_image() {
+    let rig = Rig::create(None, None, None, Clock::ExpireOnSeal, None);
+    rig.send(1, &context(1));
+    rig.acquired(1);
+    rig.send(2, &Request::Seal(key(1)));
+    assert_eq!(rig.reply(), (2, Reply::Refused(Refusal::Expired)));
+    rig.scrubbed();
+    rig.send(3, &Request::Seal(key(1)));
+    assert_eq!(rig.reply(), (3, Reply::Refused(Refusal::Stale)));
+    rig.finish();
+}
+
+#[test]
+fn a_stamp_that_expires_inside_pong_beats_a_current_nonfatal_completion() {
+    for failure in [Failure::Refused(Refusal::NoWindow), Failure::Fault(-5)] {
+        let now = Instant::now();
+        let clock = Arc::new(Mutex::new(now));
+        let (capture, entered, release) = gate();
+        let mut capture = Some(capture);
+        let (audit, _) = mpsc::channel();
+        let (sampled, _sample) = mpsc::channel();
+        let (wake, completion_queued) = mpsc::channel();
+        let native = CaptureThread::open(
+            move || {
+                Ok(Box::new(Fake {
+                    clock: Arc::clone(&clock),
+                    foreground: None,
+                    capture: capture.take(),
+                    audit: audit.clone(),
+                    completion: Some(failure),
+                    sampled: sampled.clone(),
+                    _local: Rc::new(()),
+                }))
+            },
+            Box::new(move || wake.send(()).is_ok()),
+        )
+        .unwrap();
+        let (inbox, events) = mpsc::channel();
+        inbox.send(Event::Request(1, context(1), now)).unwrap();
+        inbox.send(Event::Request(2, Request::Ping, now)).unwrap();
+        inbox.send(Event::End(Ok(()))).unwrap();
+        let (send, replies) = mpsc::channel();
+        STAMP_EXPIRED.set(false);
+        let mut screen = Screen::default();
+        screen.left_until = |stamp| (!STAMP_EXPIRED.get()).then(|| Duration::from_millis(stamp));
+        run(
+            &events,
+            &mut Output {
+                send,
+                bytes: Vec::new(),
+                on_pong: Some(Box::new(move || {
+                    entered.recv_timeout(PATIENCE).unwrap();
+                    release.send(()).unwrap();
+                    completion_queued.recv_timeout(PATIENCE).unwrap();
+                    STAMP_EXPIRED.set(true);
+                })),
+            },
+            native,
+            screen,
+            &|| now,
+        )
+        .unwrap();
+        assert_eq!(replies.try_recv(), Ok((2, Reply::Pong)));
+        let (id, reply) = replies.try_recv().unwrap();
+        assert_eq!(id, 1);
+        assert!(
+            matches!(reply, Reply::Refused(Refusal::Expired)),
+            "the completion {failure:?} overtook expiry"
+        );
     }
 }
 
@@ -624,7 +766,7 @@ fn actor_clock_expiry_scrubs_a_returning_capture_without_a_new_request() {
     entered.recv_timeout(PATIENCE).unwrap();
     *rig.clock.lock().unwrap() += Duration::from_secs(31);
     release.send(()).unwrap();
-    assert_eq!(rig.reply(), (1, Reply::Refused(Refusal::Stale)));
+    assert_eq!(rig.reply(), (1, Reply::Refused(Refusal::Expired)));
     rig.scrubbed();
     rig.finish();
 }

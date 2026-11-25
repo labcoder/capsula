@@ -1,5 +1,36 @@
-//! The operating system behind small, safe functions. Windows only for now.
+//! The operating system behind small, safe functions. The live shell uses Windows.
 
+#[cfg(target_os = "macos")]
+pub(crate) mod logging;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::logging::Admitted;
+
+pub(crate) use kumochi_shell::presence_platform::{PresenceError, require_connected_geometry};
+#[cfg(all(not(windows), not(test)))]
+pub(crate) use kumochi_shell::presence_platform::{
+    client_origin, hide_presence_window, place_presence_window, work_area,
+};
+
+mod connected_events;
+mod connected_keyboard;
+pub(crate) use connected_events::{
+    MaskUpdate, Observe, PresenceEvent, PresenceLabels, PresenceSurface, ProxyNote,
+};
+pub(crate) use connected_keyboard::{Deliver, EventTime};
+#[cfg(not(windows))]
+mod connected_desktop;
+#[cfg(not(windows))]
+pub(crate) use connected_desktop::{
+    Affinity, EscapeHotkey, Foreground, HostWatch, OverlayWindows, PresenceNative, ProxyHandle,
+    activate_presence_window, configure_presence_window, cursor_position, exclude_window, host_at,
+    restore_foreground, restore_window_affinity, watch_host, window_affinity, window_handle,
+};
+#[cfg(all(test, not(windows)))]
+pub(crate) use connected_desktop::{
+    DetachedInputs, client_origin, hide_presence_window, place_presence_window, work_area,
+};
 pub(crate) use kumochi_shell_core::platform::{host, input, microphone};
 
 /// Where a test says the pointer is. A test that sets it never reads the real one, which is
@@ -34,7 +65,10 @@ pub(crate) mod cursor_fixture {
 
     /// Puts this test thread's pointer at `at`; none makes the read fail.
     pub(crate) fn set(at: Option<[i32; 2]>) {
+        #[cfg(windows)]
         AT.set(Some(at.ok_or(())));
+        #[cfg(not(windows))]
+        super::DetachedInputs::set_cursor(at);
     }
 
     /// What this test thread set, if it set anything.
@@ -84,14 +118,11 @@ pub(crate) mod work_area_fixture {
 mod windows;
 
 #[cfg(windows)]
-pub(crate) use kumochi_shell_core::platform::{data_dir, session_id};
-#[cfg(windows)]
 pub(crate) use windows::ScreenSources;
 #[cfg(windows)]
 pub(crate) use windows::{
-    Affinity, Deliver, EscapeHotkey, EventTime, Foreground, HostWatch, MaskUpdate, OverlayWindows,
-    PresenceError, PresenceEvent, PresenceLabels, PresenceNative, PresenceSurface, ProxyHandle,
-    ProxyNote, activate_presence_window, client_origin, configure_presence_window, cursor_position,
+    Affinity, EscapeHotkey, Foreground, HostWatch, OverlayWindows, PresenceNative, ProxyHandle,
+    activate_presence_window, client_origin, configure_presence_window, cursor_position,
     exclude_window, hide_presence_window, host_at, performance_counter, performance_frequency,
     place_presence_window, restore_foreground, restore_window_affinity, watch_host,
     window_affinity, window_handle, work_area,
@@ -99,4 +130,30 @@ pub(crate) use windows::{
 #[cfg(all(test, windows))]
 pub(crate) use windows::{with_raw_keys, with_raw_modifiers};
 
-pub(crate) use crate::presence::line::machine::{ROW_SPANS, RowSpans};
+#[cfg(windows)]
+pub(crate) const INPUT_COUNTER: Option<fn() -> i64> = Some(performance_counter);
+#[cfg(not(windows))]
+pub(crate) const INPUT_COUNTER: Option<fn() -> i64> = None;
+
+pub(crate) fn diagnostic_clock() -> std::io::Result<kumochi_shell::QpcClock> {
+    #[cfg(windows)]
+    let backend = Some(kumochi_shell::QpcClock::windows(
+        performance_counter,
+        performance_frequency,
+    ));
+    #[cfg(not(windows))]
+    let backend = None;
+    kumochi_shell::QpcClock::require(backend)
+}
+
+pub(crate) use crate::presence::line::machine::ROW_SPANS;
+#[cfg(windows)]
+pub(crate) use crate::presence::line::machine::RowSpans;
+
+pub(crate) fn connected_overlay_windows() -> Result<OverlayWindows, PresenceError> {
+    #[cfg(windows)]
+    let windows = Some(OverlayWindows::default());
+    #[cfg(not(windows))]
+    let windows = None;
+    windows.ok_or(PresenceError::BindingsUnavailable)
+}

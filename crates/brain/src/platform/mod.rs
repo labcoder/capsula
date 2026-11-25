@@ -2,6 +2,20 @@
 
 pub mod credential;
 
+/// A greeting read by its own authenticated pair. No platform can produce one yet.
+pub(crate) enum BoundHello {}
+
+impl BoundHello {
+    pub(crate) fn into_greeting(self) -> kumochi_protocol::message::Hello {
+        match self {}
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos::capture::{display_at, screen_capturer};
+#[cfg(target_os = "macos")]
+pub(crate) use macos::clock::{qpc_at, qpc_left};
+
 #[cfg(all(windows, feature = "test-support"))]
 pub use windows::{WindowProbe, WindowSample, WindowSession};
 
@@ -10,17 +24,17 @@ mod connected_shell;
 mod fs;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(any(test, windows))]
 mod model_files;
+pub(crate) mod native_workers;
 mod pipe;
 mod process;
 mod protected;
 mod runtime_admission;
 mod session_lock;
 pub(crate) mod shell_process;
+pub(crate) mod speech_wire;
 mod trust_roots;
 
-#[cfg(any(test, windows))]
 pub(crate) use model_files::ModelFiles;
 pub(crate) use shell_process::ShellProcess;
 
@@ -47,9 +61,9 @@ pub(crate) fn test_is_link(metadata: &std::fs::Metadata) -> bool {
 pub(crate) use connected_shell::connected_shell_pid;
 pub(super) use connected_shell::register_shell;
 #[cfg(not(target_os = "macos"))]
-pub(crate) const DATA_ROOT: &str = WINDOWS_DATA_ROOT;
-#[cfg(not(target_os = "macos"))]
-const WINDOWS_DATA_ROOT: &str = "%LOCALAPPDATA%";
+pub(crate) const DATA_ROOT_ERROR: &str = "%LOCALAPPDATA% is not set to an absolute path";
+#[cfg(target_os = "macos")]
+pub(crate) const DATA_ROOT_ERROR: &str = "macOS Application Support folder is unavailable";
 #[cfg(not(any(windows, target_os = "macos")))]
 pub use fs::{config_dir, data_dir};
 #[cfg(not(windows))]
@@ -58,40 +72,39 @@ pub use fs::{free_space, links_unsupported, replace_file};
 #[path = "macos/folders.rs"]
 mod folders;
 #[cfg(target_os = "macos")]
-pub(crate) use folders::DATA_ROOT;
-#[cfg(target_os = "macos")]
 pub use folders::{config_dir, data_dir};
-#[cfg(windows)]
-pub(crate) use pipe::ClientRefused;
 pub use pipe::Instance;
+pub(crate) use pipe::{BridgeConnectError, ClientRefused};
 #[cfg(not(windows))]
-pub(crate) use pipe::{PipeClient, client_image, open_pipe, server_image, shell_connection};
+pub(crate) use pipe::{PipeClient, bridge_peer, client_image, open_bridge, shell_connection};
 #[cfg(not(windows))]
 pub use pipe::{PipeServer, create_owner_only, session_id};
-#[cfg(windows)]
 pub(crate) use process::spawn_if;
 pub use process::{
     ChildPipes, Helper, Job, Launch, Spawned, Stdio, launch_detached, spawn, system_env,
 };
 pub(crate) use protected::Untrusted;
-#[cfg(all(test, not(windows)))]
-pub(crate) use protected::model_file;
 #[cfg(not(windows))]
 pub(crate) use protected::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_model_creation, mark, model_final, open_model_write, publish_model, remove_model_tree,
-    validate_model_path,
+    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
+    private_tree, publish_model, remove_model_tree, remove_tree, unmark, validate_model_path,
 };
-pub use runtime_admission::require_native_runtime;
+pub use runtime_admission::{Mode, supports};
+pub(crate) use runtime_admission::{require_mode, serve_speech};
 pub use session_lock::{SessionLock, SessionLockError};
-pub(crate) use trust_roots::native_trust_supported;
+#[cfg(test)]
+pub(crate) use trust_roots::client_tls_from_roots;
 #[cfg(not(windows))]
 pub use trust_roots::trust_roots;
+pub(crate) use trust_roots::{
+    NativeTlsError, TrustDiagnostics, native_client_tls, native_trust_supported,
+};
 pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
 pub(crate) use windows::DumpExclusion;
 #[cfg(windows)]
-pub(crate) use windows::{PipeClient, bridge_peer, open_pipe, shell_connection};
+pub(crate) use windows::{PipeClient, bridge_peer, open_bridge, shell_connection};
 
 #[cfg(windows)]
 #[expect(
@@ -174,7 +187,7 @@ pub use windows::{
 pub(crate) use windows::{SpawnEdge, observe_next_spawn};
 #[cfg(windows)]
 pub(crate) use windows::{
-    WINDOW_CAPTURE, display_at, qpc_age, qpc_at, qpc_left, screen_capturer, screen_elements,
+    WINDOW_CAPTURE, display_at, qpc_age, qpc_left, screen_capturer, screen_elements,
     window_unchanged,
 };
 #[cfg(windows)]
@@ -199,15 +212,20 @@ pub(crate) fn qpc_age(_t_qpc: u64) -> Option<std::time::Duration> {
     None
 }
 
-/// A capture deadline's stamp for the screen worker, on the clock `qpc_age` reads, so none here.
-// shortcut: off Windows the worker refuses every ticket; stamp with macOS's clock once it captures.
-#[cfg(not(windows))]
-pub(crate) fn qpc_at(_until: std::time::Instant) -> Option<u64> {
+/// The Windows deadline stamp for a budget that starts now, keeping the existing QPC encoding.
+#[cfg(windows)]
+pub(crate) fn qpc_at(budget: std::time::Duration) -> Option<u64> {
+    windows::qpc_at(std::time::Instant::now().checked_add(budget)?)
+}
+
+/// No system-wide deadline clock is implemented here.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(crate) fn qpc_at(_budget: std::time::Duration) -> Option<u64> {
     None
 }
 
 /// How long until a deadline stamp from `qpc_at`, so never known here.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn qpc_left(_stamp: u64) -> Option<std::time::Duration> {
     None
 }
@@ -220,10 +238,9 @@ pub(crate) fn window_unchanged(_target: &crate::screen::Target) -> bool {
     false
 }
 
-/// The monitor that covers a captured display's bounds now. No platform but Windows captures a
-/// display yet, so there's none.
-// shortcut: macOS will read its display here.
-#[cfg(not(windows))]
+/// The monitor that covers a captured display's bounds now. Only Windows and macOS capture a
+/// display, so there's none.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn display_at(
     _bounds: kumochi_protocol::geometry::PhysicalRect,
 ) -> Option<(kumochi_protocol::geometry::PhysicalRect, u32)> {
@@ -278,9 +295,9 @@ pub(crate) use windows::test_pair;
 
 #[cfg(test)]
 #[test]
-fn missing_data_root_diagnostics_keep_the_windows_form() {
+fn missing_data_root_diagnostics_name_the_platform_source() {
     let expected = if cfg!(target_os = "macos") {
-        "HOME is not set to an absolute path"
+        "macOS Application Support folder is unavailable"
     } else {
         "%LOCALAPPDATA% is not set to an absolute path"
     };

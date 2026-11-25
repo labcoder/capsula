@@ -67,17 +67,25 @@ impl std::fmt::Debug for Target {
 /// `desktopIndependentWindow` for a window.
 pub(crate) trait Capturer {
     /// The window a click at `point` would land on, Kumochi's own aside, after the checks that
-    /// refuse it before any pixels. `shell` is the connected shell's process.
+    /// refuse it before any pixels. `shell` is the connected shell's process. A walk that asks
+    /// the system for its capture grant checks `deadline` around that ask and around its
+    /// window-list read; Windows keeps its existing Win32 walk and ignores `deadline`.
     ///
     /// # Errors
     /// `NoWindow` when only Kumochi or the desktop is there, `Ambiguous` when a drawn layered
-    /// window is there and where a click lands can't be told, or a preflight refusal.
-    fn pointer_window(&mut self, _point: PhysicalPoint, _shell: u32) -> Result<Target, Refusal> {
+    /// window is there and where a click lands can't be told, `Expired`, or a preflight refusal.
+    fn pointer_window(
+        &mut self,
+        _point: PhysicalPoint,
+        _shell: u32,
+        _deadline: Deadline,
+    ) -> Result<Target, Refusal> {
         Err(Refusal::NoWindow)
     }
 
     /// Fills `frame` through [`RawFrame::begin`] with one frame of `target` alone, which
-    /// leaves out whatever is stacked above it. It starts nothing at or after `until`.
+    /// leaves out whatever is stacked above it. Check `deadline` before sampling and while
+    /// waiting; a wake clock that pauses during sleep cannot stand in for its stamp.
     ///
     /// # Errors
     /// `WindowChanged` when the window's identity, frame or DPI moved or it closed, another
@@ -85,26 +93,38 @@ pub(crate) trait Capturer {
     fn capture_window(
         &mut self,
         _target: &Target,
-        _until: Instant,
+        _deadline: Deadline,
         _frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
         Err(Failure::Fault(NO_WINDOW_CAPTURE))
     }
 
     /// Fills `frame` through [`RawFrame::begin`] with one frame of the monitor nearest `point`,
-    /// pointer included, drawn at least one compositor redraw after `excluded`: the
-    /// performance-counter stamp taken once Kumochi's windows were kept out of capture. It
-    /// starts nothing at or after `until`, and returns the monitor's physical bounds.
+    /// pointer included. It uses the same deadline checks as a window capture and returns the
+    /// monitor's physical bounds. `excluded` is the stamp the shell took once Kumochi's windows
+    /// were kept out of capture, and `shell` is the connected shell's process. How a platform
+    /// keeps Kumochi out of the frame differs:
+    ///
+    /// - Windows: the frame must be drawn at least one compositor redraw after `excluded`, a
+    ///   performance-counter stamp. `shell` is ignored.
+    /// - macOS (built, not active while the Mac worker route is closed): `excluded` must be
+    ///   nonzero, and the frame comes through a content filter that excludes exactly the
+    ///   application whose process is `shell`. When that process can't be identified or the
+    ///   filter can't be built exactly, the capture refuses `Excluded` before any screenshot.
+    ///   The screenshot is requested only after the stamp, but Apple doesn't document when a
+    ///   one-shot screenshot samples, so that ordering alone doesn't prove the frame was composed
+    ///   after the stamp.
     ///
     /// # Errors
-    /// `Expired` for a zero stamp or when no frame drawn late enough arrived by `until`,
-    /// `DisplayChanged` when the monitor's geometry moved, a numeric fault, or `Retire` when it
-    /// can't show its capture stopped.
+    /// `Expired` for a zero exclusion stamp or, on Windows, when no frame drawn late enough
+    /// arrived in time; `Excluded` on macOS as above; `DisplayChanged` when the monitor's
+    /// geometry moved; a numeric fault; or `Retire` when it can't show its capture stopped.
     fn capture_display(
         &mut self,
         _point: PhysicalPoint,
+        _shell: u32,
         _excluded: u64,
-        _until: Instant,
+        _deadline: Deadline,
         _frame: &mut RawFrame,
     ) -> Result<(Acquired, PhysicalRect), Failure> {
         Err(Failure::Fault(NO_WINDOW_CAPTURE))
@@ -170,6 +190,39 @@ struct Held {
     ink: Vec<PhysicalPoint>,
 }
 
+/// The earlier of the local ticket limit and the stamped grant. Only the local bound wakes waits.
+#[derive(Clone, Copy)]
+pub(crate) struct Deadline {
+    pub(crate) until: Instant,
+    stamp: u64,
+    left_until: fn(u64) -> Option<Duration>,
+}
+
+impl Deadline {
+    pub(crate) fn new(until: Instant, stamp: u64, left_until: fn(u64) -> Option<Duration>) -> Self {
+        Self {
+            until,
+            stamp,
+            left_until,
+        }
+    }
+
+    pub(crate) fn tighten(self, now: Instant) -> Option<Self> {
+        if now >= self.until {
+            return None;
+        }
+        // Read the stamp's clock after the wake clock, so the local bound never extends the grant.
+        let left = (self.left_until)(self.stamp)?;
+        if left.is_zero() {
+            return None;
+        }
+        Some(Self {
+            until: now + left.min(self.until.duration_since(now)),
+            ..self
+        })
+    }
+}
+
 /// The capture state one worker owns on its serve thread.
 pub(super) struct Screen {
     book: TicketBook,
@@ -208,22 +261,20 @@ impl Screen {
         ticket: &TicketWire,
         received: Instant,
         now: &dyn Fn() -> Instant,
-    ) -> Result<Instant, Failure> {
+    ) -> Result<Deadline, Failure> {
         self.frame.invalidate();
         self.held = None;
         self.masks = Arc::new(Mutex::new(MaskSet::new(ticket.capture())));
         self.book.spend(ticket.generation())?;
-        let expires = received + Duration::from_millis(ticket.ttl_ms().into());
-        // Now is read before the counter, so the brain's deadline can only come sooner here.
-        let at = now();
-        let left = (self.left_until)(ticket.deadline_qpc()).ok_or(Refusal::Expired)?;
-        let expires = at
-            .checked_add(left)
-            .map_or(expires, |deadline| deadline.min(expires));
-        if now() >= expires {
-            return Err(Refusal::Expired.into());
-        }
-        Ok(expires)
+        let deadline = Deadline::new(
+            received + Duration::from_millis(ticket.ttl_ms().into()),
+            ticket.deadline_qpc(),
+            self.left_until,
+        );
+        deadline
+            .tighten(now())
+            .filter(|deadline| now() < deadline.until)
+            .ok_or_else(|| Refusal::Expired.into())
     }
 
     /// Commits the frame of `surface`: a display, or the window the walk resolved.
@@ -232,15 +283,18 @@ impl Screen {
         ticket: &TicketWire,
         surface: PhysicalRect,
         received: Instant,
-        expires: Instant,
+        deadline: Deadline,
         now: Instant,
         result: (Acquired, Option<TopWindow>),
     ) -> Result<FrameMeta, Failure> {
         let (acquired, foreground) = result;
-        if acquired.arrived >= expires || now >= expires {
+        let Some(deadline) = deadline
+            .tighten(now)
+            .filter(|cap| acquired.arrived < cap.until)
+        else {
             self.frame.invalidate();
             return Err(Refusal::Expired.into());
-        }
+        };
         let meta = FrameMeta {
             capture: ticket.capture(),
             display: surface,
@@ -256,7 +310,7 @@ impl Screen {
         self.frame.commit(meta)?;
         self.held = Some(Held {
             capture: meta.capture,
-            expires,
+            expires: deadline.until,
             walk_by: acquired.arrived + WALK_WINDOW,
             foreground,
             spent: false,

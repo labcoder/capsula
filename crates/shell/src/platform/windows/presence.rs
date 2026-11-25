@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use async_channel::Sender;
 use kumochi_protocol::constants::{FOCUS_INPUT_MARKER, OBJECT_PREFIX};
-use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
@@ -54,10 +54,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, PCWSTR, w};
 
 use super::hit_mask::{HitMask, MaskUpdate};
-use super::keyboard::{self, Deliver, EscapeHotkey, Keys};
+use super::keyboard::{self, EscapeHotkey, Keys};
 use super::observer::{self, Observe, ProxyHandle};
-use crate::platform::host::{HostChange, WatchGen};
+use crate::platform::Deliver;
 use crate::platform::input::{self, Button};
+pub(crate) use crate::platform::{PresenceError, PresenceEvent, PresenceLabels, PresenceSurface};
 
 /// The tray's callback message to the proxy window.
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -69,109 +70,6 @@ const HOVER_SUBCLASS_ID: usize = 0xca5;
 const RETRY_COMMAND: usize = 10;
 /// See [`RETRY_COMMAND`].
 const QUIT_COMMAND: usize = 11;
-
-/// What the presence surfaces tell the UI thread.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PresenceEvent {
-    ShowStatus,
-    DockPressed {
-        qpc: i64,
-    },
-    /// The pointer entered or left the proxy or a presence window; ask `cursor_position`.
-    /// `entered_qpc` is the counter when the entering move was dispatched, `None` on leave.
-    PointerChanged {
-        entered_qpc: Option<i64>,
-    },
-    /// The user picked a dock position in the tray menu, an index into `positions`.
-    Position(usize),
-    /// The user picked Retry in the tray menu.
-    Retry,
-    /// A panel close request hides the panel without quitting the shell.
-    DismissPanel,
-    /// Esc reached Kumochi: the global hotkey, a focused panel, or the Stop fallback.
-    Escape,
-    /// The user picked Quit in the tray menu.
-    Quit,
-    /// `--gate-observer` only: the harness asked for one dock repaint.
-    Repaint,
-    /// A presence window lost mouse capture, stamped `seq` in the UI thread's input sequence.
-    /// `released` is the button whose forwarded release caused it; `None` is a cancel mode or a
-    /// capture taken from outside.
-    CaptureLost {
-        seq: u64,
-        released: Option<Button>,
-    },
-    /// The outermost button release returned while a drained capture loss waited for it.
-    Reconcile,
-    /// A watched perch host changed; `w` is the watch's generation.
-    HostChanged {
-        w: WatchGen,
-        change: HostChange,
-    },
-    /// A screen watch source set its watch's bit. It carries nothing: the presenter reads the
-    /// bit.
-    ScreenWoke,
-}
-
-/// The localized text of the tray icon and its menu.
-#[derive(Clone, Debug)]
-pub(crate) struct PresenceLabels {
-    /// The tray icon's tooltip; Windows shows at most 127 UTF-16 units.
-    pub(crate) tooltip: String,
-    /// The title of the submenu that holds `positions`.
-    pub(crate) position_menu: String,
-    /// The nine dock positions, in the order `PresenceEvent::Position` indexes.
-    pub(crate) positions: [String; 9],
-    /// The Retry item.
-    pub(crate) retry: String,
-    /// The Quit item.
-    pub(crate) quit: String,
-}
-
-/// Why a presence surface couldn't be set up or moved.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum PresenceError {
-    /// GPUI gave no Win32 handle.
-    #[error("no Win32 window handle")]
-    NoHandle(#[from] HandleError),
-    /// The handle wasn't a Win32 one.
-    #[error("not a Win32 window")]
-    NotWin32,
-    /// A Win32 call failed.
-    #[error("a Win32 call failed")]
-    Os(#[from] windows::core::Error),
-    /// The hover subclass couldn't be installed.
-    #[error("can't subclass the window")]
-    Subclass,
-    /// The shell refused the tray icon.
-    #[error("the tray refused the icon")]
-    Tray,
-    /// Raw Input was started twice.
-    #[error("the keyboard is already armed")]
-    KeyboardArmed,
-    #[error("the Escape lease is unavailable")]
-    EscapeLease,
-    /// Session changes can't be watched, so a lock could leave keys held.
-    #[error("can't watch session changes")]
-    SessionWatch(#[source] windows::core::Error),
-    /// Desktop switches can't be watched, so the secure desktop could leave keys held.
-    #[error("can't watch desktop switches")]
-    DesktopWatch,
-    /// Windows kept the current foreground window.
-    #[error("Windows refused to activate the window")]
-    Activate,
-    /// The hit mask was empty, couldn't be allocated, or was smaller than the proxy.
-    #[error("the hit mask doesn't fit the proxy")]
-    MaskSize,
-    /// A frame id didn't fit a message parameter.
-    #[error("the frame id doesn't fit a message")]
-    FrameId,
-    #[error("no selection surface is bound")]
-    SelectionSurface,
-    /// A perch host's watch couldn't be installed, or two are already alive.
-    #[error("can't watch the host window")]
-    HostWatch,
-}
 
 /// Turns pointer moves into one `PointerChanged` per enter and per leave.
 #[derive(Debug)]
@@ -570,15 +468,6 @@ impl Drop for PresenceNative {
             }
         }
     }
-}
-
-/// Whether a GPUI surface paints only, owns status controls, or takes typing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PresenceSurface {
-    Overlay,
-    Panel,
-    /// The only surface Kumochi activates, and only when asked to.
-    Text,
 }
 
 /// Configures a tool window, reporting pointer boundaries on status panels. Overlay and status

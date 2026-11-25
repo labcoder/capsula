@@ -84,7 +84,8 @@ Both histories share pending-operation
 feedback, admitted only after the control queues successfully. App-lifetime request identities
 increase without wrapping and correlate final acknowledgements and refusals even when the
 state/version is unchanged. Welcome advertises the brain incarnation and a connection epoch
-reserved before the rest of the handshake. Every issue frame retains that originating pair.
+reserved from the process-lived `IssueEpochs` counter, separate from the active filing session.
+Every issue frame retains that originating pair.
 The brain checks it before SQL, request-watermark updates or job admission; stale provenance
 ends the connection without sending old request feedback into the replacement. A failed
 handshake also consumes its reserved epoch. A restarted shell can begin its request counter

@@ -11,7 +11,25 @@ pub enum Instance {
     Only,
 }
 
-#[cfg(windows)]
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BridgeConnectError {
+    #[error("can't open or check the bridge pipe")]
+    Io(#[from] std::io::Error),
+    #[cfg_attr(
+        not(windows),
+        expect(
+            dead_code,
+            reason = "only a native pipe can report a server image mismatch"
+        )
+    )]
+    #[error("bridge server image mismatch")]
+    NotOurBrain,
+}
+
+#[cfg_attr(
+    not(windows),
+    expect(dead_code, reason = "only a native pipe can classify a peer")
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ClientRefused {
     Exited,
@@ -30,8 +48,8 @@ mod unsupported {
 
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-    use super::Instance;
-    use crate::platform::ShellProcess;
+    use super::{BridgeConnectError, ClientRefused, Instance};
+    use crate::platform::{Job, ShellProcess};
 
     /// A native server can't exist without a platform pipe adapter.
     #[derive(Debug)]
@@ -39,6 +57,10 @@ mod unsupported {
     pub(crate) type PipeClient = PipeServer;
 
     impl PipeServer {
+        pub(crate) fn disconnect(&self) -> io::Result<()> {
+            match *self {}
+        }
+
         pub(crate) fn connect(&self) -> Ready<io::Result<()>> {
             match *self {}
         }
@@ -78,8 +100,8 @@ mod unsupported {
         Err(io::ErrorKind::Unsupported.into())
     }
 
-    pub(crate) fn open_pipe(_: &str) -> io::Result<PipeClient> {
-        Err(io::ErrorKind::Unsupported.into())
+    pub(crate) fn open_bridge(_: &str, _: &Path) -> Result<PipeClient, BridgeConnectError> {
+        Err(io::Error::from(io::ErrorKind::Unsupported).into())
     }
 
     /// # Errors
@@ -88,11 +110,15 @@ mod unsupported {
         Err(io::ErrorKind::Unsupported.into())
     }
 
-    pub(crate) fn client_image(pipe: &PipeServer) -> io::Result<PathBuf> {
+    pub(crate) fn bridge_peer(
+        pipe: &PipeServer,
+        _: &Job,
+        _: &Path,
+    ) -> Result<std::convert::Infallible, ClientRefused> {
         match *pipe {}
     }
 
-    pub(crate) fn server_image(pipe: &PipeClient) -> io::Result<PathBuf> {
+    pub(crate) fn client_image(pipe: &PipeServer) -> io::Result<PathBuf> {
         match *pipe {}
     }
 
@@ -119,19 +145,20 @@ mod unsupported {
                     io::ErrorKind::Unsupported
                 );
             }
-            assert_eq!(
-                open_pipe("no native transport")
-                    .map(|_| ())
-                    .unwrap_err()
-                    .kind(),
-                io::ErrorKind::Unsupported
-            );
+            let Err(BridgeConnectError::Io(error)) =
+                open_bridge("no native transport", Path::new("expected-image"))
+            else {
+                panic!("an unsupported platform refuses to open the bridge");
+            };
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported);
             assert_eq!(session_id().unwrap_err().kind(), io::ErrorKind::Unsupported);
         }
     }
 }
 
 #[cfg(not(windows))]
-pub(crate) use unsupported::{PipeClient, client_image, open_pipe, server_image, shell_connection};
+pub(crate) use unsupported::{
+    PipeClient, bridge_peer, client_image, open_bridge, shell_connection,
+};
 #[cfg(not(windows))]
 pub use unsupported::{PipeServer, create_owner_only, session_id};

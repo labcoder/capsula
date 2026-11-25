@@ -29,15 +29,13 @@ impl Capturer for Fake {
     fn capture_window(
         &mut self,
         _: &Target,
-        until: Instant,
+        deadline: Deadline,
         frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
         let knobs = &self.0;
         knobs.calls.set(knobs.calls.get() + 1);
         let arrived = knobs.clock.get();
-        if arrived >= until {
-            return Err(Refusal::Expired.into());
-        }
+        deadline.tighten(arrived).ok_or(Refusal::Expired)?;
         let [width, height] = knobs.size.get();
         let bytes = frame.begin(width, height)?;
         if let Some(failure) = knobs.fail.get() {
@@ -213,6 +211,38 @@ fn a_ticket_whose_deadline_cant_be_read_is_refused_and_spent() {
     assert_eq!(rig.take(1, [4, 3], 0), Err(Refusal::Reused.into()));
     assert_eq!(rig.knobs.calls.get(), 0);
     assert_eq!(rig.take(2, [4, 3], 0), Ok(meta(2, [4, 3], 0)));
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn real_clock_admission_refuses_zero_and_due_stamps_but_accepts_a_future_one() {
+    let mut screen = Screen::default();
+    let now = Instant::now;
+    for (index, (stamp, admitted)) in [
+        (0, false),
+        (crate::platform::qpc_at(Duration::ZERO).unwrap(), false),
+        (
+            crate::platform::qpc_at(Duration::from_secs(60)).unwrap(),
+            true,
+        ),
+        (u64::MAX, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let received = now();
+        let ticket = ticket(u64::try_from(index + 1).unwrap(), stamp);
+        match screen.admit(&ticket, received, &now) {
+            Ok(deadline) => {
+                assert!(admitted, "admitted a due or absent stamp");
+                assert_eq!(deadline.until, received + Duration::from_millis(TTL.into()));
+            }
+            Err(error) => {
+                assert!(!admitted, "refused the future stamp: {error:?}");
+                assert_eq!(error, Refusal::Expired.into());
+            }
+        }
+    }
 }
 
 #[test]

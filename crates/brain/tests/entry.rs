@@ -10,7 +10,7 @@ mod scratch;
 
 use std::process::Command;
 
-use kumochi_brain::{MCP_BRIDGE, SCREEN_WORKER, SPEECH_WORKER};
+use kumochi_brain::{MCP_BRIDGE, PARENT_BOUND, SCREEN_WORKER, SPEECH_WORKER};
 use kumochi_protocol::constants::{
     CATALOG_PROVENANCE_ARG, DRAW_CHECK_ARG, IMAGE_CHECK_ARG, IMAGE_DIAGNOSTIC_ARG, MARKS_CHECK_ARG,
 };
@@ -29,18 +29,6 @@ fn direct_logging_child_fixture() {
     let home = std::env::current_dir().unwrap().join("home");
     assert_eq!(std::env::var_os("HOME").as_deref(), Some(home.as_os_str()));
     assert!(!home.exists());
-    #[cfg(target_os = "macos")]
-    {
-        use kumochi_brain::{platform, store};
-        use kumochi_protocol::constants::{ProductIdentity, STORE_FILE};
-
-        let expected = home
-            .join("Library/Application Support")
-            .join(ProductIdentity::ACTIVE.data_dir);
-        assert_eq!(platform::data_dir().as_ref(), Some(&expected));
-        assert_eq!(platform::config_dir().as_ref(), Some(&expected));
-        assert_eq!(store::default_path().unwrap(), expected.join(STORE_FILE));
-    }
     let error = init("refused-entry").expect_err("native logging should refuse");
     assert!(matches!(
         &error,
@@ -106,16 +94,19 @@ fn direct_logging_refuses_before_creating_an_appender() {
 #[test]
 fn native_executable_modes_refuse_without_touching_app_data() {
     let dir = scratch::dir("unsupported-entry");
-    for args in [
-        &[][..],
-        &[MCP_BRIDGE, "0123456789abcdef0123456789abcdef"],
-        &[SCREEN_WORKER],
-        &[SPEECH_WORKER],
-        &[IMAGE_DIAGNOSTIC_ARG],
-        &[IMAGE_CHECK_ARG],
-        &[MARKS_CHECK_ARG],
-        &[DRAW_CHECK_ARG],
-        &[CATALOG_PROVENANCE_ARG],
+    for (args, code) in [
+        (&[][..], 69),
+        (&[MCP_BRIDGE, "0123456789abcdef0123456789abcdef"], 69),
+        (&[SCREEN_WORKER], 69),
+        (&[SPEECH_WORKER], 69),
+        (&[IMAGE_DIAGNOSTIC_ARG], 69),
+        (&[IMAGE_CHECK_ARG], 69),
+        (&[MARKS_CHECK_ARG], 69),
+        (&[DRAW_CHECK_ARG], 69),
+        (&[CATALOG_PROVENANCE_ARG], 69),
+        (&[PARENT_BOUND], 69),
+        (&[PARENT_BOUND, ""], 64),
+        (&[PARENT_BOUND, SCREEN_WORKER], 64),
     ] {
         #[expect(
             clippy::disallowed_methods,
@@ -130,7 +121,7 @@ fn native_executable_modes_refuse_without_touching_app_data() {
             .current_dir(dir.path())
             .output()
             .expect("run the test build of the brain");
-        assert_eq!(child.status.code(), Some(69), "{args:?}");
+        assert_eq!(child.status.code(), Some(code), "{args:?}");
         assert!(child.stdout.is_empty(), "{args:?}");
         assert!(child.stderr.is_empty(), "{args:?}");
         assert_eq!(

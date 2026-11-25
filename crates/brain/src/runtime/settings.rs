@@ -3,7 +3,6 @@
 //! connection: it's still written while no shell is connected and during Quit, and a later
 //! connection only hears the settled settings, never an answer meant for another shell.
 
-#[cfg(any(test, windows))]
 use std::path::Path;
 
 use kumochi_protocol::message::{ControlToShell, ErrorKey, SettingsOp, VoiceView};
@@ -13,7 +12,6 @@ use tokio::task::{JoinError, JoinHandle};
 use super::{Brain, Full, Link, controls::Registration};
 use crate::config::{ConfigError, Pending};
 use crate::connections::github::device::DefaultRepo;
-#[cfg(any(test, windows))]
 use crate::voice::installer::Folder;
 use crate::voice::installer::{Installer, RemoveAnswer};
 
@@ -530,7 +528,6 @@ impl Brain {
     /// deletes nothing. A folder that's already gone counts as deleted. A part whose folder can't
     /// be deleted stays listed with the refusal, so only ordinary cleanup failures can retry.
     /// Blocking is fine: it runs at start-up, before anything is served.
-    #[cfg(any(test, windows))]
     pub(crate) fn finish_removals(&mut self, models: &Path) -> Vec<(VoicePart, Folder)> {
         let mut stuck = Vec::new();
         for part in self.config.removing() {

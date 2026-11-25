@@ -115,6 +115,10 @@ pub const BRIDGE_LOG: &str = "kumochi-bridge";
 /// See [`BRAIN_LOG`].
 pub const SHELL_LOG: &str = "kumochi-shell";
 
+/// The label at the start of every session prologue (`Kumochi session`). Release and Dev share
+/// it: the prologue's channel byte keeps their sessions apart.
+pub const SESSION_LABEL: &str = "Kumochi session";
+
 /// The pipe Claude Code's MCP bridge connects back on, after [`OBJECT_PREFIX`], the session and a
 /// dash, and before the launch's value.
 pub const BRIDGE_PIPE: &str = "claude-bridge";
@@ -128,8 +132,9 @@ pub const CREDENTIAL_SERVICE: &str = ProductIdentity::ACTIVE.credential_service;
 /// Credential Manager service for the rotating instance capability.
 pub const INSTANCE_SERVICE: &str = ProductIdentity::ACTIVE.instance_service;
 
-/// The shell's single-instance lock file, `<SHELL_LOCK>-<session id>.lock` in the [`DATA_DIR`]
-/// folder under `%LOCALAPPDATA%`: one shell per Windows session.
+/// Base name of the shell's single-instance lock file in [`DATA_DIR`].
+/// Windows uses `<SHELL_LOCK>-<session id>.lock` under `%LOCALAPPDATA%`.
+/// macOS uses `<SHELL_LOCK>.lock` under `~/Library/Application Support`.
 pub const SHELL_LOCK: &str = ProductIdentity::ACTIVE.shell_lock;
 
 /// The Credential Manager account under [`INSTANCE_SERVICE`] holding the capability; the

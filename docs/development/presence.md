@@ -1,5 +1,33 @@
 # Presence and native surfaces
 
+On macOS the shell logs through the admitted storage owner, not a filesystem path. Startup
+takes the per-user instance lock first, then starts and installs the logger in that lock's
+storage. The logger and the lock travel together as one admission in the dock's app-wide
+custody, which the Quit action owns rather than the dock view: losing the view never drops
+the logger on the UI thread, and Quit still works without a window. Rollback and Quit must
+close and join the logger off the UI thread before releasing that lock: both run the one
+release, which drops the admission on the background executor (after the link finishes, once
+the dock opened) and only then removes the window and quits. Quits that AppKit starts itself
+(the Dock menu, logout) reach the same custody through GPUI's opt-in termination negotiation,
+and every request gets an answer: before the dock opens it is refused; while the admission is
+live it starts the release, or joins the one under way, and is approved after it; once the
+release has finished it is approved at once. A request approved that way ends the app by itself.
+For its own quit after the release, the app goes through GPUI's platform quit rather than
+`cx.quit()`, because GPUI sends that one from a main-queue block where a reply queued behind the
+block could never arrive. The platform approves later requests
+ahead, so they answer Now, leaves a request already in flight to end the app, waits for a
+refusal already queued to return, and asks AppKit itself only when it can answer Now.
+The backend preserves terminal
+storage-admission refusals; ordinary I/O failures remain best effort. The Windows logger is
+unchanged.
+
+Known limits on macOS:
+
+- Refusals before the logger starts (a missing or unsafe support folder, a failed lock or
+  logger start) exit without a log line.
+- A second shell finds the lock held and exits before it would start logging, so it leaves
+  no log line either.
+
 Overlay hit testing belongs to the presenter's `OverlayOwner`, not to a view. The native
 `OverlayWindows` adapter binds the dock paint window and body proxy in the Dock layer,
 panels in Panels, and every newly created drawing host in Overlay before it can be shown.
@@ -29,6 +57,44 @@ The shell owns the dock, status panel, typing panel and tray on GPUI's UI thread
 and the keyboard is armed before the brain link starts connecting; [input.md](input.md) covers
 the shortcut, the typing panel and Esc. A link failure shows in the status panel; Retry never sends
 the previous input again.
+
+The shared disconnected dock is staged separately from the connected presence owner. It opens
+one bounded, opaque normal GPUI window on the primary display, consumes the workerless link's
+initial Failed event before painting, and offers only Quit. GPUI delivers local button input;
+the button, app menu and native window close share the same one-time link teardown. This surface
+has no global keyboard, retry, capture or background link, and is not topmost or click-through.
+The ordinary macOS launcher selects this route and opens the window only after the instance
+lock is taken and logging has started in its storage.
+The local route also refuses connected diagnostic launch modes.
+
+If the admitted local dock cannot open, the launch callback records the error synchronously
+and runs the same release as Quit, so the logger closes and the instance lock is released off
+the UI thread before GPUI quits. A successful open keeps the admission for the app lifetime.
+AppKit termination does not return a caller-selected process status through GPUI; a failure
+status after native termination requires a separately validated native boundary.
+
+The connected presence requires native desktop geometry before opening any of its windows.
+Its Win32 backend still supplies physical work area and client origin and moves, shows, and hides
+windows without activation. Platforms without that backend refuse these operations; the local
+disconnected window uses GPUI's logical visible bounds and does not cross this boundary.
+Connected overlay bindings also require an admitted native owner before allocating windows.
+The local route never constructs that owner and does not bind overlay hit regions.
+Legacy panel activation similarly requires a native foreground backend; there is no placeholder
+receipt for restoring focus. The local window follows GPUI's ordinary focus behavior.
+The tray, proxy, global keys, host watch, and capture exclusion require the connected native
+backend. The disconnected route installs none of them. Shared input dispatch uses the native
+counter when available and rejects a held-screen release without it, before acquiring exclusion.
+
+The optional gate observer and input diagnostics require the Windows QPC backend before
+opening an output file. A normal launch requests neither, and an unsupported target cannot
+substitute a portable clock or emit native timing receipts.
+
+The shell's GPUI tests can run the connected presence's shared reducers on macOS without
+starting the connected desktop. Their detached owner uses GPUI test windows, a fixture work
+area and input stamp, and an in-memory talk-Escape lease. It cannot bind native surfaces
+or supply native capture exclusion. Tests that use Win32 named pipes, Raw Input decoding,
+native overlay order or Windows font shaping stay on Windows, as do the recovery tests'
+measured allocation ceilings. The recovery tests still check the same owner behavior.
 
 The shell and its offline fixtures register `shell::assets::Assets`: GPUI Kit's default
 component bundle plus the `Monitor` icon used for a held picture in history and screen notes.

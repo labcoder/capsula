@@ -32,6 +32,7 @@ mod runtime;
 mod scratch;
 pub mod screen;
 pub mod speech;
+mod startup;
 pub mod store;
 mod supervise;
 mod tap;
@@ -51,9 +52,6 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use kumochi_protocol::BUILD_ID;
-use kumochi_protocol::constants::SHELL_EXE;
-use kumochi_protocol::message::{CAPABILITY_LEN, Capability, Incarnation};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
@@ -67,6 +65,9 @@ use crate::engines::responses::{AccessHandle, Responses};
 use crate::ipc::{Identity, Pipes, Session};
 use crate::platform::Job;
 use crate::runtime::{Brain, Selected};
+use crate::startup::run_admitted;
+
+const STARTUP_LOG_TARGET: &str = module_path!();
 
 /// How long a relaunched shell the brain can't watch gets to connect: past the shell's own
 /// 10 s connect deadline, and short enough that three such losses plus the backoff still fit
@@ -80,6 +81,9 @@ pub const SPEECH_WORKER: &str = "--speech";
 
 /// The argument that starts `kumochid` as Claude Code's MCP bridge, before the launch value.
 pub const MCP_BRIDGE: &str = "--mcp-bridge";
+
+/// The sole argument for a brain launched under the shell's lifetime.
+pub const PARENT_BOUND: &str = "--parent-bound";
 
 /// Why the brain stopped with an error.
 #[derive(Debug, thiserror::Error)]
@@ -190,7 +194,7 @@ fn end_runtime(
 pub fn run() -> impl Future<Output = Result<(), BrainError>> {
     use kumochi_protocol::constants::{LIVE_CHATGPT_TEXT_ENV, ProductIdentity};
 
-    let admission = platform::require_native_runtime()
+    let admission = platform::require_mode(platform::Mode::Detached)
         .map_err(BrainError::NativeRuntime)
         .and_then(|()| {
             let mode = std::env::var(LIVE_CHATGPT_TEXT_ENV).ok();
@@ -201,6 +205,15 @@ pub fn run() -> impl Future<Output = Result<(), BrainError>> {
         #[cfg(test)]
         || {},
     )
+}
+
+/// Refuses parent-bound startup before opening any resources.
+///
+/// # Errors
+/// This build always returns `Unsupported`, including under Gate identity.
+pub fn run_parent_bound() -> Result<(), BrainError> {
+    platform::require_mode(platform::Mode::ParentBound).map_err(BrainError::NativeRuntime)?;
+    Err(BrainError::NativeRuntime(io::ErrorKind::Unsupported.into()))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -252,157 +265,6 @@ fn draw_admission(
     })
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "keeps the startup and shutdown order of the admitted brain's resources in one place"
-)]
-async fn run_admitted(
-    admission: Result<StartMode, BrainError>,
-    #[cfg(test)] starting: impl FnOnce(),
-) -> Result<(), BrainError> {
-    let mode = admission?;
-    #[cfg(test)]
-    starting();
-    let session = platform::session_id()?;
-    // The pipes come first: a second brain fails here, before it touches anything else.
-    let mut pipes = Pipes::create(session)?;
-    let exe = std::env::current_exe()?;
-    #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
-    Observation::prepare(&exe);
-    #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
-    let replay = (mode == StartMode::Draw).then(draw_engine).transpose()?;
-    #[cfg(not(all(windows, any(debug_assertions, feature = "gate-draw-replay"))))]
-    let replay = {
-        let _ = mode;
-        None
-    };
-    // Before any shell is served, so no run starts ahead of the recovery scan. Blocking is fine:
-    // nothing else runs on the runtime yet.
-    let mut store = store::Store::open(&store::default_path()?)?;
-    let recovered = store.recover()?;
-    tracing::info!(
-        crashed_runs = recovered.crashed_runs,
-        finished_deletions = recovered.finished_deletions,
-        purge_pending = recovered.purge_pending,
-        failed_deletions = recovered.failed_deletions,
-        failed_sends = recovered.failed_sends,
-        unknown_sends = recovered.unknown_sends,
-        "store recovered"
-    );
-    // Recovery created it if it was missing, so its id is below the high water.
-    let main_thread = store.main_thread()?;
-    let high_water = store.high_water()?;
-    let scenes = store.scenes()?;
-    let mut config = config::Config::load(platform::config_dir(), main_thread);
-    #[cfg(all(windows, feature = "gate-draw-replay", not(debug_assertions)))]
-    require_draw_model(&config)?;
-    #[cfg(windows)]
-    let claude_on = config.claude_code_enabled();
-    #[cfg(windows)]
-    tracing::info!(enabled = claude_on, "Claude Code setting");
-    // Before the capability is stored, so its write never overlaps the vault's first reads.
-    let (account, vault_held) = accounts(config.oauth_tuning(), config.token_tuning())?;
-    config.count_in_use(&account.view(), high_water.1);
-    let mut brain = Brain::new(
-        store,
-        main_thread,
-        high_water,
-        scenes,
-        match replay {
-            Some(replay) => replay,
-            None => engine(config.model_tuning())?,
-        },
-        config,
-        account,
-    )
-    .map_err(BrainError::StoreThread)?;
-    #[cfg(windows)]
-    let models = platform::data_dir().map(|data| data.join(kumochi_protocol::voice::MODELS_DIR));
-    #[cfg(windows)]
-    let stuck = models
-        .as_deref()
-        .map(|models| brain.finish_removals(models))
-        .unwrap_or_default();
-    let jobs = std::sync::Arc::new(Job::new().map_err(BrainError::Helpers)?);
-    #[cfg(windows)]
-    {
-        if let Some(models) = models {
-            start_voice(&mut brain, models, &stuck, &exe, &jobs);
-        }
-        let lane = claude_lane(vault_held, &jobs, &exe);
-        brain.attach_claude(match lane {
-            Some(lane) if claude_on => {
-                runtime::claude::Claude::start(lane, runtime::claude::SIGN_IN)
-            }
-            None if claude_on => runtime::claude::Claude::default(),
-            lane => runtime::claude::Claude::turned_off(lane),
-        });
-    }
-    #[cfg(not(windows))]
-    drop(vault_held);
-    start_screen(&mut brain, exe.clone(), Ok(std::sync::Arc::clone(&jobs)));
-    let mut bytes = [0; CAPABILITY_LEN];
-    getrandom::fill(&mut bytes)?;
-    let identity = Identity {
-        capability: Capability::new(bytes),
-        incarnation: Incarnation(getrandom::u64()?),
-        shell_image: exe.with_file_name(SHELL_EXE),
-    };
-    credential::store(session, &identity.capability)?;
-    tracing::info!(incarnation = ?identity.incarnation, build = BUILD_ID, "listening");
-    let ended = serve(&mut pipes, &identity, &mut brain).await;
-    match ended {
-        Ok(Some(deadline)) => {
-            brain.quit(deadline).await;
-        }
-        Ok(None) | Err(_) => brain.close().await,
-    }
-    // Ending the job waits on the processes, so it runs off the async thread.
-    match tokio::task::spawn_blocking(move || jobs.shut_down()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "couldn't end the helpers; closing the job ends them");
-        }
-        Err(error) => tracing::warn!(%error, "ending the helpers panicked"),
-    }
-    if let Err(error) = credential::delete(session) {
-        tracing::warn!(%error, "couldn't delete the instance capability");
-    }
-    ended.map(|_| ()).map_err(BrainError::from)
-}
-
-/// Starts speech input's worker and spoken replies' thread, then voice. A handle that can't start
-/// leaves its part unavailable for the session.
-#[cfg(windows)]
-fn start_voice(
-    brain: &mut Brain,
-    models: PathBuf,
-    stuck: &[(kumochi_protocol::voice::VoicePart, voice::installer::Folder)],
-    exe: &std::path::Path,
-    jobs: &std::sync::Arc<Job>,
-) {
-    use voice::Reports;
-    use voice::stt::SttHandle;
-    use voice::tts::TtsHandle;
-
-    let runtime = tokio::runtime::Handle::current();
-    let natives = exe
-        .parent()
-        .expect("the brain's path names a file in a folder")
-        .to_path_buf();
-    let (stt_reports, stt_heard) = Reports::new();
-    let stt = speech::SpeechSupervisor::start(exe.to_path_buf(), std::sync::Arc::clone(jobs))
-        .and_then(|speech| SttHandle::spawn(runtime.clone(), speech, natives, stt_reports))
-        .inspect_err(|error| tracing::warn!(kind = ?error.kind(), "speech input can't start"))
-        .ok();
-    let (tts_reports, tts_heard) = Reports::new();
-    let tts = TtsHandle::spawn(runtime, tts_reports)
-        .inspect_err(|error| tracing::warn!(kind = ?error.kind(), "spoken replies can't start"))
-        .ok();
-    let fetcher = std::sync::Arc::new(voice::download::Online(models.clone()));
-    brain.attach_voice(models, stuck, (stt, tts), [stt_heard, tts_heard], fetcher);
-}
-
 /// Gives screen holds the brain's one screen worker. One that can't start leaves screen holds
 /// `Unsupported` for the session, the way a voice part that can't start is unavailable.
 fn start_screen(brain: &mut Brain, exe: PathBuf, jobs: io::Result<std::sync::Arc<Job>>) {
@@ -446,53 +308,6 @@ fn accounts(
             .map_err(BrainError::Accounts)?,
         held,
     ))
-}
-
-/// Claude Code's lane on the installed `claude.exe`; none when it can't start.
-#[cfg(windows)]
-fn claude_lane(
-    vault_held: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    jobs: &std::sync::Arc<Job>,
-    brain_exe: &std::path::Path,
-) -> Option<engines::claude_code::lane::Lane> {
-    use engines::claude_code::install::{FindError, locate};
-    use engines::claude_code::lane::{Host, Lane, Program};
-
-    let base = match platform::local_app_data() {
-        Ok(local) => local.join(kumochi_protocol::constants::DATA_DIR),
-        Err(error) => {
-            tracing::warn!(kind = ?error.kind(), "no local data folder for Claude Code");
-            return None;
-        }
-    };
-    if let Err(error) = std::fs::create_dir(&base)
-        && error.kind() != io::ErrorKind::AlreadyExists
-    {
-        tracing::warn!(kind = ?error.kind(), "couldn't make the local data folder for Claude Code");
-        return None;
-    }
-    let host = Host {
-        find: Box::new(|| {
-            let profile = platform::profile_dir().map_err(|_| FindError::NotFound)?;
-            locate(&profile).map(|exe| Program {
-                exe,
-                prefix: Vec::new(),
-            })
-        }),
-        base,
-        vault_held,
-        managed: Box::new(platform::managed_presence),
-        brain_job: std::sync::Arc::clone(jobs),
-        console: platform::Stdio::Console,
-        terminate: Job::terminate,
-        brain_exe: brain_exe.to_owned(),
-        runtime: tokio::runtime::Handle::current(),
-    };
-    Lane::start(host)
-        .inspect_err(
-            |error| tracing::warn!(kind = ?error.kind(), "Claude Code's lane didn't start"),
-        )
-        .ok()
 }
 
 #[cfg(all(
@@ -586,10 +401,22 @@ async fn native_library_entries_return_unsupported() {
         bridge::serve("not a launch id"),
         Err(bridge::BridgeError::NativeRuntime(error)) if error.kind() == io::ErrorKind::Unsupported
     ));
+    for serve in [screen::serve, speech::serve] {
+        assert!(matches!(
+            serve(),
+            Err(kumochi_protocol::frame::FrameError::Io(error))
+                if error.kind() == io::ErrorKind::Unsupported
+        ));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn parent_bound_library_entry_always_refuses() {
+    assert!(!platform::supports(platform::Mode::ParentBound));
     assert!(matches!(
-        screen::serve(),
-        Err(kumochi_protocol::frame::FrameError::Io(error))
-            if error.kind() == io::ErrorKind::Unsupported
+        run_parent_bound(),
+        Err(BrainError::NativeRuntime(error)) if error.kind() == io::ErrorKind::Unsupported
     ));
 }
 

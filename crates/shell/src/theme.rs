@@ -6,7 +6,7 @@ use gpui_kit::App;
 use gpui_kit::component::Theme;
 
 /// Installs the shell palette after `gpui_kit::init`, preserving the current mode.
-pub(crate) fn init(cx: &mut App) {
+pub fn init(cx: &mut App) {
     Theme::update(cx, |theme| {
         let light = &mut Rc::make_mut(&mut theme.light_theme).colors;
         light.danger = Some("#B91C1C".into());

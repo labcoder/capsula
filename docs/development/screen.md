@@ -150,14 +150,31 @@ never cross the pipe**. Only the hold's seal exports one image (below).
 - **Authority.** `TicketWire` can only be built inside the brain; the hold client mints one per
   capture. The shell's exclusion lease keeps Kumochi's windows out of the frame; the worker can't
   prove that a lease is live.
-- **Local validity.** The worker starts the ticket's `ttl_ms` at receipt on its own monotonic
-  clock, and ends it no later than `deadline_qpc`, the brain's deadline as a performance-counter
-  stamp, so a ticket held up in the brain's writer, the pipe or the worker's queue gets no extra
-  time. A stamp the worker can't read, or one that isn't later than now, is refused `Expired`. It
-  refuses at exactly `ttl_ms` and accepts a millisecond before, checks again right
-  before starting the capture session, stops waiting at expiry, and discards a frame that
-  completes at or after it. This is a local bound, never a renewed grant: the brain keeps its
-  ticket's original deadline and drops a late reply.
+- **Local validity.** The brain stamps the grant when it first sets the deadline, before the
+  capture task is queued. The worker starts the ticket's `ttl_ms` at receipt on its wake clock,
+  capped by `deadline_qpc`, the authoritative deadline on the platform's shared monotonic clock.
+  A stamp that can't be read or isn't later than now is refused at admission. After admission, the
+  worker rechecks the stamp on waking, before dispatching native capture, and before accepting a
+  frame or returning a tree or sealed image. Expiry takes precedence over a still-current
+  nonfatal capture result, but does not replace an explicit Drop, Retire or supersession or
+  keep a worker alive when native cleanup cannot be proven. The brain rechecks before acting on a
+  held frame and before installing a sealed image; a late reply retires the holder and drops any
+  JPEG through its zero-on-drop owner. Once accepted, an image doesn't expire. Local waits can
+  end sooner, but must not renew the grant or let a pause in the wake clock extend it.
+
+  Windows uses QPC ticks. macOS uses continuous nanoseconds
+  (`clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`), so native and Rosetta processes do not exchange
+  architecture-dependent ticks. A suspend spends the grant. This supports only the ticket clock;
+  macOS doesn't capture yet and doesn't read shell input age. Verify suspend and resume
+  before enabling capture. The producer passes the original stamp and its reader with the local
+  bound to both adapter methods. Windows uses the conservative projection on its QPC-backed
+  `Instant` for the start and wait checks, without changing the draw/exclusion clock. Each retry
+  sleeps for 1 ms and may wake later due to scheduling. An expired wake does not issue another
+  probe, and a result that crosses the deadline during a probe is released. The deadline does not
+  bound wake-up, an in-flight call, or teardown time. An adapter whose wake clock pauses during
+  sleep must recheck the stamp before issuing native sampling and at its waits, including after
+  wake, and stop or retire if it can't establish cleanup. Linux has no shared deadline clock and
+  leaves the stamp zero.
 - **Spent generations.** Every generation at or below the highest one this worker has seen is
   refused (`Reused` when equal, `Stale` when lower), and a failed or refused capture still spends
   its generation. A respawned worker starts empty; the brain's single-use tickets guard across
@@ -181,8 +198,49 @@ never cross the pipe**. Only the hold's seal exports one image (below).
   answers `Fault` and exits, so no capture can keep running. A lost device
   (`DXGI_ERROR_DEVICE_REMOVED`, `_RESET` or `_HUNG`) retires the worker the same way, so the next
   ticket gets a fresh device. Foreign failures are HRESULT codes.
-- **macOS.** `SCScreenshotManager` with `desktopIndependentWindow`, not built yet; other platforms
-  refuse every capture as `Unsupported`.
+- **macOS.** The capturer opens on macOS 14 and later, after capability checks only: the OS version
+  first, then ScreenCaptureKit, loaded at runtime with a handle kept for the process's life, then
+  the classes and selectors its captures use. Anything missing refuses `Unsupported`. The brain
+  doesn't link ScreenCaptureKit, so it still launches on older systems. Opening reads no grant and
+  captures nothing. Display capture is built but not active, because the Mac worker route stays
+  unavailable; window capture isn't built, so it refuses with the trait's defaults. Other
+  platforms refuse every capture as `Unsupported`.
+- **macOS display capture.** It maps every active display onto physical pixels as Quartz points
+  times one integer scale, so DPI is 96 times that scale. Mirroring, a fractional or mixed scale,
+  a fractional rectangle, overlapping displays, or a point on no display refuses `Layout`. In
+  order, it checks the nonzero stamp, the display's size (`Invalid` over 8,192 pixels, before
+  anything is allocated), the shell's process (`Excluded` when it's unknown), then the deadline
+  and the grant (`CGPreflightScreenCaptureAccess`, which never prompts; `NotPermitted` when it
+  says no). The query for shareable content is prepared first and admitted on the deadline right
+  before it's sent. All ScreenCaptureKit work happens inside that query's callback: a stop check,
+  the display matched by ID and its whole frame in points, an exact filter leaving out the one
+  application with the shell's process (`Excluded` when it can't be built), then the grant. The
+  screenshot is prepared, and only then do the deadline check and the `Live` to `Committed`
+  exchange run, right before `captureImage`. That orders Kumochi's own steps; it can't control
+  when the system runs the request. Native work on each side runs inside an autorelease pool.
+  The screenshot's completion and the content callback each finish one phase, and only the
+  second sends the capture thread its one result: an owned `CGImage` or a numeric code.
+  ScreenCaptureKit's user-declined error, matched on its domain and code, refuses
+  `NotPermitted`; no error text is kept. The capture thread waits in slices of at most 20 ms,
+  checking the deadline, whose stamp keeps counting through sleep, after each slice and on
+  every result. At expiry it moves `Live` to `Stopped` if nothing is committed, then waits up to
+  200 ms on the continuous clock for the chain to finish, and takes a result only while that
+  clock still reads inside the grace. Otherwise it answers `Retire`. After the image arrives,
+  the same display must still be under the point with the same bounds, or it refuses
+  `DisplayChanged`, and the deadline is checked once more right before drawing. The image is checked for size and format, then the frame is cleared and the
+  image copied over all of it as premultiplied BGRA. Drawing reports no failure, so only those
+  checks can refuse. The seal accepts only the display that capture sampled, still at the same
+  bounds and DPI, so a same-sized display moved into its place doesn't pass.
+- **Keeping Kumochi out of a display frame differs by platform.** On Windows the frame must be
+  drawn after the exclusion stamp, as described under "Display under a point". On macOS (built,
+  not active) the stamp only has to be nonzero, and the frame comes through a content filter that
+  excludes exactly the application whose process is the connected shell's. When that process can't
+  be identified or the filter can't be built exactly, the capture refuses `Excluded` before any
+  screenshot. The screenshot is requested only after the stamp, but Apple's documentation for
+  `captureImage(contentFilter:configuration:completionHandler:)` says only that it captures a
+  single frame from a stream as an image. It doesn't say when the frame is sampled, so request
+  order alone doesn't prove the frame was composed after the stamp; the native gate has to check
+  that.
 
 ```mermaid
 sequenceDiagram
@@ -359,8 +417,10 @@ frame bounds, which are the frame's origin and size. Capture creates a `Graphics
 the window, checks the same identity again, and requires the item's size to equal the frame
 bounds. The window closing, being minimised, cloaked or capture-protected, or any change to its
 identity, frame or DPI before the pixels are read, refuses with `WindowChanged`; so does an item
-that can't be created for a window that has since changed. Every failed capture zeroes and frees
-the frame before it returns (`RawFrame::fill`).
+that can't be created for a window that has since changed. The worker always attempts to remove the
+window's close handler after a capture attempt. Failure to remove it retires the worker and doesn't
+replace an earlier terminal capture failure. Every failed capture zeroes and frees the frame
+before it returns (`RawFrame::fill`).
 
 `platform::windows::window::tests::native_window_probe` is an ignored native check over sentinel
 windows owned by a second test process (the worker's own windows count as Kumochi's). It covers
@@ -545,8 +605,8 @@ hold pays this way.
 - **`context(owner, point, until)`** mints a fresh capture id and a ticket whose number is above
   every earlier one (a worker refuses a number it has already spent), minted under the fence's
   lock so tickets reach the worker in order, with `ttl_ms` set to the time left until `until`
-  but never over `MAX_TTL`, `until` itself as a performance-counter stamp (`deadline_qpc`, 0
-  when the counter can't be read), a random nonce and the connected shell's pid. It streams
+  but never over `MAX_TTL`, the stamp made when the grant began (`deadline_qpc`, 0 when the
+  counter can't be read), a random nonce and the connected shell's pid. It streams
   `Acquired`, then `Complete`, and returns the `Held` frame with the worker generation that
   holds it.
 - **`seal(held)`** answers only when that same generation replies, for that same key. Anything else is `Lost`: a replacement holds nothing. A `Sealed` for another key is
@@ -633,7 +693,7 @@ windows; after `CaptureDone`, or for any other lease, a lapse is ignored.
 
 | Class | Worker answers |
 |---|---|
-| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition or release too old for its lease, a refused release, or still `Waiting` or `Armed` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
+| `NotReady` | `Expired`, `Unsupported` (which also turns screen holds off until the brain restarts, below), `NotPermitted` and `Layout` (which don't, since a grant or a display change can come later), `Busy`, a fault, a loss or the deadline, a lapsed lease, a recognition or release too old for its lease, a refused release, or still `Waiting` or `Armed` when the words are; `Reused` too, with a `debug_assert`, because only a brain bug sends it |
 | `NothingThere` | `NoWindow` |
 | `CantShare` | `Minimized`, `Cloaked`, `Elevated`, `Protected`, `Excluded` |
 | `Unreadable` | `Ambiguous`, and `Unmasked`, which no worker sends now |

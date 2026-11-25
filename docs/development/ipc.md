@@ -1,5 +1,18 @@
 # The pipes and the handshake
 
+## Greeting authorization
+
+The existing pipe transport checks the capability in constant time before comparing the build,
+on both control and data. A correct capability with a wrong control build still gets
+`BuildMismatch`; any data greeting that fails either check is refused as a wrong capability.
+
+`Hello::session` keeps the same field and tag layout but fills the capability field with 32
+zero bytes. The local transport selects the authorization method; a session-bound greeting must
+come from the authenticated pair's own reader, match the build, and carry only that zero
+placeholder on either leg. A nonzero placeholder is refused without capability fallback.
+The bound greeting type cannot be constructed on any platform yet, so neither shell startup
+nor brain admission selects session authorization.
+
 ## Queued-required session mode (internal)
 
 The shipped shell selects Legacy: control Hello, Welcome, then data Hello, with their
@@ -908,10 +921,12 @@ bounded repository view fits the 64 KiB control cap.
 The correlated Issue, ActionState and IssueRefused shapes retain their existing enum tags
 (25, 18 and 19). This is a paired-build wire change: the exact `BUILD_ID` handshake rejects
 mixed binaries, as for earlier shape changes; there is no independent protocol number.
-Welcome keeps tag 0 and now advertises `issue_epoch` after the brain incarnation. The brain
-reserves that epoch before sending Welcome, even if the remaining handshake fails. The shell
-copies this pair into newly created issue frames; it never rewrites an old frame for a new
-connection. Missing, stale or foreign provenance ends the connection before SQL, client
+Welcome keeps tag 0 and now advertises `issue_epoch` after the brain incarnation. One
+`IssueEpochs` counter lives for the Detached brain process. After the control capability and
+build checks, both modes reserve an epoch before Welcome, even if the data leg later fails.
+Legacy installs it immediately; Queued installs it only after the data leg passes its checks.
+The shell copies this pair into newly created issue frames; it never rewrites an old frame for
+a new connection. Missing, stale or foreign provenance ends the connection before SQL, client
 construction, request-watermark updates or HTTP work. It sends no old correlation into the
 replacement. Transport provenance is constant-size state; it does not prove a human click.
 `Rearm`, `CancelReview` and `IssueReview` are appended variants under the same paired-build rule.
@@ -1100,6 +1115,12 @@ the event body (never the FTS text column), then deserialize the bounded typed l
 do not feed reserialized storage JSON back through the model-record byte cap in `parse_record`.
 
 ## Starting and reconnecting
+
+When no brain transport is admitted, the disconnected link entry sends `Failed` on the
+same event channel without starting a worker or acquiring a session. It refuses text and
+voice admission. Retry reports unavailable and cannot start an attempt, and Quit uses
+the shared one-shot guard without waiting for a worker. The Windows connection entry
+does not use this mode.
 
 One shell runs per Windows session. It holds an exclusive `std::fs::File::try_lock` on the empty
 file `<SHELL_LOCK>-<session id>.lock` in the data folder for its whole life, and a second shell

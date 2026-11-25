@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/audio", "crates/protocol", "crates/scene", "crates/brain", "crates/shell-core", "crates/shell", "xtask"]
+members = ["crates/audio", "crates/protocol", "crates/scene", "crates/brain", "crates/shell-core", "crates/shell", "crates/storage", "crates/session", "xtask"]
 # Vendored third-party crates build as dependencies, not members, so workspace lints skip them.
 exclude = ["vendor"]
 
@@ -110,3 +110,4 @@ gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", rev = "99576
 # GPUI's Windows backend with the idle-wake fix (docs/development/gpui-patch.md). It must match
 # the gpui-pre version gpui-kit resolves; `cargo xtask check-vendor` fails CI when it stops applying.
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }

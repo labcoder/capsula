@@ -219,6 +219,7 @@ pub(crate) struct Brain {
     config_write: Option<settings::Write>,
     /// The account system; its credential work runs on its own thread.
     account: Accounts,
+    issue_epochs: issues::IssueEpochs,
     filing: issues::Filing,
     /// Claude Code's connection; its calls run on its own lane.
     claude: claude::Claude,
@@ -253,6 +254,7 @@ pub(crate) enum Seen {
     /// The brain handled a control input and applied its effects.
     ControlApplied,
     FirstPcmExpired,
+    HoldPcmBuffered,
     /// A page reply landed while the data queue was full and waits for room.
     PageHeld,
     /// Another pipe ended first, and the control reader's grace began.
@@ -288,9 +290,8 @@ impl Brain {
     ) -> std::io::Result<Self> {
         account.github.restore_default(config.github_default());
         account.github.tuning = config.github_tuning();
-        account
-            .connections
-            .configure_transport(config.model_tuning());
+        let connections = &mut account.connections;
+        connections.configure_transport(config.model_tuning());
         #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
         let (engine, access, fixture) = match engine {
             #[cfg(any(test, debug_assertions))]
@@ -365,6 +366,7 @@ impl Brain {
             settings_ops: VecDeque::new(),
             config_write: None,
             account,
+            issue_epochs: issues::IssueEpochs::default(),
             filing: issues::Filing::new(),
             claude: claude::Claude::default(),
             #[cfg(test)]
@@ -454,6 +456,14 @@ impl Brain {
         if matches!(input, Input::Deleted { .. }) {
             self.observer.send(Seen::DeleteAnswered).ok();
         }
+    }
+
+    #[cfg(all(test, windows))]
+    pub(crate) fn take_store_close_receipt(&mut self) -> tokio::sync::oneshot::Receiver<()> {
+        self.store
+            .as_mut()
+            .expect("store started")
+            .take_close_receipt()
     }
 
     /// Shuts down after an accepted Quit, all by one absolute `deadline`: ends the current run

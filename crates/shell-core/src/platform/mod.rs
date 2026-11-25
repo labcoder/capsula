@@ -5,6 +5,8 @@ pub mod clipboard;
 pub mod credential;
 pub mod host;
 pub mod input;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod microphone;
 pub mod screen_watch;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
@@ -31,6 +33,24 @@ pub(crate) use windows::pipe::test_pair;
 pub(crate) use windows::{PipeClient, launch_detached};
 #[cfg(windows)]
 pub use windows::{data_dir, session_id};
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn instance_lock_path() -> Result<std::path::PathBuf, crate::instance::SessionLockError>
+{
+    use crate::instance::SessionLockError;
+
+    #[cfg(windows)]
+    {
+        let data_dir = data_dir().ok_or(SessionLockError::DataDirectory)?;
+        let session = session_id().map_err(SessionLockError::Session)?;
+        let name = kumochi_protocol::constants::SHELL_LOCK;
+        Ok(data_dir.join(format!("{name}-{session}.lock")))
+    }
+    #[cfg(not(windows))]
+    {
+        Err(SessionLockError::Unsupported)
+    }
+}
 
 pub(crate) fn logging_data_dir() -> Result<std::path::PathBuf, crate::logging::LoggingError> {
     #[cfg(windows)]

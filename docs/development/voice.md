@@ -92,7 +92,8 @@ startup never resumes anything automatically. Its only caller is the installer's
 through the `download::Fetch` seam, which makes a `Downloader` for each fetch, so start-up builds
 none. Installing, cancelling, removing and start-up are in [The installer](#the-installer).
 
-The separate HTTPS client uses the OS trust roots, no proxy, credentials, cookies, Referer or
+The downloader shares the platform TLS config factory but doesn't emit the account client's
+trust diagnostics. Its separate HTTPS client uses no proxy, credentials, cookies, Referer or
 compression, and `Accept-Encoding: identity`. The first URL and up to five redirects must use
 port 443 without userinfo, on `huggingface.co` or a subdomain of `hf.co`; IP literals are refused.
 Signed CDN queries never enter diagnostics.
@@ -791,7 +792,8 @@ The installer must not put a VC++ runtime beside `kumochid.exe`: the brain impor
 worker's supervisor (`supervise`; see [screen.md](screen.md) and [processes.md](processes.md)). A
 native exception, abort, access violation or hang costs that process. The brain gets a
 content-free `WorkerLost` and keeps running. The model goes with the worker: a respawned worker has
-nothing loaded until the next load.
+nothing loaded until the next load. The worker and parent share the request, reply and
+content-free native error types in `platform::speech_wire`.
 
 The Linux test host builds the shared protocol and parent-side supervisor, but has no native
 speech worker, recognizer or voice runtime. Its native entry refuses before dispatching

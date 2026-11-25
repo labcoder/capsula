@@ -35,7 +35,7 @@ use super::{
     unchanged,
 };
 use crate::platform::windows::capture::screen_capturer;
-use crate::screen::{CaptureId, Capturer, Failure, FrameMeta, RawFrame, Refusal, Target};
+use crate::screen::{CaptureId, Capturer, Deadline, Failure, FrameMeta, RawFrame, Refusal, Target};
 
 fn eligible() -> Facts {
     Facts {
@@ -817,7 +817,10 @@ fn pixel(frame: &RawFrame, target: &Target, [x, y]: [i32; 2]) -> [u8; 3] {
 
 fn at(capturer: &mut Box<dyn Capturer>, point: PhysicalPoint) -> (Result<Target, Refusal>, u128) {
     let start = Instant::now();
-    let target = capturer.pointer_window(point, 0);
+    let deadline = Deadline::new(start + Duration::from_secs(2), 1, |_| {
+        Some(Duration::from_secs(2))
+    });
+    let target = capturer.pointer_window(point, 0, deadline);
     (target, start.elapsed().as_millis())
 }
 
@@ -828,7 +831,10 @@ fn grab(
 ) -> (Result<(), Failure>, u128) {
     let start = Instant::now();
     let until = Instant::now() + Duration::from_secs(2);
-    let acquired = capturer.capture_window(target, until, frame);
+    let stamp =
+        crate::platform::windows::qpc_at(until).expect("the capture deadline can be stamped");
+    let deadline = Deadline::new(until, stamp, crate::platform::qpc_left);
+    let acquired = capturer.capture_window(target, deadline, frame);
     (acquired.map(|_| ()), start.elapsed().as_millis())
 }
 

@@ -6,12 +6,12 @@ use gpui_kit::App;
 #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
 use kumochi_protocol::constants::ProductIdentity;
 use kumochi_protocol::message::{MAX_VISIBLE_SCENES, SceneId};
+use kumochi_shell::QpcClock;
 use kumochi_shell_core::presenter::{DrawKey, DrawTiming, Presenter};
 
 #[cfg(any(debug_assertions, all(windows, feature = "gate-draw-replay")))]
 use super::super::Launch;
 use super::{Observer, Record, Shared};
-use crate::platform;
 
 type Observation = (SceneId, u64, u32);
 type Observations = [Option<Observation>; MAX_VISIBLE_SCENES];
@@ -124,20 +124,21 @@ impl Observer {
     pub(in crate::presence) fn observe_draw_timing(&self, presenter: &mut Presenter) {
         if self.shared.draw_timing.is_some() {
             let shared = Rc::clone(&self.shared);
-            presenter.observe_draw_timing(move |event| shared.record_draw_timing(event));
+            let clock = self.clock;
+            presenter.observe_draw_timing(move |event| shared.record_draw_timing(event, clock));
         }
     }
 }
 
 impl Shared {
-    fn record_draw_timing(&self, event: DrawTiming) {
+    fn record_draw_timing(&self, event: DrawTiming, clock: QpcClock) {
         if !self.active.get() {
             return;
         }
         let record = match event {
             DrawTiming::Ready(key) => DrawRecord::Ready {
                 key,
-                qpc: platform::performance_counter(),
+                qpc: clock.stamp(),
             },
             DrawTiming::Active {
                 key,
@@ -146,7 +147,7 @@ impl Shared {
                 narrated,
             } => DrawRecord::Active {
                 key,
-                qpc: platform::performance_counter(),
+                qpc: clock.stamp(),
                 segment_ms,
                 entrance_ms,
                 narrated,
@@ -170,11 +171,12 @@ pub(in crate::presence) fn overlay_painted(cx: &App, before: &Observations, afte
     if !cx.has_global::<Observer>() {
         return;
     }
-    let shared = &cx.global::<Observer>().shared;
+    let observer = cx.global::<Observer>();
+    let shared = &observer.shared;
     if shared.active.get()
         && let Some(receipts) = &shared.draw_timing
     {
-        receipts.remember(before, after, platform::performance_counter());
+        receipts.remember(before, after, observer.clock.stamp());
     }
 }
 

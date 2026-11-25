@@ -30,7 +30,6 @@ const ONBOARDED: &str = "onboarded";
 const ONBOARDING_FROM: &str = "onboarding_from";
 const MAX_FRAME_RATE: &str = "max_frame_rate";
 const DEFAULT_MODEL: &str = "default_model";
-#[cfg(any(test, windows))]
 const CLAUDE_CODE: &str = "claude_code";
 const GITHUB: &str = "github";
 const DEFAULT_ACCOUNT: &str = "default_account";
@@ -49,8 +48,15 @@ const REMOVING: &str = "removing";
 /// Why a settings change was refused.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
-    /// `%APPDATA%` isn't an absolute path, so the settings have no home.
-    #[error("%APPDATA% is not set to an absolute path")]
+    /// The platform did not supply a settings folder candidate.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        error("%APPDATA% is not set to an absolute path")
+    )]
+    #[cfg_attr(
+        target_os = "macos",
+        error("macOS Application Support folder is unavailable")
+    )]
     NoHome,
     /// The file exists but can't be read or parsed; it's never overwritten.
     #[error("config.toml can't be read or parsed")]
@@ -265,7 +271,6 @@ impl Config {
 
     /// `[claude_code] enabled`: on unless it's `false`. Anything else there, or a file that
     /// couldn't be read, turns it off, because it may have said so.
-    #[cfg(any(test, windows))]
     pub(crate) fn claude_code_enabled(&self) -> bool {
         let Ok(table) = &self.table else {
             return false;
@@ -400,13 +405,11 @@ impl Config {
 
     /// The parts `[voice] removing` names, by their folder names: a removal that hasn't
     /// finished. A name this build doesn't know names nothing.
-    #[cfg(any(test, windows))]
     pub(crate) fn removing(&self) -> Vec<VoicePart> {
         self.listed(REMOVING)
     }
 
     /// The parts `[voice] installed` names and `removing` doesn't: a removal wins.
-    #[cfg(any(test, windows))]
     pub(crate) fn installed(&self) -> Vec<VoicePart> {
         let removing = self.removing();
         let mut installed = self.listed(INSTALLED);
@@ -414,7 +417,6 @@ impl Config {
         installed
     }
 
-    #[cfg(any(test, windows))]
     fn listed(&self, key: &str) -> Vec<VoicePart> {
         let names = self
             .table

@@ -538,6 +538,11 @@ impl StoreThread {
         HistoryLink::new(move |request| ops.send(StoreOp::Cutoff(CutoffSlot::new(request))).is_ok())
     }
 
+    #[cfg(all(test, windows))]
+    pub(super) fn take_close_receipt(&mut self) -> oneshot::Receiver<()> {
+        std::mem::replace(&mut self.done, oneshot::channel().1)
+    }
+
     /// Lets the queued operations and reads finish, then closes the store; a running copy stops,
     /// and the purge stays owed. The receiver fires after the store closes and its reply sender
     /// drops, and fails if the thread panicked; nothing blocks on the thread itself.

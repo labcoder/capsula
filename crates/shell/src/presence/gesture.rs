@@ -24,7 +24,7 @@ use crate::input::{
     hold::{Delivery, Fence, InputReason, InputStage, Intent},
 };
 use crate::link::{InputCancel, LinkHandle};
-use crate::platform::{Deliver, EventTime, cursor_position, performance_counter};
+use crate::platform::{Deliver, EventTime, INPUT_COUNTER, cursor_position};
 use crate::strings::Text;
 use kumochi_protocol::geometry::PhysicalPoint;
 use kumochi_protocol::message::{GestureId, ThreadId};
@@ -178,6 +178,8 @@ pub(super) fn deliver(
     let recovered_hold = Cell::new(None);
     let input = Rc::new(Cell::new((0_u64, 0_u64)));
     let gesture = Cell::new(Gesture::default());
+    #[cfg(all(test, not(windows)))]
+    let detached = cx.has_global::<super::test_fixture::WithoutDesktop>();
     let reduce: Rc<Reduce> = Rc::new(move |event, mut at| {
         let (serial, reset) = input.get();
         if matches!(event, Event::Reset | Event::Escape) {
@@ -185,10 +187,12 @@ pub(super) fn deliver(
         } else if matches!(event, Event::Key { .. }) && !at.repeated_modifier {
             input.set((serial.saturating_add(1), reset));
         }
-        let qpc = performance_counter();
+        let qpc = INPUT_COUNTER.and_then(|read| u64::try_from(read()).ok());
+        #[cfg(all(test, not(windows)))]
+        let qpc = qpc.or(detached.then_some(1));
         #[cfg(test)]
-        let qpc = if FAIL_CLOCK.take() { -1 } else { qpc };
-        let Ok(qpc) = u64::try_from(qpc) else {
+        let qpc = if FAIL_CLOCK.take() { None } else { qpc };
+        let Some(qpc) = qpc else {
             tracing::warn!(stage = ?InputStage::Delivery, reason = ?InputReason::ClockUnavailable, "held speech input failed");
             input.set((serial.saturating_add(1), reset.saturating_add(1)));
             if let Some(cancel) = link.revoke_input_for_dispatch() {
@@ -535,7 +539,7 @@ fn apply(
             let (escaping, cancelled) = (pending.escape.clone(), pending.cancelled);
             let escape = escaping.is_some();
             let intents = move |app: &mut App| {
-                #[cfg(test)]
+                #[cfg(all(test, windows))]
                 if continuous && let Some(advance) = BEFORE_DEFERRED_RELEASE.take() {
                     advance();
                 }
@@ -602,6 +606,7 @@ thread_local! {
     pub(super) static FAIL_CLOCK: Cell<bool> = const { Cell::new(false) };
     pub(super) static CLOSE_DELIVERY: Cell<bool> = const { Cell::new(false) };
     static WIRE_CANCEL_BARRIER: Cell<Option<WireCancelBarrier>> = const { Cell::new(None) };
+    #[cfg(windows)]
     static BEFORE_DEFERRED_RELEASE: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
 }
 
@@ -623,12 +628,13 @@ pub(super) fn wire_cancel_before_effects(
     drop(release);
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(super) fn before_deferred_release(advance: impl FnOnce() + 'static) {
     assert!(
         BEFORE_DEFERRED_RELEASE
             .replace(Some(Box::new(advance)))
-            .is_none()
+            .is_none(),
+        "the deferred release hook is already installed"
     );
 }
 

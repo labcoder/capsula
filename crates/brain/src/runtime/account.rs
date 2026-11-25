@@ -222,6 +222,11 @@ pub(crate) struct Accounts {
 }
 
 impl Accounts {
+    #[cfg(all(test, windows))]
+    pub(crate) fn take_release_receipt(&mut self) -> Option<oneshot::Receiver<()>> {
+        self.released.take()
+    }
+
     /// Starts the credential thread and waits, blocking, for its startup load, so the vault is
     /// read before anything is served, as the store is; an early Busy is retried for a moment.
     /// Blocking is fine: nothing else runs on the runtime yet.
