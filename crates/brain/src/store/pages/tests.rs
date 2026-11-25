@@ -466,6 +466,10 @@ fn connection_failure_survives_reopen_on_its_user_event_only() {
         store
             .begin_held_turn(thread, None, run, text, screen)
             .unwrap();
+        assert!(matches!(
+            store.end_run_with_connection_failure(other, run, &[], failure),
+            Err(StoreError::NoRun)
+        ));
         if screen.is_some() {
             store.sent_screen(run).unwrap();
         }
@@ -523,15 +527,9 @@ fn connection_failure_survives_reopen_on_its_user_event_only() {
             state: TaskState::NeedsYou,
         })
     );
-    store
-        .conn
-        .execute(
-            "UPDATE events SET run = 3 WHERE thread = ?1 AND kind = 'user'",
-            [bounded_id(other.0)],
-        )
-        .unwrap();
     let (rows, _) = store.pages().events_page(other, None, 10).unwrap();
     assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].run, Some(RunId(2)));
     assert_eq!(rows[0].kind, PageEventKind::User);
 }
 
