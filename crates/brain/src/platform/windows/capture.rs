@@ -110,6 +110,17 @@ fn fault(error: &windows::core::Error) -> Failure {
     }
 }
 
+fn finish_window_capture(
+    grabbed: Result<Instant, Failure>,
+    unsubscribe: impl FnOnce() -> Result<(), i32>,
+) -> Result<Instant, Failure> {
+    let removed = unsubscribe().map_err(Failure::Retire);
+    if matches!(grabbed, Err(Failure::Retire(_))) {
+        return grabbed;
+    }
+    removed.and(grabbed)
+}
+
 impl Wgc {
     fn new() -> windows::core::Result<Self> {
         let awareness =
@@ -561,9 +572,10 @@ impl Wgc {
                 Ok(())
             }))
             .map_err(|e| fault(&e))?;
-        let grabbed = self.grab(&item, size, extent, Shot::WINDOW, until, frame);
-        item.RemoveClosed(token).map_err(|e| fault(&e))?;
-        let arrived = grabbed?;
+        let arrived = finish_window_capture(
+            self.grab(&item, size, extent, Shot::WINDOW, until, frame),
+            || item.RemoveClosed(token).map_err(|error| error.code().0),
+        )?;
         if closed.load(Ordering::Acquire) || !super::window::unchanged(target) {
             return Err(Refusal::WindowChanged.into());
         }
@@ -610,7 +622,10 @@ mod tests {
     use kumochi_protocol::geometry::PhysicalRect;
     use windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE;
 
-    use super::{copy_rows, drawn_after, fault, not_before, poll, start_after, supported};
+    use super::{
+        copy_rows, drawn_after, fault, finish_window_capture, not_before, poll, start_after,
+        supported,
+    };
     use crate::platform::windows::clock::qpc_hns_up;
     use crate::screen::{CaptureId, Failure, FrameMeta, RawFrame, Refusal};
 
@@ -815,6 +830,31 @@ mod tests {
         assert_eq!(
             not_before(1_000, 10),
             Ok(qpc_hns_up(1_020).expect("counter"))
+        );
+    }
+
+    #[test]
+    fn failed_unsubscription_preserves_terminal_grab_or_retires() {
+        let mut attempted = false;
+        let result = finish_window_capture(Err(Failure::Retire(-7)), || {
+            attempted = true;
+            Err(-9)
+        });
+        assert!(attempted, "even a terminal grab must try to unsubscribe");
+        assert_eq!(result, Err(Failure::Retire(-7)));
+        assert_eq!(
+            finish_window_capture(Err(Refusal::Expired.into()), || Err(-9)),
+            Err(Failure::Retire(-9))
+        );
+    }
+
+    #[test]
+    fn successful_unsubscription_preserves_the_capture_outcome() {
+        let arrived = Instant::now();
+        assert_eq!(finish_window_capture(Ok(arrived), || Ok(())), Ok(arrived));
+        assert_eq!(
+            finish_window_capture(Err(Failure::Fault(-5)), || Ok(())),
+            Err(Failure::Fault(-5))
         );
     }
 
