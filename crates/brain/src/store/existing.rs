@@ -165,10 +165,11 @@ pub(crate) fn between_folder_checks(hook: impl FnOnce() + 'static) {
 }
 
 /// Runs `read` between taking the identity of `db`'s folder and confirming the same identity at
-/// the same path again. A folder renamed or swapped meanwhile makes every name under the path read
-/// as not found, so `read` counts only when the folder held still. `None` when the folder is
-/// missing, a link or reparse point, or changed; a link could redirect the read to another
-/// folder's store.
+/// the same path again, so a lasting rename or replacement of the folder meanwhile, which would
+/// make every name under the path read as not found, is refused. A swap restored before the second
+/// check isn't caught: a stable path through the read is the caller's to guarantee, by holding the
+/// product folder's chain. `None` when the folder is missing, a link or reparse point, or changed;
+/// a link could redirect the read to another folder's store.
 pub(crate) fn in_folder<T>(db: &Path, read: impl FnOnce() -> T) -> Option<T> {
     let dir = db.parent()?;
     let held = folder_id(dir)?;

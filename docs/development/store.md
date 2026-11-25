@@ -538,10 +538,13 @@ returns `LegacyHistory`. Nothing calls it yet. It reads inside `in_folder`: befo
 opened, the store's own folder must be a folder itself, not a link or reparse point, since the
 opener checks only the final file and could otherwise read a store through a redirected folder.
 Its identity (volume and file ID on Windows, device and inode on Unix) is taken then, and the
-same identity must read at the same path after every lookup, or the result is `Unverified`. A
-folder renamed or swapped in between would make every name under the path read as not found,
-which would look like `Missing`. The `SessionLock` holds only its own file, not the folder. A
-held, admitted product folder is still the caller's to establish.
+same identity must read at the same path after every lookup, or the result is `Unverified`. So a
+lasting rename or replacement of the folder in between, which would make every name under the
+path read as not found and look like `Missing`, is refused. A swap restored before the second
+read isn't caught: the `SessionLock` holds only its own file, not the folder, so a stable path
+through the read is the caller's guarantee, which the existing-profile probes give by holding
+the product folder's chain. A held, admitted product folder is likewise the caller's to
+establish.
 
 - `KnownSchema`: the file's `user_version` is one this build knows (1 to the newest), and its
   schema objects (type, name, table and SQL, from `sqlite_schema`) are exactly those the
@@ -562,7 +565,7 @@ held, admitted product folder is still the caller's to establish.
 
 Tests cover every known version, a store the brain itself opened, a `VACUUM INTO` copy like a
 purge's, each refused change, each leftover, a missing folder, a linked folder whether empty
-or holding a known store, and a folder renamed or swapped between the two identity reads, and
+or holding a known store, and a folder renamed or replaced between the two identity reads, and
 check that no file changes.
 
 ## Recovery at start
