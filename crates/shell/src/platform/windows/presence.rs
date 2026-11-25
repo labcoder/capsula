@@ -17,11 +17,11 @@ pub(crate) use capture::{Affinity, exclude_window, restore_window_affinity, wind
 pub(super) use focus::process_of;
 pub(crate) use focus::{Foreground, activate_presence_window, restore_foreground};
 pub(crate) use proxy::PresenceNative;
-pub(super) use window::hwnd_of;
 pub(crate) use window::{
     configure_presence_window, cursor_position, hide_presence_window, place_presence_window,
     work_area,
 };
+pub(super) use window::{foreground_owns_escape, hwnd_of};
 
 /// The performance counter, the clock `PresentMon`'s `--qpc_time` reports in.
 pub(crate) fn performance_counter() -> i64 {

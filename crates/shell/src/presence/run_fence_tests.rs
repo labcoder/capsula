@@ -1252,6 +1252,7 @@ fn queued_escape_stops_audio_before_teardown_when_the_control_queue_is_full(
     assert_eq!(Some(full.len()), full.capacity());
     let press = press.unwrap();
     pipe.handle.output().while_locked(|| {
+        session.stop_playback(RunId(press.run.0 + 1));
         assert_eq!(session.playback_stop_requested(press.run), Some(false));
         owner.update(cx, |owner, cx| {
             owner.native_escape(None, Some(press), cx).expect("Esc");
