@@ -1168,24 +1168,24 @@ const GUARD_HOLDER: &str = "STORAGE_GUARD_HOLDER_ANCHOR";
 struct Holder(std::process::Child);
 
 impl Holder {
-    /// Closes the holder's input and kills it, then waits at most 10 s for it to exit.
-    fn stop(&mut self) -> bool {
-        drop(self.0.stdin.take());
+    /// Kills the holder, leaving its input open, and waits at most 10 s for its exit status.
+    fn kill(&mut self) -> Option<std::process::ExitStatus> {
         self.0.kill().ok();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
-            if matches!(self.0.try_wait(), Ok(Some(_))) {
-                return true;
+            if let Ok(Some(status)) = self.0.try_wait() {
+                return Some(status);
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        false
+        None
     }
 }
 
 impl Drop for Holder {
     fn drop(&mut self) {
-        let exited = self.stop();
+        drop(self.0.stdin.take());
+        let exited = self.kill().is_some();
         if !exited {
             eprintln!("the holder didn't exit");
         }
@@ -1272,19 +1272,17 @@ fn native_setup_guard_is_busy_while_another_process_holds_it() {
         Some(GuardError::Busy),
         "another process holds it"
     );
-    holder.0.kill().expect("kill the holder without releasing");
-    let status = holder.0.wait().expect("reap the holder");
+    let status = holder.kill().expect("the holder exits once killed");
     assert_eq!(
         status.signal(),
         Some(libc::SIGKILL),
         "the holder was killed"
     );
-    drop(
-        anchor
-            .try_setup_guard()
-            .expect("the holder's exit released it"),
+    assert_eq!(
+        within_deadline(move || anchor.try_setup_guard().map(drop)),
+        Ok(()),
+        "the holder's exit released it"
     );
     drop(holder);
-    drop(anchor);
     scratch.cleanup().expect("remove recorded fixture objects");
 }
