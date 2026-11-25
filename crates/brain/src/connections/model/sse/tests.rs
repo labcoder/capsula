@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use super::super::framer::{MAX_EVENT_BYTES, MAX_LINE_BYTES};
 use super::{MAX_STREAM_BYTES, MAX_TEXT_BYTES, Progress, Reader, SseEvent};
-use crate::connections::model::error::{Code, Failure, ProviderError, RejectionOrigin};
+use crate::connections::model::error::{Code, Failure, ProviderError};
 
 const TEXT: &[u8] = include_bytes!("../../../../fixtures/responses/text.sse");
 const CRLF: &[u8] = include_bytes!("../../../../fixtures/responses/crlf.sse");
