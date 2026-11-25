@@ -505,7 +505,8 @@ fn engine(tuning: config::tuning::ModelTuning) -> Result<Selected, BrainError> {
         let fixture = Fixture::parse(&script).map_err(|error| {
             BrainError::Fixture(io::Error::new(io::ErrorKind::InvalidData, error))
         })?;
-        return Ok(Selected::Fixture(Box::new(fixture)));
+        tracing::info!("fixture engine active");
+        return Ok(Selected::DevFixture(Box::new(fixture)));
     }
     let (access, asks) = AccessHandle::new();
     let client = ModelClient::new(Tls::build().map_err(BrainError::Model)?).with_tuning(tuning);
