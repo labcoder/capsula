@@ -1164,15 +1164,43 @@ fn native_product_lookup_creates_nothing_and_the_setup_guard_excludes_other_open
 
 const GUARD_HOLDER: &str = "STORAGE_GUARD_HOLDER_ANCHOR";
 
-/// Kills and reaps the holder process if the test ends early.
+/// The holder process. Dropping it stops it, and outside a panic a holder that won't exit fails.
 struct Holder(std::process::Child);
+
+impl Holder {
+    /// Closes the holder's input and kills it, then waits at most 10 s for it to exit.
+    fn stop(&mut self) -> bool {
+        drop(self.0.stdin.take());
+        self.0.kill().ok();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if matches!(self.0.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+}
 
 impl Drop for Holder {
     fn drop(&mut self) {
-        if self.0.kill().is_ok() {
-            self.0.wait().ok();
+        let exited = self.stop();
+        if !exited {
+            eprintln!("the holder didn't exit");
         }
+        assert!(exited || std::thread::panicking(), "the holder didn't exit");
     }
+}
+
+/// Runs `work` on its own thread and fails if it takes longer than 30 s, so a blocked read or
+/// take ends the test instead of wedging it.
+fn within_deadline<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sent, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sent.send(work()).ok());
+    result
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("finished within the deadline")
 }
 
 /// The child half of the cross-process guard test, spawned only by it with the anchor in
@@ -1230,14 +1258,17 @@ fn native_setup_guard_is_busy_while_another_process_holds_it() {
     );
     let output = holder.0.stdout.take().expect("the holder's piped output");
     assert!(
-        io::BufReader::new(output)
+        within_deadline(move || io::BufReader::new(output)
             .lines()
             .map_while(Result::ok)
-            .any(|line| line == "guard-held"),
-        "the holder took the guard"
+            .any(|line| line == "guard-held")),
+        "the holder reported taking the guard"
     );
     assert_eq!(
-        anchor.try_setup_guard().err(),
+        within_deadline(move || admit_support(&support)
+            .expect("admit the fixture anchor")
+            .try_setup_guard()
+            .err()),
         Some(GuardError::Busy),
         "another process holds it"
     );
