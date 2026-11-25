@@ -4067,6 +4067,7 @@ dependencies = [
  "async-channel",
  "gpui-kit",
  "gpui-pre",
+ "gpui-pre-macos",
  "image",
  "keyring",
  "kumochi-brain",
