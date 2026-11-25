@@ -813,8 +813,19 @@ fn save_seeded_account(scratch: &Scratch, store: &FakeStore, expires_at: u64) {
     assert!(matches!(saved, SaveResult::Committed));
 }
 
+/// Runs the account system through its sign-in's check, which comes before anything is ready.
+pub(crate) async fn prove(accounts: &mut Accounts) {
+    let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
+    assert!(
+        matches!(input, Event::Proof { .. }),
+        "the check answers first"
+    );
+    accounts.handle(input);
+}
+
 /// Asks for the bearer and runs the account system until its refresh is out.
 async fn send_refresh(accounts: &mut Accounts, sent: oneshot::Receiver<()>) {
+    prove(accounts).await;
     let (wait, _) = accounts.access();
     drop(wait);
     // The pending flag, then the sent mark; then the refresh goes out.
@@ -2562,6 +2573,7 @@ async fn a_sign_out_cancels_a_catalog_read_before_its_request_goes_out() {
         Ok(probe)
     });
     let mut accounts = seeded_on(&scratch, &store, factory, LATER);
+    prove(&mut accounts).await;
     timeout(PATIENCE, entered)
         .await
         .expect("in time")
@@ -3237,4 +3249,137 @@ async fn claude_codes_default_waits_for_chatgpt_to_have_no_account() {
     brain.attach_claude(ready_claude(&base).await);
     assert_eq!(brain.repaired_default(), None);
     brain.close().await;
+}
+
+/// An ordinary sign-in is ready only once its check proves it, with no bearer out before then;
+/// a refresh keeps its connection, so it stays ready throughout with no second check.
+#[tokio::test]
+async fn an_ordinary_sign_in_is_ready_once_proved_and_stays_ready_through_a_refresh() {
+    let scratch = Scratch::new("account-proof-refresh");
+    let store = FakeStore::default();
+    let mut accounts = due_account(&scratch, &store, SharedHttp::new(Rotating));
+    assert_eq!(accounts.availability(), Availability::Finding);
+    assert!(accounts.unproved());
+    assert!(
+        !accounts.catalog_read_pending(),
+        "no bearer before the check"
+    );
+    prove(&mut accounts).await;
+    let ready = |accounts: &Accounts| {
+        matches!(accounts.availability(), Availability::Ready(ready)
+            if ready.connection == ConnectionTag(SEEDED))
+    };
+    assert!(ready(&accounts));
+    assert!(!accounts.unproved());
+    assert!(
+        accounts.catalog_read_pending(),
+        "the held catalog read goes"
+    );
+    for _ in 0..8 {
+        if saved_refresh(&scratch, &store).0 == "refresh-new" {
+            break;
+        }
+        let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
+        assert!(!matches!(input, Event::Proof { .. }), "no second check");
+        accounts.handle(input);
+        assert!(ready(&accounts));
+    }
+    assert_eq!(saved_refresh(&scratch, &store).0, "refresh-new");
+    assert_eq!(saved_connection(&scratch, &store), SEEDED);
+    accounts.close(Instant::now(), Instant::now()).await;
+}
+
+/// An unproved sign-in isn't ready and gets no bearer, and a later answer can't lift that:
+/// a failure stays failed.
+#[tokio::test]
+async fn an_unproved_sign_in_stays_unready_without_a_bearer() {
+    use crate::connections::vault::Proof;
+
+    let scratch = Scratch::new("account-proof-unproved");
+    let store = FakeStore::default();
+    let mut accounts = seeded(&scratch, &store, Catalog::answering([listing()]), LATER);
+    let unproved = Event::Proof {
+        connection: SEEDED,
+        epoch: 1,
+        proof: Proof::Unproved,
+    };
+    assert!(accounts.handle(unproved).is_empty());
+    let refused = |accounts: &Accounts| {
+        matches!(accounts.availability(), Availability::Unavailable(error)
+            if error.key() == kumochi_protocol::message::ErrorKey::SignInNeeded)
+    };
+    assert!(refused(&accounts));
+    assert!(accounts.unproved());
+    assert!(!accounts.catalog_read_pending());
+    let (answer, denied) = oneshot::channel();
+    accounts.access_for(Some(ConnectionTag(SEEDED)), answer);
+    assert!(matches!(denied.await, Ok(Err(Denied::Unusable))));
+    let late = timeout(PATIENCE, accounts.next()).await.expect("in time");
+    assert!(matches!(
+        late,
+        Event::Proof {
+            proof: Proof::Ordinary,
+            ..
+        }
+    ));
+    accounts.handle(late);
+    assert!(refused(&accounts));
+    assert!(!accounts.catalog_read_pending());
+}
+
+/// A turn that arrives while the sign-in's check is out carries `ChatGPT`'s block into its
+/// first build, so the reader reads no history for it; once the check proves the sign-in, the
+/// next arrival doesn't.
+#[tokio::test]
+async fn a_turn_before_the_proof_arrives_blocked_from_chatgpt_history() {
+    use crate::coordinator::{Effect, Input as CoreInput};
+
+    for proved in [false, true] {
+        let scratch = Scratch::new("account-proof-arrival");
+        let accounts = seeded(
+            &scratch,
+            &FakeStore::default(),
+            Catalog::answering([listing()]),
+            LATER,
+        );
+        let selected = crate::runtime::Selected::Account {
+            engine: Box::new(CountStarts(Arc::new(AtomicU64::new(0)))),
+            asks: mpsc::unbounded_channel().1,
+        };
+        let mut brain = test_support::brain_on(&scratch, selected, accounts);
+        if proved {
+            let event = timeout(PATIENCE, brain.account.next())
+                .await
+                .expect("in time");
+            assert!(matches!(event, Event::Proof { .. }));
+            brain.account_input(event, None).expect("no shell");
+        } else {
+            brain.availability_changed(None).expect("no shell");
+        }
+        let begun = brain
+            .handle(CoreInput::Turn {
+                turn: 1,
+                thread: None,
+                text: "hi".into(),
+            })
+            .expect("a turn is never stale");
+        let run = begun
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::BeginTurn { run, .. }) => Some(*run),
+                _ => None,
+            })
+            .expect("a turn begins");
+        let arrived = brain
+            .handle(CoreInput::TurnStored { run })
+            .expect("current")
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::BuildContext(build)) => Some(build.arrived),
+                _ => None,
+            })
+            .expect("a build starts");
+        assert_eq!(arrived.chatgpt_blocked(), !proved, "proved: {proved}");
+        brain.close().await;
+    }
 }

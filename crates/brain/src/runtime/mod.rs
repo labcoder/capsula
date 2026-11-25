@@ -361,7 +361,7 @@ impl Brain {
         coordinator.configure_drawing(config.drawing_tuning());
         let recovery_clears = coordinator.restore_drawings(drawing_scenes);
         let store = StoreThread::spawn(store, profile, inputs_tx.clone(), schedule)?;
-        account.history.bind(&store.history_link());
+        account.bind_history(&store.history_link());
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         let mut brain = Self {
             crashes: crate::relaunch::Crashes::default(),
@@ -433,21 +433,33 @@ impl Brain {
     }
 
     /// Tells the coordinator whether runs can be answered now; the same answer again changes
-    /// nothing.
+    /// nothing. `ChatGPT` is ready only once its sign-in is proved: an ordinary one plainly, a
+    /// recovered one with its cutoff. Until then a turn that arrives reads no history for it.
     fn availability_changed(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
         #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
-        let now = self
-            .fixture
-            .clone()
-            .map_or_else(|| self.account.availability(), Availability::Ready);
+        let fixture = self.fixture.clone();
         #[cfg(not(any(test, debug_assertions, all(windows, feature = "gate-draw-replay"))))]
-        let now = self.account.availability();
-        let input = Input::Engines(kumochi_protocol::message::ConnectionKind::ChatGpt, now);
+        let fixture: Option<Ready> = None;
+        let chatgpt = kumochi_protocol::message::ConnectionKind::ChatGpt;
+        let (input, unproved) = if let Some(ready) = fixture {
+            (Input::Engines(chatgpt, Availability::Ready(ready)), false)
+        } else {
+            let input = match (self.account.availability(), self.account.recovered()) {
+                (Availability::Ready(ready), Some(boundary)) => {
+                    Input::RecoveredChatGpt { ready, boundary }
+                }
+                (now, _) => Input::Engines(chatgpt, now),
+            };
+            (input, self.account.unproved())
+        };
         self.hold_fence(&input);
         let effects = self
             .coordinator
             .handle(input)
             .expect("availability is never stale");
+        if unproved {
+            self.coordinator.refuse_unproved_chatgpt();
+        }
         self.apply(effects, link)
     }
 

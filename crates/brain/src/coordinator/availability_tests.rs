@@ -1535,3 +1535,42 @@ fn a_turn_after_a_refused_report_arrives_blocked() {
         assert_eq!(arrived.chatgpt_blocked(), blocked);
     }
 }
+
+/// A turn that arrives while `ChatGPT`'s sign-in isn't proved, whether its check is pending or
+/// refused, records the block, so its build reads no history for `ChatGPT`; the same report
+/// without the block doesn't, and a ready report lifts it for the next turn.
+#[test]
+fn a_turn_while_chatgpt_is_unproved_arrives_blocked_until_ready() {
+    let arrival = |core: &mut Coordinator| {
+        core.handle(Input::Turn {
+            turn: 1,
+            thread: None,
+            text: "hi".into(),
+        })
+        .expect("a turn is never stale");
+        core.handle(Input::TurnStored { run: R })
+            .expect("current")
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Store(StoreOp::BuildContext(build)) => Some(build.arrived),
+                _ => None,
+            })
+            .expect("a build starts")
+    };
+    let chatgpt = kumochi_protocol::message::ConnectionKind::ChatGpt;
+    for now in [Availability::Finding, Availability::Unavailable(sign_in())] {
+        for unproved in [true, false] {
+            let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+            core.handle(Input::Engines(chatgpt, now.clone()))
+                .expect("never stale");
+            if unproved {
+                core.refuse_unproved_chatgpt();
+            }
+            assert_eq!(arrival(&mut core).chatgpt_blocked(), unproved, "{now:?}");
+        }
+    }
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+    core.refuse_unproved_chatgpt();
+    core.handle(ready(8, &["m"])).expect("never stale");
+    assert!(!arrival(&mut core).chatgpt_blocked());
+}

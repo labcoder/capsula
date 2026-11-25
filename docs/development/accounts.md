@@ -755,7 +755,8 @@ describes the recorded shape behind both decoders.
 
 `runtime::Accounts` owns the catalog, in memory only. It reads when the account becomes usable
 (`SignedIn`, plan `Enabled`, no recovery but Retry), and again on `Retry` or a new connection
-while no read has succeeded. A queued audio re-pair for a Talk-back change only replays the
+while no read has succeeded. A read waits for the sign-in's [proof](#credential-authority), and
+never goes for an unproved one. A queued audio re-pair for a Talk-back change only replays the
 ChatGPT account view and the cached catalog or its last failure. It doesn't reload a Busy vault
 or start discovery, so the user can still Retry without the audio switch doing it for them.
 One read runs at a time. The catalog has an epoch that moves when the
@@ -1013,6 +1014,31 @@ over; a missing, changed or unreadable row leaves the successor locked, and noth
 replacement cutoff. A refused establishment COMMIT is rolled back, and confirmation reads
 only committed authority state, so a connection still inside a transaction is never established. Only scripted tests
 call this path; ordinary startup still refuses version 4 and there is no browser or runtime ingress.
+
+Every sign-in is proved before `ChatGPT` is ready. Each time the account's connection changes
+(load, sign-in, sign-out; a refresh keeps it), `runtime::Accounts` asks the credential thread
+what that connection may read, under a fresh epoch. It asks only once the store thread has bound
+the vault's history link, so startup can't find a healthy replacement unproved. The vault answers
+**Ordinary** only at the ordinary schema, **Recovered** with its cutoff only for the exact
+established successor under that connection while it isn't signing out, and **Unproved** for
+every other state, a fenced predecessor included. A lost check, whose job was dropped or never
+taken, is Unproved too. An answer for another connection or epoch is dropped before anything
+else in the brain hears it.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Unchecked: connection changes
+    Unchecked --> Ordinary: ordinary schema
+    Unchecked --> Recovered: exact established successor
+    Unchecked --> Unproved: anything else, or a lost check
+    Ordinary --> Unchecked: connection changes
+    Recovered --> Unchecked: connection changes
+    Unproved --> Unchecked: connection changes
+```
+
+While a check is out, `ChatGPT` is Finding. Unproved asks for a sign-in. In both states a turn
+that arrives reads no history for `ChatGPT`, Claude's turns read as before, and no catalog read
+or round gets a bearer. Ordinary publishes plain Ready; Recovered publishes Ready with its cutoff.
 
 `connections::authority` (OSC-233) decides which credential bytes count. On Rez, with two
 processes writing, Credential Manager hid a fresh write for 120 ms and brought back a confirmed

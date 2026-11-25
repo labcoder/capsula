@@ -35,6 +35,7 @@ use crate::connections::oauth::refresh::refresh;
 use crate::connections::oauth::revoke::revoke;
 use crate::connections::oauth::{Authorization, Intent, Launcher, SignIn};
 use crate::connections::records::{Account, Revocable};
+use crate::connections::vault::Proof;
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, Ready};
 use crate::engines::responses::{AccessAsk, Bearer};
@@ -47,6 +48,7 @@ use crate::coordinator::{Input as CoreInput, RefusedKey};
 pub(super) mod github;
 #[cfg(test)]
 pub(super) mod github_tests;
+mod proof;
 #[cfg(test)]
 #[path = "account_task_tests.rs"]
 mod task_tests;
@@ -62,6 +64,11 @@ pub(super) enum Work {
     Key {
         generation: u64,
         op: crate::connections::anthropic::KeyOp,
+    },
+    /// What `connection`'s sign-in is, for [`proof::Proofs`].
+    Proof {
+        connection: u64,
+        reply: oneshot::Sender<Proof>,
     },
 }
 
@@ -101,6 +108,12 @@ pub(crate) enum Event {
     Read {
         epoch: u64,
         result: Result<Listing, Option<UserError>>,
+    },
+    /// The check of `connection` started under `epoch` answered.
+    Proof {
+        connection: u64,
+        epoch: u64,
+        proof: Proof,
     },
 }
 
@@ -225,6 +238,8 @@ pub(crate) struct Accounts {
     /// Random per process, so each sign-in's connection is one no earlier sign-in used.
     salt: u64,
     pub(super) connections: Connections,
+    /// What the current connection's sign-in may read; it isn't ready until that's known.
+    proofs: proof::Proofs,
 }
 
 impl Accounts {
@@ -259,13 +274,18 @@ impl Accounts {
         worker: Worker<S>,
         net: Net,
     ) -> std::io::Result<Self> {
-        Self::spawn_with_github(
+        let mut accounts = Self::spawn_with_github(
             worker,
             net,
             github::GitHub::with_client(None),
             OAuthTuning::default(),
             TokenTuning::default().chatgpt_refresh_lead,
-        )
+        )?;
+        // Its vault has no history link to wait for.
+        accounts
+            .proofs
+            .release(accounts.jobs.as_ref(), &accounts.reads_tx);
+        Ok(accounts)
     }
 
     fn spawn_with_github<S: CredentialStore + 'static>(
@@ -299,6 +319,7 @@ impl Accounts {
             reads,
             salt,
             connections: Connections::default(),
+            proofs: proof::Proofs::held(),
         };
         accounts.apply(started);
         let (done, key) = loaded
@@ -311,6 +332,13 @@ impl Accounts {
             .github
             .start(accounts.jobs.as_ref(), &accounts.reads_tx);
         Ok(accounts)
+    }
+
+    /// Binds the vault's history link to `writer`, the store thread's, and only then checks what
+    /// the current sign-in may read: a replacement's check needs that writer.
+    pub(crate) fn bind_history(&mut self, writer: &crate::connections::vault::HistoryLink) {
+        self.history.bind(writer);
+        self.proofs.release(self.jobs.as_ref(), &self.reads_tx);
     }
 
     /// The next report from the credential thread or a task.
@@ -398,6 +426,16 @@ impl Accounts {
                 return frames;
             }
             Event::Read { epoch, result } => return self.read_ended(epoch, result),
+            Event::Proof {
+                connection,
+                epoch,
+                proof,
+            } => {
+                return match self.proofs.found(connection, epoch, proof) {
+                    Some(true) => self.start_catalog_read(),
+                    Some(false) | None => Vec::new(),
+                };
+            }
         };
         if self.catalog.unsupported
             && (matches!(input, Input::Op(AccountOp::SignIn | AccountOp::EnablePlan))
@@ -418,30 +456,64 @@ impl Accounts {
         self.catalog.unsent |= matches!(input, Input::Connected) && self.catalog.listing.is_some();
         let was_usable = self.catalog.usable;
         let effects = self.state.handle(input);
+        self.proofs
+            .track(self.state.connection(), self.jobs.as_ref(), &self.reads_tx);
         if local_check && matches!(self.state.view(), AccountView::SignedIn { .. }) {
             self.catalog.discovery = Discovery::Explicit;
         }
         let mut frames = self.apply(effects);
-        let catalog = &self.catalog;
-        if !local_check
-            && catalog.usable
-            && catalog.read.is_none()
-            && catalog.listing.is_none()
-            && (ask || !was_usable)
-        {
-            self.catalog.failure = None;
-            let (wait, access) = self.access();
-            frames.extend(access);
-            let http = Arc::clone(&self.net.http);
-            let task = tokio::spawn(read_catalog(wait, http, self.reads_tx.clone()));
-            self.catalog.read = Some(task.abort_handle());
-            drop(tokio::spawn(catalog_task(
-                self.catalog.epoch,
-                task,
-                self.reads_tx.clone(),
-            )));
+        if !local_check && (ask || !was_usable) {
+            frames.extend(self.start_catalog_read());
         }
         frames
+    }
+
+    /// Starts the catalog read when the account is usable and has no list or read yet. No bearer
+    /// goes out for a sign-in that isn't proved: the read waits for its check, and goes only if
+    /// that proves it.
+    fn start_catalog_read(&mut self) -> Vec<ControlToShell> {
+        let catalog = &self.catalog;
+        if !catalog.usable || catalog.read.is_some() || catalog.listing.is_some() {
+            return Vec::new();
+        }
+        if !self.proved() {
+            self.proofs.owe_read();
+            return Vec::new();
+        }
+        self.catalog.failure = None;
+        let (wait, frames) = self.access();
+        let http = Arc::clone(&self.net.http);
+        let task = tokio::spawn(read_catalog(wait, http, self.reads_tx.clone()));
+        self.catalog.read = Some(task.abort_handle());
+        drop(tokio::spawn(catalog_task(
+            self.catalog.epoch,
+            task,
+            self.reads_tx.clone(),
+        )));
+        frames
+    }
+
+    /// What the current sign-in may read, once its check answered.
+    fn proof(&self) -> Option<Proof> {
+        self.proofs.proof(self.state.connection()?)
+    }
+
+    /// The current sign-in is proved ordinary, or recovered under its own connection.
+    fn proved(&self) -> bool {
+        matches!(self.proof(), Some(Proof::Ordinary | Proof::Recovered(_)))
+    }
+
+    /// The cutoff the current sign-in's reads keep to, when it's a recovered one.
+    pub(super) fn recovered(&self) -> Option<crate::store::Boundary> {
+        match self.proof()? {
+            Proof::Recovered(cut) => Some(cut),
+            Proof::Ordinary | Proof::Unproved => None,
+        }
+    }
+
+    /// A sign-in is held whose history isn't proved readable yet, or can't be.
+    pub(super) fn unproved(&self) -> bool {
+        self.state.connection().is_some() && !self.proved()
     }
 
     /// A catalog read ended; one for an account that has since changed is dropped.
@@ -498,8 +570,13 @@ impl Accounts {
                 plan: PlanState::Enabled,
                 recovery: None | Some(AccountRecovery::Retry | AccountRecovery::LoadModels),
                 ..
-            } => match self.state.connection() {
-                Some(connection) => {
+            } => match self
+                .state
+                .connection()
+                .map(|connection| (connection, self.proof()))
+            {
+                Some((_, None)) => return Availability::Finding,
+                Some((connection, Some(Proof::Ordinary | Proof::Recovered(_)))) => {
                     return Availability::Ready(Ready {
                         connection: ConnectionTag(connection),
                         models: self.models().unwrap_or_default().to_vec(),
@@ -513,7 +590,9 @@ impl Accounts {
                             .unwrap_or_default(),
                     });
                 }
-                None => error(ErrorKey::SignInNeeded, Action::SignIn),
+                Some((_, Some(Proof::Unproved))) | None => {
+                    error(ErrorKey::SignInNeeded, Action::SignIn)
+                }
             },
             AccountView::SignedIn {
                 recovery: Some(AccountRecovery::SignInAgain),
@@ -900,6 +979,14 @@ impl Brain {
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
         let event = input.into();
+        // A stale check's answer reaches neither the account nor anything after it here.
+        if let Event::Proof {
+            connection, epoch, ..
+        } = event
+            && !self.account.proofs.awaits(connection, epoch)
+        {
+            return Ok(());
+        }
         let read = matches!(event, Event::Read { .. });
         if matches!(
             event,
@@ -992,6 +1079,10 @@ fn spawn<S: CredentialStore + 'static>(
                     Work::Account(job) => job,
                     Work::GitHub { job, reply } => {
                         reply.send(worker.github(job)).ok();
+                        continue;
+                    }
+                    Work::Proof { connection, reply } => {
+                        reply.send(worker.proof(connection)).ok();
                         continue;
                     }
                     Work::Key { generation, op } => {

@@ -390,6 +390,12 @@ impl Coordinator {
         self.available(ConnectionKind::ChatGpt, Availability::Ready(ready), effects);
     }
 
+    /// `ChatGPT`'s sign-in isn't proved ordinary or recovered, so a turn that arrives now reads no
+    /// history for it, until the next ready report.
+    pub(crate) fn refuse_unproved_chatgpt(&mut self) {
+        self.chatgpt_blocked = true;
+    }
+
     /// The cutoff `tag`'s `ChatGPT` reads keep to, when that sign-in was recovered.
     pub(super) fn recovered(&self, tag: ConnectionTag) -> Option<Boundary> {
         self.recovered_chatgpt
