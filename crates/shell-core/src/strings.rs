@@ -171,6 +171,7 @@ texts! {
     GitHubUnlistedRepositories => "github-unlisted-repositories",
     GitHubTruncatedRepositories => "github-truncated-repositories",
     GitHubVerification => "github-verification",
+    GitHubCopyCode => "github-copy-code",
     GitHubCodeExpired => "github-code-expired",
     GitHubCanceling => "github-canceling",
     GitHubRefreshing => "github-refreshing",
