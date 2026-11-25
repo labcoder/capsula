@@ -2754,6 +2754,20 @@ fn a_fresh_deferred_plain_esc_can_close_its_offline_text_panel(cx: &mut TestAppC
         text.focused = true;
     });
     let deliver = native(&owner, cx);
+    let resume = crate::presence::gesture::pause_plain_escape(cx, || {
+        deliver(Event::Escape, EventTime::new(Instant::now()));
+    });
+    owner.update(cx, |owner, cx| {
+        let text = owner.text.as_mut().expect("typing panel");
+        assert!(text.typing.close(crate::presence::text::Hide::Dismiss));
+        assert!(text.typing.open());
+        owner.focus_changed(cx);
+    });
+    drop(resume);
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.text_focused(), "the replacement stays open");
+    });
     cx.update(|_| {
         deliver(Event::Escape, EventTime::new(Instant::now()));
     });

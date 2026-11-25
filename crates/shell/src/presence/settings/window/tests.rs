@@ -27,6 +27,7 @@ fn detached_settings(
     owner.settings_panel = Some(SettingsPanel {
         window,
         editing: std::rc::Rc::clone(&view.read(cx).editing),
+        opening: 0,
         view: view.clone(),
         visible: false,
         focused: false,
@@ -398,6 +399,7 @@ fn github_panel(
             owner.settings_panel = Some(SettingsPanel {
                 window,
                 editing: std::rc::Rc::clone(&view.editing),
+                opening: 0,
                 view: settings_view.clone(),
                 visible: true,
                 focused: true,
@@ -967,6 +969,7 @@ fn rejected_speech_input_keeps_the_settings_panel_open(cx: &mut TestAppContext) 
         owner.settings_panel = Some(SettingsPanel {
             window,
             editing: std::rc::Rc::clone(&view.read(cx).editing),
+            opening: 0,
             view,
             visible: true,
             focused: true,
@@ -1231,6 +1234,7 @@ fn open_settings_in_the_chat_recovery_swaps_the_chat_for_settings(cx: &mut TestA
         owner.settings_panel = Some(SettingsPanel {
             window,
             editing: std::rc::Rc::clone(&view.read(cx).editing),
+            opening: 0,
             view: view.clone(),
             visible: false,
             focused: false,
@@ -2113,6 +2117,7 @@ fn a_hold_that_closes_settings_cancels_its_sign_in(cx: &mut TestAppContext) {
         owner.settings_panel = Some(SettingsPanel {
             window,
             editing: std::rc::Rc::clone(&view.read(cx).editing),
+            opening: 0,
             view,
             visible: true,
             focused: true,

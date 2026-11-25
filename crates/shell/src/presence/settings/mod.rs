@@ -11,7 +11,6 @@ mod window;
 
 pub(super) use window::SettingsPanel;
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 use super::{Presence, PresenceEvent};
@@ -289,7 +288,8 @@ impl SettingsView {
     }
 
     pub(super) fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if let Some(field) = self.editing.take() {
+        if let Some(field) = self.editing.get() {
+            self.editing.set(None);
             self.model.update(cx, |state, cx| {
                 state.cancel(field);
                 cx.notify();
@@ -310,7 +310,7 @@ pub(in crate::presence) fn name_input_event(
     field: Field,
     input: &Entity<InputState>,
     event: &InputEvent,
-    editing: &Cell<Option<Field>>,
+    editing: &super::escape::EditSlot<Field>,
     after_enter: &FocusHandle,
     model: &Entity<Settings>,
     owner: &WeakEntity<Presence>,

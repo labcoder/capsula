@@ -8,7 +8,6 @@ mod close_tests;
 #[cfg(test)]
 mod tests;
 
-use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -56,7 +55,7 @@ pub(super) struct OnboardingView {
     inputs: [Entity<InputState>; 2],
     focus: FocusHandle,
     /// Kept for the shared name handler; Esc reads the Settings draft instead.
-    editing: Cell<Option<Field>>,
+    editing: super::escape::EditSlot<Field>,
     escape_edit: super::escape::NameEdit,
     /// Kumo's still pose under the welcome, once its bake lands.
     kumo: Option<Arc<RenderImage>>,
@@ -153,12 +152,13 @@ impl OnboardingView {
             super::settings::restore_lost_focus(&view.focus, window, cx);
             cx.notify();
         });
-        let escape_edit = Rc::new(Cell::new(
+        let escape_edit: super::escape::NameEdit = Rc::default();
+        escape_edit.set(
             state
                 .step()
                 .field()
                 .filter(|&field| model.read(cx).editing(field)),
-        ));
+        );
         Self {
             state,
             link: LinkState::Connected,
@@ -167,7 +167,7 @@ impl OnboardingView {
             events,
             inputs,
             focus: cx.focus_handle(),
-            editing: Cell::default(),
+            editing: super::escape::EditSlot::default(),
             escape_edit,
             kumo: None,
             _kumo_bake: kumo_bake,

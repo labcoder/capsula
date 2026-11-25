@@ -1353,6 +1353,38 @@ fn a_deferred_plain_esc_stops_its_marked_answer_after_the_screen_wake(cx: &mut T
     }
 }
 
+#[gpui::test]
+fn a_deferred_esc_still_cancels_the_pull_or_selection_after_its_mark_wake(cx: &mut TestAppContext) {
+    without_desktop(cx);
+    for pulling in [true, false] {
+        let watching = marks_up(cx);
+        let owner = &watching.ready.owner;
+        if pulling {
+            pull(&watching, cx);
+        } else {
+            owner.update(cx, |owner, _| {
+                select(&mut owner.presenter.input, GestureId(5))
+            });
+        }
+        let deliver = native(owner, cx);
+        assert!(watching.bit.borrow().as_ref().unwrap().set());
+        let resume = super::super::gesture::pause_plain_escape(cx, || {
+            deliver(Event::Escape, after(Instant::now(), 0));
+        });
+        wake_marked_answer(&watching, cx);
+        assert_eq!(told(&watching), gone());
+        drop(resume);
+        cx.run_until_parked();
+        let [_, _, stop] = taken();
+        assert_eq!(told(&watching), [stop]);
+        owner.read_with(cx, |owner, cx| {
+            assert!(!owner.kumo.read(cx).pull_live());
+            assert_eq!(owner.presenter.input.selection(), None);
+            assert_eq!(owner.runs.stoppable(), None);
+        });
+    }
+}
+
 #[cfg(debug_assertions)]
 #[gpui::test]
 fn marked_answer_esc_does_not_follow_new_work_after_the_screen_wake(cx: &mut TestAppContext) {
@@ -1835,6 +1867,49 @@ fn a_deferred_plain_esc_clears_its_unchanged_idle_drawing(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn a_fresh_deferred_esc_clears_the_drawing_left_by_a_mark_wake(cx: &mut TestAppContext) {
+    without_desktop(cx);
+    let watching = watch(true, cx);
+    drawn(&watching, cx);
+    let_go(&watching, cx);
+    mark_up(&watching, true, cx);
+    state(&watching, RUN, Phase::Done, None, cx);
+    end(&watching, RUN, cx);
+    let owner = &watching.ready.owner;
+    owner.update(cx, |owner, cx| {
+        let effects = owner.presenter.stop_owned(RunId(RUN), Instant::now());
+        owner.scene_effects(effects, cx);
+        owner.runs_changed(cx).unwrap();
+    });
+    assert_eq!(told(&watching), [stopped(vec![cut(MARKS)])]);
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.activity.drawing && !owner.activity.working);
+        assert_eq!(owner.presenter.marks_shown(), Some(RunId(RUN)));
+        assert_eq!(scene_ids(&owner.presenter), [MARKS, DRAWN]);
+    });
+    let deliver = native(owner, cx);
+    assert!(watching.bit.borrow().as_ref().unwrap().set());
+    owner.update(cx, |owner, cx| {
+        owner.on_event(PresenceEvent::ScreenWoke, cx).expect("wake");
+    });
+    assert_eq!(told(&watching), gone());
+    owner.read_with(cx, |owner, _| {
+        assert!(owner.activity.drawing && !owner.activity.working);
+        assert_eq!(scene_ids(&owner.presenter), [DRAWN]);
+    });
+    cx.update(|_| {
+        deliver(Event::Escape, after(Instant::now(), 0));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        told(&watching),
+        [Told::Sent(ControlToBrain::ClearDrawing {
+            scene_ids: vec![DRAWN]
+        })]
+    );
+}
+
+#[gpui::test]
 fn a_fresh_deferred_plain_esc_clears_the_drawing_after_entering_rename(cx: &mut TestAppContext) {
     use gpui_kit::{VisualTestContext, px, size};
     use kumochi_protocol::message::{DataToBrain, PageOf, ThreadKind, ThreadRow};
@@ -1903,6 +1978,32 @@ fn a_fresh_deferred_plain_esc_clears_the_drawing_after_entering_rename(cx: &mut 
     owner.read_with(cx, |owner, cx| {
         assert!(owner.thread_panel.as_ref().unwrap().view.read(cx).editing());
         assert!(scene_ids(&owner.presenter).is_empty());
+    });
+
+    let resume = super::super::gesture::pause_plain_escape(cx, || {
+        deliver(Event::Escape, after(Instant::now(), 0));
+    });
+    owner.update(cx, |owner, _| {
+        let rename = &owner.thread_panel.as_ref().expect("Tasks panel").rename;
+        assert_eq!(rename.get(), Some(ThreadId(7)));
+        rename.set(None);
+        rename.set(Some(ThreadId(7)));
+    });
+    drop(resume);
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(
+            owner.thread_panel.as_ref().unwrap().rename.get(),
+            Some(ThreadId(7)),
+            "the interrupted press doesn't cancel a replacement edit of the same title"
+        );
+    });
+    cx.update(|_| {
+        deliver(Event::Escape, after(Instant::now(), 0));
+    });
+    cx.run_until_parked();
+    owner.read_with(cx, |owner, _| {
+        assert_eq!(owner.thread_panel.as_ref().unwrap().rename.get(), None);
     });
 }
 

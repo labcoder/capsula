@@ -11,9 +11,35 @@ use crate::settings::Field;
 use kumochi_protocol::message::{GestureId, MAX_VISIBLE_SCENES, RunId, SceneId, ThreadId};
 
 pub(super) type SpeechLease = Rc<Cell<Option<(u64, RunId, Instant)>>>;
-pub(super) type NameEdit = Rc<Cell<Option<Field>>>;
-pub(super) type RenameEdit = Rc<Cell<Option<ThreadId>>>;
+pub(super) type NameEdit = Rc<EditSlot<Field>>;
+pub(super) type RenameEdit = Rc<EditSlot<ThreadId>>;
 pub(super) type PlainEscapeCell = Rc<RefCell<Option<PublishedEscape>>>;
+
+pub(super) struct EditSlot<T>(Cell<(u64, Option<T>)>);
+
+impl<T> Default for EditSlot<T> {
+    fn default() -> Self {
+        Self(Cell::new((0, None)))
+    }
+}
+
+impl<T: Copy + Eq> EditSlot<T> {
+    pub(super) fn get(&self) -> Option<T> {
+        self.0.get().1
+    }
+
+    pub(super) fn set(&self, next: Option<T>) {
+        let (generation, current) = self.0.get();
+        if current != next {
+            self.0.set((generation.wrapping_add(1), next));
+        }
+    }
+
+    fn stamped(&self) -> Option<(u64, T)> {
+        let (generation, value) = self.0.get();
+        value.map(|value| (generation, value))
+    }
+}
 
 enum PanelEdit {
     Name(NameEdit),
@@ -22,8 +48,8 @@ enum PanelEdit {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Edit {
-    Name(Field),
-    Rename(ThreadId),
+    Name(u64, Field),
+    Rename(u64, ThreadId),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -47,41 +73,42 @@ pub(super) struct PlainEscape {
     marks: Option<MarkedAnswer>,
     selection: Option<GestureId>,
     pull: Option<super::drag::Generation>,
-    panel: Option<(EscapePanel, gpui_kit::WindowId)>,
+    panel: Option<(EscapePanel, gpui_kit::WindowId, u64)>,
     edit: Option<Edit>,
 }
 
+enum PlainMatch {
+    Unchanged,
+    MarkGone(RunId),
+}
+
 impl PlainEscape {
-    pub(super) fn still_owns(&self, live: &Self) -> bool {
+    fn matches(&self, live: &Self) -> Option<PlainMatch> {
         if self == live {
-            return true;
+            return Some(PlainMatch::Unchanged);
         }
-        let Some(MarkedAnswer {
+        let MarkedAnswer {
             run,
             scene,
             other_work,
-        }) = self.marks
-        else {
-            return false;
-        };
-        if self.action != Escape::Stop
+        } = self.marks?;
+        if !matches!(self.action, Escape::Stop | Escape::CancelPull)
             || self.hold.is_some()
-            || self.selection.is_some()
             || self.moving.0 != Some(run)
-            || self.moving.1.is_some_and(|drawing| drawing > run)
             || !self.scenes[1].contains(&Some(scene))
         {
-            return false;
+            return None;
         }
         let [legacy, presented] = self.scenes;
         let mut remaining = presented.into_iter().filter(|&id| id != Some(scene));
         let scenes = [legacy, std::array::from_fn(|_| remaining.next().flatten())];
-        Self {
+        (Self {
             marks: None,
             scenes,
             moving: (Some(run), other_work),
             ..*self
-        } == *live
+        } == *live)
+            .then_some(PlainMatch::MarkGone(run))
     }
 }
 
@@ -93,8 +120,10 @@ pub(super) struct PublishedEscape {
 impl PublishedEscape {
     fn capture(&self) -> PlainEscape {
         let edit = match &self.edit {
-            Some(PanelEdit::Name(edit)) => edit.get().map(Edit::Name),
-            Some(PanelEdit::Rename(edit)) => edit.get().map(Edit::Rename),
+            Some(PanelEdit::Name(edit)) => edit.stamped().map(|(id, field)| Edit::Name(id, field)),
+            Some(PanelEdit::Rename(edit)) => {
+                edit.stamped().map(|(id, thread)| Edit::Rename(id, thread))
+            }
             None => None,
         };
         PlainEscape {
@@ -135,11 +164,15 @@ impl Presence {
         self.plain_escape.replace(self.plain_escape_snapshot(cx));
     }
 
-    pub(super) fn plain_escape_at(&self, cx: &gpui_kit::App) -> Option<PlainEscape> {
+    fn plain_escape_at(&self, cx: &gpui_kit::App) -> Option<PlainEscape> {
         let scope = self.plain_escape_snapshot(cx)?.capture();
+        let field = match scope.edit {
+            Some(Edit::Name(_, field)) => Some(field),
+            _ => None,
+        };
         if matches!(scope.action, Escape::Dismiss | Escape::CancelEdit)
-            && matches!(scope.panel, Some((EscapePanel::Onboarding, _)))
-            && scope.edit != self.onboarding_name_edit(cx).map(Edit::Name)
+            && matches!(scope.panel, Some((EscapePanel::Onboarding, ..)))
+            && field != self.onboarding_name_edit(cx)
         {
             return None;
         }
@@ -201,30 +234,32 @@ impl Presence {
             .map(|(marked_run, scene)| MarkedAnswer {
                 run: marked_run,
                 scene,
-                other_work: (action == Escape::Stop
+                other_work: (matches!(action, Escape::Stop | Escape::CancelPull)
                     && run == Some(marked_run)
-                    && hold.is_none()
-                    && selection.is_none())
+                    && hold.is_none())
                 .then(|| self.presenter.stoppable_run_excluding(Some(scene)))
                 .flatten(),
             });
         let reads_edit = action == Escape::Dismiss;
         let (window, edit) = match panel {
-            EscapePanel::Open => (Some(self.text.as_ref()?.window), None),
+            EscapePanel::Open => {
+                let panel = self.text.as_ref()?;
+                (Some((panel.window, panel.typing.opening())), None)
+            }
             EscapePanel::Settings => {
                 let panel = self.settings_panel.as_ref()?;
                 let edit = reads_edit.then(|| PanelEdit::Name(Rc::clone(&panel.editing)));
-                (Some(panel.window), edit)
+                (Some((panel.window, panel.opening)), edit)
             }
             EscapePanel::Threads => {
                 let panel = self.thread_panel.as_ref()?;
                 let edit = reads_edit.then(|| PanelEdit::Rename(Rc::clone(&panel.rename)));
-                (Some(panel.window), edit)
+                (Some((panel.window, panel.typing.opening())), edit)
             }
             EscapePanel::Onboarding => {
                 let panel = self.onboarding.as_ref()?;
                 let edit = reads_edit.then(|| PanelEdit::Name(Rc::clone(&panel.escape_edit)));
-                (Some(panel.window), edit)
+                (Some((panel.window, 0)), edit)
             }
             _ => (None, None),
         };
@@ -241,7 +276,7 @@ impl Presence {
                 marks,
                 selection,
                 pull,
-                panel: window.map(|window| (panel, window.window_id())),
+                panel: window.map(|(window, opening)| (panel, window.window_id(), opening)),
                 edit: None,
             },
             edit,
@@ -252,6 +287,34 @@ impl Presence {
         &mut self,
         gesture: Option<GestureId>,
         speech: Option<SpeechPress>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        self.native_escape_after_wake(gesture, speech, None, cx)
+    }
+
+    pub(super) fn native_plain_escape(
+        &mut self,
+        press: &PlainEscape,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        let Some(owners) = self
+            .plain_escape_at(cx)
+            .and_then(|live| press.matches(&live))
+        else {
+            return Ok(());
+        };
+        let mark = match owners {
+            PlainMatch::Unchanged => None,
+            PlainMatch::MarkGone(run) => Some(run),
+        };
+        self.native_escape_after_wake(None, None, mark, cx)
+    }
+
+    fn native_escape_after_wake(
+        &mut self,
+        gesture: Option<GestureId>,
+        speech: Option<SpeechPress>,
+        mark: Option<RunId>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
         if gesture.is_none()
@@ -329,8 +392,8 @@ impl Presence {
         self.voice.ended = None;
         // Marks that are up go at this press, and `escape` takes them before it ends a hold.
         // A hold is still pending here when its first mark came before its run's `Answering`.
-        if self.presenter.marks_shown().is_some() {
-            return self.escape_with_speech(speech, cx);
+        if self.presenter.marks_shown().is_some() || mark.is_some() {
+            return self.escape_after_wake(speech, mark, cx);
         }
         if self.voice_working() {
             return Ok(());
@@ -454,13 +517,22 @@ impl Presence {
         )
     }
 
+    pub(super) fn escape_with_speech(
+        &mut self,
+        speech: Option<SpeechPress>,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), OpenError> {
+        self.escape_after_wake(speech, None, cx)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one Esc press keeps its local decision and every effect of it in order"
     )]
-    pub(super) fn escape_with_speech(
+    fn escape_after_wake(
         &mut self,
         speech: Option<SpeechPress>,
+        mark: Option<RunId>,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), OpenError> {
         if speech.is_some_and(|press| self.speech_session(press).is_none()) {
@@ -470,7 +542,7 @@ impl Presence {
         // Esc is a key like any other to screen marks: they go at the first press, whatever
         // else that press stops. When they are a running answer's, the same press stops that
         // answer too, whatever else it does here.
-        let answer = self.presenter.marks_shown().filter(|run| {
+        let answer = self.presenter.marks_shown().or(mark).filter(|run| {
             self.runs.stoppable() == Some(*run)
                 && speech.is_none_or(|press| press.run == *run && !self.runs.state_ended(*run))
         });

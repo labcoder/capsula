@@ -199,6 +199,7 @@ impl Presence {
         });
         self.place_drawings(cx.weak_entity(), cx);
         self.request_pages(cx);
+        self.publish_plain_escape(cx);
         Ok(())
     }
 
@@ -312,6 +313,7 @@ impl Presence {
         });
         self.place_drawings(cx.weak_entity(), cx);
         self.request_pages(cx);
+        self.publish_plain_escape(cx);
         self.pointer_changed(cx)
     }
 }

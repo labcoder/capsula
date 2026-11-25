@@ -20,6 +20,7 @@ pub(in crate::presence) struct SettingsPanel {
     pub(in crate::presence) window: AnyWindowHandle,
     pub(in crate::presence) view: Entity<SettingsView>,
     pub(in crate::presence) editing: super::super::escape::NameEdit,
+    pub(in crate::presence) opening: u64,
     visible: bool,
     focused: bool,
     pub(in crate::presence) bounds: [i32; 4],
@@ -257,6 +258,7 @@ impl Presence {
                 .map(|value| super::super::scaled(value * rem, self.scale)),
         );
         panel.visible = true;
+        panel.opening = panel.opening.wrapping_add(1);
         panel.view.update(cx, |view, cx| {
             view.stop = self.escape_hold.shows_stop();
             cx.notify();
@@ -282,6 +284,7 @@ impl Presence {
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
         self.place_drawings(cx.weak_entity(), cx);
+        self.publish_plain_escape(cx);
         Ok(())
     }
 
@@ -335,6 +338,7 @@ impl Presence {
         Ok(SettingsPanel {
             window,
             editing: Rc::clone(&view.read(cx).editing),
+            opening: 0,
             view,
             visible: false,
             focused: false,
@@ -386,6 +390,7 @@ impl Presence {
             })
             .map_err(|error| OpenError::Gpui(error.into()))?;
         self.place_drawings(cx.weak_entity(), cx);
+        self.publish_plain_escape(cx);
         self.pointer_changed(cx)
     }
 

@@ -305,10 +305,12 @@ before the brain names it. At dispatch, a changed connection, turn, drawing memb
 owner retires the press instead of stopping or clearing current work. Indeterminate drawing
 recovery also declines a deferred plain press; a fresh press can act on what is there now.
 The publisher uses panel-owned edit state without reading a view that may already be handling an
-event. An edit identifies the target only when Esc would cancel it or dismiss that panel. A
-fresh Esc after entering Rename can still clear the same idle drawing first.
-If the screen wake takes the pressed Esc's own marks first, Stop still applies to that same
-running answer, provided no other work or owner changed. A canceled microphone's outstanding
+event. Reopening the same window or restarting the same edit gives it a new identity. An edit
+identifies the target only when Esc would cancel it or dismiss that panel, so a fresh Esc after
+entering Rename can still clear the same idle drawing first.
+When the screen wake takes a press's marks first, that press can still cancel the same pull or
+selection and stop the marked answer if no other owner changed. A later press sees only the
+drawing that remains. A canceled microphone's outstanding
 cleanup does not own Clear, and a new collection still invalidates the deferred press.
 
 An ignored fixture,

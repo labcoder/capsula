@@ -621,22 +621,23 @@ fn apply(
                         }
                         this.voice_delivery(intent, stamp, qpc, pointer, release, cx);
                     }
-                    let current = matches!(cancel, CancelDispatch::Inline)
+                    if !escape {
+                        return;
+                    }
+                    let result = if matches!(cancel, CancelDispatch::Inline)
                         || cancelled.is_some()
                         || speech.is_some()
-                        || plain.as_ref().is_some_and(|press| {
-                            stamp.session == this.link.link_generation()
-                                && collection == this.link.microphone_gate().latest()
-                                && this
-                                    .plain_escape_at(cx)
-                                    .is_some_and(|live| press.still_owns(&live))
-                        });
-                    if escape
-                        && current
-                        && this
-                            .native_escape(cancelled.map(|(gesture, _)| gesture), speech, cx)
-                            .is_err()
                     {
+                        this.native_escape(cancelled.map(|(gesture, _)| gesture), speech, cx)
+                    } else if let Some(press) = &plain
+                        && stamp.session == this.link.link_generation()
+                        && collection == this.link.microphone_gate().latest()
+                    {
+                        this.native_plain_escape(press, cx)
+                    } else {
+                        return;
+                    };
+                    if result.is_err() {
                         tracing::error!("can't apply native Escape");
                     }
                 });
