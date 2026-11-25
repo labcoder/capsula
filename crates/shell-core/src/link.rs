@@ -37,6 +37,7 @@ use crate::speaker;
 mod microphone;
 mod narrated;
 pub mod output;
+pub mod policy;
 mod queued;
 
 pub use narrated::Wake as NarrationWake;

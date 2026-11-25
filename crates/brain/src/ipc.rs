@@ -117,9 +117,12 @@ pub(crate) enum PeerAuth<'a> {
         hello: &'a Hello,
         expected: &'a Capability,
     },
-    #[expect(
-        dead_code,
-        reason = "only an authenticated pair reader can produce this greeting"
+    #[cfg_attr(
+        not(all(test, target_os = "macos")),
+        expect(
+            dead_code,
+            reason = "only an authenticated pair reader can produce this greeting"
+        )
     )]
     SessionBound(platform::BoundHello),
 }

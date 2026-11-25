@@ -20,8 +20,9 @@ on both control and data. A correct capability with a wrong control build still 
 zero bytes. The local transport selects the authorization method; a session-bound greeting must
 come from the authenticated pair's own reader, match the build, and carry only that zero
 placeholder on either leg. A nonzero placeholder is refused without capability fallback.
-The bound greeting type cannot be constructed on any platform yet, so neither shell startup
-nor brain admission selects session authorization.
+Only the macOS pair's greeting reads construct a bound greeting, from a frame they opened
+themselves; on other platforms the type has no values. Neither shell startup nor brain
+admission selects session authorization yet.
 
 ## Queued-required session mode (internal)
 
@@ -390,6 +391,22 @@ ends, keeps one end of each and starts the brain with `--parent-bound` and the o
 its descriptors 3 (control) and 4 (data); see [processes.md](processes.md), "The shell's brain
 child". The sockets prove only that the two ends are connected; the session handshake on top of
 them authenticates.
+
+The brain's side lives in `platform/macos/pair.rs`, still dormant. `adopt` takes the two
+inherited descriptors and needs no runtime. It refuses unless each is a connected `AF_UNIX`
+stream with `SO_NOSIGPIPE` set and a stable identity: two `fstat` samples that agree and have a
+nonzero inode, because Darwin numbers a socket's inode lazily from zero. The two identities must
+differ, so one socket can't pose as both legs. Darwin doesn't answer `SO_ACCEPTCONN` for a Unix
+socket, so a listener is refused because it has no peer, and a TCP stream because its peer isn't
+`AF_UNIX`. `adopt` then sets close-on-exec and non-blocking. `respond` takes that checked pair
+and a session state the caller made before its first await, so the caller can wipe its copy of
+the secret. It hands both ends to tokio and runs the responder handshake by one deadline: control
+init and Finished, then data init and Finished, then Bind. It writes `BindAck` before it
+returns an `AuthenticatedPair`, and it refuses a proof that doesn't name both of the pair's own
+openers. Each greeting is read once, control first, through that leg's record reader. Each of
+these sets the pair cell, so the whole pair stays refused: a read out of order, a second read, a
+frame that isn't the greeting, a data greeting in the other mode, a missed deadline (checked
+again after ready I/O completes), or a greeting read that's dropped part way.
 
 ## Who may connect
 
@@ -770,6 +787,17 @@ block. Once connected, each pipe gets a writer thread and data gets a reader thr
 thread sends on bounded channels and never waits: with no connection or a full channel the send
 fails at once, so a typed turn shows it wasn't sent, and `Stop` or `ClearDrawing` is logged as
 unsent after its local effect already happened.
+
+`link/policy.rs` decides what the shell does with what arrives, and the shell applies it one
+event at a time in batch order. It drops events another pair sent, decides what a link state
+does first and whether the models come up on that pair or go down, accepts a run's `Focus` only
+from the current pair, and decides a scene frame's run disposition and freed membership. The
+pair is read again after anything that can end it, such as placing drawings. A stop or scene
+stop is sent before anything else; if the queue refuses it on an open pair, the run's queued
+playback stops and then the pair ends. Speaker stops are offered in order, ten times 1 ms apart
+to a busy owner, and only a stop the brain was told can end its pair when those run out.
+A Hold stop uses its own scenes rather than redirecting the stop to another run's drawing.
+The settings model classifies the notice and decides if a link error rolls back the dock.
 
 Each connection reaches the UI as `Connected` with a session that carries the shell's own
 connection generation, not the brain's incarnation, since the same brain may be reconnected to.
