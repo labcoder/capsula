@@ -51,7 +51,7 @@ impl gpui_kit::component::select::SelectItem for RepoChoice {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 fn configured(view: &SettingsView) -> bool {
     #[cfg(test)]
     if let Some(configured) = view.github_configured {
@@ -60,7 +60,7 @@ fn configured(view: &SettingsView) -> bool {
     kumochi_protocol::constants::GITHUB_CLIENT_ID.is_some() || view.fixture
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(any(test, debug_assertions)))]
 fn configured(_: &SettingsView) -> bool {
     kumochi_protocol::constants::GITHUB_CLIENT_ID.is_some()
 }
@@ -135,7 +135,7 @@ impl SettingsView {
 
     pub(super) fn accounts_opened(&self, generation: Option<u64>, cx: &mut Context<'_, Self>) {
         let available = self.tab == SettingsTab::Accounts && configured(self);
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         let available = available && !self.fixture;
         self.model.update(cx, |model, _| {
             if available {
@@ -215,7 +215,7 @@ impl SettingsView {
         let owner = self.owner.clone();
         let generation = state.generation;
         let origin = Arc::clone(&state.controls_origin);
-        #[cfg(debug_assertions)]
+        #[cfg(any(test, debug_assertions))]
         let fixture = self.fixture;
         let strings = cx.global::<Strings>();
         let mut block = div().flex().flex_col().gap_2();
@@ -249,7 +249,7 @@ impl SettingsView {
                             {
                                 return;
                             }
-                            #[cfg(debug_assertions)]
+                            #[cfg(any(test, debug_assertions))]
                             if fixture {
                                 return;
                             }
