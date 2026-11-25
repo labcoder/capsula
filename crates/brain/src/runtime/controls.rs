@@ -73,7 +73,12 @@ pub(super) async fn read_control(
 ) -> Ended {
     loop {
         match ipc::read_sized::<ControlToBrain>(pipe, Pipe::Control).await {
-            Ok(Some((ControlToBrain::Hello(_) | ControlToBrain::QueuedHello(_), _))) => {
+            Ok(Some((
+                ControlToBrain::Hello(_)
+                | ControlToBrain::QueuedHello(_)
+                | ControlToBrain::QueuedAudioReconnect(..),
+                _,
+            ))) => {
                 return Ended::Broken("Hello sent twice");
             }
             Ok(Some((ControlToBrain::Quitting, _))) => {
@@ -205,6 +210,7 @@ pub(super) fn control_input(message: ControlToBrain) -> Result<Option<Input>, En
         ControlToBrain::Pong
         | ControlToBrain::Hello(_)
         | ControlToBrain::QueuedHello(_)
+        | ControlToBrain::QueuedAudioReconnect(..)
         | ControlToBrain::Quitting
         | ControlToBrain::Settings(_)
         | ControlToBrain::AccountOp(_)
