@@ -29,15 +29,13 @@ impl Capturer for Fake {
     fn capture_window(
         &mut self,
         _: &Target,
-        until: Instant,
+        deadline: Deadline,
         frame: &mut RawFrame,
     ) -> Result<Acquired, Failure> {
         let knobs = &self.0;
         knobs.calls.set(knobs.calls.get() + 1);
         let arrived = knobs.clock.get();
-        if arrived >= until {
-            return Err(Refusal::Expired.into());
-        }
+        deadline.tighten(arrived).ok_or(Refusal::Expired)?;
         let [width, height] = knobs.size.get();
         let bytes = frame.begin(width, height)?;
         if let Some(failure) = knobs.fail.get() {
@@ -106,7 +104,7 @@ impl Rig {
         };
         let acquired = self
             .fake
-            .capture_window(&target, expires.until, &mut self.screen.frame)?;
+            .capture_window(&target, expires, &mut self.screen.frame)?;
         let surface = target.top.rect;
         self.screen.acquired(
             &ticket,

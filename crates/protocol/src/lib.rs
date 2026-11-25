@@ -5,6 +5,7 @@ pub mod constants;
 pub mod frame;
 pub mod geometry;
 pub mod message;
+pub mod profile;
 mod secret;
 pub mod tap;
 pub mod voice;
