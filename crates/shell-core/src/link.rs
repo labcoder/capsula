@@ -2069,23 +2069,15 @@ fn handshake_pair(
     drawing: DrawingText,
     open_data: impl FnOnce() -> Result<PipeClient, LinkError>,
 ) -> Result<Connection, LinkError> {
-    let greeting = match audio {
-        AudioSession::Legacy => ControlToBrain::Hello(hello.clone()),
-        AudioSession::QueuedRequired => ControlToBrain::QueuedHello(hello.clone()),
-    };
     let mut handshake = HandshakeIo(&control, attempt);
-    frame::write(&mut handshake, &greeting, Pipe::Control)?;
+    write_control_hello(&mut handshake, hello.clone(), audio)?;
     let issue_origin = welcome(&mut handshake)?;
     check_attempt(attempt)?;
     let data_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let data_deadline = attempt.map_or(data_deadline, |deadline| deadline.min(data_deadline));
     let data = open_data()?;
-    let greeting = match audio {
-        AudioSession::Legacy => DataToBrain::Hello(hello),
-        AudioSession::QueuedRequired => DataToBrain::QueuedHello(hello, issue_origin),
-    };
     let mut handshake = HandshakeIo(&data, Some(data_deadline));
-    frame::write(&mut handshake, &greeting, Pipe::Data)?;
+    write_data_hello(&mut handshake, hello, audio, issue_origin)?;
     let profile = drawing.profile.filter(TextMetricsV1::valid);
     frame::write(
         &mut handshake,
@@ -2100,6 +2092,31 @@ fn handshake_pair(
         issue_origin,
         drawing_font_family: drawing.font_family,
     })
+}
+
+fn write_control_hello(
+    writer: &mut impl Write,
+    hello: Hello,
+    audio: AudioSession,
+) -> Result<(), FrameError> {
+    let greeting = match audio {
+        AudioSession::Legacy => ControlToBrain::Hello(hello),
+        AudioSession::QueuedRequired => ControlToBrain::QueuedHello(hello),
+    };
+    frame::write(writer, &greeting, Pipe::Control)
+}
+
+fn write_data_hello(
+    writer: &mut impl Write,
+    hello: Hello,
+    audio: AudioSession,
+    issue_origin: IssueSession,
+) -> Result<(), FrameError> {
+    let greeting = match audio {
+        AudioSession::Legacy => DataToBrain::Hello(hello),
+        AudioSession::QueuedRequired => DataToBrain::QueuedHello(hello, issue_origin),
+    };
+    frame::write(writer, &greeting, Pipe::Data)
 }
 
 fn check_attempt(attempt: Option<Instant>) -> Result<(), LinkError> {
@@ -2898,6 +2915,10 @@ mod delete_tests;
 #[cfg(test)]
 #[path = "link_diagnostics_tests.rs"]
 mod diagnostics_tests;
+
+#[cfg(test)]
+#[path = "link_greeting_tests.rs"]
+mod greeting_tests;
 
 #[cfg(all(test, windows))]
 #[path = "link_measure_tests.rs"]

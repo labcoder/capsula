@@ -2,6 +2,15 @@
 
 pub mod credential;
 
+/// A greeting read by its own authenticated pair. No platform can produce one yet.
+pub(crate) enum BoundHello {}
+
+impl BoundHello {
+    pub(crate) fn into_greeting(self) -> kumochi_protocol::message::Hello {
+        match self {}
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) use macos::clock::{qpc_at, qpc_left};
 
