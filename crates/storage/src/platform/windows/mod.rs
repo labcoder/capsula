@@ -4,7 +4,7 @@ mod admit;
 mod folders;
 mod protected;
 
-pub use admit::admit_leaf;
+pub use admit::{SQLITE_FILES, admit_leaf};
 pub use folders::{AppDataError, Today, local_app_data, roaming_app_data};
 
 pub use protected::{

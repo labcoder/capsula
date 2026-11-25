@@ -42,8 +42,20 @@ impl Profile {
         })
     }
 
+    /// The profile at `local` and `roaming` without holding it, for tests of what `plan` reads.
+    #[cfg(test)]
+    pub(super) fn unheld(local: PathBuf, roaming: PathBuf) -> Self {
+        Self {
+            local,
+            roaming,
+            pair: [0; 24],
+            _held: Vec::new(),
+        }
+    }
+
     /// The startup plan, read through the held folders: their data folders must hold too, and
-    /// each file read must be a plain file of its own.
+    /// each file read, and every side file SQLite may open beside a database, must be a plain file
+    /// of its own before either database opens.
     pub(super) fn plan(&self, budget: u32) -> Result<String> {
         let data = self.local.join(DATA_DIR);
         let settings = self.roaming.join(DATA_DIR);
@@ -59,6 +71,15 @@ impl Profile {
         for file in [&db, &authority, &config] {
             ensure!(
                 file.is_file() && kumochi_storage::check_leaf(file).is_ok(),
+                "profile files are missing or outside the disposable profile"
+            );
+        }
+        for (database, suffix) in [STORE_FILE, AUTHORITY_FILE]
+            .into_iter()
+            .flat_map(|database| kumochi_storage::SQLITE_FILES.map(|suffix| (database, suffix)))
+        {
+            ensure!(
+                kumochi_storage::check_leaf(&data.join(format!("{database}{suffix}"))).is_ok(),
                 "profile files are missing or outside the disposable profile"
             );
         }

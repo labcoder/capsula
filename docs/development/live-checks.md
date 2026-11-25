@@ -292,7 +292,9 @@ refuses a link anywhere on either path, and records their identities (volume ser
 file index) beside the plan, never printing them. The inner check holds the pair the same way
 until the run ends and compares its identities with the prepared ones before it reads anything
 in the profile, so another eligible profile can't stand in for the approved one. Only then does
-it check the cleanup marker and read the metadata through the held folders, and it compares the
+it check the cleanup marker, refuse a linked or hard-linked database or SQLite side file
+(`-wal`, `-shm`, `-journal`; a missing one is fine) before either database opens, and read the
+metadata through the held folders, and it compares the
 plan before taking its claim or spawning a brain. It then requires the brain to report
 ChatGPT already signed in, with plan use enabled and no recovery required.
 

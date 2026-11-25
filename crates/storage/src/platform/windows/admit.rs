@@ -19,7 +19,7 @@ use super::protected::{check_leaf, hold_chain, owner_only_dir};
 use crate::platform::Untrusted;
 
 /// The suffixes SQLite gives a database's side files, the database itself first.
-const SQLITE_FILES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
+pub const SQLITE_FILES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
 
 /// The pair this process admitted and the handles that keep it in place.
 #[derive(Debug)]

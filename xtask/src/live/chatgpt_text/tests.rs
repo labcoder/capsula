@@ -1,6 +1,8 @@
 use std::fs;
 
-use kumochi_protocol::constants::ProductIdentity;
+use kumochi_protocol::constants::{
+    AUTHORITY_FILE, CONFIG_FILE, DATA_DIR, ProductIdentity, STORE_FILE,
+};
 
 use super::{PAIR, PLAN, Startup, prepared, startup};
 use crate::live::{Check, Entry, entry};
@@ -144,6 +146,34 @@ fn a_half_pair_or_a_profile_outside_local_app_data_is_refused() {
             .to_string(),
         "the disposable profile must lie below local app data, outside its own data"
     );
+}
+
+#[test]
+fn a_hard_linked_database_side_file_refuses_before_the_open() {
+    let profile = crate::scratch::local("first-text-side-file");
+    let (local, roaming) = (profile.join("local"), profile.join("roaming"));
+    let (data, settings) = (local.join(DATA_DIR), roaming.join(DATA_DIR));
+    for folder in [&data, &settings] {
+        fs::create_dir_all(folder).expect("a data folder");
+    }
+    for file in [
+        data.join(STORE_FILE),
+        data.join(AUTHORITY_FILE),
+        settings.join(CONFIG_FILE),
+    ] {
+        fs::write(file, []).expect("a profile file");
+    }
+    let target = profile.join("kept");
+    fs::write(&target, "kept").expect("a target");
+    fs::hard_link(&target, data.join(format!("{STORE_FILE}-wal"))).expect("a hard link");
+    let error = startup::Profile::unheld(local, roaming)
+        .plan(19)
+        .expect_err("a linked side file");
+    assert_eq!(
+        error.to_string(),
+        "profile files are missing or outside the disposable profile"
+    );
+    assert_eq!(fs::read_to_string(&target).expect("target"), "kept");
 }
 
 #[test]
