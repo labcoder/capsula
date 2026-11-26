@@ -520,9 +520,10 @@ somewhere else:
   locked. `seal_and_publish` seals it (0400 for a model, 0500 for a staged native library),
   then renames it with `RENAME_EXCL`, so an arrival at the final name is kept. It then flushes
   the folder and the file. A failed rename puts the partial back at 0600 only when its name still
-  gives it with one link and the final name is shown not to; otherwise it stays sealed. A
-  partial's name ends `.part` and a final's never does, so `open_private_write` resumes a sealed
-  `.part` file, a publish stopped between seal and rename, and only once it holds the lock.
+  gives it with one link and the final name is shown not to; otherwise it stays sealed. Every
+  partial's name ends `.part` and no sealed file's does, in any ASCII case, since APFS compares
+  names that way. So `open_private_write` resumes a sealed `.part` file, a publish stopped
+  between seal and rename, and only once it holds the lock.
   `open_sealed` accepts only the exact sealed mode with one link.
 - **Two-pass removal.** `remove_private_tree` checks the whole tree before it unlinks anything:
   private folders, files this user owns at 0400, 0500 or 0600, one volume, within 32 levels and

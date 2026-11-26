@@ -72,9 +72,44 @@ fn paths_refuse_outside_the_anchor_and_dots_before_opening_anything() {
         "lexical refusal comes before admitting the anchor, which would be Missing"
     );
     assert_eq!(
-        create_private_file(support, &support.join("model.bin")).err(),
+        create_private_file(support, &support.join("model.bin.part")).err(),
         Some(Untrusted::Unsafe),
         "a file directly in the anchor, outside every private folder"
+    );
+}
+
+#[test]
+fn partial_and_sealed_names_are_disjoint_ignoring_case_before_opening_anything() {
+    let support = Path::new("/kumochi-never-exists/Support");
+    let file = |name: &str| support.join("product/part").join(name);
+    for name in ["model.bin", "model.part.bin", "part", ""] {
+        assert_eq!(
+            create_private_file(support, &file(name)).err(),
+            Some(Untrusted::Unsafe),
+            "create {name}"
+        );
+        assert_eq!(
+            open_private_write(support, &file(name)).err(),
+            Some(Untrusted::Unsafe),
+            "resume {name}"
+        );
+    }
+    for name in ["model.part", "model.PART", "model.Part", ".part"] {
+        assert_eq!(
+            open_sealed(support, &file(name), Seal::ReadOnly).err(),
+            Some(Untrusted::Unsafe),
+            "sealed {name}"
+        );
+    }
+    assert_eq!(
+        open_sealed(support, &file("model.bin"), Seal::ReadOnly).err(),
+        Some(Untrusted::Missing),
+        "a final's name passes, then the absent anchor"
+    );
+    assert_eq!(
+        open_private_write(support, &file("model.bin.PART")).err(),
+        Some(Untrusted::Missing),
+        "a partial's name in any case passes, then the absent anchor"
     );
 }
 
@@ -167,6 +202,30 @@ fn native_a_partial_is_published_sealed_and_an_arrival_is_kept() {
         "a published name never ends like a partial's"
     );
     assert_eq!(mode(&source), (0o600, 1));
+    let file = open_private_write(&support, &source).expect("resume the partial");
+    assert_eq!(
+        seal_and_publish(
+            &support,
+            file,
+            parent,
+            &source,
+            &part.join("final.PART"),
+            Seal::ReadOnly
+        ),
+        Err(Untrusted::Unsafe),
+        "in any case"
+    );
+    let file = open_private_write(&support, &source).expect("resume the partial");
+    let unstaged = part.join("model.tmp");
+    fs::rename(&source, &unstaged).expect("a partial at a name that isn't a partial's");
+    assert_eq!(
+        seal_and_publish(&support, file, parent, &unstaged, &target, Seal::ReadOnly),
+        Err(Untrusted::Unsafe),
+        "only a partial's name is published, so a stop after its seal is resumable"
+    );
+    assert_eq!(mode(&unstaged), (0o600, 1));
+    assert!(absent(&target));
+    fs::rename(&unstaged, &source).expect("back at the partial's name");
 
     let file = open_private_write(&support, &source).expect("resume the partial");
     assert_eq!(
@@ -214,7 +273,9 @@ fn native_unsealed_linked_and_link_finals_refuse_before_opening() {
     let held = create_private_dir(&support, &part).expect("private folders");
     let target = part.join("model.bin");
 
-    drop(partial(&support, &target, b"bytes"));
+    fs::write(&target, b"bytes").expect("a final");
+    fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .expect("an unsealed final");
     assert_eq!(
         open_sealed(&support, &target, Seal::ReadOnly).err(),
         Some(Untrusted::Unsafe),
@@ -241,10 +302,13 @@ fn native_unsealed_linked_and_link_finals_refuse_before_opening() {
         open_sealed(&support, &link, Seal::ReadOnly).err(),
         Some(Untrusted::Reparse)
     );
+    let staged_link = part.join("link.part");
+    std::os::unix::fs::symlink(&target, &staged_link).expect("a link at a partial's name");
     assert_eq!(
-        open_private_write(&support, &link).err(),
+        open_private_write(&support, &staged_link).err(),
         Some(Untrusted::Reparse)
     );
+    fs::remove_file(&staged_link).expect("drop the partial-named link");
     assert_eq!(
         open_sealed(&support, &part.join("absent"), Seal::ReadOnly).err(),
         Some(Untrusted::Missing)
@@ -303,7 +367,7 @@ fn native_discard_deletes_only_the_object_it_holds() {
     let held = create_private_dir(&support, &part).expect("private folders");
     let parent = held.last().expect("part folder");
     let name = part.join("model.bin.part");
-    let moved = part.join("moved");
+    let moved = part.join("moved.part");
 
     let first = partial(&support, &name, b"first");
     fs::rename(&name, &moved).expect("move the held partial away");
@@ -451,7 +515,9 @@ fn native_a_file_at_the_removed_folder_survives_and_keep_needs_the_seal() {
     let support = anchor(&scratch);
     let part = support.join("product/part");
     let held = create_private_dir(&support, &support.join("product")).expect("private folder");
-    drop(partial(&support, &part, b"not a folder"));
+    fs::write(&part, b"not a folder").expect("a file at the folder's name");
+    fs::set_permissions(&part, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .expect("a private file");
     assert_eq!(remove_private_tree(&support, &part), Err(Untrusted::Unsafe));
     assert_eq!(fs::read(&part).expect("kept"), b"not a folder");
     fs::remove_file(&part).expect("drop the fixture file");

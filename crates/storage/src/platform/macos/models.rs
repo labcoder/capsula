@@ -14,6 +14,7 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd as _;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 
 use super::private::{LIMITS, list, look};
@@ -30,7 +31,7 @@ const WRITE_FLAGS: libc::c_int =
     libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
 /// A partial file's mode until it's sealed.
 const PARTIAL: libc::mode_t = 0o600;
-/// The ending of every partial's name, which no published name may have.
+/// The ending of every partial's name, and of no sealed file's, compared ignoring ASCII case.
 const STAGE: &[u8] = b".part";
 
 /// The mode a published file is sealed at.
@@ -93,10 +94,11 @@ pub fn create_private_dir(support: &Path, path: &Path) -> Result<Vec<File>, Untr
 /// flushes the folder. It never opens an existing file.
 ///
 /// # Errors
-/// `Io` when anything is already at the name or the lock is held; `Unsafe` for a file directly in
-/// the anchor; otherwise refuses like [`hold_private_chain`] and on a file that isn't private once
+/// `Io` when anything is already at the name or the lock is held; `Unsafe` for a name that doesn't
+/// end `.part` or a file directly in the anchor; otherwise refuses like [`hold_private_chain`] and on a file that isn't private once
 /// made.
 pub fn create_private_file(support: &Path, path: &Path) -> Result<File, Untrusted> {
+    stage(path, true)?;
     let (held, name) = file_parent(support, path)?;
     let folder = held.last()?;
     let file = open_at(
@@ -114,21 +116,21 @@ pub fn create_private_file(support: &Path, path: &Path) -> Result<File, Untruste
     Ok(file)
 }
 
-/// Opens the existing partial file `path` for writing without truncating it, and locks it. A sealed
-/// file at a name ending `.part` is taken as a publish that stopped between its seal and its
-/// rename: it's locked, checked sealed and still named, and only then unsealed to 0600.
+/// Opens the existing partial file `path`, whose name ends `.part`, for writing without truncating
+/// it, and locks it. A sealed file there is taken as a publish that stopped between its seal and
+/// its rename: it's locked, checked sealed and still named, and only then unsealed to 0600.
 ///
 /// # Errors
-/// `Missing` when nothing is there; `Io` when the lock is held. Otherwise refuses anything but this
+/// `Missing` when nothing is there; `Io` when the lock is held; `Unsafe` for a name that doesn't
+/// end `.part`. Otherwise refuses anything but this
 /// user's regular file with one name on its folder's volume at mode 0600 (or a seal's mode) before
 /// opening it, and an ACL or any change by the time it's locked.
 pub fn open_private_write(support: &Path, path: &Path) -> Result<File, Untrusted> {
+    stage(path, true)?;
     let (held, name) = file_parent(support, path)?;
     let folder = held.last()?;
     let mode = look(folder, &name)?.st_mode & 0o7777;
-    if name.to_bytes().ends_with(STAGE)
-        && (mode == Seal::ReadOnly.mode() || mode == Seal::ReadExecute.mode())
-    {
+    if mode == Seal::ReadOnly.mode() || mode == Seal::ReadExecute.mode() {
         // Locked first, so a publisher still holding it keeps its seal; released before the reopen.
         let sealed = existing(&held, &name, READ_FLAGS, mode)?;
         lock(&sealed)?;
@@ -149,9 +151,11 @@ pub fn open_private_write(support: &Path, path: &Path) -> Result<File, Untrusted
 /// Opens the sealed file `path` read-only: the checked read-only open.
 ///
 /// # Errors
-/// `Missing` when nothing is there. Otherwise refuses anything but this user's regular file with
-/// one name on its folder's volume at exactly `seal`'s mode before opening it, and an ACL after.
+/// `Missing` when nothing is there; `Unsafe` for a name ending `.part`. Otherwise refuses anything
+/// but this user's regular file with one name on its folder's volume at exactly `seal`'s mode
+/// before opening it, and an ACL after.
 pub fn open_sealed(support: &Path, path: &Path, seal: Seal) -> Result<File, Untrusted> {
+    stage(path, false)?;
     let (held, name) = file_parent(support, path)?;
     existing(&held, &name, READ_FLAGS, seal.mode())
 }
@@ -170,8 +174,10 @@ pub fn check_named(support: &Path, file: &File, path: &Path) -> Result<(), Untru
 /// barrier an earlier publish may not have finished.
 ///
 /// # Errors
-/// As [`check_named`], `Unsafe` for a file that isn't sealed, and `Io` when a flush fails.
+/// As [`check_named`], `Unsafe` for a name ending `.part` or a file that isn't sealed, and `Io`
+/// when a flush fails.
 pub fn keep_sealed(support: &Path, file: &File, path: &Path, seal: Seal) -> Result<(), Untrusted> {
+    stage(path, false)?;
     let (held, name) = file_parent(support, path)?;
     let folder = held.last()?;
     let sealed = inspect_private(file, held.user(), ObjectKind::Exact(seal.mode()))?;
@@ -186,8 +192,8 @@ pub fn keep_sealed(support: &Path, file: &File, path: &Path, seal: Seal) -> Resu
 /// name is shown to still give it with one link and `to` is shown not to; otherwise it stays sealed.
 ///
 /// # Errors
-/// `Unsafe` for names that aren't siblings, a `to` ending `.part` or a `from` that no longer
-/// names `file`; `Reparse` when
+/// `Unsafe` for names that aren't siblings, a `from` that doesn't end `.part` or no longer names
+/// `file`, or a `to` that does end `.part`; `Reparse` when
 /// `parent` isn't their folder; `Io` when something is already at `to`, and when a flush fails, which
 /// leaves the file published but its durability unproved.
 pub fn seal_and_publish(
@@ -201,11 +207,10 @@ pub fn seal_and_publish(
     if from.parent() != to.parent() {
         return Err(Untrusted::Unsafe);
     }
+    stage(from, true)?;
+    stage(to, false)?;
     let source = below(support, from)?.pop().ok_or(Untrusted::Unsafe)?;
     let (held, target) = file_parent(support, to)?;
-    if target.to_bytes().ends_with(STAGE) {
-        return Err(Untrusted::Unsafe);
-    }
     let folder = held.last()?;
     if !same_object(&stat(folder.as_raw_fd())?, &stat(parent.as_raw_fd())?) {
         return Err(Untrusted::Reparse);
@@ -398,6 +403,21 @@ fn parent_of(support: &Path, path: &Path) -> Result<(Directories, CString), Untr
     let mut names = below(support, path)?;
     let name = names.pop().ok_or(Untrusted::Unsafe)?;
     Ok((walk(support, names, Folders::Existing)?, name))
+}
+
+/// Refuses `path` unless its name ends `.part` exactly when `partial` says it should. ASCII folding
+/// is how the volume compares these names: no other character folds or normalizes to them.
+fn stage(path: &Path, partial: bool) -> Result<(), Untrusted> {
+    let name = path.file_name().map_or(&[][..], |name| name.as_bytes());
+    let staged = name
+        .len()
+        .checked_sub(STAGE.len())
+        .is_some_and(|start| name[start..].eq_ignore_ascii_case(STAGE));
+    if staged == partial {
+        Ok(())
+    } else {
+        Err(Untrusted::Unsafe)
+    }
 }
 
 /// [`parent_of`] for a file, which must be in a private folder, never in the anchor itself.
