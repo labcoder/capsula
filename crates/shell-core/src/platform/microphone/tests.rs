@@ -53,9 +53,7 @@ fn a_device_gone_at_teardown_discards_and_any_other_teardown_error_stays_unconfi
 }
 
 #[test]
-#[cfg(windows)]
 fn native_batch_commit_rejects_revocation_after_authorization() {
-    use crate::platform::windows::microphone::copy_batch;
     use std::sync::atomic::AtomicU64;
 
     for cause in 0..4 {
@@ -108,6 +106,23 @@ fn native_batch_commit_rejects_revocation_after_authorization() {
         4
     );
     assert_eq!(raw, [17, 99, 240, 31]);
+}
+
+#[test]
+fn the_acceptance_edge_is_written_once_and_only_while_running() {
+    let gate = CollectionGate::default();
+    let generation = gate.arm(GestureId(1)).unwrap();
+    let session = AtomicBool::new(true);
+    assert_eq!(generation.accept_edge(7), Err(MicError::Stale));
+    generation.advance(ARMED, OPENING).unwrap();
+    generation.advance(OPENING, RUNNING).unwrap();
+    assert_eq!(generation.accept_edge(7), Ok(()));
+    assert_eq!(generation.accept_edge(9), Err(MicError::Stale));
+    assert_eq!(generation.capture_cutoff(&session), None);
+    generation.advance(RUNNING, COLLECTING).unwrap();
+    assert_eq!(generation.capture_cutoff(&session), Some(7));
+    gate.release(GestureId(1));
+    assert_eq!(generation.capture_cutoff(&session), None);
 }
 
 #[expect(
@@ -858,11 +873,11 @@ fn outer_audio_carriers_redact_text_and_byte_list_sentinels() {
     assert!(!debug.contains(&format!("{marker:?}")));
 }
 
-const ACCEPTED_QPC: u64 = 100;
+const ACCEPTED_EDGE: u64 = 100;
 const CLEAN: PacketStatus = PacketStatus {
     frames: 0,
     position: 0,
-    captured_qpc_100ns: ACCEPTED_QPC,
+    captured_at: ACCEPTED_EDGE,
     discontinuity: false,
     timestamp_error: false,
 };
@@ -896,15 +911,15 @@ fn collect(packets: &[(bool, bool, &[i16], PacketStatus)]) -> Result<Vec<i16>, M
         let status = PacketStatus {
             frames,
             position,
-            captured_qpc_100ns: if after_acceptance {
-                ACCEPTED_QPC
+            captured_at: if after_acceptance {
+                ACCEPTED_EDGE
             } else {
-                ACCEPTED_QPC - 1
+                ACCEPTED_EDGE - 1
             },
             ..flags
         };
         position += u64::from(frames);
-        if boundary.packet(live.then_some(ACCEPTED_QPC), status)? {
+        if boundary.packet(live.then_some(ACCEPTED_EDGE), status)? {
             boundary.kept(
                 status,
                 start + Duration::from_millis(u64::try_from(index).unwrap() * 10),
@@ -932,23 +947,23 @@ fn first_hold_after_idle_unload_keeps_the_first_buffer_after_acceptance() {
 #[test]
 fn startup_discards_the_packet_that_may_straddle_collection_acceptance() {
     let mut boundary = PacketBoundary::default();
-    let mut packet = |cutoff, captured_qpc_100ns, frames| {
+    let mut packet = |cutoff, captured_at, frames| {
         boundary.packet(
             cutoff,
             PacketStatus {
                 frames,
-                captured_qpc_100ns,
+                captured_at,
                 ..CLEAN
             },
         )
     };
-    let cutoff = Some(ACCEPTED_QPC);
-    assert_eq!(packet(None, ACCEPTED_QPC - 1, 7), Ok(false));
-    assert_eq!(packet(cutoff, ACCEPTED_QPC - 1, 7), Ok(false));
-    assert_eq!(packet(cutoff, ACCEPTED_QPC, 0), Ok(false));
-    assert_eq!(packet(cutoff, ACCEPTED_QPC, 7), Ok(true));
-    assert_eq!(packet(cutoff, ACCEPTED_QPC + 1, 7), Ok(true));
-    assert_eq!(packet(None, ACCEPTED_QPC + 1, 7), Ok(false));
+    let cutoff = Some(ACCEPTED_EDGE);
+    assert_eq!(packet(None, ACCEPTED_EDGE - 1, 7), Ok(false));
+    assert_eq!(packet(cutoff, ACCEPTED_EDGE - 1, 7), Ok(false));
+    assert_eq!(packet(cutoff, ACCEPTED_EDGE, 0), Ok(false));
+    assert_eq!(packet(cutoff, ACCEPTED_EDGE, 7), Ok(true));
+    assert_eq!(packet(cutoff, ACCEPTED_EDGE + 1, 7), Ok(true));
+    assert_eq!(packet(None, ACCEPTED_EDGE + 1, 7), Ok(false));
 }
 
 #[test]
@@ -1084,11 +1099,11 @@ fn lost_frames_pass_at_a_quarter_and_fail_one_frame_above() {
     );
     assert_eq!(
         boundary.packet(
-            Some(ACCEPTED_QPC),
+            Some(ACCEPTED_EDGE),
             PacketStatus {
                 frames: 9,
                 position: 7,
-                captured_qpc_100ns: ACCEPTED_QPC - 1,
+                captured_at: ACCEPTED_EDGE - 1,
                 ..GAP
             }
         ),
@@ -1103,7 +1118,7 @@ fn lost_frames_pass_at_a_quarter_and_fail_one_frame_above() {
             position,
             ..flags
         };
-        assert_eq!(boundary.packet(Some(ACCEPTED_QPC), packet), Ok(true));
+        assert_eq!(boundary.packet(Some(ACCEPTED_EDGE), packet), Ok(true));
         boundary.kept(
             packet,
             start + Duration::from_millis(u64::try_from(index).unwrap() * 10),
@@ -1122,12 +1137,12 @@ fn lost_frames_pass_at_a_quarter_and_fail_one_frame_above() {
         position: 541,
         ..GAP
     };
-    assert_eq!(boundary.packet(Some(ACCEPTED_QPC), packet), Ok(true));
+    assert_eq!(boundary.packet(Some(ACCEPTED_EDGE), packet), Ok(true));
     boundary.kept(packet, start + Duration::from_millis(30));
     assert_eq!(boundary.missing_frames, 11);
     assert_eq!(boundary.finish(Ok(())), Err(MicError::Discontinuity));
     assert_eq!(
-        boundary.packet(Some(ACCEPTED_QPC), CLEAN),
+        boundary.packet(Some(ACCEPTED_EDGE), CLEAN),
         Err(MicError::Discontinuity)
     );
     assert_eq!(boundary.finish(Ok(())), Err(MicError::Discontinuity));
@@ -1138,12 +1153,12 @@ fn timestamp_and_native_source_failures_stay_failed_after_clean_input() {
     for reason in [MicError::Unavailable, MicError::Format] {
         let mut boundary = PacketBoundary::default();
         let packet = PacketStatus { frames: 3, ..CLEAN };
-        assert_eq!(boundary.packet(Some(ACCEPTED_QPC), packet), Ok(true));
+        assert_eq!(boundary.packet(Some(ACCEPTED_EDGE), packet), Ok(true));
         boundary.kept(packet, Instant::now());
         assert_eq!(boundary.kept_frames, 3);
         assert_eq!(boundary.finish(Err(reason)), Err(reason));
         assert_eq!(
-            boundary.packet(Some(ACCEPTED_QPC), PacketStatus { frames: 1, ..CLEAN }),
+            boundary.packet(Some(ACCEPTED_EDGE), PacketStatus { frames: 1, ..CLEAN }),
             Err(reason)
         );
         assert_eq!(boundary.finish(Ok(())), Err(reason));
@@ -1151,7 +1166,7 @@ fn timestamp_and_native_source_failures_stay_failed_after_clean_input() {
     let mut boundary = PacketBoundary::default();
     assert_eq!(
         boundary.packet(
-            Some(ACCEPTED_QPC),
+            Some(ACCEPTED_EDGE),
             PacketStatus {
                 frames: 1,
                 discontinuity: true,
@@ -1161,7 +1176,7 @@ fn timestamp_and_native_source_failures_stay_failed_after_clean_input() {
         Err(MicError::Timestamp)
     );
     assert_eq!(
-        boundary.packet(Some(ACCEPTED_QPC), PacketStatus { frames: 1, ..CLEAN }),
+        boundary.packet(Some(ACCEPTED_EDGE), PacketStatus { frames: 1, ..CLEAN }),
         Err(MicError::Timestamp)
     );
     assert_eq!(boundary.finish(Ok(())), Err(MicError::Timestamp));
@@ -1173,16 +1188,16 @@ fn a_missing_capture_timestamp_does_not_admit_a_later_packet() {
     let packet = PacketStatus { frames: 1, ..CLEAN };
     assert_eq!(
         boundary.packet(
-            Some(ACCEPTED_QPC),
+            Some(ACCEPTED_EDGE),
             PacketStatus {
-                captured_qpc_100ns: 0,
+                captured_at: 0,
                 ..packet
             }
         ),
         Err(MicError::Timestamp)
     );
     assert_eq!(
-        boundary.packet(Some(ACCEPTED_QPC), packet),
+        boundary.packet(Some(ACCEPTED_EDGE), packet),
         Err(MicError::Timestamp)
     );
 }
@@ -1193,9 +1208,9 @@ fn unconfirmed_teardown_outweighs_a_latched_timestamp_error() {
     let packet = PacketStatus { frames: 1, ..CLEAN };
     assert_eq!(
         boundary.packet(
-            Some(ACCEPTED_QPC),
+            Some(ACCEPTED_EDGE),
             PacketStatus {
-                captured_qpc_100ns: 0,
+                captured_at: 0,
                 ..packet
             }
         ),

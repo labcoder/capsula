@@ -39,7 +39,10 @@ call `accept_running(Running) -> Result<(), MicError>`. On Windows this records 
 acceptance edge on the same performance clock that WASAPI uses to timestamp each
 packet's first frame. The source rejects a packet that starts before the edge,
 including a straddling packet, and keeps the first packet whose first sample is
-known to be after the edge. The comparison skips the ambiguous adjacent QPC tick
+known to be after the edge. The shared generation stores that edge once, only while
+running, in the platform capture clock's units; each native adapter supplies its own
+clock reading, and the copy-and-recheck of a borrowed batch (`copy_batch`) is shared.
+The comparison skips the ambiguous adjacent QPC tick
 and rounds forward to WASAPI's 100 ns units. Missing capture timestamps after
 acceptance and explicit timestamp faults
 fail closed. Preparing and stopping must remain distinct from Listening. A late
