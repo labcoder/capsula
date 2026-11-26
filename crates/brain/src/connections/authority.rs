@@ -316,9 +316,6 @@ pub(crate) struct Authority {
     account_fenced: bool,
     /// This open's count; a sweep in a later one is what turns Removed into Swept.
     lifetime: i64,
-    /// Leaves the next refused repair-context COMMIT's transaction open, as a failed rollback would.
-    #[cfg(test)]
-    pub(in crate::connections) refuse_rollback: bool,
 }
 
 impl fmt::Debug for Authority {
@@ -407,14 +404,7 @@ impl Authority {
             conn,
             lifetime,
             account_fenced: false,
-            #[cfg(test)]
-            refuse_rollback: false,
         })
-    }
-
-    #[cfg(test)]
-    pub(in crate::connections) fn in_transaction(&self) -> bool {
-        !self.conn.is_autocommit()
     }
 
     fn ordinary(&self, kind: Kind) -> Result<(), AuthorityError> {

@@ -201,16 +201,6 @@ impl Drop for Listening {
     }
 }
 
-/// The live owner's hold on one repair attempt: dropping it stops the attempt.
-#[derive(Debug)]
-struct HeldRepair(crate::connections::vault::RepairStop);
-
-impl Drop for HeldRepair {
-    fn drop(&mut self) {
-        self.0.stop();
-    }
-}
-
 /// The account machine, the credential thread and the tasks it started.
 #[derive(Debug)]
 pub(crate) struct Accounts {
@@ -238,8 +228,6 @@ pub(crate) struct Accounts {
     pub(super) connections: Connections,
     /// What the current connection's sign-in may read; it isn't ready until that's known.
     proofs: proof::Proofs,
-    /// The repair attempt this pair owns, stopped when the pair ends.
-    repair: Option<HeldRepair>,
 }
 
 impl Accounts {
@@ -323,7 +311,6 @@ impl Accounts {
             salt,
             connections: Connections::default(),
             proofs: proof::Proofs::held(),
-            repair: None,
         };
         accounts.apply(started);
         let (done, key) = loaded
@@ -336,21 +323,6 @@ impl Accounts {
             .github
             .start(accounts.jobs.as_ref(), &accounts.reads_tx);
         Ok(accounts)
-    }
-
-    /// Stops the repair attempt this pair owns, without waiting for the credential thread: a
-    /// bind that hasn't claimed it refuses, and one that has settles but never activates.
-    pub(crate) fn stop_repair(&mut self) {
-        drop(self.repair.take());
-    }
-
-    /// Holds `stop` as this pair's repair attempt.
-    /// shortcut: only tests hold one; repair ingress must hold it before dispatching work that
-    /// can claim the attempt, never for a pair that has ended, and call `stop_repair`
-    /// synchronously before queueing its durable cancel.
-    #[cfg(test)]
-    pub(crate) fn hold_repair(&mut self, stop: crate::connections::vault::RepairStop) {
-        self.repair = Some(HeldRepair(stop));
     }
 
     /// Binds the vault's history link to `writer`, the store thread's, and only then checks what
@@ -836,7 +808,6 @@ impl Accounts {
     /// start counts it as uncertainty. Reports the worst of the refresh against `refresh_by`,
     /// the credential job's release against `deadline`, and any issued set closing left unsaved.
     pub(crate) async fn close(&mut self, deadline: Instant, refresh_by: Instant) -> Stage {
-        self.stop_repair();
         drop(self.listener.take());
         self.proofs.close();
         self.github

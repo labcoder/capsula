@@ -1055,35 +1055,9 @@ seals the attempt against promotion, but the same vault and attempt can still dr
 If either owner goes away after the claim, the persisted charge is unresolved and stays fenced.
 The drain can settle once: a known refresh handle is escrowed even if the response is
 unusable, while a missing receipt or a refused write keeps the attempt fenced. No retry or
-ordinary account save follows. A still-live, settled receipt can be verified against the
-issued client and nonce using the standard signed-identity verifier. The authority checks
-the same escrow, predecessor, host, and staged successor before it atomically retires the
-predecessor and escrow and records the exact successor/tag as locked Pending. A failed commit
-can count as a binding only if the transaction has ended and the exact binding reads back.
-This transaction does not open history, establish a context, or authorize use. A later history
-cutoff and exact Check are required. The still-locked binding is also the one-shot proof for the
-separate [history cutoff](store.md), written only by the profile's one history writer, which
-the vault's link is bound to once the store thread runs and which shutdown releases before the
-store closes. Only that cutoff's receipt, matched by the writer's
-fresh Check, marks the context established, recording its tag and thread/run bounds beside the
-successor. Confirming it later has the writer re-read the row, which a history purge carries
-over; a missing, changed or unreadable row leaves the successor locked, and nothing mints a
-replacement cutoff. A refused establishment COMMIT is rolled back, and confirmation reads
-only committed authority state, so a connection still inside a transaction is never established. Only scripted tests
-call this path; ordinary startup still refuses version 4 and there is no browser or runtime ingress.
-
-The attempt's live owner can stop it without the vault's lock. The bind claims the attempt just
-before its COMMIT, and the context's establishment claims it again just before its own. A claim
-only lets that commit settle; it proves nothing, and a claim whose commit fails is spent. A stop
-before the bind's claim makes the bind refuse, leaving the predecessor fenced and any staged bytes
-inactive. A stop after it lets the bind settle, but the binding then mints no cutoff. A stop is not an
-undo: a cutoff already handed to the history writer may still commit, and its context stays
-unestablished only if the stop lands before the establishment's claim; once that claim has won,
-the authority may commit the context. The durable cancel finds nothing there to undo, so the
-binding stays locked; this cut doesn't clear it. Dropping the attempt after
-its bind doesn't stop it. The brain stops the attempt its pair owns as soon as that pair ends or
-quits, before the grace for its last controls, and again when it quits or closes; dropping its
-hold stops it too. Nothing holds an attempt at runtime yet.
+ordinary account save follows, and nothing verifies or promotes an escrowed handle: a copied
+profile recovers by Forget, then an ordinary sign-in. Only scripted tests call this path;
+ordinary startup still refuses version 4 and there is no browser or runtime ingress.
 
 Every sign-in is proved before `ChatGPT` is ready. Each time the account's connection changes
 (load, sign-in, sign-out; a refresh keeps it), `runtime::Accounts` asks the credential thread

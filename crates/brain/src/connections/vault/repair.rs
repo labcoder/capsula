@@ -12,15 +12,11 @@ use crate::platform::credential::CredentialStore;
 
 pub(super) mod exchange;
 pub(super) mod promotion;
-pub(crate) use promotion::{CutoffRequest, HistoryBinding, HistoryLink, Proof, Work};
+pub(crate) use promotion::{CutoffRequest, HistoryBinding, HistoryLink, Proof};
 
 const ARMED: u8 = 0;
 const DISPATCHED: u8 = 1;
 const RETIRED: u8 = 2;
-/// The bind claimed the attempt: it may settle its commit, which alone proves nothing.
-const CLAIMED: u8 = 3;
-/// The context's establishment claimed it: it may settle that commit.
-const ESTABLISHING: u8 = 4;
 
 #[derive(Debug)]
 #[must_use]
@@ -28,45 +24,14 @@ pub(in crate::connections) struct RepairAttempt {
     owner: Owner,
     lease: RepairLease,
     pub(super) intake: ExchangeIntake,
-    host: Secret<Zeroizing<String>>,
-}
-
-impl RepairAttempt {
-    /// The stop its live owner holds, taken before any work that can claim the attempt.
-    pub(in crate::connections) fn stop_handle(&self) -> RepairStop {
-        RepairStop(Arc::clone(&self.lease.0))
-    }
 }
 
 #[derive(Debug)]
 pub(super) struct RepairLease(Arc<AtomicU8>);
 
-/// Retires an attempt not yet claimed; a claimed one stays its binding's, which only a stop
-/// or a failed settlement ends.
 impl Drop for RepairLease {
     fn drop(&mut self) {
-        self.0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                matches!(state, ARMED | DISPATCHED).then_some(RETIRED)
-            })
-            .ok();
-    }
-}
-
-/// Stops one repair attempt from outside the vault, without its lock: a bind or establishment
-/// that hasn't claimed it yet refuses, and one that has settles but never activates later.
-#[derive(Clone, Debug)]
-pub(crate) struct RepairStop(Arc<AtomicU8>);
-
-impl RepairStop {
-    /// Final: nothing makes the attempt live again.
-    pub(crate) fn stop(&self) {
         self.0.store(RETIRED, Ordering::Release);
-    }
-
-    #[cfg(test)]
-    pub(super) fn retired(&self) -> bool {
-        self.0.load(Ordering::Acquire) == RETIRED
     }
 }
 
@@ -95,14 +60,9 @@ impl From<AuthorityError> for RepairRefusal {
 
 impl<S: CredentialStore> Vault<S> {
     fn owns_repair(&self, attempt: &RepairAttempt) -> bool {
-        self.holds_lease(&attempt.lease.0)
-    }
-
-    /// Whether `lease` is this vault's current attempt's, not one a later admission replaced.
-    fn holds_lease(&self, lease: &Arc<AtomicU8>) -> bool {
         self.repair_lease
             .as_ref()
-            .is_some_and(|held| Arc::ptr_eq(&held.0, lease))
+            .is_some_and(|lease| Arc::ptr_eq(&lease.0, &attempt.lease.0))
     }
 
     pub(in crate::connections) fn missing_repair_head(
@@ -160,7 +120,6 @@ impl<S: CredentialStore> Vault<S> {
             owner,
             lease: RepairLease(dispatch),
             intake: ExchangeIntake::Open,
-            host: Secret::new(value),
         })
     }
 

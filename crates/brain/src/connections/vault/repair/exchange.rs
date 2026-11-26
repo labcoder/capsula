@@ -4,10 +4,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use kumochi_protocol::Secret;
 use zeroize::Zeroizing;
 
-use super::promotion::RepairProof;
 use super::{ARMED, DISPATCHED, ExchangeIntake, RepairAttempt};
 use crate::connections::authority::repair::ExchangeStep;
-use crate::connections::clock::Clock;
 use crate::connections::error::VaultError;
 use crate::connections::http_client::Http;
 use crate::connections::oauth::{
@@ -23,8 +21,6 @@ use crate::platform::credential::{CredentialStore, SecretBytes};
 pub(in crate::connections) struct RepairDispatch {
     owner: Arc<AtomicU8>,
     request: ExchangeRequest,
-    client: Secret<Zeroizing<String>>,
-    nonce: Secret<Zeroizing<String>>,
 }
 
 #[derive(Debug)]
@@ -32,7 +28,6 @@ pub(in crate::connections) struct RepairDispatch {
 pub(in crate::connections) struct RepairReceipt {
     owner: Arc<AtomicU8>,
     result: Option<Receipt>,
-    proof: Option<RepairProof>,
 }
 
 #[derive(Debug)]
@@ -46,35 +41,18 @@ enum Receipt {
 pub(in crate::connections) enum RepairSettlement {
     NotSent,
     Unknown,
-    Escrowed(Option<RepairProof>),
+    Escrowed,
 }
 
 impl RepairDispatch {
-    pub(in crate::connections) async fn receive(
-        self,
-        http: &impl Http,
-        clock: &dyn Clock,
-    ) -> RepairReceipt {
-        let mut proof = None;
+    pub(in crate::connections) async fn receive(self, http: &impl Http) -> RepairReceipt {
         let result = if self
             .owner
             .compare_exchange(ARMED, DISPATCHED, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
             match self.request.send(http).await {
-                Ok(tokens) => match tokens.refresh_token.clone() {
-                    Some(handle) => {
-                        proof = Some(RepairProof::new(
-                            Arc::clone(&self.owner),
-                            self.client,
-                            self.nonce,
-                            tokens,
-                            clock.unix_seconds(),
-                        ));
-                        Receipt::Issued(handle)
-                    }
-                    None => Receipt::Unknown,
-                },
+                Ok(tokens) => tokens.refresh_token.map_or(Receipt::Unknown, Receipt::Issued),
                 Err(ExchangeError::Unusable { refresh_token }) => {
                     refresh_token.map_or(Receipt::Unknown, Receipt::Issued)
                 }
@@ -86,7 +64,6 @@ impl RepairDispatch {
         RepairReceipt {
             owner: self.owner,
             result: Some(result),
-            proof,
         }
     }
 }
@@ -95,24 +72,17 @@ impl<S: CredentialStore> Vault<S> {
     pub(in crate::connections) fn charge_repair_exchange(
         &mut self,
         attempt: &RepairAttempt,
-        authorization: Authorization,
+        authorization: &Authorization,
     ) -> Result<RepairDispatch, VaultError> {
         if !self.owns_repair(attempt) || attempt.lease.0.load(Ordering::Acquire) != ARMED {
             return Err(VaultError::Fenced);
         }
-        let request = prepare_exchange(&authorization).map_err(|_| VaultError::Fenced)?;
+        let request = prepare_exchange(authorization).map_err(|_| VaultError::Fenced)?;
         let bytes = encode_escrow(authorization.client_id.expose(), "")?;
-        let Authorization {
-            client_id: client,
-            nonce,
-            ..
-        } = authorization;
         self.write_repair_escrow(attempt, ExchangeStep::Charge, &bytes)?;
         Ok(RepairDispatch {
             owner: Arc::clone(&attempt.lease.0),
             request,
-            client,
-            nonce,
         })
     }
 
@@ -129,7 +99,6 @@ impl<S: CredentialStore> Vault<S> {
         }
         let active = self.authority.charged_repair_client(&attempt.owner)?;
         let result = receipt.result.take().ok_or(VaultError::Fenced)?;
-        let proof = receipt.proof.take();
         let outcome = match result {
             Receipt::Issued(handle) => {
                 attempt.intake = ExchangeIntake::Held(handle);
@@ -149,9 +118,7 @@ impl<S: CredentialStore> Vault<S> {
                     self.authority.settle_repair_uncertain(&attempt.owner)?;
                     return Err(error);
                 }
-                RepairSettlement::Escrowed(
-                    proof.filter(|_| attempt.lease.0.load(Ordering::Acquire) == DISPATCHED),
-                )
+                RepairSettlement::Escrowed
             }
             Receipt::NotSent | Receipt::Unknown => {
                 attempt.intake = ExchangeIntake::Closed;
@@ -195,7 +162,7 @@ fn encode_escrow(client: &str, handle: &str) -> Result<SecretBytes, VaultError> 
     Ok(Secret::new(bytes))
 }
 
-pub(super) fn decode_escrow(bytes: &[u8]) -> Result<(&str, &str), VaultError> {
+fn decode_escrow(bytes: &[u8]) -> Result<(&str, &str), VaultError> {
     let (len, bytes) = bytes
         .split_first_chunk::<2>()
         .ok_or(VaultError::Unreadable)?;

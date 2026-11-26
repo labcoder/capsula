@@ -201,10 +201,7 @@ fn a_valid_token_yields_its_redacted_identity() {
     );
     assert_eq!(
         format!("{identity:?}"),
-        format!(
-            "VerifiedIdentity {{ subject: ***, email: Some(***), expires_at: {} }}",
-            NOW + 600
-        )
+        "VerifiedIdentity { subject: ***, email: Some(***) }"
     );
 }
 
@@ -712,46 +709,6 @@ fn discovery(issuer: &str, jwks_uri: &str) -> Result<Response, HttpError> {
         200,
         json!({ "issuer": issuer, "jwks_uri": jwks_uri }).to_string(),
     )
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum FixtureSignature {
-    Valid,
-    WrongKey,
-}
-
-pub(crate) fn repair_exchange_fixture(
-    audience: &str,
-    nonce: &str,
-    expires_at: u64,
-    signature: FixtureSignature,
-    scope: &str,
-) -> impl Http + use<> {
-    let claims = with(&[
-        ("aud", Some(json!(audience))),
-        ("nonce", Some(json!(nonce))),
-        ("exp", Some(json!(expires_at))),
-    ]);
-    let id = match signature {
-        FixtureSignature::Valid => token(&claims),
-        FixtureSignature::WrongKey => signed(&header("RS256", Some(KID)), &claims, &OTHER),
-    };
-    Scripted::new([
-        response(
-            200,
-            json!({
-                "access_token": "replacement-access-SENTINEL",
-                "refresh_token": "replacement-refresh-SENTINEL",
-                "id_token": id,
-                "token_type": "bearer",
-                "scope": scope,
-                "expires_in": 3600
-            })
-            .to_string(),
-        ),
-        discovery(ISSUER, JWKS_URI),
-        response(200, jwks().to_string()),
-    ])
 }
 
 fn secret(token: &str) -> Secret<Zeroizing<String>> {

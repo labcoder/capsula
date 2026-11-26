@@ -3,9 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 
-use kumochi_protocol::Secret;
 
 use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
 
@@ -19,14 +18,6 @@ pub(crate) enum Fault {
 pub(crate) enum Mutation {
     Set(String),
     Delete(String),
-}
-
-#[derive(Debug, Default)]
-enum ChangeReadback {
-    #[default]
-    None,
-    NextWrite,
-    AfterRead(String),
 }
 
 #[derive(Debug, Default)]
@@ -49,10 +40,7 @@ pub(crate) struct FakeState {
     /// While set, each mutation first notes the marker the authority file there holds, so a
     /// trace shows which control state every store mutation ran under.
     pub(crate) note_markers: Option<(PathBuf, Vec<String>)>,
-    change_readback: ChangeReadback,
     written: BTreeSet<String>,
-    /// The next write says it has started, then waits until it's let go.
-    held_write: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -103,19 +91,6 @@ impl FakeStore {
         state.fault = Some((index, fault));
     }
 
-    /// Holds the next write before it lands: the first receiver hears it start, and the write
-    /// goes on once the sender sends or drops.
-    pub(crate) fn hold_next_write(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
-        let (started, start) = mpsc::channel();
-        let (release, released) = mpsc::channel();
-        self.0.lock().expect("fake lock").held_write = Some((started, released));
-        (start, release)
-    }
-
-    pub(crate) fn change_after_next_write_readback(&self) {
-        self.0.lock().expect("fake lock").change_readback = ChangeReadback::NextWrite;
-    }
-
     #[expect(
         clippy::panic_in_result_fn,
         reason = "fault injection deliberately models process death after a durable mutation"
@@ -159,9 +134,6 @@ impl FakeStore {
                         clock.fetch_add(seconds, Ordering::SeqCst);
                     }
                     state.values.insert(target.to_owned(), value.clone());
-                    if matches!(state.change_readback, ChangeReadback::NextWrite) {
-                        state.change_readback = ChangeReadback::AfterRead(target.to_owned());
-                    }
                 } else if state.sticky_deletes > 0 && state.values.contains_key(target) {
                     state.sticky_deletes -= 1;
                 } else {
@@ -193,23 +165,10 @@ impl CredentialStore for FakeStore {
             state.missed_reads -= 1;
             return Ok(None);
         }
-        if matches!(&state.change_readback, ChangeReadback::AfterRead(name) if name == target)
-            && let Some(original) = &value
-        {
-            let mut changed = original.expose().clone();
-            changed[0] ^= 1;
-            state.values.insert(target.to_owned(), Secret::new(changed));
-            state.change_readback = ChangeReadback::None;
-        }
         Ok(value)
     }
 
     fn set(&self, target: &str, secret: &SecretBytes) -> Result<(), CredentialStoreError> {
-        let held = self.0.lock().expect("fake lock").held_write.take();
-        if let Some((started, released)) = held {
-            started.send(()).ok();
-            released.recv().ok();
-        }
         self.mutate(target, Some(secret))
     }
 
