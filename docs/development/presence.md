@@ -43,8 +43,8 @@ this precondition.
 
 The adapter restacks top-first as panels, dock/body proxy, regional input, drawing overlay,
 then dormant selection. Showing a drawing reapplies this order after its native placement,
-even when the input mode has not changed. A replacement host, including after clearing or
-reconnecting, binds and configures again while hidden. Selecting puts its surface above those
+even when the input mode has not changed. Each host a show opens, including the first after clearing or
+reconnecting, binds and configures while still hidden, before it is shown. Selecting puts its surface above those
 groups, then drops it back on exit. Every restack uses
 `SWP_NOACTIVATE`, and every non-panel surface keeps `WS_EX_NOACTIVATE`; only the existing
 explicit panel activation path can take foreground. GPUI cannot express cross-process regional
