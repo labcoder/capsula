@@ -11,6 +11,7 @@ use kumochi_protocol::message::{
 };
 
 use super::{Coordinator, Effect, SendKey, Stale};
+use crate::connections::facts::{self, KINDS, PerKind};
 use crate::connections::model::error::Failure as Stream;
 use crate::context::{ConnectionTag, Route};
 use crate::engines::{EngineFailure, Finish};
@@ -108,13 +109,8 @@ impl Availability {
     }
 }
 
-/// Turns pictures on for the Anthropic key route. Only this const turns it on outside tests.
-pub(crate) const ANTHROPIC_KEY_PICTURES: bool = true;
-/// Turns pictures on for the Claude Code route. Only this const turns it on outside tests.
-pub(crate) const CLAUDE_CODE_PICTURES: bool = false;
-
 /// Which routes may carry a picture. `ChatGPT` always may, by its catalog's fact; each Claude
-/// route only once its const is on, so no setting, message, variable or flag reaches it.
+/// route only once its [`facts`] row is on, so no setting, message, variable or flag reaches it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PictureRoutes {
     anthropic_key: bool,
@@ -124,8 +120,8 @@ pub(crate) struct PictureRoutes {
 impl PictureRoutes {
     /// What every build ships.
     pub(crate) const SHIPPED: Self = Self {
-        anthropic_key: ANTHROPIC_KEY_PICTURES,
-        claude_code: CLAUDE_CODE_PICTURES,
+        anthropic_key: facts::of(ConnectionKind::AnthropicKey).pictures,
+        claude_code: facts::of(ConnectionKind::ClaudeCode).pictures,
     };
 
     #[cfg(test)]
@@ -143,7 +139,7 @@ impl PictureRoutes {
     /// Whether a request on `kind` may carry a picture at all.
     pub(crate) const fn allows(self, kind: ConnectionKind) -> bool {
         match kind {
-            ConnectionKind::ChatGpt => true,
+            ConnectionKind::ChatGpt => facts::of(ConnectionKind::ChatGpt).pictures,
             ConnectionKind::AnthropicKey => self.anthropic_key,
             ConnectionKind::ClaudeCode => self.claude_code,
         }
@@ -158,7 +154,7 @@ pub struct RefusedKey(pub(crate) ConnectionTag, pub(crate) Option<SendKey>);
 /// was recovered, and whether `ChatGPT` was refused for an inconsistent recovery report. A run
 /// is bound to one of them at its first build, by its model choice's kind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Arrived([Option<ConnectionTag>; 3], Option<Boundary>, bool);
+pub(crate) struct Arrived(PerKind<Option<ConnectionTag>>, Option<Boundary>, bool);
 
 impl Arrived {
     /// Whether `ChatGPT` was refused, so a build that answers on it reads no history at all.
@@ -169,7 +165,7 @@ impl Arrived {
     /// Nothing ready, with `ChatGPT` refused.
     #[cfg(test)]
     pub(crate) fn blocked() -> Self {
-        Self([None; 3], None, true)
+        Self(PerKind::default(), None, true)
     }
 
     /// The recovered `ChatGPT` cutoff its reads keep to, when `ChatGPT` arrived recovered.
@@ -178,7 +174,7 @@ impl Arrived {
     }
 
     pub(super) fn get(self, kind: ConnectionKind) -> Option<ConnectionTag> {
-        self.0[slot(kind)]
+        self.0[kind]
     }
 
     /// The tag `choice`'s kind had at arrival, which the run's stored rounds carry; `ChatGPT`'s
@@ -189,23 +185,15 @@ impl Arrived {
     }
 
     pub(super) fn is_empty(self) -> bool {
-        self.0.iter().all(Option::is_none)
+        KINDS.into_iter().all(|kind| self.0[kind].is_none())
     }
 
     /// Only `kind` ready, on `tag`.
     #[cfg(test)]
     pub(crate) fn of(kind: ConnectionKind, tag: ConnectionTag) -> Self {
         let mut arrived = Self::default();
-        arrived.0[slot(kind)] = Some(tag);
+        arrived.0[kind] = Some(tag);
         arrived
-    }
-}
-
-const fn slot(kind: ConnectionKind) -> usize {
-    match kind {
-        ConnectionKind::ChatGpt => 0,
-        ConnectionKind::AnthropicKey => 1,
-        ConnectionKind::ClaudeCode => 2,
     }
 }
 
@@ -237,18 +225,13 @@ pub(crate) fn model_unavailable() -> UserError {
 
 impl Coordinator {
     /// Whether runs on Claude Code can be answered now.
-    #[cfg(test)]
     pub(crate) fn claude_code(&self) -> &Availability {
-        &self.claude_code
+        &self.availability[ConnectionKind::ClaudeCode]
     }
 
     /// Whether runs on `kind` can be answered now.
     pub(crate) fn availability_of(&self, kind: ConnectionKind) -> &Availability {
-        match kind {
-            ConnectionKind::ChatGpt => &self.availability,
-            ConnectionKind::AnthropicKey => &self.anthropic_key,
-            ConnectionKind::ClaudeCode => &self.claude_code,
-        }
+        &self.availability[kind]
     }
 
     /// Which routes may carry a picture.
@@ -281,27 +264,23 @@ impl Coordinator {
     }
 
     pub(super) fn picture_models(&self) -> Vec<(Route, Vec<ModelSlug>)> {
-        [
-            ConnectionKind::ChatGpt,
-            ConnectionKind::AnthropicKey,
-            ConnectionKind::ClaudeCode,
-        ]
-        .into_iter()
-        .filter_map(|kind| match self.availability_of(kind) {
-            Availability::Ready(ready)
-                if self.pictures.allows(kind) && !ready.images.is_empty() =>
-            {
-                Some((
-                    Route {
-                        kind,
-                        tag: ready.connection,
-                    },
-                    ready.images.clone(),
-                ))
-            }
-            _ => None,
-        })
-        .collect()
+        KINDS
+            .into_iter()
+            .filter_map(|kind| match self.availability_of(kind) {
+                Availability::Ready(ready)
+                    if self.pictures.allows(kind) && !ready.images.is_empty() =>
+                {
+                    Some((
+                        Route {
+                            kind,
+                            tag: ready.connection,
+                        },
+                        ready.images.clone(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Whether a request on `route` for `choice` may carry its run's picture now, as
@@ -331,13 +310,9 @@ impl Coordinator {
     /// The sign-in each kind has ready now, which a new turn records.
     pub(super) fn arrived_now(&self) -> Arrived {
         let mut arrived = Arrived::default();
-        for kind in [
-            ConnectionKind::ChatGpt,
-            ConnectionKind::AnthropicKey,
-            ConnectionKind::ClaudeCode,
-        ] {
+        for kind in KINDS {
             if let Availability::Ready(ready) = self.availability_of(kind) {
-                arrived.0[slot(kind)] = Some(ready.connection);
+                arrived.0[kind] = Some(ready.connection);
             }
         }
         arrived.1 = arrived
@@ -451,12 +426,7 @@ impl Coordinator {
                 self.chatgpt_retired.push(last);
             }
         }
-        let entry = match kind {
-            ConnectionKind::ChatGpt => &mut self.availability,
-            ConnectionKind::AnthropicKey => &mut self.anthropic_key,
-            ConnectionKind::ClaudeCode => &mut self.claude_code,
-        };
-        *entry = now;
+        self.availability[kind] = now;
         self.lose_pictures(None);
         self.revoke_pictures();
         // A `ChatGPT` job follows the account's sign-in and sign-out instead.
@@ -487,7 +457,7 @@ impl Coordinator {
                     return;
                 };
                 let current = self.current.as_mut().expect("the run is current");
-                current.arrived.0[slot(kind)] = None;
+                current.arrived.0[kind] = None;
                 current.arrived.is_empty().then_some(reason)
             }
         };
@@ -569,8 +539,8 @@ impl Coordinator {
         else {
             return false;
         };
-        let found = &mut current.arrived.0[slot(ConnectionKind::ClaudeCode)];
-        match &self.claude_code {
+        let found = &mut current.arrived.0[ConnectionKind::ClaudeCode];
+        match &self.availability[ConnectionKind::ClaudeCode] {
             Availability::Finding => *found = None,
             Availability::Ready(ready) => *found = Some(ready.connection),
             Availability::Unavailable(_) => {
@@ -582,7 +552,10 @@ impl Coordinator {
             }
         }
         if let Some(Finding::Waiting { until }) = current.finding
-            && !matches!(self.claude_code, Availability::Finding)
+            && !matches!(
+                self.availability[ConnectionKind::ClaudeCode],
+                Availability::Finding
+            )
         {
             let now = tokio::time::Instant::now();
             if now >= until {
@@ -660,7 +633,7 @@ impl Coordinator {
     /// found, isn't reported yet, is off or is broken leaves `ChatGPT`'s notice and its Sign in.
     fn nothing_ready(&self, chatgpt: &UserError) -> UserError {
         let signed_out = matches!(
-            &self.claude_code,
+            &self.availability[ConnectionKind::ClaudeCode],
             Availability::Unavailable(reason) if reason.key() == ErrorKey::ClaudeCodeSignedOut
         );
         if chatgpt.key() == ErrorKey::SignInNeeded && signed_out {
@@ -672,7 +645,7 @@ impl Coordinator {
 
     /// `ChatGPT`'s ready sign-in.
     pub(super) fn connection(&self) -> Option<ConnectionTag> {
-        match &self.availability {
+        match &self.availability[ConnectionKind::ChatGpt] {
             Availability::Ready(ready) => Some(ready.connection),
             Availability::Unavailable(_) | Availability::Finding => None,
         }
@@ -762,7 +735,10 @@ impl Coordinator {
 
     /// The dev fixture's draw calls draw without being offered.
     pub(super) fn trusted_draw(&self) -> bool {
-        matches!(&self.availability, Availability::Ready(ready) if ready.trusted())
+        matches!(
+            &self.availability[ConnectionKind::ChatGpt],
+            Availability::Ready(ready) if ready.trusted()
+        )
     }
 
     /// What the shell hears when a round fails: the stream's own meaning, or, when it got no

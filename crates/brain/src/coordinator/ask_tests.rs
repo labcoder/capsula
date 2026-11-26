@@ -450,16 +450,17 @@ fn an_ask_from_before_the_cutoff_never_reaches_the_recovered_route() {
         let (mut core, scene) = drawn(&scratch);
         let cut = crate::store::Boundary::fixture(0, last_thread, 10);
         core.recovered_chatgpt = vec![cut];
-        core.claude_code = Availability::Ready(crate::coordinator::Ready {
-            connection: crate::context::ConnectionTag(5),
-            models: vec![ModelInfo {
-                slug: haiku.clone(),
-                display_name: ModelName::new("Haiku").expect("name"),
-                supported_efforts: None,
-            }],
-            trusted_draw: false,
-            images: Vec::new(),
-        });
+        core.availability[ConnectionKind::ClaudeCode] =
+            Availability::Ready(crate::coordinator::Ready {
+                connection: crate::context::ConnectionTag(5),
+                models: vec![ModelInfo {
+                    slug: haiku.clone(),
+                    display_name: ModelName::new("Haiku").expect("name"),
+                    supported_efforts: None,
+                }],
+                trusted_draw: false,
+                images: Vec::new(),
+            });
         core.handle(if asked {
             ask(scene, handle(1))
         } else {
