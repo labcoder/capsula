@@ -12,8 +12,10 @@ pub(crate) enum Refusal {
     /// The event came with no exact key-state read.
     Unread,
     /// A key other than the chord's was down, or a chord key wasn't.
+    #[cfg(windows)]
     Chord,
     /// The foreground changed during the read.
+    #[cfg(windows)]
     Foreground,
     /// The event's layout is no longer the foreground's.
     Layout,

@@ -581,7 +581,9 @@ fn rearm_line(read: Result<Instant, Refusal>) -> &'static str {
     match read {
         Ok(_) => "rearm ok",
         Err(Refusal::Unread) => "rearm refused check=unread",
+        #[cfg(windows)]
         Err(Refusal::Chord) => "rearm refused check=chord",
+        #[cfg(windows)]
         Err(Refusal::Foreground) => "rearm refused check=foreground",
         Err(Refusal::Layout) => "rearm refused check=layout",
     }
