@@ -217,11 +217,20 @@ measurement pair whose two commits sit on either side of the commit that added t
 compares two different builds of those crates, so build both sides with the same table.
 
 CI runs two jobs side by side. `lint` runs fmt, cargo-deny for dependency or CI configuration
-changes and on every scheduled or manual run, `check-vendor`, `check-core`, clippy on the core
+changes and on every scheduled or manual run, `check-vendor`, `check-core`, `check-platform-cfg`, clippy on the core
 alone without test support, and clippy on the workspace. `test` runs the workspace tests and the
 vsync test. Each job restores its own cache, and only runs on main save one. The test job points
 `TEMP` and `TMP` at the runner's work disk: the tests' scratch stores make many durable writes,
 and the profile's temp folder on C: takes them seven to ten times slower.
+
+`cargo xtask check-platform-cfg` keeps plain OS predicates out of product code outside
+`platform.rs` and `platform/`. It scans Rust source under `crates/*/src`, skipping test and fixture
+files and inline `#[cfg(test)] mod` bodies. A plain predicate uses only OS selectors
+(`windows`, `unix`, `target_os`, or `target_family`), not feature, debug, or test gates.
+The baseline records the existing predicates per file, including repeated sites, without line
+numbers. When a branch removes a site, delete its baseline entry (the command's `--list` output
+shows the current inventory). CI compares against the base for pull requests and batch pushes
+so the baseline cannot grow to admit a new site.
 
 ## The brain is a game loop
 

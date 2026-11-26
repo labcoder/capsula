@@ -52,6 +52,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Could not find the main merge base' }
           }
           if ([string]::IsNullOrWhiteSpace($base)) { throw 'Missing dependency comparison base' }
+          "base=$base" >> $env:GITHUB_OUTPUT
           $changed = git diff --name-only "$base...$env:HEAD" -- Cargo.lock Cargo.toml '**/Cargo.toml' deny.toml .cargo/config.toml .github/workflows/ci.yml
           if ($LASTEXITCODE -ne 0) { throw 'Could not compare dependency files' }
           "changed=$([bool]$changed)" >> $env:GITHUB_OUTPUT
@@ -84,6 +85,13 @@ jobs:
       - run: cargo xtask check-vendor
       - run: cargo xtask notices --check
       - run: cargo xtask check-core
+      - name: Check platform cfg boundaries
+        env:
+          BASE: ${{ steps.dependencies.outputs.base }}
+        run: |
+          $baseline = @()
+          if ($env:BASE) { $baseline = @('--base', $env:BASE) }
+          cargo xtask check-platform-cfg @baseline
       - run: cargo clippy -p kumochi-shell-core --lib --locked -- -D warnings
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
