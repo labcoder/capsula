@@ -496,10 +496,17 @@ impl Secret {
 impl Drop for Secret {
     fn drop(&mut self) {
         self.0.zeroize();
-        #[cfg(test)]
-        tests::wipes::record(&self.0[..]);
+        record_wipe(&self.0[..]);
     }
 }
+
+#[cfg(any(test, feature = "test-support"))]
+fn record_wipe(bytes: &[u8]) {
+    super::wipes::record(bytes);
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn record_wipe(_: &[u8]) {}
 
 /// The one byte the brain writes on control before the handshake, read by `by` and nothing past
 /// it, so the initiator's first envelope starts after it. `None` when the stream ended first.

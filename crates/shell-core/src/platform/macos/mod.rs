@@ -22,6 +22,8 @@ mod leg;
     )
 )]
 mod pair;
+#[cfg(any(test, feature = "test-support"))]
+mod wipes;
 
 pub(crate) use child::{NotStarted, start_brain};
 pub(crate) use instance::{read_instance, try_acquire_instance_lock};
