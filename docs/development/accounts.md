@@ -1043,22 +1043,9 @@ Manager; there is no automatic enumeration or cleanup of other test runs.
 
 ## Credential authority
 
-The dormant ChatGPT repair transaction admits only the exact current registration with a
-missing chunk, a readable existing host, and no outstanding sign-out, sweep, or revocation
-work. The account worker's vault lock spans the generation re-read and admission. An explicit
-claim moves the authority to version 4, fences the old account, and records the attempt
-without replacing the saved registration or writing any credential names. Cancelling that
-exact attempt clears its unspent slot, not the fence; a stale Cancel cannot clear a newer
-attempt. A confirmed attempt can charge one exchange only after the request passes local
-validation and the issued client reads back under a dedicated repair generation. Dropping
-the vault or attempt before the dispatch claim suppresses the call. Cancelling after dispatch
-seals the attempt against promotion, but the same vault and attempt can still drain its receipt.
-If either owner goes away after the claim, the persisted charge is unresolved and stays fenced.
-The drain can settle once: a known refresh handle is escrowed even if the response is
-unusable, while a missing receipt or a refused write keeps the attempt fenced. No retry or
-ordinary account save follows, and nothing verifies or promotes an escrowed handle: a copied
-profile recovers by Forget, then an ordinary sign-in. Only scripted tests call this path;
-ordinary startup still refuses version 4 and there is no browser or runtime ingress.
+A copied profile whose saved ChatGPT sign-in can't be read recovers by Forget, then an ordinary
+sign-in. The authority has no repair schema, and a file at version 4 is refused as
+newer.
 
 Every sign-in is proved before `ChatGPT` is ready. Each time the account's connection changes
 (load, sign-in, sign-out; a refresh keeps it), `runtime::Accounts` asks the credential thread

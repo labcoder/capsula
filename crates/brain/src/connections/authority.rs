@@ -4,10 +4,6 @@
 //! name can hide a credential but never authorize one.
 
 pub(crate) mod io;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "reconnect admission has no production ingress")
-)]
 pub(super) mod repair;
 #[cfg(test)]
 mod tests;
@@ -122,7 +118,6 @@ pub(crate) enum Kind {
     Revocations,
     AnthropicKey,
     GitHub,
-    Repair,
 }
 
 impl Kind {
@@ -133,7 +128,6 @@ impl Kind {
             Self::Revocations => "revoke",
             Self::AnthropicKey => "anthropic",
             Self::GitHub => "github",
-            Self::Repair => "repair",
         }
     }
 
@@ -144,7 +138,6 @@ impl Kind {
             Self::Revocations,
             Self::AnthropicKey,
             Self::GitHub,
-            Self::Repair,
         ]
         .into_iter()
         .find(|kind| kind.label() == label)
@@ -313,7 +306,6 @@ pub(crate) enum Missing {
 /// The open authority, held by the credential worker under its session lock.
 pub(crate) struct Authority {
     conn: Connection,
-    account_fenced: bool,
     /// This open's count; a sweep in a later one is what turns Removed into Swept.
     lifetime: i64,
 }
@@ -400,24 +392,12 @@ impl Authority {
         })();
         conn.pragma_update(None, "foreign_keys", true)?;
         let lifetime = opening?;
-        Ok(Self {
-            conn,
-            lifetime,
-            account_fenced: false,
-        })
-    }
-
-    fn ordinary(&self, kind: Kind) -> Result<(), AuthorityError> {
-        if kind == Kind::Repair || (kind == Kind::Account && self.account_fenced) {
-            return Err(AuthorityError::Conflict);
-        }
-        Ok(())
+        Ok(Self { conn, lifetime })
     }
 
     /// # Errors
     /// Fails on a SQLite failure or a missing or invalid row.
     pub(crate) fn current(&self, kind: Kind) -> Result<Current, AuthorityError> {
-        self.ordinary(kind)?;
         current(&self.conn, kind)
     }
 
@@ -425,7 +405,6 @@ impl Authority {
         &self,
         kind: Kind,
     ) -> Result<(u64, Result<Option<ActiveRef>, AuthorityError>), AuthorityError> {
-        self.ordinary(kind)?;
         observe(&self.conn, kind)
     }
 
@@ -440,7 +419,6 @@ impl Authority {
         expected: u64,
         len: usize,
     ) -> Result<WritePlan, AuthorityError> {
-        self.ordinary(kind)?;
         let layout = Layout::for_len(len)?;
         let (chunks, bytes) = layout.sql()?;
         let generation = Generation::fresh()?;
@@ -479,7 +457,6 @@ impl Authority {
         marker: Option<SignOutMarker>,
     ) -> Result<(ActiveRef, u64), AuthorityError> {
         let plan = verified.into_plan();
-        self.ordinary(plan.kind)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -503,9 +480,6 @@ impl Authority {
         marker: Option<SignOutMarker>,
         expected: Option<(Kind, u64)>,
     ) -> Result<(), AuthorityError> {
-        for kind in kinds {
-            self.ordinary(*kind)?;
-        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
