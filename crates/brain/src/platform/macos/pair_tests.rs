@@ -671,3 +671,68 @@ async fn a_served_pair_ends_as_fatal_once_its_parent_exits() {
     drop(shell);
     brain.close().await;
 }
+
+#[tokio::test]
+async fn control_writes_wait_for_the_control_greeting_and_stop_once_a_read_failed() {
+    use kumochi_protocol::message::ControlToShell;
+
+    let ping = frame::encode(&ControlToShell::Ping, Pipe::Control).expect("encodes");
+    let order = |error: &io::Error| {
+        (
+            error.kind(),
+            error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<PairError>())
+                .copied(),
+        )
+    };
+
+    let (mut pair, mut shell) = bound().await;
+    let error = pair
+        .write_control(&ping)
+        .await
+        .expect_err("before the greeting");
+    assert_eq!(
+        order(&error),
+        (io::ErrorKind::InvalidData, Some(PairError::Order))
+    );
+    assert!(*pair.pair.borrow(), "an early write refuses the pair");
+    drop(pair);
+    let read = bounded(shell.control_in.read(&mut [0; 1])).await;
+    assert_eq!(read.expect("closed"), 0, "no byte reached the socket");
+
+    let (mut pair, _shell) = bound().await;
+    assert_eq!(
+        pair.data_greeting(by()).await.map(|_| ()),
+        Err(PairError::Order)
+    );
+    let error = pair.write_control(&ping).await.expect_err("once spent");
+    assert_eq!(
+        order(&error),
+        (io::ErrorKind::InvalidData, Some(PairError::Order))
+    );
+
+    let (mut pair, mut shell) = bound().await;
+    shell
+        .send(Pipe::Control, &ControlToBrain::Hello(hello()))
+        .await;
+    pair.control_greeting(by()).await.expect("control greeting");
+    for before_data in [true, false] {
+        if !before_data {
+            shell.send(Pipe::Data, &DataToBrain::Hello(hello())).await;
+            pair.data_greeting(by()).await.expect("data greeting");
+        }
+        pair.write_control(&ping).await.expect("written");
+        let got = bounded(ipc::read::<ControlToShell>(
+            &mut shell.control_in,
+            Pipe::Control,
+        ))
+        .await;
+        assert_eq!(
+            got.expect("read"),
+            Some(ControlToShell::Ping),
+            "{before_data}"
+        );
+    }
+    assert!(!*pair.pair.borrow());
+}

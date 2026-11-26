@@ -354,11 +354,17 @@ impl AuthenticatedPair {
     }
 
     /// Writes one whole control frame, a greeting reply or Welcome, through this pair's control
-    /// sealer.
+    /// sealer. Only once the control greeting was read: Welcome goes before the data greeting and
+    /// the tuning after it.
     ///
     /// # Errors
-    /// As [`RecordWriter::write_frame`].
+    /// `Order` before the control greeting or once a read failed, which refuses the whole pair;
+    /// otherwise as [`RecordWriter::write_frame`].
     pub(crate) async fn write_control(&mut self, frame: &[u8]) -> io::Result<()> {
+        if !matches!(self.stage, Stage::Data { .. } | Stage::Greeted) {
+            self.pair.send_replace(true);
+            return Err(io::Error::new(io::ErrorKind::InvalidData, PairError::Order));
+        }
         self.writers[0].write_frame(frame).await
     }
 
