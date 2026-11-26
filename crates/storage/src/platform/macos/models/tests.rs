@@ -2,7 +2,6 @@ use super::*;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read as _, Write as _};
-use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
 
 use crate::platform::macos::protected::tests::{Scratch, install_acl};
@@ -190,45 +189,6 @@ fn native_a_partial_is_published_sealed_and_an_arrival_is_kept() {
 
     let file = open_private_write(&support, &source).expect("resume the partial");
     assert_eq!(
-        seal_and_publish(
-            &support,
-            file,
-            parent,
-            &source,
-            &part.join("final.part"),
-            Seal::ReadOnly
-        ),
-        Err(Untrusted::Unsafe),
-        "a published name never ends like a partial's"
-    );
-    assert_eq!(mode(&source), (0o600, 1));
-    let file = open_private_write(&support, &source).expect("resume the partial");
-    assert_eq!(
-        seal_and_publish(
-            &support,
-            file,
-            parent,
-            &source,
-            &part.join("final.PART"),
-            Seal::ReadOnly
-        ),
-        Err(Untrusted::Unsafe),
-        "in any case"
-    );
-    let file = open_private_write(&support, &source).expect("resume the partial");
-    let unstaged = part.join("model.tmp");
-    fs::rename(&source, &unstaged).expect("a partial at a name that isn't a partial's");
-    assert_eq!(
-        seal_and_publish(&support, file, parent, &unstaged, &target, Seal::ReadOnly),
-        Err(Untrusted::Unsafe),
-        "only a partial's name is published, so a stop after its seal is resumable"
-    );
-    assert_eq!(mode(&unstaged), (0o600, 1));
-    assert!(absent(&target));
-    fs::rename(&unstaged, &source).expect("back at the partial's name");
-
-    let file = open_private_write(&support, &source).expect("resume the partial");
-    assert_eq!(
         seal_and_publish(&support, file, parent, &source, &target, Seal::ReadOnly),
         Ok(())
     );
@@ -259,6 +219,55 @@ fn native_a_partial_is_published_sealed_and_an_arrival_is_kept() {
         Ok(())
     );
     assert!(absent(&support.join("product")));
+    scratch
+        .cleanup()
+        .expect("identity-checked cleanup; uncertainty leaves reported residual");
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_only_a_partial_name_is_published_and_only_to_a_final_name() {
+    let scratch = Scratch::new();
+    let support = anchor(&scratch);
+    let part = support.join("product/part");
+    let held = create_private_dir(&support, &part).expect("private folders");
+    let parent = held.last().expect("part folder");
+    let source = part.join("model.bin.part");
+    let target = part.join("model.bin");
+    drop(partial(&support, &source, b"bytes"));
+
+    for name in ["final.part", "final.PART"] {
+        let file = open_private_write(&support, &source).expect("resume the partial");
+        assert_eq!(
+            seal_and_publish(
+                &support,
+                file,
+                parent,
+                &source,
+                &part.join(name),
+                Seal::ReadOnly
+            ),
+            Err(Untrusted::Unsafe),
+            "a published name never ends like a partial's: {name}"
+        );
+        assert_eq!(mode(&source), (0o600, 1));
+    }
+    let file = open_private_write(&support, &source).expect("resume the partial");
+    let unstaged = part.join("model.tmp");
+    fs::rename(&source, &unstaged).expect("a partial at a name that isn't a partial's");
+    assert_eq!(
+        seal_and_publish(&support, file, parent, &unstaged, &target, Seal::ReadOnly),
+        Err(Untrusted::Unsafe),
+        "only a partial's name is published, so a stop after its seal is resumable"
+    );
+    assert_eq!(mode(&unstaged), (0o600, 1));
+    assert!(absent(&target));
+
+    drop(held);
+    assert_eq!(
+        remove_private_tree(&support, &support.join("product")),
+        Ok(())
+    );
     scratch
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");

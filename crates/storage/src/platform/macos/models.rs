@@ -98,7 +98,7 @@ pub fn create_private_dir(support: &Path, path: &Path) -> Result<Vec<File>, Untr
 /// end `.part` or a file directly in the anchor; otherwise refuses like [`hold_private_chain`] and on a file that isn't private once
 /// made.
 pub fn create_private_file(support: &Path, path: &Path) -> Result<File, Untrusted> {
-    stage(path, true)?;
+    partial_name(path)?;
     let (held, name) = file_parent(support, path)?;
     let folder = held.last()?;
     let file = open_at(
@@ -126,7 +126,7 @@ pub fn create_private_file(support: &Path, path: &Path) -> Result<File, Untruste
 /// user's regular file with one name on its folder's volume at mode 0600 (or a seal's mode) before
 /// opening it, and an ACL or any change by the time it's locked.
 pub fn open_private_write(support: &Path, path: &Path) -> Result<File, Untrusted> {
-    stage(path, true)?;
+    partial_name(path)?;
     let (held, name) = file_parent(support, path)?;
     let folder = held.last()?;
     let mode = look(folder, &name)?.st_mode & 0o7777;
@@ -155,7 +155,7 @@ pub fn open_private_write(support: &Path, path: &Path) -> Result<File, Untrusted
 /// but this user's regular file with one name on its folder's volume at exactly `seal`'s mode
 /// before opening it, and an ACL after.
 pub fn open_sealed(support: &Path, path: &Path, seal: Seal) -> Result<File, Untrusted> {
-    stage(path, false)?;
+    sealed_name(path)?;
     let (held, name) = file_parent(support, path)?;
     existing(&held, &name, READ_FLAGS, seal.mode())
 }
@@ -177,7 +177,7 @@ pub fn check_named(support: &Path, file: &File, path: &Path) -> Result<(), Untru
 /// As [`check_named`], `Unsafe` for a name ending `.part` or a file that isn't sealed, and `Io`
 /// when a flush fails.
 pub fn keep_sealed(support: &Path, file: &File, path: &Path, seal: Seal) -> Result<(), Untrusted> {
-    stage(path, false)?;
+    sealed_name(path)?;
     let (held, name) = file_parent(support, path)?;
     let folder = held.last()?;
     let sealed = inspect_private(file, held.user(), ObjectKind::Exact(seal.mode()))?;
@@ -207,8 +207,8 @@ pub fn seal_and_publish(
     if from.parent() != to.parent() {
         return Err(Untrusted::Unsafe);
     }
-    stage(from, true)?;
-    stage(to, false)?;
+    partial_name(from)?;
+    sealed_name(to)?;
     let source = below(support, from)?.pop().ok_or(Untrusted::Unsafe)?;
     let (held, target) = file_parent(support, to)?;
     let folder = held.last()?;
@@ -405,18 +405,30 @@ fn parent_of(support: &Path, path: &Path) -> Result<(Directories, CString), Untr
     Ok((walk(support, names, Folders::Existing)?, name))
 }
 
-/// Refuses `path` unless its name ends `.part` exactly when `partial` says it should. ASCII folding
-/// is how the volume compares these names: no other character folds or normalizes to them.
-fn stage(path: &Path, partial: bool) -> Result<(), Untrusted> {
+/// Whether `path`'s name ends `.part`. ASCII folding is how the volume compares these names: no
+/// other character folds or normalizes to them.
+fn staged(path: &Path) -> bool {
     let name = path.file_name().map_or(&[][..], |name| name.as_bytes());
-    let staged = name
-        .len()
+    name.len()
         .checked_sub(STAGE.len())
-        .is_some_and(|start| name[start..].eq_ignore_ascii_case(STAGE));
-    if staged == partial {
+        .is_some_and(|start| name[start..].eq_ignore_ascii_case(STAGE))
+}
+
+/// Refuses `path` unless it's a partial's name.
+fn partial_name(path: &Path) -> Result<(), Untrusted> {
+    if staged(path) {
         Ok(())
     } else {
         Err(Untrusted::Unsafe)
+    }
+}
+
+/// Refuses `path` if it's a partial's name.
+fn sealed_name(path: &Path) -> Result<(), Untrusted> {
+    if staged(path) {
+        Err(Untrusted::Unsafe)
+    } else {
+        Ok(())
     }
 }
 
