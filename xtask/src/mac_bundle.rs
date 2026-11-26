@@ -232,9 +232,23 @@ fn read_profile(bytes: Vec<u8>, plist: &[u8]) -> Result<Profile> {
     let [prefix] = <[String; 1]>::try_from(prefixes)
         .ok()
         .context("the profile names one App ID prefix")?;
-    // A key is present when plutil can extract it as XML, whatever its type; a present key of
-    // the wrong type is refused rather than read as absent.
-    let present = |key| field(key, "xml1", None).is_ok();
+    // One successful parse decides which optional keys are present: plutil writes each top-level
+    // key on its own line, indented by one tab. A present key that then can't be read as its
+    // type refuses the profile, so a failed read never passes for an absent key.
+    let canonical = pipe(
+        "/usr/bin/plutil",
+        &["-convert", "xml1", "-o", "-", "-"],
+        plist,
+    )
+    .context("the profile's property list")?;
+    let canonical = String::from_utf8_lossy(&canonical);
+    let present = |key: &str| {
+        canonical.lines().any(|line| {
+            line.strip_prefix("\t<key>")
+                .and_then(|rest| rest.strip_suffix("</key>"))
+                == Some(key)
+        })
+    };
     let all_devices = present("ProvisionsAllDevices")
         && field("ProvisionsAllDevices", "raw", Some("bool"))
             .ok()
@@ -242,7 +256,9 @@ fn read_profile(bytes: Vec<u8>, plist: &[u8]) -> Result<Profile> {
             .trim_ascii()
             == b"true";
     let devices = if present("ProvisionedDevices") {
-        let json = field("ProvisionedDevices", "json", None).unwrap_or_default();
+        let json = field("ProvisionedDevices", "json", None)
+            .ok()
+            .context("the profile's ProvisionedDevices has the wrong type")?;
         Some(strings("ProvisionedDevices", &json)?.len())
     } else {
         None
@@ -394,7 +410,7 @@ fn audit(app: &Path, id: &str, group: &str) -> Result<()> {
     audited(&profile, &signed, &display, id, group)
 }
 
-/// An app's signed entitlements, and `codesign -dv`'s description of its code directories.
+/// An app's signed entitlements, and `codesign -dvvv`'s description of its code directories.
 fn signature(app: &Path) -> Result<(Value, Vec<u8>)> {
     let signed = command(
         "/usr/bin/codesign",
@@ -404,7 +420,7 @@ fn signature(app: &Path) -> Result<(Value, Vec<u8>)> {
     // codesign writes the description to stderr, so the shell moves it to stdout.
     let mut display = Command::new("/bin/sh");
     display
-        .args(["-c", "exec /usr/bin/codesign -dv \"$1\" 2>&1", "sh"])
+        .args(["-c", "exec /usr/bin/codesign -dvvv \"$1\" 2>&1", "sh"])
         .arg(app);
     let display = bounded("codesign", &mut display, None, SIGN_WAIT)?;
     Ok((to_json(&signed)?, display))
@@ -420,6 +436,10 @@ fn audited(profile: &Profile, signed: &Value, display: &[u8], id: &str, group: &
         "it's signed with get-task-allow"
     );
     ensure!(thin(display), "it isn't a single-architecture app");
+    ensure!(
+        one_digest(display),
+        "it isn't signed with exactly one code directory"
+    );
     ensure!(
         hardened(display),
         "it isn't signed with the hardened runtime"
@@ -461,6 +481,19 @@ fn thin(display: &[u8]) -> bool {
         .next()
         .is_some_and(|format| format.contains("Mach-O thin ("))
         && formats.next().is_none()
+}
+
+/// Whether `codesign -dvvv` lists exactly one hash choice: a slice signed with several digests
+/// has alternate code directories that `-dv` describes as one.
+fn one_digest(display: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(display);
+    let mut choices = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("Hash choices="));
+    choices
+        .next()
+        .is_some_and(|choice| !choice.is_empty() && !choice.contains(','))
+        && choices.next().is_none()
 }
 
 /// Whether `codesign -dv` shows exactly one code directory, with the runtime flag.

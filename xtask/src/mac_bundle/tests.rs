@@ -472,6 +472,8 @@ const SIGNED_DISPLAY: &str = "Executable=/x/kumochid.app/Contents/MacOS/kumochid
 Identifier=ai.kumochi.dev.brain
 Format=app bundle with Mach-O thin (arm64)
 CodeDirectory v=20500 size=269600 flags=0x10000(runtime) hashes=8414+7 location=embedded
+Hash type=sha256 size=32
+Hash choices=sha256
 Signature size=4783
 ";
 
@@ -785,6 +787,7 @@ fn a_planted_debugger_entitlement_and_a_missing_runtime_are_read_from_a_real_sig
     // Ad-hoc, so no identity, keychain or network is involved, and nothing is launched.
     let adhoc = |runtime: bool| {
         let mut args = vec![
+            "--digest-algorithm=sha256",
             "--force",
             "--sign",
             "-",
@@ -808,6 +811,7 @@ fn a_planted_debugger_entitlement_and_a_missing_runtime_are_read_from_a_real_sig
             .to_string(),
         "it's signed with get-task-allow"
     );
+    assert!(one_digest(&display));
     let (_, display) = adhoc(false);
     assert!(!hardened(&display));
 }
@@ -862,4 +866,67 @@ fn another_roles_profile_embedded_with_the_same_team_prefix_and_groups_is_refuse
         ),
         "its team isn't its profile's"
     );
+}
+
+#[test]
+fn a_slice_signed_with_alternate_digests_is_refused() {
+    for (choices, expected) in [
+        ("Hash choices=sha256\n", true),
+        ("Hash choices=sha1,sha256\n", false),
+        ("Hash choices=\n", false),
+        ("Hash choices=sha256\nHash choices=sha256\n", false),
+        ("", false),
+    ] {
+        assert_eq!(one_digest(choices.as_bytes()), expected, "{choices:?}");
+    }
+    let doubled = SIGNED_DISPLAY.replace("Hash choices=sha256", "Hash choices=sha1,sha256");
+    assert_eq!(
+        audit_refusal(
+            &prefixed(),
+            &entitlements(PREFIX, TEAM, BRAIN, GROUP),
+            &doubled
+        ),
+        "it isn't signed with exactly one code directory"
+    );
+
+    let root = crate::scratch::dir("mac-bundle-digests");
+    let exe = root.join("probe");
+    std::fs::copy(std::env::current_exe().expect("this test binary"), &exe).expect("copy");
+    let file = root.join("probe.entitlements");
+    let granted = entitlements(PREFIX, TEAM, BRAIN, GROUP);
+    std::fs::write(&file, plist(&granted).expect("entitlements")).expect("entitlements");
+    let file = file.to_str().expect("a text path");
+    let sign = |digests: &str| {
+        command(
+            "/usr/bin/codesign",
+            &[
+                "--force",
+                "--sign",
+                "-",
+                "--timestamp=none",
+                "--entitlements",
+                file,
+                digests,
+            ],
+            &exe,
+        )
+        .expect("ad-hoc signed");
+        signature(&exe).expect("read back").1
+    };
+    assert!(one_digest(&sign("--digest-algorithm=sha256")));
+    let both = sign("--digest-algorithm=sha1,sha256");
+    assert!(thin(&both));
+    assert!(!one_digest(&both));
+}
+
+#[test]
+fn only_top_level_keys_mark_a_profiles_kind() {
+    let one = "<string>PFX1234567</string>";
+    let nested = fixture("", one).replace(
+        "<key>keychain-access-groups</key>",
+        "<key>ProvisionedDevices</key><array><string>z</string></array><key>ProvisionsAllDevices</key><true/><key>keychain-access-groups</key>",
+    );
+    let read = read_profile(Vec::new(), nested.as_bytes()).expect("read");
+    assert_eq!(read.devices, None);
+    assert!(!read.all_devices);
 }

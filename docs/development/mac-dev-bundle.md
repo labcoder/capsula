@@ -30,8 +30,10 @@ flowchart LR
   `ApplicationIdentifierPrefix`, never assumed to be the team: they usually match, but an older
   App ID can have its own. Both profiles must share the team and the prefix. Without `--beta`
   a profile must be a development one, listing at least one device in `ProvisionedDevices`;
-  with it, a Developer ID one, with `ProvisionsAllDevices` true and no device list. Either key
-  present with the wrong type refuses the profile. The
+  with it, a Developer ID one, with `ProvisionsAllDevices` true and no device list. Which of
+  these top-level keys are present comes from one successful parse of the profile; a present
+  key that can't be read as its type refuses the profile, so a failed read never counts as an
+  absent key. The
   expiry is checked again after the build, just before signing. `--out` must not exist yet.
   These checks read the profile's decoded contents without verifying Apple's signature on it, so
   they catch a wrong or stale profile early but aren't the authority: the system is, when it
@@ -46,9 +48,10 @@ flowchart LR
 - **K-8 checks.** After signing, each app is checked as it will ship, reading back its own
   signature and the profile embedded in it rather than what the task asked for. `codesign -d
   --entitlements` must show no `com.apple.security.get-task-allow`, with any value, so no
-  debugger can take the task port. `codesign -dv` must describe a thin, single-architecture
-  Mach-O with exactly one code directory, carrying the hardened-runtime flag; a universal app
-  is refused, because `codesign -dv` shows only one of its slices. The embedded profile must
+  debugger can take the task port. `codesign -dvvv` must describe a thin, single-architecture
+  Mach-O with exactly one code directory and one hash choice, carrying the hardened-runtime
+  flag. A universal app, or a slice signed with alternate digests, is refused, because the
+  display shows only one of its slices or directories. The embedded profile must
   grant exactly the role's App ID and the team, so another role's profile can't stand in. The
   signed App ID, team and keychain groups must be exactly that profile's prefixed App ID, team
   and granted groups, and nothing else may be signed in. These run in both modes,
