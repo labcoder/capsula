@@ -101,14 +101,13 @@ admitted lock target still refuse before opening a file, with no fallback locati
 Every first write to a product folder goes through one check: the Shell's instance lock and
 log, every Brain process's log and lock, the Claude Code and speech staging folders, and the
 settings folder, which settings also check before they're read. It creates any missing parent as
-an ordinary folder, then the product folder owner-only. An existing folder is kept as it is if
-it's a plain folder with a trusted owner that nobody else may change, add to, or gain write
-access to what's made in it, and refused otherwise. On Unix the check creates a missing folder
-with mode `0700` and opens the final component without following links. It checks the held
-directory for ownership by this effective user or root and refuses group or other write bits.
-macOS also applies its existing ACL inspection, and Linux requires the default POSIX ACL to be
-absent so new children don't inherit wider permissions. This is a leaf check, not custody of
-the parent chain.
+an ordinary folder, then the product folder owner-only. An existing folder is checked, not
+repaired. On Windows, it must be a plain folder with a trusted owner and no write access for
+untrusted principals, including inheritable write access. On Unix, creation requests mode
+`0700` and the final component is opened without following links. The held directory must
+belong to the effective user or root and lack group or other write bits. macOS also applies
+its existing ACL inspection; Linux requires the default POSIX ACL to be absent. The Unix
+check doesn't hold the parent chain or set the permissions of files made inside the folder.
 
 Detached brain startup acquires both pipes before touching the store. It takes the profile's
 writer lock, then opens and recovers the store, loads settings, starts accounts, and builds the Brain. It retries any interrupted

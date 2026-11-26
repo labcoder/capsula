@@ -60,7 +60,7 @@ fn check_folder(folder: &File) -> io::Result<()> {
         return Err(ErrorKind::PermissionDenied.into());
     }
     #[cfg(target_os = "linux")]
-    match rustix::fs::fgetxattr(folder, c"system.posix_acl_default", &mut [][..]) {
+    match rustix::fs::fgetxattr(folder, c"system.posix_acl_default", &mut [0_u8; 0]) {
         Err(Errno::NODATA) => {}
         Ok(_) => return Err(ErrorKind::PermissionDenied.into()),
         Err(error) => return Err(error.into()),

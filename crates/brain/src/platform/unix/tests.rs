@@ -3,9 +3,16 @@ use std::os::unix::fs::{PermissionsExt as _, symlink};
 
 use super::{ErrorKind, product_folder};
 
+fn private_scratch(label: &str) -> crate::scratch::Scratch {
+    let scratch = crate::scratch::dir(label);
+    fs::set_permissions(scratch.path(), Permissions::from_mode(0o700))
+        .expect("make the enclosing scratch directory private");
+    scratch
+}
+
 #[test]
 fn product_folder_keeps_safe_existing_folders_and_refuses_shared_writes() {
-    let scratch = crate::scratch::dir("product-folder");
+    let scratch = private_scratch("product-folder");
     let dir = scratch.join("root").join("product");
     product_folder(&dir).expect("create product folder and its missing parent");
     assert_eq!(
@@ -31,7 +38,7 @@ fn product_folder_keeps_safe_existing_folders_and_refuses_shared_writes() {
 
 #[test]
 fn product_folder_never_follows_the_leaf_link_or_accepts_a_file() {
-    let scratch = crate::scratch::dir("product-folder-type");
+    let scratch = private_scratch("product-folder-type");
     let dir = scratch.join("product");
     product_folder(&dir).unwrap();
     let link = scratch.join("alias");
@@ -59,7 +66,7 @@ fn product_folder_trusts_only_the_effective_user_or_root() {
 #[cfg(target_os = "linux")]
 #[test]
 fn product_folder_refuses_a_default_acl_even_with_mode_0700() {
-    let scratch = crate::scratch::dir("product-folder-default-acl");
+    let scratch = private_scratch("product-folder-default-acl");
     let dir = scratch.join("product");
     product_folder(&dir).unwrap();
     let mut acl = 2_u32.to_le_bytes().to_vec();
