@@ -11,6 +11,21 @@ publish.workspace = true
 kumochi-protocol.workspace = true
 thiserror.workspace = true
 libc = "0.2.191"
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFBase",
+    "CFData",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-security = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "SecBase",
+    "SecItem",
+    "SecTask",
+] }
 
 [target.'cfg(windows)'.dependencies]
 kumochi-protocol.workspace = true

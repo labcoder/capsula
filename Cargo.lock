@@ -4127,6 +4127,8 @@ version = "0.1.2"
 dependencies = [
  "kumochi-protocol",
  "libc",
+ "objc2-core-foundation",
+ "objc2-security",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
 ]
