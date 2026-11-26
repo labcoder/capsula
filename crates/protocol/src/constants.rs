@@ -101,6 +101,27 @@ impl ProductIdentity {
     };
 }
 
+/// An edition's macOS identifiers, each prefixed with the signing team when signed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppleIds {
+    /// The shell's bundle identifier, which is also the App ID its profile names.
+    pub shell: &'static str,
+    /// The nested brain's bundle identifier and App ID.
+    pub brain: &'static str,
+    /// The keychain group the shell and the brain share for the instance capability.
+    pub instance_group: &'static str,
+}
+
+impl AppleIds {
+    /// The Dev edition's identifiers; `ai.kumochi.shell` and `ai.kumochi.brain` stay reserved for
+    /// release builds.
+    pub const DEV: Self = Self {
+        shell: "ai.kumochi.dev.shell",
+        brain: "ai.kumochi.dev.brain",
+        instance_group: "ai.kumochi.dev.instance",
+    };
+}
+
 /// What only a Gate-identity build of the shell and the brain carries, in the line each logs at
 /// start, so a gate tool can tell its images from any other build, which compiles the Gate names
 /// for comparison too.

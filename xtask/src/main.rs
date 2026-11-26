@@ -20,6 +20,8 @@ mod gate;
 mod hermetic;
 #[cfg(windows)]
 mod live;
+#[cfg(target_os = "macos")]
+mod mac_bundle;
 mod notices;
 #[cfg(windows)]
 mod platform;
@@ -56,6 +58,10 @@ const _: () = {
 };
 
 fn usage() -> String {
+    #[cfg(target_os = "macos")]
+    let mac = format!("{}\n", mac_bundle::USAGE);
+    #[cfg(not(target_os = "macos"))]
+    let mac = String::new();
     format!(
         "usage: cargo xtask <task>
 
@@ -146,7 +152,7 @@ tasks:
                     verify the voice models and native runtime already on this machine
                     against the manifest, then hardlink them into the dev models folder
                     and beside target\\{{debug,release}}\\kumochid.exe; never copies or downloads
-  pipe-dump <file>  decode a pipe recording; a debug brain writes one when
+{mac}  pipe-dump <file>  decode a pipe recording; a debug brain writes one when
                     {PIPE_TAP_ENV} names a file
   help              show this message"
     )
@@ -167,6 +173,8 @@ fn main() -> Result<()> {
                 .next()
                 .with_context(|| format!("pipe-dump needs a file\n\n{}", usage()))?,
         ),
+        #[cfg(target_os = "macos")]
+        Some("mac-bundle") => mac_bundle::run(args),
         #[cfg(windows)]
         Some("bench") => bench::run(args),
         #[cfg(windows)]
