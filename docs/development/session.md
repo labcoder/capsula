@@ -166,6 +166,27 @@ teardown into refusal and suppress the ordinary-loss drain. After disposition is
 entry drops both legs. This cut doesn't change runtime wiring. The full C-7 proof needs both the
 brain's adapter and the shell's blocking adapter, which arrives in I1e-2.
 
+## The instance item (dormant)
+
+The brain stores each start's capability as one data protection Keychain item, and the shell reads
+it. Nothing calls this yet: parent-bound startup wires it in later. Only the Dev edition has an item.
+Release and Gate builds refuse with `NotAdmitted` before any call, until release packaging
+provisions their identifiers.
+
+- **One selector.** `crates/storage/src/platform/macos/instance.rs` holds it: a generic password
+  in the group `P.<AppleIds::DEV.instance_group>`, with the instance service and account, the data
+  protection keychain, not synchronizable, and `kSecUseAuthenticationUI` set to Fail on every add,
+  copy, update and delete. The update payload holds the value alone. The item is
+  `AfterFirstUnlockThisDeviceOnly`. There's no LocalAuthentication and no login-keychain fallback.
+- **Admission per role.** Before any item call, the process's own `com.apple.application-identifier`
+  must be exactly `P.<its role's id>` when split at its first dot, with a non-empty prefix and no
+  wildcard, and its `keychain-access-groups` must list `P.<instance group>`. Whether the OS
+  honours the claims is proved only by a signed run.
+- **One protection check.** An existing item (on a duplicate add) and the readback both pass only
+  with that exact protection class and no access control. Anything else refuses with no update and
+  no delete. The readback must hold exactly 32 bytes, and only the brain compares them, in constant
+  time, with its own.
+
 ## What this crate doesn't do
 
 No sockets, I/O, async or OS code; no Keychain; no READY byte, deadline or socket shutdown; no Hello
