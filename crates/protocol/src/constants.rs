@@ -63,10 +63,6 @@ pub struct ProductIdentity {
     pub object_prefix: &'static str,
     /// The shell's single-instance lock prefix.
     pub shell_lock: &'static str,
-    /// The new-format root slot's folder, beside [`Self::data_dir`] under the same anchor.
-    pub profile_root: &'static str,
-    /// The credential service of the edition's owner item, under [`PROFILE_OWNER_ACCOUNT`].
-    pub profile_service: &'static str,
 }
 
 /// Builds one edition's names from its display literal and its lowercase prefix, so each
@@ -79,8 +75,6 @@ macro_rules! identity {
             instance_service: concat!($name, " instance"),
             object_prefix: $prefix,
             shell_lock: concat!($prefix, "-shell"),
-            profile_root: concat!($name, " Profile"),
-            profile_service: concat!($name, " Profile"),
         }
     };
 }
@@ -174,10 +168,6 @@ pub const SHELL_LOCK: &str = ProductIdentity::ACTIVE.shell_lock;
 /// The Credential Manager account under [`INSTANCE_SERVICE`] holding the capability; the
 /// session id is appended, since each session runs its own brain.
 pub const INSTANCE_ACCOUNT: &str = "capability";
-
-/// The account of the edition's owner item under [`ProductIdentity::profile_service`], joined
-/// with [`account_target`]. Cut 7 only reads it; nothing writes it before the allocator.
-pub const PROFILE_OWNER_ACCOUNT: &str = "owner";
 
 /// The vault's maximum number of chunks in one record slot.
 pub const ACCOUNT_MAX_CHUNKS: usize = 64;

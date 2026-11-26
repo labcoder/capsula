@@ -9,9 +9,6 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use kumochi_protocol::constants::ProductIdentity;
-use kumochi_protocol::profile::Root;
-
 use super::protected::{self, ObjectKind};
 use crate::Untrusted;
 
@@ -103,23 +100,6 @@ pub struct Product {
 #[must_use = "dropping the folder releases its descriptor"]
 pub struct HeldFolder(Directory);
 
-/// Why the setup guard wasn't taken. It carries no path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum GuardError {
-    /// Another open holds the guard. It says nothing about who, so it only means refuse or wait.
-    #[error("another session holds the setup guard")]
-    Busy,
-    /// The anchor couldn't be re-inspected, reopened or locked.
-    #[error("the setup guard can't be verified")]
-    Unavailable,
-}
-
-/// Holds the setup guard until dropped or until its process exits.
-#[must_use = "dropping the guard releases it"]
-pub struct SetupGuard {
-    _lock: File,
-}
-
 /// An opaque private lock descriptor retaining its admitted ancestors until it closes.
 #[must_use = "dropping the owner releases its descriptor and any instance lock"]
 pub struct AdmittedLock {
@@ -170,12 +150,6 @@ impl HeldFolder {
     /// The descriptor's `fstat` failure.
     pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
         self.0.file.metadata()
-    }
-}
-
-impl fmt::Debug for SetupGuard {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SetupGuard").finish_non_exhaustive()
     }
 }
 
@@ -291,29 +265,6 @@ pub fn admit_support(support: &Path) -> Result<Support, AcquisitionError> {
 }
 
 impl Support {
-    /// Takes the setup guard without waiting: an exclusive `flock` on a fresh open of this held
-    /// folder. Every edition and anything else that locks this user's Support folder contends for
-    /// it, and closing the guard or its holder's exit releases it.
-    ///
-    /// # Errors
-    /// `Busy` when another open holds it, which says nothing about who. `Unavailable` when the
-    /// held chain no longer passes inspection, or the folder can't be reopened or locked.
-    pub fn try_setup_guard(&self) -> Result<SetupGuard, GuardError> {
-        self.0.check().map_err(|_| GuardError::Unavailable)?;
-        let held = self.0.held.last().ok_or(GuardError::Unavailable)?;
-        let file = open_at(held.file.as_raw_fd(), c".", DIRECTORY_FLAGS, 0)
-            .map_err(|_| GuardError::Unavailable)?;
-        let opened = protected::stat(file.as_raw_fd()).map_err(|_| GuardError::Unavailable)?;
-        if !protected::same_inspection(&held.identity, &opened) {
-            return Err(GuardError::Unavailable);
-        }
-        match file.try_lock() {
-            Ok(()) => Ok(SetupGuard { _lock: file }),
-            Err(TryLockError::WouldBlock) => Err(GuardError::Busy),
-            Err(TryLockError::Error(_)) => Err(GuardError::Unavailable),
-        }
-    }
-
     /// Looks up the folder `product` in this anchor without creating it. Only `ENOENT` from opening
     /// that exact name in the held folder is `Missing`, which hands the anchor back. A folder there
     /// is admitted like `open_shell_storage`'s: private, this user's, on the anchor's volume.
@@ -361,17 +312,6 @@ impl Support {
         let child = self.0.private(file, name)?;
         self.0.check()?;
         Ok(Some(HeldFolder(child)))
-    }
-
-    /// Reads this edition's new-format root slot in this anchor, creating nothing and keeping the
-    /// anchor. Only a missing slot is absent: before the allocator writes its record, a folder
-    /// there is a footprint of unknown origin, and any refusal or failure proves nothing either.
-    #[must_use]
-    pub fn profile_root(&self) -> Root {
-        match self.child(ProductIdentity::ACTIVE.profile_root) {
-            Ok(None) => Root::Absent,
-            Ok(Some(_)) | Err(_) => Root::Unverified,
-        }
     }
 }
 
@@ -741,7 +681,12 @@ fn precheck(parent: &File, name: &CStr, user: libc::uid_t) -> Result<(), Acquisi
 
 pub(super) fn named(parent: &File, name: &CStr, expected: &libc::stat) -> Result<(), Untrusted> {
     let actual = entry_stat(parent, name).map_err(|_| Untrusted::Io)?;
-    if !protected::same_inspection(&actual, expected) || actual.st_nlink != expected.st_nlink {
+    // A folder's link count moves whenever anyone adds or removes a subfolder in it; only a
+    // file's says whether it gained another name.
+    if !protected::same_inspection(&actual, expected)
+        || (expected.st_mode & libc::S_IFMT == libc::S_IFREG
+            && actual.st_nlink != expected.st_nlink)
+    {
         return Err(Untrusted::Unsafe);
     }
     Ok(())
@@ -889,9 +834,21 @@ impl Entries {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Child names a test lets this thread's listings return before one read fails like an error.
+    pub(super) static READDIR_FAILS_AFTER: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 impl Entries {
     /// The next entry's name, copied out before the stream moves on.
     pub(super) fn next_name(&mut self) -> Next {
+        #[cfg(test)]
+        if READDIR_FAILS_AFTER.get() == Some(0) {
+            READDIR_FAILS_AFTER.set(None);
+            return Next::Failed;
+        }
         // SAFETY: __error returns this thread's live errno storage.
         let errno = unsafe { libc::__error() };
         // SAFETY: errno is writable thread-local storage.
@@ -907,7 +864,14 @@ impl Entries {
             };
         };
         // SAFETY: this successful readdir record is live until the next call on this stream.
-        unsafe { read_dirent_name(entry) }.map_or(Next::Malformed, Next::Name)
+        let next = unsafe { read_dirent_name(entry) }.map_or(Next::Malformed, Next::Name);
+        #[cfg(test)]
+        if let (Next::Name(name), Some(left)) = (&next, READDIR_FAILS_AFTER.get())
+            && !matches!(name.to_bytes(), b"." | b"..")
+        {
+            READDIR_FAILS_AFTER.set(Some(left - 1));
+        }
+        next
     }
 }
 

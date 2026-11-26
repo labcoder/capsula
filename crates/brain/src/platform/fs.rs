@@ -10,16 +10,6 @@ use std::fs::{self, File};
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 use std::io::Write as _;
 
-/// The folder at `dir` itself, not a link, by its device and inode.
-pub(crate) fn folder_id(dir: &Path) -> Option<super::FolderId> {
-    use std::os::unix::fs::MetadataExt as _;
-    let metadata = std::fs::symlink_metadata(dir).ok()?;
-    metadata.is_dir().then(|| super::FolderId {
-        volume: metadata.dev(),
-        file: u128::from(metadata.ino()),
-    })
-}
-
 /// Creates the product folder at `path` readable by this user only when it's missing, making any
 /// missing ancestor first; an existing one is left as it is.
 /// shortcut: an existing folder's owner and mode aren't checked; check them before a Unix brain

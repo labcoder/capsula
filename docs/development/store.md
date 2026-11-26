@@ -27,7 +27,8 @@ in the admitted product folder, then starts the logger in the same storage.
 The macOS shell-file primitives admit an OS-discovered Support candidate without
 creating its ancestors. The read-only anchor walk independently requires local, ownership-enforced
 APFS volumes; product/log directories and private files cannot cross the Support volume. Legacy
-`hold_chain` still refuses every device crossing. Private directories require current UID/0700;
+`hold_chain` still refuses every device crossing. A name recheck compares a folder's identity,
+owner and mode but not its link count, which moves as subfolders come and go. Private directories require current UID/0700;
 regular files require current UID/0600, one link, the same ACL/identity inspection, and checked
 no-follow/nontruncating relative acquisition. Opaque lock/log owners retain their admitted
 ancestors, expose no file/descriptor/path escape, and logs support shared-reference append writes.
@@ -511,88 +512,6 @@ Beyond what deleting rows can reach: SSD wear levelling, the disk clusters a rem
 truncated file frees (`purge-old`, the snapshot, the WAL), Volume Shadow Copy restore points,
 backups and the pagefile.
 
-## Reading an existing database
-
-`store::existing::open` reads a database that must already exist without creating, changing or
-removing any of its files, and without migrating or checkpointing. A plain read-only open does
-change them: SQLite creates `-wal` and `-shm` beside a cleanly closed WAL database and rewrites
-an existing `-shm`. So the opener looks at the files first and picks one mode or refuses:
-
-| Files beside a main file of at least 512 bytes | Mode |
-|---|---|
-| none | `immutable`: reads only the main file and takes no SQLite lock |
-| nonempty `-wal` and `-shm`, no `-journal` | `readonly_shm`: reads the WAL's commits through read-only index handles |
-| anything else | `Uncertain`, nothing opened |
-
-A missing main file is `Missing`. Everything else is `Uncertain`, because SQLite would change a
-file or read the wrong one:
-
-- a main file shorter than SQLite's smallest page reads as zero pages, and SQLite then deletes
-  the WAL beside it;
-- an empty WAL or index has its permissions reset to the main file's when SQLite opens it;
-- a journal would be replayed, and a WAL or index alone would be created or rebuilt;
-- a main file or sidecar that is a link, a reparse point or not a regular file, or on Unix has a
-  second hard link, may not be the file SQLite reads, and `immutable` through a link skips the
-  target's WAL.
-
-The path goes to SQLite as a `file:` URI with every byte but unreserved ones percent-encoded, so
-separators, drive colons and UNC prefixes reach the VFS unchanged.
-
-Nothing calls it yet. It takes the caller's `SessionLock` and returns a connection borrowed from
-it, so the lock stays held through SQLite's last use. That excludes only writers that take the
-same lock, and `immutable` takes none of its own while the file check happens before the open,
-not atomically with it: a WAL removed in between is created again as an empty file. The brain
-writes the credential authority and the history store only under that lock, the profile's
-writer lock, which it takes before it opens the store. No other connection to that database may
-be open in the same process, since SQLite shares one index handle per process. SQLite run as root re-owns the WAL and index to the main
-file's owner; Kumochi doesn't run as root. Unit tests compare each file's name, bytes,
-permissions and owner before and after: a closed database, a copy left with a live WAL, every
-refused case, and on Unix the linked cases. On Windows the VFS also honours `readonly_shm`, but
-opens the index with `OPEN_ALWAYS`, so an index removed between the check and the open would be
-created there, and a second hard link isn't detected.
-
-### A legacy history store
-
-`store::existing::legacy_history` reads `kumochi.db` through that opener under the same held lock and
-returns `LegacyHistory`. Nothing calls it yet. It reads inside `in_folder`: before anything is
-opened, the store's own folder must be a folder itself, not a link or reparse point, since the
-opener checks only the final file and could otherwise read a store through a redirected folder.
-Its identity (volume and file ID on Windows, device and inode on Unix) is taken then, and the
-same identity must read at the same path after every lookup, or the result is `Unverified`. So a
-lasting rename or replacement of the folder in between, which would make every name under the
-path read as not found and look like `Missing`, is refused. A swap restored before the second
-read isn't caught: the `SessionLock` holds only its own file, not the folder, so a stable path
-through the read is the caller's guarantee, which the existing-profile probes give by holding
-the product folder's chain. A held, admitted product folder is likewise the caller's to
-establish.
-
-- `KnownSchema(version)`: the file's `user_version` is one this build knows (1 to the newest,
-  carried as `version`; below `CURRENT_HISTORY` it still needs a migration), and its schema
-  objects (type, name, table and SQL, from `sqlite_schema`) are exactly those the migrations make
-  at that version, built in memory to compare. The candidate's catalog is counted first, then
-  read once without sorting, each row using up a distinct entry of the small
-  expected set, so neither Rust nor a SQLite sorter copies a large foreign catalog. This is schema
-  evidence only. It reads no rows, product invariants (such as the `approval_mark` singleton),
-  page integrity or binding, so it promises neither an intact store nor a successful open or
-  migration, and it isn't the new-format history fact. `quick_check` wouldn't change that: it
-  scans the whole file and still passes a store missing a required row.
-- `Missing`: the store's own folder exists as a folder and holds no
-  main file, no `-wal`, `-shm` or `-journal`, and none of the files a purge leaves (`.purge-old`,
-  the snapshot and the clean copy with their sidecars). The folder itself is still a footprint,
-  so this isn't an absent profile.
-- `Unverified`: everything else. That covers a newer or unversioned schema, any extra or missing
-  object, a schema ahead of its version, files the opener refuses, a missing or linked folder, a
-  store missing beside something it left, and any failed read.
-
-The profile probe's legacy Matching builds on `KnownSchema(CURRENT_HISTORY)` and a validated
-authority and host, so it is schema-level evidence too. Runtime admission (cut 10) must revalidate
-the history's invariants before using the store.
-
-Tests cover every known version, a store the brain itself opened, a `VACUUM INTO` copy like a
-purge's, each refused change, each leftover, a missing folder, a linked folder whether empty
-or holding a known store, and a folder renamed or replaced between the two identity reads, and
-check that no file changes.
-
 ## Recovery at start
 
 The shell crash guard also uses durable `scene_cleared` events before relaunch (see
@@ -640,7 +559,3 @@ recovery scan before it serves any shell:
 
 The "store recovered" log line carries only counts and flags: crashed runs, finished and failed
 deletions, failed and unknown issue sends, and whether the purge is still owed.
-
-shortcut: two sessions of the same user run two brains on one store, and the second's recovery
-fails the first's live runs. That needs Windows Server or multi-session Windows, so a
-per-session store or a lock waits until Kumochi supports them.
