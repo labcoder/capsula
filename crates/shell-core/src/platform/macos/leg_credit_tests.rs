@@ -10,7 +10,7 @@ use kumochi_protocol::message::{
 };
 
 use super::*;
-use crate::link::{LinkEvent, counted_legacy_fixture};
+use crate::link::{LinkEvent, credit_fixture::counted_legacy_fixture};
 use crate::platform::macos::{child, pair};
 
 const LOGICAL: usize = 256 * 1024;
