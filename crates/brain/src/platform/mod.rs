@@ -61,10 +61,26 @@ pub(crate) fn instance_custody_at(
     Err(crate::startup::custody::CustodyError::NotAdmitted)
 }
 
+/// A fresh Support folder for the instance item's native fixtures, and its cleanup; only macOS
+/// has them.
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) fn instance_fixture(_: &str) -> std::path::PathBuf {
+    panic!("only macOS has the instance item's native fixtures")
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) fn instance_fixture_clean(_: &std::path::Path, _: &[&str]) {
+    panic!("only macOS has the instance item's native fixtures")
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) type InstanceLock = kumochi_storage::AdmittedLock;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use macos::instance::lock_at as instance_custody_at;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use macos::instance::tests::{
+    clean as instance_fixture_clean, support as instance_fixture,
+};
 #[cfg(target_os = "macos")]
 pub(crate) use macos::instance::{KeychainItem as InstanceItem, instance_custody};
 

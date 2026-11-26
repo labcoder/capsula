@@ -165,4 +165,4 @@ unsafe extern "C-unwind" fn allocate_nothing(
 unsafe extern "C-unwind" fn deallocate_nothing(_: *mut c_void, _: *mut c_void) {}
 
 #[cfg(test)]
-mod tests;
+pub(in crate::platform) mod tests;

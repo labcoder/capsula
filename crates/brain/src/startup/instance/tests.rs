@@ -554,9 +554,10 @@ async fn the_attempt_prints_no_key_bytes() {
 #[tokio::test]
 #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
 async fn native_a_dropped_publish_keeps_the_session_lock_until_settlement_returns() {
-    use crate::startup::custody::{CustodyError, tests};
+    use crate::platform::{instance_fixture, instance_fixture_clean};
+    use crate::startup::custody::CustodyError;
 
-    let support = tests::support("dropped");
+    let support = instance_fixture("dropped");
     let store = Fake::new(Item::Absent);
     let (started, release) = store.hold(Step::Add);
     let thread = release_after(started, release, after(Duration::from_millis(300)));
@@ -573,7 +574,7 @@ async fn native_a_dropped_publish_keeps_the_session_lock_until_settlement_return
     drop(attempt);
     let free = SessionCustody::bootstrap_at(&support).map(drop);
     thread.join().expect("release thread");
-    tests::clean(&support, &["session.lock"]);
+    instance_fixture_clean(&support, &["session.lock"]);
     assert!(dropped.is_err(), "the publish future was dropped mid-call");
     assert_eq!(busy, Err(CustodyError::Busy));
     assert_eq!(settled, Stage::Confirmed);
