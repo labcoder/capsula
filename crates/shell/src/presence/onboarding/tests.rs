@@ -866,6 +866,7 @@ fn saved_sign_in_dispatch(
     const CHECKABLE: AccountView = AccountView::SavedSignInUnavailable {
         reason: SavedSignInFailure::Missing,
         checkable: true,
+        forget: None,
         checking: false,
         revocation_unconfirmed: false,
     };

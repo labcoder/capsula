@@ -742,6 +742,7 @@ async fn saved_sign_in_check_frames_leave_foreign_voice_holds_alone() {
                     AccountView::SavedSignInUnavailable {
                         reason: SavedSignInFailure::Missing,
                         checkable: true,
+                        forget: Some(1),
                         checking: true,
                         revocation_unconfirmed: false,
                     }

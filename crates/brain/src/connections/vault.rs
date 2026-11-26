@@ -312,6 +312,23 @@ impl<S: CredentialStore> Vault<S> {
         Ok(true)
     }
 
+    /// Rereads exactly `expected` as Check does and, only while it is still current with a saved
+    /// chunk missing, durably promotes a `Discard` sign-out of it and returns `None`. Anything
+    /// else returns Check's answer, and nothing is written.
+    pub(super) fn forget_saved_sign_in(
+        &mut self,
+        expected: u64,
+    ) -> Option<Result<SavedSignIn, SavedSignInFailure>> {
+        let checked = self.saved_sign_in(Some(expected));
+        if !matches!(&checked, Ok(saved) if matches!(saved.account, Err(SavedSignInFailure::Missing)))
+        {
+            return Some(checked);
+        }
+        self.update_marker(MarkerUpdate::Promote(Disposition::Discard))
+            .err()
+            .map(|_| Err(SavedSignInFailure::Unavailable))
+    }
+
     /// Reads the marker first, so a pending or unreadable sign-out never exposes usable tokens.
     ///
     /// # Errors
@@ -661,7 +678,7 @@ impl<S: CredentialStore> Vault<S> {
         }
         self.assert_removed(Kind::Revocations)?;
         match sign_out.disposition {
-            Disposition::Erase => self.assert_removed(Kind::Account),
+            Disposition::Erase | Disposition::Discard => self.assert_removed(Kind::Account),
             Disposition::Keep => match self.read::<Account>(Kind::Account)? {
                 Some(account)
                     if account.expose().tokens.is_some()

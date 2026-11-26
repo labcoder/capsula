@@ -721,6 +721,31 @@ decides nothing: use stays fenced as `SigningOut { cleanup: Refused }`, and so d
 the load after Finish; Retry or the next start reads it again and resumes the phase it finds, or finds no sign-out. Fixtures crash after, and refuse, each of the store mutations a
 whole sign-out makes, for Keep and Erase.
 
+**Forget** (`AccountOp::ForgetSavedSignIn(revision)`) is how a profile copied from another PC signs
+in again. The view offers it, as `SavedSignInUnavailable { forget: Some(revision) }`, only while
+the current `chatgpt` revision has a missing chunk (`Missing`). A malformed, wrong-length,
+unreadable or changed record isn't offered: it may still read, or Prepare couldn't finish it. The
+shell asks first and sends the revision its dialog showed. The op shares Check's gate and lane
+flight. Under the session lock the vault rereads exactly that revision, and promotes
+`Discard`/`Revoking` only if the head is still that revision and a chunk is still missing.
+Anything else writes nothing and answers as Check does, runtime completion included, so a sign-in
+that reads again is recovered and waits for **Load models**. `SignIn` never discards anything.
+
+After its promotion a Discard runs the sign-out above from Settle, with one difference in Prepare:
+a missing or wrong-length chunk (`Unsettled`) in the account or the list is given up as damage,
+with `outcome_unknown` persisted first, instead of refusing the step. A refused read still
+refuses, and whatever the list still reads is revoked. An ordinary sign-out keeps refusing a
+missing chunk. As for any sign-out, a refused relist leaves the confirmed entries listed and the
+notice set, and the checkpoint still advances, so Delete removes the list anyway. The checkpoint
+turns `Discard` into `Erase`, so the exemption ends there, and Delete, Finish and a restart run as
+they do for Erase. A restart resumes only that cleanup. Signing in again is a separate, ordinary
+`SignIn` after the view reads `SignedOut`, never one the brain starts on its own.
+
+The new sign-in gets the profile's tasks, conversations and earlier permissions, the same as a
+sign-out and then a sign-in on one profile. Whoever holds the copied files already holds that
+data, so tying it to the lost sign-in would protect nothing. The confirmation says so. Forget
+can't tell what the other PC still holds: revoking an entry read here may end a session there too.
+
 ## Model catalog
 
 `connections::catalog::read` sends one bearer GET to `/v1/models`. The response must be an
@@ -899,7 +924,7 @@ chunks live in Credential Manager under `CREDENTIAL_SERVICE`:
 | `host` | A JSON UUIDv4 URN, generated from `getrandom` when no generation is current, or when the current one can't be used and may be replaced. |
 | `chatgpt` | JSON holds `client_id`, optional `subject` and `email`, `plan_enabled`, and optional nested `tokens` (`access_token`, `refresh_token`, optional `id_token`, `scope`, `expires_at`, `pending_identity_validation`, `refresh_sent`, which reads as false when absent). Registration-only JSON contains just `client_id` and `subject`. |
 | `revoke` | JSON holds `entries`, each with its own `client_id`, `refresh_token`, `added_at` Unix seconds, and `origin` (`Account` or `Exchange`). At most four exchanges and one account entry. |
-| sign-out marker | Not in Credential Manager: `control.marker` in credentials.db, token-free compact JSON: `{v:1,sign_out,sweep,request_pending,outcome_unknown,notice}`. `sign_out` is null or `{disposition,phase}`, with `Keep`/`Erase` and `Revoking`/`Deleting`. Unknown fields, versions, enums or malformed data fail closed to an Erase/Revoking marker with uncertainty and notice set. |
+| sign-out marker | Not in Credential Manager: `control.marker` in credentials.db, token-free compact JSON: `{v:1,sign_out,sweep,request_pending,outcome_unknown,notice}`. `sign_out` is null or `{disposition,phase}`, with `Keep`/`Erase`/`Discard` and `Revoking`/`Deleting`; `Discard` appears only in `Revoking`. Unknown fields, versions, enums or malformed data fail closed to an Erase/Revoking marker with uncertainty and notice set. |
 
 A generation holds 1 to 25 chunks of at most 2,000 bytes. Both serialized JSON records are
 capped at 48 KiB, including escaping. Access
@@ -924,9 +949,10 @@ record could still use it: none, or a registration never bound to an identity, w
 its own commit first. A crash between the two leaves no registration and the old host, and the
 next read replaces it. An account with tokens, a registration holding a verified subject, or an
 unreadable `chatgpt` record keeps the unusable host, and sign-in is refused as
-`CredentialsUnavailable`. Nothing here recovers those: ordinary sign-out keeps a subject-bound
-registration, and neither a tokenless registration nor an unreadable record can be signed out, so
-the host stays blocked until the blocking record is removed. The `chatgpt` record is never
+`CredentialsUnavailable`. Ordinary sign-out keeps a subject-bound registration, and neither a
+tokenless registration nor an unreadable record can be signed out, so the host stays blocked
+until the blocking record is removed. For a record with a missing chunk, as in a copied profile,
+that is Forget (see Sign-out). The `chatgpt` record is never
 replaced silently.
 
 ```mermaid

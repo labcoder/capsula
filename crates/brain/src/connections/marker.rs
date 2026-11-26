@@ -13,6 +13,9 @@ pub enum Disposition {
     Keep,
     /// Remove the whole account record.
     Erase,
+    /// Erase a saved sign-in this computer can't read, which the person chose to give up: Prepare
+    /// gives up its missing or wrong-length chunks too. The checkpoint turns it into `Erase`.
+    Discard,
 }
 
 /// The durable checkpoint separating revocation from irreversible local deletion.
@@ -171,6 +174,10 @@ impl SignOutMarker {
                     self.request_pending = false;
                     self.outcome_unknown = false;
                     sign_out.phase = Phase::Deleting;
+                    // The exemption is spent, and an older reader understands only Erase.
+                    if sign_out.disposition == Disposition::Discard {
+                        sign_out.disposition = Disposition::Erase;
+                    }
                 }
             }
             MarkerUpdate::FinishSignOut => {

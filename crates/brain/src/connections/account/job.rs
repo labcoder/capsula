@@ -12,13 +12,15 @@ use zeroize::Zeroizing;
 
 use crate::connections::clock::Clock;
 use crate::connections::error::VaultError;
-use crate::connections::marker::{MarkerUpdate, SignOutMarker};
+use crate::connections::marker::{Disposition, MarkerUpdate, SignOutMarker};
 use crate::connections::records::{
     Account, MAX_EXCHANGES, Origin, Revocable, RevocationList, entry_fits,
 };
 use crate::connections::vault::{DeleteResult, SaveResult, SavedSignIn, Vault};
 use crate::platform::SessionLock;
-use crate::platform::credential::{CredentialStore, NativeCredentialStore, admitted_store};
+use crate::platform::credential::{
+    CredentialStore, CredentialStoreError, NativeCredentialStore, admitted_store,
+};
 
 /// How often a patient load tries the session lock [guess]: Windows releases a dead brain's
 /// lock a little after the process ends.
@@ -43,6 +45,8 @@ pub enum Job {
     },
     /// Read only the saved `ChatGPT` sign-in under the already-held lock.
     CheckSavedSignIn(u64),
+    /// Re-read that saved sign-in and, if it's still unreadable, promote its `Discard` sign-out.
+    ForgetSavedSignIn(u64),
     /// Save a new registration before its exchange, so the issued client survives a failure.
     Register(Secret<Account>),
     /// Merge one lane fact into the marker.
@@ -88,6 +92,7 @@ impl fmt::Debug for Job {
         f.write_str(match self {
             Self::Load { .. } => "Load",
             Self::CheckSavedSignIn(_) => "CheckSavedSignIn",
+            Self::ForgetSavedSignIn(_) => "ForgetSavedSignIn",
             Self::Register(_) => "Register",
             Self::Marker(_) => "Marker",
             Self::Commit(_) => "Commit",
@@ -108,6 +113,8 @@ pub enum Done {
     Loaded(Result<Box<Snapshot>, VaultError>),
     /// The local saved sign-in reread.
     CheckedSavedSignIn(Result<SavedSignIn, SavedSignInFailure>),
+    /// The unreadable saved sign-in's `Discard` sign-out is durable.
+    Forgotten,
     /// The registration's save.
     Registered(SaveResult),
     /// The marker write.
@@ -290,13 +297,16 @@ impl<S: CredentialStore> Worker<S> {
             let tries = if patient { BUSY_TRIES } else { 1 };
             return Done::Loaded(self.load(tries).map(Box::new));
         }
-        if let Job::CheckSavedSignIn(expected) = job {
-            return Done::CheckedSavedSignIn(
-                self.vault
-                    .as_ref()
-                    .ok_or(SavedSignInFailure::Unavailable)
-                    .and_then(|vault| vault.saved_sign_in(Some(expected))),
-            );
+        if let Job::CheckSavedSignIn(expected) | Job::ForgetSavedSignIn(expected) = job {
+            let Some(vault) = self.vault.as_mut() else {
+                return Done::CheckedSavedSignIn(Err(SavedSignInFailure::Unavailable));
+            };
+            if matches!(job, Job::CheckSavedSignIn(_)) {
+                return Done::CheckedSavedSignIn(vault.saved_sign_in(Some(expected)));
+            }
+            return vault
+                .forget_saved_sign_in(expected)
+                .map_or(Done::Forgotten, Done::CheckedSavedSignIn);
         }
         let aged = matches!(job, Job::Relist { age_out: true, .. })
             .then(|| self.now_for_age_out())
@@ -311,7 +321,9 @@ impl<S: CredentialStore> Worker<S> {
         let Some(vault) = self.vault.as_mut() else {
             let refused = || SaveResult::NotCommitted(VaultError::Busy);
             return match job {
-                Job::Load { .. } | Job::CheckSavedSignIn(_) => unreachable!("handled above"),
+                Job::Load { .. } | Job::CheckSavedSignIn(_) | Job::ForgetSavedSignIn(_) => {
+                    unreachable!("handled above")
+                }
                 Job::Register(_) => Done::Registered(refused()),
                 Job::Marker(_) => Done::Marked(Err(VaultError::Busy)),
                 Job::Commit(_) => Done::Committed {
@@ -331,7 +343,9 @@ impl<S: CredentialStore> Worker<S> {
             };
         };
         match job {
-            Job::Load { .. } | Job::CheckSavedSignIn(_) => unreachable!("handled above"),
+            Job::Load { .. } | Job::CheckSavedSignIn(_) | Job::ForgetSavedSignIn(_) => {
+                unreachable!("handled above")
+            }
             Job::Register(account) => Done::Registered(vault.save_account(&account)),
             Job::Marker(update) => Done::Marked(vault.update_marker(update).map(drop)),
             Job::Commit(account) => commit(vault, &account, added_at),
@@ -613,8 +627,18 @@ fn prepare<S: CredentialStore>(
     vault: &mut Vault<S>,
     added_at: u64,
 ) -> Result<Vec<Secret<Revocable>>, VaultError> {
-    let list = vault.load_revocations().map(Ok).or_else(damaged)?;
-    let account = vault.load_for_sign_out().map(Ok).or_else(damaged)?;
+    let disposition = vault
+        .marker()?
+        .sign_out
+        .map(|sign_out| sign_out.disposition);
+    let list = vault
+        .load_revocations()
+        .map(Ok)
+        .or_else(|error| given_up(error, disposition))?;
+    let account = vault
+        .load_for_sign_out()
+        .map(Ok)
+        .or_else(|error| given_up(error, disposition))?;
     if list.is_err() || account.is_err() {
         vault.update_marker(MarkerUpdate::UnknownOutcome)?;
     }
@@ -658,6 +682,20 @@ fn prepare<S: CredentialStore>(
         }
     }
     Ok(entries.into_iter().map(Secret::new).collect())
+}
+
+/// A chosen discard also gives up the chunks this computer doesn't have, as damage; a refusal
+/// still refuses.
+fn given_up<T>(
+    error: VaultError,
+    disposition: Option<Disposition>,
+) -> Result<Result<T, VaultError>, VaultError> {
+    if disposition == Some(Disposition::Discard)
+        && matches!(error, VaultError::Store(CredentialStoreError::Unsettled))
+    {
+        return Ok(Err(error));
+    }
+    damaged(error)
 }
 
 /// Damaged data is given up on, as uncertainty; a refused read stays an error, so the step is

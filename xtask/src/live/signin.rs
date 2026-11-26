@@ -664,6 +664,7 @@ mod tests {
                 AccountView::SavedSignInUnavailable {
                     reason: SavedSignInFailure::Missing,
                     checkable: true,
+                    forget: Some(1),
                     checking: false,
                     revocation_unconfirmed: true,
                 },

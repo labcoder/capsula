@@ -359,6 +359,7 @@ impl AccountState {
             return AccountView::SavedSignInUnavailable {
                 reason,
                 checkable: revision.is_some() && reason != SavedSignInFailure::Changed,
+                forget: self.forgettable(),
                 checking: self.checking_saved_sign_in,
                 revocation_unconfirmed: self.loaded.notice,
             };
@@ -458,7 +459,8 @@ impl AccountState {
         if op == AccountOp::LoadModels {
             return;
         }
-        if op == AccountOp::CheckSavedSignIn {
+        let forget = matches!(op, AccountOp::ForgetSavedSignIn(revision) if self.forgettable() == Some(revision));
+        if op == AccountOp::CheckSavedSignIn || forget {
             if let Some((Some(revision), reason)) = self.loaded.saved_failure
                 && reason != SavedSignInFailure::Changed
                 && !self.busy
@@ -469,7 +471,11 @@ impl AccountState {
                 && matches!(self.lane, Lane::Free)
             {
                 self.checking_saved_sign_in = true;
-                self.jobs.push_back(Queued::CheckSavedSignIn(revision));
+                self.jobs.push_back(Queued::SavedSignIn(if forget {
+                    Job::ForgetSavedSignIn(revision)
+                } else {
+                    Job::CheckSavedSignIn(revision)
+                }));
             }
             return;
         }
@@ -489,7 +495,10 @@ impl AccountState {
             AccountOp::CancelSignIn => self.cancel(effects),
             AccountOp::SignOut => self.sign_out(effects),
             AccountOp::Retry if self.loaded.saved_failure.is_none() => self.retry(),
-            AccountOp::Retry | AccountOp::CheckSavedSignIn | AccountOp::LoadModels => {}
+            AccountOp::Retry
+            | AccountOp::CheckSavedSignIn
+            | AccountOp::LoadModels
+            | AccountOp::ForgetSavedSignIn(_) => {}
         }
     }
 
@@ -862,6 +871,17 @@ impl AccountState {
             self.read_saved_sign_in(snapshot.account);
         }
         self.revoke(revocable, effects);
+    }
+
+    /// The revision Forget may give up: one whose saved part is missing, as in a copied profile.
+    /// Its vault job re-reads that exact revision before anything is written.
+    fn forgettable(&self) -> Option<u64> {
+        match self.loaded.saved_failure {
+            Some((Some(revision), SavedSignInFailure::Missing)) if self.leaving.is_none() => {
+                Some(revision)
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn checked_saved_sign_in(

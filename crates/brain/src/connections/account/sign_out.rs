@@ -73,6 +73,23 @@ impl AccountState {
         self.step(Job::Marker(MarkerUpdate::Promote(disposition)));
     }
 
+    /// The vault made the person's Forget durable as a `Discard` sign-out: it goes on as any
+    /// sign-out after its promotion, and signing in again is the person's next, ordinary step.
+    pub(super) fn forgotten(&mut self, effects: &mut Vec<Effect>) {
+        self.checking_saved_sign_in = false;
+        self.attempt += 1;
+        self.admitting = None;
+        self.deferred = None;
+        self.moved(effects);
+        self.loaded.saved_failure = None;
+        self.loaded.account = None;
+        self.loaded.notice = true;
+        self.leaving = Some(Leaving {
+            step: Step::Settle,
+            stuck: None,
+        });
+    }
+
     /// A sign-out found at startup resumes at its persisted phase.
     pub(super) fn resume(&mut self, sign_out: SignOut) {
         let deleting = sign_out.phase == Phase::Deleting;
