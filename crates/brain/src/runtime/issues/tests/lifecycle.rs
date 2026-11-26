@@ -190,8 +190,8 @@ async fn close_and_quit_join_a_canceled_constructor_before_closing_the_sql_write
         let closing = async move {
             if quit {
                 assert_eq!(
-                    brain.quit(Instant::now()).await,
-                    crate::runtime::Quit::Incomplete
+                    brain.quit(Instant::now()).await.quit,
+                    Some(crate::runtime::Quit::Incomplete)
                 );
             } else {
                 brain.close().await;

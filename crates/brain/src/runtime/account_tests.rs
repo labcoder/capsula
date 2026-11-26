@@ -39,7 +39,7 @@ use crate::coordinator::{Availability, JobKind, ReadJob, Ready, StoreOp};
 use crate::engines::responses::{AccessHandle, Bearer, Responses};
 use crate::platform::{SessionLock, SessionLockError};
 use crate::runtime::account::{Access, Accounts, Event, HttpFactory, Net, exchange_task};
-use crate::runtime::{PairStart, Seen};
+use crate::runtime::{PairStart, Seen, Stage};
 use crate::tap::Tap;
 use crate::test_support::{self, Captured, Scratch};
 
@@ -426,7 +426,7 @@ async fn closing_waits_for_a_running_credential_job_past_its_deadline() {
         while !captured.text().contains("still running at the deadline") {
             tokio::select! {
                 biased;
-                () = &mut close => panic!("close returned while the job ran"),
+                _ = &mut close => panic!("close returned while the job ran"),
                 () = tokio::task::yield_now() => {}
             }
         }
@@ -436,10 +436,46 @@ async fn closing_waits_for_a_running_credential_job_past_its_deadline() {
         .expect("the deadline passes");
     assert!(!finished.load(Ordering::SeqCst), "the job is still held");
     release.send(()).expect("the job waits for its release");
-    close.await;
+    assert_eq!(
+        close.await,
+        Stage::Late,
+        "a release seen after the deadline is late"
+    );
     assert!(
         finished.load(Ordering::SeqCst),
         "the job ended before close returned"
+    );
+    drop(held);
+}
+
+/// A credential thread that panics never sends its release, so closing reports it failed.
+#[tokio::test]
+async fn closing_after_the_credential_thread_panicked_fails_its_release() {
+    let scratch = Scratch::new("account-close-panicked");
+    let lock = scratch.db().with_file_name(SESSION_LOCK);
+    let held = SessionLock::try_acquire(&lock).expect("lock");
+    let armed = Arc::new(AtomicBool::new(false));
+    let opening = Arc::clone(&armed);
+    let worker = Worker::new(
+        Box::new(move || {
+            assert!(
+                !opening.load(Ordering::SeqCst),
+                "{}",
+                test_support::SENTINEL
+            );
+            Vault::with_service(FakeStore::default(), "test-accounts-panicked", &lock)
+        }),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    let mut accounts = Accounts::spawn_unconfigured(worker, test_support::net()).expect("accounts");
+    armed.store(true, Ordering::SeqCst);
+    // Busy at startup, so a connection opens the vault again, on the credentials thread.
+    accounts.handle(Input::Connected);
+    assert_eq!(
+        accounts
+            .close(Instant::now() + PATIENCE, Instant::now() + PATIENCE)
+            .await,
+        Stage::Failed
     );
     drop(held);
 }
@@ -989,7 +1025,7 @@ async fn closing_saves_a_refresh_that_answers_in_time() {
     for _ in 0..8 {
         tokio::select! {
             biased;
-            () = &mut close => panic!("close returned while the refresh was out"),
+            _ = &mut close => panic!("close returned while the refresh was out"),
             () = tokio::task::yield_now() => {}
         }
     }
@@ -1011,6 +1047,30 @@ async fn closing_saves_a_refresh_that_answers_in_time() {
     drop(SessionLock::try_acquire(&lock).expect("released"));
 }
 
+/// A rotated set whose save is refused is held, which ends the refresh wait; closing reports it
+/// failed, and the old token stays marked as sent.
+#[tokio::test]
+async fn closing_with_a_refused_rotated_save_fails() {
+    let scratch = Scratch::new("account-close-refresh-held");
+    let store = FakeStore::default();
+    let (http, sent, release) = gated();
+    let mut accounts = due_account(&scratch, &store, http);
+    send_refresh(&mut accounts, sent).await;
+    store.0.lock().expect("fake lock").refusing = true;
+    release.send(()).expect("the refresh waits for its release");
+    assert_eq!(
+        accounts
+            .close(Instant::now() + PATIENCE, Instant::now() + PATIENCE)
+            .await,
+        Stage::Failed
+    );
+    store.0.lock().expect("fake lock").refusing = false;
+    assert_eq!(
+        saved_refresh(&scratch, &store),
+        ("refresh-old".to_owned(), true)
+    );
+}
+
 /// CAPS-151 H3: past its deadline, closing releases the lock with the refresh still out; its
 /// token stays marked as sent, so the next start never sends it again.
 #[tokio::test]
@@ -1020,7 +1080,11 @@ async fn closing_past_the_refresh_deadline_leaves_the_token_marked() {
     let (http, sent, release) = gated();
     let mut accounts = due_account(&scratch, &store, http);
     send_refresh(&mut accounts, sent).await;
-    accounts.close(Instant::now(), Instant::now()).await;
+    assert_eq!(
+        accounts.close(Instant::now(), Instant::now()).await,
+        Stage::Outstanding,
+        "a refresh still out at its deadline is outstanding"
+    );
     assert_eq!(
         saved_refresh(&scratch, &store),
         ("refresh-old".to_owned(), true)
