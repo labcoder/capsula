@@ -19,7 +19,7 @@ use crate::platform::macos::stream::RecordWriter;
 /// A synthetic group secret; no real key is ever used here.
 pub(super) const SECRET: [u8; SECRET_LEN] = [0x5A; SECRET_LEN];
 const BOUND: Duration = Duration::from_secs(10);
-const SHORT: Duration = Duration::from_millis(60);
+pub(super) const SHORT: Duration = Duration::from_millis(60);
 
 fn no_sigpipe(fd: &impl AsFd) {
     let on: libc::c_int = 1;

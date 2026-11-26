@@ -16,7 +16,7 @@ use tokio::sync::watch;
 
 use super::super::stream::{RecordReader, RecordWriter};
 use super::legs::PairLegs;
-use super::tests::{SECRET, bounded, brain, by, ends, hello, shell};
+use super::tests::{SECRET, SHORT, bounded, brain, by, ends, hello, shell};
 use super::{AuthenticatedPair, respond};
 use crate::ipc::{self, SessionError, greet};
 use crate::platform::ShellProcess;
@@ -32,16 +32,20 @@ async fn ready_is_one_control_byte_and_the_responder_speaks_only_after_the_shell
         .await
         .expect("READY read");
     assert_eq!(first, [0x52]);
+    let mut responding = Box::pin(respond(pair, brain(), by()));
+    assert!(
+        tokio::time::timeout(SHORT, &mut responding).await.is_err(),
+        "the responder waits for message 1"
+    );
     let mut more = [0; 1];
     for end in [&control, &data] {
         assert_eq!(
             end.try_read(&mut more).map_err(|error| error.kind()),
             Err(io::ErrorKind::WouldBlock),
-            "nothing else is written before the shell's first message"
+            "a running responder writes nothing before the shell's first message"
         );
     }
     let (_shell, init) = ShellAwaitsReply::start(&SECRET, Channel::Dev).expect("shell starts");
-    let responding = Box::pin(respond(pair, brain(), by()));
     let envelope = bounded(async {
         tokio::select! {
             refused = responding => panic!("the responder ended early: {:?}", refused.err()),

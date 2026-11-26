@@ -122,7 +122,8 @@ pub(crate) struct InheritedPair {
 impl InheritedPair {
     /// Writes [`SESSION_READY`](kumochi_protocol::constants::SESSION_READY) on the control leg
     /// without waiting: `Ok(1)` once it's out, `WouldBlock` while the shell's buffer is full. The
-    /// handshake on this pair starts only after it.
+    /// handshake on this pair starts only after it. Every successful call writes another `0x52`,
+    /// so the caller owns the one successful transition.
     ///
     /// # Errors
     /// As a non-blocking write.
