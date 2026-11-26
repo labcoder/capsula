@@ -9,6 +9,162 @@ use anyhow::{Result, ensure};
 
 use super::{Frame, Hover, Kind, Observation, load};
 use crate::gate::present::{Join, MatchedPresent, PresentRows};
+use crate::session::Heard;
+
+/// One heard hold's present: QPC ticks after its recognition, after its key-down, and to its
+/// display when `PresentMon` saw one, on a counter running at `frequency`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::gate) struct Presented {
+    recognized: i64,
+    key_down: i64,
+    display: Option<i64>,
+    frequency: i64,
+}
+
+/// Joins each of one batch's heard holds to the first dock frame painted while the line had the
+/// Listening colour, from `listening on` until `listening off`, and that frame to its present.
+/// Writes `listening-joins.txt` and fails unless every one of `attempted` holds was presented.
+pub(in crate::gate) fn join_listening(
+    heard: &[Heard],
+    attempted: usize,
+    path: &Path,
+    (pid, dock_chain): (u32, u64),
+    rows: &mut PresentRows,
+    output: &Path,
+    presented: &mut Vec<Presented>,
+) -> Result<()> {
+    let (observation, validation) = load(path, pid);
+    let frequency = observation.startup.map_or(0, |value| value.frequency);
+    let mut report = String::from(
+        "each hold joined to the first dock frame painted while the line showed Listening\n",
+    );
+    seed_report(&mut report, rows, frequency)?;
+    if let Err(error) = &validation {
+        writeln!(report, "observation_error={error:#}")?;
+    }
+    let before = presented.len();
+    for (index, hold) in heard.iter().enumerate() {
+        write!(
+            report,
+            "sample={} key_down_qpc={} recognized_qpc={} listening_qpc={} resting_qpc={} ",
+            index + 1,
+            hold.key_down,
+            hold.recognized,
+            hold.listening,
+            hold.resting
+        )?;
+        let Some(frame) = observation.frames.iter().find(|frame| {
+            frame.kind == Kind::Dock && (hold.listening..hold.resting).contains(&frame.paint_qpc)
+        }) else {
+            writeln!(report, "status=MissingFrame")?;
+            continue;
+        };
+        if validation.is_err() {
+            writeln!(report, "status=ObservationInvalid")?;
+            continue;
+        }
+        let joined = rows.join_present(
+            dock_chain,
+            frame.paint_qpc,
+            frame.completion_qpc.unwrap_or(0),
+            frequency,
+        );
+        if let Some((ticks, display)) =
+            sample(&mut report, frame, hold.recognized, joined, frequency)?
+        {
+            presented.push(Presented {
+                recognized: ticks,
+                key_down: ticks + (hold.recognized - hold.key_down),
+                display,
+                frequency,
+            });
+        }
+    }
+    let joined = presented.len() - before;
+    writeln!(
+        report,
+        "attempted={attempted} heard={} presented={joined}",
+        heard.len()
+    )?;
+    save_report(&output.join("listening-joins.txt"), &report)?;
+    ensure!(
+        validation.is_ok() && joined == attempted,
+        "a Listening hold went unheard or unpresented; see {}",
+        output.display()
+    );
+    Ok(())
+}
+
+/// The Listening row over every batch: recognition to present gated at p95 ≤ 7 ms over all
+/// `attempted` holds, with key-down to present and display latency beside it, not gated.
+pub(in crate::gate) fn summarize_listening(
+    presented: &[Presented],
+    attempted: usize,
+    output: &Path,
+) -> Result<()> {
+    let frequency = presented.first().map_or(0, |sample| sample.frequency);
+    ensure!(
+        presented.iter().all(|sample| sample.frequency == frequency),
+        "Listening batches ran on different counter frequencies"
+    );
+    let mut report = String::from(
+        "hold recognised to the line's first Listening present, gated; key-down to that present and display latency reported beside it, not gated\n",
+    );
+    let mut recognized = presented
+        .iter()
+        .map(|sample| sample.recognized)
+        .collect::<Vec<_>>();
+    let mut key_down = presented
+        .iter()
+        .map(|sample| sample.key_down)
+        .collect::<Vec<_>>();
+    let mut displays = presented
+        .iter()
+        .filter_map(|sample| sample.display)
+        .collect::<Vec<_>>();
+    let budget_pass = statistics(
+        &mut report,
+        "recognized_to_listening",
+        &mut recognized,
+        attempted,
+        frequency,
+        Some(7),
+    )?;
+    statistics(
+        &mut report,
+        "key_down_to_listening",
+        &mut key_down,
+        attempted,
+        frequency,
+        None,
+    )?;
+    statistics(
+        &mut report,
+        "recognized_to_listening_display",
+        &mut displays,
+        attempted,
+        frequency,
+        None,
+    )?;
+    let complete = presented.len() == attempted;
+    writeln!(
+        report,
+        "expected_holds={attempted} presented={} gate={}",
+        presented.len(),
+        if complete && budget_pass {
+            "pass"
+        } else {
+            "unmeasured_or_fail"
+        }
+    )?;
+    save_report(&output.join("listening-display.txt"), &report)?;
+    ensure!(
+        complete && budget_pass,
+        "Listening present gate incomplete or over budget; see {}",
+        output.display()
+    );
+    Ok(())
+}
 
 /// The first panel frame drawn for one visible panel change.
 fn first_panel_frame(
@@ -345,6 +501,105 @@ mod tests {
         }
         fs::write(directory.join("observer.log"), finish(text, 101, 1)).unwrap();
         fs::write(directory.join("present.csv"), csv).unwrap();
+    }
+
+    /// Four heard holds, recognised at 1000, 2000, 3000 and 4000 ms, the line Listening from 1 ms
+    /// to 100 ms later. Each has an earlier dock frame that must not count, then the Listening
+    /// frame, whose present comes `delays` ms after recognition.
+    fn listening_scenario(directory: &Path, delays: [i64; 4]) -> Vec<Heard> {
+        let mut text = format!(
+            "{GEOMETRY}{COMMIT}{STARTUP}paint frame=1 qpc=12 kind=panel hover=0 drawn_epoch=0 drawn_geometry=0 mask_epoch=1\n"
+        );
+        let mut csv = CSV_HEADER.to_owned();
+        let mut heard = Vec::new();
+        let mut frame = 1;
+        for (index, delay) in (1..=4).zip(delays) {
+            let recognized = 1000 * index;
+            for (paint, present) in [
+                (recognized - 50, recognized - 49),
+                (recognized + 2, recognized + delay),
+            ] {
+                frame += 1;
+                writeln!(text, "paint frame={frame} qpc={paint} kind=dock hover=0 drawn_epoch=1 drawn_geometry=1 mask_epoch=1\ndrawn frame={frame} qpc={}", paint + 6).unwrap();
+                writeln!(
+                    csv,
+                    "app.exe,42,0xA,DXGI,0,0,0,0.1,0,0,0,Composed: Flip,0,13,0,0,0,0,{present}"
+                )
+                .unwrap();
+            }
+            heard.push(Heard {
+                key_down: recognized - 300,
+                recognized,
+                listening: recognized + 1,
+                resting: recognized + 100,
+            });
+        }
+        fs::write(directory.join("observer.log"), finish(text, frame, 1)).unwrap();
+        fs::write(directory.join("present.csv"), csv).unwrap();
+        heard
+    }
+
+    /// Joins `heard` against the scenario, then summarises the presents as `attempted` holds.
+    fn listening_report(
+        directory: &Path,
+        heard: &[Heard],
+        attempted: usize,
+    ) -> (bool, Vec<Presented>, String) {
+        let mut rows = crate::gate::present::read(&directory.join("present.csv"), 42).unwrap();
+        let mut presented = Vec::new();
+        let joined = join_listening(
+            heard,
+            heard.len(),
+            &directory.join("observer.log"),
+            (42, 10),
+            &mut rows,
+            directory,
+            &mut presented,
+        );
+        let joins = directory.join("listening-joins.txt");
+        let mut report = fs::read_to_string(&joins).unwrap();
+        fs::remove_file(joins).unwrap();
+        let summarized = summarize_listening(&presented, attempted, directory);
+        let summary = directory.join("listening-display.txt");
+        report.push_str(&fs::read_to_string(&summary).unwrap());
+        fs::remove_file(summary).unwrap();
+        (joined.is_ok() && summarized.is_ok(), presented, report)
+    }
+
+    #[test]
+    fn listening_times_the_first_dock_frame_while_listening_from_recognition() {
+        let directory = directory();
+        let mut heard = listening_scenario(&directory, [3, 5, 7, 6]);
+        let (passed, presented, report) = listening_report(&directory, &heard, 4);
+        assert!(passed, "{report}");
+        assert_eq!(presented.len(), 4);
+        assert!(report.contains("summary=recognized_to_listening n=4 successful=4 attempted=4 p50_ms=5.000000 p95_ms=7.000000 max_ms=7.000000 budget_ms=7 budget_pass=true"), "{report}");
+        assert!(report.contains("summary=key_down_to_listening n=4 successful=4 attempted=4 p50_ms=305.000000 p95_ms=307.000000 max_ms=307.000000"), "{report}");
+        assert!(report.contains("expected_holds=4 presented=4 gate=pass"));
+        let (passed, _, report) = listening_report(&directory, &heard, 5);
+        assert!(
+            !passed,
+            "a hold that never reached Listening stays in the denominator"
+        );
+        assert!(report.contains("attempted=5") && report.contains("gate=unmeasured_or_fail"));
+        heard[0].resting = heard[0].listening + 1;
+        let (passed, presented, report) = listening_report(&directory, &heard, 4);
+        assert!(
+            !passed,
+            "a frame painted after Listening ended is not Listening"
+        );
+        assert!(
+            report.contains("status=MissingFrame") && report.contains("presented=3"),
+            "{report}"
+        );
+        assert_eq!(presented.len(), 3);
+        fs::remove_dir_all(&directory).unwrap();
+        let directory = super::super::tests::directory();
+        let heard = listening_scenario(&directory, [3, 5, 8, 6]);
+        let (passed, _, report) = listening_report(&directory, &heard, 4);
+        assert!(!passed, "8 ms misses the 7 ms budget");
+        assert!(report.contains("p95_ms=8.000000") && report.contains("budget_pass=false"));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

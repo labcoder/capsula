@@ -1,7 +1,7 @@
 # The gate identity
 
-The gate tools (`cold-start`, `gate-session`, `hover-gate`, `measure-gate`, `draw-timing`,
-`bench idle`, `slice2-gate` and `live anthropic-key`) start real
+The gate tools (`cold-start`, `gate-session`, `hover-gate`, `measure-gate`, `hold-gate`,
+`draw-timing`, `bench idle`, `slice2-gate` and `live anthropic-key`) start real
 Kumochi processes on the developer's machine. Separate folders isolate files only: anything named
 by the product identity (the pipes, the instance capability and Credential Manager names) follows
 the build, not the environment.
@@ -170,7 +170,7 @@ and admits `kumochi-gate-runs` under them: it is created owner-only when missing
 one that is a link or that someone else may change is refused, never followed. The root itself is
 created owner-only and exclusively, so a folder already there is refused. The run keeps these
 handles until it ends, and every folder and file it writes is under that root. A run that keeps a
-transcript (`cold-start`, `gate-session`, `hover-gate`, `measure-gate`, `draw-timing`) keeps its evidence in the
+transcript (`cold-start`, `gate-session`, `hover-gate`, `measure-gate`, `hold-gate`, `draw-timing`) keeps its evidence in the
 transcript's own new folder, and only the launches' data under the root. The run writes a new
 random run id into the root's
 `gate-run` file, and names both in the lock file, as one line ending in a newline, until it has

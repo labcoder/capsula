@@ -366,7 +366,12 @@ creates no file. Both need a shell built with the `gate-recorder` feature (see
   `qpc=<QueryPerformanceCounter> <event> key=value…`. Durations are in microseconds since the
   native callback's entry. Lines carry no keys and no text:
   - Legacy Listening and capture effects are inactive. The adapter keeps the callback QPC for
-    voice controls, and logs no listening-paint timing join.
+    voice controls.
+  - `hold warm callback_qpc=<n>` when the shortcut's chord goes down and
+    `hold recognized callback_qpc=<n>` when its 300 ms hold is recognised, each stamped with the
+    native callback's QPC; the line's own QPC is when presence applied it
+  - `listening on` and `listening off`, as the line takes and leaves the Listening colour
+  - `speech input ready=true|false`, from each speech state the brain sends
   - `input opened focused=true|false` and `input dismissed`
   - `input draft nonempty=true|false preserved=true|false`, after an `input opened` that follows
     a dismiss: whether the draft held at that dismiss was nonempty, and whether the input still
@@ -391,9 +396,10 @@ creates no file. Both need a shell built with the `gate-recorder` feature (see
 A paint isn't a present. The gate harness joins its exact Canvas QPC to the separately logged
 posted-completion interval and a unique eligible PresentMon row on the validated dock swapchain.
 Missing, dropped, reused or ambiguous joins remain unmeasured; a Canvas marker alone never
-passes a present or display gate. Shortcut latency, from left Ctrl + left Alt to the dock's
-first present, and AltGr for hold to talk are unmeasured for now: the session has no keyboard
-or layouts phase. Hover gates the native pointer-entry QPC →
+passes a present or display gate. Hold to talk can't show Listening before its 300 ms hold is
+recognised, the brain admits it and the microphone reports Running, so the shortcut row gates
+recognition → the line's first Listening present at p95 ≤7ms and reports key-down → that present
+beside it ([the hold to talk rows](#the-hold-to-talk-rows)). Hover gates the native pointer-entry QPC →
 the peek's first present at p95 ≤8ms. That QPC is read
 when the entering `WM_MOUSEMOVE` is dispatched to the proxy's window procedure. So it excludes
 OS routing and the message's wait in the UI thread's Win32 message queue before dispatch, and
@@ -409,9 +415,13 @@ starts, and Quit drains the worker off the UI thread, so the UI thread never tou
 
 Unit tests cover the reducer's thresholds and sequences, scan-code naming and Esc ordering.
 Focus and double-tap feel need the approved desktop session. Its gate copy has no speech model,
-so it can't show Listening or judge hold feel.
+so it can't show Listening or judge hold feel; only `hold-gate --speech` installs one.
 The separate-process fixture owns its window loop in `platform/input_session/fixture.rs`.
-The approved session compares the owner's persistent language registry settings before and
+On Windows 8 and later, layout loading must run in the process that owns keyboard focus, so
+the runner sends a bounded numeric request to the foreground fixture and verifies its active
+layout acknowledgement before typing. The fixture tracks newly loaded handles and restores
+its original layout on request and on exit, including after a lost acknowledgement. The
+runner then checks the loaded-layout list. The approved session compares the owner's persistent language registry settings before and
 after its automated phases; a change stops the session and is reported, never silently repaired
 with registry writes.
 
@@ -565,9 +575,11 @@ cleanup; a phase cannot begin without its complete budget.
    returns to the original fixture before closing the alternate. Both reopens use the non-content observation
    to check draft preservation. Normal Esc dismissal must return foreground to the fixture;
    there is no SetForegroundWindow workaround. Ordinary Esc must then reach the EDIT.
-5. Free and fixture-contested global Esc use separate products but the same fixture. Contested
+5. Layouts types AltGr characters under two layouts and then holds the shortcut once
+   ([the hold to talk rows](#the-hold-to-talk-rows)).
+6. Free and fixture-contested global Esc use separate products but the same fixture. Contested
    fallback visibility must exist before pointer movement and persist after leave.
-6. A separate bounded contested-Esc product exercises the rendered Stop button, using its
+7. A separate bounded contested-Esc product exercises the rendered Stop button, using its
    observed rectangle and exact owned panel HWND rather than a guessed coordinate. After the
    guarded click, wanted/Stop visibility must clear. The fixture then releases its own Esc
    reservation so ordinary Escape can reach the EDIT
@@ -580,8 +592,8 @@ dock. No phase or cold start is meant to pull, so every reader of the observer r
 a phase fails with `Kumo pull during <phase>`. Each phase's `pulls.txt` holds its count and
 whether the observer read completely.
 
-There is no keyboard or layouts phase, so shortcut latency and AltGr for hold to talk are
-unmeasured for now. Recursive read-only registry snapshots of the language settings, with
+The layouts phase runs after focus, and Listening runs only in `hold-gate --speech`; both are
+described in [the hold to talk rows](#the-hold-to-talk-rows). Recursive read-only registry snapshots of the language settings, with
 missing-key/read status, are compared after the phases even on failure; any difference stops
 the session and is never repaired.
 
@@ -614,7 +626,8 @@ Main trace backstops are fixed per phase:
 | Phase | Main backstop |
 | --- | ---: |
 | Hover, resting receipts | 30s |
-| Focus | 20s |
+| Focus, layouts | 20s |
+| Listening, each batch | 40s |
 | Free Esc, contested persistence, Stop button | 10s |
 
 CPU rows have no main input trace. Normal completion stops only this harness's uniquely named
@@ -791,6 +804,45 @@ outcome (`failed` if the restore itself erred). `pointer_left` says whether Wind
 move of the session's own with no completed restore after it; it is not a measured displacement.
 Every gate session then ends with `final_cursor=x,y`, sampled after the attempt to close the
 fixture and wait for it (not a confirmed close), or `unread`.
+
+### The hold to talk rows
+
+`hold-gate <path-session.txt> [--speech <models-dir> <natives-dir>]` runs the two hold to talk
+rows behind `hover-gate`'s idle opener, with the same transcript, evidence folder, fixture,
+guards and PresentMon bounds. `measure-gate` and `gate-session` run the layouts row too, never
+the Listening row.
+
+- **Layouts (AltGr typing).** German `00000407` and Spanish `0000040A` are loaded in turn in the
+  foreground fixture. Each types AltGr+Q (German) or AltGr+2 (Spanish) and then AltGr+E, and the
+  EDIT must hold exactly `@€`; no text is printed. From the AltGr press to the next left
+  Ctrl + left Alt make, no `hold warm` or `hold recognized` callback may fall, so AltGr's
+  synthetic left Ctrl never starts the shortcut. Then one held left Ctrl + left Alt must be
+  recognised by a callback after its own make. Once the product has quit, its whole log must
+  hold exactly two `hold warm`, two `hold recognized` and no `input opened`, so a late line
+  can't slip past the live check. The Gate copy has no speech model, so that hold ends in the Not installed
+  notice and opens no microphone. The fixture's original layout and the loaded-layout list are
+  restored and checked. `phases.tsv` counts three checks per layout: the typed pair, the quiet
+  AltGr window and the recognised hold.
+- **Listening (hold recognised → Listening on screen).** Only with `--speech`. The images are
+  staged into the run's own `bin`, and before the first batch speech input's model files are
+  copied from `<models-dir>/speech-input/` (an installed models folder) into the launch's own
+  models folder and the native runtime from `<natives-dir>` beside the staged brain, each checked
+  against the manifest's size and SHA-256; nothing downloads and nothing lands outside the run.
+  The run's own settings then list speech input as installed, with Hold to talk on.
+  Ten batches, each its own launch inside the shell's two-minute quit bound and one main trace,
+  wait up to 20 s for `speech input ready=true` before their trace starts, and then make 10
+  holds: each keeps the keys down until
+  `listening on`, and 150 ms more, then releases, waits for a `listening off` after the release
+  and 1.5 s more. **Each hold opens the real microphone**; the audio stays in the brain and is
+  never stored. A silent hold starts no turn; transcribed noise would start a turn that fails
+  with Sign in needed before any connection is used, since the run has no account. The clock
+  starts at the native callback that recognised the hold and stops at the present of the first
+  dock frame painted between `listening on` and `listening off`; key-down → that present is
+  reported beside it. The gate is p95 ≤7ms over all 100 holds; a hold that never reaches
+  Listening or a present fails its batch. The span covers the brain's admission
+  round trip, the microphone start and the paint, so it is a target for the current input
+  model, not the old chord → Listening figure. Each `listening-NN/listening-joins.txt` holds
+  its batch's samples, and the evidence folder's `listening-display.txt` the summary lines.
 
 ## Voice hold authority
 
