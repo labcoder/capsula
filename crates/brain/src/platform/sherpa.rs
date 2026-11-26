@@ -399,11 +399,8 @@ pub(crate) fn staging_root() -> Result<PathBuf, NativeError> {
         .map_err(|_| NativeError::Unsafe)?;
     let _parent = hold_chain(&parent).map_err(|_| NativeError::Unsafe)?;
     let root = parent.join(constants::DATA_DIR);
-    match std::fs::create_dir(&root) {
-        Ok(()) => Ok(root),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(root),
-        Err(_) => Err(NativeError::Load),
-    }
+    super::product_folder(&root).map_err(|_| NativeError::Unsafe)?;
+    Ok(root)
 }
 
 /// The pins staged in an owner-only folder. Every folder from the volume root down to it, and

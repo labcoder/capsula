@@ -95,6 +95,14 @@ The file is mode `0600` and is locked exclusively without waiting. The file stay
 closing the lock handle or exiting the process releases the lock. Platforms without an
 admitted lock target still refuse before opening a file, with no fallback location.
 
+Every first write to a product folder goes through one check: the Shell's instance lock and
+log, every Brain process's log and lock, the Claude Code and speech staging folders, and the
+settings folder, which settings also check before they're read. It creates any missing parent as
+an ordinary folder, then the product folder owner-only. An existing folder is kept as it is if
+it's a plain folder with a trusted owner that nobody else may change, add to, or gain write
+access to what's made in it, and refused otherwise. On Unix the check makes a missing folder
+`0700` but doesn't yet check an existing one.
+
 Detached brain startup acquires both pipes before touching the store. It takes the profile's
 writer lock, then opens and recovers the store, loads settings, starts accounts, and builds the Brain. It retries any interrupted
 voice model removals before creating the helpers' Job Object, then starts the optional workers.

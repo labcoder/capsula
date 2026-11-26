@@ -116,6 +116,9 @@ pub enum BrainError {
     /// The profile's writer lock couldn't be created or taken.
     #[error("can't take the profile's writer lock")]
     ProfileLock(#[source] io::Error),
+    /// The profile's missing credential authority couldn't be created.
+    #[error("can't create the credential authority")]
+    Authority,
     /// The store couldn't be opened or recovered.
     #[error("can't open the store")]
     Store(#[from] store::StoreError),
@@ -157,6 +160,7 @@ impl BrainError {
             Self::Credential(error) => ("credential", error.raw_os_error().map(i64::from)),
             Self::ProfileBusy => ("profile_busy", None),
             Self::ProfileLock(error) => ("profile_lock", raw(error)),
+            Self::Authority => ("authority", None),
             Self::Store(StoreError::Folder(error) | StoreError::Purge(error)) => {
                 ("store", raw(error))
             }
@@ -294,8 +298,30 @@ fn start_screen(brain: &mut Brain, exe: PathBuf, jobs: io::Result<std::sync::Arc
 fn open_profile(
     path: &std::path::Path,
 ) -> Result<(std::sync::Arc<platform::SessionLock>, store::Store), BrainError> {
-    let profile = profile_lock(&path.with_file_name(kumochi_protocol::constants::SESSION_LOCK))?;
-    Ok((profile, store::Store::open(path)?))
+    use connections::authority::{Authority, Missing};
+    use kumochi_protocol::constants::{AUTHORITY_FILE, SESSION_LOCK};
+
+    let profile = profile_lock(&path.with_file_name(SESSION_LOCK))?;
+    let authority = path.with_file_name(AUTHORITY_FILE);
+    // Under the writer lock, so no cooperating writer creates or removes either file meanwhile.
+    let present = |path: &std::path::Path| match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(BrainError::Store(store::StoreError::Folder(error))),
+    };
+    let has_authority = present(&authority)?;
+    // A missing store is created unless a purge's old copy shows it's mid-swap (`Retired`).
+    let store = if present(path)? {
+        store::Store::open_existing(path)?
+    } else {
+        store::Store::open(path)?
+    };
+    // Builds before the authority left history without one, so a missing authority starts fresh
+    // and signed out; it shares no ids with the store.
+    if !has_authority {
+        Authority::open(&profile, Missing::Create).map_err(|_| BrainError::Authority)?;
+    }
+    Ok((profile, store))
 }
 
 /// Takes the profile's writer lock at `path` without waiting. Only contention is
@@ -443,6 +469,99 @@ fn a_brain_refused_the_profile_never_opens_the_store() {
     drop(held);
     let (_profile, _store) = open_profile(&scratch.db()).expect("opens once the profile is free");
     assert!(scratch.db().exists());
+}
+
+#[cfg(test)]
+mod profile_files {
+    use std::path::Path;
+
+    use kumochi_protocol::constants::AUTHORITY_FILE;
+    use rusqlite::Connection;
+
+    use super::{BrainError, open_profile, store};
+    use crate::test_support::{Scratch, files};
+
+    fn version(db: &Path) -> i64 {
+        Connection::open(db)
+            .expect("raw open")
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("the version")
+    }
+
+    /// The generations a fresh authority would hold none of: every account, host and key.
+    fn generations(authority: &Path) -> i64 {
+        Connection::open(authority)
+            .expect("raw open")
+            .query_row("SELECT count(*) FROM generations", [], |row| row.get(0))
+            .expect("the generations")
+    }
+
+    #[test]
+    fn a_first_start_creates_both_databases() {
+        let scratch = Scratch::new("profile-first-start");
+        std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
+        let authority = scratch.db().with_file_name(AUTHORITY_FILE);
+        drop(open_profile(&scratch.db()).expect("a first start"));
+        assert_eq!(version(&scratch.db()), 13);
+        assert_eq!(version(&authority), 3);
+        drop(open_profile(&scratch.db()).expect("the next start opens both"));
+        assert_eq!(version(&scratch.db()), 13);
+    }
+
+    #[test]
+    fn history_from_before_the_authority_gets_a_fresh_signed_out_one() {
+        let scratch = Scratch::new("profile-no-authority");
+        let built = store::existing::tests::store_at(scratch.dir(), 11);
+        Connection::open(&built)
+            .expect("raw open")
+            .execute_batch(
+                "INSERT INTO threads (title, created_ms, updated_ms) VALUES ('kept', 1, 1);",
+            )
+            .expect("a thread an older build issued");
+        std::fs::rename(&built, scratch.db()).expect("the store's name");
+        let authority = scratch.db().with_file_name(AUTHORITY_FILE);
+        drop(open_profile(&scratch.db()).expect("the start goes on"));
+        assert_eq!(version(&scratch.db()), 13);
+        assert_eq!(version(&authority), 3);
+        assert_eq!(generations(&authority), 0, "signed out");
+        let title: String = Connection::open(scratch.db())
+            .expect("raw open")
+            .query_row("SELECT title FROM threads WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("the thread stays");
+        assert_eq!(title, "kept");
+    }
+
+    #[test]
+    fn an_authority_without_its_store_gets_an_empty_store_and_stays_as_it_was() {
+        let scratch = Scratch::new("profile-no-store");
+        std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
+        drop(open_profile(&scratch.db()).expect("a first start"));
+        let authority = scratch.db().with_file_name(AUTHORITY_FILE);
+        std::fs::remove_file(scratch.db()).expect("the store goes");
+        let before = std::fs::read(&authority).expect("the authority");
+        drop(open_profile(&scratch.db()).expect("the start goes on"));
+        assert_eq!(version(&scratch.db()), 13);
+        assert_eq!(std::fs::read(&authority).expect("the authority"), before);
+    }
+
+    #[test]
+    fn a_store_mid_purge_swap_is_refused_and_not_recreated() {
+        let scratch = Scratch::new("profile-retired");
+        std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
+        drop(open_profile(&scratch.db()).expect("a first start"));
+        std::fs::remove_file(scratch.db()).expect("the store goes");
+        let mut old = scratch.db().into_os_string();
+        old.push(".purge-old");
+        std::fs::write(&old, b"old copy").expect("a purge's old copy");
+        let before = files(scratch.dir());
+        assert!(matches!(
+            open_profile(&scratch.db()),
+            Err(BrainError::Store(store::StoreError::Retired))
+        ));
+        assert_eq!(files(scratch.dir()), before);
+    }
 }
 
 #[cfg(all(test, windows, debug_assertions))]

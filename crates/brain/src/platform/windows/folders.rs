@@ -2,7 +2,8 @@
 //! in Gate and debug builds the override pair, admitted before the first write, or the Known
 //! Folders.
 
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use kumochi_protocol::constants;
 use kumochi_storage::{Today, local_app_data, roaming_app_data};
@@ -32,4 +33,14 @@ pub fn session_lock_path() -> Option<PathBuf> {
 #[must_use]
 pub fn config_dir() -> Option<PathBuf> {
     Some(roaming_app_data().ok()?.join(constants::DATA_DIR))
+}
+
+/// Creates the product folder at `path` owner-only when it's missing, and checks an existing one
+/// without changing it.
+///
+/// # Errors
+/// Fails when it can't be created, or an existing one isn't a trusted plain folder.
+pub fn product_folder(path: &Path) -> io::Result<()> {
+    kumochi_storage::product_folder(path)
+        .map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))
 }

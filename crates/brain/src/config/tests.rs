@@ -816,6 +816,64 @@ fn the_max_frame_rate_persists_and_automatic_removes_the_key() {
 }
 
 #[test]
+fn the_first_save_makes_the_settings_folder_owner_only() {
+    let scratch = Scratch::trusted("config-owner-only");
+    let dir = scratch.dir().join("settings");
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    apply(&mut config, SettingsOp::SetAssistantName(name("Nimbus")));
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Security::{CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
+        use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+        assert!(crate::platform::dacl_sddl(&dir).starts_with("D:P("));
+        let entries: Vec<_> = crate::platform::dacl_entries(&dir)
+            .into_iter()
+            .map(|entry| (entry.allow, entry.flags, entry.rights, entry.sid))
+            .collect();
+        assert_eq!(
+            entries,
+            [(
+                true,
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                FILE_ALL_ACCESS,
+                crate::platform::this_user()
+            )]
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&dir)
+            .expect("the folder")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn an_untrusted_settings_folder_is_neither_read_nor_written() {
+    let scratch = Scratch::trusted("config-untrusted");
+    let dir = scratch.dir().join("settings");
+    let path = dir.join(CONFIG_FILE);
+    std::fs::create_dir_all(&dir).expect("the folder");
+    std::fs::write(&path, "assistant_name = \"Nimbus\"\n").expect("seeded");
+    crate::platform::set_dacl(&dir, |user| format!("D:P(A;OICI;FA;;;{user})(A;;0x4;;;WD)"));
+    let config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert_eq!(
+        config.view().assistant_name.as_str(),
+        DEFAULT_ASSISTANT_NAME
+    );
+    assert!(super::write_replacing(&path, b"assistant_name = \"Cirrus\"\n").is_err());
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file stays"),
+        "assistant_name = \"Nimbus\"\n"
+    );
+    assert!(!dir.join(format!("{CONFIG_FILE}.tmp")).exists());
+}
+
+#[test]
 fn first_save_and_replacement_ignore_an_abandoned_temp() {
     let scratch = Scratch::new("config-stale-temp");
     let dir = dir(&scratch);

@@ -34,6 +34,9 @@ pub enum LoggingError {
     /// The per-user data folder isn't known.
     #[error("{}", crate::platform::DATA_ROOT_ERROR)]
     NoLocalAppData,
+    /// The product folder couldn't be created owner-only, or the one there isn't trusted.
+    #[error("can't prepare the product folder")]
+    Folder(#[source] std::io::Error),
     /// The log folder or file couldn't be created.
     #[error("can't open the log file")]
     Appender(#[from] InitError),
@@ -48,14 +51,15 @@ pub enum LoggingError {
 /// panic message has to reach the file before a release build aborts.
 ///
 /// # Errors
-/// Fails when native logging isn't admitted, the log folder can't be found or created,
-/// or logging already started.
+/// Fails when native logging isn't admitted, the product folder can't be prepared, the log
+/// folder can't be found or created, or logging already started.
 pub fn init(prefix: &str) -> Result<(), LoggingError> {
     crate::platform::require_mode(crate::platform::Mode::Detached)
         .map_err(LoggingError::NativeRuntime)?;
-    let dir = crate::platform::data_dir()
-        .ok_or(LoggingError::NoLocalAppData)?
-        .join(kumochi_protocol::constants::LOGS_DIR);
+    let data = crate::platform::data_dir().ok_or(LoggingError::NoLocalAppData)?;
+    // The first writer in every process, so the product folder is owner-only from its creation.
+    crate::platform::product_folder(&data).map_err(LoggingError::Folder)?;
+    let dir = data.join(kumochi_protocol::constants::LOGS_DIR);
     tracing::subscriber::set_global_default(file_subscriber(&dir, prefix)?)?;
     install_panic_hook();
     Ok(())

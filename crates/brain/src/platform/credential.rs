@@ -74,7 +74,10 @@ pub(crate) fn admitted_store() -> Result<NativeCredentialStore, CredentialStoreE
 pub(crate) fn native_session_lock_path() -> Result<std::path::PathBuf, CredentialStoreError> {
     #[cfg(windows)]
     {
-        super::session_lock_path().ok_or(CredentialStoreError::NoDataDir)
+        let path = super::session_lock_path().ok_or(CredentialStoreError::NoDataDir)?;
+        let data = path.parent().ok_or(CredentialStoreError::NoDataDir)?;
+        super::product_folder(data).map_err(|_| CredentialStoreError::NoDataDir)?;
+        Ok(path)
     }
     #[cfg(not(windows))]
     {

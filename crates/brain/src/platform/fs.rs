@@ -20,6 +20,30 @@ pub(crate) fn folder_id(dir: &Path) -> Option<super::FolderId> {
     })
 }
 
+/// Creates the product folder at `path` readable by this user only when it's missing, making any
+/// missing ancestor first; an existing one is left as it is.
+/// shortcut: an existing folder's owner and mode aren't checked; check them before a Unix brain
+/// ships.
+///
+/// # Errors
+/// Fails when it can't be created, or something other than a folder is there.
+pub fn product_folder(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if std::fs::symlink_metadata(path)?.is_dir() {
+                Ok(())
+            } else {
+                Err(io::Error::from(io::ErrorKind::AlreadyExists))
+            }
+        }
+        created => created,
+    }
+}
+
 /// No per-user runtime data root is configured on this platform.
 #[cfg(not(target_os = "macos"))]
 #[must_use]

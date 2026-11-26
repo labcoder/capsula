@@ -76,6 +76,8 @@ pub(crate) fn instance_lock_path() -> Result<std::path::PathBuf, crate::instance
     #[cfg(windows)]
     {
         let data_dir = data_dir().ok_or(SessionLockError::DataDirectory)?;
+        // The shell's first write, so the product folder is owner-only from its creation.
+        kumochi_storage::product_folder(&data_dir).map_err(|_| SessionLockError::DataDirectory)?;
         let session = session_id().map_err(SessionLockError::Session)?;
         let name = kumochi_protocol::constants::SHELL_LOCK;
         let path = data_dir.join(format!("{name}-{session}.lock"));
@@ -91,7 +93,11 @@ pub(crate) fn instance_lock_path() -> Result<std::path::PathBuf, crate::instance
 pub(crate) fn logging_data_dir() -> Result<std::path::PathBuf, crate::logging::LoggingError> {
     #[cfg(windows)]
     {
-        data_dir().ok_or(crate::logging::LoggingError::NoLocalAppData)
+        use crate::logging::LoggingError;
+
+        let data_dir = data_dir().ok_or(LoggingError::NoLocalAppData)?;
+        kumochi_storage::product_folder(&data_dir).map_err(|_| LoggingError::NoLocalAppData)?;
+        Ok(data_dir)
     }
     #[cfg(not(windows))]
     {

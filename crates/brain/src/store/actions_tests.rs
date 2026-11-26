@@ -291,7 +291,7 @@ fn version_six_upgrades_with_its_rows_and_an_unused_mark() {
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 11);
+    assert_eq!(version, 13);
     let marks: Vec<(i64, i64)> = store
         .conn
         .prepare("SELECT id, last FROM approval_mark")
@@ -1315,7 +1315,7 @@ fn version_ten_attempts_gain_an_empty_repository_id_once() {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("schema");
-        assert_eq!((version, columns), (11, 1), "{open}");
+        assert_eq!((version, columns), (13, 1), "{open}");
         let action = store.action(DraftId(1)).expect("reads").expect("kept");
         assert_eq!(
             (action.repo.as_ref().map(RepoName::as_str), action.repo_id),

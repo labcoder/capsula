@@ -190,7 +190,7 @@ mod tests {
     use kumochi_protocol::Secret;
     use kumochi_protocol::constants::generation_target;
 
-    use super::super::{Authority, FILE};
+    use super::super::{Authority, FILE, Missing};
     use super::*;
     use crate::connections::vault::fake::FakeStore;
     use crate::test_support::{Scratch, files};
@@ -244,7 +244,8 @@ mod tests {
         fn writing<T>(&self, write: impl FnOnce(&mut Authority) -> T) -> T {
             let path = self.scratch.dir().join("session.lock");
             let lock = SessionLock::try_acquire(&path).expect("colocated lock");
-            let written = write(&mut Authority::open(&lock).expect("open authority"));
+            let written =
+                write(&mut Authority::open(&lock, Missing::Create).expect("open authority"));
             drop(lock);
             fs::remove_file(path).expect("remove the colocated lock");
             written

@@ -104,7 +104,7 @@ pub struct Boundary {
 
 impl Boundary {
     pub(super) fn read(conn: &Connection, tag: u64) -> Result<Option<Self>, StoreError> {
-        if tag == 0 || !schema::has_recovery_context(conn)? {
+        if tag == 0 {
             return Ok(None);
         }
         let found: Option<(i64, i64)> = conn

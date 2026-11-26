@@ -167,7 +167,45 @@ enum Existing {
     Refuse,
 }
 
+/// Creates this edition's product folder at `path` owner-only when it's missing, like
+/// [`owner_only_dir`], making any missing ancestor first as an ordinary folder. An existing folder
+/// is kept as it is and never re-secured. It's used only when the folder itself is no reparse
+/// point and has a trusted owner, and no one untrusted may change it, add to it, or gain write
+/// access to what's made in it. Its ancestors aren't checked, so a moved or junctioned
+/// application data folder still works.
+pub fn product_folder(path: &Path) -> Result<(), Untrusted> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| Untrusted::Io)?;
+    }
+    create_owner_only(path, Existing::Use)?;
+    let opened = open(path, Kind::Folder, 0)?;
+    check_not_reparse(&opened)?;
+    if attributes(&opened)? & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(Untrusted::Unsafe);
+    }
+    let security = Security::read(&opened)?;
+    let trusted = Trusted::new()?;
+    trusted_security(&security, Kind::Folder, &trusted)?;
+    // Adding a subfolder is append-data on a folder; inherited write would open the databases.
+    // CREATOR OWNER only ever names whoever made the child, who the line above already limits.
+    let mut heirs = trusted;
+    heirs.0.push(Sid::parse("S-1-3-0")?);
+    if security.others_may(
+        CHANGES | FILE_APPEND_DATA | FILE_WRITE_EA,
+        &heirs,
+        Aces::Inheritable,
+    )? {
+        return Err(Untrusted::Unsafe);
+    }
+    Ok(())
+}
+
 fn owner_only(path: &Path, existing: Existing) -> Result<File, Untrusted> {
+    create_owner_only(path, existing)?;
+    open_checked(path, Kind::Folder, &Trusted::new()?)
+}
+
+fn create_owner_only(path: &Path, existing: Existing) -> Result<(), Untrusted> {
     let user = user_sid().map_err(|_| Untrusted::Io)?;
     let descriptor = Descriptor::new(&format!("D:P(A;OICI;FA;;;{user})"))?;
     let attributes = SECURITY_ATTRIBUTES {
@@ -184,7 +222,7 @@ fn owner_only(path: &Path, existing: Existing) -> Result<File, Untrusted> {
     {
         return Err(Untrusted::Io);
     }
-    open_checked(path, Kind::Folder, &Trusted::new()?)
+    Ok(())
 }
 
 /// The SID of the user this process runs as, in string form (`S-1-5-21-…`).
@@ -941,13 +979,82 @@ fn mapped(mut mask: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use windows_sys::Win32::Security::{CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
     use windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData;
 
     use super::{
-        Kind, Security, Trusted, Untrusted, hold_chain, known_folder, new_owner_only_dir,
-        owner_only_dir, trusted_security, user_sid,
+        FILE_ALL_ACCESS, Kind, Security, Trusted, Untrusted, dacl_entries, dacl_sddl, hold_chain,
+        known_folder, new_owner_only_dir, owner_only_dir, product_folder, set_dacl,
+        trusted_security, user_sid,
     };
     use crate::scratch::Scratch;
+
+    #[test]
+    fn a_missing_product_folder_is_made_owner_only_and_an_existing_one_is_kept_or_refused() {
+        let local = known_folder(FOLDERID_LocalAppData).expect("local app data");
+        let scratch = Scratch::under(&local, "product-folder");
+        let folder = scratch.join("product");
+        let user = user_sid().expect("this user's SID");
+        product_folder(&folder).expect("a new product folder");
+        assert_owner_only(&folder, &user);
+        set_dacl(&folder, |user| {
+            format!("D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;SY)")
+        });
+        let kept = dacl_sddl(&folder);
+        product_folder(&folder).expect("an existing trusted folder");
+        assert_eq!(dacl_sddl(&folder), kept, "not re-secured");
+        set_dacl(&folder, |user| {
+            format!("D:P(A;OICI;FA;;;{user})(A;;0x2;;;WD)")
+        });
+        let open = dacl_sddl(&folder);
+        assert_eq!(
+            product_folder(&folder),
+            Err(Untrusted::Unsafe),
+            "others may add files"
+        );
+        assert_eq!(
+            dacl_sddl(&folder),
+            open,
+            "a refused folder is left as it was"
+        );
+        for (others, case) in [
+            ("(A;;0x4;;;WD)", "others may add folders"),
+            ("(A;OIIO;FA;;;WD)", "others may write what's made in it"),
+        ] {
+            set_dacl(&folder, |user| format!("D:P(A;OICI;FA;;;{user}){others}"));
+            assert_eq!(product_folder(&folder), Err(Untrusted::Unsafe), "{case}");
+        }
+        set_dacl(&folder, |user| {
+            format!("D:P(A;OICI;FA;;;{user})(A;OICIIO;FA;;;CO)")
+        });
+        product_folder(&folder).expect("CREATOR OWNER names only the trusted creator");
+        let nested = scratch.join("missing-root").join("product");
+        product_folder(&nested).expect("a product folder under a missing root");
+        assert_owner_only(&nested, &user);
+        let file = scratch.join("file");
+        std::fs::write(&file, b"kept").expect("a file at the name");
+        assert_eq!(product_folder(&file), Err(Untrusted::Unsafe), "a file");
+        assert_eq!(std::fs::read(&file).expect("the file stays"), b"kept");
+    }
+
+    /// Exactly this user's full control, passed down and not inherited from above. SDDL would
+    /// print some accounts by alias, so the entries are compared by SID.
+    fn assert_owner_only(path: &std::path::Path, user: &str) {
+        assert!(dacl_sddl(path).starts_with("D:P("), "a protected DACL");
+        let entries: Vec<_> = dacl_entries(path)
+            .into_iter()
+            .map(|entry| (entry.allow, entry.flags, entry.rights, entry.sid))
+            .collect();
+        assert_eq!(
+            entries,
+            [(
+                true,
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                FILE_ALL_ACCESS,
+                user.to_owned()
+            )]
+        );
+    }
 
     #[test]
     fn an_exclusive_create_refuses_a_folder_already_there() {

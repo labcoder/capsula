@@ -145,7 +145,7 @@ async fn an_exact_pending_replacement_can_establish_one_history_cutoff() {
     let (successor, tag) = pending.binding();
     assert!(matches!(owner.check(tag), Err(StoreError::RecoveryContext)));
     let pending = returned(vault.establish_history_cutoff(pending));
-    assert_eq!(history_version(&history), (11, 0));
+    assert_eq!(history_version(&history), (13, 1));
 
     let old = owner.run(plant_history);
     let pending = assert_sequences_cover_history(&vault, pending, &history);
@@ -298,7 +298,7 @@ async fn a_copy_taken_before_establish_cannot_remove_the_cutoff() {
     });
     assert!(matches!(swapped, Swap::Done));
     assert!(!owner.run(|store| store.purge_pending()));
-    assert_eq!(history_version(&history), (12, 1));
+    assert_eq!(history_version(&history), (13, 1));
     assert_eq!(owner.check(tag).unwrap(), cut);
     assert_eq!(vault.established_repair_context().unwrap().tag(), tag);
     assert_eq!(context_state(&path), (true, Some(9), Some(11)));
@@ -323,7 +323,7 @@ async fn a_replacement_token_is_spent_only_through_its_issuing_vault() {
         .unwrap();
     let (_, tag) = pending.binding();
     let pending = returned(other.establish_history_cutoff(pending));
-    assert_eq!(history_version(&other_history), (11, 0));
+    assert_eq!(history_version(&other_history), (13, 1));
     assert!(matches!(
         other_owner.check(tag),
         Err(StoreError::RecoveryContext)
@@ -332,7 +332,7 @@ async fn a_replacement_token_is_spent_only_through_its_issuing_vault() {
     assert_eq!(owner.check(tag).unwrap().bounds(), (9, 11));
     vault.establish_repair_context(receipt).unwrap();
     assert_eq!(vault.established_repair_context().unwrap().tag(), tag);
-    assert_eq!(history_version(&other_history), (11, 0));
+    assert_eq!(history_version(&other_history), (13, 1));
     drop(attempt);
     drop(other);
 }
@@ -348,17 +348,11 @@ async fn a_refused_history_commit_spends_the_binding() {
     Connection::open(&history)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE chatgpt_recovery_context (
-                tag BLOB PRIMARY KEY CHECK (length(tag) = 8),
-                last_thread INTEGER NOT NULL CHECK (last_thread > 0),
-                last_run INTEGER NOT NULL CHECK (last_run >= 0)
-            ) STRICT;
-            CREATE TABLE refuse_cutoff (
+            "CREATE TABLE refuse_cutoff (
                 thread INTEGER REFERENCES threads(id) DEFERRABLE INITIALLY DEFERRED
             );
             CREATE TRIGGER refuse_cutoff AFTER INSERT ON chatgpt_recovery_context
-            BEGIN INSERT INTO refuse_cutoff VALUES (999999); END;
-            PRAGMA user_version = 12;",
+            BEGIN INSERT INTO refuse_cutoff VALUES (999999); END;",
         )
         .unwrap();
     let pending = vault
@@ -484,7 +478,7 @@ async fn the_store_thread_writes_the_cutoff_and_its_purge_carries_it() {
             other => panic!("the purge didn't finish: {other:?}"),
         }
     }
-    assert_eq!(history_version(&history), (12, 1));
+    assert_eq!(history_version(&history), (13, 1));
     assert_eq!(vault.established_repair_context().unwrap().tag(), tag);
     assert_eq!(context_state(&path), (true, Some(9), Some(11)));
     raw(&path)
@@ -596,7 +590,7 @@ fn assert_sequences_cover_history(
     ] {
         assert_eq!(db.execute(edit, []).unwrap(), 1);
         pending = returned(vault.establish_history_cutoff(pending));
-        assert_eq!(history_version(history), (11, 0), "{edit}");
+        assert_eq!(history_version(history), (13, 1), "{edit}");
         assert_eq!(db.execute(restore, []).unwrap(), 1);
     }
     assert_eq!(
@@ -611,7 +605,7 @@ fn assert_sequences_cover_history(
     else {
         panic!("a NULL sequence refuses before the commit");
     };
-    assert_eq!(history_version(history), (11, 0));
+    assert_eq!(history_version(history), (13, 1));
     assert_eq!(
         db.execute("UPDATE sqlite_sequence SET seq=11 WHERE name='runs'", [])
             .unwrap(),
@@ -638,7 +632,7 @@ fn assert_retained_history_and_refuse_broken_cutoff(
     tag: u64,
     old: ThreadId,
 ) {
-    assert_eq!(history_version(history), (12, 1));
+    assert_eq!(history_version(history), (13, 1));
     assert_eq!(
         owner.run(|store| store.pages().search_ids("precutoffmarker").unwrap()),
         vec![old]
@@ -672,7 +666,7 @@ fn assert_retained_history_and_refuse_broken_cutoff(
     drop(db);
     drop(Store::open(history).unwrap());
     assert!(matches!(owner.check(tag), Err(StoreError::RecoveryContext)));
-    assert_eq!(history_version(history), (12, 1));
+    assert_eq!(history_version(history), (13, 1));
 }
 
 fn plant_history(writer: &mut Store) -> ThreadId {
