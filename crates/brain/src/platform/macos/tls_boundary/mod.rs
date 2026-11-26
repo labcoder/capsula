@@ -1,11 +1,13 @@
 use std::future::Future;
 use std::io;
+use std::pin::pin;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use tokio::runtime::{Handle, Id, Runtime};
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::{Semaphore, SemaphorePermit, oneshot};
 
 use crate::platform::tls_control::{ConnectCut, Control};
 
@@ -77,6 +79,42 @@ impl Attempt {
             })?
         })
     }
+
+    fn native_slot(&self) -> Result<SemaphorePermit<'_>, Refusal> {
+        self.check()?;
+        if let Ok(slot) = self.checks.try_acquire() {
+            return Ok(slot);
+        }
+        let mut wait = pin!(tokio::task::unconstrained(async {
+            tokio::select! {
+                biased;
+                () = self.request.until_cancelled() => Err(Refusal::Cancelled),
+                () = self.abandoned.until_closed() => Err(Refusal::Cancelled),
+                slot = self.checks.acquire() => slot.map_err(|_| Refusal::Unavailable),
+            }
+        }));
+        let waker = Waker::from(Arc::new(WakeWorker(thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        loop {
+            self.check()?;
+            if let Poll::Ready(slot) = wait.as_mut().poll(&mut cx) {
+                return slot;
+            }
+            thread::park_timeout(self.by.saturating_duration_since(Instant::now()));
+        }
+    }
+}
+
+struct WakeWorker(thread::Thread);
+
+impl Wake for WakeWorker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
 }
 
 tokio::task_local! {
@@ -90,7 +128,7 @@ fn evaluate<T>(verify: impl FnOnce(&Attempt) -> T) -> Result<T, Refusal> {
     if !Handle::try_current().is_ok_and(|worker| worker.id() == attempt.owner) {
         return Err(Refusal::Unavailable);
     }
-    let _slot = attempt.checks.try_acquire().map_err(|_| Refusal::Busy)?;
+    let _slot = attempt.native_slot()?;
     attempt.with(|| ()).map_err(|error| match error.kind() {
         io::ErrorKind::TimedOut => Refusal::Deadline,
         _ => Refusal::Cancelled,
@@ -199,9 +237,6 @@ impl Executor {
             checks: Arc::clone(&self.checks),
         });
         attempt.check()?;
-        if self.checks.available_permits() == 0 {
-            return Err(Refusal::Busy);
-        }
         let (sender, slot) = self
             .workers
             .iter()

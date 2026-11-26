@@ -321,9 +321,10 @@ brain and reactor do not poll SecTrust. The caller and workers enforce cancellat
 earliest enclosing request deadline, capped at ten seconds for connection setup. An admitted
 job keeps the reactor alive and holds its worker through an in-flight DNS lookup. A stopped
 owner can't admit a lookup or native check, but can't retract one already admitted. Only one
-SecTrust check can run at a time. Overlapping checks refuse without queuing, and a stuck check
-keeps that slot until it returns. A boundary timeout always refuses, even under soft-fail
-revocation. Mac reqwest clients disable
+SecTrust check can run at a time. A competing handshake can wait for the slot on its own
+worker until its original deadline or cancellation. An admitted check keeps the slot until
+it returns; a boundary timeout always refuses, even under soft-fail revocation. If all four
+workers are occupied, new connections refuse without queuing. Mac reqwest clients disable
 the idle pool and retries. Offline fixtures use synthetic certificates with in-memory or
 loopback transport and never change the user or system trust settings.
 

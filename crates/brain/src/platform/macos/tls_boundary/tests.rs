@@ -358,14 +358,49 @@ async fn a_stalled_check_times_out_but_keeps_the_only_native_slot() {
         Err(Refusal::Deadline)
     );
 
-    assert_eq!(
-        owner
-            .connect(Arc::new(Stop::default()), by(), async {
-                panic!("the next connection must not start or queue");
-            })
-            .await,
-        Err::<(), _>(Refusal::Busy)
-    );
+    for cancel in [true, false] {
+        let stop = Arc::new(Stop::default());
+        let (waiting, waiting_to_check) = oneshot::channel();
+        let (checked, refused) = oneshot::channel();
+        let by = if cancel {
+            by()
+        } else {
+            Instant::now() + Duration::from_millis(500)
+        };
+        let waiting = owner.connect(Arc::clone(&stop), by, async move {
+            waiting.send(()).expect("worker starts a second handshake");
+            let result =
+                evaluate(|_| panic!("the occupied native slot cannot admit another check"));
+            checked
+                .send(result)
+                .expect("report the waiting verifier's refusal");
+        });
+        let mut waiting = std::pin::pin!(waiting);
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        tokio::time::timeout(TEST_BOUND, waiting_to_check)
+            .await
+            .expect("worker starts the wait")
+            .expect("waiting");
+        let expected = if cancel {
+            stop.close();
+            Refusal::Cancelled
+        } else {
+            Refusal::Deadline
+        };
+        assert_eq!(
+            tokio::time::timeout(TEST_BOUND, refused)
+                .await
+                .expect("worker stops without its caller")
+                .expect("worker reports"),
+            Err::<(), _>(expected)
+        );
+        assert_eq!(waiting.await, Err(expected));
+    }
 
     release.send(()).expect("release the native call");
     tokio::time::timeout(TEST_BOUND, async {
@@ -381,6 +416,52 @@ async fn a_stalled_check_times_out_but_keeps_the_only_native_slot() {
             .await,
         Ok(Ok(7))
     );
+}
+
+#[tokio::test]
+async fn overlapping_native_checks_wait_and_both_finish_without_retry() {
+    let owner = Arc::new(Executor::new().expect("executor"));
+    let (entered, wait_entered) = oneshot::channel();
+    let (release, wait_release) = mpsc::channel();
+    let worker = Arc::clone(&owner);
+    let first = tokio::spawn(async move {
+        worker
+            .connect(Arc::new(Stop::default()), by(), async move {
+                evaluate(|_| {
+                    entered.send(()).expect("first entered native evaluation");
+                    wait_release
+                        .recv_timeout(TEST_BOUND)
+                        .expect("release the first check");
+                    1
+                })
+            })
+            .await
+    });
+    tokio::time::timeout(TEST_BOUND, wait_entered)
+        .await
+        .expect("first begins")
+        .expect("native slot is occupied");
+    let (waiting, wait_waiting) = oneshot::channel();
+    let mut second = tokio::spawn(async move {
+        owner
+            .connect(Arc::new(Stop::default()), by(), async {
+                waiting
+                    .send(())
+                    .expect("second handshake reached native admission");
+                evaluate(|_| 2)
+            })
+            .await
+    });
+    tokio::time::timeout(TEST_BOUND, wait_waiting)
+        .await
+        .expect("second begins")
+        .expect("both workers are active");
+    tokio::time::timeout(Duration::from_millis(50), &mut second)
+        .await
+        .expect_err("the second check waits while the first owns the slot");
+    release.send(()).expect("first still owns its slot");
+    assert_eq!(first.await.expect("first completes"), Ok(Ok(1)));
+    assert_eq!(second.await.expect("second completes"), Ok(Ok(2)));
 }
 
 #[tokio::test]
