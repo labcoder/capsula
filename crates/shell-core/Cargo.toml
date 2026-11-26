@@ -25,6 +25,7 @@ cpal = { version = "=0.18.2", default-features = false }
 kumochi-audio.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+kumochi-session = { path = "../session" }
 kumochi-storage = { path = "../storage" }
 libc = "=0.2.191"
 

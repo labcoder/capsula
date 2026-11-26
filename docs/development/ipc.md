@@ -409,6 +409,24 @@ these sets the pair cell, so the whole pair stays refused: a read out of order, 
 frame that isn't the greeting, a data greeting in the other mode, a missed deadline (checked
 again after ready I/O completes), or a greeting read that's dropped part way.
 
+The shell's side lives in `shell-core`'s `platform/macos/leg.rs` and `connect_pair`, also
+dormant: nothing calls them, and the group secret is a parameter for now. `initiate` runs the
+initiator's steps over the shell's two ends by one deadline and returns the legs only once
+`BindAck` verifies. Each leg is the link's `PipeClient` over the session crate's record owners.
+A timeout bounds each read or write call as a whole, however many socket transfers it takes, and
+the initiator and the wait for `Settings` end by their deadline even when the peer trickles
+bytes. A read that times out keeps its partial record and resumes it. A write takes exactly one
+frame and writes it whole, because a frame cut off part way can't be resumed. After a local
+abort or a refusal, reads fail and deliver nothing, not even a frame already looked at. A record that fails to
+authenticate, a stream that ends inside a record, or a write that stops part way refuses the
+whole pair and shuts down both legs, so a reader blocked on the other leg wakes. The stream
+ending between frames is an ordinary end. `connect_pair` starts the child, runs `initiate`,
+sends both greetings with the zero placeholder and the text metrics, accepts `ShellTuning` as
+the pipes do, and then reads the next control frame by the same deadline. That frame must be
+`Settings`, which the runtime sends first once it has committed, in both audio modes; anything
+else is `Rejected`. So the link reports Connected only on the first authenticated frame after
+commit. The frame stays buffered in the control leg, and the link reads it first and in order.
+
 ## Who may connect
 
 - The brain creates both pipes with a protected DACL that grants only the user who made them,
