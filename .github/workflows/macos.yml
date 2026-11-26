@@ -45,3 +45,6 @@ jobs:
       - name: Shell logging tests
         run: >-
           cargo test --locked --offline -p kumochi-shell --bin kumochi platform::logging::tests::
+      - name: Unix product-folder tests
+        run: >-
+          cargo test --locked --offline -p kumochi-brain --lib platform::unix::

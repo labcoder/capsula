@@ -41,6 +41,8 @@ mod settings;
 pub(crate) mod shell_process;
 pub(crate) mod speech_wire;
 mod trust_roots;
+#[cfg(unix)]
+mod unix;
 
 pub(crate) use model_files::ModelFiles;
 pub(crate) use shell_process::ShellProcess;
@@ -104,7 +106,9 @@ pub(crate) const DATA_ROOT_ERROR: &str = "macOS Application Support folder is un
 #[cfg(not(any(windows, target_os = "macos")))]
 pub use fs::{config_dir, data_dir};
 #[cfg(not(windows))]
-pub use fs::{free_space, links_unsupported, product_folder, replace_file};
+pub use fs::{free_space, links_unsupported, replace_file};
+#[cfg(unix)]
+pub use unix::product_folder;
 #[cfg(target_os = "macos")]
 #[path = "macos/folders.rs"]
 mod folders;

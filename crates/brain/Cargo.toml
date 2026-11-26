@@ -50,7 +50,7 @@ webbrowser = "1"
 xn = { version = "=0.2.13", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 rustls-native-certs = "0.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
