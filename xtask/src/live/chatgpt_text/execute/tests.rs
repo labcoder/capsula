@@ -274,6 +274,16 @@ fn a_new_connection_or_pending_work_is_refused_before_claim_or_spawn() {
     for (scope, sql, reason) in [
         (
             true,
+            "PRAGMA user_version = 4;",
+            "cannot verify the credential authority metadata",
+        ),
+        (
+            true,
+            "PRAGMA user_version = 3;",
+            "cannot verify the credential authority metadata",
+        ),
+        (
+            true,
             "INSERT INTO generations VALUES ('anthropic','active');",
             "connection kinds or pending authority work are not approved",
         ),

@@ -502,3 +502,174 @@ fn every_begin_requires_fresh_brain_minted_names() {
     assert_ne!(first.generation, second.generation);
     assert_ne!(second.generation.hex(), "00000000000000000000000000000000");
 }
+
+fn open_split(
+    private: &FakeStore,
+    staging: &FakeStore,
+    service: &str,
+    path: &Path,
+) -> Vault<FakeStore> {
+    Vault::with_stores(private.clone(), Some(staging.clone()), service, path)
+        .expect("split test vault")
+}
+
+/// The staged chunks land in the staging store; the same names in the private store are decoys a
+/// wrong route would read or delete.
+#[test]
+fn a_paste_is_read_and_cleaned_only_in_the_staging_store() {
+    let (_scratch, path, service, private) = setup("paste-split-adopt");
+    let staging = FakeStore::default();
+    let mut vault = open_split(&private, &staging, &service, &path);
+    vault.save_anthropic_key(OLD.as_bytes()).expect("old key");
+    let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
+    plant(&staging, &service, &plan, NEW.as_bytes());
+    let decoys = plant(&private, &service, &plan, OLD.as_bytes());
+    let (_, key) = vault
+        .adopt_anthropic_paste(plan.generation)
+        .expect("adopted");
+    assert_eq!(key.expose().as_str(), NEW);
+    assert!(
+        staging.names().is_empty(),
+        "the staged chunks were deleted there, and the saved key went elsewhere"
+    );
+    let names = private.names();
+    assert!(decoys.iter().all(|name| names.contains(name)));
+    drop(vault);
+    let mut vault = open_split(&private, &staging, &service, &path);
+    assert_eq!(loaded(&mut vault).as_deref(), Some(NEW));
+}
+
+#[test]
+fn a_rejected_paste_is_deleted_only_in_the_staging_store() {
+    let (_scratch, path, service, private) = setup("paste-split-reject");
+    let staging = FakeStore::default();
+    let mut vault = open_split(&private, &staging, &service, &path);
+    vault.save_anthropic_key(OLD.as_bytes()).expect("old key");
+    let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
+    plant(&staging, &service, &plan, &[0; NEW.len()]);
+    let decoys = plant(&private, &service, &plan, NEW.as_bytes());
+    assert!(matches!(
+        vault.adopt_anthropic_paste(plan.generation),
+        Err(PasteError::Key(KeyError::Rejected(_)))
+    ));
+    assert!(staging.names().is_empty());
+    let names = private.names();
+    assert!(decoys.iter().all(|name| names.contains(name)));
+    assert_eq!(loaded(&mut vault).as_deref(), Some(OLD));
+}
+
+#[test]
+fn superseded_removed_and_interrupted_pastes_are_cleaned_in_the_staging_store() {
+    let (_scratch, path, service, private) = setup("paste-split-cleanup");
+    let staging = FakeStore::default();
+    let mut vault = open_split(&private, &staging, &service, &path);
+    vault.save_anthropic_key(OLD.as_bytes()).expect("old key");
+    let mut decoys = Vec::new();
+    let mut stage = |vault: &mut Vault<FakeStore>| {
+        let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
+        plant(&staging, &service, &plan, NEW.as_bytes());
+        decoys.extend(plant(&private, &service, &plan, NEW.as_bytes()));
+    };
+    stage(&mut vault);
+    stage(&mut vault);
+    assert_eq!(
+        staging.names().len(),
+        1,
+        "the superseding begin swept the first paste"
+    );
+    let revision = vault.anthropic_revision();
+    vault.anthropic(KeyOp::Remove(revision)).1.expect("removed");
+    assert!(staging.names().is_empty(), "Remove deleted its paste");
+    stage(&mut vault);
+    drop(vault);
+    let mut vault = open_split(&private, &staging, &service, &path);
+    assert!(
+        staging.names().is_empty(),
+        "the next open swept the interrupted paste"
+    );
+    decoys.sort();
+    assert_eq!(
+        private.names(),
+        decoys,
+        "the private store holds only the decoys: the old key was swept there"
+    );
+    assert_eq!(loaded(&mut vault), None);
+    let states: Vec<String> = raw(&path)
+        .prepare("SELECT state FROM generations ORDER BY rowid")
+        .expect("states")
+        .query_map([], |row| row.get(0))
+        .expect("states")
+        .collect::<Result<_, _>>()
+        .expect("states");
+    assert_eq!(
+        states,
+        ["swept", "swept", "swept", "removed"],
+        "each sweep read back the store it deleted from, so the old key and the two earlier pastes are Swept"
+    );
+}
+
+#[test]
+fn a_refused_staging_read_never_falls_back_to_the_private_store() {
+    let (_scratch, path, service, private) = setup("paste-split-denied");
+    let staging = FakeStore::default();
+    let mut vault = open_split(&private, &staging, &service, &path);
+    vault.save_anthropic_key(OLD.as_bytes()).expect("old key");
+    let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
+    let staged = plant(&staging, &service, &plan, NEW.as_bytes());
+    plant(&private, &service, &plan, NEW.as_bytes());
+    staging.0.lock().expect("fake").denied_read = Some(staged[0].clone());
+    assert!(matches!(
+        vault.adopt_anthropic_paste(plan.generation),
+        Err(PasteError::Key(KeyError::Vault(VaultError::Store(
+            CredentialStoreError::Read(5)
+        ))))
+    ));
+    assert_eq!(loaded(&mut vault).as_deref(), Some(OLD));
+}
+
+#[test]
+fn failed_candidate_writes_and_refused_removes_delete_only_staged_names() {
+    let (_scratch, path, service, private) = setup("paste-split-failures");
+    let staging = FakeStore::default();
+    let mut vault = open_split(&private, &staging, &service, &path);
+    vault.save_anthropic_key(OLD.as_bytes()).expect("old key");
+    let long = format!("{NEW}{}", "x".repeat(2048 - NEW.len()));
+    let plan = vault.begin_anthropic_paste(long.len()).expect("plan");
+    plant(&staging, &service, &plan, long.as_bytes());
+    plant(&private, &service, &plan, OLD.as_bytes());
+    let before = private.names();
+    private.arm(1, Fault::Refuse);
+    assert!(matches!(
+        vault.adopt_anthropic_paste(plan.generation),
+        Err(PasteError::Key(KeyError::Vault(VaultError::Store(
+            CredentialStoreError::Write(5)
+        ))))
+    ));
+    assert!(
+        staging.names().is_empty(),
+        "the failed adoption deleted the paste"
+    );
+    assert_eq!(
+        private.names(),
+        before,
+        "only the saved key and the decoy remain"
+    );
+    assert_eq!(loaded(&mut vault).as_deref(), Some(OLD));
+
+    let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
+    plant(&staging, &service, &plan, NEW.as_bytes());
+    plant(&private, &service, &plan, OLD.as_bytes());
+    let before = private.names();
+    refuse_commits(&path);
+    assert!(matches!(
+        vault.anthropic(KeyOp::Remove(vault.anthropic_revision())).1,
+        Err(KeyError::Vault(VaultError::Authority))
+    ));
+    allow_commits(&path);
+    assert!(
+        staging.names().is_empty(),
+        "the refused Remove deleted its paste directly"
+    );
+    assert_eq!(private.names(), before);
+    assert_eq!(loaded(&mut vault).as_deref(), Some(OLD));
+}

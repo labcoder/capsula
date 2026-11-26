@@ -57,7 +57,7 @@ pub(super) fn clean_metadata() -> (rusqlite::Connection, rusqlite::Connection) {
     )
     .expect("clean history");
     let authority = rusqlite::Connection::open_in_memory().expect("fixture authority");
-    authority.execute_batch(r#"PRAGMA user_version = 3;
+    authority.execute_batch(r#"PRAGMA user_version = 5;
         CREATE TABLE generations (kind TEXT, state TEXT);
         INSERT INTO generations VALUES ('host','active'),('chatgpt','active');
         CREATE TABLE control (id, marker);

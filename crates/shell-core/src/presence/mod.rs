@@ -2,6 +2,7 @@
 //! pacing, the dock line's machine, the perch rules, the pull, the layout and the thread selection.
 
 pub mod carry;
+pub mod desktop;
 pub mod drag;
 #[expect(
     clippy::as_conversions,

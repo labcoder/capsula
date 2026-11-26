@@ -12,6 +12,18 @@
     reason = "Darwin process calls are isolated to this platform adapter"
 )]
 mod child;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the link doesn't connect over the pair until I1e-5"
+    )
+)]
+#[expect(
+    unsafe_code,
+    reason = "Darwin resource-limit calls are isolated to this platform adapter"
+)]
+mod core_dumps;
 mod instance;
 mod leg;
 #[cfg_attr(
@@ -26,6 +38,7 @@ mod pair;
 mod wipes;
 
 pub(crate) use child::{NotStarted, start_brain};
+pub(crate) use core_dumps::limit_core_dumps;
 pub(crate) use instance::{read_instance, try_acquire_instance_lock};
 pub use kumochi_storage::application_support_dir as support_dir;
 pub(crate) use leg::{PipeClient, Secret, initiate, read_ready};
