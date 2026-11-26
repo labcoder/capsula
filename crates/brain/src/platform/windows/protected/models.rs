@@ -15,8 +15,8 @@ use windows_sys::Win32::System::WindowsProgramming::{
 };
 
 use super::{
-    Kind, Trusted, Untrusted, check, check_marker, delete_on_close, hold_chain, hold_file, open,
-    owner_only_dir,
+    Kind, Trusted, Untrusted, check, check_marker, hold_chain, hold_file, open, owner_only_dir,
+    unlink_on_close,
 };
 
 pub(crate) fn validate_model_path(path: &Path) -> Result<(), Untrusted> {
@@ -131,7 +131,7 @@ fn checked_write(file: File, path: &Path) -> Result<File, Untrusted> {
 }
 
 pub(crate) fn discard_model(file: File) -> Result<(), Untrusted> {
-    delete_on_close(&file)?;
+    unlink_on_close(&file)?;
     drop(file);
     Ok(())
 }
@@ -144,7 +144,7 @@ pub(crate) fn remove_model_tree(path: &Path) -> Result<(), Untrusted> {
         Err(error) => return Err(error),
     }
     for entry in held {
-        delete_on_close(&entry)?;
+        unlink_on_close(&entry)?;
         drop(entry);
     }
     Ok(())
@@ -237,7 +237,7 @@ mod tests {
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_WRITE};
 
     #[test]
-    fn a_model_tree_is_deleted_while_another_process_reads_a_file() {
+    fn a_model_tree_is_deleted_while_another_handle_reads_a_file() {
         let scratch = Scratch::trusted("model-delete-held");
         let part = scratch.dir().join("part");
         std::fs::create_dir_all(&part).unwrap();
