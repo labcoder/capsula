@@ -1198,6 +1198,21 @@ async fn a_page_read_after_the_sent_marker_waits_for_the_mark_and_shows_the_acti
         text: "text".into(),
         screen: Some(HeldScreen::Attached),
     }));
+    let lease = crate::coordinator::LeaseId {
+        key: crate::coordinator::SendKey::Build(crate::coordinator::BuildKey {
+            run: RunId(1),
+            round: 1,
+            attempt: 1,
+        }),
+        send: 1,
+    };
+    assert!(
+        brain
+            .store
+            .as_ref()
+            .unwrap()
+            .send(StoreOp::GrantScreen { lease })
+    );
     let release = brain.hold_store(|op| matches!(op, StoreOp::SentScreen { .. }));
     assert!(
         brain

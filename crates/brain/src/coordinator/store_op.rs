@@ -126,6 +126,7 @@ fn unspoken_chat_debug_redacts_text_and_bytes() {
         "{:?}",
         [
             super::Effect::Store(StoreOp::EndRun {
+                screen: None,
                 thread: ThreadId(1),
                 run: key.run,
                 text: Some(reply),
@@ -231,6 +232,8 @@ pub enum StoreOp {
         clear: Option<SceneId>,
         /// How it ended.
         end: RunEnd,
+        /// The known-unsent screen correction, committed with the outcome.
+        screen: Option<crate::store::UnsentScreen>,
     },
     /// The scenes that left the visible set, in one transaction.
     ClearScenes {
@@ -293,19 +296,27 @@ pub enum StoreOp {
         /// The point.
         heard: crate::voice::reply::Heard,
     },
-    /// The user withdrew a run's image before any request carried it, so its turn's pending
-    /// picture becomes `withdrawn`. Nothing answers it: a failed write leaves it pending, which
-    /// recovery marks sent, an over-report.
+    /// Commit a picture's write-ahead class, answered by `ScreenGrantStored`.
+    GrantScreen {
+        /// The waiting build's authorization, not a transport lease yet.
+        lease: super::LeaseId,
+    },
+    /// A grant proved unsent and the same held picture may try again.
+    RestoreScreen {
+        /// The run.
+        run: RunId,
+    },
+    /// The user withdrew a picture before any request could write it.
     WithdrawScreen {
         /// The run.
         run: RunId,
     },
-    /// A run ended before any request carried its image, so its turn's pending picture becomes
-    /// none. Nothing answers it: a failed write leaves it pending, which recovery marks sent, an
-    /// over-report.
-    ForgetScreen {
+    /// A lease proved its picture unsent; the writer retains the correction until it commits.
+    RepairScreen {
         /// The run.
         run: RunId,
+        /// What replaces the unsent authorization.
+        correction: crate::store::UnsentScreen,
     },
     /// A run's image couldn't go to its model before any request carried it, so its turn's
     /// pending picture becomes `model_cant_see`. Nothing answers it.
@@ -313,9 +324,8 @@ pub enum StoreOp {
         /// The run.
         run: RunId,
     },
-    /// A send carrying a run's image may have written some of it, so its turn's pending picture
-    /// becomes `attached` or `screen`. Nothing answers it: a failed write leaves it pending,
-    /// which recovery marks sent.
+    /// A send carrying a run's image may have written some of it, so its authorization becomes
+    /// `attached` or `screen`. A failed write leaves the authorization for recovery.
     SentScreen {
         /// The run.
         run: RunId,
@@ -390,8 +400,10 @@ impl StoreOp {
             | Self::StoreSummary { .. }
             | Self::SetModel { .. }
             | Self::Heard { .. }
+            | Self::GrantScreen { .. }
+            | Self::RestoreScreen { .. }
             | Self::WithdrawScreen { .. }
-            | Self::ForgetScreen { .. }
+            | Self::RepairScreen { .. }
             | Self::CantSeeScreen { .. }
             | Self::SentScreen { .. }
             | Self::Cutoff(_) => None,
@@ -476,9 +488,14 @@ impl StoreOp {
                 choice: choice.clone(),
                 applied: false,
             },
+            Self::GrantScreen { lease } => Input::ScreenGrantStored {
+                lease: *lease,
+                result: Err(super::ScreenGrantRefusal::Store),
+            },
             Self::Heard { .. }
+            | Self::RestoreScreen { .. }
             | Self::WithdrawScreen { .. }
-            | Self::ForgetScreen { .. }
+            | Self::RepairScreen { .. }
             | Self::CantSeeScreen { .. }
             | Self::SentScreen { .. }
             | Self::Cutoff(_) => {

@@ -1644,13 +1644,13 @@ fn a_speaking_hold_releases_only_after_its_own_inhibit_retires(cx: &mut TestAppC
                     .state
                     .pending
                     .as_ref()
-                    .is_some_and(|hold| matches!(hold.source, Source::Joined(1)))
+                    .is_some_and(|hold| matches!(hold.source(), Source::Joined(1)))
             })
     });
     owner.read_with(cx, |owner, _| {
         let hold = owner.voice.state.pending.as_ref().unwrap();
         assert!(
-            hold.unretired && matches!(hold.source, Source::Joined(1)),
+            hold.unretired() && matches!(hold.source(), Source::Joined(1)),
             "a retired microphone alone doesn't release a speaking hold"
         );
     });
@@ -1664,7 +1664,7 @@ fn a_speaking_hold_releases_only_after_its_own_inhibit_retires(cx: &mut TestAppC
                 .state
                 .pending
                 .as_ref()
-                .is_some_and(|hold| matches!(hold.source, Source::Sent))
+                .is_some_and(|hold| matches!(hold.source(), Source::Sent))
         })
     });
     let held = spoken_run(
@@ -1732,12 +1732,12 @@ fn running_and_true_receipt_rendezvous_with_release_in_either_ui_order(cx: &mut 
                         .state
                         .pending
                         .as_ref()
-                        .is_some_and(|h| matches!(h.source, Source::Joined(1)))
+                        .is_some_and(|h| matches!(h.source(), Source::Joined(1)))
                 })
             });
             owner.read_with(cx, |owner, _| {
                 assert!(matches!(
-                    owner.voice.state.pending.as_ref().unwrap().source,
+                    owner.voice.state.pending.as_ref().unwrap().source(),
                     Source::Joined(1)
                 ));
             });
@@ -1765,7 +1765,7 @@ fn running_and_true_receipt_rendezvous_with_release_in_either_ui_order(cx: &mut 
                         .state
                         .pending
                         .as_ref()
-                        .is_some_and(|h| matches!(h.source, Source::Sent))
+                        .is_some_and(|h| matches!(h.source(), Source::Sent))
                 })
             });
         }
@@ -1798,7 +1798,7 @@ fn running_and_true_receipt_rendezvous_with_release_in_either_ui_order(cx: &mut 
         assert!(token.retired());
         owner.read_with(cx, |owner, _| {
             assert!(matches!(
-                owner.voice.state.pending.as_ref().unwrap().source,
+                owner.voice.state.pending.as_ref().unwrap().source(),
                 Source::Sent
             ));
         });
@@ -1974,7 +1974,7 @@ fn first_terminal_is_preserved_and_unconfirmed_cleanup_cannot_release_debt(
     status(&owner, 1, 1, HoldStatus::Admitted, cx);
     owner.read_with(cx, |owner, _| {
         assert_eq!(owner.voice.state.status, Some(Text::HoldUnavailable));
-        assert_eq!(owner.voice.state.pending.as_ref().unwrap().released, None);
+        assert_eq!(owner.voice.state.pending.as_ref().unwrap().released(), None);
         assert!(owner.voice.watched.is_none());
     });
     assert!(controls.is_empty());
@@ -2023,7 +2023,7 @@ fn a_stalled_open_or_stop_warns_without_releasing_its_generation(cx: &mut TestAp
         owner.read_with(cx, |owner, cx| {
             assert_eq!(owner.voice.state.status, Some(Text::HoldUnavailable));
             assert!(matches!(
-                owner.voice.state.pending.as_ref().unwrap().source,
+                owner.voice.state.pending.as_ref().unwrap().source(),
                 Source::Recording
             ));
             assert!(!owner.dock.read(cx).listening);
@@ -2116,7 +2116,7 @@ fn release(
                 .state
                 .pending
                 .as_ref()
-                .is_some_and(|h| matches!(h.source, Source::Sent))
+                .is_some_and(|h| matches!(h.source(), Source::Sent))
         })
     });
 }
@@ -2426,7 +2426,7 @@ fn the_native_callback_reads_the_pointer_at_recognition_and_when_the_keys_come_u
             .pending
             .as_mut()
             .expect("a hold")
-            .collected = true;
+            .set_collected(true);
         owner.voice.state.status = Some(Text::HoldListening);
     });
     // The line starts where the callback read the pointer at recognition, and a frame reads
@@ -3039,8 +3039,8 @@ fn a_fenced_first_state_ends_transcribing_and_releases_escape(cx: &mut TestAppCo
     owner.update(cx, |owner, _| {
         owner.runs.apply_scenes(&[]).unwrap();
         let hold = owner.voice.state.pending.as_mut().unwrap();
-        hold.source = Source::Joined(1);
-        hold.released = Some(1);
+        hold.set_source(Source::Joined(1));
+        hold.set_released(1);
         owner.finish_voice();
     });
     status(&owner, 1, 1, HoldStatus::Transcribing, cx);
@@ -3157,7 +3157,13 @@ fn a_hold_gives_global_esc_back_once_its_run_answers(cx: &mut TestAppContext) {
     hold(&owner, 1, cx);
     assert!(esc_held(&owner, cx), "the hold takes Esc");
     owner.update(cx, |owner, _| {
-        owner.voice.state.pending.as_mut().expect("the hold").source = Source::Sent;
+        owner
+            .voice
+            .state
+            .pending
+            .as_mut()
+            .expect("the hold")
+            .set_source(Source::Sent);
     });
     let origin = Some(RunOrigin::Hold {
         gesture: GestureId(1),

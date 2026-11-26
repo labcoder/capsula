@@ -523,14 +523,7 @@ impl Presence {
                 }
                 After::Start(reserved) => self.open_microphone(reserved, cx),
                 After::Retired(gesture) => {
-                    if let Some(hold) = self
-                        .voice
-                        .state
-                        .pending
-                        .as_mut()
-                        .filter(|hold| hold.token().gesture() == gesture)
-                    {
-                        hold.unretired = false;
+                    if self.voice.state.retired(gesture) {
                         self.finish_voice();
                     }
                 }
@@ -658,7 +651,7 @@ impl Presence {
         }
         let Some(hold) = self.voice.state.pending.as_ref().filter(|hold| {
             hold.token().gesture() == gate.gesture
-                && matches!(hold.source, Source::Waiting)
+                && matches!(hold.source(), Source::Waiting)
                 && hold.terminal().is_none()
         }) else {
             return Ok(());

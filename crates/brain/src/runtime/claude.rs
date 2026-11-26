@@ -712,16 +712,19 @@ impl Claude {
         if kind != Some(ConnectionKind::ClaudeCode) {
             return;
         }
-        match (key, self.asked) {
-            (SendKey::Build(build), Some((asked, generation, _)))
-                if asked == build && generation == self.generation =>
-            {
-                self.pictures
-                    .retain(|kept| kept.is_open() && kept.is_shared());
-                self.pictures.push(grant);
-            }
-            _ => grant.close(),
+        if self.picture_launch_current(key) {
+            self.pictures
+                .retain(|kept| kept.is_open() && kept.is_shared());
+            self.pictures.push(grant);
+        } else {
+            grant.close();
         }
+    }
+
+    pub(super) fn picture_launch_current(&self, key: SendKey) -> bool {
+        matches!((key, self.asked),
+            (SendKey::Build(build), Some((asked, generation, _)))
+                if asked == build && generation == self.generation)
     }
 
     /// Whether the generation moved since the last call.

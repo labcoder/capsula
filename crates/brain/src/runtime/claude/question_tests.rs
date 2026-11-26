@@ -3424,7 +3424,7 @@ async fn the_brains_grant_keeps_only_the_asked_claude_code_picture_and_never_a_k
         let question = ask.then(|| brain.claude.question(&request).expect("admitted"));
         let granted = brain
             .coordinator
-            .handle(Input::SendReady {
+            .handle_with_screen_grant(Input::SendReady {
                 key: request.key,
                 hold: None,
             })
