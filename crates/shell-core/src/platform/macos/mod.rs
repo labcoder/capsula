@@ -84,17 +84,10 @@ mod tests {
     }
 
     #[test]
-    fn a_debug_build_speaks_the_dev_channel() {
-        assert_eq!(
-            super::channel().map_err(|error| error.kind()),
-            Ok(kumochi_session::Channel::Dev)
-        );
-    }
-
-    #[test]
     fn each_identity_has_its_own_channel_and_gate_has_none() {
         use kumochi_protocol::constants::ProductIdentity;
         use kumochi_session::Channel;
+        let mut active = 0;
         for (identity, channel) in [
             (ProductIdentity::RELEASE, Ok(Channel::Release)),
             (ProductIdentity::DEV, Ok(Channel::Dev)),
@@ -105,7 +98,16 @@ mod tests {
                 channel,
                 "{identity:?}"
             );
+            if identity == ProductIdentity::ACTIVE {
+                active += 1;
+                assert_eq!(
+                    super::channel().map_err(|error| error.kind()),
+                    channel,
+                    "the build's own"
+                );
+            }
         }
+        assert_eq!(active, 1, "the build's identity is one of the three");
     }
 
     #[test]
