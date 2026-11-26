@@ -231,7 +231,7 @@ pub(crate) use tls_control::{
 };
 #[cfg(test)]
 pub(crate) use trust_roots::client_tls_from_roots;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub use trust_roots::trust_roots;
 pub use trust_roots::{NativeStream, TrustRoots, TrustRootsError};
 pub(crate) use trust_roots::{
