@@ -630,13 +630,16 @@ async fn the_runtime_seam_writes_one_whole_frame_per_call_and_a_dropped_one_refu
     let mut writer = RecordWriter::new(to_shell, brain.data.sealer, Pipe::Data, pair);
     let long = frame(2 * MAX_PLAINTEXT + 100);
     let mut got = vec![0; long.len()];
-    let (written, read) = tokio::join!(
-        FrameWrite::write_frame(&mut writer, &long),
-        timeout(Duration::from_secs(5), at_shell.read_exact(&mut got)),
-    );
+    let (written, read) = timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            FrameWrite::write_frame(&mut writer, &long),
+            at_shell.read_exact(&mut got),
+        )
+    })
+    .await
+    .expect("written and read in time");
     written.expect("one frame");
-    read.expect("in time")
-        .expect("the shell opens the whole frame");
+    read.expect("the shell opens the whole frame");
     assert_eq!(got, long);
     assert!(!*refused.borrow());
 

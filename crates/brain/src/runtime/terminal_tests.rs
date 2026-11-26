@@ -806,10 +806,11 @@ async fn a_writer_refusal_skips_grace_even_though_the_reader_is_still_open() {
 }
 
 /// A writer whose first frame never finishes and, as a transport whose frames can't resume does,
-/// refuses its pair when that frame is dropped part way.
+/// refuses its pair when that frame is dropped part way. It counts each poll of that frame.
 struct Held<'a> {
     pair: watch::Sender<bool>,
     started: &'a Notify,
+    polls: &'a Cell<usize>,
 }
 
 struct Cut(watch::Sender<bool>);
@@ -824,8 +825,22 @@ impl FrameWrite for Held<'_> {
     async fn write_frame(&mut self, _: &[u8]) -> io::Result<()> {
         let _cut = Cut(self.pair.clone());
         self.started.notify_one();
-        pending().await
+        poll_fn(|_| {
+            self.polls.set(self.polls.get() + 1);
+            Poll::Pending
+        })
+        .await
     }
+}
+
+fn page_request() -> Vec<u8> {
+    data(&DataToBrain::PageRequest {
+        request: 1,
+        page: PageOf::Threads {
+            search: None,
+            after: None,
+        },
+    })
 }
 
 #[tokio::test]
@@ -838,13 +853,14 @@ async fn an_ordinary_loss_keeps_a_frame_written_part_way_until_it_is_settled() {
         let (data_pipe, shell_data) = tokio::io::duplex(8192);
         let (pair, _parent, terminal) = cells();
         let refused = pair.subscribe();
-        let started = Notify::new();
+        let (started, polls) = (Notify::new(), Cell::new(0));
         let (control_in, _control_out) = tokio::io::split(control_pipe);
         let held = Held {
             pair,
             started: &started,
+            polls: &polls,
         };
-        {
+        let ended = timeout(LIMIT, async {
             let mut serve = pin!(brain.serve_split(
                 (control_in, held),
                 tokio::io::split(data_pipe),
@@ -860,8 +876,11 @@ async fn an_ordinary_loss_keeps_a_frame_written_part_way_until_it_is_settled() {
             }
             assert!(!*refused.borrow());
             drop((shell_control, shell_data));
-            assert_eq!(timeout(LIMIT, serve).await.unwrap(), Ended::Lost);
-        }
+            serve.await
+        })
+        .await
+        .expect("the loss ends the connection");
+        assert_eq!(ended, Ended::Lost);
         assert!(
             *refused.borrow(),
             "the pending frame is cut once serve ends"
@@ -871,7 +890,134 @@ async fn an_ordinary_loss_keeps_a_frame_written_part_way_until_it_is_settled() {
 }
 
 #[tokio::test]
-async fn a_pipe_writes_each_frame_whole_and_flushed_in_one_call() {
+async fn a_data_frame_parked_through_grace_is_never_polled_again_and_quit_is_accepted() {
+    for audio in AUDIO {
+        let scratch = Scratch::new("loss-mid-data-frame");
+        let mut brain = test_support::brain(&scratch, "");
+        let mut seen = brain.observe();
+        let mut tap = Tap::from_env();
+        let (control_pipe, mut shell_control) = tokio::io::duplex(8192);
+        let (data_pipe, mut shell_data) = tokio::io::duplex(8192);
+        let (pair, _parent, terminal) = cells();
+        let refused = pair.subscribe();
+        let (started, polls) = (Notify::new(), Cell::new(0));
+        let (data_in, _data_out) = tokio::io::split(data_pipe);
+        let held = Held {
+            pair,
+            started: &started,
+            polls: &polls,
+        };
+        shell_data.write_all(&page_request()).await.unwrap();
+        let ended = timeout(LIMIT, async {
+            let mut serve = pin!(brain.serve_split(
+                tokio::io::split(control_pipe),
+                (data_in, held),
+                &mut tap,
+                audio,
+                None,
+                PairStart::Ordinary,
+                Some(terminal),
+            ));
+            tokio::select! {
+                ended = &mut serve => panic!("ended before a data frame was pending: {ended:?}"),
+                () = started.notified() => {}
+            }
+            drop(shell_data);
+            let parked = loop {
+                tokio::select! {
+                    ended = &mut serve => panic!("ended without control grace: {ended:?}"),
+                    event = seen.recv() => if event == Some(Seen::Grace) {
+                        break polls.get();
+                    },
+                }
+            };
+            assert!(
+                !*refused.borrow(),
+                "the parked frame isn't cut during grace"
+            );
+            shell_control
+                .write_all(&control(&ControlToBrain::Quitting))
+                .await
+                .unwrap();
+            let ended = serve.await;
+            assert_eq!(
+                polls.get(),
+                parked,
+                "the frame is never polled after the select"
+            );
+            ended
+        })
+        .await
+        .expect("the quit ends the connection");
+        assert!(matches!(ended, Ended::Quit { .. }), "{ended:?}");
+        assert!(*refused.borrow(), "the parked frame is cut once serve ends");
+        drop(shell_control);
+        brain.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_page_abandons_its_started_data_frame_as_refused_without_grace() {
+    for audio in AUDIO {
+        let scratch = Scratch::new("page-cut-mid-frame");
+        let mut brain = test_support::brain(&scratch, "");
+        let mut seen = brain.observe();
+        let mut tap = Tap::from_env();
+        let (control_pipe, _shell_control) = tokio::io::duplex(8192);
+        let (data_pipe, mut shell_data) = tokio::io::duplex(8192);
+        let (pair, _parent, terminal) = cells();
+        let refused = pair.subscribe();
+        let (started, polls) = (Notify::new(), Cell::new(0));
+        let (data_in, _data_out) = tokio::io::split(data_pipe);
+        let held = Held {
+            pair,
+            started: &started,
+            polls: &polls,
+        };
+        shell_data.write_all(&page_request()).await.unwrap();
+        let ended = timeout(LIMIT, async {
+            let mut serve = pin!(brain.serve_split(
+                tokio::io::split(control_pipe),
+                (data_in, held),
+                &mut tap,
+                audio,
+                None,
+                PairStart::Ordinary,
+                Some(terminal),
+            ));
+            let key = loop {
+                tokio::select! {
+                    ended = &mut serve => panic!("ended before the page was read: {ended:?}"),
+                    event = seen.recv() => {
+                        if let Some(Seen::StoreOpStarted(StoreOp::ReadPage { key, .. })) = event {
+                            break key;
+                        }
+                    }
+                }
+            };
+            tokio::select! {
+                ended = &mut serve => panic!("ended before a data frame was pending: {ended:?}"),
+                () = started.notified() => {}
+            }
+            assert!(!*refused.borrow());
+            key.control.cancel();
+            serve.await
+        })
+        .await
+        .expect("the cancelled page ends the connection");
+        assert_eq!(ended, Ended::Fatal(Fatal::Refused));
+        assert!(*refused.borrow());
+        assert!(
+            std::iter::from_fn(|| seen.try_recv().ok()).all(|event| event != Seen::Grace),
+            "a frame the brain cut doesn't open control grace",
+        );
+        drop(shell_data);
+        brain.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_pipe_writes_each_frame_whole_in_one_call() {
     let frame = control(&ControlToBrain::Stop {
         run: RunId(1),
         revealed: vec![7; 300],
@@ -879,26 +1025,19 @@ async fn a_pipe_writes_each_frame_whole_and_flushed_in_one_call() {
     let (pipe, mut shell) = tokio::io::duplex(64);
     let (pipe_in, mut pipe_out) = tokio::io::split(pipe);
     let mut sent = Vec::new();
-    let ((), read) = tokio::join!(
-        async {
-            FrameWrite::write_frame(&mut pipe_out, &frame)
-                .await
-                .unwrap();
-            drop((pipe_in, pipe_out));
-        },
-        shell.read_to_end(&mut sent),
-    );
+    let ((), read) = timeout(LIMIT, async {
+        tokio::join!(
+            async {
+                FrameWrite::write_frame(&mut pipe_out, &frame)
+                    .await
+                    .unwrap();
+                drop((pipe_in, pipe_out));
+            },
+            shell.read_to_end(&mut sent),
+        )
+    })
+    .await
+    .expect("the frame is written and read in time");
     read.unwrap();
     assert_eq!(sent, frame, "the whole frame, from one call");
-
-    let (pipe, mut shell) = tokio::io::duplex(64);
-    let mut buffered = tokio::io::BufWriter::new(pipe);
-    let mut sent = vec![0; frame.len()];
-    let (written, read) = tokio::join!(
-        FrameWrite::write_frame(&mut buffered, &frame),
-        timeout(LIMIT, shell.read_exact(&mut sent)),
-    );
-    written.unwrap();
-    read.expect("flushed by the call").unwrap();
-    assert_eq!(sent, frame);
 }
