@@ -193,6 +193,7 @@ fn attempt(
             let owner = owned(child, word).map_err(NotStarted::Refused)?;
             Ok((owner, brain(child, then)))
         },
+        || Ok(()),
         read_item,
         Channel::Dev,
         AudioSession::Legacy,
@@ -403,6 +404,7 @@ fn a_quit_during_a_failed_spawn_tells_a_pending_spawn_from_none() {
                         NotStarted::Refused(Refusal::Quitting)
                     })
                 },
+                || Ok(()),
                 honest,
                 Channel::Dev,
                 AudioSession::Legacy,
@@ -477,6 +479,7 @@ fn a_quit_parked_before_the_queued_writers_start_is_clean_on_its_own_receipt() {
                 let owner = owned(&brain_child, word).map_err(NotStarted::Refused)?;
                 Ok((owner, parked_brain(&brain_child, gate)))
             },
+            || Ok(()),
             honest,
             Channel::Dev,
             AudioSession::QueuedRequired,

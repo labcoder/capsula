@@ -5,13 +5,6 @@
     reason = "Darwin process calls are isolated to this platform adapter"
 )]
 mod child;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the link doesn't connect over the pair until I1e-5"
-    )
-)]
 #[expect(
     unsafe_code,
     reason = "Darwin resource-limit calls are isolated to this platform adapter"
