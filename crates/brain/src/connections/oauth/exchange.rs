@@ -2,8 +2,6 @@
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-pub(crate) use tests::{Scripted, authorization, tokens};
 
 use kumochi_protocol::Secret;
 use serde::Deserialize;

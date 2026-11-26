@@ -25,10 +25,6 @@ use crate::platform::credential::native_session_lock_path;
 use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
 
 mod github;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "reconnect admission has no production ingress")
-)]
 mod repair;
 pub(crate) mod staging;
 
@@ -72,7 +68,6 @@ pub enum DeleteResult {
 /// Move the vault into blocking work, rather than dropping its guard when an async waiter ends.
 #[must_use = "the vault must retain its session lock until all blocking work ends"]
 pub struct Vault<S: CredentialStore> {
-    repair_lease: Option<repair::RepairLease>,
     authority: Authority,
     history: HistoryLink,
     store: S,
@@ -222,7 +217,6 @@ impl<S: CredentialStore> Vault<S> {
     ) -> Result<Self, VaultError> {
         let authority = Authority::open(&session, missing)?;
         let mut vault = Self {
-            repair_lease: None,
             authority,
             history,
             store,
