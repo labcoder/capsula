@@ -865,7 +865,7 @@ fn an_untrusted_settings_folder_is_neither_read_nor_written() {
         config.view().assistant_name.as_str(),
         DEFAULT_ASSISTANT_NAME
     );
-    assert!(super::write_replacing(&path, b"assistant_name = \"Cirrus\"\n").is_err());
+    assert!(crate::platform::write_settings(&path, b"assistant_name = \"Cirrus\"\n").is_err());
     assert_eq!(
         std::fs::read_to_string(&path).expect("the file stays"),
         "assistant_name = \"Nimbus\"\n"

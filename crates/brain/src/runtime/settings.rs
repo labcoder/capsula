@@ -89,6 +89,8 @@ pub(crate) enum Gate {
     WriteAndSignal(tokio::sync::oneshot::Sender<bool>),
     /// Panic with the test sentinel, as a bug in the write would.
     Panic,
+    /// Write, then answer unconfirmed, as a failed barrier after the rename would.
+    Unconfirmed,
 }
 
 /// Whether a change became the settings, and why not.
@@ -248,8 +250,14 @@ impl Brain {
         let profile = std::sync::Arc::clone(&self.profile);
         let handle = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
-            let completed = held(gate);
+            let (completed, unconfirmed) = held(gate);
             let written = pending.write();
+            #[cfg(test)]
+            let written = if unconfirmed {
+                written.and(Err(ConfigError::Unconfirmed))
+            } else {
+                written
+            };
             // Held until the write stops, even after the brain and its deadline are gone.
             drop(profile);
             #[cfg(test)]
@@ -460,7 +468,44 @@ impl Brain {
         Ok(())
     }
 
+    /// A write whose outcome isn't known: its change is taken with the screen off, and every
+    /// later change is refused until a restart reads the file again. Whether the link took what
+    /// was sent to it; the write's own follow-ups still run when it didn't.
+    fn settings_unconfirmed(
+        &mut self,
+        pending: Pending,
+        epoch: u64,
+        github: Option<&GitHubWrite>,
+        mut link: Option<&mut Link<'_, '_>>,
+    ) -> bool {
+        let (screen_holds, show_screen) = {
+            let view = self.config.view();
+            (view.screen_holds, view.show_screen)
+        };
+        self.config.unconfirmed(pending);
+        self.voice_policy();
+        if screen_holds {
+            self.screen_holds_off();
+        }
+        tracing::warn!("a settings change may not be saved; refusing changes until restart");
+        if show_screen && self.show_screen_off(link.as_deref_mut()).is_err() {
+            return false;
+        }
+        // Only a change this link sent gets the view as its answer; any other link still shows
+        // the old one.
+        match link {
+            Some(link) if epoch != self.epoch || github.is_some() => {
+                self.settings_now(link).is_ok()
+            }
+            _ => true,
+        }
+    }
+
     /// The write in flight finished: its change becomes the settings only if it's on disk.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one write's outcome settles its voice, GitHub and screen effects in order"
+    )]
     pub(super) fn settings_done(
         &mut self,
         (epoch, voice, github, written): Written,
@@ -469,6 +514,7 @@ impl Brain {
         self.owed_written(&written);
         let input_was_enabled = self.config.view().hold_to_talk;
         let mut defaulted = false;
+        let mut lost = false;
         let outcome = match written {
             Ok((pending, Ok(()))) => {
                 let (screen_holds, show_screen) = {
@@ -504,6 +550,14 @@ impl Brain {
                 self.observer.send(super::Seen::SettingsCommitted).ok();
                 Outcome::Applied
             }
+            Ok((pending, Err(ConfigError::Unconfirmed))) => {
+                if !self.settings_unconfirmed(pending, epoch, github.as_ref(), link.as_deref_mut())
+                {
+                    link = None;
+                    lost = true;
+                }
+                Outcome::Refused(ErrorKey::SettingsRefused)
+            }
             Ok((_, Err(error))) => {
                 #[cfg(test)]
                 if let crate::config::ConfigError::Write(source) = &error {
@@ -537,7 +591,8 @@ impl Brain {
                 epoch,
                 link.as_deref_mut(),
             )?;
-            return self.pump_settings(link);
+            let pumped = self.pump_settings(link);
+            return if lost { Err(Full) } else { pumped };
         }
         if let Some(write) = voice {
             let result = match outcome {
@@ -565,7 +620,8 @@ impl Brain {
             )?;
         }
         answered?;
-        self.pump_settings(link)
+        let pumped = self.pump_settings(link);
+        if lost { Err(Full) } else { pumped }
     }
 
     /// Finishes each removal that a crash or a failed delete left: the part's folder under
@@ -673,11 +729,12 @@ impl Brain {
 #[cfg(test)]
 fn held(
     gate: Option<std::sync::mpsc::Receiver<Gate>>,
-) -> Option<tokio::sync::oneshot::Sender<bool>> {
+) -> (Option<tokio::sync::oneshot::Sender<bool>>, bool) {
     match gate.and_then(|gate| gate.recv().ok()) {
-        Some(Gate::WriteAndSignal(completed)) => Some(completed),
+        Some(Gate::WriteAndSignal(completed)) => (Some(completed), false),
         Some(Gate::Panic) => panic!("{}", crate::test_support::SENTINEL),
-        Some(Gate::Write) | None => None,
+        Some(Gate::Unconfirmed) => (None, true),
+        Some(Gate::Write) | None => (None, false),
     }
 }
 
