@@ -2420,3 +2420,58 @@ async fn a_cancelled_fetch_keeps_its_files_until_its_task_finishes() {
         "the fetch's terminal result permits deletion"
     );
 }
+
+/// A removal intent whose save is unconfirmed, while its settings can't reach a newer shell,
+/// still gives the part back and settles the change behind it before the link is lost.
+#[tokio::test]
+async fn a_lost_link_still_settles_an_unconfirmed_removal_intent() {
+    use crate::runtime::settings::{BRAIN, Change, Queued};
+    use crate::voice::installer::{Folder, RemoveAnswer};
+
+    let scratch = Scratch::new("voice-remove-unconfirmed-lost");
+    let part = VoicePart::SpokenReplies;
+    let (fetch, _) = held_fetch();
+    let (mut brain, _release, _) = attached_with(&scratch, "", fetch);
+    let gate = brain.hold_config_write();
+    queue_fixture_removal(&mut brain, part);
+    brain.settings_ops.push_back(Queued {
+        change: Change::User(SettingsOp::SetTaskbar(true)),
+        epoch: BRAIN,
+    });
+    brain.pump_settings_offline();
+    gate.send(Gate::Unconfirmed)
+        .expect("the write waits on the gate");
+    let intent = next_voice_write(&mut brain).await;
+    brain.epoch += 1;
+    let (out, output) = mpsc::channel(1);
+    drop(output);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    assert!(matches!(
+        brain.settings_done(intent, Some(&mut link)),
+        Err(crate::runtime::Full)
+    ));
+    assert!(
+        brain.settings_ops.is_empty(),
+        "the change behind it settled"
+    );
+    assert!(brain.config_write.is_none());
+    let mut again = None;
+    brain
+        .voice_op(
+            |installer| {
+                let (answer, effects) = installer.remove(part, Folder::Present);
+                again = Some(answer);
+                effects
+            },
+            None,
+        )
+        .expect("voice is attached");
+    assert!(
+        matches!(again, Some(RemoveAnswer::Intent { .. })),
+        "the refused intent gave the part back, so a new removal starts"
+    );
+    brain.close().await;
+}
