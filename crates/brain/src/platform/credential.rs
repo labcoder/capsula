@@ -5,6 +5,8 @@ use kumochi_protocol::Secret;
 use kumochi_protocol::message::Capability;
 use zeroize::Zeroizing;
 
+#[cfg(target_os = "macos")]
+pub(crate) use super::macos::credential::MacCredentialStore as NativeCredentialStore;
 /// This platform's store; code outside `platform` names only this one.
 #[cfg(windows)]
 pub(crate) use super::windows::WindowsCredentialStore as NativeCredentialStore;
@@ -42,10 +44,10 @@ impl CredentialError {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) struct NativeCredentialStore;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl CredentialStore for NativeCredentialStore {
     fn get(&self, _: &str) -> Result<Option<SecretBytes>, CredentialStoreError> {
         Err(CredentialStoreError::Unsupported)
@@ -60,11 +62,20 @@ impl CredentialStore for NativeCredentialStore {
     }
 }
 
-/// This platform's native store, or Unsupported before the vault opens anything.
+/// This platform's native store, or Unsupported before the vault opens anything. On macOS only a
+/// process entitled to its own access group is admitted, so an unentitled read can't pass for an
+/// empty store.
 pub(crate) fn admitted_store() -> Result<NativeCredentialStore, CredentialStoreError> {
-    if cfg!(windows) {
+    #[cfg(windows)]
+    {
         Ok(NativeCredentialStore)
-    } else {
+    }
+    #[cfg(target_os = "macos")]
+    {
+        NativeCredentialStore::admitted()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
         Err(CredentialStoreError::Unsupported)
     }
 }
@@ -175,15 +186,38 @@ pub trait CredentialStore: Send + Sync {
 mod tests {
     use super::*;
 
+    /// A test binary claims no application identifier, so macOS refuses it here rather than
+    /// opening a store whose reads would come back empty.
+    #[test]
+    fn an_unentitled_or_unsupported_host_gets_no_native_store() {
+        assert!(matches!(
+            admitted_store(),
+            Err(CredentialStoreError::Unsupported)
+        ));
+    }
+
     #[test]
     fn native_credentials_are_unsupported() {
-        let name = "test-only-credential";
-        let secret = Secret::new(Zeroizing::new(vec![1]));
         let capability = Capability::new([1; kumochi_protocol::message::CAPABILITY_LEN]);
         assert!(matches!(
             native_session_lock_path(),
             Err(CredentialStoreError::Unsupported)
         ));
+        assert!(matches!(
+            crate::credential::store(0, &capability),
+            Err(CredentialError::Unsupported)
+        ));
+        assert!(matches!(
+            crate::credential::delete(0),
+            Err(CredentialError::Unsupported)
+        ));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_stub_store_refuses_every_call() {
+        let name = "test-only-credential";
+        let secret = Secret::new(Zeroizing::new(vec![1]));
         assert!(matches!(
             NativeCredentialStore.get(name),
             Err(CredentialStoreError::Unsupported)
@@ -195,14 +229,6 @@ mod tests {
         assert!(matches!(
             NativeCredentialStore.delete(name),
             Err(CredentialStoreError::Unsupported)
-        ));
-        assert!(matches!(
-            crate::credential::store(0, &capability),
-            Err(CredentialError::Unsupported)
-        ));
-        assert!(matches!(
-            crate::credential::delete(0),
-            Err(CredentialError::Unsupported)
         ));
     }
 }
