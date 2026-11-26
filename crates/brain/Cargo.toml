@@ -61,8 +61,16 @@ block2 = "=0.6.2"
 objc2 = "=0.6.5"
 objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
     "std",
+    "CFBase",
     "CFCGTypes",
+    "CFData",
+    "CFDictionary",
     "objc2",
+] }
+objc2-security = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "SecBase",
+    "SecItem",
 ] }
 objc2-core-graphics = { version = "=0.3.2", default-features = false, features = [
     "std",
