@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::io;
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -117,15 +117,25 @@ struct Worker {
 async fn establish<T: Send + 'static>(
     work: impl Future<Output = T> + Send + 'static,
 ) -> io::Result<T> {
-    static EXECUTOR: OnceLock<Result<Executor, Refusal>> = OnceLock::new();
     let request = Control::current()?;
-    EXECUTOR
-        .get_or_init(Executor::new)
-        .as_ref()
-        .map_err(|refusal| *refusal)?
+    shared_executor()?
         .establish(request, work)
         .await
         .map_err(Into::into)
+}
+
+fn shared_executor() -> Result<&'static Executor, Refusal> {
+    static RUNNING: OnceLock<Executor> = OnceLock::new();
+    static STARTING: Mutex<()> = Mutex::new(());
+    if let Some(executor) = RUNNING.get() {
+        return Ok(executor);
+    }
+    let _starting = STARTING.lock().map_err(|_| Refusal::Unavailable)?;
+    if let Some(executor) = RUNNING.get() {
+        return Ok(executor);
+    }
+    let started = Executor::new()?;
+    Ok(RUNNING.get_or_init(|| started))
 }
 
 impl Executor {

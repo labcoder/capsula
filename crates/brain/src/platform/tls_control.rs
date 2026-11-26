@@ -1,6 +1,6 @@
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::{Notify, watch};
 use tokio::time::{Instant, error::Elapsed, timeout_at};
@@ -26,11 +26,16 @@ impl ConnectCut {
     }
 
     pub(crate) fn with<T>(&self, poll: impl FnOnce() -> T) -> io::Result<T> {
-        let _gate = self.gate.lock().map_err(|_| io::ErrorKind::Interrupted)?;
+        let _gate = self.lock()?;
+        Ok(poll())
+    }
+
+    fn lock(&self) -> io::Result<MutexGuard<'_, ()>> {
+        let gate = self.gate.lock().map_err(|_| io::ErrorKind::Interrupted)?;
         if self.closed() {
             return Err(io::ErrorKind::Interrupted.into());
         }
-        Ok(poll())
+        Ok(gate)
     }
 
     pub(super) fn closed(&self) -> bool {
@@ -121,7 +126,7 @@ mod mac {
     #[derive(Clone, Default)]
     pub(in crate::platform) struct Control {
         by: Option<std::time::Instant>,
-        cuts: [Option<Arc<ConnectCut>>; 2],
+        cuts: [Option<Arc<ConnectCut>>; 3],
         download: Option<watch::Receiver<bool>>,
         invalid: bool,
     }
@@ -177,7 +182,7 @@ mod mac {
         pub(in crate::platform) fn fixture(by: std::time::Instant, cut: Arc<ConnectCut>) -> Self {
             Self {
                 by: Some(by),
-                cuts: [Some(cut), None],
+                cuts: [Some(cut), None, None],
                 ..Self::default()
             }
         }
@@ -209,6 +214,7 @@ mod mac {
             tokio::select! {
                 () = cut_closed(self.cuts[0].as_deref()) => {},
                 () = cut_closed(self.cuts[1].as_deref()) => {},
+                () = cut_closed(self.cuts[2].as_deref()) => {},
                 () = async {
                     if let Some(mut cancel) = self.download.clone()
                         && cancel.wait_for(|closed| *closed).await.is_ok()
@@ -224,24 +230,15 @@ mod mac {
             &self,
             poll: impl FnOnce() -> io::Result<T>,
         ) -> io::Result<T> {
-            fn with_cut<T>(
-                cut: Option<&ConnectCut>,
-                poll: impl FnOnce() -> io::Result<T>,
-            ) -> io::Result<T> {
-                match cut {
-                    Some(cut) => cut.with(poll)?,
-                    None => poll(),
-                }
+            let mut held = [None, None, None];
+            for (guard, cut) in held.iter_mut().zip(&self.cuts) {
+                *guard = cut.as_deref().map(ConnectCut::lock).transpose()?;
             }
-            with_cut(self.cuts[0].as_deref(), || {
-                with_cut(self.cuts[1].as_deref(), || {
-                    let download = self.download.as_ref().map(watch::Receiver::borrow);
-                    if download.as_ref().is_some_and(|closed| **closed) {
-                        return Err(io::ErrorKind::Interrupted.into());
-                    }
-                    poll()
-                })
-            })
+            let download = self.download.as_ref().map(watch::Receiver::borrow);
+            if download.as_ref().is_some_and(|closed| **closed) {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            poll()
         }
     }
 }

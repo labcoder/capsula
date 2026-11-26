@@ -317,12 +317,13 @@ already started can outlive a refused or canceled handshake.
 
 The Mac boundary prestarts four bounded handshake workers and a separate I/O reactor. The
 brain and reactor do not poll SecTrust. The caller and workers enforce cancellation and the
-earliest enclosing request deadline, capped at ten seconds for connection setup. An admitted job keeps the
-reactor alive until it exits without blocking owner drop. A stuck native call retains the one
-SecTrust slot and new connections refuse without queuing; a boundary timeout always refuses,
-even under soft-fail revocation. Mac reqwest clients do not race a pooled connection against
-an independent new handshake. The offline fixtures use synthetic certificates and in-memory
-transport; they never change the user or system trust settings.
+earliest enclosing request deadline, capped at ten seconds for connection setup. An admitted
+job keeps the reactor alive and holds its worker through an in-flight DNS lookup. A stopped
+owner can't admit a lookup or native check, but can't retract one already admitted. A stuck
+native check retains the only SecTrust slot, so new connections refuse without queuing. A
+boundary timeout always refuses, even under soft-fail revocation. Mac reqwest clients disable
+the idle pool and retries. Offline fixtures use synthetic certificates with in-memory or
+loopback transport and never change the user or system trust settings.
 
 The client enforces HTTPS, refuses redirects, disables proxy discovery, and exposes neither
 the raw reqwest client nor raw transport errors. Discovery and validated JWKS requests contain
