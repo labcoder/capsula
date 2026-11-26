@@ -9,17 +9,18 @@ pub fn cancel_tracked_input(link: &LinkHandle) -> Option<InputCancel> {
         .filter(|cancel| link.dispatch_input_cancel(cancel))
 }
 
-/// Consumes the Runs cancel, sending it unless the same cancel is covered by another owner.
-pub fn drain_hold_cancel(
+/// Consumes the Runs cancel, sending it unless any of `covered`, cancels other owners send, is
+/// the same cancel.
+pub fn drain_hold_cancel<'a>(
     link: &LinkHandle,
     session: Option<&Session>,
     runs: &mut Runs,
-    covered: Option<&InputCancel>,
+    covered: impl IntoIterator<Item = &'a InputCancel>,
 ) -> bool {
     runs.take_hold_cancel().is_none_or(|message| {
         session.is_some_and(|session| {
             matches!(message, ControlToBrain::GestureCancel { gesture }
-                if covered.is_some_and(|cancel| cancel.target() == (gesture, session.generation())))
+                if covered.into_iter().any(|cancel| cancel.target() == (gesture, session.generation())))
                 || link.send_control(session, message)
         })
     })
@@ -133,6 +134,43 @@ mod tests {
                 None
             );
         }
+    }
+
+    /// A press owns hold A's deferred cancel while a later explicit cancel queues tracked hold
+    /// B's: either covers the Runs cancel it matches, so the brain hears each once.
+    #[test]
+    fn either_owned_cancel_covers_the_runs_cancel_it_matches() {
+        let (link, session, mut runs, controls) = recognized_hold();
+        let generation = session.generation();
+        link.track_input(HOLD);
+        link.watch_revoke(HOLD, generation);
+        let pressed = link.revoke_input_for_dispatch().unwrap();
+        assert!(link.dispatch_input_cancel(&pressed));
+        let later = GestureId(8);
+        link.track_input(later);
+        let queued = cancel_tracked_input(&link);
+        assert_eq!(
+            queued.as_ref().map(InputCancel::target),
+            Some((later, generation))
+        );
+
+        runs.cancel_hold();
+        let deferred = link.deferred_input_cancel(HOLD, generation);
+        assert!(drain_hold_cancel(
+            &link,
+            Some(&session),
+            &mut runs,
+            queued.iter().chain(&deferred)
+        ));
+
+        for gesture in [HOLD, later] {
+            assert_eq!(
+                controls.try_recv(),
+                Ok(ControlToBrain::GestureCancel { gesture })
+            );
+        }
+        assert_eq!(controls.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(runs.take_hold_cancel(), None);
     }
 
     #[test]

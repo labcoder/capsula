@@ -1003,6 +1003,10 @@ progress is not recalled. Ordinary Esc still uses its normal cancellation path.
 Explicit voice cancellation and Presence Drop outside Quit both revoke local input.
 They skip a Runs cancel only after successfully queuing the same gesture's cancel
 on the same connection generation. A distinct or unsent cancel is still attempted.
+An Esc press through the hotkey's reducer revokes the hold's input for deferred dispatch;
+however the hold then ends (that press, its cancelled release, a reply or its run), the
+deferred cancel is the only one sent on that generation. A revoke that tells the brain
+nothing, such as a settled Show Screen change, leaves the Runs cancel to be sent.
 Explicit cancellation still waits for the microphone's stop receipt; Drop ends the connection.
 
 `voice.hold_to_talk` defaults on, including older files without the key. Settings → Voice
