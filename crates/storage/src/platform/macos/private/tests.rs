@@ -27,6 +27,75 @@ fn on_listing(hook: impl FnMut(&mut Vec<CString>) + 'static) {
     LISTED.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
+/// Where a file check is when a test may change the namespace under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Step {
+    /// The entry was looked at as a regular file and not yet opened.
+    Looked,
+    /// The open file passed its checks and its name isn't rechecked yet.
+    Checked,
+}
+
+type Stepped = Box<dyn FnMut(Step)>;
+
+thread_local! {
+    static STEPPED: RefCell<Option<Stepped>> = RefCell::new(None);
+}
+
+pub(super) fn step(step: Step) {
+    STEPPED.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(step);
+        }
+    });
+}
+
+fn on_step(hook: Option<Stepped>) {
+    STEPPED.with(|slot| *slot.borrow_mut() = hook);
+}
+
+/// Moves `f` in `folder` aside to `f-old` and puts `replace`'s object at `f`, once, at `at`.
+fn swap_at(folder: &File, at: Step, replace: fn(&File)) -> Stepped {
+    let folder = folder
+        .try_clone()
+        .expect("retain fixture folder for the hook");
+    let mut done = false;
+    Box::new(move |step| {
+        if step == at && !done {
+            done = true;
+            rename(&folder, c"f", c"f-old");
+            replace(&folder);
+        }
+    })
+}
+
+fn new_private_file(folder: &File) {
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: folder is a held fixture folder and the name is fixed; creation is exclusive.
+    let fd = unsafe { libc::openat(folder.as_raw_fd(), c"f".as_ptr(), flags, 0o600) };
+    assert!(fd >= 0, "replacement fixture file");
+    // SAFETY: the successful open transferred a fresh, uniquely owned descriptor.
+    drop(unsafe { File::from_raw_fd(fd) });
+}
+
+fn new_fifo(folder: &File) {
+    // SAFETY: folder is a held fixture folder and the name is fixed; creation is exclusive.
+    let made = unsafe { libc::mkfifoat(folder.as_raw_fd(), c"f".as_ptr(), 0o600) };
+    assert_eq!(made, 0, "replacement fixture FIFO");
+}
+
+fn nothing(_: &File) {}
+
+/// A file swap: the folder's name, when it happens, what replaces the file, the refusal, and where
+/// the replacement is moved for cleanup.
+type Swap = (
+    &'static CStr,
+    Step,
+    fn(&File),
+    Untrusted,
+    Option<&'static CStr>,
+);
+
 fn folder(scratch: &mut Scratch, parent: &File, name: &CStr, mode: libc::mode_t) -> File {
     // SAFETY: parent is a held fixture folder and name one fixed component; creation is exclusive.
     let created = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
@@ -382,15 +451,20 @@ fn native_private_tree_refuses_past_its_bounds() {
 
     let deep = folder(&mut scratch, &root, c"deep", 0o700);
     let first = folder(&mut scratch, &deep, c"d1", 0o700);
-    drop(folder(&mut scratch, &first, c"d2", 0o700));
+    let second = folder(&mut scratch, &first, c"d2", 0o700);
+    drop(file(&mut scratch, &second, c"leaf", 0o600));
     let at = |depth, entries| Limits { depth, entries };
-    assert_eq!(private_at(&root, c"deep", user, at(2, 2)), Ok(()));
     assert_eq!(
-        private_at(&root, c"deep", user, at(1, 2)),
+        private_at(&root, c"deep", user, at(2, 3)),
+        Ok(()),
+        "a file in the deepest folder"
+    );
+    assert_eq!(
+        private_at(&root, c"deep", user, at(1, 3)),
         Err(Untrusted::Io)
     );
     assert_eq!(
-        private_at(&root, c"deep", user, at(2, 1)),
+        private_at(&root, c"deep", user, at(2, 2)),
         Err(Untrusted::Io)
     );
 
@@ -404,7 +478,7 @@ fn native_private_tree_refuses_past_its_bounds() {
         Err(Untrusted::Io)
     );
 
-    drop((deep, first, wide));
+    drop((deep, first, second, wide));
     scratch
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");
@@ -458,13 +532,38 @@ fn native_private_tree_checks_files_without_reading_them() {
     drop(file(&mut scratch, &tree, c"secret", 0o600));
     let sub = folder(&mut scratch, &tree, c"sub", 0o700);
     drop(file(&mut scratch, &sub, c"inner", 0o600));
+    assert_eq!(
+        accessed(&tree, c"secret"),
+        UNREAD,
+        "the fixture's access time took"
+    );
     assert_eq!(private_at(&root, c"tree", user, LIMITS), Ok(()));
     assert_eq!(
         accessed(&tree, c"secret"),
         UNREAD,
-        "the walk never read the file"
+        "the walk read no content"
     );
-    assert_eq!(accessed(&sub, c"inner"), UNREAD, "nor the nested one");
+    assert_eq!(accessed(&sub, c"inner"), UNREAD, "nor the nested file's");
+    assert_eq!(
+        private_at(&tree, c"secret", user, LIMITS),
+        Err(Untrusted::Unsafe),
+        "a file as the root"
+    );
+    // The control: on this thread and inode, one byte read must move the access time, or the
+    // unchanged times above prove nothing.
+    // SAFETY: tree is a held fixture folder and the name is fixed; read-only, no creation.
+    let fd = unsafe { libc::openat(tree.as_raw_fd(), c"secret".as_ptr(), libc::O_RDONLY) };
+    assert!(fd >= 0, "control open");
+    // SAFETY: the successful open transferred a fresh, uniquely owned descriptor.
+    let mut control = unsafe { File::from_raw_fd(fd) };
+    let mut byte = [0_u8; 1];
+    let read = std::io::Read::read(&mut control, &mut byte).expect("control read");
+    assert_eq!(read, 1, "control read one byte");
+    drop(control);
+    assert!(
+        accessed(&tree, c"secret") > UNREAD,
+        "inconclusive: a read here doesn't move the access time"
+    );
     let found = look(&tree, c"secret").expect("fixture look");
     assert_eq!(
         private_file(&tree, c"secret", &found, user + 1),
@@ -518,6 +617,59 @@ fn native_private_tree_checks_files_without_reading_them() {
     }
 
     drop(held);
+    scratch
+        .cleanup()
+        .expect("identity-checked cleanup; uncertainty leaves reported residual");
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_a_file_is_bound_from_its_look_to_its_name() {
+    let mut scratch = Scratch::new();
+    let root = scratch.root.try_clone().expect("retain scratch root");
+    let user = this_user();
+
+    let cases: [Swap; 4] = [
+        (
+            c"opened",
+            Step::Looked,
+            new_private_file,
+            Untrusted::Unsafe,
+            Some(c"f-new"),
+        ),
+        (
+            c"renamed",
+            Step::Checked,
+            new_private_file,
+            Untrusted::Unsafe,
+            Some(c"f-new"),
+        ),
+        (c"vanished", Step::Looked, nothing, Untrusted::Io, None),
+        (
+            c"piped",
+            Step::Looked,
+            new_fifo,
+            Untrusted::Unsafe,
+            Some(c"p"),
+        ),
+    ];
+    for (name, at, replace, refused, moved) in cases {
+        let top = folder(&mut scratch, &root, name, 0o700);
+        drop(file(&mut scratch, &top, c"f", 0o600));
+        on_step(Some(swap_at(&top, at, replace)));
+        assert_eq!(
+            private_at(&root, name, user, LIMITS),
+            Err(refused),
+            "{name:?}"
+        );
+        on_step(None);
+        if let Some(moved) = moved {
+            rename(&top, c"f", moved);
+            scratch.record(&top, moved).expect("record the replacement");
+        }
+        rename(&top, c"f-old", c"f");
+    }
+
     scratch
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");

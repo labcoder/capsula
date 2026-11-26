@@ -26,9 +26,13 @@ struct Limits {
 }
 
 /// Opens a file for its metadata only. Nothing reads through it: it stays an `OwnedFd`, which has
-/// no read methods. Non-blocking, so a FIFO swapped in after the look can't stall the open.
+/// no read methods. Non-blocking and with no controlling terminal, so something other than a file
+/// swapped in after the look can't stall the open or become the process's terminal.
 const FILE_FLAGS: libc::c_int =
-    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
+
+// SDK sys/stat.h's SF_DATALESS; libc does not declare it.
+const DATALESS: u32 = 0x4000_0000;
 
 const LIMITS: Limits = Limits {
     depth: 32,
@@ -142,6 +146,8 @@ fn private_file(
     seen: &libc::stat,
     user: libc::uid_t,
 ) -> Result<(), Untrusted> {
+    #[cfg(test)]
+    tests::step(tests::Step::Looked);
     // SAFETY: parent is held and name is one listed component; there's no creation flag.
     let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), FILE_FLAGS) };
     if fd < 0 {
@@ -154,6 +160,8 @@ fn private_file(
     let file = unsafe { OwnedFd::from_raw_fd(fd) };
     let checked = inspect_private(&file, user, ObjectKind::Regular)?;
     same_entry(parent, seen, &checked)?;
+    #[cfg(test)]
+    tests::step(tests::Step::Checked);
     named(parent, name, &checked)
 }
 
@@ -186,7 +194,12 @@ fn look(parent: &File, name: &CStr) -> Result<libc::stat, Untrusted> {
         });
     }
     // SAFETY: successful fstatat initialized metadata.
-    Ok(unsafe { metadata.assume_init() })
+    let metadata = unsafe { metadata.assume_init() };
+    // A dataless entry's contents live with a file provider; touching it could fetch them.
+    if metadata.st_flags & DATALESS != 0 {
+        return Err(Untrusted::Unsafe);
+    }
+    Ok(metadata)
 }
 
 fn private_at(
@@ -206,12 +219,14 @@ fn walk(
     depth: usize,
     seen: &mut usize,
 ) -> Result<(), Untrusted> {
+    let found = look(parent, name)?;
+    // The root is a folder; only what's in it may be a file.
+    if depth > 0 && found.st_mode & libc::S_IFMT == libc::S_IFREG {
+        return private_file(parent, name, &found, user);
+    }
+    // The depth limit counts folders, so a file in the deepest allowed folder still passes.
     if depth > limits.depth {
         return Err(Untrusted::Io);
-    }
-    let found = look(parent, name)?;
-    if found.st_mode & libc::S_IFMT == libc::S_IFREG {
-        return private_file(parent, name, &found, user);
     }
     let (folder, checked) = folder_at(parent, name, &found, user)?;
     for child in list(&folder, limits, seen)? {
