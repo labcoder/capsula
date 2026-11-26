@@ -683,10 +683,16 @@ async fn a_dropped_wait_never_cancels_its_refresh() {
         account
             .and_then(|account| Some(account.expose().tokens.as_ref()?.refresh_token.to_string()))
     };
-    // The pending flag, the sent mark, the refresh and the rotated set's save.
-    for _ in 0..4 {
+    // The check, the pending flag, the sent mark, the refresh and the rotated set's save. The
+    // store is read only once the worker reports that save: a second vault's open retires a
+    // save's Pending row, which production's one opener per profile never meets.
+    for _ in 0..8 {
         let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
+        let rotated = matches!(input, Event::Machine(Input::Vault(Done::Rotated(..))));
         accounts.handle(input);
+        if rotated {
+            break;
+        }
     }
     assert_eq!(refresh_token(), Some("refresh-new".to_owned()));
     accounts.close(Instant::now(), Instant::now()).await;
@@ -3275,14 +3281,16 @@ async fn an_ordinary_sign_in_is_ready_once_proved_and_stays_ready_through_a_refr
         accounts.catalog_read_pending(),
         "the held catalog read goes"
     );
+    // The store is read only once the worker reports the rotated set's save.
     for _ in 0..8 {
-        if saved_refresh(&scratch, &store).0 == "refresh-new" {
-            break;
-        }
         let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
         assert!(!matches!(input, Event::Proof { .. }), "no second check");
+        let rotated = matches!(input, Event::Machine(Input::Vault(Done::Rotated(..))));
         accounts.handle(input);
         assert!(ready(&accounts));
+        if rotated {
+            break;
+        }
     }
     assert_eq!(saved_refresh(&scratch, &store).0, "refresh-new");
     assert_eq!(saved_connection(&scratch, &store), SEEDED);
@@ -3464,7 +3472,6 @@ async fn a_locally_checked_sign_in_is_fenced_until_its_check_answers() {
 /// rotates the set, the build still keeps to it; and once that account can't be ready, the next
 /// build reads no `ChatGPT` history at all, while a ready Claude Code still arrives.
 #[tokio::test]
-#[ignore = "stalls in its refreshed arm on the hosted runner; under repair"]
 async fn a_recovered_answer_scopes_builds_until_the_account_stops_being_ready() {
     use crate::connections::vault::Proof;
 
@@ -3481,14 +3488,16 @@ async fn a_recovered_answer_scopes_builds_until_the_account_stops_being_ready() 
         };
         brain.account_input(recovered, None).expect("no shell");
         if arm == "refreshed" {
-            let mut dropped = false;
+            // The store is read only once the worker reports the rotated set's save.
+            let (mut dropped, mut rotated) = (false, false);
             for _ in 0..12 {
-                if dropped && saved_refresh(&scratch, &store).0 == "refresh-new" {
+                if dropped && rotated {
                     break;
                 }
                 let event = timeout(PATIENCE, brain.account.next())
                     .await
                     .expect("in time");
+                rotated |= matches!(event, Event::Machine(Input::Vault(Done::Rotated(..))));
                 dropped |= matches!(
                     event,
                     Event::Proof {
