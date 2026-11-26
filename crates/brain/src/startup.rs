@@ -330,6 +330,7 @@ fn build_brain(opened: OpenedState, account: Accounts) -> Result<Brain, BrainErr
         },
         config,
         account,
+        crate::runtime::IssueEpochs::default(),
     )
     .map_err(BrainError::StoreThread)
 }

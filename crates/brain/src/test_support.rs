@@ -17,8 +17,8 @@ use crate::connections::oauth::{LaunchError, LaunchTarget, Launcher};
 use crate::connections::vault::Vault;
 use crate::connections::vault::fake::FakeStore;
 use crate::engines::fixture::Fixture;
-use crate::runtime::Brain;
 use crate::runtime::account::{Accounts, Net};
+use crate::runtime::{Brain, IssueEpochs};
 use crate::scratch;
 use crate::store::Store;
 
@@ -176,6 +176,16 @@ pub(crate) fn brain_on(
     engine: crate::runtime::Selected,
     accounts: Accounts,
 ) -> Brain {
+    brain_counting(scratch, engine, accounts, IssueEpochs::default())
+}
+
+/// [`brain_on`], taking over issue-session `epochs` something already reserved from.
+pub(crate) fn brain_counting(
+    scratch: &Scratch,
+    engine: crate::runtime::Selected,
+    accounts: Accounts,
+    epochs: IssueEpochs,
+) -> Brain {
     let mut store = Store::open(&scratch.db()).expect("store");
     store.recover().expect("recover");
     let main_thread = store.main_thread().expect("main thread");
@@ -192,6 +202,7 @@ pub(crate) fn brain_on(
         engine,
         config,
         accounts,
+        epochs,
     )
     .expect("brain")
 }

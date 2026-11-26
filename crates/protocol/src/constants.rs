@@ -168,6 +168,14 @@ pub const SESSION_LABEL: &str = "Kumochi session";
 /// The sole argument for a brain the shell starts under its own lifetime.
 pub const PARENT_BOUND: &str = "--parent-bound";
 
+/// The one byte a parent-bound brain writes on its control leg once its instance item is
+/// published, before the handshake: the shell reads the item only after it.
+pub const SESSION_READY: u8 = b'R';
+
+/// The brain's exit code when another session of this user holds its profile or instance: a
+/// refusal the shell backs off from, not a crash.
+pub const BRAIN_EXIT_BUSY: u8 = 75;
+
 /// The pipe Claude Code's MCP bridge connects back on, after [`OBJECT_PREFIX`], the session and a
 /// dash, and before the launch's value.
 pub const BRIDGE_PIPE: &str = "claude-bridge";

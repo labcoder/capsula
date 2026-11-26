@@ -21,6 +21,7 @@ mod store_thread;
 mod terminal;
 #[cfg(test)]
 mod terminal_tests;
+pub(crate) use issues::IssueEpochs;
 #[cfg(test)]
 pub(crate) use store_thread::{Attempt, Schedule};
 #[cfg(test)]
@@ -288,7 +289,7 @@ pub(crate) struct Brain {
     config_write: Option<settings::Write>,
     /// The account system; its credential work runs on its own thread.
     account: Accounts,
-    issue_epochs: issues::IssueEpochs,
+    issue_epochs: IssueEpochs,
     filing: issues::Filing,
     /// Claude Code's connection; its calls run on its own lane.
     claude: claude::Claude,
@@ -366,6 +367,7 @@ impl Brain {
         engine: Selected,
         config: Config,
         mut account: Accounts,
+        issue_epochs: IssueEpochs,
     ) -> std::io::Result<Self> {
         account.github.restore_default(config.github_default());
         account.github.tuning = config.github_tuning();
@@ -457,7 +459,7 @@ impl Brain {
             settings_ops: VecDeque::new(),
             config_write: None,
             account,
-            issue_epochs: issues::IssueEpochs::default(),
+            issue_epochs,
             filing: issues::Filing::new(),
             claude: claude::Claude::default(),
             #[cfg(test)]

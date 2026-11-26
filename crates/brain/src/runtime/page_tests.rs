@@ -1096,6 +1096,7 @@ async fn a_page_read_failure_answers_page_failed_and_keeps_the_connection() {
         crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("fixture"))),
         scratch.config(),
         crate::test_support::accounts(&scratch),
+        crate::runtime::IssueEpochs::default(),
     )
     .expect("brain");
     let ((control, data), mut shell) = duplex();

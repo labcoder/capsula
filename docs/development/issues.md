@@ -85,6 +85,8 @@ feedback, admitted only after the control queues successfully. App-lifetime requ
 increase without wrapping and correlate final acknowledgements and refusals even when the
 state/version is unchanged. Welcome advertises the brain incarnation and a connection epoch
 reserved from the process-lived `IssueEpochs` counter, separate from the active filing session.
+`Brain::new` takes that counter, so a start that reserves before the brain exists hands the same
+counter on and no epoch repeats.
 Every issue frame retains that originating pair.
 The brain checks it before SQL, request-watermark updates or job admission; stale provenance
 ends the connection without sending old request feedback into the replacement. A failed
