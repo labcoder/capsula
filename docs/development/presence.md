@@ -349,8 +349,14 @@ band and pass-through beyond it are desk checks.
 `kumochi --gate-observer=<file>` records what the dock really did, for the gate harness. Like
 the fixtures it needs `--quit-after-ms` or `--smoke`, or the shell refuses to start, and so
 does `--receipt-fixture`, which also needs the observer and only starts the dock middle-left
-for the gate's click-receipt phases. The tray's nine positions are unchanged. A normal run has no observer, no file and no writer thread;
-the only per-frame cost is checking that the observer is absent.
+for the gate's click-receipt phases. The tray's nine positions are unchanged. A normal run has no observer, no file and no writer thread.
+
+The observer, the input diagnostics and the paint stamps are compiled only with the shell's
+`gate-recorder` feature, and in its tests. Release and default builds leave them out, along
+with the hit proxy's stamps, and refuse `--gate-observer` and `--input-diagnostics` at launch
+rather than ignore them. xtask's gate and bench builds turn the feature on, and
+`gate-draw-replay` implies it. With the feature, a run without the observer pays only the
+check that it is absent.
 
 ```mermaid
 sequenceDiagram

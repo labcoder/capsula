@@ -43,6 +43,8 @@ pub struct SavedSignIn {
     pub(super) revision: u64,
     pub(super) notice: bool,
     pub(super) account: Result<Option<Secret<Account>>, SavedSignInFailure>,
+    /// The current host, read without creating or replacing it.
+    pub(super) host: Option<Secret<Zeroizing<String>>>,
 }
 
 /// A save's durable outcome.
@@ -289,8 +291,8 @@ impl<S: CredentialStore> Vault<S> {
     /// Whether an unusable host may be replaced: no sign-out pending, and no `chatgpt` record or
     /// only a registration never bound to an identity, which is retired first so a client issued
     /// under the old host is never reused with a new one.
-    // shortcut: a readable registration that holds a subject keeps its broken host and blocks
-    // sign-in, since retiring it would drop the identity check; upgrade if that loss is seen.
+    // A registration that holds a subject keeps its broken host, since retiring it unasked would
+    // drop the identity check; it reads as missing instead, for Forget to give up.
     fn release_host(&mut self) -> Result<bool, VaultError> {
         if self.marker()?.sign_out.is_some() {
             return Ok(false);
@@ -312,11 +314,11 @@ impl<S: CredentialStore> Vault<S> {
         Ok(true)
     }
 
-    /// Rereads exactly `expected` as Check does and, only while it is still current with a saved
-    /// chunk missing and every other chunk readable at its length, durably promotes a `Discard`
-    /// sign-out of it and returns `None`. Otherwise nothing is written, and it returns Check's
-    /// answer, or `Malformed` or `Unavailable` for a wrong-length or refused chunk behind a missing
-    /// one.
+    /// Rereads exactly `expected` as Check does and, only while it is still current and missing a
+    /// chunk, its own or a bound registration's host's, with every other chunk of that record
+    /// readable at its length, durably promotes a `Discard` sign-out of it and returns `None`.
+    /// Otherwise nothing is written, and it returns Check's answer, or `Malformed` or `Unavailable`
+    /// for a wrong-length or refused chunk behind a missing one.
     pub(super) fn forget_saved_sign_in(
         &mut self,
         expected: u64,
@@ -326,20 +328,18 @@ impl<S: CredentialStore> Vault<S> {
         {
             return Some(checked);
         }
-        let active = match self.authority.observe(Kind::Account) {
-            Ok((revision, Ok(Some(active)))) if revision == expected => active,
-            _ => return Some(Err(SavedSignInFailure::Unavailable)),
+        // Only a bound registration lets its host stand as the evidence; any other account that
+        // reads whole now gets Check's answer.
+        let lost = match self.read::<Account>(Kind::Account) {
+            Ok(Some(account)) if bound(account.expose()) => Kind::Host,
+            Ok(_) => return Some(self.saved_sign_in(Some(expected))),
+            Err(_) => Kind::Account,
         };
-        // Every chunk is read, so a refused or wrong-length one isn't given up behind a missing one.
-        match generation::has_missing_chunk(&self.store, &self.service, &active) {
+        match self.lost(lost) {
             Ok(true) => {}
-            Err(
-                authority::AuthorityError::WrongChunkLength
-                | authority::AuthorityError::Store(CredentialStoreError::InvalidBlob),
-            ) => return Some(Err(SavedSignInFailure::Malformed)),
             // The record read whole this time, so it gets Check's answer and is never promoted.
             Ok(false) => return Some(self.saved_sign_in(Some(expected))),
-            Err(_) => return Some(Err(SavedSignInFailure::Unavailable)),
+            Err(failure) => return Some(Err(failure)),
         }
         self.update_marker(MarkerUpdate::Promote(Disposition::Discard))
             .err()
@@ -397,10 +397,53 @@ impl<S: CredentialStore> Vault<S> {
                     })
                     .transpose()
             });
+        // A registration bound to an identity keeps its lost host from being replaced, so it can
+        // never sign in again: it reads as missing, which Forget can give up.
+        let account = match account {
+            Ok(Some(registration))
+                if bound(registration.expose()) && self.lost(Kind::Host) == Ok(true) =>
+            {
+                Err(Missing)
+            }
+            account => account,
+        };
         Ok(SavedSignIn {
             revision,
             notice: marker.notice,
             account,
+            host: self.read_host(),
+        })
+    }
+
+    /// The current host if it reads as one; never created or replaced.
+    fn read_host(&self) -> Option<Secret<Zeroizing<String>>> {
+        let active = self.authority.current(Kind::Host).ok()?.active?;
+        let bytes = generation::read_active(&self.store, &self.service, &active).ok()?;
+        decode::<Zeroizing<String>>(&bytes, 128)
+            .ok()
+            .filter(|host| valid_host(host))
+            .map(Secret::new)
+    }
+
+    /// Whether `kind`'s current generation lacks a chunk. Every chunk is read, so a wrong-length or
+    /// refused one is never hidden behind a missing one.
+    fn lost(&self, kind: Kind) -> Result<bool, SavedSignInFailure> {
+        let active = match self.authority.observe(kind) {
+            Ok((_, Ok(Some(active)))) => active,
+            Ok((_, Ok(None))) => return Ok(false),
+            Ok((_, Err(_))) | Err(authority::AuthorityError::Corrupt) => {
+                return Err(SavedSignInFailure::Malformed);
+            }
+            Err(_) => return Err(SavedSignInFailure::Unavailable),
+        };
+        generation::has_missing_chunk(&self.store, &self.service, &active).map_err(|error| {
+            match error {
+                authority::AuthorityError::WrongChunkLength
+                | authority::AuthorityError::Store(CredentialStoreError::InvalidBlob) => {
+                    SavedSignInFailure::Malformed
+                }
+                _ => SavedSignInFailure::Unavailable,
+            }
         })
     }
 
@@ -819,6 +862,11 @@ pub(super) fn decode<T: DeserializeOwned>(
         return Err(VaultError::Bounds);
     }
     serde_json::from_slice(bytes.expose()).map_err(|_| VaultError::Unreadable)
+}
+
+/// A tokenless registration bound to an identity, which keeps its host from being replaced.
+fn bound(account: &Account) -> bool {
+    account.tokens.is_none() && account.subject.is_some()
 }
 
 pub(super) fn valid_host(host: &str) -> bool {

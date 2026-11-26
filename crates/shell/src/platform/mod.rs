@@ -17,22 +17,24 @@ pub(crate) use kumochi_shell::presence_platform::{
 
 mod connected_events;
 mod connected_keyboard;
-pub(crate) use connected_events::{
-    MaskUpdate, Observe, PresenceEvent, PresenceLabels, PresenceSurface, ProxyNote,
-};
+pub(crate) use connected_events::{MaskUpdate, PresenceEvent, PresenceLabels, PresenceSurface};
+#[cfg(any(test, feature = "gate-recorder"))]
+pub(crate) use connected_events::{Observe, ProxyNote};
 pub(crate) use connected_keyboard::{Deliver, EventTime};
 #[cfg(not(windows))]
 mod connected_desktop;
 #[cfg(not(windows))]
 pub(crate) use connected_desktop::{
-    Affinity, EscapeHotkey, Foreground, HostWatch, OverlayWindows, PresenceNative, ProxyHandle,
+    Affinity, EscapeHotkey, Foreground, HostWatch, OverlayWindows, PresenceNative,
     activate_presence_window, configure_presence_window, cursor_position, exclude_window, host_at,
-    restore_foreground, restore_window_affinity, watch_host, window_affinity, window_handle,
+    restore_foreground, restore_window_affinity, watch_host, window_affinity,
 };
 #[cfg(all(test, not(windows)))]
 pub(crate) use connected_desktop::{
     DetachedInputs, client_origin, hide_presence_window, place_presence_window, work_area,
 };
+#[cfg(all(not(windows), any(test, feature = "gate-recorder")))]
+pub(crate) use connected_desktop::{ProxyHandle, window_handle};
 pub(crate) use kumochi_shell_core::platform::{host, input, microphone};
 
 /// Where a test says the pointer is. A test that sets it never reads the real one, which is
@@ -123,12 +125,13 @@ mod windows;
 pub(crate) use windows::ScreenSources;
 #[cfg(windows)]
 pub(crate) use windows::{
-    Affinity, EscapeHotkey, Foreground, HostWatch, OverlayWindows, PresenceNative, ProxyHandle,
+    Affinity, EscapeHotkey, Foreground, HostWatch, OverlayWindows, PresenceNative,
     activate_presence_window, client_origin, configure_presence_window, cursor_position,
-    exclude_window, hide_presence_window, host_at, performance_counter, performance_frequency,
-    place_presence_window, restore_foreground, restore_window_affinity, watch_host,
-    window_affinity, window_handle, work_area,
+    exclude_window, hide_presence_window, host_at, performance_counter, place_presence_window,
+    restore_foreground, restore_window_affinity, watch_host, window_affinity, work_area,
 };
+#[cfg(all(windows, any(test, feature = "gate-recorder")))]
+pub(crate) use windows::{ProxyHandle, performance_frequency, window_handle};
 #[cfg(all(test, windows))]
 pub(crate) use windows::{with_raw_keys, with_raw_modifiers};
 
@@ -137,6 +140,7 @@ pub(crate) const INPUT_COUNTER: Option<fn() -> i64> = Some(performance_counter);
 #[cfg(not(windows))]
 pub(crate) const INPUT_COUNTER: Option<fn() -> i64> = None;
 
+#[cfg(any(test, feature = "gate-recorder"))]
 pub(crate) fn diagnostic_clock() -> std::io::Result<kumochi_shell::QpcClock> {
     #[cfg(windows)]
     let backend = Some(kumochi_shell::QpcClock::windows(

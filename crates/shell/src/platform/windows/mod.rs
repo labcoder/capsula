@@ -14,7 +14,9 @@ pub(crate) use keyboard::EscapeHotkey;
 pub(super) use keyboard::foreground_layout;
 #[cfg(test)]
 pub(crate) use keyboard::{with_raw_keys, with_raw_modifiers};
-pub(crate) use observer::{ProxyHandle, client_origin, performance_frequency, window_handle};
+pub(crate) use observer::client_origin;
+#[cfg(any(test, feature = "gate-recorder"))]
+pub(crate) use observer::{ProxyHandle, performance_frequency, window_handle};
 pub(crate) use overlay_input::OverlayWindows;
 pub(crate) use presence::{
     Affinity, Foreground, PresenceNative, activate_presence_window, configure_presence_window,

@@ -777,3 +777,62 @@ async fn a_committed_default_survives_renewal_or_expiry_before_its_acknowledgmen
         assert_eq!(inherited, None);
     }
 }
+
+/// A GitHub default write isn't the shell's own change, so when its save is unconfirmed the
+/// current shell gets the latched settings on their own, then the refused default.
+#[tokio::test]
+async fn an_unconfirmed_github_default_sends_the_current_shell_its_settings() {
+    let scratch = Scratch::new("github-default-unconfirmed");
+    let store = ObservedStore::default();
+    save_default_account(&scratch, &store, 41);
+    let http = AccountHttp::new(default_replies(41));
+    let accounts = configured_accounts(&scratch, store, &http);
+    let mut brain = brain_with_github_owner(&scratch, accounts);
+    settle_default_account(&mut brain.account).await;
+    brain.github_op(GitHubOp::RefreshRepos, None).unwrap();
+    settle_default_account(&mut brain.account).await;
+    assert_eq!(displayed_default(&brain), None);
+    let release = brain.hold_config_write();
+    let (out, mut output) = mpsc::channel(16);
+    let queue = RefCell::new(DataQueue::new(window()));
+    let ready = Notify::new();
+    let mut tap = Tap::from_env();
+    let mut link = Link::new(&out, &queue, &ready, &mut tap);
+    brain
+        .github_op(
+            GitHubOp::SetDefaultRepo(RepoName::new("offline-owner/new").unwrap()),
+            Some(&mut link),
+        )
+        .unwrap();
+    while output.try_recv().is_ok() {}
+    release
+        .send(crate::runtime::settings::Gate::Unconfirmed)
+        .unwrap();
+    let done = timeout(
+        PATIENCE,
+        crate::runtime::settings::written(&mut brain.config_write),
+    )
+    .await
+    .unwrap();
+    assert!(brain.settings_done(done, Some(&mut link)).is_ok());
+    let frames: Vec<ControlToShell> = std::iter::from_fn(|| output.try_recv().ok())
+        .map(|bytes| {
+            kumochi_protocol::frame::decode(&bytes[kumochi_protocol::frame::HEADER_LEN..]).unwrap()
+        })
+        .collect();
+    assert!(
+        matches!(
+            frames.first(),
+            Some(ControlToShell::Settings { answer: false, .. })
+        ),
+        "the latched settings come first, answering nothing: {frames:?}"
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame, ControlToShell::Settings { answer: true, .. })),
+        "the shell sent no change to answer"
+    );
+    assert_eq!(displayed_default(&brain), None);
+    brain.close().await;
+}

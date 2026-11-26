@@ -63,12 +63,13 @@ These forms can start Cargo even on a warm cache; don't use them in a no-build t
 
 ### Prebuilt idle and cold-start
 
-Build the driver and both images with the Gate feature together, from the final checkout.
+Build the driver and both images with the Gate features together, from the final checkout.
+The shell's `gate-recorder` feature keeps `--input-diagnostics` and `--gate-observer` in it.
 Do this outside the timing hold, in the admitted owned target directory. Record the source
 and SHA-256s of those three files; do not use or hash-pin installed or Dev binaries here.
 
 ```bash
-cargo build --release --locked --offline --target-dir "$target"   --package xtask --package kumochi-shell --package kumochi-brain   --features kumochi-protocol/gate-identity
+cargo build --release --locked --offline --target-dir "$target"   --package xtask --package kumochi-shell --package kumochi-brain   --features kumochi-protocol/gate-identity,kumochi-shell/gate-recorder
 sha256sum "$target/release/xtask.exe" "$target/release/kumochi.exe" "$target/release/kumochid.exe"
 ```
 
@@ -96,6 +97,7 @@ cold-start result a cold executable-cache measurement.
 
 Build the replay fixture outside the assigned quiet hold. Enable Gate identity only on
 the command line; the two replay features have no default and don't enable Gate identity.
+The shell's replay feature turns on its `gate-recorder` feature too.
 
 ```bash
 cargo build --release --locked --offline -p xtask -p kumochi-shell -p kumochi-brain   --features kumochi-protocol/gate-identity,kumochi-shell/gate-draw-replay,kumochi-brain/gate-draw-replay

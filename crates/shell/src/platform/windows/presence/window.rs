@@ -59,7 +59,8 @@ impl Hover {
         if inside == self.inside.get() {
             return;
         }
-        let entered_qpc = inside.then(performance_counter);
+        let entered_qpc =
+            (cfg!(any(test, feature = "gate-recorder")) && inside).then(performance_counter);
         if inside {
             let mut track = TRACKMOUSEEVENT {
                 cbSize: struct_size::<TRACKMOUSEEVENT>(),

@@ -478,6 +478,11 @@ impl Observer {
     }
 }
 
+/// Whether this run has a gate observer.
+pub(super) fn active(cx: &App) -> bool {
+    cx.has_global::<Observer>()
+}
+
 /// Starts observing the proxy and records where everything is.
 pub(super) fn start(
     cx: &mut App,
