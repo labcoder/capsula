@@ -203,9 +203,11 @@ driver runs the prerequisites' preflight with a `live` check: the parent's fence
 clock, and the session's own cell, set once the live session sees either leg end or refuse. The
 preflight asks it before each native call; once it says no, no further call is made, and an OS
 call already in flight may finish. The driver asks it again when the preflight returns, whatever
-it answered, so a session lost during the last call, or while a latched answer made none, is
-`Refused` before the next effect. Nothing reads the legs while the stages run, so a shell that
-closes a leg then is seen at that check only once the parent watch or the clock sees it too.
+it answered, so a session the cell records as ended during the last call, or while a latched
+answer made none, is `Refused` before the next effect. The cell is the session's recorded
+verdict, not a socket probe, and nothing reads the legs while the stages run. So a raw close
+while the parent lives and the clock has time isn't cancellation: the scan can finish and local
+state can start, and the close is first seen when serving reads the leg.
 
 The stage driver fences and checks the clock on entry, asks the prerequisites whether they're
 ready, and fences again before anything starts; each checkpoint fences too. It never starts
