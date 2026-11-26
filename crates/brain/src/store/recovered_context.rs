@@ -1,35 +1,31 @@
 //! Immutable history cutoffs for explicitly bound `ChatGPT` replacements.
 
 use kumochi_protocol::message::{RunId, ThreadId};
-use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension as _};
 
-use super::{Store, StoreError, schema};
-use crate::connections::vault::{CutoffRequest, Work};
+use super::{Store, StoreError};
+use crate::connections::vault::CutoffRequest;
 
 impl Store {
     /// Serves a bound vault's cutoff request on this, the profile's one history writer.
     pub(crate) fn serve_cutoff(&mut self, request: CutoffRequest) {
-        request.serve(|work| match work {
-            Work::Write(tag, attempted) => self.establish_chatgpt_cutoff(tag, attempted),
-            Work::Read(tag) => self.check_chatgpt_cutoff(tag),
-        });
+        request.serve(|tag| self.check_chatgpt_cutoff(tag));
     }
 
-    /// Writes the one cutoff for `tag`, setting `attempted` once the commit is attempted;
-    /// earlier refusals leave it unset.
-    fn establish_chatgpt_cutoff(
-        &mut self,
-        tag: u64,
-        attempted: &mut bool,
-    ) -> Result<Boundary, StoreError> {
-        if tag == 0 {
-            return Err(StoreError::RecoveryContext);
-        }
-        self.reconnect()?;
+    /// Records `tag`'s cutoff at the history as it stands, for fixtures outside the vault.
+    #[cfg(test)]
+    pub(crate) fn cut_history(&mut self, tag: u64) -> Boundary {
+        assert_ne!(tag, 0, "a cutoff's tag");
+        self.reconnect().expect("reconnect");
+        self.write_cutoff(tag).expect("a fresh tag's cutoff")
+    }
+
+    #[cfg(test)]
+    fn write_cutoff(&mut self, tag: u64) -> Result<Boundary, StoreError> {
         let tx = self
             .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        schema::migrate_recovery_context(&tx)?;
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        super::schema::migrate_recovery_context(&tx)?;
         let (last_thread, last_run) = cutoff_sequences(&tx)?;
         let inserted = tx.execute(
             "INSERT INTO chatgpt_recovery_context (tag,last_thread,last_run)
@@ -40,20 +36,12 @@ impl Store {
         if inserted != 1 {
             return Err(StoreError::RecoveryContext);
         }
-        *attempted = true;
         tx.commit()?;
         Ok(Boundary {
             tag,
             last_thread,
             last_run,
         })
-    }
-
-    /// Records `tag`'s cutoff at the history as it stands, for fixtures outside the vault.
-    #[cfg(test)]
-    pub(crate) fn cut_history(&mut self, tag: u64) -> Boundary {
-        self.establish_chatgpt_cutoff(tag, &mut false)
-            .expect("a fresh tag's cutoff")
     }
 
     /// Reads `tag`'s committed cutoff again; refuses while this connection is inside a
@@ -69,6 +57,7 @@ impl Store {
     }
 }
 
+#[cfg(test)]
 fn cutoff_sequences(conn: &Connection) -> Result<(i64, i64), StoreError> {
     let (thread, run): (Option<i64>, Option<i64>) = conn.query_row(
         "SELECT (SELECT max(id) FROM threads), (SELECT max(id) FROM runs)",

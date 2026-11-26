@@ -145,22 +145,6 @@ pub(crate) fn read_active(
     Ok(Secret::new(bytes))
 }
 
-pub(in crate::connections) fn read_staged_once(
-    store: &dyn CredentialStore,
-    service: &str,
-    plan: &WritePlan,
-) -> Result<SecretBytes, AuthorityError> {
-    read_active(
-        store,
-        service,
-        &ActiveRef {
-            kind: plan.kind,
-            generation: plan.generation,
-            layout: plan.layout,
-        },
-    )
-}
-
 pub(in crate::connections) fn has_missing_chunk(
     store: &dyn CredentialStore,
     service: &str,

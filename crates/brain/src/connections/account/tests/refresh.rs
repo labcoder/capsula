@@ -55,7 +55,6 @@ fn identity(subject: &str) -> Result<VerifiedIdentity, IdentityError> {
     Ok(VerifiedIdentity {
         subject: secret(subject),
         email: None,
-        expires_at: NOW + 3600,
     })
 }
 
