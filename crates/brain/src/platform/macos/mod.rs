@@ -25,6 +25,7 @@ pub(super) mod pair;
     expect(dead_code, reason = "parent-bound admission is not wired yet")
 )]
 pub(super) mod parent;
+pub(super) mod settings;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the pair adapter is not wired yet")

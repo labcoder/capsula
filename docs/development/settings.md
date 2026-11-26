@@ -16,7 +16,27 @@ On macOS both config and data use `<Application Support>/<product>`, where the s
 asks Darwin for the current user's Application Support folder. It never falls back to `HOME`,
 opens or creates the directory, or establishes that it's writable.
 It is not an App Sandbox container locator.
-The macOS brain still refuses to start, and folder discovery doesn't enable settings writes.
+
+On macOS, `platform::{read_settings, write_settings}` go through `kumochi-storage`, which treats
+the settings folder's parent as the Support anchor and holds the whole chain from `/`. The
+product folder must be this user's, mode 0700, with no ACL, and `config.toml` this user's,
+mode 0600, with one link and no ACL. Neither is ever re-secured. Both are checked again, ACL
+included, after a read, before a save's rename and before a save is reported, and the whole
+chain by name. Only `ENOENT` for the product folder or the file under an admitted anchor
+reads as no settings; a missing anchor refuses. A save creates the product folder at 0700 when
+it's missing, unlinks any leftover `config.toml.tmp` unread, writes the new text to that
+reserved name with `O_EXCL` at 0600, flushes it, and syncs the anchor. It then checks the old
+file, the staged copy and the folder again, and both names, renames, and flushes the folder
+and the file. These are samples under the brain's
+session lock, not a defence against another process of the same user.
+
+A save ends three ways. It's saved; it's unchanged, because nothing was published or a rename
+error left the old file and the staged copy provably where they were; or it's unconfirmed,
+because a barrier, a rename error or the final recheck left the outcome unproved. An unconfirmed
+save shows its change with screen holds and the screen's picture off, answers
+`SettingsRefused`, and refuses every later change until a restart reads the file again.
+Windows and Linux never report one. The macOS brain still refuses to start, so none of this is
+reached outside its native tests.
 
 Linux and macOS unit tests use the same settings writer with an explicit scratch directory. Run
 the macOS tests only in a private, sandbox-confined, single-writer scratch root. The adapter
@@ -446,7 +466,8 @@ sequenceDiagram
   connection that sent it lasts. A refused or failed change gets an `Error` first
   (`ConfigUnreadable` for a bad file, `VoiceUnavailable` for an installer op, otherwise
   `SettingsRefused`), then the unchanged view, so
-  the shell's field goes back to what's saved. An `Error` only ever comes just before an
+  the shell's field goes back to what's saved. After an unconfirmed save, that view is the one
+  it took, with the screen off. An `Error` only ever comes just before an
   `answer: true` view. A `Settings` with `answer: false` answers nothing: it's
   the connection's first frame, or the settled settings after a change another connection sent.
 
@@ -457,7 +478,8 @@ no shell is connected, and Quit and close write what's left before they end.
 
 - **A later connection** gets the settings as saved so far, then, as each earlier connection's
   change is saved, the settled settings with `answer: false`. An earlier change's refusal is only
-  logged: it sends no `Error` and no view. So a new shell's own changes are answered only by `answer: true`, and nothing from a
+  logged: it sends no `Error` and no view, except that an unconfirmed save sends its view with
+  `answer: false`. So a new shell's own changes are answered only by `answer: true`, and nothing from a
   gone shell can pass for one.
 - **Quit** writes the queue within its one absolute deadline (2 s from the accepted Quit). A
   change still unconfirmed then is logged by count, with no value. The runtime then shuts down
@@ -468,7 +490,8 @@ no shell is connected, and Quit and close write what's left before they end.
   budget. Its waits for ended runs and for the store each keep their own 2 s, so closing as a
   whole can take longer.
 - A change becomes the settings only once the file is replaced, so a failed write changes
-  neither memory nor disk. A leftover `config.toml.tmp` is never read; the next write overwrites
+  neither memory nor disk. An unconfirmed one (macOS only) is taken with the screen off, and
+  every later change is refused until a restart. A leftover `config.toml.tmp` is never read; the next write overwrites
   it.
 - Keys this build doesn't know survive every write, so a newer build's settings outlive a
   downgrade.

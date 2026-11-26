@@ -33,7 +33,7 @@ const FILE_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
 
 // SDK sys/stat.h's SF_DATALESS; libc does not declare it.
-const DATALESS: u32 = 0x4000_0000;
+pub(super) const DATALESS: u32 = 0x4000_0000;
 
 const LIMITS: Limits = Limits {
     depth: 32,

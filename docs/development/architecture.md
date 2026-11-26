@@ -66,7 +66,7 @@ flowchart TD
     C -->|no| K[Both Known Folders]
     B -->|no| X
     B -->|yes| D[Hold both roots' chains for the process's life]
-    D --> E[Checked create of the product folders and logs]
+    D --> E[Checked create of the product folders and logs, each existing one held to the product-folder check]
     E --> F[Refuse a linked, hard-linked or non-file store, authority, SQLite side file, session.lock, config.toml or log]
     F --> G[Writers open the admitted paths]
 ```
@@ -78,7 +78,10 @@ process resolves admits the pair, which in every process is the log folder, befo
 write. The shell checks its instance lock the same way before it opens it. The Claude Code
 folder, the voice models and the staging pins were already made by the checked create under a
 held parent; the Claude Code base and the staging root now hold their parent's chain while they
-create the product folder, in every build. A refusal ends startup with the fixed data-root error.
+create the product folder, in every build. An existing local or roaming product folder, and the
+logs folder, must also be a folder and pass the product-folder check below: no one untrusted may add to them or
+inherit write on what's made in them. Both halves pass before the logs folder is made under the
+local one. A refusal ends startup with the fixed data-root error.
 
 The chain check itself (`hold_chain`, the checked create and the checks they're built from)
 lives in `kumochi-storage`'s Windows module, shared by the shell and the brain; the brain's

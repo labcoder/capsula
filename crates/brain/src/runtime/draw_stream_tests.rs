@@ -1512,12 +1512,12 @@ async fn same_run_replacement_keeps_the_promised_delivery_boundary() {
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
-    reason = "the producer and successor run through the same three serialized writer boundaries"
+    reason = "the same stopped run is checked at three writer boundaries and under metadata pressure"
 )]
 async fn stopped_narrated_run_end_follows_surviving_metadata_even_when_a_successor_is_named() {
     use kumochi_protocol::message::RunOrigin;
 
-    for handed in 0..=2 {
+    for (handed, saturated) in [(0, false), (1, false), (2, false), (0, true)] {
         let scratch = Scratch::new("queued-speech-run-end");
         let mut brain = brain(&scratch);
         let output = OutputGeneration(17);
@@ -1588,6 +1588,11 @@ async fn stopped_narrated_run_end_follows_surviving_metadata_even_when_a_success
             }
         }
         assert_eq!(popped, ["promise", "announcement"][..handed]);
+        if saturated {
+            stop_under_metadata_pressure(&mut brain, link, &mut controls, run, label).await;
+            brain.close().await;
+            continue;
+        }
         apply(
             &mut brain,
             &mut link,
@@ -1644,6 +1649,124 @@ async fn stopped_narrated_run_end_follows_surviving_metadata_even_when_a_success
         );
         brain.close().await;
     }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the same stopped run and writer stay in scope through the ordered drain"
+)]
+async fn stop_under_metadata_pressure(
+    brain: &mut Brain,
+    link: Link<'_, '_>,
+    controls: &mut mpsc::Receiver<Vec<u8>>,
+    run: RunId,
+    label: impl Fn(&DataToShell) -> Option<&'static str>,
+) {
+    use kumochi_protocol::message::{ControlToBrain, MAX_STEP_LABEL, MAX_STEPS, Phase, Step};
+
+    let (queue, ready) = (link.queue, link.ready);
+    let scene = SceneId(u64::MAX);
+    let snapshot = DataToShell::SceneSnapshot {
+        scene,
+        revision: 1,
+        chunk: vec![
+            Step {
+                label: "m".repeat(MAX_STEP_LABEL),
+            };
+            MAX_STEPS
+        ],
+        last: true,
+    };
+    let bytes = frame::encode(&snapshot, Pipe::Data).expect("bounded metadata frame");
+    let mut queued = 0;
+    while queue.borrow().bytes() < super::DATA_CAP {
+        queue
+            .borrow_mut()
+            .push(super::data::Owner::Scene(scene), bytes.clone());
+        queued += 1;
+    }
+    assert!(queued > 1, "multiple metadata frames fill the queue");
+
+    let (send, mut incoming) = mpsc::channel(2);
+    let (_turns, mut turns) = mpsc::channel(1);
+    let (_pages, mut pages) = mpsc::channel(1);
+    let room = Notify::new();
+    for message in [
+        ControlToBrain::Stop {
+            run,
+            revealed: Vec::new(),
+        },
+        ControlToBrain::SpeechStopped { run, cursor: None },
+    ] {
+        send.try_send((message, 0))
+            .expect("the control lane is ready");
+    }
+    let core = brain.core::<false>(
+        &mut incoming,
+        &mut turns,
+        &mut pages,
+        &room,
+        link,
+        None,
+        None::<std::pin::Pin<&mut std::future::Pending<()>>>,
+    );
+    let receive = async {
+        loop {
+            let bytes = controls.recv().await.expect("the control lane is open");
+            let message = frame::read::<ControlToShell>(&mut bytes.as_slice(), Pipe::Control)
+                .expect("control frame");
+            if matches!(message, Some(ControlToShell::RunState { run: owner, phase: Phase::Interrupted, .. }) if owner == run)
+            {
+                break;
+            }
+        }
+        assert!(
+            queue.borrow().bytes() >= super::DATA_CAP,
+            "Stop must be served before the receiver drains any pressure"
+        );
+
+        let (mut writer, mut receiver) = tokio::io::duplex(4096);
+        let drain = async {
+            let mut ordered = Vec::new();
+            loop {
+                let (message, len) =
+                    crate::ipc::read_sized::<DataToShell>(&mut receiver, Pipe::Data)
+                        .await
+                        .expect("a complete data frame")
+                        .expect("the writer stays open through RunEnd");
+                if let DataToShell::RunEnd { run: ended } = message {
+                    assert_eq!(ended, run, "the decoded fence belongs to the stopped run");
+                    break;
+                }
+                if message == snapshot {
+                    ordered.push("metadata");
+                } else {
+                    ordered.extend(label(&message));
+                }
+                queue
+                    .borrow_mut()
+                    .grant(u32::try_from(len + frame::HEADER_LEN).expect("bounded credit"));
+                ready.notify_one();
+            }
+            let mut expected = vec!["promise"];
+            expected.extend(std::iter::repeat_n("metadata", queued));
+            assert_eq!(ordered, expected, "the surviving prefix precedes RunEnd");
+        };
+        tokio::select! {
+            () = drain => {}
+            ended = super::write_data(&mut writer, queue, ready, &room) => {
+                panic!("the data writer ended before RunEnd: {ended:?}");
+            }
+        }
+    };
+    timeout(WAIT, async {
+        tokio::select! {
+            () = receive => {}
+            ended = core => panic!("the core ended before RunEnd: {ended:?}"),
+        }
+    })
+    .await
+    .expect("Stop and the matching RunEnd make progress under queued metadata pressure");
 }
 
 #[tokio::test]
