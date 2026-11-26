@@ -234,6 +234,28 @@ mod tests {
     use super::*;
     use crate::test_support::Scratch;
     use std::io::Write as _;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_WRITE};
+
+    #[test]
+    fn a_model_tree_is_deleted_while_another_process_reads_a_file() {
+        let scratch = Scratch::trusted("model-delete-held");
+        let part = scratch.dir().join("part");
+        std::fs::create_dir_all(&part).unwrap();
+        let model = part.join("model.bin");
+        std::fs::write(&model, b"fixture").unwrap();
+        // As an on-access scan opens a file just written: reading, sharing everything.
+        let scan = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(&model)
+            .unwrap();
+        assert_eq!(remove_model_tree(&part), Ok(()));
+        assert_eq!(
+            std::fs::symlink_metadata(&part).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        drop(scan);
+    }
 
     #[test]
     fn model_paths_refuse_unc_before_querying_a_drive_and_refuse_network_mappings() {
