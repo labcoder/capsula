@@ -279,6 +279,13 @@ impl Folders {
         Ok(Self { local, roaming })
     }
 
+    /// The launch's own voice models folder, under its local half.
+    pub(crate) fn models(&self) -> PathBuf {
+        self.local
+            .join(GATE.data_dir)
+            .join(kumochi_protocol::voice::MODELS_DIR)
+    }
+
     /// Leaves onboarding owed, so the shell opens the onboarding window at start.
     pub(crate) fn owe_onboarding(&self) -> Result<()> {
         fs::write(

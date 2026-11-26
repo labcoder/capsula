@@ -48,11 +48,12 @@ enum Trial {
     StopButton,
 }
 
-const TRIALS: [Trial; 7] = [
+const TRIALS: [Trial; 8] = [
     Trial::Idle,
     Trial::ReceiptRest,
     Trial::Input(Phase::Hover, FixtureEscMode::Free),
     Trial::Input(Phase::Focus, FixtureEscMode::Free),
+    Trial::Input(Phase::Layouts, FixtureEscMode::Free),
     Trial::Input(Phase::Esc, FixtureEscMode::Free),
     Trial::Input(Phase::Esc, FixtureEscMode::Reserved),
     Trial::StopButton,
@@ -62,7 +63,8 @@ impl Trial {
     fn trace_bound(self) -> Option<Duration> {
         let seconds = match self {
             Self::Input(Phase::Hover, _) | Self::ReceiptRest => 30,
-            Self::Input(Phase::Focus, _) => 20,
+            Self::Input(Phase::Focus | Phase::Layouts, _) => 20,
+            Self::Input(Phase::Listening, _) => 360,
             Self::Input(Phase::Esc, _) | Self::StopButton => 10,
             Self::Idle => return None,
         };
@@ -70,10 +72,10 @@ impl Trial {
     }
 
     fn budget(self) -> Duration {
-        if self == Self::Idle {
-            Duration::from_secs(120)
-        } else {
-            PHASE_LIMIT
+        match self {
+            Self::Idle => Duration::from_secs(120),
+            Self::Input(Phase::Listening, _) => Duration::from_secs(420),
+            _ => PHASE_LIMIT,
         }
     }
 
@@ -82,6 +84,8 @@ impl Trial {
             Self::Idle => "cpu-idle",
             Self::Input(Phase::Hover, _) => "hover",
             Self::Input(Phase::Focus, _) => "focus-draft-escape",
+            Self::Input(Phase::Layouts, _) => "layouts",
+            Self::Input(Phase::Listening, _) => "listening",
             Self::Input(Phase::Esc, FixtureEscMode::Free) => "escape-free",
             Self::Input(Phase::Esc, FixtureEscMode::Reserved) => "escape-contested",
             Self::ReceiptRest => "receipt-rest",
@@ -143,6 +147,15 @@ struct Images {
     folders: Folders,
     /// How long building them took inside the run.
     build: Duration,
+    /// Where the Listening phase copies speech input from, when the run measures it.
+    speech: Option<Speech>,
+}
+
+/// An installed speech-input model folder and the native runtime, both already on this machine.
+#[derive(Debug)]
+struct Speech {
+    models: PathBuf,
+    natives: PathBuf,
 }
 
 impl Images {
@@ -160,6 +173,7 @@ impl Images {
             brain_sha256,
             folders: run.folders("app")?,
             build,
+            speech: None,
         })
     }
 
@@ -173,6 +187,7 @@ impl Images {
             brain_sha256: pins.brain_sha256,
             folders,
             build: Duration::ZERO,
+            speech: None,
         })
     }
 
@@ -186,6 +201,25 @@ impl Images {
             self.brain_sha256,
             self.build.as_secs_f64()
         ))
+    }
+
+    /// Copies speech input into the launch's own models folder and the native runtime beside the
+    /// brain, verified against the manifest, so the next launch can hear. Never downloads.
+    fn install_speech(&self) -> Result<()> {
+        let speech = self
+            .speech
+            .as_ref()
+            .context("the Listening phase needs hold-gate --speech")?;
+        let bin = self
+            .brain
+            .parent()
+            .context("the brain image has a folder")?;
+        crate::voice_assets::place_speech_input(
+            &speech.models,
+            &speech.natives,
+            &self.folders.models(),
+            bin,
+        )
     }
 
     fn unchanged(&self) -> Result<()> {
@@ -255,6 +289,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         args,
         ("feel-ready", feel, FixturePlacement::Default),
         &TRIALS,
+        None,
     )
 }
 
@@ -264,6 +299,41 @@ pub(crate) fn hover(args: impl Iterator<Item = String>) -> Result<()> {
         args,
         ("idle-open", idle_open, FixturePlacement::AwayFromCursor),
         &[Trial::Input(Phase::Hover, FixtureEscMode::Free)],
+        None,
+    )
+}
+
+const HOLD_USAGE: &str = "hold-gate needs <path-session.txt> [--speech <models-dir> <natives-dir>]";
+
+/// The hold to talk rows alone, opened by the owner's away rule: `AltGr` typing under two layouts,
+/// then, with `--speech`, hold recognised to Listening on screen with the microphone open.
+pub(crate) fn hold(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let transcript = args.next().context(HOLD_USAGE)?;
+    let speech = match (
+        args.next().as_deref(),
+        args.next(),
+        args.next(),
+        args.next(),
+    ) {
+        (None, ..) => None,
+        (Some("--speech"), Some(models), Some(natives), None) => Some(Speech {
+            models: PathBuf::from(models),
+            natives: PathBuf::from(natives),
+        }),
+        _ => bail!(HOLD_USAGE),
+    };
+    let layouts = Trial::Input(Phase::Layouts, FixtureEscMode::Free);
+    let listening = Trial::Input(Phase::Listening, FixtureEscMode::Free);
+    let trials: &[Trial] = if speech.is_some() {
+        &[layouts, listening]
+    } else {
+        &[layouts]
+    };
+    session_run(
+        std::iter::once(transcript),
+        ("idle-open", idle_open, FixturePlacement::AwayFromCursor),
+        trials,
+        speech,
     )
 }
 
@@ -273,10 +343,13 @@ fn session_run(
     args: impl Iterator<Item = String>,
     opener: (&str, Opener, FixturePlacement),
     trials: &[Trial],
+    speech: Option<Speech>,
 ) -> Result<()> {
     retained_run(args, Run::finish, |output, run| {
-        let result =
-            Images::build(run).and_then(|images| run_session(output, &images, opener, trials));
+        let result = Images::build(run).and_then(|mut images| {
+            images.speech = speech;
+            run_session(output, &images, opener, trials)
+        });
         let cursor = native::cursor_position();
         println!(
             "final_cursor={}",
@@ -460,6 +533,7 @@ pub(crate) fn measure(args: impl Iterator<Item = String>) -> Result<()> {
             FixturePlacement::AwayFromCursor,
         ),
         &TRIALS,
+        None,
     )
 }
 
@@ -662,6 +736,9 @@ fn run_trial(
         platform::processes()?.is_empty(),
         "unexpected product process between phases"
     );
+    if let Trial::Input(Phase::Listening, _) = trial {
+        images.install_speech()?;
+    }
     let directory = output.join(trial.name());
     fs::create_dir(&directory)?;
     let calibration = if trial.cpu_limit().is_some() {
@@ -869,6 +946,15 @@ fn summarize(
             Trial::ReceiptRest => {
                 receipts::summarize(observer, pid, &mut rows, dock, output, receipts::Mode::Rest)
             }
+            Trial::Input(Phase::Listening, _) => observation::summarize_listening(
+                &diagnostics.heard.borrow(),
+                usize::try_from(session::HOLDS)?,
+                observer,
+                pid,
+                &mut rows,
+                dock,
+                output,
+            ),
             _ => Ok(()),
         }
     })();
@@ -1048,8 +1134,14 @@ mod tests {
     fn receipts_follow_idle_and_esc_conflict_is_last() {
         assert!(TRIALS.contains(&Trial::Input(Phase::Hover, FixtureEscMode::Free)));
         assert_eq!(&TRIALS[..2], &[Trial::Idle, Trial::ReceiptRest]);
+        assert!(
+            !TRIALS
+                .iter()
+                .any(|trial| matches!(trial, Trial::Input(Phase::Listening, _))),
+            "only hold-gate with a speech source opens the microphone"
+        );
         assert_eq!(
-            &TRIALS[5..],
+            &TRIALS[6..],
             &[
                 Trial::Input(Phase::Esc, FixtureEscMode::Reserved),
                 Trial::StopButton

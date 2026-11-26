@@ -161,6 +161,42 @@ fn link(
     Ok(plan.into_iter().map(|placement| placement.dest).collect())
 }
 
+/// Copies speech input's model files from an installed models folder, laid out as
+/// `<models>/speech-input/<file>`, into `models_root`, and the native runtime from `natives` into
+/// `bin`. Every source is verified against the manifest first, as in [`link`].
+pub(crate) fn place_speech_input(
+    models: &Path,
+    natives: &Path,
+    models_root: &Path,
+    bin: &Path,
+) -> Result<()> {
+    let mut plan = Vec::new();
+    for file in MODEL_FILES
+        .iter()
+        .filter(|file| file.part == VoicePart::SpeechInput)
+    {
+        let source = models.join(file.part.dir()).join(file.name);
+        verify(&source, file.bytes, file.sha256)?;
+        plan.push(Placement {
+            source,
+            dest: models_root.join(file.part.dir()).join(file.name),
+            bytes: file.bytes,
+            sha256: file.sha256,
+        });
+    }
+    for file in NATIVE_FILES {
+        let source = natives.join(file.name);
+        verify(&source, file.bytes, file.sha256)?;
+        plan.push(Placement {
+            source,
+            dest: bin.join(file.name),
+            bytes: file.bytes,
+            sha256: file.sha256,
+        });
+    }
+    install(&plan)
+}
+
 /// Keeps every destination that already verifies and copies the absent ones. Any other existing
 /// destination is a conflict: it's reported and left as it is, and nothing is copied. A failed copy
 /// leaves nothing at its final name; files this run already placed stay, since each verified.
@@ -184,7 +220,8 @@ fn install(plan: &[Placement<'_>]) -> Result<()> {
 }
 
 // shortcut: no junction, symlink or file-identity checks on the destination folders, which are the
-// developer's own %LOCALAPPDATA% and target folders; add them if this ever writes elsewhere.
+// developer's own %LOCALAPPDATA%, target folders and a gate run's own folders; add them if this
+// ever writes elsewhere.
 /// Copies the source to a temporary file beside the destination, verifying the bytes as they are
 /// written, then links the final name to it. A hardlink to the source would share its ACL, which
 /// the brain refuses where other accounts may write.
