@@ -186,6 +186,14 @@ provisions their identifiers.
   with that exact protection class and no access control. Anything else refuses with no update and
   no delete. The readback must hold exactly 32 bytes, and only the brain compares them, in constant
   time, with its own.
+- **Storage reads, the brain writes.** Storage makes the one `SecItemCopyMatching` call. The
+  brain's `platform/macos/instance.rs` makes the add, the value-only update and the delete, on a
+  no-copy CFData whose backing is wiped when CoreFoundation releases it.
+
+`startup::custody::SessionCustody` is the exclusive lock on `session.lock` opened on the admitted
+product folder's descriptor (created privately, with no `logs` folder, when it's missing). Busy
+custody refuses before any item call, and another edition refuses `NotAdmitted` before any folder
+lookup.
 
 ## What this crate doesn't do
 

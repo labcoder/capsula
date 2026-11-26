@@ -16,6 +16,30 @@ impl BoundHello {
 #[cfg(target_os = "macos")]
 pub(crate) use macos::pair::BoundHello;
 
+/// The instance item's session lock; only macOS has one.
+#[cfg(not(target_os = "macos"))]
+pub(crate) enum InstanceLock {}
+
+#[cfg(not(target_os = "macos"))]
+#[expect(dead_code, reason = "parent-bound startup is not wired yet")]
+pub(crate) fn instance_custody() -> Result<InstanceLock, crate::startup::custody::CustodyError> {
+    Err(crate::startup::custody::CustodyError::NotAdmitted)
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) fn instance_custody_at(
+    _: &std::path::Path,
+) -> Result<InstanceLock, crate::startup::custody::CustodyError> {
+    Err(crate::startup::custody::CustodyError::NotAdmitted)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) type InstanceLock = kumochi_storage::AdmittedLock;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::instance::instance_custody;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use macos::instance::lock_at as instance_custody_at;
+
 #[cfg(target_os = "macos")]
 pub(crate) use macos::capture::{display_at, screen_capturer};
 #[cfg(target_os = "macos")]
