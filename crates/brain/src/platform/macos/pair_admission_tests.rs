@@ -13,6 +13,7 @@ use kumochi_session::{Channel, ShellAwaitsReply};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use super::super::stream::{RecordReader, RecordWriter};
 use super::legs::PairLegs;
@@ -125,13 +126,15 @@ async fn greeting(
     shell: &ShellProcess,
     frames: &[(Pipe, Vec<u8>)],
 ) -> (Result<bool, SessionError>, Vec<ControlToShell>, u64) {
-    greeting_reserving(shell, frames, || {}).await
+    greeting_reserving(shell, frames, by, || {}).await
 }
 
-/// [`greeting`], running `on_reserve` inside the reservation.
+/// [`greeting`] by the deadline `by` gives once the shell has sent, running `on_reserve` inside
+/// the reservation.
 async fn greeting_reserving(
     shell: &ShellProcess,
     frames: &[(Pipe, Vec<u8>)],
+    by: impl FnOnce() -> Instant,
     on_reserve: impl FnOnce(),
 ) -> (Result<bool, SessionError>, Vec<ControlToShell>, u64) {
     let (mut pair, mut peer) = Box::pin(bound()).await;
@@ -295,7 +298,7 @@ async fn a_shell_lost_before_a_greeting_reply_gets_neither_reply() {
         data(&DataToBrain::Hello(hello())),
         data(&DataToBrain::TextMetrics(None)),
     ];
-    let (result, frames, reserved) = greeting_reserving(&losing, &legacy, || {
+    let (result, frames, reserved) = greeting_reserving(&losing, &legacy, by, || {
         assert!(losing.publish(1), "the loss comes before any claim");
     })
     .await;
@@ -303,5 +306,24 @@ async fn a_shell_lost_before_a_greeting_reply_gets_neither_reply() {
         matches!(result, Err(SessionError::ClosedEarly)),
         "{result:?}"
     );
+    assert_eq!((frames, reserved), (Vec::new(), 1));
+}
+
+#[tokio::test]
+async fn a_deadline_that_passes_before_welcome_is_written_sends_nothing() {
+    let shell = ShellProcess::fixture(1, Arc::new(AtomicU8::new(0)));
+    let legacy = [
+        control(&ControlToBrain::Hello(hello())),
+        data(&DataToBrain::Hello(hello())),
+        data(&DataToBrain::TextMetrics(None)),
+    ];
+    let (result, frames, reserved) = greeting_reserving(
+        &shell,
+        &legacy,
+        || Instant::now() + SHORT,
+        || std::thread::sleep(SHORT * 2),
+    )
+    .await;
+    assert!(matches!(result, Err(SessionError::Timeout)), "{result:?}");
     assert_eq!((frames, reserved), (Vec::new(), 1));
 }

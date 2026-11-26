@@ -416,12 +416,14 @@ again after ready I/O completes), or a greeting read that's dropped part way.
 same checks in the same order as the pipes. The control greeting is authorized as `SessionBound`
 (the zero placeholder) before a build mismatch is disclosed, Welcome goes out through the
 control sealer, and the data greeting and text metrics come through the pair's own reader.
-Acquiring the data leg does nothing, and binding names the parent shell. Two `Legs` hooks keep
+Acquiring the data leg does nothing, and binding names the parent shell. Three `Legs` hooks keep
 transport policy out of `greet`. `fence` refuses once the shell is known to be gone; `greet`
-checks it, each time with no await in between, before it reserves the session, right before it
-writes Welcome or BuildMismatch (with the deadline, since `timeout_at` polls a ready write before
-its timer), and after the data greeting. `mismatch_notice` runs before the BuildMismatch reply, so the pipes log a mismatch
-even when the reply can't be written. `PairLegs` logs nothing and never writes its tap, since
+checks it, each time with no await in between, before it reserves the session and after the data
+greeting. A third hook, `before_reply`, runs right before Welcome or BuildMismatch is written:
+`PairLegs` refuses there on parent loss and then on a passed deadline, since `timeout_at` polls a
+ready write before its timer. The pipes check nothing in either hook, so Detached greets as
+before. `mismatch_notice` runs before the BuildMismatch reply, so the pipes log a mismatch even
+when the reply can't be written. `PairLegs` logs nothing and never writes its tap, since
 nothing before the commit may.
 
 The shell's side lives in `shell-core`'s `platform/macos/leg.rs` and `connect_pair`, also

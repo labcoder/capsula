@@ -363,9 +363,14 @@ pub(crate) trait Legs {
     fn bind(&mut self) -> Result<Self::Peer, SessionError>;
     fn data(&mut self) -> &mut Self::Data;
     /// Refuses once the transport knows its shell is gone. [`greet`] checks it, each time with no
-    /// await in between, before reserving the session Welcome carries, right before writing
-    /// Welcome or `BuildMismatch`, and after the data greeting.
+    /// await in between, before reserving the session Welcome carries and after the data greeting.
     fn fence(&self) -> Result<(), SessionError> {
+        Ok(())
+    }
+    /// The last check before Welcome or `BuildMismatch` is written, with no await in between. The
+    /// pipes check nothing here; a transport that must not answer a lost shell or a passed
+    /// `deadline` refuses, since `timeout_at` polls a write that's ready before its timer.
+    fn before_reply(&self, _deadline: Instant) -> Result<(), SessionError> {
         Ok(())
     }
     /// Called before a build mismatch is answered, so it runs even when the answer can't be
@@ -482,7 +487,7 @@ pub(crate) async fn greet<L: Legs>(
             let reply = ControlToShell::BuildMismatch {
                 brain_build: BUILD_ID.to_owned(),
             };
-            before_reply(legs, deadline)?;
+            legs.before_reply(deadline)?;
             timeout_at(deadline, send(legs, &reply, tap))
                 .await
                 .map_err(|_| SessionError::Timeout)??;
@@ -496,7 +501,7 @@ pub(crate) async fn greet<L: Legs>(
         incarnation: session.incarnation,
         issue_epoch: session.epoch,
     };
-    before_reply(legs, deadline)?;
+    legs.before_reply(deadline)?;
     timeout_at(deadline, send(legs, &welcome, tap))
         .await
         .map_err(|_| SessionError::Timeout)??;
@@ -515,17 +520,6 @@ pub(crate) async fn greet<L: Legs>(
         session,
         text_metrics,
     }))
-}
-
-/// The last check before a greeting reply, with no await between it and the write: a shell known
-/// to be gone, or a deadline already passed, gets nothing. `timeout_at` alone isn't enough, because
-/// it polls a write that's ready before its timer.
-fn before_reply(legs: &impl Legs, deadline: Instant) -> Result<(), SessionError> {
-    legs.fence()?;
-    if Instant::now() >= deadline {
-        return Err(SessionError::Timeout);
-    }
-    Ok(())
 }
 
 /// The data leg after Welcome: acquiring it, its greeting and the drawing-font frame keep the

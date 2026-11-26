@@ -92,5 +92,13 @@ impl Legs for PairLegs<'_> {
         self.shell.fence().map_err(|_| SessionError::ClosedEarly)
     }
 
+    fn before_reply(&self, deadline: Instant) -> Result<(), SessionError> {
+        self.fence()?;
+        if Instant::now() >= deadline {
+            return Err(SessionError::Timeout);
+        }
+        Ok(())
+    }
+
     fn mismatch_notice(&self) {}
 }
