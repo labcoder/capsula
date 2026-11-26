@@ -75,6 +75,9 @@ pub(crate) enum LinkError {
     #[cfg(target_os = "macos")]
     #[error("can't turn off core dumps")]
     Harden,
+    #[cfg(target_os = "macos")]
+    #[error("the brain child's custody ended")]
+    Custody,
     #[error("quitting")]
     Quitting,
     #[error(transparent)]
@@ -356,9 +359,9 @@ pub(crate) fn connect_pair(
 
 /// [`connect_pair`] with its spawn, its core-dump limit and its item read supplied. A failure
 /// after the spawn settles the child before it returns, so no later attempt starts beside it; an
-/// exit with [`BRAIN_EXIT_BUSY`](kumochi_protocol::constants::BRAIN_EXIT_BUSY) is `Busy`. Once
-/// connected, custody ending aborts both legs, so a peer that keeps its ends open can't hold the
-/// link.
+/// exit with [`BRAIN_EXIT_BUSY`](kumochi_protocol::constants::BRAIN_EXIT_BUSY) is `Busy`. From
+/// the spawn on, custody ending shuts the ends down, so every wait of the attempt returns at once,
+/// and once connected it aborts both legs: a peer that keeps its ends open can't hold either.
 #[cfg(target_os = "macos")]
 #[expect(
     clippy::too_many_arguments,
@@ -381,6 +384,8 @@ pub(super) fn connect_pair_with(
     deadline: Instant,
     text_metrics: impl FnOnce(Instant) -> DrawingText,
 ) -> Result<(Connection, super::child::ChildOwner), Failed> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::child::{Exit, Settled, Unconnected};
     use kumochi_protocol::constants::BRAIN_EXIT_BUSY;
     let (owner, ends) = start(deadline).map_err(|error| {
@@ -394,21 +399,33 @@ pub(super) fn connect_pair_with(
             child: Some(child),
         }
     })?;
-    let connected = check_attempt(Some(deadline)).and_then(|()| {
-        after_ready(
-            ends,
-            channel,
-            audio,
-            repair_of,
-            deadline,
-            text_metrics,
-            harden,
-            read_item,
-        )
-    });
+    let ended = Arc::new(AtomicBool::new(false));
+    let connected = super::macos::closer(&ends)
+        .map_err(LinkError::Io)
+        .and_then(|close| {
+            let marked = Arc::clone(&ended);
+            // Terminal custody ends every wait on the ends, and the fences see it first.
+            owner.on_settled(move || {
+                marked.store(true, Ordering::SeqCst);
+                close();
+            });
+            check_attempt(Some(deadline))?;
+            after_ready(
+                ends,
+                channel,
+                audio,
+                repair_of,
+                deadline,
+                text_metrics,
+                harden,
+                read_item,
+                || ended.load(Ordering::SeqCst),
+            )
+        });
     match connected {
         Ok(connection) => {
             let legs = [&connection.control, &connection.data].map(Arc::downgrade);
+            // In place of the closer, which has run already if custody has ended.
             owner.on_settled(move || {
                 for leg in legs.iter().filter_map(std::sync::Weak::upgrade) {
                     leg.abort();
@@ -444,11 +461,12 @@ fn not_spawned(error: LinkError) -> Failed {
 /// Waits for the brain's READY byte, then turns off core dumps with `harden`, then reads the
 /// instance capability with `read_item`, then runs [`over_pair`]. Nothing is written and the item
 /// isn't read until READY arrives, and a wrong byte or the stream ending is `Rejected`. A failed
-/// `harden` is `Harden`, and the item is never read.
+/// `harden` is `Harden`, and the item is never read. Once `ended` says custody of the child is
+/// over, the attempt is `Custody` on each side of the item read.
 #[cfg(target_os = "macos")]
 #[expect(
     clippy::too_many_arguments,
-    reason = "the pair attempt's ends, identity, deadline and its two injected platform calls"
+    reason = "the pair attempt's ends, identity, deadline, custody and its two platform calls"
 )]
 pub(super) fn after_ready(
     ends: super::macos::ShellEnds,
@@ -461,8 +479,15 @@ pub(super) fn after_ready(
     read_item: impl FnOnce(
         &mut [u8; kumochi_session::SECRET_LEN],
     ) -> Result<(), kumochi_storage::ItemError>,
+    ended: impl Fn() -> bool,
 ) -> Result<Connection, LinkError> {
     use kumochi_protocol::constants::SESSION_READY;
+    let in_custody = || {
+        if ended() {
+            return Err(LinkError::Custody);
+        }
+        Ok(())
+    };
     match super::macos::read_ready(&ends, deadline) {
         Ok(Some(SESSION_READY)) => {}
         Ok(_) => return Err(LinkError::Rejected),
@@ -475,9 +500,11 @@ pub(super) fn after_ready(
     harden().map_err(|_| LinkError::Harden)?;
     let mut secret = super::macos::Secret::zeroed();
     check_attempt(Some(deadline))?;
+    in_custody()?;
     let read = read_item(secret.bytes_mut());
     // The Keychain call can outlast the attempt, so its answer counts only within the deadline.
     check_attempt(Some(deadline))?;
+    in_custody()?;
     read.map_err(LinkError::Item)?;
     over_pair(
         ends,

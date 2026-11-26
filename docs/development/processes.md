@@ -240,7 +240,9 @@ the disconnected window, so no child starts.
   the link drops the owner, the owner waits for the child to exit, then sends one SIGKILL and
   waits once more. A failed kill isn't retried. A child still unreaped after that is
   **Unsettled**: it's reported once, the claim stays taken so nothing replaces it, and the owner
-  keeps reaping it quietly while the shell lives. The owner never holds the shell's ends of the
+  keeps reaping it quietly while the shell lives. Once custody has ended, the watchdog's
+  Unsettled included, the owner only reaps: it starts no kill after the outcome is published.
+  The owner never holds the shell's ends of the
   pair, only the child's until the spawn: the link closes its own ends when the connection ends
   (aborted for Legacy, dropped for Queued), so the brain sees EOF before it's retired.
 - **Settling.** `ChildOwner::settle` retires the child and waits for how custody ended, no longer

@@ -461,7 +461,13 @@ is `Harden`, with no read and no byte written. Only then does the shell read the
 `Role::Shell`, into a `Secret`: a boxed buffer, allocated before the read, that wipes itself when
 dropped, so a move copies only the pointer. The clock is checked before the read and again after
 it, before its answer counts, so a read that ends past the deadline is `ConnectExpired` whether it
-succeeded or not. A refused read is `Item`. Either way no byte is written. `initiate` takes the
+succeeded or not. A refused read is `Item`. Either way no byte is written. From the spawn on,
+custody of the child ending (reaped, Lost or Unsettled) shuts the shell's two ends down, so the
+READY wait, the initiator and the wait for `Settings` return at once however long the deadline,
+and the attempt is `Custody` on each side of the item read, so no item is
+read once custody has ended. A child in Quit's grace is still owned and may finish connecting.
+The data leg hanging up ends the READY wait as `Rejected`, and either leg hanging up during the
+initiator ends it with `UnexpectedEof`. `initiate` takes the
 box and drops it once the initiator is keyed, before its first message goes out. It runs the
 initiator's steps over the shell's two ends by one deadline and returns the legs only once
 `BindAck` verifies. Each leg is the link's `PipeClient` over the session crate's record owners.

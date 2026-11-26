@@ -3,7 +3,8 @@
 //! each Quit's outcome belongs to the attempt it ended.
 //! Synthetic sockets and a fake child only: nothing is spawned and no Keychain is read.
 
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -29,6 +30,8 @@ use crate::platform::connect::{Failed, LinkError, connect_pair_with};
 /// The owner's grace before a kill, and its wait after one.
 const WAIT: Duration = Duration::from_millis(300);
 const BOUND: Duration = Duration::from_secs(10);
+/// How long a brain waits to see the shell shut its ends down before it goes on regardless.
+const SHUTDOWN_SEEN: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct Script {
@@ -42,6 +45,10 @@ struct Script {
     /// The next poll says it entered, then blocks until released or dropped.
     poll_blocks: Option<(mpsc::Sender<()>, Receiver<()>)>,
     killed: Option<mpsc::Sender<()>>,
+    /// The owner's grace and wait in place of [`WAIT`].
+    grace: Option<Duration>,
+    /// Told when the brain reaches the point its script names.
+    reached: Option<mpsc::Sender<()>>,
 }
 
 /// A fake child: running until it exits or is killed; a kill ends it with SIGKILL and tells
@@ -128,6 +135,15 @@ enum Then {
     ExitsAfterCommit(i32),
     /// Commits, then closes as the child's custody is lost.
     LostCloses,
+    /// Writes READY, reads the first byte of the initiator's opening, says so and holds both ends
+    /// open until killed.
+    HoldsInHandshake,
+    /// Waits to see the shell's ends shut down, says so, writes READY all the same and holds both
+    /// ends open until killed.
+    ReadyAfterShutdown,
+    /// Writes READY, waits to see the shell's ends shut down, says so and holds both ends open
+    /// until killed.
+    ReadyBeforeShutdown,
 }
 
 fn brain(child: &Child, then: Then) -> ShellEnds {
@@ -138,14 +154,40 @@ fn brain(child: &Child, then: Then) -> ShellEnds {
         let _seen = killed.recv_timeout(BOUND);
     };
     thread::spawn(move || {
+        let reached = || {
+            if let Some(reached) = child.script().reached.take() {
+                let _unwatched = reached.send(());
+            }
+        };
         match then {
             Then::NoReady => return until_killed(),
             Then::ExitsBeforeReady(code) => return child.exits(Exit::Code(code)),
+            Then::ReadyAfterShutdown => {
+                shut_down_seen(&control);
+                reached();
+                // The shell shut its end down, so the byte has nowhere to go.
+                let _refused = (&control).write_all(&[SESSION_READY]);
+                return until_killed();
+            }
             _ => {}
         }
         (&control).write_all(&[SESSION_READY]).expect("READY");
-        if matches!(then, Then::ClosesAfterReady) {
-            return;
+        match then {
+            Then::ClosesAfterReady => return,
+            Then::HoldsInHandshake => {
+                let mut opening = [0];
+                (&control)
+                    .read_exact(&mut opening)
+                    .expect("the initiator's first byte");
+                reached();
+                return until_killed();
+            }
+            Then::ReadyBeforeShutdown => {
+                shut_down_seen(&control);
+                reached();
+                return until_killed();
+            }
+            _ => {}
         }
         let deadline = Instant::now() + BOUND;
         let mut brain = scripted(
@@ -163,15 +205,32 @@ fn brain(child: &Child, then: Then) -> ShellEnds {
             Then::Stalls => until_killed(),
             Then::ExitsAfterCommit(code) => child.exits(Exit::Code(code)),
             Then::LostCloses => child.script().lost = true,
-            Then::Closes | Then::NoReady | Then::ExitsBeforeReady(_) | Then::ClosesAfterReady => {}
+            Then::Closes
+            | Then::NoReady
+            | Then::ExitsBeforeReady(_)
+            | Then::ClosesAfterReady
+            | Then::HoldsInHandshake
+            | Then::ReadyAfterShutdown
+            | Then::ReadyBeforeShutdown => {}
         }
         drop(brain);
     });
     shell
 }
 
+/// Waits until the shell's end of `control` is shut down, or [`SHUTDOWN_SEEN`] has passed.
+fn shut_down_seen(control: &UnixStream) {
+    control
+        .set_read_timeout(Some(SHUTDOWN_SEEN))
+        .expect("bounded");
+    let mut byte = [0];
+    // EOF is the shutdown; a timeout means it never came, which the test then shows.
+    let _seen = (&*control).read(&mut byte);
+}
+
 fn owned(child: &Child, word: &Arc<SpawnWord>) -> Result<ChildOwner, Refusal> {
-    let owner = ChildOwner::start(child.clone(), Arc::clone(word), WAIT).map_err(Refusal::Spawn)?;
+    let wait = child.script().grace.unwrap_or(WAIT);
+    let owner = ChildOwner::start(child.clone(), Arc::clone(word), wait).map_err(Refusal::Spawn)?;
     match owner.spawned(Instant::now() + BOUND) {
         Ok(Report::Spawned) => Ok(owner),
         Ok(Report::NotSpawned(refusal)) => Err(refusal),
@@ -188,12 +247,26 @@ fn attempt(
         &mut [u8; kumochi_session::SECRET_LEN],
     ) -> Result<(), kumochi_storage::ItemError>,
 ) -> Result<(Connection, ChildOwner), Failed> {
+    attempt_with(word, child, then, by, || Ok(()), read_item)
+}
+
+/// [`attempt`] with `harden` in place of a hardening that does nothing.
+fn attempt_with(
+    word: &Arc<SpawnWord>,
+    child: &Child,
+    then: Then,
+    by: Instant,
+    harden: impl FnOnce() -> io::Result<()>,
+    read_item: impl FnOnce(
+        &mut [u8; kumochi_session::SECRET_LEN],
+    ) -> Result<(), kumochi_storage::ItemError>,
+) -> Result<(Connection, ChildOwner), Failed> {
     connect_pair_with(
         |_| {
             let owner = owned(child, word).map_err(NotStarted::Refused)?;
             Ok((owner, brain(child, then)))
         },
-        || Ok(()),
+        harden,
         read_item,
         Channel::Dev,
         AudioSession::Legacy,
@@ -326,6 +399,8 @@ fn a_quit_outcome_is_the_attempt_quit_ended_not_an_earlier_childs_clean_exit() {
 #[test]
 fn a_quit_queued_but_never_written_is_not_clean_on_an_exit_0() {
     let child = Child::default();
+    // The test decides when the child exits, so no kill may come first.
+    child.script().grace = Some(BOUND);
     let (link, states) = link(&child, Then::Stalls, refused);
     until(&states, connected);
     let hold = link.control_writer_hold();
@@ -468,6 +543,8 @@ fn parked_brain(child: &Child, go: Receiver<()>) -> ShellEnds {
 #[test]
 fn a_quit_parked_before_the_queued_writers_start_is_clean_on_its_own_receipt() {
     let child = Child::default();
+    // The handshake under Quit takes its own time, so no kill may come first.
+    child.script().grace = Some(BOUND);
     let (go, gate) = mpsc::channel();
     let (events, _states) = async_channel::unbounded();
     let mut gate = Some(gate);
@@ -648,5 +725,220 @@ fn a_refused_attempt_names_none_of_the_item_bytes() {
     for shown in [format!("{error:?}"), error.error.to_string()] {
         assert!(!shown.contains("SENTINEL"), "as text: {shown}");
         assert!(!shown.contains("83, 69, 78"), "as a byte list: {shown}");
+    }
+}
+
+/// How a test ends custody while an attempt runs.
+#[derive(Clone, Copy, Debug)]
+enum Ending {
+    /// Waiting on the child fails.
+    Lost,
+    /// Quit, then a refused kill outlasts the owner's wait.
+    Unsettled,
+}
+
+impl Ending {
+    fn child(self) -> Child {
+        let child = Child::default();
+        child.script().kill_fails = matches!(self, Self::Unsettled);
+        child
+    }
+
+    fn end(self, child: &Child, word: &SpawnWord) {
+        match self {
+            Self::Lost => child.script().lost = true,
+            Self::Unsettled => word.quit(),
+        }
+    }
+
+    fn settled(self) -> Settled {
+        match self {
+            Self::Lost => Settled::Lost,
+            Self::Unsettled => Settled::Unsettled,
+        }
+    }
+}
+
+/// What an attempt that ended under a test did.
+struct Ended {
+    error: LinkError,
+    took: Duration,
+    reads: usize,
+}
+
+/// Runs one attempt against `child` scripted by `then` on its own thread, with `harden` and an
+/// item read that counts and then runs `reading`, while `during` ends custody on the test's
+/// thread. The attempt has [`BOUND`] and must fail with custody ended as `ending` says.
+fn attempt_while(
+    ending: Ending,
+    child: &Child,
+    then: Then,
+    harden: impl FnOnce() -> io::Result<()> + Send,
+    reading: impl FnOnce() + Send,
+    during: impl FnOnce(&Arc<SpawnWord>),
+) -> Ended {
+    let word = Arc::new(SpawnWord::default());
+    let reads = AtomicUsize::new(0);
+    let start = Instant::now();
+    let result = thread::scope(|scope| {
+        let attempt = scope.spawn(|| {
+            attempt_with(&word, child, then, start + BOUND, harden, |item| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                reading();
+                honest(item)
+            })
+            .map(drop)
+        });
+        during(&word);
+        attempt.join().expect("the attempt returned")
+    });
+    let took = start.elapsed();
+    match result {
+        Err(Failed {
+            error,
+            child: Some(Unconnected::Settled(settled)),
+        }) if settled == ending.settled() => Ended {
+            error,
+            took,
+            reads: reads.load(Ordering::SeqCst),
+        },
+        other => panic!("{ending:?}: {other:?}"),
+    }
+}
+
+fn spawned(child: &Child) {
+    let by = Instant::now() + BOUND;
+    while child.script().spawns == 0 {
+        assert!(Instant::now() < by, "the child started");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Well before the attempt's [`BOUND`]: the owner's grace and wait, and slack for a busy host.
+fn prompt(took: Duration) -> bool {
+    took < 2 * WAIT + Duration::from_secs(2)
+}
+
+#[test]
+fn custody_ending_before_ready_ends_the_attempt_and_reads_no_item() {
+    for ending in [Ending::Lost, Ending::Unsettled] {
+        let child = ending.child();
+        let ended = attempt_while(
+            ending,
+            &child,
+            Then::NoReady,
+            || Ok(()),
+            || {},
+            |word| {
+                spawned(&child);
+                ending.end(&child, word);
+            },
+        );
+        assert!(matches!(ended.error, LinkError::Rejected), "{ending:?}");
+        assert!(prompt(ended.took), "{ending:?}: {:?}", ended.took);
+        assert_eq!(ended.reads, 0, "{ending:?}");
+    }
+}
+
+#[test]
+fn custody_ending_during_the_handshake_ends_the_attempt() {
+    for ending in [Ending::Lost, Ending::Unsettled] {
+        let child = ending.child();
+        let (reached, in_handshake) = mpsc::channel();
+        child.script().reached = Some(reached);
+        let ended = attempt_while(
+            ending,
+            &child,
+            Then::HoldsInHandshake,
+            || Ok(()),
+            || {},
+            |word| {
+                in_handshake
+                    .recv_timeout(BOUND)
+                    .expect("the brain is in the handshake");
+                ending.end(&child, word);
+            },
+        );
+        let LinkError::Io(error) = &ended.error else {
+            panic!("{ending:?}: {:?}", ended.error);
+        };
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof, "{ending:?}");
+        assert!(prompt(ended.took), "{ending:?}: {:?}", ended.took);
+        assert_eq!(ended.reads, 1, "{ending:?}: read before custody ended");
+    }
+}
+
+#[test]
+fn no_item_is_read_once_custody_has_ended() {
+    for ending in [Ending::Lost, Ending::Unsettled] {
+        // A READY the brain sends only after custody ended never arrives.
+        let child = ending.child();
+        let (reached, shut) = mpsc::channel();
+        child.script().reached = Some(reached);
+        let ended = attempt_while(
+            ending,
+            &child,
+            Then::ReadyAfterShutdown,
+            || Ok(()),
+            || {},
+            |word| {
+                spawned(&child);
+                ending.end(&child, word);
+                shut.recv_timeout(BOUND).expect("the brain looked");
+            },
+        );
+        assert!(matches!(ended.error, LinkError::Rejected), "{ending:?}");
+        assert_eq!(ended.reads, 0, "{ending:?}: a late READY");
+
+        // A READY taken before custody ended reads nothing once it has.
+        let child = ending.child();
+        let (reached, shut) = mpsc::channel();
+        child.script().reached = Some(reached);
+        let (entered, hardening) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let ended = attempt_while(
+            ending,
+            &child,
+            Then::ReadyBeforeShutdown,
+            move || {
+                let _seen = entered.send(());
+                let _released = released.recv_timeout(BOUND);
+                Ok(())
+            },
+            || {},
+            |word| {
+                hardening.recv_timeout(BOUND).expect("READY came");
+                ending.end(&child, word);
+                shut.recv_timeout(BOUND).expect("the brain looked");
+                drop(release);
+            },
+        );
+        assert!(matches!(ended.error, LinkError::Custody), "{ending:?}");
+        assert_eq!(ended.reads, 0, "{ending:?}: custody ended while hardening");
+
+        // An item read that outlasts custody doesn't count.
+        let child = ending.child();
+        let (reached, shut) = mpsc::channel();
+        child.script().reached = Some(reached);
+        let (entered, reading) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let ended = attempt_while(
+            ending,
+            &child,
+            Then::ReadyBeforeShutdown,
+            || Ok(()),
+            move || {
+                let _seen = entered.send(());
+                let _released = released.recv_timeout(BOUND);
+            },
+            |word| {
+                reading.recv_timeout(BOUND).expect("the item read began");
+                ending.end(&child, word);
+                shut.recv_timeout(BOUND).expect("the brain looked");
+                drop(release);
+            },
+        );
+        assert!(matches!(ended.error, LinkError::Custody), "{ending:?}");
+        assert_eq!(ended.reads, 1, "{ending:?}: read once, then refused");
     }
 }

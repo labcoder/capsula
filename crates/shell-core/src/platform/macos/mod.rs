@@ -22,7 +22,7 @@ pub(crate) use child::{NotStarted, start_brain};
 pub(crate) use core_dumps::limit_core_dumps;
 pub(crate) use instance::{read_instance, try_acquire_instance_lock};
 pub use kumochi_storage::application_support_dir as support_dir;
-pub(crate) use leg::{PipeClient, Secret, initiate, read_ready};
+pub(crate) use leg::{PipeClient, Secret, closer, initiate, read_ready};
 pub(crate) use pair::ShellEnds;
 
 /// The shell's session for the link: always 0. The Mac's instance item and lock are per user, not

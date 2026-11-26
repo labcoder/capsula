@@ -251,7 +251,8 @@ impl ChildOwner {
     }
 
     /// Runs `hook` once custody is terminal (reaped, lost or unsettled), at once if it already
-    /// is, on whichever thread ends it. Never waits for the child.
+    /// is, on whichever thread ends it. A later hook replaces one that hasn't run. Never waits for
+    /// the child.
     pub(crate) fn on_settled(&self, hook: impl FnOnce() + Send + 'static) {
         let mut ending = self.terminal.lock();
         if ending.winner.is_none() {
@@ -357,6 +358,8 @@ fn own(
             return;
         }
         phase = match phase {
+            // After the end, only reaps: a kill now would follow a published result.
+            _ if terminal.lock().winner.is_some() => Phase::Unsettled,
             Phase::Watching if retiring || word.quitting() => Phase::Grace(Instant::now() + wait),
             Phase::Grace(deadline) if now >= deadline => {
                 retirement_refused = !kill(&mut os);
@@ -1187,6 +1190,34 @@ mod tests {
         );
         assert_eq!(hook_ran.recv_timeout(BOUND), Ok(()), "the hook ran");
         held.release();
+    }
+
+    #[test]
+    fn an_owner_that_resumes_after_the_unsettled_bound_only_reaps() {
+        let word = Arc::new(SpawnWord::default());
+        let fake = Fake::default();
+        let owner = started(&fake, &word);
+        let (poll_gate, held) = gate();
+        fake.script().poll_gate = Some(poll_gate);
+        held.entered();
+        word.quit();
+        assert!(matches!(next(&owner), Report::Settled(Settled::Unsettled)));
+        held.release();
+        // Past the grace a resumed owner would start, then two whole polls after it.
+        thread::sleep(WAIT * 2);
+        for _ in 0..2 {
+            let (poll_gate, held) = gate();
+            fake.script().poll_gate = Some(poll_gate);
+            held.entered();
+            held.release();
+        }
+        assert_eq!(fake.script().kills, 0, "no kill after the published end");
+        fake.script().exits = Some((Instant::now(), Exit::Code(0)));
+        fake.until(|script| script.reaped);
+        assert!(
+            owner.next(Instant::now() + WAIT).is_none(),
+            "no second outcome"
+        );
     }
 
     #[test]
