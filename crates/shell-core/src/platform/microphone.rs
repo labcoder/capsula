@@ -437,14 +437,19 @@ impl Generation {
         transition(&self.gate, self.gesture, CANCELLED);
     }
 
-    /// Records the native acceptance edge once, only while this generation is running.
+    /// Records the native acceptance edge once, only while this generation is running; the
+    /// clock is read only after that check, and a zero reading is a timestamp fault.
     #[cfg_attr(
         all(not(windows), not(test)),
         expect(dead_code, reason = "native capture and its tests record the edge")
     )]
-    fn accept_edge(&self, edge: u64) -> Result<(), MicError> {
+    fn accept_edge(&self, clock: impl FnOnce() -> Result<u64, MicError>) -> Result<(), MicError> {
         if self.gate.load(Ordering::Acquire) != (u64::from(self.gesture.0) << 3 | RUNNING) {
             return Err(MicError::Stale);
+        }
+        let edge = clock()?;
+        if edge == 0 {
+            return Err(MicError::Timestamp);
         }
         self.startup
             .accepted_edge
@@ -786,7 +791,7 @@ impl MicOwner {
         self.generation.mode(&self.session, Instant::now())?;
         #[cfg(windows)]
         self.generation
-            .accept_edge(super::windows::microphone::collection_start()?)?;
+            .accept_edge(super::windows::microphone::collection_start)?;
         self.generation.advance(RUNNING, COLLECTING)
     }
 

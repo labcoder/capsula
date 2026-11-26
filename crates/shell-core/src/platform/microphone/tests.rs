@@ -113,11 +113,25 @@ fn the_acceptance_edge_is_written_once_and_only_while_running() {
     let gate = CollectionGate::default();
     let generation = gate.arm(GestureId(1)).unwrap();
     let session = AtomicBool::new(true);
-    assert_eq!(generation.accept_edge(7), Err(MicError::Stale));
+    let read = std::cell::Cell::new(false);
+    let clock = || {
+        read.set(true);
+        Ok(7)
+    };
+    assert_eq!(generation.accept_edge(clock), Err(MicError::Stale));
+    assert!(
+        !read.get(),
+        "a generation that isn't running never reads the clock"
+    );
     generation.advance(ARMED, OPENING).unwrap();
     generation.advance(OPENING, RUNNING).unwrap();
-    assert_eq!(generation.accept_edge(7), Ok(()));
-    assert_eq!(generation.accept_edge(9), Err(MicError::Stale));
+    assert_eq!(generation.accept_edge(|| Ok(0)), Err(MicError::Timestamp));
+    assert_eq!(
+        generation.accept_edge(|| Err(MicError::Timestamp)),
+        Err(MicError::Timestamp)
+    );
+    assert_eq!(generation.accept_edge(|| Ok(7)), Ok(()));
+    assert_eq!(generation.accept_edge(|| Ok(9)), Err(MicError::Stale));
     assert_eq!(generation.capture_cutoff(&session), None);
     generation.advance(RUNNING, COLLECTING).unwrap();
     assert_eq!(generation.capture_cutoff(&session), Some(7));
