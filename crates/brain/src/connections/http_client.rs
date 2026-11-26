@@ -25,9 +25,6 @@ pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// Closed transport failures; no raw library diagnostics or provider text are retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum HttpError {
-    /// This platform has no native trust adapter.
-    #[error("native trust roots are unsupported on this platform")]
-    UnsupportedPlatform,
     /// No usable OS trust roots could be loaded or parsed.
     #[error("account trust store unavailable")]
     TrustStoreUnavailable,
