@@ -2,9 +2,9 @@
 //! sealed finals and a removal that checks the whole tree before it deletes anything.
 //!
 //! The same sample as the rest of this module, under one cooperating writer: descriptors hold
-//! objects, not names. Every call walks again from `/`, looks at each entry without following it
-//! and checks its type, owner, links and volume before opening it, and refuses what it sees
-//! change. Nothing is re-secured. A same-user rename between two calls isn't detected, and a
+//! objects, not names. Every call walks again from `/`: the anchor as `admit_support` admits it,
+//! then each entry below it looked at without following it, its type, owner, links and volume
+//! checked before it's opened. It refuses what it sees change. Nothing is re-secured. A same-user rename between two calls isn't detected, and a
 //! placeholder is refused only as the look sees it, so the anchor must be outside file providers.
 //!
 //! shortcut: an entry that already exists is admitted on its present metadata, not proven private
@@ -30,6 +30,8 @@ const WRITE_FLAGS: libc::c_int =
     libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
 /// A partial file's mode until it's sealed.
 const PARTIAL: libc::mode_t = 0o600;
+/// The ending of every partial's name, which no published name may have.
+const STAGE: &[u8] = b".part";
 
 /// The mode a published file is sealed at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,9 +114,9 @@ pub fn create_private_file(support: &Path, path: &Path) -> Result<File, Untruste
     Ok(file)
 }
 
-/// Opens the existing partial file `path` for writing without truncating it, and locks it. Call it
-/// only with a partial's path: a sealed file there is taken as a publish that stopped between its
-/// seal and its rename, checked as sealed, and unsealed to 0600 so it can be resumed.
+/// Opens the existing partial file `path` for writing without truncating it, and locks it. A sealed
+/// file at a name ending `.part` is taken as a publish that stopped between its seal and its
+/// rename: it's locked, checked sealed and still named, and only then unsealed to 0600.
 ///
 /// # Errors
 /// `Missing` when nothing is there; `Io` when the lock is held. Otherwise refuses anything but this
@@ -124,8 +126,18 @@ pub fn open_private_write(support: &Path, path: &Path) -> Result<File, Untrusted
     let (held, name) = file_parent(support, path)?;
     let folder = held.last()?;
     let mode = look(folder, &name)?.st_mode & 0o7777;
-    if mode == Seal::ReadOnly.mode() || mode == Seal::ReadExecute.mode() {
-        chmod(&existing(&held, &name, READ_FLAGS, mode)?, PARTIAL)?;
+    if name.to_bytes().ends_with(STAGE)
+        && (mode == Seal::ReadOnly.mode() || mode == Seal::ReadExecute.mode())
+    {
+        // Locked first, so a publisher still holding it keeps its seal; released before the reopen.
+        let sealed = existing(&held, &name, READ_FLAGS, mode)?;
+        lock(&sealed)?;
+        named(
+            folder,
+            &name,
+            &inspect_private(&sealed, held.user(), ObjectKind::Exact(mode))?,
+        )?;
+        chmod(&sealed, PARTIAL)?;
     }
     let file = existing(&held, &name, WRITE_FLAGS, PARTIAL)?;
     lock(&file)?;
@@ -170,11 +182,12 @@ pub fn keep_sealed(support: &Path, file: &File, path: &Path, seal: Seal) -> Resu
 
 /// Seals the partial `file`, named `from`, at `seal`'s mode, renames it to its sibling `to`
 /// without replacing anything there, then flushes the folder and the file. `parent` must be the
-/// held folder they're in. A rename that fails puts the partial back at mode 0600 once its name is
-/// shown to still give it.
+/// held folder they're in. A rename that fails puts the partial back at mode 0600 only once its
+/// name is shown to still give it with one link and `to` is shown not to; otherwise it stays sealed.
 ///
 /// # Errors
-/// `Unsafe` for names that aren't siblings or a `from` that no longer names `file`; `Reparse` when
+/// `Unsafe` for names that aren't siblings, a `to` ending `.part` or a `from` that no longer
+/// names `file`; `Reparse` when
 /// `parent` isn't their folder; `Io` when something is already at `to`, and when a flush fails, which
 /// leaves the file published but its durability unproved.
 pub fn seal_and_publish(
@@ -190,6 +203,9 @@ pub fn seal_and_publish(
     }
     let source = below(support, from)?.pop().ok_or(Untrusted::Unsafe)?;
     let (held, target) = file_parent(support, to)?;
+    if target.to_bytes().ends_with(STAGE) {
+        return Err(Untrusted::Unsafe);
+    }
     let folder = held.last()?;
     if !same_object(&stat(folder.as_raw_fd())?, &stat(parent.as_raw_fd())?) {
         return Err(Untrusted::Reparse);
@@ -203,9 +219,12 @@ pub fn seal_and_publish(
     if let Err(error) = renamed {
         // Unsealed only while it's still the partial, so a final is never made writable again.
         let now = stat(file.as_raw_fd())?;
-        if named(folder, &source, &now).is_ok()
-            && !look(folder, &target).is_ok_and(|seen| same_object(&seen, &now))
-        {
+        let target_free = match look(folder, &target) {
+            Ok(seen) => !same_object(&seen, &now),
+            Err(Untrusted::Missing) => true,
+            Err(_) => false,
+        };
+        if now.st_nlink == 1 && target_free && named(folder, &source, &now).is_ok() {
             chmod(&file, PARTIAL)?;
         }
         return Err(error);

@@ -155,6 +155,21 @@ fn native_a_partial_is_published_sealed_and_an_arrival_is_kept() {
 
     let file = open_private_write(&support, &source).expect("resume the partial");
     assert_eq!(
+        seal_and_publish(
+            &support,
+            file,
+            parent,
+            &source,
+            &part.join("final.part"),
+            Seal::ReadOnly
+        ),
+        Err(Untrusted::Unsafe),
+        "a published name never ends like a partial's"
+    );
+    assert_eq!(mode(&source), (0o600, 1));
+
+    let file = open_private_write(&support, &source).expect("resume the partial");
+    assert_eq!(
         seal_and_publish(&support, file, parent, &source, &target, Seal::ReadOnly),
         Ok(())
     );
@@ -167,6 +182,12 @@ fn native_a_partial_is_published_sealed_and_an_arrival_is_kept() {
         Ok(())
     );
     assert_eq!(check_named(&support, &sealed, &target), Ok(()));
+    assert_eq!(
+        open_private_write(&support, &target).err(),
+        Some(Untrusted::Unsafe),
+        "a sealed final is never unsealed"
+    );
+    assert_eq!(mode(&target), (0o400, 1));
     assert_eq!(
         open_sealed(&support, &target, Seal::ReadExecute).err(),
         Some(Untrusted::Unsafe),
@@ -443,11 +464,17 @@ fn native_a_file_at_the_removed_folder_survives_and_keep_needs_the_seal() {
         Err(Untrusted::Unsafe),
         "a writable partial isn't a sealed final"
     );
-    drop(file);
 
-    // A publish that stopped between its seal and its rename.
+    // A publish between its seal and its rename, still holding the lock, then one that stopped.
     fs::set_permissions(&source, std::os::unix::fs::PermissionsExt::from_mode(0o400))
-        .expect("seal the stranded partial");
+        .expect("seal the held partial");
+    assert_eq!(
+        open_private_write(&support, &source).err(),
+        Some(Untrusted::Io),
+        "the publisher's lock"
+    );
+    assert_eq!(mode(&source), (0o400, 1), "a locked partial keeps its seal");
+    drop(file);
     let resumed = open_private_write(&support, &source).expect("the stranded partial resumes");
     assert_eq!(mode(&source), (0o600, 1));
     assert_eq!(read_all(&resumed), b"bytes");
