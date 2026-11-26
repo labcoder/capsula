@@ -167,7 +167,27 @@ enum Existing {
     Refuse,
 }
 
+/// Creates this edition's product folder at `path` owner-only when it's missing, like
+/// [`owner_only_dir`]. An existing folder is kept as it is and never re-secured. It's used only
+/// when the folder itself is no reparse point and has a trusted owner, and no one untrusted may
+/// change it. Its ancestors aren't checked, so a moved or junctioned application data folder
+/// still works.
+pub fn product_folder(path: &Path) -> Result<(), Untrusted> {
+    create_owner_only(path, Existing::Use)?;
+    let opened = open(path, Kind::Folder, 0)?;
+    check_not_reparse(&opened)?;
+    if attributes(&opened)? & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(Untrusted::Unsafe);
+    }
+    trusted_security(&Security::read(&opened)?, Kind::Folder, &Trusted::new()?)
+}
+
 fn owner_only(path: &Path, existing: Existing) -> Result<File, Untrusted> {
+    create_owner_only(path, existing)?;
+    open_checked(path, Kind::Folder, &Trusted::new()?)
+}
+
+fn create_owner_only(path: &Path, existing: Existing) -> Result<(), Untrusted> {
     let user = user_sid().map_err(|_| Untrusted::Io)?;
     let descriptor = Descriptor::new(&format!("D:P(A;OICI;FA;;;{user})"))?;
     let attributes = SECURITY_ATTRIBUTES {
@@ -184,7 +204,7 @@ fn owner_only(path: &Path, existing: Existing) -> Result<File, Untrusted> {
     {
         return Err(Untrusted::Io);
     }
-    open_checked(path, Kind::Folder, &Trusted::new()?)
+    Ok(())
 }
 
 /// The SID of the user this process runs as, in string form (`S-1-5-21-…`).
@@ -944,10 +964,44 @@ mod tests {
     use windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData;
 
     use super::{
-        Kind, Security, Trusted, Untrusted, hold_chain, known_folder, new_owner_only_dir,
-        owner_only_dir, trusted_security, user_sid,
+        Kind, Security, Trusted, Untrusted, dacl_sddl, hold_chain, known_folder,
+        new_owner_only_dir, owner_only_dir, product_folder, set_dacl, trusted_security, user_sid,
     };
     use crate::scratch::Scratch;
+
+    #[test]
+    fn a_missing_product_folder_is_made_owner_only_and_an_existing_one_is_kept_or_refused() {
+        let local = known_folder(FOLDERID_LocalAppData).expect("local app data");
+        let scratch = Scratch::under(&local, "product-folder");
+        let folder = scratch.join("product");
+        let user = user_sid().expect("this user's SID");
+        product_folder(&folder).expect("a new product folder");
+        assert_eq!(dacl_sddl(&folder), format!("D:P(A;OICI;FA;;;{user})"));
+        set_dacl(&folder, |user| {
+            format!("D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;SY)")
+        });
+        let kept = dacl_sddl(&folder);
+        product_folder(&folder).expect("an existing trusted folder");
+        assert_eq!(dacl_sddl(&folder), kept, "not re-secured");
+        set_dacl(&folder, |user| {
+            format!("D:P(A;OICI;FA;;;{user})(A;;0x2;;;WD)")
+        });
+        let open = dacl_sddl(&folder);
+        assert_eq!(
+            product_folder(&folder),
+            Err(Untrusted::Unsafe),
+            "others may add files"
+        );
+        assert_eq!(
+            dacl_sddl(&folder),
+            open,
+            "a refused folder is left as it was"
+        );
+        let file = scratch.join("file");
+        std::fs::write(&file, b"kept").expect("a file at the name");
+        assert_eq!(product_folder(&file), Err(Untrusted::Unsafe), "a file");
+        assert_eq!(std::fs::read(&file).expect("the file stays"), b"kept");
+    }
 
     #[test]
     fn an_exclusive_create_refuses_a_folder_already_there() {

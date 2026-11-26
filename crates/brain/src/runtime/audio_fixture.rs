@@ -691,6 +691,7 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
                 Arc::clone(&held),
                 &lock,
                 crate::connections::vault::HistoryLink::unbound(),
+                crate::connections::authority::Missing::Create,
             )
         }),
         Arc::clone(&clock),

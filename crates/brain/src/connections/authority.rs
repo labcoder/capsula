@@ -308,6 +308,15 @@ pub(crate) struct Retired {
     layout: Layout,
 }
 
+/// What an open does when the authority file is missing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Missing {
+    /// Create it: a profile's first start, and fixtures.
+    Create,
+    /// Fail, so a lost authority never comes back as an empty one.
+    Refuse,
+}
+
 /// The open authority, held by the credential worker under its session lock.
 pub(crate) struct Authority {
     conn: Connection,
@@ -326,17 +335,25 @@ impl fmt::Debug for Authority {
 }
 
 impl Authority {
-    /// Opens or creates the file, then retires every Pending generation: a candidate from an
-    /// earlier process is never activated. The lock proves the caller owns the account session.
+    /// Opens the file, creating it only when `missing` allows, then retires every Pending
+    /// generation: a candidate from an earlier process is never activated. The lock proves the
+    /// caller owns the account session. A present file still at version 0 gets its schema.
     ///
     /// # Errors
-    /// Fails on a SQLite failure, a file from a newer build, or missing or invalid rows.
-    pub(crate) fn open(path: &Path, _session: &SessionLock) -> Result<Self, AuthorityError> {
+    /// Fails on a SQLite failure, a missing file it may not create, a file from a newer build, or
+    /// missing or invalid rows.
+    pub(crate) fn open(
+        path: &Path,
+        _session: &SessionLock,
+        missing: Missing,
+    ) -> Result<Self, AuthorityError> {
+        let create = match missing {
+            Missing::Create => OpenFlags::SQLITE_OPEN_CREATE,
+            Missing::Refuse => OpenFlags::empty(),
+        };
         let mut conn = Connection::open_with_flags(
             path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | create | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         if mode != "wal" {

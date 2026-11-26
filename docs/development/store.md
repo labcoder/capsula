@@ -78,8 +78,13 @@ Later slices add assets, sends and cleanup jobs, each as a
 new migration. Migrations are numbered by `PRAGMA user_version`, run forward only, one
 transaction each, and a brain refuses a file whose version is newer than it knows.
 
-The ordinary open migrates through version 11. A separate, explicit ChatGPT repair operation
-can establish a version 12 cutoff only with a still-locked replacement binding. The upgrade and
+The ordinary open migrates to version 13, all pending migrations in one transaction, so a crash
+leaves the file at the version it had. Version 12 makes the ChatGPT cutoff table ordinary, and
+13 changes no schema: builds from before the profile's writer lock know at most 12, so they
+refuse the file instead of writing history without the lock. A file that the recovery
+operation took to 12 already has the table and its rows, and moves to 13 alone. A separate,
+explicit ChatGPT repair operation can establish a cutoff only with a still-locked replacement
+binding. The upgrade and
 immutable tag row commit together, taking the last issued thread and run IDs from SQLite's
 sequences, including deleted IDs. A ceiling below a surviving ID or a missing sequence for
 existing rows refuses establishment. History keeps one writer: the vault's link is bound once,
@@ -111,12 +116,13 @@ requests take no page-read stamp, but the vault learns the cutoff only after it 
 sent once the coordinator knows it always finds the row. Nothing reports a recovered connection
 at startup yet, so the replacement stays unavailable.
 
-The recovery version sits one past the ordinary ones, and a compile-time assert keeps it there.
-The next ordinary migration can't simply take version 12, because a recovered file is already
-at 12 and would read as current while missing it. That migration instead makes the cutoff table
-ordinary: every file is migrated to it with the table empty, a recovered file is recognized by
-its table at version 12 and moved on from there, and a recovered connection is told by its row
-rather than by the version. New ordinary migrations then follow as usual.
+A recovered connection is told by its cutoff row for its tag, not by the version. A
+compile-time assert keeps the current version above 12.
+
+Before an existing store from a build earlier than the lock reaches version 13, an old Brain
+that is still running in another Windows session without the lock (its vault had not opened
+yet) can keep writing beside the new one, and its purge can then swap in a copy that misses the
+new Brain's commits. Close Kumochi in every session before upgrading.
 
 **Scenes** are events, so they need no migration. A run's first step writes `scene_begin`, whose
 event id is the `SceneId`; `AUTOINCREMENT` keeps it unique even after a deletion, and a
@@ -597,7 +603,24 @@ tests capture those warnings and isolate a corrupt scene from the other three. T
 bodies below 8 MiB, independently of the per-body limit.
 
 The brain opens the store only after it holds the profile's writer lock (see
-[accounts](accounts.md)), and runs the recovery scan before it serves any shell:
+[accounts](accounts.md)). Under the lock it opens a database that exists without creating it, and
+creates one that's missing: the store first, then the credential authority. That covers the
+first start, a first start cut short between the two, and the two older layouts below. Neither
+is refused, because each comes from an ordinary path, not only from a crash or a deleted file:
+
+- **History without an authority.** Builds from before the authority (#214) issued thread ids and
+  never made `credentials.db`. A post-#214 build that couldn't open its vault left the same
+  state. The new authority starts signed out. It shares no ids with the store: its generations
+  are random. A ChatGPT cutoff already in the store stays inert, because only an authority that
+  established it can confirm it. The vault's first open sweeps the older builds' credential names,
+  as the upgrade to #214 did.
+- **An authority without history.** The dev diagnostics of earlier builds made `credentials.db`
+  without a store. A missing store is created empty, unless a purge's old copy beside it shows a
+  swap was cut short; then the start stops with `Retired`, as before, so the old copy isn't
+  hidden.
+
+The vault and the dev diagnostics never create the authority themselves. The brain then runs the
+recovery scan before it serves any shell:
 
 - threads left `deleting` by a crash between the two transactions finish deleting. One that fails
   again is logged by id, stays hidden, and is retried at the next start, so it can't stop the brain;

@@ -521,7 +521,13 @@ impl Pending {
 /// A leftover temp file from a crash is never read; this overwrites it.
 fn write_replacing(path: &Path, text: &[u8]) -> io::Result<()> {
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    std::fs::create_dir_all(dir)?;
+    // A settings folder made here is owner-only; one already there is left as it is.
+    if !dir.exists() {
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        crate::platform::product_folder(dir)?;
+    }
     let temp = path.with_file_name(format!("{CONFIG_FILE}.tmp"));
     let mut file = std::fs::File::create(&temp)?;
     file.write_all(text)?;

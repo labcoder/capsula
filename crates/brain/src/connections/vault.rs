@@ -154,7 +154,15 @@ impl<S: CredentialStore> Vault<S> {
             CredentialStoreError::NoDataDir => VaultError::NoDataDir,
             error => error.into(),
         })?;
-        Self::with_service(store, CREDENTIAL_SERVICE, &path)
+        let session = SessionLock::try_acquire(&path)?;
+        Self::with_lock(
+            store,
+            CREDENTIAL_SERVICE,
+            Arc::new(session),
+            &path,
+            HistoryLink::unbound(),
+            authority::Missing::Refuse,
+        )
     }
 
     /// Opens the production vault under the profile lock the brain already holds for its run,
@@ -171,18 +179,25 @@ impl<S: CredentialStore> Vault<S> {
             CredentialStoreError::NoDataDir => VaultError::NoDataDir,
             error => error.into(),
         })?;
-        Self::with_lock(store, CREDENTIAL_SERVICE, session, &path, history)
+        Self::with_lock(
+            store,
+            CREDENTIAL_SERVICE,
+            session,
+            &path,
+            history,
+            authority::Missing::Refuse,
+        )
     }
 
     /// Takes the lock at `path`, then opens the authority beside it and sweeps once, legacy
     /// names included. No history writer is bound, so no cutoff can be written or confirmed.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(test)]
     pub(crate) fn with_service(store: S, service: &str, path: &Path) -> Result<Self, VaultError> {
         Self::bound_to_history(store, service, path, HistoryLink::unbound())
     }
 
     /// [`Vault::with_service`], bound for its life to the profile's one history writer.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(test)]
     pub(crate) fn bound_to_history(
         store: S,
         service: &str,
@@ -190,19 +205,28 @@ impl<S: CredentialStore> Vault<S> {
         history: HistoryLink,
     ) -> Result<Self, VaultError> {
         let session = SessionLock::try_acquire(path)?;
-        Self::with_lock(store, service, Arc::new(session), path, history)
+        Self::with_lock(
+            store,
+            service,
+            Arc::new(session),
+            path,
+            history,
+            authority::Missing::Create,
+        )
     }
 
     /// Opens the authority beside `path` under `session`, the lock held at `path`, bound to
-    /// `history`, and sweeps once, legacy names included.
+    /// `history`, and sweeps once, legacy names included. `missing` says whether a missing
+    /// authority is created.
     pub(crate) fn with_lock(
         store: S,
         service: &str,
         session: Arc<SessionLock>,
         path: &Path,
         history: HistoryLink,
+        missing: authority::Missing,
     ) -> Result<Self, VaultError> {
-        let authority = Authority::open(&path.with_file_name(authority::FILE), &session)?;
+        let authority = Authority::open(&path.with_file_name(authority::FILE), &session, missing)?;
         let mut vault = Self {
             repair_lease: None,
             authority,

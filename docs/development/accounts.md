@@ -870,7 +870,9 @@ on, and the credentials thread by opening its vault under it (`Vault::open_held`
 taking its own. So a second brain of the same Windows user in
 another session, whose pipes don't collide, stops at the lock before it touches the store. It
 tries to take the lock before it opens or creates the store and, refused, logs only that another
-session is using the profile and exits with code 75. Only brains with this lock are excluded: an earlier build opens
+session is using the profile and exits with code 75. Only the brain's
+start creates `credentials.db`, under the lock, when it's missing (see [store](store.md)). The vault and the dev diagnostics open
+it without create, so a lost authority never comes back empty. Only brains with this lock are excluded: an earlier build opens
 the store before it takes any lock. The shell starts a brain that doesn't answer once per
 connection attempt (it starts another within the attempt only after a brain of a different build
 exits), and gives up after `CONNECT_TIMEOUT` (10 s), then waits for Retry, so a refused brain is

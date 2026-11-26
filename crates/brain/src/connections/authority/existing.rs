@@ -190,7 +190,7 @@ mod tests {
     use kumochi_protocol::Secret;
     use kumochi_protocol::constants::generation_target;
 
-    use super::super::{Authority, FILE};
+    use super::super::{Authority, FILE, Missing};
     use super::*;
     use crate::connections::vault::fake::FakeStore;
     use crate::test_support::{Scratch, files};
@@ -241,7 +241,8 @@ mod tests {
 
         /// A closed current authority, committing `host` if given; returns the host's names.
         fn authority(&self, host: Option<&[u8]>) -> Vec<String> {
-            let mut authority = Authority::open(&self.db(), &self.lock).expect("open authority");
+            let mut authority =
+                Authority::open(&self.db(), &self.lock, Missing::Create).expect("open authority");
             let Some(host) = host else {
                 return Vec::new();
             };
@@ -299,7 +300,9 @@ mod tests {
             migrated.authority(Some(HOST));
             migrated.raw(sql);
             assert_eq!(migrated.read(), UNVERIFIED, "{case} before its migration");
-            drop(Authority::open(&migrated.db(), &migrated.lock).expect("migrate"));
+            drop(
+                Authority::open(&migrated.db(), &migrated.lock, Missing::Create).expect("migrate"),
+            );
             assert_eq!(migrated.read(), MATCHING, "{case} after its migration");
         }
     }

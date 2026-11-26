@@ -323,13 +323,25 @@ impl Store {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(StoreError::Folder)?;
         }
+        Self::opened(path, OpenFlags::SQLITE_OPEN_CREATE)
+    }
+
+    /// Opens the store at `path` like [`Store::open`], creating neither the file nor its folder.
+    ///
+    /// # Errors
+    /// Fails when the file is missing, the schema is newer than this build's, or SQLite fails.
+    pub fn open_existing(path: &Path) -> Result<Self, StoreError> {
+        Self::opened(path, OpenFlags::empty())
+    }
+
+    fn opened(path: &Path, create: OpenFlags) -> Result<Self, StoreError> {
         // Files a purge left are removed by the store's thread, not here on the way to the first
         // turn. Only a store missing beside its old copy stops the start: creating an empty
         // store there would hide the old one.
-        if purge::missing(path) && !purge::missing(&purge::old(path)) {
+        if retired(path) {
             return Err(StoreError::Retired);
         }
-        let mut conn = connect(path, OpenFlags::SQLITE_OPEN_CREATE)?;
+        let mut conn = connect(path, create)?;
         schema::migrate(&mut conn)?;
         let purge_pending = owes(&conn)?;
         Ok(Self {
@@ -786,6 +798,11 @@ fn connect(path: &Path, create: OpenFlags) -> Result<Connection, StoreError> {
          PRAGMA temp_store = MEMORY;",
     )?;
     Ok(conn)
+}
+
+/// Whether a purge's old copy remains beside a missing store at `path`.
+fn retired(path: &Path) -> bool {
+    purge::missing(path) && !purge::missing(&purge::old(path))
 }
 
 /// Whether the file records an owed purge.

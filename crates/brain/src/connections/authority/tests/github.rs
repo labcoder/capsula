@@ -139,7 +139,7 @@ fn a_failed_foreign_key_check_rolls_back_the_upgrade() {
     conn.pragma_update(None, "foreign_keys", false).unwrap();
     conn.execute("INSERT INTO generations(generation,kind,state,chunks,bytes) VALUES(?1,'missing','removed',1,1)",[vec![9u8;16]]).unwrap();
     assert!(matches!(
-        Authority::open(&setup.path(), &setup.lock),
+        Authority::open(&setup.path(), &setup.lock, Missing::Create),
         Err(AuthorityError::Corrupt)
     ));
     assert_eq!(

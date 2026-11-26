@@ -5,13 +5,13 @@ use rusqlite::{Connection, Transaction};
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
+pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
 const ORDINARY_VERSION: usize = MIGRATIONS.len();
-const RECOVERY_VERSION: usize = 12;
-// shortcut: an ordinary V12 would collide with recovery; store.md says how it moves past it.
+/// The newest version a build from before the profile's writer lock knows.
+const PRE_LOCK_NEWEST: usize = 12;
 const _: () = assert!(
-    ORDINARY_VERSION < RECOVERY_VERSION,
-    "an ordinary migration reached the recovery version"
+    ORDINARY_VERSION > PRE_LOCK_NEWEST,
+    "builds that write history without the writer lock must refuse the current store"
 );
 
 /// Threads, their append-only events with full-text search, and runs. Foreign keys have no
@@ -202,6 +202,8 @@ const V11: &str = "
 ALTER TABLE actions ADD COLUMN repo_id INTEGER CHECK (repo_id IS NULL OR repo_id >= 1);
 ";
 
+/// The `ChatGPT` recovery cutoffs, ordinary from here on. A file the recovery operation took to
+/// version 12 already has the table, with its rows, so it never runs this.
 const V12: &str = "
 CREATE TABLE chatgpt_recovery_context (
     tag BLOB PRIMARY KEY CHECK (length(tag) = 8),
@@ -210,50 +212,51 @@ CREATE TABLE chatgpt_recovery_context (
 ) STRICT;
 ";
 
-/// Applies ordinary migrations only; existing recovery history stays at v12.
+/// No schema change. Builds from before the profile's writer lock know at most version 12, so
+/// they refuse this file rather than write history without the lock.
+const V13: &str = "";
+
+/// Brings the schema up to date.
 pub(super) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     migrate_to(conn, ORDINARY_VERSION)
 }
 
-pub(super) fn has_recovery_context(conn: &Connection) -> Result<bool, StoreError> {
-    Ok(version(conn)? == RECOVERY_VERSION)
-}
-
+/// The cutoff table is ordinary, so a recovery cutoff only needs the current schema.
 pub(super) fn migrate_recovery_context(tx: &Transaction<'_>) -> Result<(), StoreError> {
-    match version(tx)? {
-        ORDINARY_VERSION => {
-            tx.execute_batch(V12)?;
-            tx.pragma_update(
-                None,
-                "user_version",
-                i64::try_from(RECOVERY_VERSION).expect("the schema version fits SQLite"),
-            )?;
-        }
-        RECOVERY_VERSION => {}
-        _ => return Err(StoreError::RecoveryContext),
+    if version(tx)? == ORDINARY_VERSION {
+        Ok(())
+    } else {
+        Err(StoreError::RecoveryContext)
     }
-    Ok(())
 }
 
-/// Applies ordinary migrations up to `target`; tests build older files.
+/// Applies ordinary migrations up to `target` in one transaction, so a crash leaves the file at
+/// the version it had; tests build older files.
 pub(super) fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), StoreError> {
     let applied = version(conn)?;
     debug_assert!(
         target <= ORDINARY_VERSION,
         "no ordinary migration past the known ones"
     );
-    for (version, sql) in (1_i64..).zip(&MIGRATIONS[..target]).skip(applied) {
-        let tx = conn.transaction()?;
-        tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", version)?;
-        tx.commit()?;
+    if applied >= target {
+        return Ok(());
     }
+    let tx = conn.transaction()?;
+    for sql in &MIGRATIONS[applied..target] {
+        tx.execute_batch(sql)?;
+    }
+    tx.pragma_update(
+        None,
+        "user_version",
+        i64::try_from(target).expect("the schema version fits SQLite"),
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
 fn version(conn: &Connection) -> Result<usize, StoreError> {
     let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    let known = RECOVERY_VERSION;
+    let known = ORDINARY_VERSION;
     usize::try_from(found)
         .ok()
         .filter(|&applied| applied <= known)

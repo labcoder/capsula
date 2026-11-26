@@ -38,7 +38,7 @@ pub(crate) use fault::call_throwing_export;
 pub use fault::quiet_failures;
 #[cfg(debug_assertions)]
 pub use fault::raise_access_violation;
-pub use folders::{config_dir, data_dir, session_lock_path};
+pub use folders::{config_dir, data_dir, product_folder, session_lock_path};
 pub use fs::{free_space, links_unsupported, replace_file};
 pub use job::{Helper, Job};
 pub(super) use library::{

@@ -220,6 +220,7 @@ pub(crate) fn held_accounts(
                 Arc::clone(&profile),
                 &lock,
                 crate::connections::vault::HistoryLink::unbound(),
+                crate::connections::authority::Missing::Create,
             )
         }),
         Arc::new(FixedClock(1_800_000_000)),

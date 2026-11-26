@@ -72,7 +72,7 @@ fn a_v5_store_reopens_at_v6_with_its_runs_unknown() {
         .conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 11);
+    assert_eq!(version, 13);
     assert_eq!(point(&store.conn, RunId(7)), (None, None, None));
     let state: String = store
         .conn

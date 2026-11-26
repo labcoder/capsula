@@ -816,6 +816,31 @@ fn the_max_frame_rate_persists_and_automatic_removes_the_key() {
 }
 
 #[test]
+fn the_first_save_makes_the_settings_folder_owner_only() {
+    let scratch = Scratch::trusted("config-owner-only");
+    let dir = scratch.dir().join("settings");
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    apply(&mut config, SettingsOp::SetAssistantName(name("Nimbus")));
+    #[cfg(windows)]
+    {
+        let user = crate::platform::this_user();
+        assert_eq!(
+            crate::platform::dacl_sddl(&dir),
+            format!("D:P(A;OICI;FA;;;{user})")
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&dir)
+            .expect("the folder")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+}
+
+#[test]
 fn first_save_and_replacement_ignore_an_abandoned_temp() {
     let scratch = Scratch::new("config-stale-temp");
     let dir = dir(&scratch);

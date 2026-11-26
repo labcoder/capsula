@@ -183,9 +183,76 @@ fn a_newer_schema_is_refused() {
         Store::open(&scratch.db()),
         Err(StoreError::NewerSchema {
             found: 99,
-            known: 12
+            known: 13
         })
     ));
+}
+
+fn user_version(db: &Path) -> i64 {
+    Connection::open(db)
+        .expect("raw open")
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("the version")
+}
+
+#[test]
+fn a_v11_store_moves_past_every_version_a_pre_lock_build_knows() {
+    let scratch = Scratch::new("schema-v11");
+    let db = super::existing::tests::store_at(scratch.dir(), 11);
+    drop(Store::open_existing(&db).expect("the existing store"));
+    assert_eq!(user_version(&db), 13);
+    let cutoffs: i64 = Connection::open(&db)
+        .expect("raw open")
+        .query_row("SELECT count(*) FROM chatgpt_recovery_context", [], |row| {
+            row.get(0)
+        })
+        .expect("the cutoff table exists");
+    assert_eq!(cutoffs, 0);
+}
+
+#[test]
+fn a_recovered_v12_store_keeps_its_cutoff_at_v13() {
+    let scratch = Scratch::new("schema-v12");
+    let db = super::existing::tests::store_at(scratch.dir(), 11);
+    Connection::open(&db)
+        .expect("raw open")
+        .execute_batch(
+            "CREATE TABLE chatgpt_recovery_context (
+                tag BLOB PRIMARY KEY CHECK (length(tag) = 8),
+                last_thread INTEGER NOT NULL CHECK (last_thread > 0),
+                last_run INTEGER NOT NULL CHECK (last_run >= 0)
+            ) STRICT;
+            INSERT INTO chatgpt_recovery_context VALUES (x'0000000000000007', 4, 9);
+            PRAGMA user_version = 12;",
+        )
+        .expect("a store the recovery operation took to v12");
+    let store = Store::open_existing(&db).expect("the recovered store");
+    assert_eq!(user_version(&db), 13);
+    assert_eq!(
+        super::Boundary::read(&store.conn, 7).expect("the cutoff reads"),
+        Some(super::Boundary::fixture(7, 4, 9))
+    );
+    assert_eq!(super::Boundary::read(&store.conn, 8).expect("reads"), None);
+}
+
+#[test]
+fn opening_an_existing_store_never_creates_one() {
+    let scratch = Scratch::new("open-existing");
+    std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
+    assert!(matches!(
+        Store::open_existing(&scratch.db()),
+        Err(StoreError::Sql(_))
+    ));
+    assert!(!scratch.db().exists(), "nothing was created");
+    let gone = scratch.dir().join("gone").join("store.db");
+    assert!(matches!(
+        Store::open_existing(&gone),
+        Err(StoreError::Sql(_))
+    ));
+    assert!(
+        !gone.parent().expect("a folder").exists(),
+        "no folder either"
+    );
 }
 
 #[test]

@@ -95,6 +95,12 @@ The file is mode `0600` and is locked exclusively without waiting. The file stay
 closing the lock handle or exiting the process releases the lock. Platforms without an
 admitted lock target still refuse before opening a file, with no fallback location.
 
+Each process's first write, the Shell's instance lock and every Brain process's log, goes
+through one check that creates the product folder owner-only when it's missing. An existing
+folder is kept as it is if it's a plain folder with a trusted owner that nobody else may
+change, and refused otherwise. The settings folder is created the same way when settings are
+first saved.
+
 Detached brain startup acquires both pipes before touching the store. It takes the profile's
 writer lock, then opens and recovers the store, loads settings, starts accounts, and builds the Brain. It retries any interrupted
 voice model removals before creating the helpers' Job Object, then starts the optional workers.

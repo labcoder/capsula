@@ -536,7 +536,8 @@ pub(crate) mod tests {
         let scratch = Scratch::new("existing-history-changed");
         let known = MIGRATIONS.len();
         let newer = i64::try_from(known + 1).expect("small");
-        let older = i64::try_from(known - 1).expect("small");
+        // V13 changes no schema, so only a version below 12 is a different catalog.
+        let older = i64::try_from(known - 2).expect("small");
         let cases: [(&str, String); 6] = [
             ("newer", format!("PRAGMA user_version = {newer}")),
             ("unversioned", "PRAGMA user_version = 0".into()),
