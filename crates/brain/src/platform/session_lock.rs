@@ -2,6 +2,7 @@
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::{fmt, io};
 
 use kumochi_protocol::constants::AUTHORITY_FILE;
@@ -22,9 +23,19 @@ pub enum SessionLockError {
 /// Keep this guard for the brain's whole session, including until all blocking vault work ends.
 #[must_use = "dropping the guard releases account-session ownership"]
 pub struct SessionLock {
-    _file: File,
+    _guard: Guard,
     /// The credential authority beside the locked file, fixed when the lock was taken.
     authority: PathBuf,
+}
+
+/// What holds the lock: this guard's own file, or session custody's shared lock.
+#[expect(
+    dead_code,
+    reason = "each guard is held only for its drop, which releases the lock"
+)]
+enum Guard {
+    File(File),
+    Lent(Arc<super::InstanceLock>),
 }
 
 impl fmt::Debug for SessionLock {
@@ -62,13 +73,31 @@ impl SessionLock {
         &self.authority
     }
 
+    /// The folder the authority sits in: the store's and the settings' folder too.
+    pub(crate) fn data_dir(&self) -> &Path {
+        self.authority
+            .parent()
+            .expect("an absolute authority file has a folder")
+    }
+
+    /// Custody's held lock, shared through its `loan`, in the product folder its acquisition
+    /// walked; only that acquisition makes the lock, so the folder is never resolved again.
+    pub(crate) fn lent(loan: crate::startup::custody::Loan) -> Self {
+        let lock = loan.into_lock();
+        let authority = lock.product().join(AUTHORITY_FILE);
+        Self {
+            _guard: Guard::Lent(lock),
+            authority,
+        }
+    }
+
     fn try_lock(file: File, authority: PathBuf) -> Result<Self, SessionLockError> {
         file.try_lock().map_err(|error| match error {
             TryLockError::WouldBlock => SessionLockError::Busy,
             TryLockError::Error(error) => SessionLockError::Io(error),
         })?;
         Ok(Self {
-            _file: file,
+            _guard: Guard::File(file),
             authority,
         })
     }

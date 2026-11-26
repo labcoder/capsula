@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 
 use kumochi_protocol::BUILD_ID;
-use kumochi_protocol::constants::SHELL_EXE;
+use kumochi_protocol::constants::{SHELL_EXE, STORE_FILE};
 use kumochi_protocol::message::{CAPABILITY_LEN, Capability, Incarnation, RunId, ThreadId};
 
 use crate::config::Config;
@@ -336,6 +336,23 @@ fn open_state(mode: StartMode, exe: &Path, acquired: &mut bool) -> Result<Opened
     )
 }
 
+/// Opens the profile under `profile`, custody's loan, with no second lock: the store, the
+/// settings and the authority all come from the folder the loan was taken in.
+fn open_state_held(
+    profile: Arc<SessionLock>,
+    replay: Option<Selected>,
+    acquired: &mut bool,
+) -> Result<OpenedState, BrainError> {
+    let folder = profile.data_dir().to_owned();
+    let store = folder.join(STORE_FILE);
+    OpenedState::open_marking(
+        || super::open_held(profile, &store),
+        || Some(folder),
+        replay,
+        acquired,
+    )
+}
+
 impl OpenedState {
     #[cfg(all(test, windows))]
     fn load(
@@ -357,7 +374,17 @@ impl OpenedState {
         // Every writer of the store and the credential authority holds this lock for its whole run,
         // so a brain of this user in another session stops here. Before any shell is served, so no
         // run starts ahead of the recovery scan. Blocking is fine: nothing else runs on the runtime yet.
-        let (profile, mut store) = super::open_profile(path).inspect_err(|error| {
+        Self::open_marking(|| super::open_profile(path), config_dir, replay, acquired)
+    }
+
+    /// `load_marking` with the profile and store from `open`.
+    fn open_marking(
+        open: impl FnOnce() -> Result<(Arc<SessionLock>, Store), BrainError>,
+        config_dir: impl FnOnce() -> Option<PathBuf>,
+        replay: Option<Selected>,
+        acquired: &mut bool,
+    ) -> Result<Self, BrainError> {
+        let (profile, mut store) = open().inspect_err(|error| {
             // Past the profile lock, SQLite may already be open: Unconfirmed only costs a 70.
             *acquired = !matches!(error, BrainError::ProfileBusy | BrainError::ProfileLock(_));
         })?;

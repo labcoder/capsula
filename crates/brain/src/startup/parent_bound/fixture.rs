@@ -25,6 +25,7 @@ use crate::fixture_support::{Scratch, held_accounts_until};
 use crate::platform::credential::CredentialStoreError;
 use crate::runtime::Selected;
 use crate::startup::instance::Added;
+use crate::startup::open_state_held;
 #[cfg(test)]
 use crate::test_support::failing_accounts;
 
@@ -135,16 +136,25 @@ impl Prerequisites for Scripted<'_> {
         Ok(ProcessInit::default())
     }
 
-    fn open(&mut self, acquired: &mut bool) -> Result<OpenedState, BrainError> {
+    fn open(
+        &mut self,
+        custody: &SessionCustody,
+        acquired: &mut bool,
+    ) -> Result<OpenedState, BrainError> {
         self.calls.push("open");
-        let opened = OpenedState::load_marking(
-            &self.scratch.db(),
-            || Some(self.scratch.dir().to_owned()),
-            Some(Selected::Fixture(Box::new(
-                Fixture::parse(self.script).expect("fixture script"),
-            ))),
-            acquired,
-        );
+        let replay = Some(Selected::Fixture(Box::new(
+            Fixture::parse(self.script).expect("fixture script"),
+        )));
+        // A token custody has no lock to lend, so its profile is a lock on the scratch store.
+        let opened = match custody.lend() {
+            Some(profile) => open_state_held(profile, replay, acquired),
+            None => OpenedState::load_marking(
+                &self.scratch.db(),
+                || Some(self.scratch.dir().to_owned()),
+                replay,
+                acquired,
+            ),
+        };
         self.lose_at(LoseAt::Open);
         opened
     }
