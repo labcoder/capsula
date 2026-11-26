@@ -25,14 +25,14 @@ use crate::platform::credential::native_session_lock_path;
 use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
 
 mod github;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "reconnect admission has no production ingress")
-)]
-mod repair;
 pub(crate) mod staging;
 
-pub(crate) use repair::{CutoffRequest, HistoryBinding, HistoryLink, Proof};
+/// What a sign-in's history may be read as: the whole of it, or none of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Proof {
+    Ordinary,
+    Unproved,
+}
 
 /// Removed generations one sweep pass visits [guess]; the rest wait for the next pass.
 const SWEEP: usize = 16;
@@ -72,9 +72,7 @@ pub enum DeleteResult {
 /// Move the vault into blocking work, rather than dropping its guard when an async waiter ends.
 #[must_use = "the vault must retain its session lock until all blocking work ends"]
 pub struct Vault<S: CredentialStore> {
-    repair_lease: Option<repair::RepairLease>,
     authority: Authority,
-    history: HistoryLink,
     store: S,
     service: String,
     paste: Option<authority::WritePlan>,
@@ -138,6 +136,15 @@ impl<S: CredentialStore> Vault<S> {
         (Some(current.revision), result)
     }
 
+    /// What the current sign-in may read: everything only at the ordinary schema, which no
+    /// repair ever reached, and nothing otherwise.
+    pub(crate) fn proof(&self) -> Proof {
+        match self.authority.ordinary_account() {
+            Ok(true) => Proof::Ordinary,
+            Ok(false) | Err(_) => Proof::Unproved,
+        }
+    }
+
     #[cfg(test)]
     fn anthropic_revision(&self) -> u64 {
         self.authority
@@ -161,70 +168,52 @@ impl<S: CredentialStore> Vault<S> {
             store,
             CREDENTIAL_SERVICE,
             Arc::new(session),
-            HistoryLink::unbound(),
             authority::Missing::Refuse,
         )
     }
 
     /// Opens the production vault under the profile lock the brain already holds for its run,
-    /// rather than taking its own, bound to the profile's one history writer by `history`. Its
-    /// authority is the one beside that lock; nothing looks the folder up again.
+    /// rather than taking its own. Its authority is the one beside that lock; nothing looks the
+    /// folder up again.
     ///
     /// # Errors
     /// Returns an authority failure.
     pub(in crate::connections) fn open_held(
         store: S,
         session: Arc<SessionLock>,
-        history: HistoryLink,
     ) -> Result<Self, VaultError> {
         Self::with_lock(
             store,
             CREDENTIAL_SERVICE,
             session,
-            history,
             authority::Missing::Refuse,
         )
     }
 
     /// Takes the lock at `path`, then opens the authority beside it and sweeps once, legacy
-    /// names included. No history writer is bound, so no cutoff can be written or confirmed.
+    /// names included.
     #[cfg(test)]
     pub(crate) fn with_service(store: S, service: &str, path: &Path) -> Result<Self, VaultError> {
-        Self::bound_to_history(store, service, path, HistoryLink::unbound())
-    }
-
-    /// [`Vault::with_service`], bound for its life to the profile's one history writer.
-    #[cfg(test)]
-    pub(crate) fn bound_to_history(
-        store: S,
-        service: &str,
-        path: &Path,
-        history: HistoryLink,
-    ) -> Result<Self, VaultError> {
         let session = SessionLock::try_acquire(path)?;
         Self::with_lock(
             store,
             service,
             Arc::new(session),
-            history,
             authority::Missing::Create,
         )
     }
 
-    /// Opens the authority beside `session`'s lock, bound to `history`, and sweeps once, legacy
-    /// names included. `missing` says whether a missing authority is created.
+    /// Opens the authority beside `session`'s lock and sweeps once, legacy names included.
+    /// `missing` says whether a missing authority is created.
     pub(crate) fn with_lock(
         store: S,
         service: &str,
         session: Arc<SessionLock>,
-        history: HistoryLink,
         missing: authority::Missing,
     ) -> Result<Self, VaultError> {
         let authority = Authority::open(&session, missing)?;
         let mut vault = Self {
-            repair_lease: None,
             authority,
-            history,
             store,
             service: service.to_owned(),
             paste: None,

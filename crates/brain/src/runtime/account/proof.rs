@@ -19,8 +19,7 @@ struct Check {
     read_owed: bool,
 }
 
-/// The current connection's check. Checks wait while the vault's history link waits for its
-/// writer, so a healthy replacement isn't found unproved only because startup asked first.
+/// The current connection's check. Checks wait until the brain's store thread runs.
 #[derive(Debug)]
 pub(super) struct Proofs {
     check: Option<Check>,
@@ -98,7 +97,7 @@ impl Proofs {
         let (reply, answer) = oneshot::channel();
         // A job that can't be queued drops its reply, which answers below.
         if let Some(jobs) = jobs {
-            jobs.send(Work::Proof { connection, reply }).ok();
+            jobs.send(Work::Proof { reply }).ok();
         }
         let reads = reads.clone();
         drop(tokio::spawn(async move {
@@ -132,18 +131,13 @@ impl Proofs {
     }
 
     /// Records the current check's answer, and says whether a catalog read waited for it; any
-    /// other answer changes nothing. A cutoff for another connection proves nothing.
+    /// other answer changes nothing.
     // shortcut: an unproved connection is never checked again until the connection changes,
-    // even when only a transient authority read made it unproved; repair ingress must check
-    // again once the replacement's context is established.
+    // even when only a transient authority read made it unproved.
     pub(super) fn found(&mut self, connection: u64, epoch: u64, proof: Proof) -> Option<bool> {
         if !self.awaits(connection, epoch) {
             return None;
         }
-        let proof = match proof {
-            Proof::Recovered(cut) if cut.tag() != connection => Proof::Unproved,
-            proof => proof,
-        };
         let check = self.check.as_mut()?;
         check.proof = Some(proof);
         Some(std::mem::take(&mut check.read_owed))
@@ -165,18 +159,15 @@ mod tests {
 
     use super::{Event, Proofs, Work};
     use crate::connections::vault::Proof;
-    use crate::store::Boundary;
 
     fn reads() -> (mpsc::UnboundedSender<Event>, mpsc::UnboundedReceiver<Event>) {
         mpsc::unbounded_channel()
     }
 
-    /// The next queued check's connection and reply.
-    fn queued(
-        jobs: &std_mpsc::Receiver<Work>,
-    ) -> Option<(u64, tokio::sync::oneshot::Sender<Proof>)> {
+    /// The next queued check's reply.
+    fn queued(jobs: &std_mpsc::Receiver<Work>) -> Option<tokio::sync::oneshot::Sender<Proof>> {
         match jobs.try_recv().ok()? {
-            Work::Proof { connection, reply } => Some((connection, reply)),
+            Work::Proof { reply } => Some(reply),
             _ => None,
         }
     }
@@ -218,22 +209,8 @@ mod tests {
         let (reads, _answers) = reads();
         let mut proofs = Proofs::held();
         proofs.track(Some(7), None, &reads);
-        let cut = Boundary::fixture(7, 3, 9);
-        assert_eq!(proofs.found(7, 1, Proof::Recovered(cut)), Some(false));
+        assert_eq!(proofs.found(7, 1, Proof::Unproved), Some(false));
         proofs.track(Some(7), None, &reads);
-        assert_eq!(proofs.proof(7), Some(Proof::Recovered(cut)));
-    }
-
-    #[test]
-    fn a_cutoff_for_another_connection_proves_nothing() {
-        let (reads, _answers) = reads();
-        let mut proofs = Proofs::held();
-        proofs.track(Some(7), None, &reads);
-        proofs.owe_read();
-        assert_eq!(
-            proofs.found(7, 1, Proof::Recovered(Boundary::fixture(8, 3, 9))),
-            Some(true)
-        );
         assert_eq!(proofs.proof(7), Some(Proof::Unproved));
     }
 
@@ -246,8 +223,7 @@ mod tests {
         proofs.track(Some(7), Some(&jobs), &reads);
         assert!(queued(&queue).is_none(), "held");
         proofs.release(Some(&jobs), &reads);
-        let (connection, reply) = queued(&queue).expect("the due check goes");
-        assert_eq!(connection, 7);
+        let reply = queued(&queue).expect("the due check goes");
         proofs.release(Some(&jobs), &reads);
         proofs.track(Some(7), Some(&jobs), &reads);
         assert!(queued(&queue).is_none(), "once");

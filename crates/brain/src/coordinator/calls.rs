@@ -408,7 +408,6 @@ impl Coordinator {
         {
             return Dispatch::Joined;
         }
-        let require_recovery = self.current_recovery();
         let run = self
             .current(caller.run())
             .expect("the resolved run remains current");
@@ -417,7 +416,6 @@ impl Coordinator {
             .as_ref()
             .expect("the admitted build remains current");
         let mut ctx = RunCtx {
-            require_recovery,
             build: build.key(),
             end: run.control.0.end,
             control: build.control.0.clone(),

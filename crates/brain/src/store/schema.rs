@@ -221,16 +221,6 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     migrate_to(conn, ORDINARY_VERSION)
 }
 
-/// The cutoff table is ordinary, so a recovery cutoff only needs the current schema.
-#[cfg(test)]
-pub(super) fn migrate_recovery_context(tx: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
-    if version(tx)? == ORDINARY_VERSION {
-        Ok(())
-    } else {
-        Err(StoreError::RecoveryContext)
-    }
-}
-
 /// Applies ordinary migrations up to `target` in one transaction, so a crash leaves the file at
 /// the version it had; tests build older files.
 pub(super) fn migrate_to(conn: &mut Connection, target: usize) -> Result<(), StoreError> {

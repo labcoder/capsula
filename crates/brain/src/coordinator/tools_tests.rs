@@ -94,7 +94,6 @@ fn offering(key: BuildKey, sources: &[ThreadId]) -> Input {
         key,
         snapshot: None,
         result: Ok(Built {
-            recovered_context: None,
             request: ModelRequest {
                 tools: schemas(Origin::Task(T), Route::Model),
                 ..request()
@@ -180,7 +179,6 @@ fn next(core: &mut Coordinator, round: u32) -> Vec<Effect> {
         key: build.key,
         snapshot: None,
         result: Ok(Built {
-            recovered_context: None,
             request: request(),
             sources: vec![T],
         }),
@@ -241,7 +239,6 @@ fn a_typed_chatgpt_tool_round_reuses_the_first_granted_effort() {
             key,
             snapshot,
             result: Ok(Built {
-                recovered_context: None,
                 request: ModelRequest {
                     choice,
                     ..request()
@@ -1112,7 +1109,6 @@ fn a_key_round_ends_the_run_when_a_source_it_carries_on_has_gone() {
                 key,
                 snapshot,
                 result: Ok(Built {
-                    recovered_context: None,
                     request: request(),
                     sources,
                 }),
@@ -1196,7 +1192,6 @@ fn admitted_key_round(sources: Vec<ThreadId>) -> Coordinator {
             connection: tag,
         }),
         result: Ok(Built {
-            recovered_context: None,
             request: request(),
             sources,
         }),

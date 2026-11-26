@@ -7,10 +7,10 @@ use super::{R, T, build_context, ends_failed, engine, fresh, request};
 use crate::context::{Built, Origin};
 use crate::coordinator::{
     BuildContext, BuildKey, CompactBuilt, CompactContext, ContextBuilt, Coordinator, Effect, Input,
-    JobAsk, LeaseId, Ready, SEND_DEADLINE, SendKey, Stale, StoreOp, SummaryText, Unbuilt,
+    JobAsk, LeaseId, SEND_DEADLINE, SendKey, Stale, StoreOp, SummaryText, Unbuilt,
 };
 use crate::engines::{Finish, RunRequest, TurnEvent};
-use crate::store::{Boundary, Failure, Generation};
+use crate::store::{Failure, Generation};
 
 const G: Generation = Generation(5);
 const B: ThreadId = ThreadId(2);
@@ -58,7 +58,6 @@ fn too_large(attempt: u64, room: Option<usize>) -> Input {
 
 fn compact_context(attempt: u64) -> Effect {
     Effect::Store(StoreOp::CompactContext(CompactContext {
-        require_recovery: None,
         control: crate::recall::control::Control::new(
             std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
         ),
@@ -76,7 +75,6 @@ fn compact_built(attempt: u64, sources: &[ThreadId]) -> Input {
             JobAsk {
                 generation: G,
                 built: Built {
-                    recovered_context: None,
                     request: request(),
                     sources: sources.to_vec(),
                 },
@@ -141,7 +139,6 @@ fn store_summary(attempt: u64, text: &str) -> Effect {
 /// A later attempt of the run's first round, after its first build read the snapshot.
 fn rebuilt(attempt: u64) -> Effect {
     Effect::Store(StoreOp::BuildContext(BuildContext {
-        require_recovery: None,
         control: crate::recall::control::Control::new(
             std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
         ),
@@ -478,7 +475,6 @@ fn chatgpt_inline_and_its_rebuild_use_the_same_granted_effort() {
             key: read.key,
             snapshot: None,
             result: Ok(Built {
-                recovered_context: None,
                 request: crate::context::ModelRequest {
                     choice: Some(rebuilt_choice),
                     ..request()
@@ -723,55 +719,4 @@ fn failed_with(reason: kumochi_protocol::message::UserError) -> Vec<Effect> {
     };
     *error = Some(reason);
     failed
-}
-
-/// A recovered connection's run compacts to its cutoff, and a compaction read to any other fails
-/// the run on the store.
-#[test]
-fn a_recovered_runs_compaction_reads_and_sends_only_to_its_cutoff() {
-    let cut = Boundary::fixture(0, 3, 9);
-    let Effect::Store(StoreOp::CompactContext(mut compact)) = compact_context(2) else {
-        unreachable!("compact_context reads a compaction");
-    };
-    compact.require_recovery = Some(cut);
-    for (body, admitted) in [
-        (None, false),
-        (Some(Boundary::fixture(0, 3, 10)), false),
-        (Some(cut), true),
-    ] {
-        let mut core = fresh();
-        core.handle(Input::RecoveredChatGpt {
-            ready: Ready::fixture(),
-            boundary: cut,
-        })
-        .expect("never stale");
-        core.handle(Input::Turn {
-            turn: 1,
-            thread: None,
-            text: "hi".into(),
-        })
-        .expect("a turn is never stale");
-        core.handle(Input::TurnStored { run: R }).expect("current");
-        assert_eq!(
-            core.handle(too_large(1, Some(ROOM))),
-            Ok(vec![Effect::Store(StoreOp::CompactContext(
-                compact.clone()
-            ))])
-        );
-        let Input::CompactBuilt(mut built) = compact_built(2, &[T]) else {
-            unreachable!("compact_built builds a compaction");
-        };
-        if let Ok(Some((ask, _))) = &mut built.result {
-            ask.built.recovered_context = body;
-        }
-        assert_eq!(
-            core.handle(Input::CompactBuilt(built)),
-            Ok(if admitted {
-                vec![start(2)]
-            } else {
-                ends_failed(Failure::Store)
-            }),
-            "{body:?}"
-        );
-    }
 }

@@ -15,7 +15,7 @@ use crate::connections::facts::{self, KINDS, PerKind};
 use crate::connections::model::error::Failure as Stream;
 use crate::context::{ConnectionTag, Route};
 use crate::engines::{EngineFailure, Finish};
-use crate::store::{Boundary, Failure};
+use crate::store::Failure;
 
 /// Whether runs can be answered now.
 #[derive(Clone, Debug, PartialEq)]
@@ -150,27 +150,22 @@ impl PictureRoutes {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RefusedKey(pub(crate) ConnectionTag, pub(crate) Option<SendKey>);
 
-/// The sign-in each connection kind had ready when a turn arrived, the cutoff when `ChatGPT`'s
-/// was recovered, and whether `ChatGPT` was refused for an inconsistent recovery report. A run
-/// is bound to one of them at its first build, by its model choice's kind.
+/// The sign-in each connection kind had ready when a turn arrived, and whether the account
+/// fenced `ChatGPT`'s history. A run is bound to one of them at its first build, by its model
+/// choice's kind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Arrived(PerKind<Option<ConnectionTag>>, Option<Boundary>, bool);
+pub(crate) struct Arrived(PerKind<Option<ConnectionTag>>, bool);
 
 impl Arrived {
-    /// Whether `ChatGPT` was refused, so a build that answers on it reads no history at all.
+    /// Whether `ChatGPT` was fenced, so a build that answers on it reads no history at all.
     pub(crate) fn chatgpt_blocked(self) -> bool {
-        self.2
+        self.1
     }
 
-    /// Nothing ready, with `ChatGPT` refused.
+    /// Nothing ready, with `ChatGPT` fenced.
     #[cfg(test)]
     pub(crate) fn blocked() -> Self {
-        Self(PerKind::default(), None, true)
-    }
-
-    /// The recovered `ChatGPT` cutoff its reads keep to, when `ChatGPT` arrived recovered.
-    pub(crate) fn recovered(self) -> Option<Boundary> {
-        self.1
+        Self(PerKind::default(), true)
     }
 
     pub(super) fn get(self, kind: ConnectionKind) -> Option<ConnectionTag> {
@@ -315,59 +310,12 @@ impl Coordinator {
                 arrived.0[kind] = Some(ready.connection);
             }
         }
-        arrived.1 = arrived
-            .get(ConnectionKind::ChatGpt)
-            .and_then(|tag| self.recovered(tag));
-        arrived.2 = self.chatgpt_blocked || self.chatgpt_fenced;
+        arrived.1 = self.chatgpt_fenced;
         arrived
     }
 
-    /// `ChatGPT` is ready on `ready`, recovered with `boundary`. Newly recovered, it ends what
-    /// ran on `ChatGPT` before, so no read or send straddles the change; the same report again
-    /// changes nothing. A cutoff for another sign-in, or one that differs from the cutoff its
-    /// sign-in already has, installs nothing: it ends `ChatGPT`'s work and refuses the sign-in
-    /// until a consistent report, which no ordinary refresh stands in for.
-    pub(super) fn recovered_chatgpt(
-        &mut self,
-        ready: Ready,
-        boundary: Boundary,
-        effects: &mut Vec<Effect>,
-    ) {
-        if self.chatgpt_retired.contains(&ready.connection) {
-            return;
-        }
-        let installed = self.recovered(ConnectionTag(boundary.tag()));
-        if boundary.tag() != ready.connection.0 || installed.is_some_and(|cut| cut != boundary) {
-            if !self.refused_recovery.contains(&ready.connection) {
-                self.refused_recovery.push(ready.connection);
-            }
-            self.cancel_job_on(ConnectionKind::ChatGpt, effects);
-            self.available(
-                ConnectionKind::ChatGpt,
-                Availability::Unavailable(sign_in_needed()),
-                effects,
-            );
-            self.chatgpt_blocked = true;
-            return;
-        }
-        self.refused_recovery.retain(|tag| *tag != ready.connection);
-        if installed.is_none() {
-            self.recovered_chatgpt.push(boundary);
-            self.cancel_job_on(ConnectionKind::ChatGpt, effects);
-            if self.connection() == Some(ready.connection) {
-                self.available(
-                    ConnectionKind::ChatGpt,
-                    Availability::Unavailable(sign_in_needed()),
-                    effects,
-                );
-            }
-        }
-        self.available(ConnectionKind::ChatGpt, Availability::Ready(ready), effects);
-    }
-
     /// Whether the account's sign-in keeps `ChatGPT`'s history from a turn that arrives now: one
-    /// not proved, or recovered but not ready. Only the account lifts it; a refused report's own
-    /// block is apart.
+    /// whose proof is pending or unproved, ready or not. Only the account lifts it.
     pub(crate) fn fence_chatgpt_reads(&mut self) {
         self.chatgpt_fenced = true;
     }
@@ -375,27 +323,6 @@ impl Coordinator {
     /// The account's sign-in no longer fences `ChatGPT`'s history.
     pub(crate) fn lift_chatgpt_fence(&mut self) {
         self.chatgpt_fenced = false;
-    }
-
-    /// The cutoff `tag`'s `ChatGPT` reads keep to, when that sign-in was recovered.
-    pub(super) fn recovered(&self, tag: ConnectionTag) -> Option<Boundary> {
-        self.recovered_chatgpt
-            .iter()
-            .copied()
-            .find(|cut| cut.tag() == tag.0)
-    }
-
-    /// The cutoff the current run's bound route requires.
-    pub(super) fn current_recovery(&self) -> Option<Boundary> {
-        let route = self.current.as_ref()?.route?;
-        self.required_recovery(route)
-    }
-
-    /// The cutoff every read and send on `route` requires: the recovered `ChatGPT` connection's.
-    pub(super) fn required_recovery(&self, route: Route) -> Option<Boundary> {
-        (route.kind == ConnectionKind::ChatGpt)
-            .then(|| self.recovered(route.tag))
-            .flatten()
     }
 
     /// `kind` changed. A catalog-only change keeps the current run. Any other change ends a run
@@ -407,25 +334,6 @@ impl Coordinator {
         now: Availability,
         effects: &mut Vec<Effect>,
     ) {
-        let now = match now {
-            Availability::Ready(ready)
-                if kind == ConnectionKind::ChatGpt
-                    && self.refused_recovery.contains(&ready.connection) =>
-            {
-                self.chatgpt_blocked = true;
-                Availability::Unavailable(sign_in_needed())
-            }
-            now => now,
-        };
-        if let (ConnectionKind::ChatGpt, Availability::Ready(ready)) = (kind, &now) {
-            self.chatgpt_blocked = false;
-            if let Some(last) = self.last_chatgpt.replace(ready.connection)
-                && last != ready.connection
-                && !self.chatgpt_retired.contains(&last)
-            {
-                self.chatgpt_retired.push(last);
-            }
-        }
         self.availability[kind] = now;
         self.lose_pictures(None);
         self.revoke_pictures();
@@ -601,30 +509,20 @@ impl Coordinator {
     /// run is current and bound to `ChatGPT`, or a job's, only while that exact job is sending on
     /// its ready sign-in.
     pub(crate) fn sending(&self, key: SendKey) -> Option<ConnectionTag> {
-        let (tag, built) = match key {
+        match key {
             SendKey::Build(key) => self
                 .current
                 .as_ref()
                 .filter(|run| run.id == key.run)
-                .and_then(|run| Some((run.route?, run.build.as_ref())))
-                .filter(|(route, _)| route.kind == ConnectionKind::ChatGpt)
-                .map(|(route, build)| {
-                    let proof = build.filter(|build| build.key() == key && build.admitted());
-                    (route.tag, proof.and_then(|build| build.recovered_context))
-                }),
+                .and_then(|run| run.route)
+                .filter(|route| route.kind == ConnectionKind::ChatGpt)
+                .map(|route| route.tag),
             SendKey::Job(key) => self
                 .job
                 .as_ref()
                 .filter(|job| job.is_sending(key) && job.route.kind == ConnectionKind::ChatGpt)
-                .and_then(|job| {
-                    let tag = self.connection().filter(|tag| *tag == job.route.tag)?;
-                    Some((tag, job.recovered_context()))
-                }),
-        }?;
-        // A recovered connection's bearer goes only with a body read to its exact cutoff.
-        self.recovered(tag)
-            .is_none_or(|cut| built == Some(cut))
-            .then_some(tag)
+                .and_then(|job| self.connection().filter(|tag| *tag == job.route.tag)),
+        }
     }
 
     /// Why a run on `ChatGPT` can't be answered while `ChatGPT` is unavailable: `ChatGPT`'s reason,
