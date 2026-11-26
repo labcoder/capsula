@@ -9,12 +9,11 @@ use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd as _;
 use std::path::Path;
-use std::ptr::NonNull;
 
 use super::protected::{
     components, hold_from, inspect_private, open_directory, same_inspection, stat,
 };
-use super::shell_files::{AcquisitionError, Entries, named, read_dirent_name, writable_volume};
+use super::shell_files::{AcquisitionError, Entries, Next, named, writable_volume};
 use crate::Untrusted;
 
 /// How far a private walk goes before it refuses.
@@ -33,7 +32,8 @@ const LIMITS: Limits = Limits {
 
 /// Creates `path` when it's missing as a folder only this user may use (mode 0700, no ACL), then
 /// opens and checks it. An existing folder is used only if it passes the same checks; one that
-/// doesn't is refused, never re-secured. Its parent is held from `/` and must sit on a local,
+/// doesn't is refused, never re-secured. A folder this call made that a umask or an inherited ACL
+/// left unprivate is refused too, and stays. Its parent is held from `/` and must sit on a local,
 /// writable APFS volume that enforces ownership.
 ///
 /// # Errors
@@ -45,8 +45,8 @@ pub fn owner_only_dir(path: &Path) -> Result<File, Untrusted> {
 }
 
 /// Checks `path` and everything in it, each entry looked at without following it: every folder
-/// must be private like [`owner_only_dir`]'s, and nothing else may be there. Files refuse
-/// because macOS shows a file has no ACL only through a descriptor that could read it. Nothing is
+/// must be private like [`owner_only_dir`]'s, and nothing else may be there. Every file refuses:
+/// there's no approved check that shows a file has no ACL while leaving it unopened. Nothing is
 /// re-secured. Its parent is held from `/`.
 ///
 /// # Errors
@@ -183,29 +183,21 @@ fn walk(
 
 /// Every name in `folder` but the dots, counted into `seen`. A failed or partial listing refuses.
 fn list(folder: &File, limits: Limits, seen: &mut usize) -> Result<Vec<CString>, Untrusted> {
-    let entries = Entries::open(folder).map_err(|error| match error {
+    let mut entries = Entries::open(folder).map_err(|error| match error {
         AcquisitionError::Admission(error) => error,
         AcquisitionError::Open(_) => Untrusted::Io,
     })?;
     let mut names = Vec::new();
     loop {
-        // SAFETY: __error returns this thread's live errno storage.
-        let errno = unsafe { libc::__error() };
-        // SAFETY: errno is writable thread-local storage.
-        unsafe { errno.write(0) };
-        // SAFETY: entries uniquely owns a live directory stream.
-        let entry = unsafe { libc::readdir(entries.0.as_ptr()) };
-        let Some(entry) = NonNull::new(entry) else {
-            // SAFETY: errno is the live storage used by the preceding readdir call.
-            if unsafe { errno.read() } != 0 {
-                return Err(Untrusted::Io);
+        let name = match entries.next_name() {
+            Next::Name(name) => name,
+            Next::End => {
+                #[cfg(test)]
+                tests::listed(&mut names);
+                return Ok(names);
             }
-            #[cfg(test)]
-            tests::listed(&mut names);
-            return Ok(names);
+            Next::Malformed | Next::Failed => return Err(Untrusted::Io),
         };
-        // SAFETY: this successful readdir record is live until the next call on this stream.
-        let name = unsafe { read_dirent_name(entry) }.ok_or(Untrusted::Io)?;
         if matches!(name.to_bytes(), b"." | b"..") {
             continue;
         }

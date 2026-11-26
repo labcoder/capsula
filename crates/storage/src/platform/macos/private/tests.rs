@@ -5,6 +5,7 @@ use std::os::fd::FromRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 
 use crate::platform::macos::protected::tests::{Scratch, install_acl};
+use crate::platform::macos::protected::{classify_absent_acl, query_present_acl};
 
 const DENY: &CStr = c"!#acl 1\ngroup:11111111-2222-3333-4444-555555555555:::deny:write\n";
 
@@ -94,6 +95,116 @@ fn invalid_paths_refuse_before_anything_is_made() {
     }
 }
 
+fn absent_response(returned: u32) -> [u8; 60] {
+    let mut bytes = [0_u8; 60];
+    for (offset, value) in [
+        (0, 60),
+        (4, returned),
+        (24, 7),
+        (28, 2),
+        (32, 501),
+        (36, 20),
+    ] {
+        bytes[offset..offset + 4].copy_from_slice(&u32::to_ne_bytes(value));
+    }
+    bytes[40..44].copy_from_slice(&0o700_u32.to_ne_bytes());
+    bytes[44..52].copy_from_slice(&91_u64.to_ne_bytes());
+    bytes
+}
+
+fn folder_sample() -> libc::stat {
+    // SAFETY: zero is a valid starting value for libc's integer-only stat fields.
+    let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+    metadata.st_dev = 7;
+    metadata.st_ino = 91;
+    metadata.st_uid = 501;
+    metadata.st_gid = 20;
+    metadata.st_mode = libc::S_IFDIR | 0o700;
+    metadata
+}
+
+#[test]
+fn absence_needs_a_complete_query_that_leaves_the_acl_out() {
+    let without = libc::ATTR_CMN_RETURNED_ATTRS
+        | libc::ATTR_CMN_DEVID
+        | libc::ATTR_CMN_OBJTYPE
+        | libc::ATTR_CMN_OWNERID
+        | libc::ATTR_CMN_GRPID
+        | libc::ATTR_CMN_ACCESSMASK
+        | libc::ATTR_CMN_FILEID;
+    let expected = folder_sample();
+    assert_eq!(
+        classify_absent_acl(0, &absent_response(without), &expected),
+        Ok(())
+    );
+    assert_eq!(
+        classify_absent_acl(
+            0,
+            &absent_response(without | libc::ATTR_CMN_EXTENDED_SECURITY),
+            &expected
+        ),
+        Err(Untrusted::Unsafe),
+        "a returned ACL, empty or not"
+    );
+    assert_eq!(
+        classify_absent_acl(-1, &absent_response(without), &expected),
+        Err(Untrusted::Io)
+    );
+    assert_eq!(
+        classify_absent_acl(
+            0,
+            &absent_response(without & !libc::ATTR_CMN_FILEID),
+            &expected
+        ),
+        Err(Untrusted::Io),
+        "an incomplete query"
+    );
+    let mut other = absent_response(without);
+    other[16..20].copy_from_slice(&1_u32.to_ne_bytes());
+    assert_eq!(
+        classify_absent_acl(0, &other, &expected),
+        Err(Untrusted::Io)
+    );
+    let mut short = absent_response(without);
+    short[0..4].copy_from_slice(&51_u32.to_ne_bytes());
+    assert_eq!(
+        classify_absent_acl(0, &short, &expected),
+        Err(Untrusted::Io)
+    );
+    let mut moved = expected;
+    moved.st_ino += 1;
+    assert_eq!(
+        classify_absent_acl(0, &absent_response(without), &moved),
+        Err(Untrusted::Io),
+        "another object's answer"
+    );
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_public_paths_reach_the_named_entries() {
+    let mut scratch = Scratch::new();
+    let root = scratch.root.try_clone().expect("retain scratch root");
+    let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
+        .expect("an explicitly commissioned fixture parent");
+    let base = Path::new(&parent).join(OsStr::from_bytes(scratch.residual.to_bytes()));
+
+    let made = owner_only_dir(&base.join("public")).expect("creates through the public path");
+    scratch
+        .record(&root, c"public")
+        .expect("record created folder");
+    let named = look(&root, c"public").expect("the named entry");
+    let held = stat(made.as_raw_fd()).expect("returned identity");
+    assert_eq!((held.st_dev, held.st_ino), (named.st_dev, named.st_ino));
+    assert_eq!(private_tree(&base.join("public")), Ok(()));
+    assert_eq!(private_tree(&base.join("absent")), Err(Untrusted::Missing));
+
+    drop(made);
+    scratch
+        .cleanup()
+        .expect("identity-checked cleanup; uncertainty leaves reported residual");
+}
+
 #[test]
 #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
 fn native_owner_only_dir_creates_reuses_and_refuses() {
@@ -144,6 +255,40 @@ fn native_owner_only_dir_creates_reuses_and_refuses() {
     );
 
     drop((made, again, denied));
+    scratch
+        .cleanup()
+        .expect("identity-checked cleanup; uncertainty leaves reported residual");
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_an_empty_present_acl_refuses() {
+    let mut scratch = Scratch::new();
+    let root = scratch.root.try_clone().expect("retain scratch root");
+    let user = this_user();
+
+    let empty = folder(&mut scratch, &root, c"empty", 0o700);
+    install_acl(&empty, c"!#acl 1\n").expect("install an ACL with no entries");
+    let (result, buffer) = query_present_acl(empty.as_raw_fd());
+    assert_eq!(result, 0, "completed attribute query");
+    let returned = u32::from_ne_bytes(buffer.0[4..8].try_into().expect("four bytes"));
+    assert_ne!(
+        returned & libc::ATTR_CMN_EXTENDED_SECURITY,
+        0,
+        "the fixture's ACL is present"
+    );
+    assert_eq!(
+        owner_only_at(&root, c"empty", user).err(),
+        Some(Untrusted::Unsafe)
+    );
+    assert_eq!(
+        private_at(&root, c"empty", user, LIMITS),
+        Err(Untrusted::Unsafe)
+    );
+    drop(folder(&mut scratch, &root, c"none", 0o700));
+    assert!(owner_only_at(&root, c"none", user).is_ok(), "no ACL passes");
+
+    drop(empty);
     scratch
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");

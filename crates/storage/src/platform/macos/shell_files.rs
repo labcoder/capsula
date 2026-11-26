@@ -499,26 +499,23 @@ impl ShellStorage {
         self.0.check()?;
         let mut result = Retention::default();
         let logs = &self.0.held[self.0.private_start + 1].file;
-        let entries = Entries::open(logs)?;
+        let mut entries = Entries::open(logs)?;
         let mut candidates = Vec::new();
         while result.can_read() {
-            // SAFETY: __error returns this thread's live errno storage.
-            let errno = unsafe { libc::__error() };
-            // SAFETY: errno is writable thread-local storage.
-            unsafe { errno.write(0) };
-            // SAFETY: entries uniquely owns a live directory stream.
-            let entry = unsafe { libc::readdir(entries.0.as_ptr()) };
-            let Some(entry) = NonNull::new(entry) else {
-                // SAFETY: errno is the live storage used by the preceding readdir call.
-                result.incomplete = unsafe { errno.read() } != 0;
-                break;
+            let name = match entries.next_name() {
+                Next::End => break,
+                Next::Failed => {
+                    result.incomplete = true;
+                    break;
+                }
+                Next::Malformed => {
+                    result.scanned += 1;
+                    result.skipped += 1;
+                    continue;
+                }
+                Next::Name(name) => name,
             };
             result.scanned += 1;
-            // SAFETY: this successful readdir record is live until the next call on this stream.
-            let Some(name) = (unsafe { read_dirent_name(entry) }) else {
-                result.skipped += 1;
-                continue;
-            };
             let Some(date) = log_date(prefix, name.to_bytes()) else {
                 result.skipped += 1;
                 continue;
@@ -819,7 +816,7 @@ fn log_date(prefix: &str, name: &[u8]) -> Option<SystemTime> {
     }
 }
 
-pub(super) unsafe fn read_dirent_name(entry: NonNull<libc::dirent>) -> Option<CString> {
+unsafe fn read_dirent_name(entry: NonNull<libc::dirent>) -> Option<CString> {
     let record = entry.as_ptr().cast::<u8>();
     let reclen = record
         .wrapping_add(offset_of!(libc::dirent, d_reclen))
@@ -857,7 +854,18 @@ fn bounded_dirent_name<'a>(
     CStr::from_bytes_with_nul(read(len)).ok()
 }
 
-pub(super) struct Entries(pub(super) NonNull<libc::DIR>);
+pub(super) struct Entries(NonNull<libc::DIR>);
+
+/// One step through a directory stream.
+pub(super) enum Next {
+    Name(CString),
+    /// An entry whose name couldn't be read safely.
+    Malformed,
+    /// The stream ended cleanly.
+    End,
+    /// The stream failed before its end.
+    Failed,
+}
 
 impl Entries {
     pub(super) fn open(logs: &File) -> Result<Self, AcquisitionError> {
@@ -878,6 +886,28 @@ impl Entries {
         // SAFETY: failed fdopendir did not consume fd; this is its only close.
         unsafe { libc::close(fd) };
         Err(AcquisitionError::Open(error.kind()))
+    }
+}
+
+impl Entries {
+    /// The next entry's name, copied out before the stream moves on.
+    pub(super) fn next_name(&mut self) -> Next {
+        // SAFETY: __error returns this thread's live errno storage.
+        let errno = unsafe { libc::__error() };
+        // SAFETY: errno is writable thread-local storage.
+        unsafe { errno.write(0) };
+        // SAFETY: self uniquely owns a live directory stream.
+        let entry = unsafe { libc::readdir(self.0.as_ptr()) };
+        let Some(entry) = NonNull::new(entry) else {
+            // SAFETY: errno is the live storage used by the preceding readdir call.
+            return if unsafe { errno.read() } == 0 {
+                Next::End
+            } else {
+                Next::Failed
+            };
+        };
+        // SAFETY: this successful readdir record is live until the next call on this stream.
+        unsafe { read_dirent_name(entry) }.map_or(Next::Malformed, Next::Name)
     }
 }
 

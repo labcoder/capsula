@@ -526,7 +526,7 @@ pub(in crate::platform::macos) struct Scratch {
     pub(in crate::platform::macos) root: File,
     entries: Vec<Entry>,
     _ancestors: Vec<File>,
-    residual: CString,
+    pub(in crate::platform::macos) residual: CString,
     user: libc::uid_t,
     cleaned: bool,
 }
