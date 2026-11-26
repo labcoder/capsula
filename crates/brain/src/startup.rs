@@ -18,17 +18,8 @@ use crate::store::{self, SceneState, Store};
 use crate::{
     BrainError, STARTUP_LOG_TARGET, StartMode, accounts, credential, engine, serve, start_screen,
 };
-#[expect(dead_code, reason = "parent-bound startup is not wired yet")]
 pub(crate) mod custody;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "parent-bound startup is not wired yet")
-)]
 pub(crate) mod instance;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "parent-bound startup is not wired yet")
-)]
 pub(crate) mod parent_bound;
 #[cfg(all(test, windows))]
 mod tests;

@@ -333,6 +333,10 @@ impl Brain {
             return Ok(None);
         }
         let hold = self.hold_control(&message, link);
+        #[cfg(test)]
+        if matches!(hold, Ok(true)) {
+            self.observer.send(self.holds.left()).ok();
+        }
         if let ControlToBrain::Settings(op) = message {
             match hold {
                 Ok(false) => {}

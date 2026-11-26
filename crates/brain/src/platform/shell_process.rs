@@ -7,15 +7,12 @@ use tokio::sync::watch;
 use super::macos::parent::ParentWatch;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(any(
-        test,
-        all(target_os = "macos", debug_assertions, feature = "test-support")
-    )),
-    expect(dead_code, reason = "parent-bound runtime is not wired yet")
-)]
 pub(crate) enum Verdict {
     Watching,
+    #[cfg_attr(
+        not(any(test, target_os = "macos")),
+        expect(dead_code, reason = "only Darwin's parent watch sees its parent exit")
+    )]
     Exited,
     Unconfirmed(Unconfirmed),
 }
@@ -37,13 +34,6 @@ pub(crate) enum Unconfirmed {
 }
 
 impl Verdict {
-    #[cfg_attr(
-        not(any(
-            test,
-            all(target_os = "macos", debug_assertions, feature = "test-support")
-        )),
-        expect(dead_code, reason = "parent-bound runtime is not wired yet")
-    )]
     pub(crate) async fn wait(receiver: &mut watch::Receiver<Self>) -> Self {
         receiver
             .wait_for(|verdict| *verdict != Self::Watching)
@@ -52,13 +42,6 @@ impl Verdict {
     }
 
     /// [`Verdict::wait`] on a shell's loss receiver; never resolves for a shell without one.
-    #[cfg_attr(
-        not(any(
-            test,
-            all(target_os = "macos", debug_assertions, feature = "test-support")
-        )),
-        expect(dead_code, reason = "parent-bound runtime is not wired yet")
-    )]
     pub(crate) async fn lost(loss: &mut Option<watch::Receiver<Self>>) -> Self {
         match loss {
             Some(loss) => Self::wait(loss).await,
@@ -109,13 +92,6 @@ impl CommitGate {
 }
 
 /// Held by parent-bound startup after it won the commit claim.
-#[cfg_attr(
-    not(any(
-        test,
-        all(target_os = "macos", debug_assertions, feature = "test-support")
-    )),
-    expect(dead_code, reason = "parent-bound startup is not wired yet")
-)]
 pub(crate) struct Committed(());
 
 #[derive(Clone)]
@@ -128,10 +104,6 @@ enum Owner {
     #[cfg(windows)]
     Native(std::os::windows::io::OwnedHandle),
     #[cfg(target_os = "macos")]
-    #[cfg_attr(
-        not(any(test, all(debug_assertions, feature = "test-support"))),
-        expect(dead_code, reason = "parent-bound admission is not wired yet")
-    )]
     Parent(ParentWatch),
     #[cfg(test)]
     Fixture(Arc<AtomicU8>, CommitGate),
@@ -154,14 +126,20 @@ impl ShellProcess {
         }
     }
 
+    /// Watches this process's original parent as the shell.
+    ///
+    /// # Errors
+    /// The watch couldn't be armed or the parent confirmed.
     #[cfg(target_os = "macos")]
-    #[cfg_attr(
-        not(any(test, all(debug_assertions, feature = "test-support"))),
-        expect(dead_code, reason = "parent-bound admission is not wired yet")
-    )]
-    pub(in crate::platform) fn arm_parent() -> Result<Self, Unconfirmed> {
+    pub(crate) fn arm_parent() -> Result<Self, Unconfirmed> {
         let (pid, parent) = ParentWatch::arm()?;
         Ok(Self::parent(pid, parent))
+    }
+
+    /// Only Darwin watches a parent.
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn arm_parent() -> Result<Self, Unconfirmed> {
+        Err(Unconfirmed::Lineage)
     }
 
     #[cfg(target_os = "macos")]
@@ -173,13 +151,6 @@ impl ShellProcess {
     }
 
     /// The one commit claim: Some at most once, and never after a loss was latched.
-    #[cfg_attr(
-        not(any(
-            test,
-            all(target_os = "macos", debug_assertions, feature = "test-support")
-        )),
-        expect(dead_code, reason = "parent-bound startup is not wired yet")
-    )]
     pub(crate) fn claim_commit(&self) -> Option<Committed> {
         match *self.owner {
             #[cfg(windows)]
@@ -195,13 +166,6 @@ impl ShellProcess {
 
     /// The current verdict, read without waiting: Err once a terminal verdict or a closed watch
     /// is visible. Without a parent watch nothing is confirmed.
-    #[cfg_attr(
-        not(any(
-            test,
-            all(target_os = "macos", debug_assertions, feature = "test-support")
-        )),
-        expect(dead_code, reason = "parent-bound startup is not wired yet")
-    )]
     pub(crate) fn fence(&self) -> Result<(), Verdict> {
         match self.snapshot() {
             Verdict::Watching => Ok(()),
@@ -232,13 +196,6 @@ impl ShellProcess {
         }
     }
 
-    #[cfg_attr(
-        not(any(
-            test,
-            all(target_os = "macos", debug_assertions, feature = "test-support")
-        )),
-        expect(dead_code, reason = "parent-bound runtime is not wired yet")
-    )]
     #[cfg_attr(
         all(target_os = "macos", not(test)),
         expect(clippy::unnecessary_wraps, reason = "detached platforms have no watch")

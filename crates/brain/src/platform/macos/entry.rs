@@ -5,10 +5,6 @@ use std::os::fd::OwnedFd;
 /// The inherited control and data descriptors, owned. Only the executable makes one, from its
 /// descriptors 3 and 4, so the library never takes a process descriptor itself.
 #[derive(Debug)]
-#[expect(
-    dead_code,
-    reason = "parent-bound admission adopts them; it isn't wired yet"
-)]
 pub struct InheritedFds {
     control: OwnedFd,
     data: OwnedFd,
@@ -19,6 +15,14 @@ impl InheritedFds {
     #[must_use]
     pub fn new(control: OwnedFd, data: OwnedFd) -> Self {
         Self { control, data }
+    }
+
+    /// Checks both descriptors as the inherited pair; needs no runtime.
+    ///
+    /// # Errors
+    /// As [`super::pair::adopt`].
+    pub(crate) fn adopt(self) -> Result<super::pair::InheritedPair, super::pair::PairError> {
+        super::pair::adopt(self.control, self.data)
     }
 }
 

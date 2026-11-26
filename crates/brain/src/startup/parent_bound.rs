@@ -1,12 +1,15 @@
-//! The parent-bound root: the shared stages, the instance attempt and the process services,
-//! settled in one order so nothing that started outlives custody, and its admission. The entry
-//! doesn't run admission yet, and the stage driver and serving aren't written.
+//! The parent-bound start: admission, the stage driver, serving and settlement, through one root
+//! that owns the stages, the instance attempt and the process services and settles them in one
+//! order, so nothing that started outlives custody. This build's prerequisites are never ready,
+//! so production refuses at `ready` after a real admission.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use kumochi_protocol::constants::BRAIN_LOG;
 
 use kumochi_protocol::message::{CAPABILITY_LEN, Incarnation, IssueSession};
+use tokio::sync::watch;
 use tokio::time::Instant;
 
 use super::custody::{CustodyError, SessionCustody};
@@ -14,9 +17,13 @@ use super::instance::{InstanceAttempt, InstanceStore, OwnedKey};
 use super::{Checkpoint, OpenedState, Stages, VaultHeld};
 use crate::config::tuning::{OAuthTuning, TokenTuning};
 use crate::platform::shell_process::Committed;
-use crate::platform::{SessionLock, ShellProcess};
-use crate::runtime::{Shutdown, Stage, account::Accounts};
+use crate::platform::{self, Job, SessionLock, ShellProcess};
+use crate::runtime::{Brain, Ended, Quit, Shutdown, Stage, Terminal, account::Accounts};
 use crate::{BrainError, ParentBoundError, StartMode};
+
+/// How long admission and the stages have, from before the first bootstrap action. Settlement
+/// has no admission deadline.
+pub(crate) const ADMISSION: Duration = Duration::from_secs(10);
 
 /// A parent-bound prerequisite this build lacks. Known to be missing: the vault's credential
 /// store, containment, custody lent to the opened state and R2's own list; that list may not be
@@ -39,6 +46,8 @@ pub(in crate::startup) trait Prerequisites {
         tokens: TokenTuning,
         profile: Arc<SessionLock>,
     ) -> Result<(Accounts, VaultHeld), BrainError>;
+    /// The helpers' containment, or None where there's none; workers that need it don't start.
+    fn containment(&mut self) -> Result<Option<Arc<Job>>, BrainError>;
 }
 
 /// What `init` started, held until the root has settled.
@@ -76,6 +85,10 @@ impl Prerequisites for Pending {
     ) -> Result<(Accounts, VaultHeld), BrainError> {
         crate::accounts(oauth, tokens, profile)
     }
+
+    fn containment(&mut self) -> Result<Option<Arc<Job>>, BrainError> {
+        Err(BrainError::Helpers(std::io::ErrorKind::Unsupported.into()))
+    }
 }
 
 /// What each stage was seen to do when the root settled.
@@ -99,6 +112,81 @@ pub(crate) trait AdmissionPair {
         by: Instant,
         reserve: impl FnOnce() -> IssueSession,
     ) -> impl Future<Output = Option<Self::Greeted>>;
+    /// The greeted pair's cell, set once either leg refuses.
+    fn cell(greeted: &Self::Greeted) -> watch::Receiver<bool>;
+    /// `ShellTuning` by `by`, written only while the parent and the clock both still pass, then
+    /// the runtime on both legs, lent by `greeted`, with `terminal`, until it ends. The legs stay
+    /// open until the root drops `greeted`.
+    fn serve(
+        greeted: &mut Self::Greeted,
+        brain: &mut Brain,
+        terminal: Terminal,
+        shell: &ShellProcess,
+        by: Instant,
+    ) -> impl Future<Output = Ended>;
+}
+
+/// Starts a parent-bound brain on `pair` with this build's prerequisites, which refuse at
+/// `ready`, so production stops after a real admission.
+pub(crate) async fn run_production(
+    pair: platform::InheritedPair,
+    shell: &ShellProcess,
+    by: Instant,
+) -> Result<(), ParentBoundError> {
+    Box::pin(run::<platform::InstanceItem, _>(
+        pair,
+        shell,
+        by,
+        &mut Pending,
+        SessionCustody::bootstrap,
+        platform::InstanceItem::admit,
+    ))
+    .await
+}
+
+/// Admits, stages and serves on one root, then settles it whatever happened, and maps the two.
+async fn run<S: InstanceStore, P: AdmissionPair>(
+    pair: P,
+    shell: &ShellProcess,
+    by: Instant,
+    pre: &mut impl Prerequisites,
+    custody: impl FnOnce() -> Result<SessionCustody, CustodyError>,
+    store: impl FnOnce() -> Result<S, S::Error>,
+) -> Result<(), ParentBoundError> {
+    let mut root = Root::<S>::new();
+    let (served, greeted) = root.serve(pair, shell, by, pre, custody, store).await;
+    let quit = match served {
+        Ok(Ended::Quit { deadline }) => Some(deadline),
+        _ => None,
+    };
+    exit(&served, root.settle(quit, greeted).await)
+}
+
+/// 0 only for an authenticated, latched Quit that completed with every stage Confirmed. Any
+/// stage short of Confirmed, or an incomplete Quit, is Incomplete over every other result; any
+/// other end of serving, a lost shell included, is Refused.
+fn exit(
+    served: &Result<Ended, ParentBoundError>,
+    settled: Settled,
+) -> Result<(), ParentBoundError> {
+    let Shutdown {
+        quit,
+        store,
+        settings,
+        claude,
+        account,
+    } = settled.runtime;
+    let confirmed = [store, settings, claude, account, settled.item]
+        .iter()
+        .all(|stage| *stage == Stage::Confirmed);
+    if !confirmed || quit == Some(Quit::Incomplete) {
+        return Err(ParentBoundError::Incomplete);
+    }
+    match served {
+        Ok(Ended::Quit { .. }) if quit == Some(Quit::Complete) => Ok(()),
+        Ok(_) => Err(ParentBoundError::Refused),
+        Err(refused) => Err(*refused),
+    }
 }
 
 /// Owns everything a parent-bound start makes, from its first stage to its settlement.
@@ -194,20 +282,86 @@ impl<S: InstanceStore> Root<S> {
         Ok((greeted, committed))
     }
 
-    /// Closes the Brain, or whatever started without one; then settles the instance attempt
-    /// under custody, drops custody, and only then the process services.
-    pub(crate) async fn settle(self) -> Settled {
+    /// Admits, then runs the stages, then serves until the runtime ends. Returns the greeted pair
+    /// too, once there is one, so its legs close only at settlement; a fatal end drops it here,
+    /// so the shell sees EOF before any cleanup is awaited.
+    async fn serve<P: AdmissionPair>(
+        &mut self,
+        pair: P,
+        shell: &ShellProcess,
+        by: Instant,
+        pre: &mut impl Prerequisites,
+        custody: impl FnOnce() -> Result<SessionCustody, CustodyError>,
+        store: impl FnOnce() -> Result<S, S::Error>,
+    ) -> (Result<Ended, ParentBoundError>, Option<P::Greeted>) {
+        let (mut greeted, committed) = match self.admit(pair, shell, by, custody, store).await {
+            Ok(admitted) => admitted,
+            Err(refused) => return (Err(refused), None),
+        };
+        if let Err(refused) = self.stage(pre, shell, by, &committed) {
+            return (Err(refused), Some(greeted));
+        }
+        let terminal = Terminal::new(P::cell(&greeted), shell.loss());
+        let brain = self
+            .stages
+            .brain
+            .as_mut()
+            .expect("the stages built the brain");
+        let ended = P::serve(&mut greeted, brain, terminal, shell, by).await;
+        let kept = (!matches!(ended, Ended::Fatal(_))).then_some(greeted);
+        (Ok(ended), kept)
+    }
+
+    /// Runs the stages for a committed admission, each behind a fence and the clock: on entry,
+    /// again once the prerequisites are ready and before anything starts, and at each
+    /// checkpoint. A refusal keeps what started for `settle`. Voice never starts here: this mode
+    /// builds no models, and the helpers start only what their containment allows.
+    ///
+    /// # Errors
+    /// `Unsupported` when the prerequisites aren't ready, otherwise `Refused`.
+    fn stage(
+        &mut self,
+        pre: &mut impl Prerequisites,
+        shell: &ShellProcess,
+        by: Instant,
+        _: &Committed,
+    ) -> Result<(), ParentBoundError> {
+        let fence = || -> Result<(), BrainError> {
+            let refused =
+                || BrainError::NativeRuntime(std::io::ErrorKind::ConnectionAborted.into());
+            shell.fence().map_err(|_| refused())?;
+            if Instant::now() >= by {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        fence().map_err(|_| ParentBoundError::Refused)?;
+        pre.ready().map_err(|_| ParentBoundError::Unsupported)?;
+        fence().map_err(|_| ParentBoundError::Refused)?;
+        self.start(pre, |_, _| fence())
+            .map_err(|_| ParentBoundError::Refused)?;
+        self.stages.jobs = pre.containment().map_err(|_| ParentBoundError::Refused)?;
+        fence().map_err(|_| ParentBoundError::Refused)
+    }
+
+    /// Quits the Brain by `quit` after an accepted Quit, closes it otherwise, or closes whatever
+    /// started without one; drops the helpers, then `pair`, so the shell sees EOF only after
+    /// those; then settles the instance attempt under custody, drops custody, and only then the
+    /// process services.
+    pub(crate) async fn settle(self, quit: Option<Instant>, pair: impl Sized) -> Settled {
         let Self {
             admitting: _,
             mut stages,
             mut instance,
             init: _init,
         } = self;
-        let runtime = match stages.brain.take() {
-            Some(brain) => brain.close().await,
-            None => stages.close_unbuilt().await,
+        let runtime = match (stages.brain.take(), quit) {
+            (Some(brain), Some(deadline)) => brain.quit(deadline).await,
+            (Some(brain), None) => brain.close().await,
+            (None, _) => stages.close_unbuilt().await,
         };
         drop(stages);
+        drop(pair);
         let item = match instance.as_mut() {
             Some(attempt) => attempt.settle().await,
             None => Stage::Confirmed,
@@ -225,4 +379,4 @@ thread_local! {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

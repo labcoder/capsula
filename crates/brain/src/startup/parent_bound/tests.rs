@@ -56,9 +56,9 @@ impl Drop for Hold {
 }
 
 /// The test's ends of a `Hold`.
-struct Holding {
-    entered: async_mpsc::UnboundedReceiver<()>,
-    free: mpsc::Sender<()>,
+pub(crate) struct Holding {
+    pub(crate) entered: async_mpsc::UnboundedReceiver<()>,
+    pub(crate) free: mpsc::Sender<()>,
 }
 
 /// A `Hold`'s parts, unarmed, so a fixture dropped before its accounts start never blocks.
@@ -81,12 +81,23 @@ enum Start {
     Panics,
 }
 
+/// Where a scripted start publishes the parent's loss.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoseAt {
+    /// Once the prerequisites are ready, before anything starts.
+    Ready,
+    /// Once the store is open.
+    Open,
+}
+
 /// A scratch store, accounts whose release waits on the hold, and a subscriber scoped to this
-/// thread.
+/// thread; it records each stage it ran and can publish a loss at one of them.
 struct Scripted<'a> {
     scratch: &'a Scratch,
     start: Start,
     hold: Option<(async_mpsc::UnboundedSender<()>, mpsc::Receiver<()>)>,
+    calls: Vec<&'static str>,
+    lose: Option<(LoseAt, ShellProcess)>,
 }
 
 impl<'a> Scripted<'a> {
@@ -96,6 +107,8 @@ impl<'a> Scripted<'a> {
             scratch,
             start,
             hold: Some(parts),
+            calls: Vec::new(),
+            lose: None,
         };
         (pre, holding)
     }
@@ -103,10 +116,12 @@ impl<'a> Scripted<'a> {
 
 impl Prerequisites for Scripted<'_> {
     fn ready(&self) -> Result<(), NotReady> {
+        self.lose_at(LoseAt::Ready);
         Ok(())
     }
 
     fn init(&mut self) -> Result<ProcessInit, BrainError> {
+        self.calls.push("init");
         let logs = crate::logging::file_subscriber(&self.scratch.dir().join("logs"), "brain")
             .map_err(|_| BrainError::Process(io::ErrorKind::Other.into()))?;
         Ok(ProcessInit {
@@ -115,14 +130,17 @@ impl Prerequisites for Scripted<'_> {
     }
 
     fn open(&mut self, acquired: &mut bool) -> Result<OpenedState, BrainError> {
-        OpenedState::load_marking(
+        self.calls.push("open");
+        let opened = OpenedState::load_marking(
             &self.scratch.db(),
             || Some(self.scratch.dir().to_owned()),
             Some(Selected::Fixture(Box::new(
                 Fixture::parse("").expect("empty fixture"),
             ))),
             acquired,
-        )
+        );
+        self.lose_at(LoseAt::Open);
+        opened
     }
 
     fn accounts(
@@ -131,6 +149,7 @@ impl Prerequisites for Scripted<'_> {
         _: TokenTuning,
         profile: Arc<SessionLock>,
     ) -> Result<(Accounts, VaultHeld), BrainError> {
+        self.calls.push("accounts");
         let (entered, free) = self.hold.take().expect("one start");
         let hold = Hold { entered, free };
         let accounts = match self.start {
@@ -141,6 +160,22 @@ impl Prerequisites for Scripted<'_> {
             Start::Panics => failing_accounts(hold, panicking_open)?,
         };
         Ok((accounts, Arc::default()))
+    }
+
+    fn containment(&mut self) -> Result<Option<Arc<Job>>, BrainError> {
+        self.calls.push("containment");
+        Ok(None)
+    }
+}
+
+impl Scripted<'_> {
+    /// Publishes the loss if this is where the script puts it; the claim always came first.
+    fn lose_at(&self, at: LoseAt) {
+        if let Some((lose, shell)) = &self.lose
+            && *lose == at
+        {
+            assert!(!shell.publish(1), "the claim came before the loss");
+        }
     }
 }
 
@@ -212,7 +247,7 @@ async fn assert_settles_after_the_release(name: &str, stop: Option<Checkpoint>) 
         ),
     }
     assert!(root.stages.brain.is_none(), "no Brain was built");
-    let settle = root.settle();
+    let settle = root.settle(None, ());
     tokio::pin!(settle);
     timeout(PATIENCE, async {
         tokio::select! {
@@ -298,7 +333,7 @@ async fn assert_start_waits_for_the_worker(name: &str, start: Start, kind: io::E
         "{error:?}"
     );
     let custody = watcher.join().expect("the watcher's checks hold");
-    let settled = timeout(PATIENCE, Box::pin(root.settle()))
+    let settled = timeout(PATIENCE, Box::pin(root.settle(None, ())))
         .await
         .expect("settling has nothing to wait for");
     assert_eq!(
@@ -342,7 +377,7 @@ async fn an_open_refused_before_the_store_settles_it_confirmed() {
         panic!("a busy profile must stop the start");
     };
     assert!(matches!(error, BrainError::ProfileBusy), "{error:?}");
-    let settled = Box::pin(root.settle()).await;
+    let settled = Box::pin(root.settle(None, ())).await;
     assert_eq!(
         settled.runtime.store,
         Stage::Confirmed,
@@ -367,7 +402,7 @@ async fn an_open_failed_after_the_store_settles_it_unconfirmed() {
         panic!("a failed recovery must stop the start");
     };
     assert!(matches!(error, BrainError::Store(_)), "{error:?}");
-    let settled = Box::pin(root.settle()).await;
+    let settled = Box::pin(root.settle(None, ())).await;
     assert_eq!(
         settled.runtime.store,
         Stage::Unconfirmed,
@@ -391,7 +426,7 @@ async fn an_open_refused_during_the_stores_setup_settles_it_unconfirmed() {
         panic!("a newer schema must stop the start");
     };
     assert!(matches!(error, BrainError::Store(_)), "{error:?}");
-    let settled = Box::pin(root.settle()).await;
+    let settled = Box::pin(root.settle(None, ())).await;
     assert_eq!(
         settled.runtime.store,
         Stage::Unconfirmed,
@@ -404,22 +439,44 @@ fn this_builds_prerequisites_are_never_ready() {
     assert_eq!(Pending.ready(), Err(NotReady));
 }
 
-/// A pair that records how far admission drove it: 1 once keyed, 2 once greeted.
-#[derive(Clone, Default)]
-struct FakePair(Arc<std::sync::atomic::AtomicU8>);
+/// A pair that records how far it was driven: 1 once keyed, 2 once greeted, 3 once served, when
+/// serving ends as `ends`.
+#[derive(Clone)]
+struct FakePair {
+    reached: Arc<std::sync::atomic::AtomicU8>,
+    ends: Ended,
+}
+
+impl Default for FakePair {
+    fn default() -> Self {
+        Self::ending(Ended::Lost)
+    }
+}
 
 impl FakePair {
+    fn ending(ends: Ended) -> Self {
+        Self {
+            reached: Arc::default(),
+            ends,
+        }
+    }
+
     fn reached(&self) -> u8 {
-        self.0.load(std::sync::atomic::Ordering::SeqCst)
+        self.reached.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn reach(&self, step: u8) {
+        self.reached
+            .store(step, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 impl AdmissionPair for FakePair {
     type Keyed = Self;
-    type Greeted = ();
+    type Greeted = Self;
 
     fn key(self, _: &[u8; CAPABILITY_LEN]) -> Option<Self> {
-        self.0.store(1, std::sync::atomic::Ordering::SeqCst);
+        self.reach(1);
         Some(self)
     }
 
@@ -428,10 +485,25 @@ impl AdmissionPair for FakePair {
         _: &ShellProcess,
         _: Instant,
         reserve: impl FnOnce() -> IssueSession,
-    ) -> impl Future<Output = Option<()>> {
+    ) -> impl Future<Output = Option<Self>> {
         reserve();
-        keyed.0.store(2, std::sync::atomic::Ordering::SeqCst);
-        std::future::ready(Some(()))
+        keyed.reach(2);
+        std::future::ready(Some(keyed))
+    }
+
+    fn cell(_: &Self) -> watch::Receiver<bool> {
+        watch::channel(false).1
+    }
+
+    fn serve(
+        greeted: &mut Self,
+        _: &mut Brain,
+        _: Terminal,
+        _: &ShellProcess,
+        _: Instant,
+    ) -> impl Future<Output = Ended> {
+        greeted.reach(3);
+        std::future::ready(greeted.ends)
     }
 }
 
@@ -518,7 +590,7 @@ async fn admission_fences_again_after_custody_before_the_item() {
     assert!(matches!(admitted, Err(ParentBoundError::Refused)));
     assert_eq!(pair.reached(), 0, "no READY");
     assert!(custody.upgrade().is_none(), "the unused custody is let go");
-    assert_eq!(Box::pin(root.settle()).await.item, Stage::Confirmed);
+    assert_eq!(Box::pin(root.settle(None, ())).await.item, Stage::Confirmed);
 }
 
 #[tokio::test]
@@ -546,7 +618,7 @@ async fn a_second_admission_after_a_refusal_refuses_without_running_anything() {
     .await;
     assert!(matches!(second, Err(ParentBoundError::Refused)));
     assert_eq!(pair.reached(), 0);
-    assert_eq!(Box::pin(root.settle()).await.item, Stage::Confirmed);
+    assert_eq!(Box::pin(root.settle(None, ())).await.item, Stage::Confirmed);
 }
 
 /// Starts an admission whose add the slot holds, waits for that add to enter, then drops it.
@@ -588,7 +660,7 @@ async fn custody_outlives_an_admission_dropped_during_publish_until_settlement()
         "custody is held while the add is out"
     );
     release.send(()).expect("the add waits");
-    assert_eq!(Box::pin(root.settle()).await.item, Stage::Confirmed);
+    assert_eq!(Box::pin(root.settle(None, ())).await.item, Stage::Confirmed);
     assert!(!slot.present(), "settlement deleted what the add wrote");
     assert!(custody.upgrade().is_none(), "settlement let custody go");
 }
@@ -616,7 +688,272 @@ async fn a_second_admission_after_a_cancelled_one_leaves_its_attempt_alone() {
         "the first attempt still holds custody"
     );
     release.send(()).expect("the add waits");
-    assert_eq!(Box::pin(root.settle()).await.item, Stage::Confirmed);
+    assert_eq!(Box::pin(root.settle(None, ())).await.item, Stage::Confirmed);
     assert!(!slot.present());
     assert!(custody.upgrade().is_none());
+}
+
+/// What a full run on the fixtures left: its result, the stages it ran, the item and custody.
+struct Ran {
+    result: Result<(), ParentBoundError>,
+    calls: Vec<&'static str>,
+    pair: FakePair,
+    item: Slot,
+    custody: Weak<()>,
+}
+
+/// Admits a fake pair on a live shell, runs the scripted stages, serves until `ends`, then settles.
+async fn run_to(name: &str, ends: Ended, lose: Option<LoseAt>) -> Ran {
+    let scratch = Scratch::new(name);
+    let shell = live();
+    let item = Slot::default();
+    let token = Arc::new(());
+    let custody = Arc::downgrade(&token);
+    let pair = FakePair::ending(ends);
+    let (result, calls) = timeout(
+        PATIENCE,
+        run_on_fixtures(
+            &scratch,
+            pair.clone(),
+            &shell,
+            later(),
+            item.clone(),
+            SessionCustody::fixture(token),
+            Script {
+                lose,
+                ..Script::default()
+            },
+        ),
+    )
+    .await
+    .expect("the run settles");
+    Ran {
+        result,
+        calls,
+        pair,
+        item,
+        custody,
+    }
+}
+
+const STAGES: [&str; 4] = ["init", "open", "accounts", "containment"];
+
+#[tokio::test]
+async fn a_served_quit_settles_every_stage_and_exits_cleanly() {
+    let ran = run_to("pb-quit", Ended::Quit { deadline: later() }, None).await;
+    assert_eq!(ran.result, Ok(()));
+    assert_eq!(ran.calls, STAGES);
+    assert_eq!(ran.pair.reached(), 3, "served");
+    assert!(!ran.item.present(), "settlement deleted the item");
+    assert!(ran.custody.upgrade().is_none(), "settlement let custody go");
+}
+
+#[tokio::test]
+async fn a_lost_shell_is_refused_even_after_a_clean_close() {
+    let ran = run_to("pb-lost", Ended::Lost, None).await;
+    assert_eq!(ran.result, Err(ParentBoundError::Refused));
+    assert_eq!(ran.calls, STAGES);
+    assert_eq!(ran.pair.reached(), 3, "served");
+    assert!(!ran.item.present());
+    assert!(ran.custody.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn a_loss_once_ready_stops_before_any_stage_starts() {
+    let ran = run_to("pb-lose-ready", Ended::Lost, Some(LoseAt::Ready)).await;
+    assert_eq!(ran.result, Err(ParentBoundError::Refused));
+    assert!(ran.calls.is_empty(), "{:?}", ran.calls);
+    assert_eq!(ran.pair.reached(), 2, "admitted, never served");
+    assert!(!ran.item.present());
+    assert!(ran.custody.upgrade().is_none());
+}
+
+/// The open store is dropped unconfirmed, which outranks the refusal.
+#[tokio::test]
+async fn a_loss_after_the_claim_stops_at_the_next_checkpoint() {
+    let ran = run_to("pb-lose-open", Ended::Lost, Some(LoseAt::Open)).await;
+    assert_eq!(ran.result, Err(ParentBoundError::Incomplete));
+    assert_eq!(ran.calls, ["init", "open"]);
+    assert_eq!(ran.pair.reached(), 2, "admitted, never served");
+    assert!(!ran.item.present());
+    assert!(ran.custody.upgrade().is_none());
+}
+
+/// Prerequisites none of whose stages may run: `ready` refuses, or fails the test when even asking
+/// is too early, and every later stage fails the test.
+struct Unready {
+    ask: bool,
+}
+
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "a stage that runs before readiness fails the test"
+)]
+impl Prerequisites for Unready {
+    fn ready(&self) -> Result<(), NotReady> {
+        assert!(self.ask, "readiness is asked only after the entry fence");
+        Err(NotReady)
+    }
+
+    fn init(&mut self) -> Result<ProcessInit, BrainError> {
+        panic!("init runs only once ready")
+    }
+
+    fn open(&mut self, _: &mut bool) -> Result<OpenedState, BrainError> {
+        panic!("open runs only once ready")
+    }
+
+    fn accounts(
+        &mut self,
+        _: OAuthTuning,
+        _: TokenTuning,
+        _: Arc<SessionLock>,
+    ) -> Result<(Accounts, VaultHeld), BrainError> {
+        panic!("accounts start only once ready")
+    }
+
+    fn containment(&mut self) -> Result<Option<Arc<Job>>, BrainError> {
+        panic!("containment is asked only once ready")
+    }
+}
+
+#[tokio::test]
+async fn unready_prerequisites_refuse_after_a_full_admission_before_any_stage() {
+    let item = Slot::default();
+    let token = Arc::new(());
+    let custody = Arc::downgrade(&token);
+    let pair = FakePair::default();
+    let result = Box::pin(run(
+        pair.clone(),
+        &live(),
+        later(),
+        &mut Unready { ask: true },
+        || Ok(SessionCustody::fixture(token)),
+        || Ok(item.clone()),
+    ))
+    .await;
+    assert_eq!(result, Err(ParentBoundError::Unsupported));
+    assert_eq!(pair.reached(), 2, "admitted, never served");
+    assert!(!item.present());
+    assert!(custody.upgrade().is_none());
+}
+
+/// A committed start whose parent is already lost, or whose clock already ran out, refuses on
+/// entry, before it asks whether it's ready.
+#[test]
+fn the_stage_driver_fences_on_entry_before_asking_whether_its_ready() {
+    for lost in [true, false] {
+        let shell = live();
+        let committed = shell.claim_commit().expect("the one claim");
+        let by = if lost {
+            assert!(!shell.publish(1), "the claim came first");
+            later()
+        } else {
+            Instant::now()
+        };
+        let mut root = Root::<NoItem>::new();
+        assert_eq!(
+            root.stage(&mut Unready { ask: false }, &shell, by, &committed),
+            Err(ParentBoundError::Refused),
+            "lost: {lost}"
+        );
+    }
+}
+
+#[test]
+fn the_exit_follows_the_served_end_unless_a_stage_is_short_of_confirmed() {
+    let clean = Settled {
+        runtime: Shutdown {
+            quit: None,
+            store: Stage::Confirmed,
+            settings: Stage::Confirmed,
+            claude: Stage::Confirmed,
+            account: Stage::Confirmed,
+        },
+        item: Stage::Confirmed,
+    };
+    let quit = |quit| Settled {
+        runtime: Shutdown {
+            quit: Some(quit),
+            ..clean.runtime
+        },
+        ..clean
+    };
+    let quitting = Ok(Ended::Quit { deadline: later() });
+    assert_eq!(exit(&quitting, quit(Quit::Complete)), Ok(()));
+    assert_eq!(
+        exit(&quitting, quit(Quit::Incomplete)),
+        Err(ParentBoundError::Incomplete)
+    );
+    let unconfirmed = Settled {
+        item: Stage::Unconfirmed,
+        ..quit(Quit::Complete)
+    };
+    assert_eq!(
+        exit(&quitting, unconfirmed),
+        Err(ParentBoundError::Incomplete)
+    );
+    for ended in [
+        Ended::Lost,
+        Ended::Fatal(crate::runtime::Fatal::Refused),
+        Ended::Broken("broken"),
+        Ended::Unavailable,
+    ] {
+        assert_eq!(
+            exit(&Ok(ended), clean),
+            Err(ParentBoundError::Refused),
+            "{ended:?}"
+        );
+    }
+    for refused in [
+        ParentBoundError::Unsupported,
+        ParentBoundError::Busy,
+        ParentBoundError::Refused,
+    ] {
+        assert_eq!(exit(&Err(refused), clean), Err(refused));
+        let short = Settled {
+            runtime: Shutdown {
+                store: Stage::Unconfirmed,
+                ..clean.runtime
+            },
+            ..clean
+        };
+        assert_eq!(
+            exit(&Err(refused), short),
+            Err(ParentBoundError::Incomplete),
+            "{refused:?}"
+        );
+    }
+}
+
+/// How a fixture run goes beyond its defaults.
+#[derive(Default)]
+pub(crate) struct Script {
+    /// Where the parent is lost, if anywhere.
+    pub(crate) lose: Option<LoseAt>,
+    /// Takes the accounts' release hold, so the test decides when the credential thread lets go;
+    /// without it the release never waits.
+    pub(crate) hold: Option<mpsc::Sender<Holding>>,
+}
+
+/// Runs a parent-bound start on `pair` with the fixture stages, `custody` and `item`, as
+/// `script` says; returns its result and the stages it ran. The platforms' own pair tests use it
+/// too.
+pub(crate) async fn run_on_fixtures<S: InstanceStore, P: AdmissionPair>(
+    scratch: &Scratch,
+    pair: P,
+    shell: &ShellProcess,
+    by: Instant,
+    item: S,
+    custody: SessionCustody,
+    script: Script,
+) -> (Result<(), ParentBoundError>, Vec<&'static str>) {
+    let (mut pre, holding) = Scripted::new(scratch, Start::Held);
+    pre.lose = script.lose.map(|at| (at, shell.clone()));
+    match script.hold {
+        Some(hold) => hold.send(holding).expect("the test takes the hold"),
+        None => drop(holding),
+    }
+    let result = Box::pin(run(pair, shell, by, &mut pre, || Ok(custody), || Ok(item))).await;
+    (result, pre.calls)
 }

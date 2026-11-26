@@ -61,10 +61,31 @@ mod tests {
         assert_eq!((control.as_raw_fd(), data.as_raw_fd()), (3, 4));
         let _unowned = control.into_raw_fd();
         drop(data);
+        let before = open_descriptors();
         let code = crate::parent_bound();
         assert!(Path::new("/dev/fd/3").exists(), "a refused claim closed 3");
         assert!(!Path::new("/dev/fd/4").exists(), "4 stays closed");
+        assert_eq!(
+            open_descriptors(),
+            before,
+            "a refused claim leaves no parent watch, lock or other descriptor open"
+        );
         std::process::exit(i32::from(code));
+    }
+
+    /// This process's open descriptors, listing's own included, in order.
+    fn open_descriptors() -> Vec<u32> {
+        let mut open: Vec<u32> = std::fs::read_dir("/dev/fd")
+            .expect("the descriptor folder")
+            .map(|entry| {
+                let name = entry.expect("an entry").file_name();
+                name.to_str()
+                    .and_then(|name| name.parse().ok())
+                    .expect("a descriptor number")
+            })
+            .collect();
+        open.sort_unstable();
+        open
     }
 
     #[test]
