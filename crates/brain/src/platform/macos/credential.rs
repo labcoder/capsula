@@ -1,6 +1,7 @@
 //! Data protection keychain generic passwords, accessed only by exact target name.
 //!
-//! Dormant: only tests construct it, until a signed, provisioned brain can be admitted to it.
+//! The native store, reached only through `platform::credential::admitted_store`; macOS still
+//! refuses every brain mode, so no product path opens it yet.
 
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
@@ -209,10 +210,12 @@ fn succeeded(
 /// A zeroizing copy of `bytes` owned by the returned view: CoreFoundation releases the view's
 /// allocator only after the last reference to the view, and that release wipes and frees it.
 fn owned_view(bytes: &[u8]) -> Result<CFRetained<CFData>, CredentialStoreError> {
-    let backing = Box::new(Zeroizing::new(bytes.to_vec()));
+    let info = Box::into_raw(Box::new(Zeroizing::new(bytes.to_vec())));
+    // SAFETY: `info` is this function's live, unaliased Box; the pointer is taken after the move
+    // so the view's bytes derive from the allocation the allocator will own.
+    let backing = unsafe { &*info };
     let start = backing.as_ptr();
     let len = CFIndex::try_from(backing.len()).expect("the bounded blob length fits CFIndex");
-    let info = Box::into_raw(backing);
     let mut context = CFAllocatorContext {
         version: 0,
         info: info.cast(),

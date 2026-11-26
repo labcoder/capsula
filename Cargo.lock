@@ -9767,6 +9767,7 @@ dependencies = [
  "keyring",
  "kumochi-protocol",
  "kumochi-storage",
+ "proc-macro2",
  "rusqlite",
  "serde",
  "serde_json",

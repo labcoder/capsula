@@ -14,6 +14,7 @@ use kumochi_protocol::tap;
 #[cfg(windows)]
 mod bench;
 mod check_core;
+mod check_platform_cfg;
 #[cfg(windows)]
 mod gate;
 #[cfg(windows)]
@@ -145,6 +146,8 @@ tasks:
   check-core        fail if kumochi-shell-core has a dependency that is not on its list, a UI
                     framework in its tree, its test support in a shipped binary, or a test
                     gate the shell's tests could miss; CI runs it to hold the crate boundary
+  check-platform-cfg [--list | --base <commit>]
+                    refuse new plain OS cfg gates outside product platform modules
   check-vendor      fail unless every crate in vendor/ is what Cargo.lock builds;
                     CI runs it so a GPUI bump can't silently drop a vendored patch
   notices [--check] generate or check the third-party notices for the shipped Windows build
@@ -166,6 +169,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("check-core") => check_core::run(),
+        Some("check-platform-cfg") => check_platform_cfg::run(args),
         Some("check-vendor") => vendor::run(),
         Some("notices") => notices::run(args),
         Some("pipe-dump") => pipe_dump(
