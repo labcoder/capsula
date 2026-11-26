@@ -933,11 +933,11 @@ mod tests {
         let (kill_gate, held) = gate();
         let fake = Fake::with(|s| s.kill_gate = Some(kill_gate));
         let owner = started(&fake, &word);
-        let (settled, took) = settled_within(owner, BOUND);
+        let bound = 2 * (WAIT + POLL) + SETTLE_SLACK;
+        let (settled, took) = settled_within(owner, bound + WAIT * 10);
         held.entered();
         held.release();
         assert_eq!(settled, Settled::Unsettled);
-        let bound = 2 * (WAIT + POLL) + SETTLE_SLACK;
         assert!(took >= bound, "waited the whole bound: {took:?}");
         assert!(took < bound + WAIT * 5, "and no longer: {took:?}");
     }
