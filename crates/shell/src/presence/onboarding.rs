@@ -136,9 +136,7 @@ impl OnboardingView {
             let baked_us = started.map(|started| started.elapsed().as_micros());
             let kept = view.update(cx, |view, cx| {
                 view.kumo = image.map(Arc::new);
-                if view.kumo.is_some()
-                    && let Some(baked_us) = baked_us
-                {
+                if let Some(baked_us) = baked_us.filter(|_| view.kumo.is_some()) {
                     super::diagnostics::record(
                         cx,
                         format_args!("onboarding kumo baked us={baked_us}"),
