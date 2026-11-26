@@ -54,6 +54,7 @@ fn lifecycle(slot: u32) -> Lifecycle {
         pipes: Pipes::create_for_startup_test(slot).expect("own test pipes"),
         session: 0,
         published: false,
+        instance: None,
     }
 }
 

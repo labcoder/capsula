@@ -16,9 +16,37 @@ impl BoundHello {
 #[cfg(target_os = "macos")]
 pub(crate) use macos::pair::BoundHello;
 
-/// The instance item's session lock; only macOS has one.
+/// The instance item's session lock and item; only macOS has them.
 #[cfg(not(target_os = "macos"))]
 pub(crate) enum InstanceLock {}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) enum InstanceItem {}
+
+#[cfg(not(target_os = "macos"))]
+impl crate::startup::instance::InstanceStore for InstanceItem {
+    type Error = std::convert::Infallible;
+
+    fn add(&self, _: &[u8; 32]) -> Result<crate::startup::instance::Added, Self::Error> {
+        match *self {}
+    }
+
+    fn inspect(&self) -> Result<(), Self::Error> {
+        match *self {}
+    }
+
+    fn update(&self, _: &[u8; 32]) -> Result<(), Self::Error> {
+        match *self {}
+    }
+
+    fn read(&self, _: &mut [u8; 32]) -> Result<(), Self::Error> {
+        match *self {}
+    }
+
+    fn delete(&self) -> Result<(), Self::Error> {
+        match *self {}
+    }
+}
 
 #[cfg(not(target_os = "macos"))]
 #[expect(dead_code, reason = "parent-bound startup is not wired yet")]
@@ -33,12 +61,28 @@ pub(crate) fn instance_custody_at(
     Err(crate::startup::custody::CustodyError::NotAdmitted)
 }
 
+/// A fresh Support folder for the instance item's native fixtures, and its cleanup; only macOS
+/// has them.
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) fn instance_fixture(_: &str) -> std::path::PathBuf {
+    panic!("only macOS has the instance item's native fixtures")
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) fn instance_fixture_clean(_: &std::path::Path, _: &[&str]) {
+    panic!("only macOS has the instance item's native fixtures")
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) type InstanceLock = kumochi_storage::AdmittedLock;
-#[cfg(target_os = "macos")]
-pub(crate) use macos::instance::instance_custody;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use macos::instance::lock_at as instance_custody_at;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use macos::instance::tests::{
+    clean as instance_fixture_clean, support as instance_fixture,
+};
+#[cfg(target_os = "macos")]
+pub(crate) use macos::instance::{KeychainItem as InstanceItem, instance_custody};
 
 #[cfg(target_os = "macos")]
 pub(crate) use macos::capture::{display_at, screen_capturer};

@@ -190,10 +190,38 @@ provisions their identifiers.
   brain's `platform/macos/instance.rs` makes the add, the value-only update and the delete, on a
   no-copy CFData whose backing is wiped when CoreFoundation releases it.
 
-`startup::custody::SessionCustody` is the exclusive lock on `session.lock` opened on the admitted
-product folder's descriptor (created privately, with no `logs` folder, when it's missing). Busy
-custody refuses before any item call, and another edition refuses `NotAdmitted` before any folder
-lookup.
+`startup::instance::InstanceAttempt` owns one publication and its `SessionCustody`, the exclusive
+lock on `session.lock` opened on the admitted product folder's descriptor (created privately, with
+no `logs` folder, when it's missing). Busy custody means no attempt exists, so no item call.
+Another edition refuses `NotAdmitted` before any folder lookup.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> InFlight: publish (copies the key)
+    InFlight --> Published: add, or inspect and update, then exact readback
+    InFlight --> Settled: refusal, or deadline/loss then settlement
+    Published --> Retiring: retire (delete, once)
+    Retiring --> Settled: the delete returns
+```
+
+- Each call runs on its own blocking thread and is never abandoned. The parent fence and the
+  deadline are checked before each call and when it returns, and a verdict already published beats
+  a finished call. While a call runs, loss and the deadline race it.
+- Add, inspect and update check the deadline, the fence and an invalid flag first, so one the pool
+  starts late makes no call. The settlement readback and delete skip that check, so late
+  settlement always finishes.
+- After a deadline or a loss, the attempt awaits the call in flight. It deletes only a write that
+  was acknowledged and whose one readback matches its bytes: a readback already in flight or
+  returned is used as it came back, and settlement reads only when a write never had one. A
+  failed, panicked or differing result gets no delete and no second read, and a failed delete is
+  reported as `Late { cleaned: false }`.
+- Every call, settlement's and retirement's included, stays in the attempt's state until it's
+  joined, so a dropped `publish` or `retire` leaves it for `settle`. The first terminal result is
+  kept, and later `settle` calls return it without another call.
+- The key copy and each readback buffer are zeroed when dropped. `Published` holds neither, and
+  settlement drops both before its cleanup delete.
+  `Lifecycle` settles the attempt in `finish` before custody drops with it.
 
 ## What this crate doesn't do
 
