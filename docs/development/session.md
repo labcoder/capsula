@@ -201,7 +201,8 @@ stateDiagram-v2
     Idle --> InFlight: publish (copies the key)
     InFlight --> Published: add, or inspect and update, then exact readback
     InFlight --> Settled: refusal, or deadline/loss then settlement
-    Published --> Settled: retire (delete, once)
+    Published --> Retiring: retire (delete, once)
+    Retiring --> Settled: the delete returns
 ```
 
 - Each call runs on its own blocking thread and is never abandoned. The parent fence and the
@@ -211,10 +212,15 @@ stateDiagram-v2
   starts late makes no call. The settlement readback and delete skip that check, so late
   settlement always finishes.
 - After a deadline or a loss, the attempt awaits the call in flight. It deletes only a write that
-  was acknowledged and whose readback matches its bytes. A failed, panicked or differing result
-  gets no delete, and a failed delete is reported as `Late { cleaned: false }`.
-- The key copy lives only while the attempt is in flight. `Published` holds none. `Lifecycle`
-  settles the attempt in `finish` before custody drops with it.
+  was acknowledged and whose one readback matches its bytes: a readback already in flight or
+  returned is used as it came back, and settlement reads only when a write never had one. A
+  failed, panicked or differing result gets no delete and no second read, and a failed delete is
+  reported as `Late { cleaned: false }`.
+- Every call, settlement's and retirement's included, stays in the attempt's state until it's
+  joined, so a dropped `publish` or `retire` leaves it for `settle`. The first terminal result is
+  kept, and later `settle` calls return it without another call.
+- The key copy and each readback buffer are zeroed when dropped. `Published` holds neither.
+  `Lifecycle` settles the attempt in `finish` before custody drops with it.
 
 ## What this crate doesn't do
 

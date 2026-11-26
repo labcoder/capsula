@@ -9,8 +9,8 @@ use std::time::Instant;
 use kumochi_protocol::message::CAPABILITY_LEN;
 use subtle::ConstantTimeEq as _;
 use tokio::sync::watch;
-use tokio::task::{JoinError, JoinHandle};
-use zeroize::Zeroizing;
+use tokio::task::JoinHandle;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use super::custody::SessionCustody;
 use crate::platform::ShellProcess;
@@ -79,11 +79,32 @@ enum Reply {
 /// None when a forward call found the attempt fenced and made no call.
 type Outcome<E> = Option<Result<Reply, E>>;
 
+/// A key-sized buffer overwritten with zeros when dropped.
+struct Wiped(Box<[u8; CAPABILITY_LEN]>);
+
+impl Wiped {
+    fn zeroed() -> Self {
+        Self(Box::new([0; CAPABILITY_LEN]))
+    }
+}
+
+impl Drop for Wiped {
+    fn drop(&mut self) {
+        self.0.zeroize();
+        #[cfg(test)]
+        tests::wipes::record(&self.0[..]);
+    }
+}
+
+/// Each buffer an attempt made, for the tests: its address and the wipe log's length then.
+#[cfg(test)]
+type Made = Arc<std::sync::Mutex<Vec<(usize, usize)>>>;
+
 enum Job {
-    Add(Arc<Key>),
+    Add(Arc<Wiped>),
     Inspect,
-    Update(Arc<Key>),
-    Read(Arc<Key>),
+    Update(Arc<Wiped>),
+    Read(Arc<Wiped>),
     Delete,
 }
 
@@ -108,14 +129,20 @@ struct Entry {
 
 enum State<E> {
     Idle,
+    /// Forward calls, then settlement's own; each call stays here until it's joined.
     InFlight {
-        bytes: Arc<Key>,
+        bytes: Arc<Wiped>,
         pending: Option<(Step, JoinHandle<Outcome<E>>)>,
         wrote: bool,
+        /// A readback's verdict once one returned: true only for an exact match.
+        matched: Option<bool>,
         invalid: Arc<AtomicBool>,
     },
     Published,
-    Settled,
+    /// Retirement's delete, kept until it's joined.
+    Retiring(JoinHandle<Outcome<E>>),
+    /// The first terminal result, which every later `settle` returns.
+    Settled(Stage),
 }
 
 enum Stop<E> {
@@ -130,7 +157,7 @@ pub(crate) struct InstanceAttempt<S: InstanceStore> {
     store: Arc<S>,
     state: State<S::Error>,
     #[cfg(test)]
-    copies: Arc<std::sync::Mutex<Vec<std::sync::Weak<Key>>>>,
+    made: Made,
 }
 
 impl<S: InstanceStore> fmt::Debug for InstanceAttempt<S> {
@@ -139,7 +166,8 @@ impl<S: InstanceStore> fmt::Debug for InstanceAttempt<S> {
             State::Idle => "Idle",
             State::InFlight { .. } => "InFlight",
             State::Published => "Published",
-            State::Settled => "Settled",
+            State::Retiring(_) => "Retiring",
+            State::Settled(_) => "Settled",
         };
         f.debug_struct("InstanceAttempt")
             .field("state", &state)
@@ -154,7 +182,7 @@ impl<S: InstanceStore> InstanceAttempt<S> {
             store,
             state: State::Idle,
             #[cfg(test)]
-            copies: Arc::default(),
+            made: Arc::default(),
         }
     }
 
@@ -169,16 +197,15 @@ impl<S: InstanceStore> InstanceAttempt<S> {
         if !matches!(self.state, State::Idle) {
             return Err(Refused::Used);
         }
-        let bytes = Arc::new(Zeroizing::new(**key));
+        let mut bytes = Wiped::zeroed();
+        bytes.0.copy_from_slice(&key[..]);
         #[cfg(test)]
-        self.copies
-            .lock()
-            .expect("the copy list")
-            .push(Arc::downgrade(&bytes));
+        tests::wipes::made(&self.made, &bytes);
         self.state = State::InFlight {
-            bytes,
+            bytes: Arc::new(bytes),
             pending: None,
             wrote: false,
+            matched: None,
             invalid: Arc::default(),
         };
         match self.forward(deadline, shell).await {
@@ -187,7 +214,7 @@ impl<S: InstanceStore> InstanceAttempt<S> {
                 Ok(())
             }
             Err(Stop::Refused(refused)) => {
-                self.state = State::Settled;
+                self.state = State::Settled(Stage::Confirmed);
                 Err(refused)
             }
             Err(Stop::Invalid(reason)) => Err(self.settlement(reason).await),
@@ -199,31 +226,60 @@ impl<S: InstanceStore> InstanceAttempt<S> {
         if !matches!(self.state, State::Published) {
             return Err(Refused::Used);
         }
-        self.state = State::Settled;
-        match self.run(Job::Delete).await {
-            Ok(Some(Ok(_))) => Ok(()),
-            Ok(Some(Err(error))) => Err(Refused::Store(Step::Delete, error)),
-            _ => Err(Refused::Ambiguous),
+        self.begin_retire();
+        self.retired().await
+    }
+
+    /// Finishes whatever a dropped `publish` or `retire` left, cleans up what's ours, and
+    /// returns the first terminal result from then on; custody must outlive this.
+    pub(crate) async fn settle(&mut self) -> Stage {
+        match self.state {
+            State::Idle => self.state = State::Settled(Stage::Confirmed),
+            State::Published => self.begin_retire(),
+            State::InFlight { .. } => {
+                self.settlement(Refused::Ambiguous).await;
+            }
+            State::Retiring(_) | State::Settled(_) => {}
+        }
+        if matches!(self.state, State::Retiring(_)) {
+            return match self.retired().await {
+                Ok(()) => Stage::Confirmed,
+                Err(_) => Stage::Failed,
+            };
+        }
+        match self.state {
+            State::Settled(stage) => stage,
+            _ => Stage::Failed,
         }
     }
 
-    /// Awaits any call a dropped `publish` left in flight and cleans up what's ours; custody must
-    /// outlive this.
-    pub(crate) async fn settle(&mut self) -> Stage {
-        match self.state {
-            State::Idle | State::Settled => {
-                self.state = State::Settled;
-                Stage::Confirmed
-            }
-            State::Published => match self.retire().await {
-                Ok(()) => Stage::Confirmed,
-                Err(_) => Stage::Failed,
-            },
-            State::InFlight { .. } => match self.settlement(Refused::Ambiguous).await {
-                Refused::Late { cleaned: false } => Stage::Failed,
-                _ => Stage::Confirmed,
-            },
-        }
+    fn begin_retire(&mut self) {
+        self.state = State::Retiring(spawn(
+            &self.store,
+            Job::Delete,
+            None,
+            #[cfg(test)]
+            &self.made,
+        ));
+    }
+
+    /// Joins retirement's delete in place, so a dropped `retire` leaves it for `settle`.
+    async fn retired(&mut self) -> Result<(), Refused<S::Error>> {
+        let State::Retiring(handle) = &mut self.state else {
+            return Err(Refused::Used);
+        };
+        let retired = match handle.await {
+            Ok(Some(Ok(_))) => Ok(()),
+            Ok(Some(Err(error))) => Err(Refused::Store(Step::Delete, error)),
+            _ => Err(Refused::Ambiguous),
+        };
+        let stage = if retired.is_ok() {
+            Stage::Confirmed
+        } else {
+            Stage::Failed
+        };
+        self.state = State::Settled(stage);
+        retired
     }
 
     async fn forward(
@@ -267,6 +323,7 @@ impl<S: InstanceStore> InstanceAttempt<S> {
         let State::InFlight {
             pending,
             wrote,
+            matched,
             invalid,
             ..
         } = &mut self.state
@@ -279,7 +336,7 @@ impl<S: InstanceStore> InstanceAttempt<S> {
             job,
             entry,
             #[cfg(test)]
-            &self.copies,
+            &self.made,
         );
         let handle = &mut pending.insert((step, handle)).1;
         let raced = tokio::select! {
@@ -306,6 +363,9 @@ impl<S: InstanceStore> InstanceAttempt<S> {
             (step, reply),
             (Step::Add, Some(Reply::Added(Added::Fresh))) | (Step::Update, Some(Reply::Done))
         );
+        if step == Step::Read {
+            *matched = Some(reply == Some(Reply::Matches(true)));
+        }
         if let Err(stop) = fenced(deadline, shell) {
             invalid.store(true, Ordering::Release);
             return Err(stop);
@@ -313,57 +373,66 @@ impl<S: InstanceStore> InstanceAttempt<S> {
         reply.ok_or(Stop::Refused(Refused::Ambiguous))
     }
 
-    /// After a deadline or loss: awaits the call in flight, and deletes only an acknowledged
-    /// write whose readback matches this attempt's bytes.
+    /// After a deadline, a loss or a dropped `publish`: joins each call in place, and deletes
+    /// only an acknowledged write whose one readback matched this attempt's bytes.
     async fn settlement(&mut self, reason: Refused<S::Error>) -> Refused<S::Error> {
-        let State::InFlight {
-            bytes,
-            pending,
-            mut wrote,
-            invalid,
-        } = std::mem::replace(&mut self.state, State::Settled)
-        else {
-            return reason;
-        };
-        invalid.store(true, Ordering::Release);
-        if let Some((step, handle)) = pending {
-            match (step, handle.await) {
-                (Step::Add, Ok(Some(Ok(Reply::Added(Added::Fresh)))))
-                | (Step::Update, Ok(Some(Ok(Reply::Done)))) => wrote = true,
-                (Step::Add | Step::Update, Err(_)) => return Refused::Late { cleaned: false },
-                _ => {}
+        let refused = loop {
+            let State::InFlight {
+                bytes,
+                pending,
+                wrote,
+                matched,
+                invalid,
+            } = &mut self.state
+            else {
+                return reason;
+            };
+            invalid.store(true, Ordering::Release);
+            if let Some((step, handle)) = pending {
+                let joined = handle.await;
+                let step = *step;
+                *pending = None;
+                match (step, joined) {
+                    (Step::Add, Ok(Some(Ok(Reply::Added(Added::Fresh)))))
+                    | (Step::Update, Ok(Some(Ok(Reply::Done)))) => *wrote = true,
+                    (Step::Add | Step::Update, Err(_)) => break Refused::Late { cleaned: false },
+                    (Step::Read, read) => {
+                        *matched = Some(matches!(read, Ok(Some(Ok(Reply::Matches(true))))));
+                    }
+                    (Step::Delete, deleted) => {
+                        break Refused::Late {
+                            cleaned: matches!(deleted, Ok(Some(Ok(_)))),
+                        };
+                    }
+                    _ => {}
+                }
+                continue;
             }
-        }
-        if !wrote {
-            return reason;
-        }
-        let matched = self.run(Job::Read(bytes)).await;
-        let cleaned = matches!(matched, Ok(Some(Ok(Reply::Matches(true)))))
-            && matches!(self.run(Job::Delete).await, Ok(Some(Ok(_))));
-        Refused::Late { cleaned }
-    }
-
-    /// A settlement call, which runs whatever the fences say.
-    async fn run(&self, job: Job) -> Result<Outcome<S::Error>, JoinError> {
-        spawn(
-            &self.store,
-            job,
-            None,
-            #[cfg(test)]
-            &self.copies,
-        )
-        .await
-    }
-
-    /// The key copies this attempt made that are still alive; Zeroizing wipes each as it drops.
-    #[cfg(test)]
-    pub(crate) fn live_copies(&self) -> usize {
-        self.copies
-            .lock()
-            .expect("the copy list")
-            .iter()
-            .filter(|copy| copy.strong_count() > 0)
-            .count()
+            let job = match (*wrote, *matched) {
+                (false, _) => break reason,
+                (true, None) => Job::Read(Arc::clone(bytes)),
+                (true, Some(true)) => Job::Delete,
+                (true, Some(false)) => break Refused::Late { cleaned: false },
+            };
+            let step = job.step();
+            *pending = Some((
+                step,
+                spawn(
+                    &self.store,
+                    job,
+                    None,
+                    #[cfg(test)]
+                    &self.made,
+                ),
+            ));
+        };
+        let stage = if matches!(refused, Refused::Late { cleaned: false }) {
+            Stage::Failed
+        } else {
+            Stage::Confirmed
+        };
+        self.state = State::Settled(stage);
+        refused
     }
 }
 
@@ -401,11 +470,11 @@ fn spawn<S: InstanceStore>(
     store: &Arc<S>,
     job: Job,
     entry: Option<Entry>,
-    #[cfg(test)] copies: &Arc<std::sync::Mutex<Vec<std::sync::Weak<Key>>>>,
+    #[cfg(test)] made: &Made,
 ) -> JoinHandle<Outcome<S::Error>> {
     let store = Arc::clone(store);
     #[cfg(test)]
-    let copies = Arc::clone(copies);
+    let made = Arc::clone(made);
     tokio::task::spawn_blocking(move || {
         if let Some(entry) = entry
             && (Instant::now() >= entry.deadline
@@ -415,19 +484,16 @@ fn spawn<S: InstanceStore>(
             return None;
         }
         Some(match job {
-            Job::Add(key) => store.add(&key).map(Reply::Added),
+            Job::Add(key) => store.add(&key.0).map(Reply::Added),
             Job::Inspect => store.inspect().map(|()| Reply::Done),
-            Job::Update(key) => store.update(&key).map(|()| Reply::Done),
+            Job::Update(key) => store.update(&key.0).map(|()| Reply::Done),
             Job::Read(key) => {
-                // One owner the tests can watch; Zeroizing wipes it when this call ends.
-                let mut copy = Arc::new(Zeroizing::new([0; CAPABILITY_LEN]));
-                let read = store.read(Arc::get_mut(&mut copy).expect("a fresh copy has one owner"));
+                let mut copy = Wiped::zeroed();
                 #[cfg(test)]
-                copies
-                    .lock()
-                    .expect("the copy list")
-                    .push(Arc::downgrade(&copy));
-                read.map(|()| Reply::Matches(copy[..].ct_eq(&key[..]).into()))
+                tests::wipes::made(&made, &copy);
+                store
+                    .read(&mut copy.0)
+                    .map(|()| Reply::Matches(copy.0[..].ct_eq(&key.0[..]).into()))
             }
             Job::Delete => store.delete().map(|()| Reply::Done),
         })

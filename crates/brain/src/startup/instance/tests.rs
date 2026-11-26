@@ -30,8 +30,9 @@ enum Fault {
 #[derive(Default)]
 struct Script {
     fail: Vec<Step>,
-    flip_read: bool,
-    hold: Option<(Step, mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    fail_once: Vec<Step>,
+    flips: usize,
+    hold: Vec<(Step, mpsc::Sender<()>, mpsc::Receiver<()>)>,
 }
 
 /// A keychain holding one item, whose calls a test can fail, hold or corrupt.
@@ -62,15 +63,27 @@ impl Fake {
         self.script.lock().expect("script").fail.push(step);
     }
 
+    fn fail_once(&self, step: Step) {
+        self.script.lock().expect("script").fail_once.push(step);
+    }
+
     fn flip_read(&self) {
-        self.script.lock().expect("script").flip_read = true;
+        self.script.lock().expect("script").flips = usize::MAX;
+    }
+
+    fn flip_next_read(&self) {
+        self.script.lock().expect("script").flips = 1;
     }
 
     /// Holds the next `step` call: the first receiver hears it start, the sender releases it.
     fn hold(&self, step: Step) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
         let (entered, started) = mpsc::channel();
         let (release, released) = mpsc::channel();
-        self.script.lock().expect("script").hold = Some((step, entered, released));
+        self.script
+            .lock()
+            .expect("script")
+            .hold
+            .push((step, entered, released));
         (started, release)
     }
 
@@ -78,19 +91,19 @@ impl Fake {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let held = {
             let mut script = self.script.lock().expect("script");
-            match script.hold.take() {
-                Some((held, entered, released)) if held == step => Some((entered, released)),
-                other => {
-                    script.hold = other;
-                    None
-                }
-            }
+            let at = script.hold.iter().position(|(held, ..)| *held == step);
+            at.map(|at| script.hold.remove(at))
         };
-        if let Some((entered, released)) = held {
+        if let Some((_, entered, released)) = held {
             entered.send(()).expect("the test listens");
             released.recv().expect("the test releases");
         }
-        if self.script.lock().expect("script").fail.contains(&step) {
+        let mut script = self.script.lock().expect("script");
+        if let Some(at) = script.fail_once.iter().position(|once| *once == step) {
+            script.fail_once.remove(at);
+            return Err(Fault::Failed);
+        }
+        if script.fail.contains(&step) {
             return Err(Fault::Failed);
         }
         Ok(())
@@ -138,7 +151,9 @@ impl InstanceStore for Fake {
         match self.item() {
             Item::Plain(bytes) => {
                 *into = bytes;
-                if self.script.lock().expect("script").flip_read {
+                let mut script = self.script.lock().expect("script");
+                if script.flips > 0 {
+                    script.flips -= 1;
                     into[CAPABILITY_LEN - 1] ^= 1;
                 }
                 Ok(())
@@ -166,6 +181,12 @@ fn start(store: &Arc<Fake>) -> (InstanceAttempt<Fake>, std::sync::Weak<()>) {
     let held = Arc::downgrade(&token);
     let custody = SessionCustody::fixture(token);
     (InstanceAttempt::new(custody, Arc::clone(store)), held)
+}
+
+/// Per buffer the attempt made, in order: None while it's alive, else whether it was all zero
+/// when dropped.
+fn wiped(attempt: &InstanceAttempt<Fake>) -> Vec<Option<bool>> {
+    wipes::of(&attempt.made)
 }
 
 fn key() -> Key {
@@ -199,7 +220,11 @@ async fn a_fresh_add_publishes_once_and_the_published_attempt_holds_no_bytes() {
     let (mut attempt, _held) = start(&store);
     assert_eq!(attempt.publish(&key(), later(), &shell()).await, Ok(()));
     assert_eq!(store.item(), Item::Plain(KEY));
-    assert_eq!(attempt.live_copies(), 0, "Published holds no key copy");
+    assert_eq!(
+        wiped(&attempt),
+        [Some(true), Some(true)],
+        "the copy and the readback are wiped while Published lives"
+    );
     assert_eq!(
         attempt.publish(&key(), later(), &shell()).await,
         Err(Refused::Used)
@@ -215,7 +240,7 @@ async fn a_plain_duplicate_is_inspected_then_updated_and_read_back() {
     let (mut attempt, _held) = start(&store);
     assert_eq!(attempt.publish(&key(), later(), &shell()).await, Ok(()));
     assert_eq!(store.item(), Item::Plain(KEY));
-    assert_eq!(attempt.live_copies(), 0);
+    assert_eq!(wiped(&attempt), [Some(true), Some(true)]);
 }
 
 #[tokio::test]
@@ -233,7 +258,7 @@ async fn an_ineligible_duplicate_refuses_without_update_or_delete() {
             "{seed:?}"
         );
         assert_eq!(store.item(), seed, "unchanged");
-        assert_eq!(attempt.live_copies(), 0, "{seed:?}: refusal wipes");
+        assert_eq!(wiped(&attempt), [Some(true)], "{seed:?}: refusal wipes");
         assert_eq!(
             attempt.publish(&key(), later(), &shell()).await,
             Err(Refused::Used),
@@ -252,7 +277,7 @@ async fn a_readback_that_differs_or_fails_refuses_and_deletes_nothing() {
         Err(Refused::Mismatch)
     );
     assert_eq!(store.item(), Item::Plain(KEY));
-    assert_eq!(attempt.live_copies(), 0);
+    assert_eq!(wiped(&attempt), [Some(true), Some(true)]);
 
     let store = Fake::new(Item::Absent);
     store.fail(Step::Read);
@@ -308,9 +333,10 @@ async fn a_loss_ready_when_the_readback_finishes_wins_and_settlement_deletes_our
     assert_eq!(
         store.item(),
         Item::Absent,
-        "the settlement read back and deleted"
+        "the settlement deleted what the one readback matched"
     );
-    assert_eq!(attempt.live_copies(), 0);
+    assert_eq!(store.calls(), 3, "the add, the one readback and the delete");
+    assert_eq!(wiped(&attempt), [Some(true), Some(true)]);
 }
 
 #[tokio::test]
@@ -348,7 +374,7 @@ async fn a_deadline_during_a_write_settles_by_what_the_write_did() {
     );
     thread.join().expect("release thread");
     assert_eq!(store.item(), Item::Absent);
-    assert_eq!(attempt.live_copies(), 0);
+    assert_eq!(wiped(&attempt), [Some(true), Some(true)]);
 
     let store = Fake::new(Item::Absent);
     store.fail(Step::Add);
@@ -391,6 +417,13 @@ async fn a_deadline_during_a_write_settles_by_what_the_write_did() {
     );
     thread.join().expect("release thread");
     assert_eq!(store.item(), Item::Plain(KEY));
+    assert_eq!(
+        attempt.settle().await,
+        Stage::Failed,
+        "the failed cleanup is kept"
+    );
+    assert_eq!(attempt.settle().await, Stage::Failed);
+    assert_eq!(store.calls(), 3, "the add, the readback and one delete");
 }
 
 #[tokio::test]
@@ -419,9 +452,11 @@ async fn retirement_deletes_the_published_item_once_and_records_a_failure() {
     assert_eq!(attempt.retire().await, Err(Refused::Used));
     assert_eq!(
         attempt.settle().await,
-        Stage::Confirmed,
-        "nothing left to settle"
+        Stage::Failed,
+        "the failed retirement is kept"
     );
+    assert_eq!(attempt.settle().await, Stage::Failed);
+    assert_eq!(store.calls(), 3, "no delete is retried");
 }
 
 #[tokio::test]
@@ -437,11 +472,7 @@ async fn a_dropped_publish_keeps_custody_until_settlement_returns() {
     .await;
     assert!(dropped.is_err(), "the publish future was dropped mid-call");
     assert_eq!(held.strong_count(), 1, "custody is held");
-    assert_eq!(
-        attempt.live_copies(),
-        1,
-        "the call in flight keeps its copy"
-    );
+    assert_eq!(wiped(&attempt), [None], "the call in flight keeps its copy");
     {
         let settle = attempt.settle();
         tokio::pin!(settle);
@@ -460,7 +491,7 @@ async fn a_dropped_publish_keeps_custody_until_settlement_returns() {
         Item::Absent,
         "the late item was ours and is gone"
     );
-    assert_eq!(attempt.live_copies(), 0);
+    assert_eq!(wiped(&attempt), [Some(true), Some(true)]);
     assert_eq!(held.strong_count(), 1, "custody outlives settlement");
     drop(attempt);
     assert_eq!(held.strong_count(), 0);
@@ -530,6 +561,138 @@ fn a_forward_call_the_pool_starts_after_the_deadline_makes_no_item_call() {
 }
 
 #[tokio::test]
+async fn a_publish_dropped_while_its_late_write_is_held_leaves_settle_to_wait() {
+    let store = Fake::new(Item::Absent);
+    let (started, release) = store.hold(Step::Add);
+    let (mut attempt, held) = start(&store);
+    let deadline = Instant::now() + Duration::from_millis(50);
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(150),
+        attempt.publish(&key(), deadline, &shell()),
+    )
+    .await;
+    assert!(dropped.is_err(), "dropped while settlement awaits the add");
+    started
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the add started");
+    {
+        let settle = attempt.settle();
+        tokio::pin!(settle);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut settle)
+                .await
+                .is_err(),
+            "settle waits for the held add"
+        );
+        assert_eq!(held.strong_count(), 1, "a contender is still busy");
+        release.send(()).expect("the add waits");
+        assert_eq!(settle.await, Stage::Confirmed);
+    }
+    assert_eq!(
+        store.item(),
+        Item::Absent,
+        "the late add was ours and is gone"
+    );
+    assert_eq!(store.calls(), 3, "the add, the readback and the delete");
+    assert_eq!(held.strong_count(), 1, "custody outlives settlement");
+}
+
+#[tokio::test]
+async fn a_publish_dropped_while_its_cleanup_delete_is_held_leaves_settle_to_wait() {
+    let store = Fake::new(Item::Absent);
+    let (added, release_add) = store.hold(Step::Add);
+    let (deleting, release_delete) = store.hold(Step::Delete);
+    let thread = release_after(added, release_add, after(Duration::from_millis(100)));
+    let (mut attempt, held) = start(&store);
+    let deadline = Instant::now() + Duration::from_millis(30);
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(400),
+        attempt.publish(&key(), deadline, &shell()),
+    )
+    .await;
+    assert!(dropped.is_err(), "dropped while the cleanup delete is held");
+    deleting
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the cleanup delete started");
+    {
+        let settle = attempt.settle();
+        tokio::pin!(settle);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut settle)
+                .await
+                .is_err(),
+            "settle waits for the held delete"
+        );
+        assert_eq!(held.strong_count(), 1, "a contender is still busy");
+        release_delete.send(()).expect("the delete waits");
+        assert_eq!(settle.await, Stage::Confirmed);
+    }
+    thread.join().expect("release thread");
+    assert_eq!(store.item(), Item::Absent);
+    assert_eq!(store.calls(), 3, "the add, the readback and one delete");
+}
+
+#[tokio::test]
+async fn a_retire_dropped_while_its_delete_is_held_leaves_settle_to_wait() {
+    let store = Fake::new(Item::Absent);
+    let (mut attempt, held) = start(&store);
+    assert_eq!(attempt.publish(&key(), later(), &shell()).await, Ok(()));
+    let (deleting, release) = store.hold(Step::Delete);
+    let dropped = tokio::time::timeout(Duration::from_millis(50), attempt.retire()).await;
+    assert!(dropped.is_err(), "dropped while the delete is held");
+    deleting
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the delete started");
+    assert_eq!(
+        format!("{attempt:?}"),
+        r#"InstanceAttempt { state: "Retiring", .. }"#
+    );
+    {
+        let settle = attempt.settle();
+        tokio::pin!(settle);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut settle)
+                .await
+                .is_err(),
+            "settle waits for the held delete"
+        );
+        assert_eq!(held.strong_count(), 1, "a contender is still busy");
+        release.send(()).expect("the delete waits");
+        assert_eq!(settle.await, Stage::Confirmed);
+    }
+    assert_eq!(store.item(), Item::Absent);
+    assert_eq!(attempt.retire().await, Err(Refused::Used));
+    assert_eq!(store.calls(), 3, "the add, the readback and one delete");
+}
+
+#[tokio::test]
+async fn a_loss_during_the_readback_uses_that_readback_and_never_retries_it() {
+    for (name, mismatch) in [("a mismatch", true), ("a failure", false)] {
+        let store = Fake::new(Item::Absent);
+        if mismatch {
+            store.flip_next_read();
+        } else {
+            store.fail_once(Step::Read);
+        }
+        let (started, release) = store.hold(Step::Read);
+        let (shell, verdict) = ShellProcess::watched(7);
+        let thread = release_after(started, release, move || {
+            verdict.send(Verdict::Exited).expect("the attempt watches");
+        });
+        let (mut attempt, _held) = start(&store);
+        assert_eq!(
+            attempt.publish(&key(), later(), &shell).await,
+            Err(Refused::Late { cleaned: false }),
+            "{name}: the loss beats the readback, and settlement keeps its result"
+        );
+        thread.join().expect("release thread");
+        assert_eq!(store.calls(), 2, "{name}: the add and the one readback");
+        assert_eq!(store.item(), Item::Plain(KEY), "{name}: no delete");
+        assert_eq!(attempt.settle().await, Stage::Failed, "{name}");
+    }
+}
+
+#[tokio::test]
 async fn the_attempt_prints_no_key_bytes() {
     let store = Fake::new(Item::Absent);
     let (started, release) = store.hold(Step::Add);
@@ -590,4 +753,41 @@ async fn native_a_dropped_publish_keeps_the_session_lock_until_settlement_return
         3,
         "the add, the settlement readback and the delete"
     );
+}
+
+/// Test support: each dropped [`Wiped`] buffer's address and whether it held only zeros at the
+/// end of its drop, read from the storage itself just before it is freed. Buffers drop on any
+/// thread, so the log is shared.
+pub(super) mod wipes {
+    use std::sync::Mutex;
+
+    use super::super::{Made, Wiped};
+
+    static LOG: Mutex<Vec<(usize, bool)>> = Mutex::new(Vec::new());
+
+    pub(in crate::startup::instance) fn record(bytes: &[u8]) {
+        let entry = (bytes.as_ptr().addr(), bytes.iter().all(|&byte| byte == 0));
+        LOG.lock().expect("the wipe log").push(entry);
+    }
+
+    pub(in crate::startup::instance) fn made(made: &Made, buffer: &Wiped) {
+        let since = LOG.lock().expect("the wipe log").len();
+        made.lock()
+            .expect("the made list")
+            .push((buffer.0.as_ptr().addr(), since));
+    }
+
+    pub(super) fn of(made: &Made) -> Vec<Option<bool>> {
+        let log = LOG.lock().expect("the wipe log");
+        made.lock()
+            .expect("the made list")
+            .iter()
+            .map(|&(addr, since)| {
+                log[since..]
+                    .iter()
+                    .find(|(at, _)| *at == addr)
+                    .map(|&(_, zero)| zero)
+            })
+            .collect()
+    }
 }
