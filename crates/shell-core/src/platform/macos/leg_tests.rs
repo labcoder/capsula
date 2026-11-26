@@ -1080,6 +1080,29 @@ fn an_item_read_that_ends_past_the_deadline_expires_whatever_it_answered() {
     }
 }
 
+#[test]
+fn the_secret_is_wiped_before_the_initiator_sends_its_first_message() {
+    let (shell, mut brain_control, brain_data) = ends();
+    let secret = Secret(Box::new(SECRET));
+    let (since, at) = (wipes::len(), secret.0.as_ptr().addr());
+    let peer = thread::spawn(move || {
+        brain_control
+            .set_read_timeout(Some(BOUND))
+            .expect("bounded");
+        let mut brain = BrainAwaitsInit::new(&SECRET, Channel::Dev).expect("brain starts");
+        handshake_message(&mut brain_control, |envelope| brain.record_len(envelope));
+        let wiped = wipes::found(since, at);
+        drop((brain_control, brain_data));
+        wiped
+    });
+    initiate(shell, secret, Channel::Dev, by()).expect_err("the peer closes after msg 1");
+    assert_eq!(
+        peer.join().expect("the peer read msg 1"),
+        Some(true),
+        "wiped before msg 1 reached the peer"
+    );
+}
+
 /// Test support: each dropped [`Secret`]'s address and whether it held only zeros at the end of
 /// its drop, read from the heap backing itself just before it is freed. Secrets drop on any test
 /// thread, so the log is shared; it never holds the bytes.
