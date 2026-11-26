@@ -42,12 +42,44 @@ pub(crate) mod profile;
 mod protected;
 mod runtime_admission;
 mod session_lock;
+#[cfg(any(not(target_os = "macos"), test))]
+mod settings;
 pub(crate) mod shell_process;
 pub(crate) mod speech_wire;
 mod trust_roots;
 
 pub(crate) use model_files::ModelFiles;
 pub(crate) use shell_process::ShellProcess;
+
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) use macos::settings::{read_settings, write_settings};
+#[cfg(any(not(target_os = "macos"), test))]
+pub(crate) use settings::{read_settings, write_settings};
+
+/// Why the settings file couldn't be read: kinds only, never a path or the file's bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsRead {
+    /// The folder or the file isn't one only this user controls.
+    Untrusted,
+    /// Reading failed, or the text isn't UTF-8.
+    Read(std::io::ErrorKind),
+}
+
+/// How a settings replacement that didn't finish ended.
+#[derive(Debug)]
+pub(crate) enum SettingsWrite {
+    /// The old file is untouched.
+    Unchanged(std::io::Error),
+    /// The new file may be the one named, but that it's durable, or still named, isn't known.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            dead_code,
+            reason = "only the macOS adapter can leave a save unconfirmed"
+        )
+    )]
+    Unconfirmed,
+}
 
 #[cfg(all(test, windows))]
 pub(crate) use std::os::windows::fs::{

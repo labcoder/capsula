@@ -1,13 +1,15 @@
 //! The user's settings in `config.toml`, under `%APPDATA%\\<product>`.
 //!
 //! A change is staged as a [`Pending`] write and becomes the settings only once the file is
-//! replaced, so a failed write leaves memory and disk as they were. Keys this build doesn't know
+//! replaced, so a failed write leaves memory and disk as they were. A write whose outcome can't
+//! be proved is shown with the screen off and stops every later write until a restart. Keys this build doesn't know
 //! survive every write, so a later slice's settings outlive a downgrade. Nothing here logs a
 //! value or the parser's diagnostics: both can hold names.
 
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::PathBuf;
 
+use crate::platform::{SettingsRead, SettingsWrite};
 use crate::store::choice::StoredChoice;
 use kumochi_protocol::constants::{CONFIG_FILE, DEFAULT_ASSISTANT_NAME};
 use kumochi_protocol::message::{
@@ -64,6 +66,10 @@ pub(crate) enum ConfigError {
     /// Writing the file failed; nothing changed.
     #[error("config.toml couldn't be written")]
     Write(#[source] io::Error),
+    /// A write may have replaced the file without its durability, or that it's the one named,
+    /// being proved, so nothing more is written until a restart reads the file again.
+    #[error("config.toml may or may not have been written")]
+    Unconfirmed,
     /// A repository default must belong to a positive GitHub account ID.
     #[error("github default account must be positive")]
     InvalidGitHubAccount,
@@ -77,7 +83,9 @@ impl ConfigError {
     pub(crate) fn key(&self) -> ErrorKey {
         match self {
             Self::Unreadable => ErrorKey::ConfigUnreadable,
-            Self::NoHome | Self::Write(_) | Self::InvalidGitHubAccount => ErrorKey::SettingsRefused,
+            Self::NoHome | Self::Write(_) | Self::Unconfirmed | Self::InvalidGitHubAccount => {
+                ErrorKey::SettingsRefused
+            }
             Self::VoiceUnavailable => ErrorKey::VoiceUnavailable,
         }
     }
@@ -107,6 +115,7 @@ pub(crate) struct Config {
 enum Refusal {
     NoHome,
     Unreadable,
+    Unconfirmed,
 }
 
 /// A change staged for writing. [`Pending::write`] blocks, so it runs off the core loop.
@@ -145,31 +154,21 @@ impl Config {
             return Self::refusing(None, Refusal::NoHome, main_thread);
         };
         let path = dir.join(CONFIG_FILE);
-        // An existing folder is read only when it's trusted; a missing one is made on first save.
-        let present = match std::fs::symlink_metadata(&dir) {
-            Ok(_) if crate::platform::product_folder(&dir).is_ok() => true,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            _ => {
-                tracing::warn!("the settings folder isn't trusted; using defaults, not saving");
-                return Self::refusing(Some(path), Refusal::Unreadable, main_thread);
-            }
-        };
-        let read = if present {
-            std::fs::read_to_string(&path)
-        } else {
-            Err(io::ErrorKind::NotFound.into())
-        };
-        let table = match read {
-            Ok(text) => {
+        let table = match crate::platform::read_settings(&dir) {
+            Ok(Some(text)) => {
                 let Ok(table) = text.parse::<Table>() else {
                     tracing::warn!("config.toml doesn't parse; using defaults, not saving");
                     return Self::refusing(Some(path), Refusal::Unreadable, main_thread);
                 };
                 table
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Table::new(),
-            Err(error) => {
-                tracing::warn!(kind = ?error.kind(), "config.toml can't be read; not saving");
+            Ok(None) => Table::new(),
+            Err(SettingsRead::Untrusted) => {
+                tracing::warn!("the settings folder isn't trusted; using defaults, not saving");
+                return Self::refusing(Some(path), Refusal::Unreadable, main_thread);
+            }
+            Err(SettingsRead::Read(kind)) => {
+                tracing::warn!(kind = ?kind, "config.toml can't be read; not saving");
                 return Self::refusing(Some(path), Refusal::Unreadable, main_thread);
             }
         };
@@ -510,6 +509,7 @@ impl Config {
             Ok(table) => table.clone(),
             Err(Refusal::NoHome) => return Err(ConfigError::NoHome),
             Err(Refusal::Unreadable) => return Err(ConfigError::Unreadable),
+            Err(Refusal::Unconfirmed) => return Err(ConfigError::Unconfirmed),
         };
         Ok((self.path.clone().ok_or(ConfigError::NoHome)?, table))
     }
@@ -519,31 +519,31 @@ impl Config {
         self.view = pending.view;
         self.table = Ok(pending.table);
     }
+
+    /// A write whose outcome isn't known: its change may be what the file now holds, so it's
+    /// shown, but with the screen kept off, and nothing more is written until a restart.
+    pub(crate) fn unconfirmed(&mut self, pending: Pending) {
+        self.view = pending.view;
+        self.view.screen_holds = false;
+        self.view.show_screen = false;
+        self.table = Err(Refusal::Unconfirmed);
+    }
 }
 
 impl Pending {
     /// Writes the whole table beside the file, then replaces it. Blocks until it's on disk.
     ///
     /// # Errors
-    /// [`ConfigError::Write`] when any step fails; the old file is untouched.
+    /// [`ConfigError::Write`] when any step fails and the old file is untouched;
+    /// [`ConfigError::Unconfirmed`] when that isn't known.
     pub(crate) fn write(&self) -> Result<(), ConfigError> {
         let text = toml::to_string(&self.table)
             .map_err(|_| ConfigError::Write(io::Error::from(io::ErrorKind::InvalidData)))?;
-        write_replacing(&self.path, text.as_bytes()).map_err(ConfigError::Write)
+        crate::platform::write_settings(&self.path, text.as_bytes()).map_err(|error| match error {
+            SettingsWrite::Unchanged(error) => ConfigError::Write(error),
+            SettingsWrite::Unconfirmed => ConfigError::Unconfirmed,
+        })
     }
-}
-
-/// A leftover temp file from a crash is never read; this overwrites it.
-fn write_replacing(path: &Path, text: &[u8]) -> io::Result<()> {
-    let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    // A settings folder made here is owner-only; one already there must be trusted.
-    crate::platform::product_folder(dir)?;
-    let temp = path.with_file_name(format!("{CONFIG_FILE}.tmp"));
-    let mut file = std::fs::File::create(&temp)?;
-    file.write_all(text)?;
-    file.sync_all()?;
-    drop(file);
-    crate::platform::replace_file(&temp, path)
 }
 
 /// Adds `part` to the voice table's `key` list once, starting a list where there's none.

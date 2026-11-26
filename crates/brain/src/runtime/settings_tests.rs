@@ -554,6 +554,52 @@ async fn a_failed_write_is_answered_unchanged_and_the_next_change_still_saves() 
 }
 
 #[tokio::test]
+async fn an_unconfirmed_save_shows_its_change_with_the_screen_off_and_refuses_the_next() {
+    let scratch = Scratch::new("settings-unconfirmed");
+    let config = scratch.db().with_file_name(CONFIG_FILE);
+    std::fs::create_dir_all(config.parent().expect("a folder")).expect("folder");
+    std::fs::write(&config, "screen_holds = true\nshow_screen = true\n").expect("seed");
+    let mut brain = test_support::brain(&scratch, "");
+    let release = brain.hold_config_write();
+    let ((control, data), mut shell) = duplex();
+    let mut tap = Tap::from_env();
+    let client = async {
+        let before = shell.settled().await;
+        assert!(
+            before.screen_holds && before.show_screen,
+            "the seeded screen choices"
+        );
+        shell.scenes().await;
+        shell.send(&rename("Nimbus")).await;
+        release
+            .send(Gate::Unconfirmed)
+            .expect("the write waits on the gate");
+        assert_eq!(shell.error().await, ErrorKey::SettingsRefused);
+        let shown = shell.answer().await;
+        assert_eq!(
+            (
+                shown.assistant_name.as_str(),
+                shown.screen_holds,
+                shown.show_screen
+            ),
+            ("Nimbus", false, false)
+        );
+        shell.send(&rename("Cirrus")).await;
+        assert_eq!(shell.error().await, ErrorKey::SettingsRefused);
+        assert_eq!(shell.answer().await.assistant_name.as_str(), "Nimbus");
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+    let text = std::fs::read_to_string(&config).expect("readable");
+    assert!(
+        text.contains("Nimbus") && !text.contains("Cirrus"),
+        "only the unconfirmed write reached the file"
+    );
+}
+
+#[tokio::test]
 async fn a_panicked_write_logs_only_its_kind() {
     let logs = Captured::default();
     let _guard = logs.install();

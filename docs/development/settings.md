@@ -16,7 +16,25 @@ On macOS both config and data use `<Application Support>/<product>`, where the s
 asks Darwin for the current user's Application Support folder. It never falls back to `HOME`,
 opens or creates the directory, or establishes that it's writable.
 It is not an App Sandbox container locator.
-The macOS brain still refuses to start, and folder discovery doesn't enable settings writes.
+
+On macOS, `platform::{read_settings, write_settings}` go through `kumochi-storage`, which treats
+the settings folder's parent as the Support anchor and holds the whole chain from `/`. The
+product folder must be this user's, mode 0700, with no ACL, and `config.toml` this user's,
+mode 0600, with one link and no ACL. Neither is ever re-secured, and both are rechecked by name
+after every read. Only `ENOENT` for the product folder or the file under an admitted anchor
+reads as no settings; a missing anchor refuses. A save creates the product folder at 0700 when
+it's missing, unlinks any leftover `config.toml.tmp` unread, writes the new text to that
+reserved name with `O_EXCL` at 0600, flushes it, and syncs the anchor. It then checks both
+names, renames, and flushes the folder and the file. These are samples under the brain's
+session lock, not a defence against another process of the same user.
+
+A save ends three ways. It's saved; it's unchanged, because nothing was published or a rename
+error left the old file and the staged copy provably where they were; or it's unconfirmed,
+because a barrier, a rename error or the final recheck left the outcome unproved. An unconfirmed
+save shows its change with screen holds and the screen's picture off, answers
+`SettingsRefused`, and refuses every later change until a restart reads the file again.
+Windows and Linux never report one. The macOS brain still refuses to start, so none of this is
+reached outside its native tests.
 
 Linux and macOS unit tests use the same settings writer with an explicit scratch directory. Run
 the macOS tests only in a private, sandbox-confined, single-writer scratch root. The adapter

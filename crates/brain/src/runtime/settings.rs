@@ -89,6 +89,8 @@ pub(crate) enum Gate {
     WriteAndSignal(tokio::sync::oneshot::Sender<bool>),
     /// Panic with the test sentinel, as a bug in the write would.
     Panic,
+    /// Write, then answer unconfirmed, as a failed barrier after the rename would.
+    Unconfirmed,
 }
 
 /// Whether a change became the settings, and why not.
@@ -248,8 +250,14 @@ impl Brain {
         let profile = std::sync::Arc::clone(&self.profile);
         let handle = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
-            let completed = held(gate);
+            let (completed, unconfirmed) = held(gate);
             let written = pending.write();
+            #[cfg(test)]
+            let written = if unconfirmed {
+                written.and(Err(ConfigError::Unconfirmed))
+            } else {
+                written
+            };
             // Held until the write stops, even after the brain and its deadline are gone.
             drop(profile);
             #[cfg(test)]
@@ -460,7 +468,42 @@ impl Brain {
         Ok(())
     }
 
+    /// A write whose outcome isn't known: its change is shown with the screen off, and every
+    /// later change is refused until a restart reads the file again.
+    fn settings_unconfirmed(
+        &mut self,
+        pending: Pending,
+        epoch: u64,
+        mut link: Option<&mut Link<'_, '_>>,
+    ) -> Result<Outcome, Full> {
+        let (screen_holds, show_screen) = {
+            let view = self.config.view();
+            (view.screen_holds, view.show_screen)
+        };
+        self.config.unconfirmed(pending);
+        self.voice_policy();
+        if screen_holds {
+            self.screen_holds_off();
+        }
+        if show_screen {
+            self.show_screen_off(link.as_deref_mut())
+                .map_err(|_| Full)?;
+        }
+        // A newer shell is otherwise told nothing, and still shows the old view.
+        if epoch != self.epoch
+            && let Some(link) = link
+        {
+            self.settings_now(link)?;
+        }
+        tracing::warn!("a settings change may not be saved; refusing changes until restart");
+        Ok(Outcome::Refused(ErrorKey::SettingsRefused))
+    }
+
     /// The write in flight finished: its change becomes the settings only if it's on disk.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one write's outcome settles its voice, GitHub and screen effects in order"
+    )]
     pub(super) fn settings_done(
         &mut self,
         (epoch, voice, github, written): Written,
@@ -503,6 +546,9 @@ impl Brain {
                 #[cfg(test)]
                 self.observer.send(super::Seen::SettingsCommitted).ok();
                 Outcome::Applied
+            }
+            Ok((pending, Err(ConfigError::Unconfirmed))) => {
+                self.settings_unconfirmed(pending, epoch, link.as_deref_mut())?
             }
             Ok((_, Err(error))) => {
                 #[cfg(test)]
@@ -673,11 +719,12 @@ impl Brain {
 #[cfg(test)]
 fn held(
     gate: Option<std::sync::mpsc::Receiver<Gate>>,
-) -> Option<tokio::sync::oneshot::Sender<bool>> {
+) -> (Option<tokio::sync::oneshot::Sender<bool>>, bool) {
     match gate.and_then(|gate| gate.recv().ok()) {
-        Some(Gate::WriteAndSignal(completed)) => Some(completed),
+        Some(Gate::WriteAndSignal(completed)) => (Some(completed), false),
         Some(Gate::Panic) => panic!("{}", crate::test_support::SENTINEL),
-        Some(Gate::Write) | None => None,
+        Some(Gate::Unconfirmed) => (None, true),
+        Some(Gate::Write) | None => (None, false),
     }
 }
 
