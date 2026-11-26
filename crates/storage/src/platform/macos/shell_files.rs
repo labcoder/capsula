@@ -3,7 +3,7 @@ use std::fmt;
 use std::fs::{File, TryLockError};
 use std::io::{self, Write};
 use std::mem::{MaybeUninit, offset_of};
-use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _, RawFd};
+use std::os::fd::{AsRawFd as _, IntoRawFd as _};
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -11,22 +11,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::protected::{self, ObjectKind};
 use crate::Untrusted;
+use crate::platform::unix::{
+    self, AcquisitionError, DIRECTORY_FLAGS, basename, entry_stat, named, open_at,
+    private_directory, same_object,
+};
 
-pub(super) const DIRECTORY_FLAGS: libc::c_int =
-    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 const SCAN_LIMIT: usize = 256;
 const DIRENT_NAME_OFFSET: usize = offset_of!(libc::dirent, d_name);
-
-/// The acquisition stage that failed, without paths or foreign error text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum AcquisitionError {
-    /// Ordinary creation/open failure, not a completed security inspection.
-    #[error("private object creation or open failed")]
-    Open(io::ErrorKind),
-    /// Privacy, type, volume, ACL or identity was unsafe or could not be established.
-    #[error("private object admission failed: {0}")]
-    Admission(#[from] Untrusted),
-}
 
 /// Outcomes from at most 256 consumed directory entries, including unrelated entries and dots.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -215,18 +206,8 @@ pub fn admit_support(support: &Path) -> Result<Support, AcquisitionError> {
     if !support.is_absolute() {
         return Err(Untrusted::Unsafe.into());
     }
-    let names = protected::components(support)?;
-    // SAFETY: identity queries have no arguments or ownership effects.
-    let user = unsafe { libc::getuid() };
-    // SAFETY: geteuid only returns the effective identity.
-    let effective = unsafe { libc::geteuid() };
-    // SAFETY: getgid only returns the real group identity.
-    let group = unsafe { libc::getgid() };
-    // SAFETY: getegid only returns the effective group identity.
-    let effective_group = unsafe { libc::getegid() };
-    if user == 0 || user != effective || group != effective_group {
-        return Err(Untrusted::Unsafe.into());
-    }
+    let names = unix::components(support)?;
+    let user = unix::user()?;
     let root = open_at(libc::AT_FDCWD, c"/", DIRECTORY_FLAGS, 0)?;
     let mut held = vec![directory(root, c"/".to_owned(), user)?];
     for name in names {
@@ -370,7 +351,7 @@ impl ShellStorage {
             libc::O_WRONLY | libc::O_APPEND,
             true,
         )?;
-        let identity = protected::stat(file.as_raw_fd())?;
+        let identity = unix::stat(file.as_raw_fd())?;
         Ok(AdmittedLog {
             file,
             directories: Arc::clone(&self.0),
@@ -435,7 +416,7 @@ impl ShellStorage {
                 result.skipped += 1;
                 continue;
             };
-            let Ok(identity) = protected::stat(file.as_raw_fd()) else {
+            let Ok(identity) = unix::stat(file.as_raw_fd()) else {
                 result.skipped += 1;
                 continue;
             };
@@ -462,7 +443,7 @@ impl ShellStorage {
                 result.skipped += 1;
                 continue;
             };
-            let Ok(now) = protected::stat(file.as_raw_fd()) else {
+            let Ok(now) = unix::stat(file.as_raw_fd()) else {
                 result.skipped += 1;
                 continue;
             };
@@ -621,7 +602,7 @@ impl Directories {
     pub(super) fn check(&self) -> Result<(), AcquisitionError> {
         for (index, node) in self.held.iter().enumerate() {
             let now = protected::inspect(&node.file, self.user)?;
-            if !protected::same_inspection(&node.identity, &now)
+            if !unix::same_inspection(&node.identity, &now)
                 || volume(&node.file, index + 1 >= self.private_start)? != node.volume
             {
                 return Err(Untrusted::Unsafe.into());
@@ -635,13 +616,6 @@ impl Directories {
         }
         Ok(())
     }
-}
-
-fn private_directory(metadata: &libc::stat, user: libc::uid_t) -> Result<(), Untrusted> {
-    if metadata.st_uid != user || metadata.st_mode & 0o7777 != 0o700 {
-        return Err(Untrusted::Unsafe);
-    }
-    Ok(())
 }
 
 fn directory(file: File, name: CString, user: libc::uid_t) -> Result<Directory, AcquisitionError> {
@@ -676,7 +650,7 @@ fn volume(file: &File, writable: bool) -> Result<Volume, Untrusted> {
     // SAFETY: Darwin fsid_t is a repr(C) pair of i32 values, with no padding (sys/_types/_fsid_t.h).
     let fsid = unsafe { std::mem::transmute::<libc::fsid_t, [i32; 2]>(metadata.f_fsid) };
     Ok(Volume {
-        device: protected::stat(file.as_raw_fd())?.st_dev,
+        device: unix::stat(file.as_raw_fd())?.st_dev,
         fsid,
     })
 }
@@ -697,51 +671,6 @@ fn filesystem_policy(metadata: &libc::statfs, writable: bool) -> Result<(), Untr
     Ok(())
 }
 
-pub(super) fn basename(name: &str) -> Result<CString, Untrusted> {
-    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
-        return Err(Untrusted::Unsafe);
-    }
-    CString::new(name).map_err(|_| Untrusted::Unsafe)
-}
-
-pub(super) fn open_at(
-    parent: RawFd,
-    name: &CStr,
-    flags: libc::c_int,
-    mode: libc::mode_t,
-) -> Result<File, AcquisitionError> {
-    // SAFETY: name is terminated, parent is retained or AT_FDCWD for root; mode is promoted for C.
-    let fd = unsafe { libc::openat(parent, name.as_ptr(), flags, libc::c_uint::from(mode)) };
-    if fd < 0 {
-        let error = io::Error::last_os_error();
-        return Err(match error.raw_os_error() {
-            Some(libc::ELOOP) => Untrusted::Reparse.into(),
-            Some(libc::ENOTDIR | libc::EISDIR) => Untrusted::Unsafe.into(),
-            _ => AcquisitionError::Open(error.kind()),
-        });
-    }
-    // SAFETY: successful openat transferred this new uniquely owned descriptor.
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-
-pub(super) fn entry_stat(parent: &File, name: &CStr) -> io::Result<libc::stat> {
-    let mut metadata = MaybeUninit::uninit();
-    // SAFETY: retained parent, terminated basename and writable stat storage; no link following.
-    if unsafe {
-        libc::fstatat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            metadata.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    } != 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: successful fstatat initialized metadata.
-    Ok(unsafe { metadata.assume_init() })
-}
-
 fn precheck(parent: &File, name: &CStr, user: libc::uid_t) -> Result<(), AcquisitionError> {
     let metadata = match entry_stat(parent, name) {
         Ok(metadata) => metadata,
@@ -750,25 +679,8 @@ fn precheck(parent: &File, name: &CStr, user: libc::uid_t) -> Result<(), Acquisi
         }
         Err(_) => return Err(Untrusted::Io.into()),
     };
-    protected::safe_regular(&metadata, user)?;
+    unix::safe_regular(&metadata, user)?;
     Ok(())
-}
-
-pub(super) fn named(parent: &File, name: &CStr, expected: &libc::stat) -> Result<(), Untrusted> {
-    let actual = entry_stat(parent, name).map_err(|_| Untrusted::Io)?;
-    // A folder's link count moves whenever anyone adds or removes a subfolder in it; only a
-    // file's says whether it gained another name.
-    if !protected::same_inspection(&actual, expected)
-        || (expected.st_mode & libc::S_IFMT == libc::S_IFREG
-            && actual.st_nlink != expected.st_nlink)
-    {
-        return Err(Untrusted::Unsafe);
-    }
-    Ok(())
-}
-
-fn same_object(a: &libc::stat, b: &libc::stat) -> bool {
-    a.st_dev == b.st_dev && a.st_ino == b.st_ino
 }
 
 fn valid_prefix(prefix: &str) -> bool {
@@ -891,8 +803,8 @@ impl Entries {
     pub(super) fn open(logs: &File) -> Result<Self, AcquisitionError> {
         let file = open_at(logs.as_raw_fd(), c".", DIRECTORY_FLAGS, 0)?;
         if !same_object(
-            &protected::stat(logs.as_raw_fd())?,
-            &protected::stat(file.as_raw_fd())?,
+            &unix::stat(logs.as_raw_fd())?,
+            &unix::stat(file.as_raw_fd())?,
         ) {
             return Err(Untrusted::Unsafe.into());
         }
