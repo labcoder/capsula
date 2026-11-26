@@ -32,6 +32,20 @@ pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(not(target_os = "macos"))]
 const PIPE_BUSY: i32 = 231;
 
+/// A failed attempt: why, and what it knows of a child it may have started.
+#[derive(Debug)]
+pub(crate) struct Failed {
+    pub(crate) error: LinkError,
+    /// None when the attempt owns no child, as for a detached brain.
+    pub(crate) child: Option<super::Unconnected>,
+}
+
+impl From<LinkError> for Failed {
+    fn from(error: LinkError) -> Self {
+        Self { error, child: None }
+    }
+}
+
 /// Why a connection attempt failed.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LinkError {
@@ -242,7 +256,8 @@ pub(crate) fn read_shell_tuning(
 /// which the link settles once the connection ends.
 ///
 /// # Errors
-/// Why the attempt failed; a child that started is settled before the error returns.
+/// Why the attempt failed and, for a child, how far it got; a child that started is settled
+/// before the error returns.
 #[expect(
     clippy::too_many_arguments,
     reason = "the link supplies the brain, its identity, deadline and existing callbacks"
@@ -273,7 +288,7 @@ pub(crate) fn connect(
     )]
     quit_parked: impl Fn(&PipeClient),
     text_metrics: impl FnMut(Instant) -> DrawingText,
-) -> Result<(Connection, Option<super::ChildOwner>), LinkError> {
+) -> Result<(Connection, Option<super::ChildOwner>), Failed> {
     #[cfg(not(target_os = "macos"))]
     {
         connect_brain(
@@ -287,10 +302,12 @@ pub(crate) fn connect(
             text_metrics,
         )
         .map(|connection| (connection, None))
+        .map_err(Failed::from)
     }
     #[cfg(target_os = "macos")]
     {
-        let channel = super::macos::channel().map_err(LinkError::Launch)?;
+        let channel =
+            super::macos::channel().map_err(|error| not_spawned(LinkError::Launch(error)))?;
         connect_pair(
             brain,
             Arc::clone(word),
@@ -320,8 +337,8 @@ pub(crate) fn connect_pair(
     repair_of: Option<IssueSession>,
     deadline: Instant,
     text_metrics: impl FnOnce(Instant) -> DrawingText,
-) -> Result<(Connection, super::child::ChildOwner), LinkError> {
-    check_attempt(Some(deadline))?;
+) -> Result<(Connection, super::child::ChildOwner), Failed> {
+    check_attempt(Some(deadline)).map_err(not_spawned)?;
     connect_pair_with(
         |by| super::macos::start_brain(brain, word, by),
         super::macos::read_instance,
@@ -353,10 +370,20 @@ pub(super) fn connect_pair_with(
     repair_of: Option<IssueSession>,
     deadline: Instant,
     text_metrics: impl FnOnce(Instant) -> DrawingText,
-) -> Result<(Connection, super::child::ChildOwner), LinkError> {
-    use super::child::{Exit, Settled};
+) -> Result<(Connection, super::child::ChildOwner), Failed> {
+    use super::child::{Exit, Settled, Unconnected};
     use kumochi_protocol::constants::BRAIN_EXIT_BUSY;
-    let (owner, ends) = start(deadline).map_err(|error| not_started(error, deadline))?;
+    let (owner, ends) = start(deadline).map_err(|error| {
+        let child = if matches!(error, super::macos::NotStarted::Pending) {
+            Unconnected::Pending
+        } else {
+            Unconnected::NotSpawned
+        };
+        Failed {
+            error: not_started(error, deadline),
+            child: Some(child),
+        }
+    })?;
     let connected = check_attempt(Some(deadline)).and_then(|()| {
         after_ready(
             ends,
@@ -378,12 +405,28 @@ pub(super) fn connect_pair_with(
             });
             Ok((connection, owner))
         }
-        Err(error) => match owner.settle() {
-            Settled::Reaped(Exit::Code(code)) if code == i32::from(BRAIN_EXIT_BUSY) => {
-                Err(LinkError::Busy)
-            }
-            _ => Err(error),
-        },
+        Err(error) => {
+            let settled = owner.settle();
+            let error = match settled {
+                Settled::Reaped(Exit::Code(code)) if code == i32::from(BRAIN_EXIT_BUSY) => {
+                    LinkError::Busy
+                }
+                _ => error,
+            };
+            Err(Failed {
+                error,
+                child: Some(Unconnected::Settled(settled)),
+            })
+        }
+    }
+}
+
+/// An attempt refused before any spawn.
+#[cfg(target_os = "macos")]
+fn not_spawned(error: LinkError) -> Failed {
+    Failed {
+        error,
+        child: Some(super::Unconnected::NotSpawned),
     }
 }
 

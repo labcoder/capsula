@@ -17,10 +17,14 @@ use kumochi_session::Channel;
 
 use super::leg::tests::{Commit, SECRET, ends, scripted};
 use super::{NotStarted, ShellEnds};
-use crate::link::{DrawingText, LinkEvent, LinkHandle, LinkState, QuitOutcome, start_scripted};
+use crate::link::{
+    DrawingText, LinkEvent, LinkHandle, LinkState, QuitEnd, QuitOutcome, start_scripted,
+};
 use crate::platform::Connection;
-use crate::platform::child::{ChildOwner, Exit, Observation, Os, Refusal, Report, SpawnWord};
-use crate::platform::connect::{LinkError, connect_pair_with};
+use crate::platform::child::{
+    ChildOwner, Exit, Observation, Os, Refusal, Report, Settled, SpawnWord, Unconnected,
+};
+use crate::platform::connect::{Failed, LinkError, connect_pair_with};
 
 /// The owner's grace before a kill, and its wait after one.
 const WAIT: Duration = Duration::from_millis(300);
@@ -33,6 +37,8 @@ struct Script {
     exit: Option<Exit>,
     lost: bool,
     kill_fails: bool,
+    /// A kill that blocks until this is released or dropped.
+    kill_blocks: Option<Receiver<()>>,
     killed: Option<mpsc::Sender<()>>,
 }
 
@@ -79,6 +85,10 @@ impl Os for Child {
     }
 
     fn kill(&mut self) -> io::Result<()> {
+        let blocks = self.script().kill_blocks.take();
+        if let Some(blocks) = blocks {
+            let _released = blocks.recv_timeout(BOUND);
+        }
         let mut script = self.script();
         script.kills += 1;
         if script.kill_fails {
@@ -170,7 +180,7 @@ fn attempt(
     read_item: impl FnOnce(
         &mut [u8; kumochi_session::SECRET_LEN],
     ) -> Result<(), kumochi_storage::ItemError>,
-) -> Result<(Connection, ChildOwner), LinkError> {
+) -> Result<(Connection, ChildOwner), Failed> {
     connect_pair_with(
         |_| {
             let owner = owned(child, word).map_err(NotStarted::Refused)?;
@@ -191,7 +201,18 @@ fn honest(item: &mut [u8; kumochi_session::SECRET_LEN]) -> Result<(), kumochi_st
     Ok(())
 }
 
-type Attempt = Result<(Connection, Option<ChildOwner>), LinkError>;
+type Attempt = Result<(Connection, Option<ChildOwner>), Failed>;
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "it stands in for the accessor's own value"
+)]
+fn ended(generation: Option<u64>, outcome: QuitOutcome) -> Option<QuitEnd> {
+    Some(QuitEnd {
+        generation,
+        outcome,
+    })
+}
 
 /// A link whose first attempt meets `child` scripted by `then`; later attempts come from `next`.
 fn link(
@@ -234,7 +255,7 @@ fn failed(event: &LinkEvent) -> bool {
 }
 
 fn refused(_: &Arc<SpawnWord>, _: Instant) -> Attempt {
-    Err(LinkError::Rejected)
+    Err(LinkError::Rejected.into())
 }
 
 #[test]
@@ -244,7 +265,7 @@ fn a_quit_taken_by_a_child_that_exits_0_is_clean() {
     until(&states, connected);
     assert!(link.begin_quit());
     link.finish_quit();
-    assert_eq!(link.quit_outcome(), Some(QuitOutcome::Clean));
+    assert_eq!(link.quit_end(), ended(Some(1), QuitOutcome::Clean));
     let script = child.script();
     assert_eq!((script.exit, script.kills), (Some(Exit::Code(0)), 0));
 }
@@ -260,7 +281,7 @@ fn a_quit_is_unclean_unless_the_live_child_exits_0() {
         until(&states, connected);
         assert!(link.begin_quit());
         link.finish_quit();
-        assert_eq!(link.quit_outcome(), Some(QuitOutcome::Reaped(exit)));
+        assert_eq!(link.quit_end(), ended(Some(1), QuitOutcome::Reaped(exit)));
         let script = child.script();
         assert_eq!((script.exit, script.kills), (Some(exit), kills));
     }
@@ -274,7 +295,7 @@ fn a_quit_between_attempts_after_a_child_exited_0_is_not_clean() {
     until(&states, failed);
     assert!(link.begin_quit());
     link.finish_quit();
-    assert_eq!(link.quit_outcome(), None);
+    assert_eq!(link.quit_end(), None);
 }
 
 #[test]
@@ -288,8 +309,8 @@ fn a_quit_outcome_is_the_attempt_quit_ended_not_an_earlier_childs_clean_exit() {
     assert!(link.begin_quit());
     link.finish_quit();
     assert_eq!(
-        link.quit_outcome(),
-        Some(QuitOutcome::Reaped(Exit::Code(3)))
+        link.quit_end(),
+        ended(Some(2), QuitOutcome::Reaped(Exit::Code(3)))
     );
     assert_eq!(first.script().exit, Some(Exit::Code(0)));
 }
@@ -299,7 +320,7 @@ fn a_quit_queued_but_never_written_is_not_clean_on_an_exit_0() {
     let child = Child::default();
     let (link, states) = link(&child, Then::Stalls, refused);
     until(&states, connected);
-    let hold = &link.shared.hold_control_writer;
+    let hold = link.control_writer_hold();
     hold.store(1, Ordering::Release);
     assert!(link.begin_quit());
     thread::scope(|scope| {
@@ -316,8 +337,8 @@ fn a_quit_queued_but_never_written_is_not_clean_on_an_exit_0() {
         quit.join().expect("finish_quit");
     });
     assert_eq!(
-        link.quit_outcome(),
-        Some(QuitOutcome::Reaped(Exit::Code(0)))
+        link.quit_end(),
+        ended(Some(1), QuitOutcome::Reaped(Exit::Code(0)))
     );
     assert_eq!(child.script().kills, 0);
 }
@@ -332,10 +353,85 @@ fn a_refused_kill_ends_the_link_while_the_peer_holds_both_ends_open() {
     assert!(link.begin_quit());
     link.finish_quit();
     let took = quit.elapsed();
-    assert_eq!(link.quit_outcome(), Some(QuitOutcome::Unsettled));
+    assert_eq!(link.quit_end(), ended(Some(1), QuitOutcome::Unsettled));
     assert!(took < 2 * WAIT + Duration::from_secs(2), "{took:?}");
     let script = child.script();
     assert_eq!((script.exit, script.kills), (None, 1));
+}
+
+#[test]
+fn a_kill_that_blocks_ends_the_link_unsettled_while_the_peer_holds_both_ends_open() {
+    let child = Child::default();
+    let (unblock, blocks) = mpsc::channel();
+    child.script().kill_blocks = Some(blocks);
+    let (link, states) = link(&child, Then::Stalls, refused);
+    until(&states, connected);
+    let quit = Instant::now();
+    assert!(link.begin_quit());
+    link.finish_quit();
+    let took = quit.elapsed();
+    assert_eq!(link.quit_end(), ended(Some(1), QuitOutcome::Unsettled));
+    assert!(took < 4 * WAIT + Duration::from_secs(2), "{took:?}");
+    assert_eq!(child.script().exit, None, "the kill is still blocked");
+    drop(unblock);
+}
+
+/// A brain for the queued pair that says READY only once `go` comes, then exits 0 on Quit.
+fn parked_brain(child: &Child, go: Receiver<()>) -> ShellEnds {
+    let (shell, control, data) = ends();
+    let child = child.clone();
+    thread::spawn(move || {
+        let _go = go.recv_timeout(BOUND);
+        (&control).write_all(&[SESSION_READY]).expect("READY");
+        let deadline = Instant::now() + BOUND;
+        let mut brain = scripted(
+            control,
+            data,
+            AudioSession::QueuedRequired,
+            Commit::Settings,
+            deadline,
+        );
+        while brain.control_message() != ControlToBrain::Quitting {}
+        child.exits(Exit::Code(0));
+        drop(brain);
+    });
+    shell
+}
+
+#[test]
+fn a_quit_parked_before_the_queued_writers_start_is_clean_on_its_own_receipt() {
+    let child = Child::default();
+    let (go, gate) = mpsc::channel();
+    let (events, _states) = async_channel::unbounded();
+    let mut gate = Some(gate);
+    let brain_child = child.clone();
+    let link = start_scripted(events, AudioSession::QueuedRequired, move |word, _, by| {
+        let gate = gate.take().ok_or(LinkError::Rejected)?;
+        connect_pair_with(
+            |_| {
+                let owner = owned(&brain_child, word).map_err(NotStarted::Refused)?;
+                Ok((owner, parked_brain(&brain_child, gate)))
+            },
+            honest,
+            Channel::Dev,
+            AudioSession::QueuedRequired,
+            None,
+            by,
+            |_| DrawingText::default(),
+        )
+        .map(|(connection, owner)| (connection, Some(owner)))
+    });
+    let by = Instant::now() + BOUND;
+    while child.script().spawns == 0 {
+        assert!(Instant::now() < by, "the child started");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(link.begin_quit());
+    go.send(()).expect("the brain waits for its go");
+    link.finish_quit();
+    assert_eq!(link.quit_end(), ended(None, QuitOutcome::Clean));
+    let script = child.script();
+    assert_eq!((script.exit, script.kills), (Some(Exit::Code(0)), 0));
 }
 
 #[test]
@@ -350,7 +446,7 @@ fn a_replacement_starts_only_after_the_lost_connections_child_is_reaped() {
                 .map(drop)
                 .map_err(|refusal| refusal.to_string());
             *seen.lock().unwrap_or_else(PoisonError::into_inner) = Some((reaped, claimed));
-            Err(LinkError::Rejected)
+            Err(LinkError::Rejected.into())
         })
     };
     until(&states, failed);
@@ -374,7 +470,7 @@ fn after_a_lost_child_no_attempt_spawns_again_even_on_retry() {
             if matches!(owned(&second, word), Err(Refusal::Claimed)) {
                 refusals.fetch_add(1, Ordering::SeqCst);
             }
-            Err(LinkError::Launch(io::ErrorKind::ResourceBusy.into()))
+            Err(LinkError::Launch(io::ErrorKind::ResourceBusy.into()).into())
         })
     };
     until(&states, failed);
@@ -398,8 +494,22 @@ fn a_child_that_exits_busy_before_ready_is_busy_and_any_other_exit_is_rejected()
             Instant::now() + BOUND,
             honest,
         );
+        let reaped = Some(Unconnected::Settled(Settled::Reaped(Exit::Code(code))));
         match (code, result) {
-            (75, Err(LinkError::Busy)) | (76, Err(LinkError::Rejected)) => {}
+            (
+                75,
+                Err(Failed {
+                    error: LinkError::Busy,
+                    child,
+                }),
+            )
+            | (
+                76,
+                Err(Failed {
+                    error: LinkError::Rejected,
+                    child,
+                }),
+            ) if child == reaped => {}
             (_, other) => panic!("exit {code}: {:?}", other.map(drop)),
         }
         assert_eq!(child.script().kills, 0, "exit {code}");
@@ -422,7 +532,10 @@ fn quit_while_the_brain_hasnt_said_ready_retires_its_child_well_before_the_deadl
     assert!(took < 2 * WAIT + Duration::from_secs(2), "{took:?}");
     let script = child.script();
     assert_eq!((script.exit, script.kills), (Some(Exit::Signal(9)), 1));
-    assert_eq!(link.quit_outcome(), Some(QuitOutcome::NotConnected));
+    assert_eq!(
+        link.quit_end(),
+        ended(None, QuitOutcome::Reaped(Exit::Signal(9)))
+    );
 }
 
 #[test]
@@ -431,7 +544,13 @@ fn an_attempt_that_expires_before_ready_returns_only_once_its_child_is_reaped() 
     let word = Arc::new(SpawnWord::default());
     let start = Instant::now();
     let result = attempt(&word, &child, Then::NoReady, start + WAIT, honest);
-    assert!(matches!(result, Err(LinkError::ConnectExpired)));
+    assert!(matches!(
+        result,
+        Err(Failed {
+            error: LinkError::ConnectExpired,
+            child: Some(Unconnected::Settled(Settled::Reaped(Exit::Signal(9)))),
+        })
+    ));
     assert_eq!(
         child.script().exit,
         Some(Exit::Signal(9)),
@@ -458,7 +577,7 @@ fn a_refused_attempt_names_none_of_the_item_bytes() {
     )
     .map(drop)
     .expect_err("the initiator fails");
-    for shown in [format!("{error:?}"), error.to_string()] {
+    for shown in [format!("{error:?}"), error.error.to_string()] {
         assert!(!shown.contains("SENTINEL"), "as text: {shown}");
         assert!(!shown.contains("83, 69, 78"), "as a byte list: {shown}");
     }

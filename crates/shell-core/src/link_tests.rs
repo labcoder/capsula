@@ -4116,8 +4116,7 @@ fn queued_report_refusal_closes_the_full_control_mailbox_and_parked_data_head() 
     }
     queued_pair_closed(link.link, &link.control, &link.data);
     link.handle
-        .shared
-        .hold_control_writer
+        .control_writer_hold()
         .store(0, Ordering::Release);
     assert_queued_retry_after_local_quiet(&link.handle, &session, "queued-report-refusal-retry");
 }
@@ -4126,7 +4125,7 @@ fn fill_queued_control_mailbox(link: &Attended, session: &Session) {
     use super::CONTROL_QUEUE;
     use std::sync::atomic::Ordering;
 
-    let hold = &link.handle.shared.hold_control_writer;
+    let hold = link.handle.control_writer_hold();
     hold.store(1, Ordering::Release);
     frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control)
         .expect("trigger the exact control writer");
@@ -4360,8 +4359,7 @@ fn refused_queued_progress(label: &str) -> (LinkHandle, Session, FixturePlayback
         "the full mailbox refused non-final retirement for the original callback"
     );
     link.handle
-        .shared
-        .hold_control_writer
+        .control_writer_hold()
         .store(0, Ordering::Release);
     (link.handle, session, playback)
 }

@@ -66,7 +66,7 @@ fn a_busy_attempt_waits_for_retry_and_a_quit_with_no_child_is_not_clean() {
     let counted = Arc::clone(&attempts);
     let link = super::start_scripted(events, AudioSession::Legacy, move |_, _, _| {
         counted.fetch_add(1, Ordering::SeqCst);
-        Err(crate::platform::LinkError::Busy)
+        Err(crate::platform::LinkError::Busy.into())
     });
     for attempt in 1..=2 {
         if attempt > 1 {
@@ -95,8 +95,27 @@ fn a_busy_attempt_waits_for_retry_and_a_quit_with_no_child_is_not_clean() {
         2,
         "Quit started no attempt"
     );
-    assert_eq!(link.quit_outcome(), None, "no attempt was live at Quit");
+    assert_eq!(link.quit_end(), None, "no attempt was live at Quit");
     assert_eq!(states.try_recv().unwrap_err(), TryRecvError::Closed);
+}
+
+#[test]
+fn a_quit_during_a_failed_attempt_with_no_child_has_no_outcome() {
+    let (events, _states) = async_channel::unbounded();
+    let (entered, attempting) = std::sync::mpsc::channel();
+    let (fail, failing) = std::sync::mpsc::channel::<()>();
+    let link = super::start_scripted(events, AudioSession::Legacy, move |_, _, _| {
+        let _seen = entered.send(());
+        let _released = failing.recv_timeout(Duration::from_secs(10));
+        Err(crate::platform::LinkError::Busy.into())
+    });
+    attempting
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the attempt started");
+    assert!(link.begin_quit());
+    drop(fail);
+    link.finish_quit();
+    assert_eq!(link.quit_end(), None, "a childless attempt has no outcome");
 }
 
 #[test]

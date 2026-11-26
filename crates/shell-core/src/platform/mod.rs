@@ -37,8 +37,17 @@ pub(crate) mod connect_test {
     };
 }
 
-pub(crate) use child::{ChildOwner, Exit, Settled, SpawnWord};
-pub(crate) use connect::{Connection, HANDSHAKE_TIMEOUT, LinkError, RETRY_DELAY, connect};
+pub(crate) use child::{ChildOwner, Exit, Settled, SpawnWord, Unconnected};
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "only the core's own tests script a failed attempt"
+    )
+)]
+pub(crate) use connect::LinkError;
+pub(crate) use connect::{Connection, Failed, HANDSHAKE_TIMEOUT, RETRY_DELAY, connect};
 #[cfg(windows)]
 #[cfg(debug_assertions)]
 #[cfg(any(test, feature = "test-support"))]

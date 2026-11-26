@@ -617,7 +617,7 @@ fn queue_on(
 
 /// What the UI thread and the link thread share.
 #[derive(Debug, Default)]
-pub(crate) struct Shared {
+struct Shared {
     microphone: CollectionGate,
     microphone_stop: Mutex<Option<microphone::Stop>>,
     input: AtomicU64,
@@ -640,9 +640,8 @@ pub(crate) struct Shared {
     voice_ready_at: AtomicU64,
     output: output::OutputOwner,
     narrated: bool,
-    /// Set 1 and the control writer parks unwritten at its next message, showing 2.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) hold_control_writer: std::sync::atomic::AtomicU8,
+    hold_control_writer: std::sync::atomic::AtomicU8,
     #[cfg(any(test, feature = "test-support"))]
     hold_pcm_writer: std::sync::atomic::AtomicU8,
     #[cfg(any(test, feature = "test-support"))]
@@ -660,7 +659,23 @@ pub(crate) struct Shared {
     /// Orders Quit against an owned brain child's spawn.
     spawn: Arc<platform::SpawnWord>,
     /// How Quit ended for the attempt it ended, once the link has settled that attempt's child.
-    quit_outcome: OnceLock<QuitOutcome>,
+    quit_end: OnceLock<QuitEnd>,
+}
+
+/// One attempt's own receipts: its generation once Connected went out, and whether `Quitting`
+/// was written whole to its pair.
+#[derive(Debug, Default)]
+struct Attempt {
+    generation: OnceLock<u64>,
+    quit_written: AtomicBool,
+}
+
+/// How Quit ended the attempt it ended, read by [`LinkHandle::quit_end`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct QuitEnd {
+    /// The attempt's link generation, or None when Quit ended it before Connected.
+    pub(crate) generation: Option<u64>,
+    pub(crate) outcome: QuitOutcome,
 }
 
 /// How Quit ended for the brain child of the attempt it ended, joined from that attempt's own
@@ -675,18 +690,29 @@ pub(crate) enum QuitOutcome {
     Lost,
     /// Retirement was refused or its exit wasn't confirmed in time.
     Unsettled,
-    /// Quit ended the attempt before Connected: no spawn confirmed, a spawn still pending or a pair
-    /// that never committed. `Quitting` reached no child, so no reap confirms it.
-    NotConnected,
+    /// Proven: the attempt Quit ended started no child.
+    NotSpawned,
+    /// The attempt's spawn hadn't reported, so a child may still exist.
+    SpawnPending,
 }
 
 impl QuitOutcome {
-    fn of(written: &AtomicBool, settled: platform::Settled) -> Self {
+    /// `settled` joined to the receipt of `connected`, the attempt when it reached Connected.
+    fn of(connected: Option<&Attempt>, settled: platform::Settled) -> Self {
+        let written = connected.is_some_and(|attempt| attempt.quit_written.load(Ordering::Acquire));
         match settled {
-            settled if written.load(Ordering::Acquire) && settled.is_clean() => Self::Clean,
+            settled if written && settled.is_clean() => Self::Clean,
             platform::Settled::Reaped(exit) => Self::Reaped(exit),
             platform::Settled::Lost => Self::Lost,
             platform::Settled::Unsettled => Self::Unsettled,
+        }
+    }
+
+    fn unconnected(child: platform::Unconnected) -> Self {
+        match child {
+            platform::Unconnected::NotSpawned => Self::NotSpawned,
+            platform::Unconnected::Pending => Self::SpawnPending,
+            platform::Unconnected::Settled(settled) => Self::of(None, settled),
         }
     }
 }
@@ -912,8 +938,7 @@ impl InputCancel {
 /// The UI's handle on the link.
 #[derive(Clone, Debug)]
 pub struct LinkHandle {
-    /// Crate-visible so the platforms' scripted-link tests can reach the test holds.
-    pub(crate) shared: Arc<Shared>,
+    shared: Arc<Shared>,
     worker: Option<LinkWorker>,
     #[cfg(any(test, feature = "test-support"))]
     recording: Option<Sender<DataToBrain>>,
@@ -1196,15 +1221,23 @@ impl LinkHandle {
         }
     }
 
-    /// How the last Quit ended for the brain child of the attempt it ended. Read it after
-    /// [`Self::finish_quit`]. None when that attempt owned no child, as for a detached brain, or
-    /// when Quit came between attempts.
+    /// How the last Quit ended the attempt it ended, with that attempt's generation once it was
+    /// Connected. Read it after [`Self::finish_quit`]. None when that attempt owned no child, as
+    /// for a detached brain, or when Quit came between attempts.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "R2-D's first-turn route reads it")
     )]
-    pub(crate) fn quit_outcome(&self) -> Option<QuitOutcome> {
-        self.shared.quit_outcome.get().copied()
+    pub(crate) fn quit_end(&self) -> Option<QuitEnd> {
+        self.shared.quit_end.get().copied()
+    }
+
+    /// The control writer's test hold: set 1 and the writer parks unwritten at its next
+    /// message, showing 2.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn control_writer_hold(&self) -> &std::sync::atomic::AtomicU8 {
+        &self.shared.hold_control_writer
     }
 
     /// Holds a delete the user confirmed until [`LinkHandle::settle_delete`]; it's sent by
@@ -1656,8 +1689,7 @@ pub(crate) fn start_scripted(
         &Arc<platform::SpawnWord>,
         Option<IssueSession>,
         Instant,
-    )
-        -> Result<(Connection, Option<platform::ChildOwner>), platform::LinkError>
+    ) -> Result<(Connection, Option<platform::ChildOwner>), platform::Failed>
     + Send
     + 'static,
 ) -> LinkHandle {
@@ -1762,10 +1794,8 @@ impl Link {
         mut connect: impl FnMut(
             Option<IssueSession>,
             Instant,
-        ) -> Result<
-            (Connection, Option<platform::ChildOwner>),
-            platform::LinkError,
-        >,
+        )
+            -> Result<(Connection, Option<platform::ChildOwner>), platform::Failed>,
     ) {
         let mut state = LinkState::Connecting;
         let mut last_loss: Option<Instant> = None;
@@ -1777,11 +1807,16 @@ impl Link {
             let reconnect_by = Instant::now() + CONNECT_TIMEOUT;
             let (connection, child) = match connect(repair_of, reconnect_by) {
                 Ok(connected) => connected,
-                Err(_) if self.quitting() => {
-                    let _first = self.shared.quit_outcome.set(QuitOutcome::NotConnected);
+                Err(failed) if self.quitting() => {
+                    if let Some(child) = failed.child {
+                        let _first = self.shared.quit_end.set(QuitEnd {
+                            generation: None,
+                            outcome: QuitOutcome::unconnected(child),
+                        });
+                    }
                     return;
                 }
-                Err(error) => {
+                Err(platform::Failed { error, .. }) => {
                     tracing::error!(%error, "can't reach the brain");
                     if !wait_for_retry(events, retries) {
                         return;
@@ -1792,13 +1827,15 @@ impl Link {
             };
             tracing::info!(incarnation = ?connection.issue_origin.incarnation, "connected to the brain");
             let previous = connection.issue_origin;
-            let written = Arc::<AtomicBool>::default();
-            let attended = self.attend_until(connection, events, reconnect_by, &written);
+            let attempt = Arc::<Attempt>::default();
+            let attended = self.attend_until(connection, events, reconnect_by, &attempt);
             let settled = child.map(platform::ChildOwner::settle);
             if self.quitting() {
                 if let Some(settled) = settled {
-                    let outcome = QuitOutcome::of(&written, settled);
-                    let _first = self.shared.quit_outcome.set(outcome);
+                    let _first = self.shared.quit_end.set(QuitEnd {
+                        generation: attempt.generation.get().copied(),
+                        outcome: QuitOutcome::of(Some(&attempt), settled),
+                    });
                 }
                 return;
             }
@@ -1885,10 +1922,12 @@ impl Link {
         control: &PipeClient,
         events: &Sender<LinkEvent>,
         reconnect_by: Instant,
-        written: &AtomicBool,
+        attempt: &Attempt,
     ) -> Option<Attendance> {
         if self.quitting() {
-            written.store(self.quit_parked(control), Ordering::Release);
+            attempt
+                .quit_written
+                .store(self.quit_parked(control), Ordering::Release);
             Some(Attendance::Ended)
         } else if events.is_closed() {
             Some(Attendance::Ended)
@@ -1919,7 +1958,7 @@ impl Link {
         connection: Connection,
         events: &Sender<LinkEvent>,
         reconnect_by: Instant,
-        written: &Arc<AtomicBool>,
+        attempt: &Arc<Attempt>,
     ) -> Attendance {
         let Connection {
             control,
@@ -1931,7 +1970,7 @@ impl Link {
         let queued = self.audio == AudioSession::QueuedRequired;
         if queued
             && let Some(refused) =
-                self.queued_start_refusal(&control, events, reconnect_by, written)
+                self.queued_start_refusal(&control, events, reconnect_by, attempt)
         {
             return refused;
         }
@@ -2013,7 +2052,7 @@ impl Link {
                 },
             ) else {
                 return self
-                    .queued_start_refusal(&control, events, reconnect_by, written)
+                    .queued_start_refusal(&control, events, reconnect_by, attempt)
                     .unwrap_or(Attendance::Retry);
             };
             Some((started, deadline))
@@ -2046,7 +2085,7 @@ impl Link {
             drop(outbox);
             drop(control_slot);
             return self
-                .queued_start_refusal(&control, events, reconnect_by, written)
+                .queued_start_refusal(&control, events, reconnect_by, attempt)
                 .unwrap_or(Attendance::Retry);
         } else {
             None
@@ -2100,13 +2139,13 @@ impl Link {
                 })?;
             }
             spawn_helper("link-control-writer", &mut helpers, {
-                let (control, written) = (Arc::clone(&control), Arc::clone(written));
+                let (control, attempt) = (Arc::clone(&control), Arc::clone(attempt));
                 let ended = ended.clone();
                 move || {
                     write_control(
                         &control,
                         &control_queue,
-                        &written,
+                        &attempt.quit_written,
                         #[cfg(any(test, feature = "test-support"))]
                         &ended.shared.hold_control_writer,
                     );
@@ -2126,6 +2165,9 @@ impl Link {
             })
         })();
         let open = legacy_connected.is_none_or(|connected| events.send_blocking(connected).is_ok());
+        if open {
+            let _first = attempt.generation.set(generation);
+        }
         let read = spawned.and_then(|()| {
             // Only now, so nothing from the brain reaches the UI before Connected.
             spawn_helper("link-data-reader", &mut helpers, {

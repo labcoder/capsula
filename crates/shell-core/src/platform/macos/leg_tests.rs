@@ -665,7 +665,13 @@ fn an_expired_attempt_starts_no_brain() {
         Instant::now(),
         |_| panic!("no metrics for an expired attempt"),
     );
-    assert!(matches!(result, Err(LinkError::ConnectExpired)));
+    assert!(matches!(
+        result,
+        Err(crate::platform::Failed {
+            error: LinkError::ConnectExpired,
+            child: Some(crate::platform::Unconnected::NotSpawned),
+        })
+    ));
 }
 
 #[test]
