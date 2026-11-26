@@ -232,7 +232,7 @@ stateDiagram-v2
   kept, and later `settle` calls return it without another call.
 - The key copy and each readback buffer are zeroed when dropped. `Published` holds neither, and
   settlement drops both before its cleanup delete.
-  `Lifecycle` settles the attempt in `finish` before custody drops with it.
+  The parent-bound root settles the attempt before custody drops with it.
 
 ## What this crate doesn't do
 

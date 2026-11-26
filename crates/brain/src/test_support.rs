@@ -222,9 +222,19 @@ pub(crate) fn accounts(scratch: &Scratch) -> Accounts {
 /// opens its vault.
 #[cfg(windows)]
 pub(crate) fn held_accounts(profile: Arc<crate::platform::SessionLock>) -> Accounts {
+    held_accounts_until(profile, ())
+}
+
+/// [`held_accounts`], whose credential thread drops `hold` after the vault and before it
+/// reports the release.
+pub(crate) fn held_accounts_until(
+    profile: Arc<crate::platform::SessionLock>,
+    hold: impl Send + 'static,
+) -> Accounts {
     let store = FakeStore::default();
     let worker = Worker::new(
         Box::new(move || {
+            let _hold = &hold;
             Vault::with_lock(
                 store.clone(),
                 "test-accounts",
@@ -236,6 +246,22 @@ pub(crate) fn held_accounts(profile: Arc<crate::platform::SessionLock>) -> Accou
         Arc::new(FixedClock(1_800_000_000)),
     );
     Accounts::spawn_unconfigured(worker, net()).expect("credential thread")
+}
+
+/// An account system whose vault opens with `open`, which fails or panics; its credential
+/// thread drops `hold` after it stops and before it reports the release.
+pub(crate) fn failing_accounts(
+    hold: impl Send + 'static,
+    open: fn() -> Result<Vault<FakeStore>, crate::connections::error::VaultError>,
+) -> std::io::Result<Accounts> {
+    let worker = Worker::<FakeStore>::new(
+        Box::new(move || {
+            let _hold = &hold;
+            open()
+        }),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    Accounts::spawn_unconfigured(worker, net())
 }
 
 /// What an account system reaches outside the brain through, in tests: it never opens a

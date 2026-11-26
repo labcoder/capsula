@@ -121,6 +121,15 @@ so a claim that comes after a loss fails, and a fence refuses once a loss or a c
 visible. Each passed checkpoint admits the work up to the next one; the fences owed inside the
 helpers' Job and worker starts come with containment. A loss during admitted work lets it
 finish, and the next fence refuses with the same unwind as an error there.
+Both modes run the stages through one owner of what has started. Started accounts stay there
+until the Brain takes them, and a failed `Brain::new` hands them back. Detached drops whatever
+started, as before. The parent-bound root, not wired yet, settles it instead. With no Brain, it
+closes the accounts, which waits for the credential thread to let the vault go, then drops the
+raw store, recorded Unconfirmed because no receipt confirms that drop; so is a store an open
+acquired before it failed. A refused or panicked startup load returns only after the credential
+thread has let the vault go, so no worker outlives a failed start unseen. Then it settles the
+instance attempt, drops custody, and only then ends the process services that its injected
+prerequisites start after the claim. This build's prerequisites are never ready.
 Only then does it publish the instance capability and serve the shell. The lifecycle owner
 keeps the pipes alive through teardown. Before capability publication, a failure drops the
 resources that started without entering graceful shutdown. The store and credential workers

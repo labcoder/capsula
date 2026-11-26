@@ -46,15 +46,11 @@ fn refused(shell: &ShellProcess) -> Result<(), BrainError> {
 
 fn lifecycle(slot: u32) -> Lifecycle {
     Lifecycle {
-        jobs: None,
-        brain: None,
-        opened: None,
-        profile: None,
+        stages: Stages::default(),
         exe: std::env::current_exe().expect("current test executable"),
         pipes: Pipes::create_for_startup_test(slot).expect("own test pipes"),
         session: 0,
         published: false,
-        instance: None,
     }
 }
 
@@ -283,8 +279,8 @@ async fn settled(
 ) -> (Settlement, Result<(), BrainError>) {
     let scratch = Scratch::new("startup-settle");
     let mut lifecycle = lifecycle(slot);
-    lifecycle.brain = Some(crate::test_support::brain(&scratch, ""));
-    lifecycle.jobs = Some(Arc::new(Job::new().expect("helper Job")));
+    lifecycle.stages.brain = Some(crate::test_support::brain(&scratch, ""));
+    lifecycle.stages.jobs = Some(Arc::new(Job::new().expect("helper Job")));
     // Boxed, because the future holds the whole brain. Nothing was published, so a delete
     // would be a bug.
     let settlement =
@@ -298,8 +294,8 @@ async fn settled(
 async fn a_failed_helper_shutdown_and_delete_are_failed_and_detached_still_exits_0() {
     let scratch = Scratch::new("startup-settle-failed");
     let mut lifecycle = lifecycle(9);
-    lifecycle.brain = Some(crate::test_support::brain(&scratch, ""));
-    lifecycle.jobs = Some(Arc::new(Job::new().expect("helper Job")));
+    lifecycle.stages.brain = Some(crate::test_support::brain(&scratch, ""));
+    lifecycle.stages.jobs = Some(Arc::new(Job::new().expect("helper Job")));
     lifecycle.published = true;
     let ended = Ok(Some(tokio::time::Instant::now() + PATIENCE));
     let mut deleted = None;

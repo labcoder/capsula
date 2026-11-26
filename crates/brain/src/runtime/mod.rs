@@ -23,6 +23,8 @@ mod terminal;
 mod terminal_tests;
 pub(crate) use issues::IssueEpochs;
 #[cfg(test)]
+pub(crate) use store_thread::REFUSE_SPAWN;
+#[cfg(test)]
 pub(crate) use store_thread::{Attempt, Schedule};
 #[cfg(test)]
 mod tests;
@@ -127,6 +129,14 @@ fn close_wait() -> Duration {
     CLOSE_WAIT
 }
 
+/// Closes accounts no Brain took, with the waits `Brain::close` gives its own.
+pub(crate) async fn close_unbuilt(mut accounts: Accounts) -> Stage {
+    let deadline = Instant::now() + close_wait();
+    accounts
+        .close(deadline, Instant::now() + REFRESH_WAIT)
+        .await
+}
+
 /// [`SCENES_WAIT`]; tests choose their own, so a slow runner never races it.
 #[cfg(not(test))]
 fn scenes_wait() -> Duration {
@@ -176,6 +186,8 @@ pub(crate) enum Stage {
     Confirmed,
     /// An explicit success, observed at or after it.
     Late,
+    /// Ended with nothing to observe, as a raw store's drop: never Confirmed.
+    Unconfirmed,
     /// An error, a refusal, a panic or a closed sender.
     Failed,
     /// The deadline passed and the stage wasn't seen to end.
@@ -368,7 +380,7 @@ impl Brain {
         config: Config,
         mut account: Accounts,
         issue_epochs: IssueEpochs,
-    ) -> std::io::Result<Self> {
+    ) -> Result<Self, (std::io::Error, Box<Accounts>)> {
         account.github.restore_default(config.github_default());
         account.github.tuning = config.github_tuning();
         let connections = &mut account.connections;
@@ -418,7 +430,12 @@ impl Brain {
         coordinator.tuning = config.run_tuning();
         coordinator.configure_drawing(config.drawing_tuning());
         let recovery_clears = coordinator.restore_drawings(drawing_scenes);
-        let store = StoreThread::spawn(store, Arc::clone(&profile), inputs_tx.clone(), schedule)?;
+        // The accounts go back with the error, so their owner can still close them.
+        let store =
+            match StoreThread::spawn(store, Arc::clone(&profile), inputs_tx.clone(), schedule) {
+                Ok(store) => store,
+                Err(error) => return Err((error, Box::new(account))),
+            };
         account.bind_history(&store.history_link());
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         let mut brain = Self {

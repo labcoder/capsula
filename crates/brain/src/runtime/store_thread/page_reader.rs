@@ -361,11 +361,21 @@ fn hold(
 #[cfg(test)]
 pub(crate) type HelperGate = (mpsc::Sender<bool>, mpsc::Receiver<()>);
 
+#[cfg(test)]
+thread_local! {
+    /// Makes this thread's next store thread fail to start, at its first thread.
+    pub(crate) static REFUSE_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Checkpoints when raised, and again after a delay while frames are left, until stopped.
 pub(super) fn spawn_helper(
     exit: &Exit,
     #[cfg(test)] gate: Option<HelperGate>,
 ) -> io::Result<JoinHandle<()>> {
+    #[cfg(test)]
+    if REFUSE_SPAWN.replace(false) {
+        return Err(io::ErrorKind::Other.into());
+    }
     let (side, checkpoints) = (Arc::clone(&exit.side), Arc::clone(&exit.checkpoints));
     thread::Builder::new()
         .name("checkpoint".to_owned())
