@@ -17,7 +17,7 @@ mod bounds;
 mod github;
 mod inventory;
 mod marker;
-mod repair;
+pub(crate) mod repair;
 mod staging;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +44,35 @@ fn open(store: &FakeStore, service: &str, path: &Path) -> Vault<FakeStore> {
 /// The vault's authority file, as another process would see it.
 fn raw(path: &Path) -> Connection {
     Connection::open(path.with_file_name(authority::FILE)).expect("raw authority connection")
+}
+
+#[test]
+fn the_held_vault_opens_its_authority_beside_its_lock() {
+    let held = Scratch::new("vault-held-lock");
+    let lock =
+        Arc::new(SessionLock::try_acquire(&held.dir().join(SESSION_LOCK)).expect("held lock"));
+    assert!(
+        matches!(
+            Vault::open_held(
+                FakeStore::default(),
+                Arc::clone(&lock),
+                HistoryLink::unbound()
+            ),
+            Err(VaultError::Authority)
+        ),
+        "the held vault never creates an authority"
+    );
+    assert!(!held.dir().join("credentials.db").exists());
+    drop(Authority::open(&lock, authority::Missing::Create).expect("the brain's start creates it"));
+    let _vault = Vault::open_held(FakeStore::default(), lock, HistoryLink::unbound())
+        .expect("the held vault opens");
+    let lifetime: i64 = Connection::open_with_flags(
+        held.dir().join("credentials.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .and_then(|conn| conn.query_row("SELECT lifetime FROM control", [], |row| row.get(0)))
+    .expect("the authority beside the lock");
+    assert_eq!(lifetime, 2, "the start's open, then the vault's");
 }
 
 /// A copy of a closed vault's authority file in a new folder, as a crash test's restart point.

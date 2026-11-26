@@ -7,6 +7,7 @@ use crate::engines::fixture::Fixture;
 use kumochi_protocol::constants::SESSION_LOCK;
 
 use crate::platform::{SessionLockError, ShellProcess};
+use crate::runtime::Quit;
 use crate::test_support::{Scratch, held_accounts};
 
 const POINTS: [Checkpoint; 4] = [
@@ -84,7 +85,7 @@ async fn unwind(stop: Checkpoint, slot: u32, shell: Option<&ShellProcess>) {
         Mode::Detached,
         opened,
         |_, _, profile| {
-            let mut account = held_accounts(&scratch, profile);
+            let mut account = held_accounts(profile);
             vault = account.take_release_receipt();
             Ok((account, Arc::default()))
         },
@@ -235,7 +236,7 @@ async fn a_loss_while_the_accounts_start_refuses_the_brain() {
         Mode::Detached,
         opened,
         |_, _, profile| {
-            let mut account = held_accounts(&scratch, profile);
+            let mut account = held_accounts(profile);
             vault = account.take_release_receipt();
             shell.publish(1);
             Ok((account, Arc::default()))
@@ -258,6 +259,145 @@ async fn a_loss_while_the_accounts_start_refuses_the_brain() {
         .expect("the disconnected credential worker finishes")
         .expect("the credential worker released its session");
     assert_profile_free(&scratch).await;
+}
+
+const PATIENCE: Duration = Duration::from_secs(60);
+
+const CONFIRMED: Settlement = Settlement {
+    runtime: Shutdown {
+        quit: Some(Quit::Complete),
+        store: Stage::Confirmed,
+        settings: Stage::Confirmed,
+        claude: Stage::Confirmed,
+        account: Stage::Confirmed,
+    },
+    helpers: Stage::Confirmed,
+    item: Stage::Confirmed,
+};
+
+/// Settles a served brain and a real Job, with nothing published.
+async fn settled(
+    slot: u32,
+    ended: Result<Option<tokio::time::Instant>, ipc::IpcError>,
+) -> (Settlement, Result<(), BrainError>) {
+    let scratch = Scratch::new("startup-settle");
+    let mut lifecycle = lifecycle(slot);
+    lifecycle.brain = Some(crate::test_support::brain(&scratch, ""));
+    lifecycle.jobs = Some(Arc::new(Job::new().expect("helper Job")));
+    // Boxed, because the future holds the whole brain. Nothing was published, so a delete
+    // would be a bug.
+    let settlement =
+        Box::pin(lifecycle.settle(&ended, Job::shut_down, |_| panic!("nothing was published")))
+            .await;
+    (settlement, detached_exit(ended, settlement))
+}
+
+/// The helpers' shutdown and the capability's delete fail; neither touches Credential Manager.
+#[tokio::test]
+async fn a_failed_helper_shutdown_and_delete_are_failed_and_detached_still_exits_0() {
+    let scratch = Scratch::new("startup-settle-failed");
+    let mut lifecycle = lifecycle(9);
+    lifecycle.brain = Some(crate::test_support::brain(&scratch, ""));
+    lifecycle.jobs = Some(Arc::new(Job::new().expect("helper Job")));
+    lifecycle.published = true;
+    let ended = Ok(Some(tokio::time::Instant::now() + PATIENCE));
+    let mut deleted = None;
+    let settlement = Box::pin(lifecycle.settle(
+        &ended,
+        |_| Err(io::ErrorKind::TimedOut.into()),
+        |session| {
+            deleted = Some(session);
+            Err(keyring::Error::NoEntry.into())
+        },
+    ))
+    .await;
+    assert_eq!(
+        settlement,
+        Settlement {
+            helpers: Stage::Failed,
+            item: Stage::Failed,
+            ..CONFIRMED
+        }
+    );
+    assert_eq!(deleted, Some(0), "the published session's delete was tried");
+    assert!(!lifecycle.published, "a failed delete still unpublishes");
+    let exit = detached_exit(ended, settlement);
+    assert!(matches!(exit, Ok(())), "{exit:?}");
+}
+
+#[tokio::test]
+async fn settling_a_quit_reports_each_stage_and_exits_0() {
+    let (settlement, exit) = settled(7, Ok(Some(tokio::time::Instant::now() + PATIENCE))).await;
+    assert_eq!(settlement, CONFIRMED);
+    assert!(matches!(exit, Ok(())), "{exit:?}");
+}
+
+#[tokio::test]
+async fn settling_a_lost_shell_closes_with_no_quit_and_exits_0() {
+    let (settlement, exit) = settled(8, Ok(None)).await;
+    assert_eq!(
+        settlement,
+        Settlement {
+            runtime: Shutdown {
+                quit: None,
+                ..CONFIRMED.runtime
+            },
+            ..CONFIRMED
+        }
+    );
+    assert!(matches!(exit, Ok(())), "{exit:?}");
+}
+
+/// Detached reads none of the stages: an incomplete Quit, a failed helper shutdown or any other
+/// stage short of Confirmed still exits 0, and a serving error is still the exit.
+#[test]
+fn detached_exits_with_the_result_of_serving_whatever_settled() {
+    let ended = || Ok(Some(tokio::time::Instant::now()));
+    let mut settlements = vec![
+        Settlement {
+            runtime: Shutdown {
+                quit: Some(Quit::Incomplete),
+                ..CONFIRMED.runtime
+            },
+            ..CONFIRMED
+        },
+        Settlement {
+            runtime: Shutdown {
+                quit: None,
+                ..CONFIRMED.runtime
+            },
+            ..CONFIRMED
+        },
+    ];
+    let stages: [fn(&mut Settlement) -> &mut Stage; 6] = [
+        |settled| &mut settled.runtime.store,
+        |settled| &mut settled.runtime.settings,
+        |settled| &mut settled.runtime.claude,
+        |settled| &mut settled.runtime.account,
+        |settled| &mut settled.helpers,
+        |settled| &mut settled.item,
+    ];
+    for value in [Stage::Late, Stage::Failed, Stage::Outstanding] {
+        for stage in stages {
+            let mut settlement = CONFIRMED;
+            *stage(&mut settlement) = value;
+            settlements.push(settlement);
+        }
+    }
+    for settlement in settlements {
+        assert!(
+            matches!(detached_exit(ended(), settlement), Ok(())),
+            "{settlement:?}"
+        );
+        let refused = ipc::IpcError::Accept(io::ErrorKind::BrokenPipe.into());
+        assert!(
+            matches!(
+                detached_exit(Err(refused), settlement),
+                Err(BrainError::Ipc(ipc::IpcError::Accept(error))) if error.kind() == io::ErrorKind::BrokenPipe
+            ),
+            "{settlement:?}"
+        );
+    }
 }
 
 async fn assert_profile_free(scratch: &Scratch) {

@@ -3,6 +3,8 @@
 
 use std::fmt;
 use std::io::{self, Write};
+#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,9 +20,9 @@ use super::error::VaultError;
 use super::marker::{Disposition, MarkerUpdate, Phase, SignOutMarker};
 use super::records::{Account, MAX_RECORD_BYTES, Record, RevocationList};
 use crate::platform::SessionLock;
-use crate::platform::credential::{
-    CredentialStore, CredentialStoreError, SecretBytes, native_session_lock_path,
-};
+#[cfg(debug_assertions)]
+use crate::platform::credential::native_session_lock_path;
+use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
 
 mod github;
 #[cfg_attr(
@@ -30,7 +32,7 @@ mod github;
 mod repair;
 pub(crate) mod staging;
 
-pub(crate) use repair::{CutoffRequest, HistoryBinding, HistoryLink, Proof, Work};
+pub(crate) use repair::{CutoffRequest, HistoryBinding, HistoryLink, Proof, RepairStop, Work};
 
 /// Removed generations one sweep pass visits [guess]; the rest wait for the next pass.
 const SWEEP: usize = 16;
@@ -76,6 +78,9 @@ pub struct Vault<S: CredentialStore> {
     store: S,
     service: String,
     paste: Option<authority::WritePlan>,
+    /// Runs once inside the next repair bind, right after its claim.
+    #[cfg(test)]
+    after_claim: Option<Box<dyn FnOnce() + Send>>,
     _session: Arc<SessionLock>,
 }
 
@@ -159,31 +164,26 @@ impl<S: CredentialStore> Vault<S> {
             store,
             CREDENTIAL_SERVICE,
             Arc::new(session),
-            &path,
             HistoryLink::unbound(),
             authority::Missing::Refuse,
         )
     }
 
     /// Opens the production vault under the profile lock the brain already holds for its run,
-    /// rather than taking its own, bound to the profile's one history writer by `history`.
+    /// rather than taking its own, bound to the profile's one history writer by `history`. Its
+    /// authority is the one beside that lock; nothing looks the folder up again.
     ///
     /// # Errors
-    /// Returns an unsupported-store error or a path failure.
+    /// Returns an authority failure.
     pub(in crate::connections) fn open_held(
         store: S,
         session: Arc<SessionLock>,
         history: HistoryLink,
     ) -> Result<Self, VaultError> {
-        let path = native_session_lock_path().map_err(|error| match error {
-            CredentialStoreError::NoDataDir => VaultError::NoDataDir,
-            error => error.into(),
-        })?;
         Self::with_lock(
             store,
             CREDENTIAL_SERVICE,
             session,
-            &path,
             history,
             authority::Missing::Refuse,
         )
@@ -209,24 +209,21 @@ impl<S: CredentialStore> Vault<S> {
             store,
             service,
             Arc::new(session),
-            path,
             history,
             authority::Missing::Create,
         )
     }
 
-    /// Opens the authority beside `path` under `session`, the lock held at `path`, bound to
-    /// `history`, and sweeps once, legacy names included. `missing` says whether a missing
-    /// authority is created.
+    /// Opens the authority beside `session`'s lock, bound to `history`, and sweeps once, legacy
+    /// names included. `missing` says whether a missing authority is created.
     pub(crate) fn with_lock(
         store: S,
         service: &str,
         session: Arc<SessionLock>,
-        path: &Path,
         history: HistoryLink,
         missing: authority::Missing,
     ) -> Result<Self, VaultError> {
-        let authority = Authority::open(&path.with_file_name(authority::FILE), &session, missing)?;
+        let authority = Authority::open(&session, missing)?;
         let mut vault = Self {
             repair_lease: None,
             authority,
@@ -235,6 +232,8 @@ impl<S: CredentialStore> Vault<S> {
             store,
             service: service.to_owned(),
             paste: None,
+            #[cfg(test)]
+            after_claim: None,
             _session: session,
         };
         vault.sweep_legacy();
@@ -764,4 +763,4 @@ pub(super) fn valid_host(host: &str) -> bool {
 #[cfg(test)]
 pub(crate) mod fake;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

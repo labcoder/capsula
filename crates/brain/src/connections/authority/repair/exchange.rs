@@ -166,6 +166,7 @@ impl Authority {
         successor: Generation,
         tag: u64,
         (last_thread, last_run): (i64, i64),
+        claim: impl FnOnce() -> bool,
     ) -> Result<(), AuthorityError> {
         let tag = i64::try_from(tag).map_err(|_| AuthorityError::Bounds)?;
         let tx = self
@@ -185,7 +186,7 @@ impl Authority {
              AND context_successor=?2",
             params![tag, successor.0.as_slice(), last_thread, last_run],
         )?;
-        if changed != 1 {
+        if changed != 1 || !claim() {
             return Err(AuthorityError::Conflict);
         }
         if let Err(error) = tx.execute_batch("COMMIT") {

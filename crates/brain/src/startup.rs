@@ -13,7 +13,7 @@ use crate::config::tuning::{OAuthTuning, TokenTuning};
 use crate::connections::model::text_observation::Observation;
 use crate::ipc::{self, Identity, Pipes};
 use crate::platform::{self, Job, Mode, SessionLock, native_workers};
-use crate::runtime::{Brain, Quit, Selected, account::Accounts};
+use crate::runtime::{Brain, Quit, Selected, Shutdown, Stage, account::Accounts};
 use crate::store::{self, SceneState, Store};
 use crate::{
     BrainError, STARTUP_LOG_TARGET, StartMode, accounts, credential, engine, serve, start_screen,
@@ -61,8 +61,29 @@ pub(super) async fn run_admitted(
     tracing::info!(target: STARTUP_LOG_TARGET, incarnation = ?identity.incarnation, build = BUILD_ID, "listening");
     let brain = lifecycle.brain.as_mut().expect("started brain");
     let ended = serve(&mut lifecycle.pipes, &identity, brain).await;
-    let quit = lifecycle.settle(&ended).await;
-    match (ended, quit) {
+    let settlement = lifecycle
+        .settle(&ended, Job::shut_down, credential::delete)
+        .await;
+    detached_exit(ended, settlement)
+}
+
+/// What each lifecycle stage was seen to do after serving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Settlement {
+    runtime: Shutdown,
+    /// Ending the helpers' Job, which has no deadline of its own.
+    helpers: Stage,
+    /// Deleting the published capability, which has none either; Confirmed when nothing was
+    /// published.
+    item: Stage,
+}
+
+/// Detached keeps the result of serving, whatever settled after it.
+fn detached_exit(
+    ended: Result<Option<tokio::time::Instant>, ipc::IpcError>,
+    settlement: Settlement,
+) -> Result<(), BrainError> {
+    match (ended, settlement.runtime.quit) {
         (Ok(_), None | Some(Quit::Complete | Quit::Incomplete)) => Ok(()),
         (Err(error), _) => Err(error.into()),
     }
@@ -140,34 +161,45 @@ impl Lifecycle {
         Ok(identity)
     }
 
+    /// Quits or closes the Brain, ends the helpers with `shut_down` and deletes a published
+    /// capability with `delete`; tests pass failing ones.
     async fn settle(
         &mut self,
         ended: &Result<Option<tokio::time::Instant>, ipc::IpcError>,
-    ) -> Option<Quit> {
+        shut_down: impl FnOnce(&Job) -> std::io::Result<()> + Send + 'static,
+        delete: impl FnOnce(u32) -> Result<(), credential::CredentialError>,
+    ) -> Settlement {
         let brain = self.brain.take().expect("serving brain");
-        let quit = if let Ok(Some(deadline)) = ended {
-            Some(brain.quit(*deadline).await)
+        let runtime = if let Ok(Some(deadline)) = ended {
+            brain.quit(*deadline).await
         } else {
-            brain.close().await;
-            None
+            brain.close().await
         };
         // Ending the job waits on the processes, so it runs off the async thread.
         let jobs = self.jobs.take().expect("serving helpers");
-        match tokio::task::spawn_blocking(move || jobs.shut_down()).await {
-            Ok(Ok(())) => {}
+        let helpers = match tokio::task::spawn_blocking(move || shut_down(&jobs)).await {
+            Ok(Ok(())) => Stage::Confirmed,
             Ok(Err(error)) => {
                 tracing::warn!(target: STARTUP_LOG_TARGET, %error, "couldn't end the helpers; closing the job ends them");
+                Stage::Failed
             }
             Err(error) => {
                 tracing::warn!(target: STARTUP_LOG_TARGET, %error, "ending the helpers panicked");
+                Stage::Failed
             }
+        };
+        let item = match std::mem::take(&mut self.published).then(|| delete(self.session)) {
+            None | Some(Ok(())) => Stage::Confirmed,
+            Some(Err(error)) => {
+                tracing::warn!(target: STARTUP_LOG_TARGET, %error, "couldn't delete the instance capability");
+                Stage::Failed
+            }
+        };
+        Settlement {
+            runtime,
+            helpers,
+            item,
         }
-        if std::mem::take(&mut self.published)
-            && let Err(error) = credential::delete(self.session)
-        {
-            tracing::warn!(target: STARTUP_LOG_TARGET, %error, "couldn't delete the instance capability");
-        }
-        quit
     }
 }
 

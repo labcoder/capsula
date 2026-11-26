@@ -14,7 +14,7 @@ use crate::connections::vault::repair::exchange::RepairSettlement;
 use crate::connections::vault::repair::promotion::{
     CutoffReceipt, CutoffRefused, PendingReplacement, RepairProof, VerifiedReplacement,
 };
-use crate::connections::vault::{CutoffRequest, HistoryLink};
+use crate::connections::vault::{CutoffRequest, HistoryLink, RepairStop};
 use crate::coordinator::StoreOp;
 use crate::runtime::{Attempt, Schedule, StoreThread};
 use crate::store::{Boundary, Cancel, Copied, RunEnd, Store, StoreError, Swap};
@@ -1079,4 +1079,230 @@ async fn a_sign_in_is_recovered_only_as_the_exact_established_replacement() {
     assert_eq!(vault.proof(tag), Proof::Unproved, "a sign-out is pending");
     drop(attempt);
     drop(vault);
+}
+
+/// A real repair bind on its own thread, in the credential thread's place, held inside its
+/// first credential write until released. Its live owner's stop needs neither thread.
+pub(crate) struct BlockedBind {
+    pub(crate) stop: RepairStop,
+    release: mpsc::Sender<()>,
+    bind: std::thread::JoinHandle<Result<(), VaultError>>,
+    _scratch: Scratch,
+}
+
+pub(crate) async fn blocked_bind(name: &str) -> BlockedBind {
+    let (scratch, path, service, store) = setup(name);
+    let mut vault = open(&store, &service, &path);
+    let (old, mut attempt) = admitted(&mut vault, &store);
+    let script = repair_exchange_fixture(
+        "issued-client",
+        "expected-nonce",
+        NOW + 90,
+        FixtureSignature::Valid,
+        PLAN,
+    );
+    let proof = settled_proof(&mut vault, &mut attempt, &script).await;
+    let verified = proof.verify(&script, &FixedClock(NOW)).await.unwrap();
+    let escrow = escrow_name(&path, &service);
+    let stop = attempt.stop_handle();
+    let (started, release) = store.hold_next_write();
+    let bind = std::thread::spawn(move || {
+        let bound = vault
+            .bind_repair_replacement(&attempt, verified, &FixedClock(NOW))
+            .map(drop);
+        if bound.is_err() {
+            assert_escrow_unchanged(&raw(&path), old, &service, &escrow);
+            assert!(matches!(vault.load_account(), Err(VaultError::Authority)));
+        }
+        bound
+    });
+    started
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the bind reached its first write");
+    BlockedBind {
+        stop,
+        release,
+        bind,
+        _scratch: scratch,
+    }
+}
+
+impl BlockedBind {
+    /// Lets the bind go on, and what it came to. A refused one left the predecessor fenced,
+    /// its escrow as it was and no active successor.
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "a bind stuck after its release fails the test instead of hanging it"
+    )]
+    pub(crate) fn release(self) -> Result<(), VaultError> {
+        self.release.send(()).ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !self.bind.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the released bind ends"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.bind.join().expect("the bind thread")
+    }
+}
+
+/// While the bind blocks in its credential write, the owner's stop wins before the claim, so
+/// nothing binds; without it the same bind binds.
+#[tokio::test]
+async fn a_stop_while_the_bind_blocks_wins_before_its_claim() {
+    for stopped in [true, false] {
+        let blocked = blocked_bind("repair-stop-blocked").await;
+        if stopped {
+            blocked.stop.stop();
+        }
+        let result = blocked.release();
+        if stopped {
+            assert!(matches!(result, Err(VaultError::Authority)));
+        } else {
+            assert!(result.is_ok());
+        }
+    }
+}
+
+/// A stop that lands after the bind's claim, before its SQL outcome, leaves the bind to settle:
+/// the locked binding commits, mints no cutoff, and the durable cancel finds nothing it may
+/// undo, so it stays locked until a sign-out clears it. A claim whose commit fails is spent.
+#[tokio::test]
+async fn a_stop_after_the_bind_claims_settles_it_but_never_establishes() {
+    for commit_fails in [false, true] {
+        let (_scratch, path, service, store) = setup("repair-stop-claimed");
+        let history = path.with_file_name(kumochi_protocol::constants::STORE_FILE);
+        let owner = HistoryOwner::open(&history);
+        let mut vault = bound(&store, &service, &path, &owner);
+        let (attempt, verified) = bound_replacement(&mut vault, &store).await;
+        owner.run(plant_history);
+        let stop = attempt.stop_handle();
+        if commit_fails {
+            raw(&path)
+                .execute_batch(
+                    "CREATE TABLE refuse_commit (
+                        repair_id INTEGER REFERENCES chatgpt_repair(id) DEFERRABLE INITIALLY DEFERRED
+                    );
+                    CREATE TRIGGER refuse_bind AFTER UPDATE OF context_tag ON chatgpt_repair
+                    WHEN NEW.context_tag IS NOT NULL BEGIN INSERT INTO refuse_commit VALUES (2); END;",
+                )
+                .unwrap();
+        } else {
+            let stopping = stop.clone();
+            vault.after_claim = Some(Box::new(move || stopping.stop()));
+        }
+        let result = vault.bind_repair_replacement(&attempt, verified, &FixedClock(NOW));
+        if commit_fails {
+            assert!(matches!(result, Err(VaultError::Authority)));
+            assert!(stop.retired(), "a failed settlement spends the claim");
+            continue;
+        }
+        let pending = result.unwrap();
+        let (successor, tag) = pending.binding();
+        let refused = vault.establish_history_cutoff(pending).unwrap_err();
+        assert!(refused.pending.is_some(), "nothing was queued");
+        assert!(matches!(owner.check(tag), Err(StoreError::RecoveryContext)));
+        assert!(matches!(
+            vault.cancel_repair_admission(&attempt),
+            Err(VaultError::Authority)
+        ));
+        let (bound_tag, bound_successor): (i64, String) = raw(&path)
+            .query_row(
+                "SELECT context_tag, lower(hex(context_successor)) FROM chatgpt_repair",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(bound_tag, i64::try_from(tag).unwrap());
+        assert_eq!(bound_successor, successor.hex());
+        assert_eq!(context_state(&path), (false, None, None));
+        assert!(matches!(vault.load_account(), Err(VaultError::Authority)));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Establishing {
+    Live,
+    StoppedBefore,
+    StoppedDuring,
+    CommitFails,
+}
+
+/// A claimed binding still establishes after its attempt is dropped. A stop before the
+/// establishment, or during it before its claim, leaves even a committed cutoff unestablished,
+/// its row as it was. An establishment whose commit fails spends its claim.
+#[tokio::test]
+async fn a_stop_before_the_establish_claim_leaves_a_written_cutoff_unestablished() {
+    use std::sync::Mutex;
+
+    for case in [
+        Establishing::Live,
+        Establishing::StoppedBefore,
+        Establishing::StoppedDuring,
+        Establishing::CommitFails,
+    ] {
+        let (_scratch, path, service, store) = setup("repair-stop-establish");
+        let history = path.with_file_name(kumochi_protocol::constants::STORE_FILE);
+        let owner = HistoryOwner::open(&history);
+        let armed: Arc<Mutex<Option<RepairStop>>> = Arc::default();
+        let link = {
+            let serve = owner.serve.clone().unwrap();
+            let armed = Arc::clone(&armed);
+            HistoryLink::new(move |request| {
+                if let Some(stop) = armed.lock().unwrap().take() {
+                    stop.stop();
+                }
+                serve.send(Serve::Cutoff(request)).is_ok()
+            })
+        };
+        let mut vault =
+            Vault::bound_to_history(store.clone(), &service, &path, link).expect("test vault lock");
+        let (attempt, verified) = bound_replacement(&mut vault, &store).await;
+        owner.run(plant_history);
+        let stop = attempt.stop_handle();
+        let pending = vault
+            .bind_repair_replacement(&attempt, verified, &FixedClock(NOW))
+            .unwrap();
+        let (_, tag) = pending.binding();
+        drop(attempt);
+        let receipt = vault.establish_history_cutoff(pending).unwrap();
+        let cut = owner.check(tag).unwrap();
+        match case {
+            Establishing::Live => {}
+            Establishing::StoppedBefore => stop.stop(),
+            Establishing::StoppedDuring => *armed.lock().unwrap() = Some(stop.clone()),
+            Establishing::CommitFails => raw(&path)
+                .execute_batch(
+                    "CREATE TABLE refuse_commit (
+                        repair_id INTEGER REFERENCES chatgpt_repair(id) DEFERRABLE INITIALLY DEFERRED
+                    );
+                    CREATE TRIGGER refuse_establish AFTER UPDATE OF context_established ON chatgpt_repair
+                    WHEN NEW.context_established=1 BEGIN INSERT INTO refuse_commit VALUES (2); END;",
+                )
+                .unwrap(),
+        }
+        let established = vault.establish_repair_context(receipt);
+        match case {
+            Establishing::Live => established.unwrap(),
+            Establishing::StoppedBefore => {
+                assert!(matches!(established, Err(VaultError::Fenced)));
+            }
+            Establishing::StoppedDuring | Establishing::CommitFails => {
+                assert!(
+                    matches!(established, Err(VaultError::Authority)),
+                    "{case:?}"
+                );
+            }
+        }
+        assert_eq!(
+            context_state(&path).0,
+            case == Establishing::Live,
+            "{case:?}"
+        );
+        assert_eq!(stop.retired(), case != Establishing::Live, "{case:?}");
+        assert_eq!(owner.check(tag).unwrap(), cut);
+        drop(vault);
+    }
 }

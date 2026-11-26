@@ -396,8 +396,11 @@ async fn pictured_key_replay(ending: PictureEnd) {
     };
     if ending == PictureEnd::Quit {
         assert_eq!(
-            brain.quit(tokio::time::Instant::now() + PATIENCE).await,
-            Quit::Complete
+            brain
+                .quit(tokio::time::Instant::now() + PATIENCE)
+                .await
+                .quit,
+            Some(Quit::Complete)
         );
         timeout(PICTURE_WAIT, closed)
             .await

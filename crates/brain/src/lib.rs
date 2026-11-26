@@ -319,8 +319,7 @@ fn open_profile(
     // Builds before the authority left history without one, so a missing authority starts fresh
     // and signed out; it shares no ids with the store.
     if !has_authority {
-        Authority::open(&authority, &profile, Missing::Create)
-            .map_err(|_| BrainError::Authority)?;
+        Authority::open(&profile, Missing::Create).map_err(|_| BrainError::Authority)?;
     }
     Ok((profile, store))
 }

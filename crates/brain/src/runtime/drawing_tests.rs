@@ -656,7 +656,7 @@ async fn quit_drains_a_held_typed_cut_then_confirms_its_clear_before_success() {
         release.send(()).expect("release cut");
     };
     let (quit, ()) = tokio::join!(quit, released);
-    assert_eq!(quit, super::super::Quit::Complete);
+    assert_eq!(quit.quit, Some(super::super::Quit::Complete));
     let store = Store::open(&scratch.db()).expect("restart");
     assert!(
         store
@@ -793,8 +793,9 @@ async fn an_unavailable_drawing_read_starts_the_brain_but_cannot_confirm_quit() 
     assert_eq!(
         brain
             .quit(tokio::time::Instant::now() + super::PATIENCE)
-            .await,
-        super::super::Quit::Incomplete
+            .await
+            .quit,
+        Some(super::super::Quit::Incomplete)
     );
     let store = Store::open(&scratch.db()).expect("restart");
     assert_eq!(
@@ -831,8 +832,9 @@ async fn quit_supersedes_failed_typed_cut_debt_and_durably_clears_the_scene() {
     assert_eq!(
         brain
             .quit(tokio::time::Instant::now() + super::PATIENCE)
-            .await,
-        super::super::Quit::Complete
+            .await
+            .quit,
+        Some(super::super::Quit::Complete)
     );
     let store = Store::open(&scratch.db()).expect("restart");
     assert!(
@@ -856,8 +858,9 @@ async fn quit_with_an_unconfirmed_typed_clear_is_incomplete() {
     assert_eq!(
         brain
             .quit(tokio::time::Instant::now() + super::PATIENCE)
-            .await,
-        super::super::Quit::Incomplete
+            .await
+            .quit,
+        Some(super::super::Quit::Incomplete)
     );
     let store = Store::open(&scratch.db()).expect("restart");
     assert_eq!(

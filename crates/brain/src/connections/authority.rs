@@ -21,7 +21,6 @@ pub(super) mod repair;
 mod tests;
 
 use std::fmt;
-use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
 
@@ -30,7 +29,9 @@ use crate::platform::SessionLock;
 use crate::platform::credential::CredentialStoreError;
 use io::Verified;
 
-/// The authority's file in the data folder; not the history store, so no purge touches it.
+/// The authority's file in the data folder; not the history store, so no purge touches it. Only
+/// tests name it: production reaches it through the held lock's `authority_path`.
+#[cfg(test)]
 pub(crate) const FILE: &str = kumochi_protocol::constants::AUTHORITY_FILE;
 /// The newest schema this build knows; a newer file is refused, never downgraded.
 const VERSION: i64 = 3;
@@ -336,23 +337,20 @@ impl fmt::Debug for Authority {
 
 impl Authority {
     /// Opens the file, creating it only when `missing` allows, then retires every Pending
-    /// generation: a candidate from an earlier process is never activated. The lock proves the
-    /// caller owns the account session. A present file still at version 0 gets its schema.
+    /// generation: a candidate from an earlier process is never activated. The file is the one
+    /// beside `session`'s lock, which proves the caller owns the account session. A present file
+    /// still at version 0 gets its schema.
     ///
     /// # Errors
     /// Fails on a SQLite failure, a missing file it may not create, a file from a newer build, or
     /// missing or invalid rows.
-    pub(crate) fn open(
-        path: &Path,
-        _session: &SessionLock,
-        missing: Missing,
-    ) -> Result<Self, AuthorityError> {
+    pub(crate) fn open(session: &SessionLock, missing: Missing) -> Result<Self, AuthorityError> {
         let create = match missing {
             Missing::Create => OpenFlags::SQLITE_OPEN_CREATE,
             Missing::Refuse => OpenFlags::empty(),
         };
         let mut conn = Connection::open_with_flags(
-            path,
+            session.authority_path(),
             OpenFlags::SQLITE_OPEN_READ_WRITE | create | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;

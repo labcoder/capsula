@@ -167,6 +167,43 @@ pub(crate) enum Quit {
     Incomplete,
 }
 
+/// What one shutdown stage was seen to do, best first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Stage {
+    /// An explicit success, observed before the stage's deadline.
+    Confirmed,
+    /// An explicit success, observed at or after it.
+    Late,
+    /// An error, a refusal, a panic or a closed sender.
+    Failed,
+    /// The deadline passed and the stage wasn't seen to end.
+    Outstanding,
+}
+
+impl Stage {
+    /// A success observed at `at`: `timeout_at` returns a ready result even past its deadline,
+    /// so only the clock says whether it was in time.
+    fn seen(at: Instant, deadline: Instant) -> Self {
+        if at < deadline {
+            Self::Confirmed
+        } else {
+            Self::Late
+        }
+    }
+}
+
+/// What each stage of the Brain's shutdown was seen to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Shutdown {
+    /// Some from `quit` only.
+    pub(crate) quit: Option<Quit>,
+    pub(crate) store: Stage,
+    /// Every settings write owed from the start of shutdown.
+    pub(crate) settings: Stage,
+    pub(crate) claude: Stage,
+    pub(crate) account: Stage,
+}
+
 /// The engine runs use, picked once at start (docs/development/engines.md, "Selection").
 #[derive(Debug)]
 pub(crate) enum Selected {
@@ -240,6 +277,10 @@ pub(crate) struct Brain {
     chunk_target: usize,
     /// The settings, owned here: they never touch runs or the store.
     config: Config,
+    /// The profile's writer lock; each settings write keeps a clone until it stops.
+    profile: Arc<crate::platform::SessionLock>,
+    /// What the settings writes owed since shutdown began did; none before it.
+    settings_owed: Option<settings::Owed>,
     /// Settings changes waiting for the one write in flight, answered in order.
     settings_ops: VecDeque<settings::Queued>,
     /// The settings write in flight, off the core loop: a durable replace can take any time.
@@ -317,7 +358,7 @@ impl Brain {
     #[expect(clippy::too_many_lines, reason = "one field per part of the brain")]
     pub(crate) fn new(
         store: Store,
-        profile: std::sync::Arc<crate::platform::SessionLock>,
+        profile: Arc<crate::platform::SessionLock>,
         main_thread: ThreadId,
         high_water: (ThreadId, RunId),
         scenes: Vec<SceneState>,
@@ -374,7 +415,7 @@ impl Brain {
         coordinator.tuning = config.run_tuning();
         coordinator.configure_drawing(config.drawing_tuning());
         let recovery_clears = coordinator.restore_drawings(drawing_scenes);
-        let store = StoreThread::spawn(store, profile, inputs_tx.clone(), schedule)?;
+        let store = StoreThread::spawn(store, Arc::clone(&profile), inputs_tx.clone(), schedule)?;
         account.bind_history(&store.history_link());
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         let mut brain = Self {
@@ -410,6 +451,8 @@ impl Brain {
             drawing_reaccount: None,
             chunk_target: crate::drawing::CHUNK_TARGET,
             config,
+            profile,
+            settings_owed: None,
             settings_ops: VecDeque::new(),
             config_write: None,
             account,
@@ -541,8 +584,10 @@ impl Brain {
     /// and what's still clearing in one write, waits for its commit, then closes the store. No
     /// stage starts a budget of its own. Only a committed clear with every delete done is a
     /// complete quit; otherwise the scenes, or a thread whose delete didn't commit, come back at
-    /// the next start, as after a crash.
-    pub(crate) async fn quit(mut self, deadline: Instant) -> Quit {
+    /// the next start, as after a crash. Reports what each later stage was seen to do.
+    pub(crate) async fn quit(mut self, deadline: Instant) -> Shutdown {
+        self.account.stop_repair();
+        self.settings_owed = Some(settings::Owed::default());
         self.claude.stop();
         self.offline(Input::ShellLost);
         self.voice_quit();
@@ -590,22 +635,14 @@ impl Brain {
         .unwrap_or(false);
         // The vault's link holds the store thread's queue open, so it goes first.
         self.account.history.release();
-        if let Some(store) = self.store.take() {
-            match tokio::time::timeout_at(deadline, store.close()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => tracing::error!("the store thread panicked"),
-                Err(_) => tracing::warn!("the store thread didn't finish in time"),
-            }
-        }
-        self.drain_settings_by(deadline).await;
-        // Before the vault: no other brain may take Claude Code over while a call still runs.
-        if !self.claude.close(deadline).await {
-            tracing::warn!("a claude call may still be running; Claude Code's lock is kept");
-        }
-        self.account
+        let store = self.close_store(deadline).await;
+        let settings = self.drain_settings_by(deadline).await;
+        let claude = self.close_claude(deadline).await;
+        let account = self
+            .account
             .close(deadline, Instant::now() + REFRESH_WAIT)
             .await;
-        if cleared && !undeleted && filing_in_time {
+        let quit = if cleared && !undeleted && filing_in_time {
             Quit::Complete
         } else {
             tracing::warn!(
@@ -613,14 +650,24 @@ impl Brain {
                 "the quit was incomplete; what it didn't clear or delete comes back at the next start"
             );
             Quit::Incomplete
+        };
+        Shutdown {
+            quit: Some(quit),
+            store,
+            settings,
+            claude,
+            account,
         }
     }
 
     /// Lets runs that ended reach the store, then lets its queued writes finish. Each wait is
     /// bounded except for an unabortable issue phase, whose owner must settle before the writer
     /// closes. At the next start, runs still active in the store become `failed(crash)`;
-    /// committed outcomes stay, and uncommitted work may be lost.
-    pub(crate) async fn close(mut self) {
+    /// committed outcomes stay, and uncommitted work may be lost. Reports what each later stage
+    /// was seen to do.
+    pub(crate) async fn close(mut self) -> Shutdown {
+        self.account.stop_repair();
+        self.settings_owed = Some(settings::Owed::default());
         let deadline = Instant::now() + close_wait();
         self.voice_quit();
         self.pump_settings_offline();
@@ -640,21 +687,51 @@ impl Brain {
         }
         // The vault's link holds the store thread's queue open, so it goes first.
         self.account.history.release();
-        if let Some(store) = self.store.take() {
-            match tokio::time::timeout(close_wait(), store.close()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => tracing::error!("the store thread panicked"),
-                Err(_) => tracing::warn!("the store thread didn't finish in time"),
-            }
-        }
-        self.drain_settings_by(deadline).await;
-        // Before the vault: no other brain may take Claude Code over while a call still runs.
-        if !self.claude.close(deadline).await {
-            tracing::warn!("a claude call may still be running; Claude Code's lock is kept");
-        }
-        self.account
+        // Its own wait from here, unlike Quit's one deadline.
+        let store = self.close_store(Instant::now() + close_wait()).await;
+        let settings = self.drain_settings_by(deadline).await;
+        let claude = self.close_claude(deadline).await;
+        let account = self
+            .account
             .close(deadline, Instant::now() + REFRESH_WAIT)
             .await;
+        Shutdown {
+            quit: None,
+            store,
+            settings,
+            claude,
+            account,
+        }
+    }
+
+    /// Closes the store thread by `deadline`. Its receipt proves SQLite closed, not that its
+    /// helpers joined or that it let the profile's lock go.
+    async fn close_store(&mut self, deadline: Instant) -> Stage {
+        // No store thread left means no receipt to confirm.
+        let Some(store) = self.store.take() else {
+            return Stage::Failed;
+        };
+        match tokio::time::timeout_at(deadline, store.close()).await {
+            Ok(Ok(())) => Stage::seen(Instant::now(), deadline),
+            Ok(Err(_)) => {
+                tracing::error!("the store thread panicked");
+                Stage::Failed
+            }
+            Err(_) => {
+                tracing::warn!("the store thread didn't finish in time");
+                Stage::Outstanding
+            }
+        }
+    }
+
+    /// Before the vault: no other brain may take Claude Code over while a call still runs.
+    async fn close_claude(&mut self, deadline: Instant) -> Stage {
+        if self.claude.close(deadline).await {
+            Stage::seen(Instant::now(), deadline)
+        } else {
+            tracing::warn!("a claude call may still be running; Claude Code's lock is kept");
+            Stage::Outstanding
+        }
     }
 
     /// Keeps runs that ended moving through the store, and settings changes being written,
@@ -958,6 +1035,8 @@ impl Brain {
                 ended = core => ended,
             }
         };
+        // The pair is gone or quitting: its repair attempt stops before any grace or drain.
+        self.account.stop_repair();
         if WATCH_FATAL && let Some(cause) = fence.and_then(Fence::check) {
             ended = Ended::Fatal(cause);
         }

@@ -116,11 +116,26 @@ finish, and the next fence refuses with the same unwind as an error there.
 Only then does it publish the instance capability and serve the shell. The lifecycle owner
 keeps the pipes alive through teardown. Before capability publication, a failure drops the
 resources that started without entering graceful shutdown. The store and credential workers
-each keep a reference to the writer lock until they finish, so neither a failed start nor a
-close that stopped waiting releases it while a writer still runs. After serving, it quits or closes
-the Brain, shuts down the Job off the async thread, and deletes the capability in that order.
-Detached keeps the result of serving as its exit status; an incomplete Quit or capability
-deletion warning does not change that status.
+each keep a reference to the writer lock until they finish, and so does each settings write,
+including one the removal pass starts, until its blocking write returns or panics. So neither a
+failed start nor a close that stopped waiting releases it while a writer still runs. After
+serving, it quits or closes the Brain, shuts down the Job off the async thread, and deletes the
+capability in that order.
+
+Each of those steps reports what it was seen to do: Confirmed when an explicit success was
+observed before its deadline, Late when it was observed at or after it, Failed on an error, a
+refusal, a panic or a closed sender, and Outstanding when the deadline passed first. Success is
+timed by when it's observed, because a wait that was already ready returns it even past the
+deadline. The Brain reports the store's close receipt (SQLite closed, not its helpers joined or
+the lock released); the settings writes owed from the start of shutdown, graded by their last
+save, where a later save cannot clear a refusal; Claude Code's lane; and the accounts,
+whose credential job is still waited for past the deadline and then reads Late, and which are
+Failed when an issued set was held after a refused save or a GitHub save or rotation was left
+unfinished or ended in an error while closing.
+The Job's shutdown and the capability's deletion have no deadline, so they're only Confirmed or
+Failed. Nothing reads these yet: Detached keeps the result of serving as its exit status, so an
+incomplete Quit or any stage short of Confirmed doesn't change it. A parent-bound exit will
+require every stage Confirmed after a complete Quit.
 
 ## Crates
 
