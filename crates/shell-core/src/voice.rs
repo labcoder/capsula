@@ -490,7 +490,9 @@ impl State {
             Source::Waiting => ended.unused = Some((hold.token, hold.session)),
             Source::Recording => {
                 let terminal = *hold.terminal.get_or_insert(text);
-                ended.notice = if terminal == Text::HoldUnavailable || text == Text::HoldUnavailable
+                let published = self.status;
+                ended.notice = if [Some(terminal), Some(text), published]
+                    .contains(&Some(Text::HoldUnavailable))
                 {
                     Text::HoldUnavailable
                 } else {

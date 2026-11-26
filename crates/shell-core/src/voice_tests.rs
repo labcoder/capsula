@@ -71,6 +71,34 @@ fn a_recording_hold_keeps_its_first_end_until_its_receipt() {
 }
 
 #[test]
+fn repeated_cancel_keeps_the_restart_warning_for_an_unconfirmed_source() {
+    let gesture = GestureId(1);
+    let (mut state, _gate) = holding(Source::Recording);
+    let first = state.end(Text::TurnBusy);
+    state.notice(first.notice);
+    let ReceiptStep::End(unavailable) = state.receipt(gesture, Err(MicError::Unconfirmed), 0)
+    else {
+        panic!("the source could not confirm closure");
+    };
+    let warning = state.end(unavailable);
+    state.notice(warning.notice);
+    assert_eq!(state.status, Some(Text::HoldUnavailable));
+
+    let (cancel, _) = state.cancel(|| None);
+    assert_eq!(cancel, Cancel::End);
+    let repeated = state.end(Text::HoldCancelled);
+    state.notice(repeated.notice);
+    assert_eq!(state.status, Some(Text::HoldUnavailable));
+    assert_eq!(
+        state.pending.as_ref().and_then(Hold::terminal),
+        Some(Text::TurnBusy)
+    );
+
+    assert!(state.quit(|| {}).is_none());
+    assert!(state.pending.is_none() && state.status.is_none());
+}
+
+#[test]
 fn an_unstarted_hold_is_handed_back_to_discard_once() {
     let (mut state, _gate) = holding(Source::Waiting);
     let ended = state.end(Text::HoldFailed);
