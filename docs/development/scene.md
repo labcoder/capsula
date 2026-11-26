@@ -1209,7 +1209,7 @@ the scene instead of silently skipping it. The overlay is transparent and click-
 only the primary display from logical origin, and holds Esc only while shown. Its real drawing
 window binds to the shared input adapter before showing: all pixels pass mouse input through,
 and native placement is followed by restacking below panels, the dock and regional input,
-above dormant selection. Recreated hosts follow the same path; drawings never take focus.
+above dormant selection. Every host a later show opens follows the same path; drawings never take focus.
 
 Fills paint from a cache. When the presenter commits a view, `presence::paint_cache` stages its
 `PaintScene`: each `Prim::Fill` of the view's objects is tessellated once in prim space by the
@@ -1239,12 +1239,13 @@ animation frames. Live steps activate and acknowledge their first paint as "Seri
 activation and first-paint acknowledgement" describes.
 
 The overlay lifecycle keeps native visibility separate from paint eligibility. A successful
-hide closes the old GPUI window, and a fresh hidden replacement opens once the update that hid
-it is over; a refused hide keeps
+hide repaints the frames empty and closes the GPUI window. No hidden host waits: the next show
+opens a fresh one that never presented the old drawing. A refused hide keeps
 an empty, click-through host without Esc, paint acknowledgement or retry demand. The next
 show retires that uncertain host before opening another. A refused show is also uncertain,
-never trusted as a hidden window. Close/open failures fail the visible update closed; a
-replacement that can't open is logged, and the next show opens its own.
+never trusted as a hidden window, and the next show retires it the same way. Close/open
+failures fail the visible update closed; an open that fails leaves no host, and the next show
+opens its own.
 If configuration or capture affinity fails after creation, the new hidden host is removed
 before the error returns.
 Each window has its own revocable painting gate: an old queued canvas cannot read another
