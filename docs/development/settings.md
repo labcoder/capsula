@@ -21,11 +21,13 @@ On macOS, `platform::{read_settings, write_settings}` go through `kumochi-storag
 the settings folder's parent as the Support anchor and holds the whole chain from `/`. The
 product folder must be this user's, mode 0700, with no ACL, and `config.toml` this user's,
 mode 0600, with one link and no ACL. Neither is ever re-secured. Both are checked again, ACL
-included, after a read and before a save is reported, and the whole chain by name. Only `ENOENT` for the product folder or the file under an admitted anchor
+included, after a read, before a save's rename and before a save is reported, and the whole
+chain by name. Only `ENOENT` for the product folder or the file under an admitted anchor
 reads as no settings; a missing anchor refuses. A save creates the product folder at 0700 when
 it's missing, unlinks any leftover `config.toml.tmp` unread, writes the new text to that
-reserved name with `O_EXCL` at 0600, flushes it, and syncs the anchor. It then checks both
-names, renames, and flushes the folder and the file. These are samples under the brain's
+reserved name with `O_EXCL` at 0600, flushes it, and syncs the anchor. It then checks the old
+file, the staged copy and the folder again, and both names, renames, and flushes the folder
+and the file. These are samples under the brain's
 session lock, not a defence against another process of the same user.
 
 A save ends three ways. It's saved; it's unchanged, because nothing was published or a rename
@@ -512,3 +514,62 @@ typed struct built from a table of limits: key, default and range, with the unit
 (`_s`, `_count`). `Config::load` reads them once, so a change needs a restart, and nothing
 writes them; the settings writer keeps them like any key it doesn't own. A file that doesn't
 parse gives every group its defaults, as for every other key.
+
+- **Wrong type** (not a non-negative integer): that key's default.
+- **Out of range:** the nearer edge, in every build. Wider Dev-only ranges are for harmless
+  values only and arrive with the first such key; budgets that bound requests, spending or
+  privacy never widen.
+- **Inconsistent group:** every key in the group takes its default, so a group is never half
+  applied.
+- **Logs** name only keys this build owns. Unknown keys are counted, never named, because a key
+  can hold anything.
+
+`[tuning.github]` holds the filing and listing budgets. A filing (`issues::transport::Control`)
+gets one deadline, `filing_s`, at creation, shared by every request and retry in it, and
+counts up to `filing_requests_count` requests, refusing the next without dispatching it. A
+reservation is never refunded and a create that may have been sent is never resent. Local
+settlement (`runtime/issues.rs`) may finish after the deadline, so a terminal write never loses
+whether a create went out. A filing makes its listing's requests plus four (the user, two match
+pages and the create), so the group
+needs `filing_requests_count >= listing_requests_count + 4` and `listing_s <= filing_s`.
+`repositories::fetch` takes the listing pair; review rearms use `filing_s` too.
+
+`[tuning.model]` rides on `ModelClient` (`with_tuning`), so the ChatGPT engine and each Anthropic
+Messages post use it; image and marks checks and API-key checks keep the built-in waits.
+`send_s` can only shorten the existing upload timeout so it stays below the coordinator's
+shortest send-grant deadline. A group with `content_idle_s` below `idle_s` takes its defaults.
+`[tuning.runs]` supplies the coordinator and Claude Code lane: the round and call counts only
+lower the compile-time ceilings `MAX_ROUNDS` and
+`MAX_CALLS` (the engine's attempt budget is sized from `MAX_ROUNDS`), and `wall_clock_s` and
+`finding_wait_s` replace `WALL_CLOCK` and `FINDING_WAIT`, which stay the defaults. The direct
+send lease always outlasts the upload timeout. A held send still uses the remaining Claude Code
+launch time plus its fixed teardown allowance, under the fixed outer cap.
+
+`[tuning.oauth]` is copied into the ChatGPT account lane at startup. The local sign-in window
+and refresh request cannot outlast their built-in limits. Refresh and revocation both bound
+HTTP setup and network work under one absolute deadline. The nondecreasing backoffs must sum to less
+than that budget, or all OAuth keys use their defaults. Token validation, shutdown settlement
+and the number of retry attempts are unchanged.
+
+`[tuning.tokens]` goes to the account lanes at startup. The lead can only shorten, and GitHub
+still computes the smaller of its lead and half the token's remaining lifetime.
+`[tuning.drawing]` supplies the draw controller and the readiness and scene-clear timers.
+The first retry cannot be longer than the cap, and draw counts only lower the existing ceilings.
+`[tuning.context]` supplies the page reader and compaction threshold. `reread_bytes` caps new
+history reads and older reference excerpts; recall replay still checks saved selections against
+the fixed record and request limits. `summary_input_bytes` limits the background compaction
+input estimate (JSON-escaped strings plus fixed overhead), not inline rewriting or exact
+provider request bytes. See [tuning](../user/tuning.md) for the examples the docs test checks.
+
+`[tuning.hold]` supplies the same startup and drain values to the brain and shell-core.
+Missing, mistyped and negative entries use the key's default; nonnegative out-of-range
+integers clamp. The shell doesn't parse this file. Its required [startup snapshot](ipc.md#the-handshake)
+must match the authenticated connection and its values must already be in range.
+
+## Claude Code
+
+`[claude_code] enabled = false` in `config.toml` turns Claude Code's discovery off: the brain
+finds nothing and starts no `claude`, and the view is `TurnedOff`. A missing section or key
+leaves it on; any other value there, or a file that can't be read, turns it off, since it may
+have said so. It's read once at startup, so a change needs a restart. It signs nothing out and
+deletes nothing.

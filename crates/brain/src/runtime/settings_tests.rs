@@ -611,6 +611,67 @@ async fn an_unconfirmed_save_shows_its_change_with_the_screen_off_and_refuses_th
 }
 
 #[tokio::test]
+async fn a_gone_shells_unconfirmed_save_reaches_the_next_one_unanswered() {
+    let scratch = Scratch::new("settings-unconfirmed-reconnect");
+    let config = scratch.db().with_file_name(CONFIG_FILE);
+    std::fs::create_dir_all(config.parent().expect("a folder")).expect("folder");
+    std::fs::write(
+        &config,
+        "[voice]\nscreen_holds = true\nshow_screen = true\n",
+    )
+    .expect("seed");
+    let mut brain = test_support::brain(&scratch, "");
+    let release = brain.hold_config_write();
+    let mut tap = Tap::from_env();
+    let ((control, data), mut shell) = duplex();
+    let first = async {
+        shell.settled().await;
+        shell.scenes().await;
+        shell.send(&rename("Nimbus")).await;
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), first);
+    assert_eq!(ended, Ended::Lost);
+    let ((control, data), mut shell) = duplex();
+    let second = async {
+        let before = shell.settled().await;
+        assert_eq!(
+            (
+                before.assistant_name.as_str(),
+                before.screen_holds,
+                before.show_screen
+            ),
+            (DEFAULT_ASSISTANT_NAME, true, true)
+        );
+        shell.scenes().await;
+        shell.send(&rename("Cirrus")).await;
+        release
+            .send(Gate::Unconfirmed)
+            .expect("the write waits on the gate");
+        let shown = shell.settled().await;
+        assert_eq!(
+            (
+                shown.assistant_name.as_str(),
+                shown.screen_holds,
+                shown.show_screen
+            ),
+            ("Nimbus", false, false),
+            "the earlier shell's change, with the screen off, answering nothing"
+        );
+        assert_eq!(
+            shell.error().await,
+            ErrorKey::SettingsRefused,
+            "this shell's own change is still answered"
+        );
+        assert_eq!(shell.answer().await.assistant_name.as_str(), "Nimbus");
+        drop(shell);
+    };
+    let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), second);
+    assert_eq!(ended, Ended::Lost);
+    brain.close().await;
+}
+
+#[tokio::test]
 async fn a_panicked_write_logs_only_its_kind() {
     let logs = Captured::default();
     let _guard = logs.install();

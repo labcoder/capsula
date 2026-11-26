@@ -51,13 +51,27 @@ pub(super) enum Fault {
     FolderSync,
 }
 
+/// Where a test changes the namespace.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Point {
+    /// After the staged copy is flushed, before the checks that precede the rename.
+    Staged,
+    /// After an injected rename failure.
+    Renaming,
+    /// Before the last checks of a read or a published save.
+    Last,
+}
+
+#[cfg(test)]
+type Hook = (Point, Box<dyn FnOnce()>);
+
 #[cfg(test)]
 thread_local! {
     /// The failures this thread's replacements meet, each once.
     pub(super) static FAULTS: std::cell::RefCell<Vec<Fault>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// Runs once, where a test changes the namespace: after an injected rename failure, or
-    /// before the final checks.
-    pub(super) static HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Runs once, at its point.
+    pub(super) static HOOK: std::cell::RefCell<Option<Hook>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Reads `CONFIG_FILE` in `product` under the existing Support anchor `support`, creating nothing.
@@ -81,6 +95,8 @@ pub fn read_settings(support: &Path, product: &str) -> Result<Option<Vec<u8>>, A
     (&file)
         .read_to_end(&mut text)
         .map_err(|error| AcquisitionError::Open(error.kind()))?;
+    #[cfg(test)]
+    hook(Point::Last);
     still_private(&held, &file, &name, &checked)?;
     Ok(Some(text))
 }
@@ -88,7 +104,8 @@ pub fn read_settings(support: &Path, product: &str) -> Result<Option<Vec<u8>>, A
 /// Replaces `CONFIG_FILE` in `product` under the existing Support anchor `support` with `text`,
 /// creating the product folder at mode 0700 when it's missing. The text goes to the reserved
 /// sibling first, created exclusively at 0600 after any crash leftover there is unlinked unread;
-/// it's flushed, renamed over the file, and the folder and file are flushed again. The anchor is
+/// it's flushed; the old file, the staged copy and the folder are checked again, ACL included;
+/// then it's renamed over the file, and the folder and file are flushed again. The anchor is
 /// flushed before the rename, so a first save's folder entry is on disk too.
 ///
 /// # Errors
@@ -104,7 +121,7 @@ pub fn replace_settings(
     let folder = held.last()?;
     let user = held.user();
     sync(held.before_last()?, Fault::AnchorSync).map_err(AcquisitionError::Open)?;
-    let old = private_file(folder, &name, user)?.map(|(_, checked)| checked);
+    let old = private_file(folder, &name, user)?;
     // SAFETY: folder is held and temp is the fixed reserved leaf; unlinking never follows it.
     if unsafe { libc::unlinkat(folder.as_raw_fd(), temp.as_ptr(), 0) } != 0 {
         let error = io::Error::last_os_error();
@@ -118,9 +135,14 @@ pub fn replace_settings(
         .write_all(text)
         .and_then(|()| staged.sync_all())
         .map_err(|error| AcquisitionError::Open(error.kind()))?;
-    named(folder, &temp, &identity)?;
+    #[cfg(test)]
+    hook(Point::Staged);
+    if let Some((file, _)) = &old {
+        inspect_private(file, user, ObjectKind::Regular)?;
+    }
+    still_private(&held, &staged, &temp, &identity)?;
+    let old = old.map(|(_, checked)| checked);
     unchanged(folder, &name, old.as_ref())?;
-    held.check()?;
     if let Err(error) = rename(folder, &temp, &name) {
         let published = entry_stat(folder, &name)
             .is_ok_and(|now| now.st_dev == identity.st_dev && now.st_ino == identity.st_ino);
@@ -138,6 +160,8 @@ pub fn replace_settings(
     if sync(folder, Fault::FolderSync).is_err() || staged.sync_all().is_err() {
         return Err(SettingsWriteError::Unconfirmed);
     }
+    #[cfg(test)]
+    hook(Point::Last);
     still_private(&held, &staged, &name, &identity).map_err(|_| SettingsWriteError::Unconfirmed)
 }
 
@@ -220,16 +244,15 @@ fn private_file(
     Ok(Some((file, checked)))
 }
 
-/// The last samples: `file` and the held product folder still pass the private checks, ACL
-/// included, `name` still gives `file`, and the whole chain is still where its names say.
+/// The samples a read ends with and a rename starts and ends with: `file` and the held product
+/// folder still pass the private checks, ACL included, `name` still gives `file`, and the
+/// whole chain is still where its names say.
 fn still_private(
     held: &Directories,
     file: &impl AsRawFd,
     name: &CStr,
     identity: &libc::stat,
 ) -> Result<(), AcquisitionError> {
-    #[cfg(test)]
-    hook();
     let folder = held.last()?;
     inspect_private(file, held.user(), ObjectKind::Regular)?;
     inspect_private(folder, held.user(), ObjectKind::Directory)?;
@@ -251,7 +274,7 @@ fn unchanged(folder: &File, name: &CStr, old: Option<&libc::stat>) -> Result<(),
 fn rename(folder: &File, from: &CStr, to: &CStr) -> io::Result<()> {
     if injected(Fault::RenameBefore) {
         #[cfg(test)]
-        hook();
+        hook(Point::Renaming);
         return Err(io::Error::from_raw_os_error(libc::EBUSY));
     }
     let fd = folder.as_raw_fd();
@@ -286,8 +309,9 @@ fn injected(fault: Fault) -> bool {
 }
 
 #[cfg(test)]
-fn hook() {
-    if let Some(hook) = HOOK.take() {
+fn hook(point: Point) {
+    let due = HOOK.with_borrow(|hook| hook.as_ref().is_some_and(|(at, _)| *at == point));
+    if let Some((_, hook)) = due.then(|| HOOK.take()).flatten() {
         hook();
     }
 }

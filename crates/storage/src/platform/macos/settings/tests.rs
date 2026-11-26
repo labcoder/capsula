@@ -265,8 +265,8 @@ fn native_settings_refuse_what_isnt_private() {
     );
 }
 
-fn on_hook(hook: impl FnOnce() + 'static) {
-    HOOK.set(Some(Box::new(hook)));
+fn on_hook(point: Point, hook: impl FnOnce() + 'static) {
+    HOOK.set(Some((point, Box::new(hook))));
 }
 
 #[test]
@@ -326,22 +326,32 @@ fn native_the_last_checks_see_an_acl_or_a_moved_folder() {
     let mut scratch = Scratch::new();
     let support = anchor(&scratch);
     let root = scratch.root.try_clone().expect("retain scratch root");
-    for product in [c"read-acl", c"write-acl", c"moved"] {
+    for product in [c"read-acl", c"old-acl", c"write-acl", c"moved"] {
         let name = product.to_str().expect("ASCII fixture name");
         assert_eq!(replace_settings(&support, name, b"old"), Ok(()));
     }
     let folder = |name: &CStr| open_directory(root.as_raw_fd(), name).expect("product folder");
 
     let file = open_at(folder(c"read-acl").as_raw_fd(), CONFIG, READ_FLAGS, 0).expect("settings");
-    on_hook(move || install_acl(&file, DENY).expect("file ACL after the look"));
+    on_hook(Point::Last, move || {
+        install_acl(&file, DENY).expect("file ACL after the look");
+    });
     let read = read_settings(&support, "read-acl");
 
+    let old = open_at(folder(c"old-acl").as_raw_fd(), CONFIG, READ_FLAGS, 0).expect("settings");
+    on_hook(Point::Staged, move || {
+        install_acl(&old, DENY).expect("old file ACL while the new one is staged");
+    });
+    let refused = replace_settings(&support, "old-acl", b"new");
+
     let written = folder(c"write-acl");
-    on_hook(move || install_acl(&written, DENY).expect("folder ACL before the last checks"));
+    on_hook(Point::Last, move || {
+        install_acl(&written, DENY).expect("folder ACL before the last checks");
+    });
     let replaced = replace_settings(&support, "write-acl", b"new");
 
     let held = root.try_clone().expect("retain scratch root");
-    on_hook(move || {
+    on_hook(Point::Renaming, move || {
         let fd = held.as_raw_fd();
         // SAFETY: held is the scratch root; both names are fixed fixture components.
         let moved = unsafe { libc::renameat(fd, c"moved".as_ptr(), fd, c"elsewhere".as_ptr()) };
@@ -350,9 +360,16 @@ fn native_the_last_checks_see_an_acl_or_a_moved_folder() {
     FAULTS.set(vec![Fault::RenameBefore]);
     let detached = replace_settings(&support, "moved", b"new");
 
-    for product in [c"read-acl", c"write-acl"] {
+    for product in [c"read-acl", c"old-acl", c"write-acl"] {
         record_saved(&mut scratch, product);
     }
+    let staged = folder(c"old-acl");
+    scratch
+        .record(&staged, TEMP)
+        .expect("record the refused staged copy");
+    let first =
+        read_all(&open_at(staged.as_raw_fd(), CONFIG, READ_FLAGS, 0).expect("old settings"));
+    drop(staged);
     record_saved(&mut scratch, c"elsewhere");
     let moved = folder(c"elsewhere");
     scratch
@@ -364,6 +381,16 @@ fn native_the_last_checks_see_an_acl_or_a_moved_folder() {
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");
     assert_eq!(read, Err(AcquisitionError::Admission(Untrusted::Unsafe)));
+    assert_eq!(
+        (refused, first),
+        (
+            Err(SettingsWriteError::Unchanged(AcquisitionError::Admission(
+                Untrusted::Unsafe
+            ))),
+            b"old".to_vec()
+        ),
+        "an old file that stopped being private isn't overwritten"
+    );
     assert_eq!(replaced, Err(SettingsWriteError::Unconfirmed));
     assert_eq!(
         (detached, kept),
