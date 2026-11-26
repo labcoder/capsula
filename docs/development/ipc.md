@@ -429,12 +429,13 @@ when the reply can't be written. `PairLegs` logs nothing and never writes its ta
 nothing before the commit may. It writes through the pair's own `write_control`, so a write
 before the control greeting refuses the pair.
 
-`admit` runs READY, then the handshake and then the whole greeting, each by the attempt's
-deadline capped at the 5-second handshake phase. The handshake and the greeting are each raced
-against the parent's loss as one unit, `read_text_metrics` included, and fenced again when they
+`admit` runs READY by the attempt's deadline, then the handshake and then the whole greeting,
+each by that deadline capped at the 5-second handshake phase. The handshake and the greeting are
+each raced against the parent's loss as one unit, `read_text_metrics` included, and fenced again when they
 finish. A loss drops the unit and refuses at once instead of at the deadline. A refusal drops
 the pair, which closes both legs. The parent-bound root's own `admit`, not wired into the entry
-yet, runs before it: custody, where Busy makes no item call, then the instance attempt, placed in
+yet, runs before it, once per root. It fences and checks the clock, takes custody, where Busy
+makes no item call, and fences again; then the instance attempt, placed in
 the root before the first item call so settlement always finds it, then a fresh `OwnedKey`. It
 publishes the key, keys the pair, and drops the key, which wipes it before it is recorded. Then
 it reserves Welcome's session from the root's own epochs, which the Brain later continues. After

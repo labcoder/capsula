@@ -403,3 +403,220 @@ async fn an_open_refused_during_the_stores_setup_settles_it_unconfirmed() {
 fn this_builds_prerequisites_are_never_ready() {
     assert_eq!(Pending.ready(), Err(NotReady));
 }
+
+/// A pair that records how far admission drove it: 1 once keyed, 2 once greeted.
+#[derive(Clone, Default)]
+struct FakePair(Arc<std::sync::atomic::AtomicU8>);
+
+impl FakePair {
+    fn reached(&self) -> u8 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl AdmissionPair for FakePair {
+    type Keyed = Self;
+    type Greeted = ();
+
+    fn key(self, _: &[u8; CAPABILITY_LEN]) -> Option<Self> {
+        self.0.store(1, std::sync::atomic::Ordering::SeqCst);
+        Some(self)
+    }
+
+    fn admit(
+        keyed: Self,
+        _: &ShellProcess,
+        _: Instant,
+        reserve: impl FnOnce() -> IssueSession,
+    ) -> impl Future<Output = Option<()>> {
+        reserve();
+        keyed.0.store(2, std::sync::atomic::Ordering::SeqCst);
+        std::future::ready(Some(()))
+    }
+}
+
+/// Where a held add says it entered, and what releases it.
+type HeldAdd = Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>;
+
+/// A fake item whose next add can be held: the test hears it enter and releases it.
+#[derive(Clone, Default)]
+struct Slot {
+    item: Arc<std::sync::Mutex<Option<[u8; CAPABILITY_LEN]>>>,
+    hold: Arc<std::sync::Mutex<HeldAdd>>,
+}
+
+impl Slot {
+    fn present(&self) -> bool {
+        self.item.lock().expect("item").is_some()
+    }
+
+    fn hold_add(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (entered, started) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        *self.hold.lock().expect("hold") = Some((entered, released));
+        (started, release)
+    }
+}
+
+impl InstanceStore for Slot {
+    type Error = ();
+
+    fn add(&self, key: &[u8; CAPABILITY_LEN]) -> Result<Added, ()> {
+        if let Some((entered, released)) = self.hold.lock().expect("hold").take() {
+            entered.send(()).expect("the test listens");
+            released.recv_timeout(PATIENCE).expect("the test releases");
+        }
+        *self.item.lock().expect("item") = Some(*key);
+        Ok(Added::Fresh)
+    }
+
+    fn inspect(&self) -> Result<(), ()> {
+        self.present().then_some(()).ok_or(())
+    }
+
+    fn update(&self, key: &[u8; CAPABILITY_LEN]) -> Result<(), ()> {
+        *self.item.lock().expect("item") = Some(*key);
+        Ok(())
+    }
+
+    fn read(&self, into: &mut [u8; CAPABILITY_LEN]) -> Result<(), ()> {
+        *into = self.item.lock().expect("item").ok_or(())?;
+        Ok(())
+    }
+
+    fn delete(&self) -> Result<(), ()> {
+        self.item.lock().expect("item").take().map(drop).ok_or(())
+    }
+}
+
+fn live() -> ShellProcess {
+    ShellProcess::fixture(1, Arc::new(std::sync::atomic::AtomicU8::new(0)))
+}
+
+fn later() -> Instant {
+    Instant::now() + PATIENCE
+}
+
+#[tokio::test]
+async fn admission_fences_again_after_custody_before_the_item() {
+    let shell = live();
+    let token = Arc::new(());
+    let custody = Arc::downgrade(&token);
+    let pair = FakePair::default();
+    let mut root = Root::<Slot>::new();
+    let admitted = Box::pin(root.admit(
+        pair.clone(),
+        &shell,
+        later(),
+        || {
+            assert!(shell.publish(1), "the loss lands while custody is taken");
+            Ok(SessionCustody::fixture(token))
+        },
+        || panic!("no item is made after a loss"),
+    ))
+    .await;
+    assert!(matches!(admitted, Err(ParentBoundError::Refused)));
+    assert_eq!(pair.reached(), 0, "no READY");
+    assert!(custody.upgrade().is_none(), "the unused custody is let go");
+    assert_eq!(Box::pin(root.settle()).await.item, Stage::Confirmed);
+}
+
+#[tokio::test]
+async fn a_second_admission_after_a_refusal_refuses_without_running_anything() {
+    let lost = live();
+    assert!(lost.publish(1));
+    let mut root = Root::<Slot>::new();
+    let first = Box::pin(root.admit(
+        FakePair::default(),
+        &lost,
+        later(),
+        || panic!("no custody after a loss"),
+        || panic!("no item after a loss"),
+    ))
+    .await;
+    assert!(matches!(first, Err(ParentBoundError::Refused)));
+    let pair = FakePair::default();
+    let second = Box::pin(root.admit(
+        pair.clone(),
+        &live(),
+        later(),
+        || panic!("a second admission takes no custody"),
+        || panic!("a second admission makes no item"),
+    ))
+    .await;
+    assert!(matches!(second, Err(ParentBoundError::Refused)));
+    assert_eq!(pair.reached(), 0);
+    assert_eq!(Box::pin(root.settle()).await.item, Stage::Confirmed);
+}
+
+/// Starts an admission whose add the slot holds, waits for that add to enter, then drops it.
+async fn dropped_mid_publish(
+    root: &mut Root<Slot>,
+    slot: &Slot,
+    token: Arc<()>,
+) -> mpsc::Sender<()> {
+    let (entered, release) = slot.hold_add();
+    let shell = live();
+    let mut admitting = Box::pin(root.admit(
+        FakePair::default(),
+        &shell,
+        later(),
+        || Ok(SessionCustody::fixture(token)),
+        || Ok(slot.clone()),
+    ));
+    let waiting = tokio::task::spawn_blocking(move || entered.recv_timeout(PATIENCE));
+    timeout(PATIENCE, async {
+        tokio::select! {
+            _ = &mut admitting => panic!("the add is held"),
+            heard = waiting => heard.expect("the listener").expect("the add entered"),
+        }
+    })
+    .await
+    .expect("the add enters in time");
+    release
+}
+
+#[tokio::test]
+async fn custody_outlives_an_admission_dropped_during_publish_until_settlement() {
+    let slot = Slot::default();
+    let token = Arc::new(());
+    let custody = Arc::downgrade(&token);
+    let mut root = Root::new();
+    let release = dropped_mid_publish(&mut root, &slot, token).await;
+    assert!(
+        custody.upgrade().is_some(),
+        "custody is held while the add is out"
+    );
+    release.send(()).expect("the add waits");
+    assert_eq!(Box::pin(root.settle()).await.item, Stage::Confirmed);
+    assert!(!slot.present(), "settlement deleted what the add wrote");
+    assert!(custody.upgrade().is_none(), "settlement let custody go");
+}
+
+#[tokio::test]
+async fn a_second_admission_after_a_cancelled_one_leaves_its_attempt_alone() {
+    let slot = Slot::default();
+    let token = Arc::new(());
+    let custody = Arc::downgrade(&token);
+    let mut root = Root::new();
+    let release = dropped_mid_publish(&mut root, &slot, token).await;
+    let pair = FakePair::default();
+    let second = Box::pin(root.admit(
+        pair.clone(),
+        &live(),
+        later(),
+        || panic!("a second admission takes no custody"),
+        || panic!("a second admission makes no item"),
+    ))
+    .await;
+    assert!(matches!(second, Err(ParentBoundError::Refused)));
+    assert_eq!(pair.reached(), 0);
+    assert!(
+        custody.upgrade().is_some(),
+        "the first attempt still holds custody"
+    );
+    release.send(()).expect("the add waits");
+    assert_eq!(Box::pin(root.settle()).await.item, Stage::Confirmed);
+    assert!(!slot.present());
+    assert!(custody.upgrade().is_none());
+}

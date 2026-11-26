@@ -41,6 +41,13 @@ fn refused(error: PairError) -> SessionError {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Runs once when the greeting takes the data leg for its text-metrics read.
+    pub(super) static ON_DATA: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        std::cell::Cell::new(None);
+}
+
 impl Legs for PairLegs<'_> {
     type Peer = ShellProcess;
     type Data = RecordReader<OwnedReadHalf>;
@@ -85,6 +92,10 @@ impl Legs for PairLegs<'_> {
     }
 
     fn data(&mut self) -> &mut Self::Data {
+        #[cfg(test)]
+        if let Some(hook) = ON_DATA.take() {
+            hook();
+        }
         &mut self.pair.data
     }
 

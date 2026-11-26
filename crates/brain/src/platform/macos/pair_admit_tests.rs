@@ -18,9 +18,10 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use super::super::stream::{RecordReader, RecordWriter};
+use super::legs::ON_DATA;
 use super::legs::PairLegs;
 use super::tests::{SECRET, bounded, brain, by, ends, fd, hello, shell, sockets};
-use super::{InheritedPair, KeyedPair, PairError, RegisteredPair, admit, adopt, respond};
+use super::{InheritedPair, KeyedPair, PairError, RegisteredPair, admit, adopt, channel, respond};
 use crate::ParentBoundError;
 use crate::ipc::{self, Legs as _};
 use crate::platform::ShellProcess;
@@ -126,7 +127,7 @@ struct Greeter {
     control: RecordWriter<OwnedWriteHalf>,
     data: RecordWriter<OwnedWriteHalf>,
     from_control: RecordReader<OwnedReadHalf>,
-    _data_in: OwnedReadHalf,
+    data_in: OwnedReadHalf,
 }
 
 impl Greeter {
@@ -143,7 +144,7 @@ impl Greeter {
             ),
             data: RecordWriter::new(data_out, session.data.sealer, Pipe::Data, cell.clone()),
             from_control: RecordReader::new(control_in, session.control.opener, cell),
-            _data_in: data_in,
+            data_in,
         }
     }
 
@@ -167,6 +168,11 @@ impl Greeter {
     async fn metrics(&mut self) {
         let metrics = frame::encode(&DataToBrain::TextMetrics(None), Pipe::Data).expect("encodes");
         self.data.write_frame(&metrics).await.expect("text metrics");
+    }
+
+    /// True once the brain closed the data leg with nothing written on it.
+    async fn data_closed(&mut self) -> bool {
+        matches!(self.data_in.read(&mut [0; 1]).await, Ok(0))
     }
 
     /// True once the brain closed the control leg with nothing more written.
@@ -257,6 +263,10 @@ async fn a_loss_during_the_text_metrics_read_refuses_and_closes_the_pair() {
     };
     let mut epochs = crate::runtime::IssueEpochs::default();
     let reserve = || epochs.reserve(kumochi_protocol::message::Incarnation(3));
+    let losing = watched.clone();
+    ON_DATA.set(Some(Box::new(move || {
+        assert!(losing.publish_watched(&verdict, Verdict::Exited));
+    })));
     let (admitted, mut greeter) = bounded(async {
         tokio::join!(Box::pin(admit(keyed, &watched, by(), reserve)), async {
             let mut ready = [0; 1];
@@ -267,17 +277,16 @@ async fn a_loss_during_the_text_metrics_read_refuses_and_closes_the_pair() {
                 greeter.hellos().await,
                 ControlToShell::Welcome { .. }
             ));
-            // Long enough for the brain to pass the data greeting's own fence.
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            assert!(watched.publish_watched(&verdict, Verdict::Exited));
             greeter
         })
     })
     .await;
+    assert!(ON_DATA.take().is_none(), "the text-metrics read started");
     assert!(matches!(admitted, Err(PairError::Lost)));
+    assert!(bounded(greeter.closed()).await, "the control leg is closed");
     assert!(
-        bounded(greeter.closed()).await,
-        "the refused pair is closed"
+        bounded(greeter.data_closed()).await,
+        "the data leg is closed"
     );
 }
 
@@ -338,7 +347,7 @@ async fn admission_publishes_before_ready_and_claims_after_the_greeting() {
     drop(greeted);
     assert!(item.get().is_some());
     assert_eq!(Box::pin(root.settle()).await.item, Stage::Confirmed);
-    assert_eq!(item.get(), None);
+    assert!(item.get().is_none());
 }
 
 #[tokio::test]
@@ -363,7 +372,7 @@ async fn a_loss_between_the_last_fence_and_the_claim_refuses() {
     .await;
     assert!(matches!(admitted, Err(ParentBoundError::Refused)));
     assert_eq!(Box::pin(root.settle()).await.item, Stage::Confirmed);
-    assert_eq!(item.get(), None);
+    assert!(item.get().is_none());
 }
 
 #[tokio::test]
@@ -388,24 +397,51 @@ async fn busy_custody_refuses_before_any_item_call_or_ready() {
     assert_eq!(Box::pin(root.settle()).await.item, Stage::Confirmed);
 }
 
+/// Admits on a fresh pair with `shell` by `by`, where neither factory may run; returns the
+/// result and whether READY reached the shell.
+async fn refused_before_custody(shell: &ShellProcess, by: Instant) -> (bool, bool) {
+    let (pair, [control, _data]) = inherited();
+    let mut root = Root::<Item>::new();
+    let admitted = Box::pin(root.admit(
+        pair,
+        shell,
+        by,
+        || panic!("no custody is taken"),
+        || panic!("no item is made"),
+    ))
+    .await;
+    let refused = matches!(admitted, Err(ParentBoundError::Refused));
+    (refused, ready_seen(&control))
+}
+
 #[tokio::test]
-async fn a_dropped_admission_still_retires_its_published_item_at_settlement() {
-    let item = Item::default();
+async fn an_already_lost_shell_is_refused_before_custody_with_no_ready() {
     let shell = fixture();
-    let (pair, [mut control, _data]) = inherited();
-    let mut root = Root::new();
-    {
-        let mut admitting = Box::pin(root.admit(pair, &shell, by(), custody, || Ok(item.clone())));
-        let mut ready = [0; 1];
-        bounded(async {
-            tokio::select! {
-                _ = &mut admitting => panic!("admission waits for the shell's first message"),
-                read = control.read_exact(&mut ready) => read.expect("READY"),
-            }
-        })
-        .await;
-    }
-    assert!(item.get().is_some(), "published before READY");
-    assert_eq!(Box::pin(root.settle()).await.item, Stage::Confirmed);
-    assert_eq!(item.get(), None);
+    assert!(shell.publish(1));
+    assert_eq!(refused_before_custody(&shell, by()).await, (true, false));
+}
+
+#[tokio::test]
+async fn a_passed_deadline_is_refused_before_custody_with_no_ready() {
+    let passed = Instant::now();
+    assert_eq!(
+        refused_before_custody(&fixture(), passed).await,
+        (true, false)
+    );
+}
+
+#[test]
+fn only_an_installed_or_a_development_edition_has_a_session_channel() {
+    use kumochi_protocol::constants::ProductIdentity;
+    use kumochi_session::Channel;
+
+    assert!(matches!(
+        channel(ProductIdentity::RELEASE),
+        Ok(Channel::Release)
+    ));
+    assert!(matches!(channel(ProductIdentity::DEV), Ok(Channel::Dev)));
+    assert!(matches!(
+        channel(ProductIdentity::GATE),
+        Err(PairError::Edition)
+    ));
 }

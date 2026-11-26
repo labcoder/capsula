@@ -329,7 +329,7 @@ impl ShellProcess {
 
     /// Publishes `verdict` to a [`ShellProcess::watched`] shell as the parent watch does: latches
     /// the gate first, then wakes every waiter. True when this latched it.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn publish_watched(&self, send: &watch::Sender<Verdict>, verdict: Verdict) -> bool {
         let first = match *self.owner {
             Owner::Watched(_, ref gate) => gate.lose(),

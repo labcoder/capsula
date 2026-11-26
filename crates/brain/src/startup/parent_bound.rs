@@ -6,14 +6,15 @@ use std::sync::Arc;
 
 use kumochi_protocol::constants::BRAIN_LOG;
 
-use kumochi_protocol::message::Incarnation;
+use kumochi_protocol::message::{CAPABILITY_LEN, Incarnation, IssueSession};
+use tokio::time::Instant;
 
 use super::custody::{CustodyError, SessionCustody};
 use super::instance::{InstanceAttempt, InstanceStore, OwnedKey};
 use super::{Checkpoint, OpenedState, Stages, VaultHeld};
 use crate::config::tuning::{OAuthTuning, TokenTuning};
 use crate::platform::shell_process::Committed;
-use crate::platform::{self, SessionLock, ShellProcess};
+use crate::platform::{SessionLock, ShellProcess};
 use crate::runtime::{Shutdown, Stage, account::Accounts};
 use crate::{BrainError, ParentBoundError, StartMode};
 
@@ -85,8 +86,25 @@ pub(crate) struct Settled {
     pub(crate) item: Stage,
 }
 
+/// The inherited pair as admission drives it: the platform's own, or a test's.
+pub(crate) trait AdmissionPair {
+    type Keyed;
+    type Greeted;
+    /// Keys the responder from `key`; the caller wipes its own copy right after.
+    fn key(self, key: &[u8; CAPABILITY_LEN]) -> Option<Self::Keyed>;
+    /// READY, the handshake and the greeting by `by`; `reserve` reserves Welcome's session.
+    fn admit(
+        keyed: Self::Keyed,
+        shell: &ShellProcess,
+        by: Instant,
+        reserve: impl FnOnce() -> IssueSession,
+    ) -> impl Future<Output = Option<Self::Greeted>>;
+}
+
 /// Owns everything a parent-bound start makes, from its first stage to its settlement.
 pub(crate) struct Root<S: InstanceStore> {
+    /// Set by the first `admit`, before anything else it does, so admission runs once.
+    admitting: bool,
     stages: Stages,
     /// The attempt and the custody it holds, set before its first publish.
     instance: Option<InstanceAttempt<S>>,
@@ -96,6 +114,7 @@ pub(crate) struct Root<S: InstanceStore> {
 impl<S: InstanceStore> Root<S> {
     pub(crate) fn new() -> Self {
         Self {
+            admitting: false,
             stages: Stages::default(),
             instance: None,
             init: None,
@@ -120,26 +139,37 @@ impl<S: InstanceStore> Root<S> {
             .map(drop)
     }
 
-    /// Closes the Brain, or whatever started without one; then settles the instance attempt
-    /// under custody, drops custody, and only then the process services.
-    /// Admits the parent shell on `pair` by `by`: custody, the item, the key, READY, the
-    /// handshake and the greeting, then the commit claim. The attempt is in the root before the
-    /// first item call, so settlement finds whatever a refusal left.
+    /// Admits the parent shell on `pair` by `by`: a fence, custody, a fence again, the item,
+    /// the key, READY, the handshake and the greeting, then the commit claim. It runs once: a
+    /// later call refuses without touching the root. The attempt is in the root before its first
+    /// item call, so settlement finds whatever a refusal or a dropped call left.
     ///
     /// # Errors
     /// `Busy` when another session holds custody, otherwise `Refused`.
-    pub(crate) async fn admit(
+    pub(crate) async fn admit<P: AdmissionPair>(
         &mut self,
-        pair: platform::InheritedPair,
+        pair: P,
         shell: &ShellProcess,
-        by: tokio::time::Instant,
+        by: Instant,
         custody: impl FnOnce() -> Result<SessionCustody, CustodyError>,
         store: impl FnOnce() -> Result<S, S::Error>,
-    ) -> Result<(platform::Greeted, Committed), ParentBoundError> {
+    ) -> Result<(P::Greeted, Committed), ParentBoundError> {
+        if std::mem::replace(&mut self.admitting, true) {
+            return Err(ParentBoundError::Refused);
+        }
+        let fence = || -> Result<(), ParentBoundError> {
+            shell.fence().map_err(|_| ParentBoundError::Refused)?;
+            if Instant::now() >= by {
+                return Err(ParentBoundError::Refused);
+            }
+            Ok(())
+        };
+        fence()?;
         let custody = custody().map_err(|error| match error {
             CustodyError::Busy => ParentBoundError::Busy,
             _ => ParentBoundError::Refused,
         })?;
+        fence()?;
         let store = Arc::new(store().map_err(|_| ParentBoundError::Refused)?);
         let attempt = self.instance.insert(InstanceAttempt::new(custody, store));
         let key = OwnedKey::generate().map_err(|_| ParentBoundError::Refused)?;
@@ -147,20 +177,15 @@ impl<S: InstanceStore> Root<S> {
             .publish(key.key(), by.into_std(), shell)
             .await
             .map_err(|_| ParentBoundError::Refused)?;
-        let keyed = pair
-            .keyed(key.key())
-            .map_err(|_| ParentBoundError::Refused)?;
+        let keyed = pair.key(key.key()).ok_or(ParentBoundError::Refused)?;
         drop(key);
         let incarnation = Incarnation(getrandom::u64().map_err(|_| ParentBoundError::Refused)?);
         let epochs = &mut self.stages.epochs;
-        let greeted = platform::admit_pair(keyed, shell, by, || epochs.reserve(incarnation))
+        let greeted = P::admit(keyed, shell, by, || epochs.reserve(incarnation))
             .await
-            .map_err(|_| ParentBoundError::Refused)?;
+            .ok_or(ParentBoundError::Refused)?;
         // No await from here to the claim, so a loss either lands before it or loses to it.
-        shell.fence().map_err(|_| ParentBoundError::Refused)?;
-        if tokio::time::Instant::now() >= by {
-            return Err(ParentBoundError::Refused);
-        }
+        fence()?;
         #[cfg(test)]
         if let Some(hook) = BEFORE_CLAIM.take() {
             hook();
@@ -169,8 +194,11 @@ impl<S: InstanceStore> Root<S> {
         Ok((greeted, committed))
     }
 
+    /// Closes the Brain, or whatever started without one; then settles the instance attempt
+    /// under custody, drops custody, and only then the process services.
     pub(crate) async fn settle(self) -> Settled {
         let Self {
+            admitting: _,
             mut stages,
             mut instance,
             init: _init,

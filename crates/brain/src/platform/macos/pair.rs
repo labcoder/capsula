@@ -26,6 +26,7 @@ use super::stream::{RecordReader, RecordWriter};
 use crate::ipc;
 use crate::platform::ShellProcess;
 use crate::runtime::Terminal;
+use crate::startup::parent_bound::AdmissionPair;
 use crate::tap::Tap;
 
 /// Why the pair was refused. Every refusal ends the attempt.
@@ -55,6 +56,8 @@ pub(crate) enum PairError {
     Greeting,
     #[error("the parent was lost")]
     Lost,
+    #[error("this edition has no session channel")]
+    Edition,
 }
 
 /// A socket's identity from `fstat`.
@@ -147,16 +150,40 @@ impl InheritedPair {
     /// # Errors
     /// As [`InheritedPair::register`], or the Noise library couldn't build the handshake.
     pub(crate) fn keyed(self, secret: &[u8; SECRET_LEN]) -> Result<KeyedPair, PairError> {
-        let channel = if ProductIdentity::ACTIVE == ProductIdentity::RELEASE {
-            Channel::Release
-        } else {
-            Channel::Dev
-        };
-        let brain = BrainAwaitsInit::new(secret, channel)?;
+        let brain = BrainAwaitsInit::new(secret, channel(ProductIdentity::ACTIVE)?)?;
         Ok(KeyedPair {
             pair: self.register()?,
             brain,
         })
+    }
+}
+
+impl AdmissionPair for InheritedPair {
+    type Keyed = KeyedPair;
+    type Greeted = Greeted;
+
+    fn key(self, key: &[u8; SECRET_LEN]) -> Option<KeyedPair> {
+        self.keyed(key).ok()
+    }
+
+    async fn admit(
+        keyed: KeyedPair,
+        shell: &ShellProcess,
+        by: Instant,
+        reserve: impl FnOnce() -> IssueSession,
+    ) -> Option<Greeted> {
+        admit(keyed, shell, by, reserve).await.ok()
+    }
+}
+
+/// The session channel of an edition the pair serves: an installed or a development build.
+fn channel(identity: ProductIdentity) -> Result<Channel, PairError> {
+    if identity == ProductIdentity::RELEASE {
+        Ok(Channel::Release)
+    } else if identity == ProductIdentity::DEV {
+        Ok(Channel::Dev)
+    } else {
+        Err(PairError::Edition)
     }
 }
 
