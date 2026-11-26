@@ -19,7 +19,8 @@ use windows::Win32::Foundation::RECT;
 use crate::platform::{
     self,
     input_session::{
-        self as native, FixtureEscMode, InputEdge, Session, Target, Window, WindowKind,
+        self as native, FixtureEscMode, InputEdge, Layout, Layouts, Session, Target, Window,
+        WindowKind,
     },
 };
 
@@ -39,7 +40,20 @@ pub(crate) struct PhaseContext<'a> {
 pub(crate) enum Phase {
     Hover,
     Focus,
+    Layouts,
+    /// One numbered batch of the Listening row.
+    Listening(u8),
     Esc,
+}
+
+/// One hold that reached Listening: its chord's and its recognition's native callback QPCs, and
+/// the QPCs at which the line took and left the Listening colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Heard {
+    pub(crate) key_down: i64,
+    pub(crate) recognized: i64,
+    pub(crate) listening: i64,
+    pub(crate) resting: i64,
 }
 
 #[derive(Debug, Default)]
@@ -48,12 +62,15 @@ pub(crate) struct Counts {
     pub(crate) sent: u32,
     pub(crate) behavior_pass: u32,
     pub(crate) behavior_fail: u32,
+    /// From each `AltGr` press to the next left Ctrl + left Alt make, by injection QPC.
+    altgr_windows: Vec<(i64, i64)>,
 }
 
 #[derive(Debug)]
 pub(crate) struct Diagnostics {
     path: PathBuf,
     pub(crate) hover_injections: RefCell<Vec<i64>>,
+    pub(crate) heard: RefCell<Vec<Heard>>,
 }
 
 impl Diagnostics {
@@ -61,6 +78,7 @@ impl Diagnostics {
         Self {
             path: directory.join("milestones.log"),
             hover_injections: RefCell::default(),
+            heard: RefCell::default(),
         }
     }
 
@@ -110,7 +128,17 @@ impl Diagnostics {
         since: i64,
         ready: impl Fn(&[Record]) -> bool,
     ) -> Result<Vec<Record>> {
-        let until = Instant::now() + Duration::from_secs(1);
+        self.observe_within(session, since, Duration::from_secs(1), ready)
+    }
+
+    fn observe_within(
+        &self,
+        session: &Session,
+        since: i64,
+        limit: Duration,
+        ready: impl Fn(&[Record]) -> bool,
+    ) -> Result<Vec<Record>> {
+        let until = Instant::now() + limit;
         loop {
             session.guard()?;
             let records = self
@@ -138,6 +166,22 @@ pub(crate) fn check_flushed(
     let records = diagnostics.read()?;
     ensure!(!records.is_empty(), "no input diagnostics were flushed");
     let count = |mark: Mark| records.iter().filter(|record| record.mark == mark).count();
+    if phase == Phase::Layouts {
+        let hold = |recognized: bool| {
+            records
+                .iter()
+                .filter(|record| matches!(record.mark, Mark::Hold { recognized: seen, .. } if seen == recognized))
+                .count()
+        };
+        ensure!(
+            hold(false) == 2
+                && hold(true) == 2
+                && !records
+                    .iter()
+                    .any(|record| matches!(record.mark, Mark::Opened(_))),
+            "layouts needs exactly its two chords and two holds and no typing box"
+        );
+    }
     if phase == Phase::Focus {
         let actions = records
             .iter()
@@ -400,6 +444,8 @@ pub(crate) fn exercise(
         match phase {
             Phase::Hover => hover_panel(session, counts, context, diagnostics),
             Phase::Focus => focus(session, counts, diagnostics),
+            Phase::Layouts => layouts(session, counts, diagnostics),
+            Phase::Listening(_) => listening(session, counts, diagnostics),
             Phase::Esc => exercise_escape(contested, session, counts, diagnostics, context),
         }
     })();
@@ -598,3 +644,184 @@ fn switch_from_typing(session: &mut Session, diagnostics: &Diagnostics) -> Resul
     })();
     combine([checked, alternate.close()])
 }
+
+/// Holds left Ctrl + left Alt until the hold is recognised, then releases. Returns the make's
+/// injection QPC and the hold's records.
+fn positive_hold(session: &mut Session, diagnostics: &Diagnostics) -> Result<(i64, Vec<Record>)> {
+    session.modifier(0x1d, InputEdge::Down)?;
+    session.modifier(0x38, InputEdge::Down)?;
+    let since = session.last_qpc.context("hold make QPC missing")?;
+    let held = diagnostics.observe(session, since, |records| {
+        records.iter().any(|record| {
+            matches!(
+                record.mark,
+                Mark::Hold {
+                    recognized: true,
+                    callback_qpc,
+                } if callback_qpc >= since
+            )
+        })
+    });
+    session.modifier(0x38, InputEdge::Up)?;
+    session.modifier(0x1d, InputEdge::Up)?;
+    Ok((since, held?))
+}
+
+/// Whether a record is the shortcut firing: a chord, a recognised hold or an opened typing box.
+fn shortcut(record: &Record) -> Option<i64> {
+    match record.mark {
+        Mark::Hold { callback_qpc, .. } => Some(callback_qpc),
+        Mark::Opened(_) => Some(record.qpc),
+        _ => None,
+    }
+}
+
+/// `AltGr` typing under German and Spanish in the fixture: each layout types its `@` and `€`
+/// with no chord, hold or typing box between the `AltGr` press and the next left-modifier make,
+/// then one left Ctrl + left Alt hold is recognised.
+fn layouts(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) -> Result<()> {
+    let layouts = Layouts::capture(session);
+    let exercise = (|| {
+        for selection in [Layout::German, Layout::Spanish] {
+            counts.attempts += 1;
+            Layouts::load(session, selection)?;
+            session.clear_fixture()?;
+            session.modifier(0x138, InputEdge::Down)?;
+            let altgr = session.last_qpc.context("AltGr injection QPC missing")?;
+            session.tap(match selection {
+                Layout::German => 0x10,
+                Layout::Spanish => 0x03,
+            })?;
+            session.tap(0x12)?;
+            session.modifier(0x138, InputEdge::Up)?;
+            counts.sent += 1;
+            session.wait(Duration::from_millis(100))?;
+            let typed = session.expected_layout_text()?;
+            counts.behavior_pass += u32::from(typed);
+            counts.behavior_fail += u32::from(!typed);
+            counts.attempts += 1;
+            let (since, _) = positive_hold(session, diagnostics)?;
+            counts.altgr_windows.push((altgr, since));
+            counts.sent += 1;
+            counts.behavior_pass += 1;
+            session.wait(Duration::from_millis(300))?;
+        }
+        let records = diagnostics.read()?;
+        for &(start, end) in &counts.altgr_windows {
+            let quiet = !records
+                .iter()
+                .filter_map(shortcut)
+                .any(|qpc| (start..end).contains(&qpc));
+            println!("altgr_only_window start_qpc={start} next_left_chord_qpc={end} quiet={quiet}");
+            counts.behavior_pass += u32::from(quiet);
+            counts.behavior_fail += u32::from(!quiet);
+        }
+        ensure!(
+            counts.behavior_fail == 0,
+            "AltGr typed the wrong characters or fired the shortcut"
+        );
+        Ok(())
+    })();
+    let release = session.release_injected();
+    let restore = layouts.restore(session);
+    combine([exercise, release, restore])
+}
+
+/// How many batches of [`BATCH_HOLDS`] the Listening row measures: each batch is its own launch,
+/// so it stays inside the shell's two-minute quit bound and one main trace.
+pub(crate) const BATCHES: u8 = 10;
+/// How many holds each Listening batch measures.
+pub(crate) const BATCH_HOLDS: u32 = 10;
+
+/// One hold's records since its make: its chord, its recognition and the line taking the
+/// Listening colour, each no earlier than `since`.
+fn heard(records: &[Record], since: i64) -> Option<Heard> {
+    let hold = |recognized: bool| {
+        records.iter().find_map(|record| match record.mark {
+            Mark::Hold {
+                recognized: seen,
+                callback_qpc,
+            } if seen == recognized && callback_qpc >= since => Some(callback_qpc),
+            _ => None,
+        })
+    };
+    let listening = records
+        .iter()
+        .find(|record| record.mark == Mark::Listening(true))?
+        .qpc;
+    let (key_down, recognized) = (hold(false)?, hold(true)?);
+    (key_down <= recognized && recognized <= listening).then_some(Heard {
+        key_down,
+        recognized,
+        listening,
+        resting: i64::MAX,
+    })
+}
+
+/// How long a Listening batch waits, before its trace starts, for the brain to load speech input.
+pub(crate) const SPEECH_WAIT: Duration = Duration::from_secs(20);
+
+/// Waits until the brain reports speech input loaded and ready.
+pub(crate) fn await_speech(session: &Session, diagnostics: &Diagnostics) -> Result<()> {
+    diagnostics
+        .observe_within(session, 0, SPEECH_WAIT, |records| {
+            records
+                .iter()
+                .any(|record| record.mark == Mark::SpeechReady(true))
+        })
+        .map(drop)
+}
+
+/// Makes [`BATCH_HOLDS`] holds of left Ctrl + left Alt, each kept down until the line shows
+/// Listening and a little after, then released and left to finish before the next.
+fn listening(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) -> Result<()> {
+    for index in 0..BATCH_HOLDS {
+        session.wait(Duration::from_micros(1000 + u64::from(index * 997 % 6944)))?;
+        counts.attempts += 1;
+        session.modifier(0x1d, InputEdge::Down)?;
+        session.modifier(0x38, InputEdge::Down)?;
+        let since = session.last_qpc.context("hold make QPC missing")?;
+        let shown = diagnostics.observe_within(session, since, Duration::from_secs(3), |records| {
+            records
+                .iter()
+                .any(|record| record.mark == Mark::Listening(true))
+        });
+        let kept =
+            shown.and_then(|records| session.wait(Duration::from_millis(150)).map(|()| records));
+        session.modifier(0x38, InputEdge::Up)?;
+        let released = session.last_qpc;
+        session.modifier(0x1d, InputEdge::Up)?;
+        counts.sent += 1;
+        let released = released.context("hold break QPC missing")?;
+        let sample = kept.map(|records| heard(&records, since));
+        let Ok(Some(mut sample)) = sample else {
+            counts.behavior_fail += 1;
+            println!(
+                "hold attempt={} reached no complete Listening",
+                counts.attempts
+            );
+            return sample.and_then(|_| {
+                bail!("a hold's chord, recognition and Listening are missing or out of order")
+            });
+        };
+        let ended =
+            diagnostics.observe_within(session, released, Duration::from_secs(3), |records| {
+                records
+                    .iter()
+                    .any(|record| record.mark == Mark::Listening(false))
+            })?;
+        sample.resting = ended
+            .iter()
+            .find(|record| record.mark == Mark::Listening(false))
+            .context("Listening off vanished")?
+            .qpc;
+        diagnostics.heard.borrow_mut().push(sample);
+        counts.behavior_pass += 1;
+        session.wait(SETTLE)?;
+    }
+    Ok(())
+}
+
+/// The pause after a hold leaves Listening, so its silent audio is transcribed and dropped
+/// before the next hold asks to be admitted [guess: unmeasured on Rez].
+const SETTLE: Duration = Duration::from_millis(1500);

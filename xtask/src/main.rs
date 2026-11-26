@@ -66,7 +66,7 @@ fn usage() -> String {
     format!(
         "usage: cargo xtask <task>
 
-The gate tasks (cold-start, gate-session, hover-gate, measure-gate, bench, slice2-gate) run only
+The gate tasks (cold-start, gate-session, hover-gate, measure-gate, hold-gate, bench, slice2-gate) run only
 as the gate identity, never as Kumochi or Kumochi Dev. Unless explicitly prebuilt,
 they build the images they launch:
   cargo run --release --package xtask --features kumochi-protocol/gate-identity -- <task>
@@ -86,6 +86,8 @@ tasks:
   measure-gate <path-session.txt>
                     gate-session's measured phases with hover-gate's opener;
                     no Ready and no feel verdicts
+  hold-gate <path-session.txt> [--prebuilt <shell-sha256> <brain-sha256>] [--speech <models-dir> <natives-dir>]
+                    hover-gate's opener; AltGr row, --speech adds Listening with the microphone
   draw-timing <path-session.txt> [--prebuilt] <shell-sha256> <brain-sha256>
                     one offline paint timing trial (90 seconds plus shared teardown);
                     use --prebuilt for prepared release Gate replay builds; omit for Debug Gate;
@@ -187,6 +189,8 @@ fn main() -> Result<()> {
         Some("hover-gate") => gate::hover(args),
         #[cfg(windows)]
         Some("measure-gate") => gate::measure(args),
+        #[cfg(windows)]
+        Some("hold-gate") => gate::hold(args),
         #[cfg(windows)]
         Some("draw-timing") => gate::draw_timing(args),
         #[cfg(windows)]

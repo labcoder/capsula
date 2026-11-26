@@ -4,6 +4,16 @@ use anyhow::{Context as _, Result, bail, ensure};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mark {
+    /// The shortcut's chord went down (`recognized: false`) or its 300 ms hold was recognised,
+    /// stamped with the native callback's QPC.
+    Hold {
+        recognized: bool,
+        callback_qpc: i64,
+    },
+    /// The dock's line took or left the Listening colour.
+    Listening(bool),
+    /// The brain reported whether speech input is loaded and ready.
+    SpeechReady(bool),
     Opened(bool),
     Draft {
         nonempty: bool,
@@ -50,7 +60,27 @@ impl Record {
             .context("invalid input diagnostic envelope")?;
         let qpc = counter.parse()?;
         ensure!(qpc > 0, "invalid diagnostic QPC counter");
-        let mark = if let Some(value) = event.strip_prefix("input opened focused=") {
+        let mark = if let Some(value) = event.strip_prefix("hold ") {
+            let (kind, callback) = value
+                .split_once(" callback_qpc=")
+                .context("hold diagnostic callback QPC missing")?;
+            let recognized = match kind {
+                "warm" => false,
+                "recognized" => true,
+                _ => bail!("unknown hold diagnostic"),
+            };
+            let callback_qpc = callback.parse()?;
+            ensure!(
+                callback_qpc > 0 && callback_qpc <= qpc,
+                "invalid hold callback QPC"
+            );
+            Mark::Hold {
+                recognized,
+                callback_qpc,
+            }
+        } else if let Some(value) = event.strip_prefix("speech input ready=") {
+            Mark::SpeechReady(value.parse()?)
+        } else if let Some(value) = event.strip_prefix("input opened focused=") {
             Mark::Opened(value.parse()?)
         } else if let Some(value) = event.strip_prefix("input draft nonempty=") {
             let (nonempty, preserved) = value
@@ -73,6 +103,8 @@ impl Record {
         } else {
             match event {
                 "resting" => Mark::Status,
+                "listening on" => Mark::Listening(true),
+                "listening off" => Mark::Listening(false),
                 "input dismissed" => Mark::Dismissed,
                 "escape action=Stop" => Mark::EscapeStop,
                 "escape action=Clear" => Mark::EscapeClear,
@@ -147,6 +179,51 @@ mod tests {
                 Record::parse(line).is_err(),
                 "invalid diagnostic envelope or milestone"
             );
+        }
+    }
+
+    #[test]
+    fn hold_and_listening_lines_keep_their_callback_clock_and_reject_the_rest() {
+        for (line, mark) in [
+            (
+                "qpc=50 hold warm callback_qpc=40",
+                Mark::Hold {
+                    recognized: false,
+                    callback_qpc: 40,
+                },
+            ),
+            (
+                "qpc=50 hold recognized callback_qpc=50",
+                Mark::Hold {
+                    recognized: true,
+                    callback_qpc: 50,
+                },
+            ),
+            ("qpc=60 listening on", Mark::Listening(true)),
+            ("qpc=70 listening off", Mark::Listening(false)),
+            ("qpc=80 speech input ready=true", Mark::SpeechReady(true)),
+            ("qpc=90 speech input ready=false", Mark::SpeechReady(false)),
+        ] {
+            assert_eq!(
+                Record::parse(line).unwrap(),
+                Record {
+                    qpc: line[4..6].parse().unwrap(),
+                    mark
+                },
+                "{line}"
+            );
+        }
+        for line in [
+            "qpc=50 hold warm callback_qpc=51",
+            "qpc=50 hold warm callback_qpc=0",
+            "qpc=50 hold warm",
+            "qpc=50 hold ended callback_qpc=40",
+            "qpc=50 hold recognized callback_qpc=x",
+            "qpc=60 listening",
+            "qpc=60 listening yes",
+            "qpc=80 speech input ready=maybe",
+        ] {
+            assert!(Record::parse(line).is_err(), "{line}");
         }
     }
 

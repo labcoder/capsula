@@ -35,6 +35,7 @@ mod activation;
 mod fixture;
 mod gate;
 mod guard;
+mod layouts;
 mod quiet;
 mod registry;
 mod session;
@@ -45,6 +46,7 @@ pub(crate) use fixture::fixture;
 use fixture::{
     CHANGES, CLICK_POINT, CLICK_QPC, CLICKS, ESCAPES, IdleRefusal, PREPARE_IDLE, property,
 };
+pub(crate) use layouts::Layouts;
 pub(crate) use quiet::quiet;
 pub(crate) use registry::Registry;
 pub(crate) use session::{Session, Target};
@@ -238,6 +240,12 @@ pub(crate) enum FixturePlacement {
 
 pub(super) const AWAY_FROM_CURSOR: &str = "--away-from-cursor";
 pub(crate) const FIXTURE_PLACEMENT_REFUSED: i32 = 13;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Layout {
+    German,
+    Spanish,
+}
 
 /// Starts the fixture, which closes itself after `lifetime` (at most an hour). It shows the feel
 /// verdicts and Ready, and arms nothing until the owner physically clicks Ready.
