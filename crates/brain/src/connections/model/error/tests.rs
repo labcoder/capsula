@@ -236,6 +236,18 @@ fn a_stream_that_ends_badly_offers_retry() {
 }
 
 #[test]
+fn a_spent_live_budget_says_so_and_offers_nothing() {
+    assert_eq!(
+        Failure::Spent.user_error(),
+        user_error(ErrorKey::LiveBudgetSpent, &[])
+    );
+    assert_eq!(
+        Failure::Request.user_error(),
+        user_error(ErrorKey::RequestRefused, &[])
+    );
+}
+
+#[test]
 fn a_param_is_kept_only_as_its_first_segment() {
     for (param, expected) in [
         ("model", Param::Model),

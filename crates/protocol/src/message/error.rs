@@ -122,6 +122,8 @@ pub enum ErrorKey {
     ScreenConnectionChanged,
     /// The platform has no native adapter for the requested operation.
     UnsupportedPlatform,
+    /// A debug build's live-check request budget is spent, so nothing was sent.
+    LiveBudgetSpent,
 }
 
 macro_rules! catalog {
@@ -197,6 +199,7 @@ impl ErrorKey {
         ScreenConnectionChanged,
         ConnectionNeeded,
         UnsupportedPlatform,
+        LiveBudgetSpent,
     }
 }
 

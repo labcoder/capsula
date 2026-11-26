@@ -754,6 +754,7 @@ const fn error_id(key: ErrorKey) -> &'static str {
         ErrorKey::ScreenPictureStopped => "error-screen-picture-stopped",
         ErrorKey::ScreenConnectionChanged => "error-screen-connection-changed",
         ErrorKey::ConnectionNeeded => "error-connection-needed",
+        ErrorKey::LiveBudgetSpent => "error-live-budget-spent",
     }
 }
 
@@ -901,6 +902,24 @@ mod tests {
         )
         .expect("within the limits");
         assert_eq!(strings.error(&error), "Wait 30 s for 3 more");
+    }
+
+    #[test]
+    fn a_spent_test_budget_says_so_rather_than_a_refusal() {
+        let strings = Strings::english();
+        let text = |key: ErrorKey| strings.error(&key.into());
+        assert_eq!(
+            text(ErrorKey::LiveBudgetSpent),
+            "The test request budget for this session is used up. Relaunch to reset it."
+        );
+        assert_eq!(
+            text(ErrorKey::ClaudeCodeBudget),
+            "The Claude Code test request limit for this session is used up. Relaunch to reset it."
+        );
+        assert_eq!(
+            text(ErrorKey::RequestRefused),
+            "That request couldn't be accepted. Trying again won't help."
+        );
     }
 
     #[test]

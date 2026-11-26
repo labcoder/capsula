@@ -613,7 +613,10 @@ hears the current list if it isn't empty, and nothing before Claude Code's first
   4. asks with `ask_held` for the launch's deadline plus `SETTLE` (a `Rebuild` writes nothing
      and spends no question);
   5. reserves one question from `KUMOCHI_CLAUDE_QUESTIONS` (debug builds only; out means
-     `ClaudeCodeBudget` and the lease goes back unused);
+     `ClaudeCodeBudget` and the lease goes back unused). Every seeded launch reserves one, not
+     every user turn: a compaction the run needs before its answer, and the title and compaction
+     jobs after it, each count, so a cap of 1 can be spent before a long thread's first answer;
+     `claude-question` budgets its title job for this reason;
   6. moves the lease into the launch, and seeds.
 
   Then every init goes through the one `PostSeedAudit`. The gate passes only after the first one

@@ -213,6 +213,10 @@ fn control_messages_and_error_keys_keep_their_wire_tags() {
         postcard::to_allocvec(&ErrorKey::UnsupportedPlatform).unwrap(),
         [53]
     );
+    assert_eq!(
+        postcard::to_allocvec(&ErrorKey::LiveBudgetSpent).unwrap(),
+        [54]
+    );
 }
 
 #[test]

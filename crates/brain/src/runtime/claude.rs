@@ -93,7 +93,7 @@ pub(crate) struct Claude {
     /// Calls handed to the coordinator that wait on their settlement.
     waiting: Vec<mcp::Waiter>,
     clock: Clock,
-    /// The questions seeds may still take.
+    /// The launches that may still be seeded: questions, inline compactions and jobs alike.
     budget: Arc<Budget>,
     /// The tag runs on Claude Code are bound to, while a launch would be admitted.
     epoch: Option<Epoch>,
