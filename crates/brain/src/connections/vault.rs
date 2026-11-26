@@ -32,7 +32,7 @@ mod github;
 mod repair;
 pub(crate) mod staging;
 
-pub(crate) use repair::{CutoffRequest, HistoryBinding, HistoryLink, Proof, RepairStop, Work};
+pub(crate) use repair::{CutoffRequest, HistoryBinding, HistoryLink, Proof};
 
 /// Removed generations one sweep pass visits [guess]; the rest wait for the next pass.
 const SWEEP: usize = 16;
@@ -75,14 +75,9 @@ pub struct Vault<S: CredentialStore> {
     repair_lease: Option<repair::RepairLease>,
     authority: Authority,
     history: HistoryLink,
-    /// This vault's identity; a replacement token it issues is spent only through its own writer.
-    incarnation: std::sync::Arc<()>,
     store: S,
     service: String,
     paste: Option<authority::WritePlan>,
-    /// Runs once inside the next repair bind, right after its claim.
-    #[cfg(test)]
-    after_claim: Option<Box<dyn FnOnce() + Send>>,
     _session: Arc<SessionLock>,
 }
 
@@ -230,12 +225,9 @@ impl<S: CredentialStore> Vault<S> {
             repair_lease: None,
             authority,
             history,
-            incarnation: std::sync::Arc::new(()),
             store,
             service: service.to_owned(),
             paste: None,
-            #[cfg(test)]
-            after_claim: None,
             _session: session,
         };
         vault.sweep_legacy();
@@ -886,4 +878,4 @@ pub(super) fn valid_host(host: &str) -> bool {
 #[cfg(test)]
 pub(crate) mod fake;
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

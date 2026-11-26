@@ -330,7 +330,6 @@ fn received(refresh: Option<&str>, subject: &str, scope: &str) -> Result<Receive
         identity: Ok(VerifiedIdentity {
             subject: secret(subject),
             email: Some(secret(EMAIL)),
-            expires_at: NOW + 3600,
         }),
         now: Some(NOW),
         connection: 1,
@@ -1233,7 +1232,6 @@ fn no_secret_reaches_the_logs_or_debug_output() {
             identity: Ok(VerifiedIdentity {
                 subject: secret("subject-SENTINEL"),
                 email: Some(secret("SENTINEL@example.invalid")),
-                expires_at: NOW + 3600,
             }),
             now: Some(NOW),
             connection: 1,

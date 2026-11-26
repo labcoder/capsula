@@ -650,13 +650,7 @@ fn serve_op(
             let Some(request) = slot.take() else {
                 return;
             };
-            if request.establishes() {
-                purger.op_arriving();
-                store.serve_cutoff(request);
-                purger.op_arrived(store);
-            } else {
-                store.serve_cutoff(request);
-            }
+            store.serve_cutoff(request);
         }
         StoreOp::ClearScenes { scenes } => {
             purger.op_arriving();

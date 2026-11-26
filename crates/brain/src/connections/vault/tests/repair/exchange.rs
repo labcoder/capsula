@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::task::{Context, Waker};
 
 use crate::connections::authority::Current;
-use crate::connections::clock::FixedClock;
 use crate::connections::oauth::exchange::{Scripted, authorization, tokens};
 use crate::connections::records::MAX_TOKEN_BYTES;
 use crate::connections::vault::repair::exchange::RepairSettlement;
@@ -42,13 +41,12 @@ async fn retiring_either_owner_suppresses_unsent_work_or_keeps_the_charge_unreso
             let mut vault = open(&store, &service, &path);
             let (_, attempt) = admitted(&mut vault, &store);
             let dispatch = vault
-                .charge_repair_exchange(&attempt, authorization())
+                .charge_repair_exchange(&attempt, &authorization())
                 .unwrap();
             let resume = Arc::new(tokio::sync::Notify::new());
             let scripted = Scripted::new(200, serde_json::to_vec(&tokens()).unwrap())
                 .with_pause(Arc::clone(&resume));
-            let mut pending =
-                std::pin::pin!(dispatch.receive(&scripted, &FixedClock(1_800_000_000)));
+            let mut pending = std::pin::pin!(dispatch.receive(&scripted));
             if claim {
                 let mut context = Context::from_waker(Waker::noop());
                 assert!(pending.as_mut().poll(&mut context).is_pending());
@@ -82,18 +80,16 @@ async fn invalid_callback_does_not_spend_the_admitted_slot() {
     invalid.code = Secret::new(Zeroizing::new("x".repeat(MAX_TOKEN_BYTES + 1)));
     let scripted = Scripted::new(200, serde_json::to_vec(&tokens()).unwrap());
     assert!(matches!(
-        vault.charge_repair_exchange(&attempt, invalid),
+        vault.charge_repair_exchange(&attempt, &invalid),
         Err(VaultError::Fenced)
     ));
     assert_eq!(settlement(&path), ("browser".into(), false));
     assert_eq!(store.names(), names);
     assert_eq!(scripted.request_count(), 0);
     let dispatch = vault
-        .charge_repair_exchange(&attempt, authorization())
+        .charge_repair_exchange(&attempt, &authorization())
         .unwrap();
-    let _receipt = dispatch
-        .receive(&scripted, &FixedClock(1_800_000_000))
-        .await;
+    let _receipt = dispatch.receive(&scripted).await;
     assert_eq!(scripted.request_count(), 1);
 }
 
@@ -104,26 +100,24 @@ async fn cancelling_before_dispatch_sends_nothing_and_spends_the_charge_once() {
     let (old, first) = admitted(&mut vault, &store);
     vault.cancel_repair_admission(&first).unwrap();
     assert!(matches!(
-        vault.charge_repair_exchange(&first, authorization()),
+        vault.charge_repair_exchange(&first, &authorization()),
         Err(VaultError::Fenced)
     ));
 
     let mut second = vault.confirm_repair(old, || true).unwrap();
     let dispatch = vault
-        .charge_repair_exchange(&second, authorization())
+        .charge_repair_exchange(&second, &authorization())
         .unwrap();
     assert_eq!(settlement(&path), ("exchange".into(), false));
     assert!(vault.confirm_repair(old, || true).is_err());
     assert!(matches!(vault.load_account(), Err(VaultError::Authority)));
     assert!(matches!(
-        vault.charge_repair_exchange(&second, authorization()),
+        vault.charge_repair_exchange(&second, &authorization()),
         Err(VaultError::Authority)
     ));
     vault.cancel_repair_admission(&second).unwrap();
     let scripted = Scripted::new(200, serde_json::to_vec(&tokens()).unwrap());
-    let mut receipt = dispatch
-        .receive(&scripted, &FixedClock(1_800_000_000))
-        .await;
+    let mut receipt = dispatch.receive(&scripted).await;
     assert_eq!(scripted.request_count(), 0);
     assert!(matches!(
         vault.settle_repair_exchange(&mut second, &mut receipt),
@@ -145,7 +139,7 @@ async fn a_canceled_unusable_exchange_keeps_its_exact_issued_handle() {
     vault.cancel_repair_admission(&earlier).unwrap();
     let mut attempt = vault.confirm_repair(old, || true).unwrap();
     let dispatch = vault
-        .charge_repair_exchange(&attempt, authorization())
+        .charge_repair_exchange(&attempt, &authorization())
         .unwrap();
 
     let mut response = tokens();
@@ -153,7 +147,7 @@ async fn a_canceled_unusable_exchange_keeps_its_exact_issued_handle() {
     let resume = Arc::new(tokio::sync::Notify::new());
     let scripted =
         Scripted::new(200, serde_json::to_vec(&response).unwrap()).with_pause(Arc::clone(&resume));
-    let mut pending = std::pin::pin!(dispatch.receive(&scripted, &FixedClock(1_800_000_000)));
+    let mut pending = std::pin::pin!(dispatch.receive(&scripted));
     let mut context = Context::from_waker(Waker::noop());
     assert!(pending.as_mut().poll(&mut context).is_pending());
     assert_eq!(scripted.request_count(), 1);
@@ -173,7 +167,7 @@ async fn a_canceled_unusable_exchange_keeps_its_exact_issued_handle() {
     ));
     assert!(matches!(
         vault.settle_repair_exchange(&mut attempt, &mut receipt),
-        Ok(RepairSettlement::Escrowed(None))
+        Ok(RepairSettlement::Escrowed)
     ));
     assert!(matches!(
         vault.settle_repair_exchange(&mut attempt, &mut receipt),
@@ -216,7 +210,7 @@ async fn retired_repair_client_and_other_provider_key_sweep_together() {
     );
     let (_, mut attempt) = admitted(&mut vault, &store);
     let dispatch = vault
-        .charge_repair_exchange(&attempt, authorization())
+        .charge_repair_exchange(&attempt, &authorization())
         .unwrap();
     let client: String = raw(&path)
         .query_row(
@@ -227,12 +221,10 @@ async fn retired_repair_client_and_other_provider_key_sweep_together() {
         .unwrap();
     let client = generation_target(&service, "repair", &client, 0);
     let scripted = Scripted::new(200, serde_json::to_vec(&tokens()).unwrap());
-    let mut receipt = dispatch
-        .receive(&scripted, &FixedClock(1_800_000_000))
-        .await;
+    let mut receipt = dispatch.receive(&scripted).await;
     assert!(matches!(
         vault.settle_repair_exchange(&mut attempt, &mut receipt),
-        Ok(RepairSettlement::Escrowed(Some(_)))
+        Ok(RepairSettlement::Escrowed)
     ));
     assert!(store.get(&client).unwrap().is_some());
     assert!(store.get(&old_key).unwrap().is_some());
@@ -258,16 +250,14 @@ async fn missing_or_refused_settlement_stays_fenced_without_retry() {
         let mut vault = open(&store, &service, &path);
         let (old, mut attempt) = admitted(&mut vault, &store);
         let dispatch = vault
-            .charge_repair_exchange(&attempt, authorization())
+            .charge_repair_exchange(&attempt, &authorization())
             .unwrap();
         let scripted = if issued {
             Scripted::new(200, serde_json::to_vec(&tokens()).unwrap())
         } else {
             Scripted::new(500, b"{}".to_vec())
         };
-        let mut receipt = dispatch
-            .receive(&scripted, &FixedClock(1_800_000_000))
-            .await;
+        let mut receipt = dispatch.receive(&scripted).await;
         assert_eq!(scripted.request_count(), 1);
         store.0.lock().unwrap().refusing = issued;
 

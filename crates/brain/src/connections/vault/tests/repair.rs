@@ -1,7 +1,6 @@
 use super::*;
 
 mod exchange;
-pub(crate) mod promotion;
 
 fn account_chunk(vault: &Vault<FakeStore>, index: usize) -> String {
     let active = vault
