@@ -118,6 +118,11 @@ impl<'a> Scripted<'a> {
 }
 
 impl Prerequisites for Scripted<'_> {
+    /// The fixtures open a fake vault, so there's no Keychain to check.
+    fn preflight(&mut self, _: &mut dyn FnMut() -> bool) -> Result<(), ParentBoundError> {
+        Ok(())
+    }
+
     fn ready(&self) -> Result<(), NotReady> {
         self.lose_at(LoseAt::Ready);
         Ok(())

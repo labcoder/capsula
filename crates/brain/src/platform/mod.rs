@@ -58,6 +58,10 @@ impl crate::startup::parent_bound::AdmissionPair for InheritedPair {
     type Keyed = Self;
     type Greeted = Self;
 
+    fn ended(&self) -> bool {
+        match self.0 {}
+    }
+
     fn key(self, _: &[u8; kumochi_protocol::message::CAPABILITY_LEN]) -> Option<Self> {
         match self.0 {}
     }
@@ -157,6 +161,10 @@ impl InstanceLock {
     pub(crate) fn fresh(&self) -> bool {
         match *self {}
     }
+
+    pub(crate) fn intact(&self) -> bool {
+        match *self {}
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -205,6 +213,11 @@ pub(crate) fn instance_custody_at(_: &std::path::Path) -> Result<InstanceLock, C
     Err(CustodyError::NotAdmitted)
 }
 
+#[cfg(all(test, feature = "first-light", not(target_os = "macos")))]
+pub(crate) fn fresh_custody_at(_: &std::path::Path) -> Result<InstanceLock, CustodyError> {
+    Err(CustodyError::NotAdmitted)
+}
+
 /// A fresh Support folder for the instance item's native fixtures, and its cleanup; only macOS
 /// has them.
 #[cfg(all(test, not(target_os = "macos")))]
@@ -217,6 +230,8 @@ pub(crate) fn instance_fixture_clean(_: &std::path::Path, _: &[&str]) {
     panic!("only macOS has the instance item's native fixtures")
 }
 
+#[cfg(all(test, target_os = "macos", feature = "first-light"))]
+pub(crate) use macos::instance::fresh_lock_at as fresh_custody_at;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use macos::instance::lock_at as instance_custody_at;
 #[cfg(all(test, target_os = "macos"))]

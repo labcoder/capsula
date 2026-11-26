@@ -119,6 +119,23 @@ pub(super) fn inherited() -> (InheritedPair, [UnixStream; 2]) {
     (pair, shell)
 }
 
+/// Before READY the shell writes nothing: an ended leg, or a byte on either, shows as ended.
+#[tokio::test]
+async fn the_pair_shows_ended_for_a_closed_leg_or_an_early_byte() {
+    use crate::startup::parent_bound::AdmissionPair as _;
+
+    let (pair, [control, data]) = inherited();
+    assert!(!pair.ended(), "both legs open and quiet");
+    drop(data);
+    assert!(pair.ended(), "the data leg ended");
+    drop(control);
+
+    let (pair, [control, _data]) = inherited();
+    control.writable().await.expect("room for a byte");
+    assert_eq!(control.try_write(b"x").expect("an early byte"), 1);
+    assert!(pair.ended(), "a byte before READY");
+}
+
 /// Fills the brain's control buffer to the last byte, so READY has to wait for room. Sleeps first,
 /// so the reactor takes registration's writable event and the fill's `WouldBlock` clears it.
 async fn fill(pair: &RegisteredPair) {

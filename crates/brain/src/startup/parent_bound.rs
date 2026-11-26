@@ -19,6 +19,7 @@ use super::instance::{InstanceAttempt, InstanceStore, OwnedKey};
 use super::{Checkpoint, OpenedState, Stages, VaultHeld};
 use crate::config::tuning::{OAuthTuning, TokenTuning};
 use crate::connections::model::budget::Budget;
+use crate::platform::credential::CredentialStoreError;
 use crate::platform::shell_process::Committed;
 use crate::platform::{self, Job, Mode, SessionLock, ShellProcess};
 use crate::runtime::{Brain, Ended, Quit, Shutdown, Stage, Terminal, account::Accounts};
@@ -35,6 +36,12 @@ pub(in crate::startup) struct NotReady;
 
 /// What parent-bound startup takes from outside the shared stages.
 pub(in crate::startup) trait Prerequisites {
+    /// Checks what must hold before custody makes anything, asking `live` before each native
+    /// call and stopping for good once it says no; a call already made may finish.
+    ///
+    /// # Errors
+    /// `Busy` when an earlier build's state may be there, otherwise `Refused`.
+    fn preflight(&mut self, live: &mut dyn FnMut() -> bool) -> Result<(), ParentBoundError>;
     /// Refuses until every prerequisite is in place, before any process effect.
     fn ready(&self) -> Result<(), NotReady>;
     /// Starts the process-wide services once the claim is committed.
@@ -65,13 +72,16 @@ pub(in crate::startup) struct ProcessInit {
 }
 
 /// First light's prerequisites: ready only where parent-bound is supported, the macOS
-/// `first-light` Dev build. The root must be one custody created, with nothing a store, the
-/// settings or a purge would act on; there's no file log, no helpers and one model request.
+/// `first-light` Dev build. No name an earlier build wrote may be in the Keychain, the root must
+/// be one custody created, with nothing a store, the settings or a purge would act on; there's no
+/// file log, no helpers and one model request.
 pub(in crate::startup) struct FirstLight {
     /// The run's model requests; OAuth and catalog traffic never draw on it.
     budget: Budget,
     /// Set by the first `open`, so a refused root stays refused.
     opened: bool,
+    /// The latched legacy check: the platform's, or a test's.
+    legacy: fn(&mut dyn FnMut() -> bool) -> Result<(), CredentialStoreError>,
 }
 
 impl FirstLight {
@@ -79,11 +89,19 @@ impl FirstLight {
         Self {
             budget: Budget::limited(Some(1)),
             opened: false,
+            legacy: platform::credential::legacy_preflight,
         }
     }
 }
 
 impl Prerequisites for FirstLight {
+    fn preflight(&mut self, live: &mut dyn FnMut() -> bool) -> Result<(), ParentBoundError> {
+        (self.legacy)(live).map_err(|error| match error {
+            CredentialStoreError::Legacy => ParentBoundError::Busy,
+            _ => ParentBoundError::Refused,
+        })
+    }
+
     fn ready(&self) -> Result<(), NotReady> {
         if platform::supports(Mode::ParentBound) {
             Ok(())
@@ -138,8 +156,9 @@ impl Prerequisites for FirstLight {
 }
 
 /// Whether `folder` holds nothing the store, the authority, the settings or a purge would act
-/// on: either database or its WAL, shared-memory or rollback journal, the settings file, or any
-/// file a purge leaves. One that can't be checked counts as there.
+/// on: either database or its WAL, shared-memory or rollback journal, the settings file or the
+/// temporary one a settings write unlinks, or any file a purge leaves. One that can't be checked
+/// counts as there.
 fn untouched(folder: &Path) -> bool {
     let databases = [STORE_FILE, AUTHORITY_FILE].into_iter().flat_map(|db| {
         ["", "-wal", "-shm", "-journal"].map(|suffix| {
@@ -150,7 +169,10 @@ fn untouched(folder: &Path) -> bool {
     });
     let store = folder.join(STORE_FILE);
     databases
-        .chain([folder.join(CONFIG_FILE)])
+        .chain([
+            folder.join(CONFIG_FILE),
+            folder.join(format!("{CONFIG_FILE}.tmp")),
+        ])
         .chain(crate::store::purge_files(&store))
         .all(|path| {
             std::fs::symlink_metadata(path)
@@ -162,7 +184,8 @@ fn untouched(folder: &Path) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Settled {
     pub(in crate::startup) runtime: Shutdown,
-    /// The instance attempt's settlement; Confirmed when there was none.
+    /// The instance attempt's settlement, Failed once a root its custody made stops passing;
+    /// Confirmed when there was none.
     pub(crate) item: Stage,
 }
 
@@ -170,6 +193,9 @@ pub(crate) struct Settled {
 pub(crate) trait AdmissionPair {
     type Keyed;
     type Greeted;
+    /// Whether either leg already ended, or holds bytes the shell may not send before READY,
+    /// seen without waiting or reading.
+    fn ended(&self) -> bool;
     /// Keys the responder from `key`; the caller wipes its own copy right after.
     fn key(self, key: &[u8; CAPABILITY_LEN]) -> Option<Self::Keyed>;
     /// READY, the handshake and the greeting by `by`; `reserve` reserves Welcome's session.
@@ -354,7 +380,8 @@ impl<S: InstanceStore> Root<S> {
         Ok((greeted, committed))
     }
 
-    /// Admits, then runs the stages, then serves until the runtime ends. Returns the greeted pair
+    /// Runs the preflight on the parent, the deadline and the pair, then admits, then runs the
+    /// stages, then serves until the runtime ends. Returns the greeted pair
     /// too, once there is one, so its legs close only at settlement; a fatal end drops it here,
     /// so the shell sees EOF before any cleanup is awaited.
     async fn serve<P: AdmissionPair>(
@@ -366,6 +393,15 @@ impl<S: InstanceStore> Root<S> {
         custody: impl FnOnce() -> Result<SessionCustody, CustodyError>,
         store: impl FnOnce() -> Result<S, S::Error>,
     ) -> (Result<Ended, ParentBoundError>, Option<P::Greeted>) {
+        let mut live = || shell.fence().is_ok() && Instant::now() < by && !pair.ended();
+        if let Err(refused) = pre.preflight(&mut live) {
+            let refused = if live() {
+                refused
+            } else {
+                ParentBoundError::Refused
+            };
+            return (Err(refused), None);
+        }
         let (mut greeted, committed) = match self.admit(pair, shell, by, custody, store).await {
             Ok(admitted) => admitted,
             Err(refused) => return (Err(refused), None),
@@ -418,8 +454,8 @@ impl<S: InstanceStore> Root<S> {
 
     /// Quits the Brain by `quit` after an accepted Quit, closes it otherwise, or closes whatever
     /// started without one; drops the helpers, then `pair`, so the shell sees EOF only after
-    /// those; then settles the instance attempt under custody, drops custody, and only then the
-    /// process services.
+    /// those; then settles the instance attempt under custody, checks again that a root custody
+    /// made is still the one it made, drops custody, and only then the process services.
     pub(crate) async fn settle(self, quit: Option<Instant>, pair: impl Sized) -> Settled {
         let Self {
             admitting: _,
@@ -435,7 +471,14 @@ impl<S: InstanceStore> Root<S> {
         drop(stages);
         drop(pair);
         let item = match instance.as_mut() {
-            Some(attempt) => attempt.settle().await,
+            Some(attempt) => {
+                let settled = attempt.settle().await;
+                if attempt.custody().intact() {
+                    settled
+                } else {
+                    Stage::Failed
+                }
+            }
             None => Stage::Confirmed,
         };
         drop(instance);

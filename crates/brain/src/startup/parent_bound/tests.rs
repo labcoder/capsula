@@ -304,11 +304,12 @@ fn first_light_allows_one_model_request_and_refuses_the_second() {
 }
 
 /// A pair that records how far it was driven: 1 once keyed, 2 once greeted, 3 once served, when
-/// serving ends as `ends`.
+/// serving ends as `ends`; `end` shows its legs ended.
 #[derive(Clone)]
 struct FakePair {
     reached: Arc<std::sync::atomic::AtomicU8>,
     ends: Ended,
+    ended: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for FakePair {
@@ -322,7 +323,12 @@ impl FakePair {
         Self {
             reached: Arc::default(),
             ends,
+            ended: Arc::default(),
         }
+    }
+
+    fn end(&self) {
+        self.ended.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn reached(&self) -> u8 {
@@ -338,6 +344,10 @@ impl FakePair {
 impl AdmissionPair for FakePair {
     type Keyed = Self;
     type Greeted = Self;
+
+    fn ended(&self) -> bool {
+        self.ended.load(std::sync::atomic::Ordering::SeqCst)
+    }
 
     fn key(self, _: &[u8; CAPABILITY_LEN]) -> Option<Self> {
         self.reach(1);
@@ -600,6 +610,10 @@ struct Unready {
     reason = "a stage that runs before readiness fails the test"
 )]
 impl Prerequisites for Unready {
+    fn preflight(&mut self, _: &mut dyn FnMut() -> bool) -> Result<(), ParentBoundError> {
+        Ok(())
+    }
+
     fn ready(&self) -> Result<(), NotReady> {
         assert!(self.ask, "readiness is asked only after the entry fence");
         Err(NotReady)
@@ -625,6 +639,118 @@ impl Prerequisites for Unready {
     fn containment(&mut self) -> Result<Option<Arc<Job>>, BrainError> {
         panic!("containment is asked only once ready")
     }
+}
+
+/// A preflight over three native calls that fires `during` while its first call is in flight,
+/// counting the calls it made and refusing the way first light does once `live` says no. No
+/// later stage may run.
+struct Checking<F> {
+    during: F,
+    made: usize,
+}
+
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "a stage that runs after a refused preflight fails the test"
+)]
+impl<F: FnMut()> Prerequisites for Checking<F> {
+    fn preflight(&mut self, live: &mut dyn FnMut() -> bool) -> Result<(), ParentBoundError> {
+        for _ in 0..3 {
+            if !live() {
+                return Err(ParentBoundError::Busy);
+            }
+            self.made += 1;
+            if self.made == 1 {
+                (self.during)();
+            }
+        }
+        Ok(())
+    }
+
+    fn ready(&self) -> Result<(), NotReady> {
+        panic!("readiness is asked only after admission")
+    }
+
+    fn init(&mut self) -> Result<ProcessInit, BrainError> {
+        panic!("init runs only after admission")
+    }
+
+    fn open(&mut self, _: &SessionCustody, _: &mut bool) -> Result<OpenedState, BrainError> {
+        panic!("open runs only after admission")
+    }
+
+    fn accounts(
+        &mut self,
+        _: OAuthTuning,
+        _: TokenTuning,
+        _: Arc<SessionLock>,
+    ) -> Result<(Accounts, VaultHeld), BrainError> {
+        panic!("accounts start only after admission")
+    }
+
+    fn containment(&mut self) -> Result<Option<Arc<Job>>, BrainError> {
+        panic!("containment is asked only after admission")
+    }
+}
+
+/// The parent lost, the pair ended or the deadline passed while a preflight call is in flight:
+/// no further call is made, nothing after it runs, and the refusal is the loss's, not Busy.
+#[tokio::test]
+async fn a_preflight_stops_at_a_lost_parent_an_ended_pair_or_the_deadline() {
+    for signal in ["parent", "pair", "deadline"] {
+        let shell = live();
+        let pair = FakePair::default();
+        let soon = Instant::now() + Duration::from_millis(200);
+        let by = if signal == "deadline" { soon } else { later() };
+        let mut pre = Checking {
+            during: || match signal {
+                "parent" => assert!(shell.publish(1), "the loss lands"),
+                "pair" => pair.end(),
+                _ => std::thread::sleep(
+                    soon.into_std()
+                        .saturating_duration_since(std::time::Instant::now()),
+                ),
+            },
+            made: 0,
+        };
+        let ran = Box::pin(run::<Slot, _>(
+            pair.clone(),
+            &shell,
+            by,
+            &mut pre,
+            || panic!("no custody after a refused preflight"),
+            || panic!("no item after a refused preflight"),
+        ))
+        .await;
+        assert_eq!(ran, Err(ParentBoundError::Refused), "{signal}");
+        assert_eq!(pre.made, 1, "{signal}: no call after the one in flight");
+        assert_eq!(pair.reached(), 0, "{signal}: no READY");
+    }
+}
+
+/// With nothing fired the same preflight makes every call and admission goes on to custody.
+#[tokio::test]
+async fn a_preflight_that_stays_live_makes_every_call_before_custody() {
+    let mut pre = Checking {
+        during: || {},
+        made: 0,
+    };
+    let custody = std::cell::Cell::new(false);
+    let ran = Box::pin(run::<Slot, _>(
+        FakePair::default(),
+        &live(),
+        later(),
+        &mut pre,
+        || {
+            custody.set(true);
+            Err(CustodyError::Busy)
+        },
+        || panic!("no item while custody is busy"),
+    ))
+    .await;
+    assert_eq!(ran, Err(ParentBoundError::Busy));
+    assert_eq!(pre.made, 3);
+    assert!(custody.get(), "custody came after the preflight");
 }
 
 #[tokio::test]
@@ -742,15 +868,27 @@ mod first_light {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
 
+    use std::sync::OnceLock;
+
     use kumochi_protocol::constants::{AUTHORITY_FILE, CONFIG_FILE, DATA_DIR, STORE_FILE};
+    use objc2_security::{errSecInteractionNotAllowed, errSecItemNotFound, errSecSuccess};
 
     use super::*;
     use crate::fixture_support::held_accounts_until;
+    use crate::platform::credential::legacy_absent;
     use crate::platform::{instance_fixture, instance_fixture_clean};
     use crate::store::StoreError;
 
-    /// First light's ready, open and containment, with offline accounts on a fake vault and no
-    /// process-wide init; it records whether the authority was there before the accounts.
+    type Legacy = fn(&mut dyn FnMut() -> bool) -> Result<(), CredentialStoreError>;
+
+    /// The legacy check on status answers that find every name absent.
+    fn absent(live: &mut dyn FnMut() -> bool) -> Result<(), CredentialStoreError> {
+        legacy_absent(&OnceLock::new(), live, |_| Ok(errSecItemNotFound))
+    }
+
+    /// First light's preflight, ready, open and containment, with the legacy check on fake status
+    /// answers, offline accounts on a fake vault and no process-wide init; it records whether the
+    /// authority was there before the accounts.
     struct Offline {
         inner: FirstLight,
         authority: Option<bool>,
@@ -758,14 +896,25 @@ mod first_light {
 
     impl Offline {
         fn new() -> Self {
+            Self::with(absent)
+        }
+
+        fn with(legacy: Legacy) -> Self {
             Self {
-                inner: FirstLight::new(),
+                inner: FirstLight {
+                    legacy,
+                    ..FirstLight::new()
+                },
                 authority: None,
             }
         }
     }
 
     impl Prerequisites for Offline {
+        fn preflight(&mut self, live: &mut dyn FnMut() -> bool) -> Result<(), ParentBoundError> {
+            self.inner.preflight(live)
+        }
+
         fn ready(&self) -> Result<(), NotReady> {
             self.inner.ready()
         }
@@ -798,6 +947,48 @@ mod first_light {
         }
     }
 
+    /// The fixture item, which moves custody's root aside for an empty stand-in at its first
+    /// delete: in settlement, after the store closed and before custody's last check.
+    struct Swapping {
+        slot: Slot,
+        support: PathBuf,
+        swapped: std::sync::atomic::AtomicBool,
+    }
+
+    impl InstanceStore for Swapping {
+        type Error = ();
+
+        fn add(&self, key: &[u8; CAPABILITY_LEN]) -> Result<Added, ()> {
+            self.slot.add(key)
+        }
+
+        fn inspect(&self) -> Result<(), ()> {
+            self.slot.inspect()
+        }
+
+        fn update(&self, key: &[u8; CAPABILITY_LEN]) -> Result<(), ()> {
+            self.slot.update(key)
+        }
+
+        fn read(&self, into: &mut [u8; CAPABILITY_LEN]) -> Result<(), ()> {
+            self.slot.read(into)
+        }
+
+        fn delete(&self) -> Result<(), ()> {
+            use std::os::unix::fs::DirBuilderExt as _;
+
+            if !self.swapped.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let product = self.support.join(DATA_DIR);
+                std::fs::rename(&product, self.support.join("moved")).expect("move the root");
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&product)
+                    .expect("a stand-in root");
+            }
+            self.slot.delete()
+        }
+    }
+
     fn entries(folder: &Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(folder)
             .expect("the product folder")
@@ -813,20 +1004,29 @@ mod first_light {
         names
     }
 
-    fn clean(support: &Path) {
-        let product = support.join(DATA_DIR);
-        let names = if product.exists() {
-            entries(&product)
-        } else {
-            Vec::new()
-        };
-        instance_fixture_clean(
-            support,
-            &names.iter().map(String::as_str).collect::<Vec<_>>(),
-        );
+    fn sorted(names: &[&str]) -> Vec<String> {
+        let mut names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+        names.sort();
+        names
     }
 
-    async fn run_quit(support: &Path, pre: &mut Offline) -> Result<(), ParentBoundError> {
+    /// Removes exactly `expected` once the product folder holds exactly that, then the folders;
+    /// anything else is left in place, and the assertion names it.
+    fn clean(support: &Path, expected: &[&str]) {
+        assert_eq!(
+            entries(&support.join(DATA_DIR)),
+            sorted(expected),
+            "the fixture holds only what the run should make"
+        );
+        instance_fixture_clean(support, expected);
+    }
+
+    /// A Quit run on fresh custody in `support`; `item` makes the instance store.
+    async fn run_quit<S: InstanceStore>(
+        support: &Path,
+        pre: &mut Offline,
+        item: impl FnOnce() -> Result<S, S::Error>,
+    ) -> Result<(), ParentBoundError> {
         timeout(
             PATIENCE,
             Box::pin(run(
@@ -834,12 +1034,20 @@ mod first_light {
                 &live(),
                 later(),
                 pre,
-                || SessionCustody::bootstrap_at(support),
-                || Ok(Slot::default()),
+                || SessionCustody::fresh_at(support),
+                item,
             )),
         )
         .await
         .expect("the run settles")
+    }
+
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "an item made for a refused root fails the test"
+    )]
+    fn no_item() -> Result<Slot, ()> {
+        panic!("a refused root publishes no item")
     }
 
     fn refused_root(result: &Result<OpenedState, BrainError>) -> bool {
@@ -850,6 +1058,9 @@ mod first_light {
         )
     }
 
+    /// What a Quit run leaves in its root: the lock, the store and the authority, closed.
+    const RAN: [&str; 3] = [SESSION_LOCK, STORE_FILE, AUTHORITY_FILE];
+
     #[tokio::test]
     #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
     async fn a_fresh_root_serves_a_quit_cleanly_and_a_second_run_on_it_is_refused() {
@@ -857,32 +1068,28 @@ mod first_light {
         let product = support.join(DATA_DIR);
         let mut first = Offline::new();
         let budget = first.inner.budget.clone();
-        assert_eq!(run_quit(&support, &mut first).await, Ok(()));
+        assert_eq!(
+            run_quit(&support, &mut first, || Ok(Slot::default())).await,
+            Ok(())
+        );
         assert_eq!(
             first.authority,
             Some(true),
             "the open created the authority"
         );
-        assert!(product.join(STORE_FILE).is_file());
-        assert!(!product.join("logs").exists(), "no file log");
+        assert_eq!(entries(&product), sorted(&RAN), "no file log, nothing else");
         assert_eq!(
             budget.spent(),
             0,
             "admission and serving send no model request"
         );
-        let before = entries(&product);
         let mut second = Offline::new();
         assert_eq!(
-            run_quit(&support, &mut second).await,
+            run_quit(&support, &mut second, no_item).await,
             Err(ParentBoundError::Refused)
         );
         assert_eq!(second.authority, None, "no accounts start on a used root");
-        assert_eq!(
-            entries(&product),
-            before,
-            "a refused root is left as it was"
-        );
-        clean(&support);
+        clean(&support, &RAN);
     }
 
     #[tokio::test]
@@ -892,12 +1099,89 @@ mod first_light {
         drop(SessionCustody::bootstrap_at(&support).expect("an earlier custody made the root"));
         let mut pre = Offline::new();
         assert_eq!(
-            run_quit(&support, &mut pre).await,
+            run_quit(&support, &mut pre, no_item).await,
             Err(ParentBoundError::Refused)
         );
         assert_eq!(pre.authority, None);
-        assert_eq!(entries(&support.join(DATA_DIR)), [SESSION_LOCK]);
-        clean(&support);
+        clean(&support, &[SESSION_LOCK]);
+    }
+
+    /// Custody's root moved away before settlement ended: the store and the item settle, but the
+    /// run doesn't settle clean.
+    #[tokio::test]
+    #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+    async fn a_root_replaced_during_the_run_does_not_settle_clean() {
+        let support = instance_fixture("fl-swapped");
+        let (product, moved) = (support.join(DATA_DIR), support.join("moved"));
+        let item = Swapping {
+            slot: Slot::default(),
+            support: support.clone(),
+            swapped: false.into(),
+        };
+        assert_eq!(
+            run_quit(&support, &mut Offline::new(), || Ok(item)).await,
+            Err(ParentBoundError::Incomplete)
+        );
+        assert!(
+            entries(&product).is_empty(),
+            "nothing landed in the stand-in"
+        );
+        std::fs::remove_dir(&product).expect("remove the stand-in");
+        std::fs::rename(&moved, &product).expect("restore the root");
+        clean(&support, &RAN);
+    }
+
+    fn present(live: &mut dyn FnMut() -> bool) -> Result<(), CredentialStoreError> {
+        legacy_absent(&OnceLock::new(), live, |_| Ok(errSecSuccess))
+    }
+
+    fn unanswered(live: &mut dyn FnMut() -> bool) -> Result<(), CredentialStoreError> {
+        legacy_absent(&OnceLock::new(), live, |_| {
+            Err(CredentialStoreError::Read(errSecInteractionNotAllowed))
+        })
+    }
+
+    fn unadmitted(_: &mut dyn FnMut() -> bool) -> Result<(), CredentialStoreError> {
+        Err(CredentialStoreError::Unsupported)
+    }
+
+    /// A start whose preflight refuses: nothing after it runs, custody and the item included.
+    async fn refused_start(legacy: Legacy) -> (Result<(), ParentBoundError>, FakePair, Offline) {
+        let pair = FakePair::ending(Ended::Quit { deadline: later() });
+        let mut pre = Offline::with(legacy);
+        let ran = timeout(
+            PATIENCE,
+            Box::pin(run::<Slot, _>(
+                pair.clone(),
+                &live(),
+                later(),
+                &mut pre,
+                || panic!("no custody, so no root"),
+                no_item,
+            )),
+        )
+        .await
+        .expect("the run settles");
+        (ran, pair, pre)
+    }
+
+    #[tokio::test]
+    async fn a_legacy_name_present_or_unanswered_is_busy_before_custody_makes_a_root() {
+        let cases: [(Legacy, &str); 2] = [(present, "present"), (unanswered, "an error")];
+        for (legacy, label) in cases {
+            let (ran, pair, pre) = refused_start(legacy).await;
+            assert_eq!(ran, Err(ParentBoundError::Busy), "{label}");
+            assert_eq!(pair.reached(), 0, "{label}: no READY and no serving");
+            assert_eq!(pre.authority, None, "{label}: no store or vault opened");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unadmitted_store_is_refused_before_custody_makes_a_root() {
+        let (ran, pair, pre) = refused_start(unadmitted).await;
+        assert_eq!(ran, Err(ParentBoundError::Refused));
+        assert_eq!(pair.reached(), 0);
+        assert_eq!(pre.authority, None);
     }
 
     /// Every file first light refuses to find in a fresh root, written out by hand.
@@ -909,6 +1193,7 @@ mod first_light {
             }
         }
         names.push(CONFIG_FILE.to_owned());
+        names.push(format!("{CONFIG_FILE}.tmp"));
         names.push(format!("{STORE_FILE}.purge-old"));
         for copy in [".purge-snapshot", ".purge-clean"] {
             for suffix in ["", "-journal", "-wal", "-shm"] {
@@ -923,10 +1208,10 @@ mod first_light {
     fn a_lone_leftover_in_a_fresh_root_is_refused_for_good_before_the_store_opens() {
         const SENTINEL: &str = "SENTINEL-r2b-7f3a";
         let names = leftovers();
-        assert_eq!(names.len(), 18);
+        assert_eq!(names.len(), 19);
         for name in names {
             let support = instance_fixture(SENTINEL);
-            let custody = SessionCustody::bootstrap_at(&support).expect("fresh custody");
+            let custody = SessionCustody::fresh_at(&support).expect("fresh custody");
             let product = support.join(DATA_DIR);
             let leftover = product.join(&name);
             std::fs::write(&leftover, SENTINEL).expect("plant one leftover");
@@ -952,9 +1237,8 @@ mod first_light {
                 refused_root(&pre.open(&custody, &mut acquired)),
                 "{name}: refusal is final"
             );
-            assert_eq!(entries(&product), [SESSION_LOCK], "{name}");
             drop(custody);
-            clean(&support);
+            clean(&support, &[SESSION_LOCK]);
         }
     }
 
@@ -964,7 +1248,7 @@ mod first_light {
         use std::os::unix::fs::DirBuilderExt as _;
 
         let support = instance_fixture("fl-moved");
-        let custody = SessionCustody::bootstrap_at(&support).expect("fresh custody");
+        let custody = SessionCustody::fresh_at(&support).expect("fresh custody");
         let product = support.join(DATA_DIR);
         let moved = support.join("moved");
         std::fs::rename(&product, &moved).expect("move the created root");
@@ -983,7 +1267,7 @@ mod first_light {
         drop(custody);
         std::fs::remove_dir(&product).expect("remove the stand-in");
         std::fs::rename(&moved, &product).expect("restore the root");
-        clean(&support);
+        clean(&support, &[SESSION_LOCK]);
     }
 
     #[test]
@@ -1045,8 +1329,17 @@ mod first_light {
                 break status;
             }
             if std::time::Instant::now() >= by {
-                child.kill().ok();
-                child.wait().ok();
+                let stopped =
+                    child.kill().is_ok() || child.try_wait().expect("the child's status").is_some();
+                assert!(stopped, "couldn't stop the init child");
+                let reap_by = std::time::Instant::now() + Duration::from_secs(2);
+                while child.try_wait().expect("the child's status").is_none() {
+                    assert!(
+                        std::time::Instant::now() < reap_by,
+                        "the init child didn't exit"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 panic!("the init child didn't end by its deadline");
             }
             std::thread::sleep(Duration::from_millis(10));

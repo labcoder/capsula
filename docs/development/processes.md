@@ -47,13 +47,14 @@ executable maps it to a code:
 | A clean, confirmed quit | 0 |
 | `Unsupported`: the mode, an identity other than Dev, or missing prerequisites | 69 |
 | `Incomplete`: a settlement stage short of confirmed | 70 |
-| `Busy`: another session holds the instance | 75, `BRAIN_EXIT_BUSY`, shared with the shell |
+| `Busy`: another session holds the instance, or first light's legacy stop | 75, `BRAIN_EXIT_BUSY`, shared with the shell |
 | `Refused`: the descriptors, hardening, the parent, the pair, the greeting, the commit claim, or serving that ended other than by a Quit | 76 |
 
 Detached keeps 75 for a busy profile. Without the feature every ParentBound start exits 69 at the
 support check. A `first-light` Dev build with no pair exits 76 and touches nothing; with a pair it
-goes through the parent, the handshake, custody, the item's entitlement and first light's
-prerequisites (architecture.md, "Parent-bound startup").
+goes through the legacy preflight, the parent, custody (which refuses an existing root with 76),
+the item's entitlement, the handshake and first light's prerequisites (architecture.md,
+"Parent-bound startup").
 
 Argument matching uses OS strings without logging them. Non-Unicode input no longer panics: a
 non-Unicode first argument falls through like an unknown flag; a non-Unicode bridge launch is

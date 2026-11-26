@@ -34,13 +34,20 @@ impl fmt::Debug for SessionCustody {
 }
 
 impl SessionCustody {
-    /// Locks the session leaf in the OS-resolved Support folder's product folder, creating only
-    /// that folder when it's missing. Busy refuses, so no item call follows.
+    /// Creates the OS-resolved Support folder's product folder, refusing one already there, and
+    /// locks the session leaf in it. Every refusal comes before any item call.
     pub(in crate::startup) fn bootstrap() -> Result<Self, CustodyError> {
         platform::instance_custody().map(Self::held)
     }
 
-    /// `bootstrap` under a test's own Support folder.
+    /// `bootstrap` under a test's own Support folder, for first light's fixtures.
+    #[cfg(all(test, feature = "first-light"))]
+    pub(crate) fn fresh_at(support: &std::path::Path) -> Result<Self, CustodyError> {
+        platform::fresh_custody_at(support).map(Self::held)
+    }
+
+    /// Custody under a test's own Support folder that holds a product folder already there, and
+    /// is Busy while another holds its lock.
     #[cfg(test)]
     pub(crate) fn bootstrap_at(support: &std::path::Path) -> Result<Self, CustodyError> {
         platform::instance_custody_at(support).map(Self::held)
@@ -62,10 +69,16 @@ impl SessionCustody {
         Some(Arc::new(SessionLock::lent(Loan(Arc::clone(lock)))))
     }
 
-    /// Whether custody created its product folder and the folder's pathname still names it; a
-    /// token custody holds no folder, so it has none.
+    /// Whether custody created its product folder and its held chain still passes; a token
+    /// custody holds no folder, so it has none.
     pub(in crate::startup) fn fresh_root(&self) -> bool {
         self.held.as_ref().is_some_and(|lock| lock.fresh())
+    }
+
+    /// Whether a root custody made still passes its check; custody that made none has none to
+    /// lose.
+    pub(in crate::startup) fn intact(&self) -> bool {
+        self.held.as_ref().is_none_or(|lock| lock.intact())
     }
 
     fn held(lock: platform::InstanceLock) -> Self {

@@ -178,12 +178,13 @@ legacy staging name as defense against earlier writers. Anyone signed in on an e
 connects again, and the revocations it still owed are dropped unsent.
 
 A macOS `first-light` brain replaces that deletion pass in its store, so the shared vault is
-unchanged. Admitting the store checks each of the 262 names by exact selector with a no-UI
-context and status alone, never asking for data or attributes back. Only `errSecItemNotFound` is
-absence. A present item or any other answer refuses the store with `CredentialStoreError::Legacy`
-before the vault opens, so nothing is deleted, the worker doesn't retry it as Busy, and the first
-answer is latched for the process. Once admitted, the vault's deletes of those names are answered
-by that check and never made.
+unchanged. Its parent-bound preflight, before custody makes a root, checks each of the 262 names
+by exact selector with a no-UI context and status alone, never asking for data or attributes
+back, and asks the start's `live` check (parent, pair, clock) before each one. Only
+`errSecItemNotFound` is absence. A present item, any other answer or a no from `live` refuses
+with `CredentialStoreError::Legacy`, which the start answers as `Busy` (75), and the first answer
+is latched for the process. Admitting the store for the vault reads that latch, and the vault's
+deletes of those names are answered by it and never made.
 
 Instance capabilities use keyring instead: `instance_entry(session)` formats the account
 `capability-<u32>` with the session ID in decimal.

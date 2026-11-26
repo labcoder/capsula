@@ -223,7 +223,7 @@ mod legacy {
     #[test]
     fn every_legacy_name_absent_passes_after_checking_each_exactly_once() {
         let mut seen = Vec::new();
-        assert!(legacy_absent(&OnceLock::new(), absent(&mut seen)).is_ok());
+        assert!(legacy_absent(&OnceLock::new(), &mut || true, absent(&mut seen)).is_ok());
         assert_eq!(seen.len(), NAMES);
         let unique: std::collections::BTreeSet<_> = seen.iter().collect();
         assert_eq!(unique.len(), NAMES);
@@ -246,7 +246,7 @@ mod legacy {
             Err(CredentialStoreError::Unsupported),
         ] {
             let mut calls = 0;
-            let result = legacy_absent(&OnceLock::new(), |name| {
+            let result = legacy_absent(&OnceLock::new(), &mut || true, |name| {
                 calls += 1;
                 if name == staging {
                     answer
@@ -269,7 +269,7 @@ mod legacy {
     fn a_present_name_refuses_before_any_later_check() {
         let present = account_target(CREDENTIAL_SERVICE, "signout");
         let mut seen = Vec::new();
-        let result = legacy_absent(&OnceLock::new(), |name| {
+        let result = legacy_absent(&OnceLock::new(), &mut || true, |name| {
             seen.push(name.to_owned());
             Ok(if name == present {
                 errSecSuccess
@@ -284,10 +284,10 @@ mod legacy {
     #[test]
     fn a_refusal_is_final_for_the_process() {
         let latch = OnceLock::new();
-        assert!(legacy_absent(&latch, |_| Ok(errSecSuccess)).is_err());
+        assert!(legacy_absent(&latch, &mut || true, |_| Ok(errSecSuccess)).is_err());
         let mut seen = Vec::new();
         assert!(matches!(
-            legacy_absent(&latch, absent(&mut seen)),
+            legacy_absent(&latch, &mut || true, absent(&mut seen)),
             Err(CredentialStoreError::Legacy)
         ));
         assert!(seen.is_empty(), "a latched refusal checks nothing again");
@@ -295,6 +295,50 @@ mod legacy {
             legacy_delete(&latch, &account_target(CREDENTIAL_SERVICE, "host")),
             Some(Err(CredentialStoreError::Legacy))
         ));
+    }
+
+    #[test]
+    fn a_no_from_live_checks_no_further_name_and_refuses_for_good() {
+        let latch = OnceLock::new();
+        let fired = std::cell::Cell::new(false);
+        let mut seen = 0;
+        let result = legacy_absent(&latch, &mut || !fired.get(), |_| {
+            seen += 1;
+            if seen == 3 {
+                fired.set(true);
+            }
+            Ok(errSecItemNotFound)
+        });
+        assert!(matches!(result, Err(CredentialStoreError::Legacy)));
+        assert_eq!(
+            seen, 3,
+            "the call in flight finished; no later name was asked"
+        );
+        assert_eq!(latch.get(), Some(&false));
+        assert!(matches!(
+            legacy_delete(&latch, &account_target(CREDENTIAL_SERVICE, "host")),
+            Some(Err(CredentialStoreError::Legacy))
+        ));
+    }
+
+    /// The test process never latches the legacy check, so its store's delete of a legacy name
+    /// refuses before the native call.
+    #[test]
+    fn the_store_delete_answers_a_legacy_name_without_the_native_call() {
+        let store = store();
+        assert!(matches!(
+            store.delete_by(&account_target(CREDENTIAL_SERVICE, "host"), |_| {
+                panic!("a legacy name is never deleted")
+            }),
+            Err(CredentialStoreError::Legacy)
+        ));
+        let mut made = false;
+        let other = store.delete_by(&scratch_name(), |_| {
+            made = true;
+            errSecItemNotFound
+        });
+        assert!(matches!(other, Ok(())));
+        assert!(made, "any other name is deleted as usual");
     }
 
     #[test]
@@ -307,7 +351,7 @@ mod legacy {
         ));
         let passed = OnceLock::new();
         let mut seen = Vec::new();
-        assert!(legacy_absent(&passed, absent(&mut seen)).is_ok());
+        assert!(legacy_absent(&passed, &mut || true, absent(&mut seen)).is_ok());
         for name in [host, anthropic_staging_target(CREDENTIAL_SERVICE)] {
             assert!(
                 matches!(legacy_delete(&passed, &name), Some(Ok(()))),

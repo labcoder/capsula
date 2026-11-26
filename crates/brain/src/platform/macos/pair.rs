@@ -162,6 +162,20 @@ impl AdmissionPair for InheritedPair {
     type Keyed = KeyedPair;
     type Greeted = Greeted;
 
+    /// Before READY the shell writes nothing, so a readable leg has ended or broken the order;
+    /// a failed poll counts as ended too.
+    fn ended(&self) -> bool {
+        let mut legs = [&self.control, &self.data].map(|leg| libc::pollfd {
+            fd: leg.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        // SAFETY: `legs` is a live array of two pollfds on descriptors this pair owns, and a zero
+        // timeout returns at once.
+        let ready = unsafe { libc::poll(legs.as_mut_ptr(), 2, 0) };
+        ready != 0
+    }
+
     fn key(self, key: &[u8; SECRET_LEN]) -> Option<KeyedPair> {
         self.keyed(key).ok()
     }

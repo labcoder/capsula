@@ -42,6 +42,10 @@ impl<P: AdmissionPair> AdmissionPair for Observed<P> {
         Option<mpsc::Sender<async_mpsc::UnboundedReceiver<Seen>>>,
     );
 
+    fn ended(&self) -> bool {
+        self.pair.ended()
+    }
+
     fn key(self, key: &[u8; CAPABILITY_LEN]) -> Option<Self::Keyed> {
         Some((self.pair.key(key)?, self.seen))
     }
