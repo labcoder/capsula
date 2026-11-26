@@ -18,7 +18,6 @@ use crate::store::{self, SceneState, Store};
 use crate::{
     BrainError, STARTUP_LOG_TARGET, StartMode, accounts, credential, engine, serve, start_screen,
 };
-use instance::InstanceAttempt;
 #[expect(dead_code, reason = "parent-bound startup is not wired yet")]
 pub(crate) mod custody;
 #[cfg_attr(
@@ -26,6 +25,11 @@ pub(crate) mod custody;
     expect(dead_code, reason = "parent-bound startup is not wired yet")
 )]
 pub(crate) mod instance;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "parent-bound startup is not wired yet")
+)]
+mod parent_bound;
 #[cfg(all(test, windows))]
 mod tests;
 
@@ -42,20 +46,26 @@ struct OpenedState {
     replay: Option<Selected>,
 }
 
-struct Lifecycle {
-    // Before publication, retain the old passive unwind order: Job, Brain, store, the profile
-    // lock, then pipes. The store and credential workers keep their own references to the lock.
+/// What the shared startup stages made so far; every mode's root owns one.
+#[derive(Default)]
+struct Stages {
+    // Before publication, retain the old passive unwind order: Job, Brain, accounts, store, the
+    // profile lock. The store and credential workers keep their own references to the lock.
     jobs: Option<Arc<Job>>,
     brain: Option<Brain>,
+    /// Started accounts until the Brain takes them, so a failure before it can still close them.
+    accounts: Option<Accounts>,
     opened: Option<OpenedState>,
     profile: Option<Arc<SessionLock>>,
+}
+
+struct Lifecycle {
+    stages: Stages,
     exe: PathBuf,
+    /// After the stages, so the pipes still go last.
     pipes: Pipes,
     session: u32,
     published: bool,
-    /// The parent-bound item and the custody it holds, settled by `finish` before custody drops.
-    #[expect(dead_code, reason = "parent-bound startup is not wired yet")]
-    instance: Option<InstanceAttempt<platform::InstanceItem>>,
 }
 
 pub(super) async fn run_admitted(
@@ -70,7 +80,7 @@ pub(super) async fn run_admitted(
     let mut lifecycle = lifecycle.start(Mode::Detached, opened, accounts, |_, _| Ok(()))?;
     let identity = lifecycle.publish_capability()?;
     tracing::info!(target: STARTUP_LOG_TARGET, incarnation = ?identity.incarnation, build = BUILD_ID, "listening");
-    let brain = lifecycle.brain.as_mut().expect("started brain");
+    let brain = lifecycle.stages.brain.as_mut().expect("started brain");
     let ended = serve(&mut lifecycle.pipes, &identity, brain).await;
     let settlement = lifecycle
         .settle(&ended, Job::shut_down, credential::delete)
@@ -106,25 +116,12 @@ impl Lifecycle {
         let pipes = Pipes::create(session)?;
         let exe = std::env::current_exe()?;
         Ok(Self {
-            jobs: None,
-            brain: None,
-            opened: None,
-            profile: None,
+            stages: Stages::default(),
             exe,
             pipes,
             session,
             published: false,
-            instance: None,
         })
-    }
-
-    /// Settles the instance attempt on every exit; custody drops with it, after.
-    #[expect(dead_code, reason = "parent-bound startup is not wired yet")]
-    async fn finish(mut self) -> Stage {
-        match self.instance.as_mut() {
-            Some(attempt) => attempt.settle().await,
-            None => Stage::Confirmed,
-        }
     }
 
     /// Each checkpoint admits the work up to the next one; Detached passes a no-op.
@@ -137,33 +134,24 @@ impl Lifecycle {
             TokenTuning,
             Arc<SessionLock>,
         ) -> Result<(Accounts, VaultHeld), BrainError>,
-        mut checkpoint: impl FnMut(Checkpoint, &mut Self) -> Result<(), BrainError>,
+        mut checkpoint: impl FnMut(Checkpoint, &mut Stages) -> Result<(), BrainError>,
     ) -> Result<Self, BrainError> {
-        self.profile = Some(Arc::clone(&opened.profile));
-        self.opened = Some(opened);
-        checkpoint(Checkpoint::Open, &mut self)?;
-        let opened = self.opened.as_mut().expect("opened state");
         let claude_setting = native_workers::claude_setting(&opened.config, mode);
-        let (account, vault_held) = start_accounts(opened, accounts)?;
-        checkpoint(Checkpoint::Accounts, &mut self)?;
-        self.brain = Some(build_brain(
-            self.opened.take().expect("opened state"),
-            account,
-        )?);
-        checkpoint(Checkpoint::Brain, &mut self)?;
+        let vault_held = self.stages.start(opened, accounts, &mut checkpoint)?;
+        let stages = &mut self.stages;
         // shortcut: a parent loss during the removal pass doesn't stop the Job from starting; fence
         // the Job's creation when containment lands.
         let (jobs, workers) = native_workers::prepare(
-            self.brain.as_mut().expect("built brain"),
+            stages.brain.as_mut().expect("built brain"),
             claude_setting,
             mode,
         )?;
-        self.jobs = Some(jobs);
-        checkpoint(Checkpoint::Helpers, &mut self)?;
+        stages.jobs = Some(jobs);
+        checkpoint(Checkpoint::Helpers, stages)?;
         // shortcut: a parent loss after voice starts doesn't stop the Claude lane or the screen
         // worker; fence each start when containment lands.
-        let brain = self.brain.as_mut().expect("built brain");
-        let jobs = self.jobs.as_ref().expect("started helpers");
+        let brain = self.stages.brain.as_mut().expect("built brain");
+        let jobs = self.stages.jobs.as_ref().expect("started helpers");
         native_workers::start(workers, brain, vault_held, &self.exe, jobs);
         start_screen(brain, self.exe.clone(), Ok(Arc::clone(jobs)));
         Ok(self)
@@ -190,14 +178,14 @@ impl Lifecycle {
         shut_down: impl FnOnce(&Job) -> std::io::Result<()> + Send + 'static,
         delete: impl FnOnce(u32) -> Result<(), credential::CredentialError>,
     ) -> Settlement {
-        let brain = self.brain.take().expect("serving brain");
+        let brain = self.stages.brain.take().expect("serving brain");
         let runtime = if let Ok(Some(deadline)) = ended {
             brain.quit(*deadline).await
         } else {
             brain.close().await
         };
         // Ending the job waits on the processes, so it runs off the async thread.
-        let jobs = self.jobs.take().expect("serving helpers");
+        let jobs = self.stages.jobs.take().expect("serving helpers");
         let helpers = match tokio::task::spawn_blocking(move || shut_down(&jobs)).await {
             Ok(Ok(())) => Stage::Confirmed,
             Ok(Err(error)) => {
@@ -220,6 +208,95 @@ impl Lifecycle {
             runtime,
             helpers,
             item,
+        }
+    }
+}
+
+impl Stages {
+    /// Opens, starts the accounts and builds the Brain, passing `checkpoint` after each unit.
+    /// Whatever started stays here on an error, for its owner to drop or close. Returns the flag
+    /// the helpers read while the vault is held.
+    fn start(
+        &mut self,
+        opened: OpenedState,
+        accounts: impl FnOnce(
+            OAuthTuning,
+            TokenTuning,
+            Arc<SessionLock>,
+        ) -> Result<(Accounts, VaultHeld), BrainError>,
+        checkpoint: &mut impl FnMut(Checkpoint, &mut Self) -> Result<(), BrainError>,
+    ) -> Result<VaultHeld, BrainError> {
+        self.profile = Some(Arc::clone(&opened.profile));
+        self.opened = Some(opened);
+        checkpoint(Checkpoint::Open, self)?;
+        let (account, vault_held) =
+            start_accounts(self.opened.as_mut().expect("opened state"), accounts)?;
+        self.accounts = Some(account);
+        checkpoint(Checkpoint::Accounts, self)?;
+        self.build_brain()?;
+        checkpoint(Checkpoint::Brain, self)?;
+        Ok(vault_held)
+    }
+
+    /// Takes the opened state and the accounts only once nothing before `Brain::new` can fail,
+    /// and takes the accounts back when it does.
+    fn build_brain(&mut self) -> Result<(), BrainError> {
+        let opened = self.opened.as_mut().expect("opened state");
+        let engine = match opened.replay.take() {
+            Some(replay) => replay,
+            None => engine(opened.config.model_tuning())?,
+        };
+        let OpenedState {
+            profile,
+            store,
+            main_thread,
+            high_water,
+            scenes,
+            config,
+            replay: _,
+        } = self.opened.take().expect("opened state");
+        match Brain::new(
+            store,
+            profile,
+            main_thread,
+            high_water,
+            scenes,
+            engine,
+            config,
+            self.accounts.take().expect("started accounts"),
+            crate::runtime::IssueEpochs::default(),
+        ) {
+            Ok(brain) => {
+                self.brain = Some(brain);
+                Ok(())
+            }
+            Err((error, accounts)) => {
+                self.accounts = Some(*accounts);
+                Err(BrainError::StoreThread(error))
+            }
+        }
+    }
+
+    /// Settles what started when no Brain was built: closes the accounts, which waits for the
+    /// credential thread to let the vault go, then drops a raw store. No receipt confirms that
+    /// drop, so an opened store is Unconfirmed, even one a failed `Brain::new` dropped.
+    async fn close_unbuilt(&mut self) -> Shutdown {
+        let account = match self.accounts.take() {
+            Some(accounts) => crate::runtime::close_unbuilt(accounts).await,
+            None => Stage::Confirmed,
+        };
+        drop(self.opened.take());
+        let store = if self.profile.is_some() {
+            Stage::Unconfirmed
+        } else {
+            Stage::Confirmed
+        };
+        Shutdown {
+            quit: None,
+            store,
+            settings: Stage::Confirmed,
+            claude: Stage::Confirmed,
+            account,
         }
     }
 }
@@ -306,31 +383,4 @@ fn start_accounts(
         .config
         .count_in_use(&account.view(), opened.high_water.1);
     Ok((account, vault_held))
-}
-
-fn build_brain(opened: OpenedState, account: Accounts) -> Result<Brain, BrainError> {
-    let OpenedState {
-        profile,
-        store,
-        main_thread,
-        high_water,
-        scenes,
-        config,
-        replay,
-    } = opened;
-    Brain::new(
-        store,
-        profile,
-        main_thread,
-        high_water,
-        scenes,
-        match replay {
-            Some(replay) => replay,
-            None => engine(config.model_tuning())?,
-        },
-        config,
-        account,
-        crate::runtime::IssueEpochs::default(),
-    )
-    .map_err(BrainError::StoreThread)
 }

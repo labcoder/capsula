@@ -38,6 +38,7 @@ pub(crate) use macos::entry::harden;
 pub(crate) enum InstanceLock {}
 
 #[cfg(not(target_os = "macos"))]
+#[expect(dead_code, reason = "parent-bound startup is not wired yet")]
 pub(crate) enum InstanceItem {}
 
 #[cfg(not(target_os = "macos"))]
@@ -99,6 +100,7 @@ pub(crate) use macos::instance::tests::{
     clean as instance_fixture_clean, support as instance_fixture,
 };
 #[cfg(target_os = "macos")]
+#[expect(unused_imports, reason = "parent-bound startup is not wired yet")]
 pub(crate) use macos::instance::{KeychainItem as InstanceItem, instance_custody};
 
 #[cfg(target_os = "macos")]

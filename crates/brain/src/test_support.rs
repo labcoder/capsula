@@ -222,9 +222,20 @@ pub(crate) fn accounts(scratch: &Scratch) -> Accounts {
 /// opens its vault.
 #[cfg(windows)]
 pub(crate) fn held_accounts(profile: Arc<crate::platform::SessionLock>) -> Accounts {
+    held_accounts_until(profile, ())
+}
+
+/// [`held_accounts`], whose credential thread drops `hold` after the vault and before it
+/// reports the release.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn held_accounts_until(
+    profile: Arc<crate::platform::SessionLock>,
+    hold: impl Send + 'static,
+) -> Accounts {
     let store = FakeStore::default();
     let worker = Worker::new(
         Box::new(move || {
+            let _hold = &hold;
             Vault::with_lock(
                 store.clone(),
                 "test-accounts",

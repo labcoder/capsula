@@ -389,6 +389,9 @@ pub(crate) struct StoreThread {
     done: oneshot::Receiver<()>,
 }
 
+#[cfg(test)]
+pub(crate) use page_reader::REFUSE_SPAWN;
+
 impl StoreThread {
     /// Starts the thread that owns `store`. It keeps `custody`, the profile's writer lock, until
     /// its last helper ends: past close's acknowledgement and any caller's wait that timed out.
