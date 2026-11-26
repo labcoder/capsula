@@ -4,7 +4,6 @@
 //! name can hide a credential but never authorize one.
 
 pub(crate) mod io;
-pub(super) mod repair;
 #[cfg(test)]
 mod tests;
 
@@ -393,6 +392,18 @@ impl Authority {
         conn.pragma_update(None, "foreign_keys", true)?;
         let lifetime = opening?;
         Ok(Self { conn, lifetime })
+    }
+
+    /// Whether `ChatGPT`'s account can only be an ordinary one: the authority is at the ordinary
+    /// schema. A connection still inside a transaction answers nothing.
+    pub(in crate::connections) fn ordinary_account(&self) -> Result<bool, AuthorityError> {
+        if !self.conn.is_autocommit() {
+            return Err(AuthorityError::Conflict);
+        }
+        let version: i64 = self
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        Ok(version == VERSION)
     }
 
     /// # Errors

@@ -343,51 +343,8 @@ impl Coordinator {
         arrived.1 = arrived
             .get(ConnectionKind::ChatGpt)
             .and_then(|tag| self.recovered(tag));
-        arrived.2 = self.chatgpt_blocked || self.chatgpt_fenced;
+        arrived.2 = self.chatgpt_fenced;
         arrived
-    }
-
-    /// `ChatGPT` is ready on `ready`, recovered with `boundary`. Newly recovered, it ends what
-    /// ran on `ChatGPT` before, so no read or send straddles the change; the same report again
-    /// changes nothing. A cutoff for another sign-in, or one that differs from the cutoff its
-    /// sign-in already has, installs nothing: it ends `ChatGPT`'s work and refuses the sign-in
-    /// until a consistent report, which no ordinary refresh stands in for.
-    pub(super) fn recovered_chatgpt(
-        &mut self,
-        ready: Ready,
-        boundary: Boundary,
-        effects: &mut Vec<Effect>,
-    ) {
-        if self.chatgpt_retired.contains(&ready.connection) {
-            return;
-        }
-        let installed = self.recovered(ConnectionTag(boundary.tag()));
-        if boundary.tag() != ready.connection.0 || installed.is_some_and(|cut| cut != boundary) {
-            if !self.refused_recovery.contains(&ready.connection) {
-                self.refused_recovery.push(ready.connection);
-            }
-            self.cancel_job_on(ConnectionKind::ChatGpt, effects);
-            self.available(
-                ConnectionKind::ChatGpt,
-                Availability::Unavailable(sign_in_needed()),
-                effects,
-            );
-            self.chatgpt_blocked = true;
-            return;
-        }
-        self.refused_recovery.retain(|tag| *tag != ready.connection);
-        if installed.is_none() {
-            self.recovered_chatgpt.push(boundary);
-            self.cancel_job_on(ConnectionKind::ChatGpt, effects);
-            if self.connection() == Some(ready.connection) {
-                self.available(
-                    ConnectionKind::ChatGpt,
-                    Availability::Unavailable(sign_in_needed()),
-                    effects,
-                );
-            }
-        }
-        self.available(ConnectionKind::ChatGpt, Availability::Ready(ready), effects);
     }
 
     /// Whether the account's sign-in keeps `ChatGPT`'s history from a turn that arrives now: one
@@ -402,12 +359,15 @@ impl Coordinator {
         self.chatgpt_fenced = false;
     }
 
-    /// The cutoff `tag`'s `ChatGPT` reads keep to, when that sign-in was recovered.
-    pub(super) fn recovered(&self, tag: ConnectionTag) -> Option<Boundary> {
-        self.recovered_chatgpt
-            .iter()
-            .copied()
-            .find(|cut| cut.tag() == tag.0)
+    /// The cutoff `tag`'s `ChatGPT` reads keep to: none, since no sign-in is recovered.
+    // shortcut: always none now that recovered sign-ins are gone; the read-side cutoff plumbing
+    // that still asks goes in its own change.
+    #[expect(
+        clippy::unused_self,
+        reason = "its callers go with the read-side cutoff plumbing"
+    )]
+    pub(super) fn recovered(&self, _tag: ConnectionTag) -> Option<Boundary> {
+        None
     }
 
     /// The cutoff the current run's bound route requires.
@@ -432,25 +392,6 @@ impl Coordinator {
         now: Availability,
         effects: &mut Vec<Effect>,
     ) {
-        let now = match now {
-            Availability::Ready(ready)
-                if kind == ConnectionKind::ChatGpt
-                    && self.refused_recovery.contains(&ready.connection) =>
-            {
-                self.chatgpt_blocked = true;
-                Availability::Unavailable(sign_in_needed())
-            }
-            now => now,
-        };
-        if let (ConnectionKind::ChatGpt, Availability::Ready(ready)) = (kind, &now) {
-            self.chatgpt_blocked = false;
-            if let Some(last) = self.last_chatgpt.replace(ready.connection)
-                && last != ready.connection
-                && !self.chatgpt_retired.contains(&last)
-            {
-                self.chatgpt_retired.push(last);
-            }
-        }
         let entry = match kind {
             ConnectionKind::ChatGpt => &mut self.availability,
             ConnectionKind::AnthropicKey => &mut self.anthropic_key,

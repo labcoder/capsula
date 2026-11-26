@@ -1,26 +1,19 @@
-//! Immutable history cutoffs for explicitly bound `ChatGPT` replacements.
+//! Immutable history cutoffs for `ChatGPT` replacements.
 
 use kumochi_protocol::message::{RunId, ThreadId};
 use rusqlite::{Connection, OptionalExtension as _};
 
-use super::{Store, StoreError};
-use crate::connections::vault::CutoffRequest;
+use super::StoreError;
 
-impl Store {
-    /// Serves a bound vault's cutoff request on this, the profile's one history writer.
-    pub(crate) fn serve_cutoff(&mut self, request: CutoffRequest) {
-        request.serve(|tag| self.check_chatgpt_cutoff(tag));
-    }
-
-    /// Records `tag`'s cutoff at the history as it stands, for fixtures outside the vault.
-    #[cfg(test)]
+#[cfg(test)]
+impl super::Store {
+    /// Records `tag`'s cutoff at the history as it stands, for fixtures.
     pub(crate) fn cut_history(&mut self, tag: u64) -> Boundary {
         assert_ne!(tag, 0, "a cutoff's tag");
         self.reconnect().expect("reconnect");
         self.write_cutoff(tag).expect("a fresh tag's cutoff")
     }
 
-    #[cfg(test)]
     fn write_cutoff(&mut self, tag: u64) -> Result<Boundary, StoreError> {
         let tx = self
             .conn
@@ -42,18 +35,6 @@ impl Store {
             last_thread,
             last_run,
         })
-    }
-
-    /// Reads `tag`'s committed cutoff again; refuses while this connection is inside a
-    /// transaction, so an uncommitted row is never read back.
-    fn check_chatgpt_cutoff(&self, tag: u64) -> Result<Boundary, StoreError> {
-        if !self.serving || !self.conn.is_autocommit() {
-            return Err(StoreError::RecoveryContext);
-        }
-        let tx = self.conn.unchecked_transaction()?;
-        let boundary = Boundary::read(&tx, tag)?;
-        tx.commit()?;
-        boundary.ok_or(StoreError::RecoveryContext)
     }
 }
 

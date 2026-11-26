@@ -239,7 +239,6 @@ pub(crate) fn held_accounts_until(
                 store.clone(),
                 "test-accounts",
                 Arc::clone(&profile),
-                crate::connections::vault::HistoryLink::unbound(),
                 crate::connections::authority::Missing::Create,
             )
         }),

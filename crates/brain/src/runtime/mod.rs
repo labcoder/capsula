@@ -434,7 +434,7 @@ impl Brain {
                 Ok(store) => store,
                 Err(error) => return Err((error, Box::new(account))),
             };
-        account.bind_history(&store.history_link());
+        account.release_proofs();
         let (engine_tx, engine_events) = mpsc::channel(ENGINE_QUEUE);
         let mut brain = Self {
             crashes: crate::relaunch::Crashes::default(),
@@ -510,8 +510,8 @@ impl Brain {
     }
 
     /// Tells the coordinator whether runs can be answered now; the same answer again changes
-    /// nothing. `ChatGPT` is ready only once its sign-in is proved: an ordinary one plainly, a
-    /// recovered one with its cutoff. Until then a turn that arrives reads no history for it.
+    /// nothing. `ChatGPT` is ready only once its sign-in is proved ordinary. Until then a turn
+    /// that arrives reads no history for it.
     fn availability_changed(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
         #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
         let fixture = self.fixture.clone();
@@ -521,12 +521,7 @@ impl Brain {
         let input = if let Some(ready) = fixture {
             Input::Engines(chatgpt, Availability::Ready(ready))
         } else {
-            match (self.account.availability(), self.account.recovered()) {
-                (Availability::Ready(ready), Some(boundary)) => {
-                    Input::RecoveredChatGpt { ready, boundary }
-                }
-                (now, _) => Input::Engines(chatgpt, now),
-            }
+            Input::Engines(chatgpt, self.account.availability())
         };
         self.hold_fence(&input);
         let effects = self
@@ -650,8 +645,6 @@ impl Brain {
         })
         .await
         .unwrap_or(false);
-        // The vault's link holds the store thread's queue open, so it goes first.
-        self.account.history.release();
         let store = self.close_store(deadline).await;
         let settings = self.drain_settings_by(deadline).await;
         let claude = self.close_claude(deadline).await;
@@ -701,8 +694,6 @@ impl Brain {
             let ending = self.coordinator.ending_runs();
             tracing::warn!(ending, "closing before the store confirmed every run");
         }
-        // The vault's link holds the store thread's queue open, so it goes first.
-        self.account.history.release();
         // Its own wait from here, unlike Quit's one deadline.
         let store = self.close_store(Instant::now() + close_wait()).await;
         let settings = self.drain_settings_by(deadline).await;

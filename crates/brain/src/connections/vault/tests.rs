@@ -52,19 +52,14 @@ fn the_held_vault_opens_its_authority_beside_its_lock() {
         Arc::new(SessionLock::try_acquire(&held.dir().join(SESSION_LOCK)).expect("held lock"));
     assert!(
         matches!(
-            Vault::open_held(
-                FakeStore::default(),
-                Arc::clone(&lock),
-                HistoryLink::unbound()
-            ),
+            Vault::open_held(FakeStore::default(), Arc::clone(&lock)),
             Err(VaultError::Authority)
         ),
         "the held vault never creates an authority"
     );
     assert!(!held.dir().join("credentials.db").exists());
     drop(Authority::open(&lock, authority::Missing::Create).expect("the brain's start creates it"));
-    let _vault = Vault::open_held(FakeStore::default(), lock, HistoryLink::unbound())
-        .expect("the held vault opens");
+    let _vault = Vault::open_held(FakeStore::default(), lock).expect("the held vault opens");
     let lifetime: i64 = Connection::open_with_flags(
         held.dir().join("credentials.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
