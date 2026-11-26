@@ -17,14 +17,6 @@ pub mod issues;
 mod jobs;
 pub mod logging;
 pub mod platform;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "cut 9's allocator and the observer's callers read it"
-    )
-)]
-mod profile;
 mod recall;
 mod relaunch;
 mod runtime;
@@ -511,7 +503,7 @@ mod profile_files {
     #[test]
     fn history_from_before_the_authority_gets_a_fresh_signed_out_one() {
         let scratch = Scratch::new("profile-no-authority");
-        let built = store::existing::tests::store_at(scratch.dir(), 11);
+        let built = store::tests::store_at(scratch.dir(), 11);
         Connection::open(&built)
             .expect("raw open")
             .execute_batch(

@@ -20,15 +20,9 @@ use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::path::{Component, Path, PathBuf, Prefix};
 
-use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
-use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
-    NtCreateFile,
-};
 use windows_sys::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GENERIC_ALL, GENERIC_EXECUTE,
-    GENERIC_READ, GENERIC_WRITE, HANDLE, LocalFree, NTSTATUS, OBJ_CASE_INSENSITIVE,
-    STATUS_NO_SUCH_FILE, STATUS_OBJECT_NAME_NOT_FOUND, UNICODE_STRING,
+    ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE,
+    HANDLE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -51,7 +45,6 @@ use windows_sys::Win32::Storage::FileSystem::{
     READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_DOS, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
-use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
     ACCESS_DENIED_CALLBACK_ACE_TYPE, SECURITY_MANDATORY_MEDIUM_RID,
@@ -61,11 +54,6 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 use windows_sys::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
 use crate::platform::Untrusted;
-
-mod anchor;
-pub use anchor::{Child, hold_product_folder, profile_root};
-mod guard;
-pub use guard::{GuardError, SetupGuard, acquire_setup_guard};
 
 /// SYSTEM, Administrators and `TrustedInstaller`, which may change anything here; this user joins
 /// them at run time.
@@ -359,65 +347,6 @@ fn open_native(path: &Path, kind: Kind, extra: u32) -> io::Result<File> {
         .share_mode(share)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
-}
-
-/// Opens `name`, one plain component, inside the folder `parent` holds, resolved from that handle
-/// rather than from a path, so a rename of the parent after it was checked can't redirect the open.
-/// It asks for what `open_native` asks for a folder and follows no reparse point. Not found maps to
-/// `ERROR_FILE_NOT_FOUND`, as a path open reports it.
-fn open_child(parent: &File, name: &str) -> io::Result<File> {
-    let mut wide: Vec<u16> = name.encode_utf16().collect();
-    let bytes =
-        u16::try_from(wide.len() * 2).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let object_name = UNICODE_STRING {
-        Length: bytes,
-        MaximumLength: bytes,
-        Buffer: wide.as_mut_ptr(),
-    };
-    let attributes = OBJECT_ATTRIBUTES {
-        Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>())
-            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?,
-        RootDirectory: parent.as_raw_handle(),
-        ObjectName: &raw const object_name,
-        Attributes: OBJ_CASE_INSENSITIVE,
-        SecurityDescriptor: std::ptr::null(),
-        SecurityQualityOfService: std::ptr::null(),
-    };
-    let mut handle = std::ptr::null_mut();
-    let mut status_block = IO_STATUS_BLOCK::default();
-    // SAFETY: every pointer is to a live local; the name buffer outlives the call, `parent` is an
-    // open folder handle, and no EA buffer is passed.
-    let status = unsafe {
-        NtCreateFile(
-            &raw mut handle,
-            READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-            &raw const attributes,
-            &raw mut status_block,
-            std::ptr::null(),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            FILE_OPEN,
-            FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
-            std::ptr::null(),
-            0,
-        )
-    };
-    if status < 0 {
-        return Err(status_error(status));
-    }
-    // SAFETY: a successful NtCreateFile returned this handle, and nothing else owns it.
-    Ok(unsafe { File::from_raw_handle(handle) })
-}
-
-/// Only "no such name" from the open itself is absence, reported as `ERROR_FILE_NOT_FOUND`. Every
-/// other failure is opaque, since translating a status first folds unrelated ones, such as a missing
-/// object ID, into not-found.
-fn status_error(status: NTSTATUS) -> io::Error {
-    if status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_NO_SUCH_FILE {
-        io::Error::from_raw_os_error(ERROR_FILE_NOT_FOUND.cast_signed())
-    } else {
-        io::Error::other("the child couldn't be opened")
-    }
 }
 
 /// Checks what `opened` holds: no reparse point, the object `path` names, and trusted security.
