@@ -138,7 +138,11 @@ flowchart TD
 ## `draw`
 
 `draw { records }` offers the scene v1 2D contract, with a 16 KiB complete-argument ceiling.
-The provider description comes from `crates/brain/prompts/draw.md`. Claude Code's MCP list and
+The provider description comes from `crates/brain/prompts/draw.md`. It tells the model to call
+`draw` in the same answer when the user asks for a drawing, diagram, chart, graph or overlay,
+to mark the screen only when asked or when the answer can't be followed without it, and to
+describe only the direction and positions its records set: an overlay diagram flows right
+unless `dir` is down, and a Mermaid flowchart flows down unless its header says LR. Claude Code's MCP list and
 seed use the overlay schema and omit the prompt's screen paragraph and example. Responses sends
 `strict: false` specifically for this tool: optional scene fields remain optional.
 Fenced Mermaid text is not a tool call; diagrams use the Mermaid scene operation.

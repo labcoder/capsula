@@ -432,7 +432,8 @@ snapshot from when the user spoke.", or one fixed line naming the class ("The sc
 included: it wasn't ready in time."). A screen hold's picture has its own lines: one saying it's
 a picture of the user's screen, its width and height in pixels, taken at release, with their pointer where it was then, and, when
 the pointer's path was painted inside the image, one saying the pink line follows the pointer's
-movement and where it lies, in image pixels. Its changed display and too-large picture have their
+movement, where it lies and where it gathers most, in image pixels, and that the thing there is
+the likeliest answer when the user asks what they are pointing at. Its changed display and too-large picture have their
 own class lines. The lines live in `locales/en/brain.ftl` and carry no window details. The
 picture goes only where the run's route may carry it now (screen.md, "The brain's hold client"):
 on `ChatGPT` when its current sign-in's catalog lists the chosen model as taking images, and on

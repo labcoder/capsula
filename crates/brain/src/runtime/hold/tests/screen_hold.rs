@@ -461,6 +461,7 @@ async fn words_go_on_at_once_with_an_armed_part_and_wait_for_a_capturing_one() {
         top: 0,
         right: 3,
         bottom: 2,
+        focus: [2, 1],
     };
     let sealed = ScreenContext::fixture(JPEG).with_ink(Some(bounds));
     let sealed_geometry = sealed.geometry();

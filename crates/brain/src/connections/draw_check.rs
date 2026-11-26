@@ -1,6 +1,7 @@
 //! Debug builds only: `kumochid --draw-check`, the drawing live check behind
-//! `cargo xtask live draw`. It asks for the two drawings the recorded calls in
-//! `fixtures/responses` hold, the water cycle and y = x², through the user's own `ChatGPT`
+//! `cargo xtask live draw`. It asks for an overlay diagram in the words a user typed when the
+//! first ask drew nothing, then the two drawings the recorded calls in `fixtures/responses`
+//! hold, the water cycle and y = x², through the user's own `ChatGPT`
 //! connection, with `draw` as Kumo's model is offered it: at most [`BUDGET`] requests, none
 //! retried. Each call is checked as the drawing ingress checks a new scene: the format's parser,
 //! the scene's begin and every step's admission. It prints numbers and fixed words only, never the
@@ -40,8 +41,8 @@ use crate::drawing::CallError;
 use crate::engines::responses::body;
 use crate::platform::credential::admitted_store;
 
-/// One request per recorded drawing, none retried.
-const BUDGET: u32 = 2;
+/// One request per prompt, none retried.
+const BUDGET: u32 = 3;
 /// Exit code when a body couldn't be built; nothing was sent.
 const UNBUILT: u8 = 18;
 /// Exit code when the session went stale, a reply couldn't be read whole or a line couldn't be
@@ -53,7 +54,12 @@ const EFFORT: Effort = Effort::Low;
 const INSTRUCTIONS: &str = "You are Kumo, a desktop assistant. Answer the user, and use the draw \
                             tool when a drawing helps.";
 /// Each request's name and the user's words.
-const PROMPTS: [(&str, &str); 2] = [
+const PROMPTS: [(&str, &str); 3] = [
+    (
+        "overlay-diagram",
+        "Draw an overlay diagram of two boxes, Box 1 and Box 2, with an arrow pointing right \
+         from Box 1 to Box 2.",
+    ),
     ("water-cycle", "Draw the water cycle for me."),
     ("y-squared", "Graph y = x² for me."),
 ];

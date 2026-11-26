@@ -582,8 +582,11 @@ real one only in a live turn the Captain assigned, from the reviewed head.
   its kill-on-close job, stdout piped, keeping only `request=` and `summary` lines. The mode is
   built into debug brains only, and a brain without it exits 10. Its preflight is the image
   check's, and it never renews the session.
-- Two requests, one per recorded call in `crates/brain/fixtures/responses`: the user asks for the
-  water cycle, then for a graph of y = x². Each goes through the product's request path on the
+- Three requests. The first asks for an overlay diagram of two boxes with an arrow pointing
+  right, in the words a user typed when the first ask drew nothing (OSC-1160), so it checks that
+  an explicit request draws at once. Then one per recorded call in
+  `crates/brain/fixtures/responses`: the user asks for the water cycle, then for a graph of
+  y = x². `KUMOCHI_LIVE_BUDGET=1` sends only the first. Each goes through the product's request path on the
   default model at low effort, with short fixed instructions and `draw` exactly as Kumo's model is
   offered it. A refusal of the account (401, 403, 429 or a usage-limit, plan, route or sign-in
   code) stops the run, and so does a reply that couldn't be read whole, since it may hide one (a
@@ -595,7 +598,7 @@ real one only in a live turn the Captain assigned, from the reviewed head.
   record after the call's `end` as `scene.AfterEnd`. Replacing
   older scenes, the run's step budget and layout aren't checked.
 
-**Requests.** The mode's `Budget` is 2, one per prompt, pinned by a unit test, and
+**Requests.** The mode's `Budget` is 3, one per prompt, pinned by a unit test, and
 `KUMOCHI_LIVE_BUDGET` can only lower it; a value that isn't a count, or isn't Unicode, allows none. At 0 the vault is
 never opened: each request's line says `result=dry`. The brain prints numbers and fixed words only:
 one line per request with its prompt name, body bytes, status, provider code and part, result,
@@ -605,7 +608,7 @@ attempts and drawn count. Never the model's text, scene names or arguments. xtas
 out a line the budget left unsent (`result=spent`).
 
 ```text
-draw check: done (requests: 2)
+draw check: done (requests: 3)
 draw check: nothing sent, exit 16 (requests: 0)
 ```
 

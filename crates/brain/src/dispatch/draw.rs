@@ -371,7 +371,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         for screen in [
-            "When this turn includes a picture of the user's screen, use surface: screen to point at something in that picture when it helps the answer.",
+            "When this turn includes a picture of the user's screen, use surface: screen to point at something in that picture only when the user asks you to show or mark it, or when the answer can't be followed without it.",
+            "Asked what something is or what they are pointing at, name it in words and don't draw.",
             "Omit begin.size and never write begin.display.",
             "Coordinates are picture pixels from its top-left corner, not display pixels or the pink pointing line.",
             r#"Give the thing's own tight box as target: {"box":[x,y,width,height]}; Kumochi adds the space and stroke."#,

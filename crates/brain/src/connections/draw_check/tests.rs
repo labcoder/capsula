@@ -16,13 +16,13 @@ fn the_budget_is_one_request_per_prompt() {
 }
 
 #[test]
-fn the_variable_can_only_lower_the_budget_of_two() {
+fn the_variable_can_only_lower_the_budget_of_three() {
     for (value, want) in [
-        (None, 2),
-        (Some("2"), 2),
+        (None, 3),
+        (Some("3"), 3),
         (Some(" 1 "), 1),
         (Some("0"), 0),
-        (Some("3"), 2),
+        (Some("4"), 3),
         (Some("4294967296"), 0),
         (Some("-1"), 0),
         (Some("x"), 0),

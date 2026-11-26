@@ -19,6 +19,6 @@ screen-changed = The screen was not included: the window changed while it was be
 screen-model-cant-see = The screen was not included: this model can't be sent images.
 # A screen hold's own lines. The rectangle is the painted line's bounds, in image pixels.
 screen-picture = The image is a picture of the user's screen, { $width } by { $height } pixels, taken when they let go of the talk keys, with their mouse pointer where it was then.
-screen-pointed = While speaking, the user moved the mouse pointer, perhaps to show you something. The pink line on the image follows that movement. It was drawn on the image for you and is not on their screen. It lies inside the rectangle from ({ $left }, { $top }) to ({ $right }, { $bottom }), in image pixels.
+screen-pointed = While speaking, the user moved the mouse pointer, perhaps to show you something. The pink line on the image follows that movement. It was drawn on the image for you and is not on their screen. It lies inside the rectangle from ({ $left }, { $top }) to ({ $right }, { $bottom }), in image pixels, and gathers most around ({ $x }, { $y }), where they circled, went back and forth or slowed down. When they ask what they are pointing at, the thing there is the likeliest answer, not where the line starts or everything it crosses.
 screen-picture-too-large = The screen was not included: its picture was too large.
 screen-display-changed = The screen was not included: the display changed while it was being captured.

@@ -51,7 +51,8 @@ fn a_sealed_display_paints_the_path_its_request_carried() {
             left: 0,
             top: 0,
             right: 3,
-            bottom: 3
+            bottom: 3,
+            focus: [0, 0],
         })
     );
     rig.scrubbed();

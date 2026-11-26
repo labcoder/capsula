@@ -501,8 +501,15 @@ image, in 64-bit floats, and colours only pixels inside it, so a segment that le
 is painted up to the edge. The line is 3 pixels of pink with a 1-pixel white edge on each side
 [guess]. A path of fewer than two points paints nothing. `ScreenContext` carries the painted
 pixels' bounding rectangle in image pixels, left out of its `Debug`, as `InkBounds`, whose
-`Debug` prints no numbers. The brain reads it through `ScreenContext::ink`, which returns it only
-when it is non-empty and lies inside the image, so a bad worker answer reaches no model line.
+`Debug` prints no numbers. `InkBounds` also holds `focus`, the pixel where the path gathers
+most: the mean of the points within 48 image pixels of the point with the most such neighbours,
+the later one on a tie [guess]. The shell keeps a point at most every 16 ms while the pointer
+moves, so points crowd where the user circled, went back and forth or slowed down, and a straight
+line gathers at its end. A long approach to a word circled many times gathers on the circle,
+which is what the model is told the user most likely means, rather than the whole rectangle.
+The brain reads it through `ScreenContext::ink`, which returns it only when it is non-empty and
+lies inside the image, with `focus` inside the rectangle, so a bad worker answer reaches no model
+line.
 
 ### Slice 6 release-capture gate
 

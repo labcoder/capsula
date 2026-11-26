@@ -2468,6 +2468,7 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
         top: 20,
         right: 9_890,
         bottom: 41,
+        focus: [9_884, 37],
     };
     let mut pointed = request();
     assert_eq!(
@@ -2485,7 +2486,7 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
             message(Role::Developer, picture),
             message(
                 Role::Developer,
-                "While speaking, the user moved the mouse pointer, perhaps to show you something. The pink line on the image follows that movement. It was drawn on the image for you and is not on their screen. It lies inside the rectangle from (9871, 20) to (9890, 41), in image pixels."
+                "While speaking, the user moved the mouse pointer, perhaps to show you something. The pink line on the image follows that movement. It was drawn on the image for you and is not on their screen. It lies inside the rectangle from (9871, 20) to (9890, 41), in image pixels, and gathers most around (9884, 37), where they circled, went back and forth or slowed down. When they ask what they are pointing at, the thing there is the likeliest answer, not where the line starts or everything it crosses."
             ),
         ]
     );
@@ -2494,7 +2495,7 @@ fn a_screen_picture_tells_the_model_what_it_is_and_where_the_line_lies() {
         Screen::Picture(jpeg.clone(), Some(ink), Geometry::FIXTURE)
     );
     assert!(
-        ["9871", "9890", "1280", "720", "2560", "1440"]
+        ["9871", "9890", "9884", "1280", "720", "2560", "1440"]
             .iter()
             .all(|number| !screen.contains(number)),
         "{screen}"
