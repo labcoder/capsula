@@ -6,8 +6,9 @@ use kumochi_brain::platform::InheritedFds;
 /// Descriptors 3 and 4 weren't both open.
 pub(crate) struct Unclaimed;
 
-/// Takes descriptors 3 (control) and 4 (data) once both are open; neither is owned otherwise.
-/// Called once, by `main`, before any other code in the process opens a descriptor.
+/// Takes descriptors 3 (control) and 4 (data) once both are open, and neither otherwise. Private to
+/// the executable and called once, by `main` at startup, before anything in the process makes an
+/// owner for either. Whether they really are the shell's pair is for adoption and the handshake.
 #[cfg(target_os = "macos")]
 #[expect(
     unsafe_code,
@@ -25,8 +26,8 @@ pub(crate) fn claim_inherited() -> Result<InheritedFds, Unclaimed> {
     if !(control_open && data_open) {
         return Err(Unclaimed);
     }
-    // SAFETY: 3 is open, and main runs this once before anything else opens a descriptor, so it's
-    // the descriptor the shell passed and nothing else in the process owns it.
+    // SAFETY: 3 is open, and this private function runs once, at startup, before anything in the
+    // process makes an owner for 3, so this handle is its only owner.
     let control = unsafe { OwnedFd::from_raw_fd(CONTROL) };
     // SAFETY: as above, for 4.
     let data = unsafe { OwnedFd::from_raw_fd(DATA) };
@@ -40,14 +41,16 @@ pub(crate) fn claim_inherited() -> Result<InheritedFds, Unclaimed> {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use std::os::fd::AsRawFd as _;
+    use std::os::fd::{AsRawFd as _, IntoRawFd as _};
     use std::os::unix::net::UnixStream;
+    use std::path::Path;
     use std::process::Command;
 
     const CLAIM_CHILD: &str = "KUMOCHI_TEST_CLAIM_CHILD";
 
     /// Run only by the test below, as a child with nothing on 3 or 4: it opens a pair onto them,
-    /// closes 4 and goes through the parent-bound entry.
+    /// gives up its ownership of 3, closes 4 and goes through the parent-bound entry, which must
+    /// leave 3 open.
     #[test]
     #[ignore = "subprocess fixture that owns descriptors 3 and 4"]
     fn missing_data_leg_child() {
@@ -56,8 +59,12 @@ mod tests {
         }
         let (control, data) = UnixStream::pair().expect("socketpair");
         assert_eq!((control.as_raw_fd(), data.as_raw_fd()), (3, 4));
+        let _unowned = control.into_raw_fd();
         drop(data);
-        std::process::exit(i32::from(crate::parent_bound()));
+        let code = crate::parent_bound();
+        assert!(Path::new("/dev/fd/3").exists(), "a refused claim closed 3");
+        assert!(!Path::new("/dev/fd/4").exists(), "4 stays closed");
+        std::process::exit(i32::from(code));
     }
 
     #[test]
