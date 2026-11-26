@@ -209,11 +209,6 @@ pub(crate) fn instance_custody_at(_: &std::path::Path) -> Result<InstanceLock, C
     Err(CustodyError::NotAdmitted)
 }
 
-#[cfg(all(test, feature = "first-light", not(target_os = "macos")))]
-pub(crate) fn fresh_custody_at(_: &std::path::Path) -> Result<InstanceLock, CustodyError> {
-    Err(CustodyError::NotAdmitted)
-}
-
 /// A fresh Support folder for the instance item's native fixtures, and its cleanup; only macOS
 /// has them.
 #[cfg(all(test, not(target_os = "macos")))]

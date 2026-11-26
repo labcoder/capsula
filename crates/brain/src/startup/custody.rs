@@ -40,12 +40,6 @@ impl SessionCustody {
         platform::instance_custody().map(Self::held)
     }
 
-    /// `bootstrap` under a test's own Support folder, for first light's fixtures.
-    #[cfg(all(test, feature = "first-light"))]
-    pub(crate) fn fresh_at(support: &std::path::Path) -> Result<Self, CustodyError> {
-        platform::fresh_custody_at(support).map(Self::held)
-    }
-
     /// Custody under a test's own Support folder that holds a product folder already there, and
     /// is Busy while another holds its lock.
     #[cfg(test)]
@@ -81,7 +75,7 @@ impl SessionCustody {
         self.held.as_ref().is_none_or(|lock| lock.intact())
     }
 
-    fn held(lock: platform::InstanceLock) -> Self {
+    pub(in crate::startup) fn held(lock: platform::InstanceLock) -> Self {
         Self {
             held: Some(Arc::new(lock)),
             #[cfg(any(test, all(debug_assertions, feature = "test-support")))]

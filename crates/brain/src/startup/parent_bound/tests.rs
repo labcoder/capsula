@@ -897,6 +897,11 @@ mod first_light {
 
     type Legacy = fn(&mut dyn FnMut() -> bool) -> Result<(), CredentialStoreError>;
 
+    /// Custody's bootstrap under a test's own Support folder.
+    fn fresh_at(support: &Path) -> Result<SessionCustody, CustodyError> {
+        crate::platform::fresh_custody_at(support).map(SessionCustody::held)
+    }
+
     /// The legacy check on status answers that find every name absent.
     fn absent(live: &mut dyn FnMut() -> bool) -> Result<(), CredentialStoreError> {
         legacy_absent(&OnceLock::new(), live, |_| Ok(errSecItemNotFound))
@@ -1053,7 +1058,7 @@ mod first_light {
                 &live(),
                 later(),
                 pre,
-                || SessionCustody::fresh_at(support),
+                || fresh_at(support),
                 item,
             )),
         )
@@ -1249,7 +1254,7 @@ mod first_light {
         assert_eq!(names.len(), 19);
         for name in names {
             let support = instance_fixture(SENTINEL);
-            let custody = SessionCustody::fresh_at(&support).expect("fresh custody");
+            let custody = fresh_at(&support).expect("fresh custody");
             let product = support.join(DATA_DIR);
             let leftover = product.join(&name);
             std::fs::write(&leftover, SENTINEL).expect("plant one leftover");
@@ -1286,7 +1291,7 @@ mod first_light {
         use std::os::unix::fs::DirBuilderExt as _;
 
         let support = instance_fixture("fl-moved");
-        let custody = SessionCustody::fresh_at(&support).expect("fresh custody");
+        let custody = fresh_at(&support).expect("fresh custody");
         let product = support.join(DATA_DIR);
         let moved = support.join("moved");
         std::fs::rename(&product, &moved).expect("move the created root");
