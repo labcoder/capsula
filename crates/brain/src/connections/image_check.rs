@@ -29,7 +29,7 @@ use super::provenance::{Outcome, dev_names, output_path, usable};
 use super::vault::Vault;
 use crate::context::{BODY_CEILING, InputItem, Jpeg, ModelRequest, Role};
 use crate::engines::responses::body;
-use crate::platform::credential::NativeCredentialStore;
+use crate::platform::credential::admitted_store;
 use crate::screen::JPEG_CAP;
 
 /// The hard cap on model requests this process may send, retries and renewals included; the
@@ -79,7 +79,10 @@ pub fn run(set: Set) -> u8 {
     let Some(requests) = requests(set) else {
         return UNBUILT;
     };
-    let vault = match Vault::open(NativeCredentialStore) {
+    let vault = match admitted_store()
+        .map_err(VaultError::from)
+        .and_then(Vault::open)
+    {
         Ok(vault) => vault,
         Err(VaultError::Busy) => return Outcome::Busy.code(),
         Err(_) => return Outcome::Vault.code(),

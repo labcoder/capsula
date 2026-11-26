@@ -36,7 +36,7 @@ use super::vault::Vault;
 use crate::context::{InputItem, Jpeg, ModelRequest, Role, ToolSchema};
 use crate::engines::responses::body;
 use crate::engines::{CallId, Opaque};
-use crate::platform::credential::NativeCredentialStore;
+use crate::platform::credential::admitted_store;
 
 /// The owner's approval: 45 requests, renewals included, none retried.
 const BUDGET: u32 = 45;
@@ -618,7 +618,10 @@ pub fn run() -> u8 {
             STOPPED
         };
     }
-    let vault = match Vault::open(NativeCredentialStore) {
+    let vault = match admitted_store()
+        .map_err(VaultError::from)
+        .and_then(Vault::open)
+    {
         Ok(vault) => vault,
         Err(VaultError::Busy) => return Outcome::Busy.code(),
         Err(_) => return Outcome::Vault.code(),

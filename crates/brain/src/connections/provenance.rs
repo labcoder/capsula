@@ -25,7 +25,7 @@ use super::error::VaultError;
 use super::http_client::{self, Endpoint, Http, HttpError, MAX_BODY_BYTES, Request, Response};
 use super::records::Account;
 use super::vault::Vault;
-use crate::platform::credential::NativeCredentialStore;
+use crate::platform::credential::admitted_store;
 
 /// The approved observation keys, matched exactly; any other key becomes `<key-n>`, its index
 /// in its own object.
@@ -145,7 +145,10 @@ pub fn run() -> Outcome {
     if out.try_exists().ok() != Some(false) {
         return Outcome::Preflight;
     }
-    let vault = match Vault::open(NativeCredentialStore) {
+    let vault = match admitted_store()
+        .map_err(VaultError::from)
+        .and_then(Vault::open)
+    {
         Ok(vault) => vault,
         Err(VaultError::Busy) => return Outcome::Busy,
         Err(_) => return Outcome::Vault,
