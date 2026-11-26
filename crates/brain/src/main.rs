@@ -9,7 +9,7 @@ use kumochi_brain::{
 };
 use kumochi_protocol::constants::{self, BRAIN_EXIT_BUSY, ProductIdentity};
 
-#[path = "main_platform.rs"]
+#[path = "main/platform.rs"]
 mod platform;
 
 const UNAVAILABLE: u8 = 69;

@@ -30,7 +30,7 @@ invalid launch fails rather than starting the brain. The other workers and diagn
 entire tail. Recognized debug diagnostics still exit 10 on a supported release build.
 
 A ParentBound start checks, in order, the support table, Gate identity (refused, 69) and then
-descriptors 3 and 4. The executable's own platform module (`main_platform.rs`) takes them as
+descriptors 3 and 4. The executable's own platform module (`main/platform.rs`) takes them as
 owned handles only when both are open, before anything else in the process can open a
 descriptor, and refuses with 76 otherwise; it never closes or scans other descriptors, since the
 shell spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`. The library entry, `run_parent_bound`, takes
