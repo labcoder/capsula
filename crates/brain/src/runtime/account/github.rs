@@ -351,16 +351,6 @@ impl GitHub {
         {
             return self.resume_suspended(jobs, events, http);
         }
-        let newly_unsupported = !self.unsupported
-            && matches!(
-                &event.outcome,
-                VerificationOutcome::Built(Err(HttpError::UnsupportedPlatform))
-            );
-        if newly_unsupported {
-            self.unsupported = true;
-            self.wake = None;
-            self.suspended.clear();
-        }
         let input = match event.outcome {
             VerificationOutcome::Built(Ok(client)) => {
                 let operation = verification
@@ -405,15 +395,7 @@ impl GitHub {
             VerificationOutcome::Stopped => Input::Stopped { stamp: event.stamp },
             VerificationOutcome::Wake => return Vec::new(),
         };
-        let mut frames = self.input(input, event.session, jobs, events, http);
-        if newly_unsupported
-            && !frames.iter().any(|frame| matches!(
-                frame, ControlToShell::GitHubError(error) if error.key() == ErrorKey::UnsupportedPlatform
-            ))
-        {
-            frames.extend(self.opened());
-        }
-        frames
+        self.input(input, event.session, jobs, events, http)
     }
 
     fn automatic(&self) -> bool {
