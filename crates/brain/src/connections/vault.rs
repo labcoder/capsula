@@ -313,8 +313,10 @@ impl<S: CredentialStore> Vault<S> {
     }
 
     /// Rereads exactly `expected` as Check does and, only while it is still current with a saved
-    /// chunk missing, durably promotes a `Discard` sign-out of it and returns `None`. Anything
-    /// else returns Check's answer, and nothing is written.
+    /// chunk missing and every other chunk readable at its length, durably promotes a `Discard`
+    /// sign-out of it and returns `None`. Otherwise nothing is written, and it returns Check's
+    /// answer, or `Malformed` or `Unavailable` for a wrong-length or refused chunk behind a missing
+    /// one.
     pub(super) fn forget_saved_sign_in(
         &mut self,
         expected: u64,
@@ -335,7 +337,9 @@ impl<S: CredentialStore> Vault<S> {
                 authority::AuthorityError::WrongChunkLength
                 | authority::AuthorityError::Store(CredentialStoreError::InvalidBlob),
             ) => return Some(Err(SavedSignInFailure::Malformed)),
-            Ok(false) | Err(_) => return Some(Err(SavedSignInFailure::Unavailable)),
+            // The record read whole this time, so it gets Check's answer and is never promoted.
+            Ok(false) => return Some(self.saved_sign_in(Some(expected))),
+            Err(_) => return Some(Err(SavedSignInFailure::Unavailable)),
         }
         self.update_marker(MarkerUpdate::Promote(Disposition::Discard))
             .err()

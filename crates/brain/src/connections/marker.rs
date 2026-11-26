@@ -109,6 +109,10 @@ impl SignOutMarker {
                     && match sign_out.phase {
                         // The checkpoint turns a Discard into an Erase, so this was never written.
                         Phase::Deleting if sign_out.disposition == Disposition::Discard => false,
+                        // Only a promotion writes a Discard, and it sets both.
+                        Phase::Revoking if sign_out.disposition == Disposition::Discard => {
+                            self.notice && self.outcome_unknown
+                        }
                         Phase::Revoking => self.notice,
                         Phase::Deleting => !self.request_pending && !self.outcome_unknown,
                     }

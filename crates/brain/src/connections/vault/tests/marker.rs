@@ -94,6 +94,7 @@ fn marker_layout_is_compact_versioned_and_unknown_values_fail_closed() {
             "\"disposition\":\"Keep\",\"phase\":\"Revoking\"",
             "\"disposition\":\"Discard\",\"phase\":\"Deleting\"",
         ),
+        expected.replace("\"disposition\":\"Keep\"", "\"disposition\":\"Discard\""),
         expected.replace(
             "\"phase\":\"Revoking\"",
             "\"phase\":\"Revoking\",\"extra\":true",

@@ -321,13 +321,29 @@ fn forget_writes_nothing_when_another_chunk_is_refused_or_the_wrong_length() {
         let before = h.marker();
         h.op(AccountOp::ForgetSavedSignIn(1));
         assert_eq!(h.marker(), before, "{context}");
-        assert!(
-            matches!(
-                h.view(),
-                AccountView::SavedSignInUnavailable { forget: None, .. }
-            ),
-            "{context}: {:?}",
-            h.view()
-        );
+        let reason = if refused {
+            SavedSignInFailure::Unavailable
+        } else {
+            SavedSignInFailure::Malformed
+        };
+        assert_eq!(h.view(), &unavailable(reason, None), "{context}");
     }
+}
+
+/// A record that reads whole by the time every chunk is scanned is recovered as Check would,
+/// never discarded.
+#[test]
+fn forget_recovers_a_sign_in_that_reads_whole_during_its_scan() {
+    let (mut h, saved) = copied("forget-reappears");
+    let names: Vec<_> = saved.keys().cloned().collect();
+    h.store.rollback(&saved, &names);
+    h.store.0.lock().expect("fake lock").missed_reads = 1;
+    let before = h.marker();
+    h.op(AccountOp::ForgetSavedSignIn(1));
+    assert_eq!(h.marker(), before);
+    assert!(
+        matches!(h.view(), AccountView::SignedIn { .. }),
+        "{:?}",
+        h.view()
+    );
 }
