@@ -433,13 +433,18 @@ before the control greeting refuses the pair.
 each by that deadline capped at the 5-second handshake phase. The handshake and the greeting are
 each raced against the parent's loss as one unit, `read_text_metrics` included, and fenced again when they
 finish. A loss drops the unit and refuses at once instead of at the deadline. A refusal drops
-the pair, which closes both legs. The parent-bound root's own `admit`, not wired into the entry
-yet, runs before it, once per root. It fences and checks the clock, takes custody, where Busy
+the pair, which closes both legs. The parent-bound root's own `admit` runs before it, once per
+root. It fences and checks the clock, takes custody, where Busy
 makes no item call, and fences again; then the instance attempt, placed in
 the root before the first item call so settlement always finds it, then a fresh `OwnedKey`. It
 publishes the key, keys the pair, and drops the key, which wipes it before it is recorded. Then
 it reserves Welcome's session from the root's own epochs, which the Brain later continues. After
 the greeting it fences, checks the clock and takes the commit claim, with no await between them.
+
+Serving sends ShellTuning through the pair's `write_control`, raced against the parent's loss,
+then `into_legs` hands the same advanced readers and writers to `serve_split`. The greeting's
+text metrics go on as a value; a frame the shell sent right after them stays in the data
+reader, and a replayed TextMetrics would end serving as Broken.
 
 The shell's side lives in `shell-core`'s `platform/macos/leg.rs` and `connect_pair`, also
 dormant: nothing calls them, since the Mac shell only opens the disconnected window. On macOS the

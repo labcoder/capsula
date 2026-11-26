@@ -74,10 +74,6 @@ impl InstanceStore for KeychainItem {
 }
 
 /// Custody in the OS-resolved Application Support folder.
-#[cfg_attr(
-    test,
-    expect(dead_code, reason = "only a product start resolves the OS folder")
-)]
 pub(crate) fn instance_custody() -> Result<AdmittedLock, CustodyError> {
     custody_in(ProductIdentity::ACTIVE, application_support_dir)
 }

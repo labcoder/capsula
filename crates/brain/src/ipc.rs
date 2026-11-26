@@ -111,21 +111,7 @@ pub(crate) enum SessionError {
     Io(#[from] io::Error),
 }
 
-/// Authorization selected by the local transport, not by the greeting's contents.
-pub(crate) enum PeerAuth<'a> {
-    Capability {
-        hello: Hello,
-        expected: &'a Capability,
-    },
-    #[cfg_attr(
-        not(all(test, target_os = "macos")),
-        expect(
-            dead_code,
-            reason = "only an authenticated pair reader can produce this greeting"
-        )
-    )]
-    SessionBound(platform::BoundHello),
-}
+pub(crate) use crate::platform::PeerAuth;
 
 /// Why a greeting was refused.
 #[derive(Debug, PartialEq, Eq)]
@@ -456,12 +442,13 @@ impl Legs for PipeLegs<'_> {
 
 /// A greeting both legs passed, ready to serve.
 pub(crate) struct Admitted<P> {
-    peer: P,
-    audio: AudioSession,
-    start: PairStart,
+    pub(crate) peer: P,
+    pub(crate) audio: AudioSession,
+    pub(crate) start: PairStart,
     /// The reserved session Welcome carried.
-    session: IssueSession,
-    text_metrics: Option<TextMetricsV1>,
+    pub(crate) session: IssueSession,
+    /// Parsed once by the greeting and handed on as a value, never read again.
+    pub(crate) text_metrics: Option<TextMetricsV1>,
 }
 
 /// Greets a shell over `legs` by the caller's `deadline`: the control greeting is authorized
