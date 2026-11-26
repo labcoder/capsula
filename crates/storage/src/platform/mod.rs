@@ -4,6 +4,9 @@
     reason = "Darwin descriptor and filesec APIs stay in platform"
 )]
 pub(crate) mod macos;
+#[cfg(unix)]
+#[expect(unsafe_code, reason = "POSIX descriptor APIs stay in platform")]
+pub(crate) mod unix;
 #[cfg(windows)]
 #[expect(unsafe_code, reason = "Win32 file and security APIs stay in platform")]
 pub(crate) mod windows;
