@@ -2053,7 +2053,7 @@ each actual handoff to its allocation lifetime and track scratch growth across b
 
 In this source, the live-owner terminal callback (`paint_observed`, checkpoints `160..161`)
 records retirement (`Case::A`..`Case::E`), control refusal (`Case::B`, `Case::D`), host
-recreation (`Case::A`, `Case::B`, `Case::D`) and panel/typing entity state plus `cx.notify()`
+closure with no replacement opened (`Case::A`, `Case::B`, `Case::D`) and panel/typing entity state plus `cx.notify()`
 updates (`Case::A`, `Case::B`, `Case::D`, `Case::E`) as one-off `App` recovery work while
 post-recovery steady-state draws (`166..167`) remain zero-extra-App-allocation. However, the
 existing headless fixture does not render or paint a mounted visible status or typing panel
