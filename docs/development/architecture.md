@@ -176,13 +176,8 @@ folder separately; a candidate does not authorize a write.
 `kumochi_storage::admit_support` holds and inspects that folder the way `open_shell_storage`
 does, creating nothing. On the held anchor, `Support::product_folder` looks up this edition's
 product folder: only `ENOENT` from opening that exact name in the held folder is `Missing`, and a
-folder there must pass the same private-folder checks. `Support::try_setup_guard` takes a
-nonblocking exclusive `flock` on a fresh open of the held folder. It is per user and coarser than
-the Windows guard, since every edition and anything else that locks Application Support contends
-for it. Closing the guard or its holder's exit releases it, and `Busy` says nothing about who
-holds it. `open_shell_storage` starts with `admit_support`; the product-folder lookup and the
-guard have no caller yet. `Support::profile_root` uses the same lookup for the root slot (see
-below).
+folder there must pass the same private-folder checks. `open_shell_storage` starts with
+`admit_support`; the product-folder lookup has no caller yet.
 
 Linux is a build and test host for `shell-core`, not a supported runtime. Its native
 IPC, process launch, credential storage, file logging, and audio entry points return
@@ -198,82 +193,6 @@ workspace. One build is outside its reach: `cargo build --all-targets` resolves 
 once for the whole command, so the `kumochi.exe` it writes carries the core's test support.
 That has to fail safe, so test support only ever takes something away: a device becomes a
 stub that reports itself unavailable, never the other way round.
-
-The shared, read-only `protocol::profile` classifier describes a local installation, not a
-Kumochi account. First open can be a background setup candidate only with positive evidence
-for a disjoint protected root and credential namespace, and definite absence of all known
-profile footprints. An intact installation can reopen. `ResumeSetup` permits reinspection
-only: even a pending, unstarted owner reservation can receive this result while its credential
-namespace is unverified. A writer must reacquire the guard and revalidate that namespace and
-the exact step before any write. Uncertain or conflicting evidence leaves the data untouched.
-Windows and macOS use the same policy. `profile::observe` feeds it: it tries the setup guard
-without waiting, samples the legacy footprints, the root slot and the owner record under that
-guard, and releases it on return. A busy or unavailable guard samples nothing. Objects inside
-the new-format root count as absent only with the root, and fresh targets stay unverified
-until an allocator can prove them disjoint, so observation never yields first use. No
-executable calls it yet, and its decisions do not authorize writes, reconnect a provider, or
-identify a person.
-
-Two probes feed it so far, and both only read (OSC-1085 cut 7). The root slot is a folder named
-`ProductIdentity::profile_root` (`Kumochi Profile`, `Kumochi Dev Profile` or `Kumochi Gate
-Profile`) beside the legacy product folder under the same anchor; `kumochi_storage::profile_root`
-on Windows and `Support::profile_root` on macOS read it. The owner item is
-`brain::profile::owner`'s exact read of [the owner target](accounts.md#profile-owner-item). Until
-the allocator (cut 9) writes them, each reads only absent or unverified: a missing slot or item is
-absent, while a folder, a file, an item or any refusal is unverified, because nothing yet tells
-the allocator's own from anything else. The owner probe drops the item's bytes unread. Nothing
-writes either name yet, so both stay cheap to change until cut 9 does.
-
-`brain::profile::NativeProbes` composes the real probes, still with no caller. Its guard is
-`acquire_setup_guard` on Windows and `Support::try_setup_guard` on the admitted Support anchor on
-macOS: only contention is `Busy`, and any other failure, an anchor that can't be found or admitted
-included, is `Unavailable`. Its anchors are the Local and Roaming AppData Known Folders on Windows
-and `application_support_dir` on macOS, never `LOCALAPPDATA`, `APPDATA` or the Gate override,
-whose admission creates the product folders. Each probe holds its anchors through its reads. Legacy
-is absent only when every legacy product folder (local data and, on Windows, roaming settings) is a
-definitive not-found under its verified anchor. A present local data folder is read in place under
-its existing `session.lock`, taken with `try_acquire_existing` and held through every read, and
-matches only with the current history schema and with an authority and committed host that both
-match, read by `connections::authority::existing::legacy` under the same lock over the native
-credential store. An absent authority or host is unverified, since the folder is there. An older
-known schema needs a migration, so it reads unverified until the owner decides how legacy schema
-updates are explained. A roaming folder without local data and any failed lookup are unverified
-too.
-
-The lookup carries the identity of the held product folder (volume and file ID on Windows, device
-and inode on macOS), and the folder at that path must have it before the lock is taken and again
-after the last read. SQLite opens the databases by path, so those checks catch only a lasting
-replacement, not one restored in between. Nothing in a present folder is read without
-`ExclusiveUse`: evidence that older writers, which don't take the session lock, are excluded and
-that the folder's path stays stable for the read, both established outside this read by the
-installation (owner decision 4). On Windows the held lock already keeps the path stable, since
-NTFS refuses to rename a folder with a file open under it; on macOS it doesn't. Nothing can make
-the token yet, so a present legacy folder reads unverified unread. On macOS the guard keeps
-the Support anchor it locks, and the root and legacy lookups open their children relative to it
-(`Support::child`), so a renamed path can't leave the guard on one folder and the lookup on
-another. On Windows the guard is a named mutex, so each probe holds its own anchor chain. Legacy
-Matching is schema-level evidence: the current history schema and a validated authority and host.
-It proves no history invariant, such as the `approval_mark` row, so runtime admission (cut 10)
-revalidates those before use.
-
-On Windows `kumochi_storage::hold_product_folder(anchor)` looks up only this edition's product
-folder (`DATA_DIR`) and `profile_root(anchor)` only its root slot, both through one private lookup
-under a held, trusted anchor folder that creates nothing. The name is opened relative to the held
-anchor handle (`NtCreateFile` with a root directory), not by path, so renaming the anchor after its
-check can't redirect the open to a replacement. Only "file not found" from that exact open, under
-an anchor no one untrusted may add to, counts as missing; a missing or non-folder anchor, a lost
-path, a file at the name or an untrusted folder is refused. Nothing calls either yet.
-
-On Windows the guard is a named mutex per user and edition in the global namespace, so every
-session of that user contends on one object and taking it writes nothing to disk
-(`kumochi_storage::acquire_setup_guard`). It's created with a medium label whose no-write-up,
-no-read-up and no-execute-up policy keeps lower-integrity code, the same user's included, from
-opening it to take it. An existing mutex is used only if its owner is trusted, it carries that
-label and policy and no one else may take, release or re-secure it; otherwise the guard is
-unavailable, never busy. Busy means another handle holds that verified object, not who holds
-it, so a caller only refuses or waits. A guard whose holder exited is taken, and the inspection
-under it judges what that holder left; taking it says nothing about whether setup finished.
-Older builds don't know the guard. Nothing takes it yet, and macOS has no guard yet.
 
 Tests that need files use the shared scratch guard in `tests/support/scratch.rs`. It creates
 a new child of Temp (or of an existing trusted root for fixtures that need one), skips
