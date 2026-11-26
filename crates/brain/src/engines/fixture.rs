@@ -149,7 +149,7 @@ async fn play(lines: Arc<[Line]>, mut out: Outbox) {
     for line in lines.iter() {
         let (Line::Text(after, _) | Line::Step(after, _) | Line::Fail(after)) = line;
         if after.is_zero() {
-            // A zero sleep still waits a timer tick: about 15.6 ms on Windows by default.
+            // A zero sleep can still park an idle runtime until a timer tick, ~15.6 ms on Windows.
             tokio::task::yield_now().await;
         } else {
             tokio::time::sleep(*after).await;
@@ -288,7 +288,26 @@ mod tests {
         let (events_tx, mut events) = mpsc::channel(8);
         let began = tokio::time::Instant::now();
         tokio::spawn(fixture.start(request(), events_tx, gate()));
-        while events.recv().await.is_some() {}
+        let mut seen = Vec::new();
+        while let Some(event) = events.recv().await {
+            seen.push(event);
+        }
+        assert_eq!(
+            seen,
+            [
+                TurnEvent::ToolCallStarted {
+                    call: call(),
+                    name: ToolName::Draw
+                },
+                step("a"),
+                TurnEvent::TextDelta("b".to_owned()),
+                TurnEvent::ToolCallReady {
+                    call: call(),
+                    args: "a\n".to_owned()
+                },
+                TurnEvent::Finished(Finish::Completed),
+            ]
+        );
         assert_eq!(began.elapsed(), Duration::ZERO);
     }
 
