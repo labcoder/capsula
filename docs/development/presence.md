@@ -79,6 +79,16 @@ it. The connected shell rounds that snapshot back to physical pixels. Win32 stil
 physical client origin and moves, shows, and hides windows without activation. Platforms without
 connected geometry refuse these operations; the local disconnected window uses GPUI's logical
 visible bounds and does not cross this boundary.
+
+Shell Core's `presence/desktop.rs` holds the geometry a Mac presence will place with. Nothing
+calls it yet. It takes Quartz displays (top-left global points, each mode's pixel size and
+whether it mirrors) and maps them onto physical pixels with one integer scale. It refuses the
+same arrangements the screen worker's `capture/layout.rs` refuses: none, mirrored, a fractional
+or mixed scale, a fractional or overflowing rectangle, or overlapping displays. It also refuses an
+arrangement with no display at the Quartz origin. So the shell never places onto a desktop whose
+picture the worker would refuse. A pointer is given to its display in points, before scaling.
+The work area comes from AppKit's bottom-left `visibleFrame`, flipped against the primary display
+and rounded inwards to whole pixels; a frame that is empty or leaves the primary display has no work area.
 Connected overlay bindings also require an admitted native owner before allocating windows.
 The local route never constructs that owner and does not bind overlay hit regions.
 Legacy panel activation similarly requires a native foreground backend; there is no placeholder
