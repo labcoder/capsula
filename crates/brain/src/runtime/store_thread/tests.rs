@@ -1600,3 +1600,177 @@ fn an_owed_picture_correction_refuses_new_authority_until_its_row_is_gone() {
         }
     );
 }
+
+#[test]
+fn a_job_key_picture_authorization_is_refused_without_touching_the_store() {
+    use kumochi_protocol::message::HeldScreen;
+
+    use crate::coordinator::{BuildKey, JobKey, LeaseId, ScreenGrantRefusal, SendKey};
+
+    let scratch = Scratch::new("job-screen-grant");
+    let store = Store::open(&scratch.db()).expect("store");
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let custody = crate::test_support::custody(&store);
+    let store = StoreThread::spawn(store, custody, acks, Schedule::default()).expect("thread");
+    for id in [1, 2] {
+        assert!(store.send(StoreOp::BeginTurn {
+            thread: ThreadId(id),
+            title: Some("t".into()),
+            run: RunId(id),
+            text: "hi".into(),
+            screen: Some(HeldScreen::Screen),
+        }));
+    }
+    let job = LeaseId {
+        key: SendKey::Job(JobKey {
+            thread: ThreadId(1),
+            serial: 1,
+        }),
+        send: 1,
+    };
+    let build = LeaseId {
+        key: SendKey::Build(BuildKey {
+            run: RunId(2),
+            round: 1,
+            attempt: 1,
+        }),
+        send: 2,
+    };
+    assert!(store.send(StoreOp::GrantScreen { lease: job }));
+    assert!(store.send(StoreOp::GrantScreen { lease: build }));
+    store.close().blocking_recv().expect("closed");
+    let mut got = Vec::new();
+    while let Ok(reply) = replies.try_recv() {
+        got.push(reply);
+    }
+    assert_eq!(
+        got,
+        [
+            Input::TurnStored { run: RunId(1) },
+            Input::TurnStored { run: RunId(2) },
+            Input::ScreenGrantStored {
+                lease: job,
+                result: Err(ScreenGrantRefusal::NotBuild),
+            },
+            Input::ScreenGrantStored {
+                lease: build,
+                result: Ok(()),
+            },
+        ]
+    );
+    let conn = rusqlite::Connection::open(scratch.db()).expect("raw open");
+    let stored = |id: i64| -> Option<String> {
+        conn.query_row("SELECT screen FROM runs WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .expect("the run's row")
+    };
+    assert_eq!(stored(1).as_deref(), Some("pending_screen"));
+    assert_eq!(stored(2).as_deref(), Some("granted_screen"));
+}
+
+#[test]
+fn an_invalid_picture_authorization_leaves_an_owed_correction_for_the_next_valid_ask() {
+    use kumochi_protocol::message::HeldScreen;
+
+    use crate::coordinator::{BuildKey, JobKey, LeaseId, ScreenGrantRefusal, SendKey};
+
+    let scratch = Scratch::new("invalid-grant-repair");
+    let mut store = Store::open(&scratch.db()).unwrap();
+    for id in [1, 2] {
+        store
+            .begin_held_turn(
+                ThreadId(id),
+                Some("t"),
+                RunId(id),
+                "words",
+                Some(HeldScreen::Screen),
+            )
+            .unwrap();
+    }
+    assert!(store.grant_screen(RunId(1)).unwrap());
+    store
+        .end_run(ThreadId(1), RunId(1), &[], RunEnd::Done)
+        .unwrap();
+    store
+        .conn_for_tests()
+        .execute_batch(
+            "CREATE TRIGGER refuse_late_clear BEFORE UPDATE OF screen ON runs
+         WHEN old.id = 1 AND new.screen IS NULL BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
+        )
+        .unwrap();
+    let (acks, mut replies) = mpsc::unbounded_channel();
+    let mut repairs = BTreeMap::new();
+    let mut purger = Purger::new(Schedule::default(), &store);
+    let mut serve = |store: &mut Store, repairs: &mut BTreeMap<_, _>, op| {
+        super::serve_op(store, &mut purger, &acks, repairs, op);
+        std::iter::from_fn(|| replies.try_recv().ok()).collect::<Vec<_>>()
+    };
+    let repair = StoreOp::RepairScreen {
+        run: RunId(1),
+        correction: UnsentScreen::Clear,
+    };
+    assert_eq!(serve(&mut store, &mut repairs, repair), []);
+    let owed = BTreeMap::from([(RunId(1), UnsentScreen::Clear)]);
+    assert_eq!(repairs, owed);
+    store
+        .conn_for_tests()
+        .execute_batch("DROP TRIGGER refuse_late_clear;")
+        .unwrap();
+    let screen = |store: &Store, id: i64| -> Option<String> {
+        store
+            .conn_for_tests()
+            .query_row("SELECT screen FROM runs WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let job = LeaseId {
+        key: SendKey::Job(JobKey {
+            thread: ThreadId(2),
+            serial: 1,
+        }),
+        send: 1,
+    };
+    assert_eq!(
+        serve(
+            &mut store,
+            &mut repairs,
+            StoreOp::GrantScreen { lease: job }
+        ),
+        [Input::ScreenGrantStored {
+            lease: job,
+            result: Err(ScreenGrantRefusal::NotBuild),
+        }]
+    );
+    assert_eq!(repairs, owed);
+    assert_eq!(screen(&store, 1).as_deref(), Some("granted_screen"));
+    assert_eq!(screen(&store, 2).as_deref(), Some("pending_screen"));
+    let build = LeaseId {
+        key: SendKey::Build(BuildKey {
+            run: RunId(2),
+            round: 1,
+            attempt: 1,
+        }),
+        send: 2,
+    };
+    assert_eq!(
+        serve(
+            &mut store,
+            &mut repairs,
+            StoreOp::GrantScreen { lease: build }
+        ),
+        [
+            Input::ScreenRepaired {
+                thread: ThreadId(1)
+            },
+            Input::ScreenGrantStored {
+                lease: build,
+                result: Ok(()),
+            },
+        ]
+    );
+    assert!(repairs.is_empty());
+    assert_eq!(screen(&store, 1), None);
+    assert_eq!(screen(&store, 2).as_deref(), Some("granted_screen"));
+}

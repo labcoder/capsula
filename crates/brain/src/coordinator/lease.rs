@@ -110,6 +110,8 @@ pub enum ScreenGrantRefusal {
     Expired,
     /// The Claude Code launch no longer owns the authorization.
     LaunchChanged,
+    /// Only a build's round can authorize a held picture.
+    NotBuild,
 }
 
 /// The protected digest a Key run's first request carried, which later true continuations resend
