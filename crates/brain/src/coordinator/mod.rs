@@ -1469,8 +1469,7 @@ impl Coordinator {
         let arrived = hold
             .as_ref()
             .map_or_else(|| self.arrived_now(), |hold| hold.arrived);
-        let finding = (hold.is_none()
-            && self.availability[ConnectionKind::ClaudeCode] == Availability::Finding)
+        let finding = (hold.is_none() && *self.claude_code() == Availability::Finding)
             .then_some(availability::Finding::Due);
         self.current = Some(Run {
             control: crate::recall::control::CancelOnDrop(control),

@@ -225,7 +225,6 @@ pub(crate) fn model_unavailable() -> UserError {
 
 impl Coordinator {
     /// Whether runs on Claude Code can be answered now.
-    #[cfg(test)]
     pub(crate) fn claude_code(&self) -> &Availability {
         &self.availability[ConnectionKind::ClaudeCode]
     }
