@@ -93,13 +93,15 @@ pub(super) fn hold_from(
 pub(super) enum ObjectKind {
     Directory,
     Regular,
+    /// A regular file like [`Self::Regular`] but at exactly this mode, as a sealed model is.
+    Exact(libc::mode_t),
 }
 
 impl ObjectKind {
     fn attribute_type(self) -> u32 {
         match self {
             Self::Directory => 2,
-            Self::Regular => 1,
+            Self::Regular | Self::Exact(_) => 1,
         }
     }
 
@@ -131,15 +133,32 @@ pub(super) fn inspect_private(
             }
         }
         ObjectKind::Regular => safe_regular(&before, user)?,
+        ObjectKind::Exact(mode) => exact_regular(&before, user, mode)?,
     }
     Filesec::new()?.inspect_with(file.as_raw_fd(), &before, Acl::Absent)?;
     let after = stat(file.as_raw_fd())?;
     if !same_inspection(&before, &after)
-        || (kind == ObjectKind::Regular && before.st_nlink != after.st_nlink)
+        || (kind != ObjectKind::Directory && before.st_nlink != after.st_nlink)
     {
         return Err(Untrusted::Io);
     }
     Ok(after)
+}
+
+/// A regular file this user owns with one link, at exactly `mode`.
+fn exact_regular(
+    metadata: &libc::stat,
+    user: libc::uid_t,
+    mode: libc::mode_t,
+) -> Result<(), Untrusted> {
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFREG
+        || metadata.st_uid != user
+        || metadata.st_mode & 0o7777 != mode
+        || metadata.st_nlink != 1
+    {
+        return Err(Untrusted::Unsafe);
+    }
+    Ok(())
 }
 
 /// Checks only this held folder, not its name or ancestors, against the existing ownership,
@@ -166,12 +185,13 @@ pub(super) fn inspect_object(
     match kind {
         ObjectKind::Directory => safe_directory(&before, user)?,
         ObjectKind::Regular => safe_regular(&before, user)?,
+        ObjectKind::Exact(mode) => exact_regular(&before, user, mode)?,
     }
     let security = Filesec::new()?;
     security.inspect(file.as_raw_fd(), &before)?;
     let after = stat(file.as_raw_fd())?;
     if !same_inspection(&before, &after)
-        || (kind == ObjectKind::Regular && before.st_nlink != after.st_nlink)
+        || (kind != ObjectKind::Directory && before.st_nlink != after.st_nlink)
     {
         return Err(Untrusted::Io);
     }

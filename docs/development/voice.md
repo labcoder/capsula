@@ -503,6 +503,38 @@ The brain sends `ControlToShell::Voice` with both parts' `PartState` once per co
 connected are applied first, so the view is current. Settings → Voice shows both parts' states
 and routes explicit Install or Retry requests to this installer.
 
+### Model files on macOS
+
+`kumochi-storage`'s `platform/macos/models.rs` holds the macOS model-file primitives. Nothing calls
+them yet: the brain still refuses model storage on macOS. Windows guards held names by refusing to
+share them. A POSIX descriptor holds an object, not its name, so the Mac guarantee comes from
+somewhere else:
+
+- **One private anchor.** Every path must be below the Support anchor that `admit_support`
+  admits. Each folder below it must be this user's, mode 0700, with no ACL at all, on the anchor's
+  volume. Each call walks again from `/`: the anchor as `admit_support` admits it, then each
+  entry below it is looked at without following it, and its type, owner, links and volume are
+  checked before it's opened. Its ACL is checked after. A placeholder is refused only as that
+  look sees it, so the anchor must be outside file providers.
+- **Exclusive partials, sealed finals.** A partial is created only with `O_EXCL` at 0600 and
+  locked. `seal_and_publish` seals it (0400 for a model, 0500 for a staged native library),
+  then renames it with `RENAME_EXCL`, so an arrival at the final name is kept. It then flushes
+  the folder and the file. A failed rename puts the partial back at 0600 only when its name still
+  gives it with one link and the final name is shown not to; otherwise it stays sealed. Every
+  partial's name ends `.part` and no sealed file's does, in any ASCII case, since APFS compares
+  names that way. So `open_private_write` resumes a sealed `.part` file, a publish stopped
+  between seal and rename, and only once it holds the lock.
+  `open_sealed` accepts only the exact sealed mode with one link.
+- **Two-pass removal.** `remove_private_tree` checks the whole tree before it unlinks anything:
+  private folders, files this user owns at 0400, 0500 or 0600, one volume, within 32 levels and
+  65,536 entries. It then deletes leaves first, each once its name still gives what the first pass
+  saw, and flushes the folder above. A part already gone counts as removed.
+
+This assumes one cooperating writer. A rename by this user between two calls isn't detected,
+and neither is a replacement made between a removal's last look and its unlink.
+An entry that already exists is admitted on its present metadata, not proven private since it was
+made.
+
 ## Provenance
 
 - **Speech input:** `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` at

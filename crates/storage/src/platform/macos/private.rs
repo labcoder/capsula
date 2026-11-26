@@ -20,17 +20,17 @@ use crate::platform::unix::{
 
 /// How far a private walk goes before it refuses.
 #[derive(Clone, Copy)]
-struct Limits {
+pub(super) struct Limits {
     /// Folders below the root.
-    depth: usize,
+    pub(super) depth: usize,
     /// Entries seen across the whole walk.
-    entries: usize,
+    pub(super) entries: usize,
 }
 
 // SDK sys/stat.h's SF_DATALESS; libc does not declare it.
 pub(super) const DATALESS: u32 = 0x4000_0000;
 
-const LIMITS: Limits = Limits {
+pub(super) const LIMITS: Limits = Limits {
     depth: 32,
     entries: 65_536,
 };
@@ -150,7 +150,7 @@ fn private_file(
     named(parent, name, &checked)
 }
 
-fn look(parent: &File, name: &CStr) -> Result<libc::stat, Untrusted> {
+pub(super) fn look(parent: &File, name: &CStr) -> Result<libc::stat, Untrusted> {
     let mut metadata = MaybeUninit::uninit();
     // SAFETY: parent is held, name is terminated and metadata is writable stat storage.
     if unsafe {
@@ -220,7 +220,11 @@ fn walk(
 }
 
 /// Every name in `folder` but the dots, counted into `seen`. A failed or partial listing refuses.
-fn list(folder: &File, limits: Limits, seen: &mut usize) -> Result<Vec<CString>, Untrusted> {
+pub(super) fn list(
+    folder: &File,
+    limits: Limits,
+    seen: &mut usize,
+) -> Result<Vec<CString>, Untrusted> {
     let mut entries = Entries::open(folder).map_err(|error| match error {
         AcquisitionError::Admission(error) => error,
         AcquisitionError::Open(_) => Untrusted::Io,
