@@ -190,7 +190,10 @@ fn authenticated_with_output(
             || open(Pipe::Data),
         )
         .expect("authenticate both fixture legs");
-        start.link.attend_until(connection, &start.events, end) == Attendance::Lost
+        start
+            .link
+            .attend_until(connection, &start.events, end, &Arc::default())
+            == Attendance::Lost
     });
     Authenticated {
         handle,
