@@ -1066,7 +1066,8 @@ While a check is out, `ChatGPT` is Finding. Unproved asks for a sign-in. In both
 that arrives reads no history for `ChatGPT`; Claude's turns read as before. The account sets and lifts that fence
 after every change, the local saved-sign-in check included. No catalog read or round gets a
 bearer for an unproved sign-in, and an answer after shutdown begins starts no catalog read.
-Ordinary publishes Ready.
+Ready needs an Ordinary answer, along with everything else Ready already needs, such as loaded
+models.
 
 `connections::authority` (OSC-233) decides which credential bytes count. On Rez, with two
 processes writing, Credential Manager hid a fresh write for 120 ms and brought back a confirmed
