@@ -450,9 +450,11 @@ keep the sibling `BRAIN_EXE`. After the spawn, `after_ready` reads exactly one b
 what's left of the attempt's deadline, before the shell writes anything. A byte other than
 READY, or the stream ending, is `Rejected`, and the deadline is `ConnectExpired`; none of them
 touch the Keychain. Only after READY does the shell read the instance item, admitted as
-`Role::Shell`, into a zeroizing buffer; a refused read is `Item` with no bytes written, and the
-attempt is checked against its deadline again after the call. `initiate` takes the buffer and
-wipes it once the initiator is keyed, before its first message goes out. It runs the
+`Role::Shell`, into a `Secret`: a boxed buffer, allocated before the read, that wipes itself when
+dropped, so a move copies only the pointer. The clock is checked before the read and again after
+it, before its answer counts, so a read that ends past the deadline is `ConnectExpired` whether it
+succeeded or not. A refused read is `Item`. Either way no byte is written. `initiate` takes the
+box and drops it once the initiator is keyed, before its first message goes out. It runs the
 initiator's steps over the shell's two ends by one deadline and returns the legs only once
 `BindAck` verifies. Each leg is the link's `PipeClient` over the session crate's record owners.
 A timeout bounds each read or write call as a whole, however many socket transfers it takes, and

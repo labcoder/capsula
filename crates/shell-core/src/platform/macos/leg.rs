@@ -480,6 +480,27 @@ fn message(
     Ok(message)
 }
 
+/// The instance capability on the heap, so a move copies only the pointer. Wiped when dropped.
+pub(crate) struct Secret(Box<[u8; SECRET_LEN]>);
+
+impl Secret {
+    pub(crate) fn zeroed() -> Self {
+        Self(Box::new([0; SECRET_LEN]))
+    }
+
+    pub(crate) fn bytes_mut(&mut self) -> &mut [u8; SECRET_LEN] {
+        &mut self.0
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        self.0.zeroize();
+        #[cfg(test)]
+        tests::wipes::record(&self.0[..]);
+    }
+}
+
 /// The one byte the brain writes on control before the handshake, read by `by` and nothing past
 /// it, so the initiator's first envelope starts after it. `None` when the stream ended first.
 ///
@@ -503,14 +524,14 @@ pub(crate) fn read_ready(ends: &ShellEnds, by: Instant) -> io::Result<Option<u8>
 /// `TimedOut` past `by`, `InvalidData` for a session refusal, or the transport's error.
 pub(crate) fn initiate(
     ends: ShellEnds,
-    secret: Zeroizing<[u8; SECRET_LEN]>,
+    secret: Secret,
     channel: Channel,
     by: Instant,
 ) -> io::Result<(PipeClient, PipeClient)> {
     for end in [&ends.control, &ends.data] {
         end.set_nonblocking(true)?;
     }
-    let (mut shell, init) = ShellAwaitsReply::start(&secret, channel).map_err(session_error)?;
+    let (mut shell, init) = ShellAwaitsReply::start(&secret.0, channel).map_err(session_error)?;
     drop(secret);
     send(end(&ends, init.leg), &init.bytes, by)?;
     let reply = message(&ends.control, by, |envelope| shell.record_len(envelope))?;

@@ -286,9 +286,12 @@ pub(super) fn after_ready(
         }
         Err(error) => return Err(LinkError::Io(error)),
     }
-    let mut secret = zeroize::Zeroizing::new([0; kumochi_session::SECRET_LEN]);
-    read_item(&mut secret).map_err(LinkError::Item)?;
     check_attempt(Some(deadline))?;
+    let mut secret = super::macos::Secret::zeroed();
+    let read = read_item(secret.bytes_mut());
+    // The Keychain call can outlast the attempt, so its answer counts only within the deadline.
+    check_attempt(Some(deadline))?;
+    read.map_err(LinkError::Item)?;
     over_pair(
         ends,
         secret,
@@ -324,7 +327,7 @@ pub(super) fn not_started(error: super::macos::NotStarted, deadline: Instant) ->
 #[cfg(target_os = "macos")]
 pub(super) fn over_pair(
     ends: super::macos::ShellEnds,
-    secret: zeroize::Zeroizing<[u8; kumochi_session::SECRET_LEN]>,
+    secret: super::macos::Secret,
     channel: kumochi_session::Channel,
     audio: AudioSession,
     repair_of: Option<IssueSession>,

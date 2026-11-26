@@ -148,7 +148,7 @@ fn bound() -> (PipeClient, PipeClient, Brain) {
     let (shell, brain_control, brain_data) = ends();
     let brain = thread::spawn(move || respond(brain_control, brain_data));
     let (control, data) =
-        initiate(shell, Zeroizing::new(SECRET), Channel::Dev, by()).expect("initiated");
+        initiate(shell, Secret(Box::new(SECRET)), Channel::Dev, by()).expect("initiated");
     (
         control,
         data,
@@ -318,7 +318,7 @@ fn abort_ends_only_its_own_leg() {
 fn the_initiator_ends_at_its_deadline() {
     let (shell, _brain_control, _brain_data) = ends();
     let deadline = Instant::now() + SHORT;
-    let refused = initiate(shell, Zeroizing::new(SECRET), Channel::Dev, deadline)
+    let refused = initiate(shell, Secret(Box::new(SECRET)), Channel::Dev, deadline)
         .expect_err("nobody answers");
     assert!(matches!(
         refused.kind(),
@@ -342,7 +342,7 @@ fn a_brain_with_another_secret_never_binds() {
         drop((brain_control, brain_data));
     });
     let refused =
-        initiate(shell, Zeroizing::new(SECRET), Channel::Dev, by()).expect_err("no reply");
+        initiate(shell, Secret(Box::new(SECRET)), Channel::Dev, by()).expect_err("no reply");
     assert_eq!(refused.kind(), std::io::ErrorKind::UnexpectedEof);
     brain.join().expect("the brain side finished");
 }
@@ -420,7 +420,7 @@ fn attempt(
     };
     let result = over_pair(
         shell,
-        Zeroizing::new(SECRET),
+        Secret(Box::new(SECRET)),
         Channel::Dev,
         audio,
         None,
@@ -559,7 +559,7 @@ fn the_initiator_ends_at_its_deadline_however_the_reply_trickles() {
     });
     let deadline = Instant::now() + Duration::from_millis(400);
     let refused =
-        initiate(shell, Zeroizing::new(SECRET), Channel::Dev, deadline).expect_err("too slow");
+        initiate(shell, Secret(Box::new(SECRET)), Channel::Dev, deadline).expect_err("too slow");
     assert!(matches!(
         refused.kind(),
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
@@ -858,14 +858,26 @@ fn nothing_moves_once_the_call_deadline_has_passed() {
     );
 }
 
-/// Runs the shell's side after the spawn over `shell`, with a fake item reader that answers
-/// `item`, filling the synthetic secret on success. Returns the result and how often it was read.
+/// What one run of the shell's side after the spawn did.
+struct Spawned {
+    result: Result<Connection, LinkError>,
+    /// How often the fake item reader ran.
+    reads: usize,
+    /// Whether the reader's buffer held only zeros as it was freed; None if never read or freed.
+    wiped: Option<bool>,
+}
+
+/// Runs the shell's side after the spawn over `shell`, with a fake item reader that fills the
+/// synthetic secret, takes `lag` and answers `item`. It fills even when it refuses, so a wipe
+/// on a refusal is seen.
 fn after_spawn(
     shell: ShellEnds,
     deadline: Instant,
     item: Result<(), kumochi_storage::ItemError>,
-) -> (Result<Connection, LinkError>, usize) {
+    lag: Duration,
+) -> Spawned {
     let reads = std::cell::Cell::new(0);
+    let buffer = std::cell::Cell::new(None);
     let result = after_ready(
         shell,
         Channel::Dev,
@@ -875,13 +887,38 @@ fn after_spawn(
         |_| DrawingText::default(),
         |into| {
             reads.set(reads.get() + 1);
-            if item.is_ok() {
-                *into = SECRET;
-            }
+            buffer.set(Some((wipes::len(), into.as_ptr().addr())));
+            *into = SECRET;
+            thread::sleep(lag);
             item
         },
     );
-    (result, reads.get())
+    Spawned {
+        result,
+        reads: reads.get(),
+        wiped: buffer.get().and_then(|(since, at)| wipes::found(since, at)),
+    }
+}
+
+/// Reads both brain ends to their close and asserts the shell wrote nothing on either.
+fn nothing_written(control: &mut UnixStream, data: &mut UnixStream) {
+    for end in [control, data] {
+        let mut written = Vec::new();
+        end.read_to_end(&mut written)
+            .expect("the shell's end closed");
+        assert_eq!(written, Vec::<u8>::new(), "no initiator bytes");
+    }
+}
+
+/// Both brain ends bounded, then READY queued. Darwin refuses the option once the peer has
+/// closed, so it's set first.
+fn ready_queued() -> (ShellEnds, UnixStream, UnixStream) {
+    let (shell, mut brain_control, brain_data) = ends();
+    for end in [&brain_control, &brain_data] {
+        end.set_read_timeout(Some(BOUND)).expect("bounded");
+    }
+    brain_control.write_all(&[SESSION_READY]).expect("READY");
+    (shell, brain_control, brain_data)
 }
 
 #[test]
@@ -897,9 +934,12 @@ fn ready_then_the_item_runs_the_initiator_to_settings() {
             by(),
         )
     });
-    let (result, reads) = after_spawn(shell, by(), Ok(()));
-    let connection = result.expect("connected");
-    assert_eq!((connection.issue_origin, reads), (ORIGIN, 1));
+    let spawned = after_spawn(shell, by(), Ok(()), Duration::ZERO);
+    let connection = spawned.result.expect("connected");
+    assert_eq!(
+        (connection.issue_origin, spawned.reads, spawned.wiped),
+        (ORIGIN, 1, Some(true))
+    );
     brain.join().expect("the brain side finished");
     assert!(
         matches!(
@@ -908,6 +948,23 @@ fn ready_then_the_item_runs_the_initiator_to_settings() {
         ),
         "the link reads Settings first"
     );
+}
+
+#[test]
+fn ready_reads_one_byte_and_leaves_the_next_for_the_initiator() {
+    let (shell, mut brain_control, _brain_data) = ends();
+    brain_control
+        .write_all(&[SESSION_READY, 0xEE])
+        .expect("READY and a sentinel");
+    assert_eq!(read_ready(&shell, by()).expect("read"), Some(SESSION_READY));
+    let mut next = [0; 1];
+    assert_eq!(
+        (&shell.control)
+            .read(&mut next)
+            .expect("the sentinel is still queued"),
+        1
+    );
+    assert_eq!(next, [0xEE]);
 }
 
 #[test]
@@ -937,10 +994,13 @@ fn the_shell_writes_nothing_before_ready() {
             by(),
         )
     });
-    let (result, reads) = after_spawn(shell, by(), Ok(()));
+    let spawned = after_spawn(shell, by(), Ok(()), Duration::ZERO);
     brain.join().expect("the brain saw nothing before READY");
     assert_eq!(
-        (result.expect("connected").issue_origin, reads),
+        (
+            spawned.result.expect("connected").issue_origin,
+            spawned.reads
+        ),
         (ORIGIN, 1)
     );
 }
@@ -950,12 +1010,12 @@ fn a_first_byte_other_than_ready_is_rejected_before_the_item() {
     for first in [0x00, 0x53] {
         let (shell, mut brain_control, _brain_data) = ends();
         brain_control.write_all(&[first]).expect("first byte");
-        let (result, reads) = after_spawn(shell, by(), Ok(()));
+        let spawned = after_spawn(shell, by(), Ok(()), Duration::ZERO);
         assert!(
-            matches!(result, Err(LinkError::Rejected)),
+            matches!(spawned.result, Err(LinkError::Rejected)),
             "first byte {first:#04x}"
         );
-        assert_eq!(reads, 0, "first byte {first:#04x}");
+        assert_eq!(spawned.reads, 0, "first byte {first:#04x}");
     }
 }
 
@@ -963,9 +1023,9 @@ fn a_first_byte_other_than_ready_is_rejected_before_the_item() {
 fn the_stream_ending_before_ready_is_rejected_before_the_item() {
     let (shell, brain_control, _brain_data) = ends();
     drop(brain_control);
-    let (result, reads) = after_spawn(shell, by(), Ok(()));
-    assert!(matches!(result, Err(LinkError::Rejected)));
-    assert_eq!(reads, 0);
+    let spawned = after_spawn(shell, by(), Ok(()), Duration::ZERO);
+    assert!(matches!(spawned.result, Err(LinkError::Rejected)));
+    assert_eq!(spawned.reads, 0);
 }
 
 #[test]
@@ -976,10 +1036,10 @@ fn the_ready_wait_ends_at_the_deadline_before_the_item() {
         thread::sleep(Duration::from_secs(1) + deadline.saturating_duration_since(Instant::now()));
         drop((brain_control, brain_data));
     });
-    let (result, reads) = after_spawn(shell, deadline, Ok(()));
+    let spawned = after_spawn(shell, deadline, Ok(()), Duration::ZERO);
     let ended = Instant::now();
-    assert!(matches!(result, Err(LinkError::ConnectExpired)));
-    assert_eq!(reads, 0);
+    assert!(matches!(spawned.result, Err(LinkError::ConnectExpired)));
+    assert_eq!(spawned.reads, 0);
     assert!(ended >= deadline, "waited for the deadline");
     assert!(
         ended < deadline + Duration::from_millis(400),
@@ -990,22 +1050,58 @@ fn the_ready_wait_ends_at_the_deadline_before_the_item() {
 
 #[test]
 fn a_refused_item_read_refuses_with_nothing_written() {
-    let (shell, mut brain_control, mut brain_data) = ends();
-    // Darwin refuses the option once the peer has closed, so it's set first.
-    for end in [&brain_control, &brain_data] {
-        end.set_read_timeout(Some(BOUND)).expect("bounded");
-    }
-    brain_control.write_all(&[SESSION_READY]).expect("READY");
-    let (result, reads) = after_spawn(shell, by(), Err(kumochi_storage::ItemError::Missing));
+    let (shell, mut brain_control, mut brain_data) = ready_queued();
+    let spawned = after_spawn(
+        shell,
+        by(),
+        Err(kumochi_storage::ItemError::Missing),
+        Duration::ZERO,
+    );
     assert!(matches!(
-        result,
+        spawned.result,
         Err(LinkError::Item(kumochi_storage::ItemError::Missing))
     ));
-    assert_eq!(reads, 1);
-    for end in [&mut brain_control, &mut brain_data] {
-        let mut written = Vec::new();
-        end.read_to_end(&mut written)
-            .expect("the shell's end closed");
-        assert_eq!(written, Vec::<u8>::new(), "no initiator bytes");
+    assert_eq!((spawned.reads, spawned.wiped), (1, Some(true)));
+    nothing_written(&mut brain_control, &mut brain_data);
+}
+
+#[test]
+fn an_item_read_that_ends_past_the_deadline_expires_whatever_it_answered() {
+    for item in [Ok(()), Err(kumochi_storage::ItemError::Missing)] {
+        let (shell, mut brain_control, mut brain_data) = ready_queued();
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let spawned = after_spawn(shell, deadline, item, Duration::from_millis(300));
+        assert!(
+            matches!(spawned.result, Err(LinkError::ConnectExpired)),
+            "{item:?}"
+        );
+        assert_eq!((spawned.reads, spawned.wiped), (1, Some(true)), "{item:?}");
+        nothing_written(&mut brain_control, &mut brain_data);
+    }
+}
+
+/// Test support: each dropped [`Secret`]'s address and whether it held only zeros at the end of
+/// its drop, read from the heap backing itself just before it is freed. Secrets drop on any test
+/// thread, so the log is shared; it never holds the bytes.
+pub(super) mod wipes {
+    use std::sync::Mutex;
+
+    static LOG: Mutex<Vec<(usize, bool)>> = Mutex::new(Vec::new());
+
+    pub(in super::super) fn record(bytes: &[u8]) {
+        let entry = (bytes.as_ptr().addr(), bytes.iter().all(|&byte| byte == 0));
+        LOG.lock().expect("the wipe log").push(entry);
+    }
+
+    pub(super) fn len() -> usize {
+        LOG.lock().expect("the wipe log").len()
+    }
+
+    /// Whether the first record of `addr` since `since` was all zeros.
+    pub(super) fn found(since: usize, addr: usize) -> Option<bool> {
+        LOG.lock().expect("the wipe log")[since..]
+            .iter()
+            .find(|(at, _)| *at == addr)
+            .map(|&(_, zero)| zero)
     }
 }
