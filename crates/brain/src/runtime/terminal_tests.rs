@@ -957,7 +957,7 @@ async fn a_data_frame_parked_through_grace_is_never_polled_again_and_quit_is_acc
 }
 
 #[tokio::test]
-async fn a_cancelled_page_abandons_its_started_data_frame_as_refused_without_grace() {
+async fn a_cancelled_page_abandons_a_started_data_frame_as_refused_without_grace() {
     for audio in AUDIO {
         let scratch = Scratch::new("page-cut-mid-frame");
         let mut brain = test_support::brain(&scratch, "");
@@ -990,6 +990,9 @@ async fn a_cancelled_page_abandons_its_started_data_frame_as_refused_without_gra
                     ended = &mut serve => panic!("ended before the page was read: {ended:?}"),
                     event = seen.recv() => {
                         if let Some(Seen::StoreOpStarted(StoreOp::ReadPage { key, .. })) = event {
+                            // Frozen before its end, so only the cancel below can end the read.
+                            *key.control.test.time.lock().unwrap() =
+                                key.control.end.checked_sub(Duration::from_secs(1));
                             break key;
                         }
                     }
