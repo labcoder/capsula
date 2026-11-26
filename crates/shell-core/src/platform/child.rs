@@ -77,7 +77,7 @@ pub(crate) trait Os: Send + 'static {
     fn spawn(&mut self) -> io::Result<()>;
     /// Waits on the child's exact pid without blocking, retrying interruptions.
     fn poll(&mut self) -> Observation;
-    /// Sends the child SIGKILL.
+    /// Requests forced retirement while this owner still has custody.
     fn kill(&mut self) -> io::Result<()>;
 }
 
@@ -112,8 +112,8 @@ pub(crate) enum Settled {
     Reaped(Exit),
     /// Custody is gone. The claim stays taken, so nothing replaces this child.
     Lost,
-    /// Still unreaped after the kill's bounded wait. The claim stays taken; the owner keeps
-    /// reaping in the background while the shell lives, but reports nothing more.
+    /// Forced retirement was refused or exit was not confirmed within its bounded wait.
+    /// The claim stays taken; the owner can still reap without reporting a new outcome.
     Unsettled,
 }
 
@@ -201,6 +201,7 @@ fn own(
     let _unheard = report.send(Report::Spawned);
     let mut retires = Some(retires);
     let mut retiring = false;
+    let mut retirement_refused = false;
     let mut phase = Phase::Watching;
     loop {
         // Read before the poll: a decision at a deadline follows a poll at or after it, so a child
@@ -213,6 +214,11 @@ fn own(
         };
         if let Some(settled) = settled {
             if phase != Phase::Unsettled {
+                let settled = if retirement_refused && matches!(settled, Settled::Reaped(_)) {
+                    Settled::Unsettled
+                } else {
+                    settled
+                };
                 if matches!(settled, Settled::Reaped(_)) {
                     word.release();
                 }
@@ -223,11 +229,11 @@ fn own(
         phase = match phase {
             Phase::Watching if retiring || word.quitting() => Phase::Grace(Instant::now() + wait),
             Phase::Grace(deadline) if now >= deadline => {
-                kill(&mut os);
+                retirement_refused = !kill(&mut os);
                 Phase::Killed(Instant::now() + wait)
             }
             Phase::Killed(deadline) if now >= deadline => {
-                tracing::error!("the brain child is still unreaped after SIGKILL");
+                tracing::error!("the brain child's forced retirement is unconfirmed");
                 let _unheard = report.send(Report::Settled(Settled::Unsettled));
                 Phase::Unsettled
             }
@@ -265,17 +271,19 @@ fn spawn(os: &mut impl Os, word: &SpawnWord) -> Result<(), Refusal> {
 }
 
 /// One kill, never retried: a refusal or a failure leaves the bounded wait to decide.
-fn kill(os: &mut impl Os) {
+fn kill(os: &mut impl Os) -> bool {
     if os.auto_reaps() {
         tracing::error!("not signalling the brain child: the shell reaps its children itself");
-        return;
+        return false;
     }
     if let Err(error) = os.kill() {
         tracing::error!(
             errno = error.raw_os_error(),
             "couldn't kill the brain child"
         );
+        return false;
     }
+    true
 }
 
 #[cfg(test)]
@@ -737,6 +745,23 @@ mod tests {
         );
         assert_eq!(fake.script().forbidden, 0, "no poll after the late reap");
         assert!(!claimable(&word), "a late reap frees no claim");
+    }
+
+    #[test]
+    fn a_refused_retirement_cannot_become_clean_on_a_timely_exit_zero() {
+        let word = Arc::new(SpawnWord::default());
+        let fake = Fake::with(|s| s.kill_fails = true);
+        let owner = started(&fake, &word);
+        owner.retire();
+        fake.until(|script| script.kills == 1);
+        fake.script().exits = Some((Instant::now(), Exit::Code(0)));
+        fake.until(|script| script.reaped);
+        let Report::Settled(settled) = next(&owner) else {
+            panic!("one retirement settlement");
+        };
+        assert_eq!(settled, Settled::Unsettled);
+        assert!(!settled.is_clean());
+        assert!(!claimable(&word), "refused retirement frees no claim");
     }
 
     #[test]
