@@ -16,10 +16,11 @@ mod scratch;
 pub use platform::Untrusted;
 #[cfg(target_os = "macos")]
 pub use platform::macos::{
-    AcquisitionError, AdmittedLock, AdmittedLog, ApplicationSupportError, HeldFolder, Product,
-    ProductFolder, Retention, SettingsWriteError, ShellStorage, Support, admit_support,
-    application_support_dir, check_product_folder, hold_chain, open_shell_storage, owner_only_dir,
-    private_tree, read_settings, replace_settings,
+    AcquisitionError, AdmittedLock, AdmittedLog, ApplicationSupportError, HeldFolder, INSTANCE_LEN,
+    InstanceItem, ItemError, ItemQuery, Op, Product, ProductFolder, Retention, Role,
+    SettingsWriteError, ShellStorage, Support, admit_support, application_support_dir,
+    check_product_folder, hold_chain, instance_edition, open_shell_storage, owner_only_dir,
+    private_tree, read_settings, replace_settings, status,
 };
 #[cfg(windows)]
 pub use platform::windows::{

@@ -20,15 +20,18 @@ use kumochi_storage::user_sid;
 #[cfg(test)]
 pub(crate) use kumochi_storage::{DaclEntry, dacl_entries, dacl_sddl, set_dacl};
 pub(crate) use kumochi_storage::{hold_chain, owner_only_dir};
-use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
+use windows_sys::Win32::Foundation::{
+    ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO,
+    FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_FULL_DIR_INFO, FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_LIST_DIRECTORY,
     FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FileDispositionInfo, FileFullDirectoryInfo, FileFullDirectoryRestartInfo,
-    FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, READ_CONTROL,
-    SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
+    FILE_SHARE_WRITE, FileDispositionInfo, FileDispositionInfoEx, FileFullDirectoryInfo,
+    FileFullDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, READ_CONTROL, SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::UI::Shell::FOLDERID_Profile;
 
@@ -212,19 +215,59 @@ fn remove_entry(path: &Path, trusted: &Trusted) -> Result<(), Untrusted> {
 
 /// Deletes what `entry` is open on, with DELETE, once its last handle closes.
 fn delete_on_close(entry: &File) -> Result<(), Untrusted> {
-    let delete = FILE_DISPOSITION_INFO { DeleteFile: true };
-    let size = u32::try_from(size_of::<FILE_DISPOSITION_INFO>()).map_err(|_| Untrusted::Io)?;
-    // SAFETY: `delete` is readable for `size` bytes and the handle is open with DELETE.
-    let set = unsafe {
-        SetFileInformationByHandle(
-            entry.as_raw_handle(),
-            FileDispositionInfo,
-            (&raw const delete).cast(),
-            size,
-        )
+    set_disposition(entry, Disposition::Legacy).map_err(|_| Untrusted::Io)
+}
+
+/// Deletes what `entry` is open on, with DELETE, once `entry` closes. With POSIX semantics its name
+/// leaves the folder then even while another process, such as a virus scan, still has it open, so
+/// the folder above can be deleted next. Only a volume or driver that refuses them gets the legacy
+/// delete, whose name stays until the last handle closes. Model storage only: elsewhere a delete
+/// stays unfinished while anyone still holds the file.
+fn unlink_on_close(entry: &File) -> Result<(), Untrusted> {
+    match set_disposition(entry, Disposition::Posix) {
+        Err(error)
+            if matches!(
+                error.raw_os_error().map(i32::cast_unsigned),
+                Some(ERROR_INVALID_FUNCTION | ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED)
+            ) =>
+        {
+            set_disposition(entry, Disposition::Legacy)
+        }
+        set => set,
+    }
+    .map_err(|_| Untrusted::Io)
+}
+
+#[derive(Clone, Copy)]
+enum Disposition {
+    Posix,
+    Legacy,
+}
+
+/// Marks what `entry` is open on for deletion, the way `disposition` names.
+fn set_disposition(entry: &File, disposition: Disposition) -> io::Result<()> {
+    let posix = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
     };
+    let legacy = FILE_DISPOSITION_INFO { DeleteFile: true };
+    let (class, info, size) = match disposition {
+        Disposition::Posix => (
+            FileDispositionInfoEx,
+            (&raw const posix).cast::<std::ffi::c_void>(),
+            size_of_val(&posix),
+        ),
+        Disposition::Legacy => (
+            FileDispositionInfo,
+            (&raw const legacy).cast::<std::ffi::c_void>(),
+            size_of_val(&legacy),
+        ),
+    };
+    let size = u32::try_from(size).map_err(|_| io::ErrorKind::InvalidInput)?;
+    // SAFETY: `info` points to the initialized record `class` takes, readable for `size` bytes,
+    // and the handle is open for the call.
+    let set = unsafe { SetFileInformationByHandle(entry.as_raw_handle(), class, info, size) };
     if set == 0 {
-        return Err(Untrusted::Io);
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -406,8 +449,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        DELETE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, Kind, READ_CONTROL,
-        Untrusted, granted,
+        DELETE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, Kind, READ_CONTROL, Untrusted, granted,
     };
     use crate::scratch::Scratch;
     use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
@@ -445,6 +488,22 @@ mod tests {
         assert_eq!(granted(&root), [LOOK | DELETE, LIST]);
         assert_eq!(granted(&root.join("file")), [LOOK | DELETE]);
         assert_eq!(granted(&root.join("folder")), [LOOK | DELETE, LIST]);
+    }
+
+    /// Outside model storage, a delete stays unfinished while anyone still holds a file.
+    #[test]
+    fn a_tree_stays_while_another_handle_reads_a_file() {
+        let (_scratch, root) = scratch("delete-held");
+        let reader = File::options()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(root.join("file"))
+            .expect("a reader");
+        assert_eq!(super::remove_tree(&root), Err(Untrusted::Io));
+        assert!(root.exists(), "the folder stays while the file is held");
+        drop(reader);
+        super::remove_tree(&root).expect("deleted once the reader closes");
+        assert!(!root.exists(), "the tree is gone");
     }
 
     #[test]

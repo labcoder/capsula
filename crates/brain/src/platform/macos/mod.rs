@@ -9,6 +9,12 @@ pub(super) mod clock;
     reason = "the Keychain store calls Security and LocalAuthentication"
 )]
 pub(super) mod credential;
+#[expect(unsafe_code, reason = "the instance item's writes call Security")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "parent-bound startup is not wired yet")
+)]
+pub(super) mod instance;
 #[expect(unsafe_code, reason = "reads the inherited sockets' options")]
 #[cfg_attr(
     not(test),
