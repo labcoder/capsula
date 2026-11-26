@@ -153,6 +153,10 @@ impl InstanceLock {
     pub(crate) fn product(&self) -> &std::path::Path {
         match *self {}
     }
+
+    pub(crate) fn fresh(&self) -> bool {
+        match *self {}
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -342,7 +346,7 @@ pub(crate) use protected::{
     hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
     private_tree, publish_model, remove_model_tree, remove_tree, unmark, validate_model_path,
 };
-pub use runtime_admission::{Mode, supports};
+pub use runtime_admission::{Mode, admits_parent_bound, supports};
 pub(crate) use runtime_admission::{require_mode, serve_speech};
 pub use session_lock::{SessionLock, SessionLockError};
 pub(crate) use tls_control::{

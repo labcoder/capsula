@@ -3,7 +3,7 @@
 
 use std::{ffi::OsString, process::ExitCode};
 
-use kumochi_brain::platform::{Mode, supports};
+use kumochi_brain::platform::{Mode, admits_parent_bound, supports};
 use kumochi_brain::{
     BrainError, MCP_BRIDGE, PARENT_BOUND, ParentBoundError, SCREEN_WORKER, SPEECH_WORKER, logging,
 };
@@ -113,9 +113,9 @@ fn main() -> ExitCode {
 }
 
 /// Takes descriptors 3 and 4 only after the mode and identity checks, and before anything else in
-/// the process can open a descriptor.
+/// the process can open a descriptor. Only a supporting build's Dev edition gets that far.
 fn parent_bound() -> u8 {
-    if ProductIdentity::ACTIVE == ProductIdentity::GATE {
+    if !admits_parent_bound(ProductIdentity::ACTIVE) {
         return UNAVAILABLE;
     }
     let Ok(fds) = platform::claim_inherited() else {

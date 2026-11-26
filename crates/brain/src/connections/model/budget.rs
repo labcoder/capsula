@@ -1,16 +1,18 @@
 //! A cap on model requests for live checks. Only debug builds read it; release builds have none.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use kumochi_protocol::constants::{
     LIVE_BUDGET_ENV, LIVE_KEY_CATALOG_BUDGET_ENV, LIVE_KEY_MESSAGES_BUDGET_ENV,
 };
 
-/// The model requests this process may still send.
-#[derive(Debug, Default)]
+/// The model requests this process may still send. Clones share one count, so a caller that
+/// hands the budget on can still read what was reserved.
+#[derive(Clone, Debug, Default)]
 pub struct Budget {
     limit: Option<u32>,
-    used: AtomicU32,
+    used: Arc<AtomicU32>,
 }
 
 impl Budget {
@@ -34,7 +36,7 @@ impl Budget {
     pub fn limited(limit: Option<u32>) -> Self {
         Self {
             limit,
-            used: AtomicU32::new(0),
+            used: Arc::new(AtomicU32::new(0)),
         }
     }
 

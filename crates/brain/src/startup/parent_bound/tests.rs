@@ -284,8 +284,23 @@ async fn an_open_refused_during_the_stores_setup_settles_it_unconfirmed() {
 }
 
 #[test]
-fn this_builds_prerequisites_are_never_ready() {
-    assert_eq!(Pending.ready(), Err(NotReady));
+fn first_light_is_ready_only_where_parent_bound_is_supported() {
+    let expected = if platform::supports(Mode::ParentBound) {
+        Ok(())
+    } else {
+        Err(NotReady)
+    };
+    assert_eq!(FirstLight::new().ready(), expected);
+}
+
+#[test]
+fn first_light_allows_one_model_request_and_refuses_the_second() {
+    let first_light = FirstLight::new();
+    let shared = first_light.budget.clone();
+    assert!(first_light.budget.reserve());
+    assert!(!first_light.budget.reserve(), "a second round is spent");
+    assert!(!shared.reserve(), "a clone shares the count");
+    assert_eq!(shared.spent(), 1);
 }
 
 /// A pair that records how far it was driven: 1 once keyed, 2 once greeted, 3 once served, when
@@ -717,6 +732,330 @@ fn the_exit_follows_the_served_end_unless_a_stage_is_short_of_confirmed() {
             exit(&Err(refused), short),
             Err(ParentBoundError::Incomplete),
             "{refused:?}"
+        );
+    }
+}
+
+/// First light's own prerequisites on scratch custody: only a macOS `first-light` build has them.
+#[cfg(all(target_os = "macos", feature = "first-light"))]
+mod first_light {
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    use kumochi_protocol::constants::{AUTHORITY_FILE, CONFIG_FILE, DATA_DIR, STORE_FILE};
+
+    use super::*;
+    use crate::fixture_support::held_accounts_until;
+    use crate::platform::{instance_fixture, instance_fixture_clean};
+    use crate::store::StoreError;
+
+    /// First light's ready, open and containment, with offline accounts on a fake vault and no
+    /// process-wide init; it records whether the authority was there before the accounts.
+    struct Offline {
+        inner: FirstLight,
+        authority: Option<bool>,
+    }
+
+    impl Offline {
+        fn new() -> Self {
+            Self {
+                inner: FirstLight::new(),
+                authority: None,
+            }
+        }
+    }
+
+    impl Prerequisites for Offline {
+        fn ready(&self) -> Result<(), NotReady> {
+            self.inner.ready()
+        }
+
+        fn init(&mut self) -> Result<ProcessInit, BrainError> {
+            Ok(ProcessInit::default())
+        }
+
+        fn open(
+            &mut self,
+            custody: &SessionCustody,
+            acquired: &mut bool,
+        ) -> Result<OpenedState, BrainError> {
+            self.inner.open(custody, acquired)
+        }
+
+        fn accounts(
+            &mut self,
+            _: OAuthTuning,
+            _: TokenTuning,
+            profile: Arc<SessionLock>,
+        ) -> Result<(Accounts, VaultHeld), BrainError> {
+            // The fake vault opens with `Missing::Create`, so the open's own creation is checked here.
+            self.authority = Some(profile.authority_path().is_file());
+            Ok((held_accounts_until(profile, ()), Arc::default()))
+        }
+
+        fn containment(&mut self) -> Result<Option<Arc<Job>>, BrainError> {
+            self.inner.containment()
+        }
+    }
+
+    fn entries(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .expect("the product folder")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn clean(support: &Path) {
+        let product = support.join(DATA_DIR);
+        let names = if product.exists() {
+            entries(&product)
+        } else {
+            Vec::new()
+        };
+        instance_fixture_clean(
+            support,
+            &names.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+    }
+
+    async fn run_quit(support: &Path, pre: &mut Offline) -> Result<(), ParentBoundError> {
+        timeout(
+            PATIENCE,
+            Box::pin(run(
+                FakePair::ending(Ended::Quit { deadline: later() }),
+                &live(),
+                later(),
+                pre,
+                || SessionCustody::bootstrap_at(support),
+                || Ok(Slot::default()),
+            )),
+        )
+        .await
+        .expect("the run settles")
+    }
+
+    fn refused_root(result: &Result<OpenedState, BrainError>) -> bool {
+        matches!(
+            result,
+            Err(BrainError::Store(StoreError::Folder(error)))
+                if error.kind() == io::ErrorKind::AlreadyExists
+        )
+    }
+
+    #[tokio::test]
+    #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+    async fn a_fresh_root_serves_a_quit_cleanly_and_a_second_run_on_it_is_refused() {
+        let support = instance_fixture("fl-fresh");
+        let product = support.join(DATA_DIR);
+        let mut first = Offline::new();
+        let budget = first.inner.budget.clone();
+        assert_eq!(run_quit(&support, &mut first).await, Ok(()));
+        assert_eq!(
+            first.authority,
+            Some(true),
+            "the open created the authority"
+        );
+        assert!(product.join(STORE_FILE).is_file());
+        assert!(!product.join("logs").exists(), "no file log");
+        assert_eq!(
+            budget.spent(),
+            0,
+            "admission and serving send no model request"
+        );
+        let before = entries(&product);
+        let mut second = Offline::new();
+        assert_eq!(
+            run_quit(&support, &mut second).await,
+            Err(ParentBoundError::Refused)
+        );
+        assert_eq!(second.authority, None, "no accounts start on a used root");
+        assert_eq!(
+            entries(&product),
+            before,
+            "a refused root is left as it was"
+        );
+        clean(&support);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+    async fn an_existing_empty_root_is_refused_before_anything_opens() {
+        let support = instance_fixture("fl-existing");
+        drop(SessionCustody::bootstrap_at(&support).expect("an earlier custody made the root"));
+        let mut pre = Offline::new();
+        assert_eq!(
+            run_quit(&support, &mut pre).await,
+            Err(ParentBoundError::Refused)
+        );
+        assert_eq!(pre.authority, None);
+        assert_eq!(entries(&support.join(DATA_DIR)), [SESSION_LOCK]);
+        clean(&support);
+    }
+
+    /// Every file first light refuses to find in a fresh root, written out by hand.
+    fn leftovers() -> Vec<String> {
+        let mut names = Vec::new();
+        for db in [STORE_FILE, AUTHORITY_FILE] {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                names.push(format!("{db}{suffix}"));
+            }
+        }
+        names.push(CONFIG_FILE.to_owned());
+        names.push(format!("{STORE_FILE}.purge-old"));
+        for copy in [".purge-snapshot", ".purge-clean"] {
+            for suffix in ["", "-journal", "-wal", "-shm"] {
+                names.push(format!("{STORE_FILE}{copy}{suffix}"));
+            }
+        }
+        names
+    }
+
+    #[test]
+    #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+    fn a_lone_leftover_in_a_fresh_root_is_refused_for_good_before_the_store_opens() {
+        const SENTINEL: &str = "SENTINEL-r2b-7f3a";
+        let names = leftovers();
+        assert_eq!(names.len(), 18);
+        for name in names {
+            let support = instance_fixture(SENTINEL);
+            let custody = SessionCustody::bootstrap_at(&support).expect("fresh custody");
+            let product = support.join(DATA_DIR);
+            let leftover = product.join(&name);
+            std::fs::write(&leftover, SENTINEL).expect("plant one leftover");
+            let mut pre = FirstLight::new();
+            let mut acquired = false;
+            let refused = pre.open(&custody, &mut acquired);
+            assert!(refused_root(&refused), "{name}");
+            assert!(!acquired, "{name}: no store opened");
+            let mut expected = vec![name.clone(), SESSION_LOCK.to_owned()];
+            expected.sort();
+            assert_eq!(entries(&product), expected, "{name}");
+            let error = refused.err().expect("refused");
+            let shown = format!("{error:?} {error}");
+            assert!(!shown.contains(SENTINEL), "{shown}");
+            assert!(
+                !shown
+                    .as_bytes()
+                    .windows(SENTINEL.len())
+                    .any(|bytes| bytes == SENTINEL.as_bytes())
+            );
+            std::fs::remove_file(&leftover).expect("remove the leftover");
+            assert!(
+                refused_root(&pre.open(&custody, &mut acquired)),
+                "{name}: refusal is final"
+            );
+            assert_eq!(entries(&product), [SESSION_LOCK], "{name}");
+            drop(custody);
+            clean(&support);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+    fn a_root_replaced_after_custody_created_it_is_refused() {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        let support = instance_fixture("fl-moved");
+        let custody = SessionCustody::bootstrap_at(&support).expect("fresh custody");
+        let product = support.join(DATA_DIR);
+        let moved = support.join("moved");
+        std::fs::rename(&product, &moved).expect("move the created root");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&product)
+            .expect("a stand-in root");
+        let mut acquired = false;
+        assert!(refused_root(
+            &FirstLight::new().open(&custody, &mut acquired)
+        ));
+        assert!(
+            entries(&product).is_empty(),
+            "nothing opened in the stand-in"
+        );
+        drop(custody);
+        std::fs::remove_dir(&product).expect("remove the stand-in");
+        std::fs::rename(&moved, &product).expect("restore the root");
+        clean(&support);
+    }
+
+    #[test]
+    fn a_token_custody_opens_nothing() {
+        let mut acquired = false;
+        let opened = FirstLight::new().open(&SessionCustody::fixture(Arc::new(())), &mut acquired);
+        assert!(matches!(
+            opened,
+            Err(BrainError::ProfileLock(error)) if error.kind() == io::ErrorKind::NotFound
+        ));
+        assert!(!acquired);
+    }
+
+    const INIT_CHILD: &str = "KUMOCHI_TEST_FIRST_LIGHT_INIT_CHILD";
+    const INITIALIZED: i32 = 77;
+
+    /// Run only by the test below, as a child: init installs process-wide services.
+    #[test]
+    #[ignore = "subprocess fixture that installs process-wide services"]
+    fn init_child() {
+        if std::env::var_os(INIT_CHILD).is_none() {
+            return;
+        }
+        let started = FirstLight::new().init().is_ok();
+        let quiet = !tracing::dispatcher::has_been_set();
+        std::process::exit(if started && quiet && kumochi_scene::deferred::running() {
+            INITIALIZED
+        } else {
+            1
+        });
+    }
+
+    #[test]
+    fn first_light_init_starts_the_services_with_no_file_log_or_subscriber() {
+        let scratch = Scratch::new("fl-init");
+        std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
+        let home: PathBuf = scratch.dir().join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this macOS test runs its own fixture child, which inherits no handles"
+        )]
+        let mut child = Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--ignored",
+                "--exact",
+                "startup::parent_bound::tests::first_light::init_child",
+            ])
+            .env_clear()
+            .env(INIT_CHILD, "1")
+            .env("HOME", &home)
+            .current_dir(scratch.dir())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("run the fixture child");
+        let by = std::time::Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("the child's status") {
+                break status;
+            }
+            if std::time::Instant::now() >= by {
+                child.kill().ok();
+                child.wait().ok();
+                panic!("the init child didn't end by its deadline");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.code(), Some(INITIALIZED));
+        assert_eq!(
+            std::fs::read_dir(scratch.dir()).expect("scratch").count(),
+            0,
+            "no log folder or file"
         );
     }
 }

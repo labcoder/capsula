@@ -9,6 +9,7 @@ use kumochi_protocol::message::{CAPABILITY_LEN, Capability, Incarnation, RunId, 
 
 use crate::config::Config;
 use crate::config::tuning::{OAuthTuning, TokenTuning};
+use crate::connections::model::budget::Budget;
 #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
 use crate::connections::model::text_observation::Observation;
 use crate::ipc::{self, Identity, Pipes};
@@ -35,6 +36,8 @@ struct OpenedState {
     scenes: Vec<SceneState>,
     config: Config,
     replay: Option<Selected>,
+    /// The model requests the account engine may send.
+    budget: Budget,
 }
 
 /// What the shared startup stages made so far; every mode's root owns one.
@@ -250,7 +253,10 @@ impl Stages {
         let opened = self.opened.as_mut().expect("opened state");
         let engine = match opened.replay.take() {
             Some(replay) => replay,
-            None => engine(opened.config.model_tuning())?,
+            None => engine(
+                opened.config.model_tuning(),
+                std::mem::take(&mut opened.budget),
+            )?,
         };
         let OpenedState {
             profile,
@@ -260,6 +266,7 @@ impl Stages {
             scenes,
             config,
             replay: _,
+            budget: _,
         } = self.opened.take().expect("opened state");
         match Brain::new(
             store,
@@ -337,10 +344,12 @@ fn open_state(mode: StartMode, exe: &Path, acquired: &mut bool) -> Result<Opened
 }
 
 /// Opens the profile under `profile`, custody's loan, with no second lock: the store, the
-/// settings and the authority all come from the folder the loan was taken in.
+/// settings and the authority all come from the folder the loan was taken in. The engine sends
+/// within `budget`.
 fn open_state_held(
     profile: Arc<SessionLock>,
     replay: Option<Selected>,
+    budget: Budget,
     acquired: &mut bool,
 ) -> Result<OpenedState, BrainError> {
     let folder = profile.data_dir().to_owned();
@@ -349,6 +358,7 @@ fn open_state_held(
         || super::open_held(profile, &store),
         || Some(folder),
         replay,
+        budget,
         acquired,
     )
 }
@@ -374,14 +384,21 @@ impl OpenedState {
         // Every writer of the store and the credential authority holds this lock for its whole run,
         // so a brain of this user in another session stops here. Before any shell is served, so no
         // run starts ahead of the recovery scan. Blocking is fine: nothing else runs on the runtime yet.
-        Self::open_marking(|| super::open_profile(path), config_dir, replay, acquired)
+        Self::open_marking(
+            || super::open_profile(path),
+            config_dir,
+            replay,
+            Budget::from_env(),
+            acquired,
+        )
     }
 
-    /// `load_marking` with the profile and store from `open`.
+    /// `load_marking` with the profile and store from `open`, and the engine's replay or budget.
     fn open_marking(
         open: impl FnOnce() -> Result<(Arc<SessionLock>, Store), BrainError>,
         config_dir: impl FnOnce() -> Option<PathBuf>,
         replay: Option<Selected>,
+        budget: Budget,
         acquired: &mut bool,
     ) -> Result<Self, BrainError> {
         let (profile, mut store) = open().inspect_err(|error| {
@@ -415,6 +432,7 @@ impl OpenedState {
             scenes,
             config,
             replay,
+            budget,
         })
     }
 }

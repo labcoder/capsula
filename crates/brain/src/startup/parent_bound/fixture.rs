@@ -19,6 +19,7 @@ use super::{
 };
 #[cfg(test)]
 use crate::connections::error::VaultError;
+use crate::connections::model::budget::Budget;
 use crate::engines::fixture::Fixture;
 use crate::fixture_support::{Scratch, held_accounts_until};
 #[cfg(test)]
@@ -147,7 +148,7 @@ impl Prerequisites for Scripted<'_> {
         )));
         // A token custody has no lock to lend, so its profile is a lock on the scratch store.
         let opened = match custody.lend() {
-            Some(profile) => open_state_held(profile, replay, acquired),
+            Some(profile) => open_state_held(profile, replay, Budget::default(), acquired),
             None => OpenedState::load_marking(
                 &self.scratch.db(),
                 || Some(self.scratch.dir().to_owned()),

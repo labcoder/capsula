@@ -62,6 +62,12 @@ impl SessionCustody {
         Some(Arc::new(SessionLock::lent(Loan(Arc::clone(lock)))))
     }
 
+    /// Whether custody created its product folder and the folder's pathname still names it; a
+    /// token custody holds no folder, so it has none.
+    pub(in crate::startup) fn fresh_root(&self) -> bool {
+        self.held.as_ref().is_some_and(|lock| lock.fresh())
+    }
+
     fn held(lock: platform::InstanceLock) -> Self {
         Self {
             held: Some(Arc::new(lock)),

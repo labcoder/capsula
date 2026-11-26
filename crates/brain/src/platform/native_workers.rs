@@ -1,7 +1,8 @@
+use std::io;
 use std::path::Path;
 use std::sync::{Arc, atomic::AtomicBool};
 
-use super::{Job, Mode};
+use super::{Containment, ContainmentTier, Job, Mode};
 use crate::{BrainError, config::Config, runtime::Brain};
 
 use crate::engines::claude_code::lane::{Host, Lane};
@@ -36,8 +37,7 @@ pub(crate) fn prepare(
     setting: ClaudeSetting,
     mode: Mode,
 ) -> Result<(Arc<Job>, Prepared), BrainError> {
-    // First, so a build without containment for this mode removes nothing.
-    super::require_mode(mode).map_err(BrainError::Helpers)?;
+    kernel_contained(mode)?;
     let models = super::data_dir().map(|data| data.join(kumochi_protocol::voice::MODELS_DIR));
     let stuck = models
         .as_deref()
@@ -52,6 +52,16 @@ pub(crate) fn prepare(
             stuck,
         },
     ))
+}
+
+/// First in `prepare`, so a mode without Job containment, a parent-bound Group included,
+/// removes nothing and starts no worker.
+fn kernel_contained(mode: Mode) -> Result<(), BrainError> {
+    if super::containment(mode) == Containment::RuntimeEnabled(ContainmentTier::Kernel) {
+        Ok(())
+    } else {
+        Err(BrainError::Helpers(io::ErrorKind::Unsupported.into()))
+    }
 }
 
 pub(crate) fn start(
@@ -163,6 +173,21 @@ fn claude_host(vault_held: Arc<AtomicBool>, jobs: &Arc<Job>, brain_exe: &Path) -
 #[cfg(not(windows))]
 fn claude_host(_: Arc<AtomicBool>, _: &Arc<Job>, _: &Path) -> Option<Host> {
     None
+}
+
+#[cfg(test)]
+#[test]
+fn only_job_containment_admits_native_workers() {
+    for mode in [Mode::Detached, Mode::ParentBound] {
+        let admitted = cfg!(windows) && mode == Mode::Detached;
+        let result = kernel_contained(mode);
+        assert_eq!(result.is_ok(), admitted, "{mode:?}");
+        if !admitted {
+            assert!(
+                matches!(result, Err(BrainError::Helpers(error)) if error.kind() == io::ErrorKind::Unsupported)
+            );
+        }
+    }
 }
 
 #[cfg(all(test, not(windows)))]

@@ -45,6 +45,9 @@ pub enum Containment {
 pub const fn containment(mode: Mode) -> Containment {
     match mode {
         Mode::Detached if cfg!(windows) => Containment::RuntimeEnabled(ContainmentTier::Kernel),
+        Mode::ParentBound if super::supports(Mode::ParentBound) => {
+            Containment::RuntimeEnabled(ContainmentTier::Group)
+        }
         Mode::ParentBound if cfg!(target_os = "macos") => {
             Containment::Staged(ContainmentTier::Group)
         }
@@ -167,13 +170,16 @@ mod tests {
     use super::{Containment, ContainmentTier, Mode, containment};
 
     #[test]
-    fn only_the_detached_kernel_tier_can_attempt_runtime_admission() {
-        use crate::platform::supports;
-
+    fn only_windows_detached_and_mac_first_light_can_attempt_runtime_admission() {
         let (detached, parent_bound) = if cfg!(windows) {
             (
                 Containment::RuntimeEnabled(ContainmentTier::Kernel),
                 Containment::Unsupported,
+            )
+        } else if cfg!(all(target_os = "macos", feature = "first-light")) {
+            (
+                Containment::Unsupported,
+                Containment::RuntimeEnabled(ContainmentTier::Group),
             )
         } else if cfg!(target_os = "macos") {
             (
@@ -185,7 +191,5 @@ mod tests {
         };
         assert_eq!(containment(Mode::Detached), detached);
         assert_eq!(containment(Mode::ParentBound), parent_bound);
-        assert_eq!(supports(Mode::Detached), cfg!(windows));
-        assert!(!supports(Mode::ParentBound));
     }
 }

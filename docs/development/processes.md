@@ -16,8 +16,8 @@ inherited environment is a fallback.
 
 The brain's launch mode is a lifetime contract. Windows supports **Detached**, in which the brain
 outlives its shell. **ParentBound** means the shell starts the brain with an inherited pair and
-owns its lifetime; no platform supports it yet, including under Gate identity. macOS and Linux
-support neither mode. The executable and the library's brain, parent-bound, bridge, screen and
+owns its lifetime; only a macOS build with the brain's `first-light` Cargo feature supports it,
+and only as the Dev edition. Every other macOS build, and Linux, supports neither mode. The executable and the library's brain, parent-bound, bridge, screen and
 speech entries check the same platform support table before starting anything. The executable
 exits 69 for an unsupported mode without initializing logs, creating a runtime or touching app
 data. The detached launcher doesn't observe that status.
@@ -29,12 +29,13 @@ the normal brain. The bridge consumes one launch argument and ignores the rest; 
 invalid launch fails rather than starting the brain. The other workers and diagnostics ignore the
 entire tail. Recognized debug diagnostics still exit 10 on a supported release build.
 
-A ParentBound start checks, in order, the support table, Gate identity (refused, 69) and then
-descriptors 3 and 4. The executable's own platform module (`main/platform.rs`) takes them as
+A ParentBound start checks, in order, the support table, the Dev identity (Gate and Release are
+refused with 69, since their names reach other editions' data; the feature is a build switch, not
+admission) and then descriptors 3 and 4. The executable's own platform module (`main/platform.rs`) takes them as
 owned handles only when both are open, before anything else in the process can open a
 descriptor, and refuses with 76 otherwise; it never closes or scans other descriptors, since the
 shell spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`. The library entry, `run_parent_bound`, takes
-those handles as `InheritedFds` and repeats the mode and Gate checks before it reads them, so a
+those handles as `InheritedFds` and repeats the mode and identity checks before it reads them, so a
 refused call drops them unread and the shell sees EOF. Past those checks it starts the admission
 clock and hardens the process: `/` as the working folder and core dumps off, soft and hard limits
 both 0. Then it adopts the pair, arms the parent watch and runs the parent-bound root
@@ -44,13 +45,15 @@ executable maps it to a code:
 | Result | Exit |
 |---|---|
 | A clean, confirmed quit | 0 |
-| `Unsupported`: the mode, Gate identity or missing prerequisites | 69 |
+| `Unsupported`: the mode, an identity other than Dev, or missing prerequisites | 69 |
 | `Incomplete`: a settlement stage short of confirmed | 70 |
 | `Busy`: another session holds the instance | 75, `BRAIN_EXIT_BUSY`, shared with the shell |
 | `Refused`: the descriptors, hardening, the parent, the pair, the greeting, the commit claim, or serving that ended other than by a Quit | 76 |
 
-Detached keeps 75 for a busy profile. Today every ParentBound start still exits 69 at the support
-check; past it, this build's prerequisites would refuse with 69 after admission.
+Detached keeps 75 for a busy profile. Without the feature every ParentBound start exits 69 at the
+support check. A `first-light` Dev build with no pair exits 76 and touches nothing; with a pair it
+goes through the parent, the handshake, custody, the item's entitlement and first light's
+prerequisites (architecture.md, "Parent-bound startup").
 
 Argument matching uses OS strings without logging them. Non-Unicode input no longer panics: a
 non-Unicode first argument falls through like an unknown flag; a non-Unicode bridge launch is
@@ -59,8 +62,9 @@ already ignored is still ignored. The executable name isn't parsed.
 
 The brain's platform module assembles native workers. On Windows it retries pending voice-model
 removals before creating the brain Job, then attaches voice and Claude Code before shared startup
-starts the screen worker and publishes the capability. Without native containment, worker
-assembly refuses; it does not fall back to uncontained workers.
+starts the screen worker and publishes the capability. Worker assembly refuses, before any removal,
+unless the mode's containment is runtime-enabled at Kernel; Group isn't enough, and it never falls
+back to uncontained workers.
 
 ## Containment tiers
 
@@ -69,12 +73,13 @@ establish custody of any particular process. Windows Detached is runtime-enabled
 helpers join a Job from creation, and closing the last Job handle ends its contents. Existing
 Windows jobs, nesting, and bridge peer checks are unchanged.
 
-macOS ParentBound is staged at **Group**, only for the fixed shell-to-brain launch. The shell uses
+macOS ParentBound is **Group**, only for the fixed shell-to-brain launch: runtime-enabled in a
+`first-light` build, staged otherwise. The shell uses
 `posix_spawn` with `POSIX_SPAWN_SETSID` and closed-by-default descriptors. That puts the child
 in a private session and process group from creation; the shell holds the exact child, and the
 brain watches its original parent. A headless fixture combines both owners: it observes a latched
 parent loss, checks that the brain cannot claim admission, and witnesses its cooperative exit.
-Neither macOS runtime mode nor any macOS helper launch is enabled by this tier.
+No macOS helper launch is enabled by this tier: first light starts no helper.
 
 On normal exit the shell reaps the exact child without signalling the group. When forced
 retirement is needed, it may signal the group once while it still owns the unreaped leader; a

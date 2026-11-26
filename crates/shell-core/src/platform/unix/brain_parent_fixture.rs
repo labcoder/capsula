@@ -45,12 +45,14 @@ impl Drop for FixtureOwner {
 fn isolated_owned_brain_exits_cooperatively_when_its_shell_exits() {
     use kumochi_brain::platform::{Containment, ContainmentTier, Mode, containment, supports};
 
-    assert_eq!(
-        containment(Mode::ParentBound),
+    let parent_bound = if supports(Mode::ParentBound) {
+        Containment::RuntimeEnabled(ContainmentTier::Group)
+    } else {
         Containment::Staged(ContainmentTier::Group)
-    );
+    };
+    assert_eq!(containment(Mode::ParentBound), parent_bound);
     assert_eq!(containment(Mode::Detached), Containment::Unsupported);
-    assert!(!supports(Mode::ParentBound) && !supports(Mode::Detached));
+    assert!(!supports(Mode::Detached));
 
     let (mut brain, brain_leg) = UnixStream::pair().expect("direct fixture channel");
     let (mut owner, owner_leg) = UnixStream::pair().expect("owner release channel");

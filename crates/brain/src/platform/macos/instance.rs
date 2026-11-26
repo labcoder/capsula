@@ -3,6 +3,7 @@
 
 use std::ffi::c_void;
 use std::fs::TryLockError;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::ptr;
 
@@ -78,12 +79,27 @@ impl InstanceStore for KeychainItem {
 pub(crate) struct InstanceLock {
     _lock: AdmittedLock,
     product: PathBuf,
+    /// The device and inode of the product folder, read from the descriptor that created it;
+    /// none when the folder was already there.
+    // shortcut: held in memory only; first light records the root with `stat` around the run,
+    // and D-b decides where a durable record lives before any run reopens a root.
+    created: Option<(u64, u64)>,
 }
 
 impl InstanceLock {
     /// The product folder this lock was taken in, by the pathname the acquisition walked.
     pub(crate) fn product(&self) -> &Path {
         &self.product
+    }
+
+    /// Whether this acquisition created the product folder and its pathname, unfollowed, still
+    /// names that folder. A same-user rename race after this check stays possible: the store
+    /// opens by pathname.
+    pub(crate) fn fresh(&self) -> bool {
+        self.created.is_some_and(|created| {
+            std::fs::symlink_metadata(&self.product)
+                .is_ok_and(|now| now.is_dir() && (now.dev(), now.ino()) == created)
+        })
     }
 }
 
@@ -106,12 +122,18 @@ fn custody_in(
 /// lock carries the absolute product path this acquisition walked, so nothing resolves it again.
 pub(crate) fn lock_at(support: &Path) -> Result<InstanceLock, CustodyError> {
     instance_edition(ProductIdentity::ACTIVE).map_err(|_| CustodyError::NotAdmitted)?;
-    let product = match admit_support(support)
+    let (product, created) = match admit_support(support)
         .and_then(|support| support.product_folder(DATA_DIR))
         .map_err(refused)?
     {
-        ProductFolder::Held(product) => product,
-        ProductFolder::Missing(support) => support.create_product(DATA_DIR).map_err(refused)?,
+        ProductFolder::Held(product) => (product, None),
+        ProductFolder::Missing(support) => {
+            let product = support.create_product(DATA_DIR).map_err(refused)?;
+            let held = product
+                .metadata()
+                .map_err(|error| CustodyError::Open(error.kind()))?;
+            (product, Some((held.dev(), held.ino())))
+        }
     };
     let lock = product.into_lock(SESSION_LOCK).map_err(refused)?;
     lock.try_lock().map_err(|error| match error {
@@ -121,6 +143,7 @@ pub(crate) fn lock_at(support: &Path) -> Result<InstanceLock, CustodyError> {
     Ok(InstanceLock {
         _lock: lock,
         product: support.join(DATA_DIR),
+        created,
     })
 }
 

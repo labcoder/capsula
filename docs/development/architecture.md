@@ -211,8 +211,26 @@ platforms have no pair to make one, and the tests drive the same root with a fak
 | Lost, Fatal, Broken or Unavailable, even after a clean close | `Refused` |
 | A refusal before serving | that refusal: `Unsupported`, `Busy` or `Refused` |
 
-This build's prerequisites refuse at `ready`, after a real admission, so a parent-bound start
-still never runs a stage; the support table refuses before that anyway.
+The production prerequisites, `FirstLight`, are ready only where the support table admits
+parent-bound: the macOS `first-light` Dev build. Everywhere else they refuse at `ready`, and the
+support table refuses before that anyway. On first light:
+
+- `init` installs the panic hook and starts deferred scene destruction, with no file sink. The
+  brain has no log at first light; that's a first-light-only gap, not G-2 evidence, and the
+  admitted brain log (L1) lands before the feature leaves the support table.
+- `open` is run 1 only. Custody must have created the product folder itself, its pathname must
+  still name the device and inode custody read from the creating descriptor, and none of either
+  database or its `-wal`, `-shm` or `-journal` sidecar, the settings, or any file a purge leaves
+  may be there. Any of these, or a second `open`, refuses before SQLite opens, so
+  `Store::recover`'s pending deletions and the purger's leftover removal have nothing to act on.
+  A same-user rename between the check and SQLite's pathname open stays possible; this isn't a
+  held store.
+- `accounts` is the real account system; its vault checks the legacy names first
+  ([accounts](accounts.md)).
+- `containment` is none: no Job and no helpers, so voice, Claude Code, the screen worker and
+  speech stay unavailable. Worker assembly needs Kernel containment, so it can't run here.
+- The engine gets one model request. OAuth and catalog traffic don't draw on it, a second round
+  fails as spent, and the count is shared with the prerequisites so tests can read it.
 
 ## Crates
 

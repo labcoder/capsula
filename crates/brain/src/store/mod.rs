@@ -33,6 +33,7 @@ mod pages;
 mod purge;
 #[cfg(test)]
 mod rearm_tests;
+pub(crate) use purge::files as purge_files;
 pub(crate) mod recall;
 mod rounds;
 mod scenes;

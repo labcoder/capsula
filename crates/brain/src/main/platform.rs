@@ -104,6 +104,14 @@ mod tests {
             .env(CLAIM_CHILD, "1")
             .output()
             .expect("run the fixture child");
-        assert_eq!(child.status.code(), Some(76), "{child:?}");
+        // A build that doesn't admit parent-bound refuses before the claim.
+        let refused = if kumochi_brain::platform::admits_parent_bound(
+            kumochi_protocol::constants::ProductIdentity::ACTIVE,
+        ) {
+            76
+        } else {
+            69
+        };
+        assert_eq!(child.status.code(), Some(refused), "{child:?}");
     }
 }

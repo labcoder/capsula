@@ -306,6 +306,19 @@ impl Support {
 }
 
 impl Product {
+    /// The product folder's metadata, read from its held descriptor rather than a path.
+    ///
+    /// # Errors
+    /// The descriptor's `fstat` failure.
+    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        self.held
+            .held
+            .last()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+            .file
+            .metadata()
+    }
+
     /// Opens/creates one private lock basename in the product folder like
     /// [`ShellStorage::open_instance_lock`], the lock keeping the held chain until it closes.
     ///

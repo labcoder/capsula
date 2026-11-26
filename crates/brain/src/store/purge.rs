@@ -403,7 +403,7 @@ impl Leftovers {
 }
 
 /// Every file a purge may leave beside `db`, the old store first.
-fn files(db: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+pub(crate) fn files(db: &Path) -> impl Iterator<Item = PathBuf> + '_ {
     [sidecar(db, OLD)]
         .into_iter()
         .chain([SNAPSHOT, CLEAN].into_iter().flat_map(move |copy| {
