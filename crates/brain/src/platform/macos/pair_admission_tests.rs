@@ -27,7 +27,8 @@ use crate::tap::Tap;
 #[tokio::test]
 async fn ready_is_one_control_byte_and_the_responder_speaks_only_after_the_shells_first_message() {
     let (pair, [mut control, data]) = ends();
-    assert_eq!(pair.try_ready().expect("READY written"), 1);
+    let shell = ShellProcess::fixture(1, Arc::new(AtomicU8::new(0)));
+    pair.ready(&shell, by()).await.expect("READY written");
     let mut first = [0; 1];
     bounded(control.read_exact(&mut first))
         .await

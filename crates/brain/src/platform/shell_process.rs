@@ -50,6 +50,21 @@ impl Verdict {
             .await
             .map_or(Self::Unconfirmed(Unconfirmed::Watch), |verdict| *verdict)
     }
+
+    /// [`Verdict::wait`] on a shell's loss receiver; never resolves for a shell without one.
+    #[cfg_attr(
+        not(any(
+            test,
+            all(target_os = "macos", debug_assertions, feature = "test-support")
+        )),
+        expect(dead_code, reason = "parent-bound runtime is not wired yet")
+    )]
+    pub(crate) async fn lost(loss: &mut Option<watch::Receiver<Self>>) -> Self {
+        match loss {
+            Some(loss) => Self::wait(loss).await,
+            None => std::future::pending().await,
+        }
+    }
 }
 
 const OPEN: u8 = 0;
@@ -310,6 +325,22 @@ impl ShellProcess {
             Owner::Parent(_) => panic!("only a fixture publishes on demand"),
             Owner::Watched(..) => panic!("only a fixture publishes on demand"),
         }
+    }
+
+    /// Publishes `verdict` to a [`ShellProcess::watched`] shell as the parent watch does: latches
+    /// the gate first, then wakes every waiter. True when this latched it.
+    #[cfg(test)]
+    pub(crate) fn publish_watched(&self, send: &watch::Sender<Verdict>, verdict: Verdict) -> bool {
+        let first = match *self.owner {
+            Owner::Watched(_, ref gate) => gate.lose(),
+            #[cfg(windows)]
+            Owner::Native(_) => panic!("only a watched fixture publishes a verdict"),
+            #[cfg(target_os = "macos")]
+            Owner::Parent(_) => panic!("only a watched fixture publishes a verdict"),
+            Owner::Fixture(..) => panic!("only a watched fixture publishes a verdict"),
+        };
+        send.send_replace(verdict);
+        first
     }
 }
 

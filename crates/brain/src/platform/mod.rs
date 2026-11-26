@@ -24,6 +24,36 @@ pub enum InheritedFds {}
 #[cfg(target_os = "macos")]
 pub use macos::entry::InheritedFds;
 
+/// The inherited pair, adopted, then keyed, then greeted; only macOS starts a brain on one.
+#[cfg(not(target_os = "macos"))]
+pub(crate) enum InheritedPair {}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) enum KeyedPair {}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) enum Greeted {}
+
+#[cfg(not(target_os = "macos"))]
+impl InheritedPair {
+    pub(crate) fn keyed(self, _: &[u8; 32]) -> Result<KeyedPair, std::convert::Infallible> {
+        match self {}
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn admit_pair(
+    keyed: KeyedPair,
+    _: &ShellProcess,
+    _: tokio::time::Instant,
+    _: impl FnOnce() -> kumochi_protocol::message::IssueSession,
+) -> std::future::Ready<Result<Greeted, std::convert::Infallible>> {
+    match keyed {}
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos::pair::{Greeted, InheritedPair, admit as admit_pair};
+
 /// Readies a parent-bound process before admission; only macOS starts one.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn harden() -> std::io::Result<()> {

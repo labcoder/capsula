@@ -64,7 +64,7 @@ impl Legs for PairLegs<'_> {
     }
 
     async fn write_control(&mut self, frame: &[u8]) -> io::Result<()> {
-        self.pair.writers[0].write_frame(frame).await
+        self.pair.write_control(frame).await
     }
 
     /// The pair already holds both legs.

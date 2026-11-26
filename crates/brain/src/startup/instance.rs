@@ -96,6 +96,35 @@ impl Drop for Wiped {
     }
 }
 
+/// The generated instance key. Publication and the responder each copy it, and it's wiped as
+/// soon as both have, before READY.
+pub(crate) struct OwnedKey(Box<Key>);
+
+impl OwnedKey {
+    /// A fresh random key.
+    ///
+    /// # Errors
+    /// The system's random source failed.
+    pub(crate) fn generate() -> Result<Self, getrandom::Error> {
+        let mut key = Self(Box::new(Zeroizing::new([0; CAPABILITY_LEN])));
+        getrandom::fill(&mut key.0[..])?;
+        Ok(key)
+    }
+
+    pub(crate) fn key(&self) -> &Key {
+        &self.0
+    }
+}
+
+impl Drop for OwnedKey {
+    fn drop(&mut self) {
+        // Wiped here, not only by the inner `Zeroizing`, which drops after this body.
+        self.0.zeroize();
+        #[cfg(test)]
+        tests::wipes::record(&self.0[..]);
+    }
+}
+
 /// Each buffer an attempt made, for the tests: its address and the wipe log's length then.
 #[cfg(test)]
 type Made = Arc<std::sync::Mutex<Vec<(usize, usize)>>>;
@@ -343,7 +372,7 @@ impl<S: InstanceStore> InstanceAttempt<S> {
         let handle = &mut pending.insert((step, handle)).1;
         let raced = tokio::select! {
             biased;
-            verdict = lost(loss) => Err(Refused::Lost(verdict)),
+            verdict = Verdict::lost(loss) => Err(Refused::Lost(verdict)),
             () = tokio::time::sleep_until(deadline.into()) => Err(Refused::Deadline),
             joined = handle => Ok(joined),
         };
@@ -458,13 +487,6 @@ fn fenced<E>(deadline: Instant, shell: &ShellProcess) -> Result<(), Stop<E>> {
         return Err(Stop::Invalid(Refused::Deadline));
     }
     Ok(())
-}
-
-async fn lost(loss: &mut Option<watch::Receiver<Verdict>>) -> Verdict {
-    match loss {
-        Some(loss) => Verdict::wait(loss).await,
-        None => std::future::pending().await,
-    }
 }
 
 fn spawn<S: InstanceStore>(
