@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 
 use super::{ClientId, DeviceCodeValue, GitHubEndpoint, GitHubToken, Page, RefreshToken};
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, ResponseMeta};
+use crate::platform::connect_timeout_at;
 
 #[cfg(test)]
 mod tests;
@@ -375,8 +376,8 @@ pub(super) async fn execute(
     endpoint: GitHubEndpoint,
 ) -> Result<Response, HttpError> {
     endpoint.url()?;
-    tokio::time::timeout(
-        endpoint.deadline(),
+    connect_timeout_at(
+        tokio::time::Instant::now() + endpoint.deadline(),
         http.execute(Request {
             endpoint: Endpoint::GitHub(endpoint),
             fields: Vec::new(),
