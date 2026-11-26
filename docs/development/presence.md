@@ -88,7 +88,7 @@ or mixed scale, a fractional or overflowing rectangle, or overlapping displays. 
 arrangement with no display at the Quartz origin. So the shell never places onto a desktop whose
 picture the worker would refuse. A pointer is given to its display in points, before scaling.
 The work area comes from AppKit's bottom-left `visibleFrame`, flipped against the primary display
-and rounded inwards; a frame that is empty or leaves the primary display has no work area.
+and rounded inwards to whole pixels; a frame that is empty or leaves the primary display has no work area.
 Connected overlay bindings also require an admitted native owner before allocating windows.
 The local route never constructs that owner and does not bind overlay hit regions.
 Legacy panel activation similarly requires a native foreground backend; there is no placeholder

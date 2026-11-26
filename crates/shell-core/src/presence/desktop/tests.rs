@@ -22,8 +22,8 @@ const BUILT_IN: Screen = Screen {
 
 fn two_side_by_side() -> Desktop {
     Desktop::map(&[
-        BUILT_IN,
         screen(2, [-1280.0, 200.0], [1280.0, 720.0], [2560, 1440]),
+        BUILT_IN,
     ])
     .unwrap()
 }
@@ -51,7 +51,7 @@ fn a_display_left_of_the_primary_keeps_its_negative_origin() {
     let desktop = two_side_by_side();
     assert_eq!(desktop.primary().id, 1);
     assert_eq!(
-        desktop.displays()[1].bounds,
+        desktop.displays[0].bounds,
         PhysicalRect {
             origin: [-2560, 400],
             size: [2560, 1440],
@@ -64,7 +64,7 @@ fn arrangements_the_worker_refuses_are_refused() {
     let half = screen(2, [-1280.0, 0.0], [1280.0, 720.0], [1280, 720]);
     let fractional = screen(1, [0.0, 0.0], [1800.0, 1169.0], [3456, 2234]);
     let uneven = screen(1, [0.0, 0.0], [1728.0, 1117.0], [3456, 2235]);
-    let fractional_points = screen(1, [0.0, 0.0], [1728.5, 1117.0], [3457, 2234]);
+    let fractional_points = screen(1, [0.0, 0.0], [1728.5, 1117.0], [3456, 2234]);
     let overlapping = screen(2, [1727.0, 0.0], [1280.0, 720.0], [2560, 1440]);
     let off_origin = screen(1, [0.5, 0.0], [1728.0, 1117.0], [3456, 2234]);
     let mirrored = Screen {
@@ -93,7 +93,7 @@ fn arrangements_the_worker_refuses_are_refused() {
 fn displays_that_share_an_edge_are_not_an_overlap() {
     let right = screen(2, [1728.0, 0.0], [1280.0, 720.0], [2560, 1440]);
     let desktop = Desktop::map(&[BUILT_IN, right]).unwrap();
-    assert_eq!(desktop.displays()[1].bounds.origin, [3456, 0]);
+    assert_eq!(desktop.displays[1].bounds.origin, [3456, 0]);
 }
 
 #[test]
@@ -140,8 +140,8 @@ fn a_fractional_work_area_edge_rounds_inwards() {
     assert_eq!(
         desktop.work_area([63.5, 0.25, 1664.0, 1079.5]),
         Some(PhysicalRect {
-            origin: [128, 76],
-            size: [3326, 2156],
+            origin: [127, 75],
+            size: [3328, 2158],
         })
     );
 }
@@ -153,6 +153,8 @@ fn a_work_area_that_is_empty_or_leaves_the_primary_has_none() {
         [0.0, 0.0, 0.0, 1080.0],
         [0.0, 0.0, 1728.0, 0.4],
         [-1.0, 0.0, 1728.0, 1080.0],
+        [-0.25, 0.0, 1728.0, 1080.0],
+        [0.0, 0.0, 1728.25, 1080.0],
         [0.0, -1.0, 1728.0, 1080.0],
         [1.0, 0.0, 1728.0, 1080.0],
         [0.0, 38.0, 1728.0, 1080.0],
@@ -160,4 +162,34 @@ fn a_work_area_that_is_empty_or_leaves_the_primary_has_none() {
     ] {
         assert_eq!(desktop.work_area(visible), None, "{visible:?}");
     }
+}
+
+#[test]
+fn the_scale_stops_where_the_workers_dpi_would_overflow() {
+    let largest = u32::MAX / 96;
+    let at = |pixels: u32| {
+        Desktop::map(&[screen(
+            1,
+            [0.0, 0.0],
+            [1.0, 1.0],
+            [usize::try_from(pixels).unwrap(); 2],
+        )])
+        .map(|desktop| desktop.primary().scale)
+    };
+    assert_eq!(largest, 44_739_242);
+    assert_eq!(at(largest), Ok(44_739_242));
+    assert_eq!(at(largest + 1), Err(UnsupportedLayout));
+}
+
+#[test]
+fn the_leftmost_pixel_of_the_signed_range_is_a_point() {
+    let far = screen(
+        2,
+        [-1_073_741_824.0, 0.0],
+        [1_073_741_824.0, 720.0],
+        [2_147_483_648, 1440],
+    );
+    let desktop = Desktop::map(&[BUILT_IN, far]).unwrap();
+    let (display, point) = desktop.physical([-1_073_741_824.0, 10.0]).unwrap();
+    assert_eq!((display.id, point), (2, PhysicalPoint([i32::MIN, 20])));
 }

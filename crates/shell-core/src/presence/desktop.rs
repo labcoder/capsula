@@ -10,6 +10,9 @@
 
 use kumochi_protocol::geometry::{PhysicalPoint, PhysicalRect};
 
+/// The DPI the screen worker reads as one physical pixel per point; its scale must fit with it.
+const POINT_DPI: u32 = 96;
+
 /// One active display as Quartz reports it: top-left global bounds in points, and its mode's
 /// size in pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -38,7 +41,7 @@ pub struct Display {
 pub struct UnsupportedLayout;
 
 /// Every display mapped with one scale, and the primary (the display at the Quartz origin).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Desktop {
     displays: Vec<Display>,
     primary: usize,
@@ -71,10 +74,6 @@ impl Desktop {
         Ok(Self { displays, primary })
     }
 
-    pub fn displays(&self) -> &[Display] {
-        &self.displays
-    }
-
     pub fn primary(&self) -> &Display {
         &self.displays[self.primary]
     }
@@ -89,30 +88,30 @@ impl Desktop {
             })
         })?;
         let scale = f64::from(display.scale);
-        let [x, y] = point.map(|side| floor(side * scale));
+        let [x, y] = point.map(|side| pixel((side * scale).floor()));
         Some((display, PhysicalPoint([x?, y?])))
     }
 
     /// The primary display's work area on physical pixels, from `AppKit`'s `visibleFrame`
-    /// (`[x, y, width, height]` in bottom-left points). A fractional edge rounds inwards; a frame
-    /// that is empty or leaves the primary display has no work area.
+    /// (`[x, y, width, height]` in bottom-left points). A fractional edge rounds inwards to a
+    /// whole pixel; a frame that is empty or leaves the primary display has no work area.
     pub fn work_area(&self, visible: [f64; 4]) -> Option<PhysicalRect> {
         let display = self.primary();
         let [x, bottom, width, height] = visible;
         let top = f64::from(display.points[1]) - (bottom + height);
-        let start = [x, top].map(f64::ceil);
-        let end = [x + width, top + height].map(f64::floor);
-        let [left, top, right, low] = [start[0], start[1], end[0], end[1]].map(whole);
-        let [left, top, right, low] = [left?, top?, right?, low?];
-        let [wide, high] = display.points.map(i64::from);
-        if left < 0 || top < 0 || right > wide || low > high || left >= right || top >= low {
+        let [right, low] = [x + width, top + height];
+        let [wide, high] = display.points.map(f64::from);
+        if !(x >= 0.0 && top >= 0.0 && right <= wide && low <= high) {
             return None;
         }
-        let scale = i64::from(display.scale);
-        let origin = [left, top].map(|side| i32::try_from(side * scale).ok());
-        let size = [right - left, low - top].map(|side| u32::try_from(side * scale).ok());
+        let scale = f64::from(display.scale);
+        let [left, top] = [x, top].map(|side| pixel((side * scale).ceil()));
+        let [right, low] = [right, low].map(|side| pixel((side * scale).floor()));
+        let [left, top, right, low] = [left?, top?, right?, low?];
+        let size =
+            [right - left, low - top].map(|side| u32::try_from(side).ok().filter(|&side| side > 0));
         Some(PhysicalRect {
-            origin: [origin[0]?, origin[1]?],
+            origin: [left, top],
             size: [size[0]?, size[1]?],
         })
     }
@@ -130,7 +129,11 @@ fn mapped(screen: &Screen) -> Option<Display> {
         return None;
     }
     let scale = size[0] / width;
-    if scale == 0 || height == 0 || size[1] != height.checked_mul(scale)? {
+    if scale == 0
+        || height == 0
+        || size[1] != height.checked_mul(scale)?
+        || POINT_DPI.checked_mul(scale).is_none()
+    {
         return None;
     }
     let factor = i32::try_from(scale).ok()?;
@@ -159,8 +162,16 @@ fn whole(value: f64) -> Option<i64> {
     (value.trunc() == value && value.abs() <= f64::from(i32::MAX)).then_some(value as i64)
 }
 
-fn floor(value: f64) -> Option<i32> {
-    i32::try_from(whole(value.floor())?).ok()
+/// A whole pixel coordinate, the full signed range; not a number has none.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::float_cmp,
+    reason = "only a whole value inside i32's range is converted, so nothing is lost"
+)]
+fn pixel(value: f64) -> Option<i32> {
+    (value.trunc() == value && value >= f64::from(i32::MIN) && value <= f64::from(i32::MAX))
+        .then_some(value as i32)
 }
 
 fn span(rect: PhysicalRect, axis: usize) -> (i64, i64) {
