@@ -51,10 +51,6 @@ pub(crate) fn build(
     Ok(built)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one ordered assembly keeps run boundaries and source accounting together"
-)]
 fn assemble(
     snapshot: &Snapshot<'_>,
     run: &RunSnapshot,
@@ -73,14 +69,15 @@ fn assemble(
     if !owns {
         return Err(BuildError::Origin);
     }
-    let history = snapshot.permits_history(turn.thread);
     let summary = supplied.summary;
     let after = summary.as_ref().map(|summary| summary.last);
-    let mut items: Vec<Item> =
-        snapshot.conversation(turn.thread, after, bound, (!history).then_some(turn.run))?;
-    items.extend(supplied.items.into_iter().filter(|item| {
-        (history || item.run == turn.run) && after.is_none_or(|after| item.id > after)
-    }));
+    let mut items: Vec<Item> = snapshot.conversation(turn.thread, after, bound)?;
+    items.extend(
+        supplied
+            .items
+            .into_iter()
+            .filter(|item| after.is_none_or(|after| item.id > after)),
+    );
     items.sort_by_key(|item| item.id);
     let runs = runs(items, turn.run)?;
     let (current, older) = runs.split_last().ok_or(BuildError::NoTurn)?;
@@ -98,9 +95,7 @@ fn assemble(
         turn.key_results,
         &mut sources,
     )?;
-    if history {
-        append_drawings(&mut current, &supplied.drawings, turn.picture);
-    }
+    append_drawings(&mut current, &supplied.drawings, turn.picture);
     let unsummarized =
         fixed_bytes(&instructions, &tools) + current.iter().map(item_bytes).sum::<usize>();
     let mut total = unsummarized + summary.iter().map(item_bytes).sum::<usize>();
@@ -114,11 +109,7 @@ fn assemble(
     // A deletion note follows the last run that began before it, never splitting one, and is
     // dropped with that run; notes older than every run stay only while no run left the window.
     let tuning = snapshot.tuning();
-    let mut notes = if history {
-        snapshot.notes(turn.thread, after, tuning.notes)?
-    } else {
-        Vec::new()
-    };
+    let mut notes = snapshot.notes(turn.thread, after, tuning.notes)?;
     let whole = older.len() < tuning.raw_runs;
     let mut segments = older.iter().rev().take(tuning.raw_runs - 1);
     let mut kept = Vec::new();
@@ -168,7 +159,6 @@ fn assemble(
             tools,
         },
         sources: sources.into_iter().collect(),
-        recovered_context: snapshot.recovery(),
     })
 }
 

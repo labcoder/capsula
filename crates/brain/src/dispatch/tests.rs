@@ -94,7 +94,6 @@ const OFFERED: &[ToolName] = &[ToolName::Probe, ToolName::Recall];
 fn ctx(ledger: &mut Ledger, reach: Origin, mcp: Option<LaunchId>) -> RunCtx<'_> {
     let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
     RunCtx {
-        require_recovery: None,
         build: crate::coordinator::BuildKey {
             run: R,
             round: 1,

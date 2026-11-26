@@ -143,7 +143,6 @@ pub(crate) fn compaction(
         generation,
         covers: (first, through),
         built: Built {
-            recovered_context: snapshot.recovery(),
             request: ModelRequest {
                 choice: run.choice.clone(),
                 instructions,
@@ -229,7 +228,6 @@ pub(crate) fn rewrite(
             built: Built {
                 request,
                 sources: vec![thread],
-                recovered_context: snapshot.recovery(),
             },
         },
         allowance,

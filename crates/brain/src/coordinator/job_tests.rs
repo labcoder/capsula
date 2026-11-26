@@ -18,7 +18,7 @@ use crate::coordinator::{
     SummaryText, Unbuilt,
 };
 use crate::engines::{Finish, RunRequest, TurnEvent};
-use crate::store::{Boundary, Failure, Generation, TitleSource};
+use crate::store::{Failure, Generation, TitleSource};
 
 /// The deletion generation every test read finds.
 const G: Generation = Generation(5);
@@ -103,7 +103,6 @@ fn reading() -> Coordinator {
 
 fn read_job(key: JobKey, kind: JobKind) -> Effect {
     Effect::Store(StoreOp::ReadJob(ReadJob {
-        require_recovery: None,
         control: crate::recall::control::Control::new(
             std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
         ),
@@ -130,7 +129,6 @@ fn job_built(key: JobKey, sources: &[ThreadId]) -> Input {
         result: Ok(Some(JobAsk {
             generation: G,
             built: Built {
-                recovered_context: None,
                 request: request(),
                 sources: sources.to_vec(),
             },
@@ -647,7 +645,6 @@ fn compact_built(key: JobKey, sources: &[ThreadId]) -> Input {
         result: Ok(Some(JobAsk {
             generation: G,
             built: Built {
-                recovered_context: None,
                 request: request(),
                 sources: sources.to_vec(),
             },
@@ -835,7 +832,6 @@ fn a_delete_of_a_quoted_task_voids_kumos_compaction() {
             result: Ok(Some(JobAsk {
                 generation: G,
                 built: Built {
-                    recovered_context: None,
                     request: request(),
                     sources: vec![MAIN, T],
                 },
@@ -1010,7 +1006,6 @@ fn run_done_on(
             connection: ConnectionTag(7),
         }),
         result: Ok(Built {
-            recovered_context: None,
             request: request(),
             sources: vec![T],
         }),
@@ -1449,122 +1444,5 @@ fn an_obsolete_job_cannot_read_history_or_select_the_next_accounts_bearer() {
         );
         assert_eq!(core.sending(current), Some(ConnectionTag(7)));
         assert_eq!(core.handle(ready(key)), Ok(granted(lease(key, 1))));
-    }
-}
-
-/// A signed-in coordinator whose run 10 in new task 4 ended `Done` after `ChatGPT` recovered with
-/// `cut`, and what job 2's read, answered with a body read to `body`, did.
-fn recovered_reading(cut: Boundary, body: Option<Boundary>) -> (Coordinator, Vec<Effect>) {
-    let mut core = signed_in();
-    core.handle(Input::Turn {
-        turn: 1,
-        thread: None,
-        text: "Plan a trip".into(),
-    })
-    .expect("a turn is never stale");
-    admit(&mut core, R);
-    core.recovered_chatgpt = vec![cut];
-    core.handle(engine(
-        super::engine_key(&core, R),
-        TurnEvent::Finished(Finish::Completed),
-    ))
-    .expect("current");
-    let Effect::Store(StoreOp::ReadJob(mut read)) = read_job(key(2), JobKind::Title) else {
-        unreachable!("read_job reads a job");
-    };
-    read.require_recovery = Some(cut);
-    assert_eq!(
-        core.handle(Input::RunStored { run: R }),
-        Ok(vec![
-            Effect::Store(StoreOp::ReadJob(read)),
-            state(R, T, Phase::Done),
-            run_end(R)
-        ]),
-        "the job's read keeps to the cutoff"
-    );
-    let Input::JobBuilt(mut built) = job_built(key(2), &[T]) else {
-        unreachable!("job_built builds a job's read");
-    };
-    if let Ok(Some(ask)) = &mut built.result {
-        ask.built.recovered_context = body;
-    }
-    let effects = core.handle(Input::JobBuilt(built)).expect("current");
-    (core, effects)
-}
-
-/// A recovered connection's job starts only on a body read to its exact cutoff, and its bearer and
-/// grant check the cutoff again.
-#[test]
-fn a_recovered_chatgpt_job_reads_and_sends_only_to_its_cutoff() {
-    let cut = Boundary::fixture(0, 3, 9);
-    let other = Boundary::fixture(0, 3, 10);
-    let Effect::Store(StoreOp::ReadJob(mut compact)) = compacts(3) else {
-        unreachable!("compacts reads a job");
-    };
-    compact.require_recovery = Some(cut);
-    for body in [None, Some(other)] {
-        let (mut core, effects) = recovered_reading(cut, body);
-        assert_eq!(
-            effects,
-            vec![Effect::Store(StoreOp::ReadJob(compact.clone()))],
-            "ends unsent and compaction reads to the cutoff: {body:?}"
-        );
-        assert_eq!(
-            core.handle(ready(key(2))),
-            Ok(rebuild(key(2))),
-            "the slot is empty"
-        );
-    }
-    let (mut core, effects) = recovered_reading(cut, Some(cut));
-    assert_eq!(effects, vec![start_job(key(2), R)]);
-    assert_eq!(core.sending(SendKey::Job(key(2))), Some(ConnectionTag(0)));
-    core.recovered_chatgpt = vec![other];
-    assert_eq!(core.sending(SendKey::Job(key(2))), None);
-    assert_eq!(
-        core.handle(ready(key(2))),
-        Ok(vec![
-            Effect::Rebuild(SendKey::Job(key(2))),
-            Effect::CancelJob(key(2))
-        ])
-    );
-}
-
-/// A report that refuses the recovered sign-in, a conflicting cutoff or one for another sign-in,
-/// cancels its job queued or sending, so no refresh grants it and a late completion writes
-/// nothing.
-#[test]
-fn a_refused_recovery_cancels_the_sending_job_and_its_late_answer_is_stale() {
-    let cut = Boundary::fixture(0, 3, 9);
-    for (boundary, sending) in [
-        (Boundary::fixture(0, 3, 10), false),
-        (Boundary::fixture(0, 3, 10), true),
-        (Boundary::fixture(5, 3, 9), false),
-        (Boundary::fixture(5, 3, 9), true),
-    ] {
-        let (mut core, effects) = recovered_reading(cut, Some(cut));
-        assert_eq!(effects, vec![start_job(key(2), R)]);
-        if sending {
-            assert_eq!(core.handle(ready(key(2))), Ok(granted(lease(key(2), 1))));
-        }
-        assert_eq!(
-            core.handle(Input::RecoveredChatGpt {
-                ready: Ready::fixture(),
-                boundary,
-            }),
-            Ok(vec![Effect::CancelJob(key(2))]),
-            "{boundary:?}"
-        );
-        core.handle(ready_on(ConnectionKind::ChatGpt, 0))
-            .expect("never stale");
-        assert_eq!(
-            core.sending(SendKey::Job(key(2))),
-            None,
-            "a refresh is no evidence"
-        );
-        assert_eq!(core.handle(ready(key(2))), Ok(rebuild(key(2))));
-        assert_eq!(
-            core.handle(job_done(key(2), Some(titled("Late")))),
-            Err(Stale)
-        );
     }
 }

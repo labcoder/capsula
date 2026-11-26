@@ -65,9 +65,8 @@ pub(super) enum Work {
         generation: u64,
         op: crate::connections::anthropic::KeyOp,
     },
-    /// What `connection`'s sign-in is, for [`proof::Proofs`].
+    /// What the current sign-in may read, for [`proof::Proofs`].
     Proof {
-        connection: u64,
         reply: oneshot::Sender<Proof>,
     },
 }
@@ -210,8 +209,6 @@ pub(crate) struct Accounts {
     pub(super) jobs: Option<std_mpsc::Sender<Work>>,
     /// Fires once the credential thread has dropped the vault and its session lock.
     released: Option<oneshot::Receiver<()>>,
-    /// Binds the vault's history link to the store thread, and releases it before that closes.
-    pub(crate) history: crate::connections::vault::HistoryBinding,
     events_tx: mpsc::UnboundedSender<Input>,
     events: mpsc::UnboundedReceiver<Input>,
     /// The live attempt; dropping it fences the opener and aborts the listener.
@@ -298,7 +295,6 @@ impl Accounts {
             state,
             jobs: Some(jobs),
             released: Some(released),
-            history: crate::connections::vault::HistoryBinding::default(),
             events_tx,
             events,
             listener: None,
@@ -325,10 +321,8 @@ impl Accounts {
         Ok(accounts)
     }
 
-    /// Binds the vault's history link to `writer`, the store thread's, and only then checks what
-    /// the current sign-in may read: a replacement's check needs that writer.
-    pub(crate) fn bind_history(&mut self, writer: &crate::connections::vault::HistoryLink) {
-        self.history.bind(writer);
+    /// Checks what the current sign-in may read, once the store thread runs.
+    pub(crate) fn release_proofs(&mut self) {
         self.proofs.release(self.jobs.as_ref(), &self.reads_tx);
     }
 
@@ -473,30 +467,14 @@ impl Accounts {
         self.proofs.proof(self.state.connection()?)
     }
 
-    /// The current sign-in is proved ordinary, or recovered under its own connection.
+    /// The current sign-in is proved ordinary.
     fn proved(&self) -> bool {
-        matches!(self.proof(), Some(Proof::Ordinary | Proof::Recovered(_)))
+        self.proof() == Some(Proof::Ordinary)
     }
 
-    /// The cutoff the current sign-in's reads keep to, when it's a recovered one.
-    pub(super) fn recovered(&self) -> Option<crate::store::Boundary> {
-        match self.proof()? {
-            Proof::Recovered(cut) => Some(cut),
-            Proof::Ordinary | Proof::Unproved => None,
-        }
-    }
-
-    /// A sign-in is held whose history a turn mustn't read unscoped: one not proved yet or
-    /// unprovable, or a recovered one that can't publish its cutoff because it isn't ready.
+    /// A sign-in is held whose history a turn mustn't read: one not proved yet or unprovable.
     pub(super) fn reads_fenced(&self) -> bool {
-        if self.state.connection().is_none() {
-            return false;
-        }
-        match self.proof() {
-            Some(Proof::Ordinary) => false,
-            Some(Proof::Recovered(_)) => !matches!(self.availability(), Availability::Ready(_)),
-            Some(Proof::Unproved) | None => true,
-        }
+        self.state.connection().is_some() && !self.proved()
     }
 
     /// A catalog read ended; one for an account that has since changed is dropped.
@@ -552,7 +530,7 @@ impl Accounts {
                 .map(|connection| (connection, self.proof()))
             {
                 Some((_, None)) => return Availability::Finding,
-                Some((connection, Some(Proof::Ordinary | Proof::Recovered(_)))) => {
+                Some((connection, Some(Proof::Ordinary))) => {
                     return Availability::Ready(Ready {
                         connection: ConnectionTag(connection),
                         models: self.models().unwrap_or_default().to_vec(),
@@ -1040,8 +1018,8 @@ fn spawn<S: CredentialStore + 'static>(
                         reply.send(worker.github(job)).ok();
                         continue;
                     }
-                    Work::Proof { connection, reply } => {
-                        reply.send(worker.proof(connection)).ok();
+                    Work::Proof { reply } => {
+                        reply.send(worker.proof()).ok();
                         continue;
                     }
                     Work::Key { generation, op } => {

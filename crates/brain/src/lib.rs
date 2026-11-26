@@ -378,17 +378,15 @@ fn accounts(
     use connections::http_client::{self, SharedHttp};
     use connections::oauth::SystemBrowser;
 
-    let (history, binding) = connections::vault::HistoryLink::pending();
-    let worker = Worker::system(Arc::new(SystemClock), profile, history);
+    let worker = Worker::system(Arc::new(SystemClock), profile);
     let net = runtime::account::Net {
         http: Arc::new(|| http_client::build().map(SharedHttp::new)),
         launcher: Arc::new(SystemBrowser),
         clock: Arc::new(SystemClock),
     };
     let held = worker.held();
-    let mut accounts = runtime::account::Accounts::spawn(worker, net, oauth, tokens)
+    let accounts = runtime::account::Accounts::spawn(worker, net, oauth, tokens)
         .map_err(BrainError::Accounts)?;
-    accounts.history = binding;
     Ok((accounts, held))
 }
 
