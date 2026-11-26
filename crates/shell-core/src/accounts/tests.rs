@@ -62,6 +62,7 @@ fn an_unscoped_platform_error_isnt_account_state() {
     let mut accounts = Accounts::default();
     receive(&mut accounts, signed_out());
     accounts.error(&error(ErrorKey::UnsupportedPlatform, vec![]));
+    assert_eq!(accounts.error, None);
     assert_eq!(allowed(&accounts), [AccountOp::SignIn]);
 }
 
