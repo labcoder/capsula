@@ -46,6 +46,10 @@ jobs:
           cargo test --locked --offline --no-fail-fast
           -p kumochi-brain -p kumochi-shell-core --lib platform::macos::
           -- --skip platform::macos::pair::tests::adoption_refuses_anything_but_two_connected_unix_streams
+      - name: Shared microphone tests
+        run: >-
+          cargo test --locked --offline --no-fail-fast
+          -p kumochi-shell-core --lib platform::microphone::
       - name: macOS TLS boundary tests (offline)
         run: >-
           cargo test --locked --offline --no-fail-fast
