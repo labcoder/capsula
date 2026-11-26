@@ -1,0 +1,47 @@
+name: macOS
+
+on:
+  schedule:
+    - cron: '43 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  build-and-test:
+    name: Build and headless tests
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Ensure the Metal compiler is available
+        run: |
+          if ! xcrun --sdk macosx metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+            xcrun --sdk macosx metal --version
+          fi
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked --target aarch64-apple-darwin
+      - name: Build the workspace
+        run: cargo build --locked --offline --workspace
+      - name: Storage and session tests
+        run: cargo test --locked --offline --no-fail-fast -p kumochi-storage -p kumochi-session
+      - name: macOS platform tests (no TCP)
+        run: >-
+          cargo test --locked --offline --no-fail-fast
+          -p kumochi-brain -p kumochi-shell-core --lib platform::macos::
+          -- --skip platform::macos::pair::tests::adoption_refuses_anything_but_two_connected_unix_streams
+      - name: Shell logging tests
+        run: >-
+          cargo test --locked --offline -p kumochi-shell --bin kumochi platform::logging::tests::
