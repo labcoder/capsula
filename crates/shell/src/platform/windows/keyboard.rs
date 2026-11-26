@@ -1248,6 +1248,71 @@ mod tests {
     }
 
     #[test]
+    fn a_hold_after_altgr_typing_in_a_newly_switched_layout_is_recognised() {
+        use std::time::{Duration, Instant};
+
+        use crate::input::Gesture;
+        use crate::input::hold::Fence;
+        use crate::platform::microphone::CollectionGate;
+
+        let keys = super::Keys::default();
+        let mut gesture = Gesture::default();
+        let mut fence = Fence::new(CollectionGate::default());
+        let start = Instant::now();
+        let (mut ms, mut queued) = (0, 1_000);
+        let mut send = |key: Option<(u16, u32)>, layout: usize, gesture: &mut Gesture| {
+            ms += if key.is_some() { 10 } else { 300 };
+            queued += 10;
+            let now = start + Duration::from_millis(ms);
+            let (event, queued_press) = match key {
+                Some((make, flags)) => {
+                    let Some((event, time)) = raw_at(&keys, 1, make, flags, layout, queued) else {
+                        return;
+                    };
+                    (event, time.queued_press.filter(|_| !time.repeated_modifier))
+                }
+                None => (Event::Deadline, None),
+            };
+            fence.reduce_with_keyboard_read(
+                gesture,
+                event,
+                now,
+                queued_press,
+                || None,
+                || Some(now),
+            );
+        };
+        let (up, e0) = (super::RI_KEY_BREAK, super::RI_KEY_E0);
+        for (layout, typed) in [(1, 0x10), (2, 0x03)] {
+            for key in [
+                (0x1D, 0),
+                (0x38, e0),
+                (typed, 0),
+                (typed, up),
+                (0x12, 0),
+                (0x12, up),
+                (0x38, e0 | up),
+                (0x1D, up),
+            ] {
+                send(Some(key), layout, &mut gesture);
+                assert!(
+                    !gesture.engaged(),
+                    "AltGr in layout {layout} engaged the shortcut"
+                );
+            }
+            send(Some((0x1D, 0)), layout, &mut gesture);
+            send(Some((0x38, 0)), layout, &mut gesture);
+            assert!(
+                gesture.engaged(),
+                "the hold after AltGr typing in layout {layout} wasn't a chord"
+            );
+            send(None, layout, &mut gesture);
+            send(Some((0x38, up)), layout, &mut gesture);
+            send(Some((0x1D, up)), layout, &mut gesture);
+        }
+    }
+
+    #[test]
     fn a_layout_change_at_release_resets_and_needs_the_new_layout_to_rearm() {
         let keys = super::Keys::default();
         let up = super::RI_KEY_BREAK;
