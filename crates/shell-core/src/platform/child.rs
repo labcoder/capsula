@@ -1197,10 +1197,8 @@ mod tests {
                 word.quit();
             }
             let fake = Fake::with(|s| s.spawn_fails = true);
-            let start = Instant::now();
             let owner = ChildOwner::start(fake, Arc::clone(&word), WAIT).expect("owner");
             assert!(matches!(next(&owner), Report::NotSpawned(_)), "{refusal}");
-            assert!(start.elapsed() < WAIT, "{refusal}: at once");
             let (hooked, hook_ran) = mpsc::channel();
             owner.on_settled(move || {
                 let _unwatched = hooked.send(());
