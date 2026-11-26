@@ -216,6 +216,12 @@ use crate::runtime::{Full, Selected};
 use tokio::time::Instant;
 
 fn brain_with_github_owner(scratch: &Scratch, account: crate::runtime::account::Accounts) -> Brain {
+    #[cfg(not(windows))]
+    let account = {
+        let mut account = account;
+        account.connections.use_offline_route();
+        account
+    };
     let mut store = Store::open(&scratch.db()).unwrap();
     store.recover().unwrap();
     let main = store.main_thread().unwrap();

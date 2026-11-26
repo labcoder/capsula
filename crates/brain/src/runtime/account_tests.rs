@@ -60,15 +60,22 @@ const SIGNED_OUT: AccountView = AccountView::SignedOut {
 };
 
 #[cfg(not(windows))]
-#[test]
-fn native_account_subsystem_refuses_before_starting_without_a_trust_adapter() {
-    let (_scratch, profile) = profile();
-    assert!(matches!(
-        crate::accounts(OAuthTuning::default(), TokenTuning::default(), profile),
-        Err(crate::BrainError::NativeTrust(
-            crate::platform::TrustRootsError::Unsupported
-        ))
-    ));
+#[tokio::test]
+async fn native_account_subsystem_refuses_at_the_credential_store_before_starting() {
+    let (scratch, profile) = profile();
+    let Err(crate::BrainError::Accounts(refusal)) =
+        crate::accounts(OAuthTuning::default(), TokenTuning::default(), profile)
+    else {
+        panic!("the account subsystem started without a credential store");
+    };
+    assert_eq!(refusal.kind(), std::io::ErrorKind::Unsupported);
+    assert!(
+        !scratch
+            .dir()
+            .join(kumochi_protocol::constants::AUTHORITY_FILE)
+            .exists(),
+        "refused before the authority opened"
+    );
 }
 
 #[cfg(not(windows))]
@@ -1488,8 +1495,6 @@ fn refused_with(
             vec![Action::OpenSettings],
         )
         .expect("one action"),
-        #[cfg(not(windows))]
-        (Some(ConnectionKind::AnthropicKey), None) => ErrorKey::UnsupportedPlatform.into(),
         _ => model_unavailable(),
     }
 }

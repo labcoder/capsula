@@ -14,7 +14,6 @@ use super::models::{self, CatalogModel, CheckError};
 use super::sse_map::{Capture, StopReason};
 use super::tls::{AnthropicTls, RouteConnector};
 use crate::config::tuning::ModelTuning;
-use crate::connections::http_client::HttpError;
 use crate::connections::model::Events;
 use crate::connections::model::budget::Budget;
 use crate::connections::model::conn::ModelClient;
@@ -37,22 +36,18 @@ pub(crate) struct Transport {
 }
 
 impl Transport {
-    pub(crate) fn native(model: ModelTuning) -> Result<Option<Self>, HttpError> {
+    pub(crate) fn native(model: ModelTuning) -> Option<Self> {
         if !SERVE_ANTHROPIC_KEY {
-            return Ok(None);
+            return None;
         }
-        let connector = match AnthropicTls::build() {
-            Ok(tls) => Some(Arc::new(tls)),
-            Err(HttpError::UnsupportedPlatform) => return Err(HttpError::UnsupportedPlatform),
-            Err(_) => None,
-        };
-        Ok(Some(Self {
+        let connector = AnthropicTls::build().ok().map(Arc::new);
+        Some(Self {
             connector: RouteConnector::Native(connector),
             catalog: Arc::new(Budget::from_var(LIVE_KEY_CATALOG_BUDGET_ENV)),
             messages: Arc::new(Budget::from_var(LIVE_KEY_MESSAGES_BUDGET_ENV)),
             refused: None,
             model,
-        }))
+        })
     }
 
     #[cfg(test)]

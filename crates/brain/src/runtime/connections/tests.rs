@@ -7,6 +7,7 @@ use crate::connections::vault::{Vault, fake::FakeStore};
 use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
 use crate::runtime::account::Net;
 use crate::test_support::{self, Scratch};
+use kumochi_protocol::message::UserError;
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
@@ -18,11 +19,7 @@ mod staging;
 async fn production_composition_serves_the_key_route_and_refuses_unadmitted_sends_unasked() {
     let scratch = Scratch::new("dormant-key-transport");
     let mut brain = test_support::brain(&scratch, "");
-    let unavailable = if cfg!(windows) {
-        model_unavailable()
-    } else {
-        ErrorKey::UnsupportedPlatform.into()
-    };
+    let unavailable = model_unavailable();
     assert!(matches!(
         brain.account.connections.route_input(),
         Some(Input::Engines(
@@ -31,23 +28,6 @@ async fn production_composition_serves_the_key_route_and_refuses_unadmitted_send
         )) if refusal == unavailable
     ));
     assert_owned_key_refusal(&mut brain, unavailable).await;
-    #[cfg(not(windows))]
-    {
-        brain.account.connections.stage_session(Some(1));
-        assert_eq!(
-            brain.account.stage_op(
-                1,
-                ConnectionOp::BeginAnthropicKeyStage {
-                    request: 1,
-                    len: 16
-                }
-            ),
-            [ControlToShell::AnthropicKeyStage {
-                request: 1,
-                result: Err(KeyStageFailure::Unavailable),
-            }]
-        );
-    }
     brain.close().await;
 }
 
@@ -241,39 +221,6 @@ async fn saved_key_startup_and_check_never_send_without_a_catalog_allowance() {
             .close(tokio::time::Instant::now(), tokio::time::Instant::now())
             .await;
     }
-}
-
-#[cfg(not(windows))]
-#[tokio::test]
-async fn a_saved_key_stays_unsupported_in_runtime_and_reconnect_snapshots() {
-    let scratch = Scratch::new("key-no-native-transport");
-    let store = FakeStore::default();
-    let lock = scratch.db().with_file_name("key-test.lock");
-    save_key(&store, &lock);
-    let worker = Worker::new(
-        Box::new(move || Vault::with_service(store.clone(), "key-test", &lock)),
-        Arc::new(FixedClock(0)),
-    );
-    let accounts = Accounts::spawn_unconfigured(worker, test_support::net()).unwrap();
-    let mut brain = test_support::brain_with(&scratch, "", accounts);
-    settle(&mut brain.account).await;
-    let expected = ControlToShell::Connections(ConnectionsView {
-        anthropic: KeyView::UnsupportedPlatform,
-        anthropic_revision: Some(1),
-        claude_code: ClaudeCodeView::NotFound,
-    });
-    assert_eq!(brain.connections_frame(), expected);
-    assert_eq!(retained_key(&brain.account.connections), None);
-    assert_eq!(
-        brain
-            .account
-            .connection_event(ConnectionEvent::Op(ConnectionOp::CheckAnthropicKey)),
-        std::slice::from_ref(&expected)
-    );
-    assert!(!brain.account.connections.loading);
-    assert_eq!(brain.account.connections.connected(), expected);
-    assert_owned_key_refusal(&mut brain, ErrorKey::UnsupportedPlatform.into()).await;
-    brain.close().await;
 }
 
 #[tokio::test]

@@ -347,12 +347,7 @@ async fn names_never_reach_the_tap_in_either_direction() {
     let lines: Vec<_> = dumped.lines().collect();
     assert!(lines[0].contains("brain -> shell  Settings ("), "{dumped}");
     assert!(lines[1].contains("brain -> shell  Account ("), "{dumped}");
-    let anthropic = if cfg!(windows) {
-        "Missing"
-    } else {
-        "UnsupportedPlatform"
-    };
-    assert!(lines[2].contains(&format!("brain -> shell  Connections(ConnectionsView {{ anthropic: {anthropic}, anthropic_revision: None, claude_code: NotFound }})")), "{dumped}");
+    assert!(lines[2].contains("brain -> shell  Connections(ConnectionsView { anthropic: Missing, anthropic_revision: None, claude_code: NotFound })"), "{dumped}");
     assert!(
         lines[3].contains("brain -> shell  ScreenHolds ("),
         "{dumped}"
