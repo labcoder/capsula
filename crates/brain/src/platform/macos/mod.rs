@@ -26,7 +26,7 @@ pub(super) mod pair;
     reason = "the parent watch owns Darwin process and kqueue calls"
 )]
 #[cfg_attr(
-    not(test),
+    not(any(test, all(debug_assertions, feature = "test-support"))),
     expect(dead_code, reason = "parent-bound admission is not wired yet")
 )]
 pub(super) mod parent;
