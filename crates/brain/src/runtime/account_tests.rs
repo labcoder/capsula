@@ -685,16 +685,18 @@ async fn a_dropped_wait_never_cancels_its_refresh() {
     };
     // The check, the pending flag, the sent mark's save, the refresh and the rotated set's save.
     // The store is read only once the worker reports the save after the refresh.
-    let mut refreshed = false;
+    let (mut refreshed, mut saved) = (false, false);
     for _ in 0..8 {
         let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
         let rotated = matches!(input, Event::Machine(Input::Vault(Done::Rotated(..))));
         refreshed |= matches!(input, Event::Machine(Input::Refreshed { .. }));
         accounts.handle(input);
-        if refreshed && rotated {
+        saved = refreshed && rotated;
+        if saved {
             break;
         }
     }
+    assert!(saved, "the rotated set's save was reported");
     assert_eq!(refresh_token(), Some("refresh-new".to_owned()));
     accounts.close(Instant::now(), Instant::now()).await;
 }
@@ -3283,7 +3285,7 @@ async fn an_ordinary_sign_in_is_ready_once_proved_and_stays_ready_through_a_refr
         "the held catalog read goes"
     );
     // The store is read only once the worker reports the save after the refresh.
-    let mut refreshed = false;
+    let (mut refreshed, mut saved) = (false, false);
     for _ in 0..8 {
         let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
         assert!(!matches!(input, Event::Proof { .. }), "no second check");
@@ -3291,10 +3293,12 @@ async fn an_ordinary_sign_in_is_ready_once_proved_and_stays_ready_through_a_refr
         refreshed |= matches!(input, Event::Machine(Input::Refreshed { .. }));
         accounts.handle(input);
         assert!(ready(&accounts));
-        if refreshed && rotated {
+        saved = refreshed && rotated;
+        if saved {
             break;
         }
     }
+    assert!(saved, "the rotated set's save was reported");
     assert_eq!(saved_refresh(&scratch, &store).0, "refresh-new");
     assert_eq!(saved_connection(&scratch, &store), SEEDED);
     accounts.close(Instant::now(), Instant::now()).await;
@@ -3513,6 +3517,7 @@ async fn a_recovered_answer_scopes_builds_until_the_account_stops_being_ready() 
                 brain.account_input(event, None).expect("no shell");
             }
             assert!(dropped, "the vault's own answer came after");
+            assert!(rotated, "the rotated set's save was reported");
             assert_eq!(saved_refresh(&scratch, &store).0, "refresh-new");
             assert_eq!(saved_connection(&scratch, &store), SEEDED);
         }
