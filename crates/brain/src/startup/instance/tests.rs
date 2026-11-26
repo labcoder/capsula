@@ -624,6 +624,11 @@ async fn a_publish_dropped_while_its_cleanup_delete_is_held_leaves_settle_to_wai
     deleting
         .recv_timeout(Duration::from_secs(5))
         .expect("the cleanup delete started");
+    assert_eq!(
+        wiped(&attempt),
+        [Some(true), Some(true)],
+        "the copy and the readback are wiped before the held delete returns"
+    );
     {
         let settle = attempt.settle();
         tokio::pin!(settle);

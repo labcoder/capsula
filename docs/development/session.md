@@ -219,7 +219,8 @@ stateDiagram-v2
 - Every call, settlement's and retirement's included, stays in the attempt's state until it's
   joined, so a dropped `publish` or `retire` leaves it for `settle`. The first terminal result is
   kept, and later `settle` calls return it without another call.
-- The key copy and each readback buffer are zeroed when dropped. `Published` holds neither.
+- The key copy and each readback buffer are zeroed when dropped. `Published` holds neither, and
+  settlement drops both before its cleanup delete.
   `Lifecycle` settles the attempt in `finish` before custody drops with it.
 
 ## What this crate doesn't do

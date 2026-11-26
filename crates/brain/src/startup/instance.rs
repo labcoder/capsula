@@ -139,7 +139,8 @@ enum State<E> {
         invalid: Arc<AtomicBool>,
     },
     Published,
-    /// Retirement's delete, kept until it's joined.
+    /// The final delete, retirement's or settlement's cleanup, holding no key and kept until
+    /// it's joined.
     Retiring(JoinHandle<Outcome<E>>),
     /// The first terminal result, which every later `settle` returns.
     Settled(Stage),
@@ -399,11 +400,6 @@ impl<S: InstanceStore> InstanceAttempt<S> {
                     (Step::Read, read) => {
                         *matched = Some(matches!(read, Ok(Some(Ok(Reply::Matches(true))))));
                     }
-                    (Step::Delete, deleted) => {
-                        break Refused::Late {
-                            cleaned: matches!(deleted, Ok(Some(Ok(_)))),
-                        };
-                    }
                     _ => {}
                 }
                 continue;
@@ -411,7 +407,11 @@ impl<S: InstanceStore> InstanceAttempt<S> {
             let job = match (*wrote, *matched) {
                 (false, _) => break reason,
                 (true, None) => Job::Read(Arc::clone(bytes)),
-                (true, Some(true)) => Job::Delete,
+                (true, Some(true)) => {
+                    self.begin_retire();
+                    let cleaned = self.retired().await.is_ok();
+                    return Refused::Late { cleaned };
+                }
                 (true, Some(false)) => break Refused::Late { cleaned: false },
             };
             let step = job.step();
