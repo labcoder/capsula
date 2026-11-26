@@ -1,12 +1,21 @@
-//! The shell's per-user lock, opened through admitted Application Support storage.
+//! The shell's per-user lock, opened through admitted Application Support storage, and its one
+//! read of the instance capability.
 
 use std::fs::TryLockError;
 use std::path::PathBuf;
 
 use kumochi_protocol::constants;
-use kumochi_storage::{AdmittedLock, ShellStorage};
+use kumochi_storage::{AdmittedLock, INSTANCE_LEN, InstanceItem, ItemError, Role, ShellStorage};
 
 use crate::instance::SessionLockError;
+
+/// Reads the brain's published instance capability into `into`, admitted as the shell.
+///
+/// # Errors
+/// Why the item can't be admitted or read; `into` is filled only on success.
+pub(crate) fn read_instance(into: &mut [u8; INSTANCE_LEN]) -> Result<(), ItemError> {
+    InstanceItem::admit(Role::Shell)?.read(into)
+}
 
 /// Takes `<SHELL_LOCK>.lock` in the product folder without waiting, or returns `None` when
 /// another shell of this user and identity holds it. The storage stays with the lock.

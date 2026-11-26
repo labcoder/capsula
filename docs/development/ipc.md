@@ -447,7 +447,19 @@ text metrics go on as a value; a frame the shell sent right after them stays in 
 reader, and a replayed TextMetrics would end serving as Broken.
 
 The shell's side lives in `shell-core`'s `platform/macos/leg.rs` and `connect_pair`, also
-dormant: nothing calls them, and the group secret is a parameter for now. `initiate` runs the
+dormant: nothing calls them, since the Mac shell only opens the disconnected window. On macOS the
+brain is the helper nested in the shell's bundle: from an absolute
+`<name>.app/Contents/MacOS/<shell>` up to `Contents`, then down `BRAIN_HELPER`
+(`Helpers/kumochid.app/Contents/MacOS/kumochid`); any other path is `NotFound`. Windows and Linux
+keep the sibling `BRAIN_EXE`. After the spawn, `after_ready` reads exactly one byte on control by
+what's left of the attempt's deadline, before the shell writes anything. A byte other than
+READY, or the stream ending, is `Rejected`, and the deadline is `ConnectExpired`; none of them
+touch the Keychain. Only after READY does the shell read the instance item, admitted as
+`Role::Shell`, into a `Secret`: a boxed buffer, allocated before the read, that wipes itself when
+dropped, so a move copies only the pointer. The clock is checked before the read and again after
+it, before its answer counts, so a read that ends past the deadline is `ConnectExpired` whether it
+succeeded or not. A refused read is `Item`. Either way no byte is written. `initiate` takes the
+box and drops it once the initiator is keyed, before its first message goes out. It runs the
 initiator's steps over the shell's two ends by one deadline and returns the legs only once
 `BindAck` verifies. Each leg is the link's `PipeClient` over the session crate's record owners.
 A timeout bounds each read or write call as a whole, however many socket transfers it takes, and
@@ -462,7 +474,7 @@ whole pair and shuts down both legs, so a reader blocked on the other leg wakes.
 abort or a refusal, reads fail and deliver nothing, not even a frame already looked at, and the
 affected readers' buffers are wiped at once; a call that holds a reader then wipes it as it
 lets go. A dropped leg wipes its own reader too. The stream ending between frames is an ordinary end. `connect_pair` starts the child,
-waiting for its spawn report no longer than the attempt, runs `initiate`,
+waiting for its spawn report no longer than the attempt, waits for READY and reads the item, runs `initiate`,
 sends both greetings with the zero placeholder and the text metrics, accepts `ShellTuning` as
 the pipes do, and then reads the next control frame by the same deadline. That frame must be
 `Settings`, which the runtime sends first once it has committed, in both audio modes; anything
