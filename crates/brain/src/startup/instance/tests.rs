@@ -614,21 +614,27 @@ async fn a_publish_dropped_while_its_cleanup_delete_is_held_leaves_settle_to_wai
     let (deleting, release_delete) = store.hold(Step::Delete);
     let thread = release_after(added, release_add, after(Duration::from_millis(100)));
     let (mut attempt, held) = start(&store);
+    let made = Arc::clone(&attempt.made);
+    let (key, shell) = (key(), shell());
     let deadline = Instant::now() + Duration::from_millis(30);
-    let dropped = tokio::time::timeout(
-        Duration::from_millis(400),
-        attempt.publish(&key(), deadline, &shell()),
-    )
-    .await;
-    assert!(dropped.is_err(), "dropped while the cleanup delete is held");
-    deleting
-        .recv_timeout(Duration::from_secs(5))
-        .expect("the cleanup delete started");
-    assert_eq!(
-        wiped(&attempt),
-        [Some(true), Some(true)],
-        "the copy and the readback are wiped before the held delete returns"
-    );
+    {
+        let publish = attempt.publish(&key, deadline, &shell);
+        tokio::pin!(publish);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), &mut publish)
+                .await
+                .is_err(),
+            "the cleanup delete is held"
+        );
+        deleting
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the cleanup delete started");
+        assert_eq!(
+            wipes::of(&made),
+            [Some(true), Some(true)],
+            "the copy and the readback are wiped while the live publish awaits the delete"
+        );
+    }
     {
         let settle = attempt.settle();
         tokio::pin!(settle);
