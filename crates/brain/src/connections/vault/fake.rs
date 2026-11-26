@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-
 use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
 
 #[derive(Debug, Clone, Copy)]

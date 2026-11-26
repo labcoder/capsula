@@ -75,7 +75,6 @@ pub struct Vault<S: CredentialStore> {
     repair_lease: Option<repair::RepairLease>,
     authority: Authority,
     history: HistoryLink,
-    /// This vault's identity; a replacement token it issues is spent only through its own writer.
     store: S,
     service: String,
     paste: Option<authority::WritePlan>,

@@ -203,11 +203,7 @@ fn candidate(
             [],
             |row| row.get(0),
         )?;
-        if !same_heads
-            || marker.sign_out.is_some()
-            || marker.request_pending
-            || marker.sweep
-        {
+        if !same_heads || marker.sign_out.is_some() || marker.request_pending || marker.sweep {
             return Err(AuthorityError::Conflict);
         }
     }

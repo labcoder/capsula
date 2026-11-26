@@ -46,8 +46,7 @@ async fn retiring_either_owner_suppresses_unsent_work_or_keeps_the_charge_unreso
             let resume = Arc::new(tokio::sync::Notify::new());
             let scripted = Scripted::new(200, serde_json::to_vec(&tokens()).unwrap())
                 .with_pause(Arc::clone(&resume));
-            let mut pending =
-                std::pin::pin!(dispatch.receive(&scripted));
+            let mut pending = std::pin::pin!(dispatch.receive(&scripted));
             if claim {
                 let mut context = Context::from_waker(Waker::noop());
                 assert!(pending.as_mut().poll(&mut context).is_pending());
@@ -90,9 +89,7 @@ async fn invalid_callback_does_not_spend_the_admitted_slot() {
     let dispatch = vault
         .charge_repair_exchange(&attempt, &authorization())
         .unwrap();
-    let _receipt = dispatch
-        .receive(&scripted)
-        .await;
+    let _receipt = dispatch.receive(&scripted).await;
     assert_eq!(scripted.request_count(), 1);
 }
 
@@ -120,9 +117,7 @@ async fn cancelling_before_dispatch_sends_nothing_and_spends_the_charge_once() {
     ));
     vault.cancel_repair_admission(&second).unwrap();
     let scripted = Scripted::new(200, serde_json::to_vec(&tokens()).unwrap());
-    let mut receipt = dispatch
-        .receive(&scripted)
-        .await;
+    let mut receipt = dispatch.receive(&scripted).await;
     assert_eq!(scripted.request_count(), 0);
     assert!(matches!(
         vault.settle_repair_exchange(&mut second, &mut receipt),
@@ -226,9 +221,7 @@ async fn retired_repair_client_and_other_provider_key_sweep_together() {
         .unwrap();
     let client = generation_target(&service, "repair", &client, 0);
     let scripted = Scripted::new(200, serde_json::to_vec(&tokens()).unwrap());
-    let mut receipt = dispatch
-        .receive(&scripted)
-        .await;
+    let mut receipt = dispatch.receive(&scripted).await;
     assert!(matches!(
         vault.settle_repair_exchange(&mut attempt, &mut receipt),
         Ok(RepairSettlement::Escrowed)
@@ -264,9 +257,7 @@ async fn missing_or_refused_settlement_stays_fenced_without_retry() {
         } else {
             Scripted::new(500, b"{}".to_vec())
         };
-        let mut receipt = dispatch
-            .receive(&scripted)
-            .await;
+        let mut receipt = dispatch.receive(&scripted).await;
         assert_eq!(scripted.request_count(), 1);
         store.0.lock().unwrap().refusing = issued;
 

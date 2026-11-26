@@ -52,7 +52,9 @@ impl RepairDispatch {
             .is_ok()
         {
             match self.request.send(http).await {
-                Ok(tokens) => tokens.refresh_token.map_or(Receipt::Unknown, Receipt::Issued),
+                Ok(tokens) => tokens
+                    .refresh_token
+                    .map_or(Receipt::Unknown, Receipt::Issued),
                 Err(ExchangeError::Unusable { refresh_token }) => {
                     refresh_token.map_or(Receipt::Unknown, Receipt::Issued)
                 }
