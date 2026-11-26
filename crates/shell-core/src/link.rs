@@ -1568,10 +1568,11 @@ pub fn prepare(
     events: Sender<LinkEvent>,
     audio: AudioSession,
 ) -> std::io::Result<(LinkHandle, LinkStart)> {
-    // The session first, so a platform with no transport refuses as unsupported before any path.
+    let exe = std::env::current_exe()?;
+    // Before the bundle check, so a platform with no transport refuses as unsupported.
     let session = platform::session_id()?;
     let link = Link {
-        brain: platform::brain_path(&std::env::current_exe()?)?,
+        brain: platform::brain_path(&exe)?,
         session,
         audio,
         shared: Arc::new(Shared::default()),
