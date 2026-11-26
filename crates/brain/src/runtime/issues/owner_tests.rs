@@ -7,6 +7,31 @@ use kumochi_scene::text::Bounded;
 use std::num::NonZeroU64;
 
 #[tokio::test]
+async fn a_counter_reserved_before_the_brain_exists_keeps_counting_inside_it() {
+    let scratch = crate::test_support::Scratch::new("issue-epochs-handed-on");
+    let mut epochs = IssueEpochs::default();
+    let welcomed = epochs.reserve(Incarnation(4));
+    let lost_data_leg = epochs.reserve(Incarnation(4));
+    assert_eq!((welcomed.epoch, lost_data_leg.epoch), (1, 2));
+    let fixture = crate::engines::fixture::Fixture::parse("").expect("script");
+    let mut brain = crate::test_support::brain_counting(
+        &scratch,
+        crate::runtime::Selected::Fixture(Box::new(fixture)),
+        crate::test_support::accounts(&scratch),
+        epochs,
+    );
+    brain.install_issue_session(welcomed);
+    assert_eq!(brain.issue_session(), Some(welcomed));
+    assert_eq!(
+        brain.reserve_issue_session(Incarnation(4)),
+        IssueSession {
+            incarnation: Incarnation(4),
+            epoch: 3,
+        }
+    );
+}
+
+#[tokio::test]
 async fn failed_request_identities_are_fenced_at_zero_and_max_until_the_session_changes() {
     let scratch = crate::test_support::Scratch::new("github-filing-request-watermark");
     let mut brain = crate::test_support::brain(&scratch, "");

@@ -237,6 +237,7 @@ fn brain_with_github_owner(scratch: &Scratch, account: crate::runtime::account::
         Selected::Fixture(Box::new(Fixture::parse("").unwrap())),
         scratch.config(),
         account,
+        crate::runtime::IssueEpochs::default(),
     )
     .unwrap()
 }
