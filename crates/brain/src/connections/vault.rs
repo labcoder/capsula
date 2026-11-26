@@ -241,18 +241,33 @@ impl<S: CredentialStore> Vault<S> {
         Ok(vault)
     }
 
-    /// Reads or creates the machine-local random `UUIDv4` host identifier. A current host whose
-    /// bytes don't read back is an error, never replaced.
+    /// Reads or creates the machine-local random `UUIDv4` host identifier. It's an identifier,
+    /// not a credential: a current host whose chunks are missing or whose bytes aren't a host is
+    /// replaced, once no sign-out is pending and no registration could still be bound to it.
     ///
     /// # Errors
-    /// Reports unreadable data, unavailable randomness or any refused credential operation.
+    /// Reports a refused read, an unusable host it may not replace, unavailable randomness or any
+    /// refused credential operation.
     pub fn host_id(&mut self) -> Result<Secret<Zeroizing<String>>, VaultError> {
-        if let Some(bytes) = self.read_bytes(Kind::Host)? {
-            let host: Zeroizing<String> = decode(&bytes, 128)?;
-            if !valid_host(&host) {
-                return Err(VaultError::Unreadable);
+        let head = self.authority.current(Kind::Host)?;
+        if let Some(active) = &head.active {
+            let unusable = match generation::read_active(&self.store, &self.service, active) {
+                Ok(bytes) => match decode::<Zeroizing<String>>(&bytes, 128) {
+                    Ok(host) if valid_host(&host) => return Ok(Secret::new(host)),
+                    _ => VaultError::Unreadable,
+                },
+                Err(
+                    authority::AuthorityError::MissingChunk
+                    | authority::AuthorityError::WrongChunkLength,
+                ) => VaultError::Store(CredentialStoreError::Unsettled),
+                Err(authority::AuthorityError::Store(CredentialStoreError::InvalidBlob)) => {
+                    VaultError::Unreadable
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if !self.release_host()? {
+                return Err(unusable);
             }
-            return Ok(Secret::new(host));
         }
         let mut bytes = Zeroizing::new([0u8; 16]);
         getrandom::fill(&mut *bytes)?;
@@ -267,8 +282,34 @@ impl<S: CredentialStore> Vault<S> {
             }
             write!(&mut *host, "{byte:02x}").expect("writing into a String cannot fail");
         }
-        self.write(Kind::Host, &encode(&host, 128)?, None)?;
+        self.write_expected(Kind::Host, head.revision, &encode(&host, 128)?, None)?;
         Ok(Secret::new(host))
+    }
+
+    /// Whether an unusable host may be replaced: no sign-out pending, and no `chatgpt` record or
+    /// only a registration never bound to an identity, which is retired first so a client issued
+    /// under the old host is never reused with a new one.
+    // shortcut: a readable registration that holds a subject keeps its broken host and blocks
+    // sign-in, since retiring it would drop the identity check; upgrade if that loss is seen.
+    fn release_host(&mut self) -> Result<bool, VaultError> {
+        if self.marker()?.sign_out.is_some() {
+            return Ok(false);
+        }
+        let head = self.authority.current(Kind::Account)?;
+        if head.active.is_none() {
+            return Ok(true);
+        }
+        let Ok(Some(account)) = self.read::<Account>(Kind::Account) else {
+            return Ok(false);
+        };
+        let account = account.expose();
+        if account.tokens.is_some() || account.subject.is_some() {
+            return Ok(false);
+        }
+        self.authority
+            .remove(&[Kind::Account], None, Some((Kind::Account, head.revision)))?;
+        self.sweep();
+        Ok(true)
     }
 
     /// Reads the marker first, so a pending or unreadable sign-out never exposes usable tokens.
