@@ -37,7 +37,8 @@ pub(crate) enum NotStarted {
 /// Starts a parent-bound brain as the shell's child, with the control leg on its descriptor 3 and
 /// the data leg on 4, and hands out the shell's ends only once the child exists. Retirement
 /// waits the link's Quit timeout before the kill, and again after. Blocks until the owner reports
-/// its one spawn attempt, or for `SPAWN_REPORT` at most. Call it off the UI thread.
+/// its one spawn attempt, until `by` or for `SPAWN_REPORT`, whichever ends first. Call it off the
+/// UI thread.
 ///
 /// # Errors
 /// `Pending` when the report didn't come in time. Otherwise the owner's refusal, or `Spawn` when
@@ -45,12 +46,18 @@ pub(crate) enum NotStarted {
 pub(crate) fn start_brain(
     brain: &Path,
     word: Arc<SpawnWord>,
+    by: Instant,
 ) -> Result<(ChildOwner, ShellEnds), NotStarted> {
     let (shell, child) = pair::pairs().map_err(Refusal::Spawn)?;
     let os = Darwin::new(brain, &[OsStr::new(PARENT_BOUND)], child).map_err(Refusal::Spawn)?;
+    Ok((reported(os, word, by)?, shell))
+}
+
+/// Starts the owner and waits for its spawn report, until `by` or for `SPAWN_REPORT` at most.
+fn reported(os: impl Os, word: Arc<SpawnWord>, by: Instant) -> Result<ChildOwner, NotStarted> {
     let owner = ChildOwner::start(os, word, crate::link::QUIT_TIMEOUT).map_err(Refusal::Spawn)?;
-    match owner.spawned(Instant::now() + SPAWN_REPORT) {
-        Ok(Report::Spawned) => Ok((owner, shell)),
+    match owner.spawned(by.min(Instant::now() + SPAWN_REPORT)) {
+        Ok(Report::Spawned) => Ok(owner),
         Ok(Report::NotSpawned(refusal)) => Err(refusal.into()),
         Err(RecvTimeoutError::Timeout) => Err(NotStarted::Pending),
         Ok(Report::Settled(_)) | Err(RecvTimeoutError::Disconnected) => {
@@ -261,19 +268,18 @@ fn descriptor_limit() -> io::Result<u64> {
     Ok(limit.rlim_cur)
 }
 
-const SOCKET_FLAG_LEN: libc::socklen_t = 4;
+const SOCKET_INT_LEN: libc::socklen_t = 4;
 
-/// Sets `SO_NOSIGPIPE` on a socket.
-pub(super) fn no_sigpipe(fd: RawFd) -> io::Result<()> {
-    let on: libc::c_int = 1;
-    // SAFETY: `on` is a valid c_int of the stated length for the duration of the call.
+/// Sets one integer `SOL_SOCKET` option on a socket.
+pub(super) fn set_socket_int(fd: RawFd, name: libc::c_int, value: libc::c_int) -> io::Result<()> {
+    // SAFETY: `value` is a valid c_int of the stated length for the duration of the call.
     let set = unsafe {
         libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
-            libc::SO_NOSIGPIPE,
-            (&raw const on).cast(),
-            SOCKET_FLAG_LEN,
+            name,
+            (&raw const value).cast(),
+            SOCKET_INT_LEN,
         )
     };
     if set != 0 {
@@ -282,21 +288,27 @@ pub(super) fn no_sigpipe(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
+/// Sets `SO_NOSIGPIPE` on a socket.
+pub(super) fn no_sigpipe(fd: RawFd) -> io::Result<()> {
+    set_socket_int(fd, libc::SO_NOSIGPIPE, 1)
+}
+
+/// One integer `SOL_SOCKET` option, or None when it can't be read.
 #[cfg(test)]
-pub(super) fn has_no_sigpipe(fd: RawFd) -> bool {
+pub(super) fn socket_int(fd: RawFd, name: libc::c_int) -> Option<libc::c_int> {
     let mut value: libc::c_int = 0;
-    let mut len = SOCKET_FLAG_LEN;
+    let mut len = SOCKET_INT_LEN;
     // SAFETY: `value` and `len` are valid for writes of the stated length.
     let read = unsafe {
         libc::getsockopt(
             fd,
             libc::SOL_SOCKET,
-            libc::SO_NOSIGPIPE,
+            name,
             (&raw mut value).cast(),
             &raw mut len,
         )
     };
-    read == 0 && value != 0
+    (read == 0).then_some(value)
 }
 
 /// Classifies one `waitpid(pid, WNOHANG)` result; None means interrupted, so wait again.
@@ -586,7 +598,12 @@ mod tests {
         .expect("fixture");
         std::fs::set_permissions(&brain, std::os::unix::fs::PermissionsExt::from_mode(0o700))
             .expect("executable");
-        let (owner, shell) = start_brain(&brain, Arc::new(SpawnWord::default())).expect("start");
+        let (owner, shell) = start_brain(
+            &brain,
+            Arc::new(SpawnWord::default()),
+            Instant::now() + BOUND,
+        )
+        .expect("start");
         assert!(matches!(
             next(&owner),
             Report::Settled(Settled::Reaped(Exit::Code(0)))
@@ -599,6 +616,7 @@ mod tests {
         let refused = start_brain(
             Path::new("/nonexistent/kumochid"),
             Arc::new(SpawnWord::default()),
+            Instant::now() + BOUND,
         );
         assert!(matches!(
             refused,
@@ -607,8 +625,41 @@ mod tests {
         let word = Arc::new(SpawnWord::default());
         word.quit();
         assert!(matches!(
-            start_brain(Path::new("/bin/test"), word),
+            start_brain(Path::new("/bin/test"), word, Instant::now() + BOUND),
             Err(NotStarted::Refused(Refusal::Quitting))
         ));
+    }
+
+    /// A spawn that doesn't return until the test lets it, and then makes no child.
+    struct Stalled(std::sync::mpsc::Receiver<()>);
+
+    impl Os for Stalled {
+        fn auto_reaps(&self) -> bool {
+            false
+        }
+        fn spawn(&mut self) -> io::Result<()> {
+            let _released = self.0.recv();
+            Err(io::ErrorKind::NotFound.into())
+        }
+        fn poll(&mut self) -> Observation {
+            Observation::Lost
+        }
+        fn kill(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_spawn_report_waits_no_longer_than_the_attempt() {
+        let (release, held) = std::sync::mpsc::channel();
+        let by = Instant::now() + Duration::from_millis(100);
+        let started = reported(Stalled(held), Arc::new(SpawnWord::default()), by);
+        assert!(matches!(started, Err(NotStarted::Pending)));
+        assert!(Instant::now() >= by, "waited for the attempt");
+        assert!(
+            Instant::now() < by + Duration::from_secs(1),
+            "and not for the whole spawn report"
+        );
+        drop(release);
     }
 }

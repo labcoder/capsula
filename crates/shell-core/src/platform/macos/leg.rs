@@ -9,7 +9,7 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::frame::{self, FrameError, HEADER_LEN, Pipe};
@@ -20,14 +20,15 @@ use kumochi_session::{
 };
 use zeroize::{Zeroize as _, Zeroizing};
 
-use super::pair::ShellEnds;
+use super::pair::{SEND_LOW_WATER, ShellEnds};
 
 /// Both legs' shared state: once refused, neither leg reads, delivers or writes again.
-#[derive(Debug)]
 struct Pair {
     refused: AtomicBool,
     /// Clones of both legs' sockets, so a refusal can shut both down.
     ends: [UnixStream; 2],
+    /// Both legs' incoming directions, here so a refusal can wipe both.
+    readers: [Mutex<Reader>; 2],
 }
 
 impl Pair {
@@ -35,14 +36,27 @@ impl Pair {
         self.refused.load(Ordering::SeqCst)
     }
 
-    /// Latches the refusal, then shuts down both legs so every blocked call returns.
+    /// Latches the refusal, shuts down both legs so every blocked call returns, and wipes both
+    /// readers.
     fn refuse(&self, error: impl Into<io::Error>) -> io::Error {
         self.refused.store(true, Ordering::SeqCst);
         for end in &self.ends {
             // A leg that's already shut down has nothing left to wake.
             let _shut = end.shutdown(Shutdown::Both);
         }
+        for reader in &self.readers {
+            wipe_unless_held(reader);
+        }
         error.into()
+    }
+}
+
+/// Wipes a reader now, unless a call holds it; that call wipes it as it lets go.
+fn wipe_unless_held(reader: &Mutex<Reader>) {
+    match reader.try_lock() {
+        Ok(mut reader) => reader.wipe(),
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().wipe(),
+        Err(TryLockError::WouldBlock) => {}
     }
 }
 
@@ -53,10 +67,6 @@ fn session_error(error: SessionError) -> io::Error {
 fn pair_refused() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "the pair already refused")
 }
-
-/// Darwin restarts a send's timeout each time it delivers more data, so a bounded call sends at
-/// most the default send low-water mark per transfer: such a send waits once, then delivers whole.
-const BOUNDED_SEND: usize = 2048;
 
 /// A socket bound that took, or one Darwin refused because both directions are already shut
 /// (`EINVAL`); then no transfer on the socket can block, so there's nothing left to bound.
@@ -97,11 +107,33 @@ struct Reader {
     retained_at: usize,
 }
 
+impl Reader {
+    fn new(opener: Opener) -> Self {
+        Self {
+            opener: Some(opener),
+            record: Zeroizing::new(vec![0; ENVELOPE_LEN + MAX_RECORD]),
+            filled: 0,
+            announced: None,
+            start: 0,
+            end: 0,
+            retained: Zeroizing::new(Vec::new()),
+            retained_at: 0,
+        }
+    }
+
+    /// Wipes every byte this reader holds, plaintext and ciphertext alike.
+    fn wipe(&mut self) {
+        self.record.as_mut_slice().zeroize();
+        (self.filled, self.announced, self.start, self.end) = (0, None, 0, 0);
+        self.retained.zeroize();
+        self.retained_at = 0;
+    }
+}
+
 /// One leg of the pair. Reads and writes may run on different threads at once.
 pub(crate) struct PipeClient {
     stream: UnixStream,
     pipe: Pipe,
-    reader: Mutex<Reader>,
     writer: Mutex<Sealer>,
     /// How long each read or write call may take as a whole; None waits without a bound.
     timeout: Mutex<Option<Duration>>,
@@ -123,26 +155,10 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl PipeClient {
-    fn new(
-        stream: UnixStream,
-        pipe: Pipe,
-        opener: Opener,
-        sealer: Sealer,
-        pair: Arc<Pair>,
-    ) -> Self {
+    fn new(stream: UnixStream, pipe: Pipe, sealer: Sealer, pair: Arc<Pair>) -> Self {
         Self {
             stream,
             pipe,
-            reader: Mutex::new(Reader {
-                opener: Some(opener),
-                record: Zeroizing::new(vec![0; ENVELOPE_LEN + MAX_RECORD]),
-                filled: 0,
-                announced: None,
-                start: 0,
-                end: 0,
-                retained: Zeroizing::new(Vec::new()),
-                retained_at: 0,
-            }),
             writer: Mutex::new(sealer),
             timeout: Mutex::new(None),
             aborted: AtomicBool::new(false),
@@ -164,11 +180,27 @@ impl PipeClient {
         Err(io::ErrorKind::Unsupported.into())
     }
 
-    /// Ends this leg: blocked calls return, and later ones fail.
+    fn reader(&self) -> &Mutex<Reader> {
+        &self.pair.readers[match self.pipe {
+            Pipe::Control => 0,
+            Pipe::Data => 1,
+        }]
+    }
+
+    /// After a call lets go of the reader: a refusal or abort that came while it held the lock
+    /// couldn't wipe it, so the call does.
+    fn wipe_if_aborted(&self) {
+        if self.is_aborted() {
+            locked(self.reader()).wipe();
+        }
+    }
+
+    /// Ends this leg: blocked calls return, later ones fail, and its reader is wiped.
     pub(crate) fn abort(&self) {
         self.aborted.store(true, Ordering::SeqCst);
         // Already shut down when the pair refused.
         let _shut = self.stream.shutdown(Shutdown::Both);
+        wipe_unless_held(self.reader());
     }
 
     pub(crate) fn is_aborted(&self) -> bool {
@@ -212,8 +244,10 @@ impl PipeClient {
         bytes[..HEADER_LEN].copy_from_slice(&header);
         io.read_exact(&mut bytes[HEADER_LEN..])?;
         let message = frame::decode(&bytes[HEADER_LEN..])?;
-        let mut reader = locked(&self.reader);
+        let mut reader = locked(self.reader());
         (reader.retained, reader.retained_at) = (bytes, 0);
+        drop(reader);
+        self.wipe_if_aborted();
         Ok(Some(message))
     }
 }
@@ -234,8 +268,17 @@ impl Read for By<'_> {
 
 impl Read for &PipeClient {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let client = *self;
-        let mut reader = locked(&client.reader);
+        let result = self.read_held(buf);
+        self.wipe_if_aborted();
+        result
+    }
+}
+
+impl PipeClient {
+    /// One read with the reader held.
+    fn read_held(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let client = self;
+        let mut reader = locked(client.reader());
         let Reader {
             opener,
             record,
@@ -249,10 +292,6 @@ impl Read for &PipeClient {
         let by = client.call_deadline();
         loop {
             if client.is_aborted() {
-                record.as_mut_slice().zeroize();
-                (*filled, *announced, *start, *end) = (0, None, 0, 0);
-                retained.zeroize();
-                *retained_at = 0;
                 return Err(if client.pair.refused() {
                     pair_refused()
                 } else {
@@ -362,7 +401,7 @@ impl Write for &PipeClient {
                     client
                         .bounded(client.stream.set_write_timeout(Some(left)))
                         .map_err(|error| client.pair.refuse(error))?;
-                    take = take.min(BOUNDED_SEND);
+                    take = take.min(SEND_LOW_WATER);
                 }
                 let n = match (&client.stream).write(&rest[..take]) {
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -401,7 +440,7 @@ fn end(ends: &ShellEnds, leg: Pipe) -> &UnixStream {
 fn send(stream: &UnixStream, mut bytes: &[u8], by: Instant) -> io::Result<()> {
     while !bytes.is_empty() {
         bound(stream, by)?;
-        match (&*stream).write(&bytes[..bytes.len().min(BOUNDED_SEND)]) {
+        match (&*stream).write(&bytes[..bytes.len().min(SEND_LOW_WATER)]) {
             Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
             Ok(n) => bytes = &bytes[n..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -474,16 +513,19 @@ pub(crate) fn initiate(
     let pair = Arc::new(Pair {
         refused: AtomicBool::new(false),
         ends: [ends.control.try_clone()?, ends.data.try_clone()?],
+        readers: [
+            Mutex::new(Reader::new(control.opener)),
+            Mutex::new(Reader::new(data.opener)),
+        ],
     });
     Ok((
         PipeClient::new(
             ends.control,
             Pipe::Control,
-            control.opener,
             control.sealer,
             Arc::clone(&pair),
         ),
-        PipeClient::new(ends.data, Pipe::Data, data.opener, data.sealer, pair),
+        PipeClient::new(ends.data, Pipe::Data, data.sealer, pair),
     ))
 }
 

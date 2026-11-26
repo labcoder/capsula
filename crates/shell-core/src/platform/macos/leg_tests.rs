@@ -1,3 +1,4 @@
+use std::os::fd::AsRawFd as _;
 use std::os::unix::net::UnixStream;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -646,6 +647,13 @@ fn an_expired_attempt_starts_no_brain() {
 #[test]
 fn a_bounded_write_ends_at_its_deadline_while_the_brain_drains_slowly() {
     let (control, data, mut brain) = bound();
+    // Small buffers, so one record can't fit whatever the host's defaults.
+    for (fd, buffer) in [
+        (data.stream.as_raw_fd(), libc::SO_SNDBUF),
+        (brain.data.as_raw_fd(), libc::SO_RCVBUF),
+    ] {
+        super::super::child::set_socket_int(fd, buffer, 8192).expect("buffer size");
+    }
     let drained = thread::spawn(move || {
         let mut chunk = [0; 1024];
         let mut total = 0;
@@ -684,4 +692,74 @@ fn a_bounded_write_ends_at_its_deadline_while_the_brain_drains_slowly() {
         drained.join().expect("the brain side finished") > 0,
         "part of the frame reached the brain"
     );
+}
+
+/// Whether a leg's reader holds no bytes at all.
+fn wiped(client: &PipeClient) -> bool {
+    let reader = locked(client.reader());
+    reader.record.iter().all(|&byte| byte == 0)
+        && (reader.filled, reader.start, reader.end) == (0, 0, 0)
+        && reader.retained.is_empty()
+}
+
+#[test]
+fn a_refusal_wipes_both_readers_without_another_read() {
+    let (control, data, mut brain) = bound();
+    control.set_timeout(Some(BOUND));
+    data.set_timeout(Some(BOUND));
+    brain.control(&ControlToShell::Ping);
+    let mut byte = [0; 1];
+    (&control)
+        .read_exact(&mut byte)
+        .expect("the frame's first byte");
+    assert!(!wiped(&control), "the rest of the frame waits to be read");
+    let mut forged = vec![0, 32];
+    forged.extend([0xAB; 32]);
+    brain.data.write_all(&forged).expect("forged record");
+    assert_eq!(
+        (&data).read(&mut byte).expect_err("forged").kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert!(
+        wiped(&control) && wiped(&data),
+        "both readers, before any later read"
+    );
+}
+
+#[test]
+fn a_refusal_wipes_a_peeked_frame_without_another_read() {
+    let (control, data, mut brain) = bound();
+    brain.control(&ControlToShell::Settings {
+        view: view(),
+        answer: false,
+    });
+    assert!(matches!(
+        control.peek_control(by()),
+        Ok(Some(ControlToShell::Settings { .. }))
+    ));
+    assert!(!wiped(&control), "the peeked frame is kept");
+    let mut forged = vec![0, 32];
+    forged.extend([0xAB; 32]);
+    brain.data.write_all(&forged).expect("forged record");
+    data.set_timeout(Some(BOUND));
+    let mut byte = [0; 1];
+    assert!((&data).read(&mut byte).is_err(), "forged");
+    assert!(wiped(&control), "the peeked frame is gone");
+}
+
+#[test]
+fn abort_wipes_its_own_reader_without_another_read() {
+    let (control, data, mut brain) = bound();
+    control.set_timeout(Some(BOUND));
+    data.set_timeout(Some(BOUND));
+    brain.control(&ControlToShell::Ping);
+    brain.send(Pipe::Data, &counting_frame(HEADER_LEN + 9));
+    let mut byte = [0; 1];
+    (&control)
+        .read_exact(&mut byte)
+        .expect("control's first byte");
+    (&data).read_exact(&mut byte).expect("data's first byte");
+    control.abort();
+    assert!(wiped(&control), "the aborted leg");
+    assert!(!wiped(&data), "the other leg keeps its frame");
 }

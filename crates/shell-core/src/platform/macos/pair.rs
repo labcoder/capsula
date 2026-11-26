@@ -10,6 +10,10 @@ use std::os::unix::net::UnixStream;
 pub(super) const CONTROL_FD: RawFd = 3;
 /// The child's descriptor for the data leg.
 pub(super) const DATA_FD: RawFd = 4;
+/// The shell ends' send low-water mark, set rather than assumed, and below Darwin's usual 2048.
+/// Darwin restarts a send's timeout whenever it delivers more data, but a send no larger than
+/// this waits once and then delivers whole, so a bounded leg sends at most this much per transfer.
+pub(super) const SEND_LOW_WATER: usize = 1024;
 
 /// The shell's ends. Dropping them closes both legs, so the brain sees EOF.
 #[derive(Debug)]
@@ -26,7 +30,8 @@ pub(crate) struct ChildEnds {
 }
 
 /// Makes both pairs, with `SO_NOSIGPIPE` on all four ends so a write to a closed peer fails
-/// with EPIPE instead of a signal.
+/// with EPIPE instead of a signal, and the shell ends' send low-water mark set to
+/// [`SEND_LOW_WATER`] rather than assumed.
 ///
 /// # Errors
 /// Fails when a socket can't be made or configured; nothing is left open.
@@ -35,6 +40,10 @@ pub(crate) fn pairs() -> io::Result<(ShellEnds, ChildEnds)> {
     let (data, child_data) = UnixStream::pair()?;
     for end in [&control, &child_control, &data, &child_data] {
         super::child::no_sigpipe(end.as_raw_fd())?;
+    }
+    let low_water = libc::c_int::try_from(SEND_LOW_WATER).expect("the low-water mark fits a c_int");
+    for end in [&control, &data] {
+        super::child::set_socket_int(end.as_raw_fd(), libc::SO_SNDLOWAT, low_water)?;
     }
     Ok((
         ShellEnds { control, data },
@@ -182,8 +191,15 @@ mod tests {
             child.data.as_raw_fd(),
         ] {
             assert!(
-                super::super::child::has_no_sigpipe(fd),
+                matches!(super::super::child::socket_int(fd, libc::SO_NOSIGPIPE), Some(on) if on != 0),
                 "SO_NOSIGPIPE on {fd}"
+            );
+        }
+        for fd in [shell.control.as_raw_fd(), shell.data.as_raw_fd()] {
+            assert_eq!(
+                super::super::child::socket_int(fd, libc::SO_SNDLOWAT),
+                Some(1024),
+                "the shell end's send low-water mark on {fd}"
             );
         }
         let bound = Some(std::time::Duration::from_secs(5));
