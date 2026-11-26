@@ -16,12 +16,14 @@ use kumochi_session::{
 use super::*;
 use crate::link::DrawingText;
 use crate::platform::Connection;
-use crate::platform::connect::{LinkError, over_pair};
+use crate::platform::SpawnWord;
+use crate::platform::connect::{LinkError, connect_pair, over_pair};
 
 /// A synthetic group secret; no real key is ever used here.
 const SECRET: [u8; SECRET_LEN] = [0x5A; SECRET_LEN];
 const BOUND: Duration = Duration::from_secs(10);
 const SHORT: Duration = Duration::from_millis(60);
+const GAP: Duration = Duration::from_millis(40);
 
 fn by() -> Instant {
     Instant::now() + BOUND
@@ -229,6 +231,8 @@ fn a_record_that_fails_to_authenticate_refuses_and_wakes_both_legs() {
     });
     let mut forged = vec![0, 32];
     forged.extend([0xAB; 32]);
+    // Let the data reader reach its socket wait first.
+    thread::sleep(SHORT);
     let started = Instant::now();
     brain.control.write_all(&forged).expect("forged record");
     control.set_timeout(Some(BOUND));
@@ -244,6 +248,15 @@ fn a_record_that_fails_to_authenticate_refuses_and_wakes_both_legs() {
     assert_eq!(
         woke.expect_err("refused, not an end").kind(),
         std::io::ErrorKind::BrokenPipe
+    );
+    let mut byte = [0; 1];
+    assert_eq!(
+        brain
+            .data
+            .read(&mut byte)
+            .expect("the brain reads its data end"),
+        0,
+        "the shell shut its data end down"
     );
     assert!(control.is_aborted() && data.is_aborted(), "both legs");
 }
@@ -307,7 +320,10 @@ fn the_initiator_ends_at_its_deadline() {
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
     ));
     assert!(Instant::now() >= deadline, "waited for the deadline");
-    assert!(Instant::now() < deadline + BOUND, "and no longer");
+    assert!(
+        Instant::now() < deadline + Duration::from_secs(1),
+        "and no longer"
+    );
 }
 
 #[test]
@@ -336,7 +352,7 @@ fn a_peeked_frame_is_read_again_first() {
     brain.control(&ControlToShell::Ping);
     control.set_timeout(Some(BOUND));
     assert_eq!(
-        control.peek_control().expect("peeked"),
+        control.peek_control(by()).expect("peeked"),
         Some(settings.clone())
     );
     assert_eq!(
@@ -380,6 +396,8 @@ enum Commit {
     Closes,
     Pings,
     Stalls,
+    /// Settings a byte at a time, each gap well inside any one transfer's bound.
+    Trickles,
 }
 
 /// Runs the session-path attempt against a scripted brain and returns its result.
@@ -421,6 +439,22 @@ fn attempt(
                 .control
                 .shutdown(std::net::Shutdown::Both)
                 .expect("closed"),
+            Commit::Trickles => {
+                let settings = frame::encode(
+                    &ControlToShell::Settings {
+                        view: view(),
+                        answer: false,
+                    },
+                    Pipe::Control,
+                )
+                .expect("encodes");
+                for byte in brain.sealed(Pipe::Control, &settings) {
+                    thread::sleep(GAP);
+                    if brain.control.write_all(&[byte]).is_err() {
+                        break;
+                    }
+                }
+            }
             Commit::Stalls => {
                 thread::sleep(deadline.saturating_duration_since(Instant::now()) + SHORT);
             }
@@ -470,4 +504,141 @@ fn the_attempt_ends_at_its_deadline_while_waiting_for_settings() {
     assert!(matches!(result, Err(LinkError::ConnectExpired)));
     assert!(Instant::now() >= deadline, "waited for the deadline");
     brain.join().expect("the brain side finished");
+}
+
+#[test]
+fn the_settings_wait_ends_at_the_deadline_however_the_frame_trickles() {
+    let deadline = Instant::now() + Duration::from_millis(700);
+    let (result, brain) = attempt(AudioSession::Legacy, Commit::Trickles, deadline);
+    assert!(matches!(result, Err(LinkError::ConnectExpired)));
+    assert!(
+        Instant::now() < deadline + Duration::from_millis(400),
+        "ended near the deadline, not when the frame finished"
+    );
+    brain.join().expect("the brain side finished");
+}
+
+#[test]
+fn the_initiator_ends_at_its_deadline_however_the_reply_trickles() {
+    let (shell, mut brain_control, brain_data) = ends();
+    let brain = thread::spawn(move || {
+        let mut brain = BrainAwaitsInit::new(&SECRET, Channel::Dev).expect("brain starts");
+        let init = handshake_message(&mut brain_control, |envelope| brain.record_len(envelope));
+        let (_brain, reply) = brain.receive(&init).expect("init");
+        for byte in &reply.bytes {
+            thread::sleep(GAP);
+            if brain_control.write_all(&[*byte]).is_err() {
+                break;
+            }
+        }
+        drop(brain_data);
+    });
+    let deadline = Instant::now() + Duration::from_millis(400);
+    let refused = initiate(shell, &SECRET, Channel::Dev, deadline).expect_err("too slow");
+    assert!(matches!(
+        refused.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+    assert!(
+        Instant::now() < deadline + Duration::from_millis(400),
+        "ended near the deadline, not when the reply finished"
+    );
+    brain.join().expect("the brain side finished");
+}
+
+#[test]
+fn a_peeked_frame_isnt_delivered_once_the_pair_refuses() {
+    let (control, data, mut brain) = bound();
+    brain.control(&ControlToShell::Settings {
+        view: view(),
+        answer: false,
+    });
+    assert!(matches!(
+        control.peek_control(by()),
+        Ok(Some(ControlToShell::Settings { .. }))
+    ));
+    let mut forged = vec![0, 32];
+    forged.extend([0xAB; 32]);
+    brain.data.write_all(&forged).expect("forged record");
+    data.set_timeout(Some(BOUND));
+    let mut byte = [0; 1];
+    assert_eq!(
+        (&data).read(&mut byte).expect_err("forged").kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    let mut buf = [0x77; 8];
+    assert_eq!(
+        (&control).read(&mut buf).expect_err("refused").kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    assert_eq!(buf, [0x77; 8], "nothing delivered");
+}
+
+#[test]
+fn an_aborted_leg_fails_its_reads_and_leaves_the_other_leg_working() {
+    let (control, data, mut brain) = bound();
+    let wire = brain.sealed(
+        Pipe::Control,
+        &frame::encode(&ControlToShell::Ping, Pipe::Control).expect("encodes"),
+    );
+    brain
+        .control
+        .write_all(&wire[..wire.len() / 2])
+        .expect("half a record");
+    control.set_timeout(Some(SHORT));
+    let mut byte = [0; 1];
+    assert!((&control).read(&mut byte).is_err(), "half a record");
+    control.abort();
+    assert_eq!(
+        (&control).read(&mut byte).expect_err("aborted").kind(),
+        std::io::ErrorKind::ConnectionAborted
+    );
+    assert!(!data.is_aborted(), "its own shutdown isn't a truncation");
+    data.set_timeout(Some(BOUND));
+    frame::write(&mut &data, &DataToBrain::TextMetrics(None), Pipe::Data).expect("written");
+    assert_eq!(brain.data_message(), DataToBrain::TextMetrics(None));
+}
+
+#[test]
+fn a_frame_larger_than_a_record_leaves_the_shell_whole() {
+    let (_control, data, mut brain) = bound();
+    data.set_timeout(Some(BOUND));
+    let large = counting_frame(3 * MAX_PLAINTEXT + 7);
+    let writer = thread::spawn(move || (&data).write(&large).map(|n| (n, large)));
+    let got = brain.receive(Pipe::Data);
+    let (n, large) = writer
+        .join()
+        .expect("the writer returned")
+        .expect("written");
+    assert_eq!((n, got), (large.len(), large));
+}
+
+#[test]
+fn a_write_that_fails_refuses_the_pair_for_good() {
+    let (control, data, brain) = bound();
+    drop(brain);
+    data.set_timeout(Some(BOUND));
+    let large = counting_frame(3 * MAX_PLAINTEXT + 7);
+    assert!((&data).write(&large).is_err(), "the brain is gone");
+    assert!(control.is_aborted() && data.is_aborted(), "both legs");
+    let small = frame::encode(&ControlToBrain::Pong, Pipe::Control).expect("encodes");
+    assert_eq!(
+        (&control).write(&small).expect_err("still refused").kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+}
+
+#[test]
+fn an_expired_attempt_starts_no_brain() {
+    let result = connect_pair(
+        std::path::Path::new("/nonexistent/kumochid"),
+        std::sync::Arc::new(SpawnWord::default()),
+        &SECRET,
+        Channel::Dev,
+        AudioSession::Legacy,
+        None,
+        Instant::now(),
+        |_| panic!("no metrics for an expired attempt"),
+    );
+    assert!(matches!(result, Err(LinkError::ConnectExpired)));
 }

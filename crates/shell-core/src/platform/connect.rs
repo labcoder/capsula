@@ -229,7 +229,10 @@ pub(crate) fn read_shell_tuning(
 /// # Errors
 /// `Quitting` when Quit came first, `Launch` when no child started, or why the pair failed.
 #[cfg(target_os = "macos")]
-#[expect(dead_code, reason = "the link doesn't connect over the pair until R2")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the link doesn't connect over the pair until R2")
+)]
 #[expect(
     clippy::too_many_arguments,
     reason = "the link supplies the pair identity, deadline and existing callbacks"
@@ -246,6 +249,7 @@ pub(crate) fn connect_pair(
 ) -> Result<(Connection, super::child::ChildOwner), LinkError> {
     use super::child::Refusal;
     use super::macos::NotStarted;
+    check_attempt(Some(deadline))?;
     let (owner, ends) = super::macos::start_brain(brain, word).map_err(|error| match error {
         NotStarted::Refused(Refusal::Quitting) => LinkError::Quitting,
         NotStarted::Refused(Refusal::Spawn(error)) => LinkError::Launch(error),
@@ -254,6 +258,7 @@ pub(crate) fn connect_pair(
         }
         NotStarted::Pending => LinkError::Launch(std::io::ErrorKind::TimedOut.into()),
     })?;
+    check_attempt(Some(deadline))?;
     let connection = over_pair(
         ends,
         secret,
@@ -292,10 +297,7 @@ pub(super) fn over_pair(
         drawing,
         || Ok(data),
     )?;
-    HandshakeIo(&connection.control, Some(deadline))
-        .bounded()
-        .map_err(LinkError::Io)?;
-    let settings = connection.control.peek_control();
+    let settings = connection.control.peek_control(deadline);
     connection.control.set_timeout(None);
     check_attempt(Some(deadline))?;
     match settings? {
