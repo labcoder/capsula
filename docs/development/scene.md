@@ -2084,10 +2084,11 @@ The latency was measured in a release-profile build of the shell test binary
 (`cargo test --release -p kumochi-shell --bin kumochi --no-run`) with a temporary print added
 around the failing update, on the same GPUI headless test-platform fixture. The clock is
 `std::time::Instant` (QueryPerformanceCounter on Windows), from just before the armed draw
-(`162`) to the return of the update that ends at `163`; for `Case::C` and `Case::E`, whose
-survivor host draws again, the following redraw (`166..167`) is timed separately. Each episode
+(`162`) to the return of the update that ends at `163`, before its queued work runs; for
+`Case::C` and `Case::E`, which draw their kept host again (C's survivor scene, E's disabled
+host), the later redraw (`166..167`) is timed separately. Each episode
 ran in 20 fresh processes, A to E round-robin, 100 in total, on a quiet Windows 11 desktop
-(i9-10900K, 100% display scale; whole-machine CPU median 17% and peak 25%, 14% outside the run).
+(i9-10900K, 100% display scale; whole-machine CPU median 17% and peak 25%, 14% attributable to other work during the run).
 
 | Episode | Recover median | Min | Peak | Redraw median | Redraw peak |
 |---|---|---|---|---|---|
@@ -2097,13 +2098,15 @@ ran in 20 fresh processes, A to E round-robin, 100 in total, on a quiet Windows 
 | D | 420 µs | 398 µs | 545 µs | — | — |
 | E | 427 µs | 405 µs | 659 µs | 45 µs | 68 µs |
 
-The documented bound is 1 ms from the failing draw to a usable drawing again, redraw included,
-in a release test build. The slowest single run (E, 659 µs recover plus at most 68 µs redraw)
-leaves about 1.4x headroom, and the widest median-to-peak spread seen (E, 1.54x) applied to
-the slowest median (C, 498 µs, plus its 52 µs redraw peak) gives about 820 µs. This times only the shell's
-headless path. Native host recreation (a real Win32 window and DWM), GPU present of the first
-recovered frame and the brain round trip (learning of the failure and sending the next scene)
-stay unmeasured.
+The documented budget is 1 ms for the two measured headless intervals together, recovery plus
+redraw, in a release test build. It is not the elapsed time until drawing resumes: the gap
+between them (the queued work and the episode's checks) isn't timed, and A, B and D close their
+host without a next draw to time. The slowest single run (E, 659 µs recover plus at most 68 µs
+redraw) leaves about 1.4x headroom, and the widest median-to-peak spread seen (E, 1.54x) applied
+to the slowest median (C, 498 µs, plus its 52 µs redraw peak) gives about 820 µs. Beyond that
+gap, native host recreation (a real Win32 window and DWM), GPU present of the first recovered
+frame and the brain round trip (learning of the failure and sending the next scene) stay
+unmeasured.
 
 Fixed four-slot cache
 metadata is conservatively charged in full to each scene, rather than adding an unmetered
