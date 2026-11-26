@@ -1,5 +1,6 @@
 use std::future::{Future, poll_fn};
 use std::io;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -21,25 +22,29 @@ pub(in crate::platform) async fn direct(
     host: &'static str,
 ) -> io::Result<NativeStream> {
     let name = ServerName::try_from(host).map_err(|_| io::ErrorKind::InvalidInput)?;
-    handshake(tls.clone(), name, async move {
-        let tcp = TcpStream::connect((host, 443)).await?;
-        tcp.set_nodelay(true)?;
-        Ok(tcp)
+    handshake(tls.clone(), name, move || {
+        let addresses = resolve((host, 443))?;
+        Ok(async move {
+            let tcp = TcpStream::connect(addresses.as_slice()).await?;
+            tcp.set_nodelay(true)?;
+            Ok(tcp)
+        })
     })
     .await
 }
 
-pub(super) async fn handshake<I>(
+pub(super) async fn handshake<I, D>(
     tls: TlsConnector,
     name: ServerName<'static>,
-    dial: impl Future<Output = io::Result<I>> + Send + 'static,
+    prepare: impl FnOnce() -> io::Result<D> + Send + 'static,
 ) -> io::Result<TlsStream<HandshakeIo<I>>>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    D: Future<Output = io::Result<I>> + Send + 'static,
 {
     establish(async move {
         let authority = current()?;
-        let mut dial = pin!(dial);
+        let mut dial = pin!(prepare()?);
         let io = poll_fn(|cx| authority.with(|| dial.as_mut().poll(cx))?).await?;
         let mut stream = tls
             .connect(
@@ -60,6 +65,26 @@ fn current() -> io::Result<Arc<Attempt>> {
     CONNECTING
         .try_with(Arc::clone)
         .map_err(|_| io::ErrorKind::PermissionDenied.into())
+}
+
+pub(super) fn resolve(host: impl ToSocketAddrs) -> io::Result<Vec<SocketAddr>> {
+    let authority = current()?;
+    authority.with(|| ())?;
+    let addresses = host.to_socket_addrs()?.collect();
+    authority.check()?;
+    Ok(addresses)
+}
+
+struct Resolver;
+
+impl reqwest::dns::Resolve for Resolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let addresses = resolve((name.as_str(), 0))?;
+            let addresses: reqwest::dns::Addrs = Box::new(addresses.into_iter());
+            Ok(addresses)
+        })
+    }
 }
 
 /// Transport that checks connection authority until the handshake hands it off.
@@ -115,6 +140,7 @@ pub(in crate::platform) fn http(builder: reqwest::ClientBuilder) -> reqwest::Cli
     builder
         .pool_max_idle_per_host(0)
         .retry(reqwest::retry::never())
+        .dns_resolver(Arc::new(Resolver))
         .connector_layer(Boundary)
 }
 
@@ -153,9 +179,14 @@ where
         let mut inner = self.0.clone();
         Box::pin(async move {
             establish(async move {
-                poll_fn(|cx| inner.poll_ready(cx)).await?;
-                current()?.with(|| ())?;
-                inner.call(request).await
+                let authority = current()?;
+                poll_fn(|cx| authority.with(|| inner.poll_ready(cx))?).await?;
+                let mut connecting = pin!(authority.with(|| inner.call(request))?);
+                poll_fn(|cx| {
+                    authority.with(|| ())?;
+                    connecting.as_mut().poll(cx)
+                })
+                .await
             })
             .await?
         })

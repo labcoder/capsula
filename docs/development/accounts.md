@@ -319,8 +319,10 @@ only, writes nothing, and exercises the FFI ownership path rather than leaving i
 On macOS, the account and download clients and the direct model connectors open connections
 on four bounded handshake workers with a separate I/O reactor. Workers and callers enforce
 the earliest enclosing request deadline, capped at ten seconds for connection setup, and
-observe cancellation even while the answer is unpolled. Mac reqwest clients disable the idle
-pool and retries so a competing pooled connection or retry cannot outlive the request's
+observe cancellation even while the answer is unpolled. A DNS lookup keeps its worker until
+the resolver returns; a stopped owner can't admit a new lookup but can't retract one already
+admitted. Mac reqwest clients disable the idle pool and retries so a competing pooled
+connection or retry cannot outlive the request's
 authority. The clients still use the interim verifier above. The staged SecTrust verifier is
 used only by offline tests with synthetic certificates; no macOS release ships before its
 production activation.

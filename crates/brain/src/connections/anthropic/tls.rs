@@ -19,6 +19,47 @@ pub(super) mod sealed {
     pub trait Sealed {}
 }
 
+#[cfg(test)]
+#[doc(hidden)]
+pub struct FixtureConnect<F>(pub std::sync::Mutex<Option<F>>);
+
+#[cfg(test)]
+impl<F> fmt::Debug for FixtureConnect<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FixtureConnect")
+    }
+}
+
+#[cfg(test)]
+impl<F> sealed::Sealed for FixtureConnect<F> {}
+
+#[cfg(test)]
+impl<F, I> AnthropicConnect for FixtureConnect<F>
+where
+    F: Future<Output = io::Result<I>> + Send,
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
+}
+
+#[cfg(test)]
+impl<F, I> Connect for FixtureConnect<F>
+where
+    F: Future<Output = io::Result<I>> + Send,
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
+    type Io = I;
+
+    async fn connect(&self) -> io::Result<I> {
+        let attempt = self
+            .0
+            .lock()
+            .expect("fixture lock")
+            .take()
+            .expect("one connect");
+        attempt.await
+    }
+}
+
 /// TLS to the fixed Anthropic host, using OS roots and HTTP/1.1 without early data.
 pub struct AnthropicTls(TlsConnector);
 
