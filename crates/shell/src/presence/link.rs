@@ -13,8 +13,8 @@ use crate::link::policy::{self, GitHub, Models, Offered, RunStop, STOP_RETRY, Se
 use crate::link::{Batch, LinkEvent, LinkState};
 use crate::settings::Update;
 use kumochi_protocol::message::{
-    ConnectionsView, ControlToBrain, DataToShell, HeldScreen, Phase, RunId, RunOrigin, ScreenHolds,
-    ScreenOff, SettingsView, ThreadId, UserError,
+    ConnectionsView, ControlToBrain, DataToShell, HeldScreen, PartState, Phase, RunId, RunOrigin,
+    ScreenHolds, ScreenOff, SettingsView, ThreadId, UserError,
 };
 use kumochi_scene::deferred::Deferred;
 use std::time::Instant;
@@ -111,6 +111,8 @@ impl Presence {
                     self.settings_changed(generation, view, Update::SpokenRepliesDefaulted, cx);
                 }
                 LinkEvent::Voice { generation, view } => {
+                    let ready = matches!(view.speech_input, PartState::Ready);
+                    diagnostics::record(cx, format_args!("speech input ready={ready}"));
                     let current = self.session.as_ref().map(crate::link::Session::generation);
                     self.settings.update(cx, |state, cx| {
                         if state.receive_voice(current, generation, view) {
