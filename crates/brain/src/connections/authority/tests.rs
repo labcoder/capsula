@@ -45,7 +45,7 @@ impl Setup {
 
     /// Opening again is the crash cut: every commit before it survives, nothing in memory does.
     fn open(&self) -> Authority {
-        Authority::open(&self.path(), &self.lock).expect("open authority")
+        Authority::open(&self.lock).expect("open authority")
     }
 
     fn raw(&self) -> Connection {
@@ -628,7 +628,7 @@ fn missing_or_invalid_rows_and_newer_files_are_refused() {
         .execute("DELETE FROM control", [])
         .expect("drop control");
     assert!(matches!(
-        Authority::open(&setup.path(), &setup.lock),
+        Authority::open(&setup.lock),
         Err(AuthorityError::Corrupt)
     ));
     setup
@@ -636,7 +636,7 @@ fn missing_or_invalid_rows_and_newer_files_are_refused() {
         .execute_batch("PRAGMA user_version = 4")
         .expect("newer");
     assert!(matches!(
-        Authority::open(&setup.path(), &setup.lock),
+        Authority::open(&setup.lock),
         Err(AuthorityError::NewerSchema)
     ));
 }

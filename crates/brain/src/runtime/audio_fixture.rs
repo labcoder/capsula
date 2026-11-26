@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use kumochi_protocol::constants::{CONFIG_FILE, SESSION_LOCK};
+use kumochi_protocol::constants::CONFIG_FILE;
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
     ControlToBrain, ControlToShell, Cursor, DataToShell, RunId, SceneId, SegmentStart,
@@ -681,7 +681,6 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
         .expect("configure Talk Back in this fixture");
     let config = Config::load(Some(dir.to_path_buf()), main);
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let lock = dir.join(SESSION_LOCK);
     let held = Arc::clone(&profile);
     let worker = Worker::new(
         Box::new(move || {
@@ -689,7 +688,6 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
                 Offline,
                 "test-accounts",
                 Arc::clone(&held),
-                &lock,
                 crate::connections::vault::HistoryLink::unbound(),
             )
         }),
