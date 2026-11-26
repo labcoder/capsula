@@ -119,43 +119,47 @@ const STORE_OVERRIDES: [&str; 2] = ["SSL_CERT_FILE", "SSL_CERT_DIR"];
 /// and `Unreadable` when any trust setting couldn't be read.
 #[cfg(not(windows))]
 pub fn trust_roots() -> Result<TrustRoots, TrustRootsError> {
-    // shortcut: Keychain anchors are read less strictly than SecTrust checks them (Unspecified and non-SSL entries count as roots; hostname and app limits are ignored), until OSC-1136 verifies through SecTrust
-    let keychain = cfg!(target_os = "macos");
-    if keychain && overridden(|name| std::env::var_os(name).is_some()) {
-        return Err(TrustRootsError::Overridden);
-    }
-    let loaded = rustls_native_certs::load_native_certs();
-    let failures = if keychain {
-        Failures::Refuse
+    let store = if cfg!(target_os = "macos") {
+        Store::Keychain
     } else {
-        Failures::Skip
+        Store::Files
     };
-    roots_from(&loaded.certs, loaded.errors.len(), failures)
+    roots_in(
+        store,
+        |name| std::env::var_os(name).is_some(),
+        || {
+            let loaded = rustls_native_certs::load_native_certs();
+            (loaded.certs, loaded.errors.len())
+        },
+    )
 }
 
-/// What a store entry that couldn't be read does to the store.
+/// Where rustls-native-certs reads roots on this OS.
 #[cfg(any(not(windows), test))]
 #[derive(Clone, Copy)]
-enum Failures {
-    /// It's left out, like any root that isn't kept.
-    Skip,
-    /// It refuses the whole store: the Keychain entry might have been a denial.
-    Refuse,
+enum Store {
+    /// macOS's Keychain trust settings: a variable that would replace them, or any entry that
+    /// couldn't be read and might have been a denial, refuses the whole store.
+    Keychain,
+    /// Linux's bundle files: an entry that couldn't be read is left out and counted.
+    Files,
 }
 
+/// Applies `store`'s policy to what `load` returns, the roots and how many entries failed;
+/// `set` says whether an environment variable is set.
 #[cfg(any(not(windows), test))]
-fn overridden(set: impl Fn(&str) -> bool) -> bool {
-    STORE_OVERRIDES.into_iter().any(set)
-}
-
-/// Keeps every loaded root whole; `failed` counts the store entries that couldn't be read.
-#[cfg(any(not(windows), test))]
-fn roots_from(
-    certs: &[CertificateDer<'static>],
-    failed: usize,
-    failures: Failures,
+fn roots_in(
+    store: Store,
+    set: impl Fn(&str) -> bool,
+    load: impl FnOnce() -> (Vec<CertificateDer<'static>>, usize),
 ) -> Result<TrustRoots, TrustRootsError> {
-    if matches!(failures, Failures::Refuse) && failed > 0 {
+    // shortcut: Keychain anchors are read less strictly than SecTrust checks them (Unspecified and non-SSL entries count as roots; hostname and app limits are ignored), until OSC-1136 verifies through SecTrust
+    let keychain = matches!(store, Store::Keychain);
+    if keychain && STORE_OVERRIDES.into_iter().any(set) {
+        return Err(TrustRootsError::Overridden);
+    }
+    let (certs, failed) = load();
+    if keychain && failed > 0 {
         return Err(TrustRootsError::Unreadable);
     }
     if certs.is_empty() {
@@ -172,54 +176,69 @@ fn roots_from(
 mod tests {
     use rustls::pki_types::CertificateDer;
 
-    use super::{Failures, TrustRoots, TrustRootsError, overridden, roots_from};
+    use super::{Store, TrustRoots, TrustRootsError, roots_in};
 
     const DER: [u8; 5] = [0x30, 0x03, 0x02, 0x01, 0x07];
 
+    fn one_root(failed: usize) -> impl FnOnce() -> (Vec<CertificateDer<'static>>, usize) {
+        move || (vec![CertificateDer::from(DER.to_vec())], failed)
+    }
+
+    fn kept(failed: usize) -> TrustRoots {
+        TrustRoots {
+            certificates: vec![DER.to_vec()],
+            skipped: failed,
+            unreadable: failed,
+        }
+    }
+
     #[test]
     fn a_store_that_loads_no_root_is_empty() {
-        for failures in [Failures::Skip, Failures::Refuse] {
-            assert_eq!(roots_from(&[], 0, failures), Err(TrustRootsError::Empty));
+        for store in [Store::Keychain, Store::Files] {
+            assert_eq!(
+                roots_in(store, |_| false, || (Vec::new(), 0)),
+                Err(TrustRootsError::Empty)
+            );
         }
         assert_eq!(
-            roots_from(&[], 3, Failures::Skip),
+            roots_in(Store::Files, |_| false, || (Vec::new(), 3)),
             Err(TrustRootsError::Empty)
         );
     }
 
     #[test]
-    fn loaded_roots_are_kept_whole_and_failed_entries_counted() {
-        assert_eq!(
-            roots_from(&[CertificateDer::from(DER.to_vec())], 2, Failures::Skip),
-            Ok(TrustRoots {
-                certificates: vec![DER.to_vec()],
-                skipped: 2,
-                unreadable: 2,
-            })
-        );
+    fn bundle_files_keep_roots_whole_and_count_failed_entries() {
+        assert_eq!(roots_in(Store::Files, |_| false, one_root(2)), Ok(kept(2)));
+        assert_eq!(roots_in(Store::Files, |_| true, one_root(0)), Ok(kept(0)));
     }
 
     #[test]
-    fn a_strict_store_with_any_unreadable_entry_is_refused() {
+    fn the_keychain_refuses_any_unreadable_entry() {
         assert_eq!(
-            roots_from(&[CertificateDer::from(DER.to_vec())], 1, Failures::Refuse),
+            roots_in(Store::Keychain, |_| false, one_root(1)),
             Err(TrustRootsError::Unreadable)
         );
         assert_eq!(
-            roots_from(&[CertificateDer::from(DER.to_vec())], 0, Failures::Refuse),
-            Ok(TrustRoots {
-                certificates: vec![DER.to_vec()],
-                skipped: 0,
-                unreadable: 0,
-            })
+            roots_in(Store::Keychain, |_| false, one_root(0)),
+            Ok(kept(0))
         );
     }
 
     #[test]
-    fn either_variable_overrides_the_store() {
-        assert!(!overridden(|_| false));
-        assert!(overridden(|name| name == "SSL_CERT_FILE"));
-        assert!(overridden(|name| name == "SSL_CERT_DIR"));
-        assert!(!overridden(|name| name == "SSL_CERT"));
+    fn either_variable_refuses_the_keychain_before_it_is_read() {
+        for variable in ["SSL_CERT_FILE", "SSL_CERT_DIR"] {
+            assert_eq!(
+                roots_in(
+                    Store::Keychain,
+                    |name| name == variable,
+                    || panic!("the Keychain was read")
+                ),
+                Err(TrustRootsError::Overridden)
+            );
+        }
+        assert_eq!(
+            roots_in(Store::Keychain, |name| name == "SSL_CERT", one_root(0)),
+            Ok(kept(0))
+        );
     }
 }

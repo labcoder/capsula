@@ -1495,8 +1495,6 @@ fn refused_with(
             vec![Action::OpenSettings],
         )
         .expect("one action"),
-        #[cfg(not(windows))]
-        (Some(ConnectionKind::AnthropicKey), None) => ErrorKey::UnsupportedPlatform.into(),
         _ => model_unavailable(),
     }
 }

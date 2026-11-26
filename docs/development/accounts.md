@@ -293,23 +293,26 @@ On macOS and Linux the same function reads roots through `rustls-native-certs`, 
 
 | | macOS | Linux |
 | --- | --- | --- |
-| Source | User, then admin, then system Keychain trust settings; the first domain with a setting for a certificate decides | The system bundle the OpenSSL probe finds |
-| `SSL_CERT_FILE` / `SSL_CERT_DIR` | Refused (`Overridden`): they would replace the Keychain, denials included | Used instead of the system bundle, as the platform documents |
+| Source | User, then admin, then system Keychain trust settings; the first domain with a setting for a certificate decides | The system bundle files and certificate directories the OpenSSL probe finds |
+| `SSL_CERT_FILE` / `SSL_CERT_DIR` | Either one set, even empty, refuses (`Overridden`): they would replace the Keychain, denials included | A set file, or a nonempty directory list, is read instead of the system store |
 | An unreadable entry | Refuses the whole store (`Unreadable`): it might have been a denial | Left out and counted |
 | No root | `Empty` | `Empty` |
 
 Every refusal is `TrustStoreUnavailable` to callers. On macOS these anchors follow the Keychain
 less strictly than SecTrust does: a certificate with only Unspecified or non-SSL trust settings
-counts as a root, and hostname or app limits on an SSL setting are ignored. A Deny that was read
-still excludes that certificate. This is an interim policy until SecTrust verifies on macOS; no
-macOS release build ships with it.
+counts as a root, and hostname or app limits on an SSL setting are ignored. When the deciding
+domain's setting is Deny, that certificate is left out of the anchors; a lower domain's Deny
+doesn't override a higher domain's Unspecified. This is an interim policy until SecTrust verifies
+on macOS; no macOS release build ships with it.
 
 Rustls parses those DER roots and verifies chains offline with ring on every platform. Empty or
 entirely unparsable roots fail as `TrustStoreUnavailable`, without a fallback root bundle or
-permissive verifier. There is no platform verifier or certificate-override setting. Off Windows,
-building a client no longer refuses; the runtime admission and the credential store still refuse
-before any account work, and test fixtures there get an offline Anthropic route instead of
-reading the host's store. Loopback TLS tests can still inject their own roots.
+permissive verifier. There is no platform verifier, and Kumochi has no certificate-override
+setting of its own. Off Windows, building a client succeeds once roots load; a trust refusal is
+`TrustStoreUnavailable`, and the native Anthropic route then has no connector. The runtime
+admission and the credential store still refuse before any account work, and test fixtures
+there get an offline Anthropic route instead of reading the host's store. Loopback TLS tests
+can still inject their own roots.
 The real-store test runs in the normal Windows test suite: it reads bounded public certificates
 only, writes nothing, and exercises the FFI ownership path rather than leaving it ignored.
 
@@ -321,7 +324,7 @@ only `127.0.0.1:0`, generate CA and leaf keys in memory, and never install a cer
 
 **Local policies:** 15 s connect, 60 s read and 120 s total request limits; discovery and JWKS
 requests have a 10 s limit. All success and error bodies are capped at 1 MiB, and a request-id
-header is retained only as at most 256 graphic ASCII bytes. The root loader keeps at most
+header is retained only as at most 256 graphic ASCII bytes. The Windows root loader keeps at most
 1,024 roots, caps each DER certificate and EKU buffer at 16 KiB, and counts skipped and unreadable entries separately.
 Proxied networks cannot sign in until a user-set proxy setting exists. Each exchange builds its
 own client on a blocking thread (`spawn_blocking`), because reading the trust store blocks; a
@@ -893,10 +896,9 @@ state. It neither reports damaged data nor offers Retry. Temporary Windows failu
 existing recovery behavior.
 
 At the service boundary, a permanent trust refusal fences further requests rather than asking
-the user to repair a trust store. ChatGPT preserves unconfirmed revocation debt and uses the same refusal
-for bearer waiters and reconnecting shells, even if only the revocation pass failed. Anthropic
-uses its permanent refusal in both the connection view and an unserved run, without suggesting
-opening Settings. GitHub replays its scoped refusal before the local GitHub view on each
+the user to repair a trust store. ChatGPT preserves unconfirmed revocation debt and uses the same
+refusal for bearer waiters and reconnecting shells, even if only the revocation pass failed.
+GitHub replays its scoped refusal before the local GitHub view on each
 connection and keeps local sign-out and cleanup separate from network actions.
 
 ## Vault records

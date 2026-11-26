@@ -49,7 +49,7 @@ fn mint_failure_cannot_produce_a_verified_authority() {
     assert_eq!(tag.revision, 7);
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 #[test]
 fn native_route_is_served_with_os_roots() {
     let native =

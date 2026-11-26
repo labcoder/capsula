@@ -235,6 +235,16 @@ impl Connections {
         self.transport = Some(transport);
     }
 
+    /// Off Windows a native route would read the host's trust store; tests get an offline one.
+    #[cfg(all(test, not(windows)))]
+    pub(super) fn use_offline_route(&mut self) {
+        self.use_test_transport(Transport::offline(
+            crate::connections::anthropic::tls::Scripted(Arc::default()),
+            0,
+            0,
+        ));
+    }
+
     pub(super) fn configure_transport(&mut self, model: ModelTuning) {
         if self.transport.is_none() {
             self.transport = Transport::native(model);

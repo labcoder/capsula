@@ -297,15 +297,8 @@ impl Accounts {
         accounts
             .proofs
             .release(accounts.jobs.as_ref(), &accounts.reads_tx);
-        // Off Windows a native route would read the host's trust store; tests get an offline one.
         #[cfg(all(test, not(windows)))]
-        accounts.connections.use_test_transport(
-            crate::connections::anthropic::route::Transport::offline(
-                crate::connections::anthropic::tls::Scripted(Arc::default()),
-                0,
-                0,
-            ),
-        );
+        accounts.connections.use_offline_route();
         Ok(accounts)
     }
 
