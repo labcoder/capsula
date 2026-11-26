@@ -105,13 +105,13 @@ impl Desktop {
             return None;
         }
         let scale = f64::from(display.scale);
-        let [left, top] = [x, top].map(|side| pixel((side * scale).ceil()));
-        let [right, low] = [right, low].map(|side| pixel((side * scale).floor()));
+        let [left, top] = [x, top].map(|side| edge((side * scale).ceil()));
+        let [right, low] = [right, low].map(|side| edge((side * scale).floor()));
         let [left, top, right, low] = [left?, top?, right?, low?];
-        let size =
-            [right - left, low - top].map(|side| u32::try_from(side).ok().filter(|&side| side > 0));
+        let size = [right.checked_sub(left), low.checked_sub(top)]
+            .map(|side| side.filter(|&side| side > 0));
         Some(PhysicalRect {
-            origin: [left, top],
+            origin: [i32::try_from(left).ok()?, i32::try_from(top).ok()?],
             size: [size[0]?, size[1]?],
         })
     }
@@ -160,6 +160,19 @@ fn mapped(screen: &Screen) -> Option<Display> {
 )]
 fn whole(value: f64) -> Option<i64> {
     (value.trunc() == value && value.abs() <= f64::from(i32::MAX)).then_some(value as i64)
+}
+
+/// A whole pixel inside the primary display, which starts at the origin and spans at most
+/// `u32::MAX` pixels; not a number has none.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    reason = "only a whole value inside u32's range is converted, so nothing is lost"
+)]
+fn edge(value: f64) -> Option<u32> {
+    (value.trunc() == value && value >= 0.0 && value <= f64::from(u32::MAX)).then_some(value as u32)
 }
 
 /// A whole pixel coordinate, the full signed range; not a number has none.
