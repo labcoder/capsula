@@ -7,7 +7,7 @@ use kumochi_protocol::Secret;
 use zeroize::Zeroizing;
 
 use super::exchange::decode_escrow;
-use super::{DISPATCHED, RETIRED, RepairAttempt};
+use super::{CLAIMED, DISPATCHED, ESTABLISHING, RETIRED, RepairAttempt};
 use crate::connections::authority::{AuthorityError, Generation, Kind, repair::ExchangeStep};
 use crate::connections::clock::Clock;
 use crate::connections::error::VaultError;
@@ -178,6 +178,8 @@ impl CutoffRequest {
                     Ok(boundary) => Ok(CutoffReceipt {
                         successor: pending.successor,
                         boundary,
+                        issuer: pending.issuer,
+                        lease: pending.lease,
                     }),
                     Err(error) => Err(CutoffRefused {
                         pending: (!attempted).then_some(pending),
@@ -208,6 +210,8 @@ pub(crate) struct CutoffRefused {
 pub(crate) struct CutoffReceipt {
     successor: Generation,
     boundary: Boundary,
+    issuer: Arc<()>,
+    lease: Arc<AtomicU8>,
 }
 
 /// The one-shot proof of an exact locked binding. It moves into the writer's Establish request,
@@ -218,6 +222,8 @@ pub(crate) struct PendingReplacement {
     successor: Generation,
     tag: u64,
     issuer: Arc<()>,
+    /// The claimed attempt's; a stop ends what the binding may still do.
+    lease: Arc<AtomicU8>,
 }
 
 impl PendingReplacement {
@@ -340,8 +346,10 @@ impl<S: CredentialStore> Vault<S> {
             bytes.expose().len(),
         )?;
         let (store, service) = (&self.store, self.service.as_str());
+        #[cfg(test)]
+        let after_claim = self.after_claim.take();
         let verified = generation::write(store, service, plan, &bytes)?;
-        let generation = self.authority.bind_repair_replacement(
+        let bound = self.authority.bind_repair_replacement(
             &attempt.owner,
             verified,
             tag,
@@ -365,18 +373,33 @@ impl<S: CredentialStore> Vault<S> {
                 if generation::read_staged_once(store, service, plan)?.expose() != bytes.expose()
                     || !current_time()
                     || owner
-                        .compare_exchange(DISPATCHED, RETIRED, Ordering::AcqRel, Ordering::Acquire)
+                        .compare_exchange(DISPATCHED, CLAIMED, Ordering::AcqRel, Ordering::Acquire)
                         .is_err()
                 {
                     return Err(AuthorityError::Conflict);
                 }
+                #[cfg(test)]
+                if let Some(hook) = after_claim {
+                    hook();
+                }
                 Ok(())
             },
-        )?;
+        );
+        let generation = match bound {
+            Ok(generation) => generation,
+            Err(error) => {
+                // A claim whose settlement failed is spent.
+                owner
+                    .compare_exchange(CLAIMED, RETIRED, Ordering::AcqRel, Ordering::Acquire)
+                    .ok();
+                return Err(error.into());
+            }
+        };
         Ok(PendingReplacement {
             successor: generation,
             tag,
             issuer: Arc::clone(&self.incarnation),
+            lease: owner,
         })
     }
 
@@ -390,7 +413,7 @@ impl<S: CredentialStore> Vault<S> {
             pending,
             error: StoreError::RecoveryContext,
         };
-        if !Arc::ptr_eq(&pending.issuer, &self.incarnation) {
+        if !Arc::ptr_eq(&pending.issuer, &self.incarnation) || !self.claimed(&pending.lease) {
             return Err(refused(Some(pending)));
         }
         let (reply, answer) = mpsc::sync_channel(1);
@@ -406,11 +429,8 @@ impl<S: CredentialStore> Vault<S> {
     }
 
     /// Marks the bound replacement's context established only when the history writer's fresh
-    /// Check reads exactly the row its receipt wrote. The receipt is spent either way.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "every call spends the receipt"
-    )]
+    /// Check reads exactly the row its receipt wrote, and only while its claim still stands. The
+    /// receipt is spent either way.
     pub(crate) fn establish_repair_context(
         &mut self,
         receipt: CutoffReceipt,
@@ -418,13 +438,37 @@ impl<S: CredentialStore> Vault<S> {
         let CutoffReceipt {
             successor,
             boundary,
+            issuer,
+            lease,
         } = receipt;
-        if self.history.check(boundary.tag()).ok() != Some(boundary) {
+        if !Arc::ptr_eq(&issuer, &self.incarnation)
+            || !self.claimed(&lease)
+            || self.history.check(boundary.tag()).ok() != Some(boundary)
+        {
             return Err(VaultError::Fenced);
         }
-        Ok(self
-            .authority
-            .establish_repair_context(successor, boundary.tag(), boundary.bounds())?)
+        let established = self.authority.establish_repair_context(
+            successor,
+            boundary.tag(),
+            boundary.bounds(),
+            || {
+                lease
+                    .compare_exchange(CLAIMED, ESTABLISHING, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            },
+        );
+        if established.is_err() {
+            // A claim whose settlement failed is spent.
+            lease
+                .compare_exchange(ESTABLISHING, RETIRED, Ordering::AcqRel, Ordering::Acquire)
+                .ok();
+        }
+        Ok(established?)
+    }
+
+    /// Whether `lease` is this vault's current attempt and its bind's claim still stands.
+    fn claimed(&self, lease: &Arc<AtomicU8>) -> bool {
+        self.holds_lease(lease) && lease.load(Ordering::Acquire) == CLAIMED
     }
 
     /// The established replacement's cutoff, once the history writer reads its row again and
