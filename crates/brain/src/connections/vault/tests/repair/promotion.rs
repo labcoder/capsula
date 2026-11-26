@@ -1138,6 +1138,14 @@ impl BlockedBind {
     /// its escrow as it was and no active successor.
     pub(crate) fn release(self) -> Result<(), VaultError> {
         self.release.send(()).ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !self.bind.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the released bind ends"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         self.bind.join().expect("the bind thread")
     }
 }
