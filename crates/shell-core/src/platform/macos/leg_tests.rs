@@ -948,14 +948,27 @@ fn a_failed_hardening_reads_no_item_and_writes_nothing() {
 
 const CORE_DUMPS_ENTRY: &str = "platform::macos::leg::tests::core_dumps_entry";
 
+/// The re-exec child's exact arguments. The entry does nothing under any others, so a plain
+/// `--ignored` run never lowers the test process's own core limit.
+const CORE_DUMPS_ARGS: [&str; 4] = ["--exact", CORE_DUMPS_ENTRY, "--ignored", "--test-threads=1"];
+
+/// The entry's exit code once every check passed; libtest never exits with it.
+const CORE_DUMPS_RAN: i32 = 87;
+
 /// Run only by [`the_item_is_read_only_after_core_dumps_are_off`], in its own process: it lowers
-/// that process's core limit for good.
+/// that process's core limit for good, then exits with [`CORE_DUMPS_RAN`].
 #[test]
 #[ignore = "runs in a re-exec child: it lowers its process's core limit"]
 fn core_dumps_entry() {
     use super::super::core_dumps::core_limit;
     use super::super::limit_core_dumps;
 
+    if !std::env::args_os()
+        .skip(1)
+        .eq(CORE_DUMPS_ARGS.map(std::ffi::OsString::from))
+    {
+        return;
+    }
     let (shell, brain_control, brain_data) = ready_queued();
     drop((brain_control, brain_data));
     let hardened = std::cell::Cell::new(false);
@@ -988,17 +1001,17 @@ fn core_dumps_entry() {
         Ok(()),
         "idempotent"
     );
+    std::process::exit(CORE_DUMPS_RAN);
 }
 
 #[test]
 fn the_item_is_read_only_after_core_dumps_are_off() {
-    use std::io::Read as _;
     use std::process::{Command, Stdio};
 
     let mut child = Command::new(std::env::current_exe().expect("the test binary"))
-        .args(["--exact", CORE_DUMPS_ENTRY, "--ignored", "--test-threads=1"])
+        .args(CORE_DUMPS_ARGS)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .expect("the re-exec child starts");
@@ -1008,23 +1021,28 @@ fn the_item_is_read_only_after_core_dumps_are_off() {
             break status;
         }
         if Instant::now() >= by {
-            child.kill().expect("kill the late child");
-            let _reaped = child.wait();
+            let stopped = child.kill().is_ok() || child.try_wait().is_ok_and(|s| s.is_some());
+            assert!(stopped, "could not stop the late re-exec child");
+            let reap_by = Instant::now() + BOUND;
+            while child
+                .try_wait()
+                .expect("wait on the killed child")
+                .is_none()
+            {
+                assert!(
+                    Instant::now() < reap_by,
+                    "the killed re-exec child was reaped"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
             panic!("the re-exec child didn't finish within the bound");
         }
         thread::sleep(Duration::from_millis(10));
     };
-    let mut report = String::new();
-    child
-        .stdout
-        .take()
-        .expect("piped")
-        .read_to_string(&mut report)
-        .expect("the child's report");
-    assert!(status.success(), "{report}");
-    assert!(
-        report.contains(&format!("test {CORE_DUMPS_ENTRY} ... ok")) && report.contains("1 passed"),
-        "the entry ran: {report}"
+    assert_eq!(
+        status.code(),
+        Some(CORE_DUMPS_RAN),
+        "the entry ran every check"
     );
 }
 
