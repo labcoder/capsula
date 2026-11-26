@@ -584,7 +584,10 @@ impl AccountState {
         {
             *held = None;
             self.jobs.push_back(Queued::Save);
-        } else if self.loaded.damaged && self.live.is_none() && matches!(self.lane, Lane::Free) {
+        } else if (self.loaded.damaged || self.loaded.host.is_none())
+            && self.live.is_none()
+            && matches!(self.lane, Lane::Free)
+        {
             self.reload();
         } else {
             self.sweep();
@@ -843,9 +846,10 @@ impl AccountState {
             tracing::warn!(%failure, record = name, "an account record can't be read");
             damaged = true;
         };
+        // A missing host already refuses sign-in, and a later Check may find it read again.
         let host = snapshot
             .host
-            .inspect_err(|failure| readable("host", failure))
+            .inspect_err(|failure| tracing::warn!(%failure, record = "host", "an account record can't be read"))
             .ok();
         let revocable = snapshot
             .revocable
@@ -894,6 +898,10 @@ impl AccountState {
             Ok(saved) => {
                 revision = Some(saved.revision);
                 self.loaded.notice = saved.notice;
+                // A host that reads again lets the sign-in Check recovered start, read-only.
+                if self.loaded.host.is_none() {
+                    self.loaded.host = saved.host;
+                }
                 saved.account
             }
             Err(failure) => Err(failure),
