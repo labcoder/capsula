@@ -12,6 +12,326 @@ fn by() -> Instant {
     Instant::now() + TEST_BOUND
 }
 
+static SHARED_BOUNDARY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[derive(Debug)]
+struct ParkedRound {
+    entered: tokio::sync::mpsc::UnboundedSender<()>,
+    reply: tokio::sync::mpsc::UnboundedSender<io::ErrorKind>,
+}
+
+impl crate::engines::Engine for ParkedRound {
+    fn start(
+        &self,
+        _: crate::engines::RunRequest,
+        events: tokio::sync::mpsc::Sender<crate::engines::TurnEvent>,
+        _: crate::engines::SendGate,
+    ) -> crate::engines::Round {
+        let entered = self.entered.clone();
+        let reply = self.reply.clone();
+        Box::pin(async move {
+            let _events = events;
+            let result = crate::platform::connect_scope(
+                by().into(),
+                None,
+                establish(async move {
+                    entered.send(()).expect("worker was admitted");
+                    std::future::pending::<()>().await;
+                }),
+            )
+            .await;
+            reply
+                .send(
+                    result
+                        .expect_err("the run expires its parked connect")
+                        .kind(),
+                )
+                .expect("the run's owner still listens");
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_spawned_round_cannot_renew_the_runs_deadline() {
+    use crate::engines::{RunRequest, SendGate, start};
+    use kumochi_protocol::message::{RunId, ThreadId};
+    use tokio::sync::mpsc;
+
+    let _shared = SHARED_BOUNDARY.lock().await;
+    let (entered, mut started) = mpsc::unbounded_channel();
+    let (reply, mut result) = mpsc::unbounded_channel();
+    let (inputs, _keep) = mpsc::channel(1);
+    let request = RunRequest::for_tests(RunId(1), ThreadId(1), "");
+    let gate = SendGate::closed(request.key)
+        .with_run_deadline((Instant::now() + Duration::from_secs(1)).into());
+    let _round = start(&ParkedRound { entered, reply }, request, inputs, gate);
+    assert_eq!(
+        tokio::time::timeout(TEST_BOUND, started.recv())
+            .await
+            .expect("worker starts"),
+        Some(())
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), result.recv())
+            .await
+            .expect("no runtime timer was needed"),
+        Some(io::ErrorKind::TimedOut)
+    );
+}
+
+struct NoDns(mpsc::Sender<bool>);
+
+impl reqwest::dns::Resolve for NoDns {
+    fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let _unheard = self.0.send(
+            CONNECTING
+                .try_with(|attempt| Handle::current().id() == attempt.owner)
+                .unwrap_or(false),
+        );
+        Box::pin(async { Err(io::Error::from(io::ErrorKind::NotFound).into()) })
+    }
+}
+
+struct SeenLookup(mpsc::Sender<()>);
+
+impl std::net::ToSocketAddrs for SeenLookup {
+    type Iter = std::iter::Empty<std::net::SocketAddr>;
+
+    fn to_socket_addrs(&self) -> io::Result<Self::Iter> {
+        self.0.send(()).expect("lookup witness");
+        Ok(std::iter::empty())
+    }
+}
+
+#[tokio::test]
+async fn a_worker_cannot_dispatch_dns_after_its_owner_stops() {
+    let _shared = SHARED_BOUNDARY.lock().await;
+    let stop = Arc::new(ConnectCut::default());
+    let (entered, started) = oneshot::channel();
+    let (resume, parked) = mpsc::channel();
+    let (on_lookup, lookup) = mpsc::channel();
+    let (done, settled) = oneshot::channel();
+    let answer = crate::platform::connect_owned_scope(
+        Some(by().into()),
+        &stop,
+        establish(async move {
+            entered.send(()).expect("admitted connector");
+            parked.recv_timeout(TEST_BOUND).expect("release connector");
+            let result = connect::resolve(SeenLookup(on_lookup));
+            done.send(result).expect("resolver witness");
+        }),
+    );
+    tokio::pin!(answer);
+    assert!(
+        answer
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    tokio::time::timeout(TEST_BOUND, started)
+        .await
+        .expect("admitted")
+        .expect("entered");
+    stop.close();
+    resume.send(()).expect("parked connector");
+    let error = tokio::time::timeout(TEST_BOUND, settled)
+        .await
+        .expect("resolver exits")
+        .expect("settled")
+        .expect_err("stop beat DNS admission");
+    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    assert_ne!(lookup.try_recv(), Ok(()));
+    assert_eq!(
+        answer.await.expect_err("discard stopped connection").kind(),
+        io::ErrorKind::Interrupted
+    );
+}
+
+#[tokio::test]
+async fn a_real_reqwest_connector_requires_scope_and_runs_off_the_caller() {
+    let _shared = SHARED_BOUNDARY.lock().await;
+    let (resolved, wait_resolve) = mpsc::channel();
+    let tls = trust::config(Vec::new()).expect("offline fixture config");
+    let client = super::super::http_builder(tls)
+        .no_proxy()
+        .dns_resolver(Arc::new(NoDns(resolved)))
+        .build()
+        .expect("configure the real connector without using sockets");
+
+    let request = || client.get("https://localhost/").send();
+    assert!(
+        request()
+            .await
+            .expect_err("no connection scope")
+            .is_connect()
+    );
+    assert_eq!(wait_resolve.try_recv(), Err(mpsc::TryRecvError::Empty));
+    let (cancel, current) = tokio::sync::watch::channel(true);
+    let error = crate::platform::connect_scope(by().into(), Some(&current), request())
+        .await
+        .expect_err("cancelled download must not start resolution");
+    assert!(error.is_connect());
+    assert_eq!(wait_resolve.try_recv(), Err(mpsc::TryRecvError::Empty));
+    drop(cancel);
+
+    let stop = Arc::new(ConnectCut::default());
+    let expired = Instant::now();
+    for expired_owner in [true, false] {
+        if !expired_owner {
+            stop.close();
+        }
+        let deadline = expired_owner.then_some(expired.into());
+        let error = crate::platform::connect_owned_scope(deadline, &stop, async {
+            crate::platform::connect_scope(by().into(), None, request()).await
+        })
+        .await
+        .expect_err("an inner HTTP request cannot renew an expired or stopped owner");
+        assert!(error.is_connect());
+        assert_eq!(wait_resolve.try_recv(), Err(mpsc::TryRecvError::Empty));
+    }
+
+    let error = crate::platform::connect_scope(by().into(), None, request())
+        .await
+        .expect_err("the synthetic resolver refuses without dialing");
+    assert!(error.is_connect());
+    assert_eq!(wait_resolve.try_recv(), Ok(true));
+    assert_eq!(wait_resolve.try_recv(), Err(mpsc::TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn a_successful_reqwest_connection_cannot_be_reused_without_authority() {
+    use std::net::Ipv4Addr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let _shared = SHARED_BOUNDARY.lock().await;
+    let (root, server) = fixture(Peer::Valid, &rustls::version::TLS13);
+    let tls = crate::platform::client_tls_from_roots(
+        Ok(crate::platform::TrustRoots {
+            certificates: vec![root.to_vec()],
+            skipped: 0,
+            unreadable: 0,
+        }),
+        crate::platform::TrustDiagnostics::Quiet,
+    )
+    .expect("interim rustls verifier with fixture roots");
+    let client = super::super::http_builder(tls)
+        .no_proxy()
+        .timeout(TEST_BOUND)
+        .build()
+        .expect("HTTP client");
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("owned loopback port");
+    let url = format!("https://{}/", listener.local_addr().expect("address"));
+    let (seen, requests) = mpsc::channel();
+    let peer = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.expect("first request connects");
+        let mut stream = tokio_rustls::TlsAcceptor::from(Arc::new(server))
+            .accept(tcp)
+            .await
+            .expect("fixture TLS");
+        for _ in 0..2 {
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let Ok(byte) = stream.read_u8().await else {
+                    return;
+                };
+                head.push(byte);
+                assert!(head.len() < 1024);
+            }
+            seen.send(()).expect("request witness");
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n")
+                .await
+                .expect("fixture response");
+            stream.flush().await.expect("fixture flush");
+        }
+    });
+    let request = || client.get(&url).send();
+    let authorized = crate::platform::connect_scope(by().into(), None, request())
+        .await
+        .expect("authorized connection");
+    assert_eq!(authorized.status().as_u16(), 204);
+    assert_eq!(requests.try_recv(), Ok(()));
+    assert!(
+        request()
+            .await
+            .expect_err("no connection scope")
+            .is_connect()
+    );
+    assert_ne!(requests.try_recv(), Ok(()));
+    peer.abort();
+}
+
+#[tokio::test]
+async fn either_original_cut_stops_the_direct_worker_without_polling_its_answer() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::connections::anthropic::{
+        fence::{Fence, Fenced},
+        tls::FixtureConnect,
+    };
+    use crate::connections::model::conn::Connect;
+
+    let _shared = SHARED_BOUNDARY.lock().await;
+    for revoked in 0..2 {
+        let cuts = [Fence::default(), Fence::default()];
+        let (entered, wait_entered) = oneshot::channel();
+        let (release, wait_release) = oneshot::channel();
+        let (settled, wait_settled) = oneshot::channel::<()>();
+        let resumed = Arc::new(AtomicBool::new(false));
+        let did_dial = Arc::clone(&resumed);
+        let handshake = connect::handshake(
+            tokio_rustls::TlsConnector::from(Arc::new(
+                trust::config(Vec::new()).expect("offline verifier"),
+            )),
+            ServerName::try_from("localhost").expect("fixture host"),
+            || {
+                Ok(async move {
+                    let _pending = settled;
+                    entered.send(()).expect("first dial poll");
+                    if wait_release.await.is_ok() {
+                        did_dial.store(true, Ordering::SeqCst);
+                    }
+                    Err::<tokio::io::DuplexStream, _>(io::ErrorKind::ConnectionRefused.into())
+                })
+            },
+        );
+        let endpoint = Fenced(
+            Fenced(FixtureConnect(Mutex::new(Some(handshake))), cuts[1].clone()),
+            cuts[0].clone(),
+        );
+        let mut answer = Box::pin(crate::platform::connect_scope(
+            by().into(),
+            None,
+            endpoint.connect(),
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(answer.as_mut().poll(&mut cx).is_pending());
+        tokio::time::timeout(TEST_BOUND, wait_entered)
+            .await
+            .expect("dial entered")
+            .expect("worker reported its first poll");
+        cuts[revoked].revoke();
+        let _unheard = release.send(());
+        assert!(
+            tokio::time::timeout(TEST_BOUND, wait_settled)
+                .await
+                .expect("the worker settled without its caller")
+                .is_err()
+        );
+        assert!(!resumed.load(Ordering::SeqCst));
+        assert_eq!(
+            answer
+                .await
+                .err()
+                .expect("a revoked cut cannot hand off")
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_stalled_check_times_out_but_keeps_the_only_native_slot() {
     let owner = Arc::new(Executor::new().expect("executor"));
@@ -360,7 +680,8 @@ fn fixture(
     ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     let root = ca.self_signed(&ca_key).expect("CA certificate");
     let leaf_key = KeyPair::generate().expect("fixture leaf key");
-    let mut leaf = CertificateParams::new(vec!["localhost".into()]).expect("leaf parameters");
+    let mut leaf = CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])
+        .expect("leaf parameters");
     let now = time::OffsetDateTime::now_utc();
     leaf.not_before = now - time::Duration::days(2);
     leaf.not_after = now
@@ -397,6 +718,7 @@ async fn handshake(
     case: Peer,
     version: &'static rustls::SupportedProtocolVersion,
 ) -> Result<(), rustls::Error> {
+    let _shared = SHARED_BOUNDARY.lock().await;
     let (root, server) = fixture(case, version);
     let anchors = if matches!(case, Peer::UnknownIssuer) {
         vec![]
@@ -412,15 +734,16 @@ async fn handshake(
             .accept(peer)
             .await
     });
-    let result = Executor::new()
-        .expect("executor")
-        .connect(Arc::new(Stop::default()), by(), async move {
-            tokio_rustls::TlsConnector::from(Arc::new(config))
-                .connect(ServerName::try_from(name).expect("fixture name"), client)
-                .await
-        })
-        .await
-        .expect("the handshake completed within the boundary");
+    let result = crate::platform::connect_scope(
+        by().into(),
+        None,
+        connect::handshake(
+            tokio_rustls::TlsConnector::from(Arc::new(config)),
+            ServerName::try_from(name).expect("fixture name"),
+            || Ok(async { Ok(client) }),
+        ),
+    )
+    .await;
     if let Err(error) = result {
         peer.abort();
         return Err(error
@@ -430,8 +753,11 @@ async fn handshake(
             .map(|error| *error)
             .expect("rustls proof error"));
     }
+    let _peer = peer
+        .await
+        .expect("peer settled")
+        .expect("peer completed TLS");
     drop(result);
-    assert!(peer.await.expect("peer settled").is_ok());
     Ok(())
 }
 

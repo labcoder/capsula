@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 use super::api::{ApiError, MAX_RETRY_AFTER_S, execute, parse};
 use super::{GitHubEndpoint, GitHubToken, Page};
 use crate::connections::http_client::{Http, HttpError, ResponseMeta};
+use crate::platform::connect_timeout_at;
 
 #[cfg(test)]
 mod tests;
@@ -339,7 +340,8 @@ pub async fn list_matches(
         since_s: query.since_s,
         page,
     };
-    tokio::time::timeout(endpoint(Page::new(1)?).deadline(), async {
+    let deadline = tokio::time::Instant::now() + endpoint(Page::new(1)?).deadline();
+    connect_timeout_at(deadline, async {
         let mut found = Matches {
             issues: Vec::new(),
             meta: ResponseMeta::default(),

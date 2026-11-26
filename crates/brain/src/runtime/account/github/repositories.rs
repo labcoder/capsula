@@ -18,6 +18,7 @@ use crate::connections::{
     },
     http_client::{Http, HttpError},
 };
+use crate::platform::connect_timeout_at;
 
 #[cfg(test)]
 mod tests;
@@ -29,7 +30,7 @@ pub(in crate::runtime) async fn fetch(
     tuning: GitHubTuning,
 ) -> Result<device::Repositories, ApiError> {
     let deadline = Instant::now() + tuning.listing_budget;
-    tokio::time::timeout_at(deadline, async {
+    connect_timeout_at(deadline, async {
         let mut requests = 0;
         let mut installations = BTreeSet::new();
         let mut installation_total = None;

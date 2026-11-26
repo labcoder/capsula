@@ -257,9 +257,7 @@ async fn send<C: Connect, L: Lease>(
     let upload = timeout_at(deadline, async {
         let io = match client.checkout() {
             Some(io) => io,
-            None => client
-                .connect
-                .connect()
+            None => crate::platform::connect_scope(deadline, None, client.connect.connect())
                 .await
                 .map_err(|_| Failure::Transport)?,
         };

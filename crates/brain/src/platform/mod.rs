@@ -127,6 +127,7 @@ mod session_lock;
 mod settings;
 pub(crate) mod shell_process;
 pub(crate) mod speech_wire;
+mod tls_control;
 mod trust_roots;
 #[cfg(unix)]
 mod unix;
@@ -225,12 +226,17 @@ pub(crate) use protected::{
 pub use runtime_admission::{Mode, supports};
 pub(crate) use runtime_admission::{require_mode, serve_speech};
 pub use session_lock::{SessionLock, SessionLockError};
+pub(crate) use tls_control::{
+    ConnectCut, connect_owned_scope, connect_scope, connect_timeout_at, connect_with_cut,
+};
 #[cfg(test)]
 pub(crate) use trust_roots::client_tls_from_roots;
 #[cfg(not(windows))]
 pub use trust_roots::trust_roots;
-pub(crate) use trust_roots::{NativeTlsError, TrustDiagnostics, native_client_tls};
-pub use trust_roots::{TrustRoots, TrustRootsError};
+pub use trust_roots::{NativeStream, TrustRoots, TrustRootsError};
+pub(crate) use trust_roots::{
+    NativeTlsError, TrustDiagnostics, connect_native_tls, native_client_tls, native_http_builder,
+};
 #[cfg(windows)]
 pub(crate) use windows::DumpExclusion;
 #[cfg(windows)]

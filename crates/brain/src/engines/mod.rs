@@ -32,6 +32,7 @@ use std::time::Duration;
 use kumochi_protocol::message::{RunId, ThreadId, UserError};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
+use tokio::time::Instant;
 
 use crate::bridge::LaunchId;
 use crate::context::compact::clean_summary;
@@ -156,11 +157,22 @@ pub struct SendGate {
     key: SendKey,
     asks: Asks,
     inputs: mpsc::UnboundedSender<Input>,
+    run_deadline: Option<Instant>,
 }
 
 impl SendGate {
     pub(crate) fn new(key: SendKey, asks: Asks, inputs: mpsc::UnboundedSender<Input>) -> Self {
-        Self { key, asks, inputs }
+        Self {
+            key,
+            asks,
+            inputs,
+            run_deadline: None,
+        }
+    }
+
+    pub(crate) fn with_run_deadline(mut self, by: Instant) -> Self {
+        self.run_deadline = Some(by);
+        self
     }
 
     /// Waits for leave to send. A brain that's gone, or a coordinator that never answers
@@ -659,10 +671,19 @@ pub enum Refused {
 /// A started round; dropping it aborts the round's pump and the engine's future with it.
 #[derive(Debug)]
 #[must_use = "dropping a Cancel cancels its round"]
-pub struct Cancel(AbortHandle);
+pub struct Cancel(AbortHandle, Arc<crate::platform::ConnectCut>);
+
+impl Cancel {
+    fn spawn(by: Option<Instant>, work: impl Future<Output = ()> + Send + 'static) -> Self {
+        let stop = Arc::default();
+        let work = crate::platform::connect_owned_scope(by, &stop, work);
+        Self(tokio::spawn(work).abort_handle(), stop)
+    }
+}
 
 impl Drop for Cancel {
     fn drop(&mut self) {
+        self.1.close();
         self.0.abort();
     }
 }
@@ -679,8 +700,9 @@ pub fn start(
         unreachable!("a run engine answers a build, not a background job");
     };
     let (events_tx, events) = mpsc::channel(ROUND_QUEUE);
+    let by = gate.run_deadline;
     let round = engine.start(request, events_tx, gate);
-    Cancel(tokio::spawn(pump(key, round, events, inputs)).abort_handle())
+    Cancel::spawn(by, pump(key, round, events, inputs))
 }
 
 /// Starts a background job's one round behind its own task, which takes the round's text and
@@ -694,7 +716,7 @@ pub(crate) fn start_job(
 ) -> Cancel {
     let (events_tx, events) = mpsc::channel(ROUND_QUEUE);
     let round = engine.start(request, events_tx, gate);
-    Cancel(tokio::spawn(collect(key, kind, round, events, inputs)).abort_handle())
+    Cancel::spawn(None, collect(key, kind, round, events, inputs))
 }
 
 /// Takes a job's text until its round completes, and cleans it into a title or summary as its
