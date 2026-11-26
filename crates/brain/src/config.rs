@@ -146,12 +146,20 @@ impl Config {
         };
         let path = dir.join(CONFIG_FILE);
         // An existing folder is read only when it's trusted; a missing one is made on first save.
-        if std::fs::symlink_metadata(&dir).is_ok() && crate::platform::product_folder(&dir).is_err()
-        {
-            tracing::warn!("the settings folder isn't trusted; using defaults, not saving");
-            return Self::refusing(Some(path), Refusal::Unreadable, main_thread);
-        }
-        let table = match std::fs::read_to_string(&path) {
+        let present = match std::fs::symlink_metadata(&dir) {
+            Ok(_) if crate::platform::product_folder(&dir).is_ok() => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            _ => {
+                tracing::warn!("the settings folder isn't trusted; using defaults, not saving");
+                return Self::refusing(Some(path), Refusal::Unreadable, main_thread);
+            }
+        };
+        let read = if present {
+            std::fs::read_to_string(&path)
+        } else {
+            Err(io::ErrorKind::NotFound.into())
+        };
+        let table = match read {
             Ok(text) => {
                 let Ok(table) = text.parse::<Table>() else {
                     tracing::warn!("config.toml doesn't parse; using defaults, not saving");

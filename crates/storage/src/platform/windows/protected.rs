@@ -187,9 +187,12 @@ pub fn product_folder(path: &Path) -> Result<(), Untrusted> {
     let trusted = Trusted::new()?;
     trusted_security(&security, Kind::Folder, &trusted)?;
     // Adding a subfolder is append-data on a folder; inherited write would open the databases.
+    // CREATOR OWNER only ever names whoever made the child, who the line above already limits.
+    let mut heirs = trusted;
+    heirs.0.push(Sid::parse("S-1-3-0")?);
     if security.others_may(
         CHANGES | FILE_APPEND_DATA | FILE_WRITE_EA,
-        &trusted,
+        &heirs,
         Aces::Inheritable,
     )? {
         return Err(Untrusted::Unsafe);
@@ -1019,6 +1022,10 @@ mod tests {
             set_dacl(&folder, |user| format!("D:P(A;OICI;FA;;;{user}){others}"));
             assert_eq!(product_folder(&folder), Err(Untrusted::Unsafe), "{case}");
         }
+        set_dacl(&folder, |user| {
+            format!("D:P(A;OICI;FA;;;{user})(A;OICIIO;FA;;;CO)")
+        });
+        product_folder(&folder).expect("CREATOR OWNER names only the trusted creator");
         let nested = scratch.join("missing-root").join("product");
         product_folder(&nested).expect("a product folder under a missing root");
         assert_eq!(dacl_sddl(&nested), format!("D:P(A;OICI;FA;;;{user})"));
