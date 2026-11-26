@@ -9,7 +9,7 @@ use kumochi_protocol::message::{ControlToShell, ErrorKey, SettingsOp, VoiceView}
 use kumochi_protocol::voice::VoicePart;
 use tokio::task::{JoinError, JoinHandle};
 
-use super::{Brain, Full, Link, controls::Registration};
+use super::{Brain, Full, Link, Stage, controls::Registration};
 use crate::config::{ConfigError, Pending};
 use crate::connections::github::device::DefaultRepo;
 use crate::voice::installer::Folder;
@@ -51,6 +51,14 @@ pub(super) enum VoiceWrite {
 pub(super) struct Queued {
     pub(super) change: Change,
     pub(super) epoch: u64,
+}
+
+/// The settings writes owed since shutdown began: whether one was refused or failed, and when
+/// the last save was seen.
+#[derive(Debug, Default)]
+pub(super) struct Owed {
+    failed: bool,
+    saved: Option<tokio::time::Instant>,
 }
 
 /// The one settings write in flight.
@@ -237,10 +245,13 @@ impl Brain {
     ) {
         #[cfg(test)]
         let gate = self.config_gate.take();
+        let profile = std::sync::Arc::clone(&self.profile);
         let handle = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             let completed = held(gate);
             let written = pending.write();
+            // Held until the write stops, even after the brain and its deadline are gone.
+            drop(profile);
             #[cfg(test)]
             if let Some(completed) = completed {
                 completed
@@ -428,6 +439,7 @@ impl Brain {
                     self.start_settings_write(pending, epoch, model, op, voice, github);
                 }
                 Err(error) => {
+                    self.owed_failed();
                     tracing::warn!(%error, "settings change refused");
                     if let Some(write) = github {
                         self.github_default_written(
@@ -454,6 +466,7 @@ impl Brain {
         (epoch, voice, github, written): Written,
         mut link: Option<&mut Link<'_, '_>>,
     ) -> Result<(), Full> {
+        self.owed_written(&written);
         let input_was_enabled = self.config.view().hold_to_talk;
         let mut defaulted = false;
         let outcome = match written {
@@ -579,6 +592,22 @@ impl Brain {
         stuck
     }
 
+    /// Notes, once shutdown began, a write's save as it's seen, or its failure.
+    fn owed_written(&mut self, written: &Result<(Pending, Result<(), ConfigError>), JoinError>) {
+        if !matches!(written, Ok((_, Ok(())))) {
+            self.owed_failed();
+        } else if let Some(owed) = &mut self.settings_owed {
+            owed.saved = Some(tokio::time::Instant::now());
+        }
+    }
+
+    /// Notes, once shutdown began, a refused change; nothing later undoes it.
+    fn owed_failed(&mut self) {
+        if let Some(owed) = &mut self.settings_owed {
+            owed.failed = true;
+        }
+    }
+
     /// Advances settings with no shell to tell.
     pub(super) fn pump_settings_offline(&mut self) {
         let pumped = self.pump_settings(None);
@@ -616,17 +645,26 @@ impl Brain {
 
     /// Drains the settings by `deadline`; what's still unsaved then is logged, never dropped
     /// silently. A write already started may still finish before the process exits, and the
-    /// file is replaced whole either way.
-    pub(super) async fn drain_settings_by(&mut self, deadline: tokio::time::Instant) {
-        if tokio::time::timeout_at(deadline, self.drain_settings())
+    /// file is replaced whole either way. Failed when anything owed since shutdown began was
+    /// refused or failed to save; otherwise graded by when its last save was seen.
+    pub(super) async fn drain_settings_by(&mut self, deadline: tokio::time::Instant) -> Stage {
+        let drained = tokio::time::timeout_at(deadline, self.drain_settings())
             .await
-            .is_err()
-        {
+            .is_ok();
+        let owed = self.settings_owed.take().unwrap_or_default();
+        if !drained {
             let unsaved = self.settings_ops.len() + usize::from(self.config_write.is_some());
             tracing::warn!(
                 unsaved,
                 "settings changes weren't saved before shutting down"
             );
+            return Stage::Outstanding;
+        }
+        if owed.failed {
+            Stage::Failed
+        } else {
+            owed.saved
+                .map_or(Stage::Confirmed, |saved| Stage::seen(saved, deadline))
         }
     }
 }

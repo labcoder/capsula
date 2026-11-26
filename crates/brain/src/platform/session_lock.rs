@@ -21,10 +21,16 @@ pub enum SessionLockError {
 /// Owns the account session until dropped, when closing the file releases its lock.
 ///
 /// Keep this guard for the brain's whole session, including until all blocking vault work ends.
-#[derive(Debug)]
 #[must_use = "dropping the guard releases account-session ownership"]
 pub struct SessionLock {
     _file: File,
+}
+
+/// Fieldless: a `File`'s Debug prints its path, which names the user's profile.
+impl std::fmt::Debug for SessionLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionLock").finish_non_exhaustive()
+    }
 }
 
 impl SessionLock {

@@ -180,7 +180,7 @@ pub(super) async fn read_user(
 
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "the feature switch, transport refusal, closing and stopped rotation are independent"
+    reason = "the feature switch, transport refusal, closing, stopped and failed rotation are independent"
 )]
 pub(crate) struct GitHub {
     enabled: bool,
@@ -196,6 +196,8 @@ pub(crate) struct GitHub {
     session: Option<u64>,
     closing: bool,
     rotation_stopped: bool,
+    /// A rotation owned while closing ended in an error, so its set was never saved.
+    rotation_failed: bool,
     outstanding: usize,
     suspended: Vec<(Stamp, Effect)>,
     issue: Option<Weak<crate::runtime::issues::transport::Control>>,
@@ -245,6 +247,7 @@ impl GitHub {
             session: None,
             closing: false,
             rotation_stopped: false,
+            rotation_failed: false,
             outstanding: 0,
             suspended: Vec::new(),
             tuning: GitHubTuning::default(),
@@ -500,6 +503,10 @@ impl GitHub {
         self.machine.rotating() && !self.rotation_stopped
     }
 
+    pub(super) fn rotation_failed(&self) -> bool {
+        self.rotation_failed
+    }
+
     pub(super) fn stop_rotation(&mut self) {
         self.rotation_stopped = true;
         self.cancel_verification();
@@ -734,7 +741,12 @@ impl GitHub {
                 }
                 _ => false,
             });
+        let owned = self.closing && self.rotating();
         let effects = self.machine.on(input, Instant::now());
+        self.rotation_failed |= owned
+            && effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Error(_)));
         self.suspended
             .retain(|(stamp, _)| *stamp == self.machine.stamp());
         self.apply(effects, origin, jobs, events, http)

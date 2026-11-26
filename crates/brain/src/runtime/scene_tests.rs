@@ -466,7 +466,7 @@ async fn a_quit_applies_a_queued_stop_and_clear_and_waits_for_a_late_first_ack()
         brain.quit(deadline),
         unlock_once_quitting(&mut observed, lock)
     );
-    assert_eq!(quit, Quit::Complete);
+    assert_eq!(quit.quit, Some(Quit::Complete));
     assert_eq!(
         outcomes(&scratch).last(),
         Some(&outcome("interrupted", "stop")),
@@ -498,7 +498,7 @@ async fn a_quit_ends_a_current_run_whose_first_ack_is_pending() {
         brain.quit(deadline),
         unlock_once_quitting(&mut observed, lock)
     );
-    assert_eq!(quit, Quit::Complete);
+    assert_eq!(quit.quit, Some(Quit::Complete));
     assert_eq!(
         outcomes(&scratch).last(),
         Some(&outcome("interrupted", "shell_lost"))
@@ -523,7 +523,7 @@ async fn quitting_with_four_scenes_visible_after_an_eviction_brings_none_back() 
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
-    assert_eq!(brain.quit(deadline(ended)).await, Quit::Complete);
+    assert_eq!(brain.quit(deadline(ended)).await.quit, Some(Quit::Complete));
     assert_eq!(recovered(&scratch), [], "A doesn't come back either");
 }
 
@@ -536,7 +536,7 @@ async fn a_quitting_written_before_both_pipes_close_is_accepted() {
     shell.send(&ControlToBrain::Quitting).await;
     drop(shell);
     let ended = brain.serve(control, data, &mut tap).await;
-    assert_eq!(brain.quit(deadline(ended)).await, Quit::Complete);
+    assert_eq!(brain.quit(deadline(ended)).await.quit, Some(Quit::Complete));
 }
 
 /// A pipe end that reports how many bytes have been read from it in all.
@@ -620,7 +620,7 @@ async fn a_quitting_split_around_the_data_pipe_s_end_is_finished_and_accepted() 
         drop((control_in, control_out));
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
-    assert_eq!(brain.quit(deadline(ended)).await, Quit::Complete);
+    assert_eq!(brain.quit(deadline(ended)).await.quit, Some(Quit::Complete));
 }
 
 #[tokio::test]
@@ -643,7 +643,7 @@ async fn controls_queued_ahead_of_a_quitting_drain_in_order_and_the_quit_is_acce
         brain.coordinator.visible().is_empty(),
         "the Clear behind them was applied"
     );
-    assert_eq!(brain.quit(deadline).await, Quit::Complete);
+    assert_eq!(brain.quit(deadline).await.quit, Some(Quit::Complete));
     assert_eq!(recovered(&scratch), []);
 }
 
@@ -656,7 +656,7 @@ async fn a_store_stalled_past_the_deadline_makes_the_quit_incomplete_on_time() {
     let ended = quit_with(&mut brain, &[]).await;
     let deadline = deadline(ended);
     let accepted = deadline - CLOSE_WAIT;
-    assert_eq!(brain.quit(deadline).await, Quit::Incomplete);
+    assert_eq!(brain.quit(deadline).await.quit, Some(Quit::Incomplete));
     let took = accepted.elapsed();
     assert!(took >= CLOSE_WAIT, "{took:?}");
     assert!(
@@ -896,7 +896,7 @@ async fn a_clear_two_failed_outcomes_left_keeps_a_quit_incomplete_while_it_fails
     let (brain, scene) = stopped_with_both_outcomes_failed(&scratch).await;
     assert!(!brain.coordinator.settled(), "the clear is still owed");
     let deadline = tokio::time::Instant::now() + CLOSE_WAIT;
-    assert_eq!(brain.quit(deadline).await, Quit::Incomplete);
+    assert_eq!(brain.quit(deadline).await.quit, Some(Quit::Incomplete));
     sql(&scratch, "DROP TRIGGER no_outcome; DROP TRIGGER full;");
     assert_eq!(recovered(&scratch), [scene], "it returns, as after a crash");
 }

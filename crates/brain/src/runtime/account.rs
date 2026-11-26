@@ -42,7 +42,7 @@ use crate::engines::responses::{AccessAsk, Bearer};
 use crate::platform::credential::{CredentialStore, CredentialStoreError};
 
 use super::connections::{ConnectionEvent, Connections};
-use super::{Brain, Full, Link, settings};
+use super::{Brain, Full, Link, Stage, settings};
 use crate::coordinator::Input as CoreInput;
 
 pub(super) mod github;
@@ -880,8 +880,9 @@ impl Accounts {
     /// job already dispatched, past `deadline` if it must, so it never overlaps the instance
     /// capability's delete; then the vault and its session lock are gone. Jobs not yet
     /// dispatched are dropped: a pending flag they would have cleared stays set, and the next
-    /// start counts it as uncertainty.
-    pub(crate) async fn close(&mut self, deadline: Instant, refresh_by: Instant) {
+    /// start counts it as uncertainty. Reports the worst of the refresh against `refresh_by`,
+    /// the credential job's release against `deadline`, and any issued set closing left unsaved.
+    pub(crate) async fn close(&mut self, deadline: Instant, refresh_by: Instant) -> Stage {
         drop(self.listener.take());
         self.proofs.close();
         self.github
@@ -896,10 +897,13 @@ impl Accounts {
             }
         })
         .await;
-        if settled.is_err() {
+        let refreshed = if settled.is_ok() {
+            Stage::seen(Instant::now(), refresh_by)
+        } else {
             tracing::warn!("a refresh is still out at shutdown; its token stays marked as sent");
             self.github.stop_rotation();
-        }
+            Stage::Outstanding
+        };
         // One the settling started.
         self.catalog.cancel();
         while self.github.pending() {
@@ -907,19 +911,35 @@ impl Accounts {
             self.handle(input);
         }
         self.jobs = None;
-        if let Some(mut released) = self.released.take()
-            && tokio::time::timeout_at(deadline, &mut released)
-                .await
-                .is_err()
-        {
-            // It can't be aborted, and the instance capability is deleted next, so it ends first.
-            tracing::warn!("a credential job is still running at the deadline; waiting for it");
-            released.await.ok();
-        }
+        // No receipt left means no release to confirm.
+        let released = if let Some(mut released) = self.released.take() {
+            if let Ok(receipt) = tokio::time::timeout_at(deadline, &mut released).await {
+                receipt.map_or(Stage::Failed, |()| Stage::seen(Instant::now(), deadline))
+            } else {
+                // It can't be aborted, and the instance capability is deleted next, so it ends
+                // first.
+                tracing::warn!("a credential job is still running at the deadline; waiting for it");
+                released.await.map_or(Stage::Failed, |()| Stage::Late)
+            }
+        } else {
+            Stage::Failed
+        };
         while self.github.verifying() {
             let verified = self.github.next_verification().await;
             self.handle(Event::Verification(verified));
         }
+        // A refused save holds its set, a GitHub save or rotation started after the job closed
+        // can't finish, and one that ended in an error can't either: an issued set was never saved.
+        let unsaved = if self.state.held()
+            || self.github.pending()
+            || self.github.rotating()
+            || self.github.rotation_failed()
+        {
+            Stage::Failed
+        } else {
+            Stage::Confirmed
+        };
+        refreshed.max(released).max(unsaved)
     }
 }
 

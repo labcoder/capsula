@@ -110,7 +110,7 @@ async fn quit_with_a_held_lease_pumps_settlement_and_held_deletes() {
         release.send(true).expect("the holder waits");
     };
     let (quit, ()) = tokio::join!(brain.quit(deadline), settle);
-    assert_eq!(quit, Quit::Complete);
+    assert_eq!(quit.quit, Some(Quit::Complete));
     let mut queued = 0;
     while let Ok(seen) = observed.try_recv() {
         queued += usize::from(is_delete(&seen));

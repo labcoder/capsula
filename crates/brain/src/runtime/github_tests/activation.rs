@@ -364,34 +364,86 @@ async fn configured_account_flows_through_real_controls_fifo_settings_and_reconn
     assert_eq!(counts(&store), (0, 0));
 }
 
-#[tokio::test]
-async fn an_expired_saved_account_rotates_once_and_commits_the_pair_before_becoming_usable() {
+/// Saves a GitHub account whose access token expired a second ago; the current Unix time.
+fn save_expired_account(scratch: &Scratch, store: &ObservedStore) -> u64 {
     use crate::connections::clock::{Clock, SystemClock};
-    let scratch = Scratch::new("github-expired-account");
-    let store = ObservedStore::default();
     let now = SystemClock.unix_seconds().unwrap();
     let saved = json!({
         "token":"ghu_runtime_expired", "refresh":"ghr_runtime_expired",
         "expires_at_s":now - 1, "refresh_expires_at_s":now + 15_868_799,
         "refresh_sent":false, "login":"offline-user", "id":41
     });
-    {
-        let mut vault = Vault::with_service(
-            store.store.clone(),
-            "github-owner-test",
-            &owner_lock(&scratch),
-        )
-        .unwrap();
-        let bytes: SecretBytes = Secret::new(Zeroizing::new(serde_json::to_vec(&saved).unwrap()));
-        assert!(matches!(
-            vault.github(lane::Job::Save {
-                stamp: crate::connections::github::device::Stamp { generation: 0 },
-                fence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                account: record::decode(&bytes).unwrap(),
-            }),
-            lane::Reply::Saved { saved: true, .. }
-        ));
-    }
+    let mut vault = Vault::with_service(
+        store.store.clone(),
+        "github-owner-test",
+        &owner_lock(scratch),
+    )
+    .unwrap();
+    let bytes: SecretBytes = Secret::new(Zeroizing::new(serde_json::to_vec(&saved).unwrap()));
+    assert!(matches!(
+        vault.github(lane::Job::Save {
+            stamp: crate::connections::github::device::Stamp { generation: 0 },
+            fence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            account: record::decode(&bytes).unwrap(),
+        }),
+        lane::Reply::Saved { saved: true, .. }
+    ));
+    now
+}
+
+/// The load is still pending when the refresh wait ends, so the expired account rotates in the
+/// second drain; its successor save comes after the credential job closed and can't be saved.
+#[tokio::test]
+async fn an_expired_load_that_rotates_while_closing_fails_the_account() {
+    let scratch = Scratch::new("github-expired-closing");
+    let store = ObservedStore::default();
+    save_expired_account(&scratch, &store);
+    let mut replies = vec![(RequestKind::Refresh, token_reply())];
+    replies.push((RequestKind::User, json!({"id":41,"login":"offline-user"})));
+    let http = AccountHttp::new(replies);
+    let mut accounts = configured_accounts(&scratch, store.clone(), &http);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    assert_eq!(
+        accounts.close(deadline, deadline).await,
+        crate::runtime::Stage::Failed
+    );
+    assert_eq!(http.seen(), [RequestKind::Refresh, RequestKind::User]);
+    let mut vault =
+        Vault::with_service(store.store, "github-owner-test", &owner_lock(&scratch)).unwrap();
+    let lane::Reply::Loaded {
+        result: Ok(Some(account)),
+        ..
+    } = vault.github(lane::Job::Load {
+        stamp: crate::connections::github::device::Stamp { generation: 99 },
+    })
+    else {
+        panic!("the expired account stays saved");
+    };
+    assert!(account.refresh_sent);
+}
+
+/// The rotation ends in an error while closing: the missing reply panics the identity read,
+/// which stops it and leaves the account signed out, not rotating, with nothing outstanding.
+#[tokio::test]
+async fn an_expired_load_whose_rotation_stops_while_closing_fails_the_account() {
+    let scratch = Scratch::new("github-expired-stopped");
+    let store = ObservedStore::default();
+    save_expired_account(&scratch, &store);
+    let http = AccountHttp::new(vec![(RequestKind::Refresh, token_reply())]);
+    let mut accounts = configured_accounts(&scratch, store, &http);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    assert_eq!(
+        accounts.close(deadline, deadline).await,
+        crate::runtime::Stage::Failed
+    );
+    assert_eq!(http.seen(), [RequestKind::Refresh]);
+}
+
+#[tokio::test]
+async fn an_expired_saved_account_rotates_once_and_commits_the_pair_before_becoming_usable() {
+    let scratch = Scratch::new("github-expired-account");
+    let store = ObservedStore::default();
+    let now = save_expired_account(&scratch, &store);
     let mut replies = vec![(RequestKind::Refresh, token_reply())];
     replies.push((RequestKind::User, json!({"id":41,"login":"offline-user"})));
     let http = AccountHttp::new(replies);

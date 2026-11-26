@@ -11,7 +11,7 @@ use tokio::time::timeout;
 
 use super::{PATIENCE, Shell, duplex, outcome, outcomes, patient_brain};
 use crate::coordinator::StoreOp;
-use crate::runtime::{Brain, Ended, Quit, Seen};
+use crate::runtime::{Brain, Ended, Quit, Seen, Stage};
 use crate::store::Store;
 use crate::tap::Tap;
 use crate::test_support::Scratch;
@@ -343,7 +343,7 @@ async fn a_hide_that_never_committed_leaves_the_thread_for_the_next_start() {
 
 /// Serves a connection whose shell sends a delete for T and then quits; the quit's outcome.
 /// Boxed, because the future holds the whole brain.
-fn delete_then_quit(mut brain: Brain) -> std::pin::Pin<Box<impl Future<Output = Quit>>> {
+fn delete_then_quit(mut brain: Brain) -> std::pin::Pin<Box<impl Future<Output = Option<Quit>>>> {
     Box::pin(async move {
         let ((control, data), mut shell) = duplex();
         let mut tap = Tap::from_env();
@@ -358,7 +358,7 @@ fn delete_then_quit(mut brain: Brain) -> std::pin::Pin<Box<impl Future<Output = 
         let Ended::Quit { deadline } = ended else {
             panic!("expected a quit, got {ended:?}");
         };
-        brain.quit(deadline).await
+        brain.quit(deadline).await.quit
     })
 }
 
@@ -375,7 +375,7 @@ async fn with_a_thread(scratch: &Scratch) -> Brain {
 async fn a_quit_waits_for_an_accepted_delete() {
     let scratch = Scratch::new("quit-delete");
     let brain = with_a_thread(&scratch).await;
-    assert_eq!(delete_then_quit(brain).await, Quit::Complete);
+    assert_eq!(delete_then_quit(brain).await, Some(Quit::Complete));
     assert_eq!(listed(&scratch), 0);
 }
 
@@ -391,8 +391,26 @@ async fn a_delete_that_hid_nothing_makes_the_quit_incomplete() {
              END;",
         )
         .expect("trap");
-    assert_eq!(delete_then_quit(brain).await, Quit::Incomplete);
+    assert_eq!(delete_then_quit(brain).await, Some(Quit::Incomplete));
     assert_eq!(listed(&scratch), 1, "the thread comes back");
+}
+
+/// The store thread waits at the gate, so its close receipt can't come before the deadline.
+#[tokio::test]
+async fn a_store_held_past_the_quit_deadline_is_outstanding() {
+    let scratch = Scratch::new("quit-store-held");
+    let mut brain = with_a_thread(&scratch).await;
+    let release = brain.hold_store(is_delete);
+    brain.control_offline(delete(0), 0, &mut Tap::from_env());
+    let shutdown = brain
+        .quit(tokio::time::Instant::now() + std::time::Duration::from_millis(100))
+        .await;
+    assert_eq!(
+        (shutdown.quit, shutdown.store),
+        (Some(Quit::Incomplete), Stage::Outstanding),
+        "{shutdown:?}"
+    );
+    drop(release);
 }
 
 #[tokio::test]
@@ -425,7 +443,7 @@ async fn a_delete_refused_for_capacity_makes_the_quit_incomplete() {
     release
         .send(())
         .expect("the first delete waits at the gate");
-    assert_eq!(brain.quit(deadline).await, Quit::Incomplete);
+    assert_eq!(brain.quit(deadline).await.quit, Some(Quit::Incomplete));
     assert_eq!(listed(&scratch), 1, "the ninth delete, T's, didn't happen");
 }
 
