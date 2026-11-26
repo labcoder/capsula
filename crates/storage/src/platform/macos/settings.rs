@@ -7,7 +7,7 @@
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Read as _, Write as _};
-use std::os::fd::AsRawFd as _;
+use std::os::fd::AsRawFd;
 use std::path::Path;
 
 use kumochi_protocol::constants::CONFIG_FILE;
@@ -49,13 +49,15 @@ pub(super) enum Fault {
     RenameBefore,
     RenameAfter,
     FolderSync,
-    Recheck,
 }
 
 #[cfg(test)]
 thread_local! {
-    /// The one failure this thread's next replacement meets.
-    pub(super) static FAULT: std::cell::Cell<Option<Fault>> = const { std::cell::Cell::new(None) };
+    /// The failures this thread's replacements meet, each once.
+    pub(super) static FAULTS: std::cell::RefCell<Vec<Fault>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Runs once, where a test changes the namespace: after an injected rename failure, or
+    /// before the final checks.
+    pub(super) static HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Reads `CONFIG_FILE` in `product` under the existing Support anchor `support`, creating nothing.
@@ -79,8 +81,7 @@ pub fn read_settings(support: &Path, product: &str) -> Result<Option<Vec<u8>>, A
     (&file)
         .read_to_end(&mut text)
         .map_err(|error| AcquisitionError::Open(error.kind()))?;
-    named(folder, &name, &checked)?;
-    held.check()?;
+    still_private(&held, &file, &name, &checked)?;
     Ok(Some(text))
 }
 
@@ -126,6 +127,7 @@ pub fn replace_settings(
         if !published {
             return if unchanged(folder, &name, old.as_ref()).is_ok()
                 && named(folder, &temp, &identity).is_ok()
+                && held.check().is_ok()
             {
                 Err(AcquisitionError::Open(error.kind()).into())
             } else {
@@ -136,11 +138,7 @@ pub fn replace_settings(
     if sync(folder, Fault::FolderSync).is_err() || staged.sync_all().is_err() {
         return Err(SettingsWriteError::Unconfirmed);
     }
-    if injected(Fault::Recheck) || named(folder, &name, &identity).is_err() || held.check().is_err()
-    {
-        return Err(SettingsWriteError::Unconfirmed);
-    }
-    Ok(())
+    still_private(&held, &staged, &name, &identity).map_err(|_| SettingsWriteError::Unconfirmed)
 }
 
 /// The admitted anchor's chain with the private product folder last; `None` only when `create`
@@ -165,15 +163,23 @@ fn product_chain(
             return Err(AcquisitionError::Open(error.kind()));
         }
     }
-    let folder = match open_at(anchor.as_raw_fd(), &product, DIRECTORY_FLAGS, 0) {
-        Ok(folder) => folder,
-        Err(AcquisitionError::Open(io::ErrorKind::NotFound)) if !create => {
+    // A provider placeholder is refused before it's opened, which could fetch its contents.
+    let seen = match entry_stat(anchor, &product) {
+        Ok(seen) => seen,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !create => {
             held.check()?;
             return Ok(None);
         }
-        Err(error) => return Err(error),
+        Err(_) => return Err(Untrusted::Io.into()),
     };
-    inspect_private(&folder, held.user(), ObjectKind::Directory)?;
+    if seen.st_flags & DATALESS != 0 {
+        return Err(Untrusted::Unsafe.into());
+    }
+    let folder = open_at(anchor.as_raw_fd(), &product, DIRECTORY_FLAGS, 0)?;
+    let checked = inspect_private(&folder, held.user(), ObjectKind::Directory)?;
+    if checked.st_dev != seen.st_dev || checked.st_ino != seen.st_ino {
+        return Err(Untrusted::Unsafe.into());
+    }
     held.push_private(folder, product)?;
     held.check()?;
     Ok(Some(held))
@@ -214,6 +220,23 @@ fn private_file(
     Ok(Some((file, checked)))
 }
 
+/// The last samples: `file` and the held product folder still pass the private checks, ACL
+/// included, `name` still gives `file`, and the whole chain is still where its names say.
+fn still_private(
+    held: &Directories,
+    file: &impl AsRawFd,
+    name: &CStr,
+    identity: &libc::stat,
+) -> Result<(), AcquisitionError> {
+    #[cfg(test)]
+    hook();
+    let folder = held.last()?;
+    inspect_private(file, held.user(), ObjectKind::Regular)?;
+    inspect_private(folder, held.user(), ObjectKind::Directory)?;
+    named(folder, name, identity)?;
+    held.check()
+}
+
 /// `name` still gives `old`, or is still missing when there was none.
 fn unchanged(folder: &File, name: &CStr, old: Option<&libc::stat>) -> Result<(), Untrusted> {
     match old {
@@ -227,6 +250,8 @@ fn unchanged(folder: &File, name: &CStr, old: Option<&libc::stat>) -> Result<(),
 
 fn rename(folder: &File, from: &CStr, to: &CStr) -> io::Result<()> {
     if injected(Fault::RenameBefore) {
+        #[cfg(test)]
+        hook();
         return Err(io::Error::from_raw_os_error(libc::EBUSY));
     }
     let fd = folder.as_raw_fd();
@@ -254,7 +279,17 @@ fn sync(folder: &File, fault: Fault) -> Result<(), io::ErrorKind> {
 
 #[cfg(test)]
 fn injected(fault: Fault) -> bool {
-    FAULT.get() == Some(fault) && FAULT.replace(None).is_some()
+    FAULTS.with_borrow_mut(|faults| {
+        let found = faults.iter().position(|&next| next == fault);
+        found.map(|index| faults.remove(index)).is_some()
+    })
+}
+
+#[cfg(test)]
+fn hook() {
+    if let Some(hook) = HOOK.take() {
+        hook();
+    }
 }
 
 #[cfg(not(test))]

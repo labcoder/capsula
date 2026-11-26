@@ -109,13 +109,14 @@ pub(crate) struct Config {
     /// What an absent `onboarded` key reads as, fixed at start: true when the profile was
     /// already in use, or the file can't be written, so neither ever asks for onboarding.
     in_use: bool,
+    /// A write's outcome wasn't proved, so nothing more is written until a restart.
+    unconfirmed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
 enum Refusal {
     NoHome,
     Unreadable,
-    Unconfirmed,
 }
 
 /// A change staged for writing. [`Pending::write`] blocks, so it runs off the core loop.
@@ -186,6 +187,7 @@ impl Config {
             table: Ok(table),
             view,
             in_use: false,
+            unconfirmed: false,
         }
     }
 
@@ -207,6 +209,7 @@ impl Config {
             context_tuning: ContextTuning::default(),
             shell_tuning: ShellTuning::default(),
             in_use: true,
+            unconfirmed: false,
         }
     }
 
@@ -505,11 +508,13 @@ impl Config {
 
     /// The file's path and a copy of its table to change.
     fn editable(&self) -> Result<(PathBuf, Table), ConfigError> {
+        if self.unconfirmed {
+            return Err(ConfigError::Unconfirmed);
+        }
         let table = match &self.table {
             Ok(table) => table.clone(),
             Err(Refusal::NoHome) => return Err(ConfigError::NoHome),
             Err(Refusal::Unreadable) => return Err(ConfigError::Unreadable),
-            Err(Refusal::Unconfirmed) => return Err(ConfigError::Unconfirmed),
         };
         Ok((self.path.clone().ok_or(ConfigError::NoHome)?, table))
     }
@@ -521,12 +526,12 @@ impl Config {
     }
 
     /// A write whose outcome isn't known: its change may be what the file now holds, so it's
-    /// shown, but with the screen kept off, and nothing more is written until a restart.
+    /// taken, with the screen kept off, and nothing more is written until a restart.
     pub(crate) fn unconfirmed(&mut self, pending: Pending) {
-        self.view = pending.view;
+        self.commit(pending);
         self.view.screen_holds = false;
         self.view.show_screen = false;
-        self.table = Err(Refusal::Unconfirmed);
+        self.unconfirmed = true;
     }
 }
 

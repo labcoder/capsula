@@ -558,19 +558,21 @@ async fn an_unconfirmed_save_shows_its_change_with_the_screen_off_and_refuses_th
     let scratch = Scratch::new("settings-unconfirmed");
     let config = scratch.db().with_file_name(CONFIG_FILE);
     std::fs::create_dir_all(config.parent().expect("a folder")).expect("folder");
-    std::fs::write(&config, "screen_holds = true\nshow_screen = true\n").expect("seed");
+    std::fs::write(
+        &config,
+        "[voice]\nscreen_holds = true\nshow_screen = true\n",
+    )
+    .expect("seed");
     let mut brain = test_support::brain(&scratch, "");
     let release = brain.hold_config_write();
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();
     let client = async {
         let before = shell.settled().await;
-        assert!(
-            before.screen_holds && before.show_screen,
-            "the seeded screen choices"
-        );
+        assert_eq!((before.screen_holds, before.show_screen), (true, true));
         shell.scenes().await;
         shell.send(&rename("Nimbus")).await;
+        shell.send(&rename("Cirrus")).await;
         release
             .send(Gate::Unconfirmed)
             .expect("the write waits on the gate");
@@ -584,19 +586,28 @@ async fn an_unconfirmed_save_shows_its_change_with_the_screen_off_and_refuses_th
             ),
             ("Nimbus", false, false)
         );
-        shell.send(&rename("Cirrus")).await;
-        assert_eq!(shell.error().await, ErrorKey::SettingsRefused);
+        assert_eq!(
+            shell.error().await,
+            ErrorKey::SettingsRefused,
+            "the queued change"
+        );
         assert_eq!(shell.answer().await.assistant_name.as_str(), "Nimbus");
         drop(shell);
     };
     let (ended, ()) = tokio::join!(brain.serve(control, data, &mut tap), client);
     assert_eq!(ended, Ended::Lost);
-    brain.close().await;
-    let text = std::fs::read_to_string(&config).expect("readable");
-    assert!(
-        text.contains("Nimbus") && !text.contains("Cirrus"),
-        "only the unconfirmed write reached the file"
+    assert_eq!(
+        brain.config.default_choice(),
+        crate::store::choice::StoredChoice::Absent,
+        "the latch keeps the table the change was written from"
     );
+    brain.close().await;
+    let saved: toml::Table = std::fs::read_to_string(&config)
+        .expect("readable")
+        .parse()
+        .expect("parses");
+    assert_eq!(saved["assistant_name"].as_str(), Some("Nimbus"));
+    assert_eq!(saved["voice"]["show_screen"].as_bool(), Some(true));
 }
 
 #[tokio::test]

@@ -126,6 +126,12 @@ fn native_a_first_save_makes_private_settings_and_later_saves_replace_them() {
     let mut scratch = Scratch::new();
     let support = anchor(&scratch);
     assert_eq!(read_settings(&support, "product"), Ok(None));
+    drop(scratch.directory(c"empty"));
+    assert_eq!(
+        read_settings(&support, "empty"),
+        Ok(None),
+        "a private product folder without the file"
+    );
     assert_eq!(
         read_settings(&support.join("absent"), "product"),
         Err(AcquisitionError::Open(io::ErrorKind::NotFound)),
@@ -259,25 +265,29 @@ fn native_settings_refuse_what_isnt_private() {
     );
 }
 
+fn on_hook(hook: impl FnOnce() + 'static) {
+    HOOK.set(Some(Box::new(hook)));
+}
+
 #[test]
 #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
 fn native_a_replacement_reports_only_what_it_can_prove() {
     let mut scratch = Scratch::new();
     let support = anchor(&scratch);
     assert_eq!(replace_settings(&support, "product", b"old"), Ok(()));
-    let faults: [(Fault, &[u8]); 5] = [
-        (Fault::AnchorSync, b"anchor"),
-        (Fault::RenameBefore, b"before"),
-        (Fault::RenameAfter, b"after1"),
-        (Fault::FolderSync, b"folder"),
-        (Fault::Recheck, b"recheck"),
+    let faults: [(&[Fault], &[u8]); 5] = [
+        (&[Fault::AnchorSync], b"anchor"),
+        (&[Fault::RenameBefore], b"before"),
+        (&[Fault::RenameAfter], b"after1"),
+        (&[Fault::FolderSync], b"folder"),
+        (&[Fault::RenameAfter, Fault::FolderSync], b"after2"),
     ];
     let outcomes: Vec<_> = faults
         .into_iter()
-        .map(|(fault, text)| {
-            FAULT.set(Some(fault));
+        .map(|(faults, text)| {
+            FAULTS.set(faults.to_vec());
             let written = replace_settings(&support, "product", text);
-            let left = FAULT.replace(None);
+            let left = FAULTS.take();
             (written, left, read_settings(&support, "product"))
         })
         .collect();
@@ -294,18 +304,70 @@ fn native_a_replacement_reports_only_what_it_can_prove() {
         [
             (
                 unchanged(io::ErrorKind::Other),
-                None,
+                vec![],
                 Ok(Some(b"old".to_vec()))
             ),
             (
                 unchanged(io::ErrorKind::ResourceBusy),
-                None,
+                vec![],
                 Ok(Some(b"old".to_vec()))
             ),
-            (Ok(()), None, Ok(Some(b"after1".to_vec()))),
-            (unconfirmed, None, Ok(Some(b"folder".to_vec()))),
-            (unconfirmed, None, Ok(Some(b"recheck".to_vec()))),
+            (Ok(()), vec![], Ok(Some(b"after1".to_vec()))),
+            (unconfirmed, vec![], Ok(Some(b"folder".to_vec()))),
+            (unconfirmed, vec![], Ok(Some(b"after2".to_vec()))),
         ]
     );
     assert_eq!((after, read), (Ok(()), Ok(Some(b"last".to_vec()))));
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_the_last_checks_see_an_acl_or_a_moved_folder() {
+    let mut scratch = Scratch::new();
+    let support = anchor(&scratch);
+    let root = scratch.root.try_clone().expect("retain scratch root");
+    for product in [c"read-acl", c"write-acl", c"moved"] {
+        let name = product.to_str().expect("ASCII fixture name");
+        assert_eq!(replace_settings(&support, name, b"old"), Ok(()));
+    }
+    let folder = |name: &CStr| open_directory(root.as_raw_fd(), name).expect("product folder");
+
+    let file = open_at(folder(c"read-acl").as_raw_fd(), CONFIG, READ_FLAGS, 0).expect("settings");
+    on_hook(move || install_acl(&file, DENY).expect("file ACL after the look"));
+    let read = read_settings(&support, "read-acl");
+
+    let written = folder(c"write-acl");
+    on_hook(move || install_acl(&written, DENY).expect("folder ACL before the last checks"));
+    let replaced = replace_settings(&support, "write-acl", b"new");
+
+    let held = root.try_clone().expect("retain scratch root");
+    on_hook(move || {
+        let fd = held.as_raw_fd();
+        // SAFETY: held is the scratch root; both names are fixed fixture components.
+        let moved = unsafe { libc::renameat(fd, c"moved".as_ptr(), fd, c"elsewhere".as_ptr()) };
+        assert_eq!(moved, 0, "move the product folder at the rename failure");
+    });
+    FAULTS.set(vec![Fault::RenameBefore]);
+    let detached = replace_settings(&support, "moved", b"new");
+
+    for product in [c"read-acl", c"write-acl"] {
+        record_saved(&mut scratch, product);
+    }
+    record_saved(&mut scratch, c"elsewhere");
+    let moved = folder(c"elsewhere");
+    scratch
+        .record(&moved, TEMP)
+        .expect("record the staged copy");
+    let kept = read_all(&open_at(moved.as_raw_fd(), CONFIG, READ_FLAGS, 0).expect("old settings"));
+    drop(moved);
+    scratch
+        .cleanup()
+        .expect("identity-checked cleanup; uncertainty leaves reported residual");
+    assert_eq!(read, Err(AcquisitionError::Admission(Untrusted::Unsafe)));
+    assert_eq!(replaced, Err(SettingsWriteError::Unconfirmed));
+    assert_eq!(
+        (detached, kept),
+        (Err(SettingsWriteError::Unconfirmed), b"old".to_vec()),
+        "a folder moved off its path proves nothing unchanged"
+    );
 }
