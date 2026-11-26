@@ -428,7 +428,9 @@ fn a_poll_that_blocks_ends_the_link_unsettled_while_the_peer_holds_both_ends_ope
     let (entered, polling) = mpsc::channel();
     let (unblock, blocks) = mpsc::channel();
     child.script().poll_blocks = Some((entered, blocks));
-    polling.recv_timeout(BOUND).expect("the owner is inside its poll");
+    polling
+        .recv_timeout(BOUND)
+        .expect("the owner is inside its poll");
     let quit = Instant::now();
     assert!(link.begin_quit());
     link.finish_quit();

@@ -716,6 +716,10 @@ mod tests {
         fn auto_reaps(&self) -> bool {
             false
         }
+        #[expect(
+            clippy::panic_in_result_fn,
+            reason = "the owner thread must end without a report"
+        )]
         fn spawn(&mut self) -> io::Result<()> {
             panic!("the owner dies before its spawn report");
         }
