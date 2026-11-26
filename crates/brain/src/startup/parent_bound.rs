@@ -380,3 +380,6 @@ thread_local! {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod fixture;

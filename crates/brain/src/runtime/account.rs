@@ -257,7 +257,7 @@ impl Accounts {
         )
     }
 
-    #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn spawn_unconfigured<S: CredentialStore + 'static>(
         worker: Worker<S>,
         net: Net,

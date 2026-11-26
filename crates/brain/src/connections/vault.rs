@@ -875,7 +875,7 @@ pub(super) fn valid_host(host: &str) -> bool {
         && b"89ab".contains(&host.as_bytes()[28])
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod fake;
 #[cfg(test)]
 mod tests;

@@ -129,8 +129,11 @@ pub(crate) enum CustodyError {
 /// What an instance item add found. Only macOS's item, and the tests' fakes, make one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
-    not(any(test, target_os = "macos")),
-    expect(dead_code, reason = "only macOS has an instance item")
+    not(any(test, feature = "test-support", target_os = "macos")),
+    expect(
+        dead_code,
+        reason = "only macOS and the fixtures have an instance item"
+    )
 )]
 pub(crate) enum Added {
     Fresh,

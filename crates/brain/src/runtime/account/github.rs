@@ -219,7 +219,7 @@ impl GitHub {
         )
     }
 
-    #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::runtime) fn with_client(client_id: Option<&'static str>) -> Self {
         Self::with_client_and_refresh_lead(
             client_id,

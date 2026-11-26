@@ -19,7 +19,7 @@ pub(crate) mod anthropic;
     expect(dead_code, reason = "the claude engine (slice 8's C5b) drives it")
 )]
 pub(crate) mod claude_code;
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, debug_assertions, feature = "test-support"))]
 pub(crate) mod fixture;
 pub(crate) mod responses;
 

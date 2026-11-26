@@ -1,25 +1,24 @@
 //! Helpers shared by the brain's tests.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use kumochi_protocol::constants;
-use kumochi_protocol::message::ThreadId;
 
 use crate::config::Config;
 use crate::connections::account::Worker;
 use crate::connections::clock::FixedClock;
-use crate::connections::http_client::HttpError;
-use crate::connections::oauth::{LaunchError, LaunchTarget, Launcher};
 use crate::connections::vault::Vault;
 use crate::connections::vault::fake::FakeStore;
 use crate::engines::fixture::Fixture;
-use crate::runtime::account::{Accounts, Net};
+#[cfg(windows)]
+use crate::fixture_support::held_accounts_until;
+pub(crate) use crate::fixture_support::{Scratch, net};
+use crate::runtime::account::Accounts;
 use crate::runtime::{Brain, IssueEpochs};
-use crate::scratch;
 use crate::store::Store;
 
 pub(crate) const SCRATCH_PUBLICATION_UNCERTAIN: i32 = 78;
@@ -28,65 +27,6 @@ pub(crate) const SCRATCH_PUBLICATION_UNCERTAIN: i32 = 78;
 pub(crate) fn propagate_scratch_publication(status: std::process::ExitStatus) {
     if status.code() == Some(SCRATCH_PUBLICATION_UNCERTAIN) {
         std::process::exit(SCRATCH_PUBLICATION_UNCERTAIN);
-    }
-}
-
-/// A store file in its own temp folder, removed afterwards.
-pub(crate) struct Scratch {
-    // Teardown uses the pathname shortcut documented in tests/support/scratch.rs.
-    _guard: scratch::Scratch,
-    case: PathBuf,
-}
-
-impl Scratch {
-    /// Fixture root for path-sensitive Windows tests and ordinary scratch elsewhere.
-    pub(crate) fn trusted(name: &str) -> Self {
-        #[cfg(windows)]
-        {
-            Self::with_guard(scratch::Scratch::under(
-                &crate::platform::local_app_data().expect("local application data"),
-                name,
-            ))
-        }
-        #[cfg(not(windows))]
-        {
-            Self::new(name)
-        }
-    }
-
-    pub(crate) fn new(name: &str) -> Self {
-        let guard = scratch::dir(name);
-        // The temp folder may let other accounts write, and the product refuses such a folder.
-        #[cfg(windows)]
-        crate::platform::set_dacl(guard.path(), |user| format!("D:P(A;OICI;FA;;;{user})"));
-        Self::with_guard(guard)
-    }
-
-    pub(crate) fn under(base: &Path, name: &str) -> Self {
-        Self::with_guard(scratch::Scratch::under(base, name))
-    }
-
-    fn with_guard(guard: scratch::Scratch) -> Self {
-        let case = guard.join("case");
-        Self {
-            _guard: guard,
-            case,
-        }
-    }
-
-    /// The folder, which nothing creates until a test does.
-    pub(crate) fn dir(&self) -> &Path {
-        &self.case
-    }
-
-    pub(crate) fn db(&self) -> PathBuf {
-        self.case.join("store.db")
-    }
-
-    /// Settings kept in this folder, so a test never touches the user's, naming the main thread
-    /// a fresh store creates.
-    pub(crate) fn config(&self) -> Config {
-        Config::load(Some(self.case.clone()), ThreadId(1))
     }
 }
 
@@ -191,7 +131,7 @@ pub(crate) fn brain_counting(
     let main_thread = store.main_thread().expect("main thread");
     let high_water = store.high_water().expect("high water");
     let scenes = store.scenes().expect("scenes");
-    let config = Config::load(Some(scratch.case.clone()), main_thread);
+    let config = Config::load(Some(scratch.dir().to_owned()), main_thread);
     let custody = crate::test_support::custody(&store);
     Brain::new(
         store,
@@ -225,29 +165,6 @@ pub(crate) fn held_accounts(profile: Arc<crate::platform::SessionLock>) -> Accou
     held_accounts_until(profile, ())
 }
 
-/// [`held_accounts`], whose credential thread drops `hold` after the vault and before it
-/// reports the release.
-pub(crate) fn held_accounts_until(
-    profile: Arc<crate::platform::SessionLock>,
-    hold: impl Send + 'static,
-) -> Accounts {
-    let store = FakeStore::default();
-    let worker = Worker::new(
-        Box::new(move || {
-            let _hold = &hold;
-            Vault::with_lock(
-                store.clone(),
-                "test-accounts",
-                Arc::clone(&profile),
-                crate::connections::vault::HistoryLink::unbound(),
-                crate::connections::authority::Missing::Create,
-            )
-        }),
-        Arc::new(FixedClock(1_800_000_000)),
-    );
-    Accounts::spawn_unconfigured(worker, net()).expect("credential thread")
-}
-
 /// An account system whose vault opens with `open`, which fails or panics; its credential
 /// thread drops `hold` after it stops and before it reports the release.
 pub(crate) fn failing_accounts(
@@ -262,22 +179,6 @@ pub(crate) fn failing_accounts(
         Arc::new(FixedClock(1_800_000_000)),
     );
     Accounts::spawn_unconfigured(worker, net())
-}
-
-/// What an account system reaches outside the brain through, in tests: it never opens a
-/// browser or reaches the network, since launches and requests are refused.
-pub(crate) fn net() -> Net {
-    struct NoBrowser;
-    impl Launcher for NoBrowser {
-        fn launch(&self, _: &LaunchTarget) -> Result<(), LaunchError> {
-            Err(LaunchError::Launch)
-        }
-    }
-    Net {
-        http: Arc::new(|| Err(HttpError::Configuration)),
-        launcher: Arc::new(NoBrowser),
-        clock: Arc::new(FixedClock(1_800_000_000)),
-    }
 }
 
 /// Collects what `tracing` writes while it's the default subscriber.

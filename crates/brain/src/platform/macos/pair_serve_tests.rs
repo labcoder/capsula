@@ -25,7 +25,7 @@ use crate::platform::ShellProcess;
 use crate::platform::shell_process::Verdict;
 use crate::runtime::{Brain, Ended, Fatal, Seen, Terminal};
 use crate::startup::custody::SessionCustody;
-use crate::startup::parent_bound::tests::{Holding, Script, run_on_fixtures};
+use crate::startup::parent_bound::fixture::{Holding, Script, run_on_fixtures};
 use crate::startup::parent_bound::{AdmissionPair, Root};
 use crate::test_support::Scratch;
 
