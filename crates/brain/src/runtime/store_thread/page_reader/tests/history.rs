@@ -87,40 +87,6 @@ enum Prior {
     CompactableQuote(&'static str),
 }
 
-/// A read call from a run that began before a required cutoff is refused; the same call reads
-/// without one.
-#[test]
-fn a_recovered_read_call_from_a_run_before_the_cutoff_is_refused() {
-    let (scratch, running, mut core, key) = active("history-recovery-run", "small", Prior::Empty);
-    let cut = Store::open(&scratch.db()).unwrap().cut_history(7);
-    let call = calls(
-        &mut core,
-        key,
-        1,
-        ToolName::ReadHistory,
-        r#"{"task":2,"from":1,"to":1}"#,
-    )
-    .pop()
-    .unwrap();
-    let mut stale = call.clone();
-    stale.require_recovery = Some(cut);
-    assert!(running.thread.send(StoreOp::ReadCall(call)));
-    let Input::ReadFinished(done) = running.ack() else {
-        panic!("a read reply");
-    };
-    assert!(
-        matches!(done.result, Ok((Selection::Read { task: 2, .. }, _))),
-        "{:?}",
-        done.result
-    );
-    assert!(running.thread.send(StoreOp::ReadCall(stale)));
-    let Input::ReadFinished(done) = running.ack() else {
-        panic!("a read reply");
-    };
-    assert_eq!(done.result, Err(crate::recall::Error::Read));
-    running.thread.close().blocking_recv().unwrap();
-}
-
 fn recorded(scratch: &Scratch) -> (i64, i64) {
     let reader = rusqlite::Connection::open(scratch.db()).unwrap();
     (

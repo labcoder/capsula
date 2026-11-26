@@ -5,10 +5,8 @@ use kumochi_protocol::message::{
     ThreadId, ThreadTitle,
 };
 
-use std::sync::{Arc, Mutex};
 use std::{fmt, ops::Deref};
 
-use crate::connections::vault::CutoffRequest;
 use crate::store::{EventKind, NewEvent};
 
 /// The unflushed answer. Delayed delivery doesn't delay acceptance into this buffer.
@@ -330,35 +328,6 @@ pub enum StoreOp {
         /// The run.
         run: RunId,
     },
-    /// A bound vault's history cutoff request, answered on its own channel. It isn't counted
-    /// against page reads' stamps.
-    Cutoff(CutoffSlot),
-}
-
-/// Holds one cutoff request until the store thread takes it.
-#[derive(Clone)]
-pub struct CutoffSlot(Arc<Mutex<Option<CutoffRequest>>>);
-
-impl CutoffSlot {
-    pub(crate) fn new(request: CutoffRequest) -> Self {
-        Self(Arc::new(Mutex::new(Some(request))))
-    }
-
-    pub(crate) fn take(&self) -> Option<CutoffRequest> {
-        self.0.lock().ok().and_then(|mut slot| slot.take())
-    }
-}
-
-impl PartialEq for CutoffSlot {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl fmt::Debug for CutoffSlot {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("CutoffSlot")
-    }
 }
 
 /// A summary's text. Its `Debug` shows only the length, so formatting a write never prints it.
@@ -405,8 +374,7 @@ impl StoreOp {
             | Self::WithdrawScreen { .. }
             | Self::RepairScreen { .. }
             | Self::CantSeeScreen { .. }
-            | Self::SentScreen { .. }
-            | Self::Cutoff(_) => None,
+            | Self::SentScreen { .. } => None,
         }
     }
 
@@ -497,8 +465,7 @@ impl StoreOp {
             | Self::WithdrawScreen { .. }
             | Self::RepairScreen { .. }
             | Self::CantSeeScreen { .. }
-            | Self::SentScreen { .. }
-            | Self::Cutoff(_) => {
+            | Self::SentScreen { .. } => {
                 return None;
             }
         })

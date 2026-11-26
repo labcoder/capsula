@@ -305,13 +305,3 @@ fn invalid_read_selection_cannot_be_persisted() {
         )]
     );
 }
-
-/// A history call on a recovered connection's run reads to that connection's cutoff.
-#[test]
-fn a_history_read_on_a_recovered_route_keeps_to_its_cutoff() {
-    let mut core = kumo_rendered_b();
-    let tag = core.current(R).unwrap().route.unwrap().tag.0;
-    let cut = crate::store::Boundary::fixture(tag, 3, 9);
-    core.recovered_chatgpt = vec![cut];
-    assert_eq!(start_read(&mut core).require_recovery, Some(cut));
-}

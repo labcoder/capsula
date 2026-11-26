@@ -87,11 +87,7 @@ async fn native_account_startup_refuses_unsupported_without_publishing_retry() {
     let _logs = captured.install();
     let net = test_support::net();
     let (scratch, profile) = profile();
-    let worker = Worker::system(
-        Arc::clone(&net.clock),
-        profile,
-        crate::connections::vault::HistoryLink::unbound(),
-    );
+    let worker = Worker::system(Arc::clone(&net.clock), profile);
     let held = worker.held();
 
     let refusal = Accounts::spawn(worker, net, OAuthTuning::default(), TokenTuning::default())
@@ -2840,7 +2836,6 @@ async fn a_title_job_starts_only_while_the_account_can_send() {
             while !matches!(
                 seen.recv().await.expect("the brain reports"),
                 Seen::StoreOpQueued(StoreOp::ReadJob(ReadJob {
-                    require_recovery: None,
                     kind: JobKind::Title,
                     ..
                 }))
@@ -3416,96 +3411,6 @@ async fn a_locally_checked_sign_in_is_fenced_until_its_check_answers() {
         }
         let arrived = first_build(&mut brain).arrived;
         assert_eq!(arrived.chatgpt_blocked(), !proved, "proved: {proved}");
-        brain.close().await;
-    }
-}
-
-/// From the producer to the build: a current recovered answer gives the first build its exact
-/// cutoff; after the vault's own later answer for that check is dropped and an ordinary refresh
-/// rotates the set, the build still keeps to it; and once that account can't be ready, the next
-/// build reads no `ChatGPT` history at all, while a ready Claude Code still arrives.
-#[tokio::test]
-async fn a_recovered_answer_scopes_builds_until_the_account_stops_being_ready() {
-    use crate::connections::vault::Proof;
-
-    let cut = crate::store::Boundary::fixture(SEEDED, 3, 9);
-    for arm in ["first", "refreshed", "unavailable"] {
-        let scratch = Scratch::new("account-proof-recovered");
-        let store = FakeStore::default();
-        let accounts = due_account(&scratch, &store, SharedHttp::new(Rotating));
-        let mut brain = test_support::brain_on(&scratch, account_engine(), accounts);
-        let recovered = Event::Proof {
-            connection: SEEDED,
-            epoch: 1,
-            proof: Proof::Recovered(cut),
-        };
-        brain.account_input(recovered, None).expect("no shell");
-        if arm == "refreshed" {
-            // The store is read only once the worker reports the save after the refresh.
-            let (mut dropped, mut refreshed, mut rotated) = (false, false, false);
-            for _ in 0..12 {
-                if dropped && rotated {
-                    break;
-                }
-                let event = timeout(PATIENCE, brain.account.next())
-                    .await
-                    .expect("in time");
-                rotated |=
-                    refreshed && matches!(event, Event::Machine(Input::Vault(Done::Rotated(..))));
-                refreshed |= matches!(event, Event::Machine(Input::Refreshed { .. }));
-                dropped |= matches!(
-                    event,
-                    Event::Proof {
-                        proof: Proof::Ordinary,
-                        ..
-                    }
-                );
-                brain.account_input(event, None).expect("no shell");
-            }
-            assert!(dropped, "the vault's own answer came after");
-            assert!(rotated, "the rotated set's save was reported");
-            assert_eq!(saved_refresh(&scratch, &store).0, "refresh-new");
-            assert_eq!(saved_connection(&scratch, &store), SEEDED);
-        }
-        if arm == "unavailable" {
-            brain
-                .account_input(Input::PlanUnavailable, None)
-                .expect("no shell");
-        }
-        #[cfg(windows)]
-        let claude = if arm == "unavailable" {
-            let base =
-                crate::engines::claude_code::lane::tests::Base::new("account-proof-recovered");
-            brain.attach_claude(ready_claude(&base).await);
-            let Availability::Ready(ready) = brain.claude.availability() else {
-                panic!("Claude Code is ready");
-            };
-            Some(ready.connection)
-        } else {
-            None
-        };
-        let build = first_build(&mut brain);
-        if arm == "unavailable" {
-            assert!(build.arrived.chatgpt_blocked());
-            assert_eq!(build.require_recovery, None);
-            #[cfg(windows)]
-            {
-                let choice = ModelChoice {
-                    model: ModelSlug::new("haiku").expect("valid"),
-                    effort: Effort::Low,
-                    connection: ConnectionKind::ClaudeCode,
-                };
-                assert_eq!(
-                    Some(build.arrived.replay(Some(&choice))),
-                    claude,
-                    "Claude Code still arrives ready"
-                );
-            }
-        } else {
-            assert!(!build.arrived.chatgpt_blocked(), "{arm}");
-            assert_eq!(build.arrived.recovered(), Some(cut), "{arm}");
-            assert_eq!(build.require_recovery, Some(cut), "{arm}");
-        }
         brain.close().await;
     }
 }

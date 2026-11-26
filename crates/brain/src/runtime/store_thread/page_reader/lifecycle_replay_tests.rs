@@ -12,7 +12,7 @@ use crate::recall::{
     Selection,
     control::{Control, tests::Gate},
 };
-use crate::store::{Boundary, Generation, RunEnd, Store};
+use crate::store::{Generation, RunEnd, Store};
 use crate::test_support::Scratch;
 use kumochi_protocol::message::{AssistantName, EventId, RunId, ThreadId};
 
@@ -54,7 +54,6 @@ fn snapshot() -> RunSnapshot {
 
 fn build(control: Control) -> BuildContext {
     BuildContext {
-        require_recovery: None,
         control,
         key: BuildKey {
             run: RunId(2),
@@ -120,7 +119,6 @@ fn lifecycle_background_compaction_remains_text_only_with_an_inactive_handler() 
     let control = Control::new(Instant::now() + Duration::from_secs(60));
     let side = store.side();
     let read = ReadJob {
-        require_recovery: None,
         control: control.clone(),
         key: JobKey {
             thread: ThreadId(1),
@@ -158,97 +156,6 @@ fn lifecycle_background_compaction_remains_text_only_with_an_inactive_handler() 
     ordinary_read_after_cleanup(&store, &control);
 }
 
-/// Title and compaction jobs for a thread from before a required cutoff read nothing, and a
-/// missing or different cutoff refuses them.
-#[test]
-fn recovered_jobs_skip_threads_from_before_the_cutoff() {
-    let scratch = Scratch::new("recall-recovered-jobs");
-    let mut store = replay_store(&scratch);
-    store
-        .end_run(ThreadId(1), RunId(2), &[], RunEnd::Done)
-        .unwrap();
-    for run in 3..=11 {
-        store
-            .begin_turn(ThreadId(1), None, RunId(run), "later")
-            .unwrap();
-        store
-            .end_run(ThreadId(1), RunId(run), &[], RunEnd::Done)
-            .unwrap();
-    }
-    assert!(
-        store
-            .store_summary(
-                ThreadId(1),
-                Generation(0),
-                (EventId(2), EventId(2)),
-                "summary",
-                None
-            )
-            .unwrap()
-    );
-    let cut = store.cut_history(7);
-    store
-        .begin_turn(ThreadId(1), None, RunId(12), "after")
-        .unwrap();
-    let side = store.side();
-    let control = Control::new(Instant::now() + Duration::from_secs(60));
-    let job = |thread, kind, require_recovery| {
-        super::context::read_job(
-            Some(&side),
-            ReadJob {
-                require_recovery,
-                control: control.clone(),
-                key: JobKey { thread, serial: 1 },
-                kind,
-                origin: Origin::Kumo,
-                snapshot: Some(snapshot()),
-                compact_at: 0,
-            },
-            ContextTuning::default(),
-            || {},
-        )
-        .result
-    };
-    let compact = |require_recovery| {
-        let mut key = build(control.clone()).key;
-        key.run = RunId(12);
-        super::context::read_compact(
-            Some(&side),
-            CompactContext {
-                require_recovery,
-                control: control.clone(),
-                key,
-                thread: ThreadId(1),
-                snapshot: Some(snapshot()),
-                room: 1000,
-            },
-            || {},
-        )
-        .result
-    };
-    let (title, compaction) = (
-        (ThreadId(2), JobKind::Title),
-        (ThreadId(1), JobKind::Compact),
-    );
-    for (thread, kind) in [title, compaction] {
-        assert!(matches!(job(thread, kind, None), Ok(Some(_))), "{kind:?}");
-        assert_eq!(job(thread, kind, Some(cut)), Ok(None), "{kind:?}");
-    }
-    assert!(matches!(compact(None), Ok(Some(_))));
-    assert_eq!(compact(Some(cut)), Ok(None));
-    let (threads, runs) = cut.bounds();
-    for wrong in [
-        Boundary::fixture(8, threads, runs),
-        Boundary::fixture(7, threads - 1, runs),
-    ] {
-        assert_eq!(
-            job(ThreadId(1), JobKind::Compact, Some(wrong)),
-            Err(Unbuilt::Failed)
-        );
-        assert_eq!(compact(Some(wrong)), Err(Unbuilt::Failed));
-    }
-}
-
 #[test]
 fn lifecycle_inline_summary_sql_does_not_activate_the_recall_handler() {
     let scratch = Scratch::new("recall-inline-inactive");
@@ -267,7 +174,6 @@ fn lifecycle_inline_summary_sql_does_not_activate_the_recall_handler() {
     let control = Control::new(Instant::now() + Duration::from_secs(60));
     let side = store.side();
     let read = CompactContext {
-        require_recovery: None,
         control: control.clone(),
         key: build(control.clone()).key,
         thread: ThreadId(1),
@@ -294,7 +200,6 @@ fn lifecycle_expired_barrier_answers_remain_budget_errors() {
     );
     assert_eq!(built.result, Err(Unbuilt::TooLarge { room: None }));
     let compact = CompactContext {
-        require_recovery: None,
         control: control.clone(),
         key: build(control.clone()).key,
         thread: ThreadId(1),
@@ -304,7 +209,6 @@ fn lifecycle_expired_barrier_answers_remain_budget_errors() {
     let compact = super::context::read_compact(None, compact, || panic!("no snapshot admitted"));
     assert_eq!(compact.result, Err(Unbuilt::TooLarge { room: None }));
     let job = ReadJob {
-        require_recovery: None,
         control,
         key: JobKey {
             thread: ThreadId(1),

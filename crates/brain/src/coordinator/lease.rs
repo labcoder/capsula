@@ -480,16 +480,7 @@ impl Coordinator {
         }
         let refused = run
             .route
-            .map_or_else(
-                || Some(sign_in_needed()),
-                |route| {
-                    self.refusal(route).or_else(|| {
-                        // A recovered route sends only a body read to its exact cutoff.
-                        (build.recovered_context != self.required_recovery(route))
-                            .then(sign_in_needed)
-                    })
-                },
-            )
+            .map_or_else(|| Some(sign_in_needed()), |route| self.refusal(route))
             .or_else(|| {
                 // A request that started before the switch went off still holds its own copy.
                 matches!(run.screen, Some(crate::context::Screen::Withdrawn))
