@@ -545,18 +545,28 @@ fn a_forward_call_the_pool_starts_after_the_deadline_makes_no_item_call() {
         let store = Fake::new(Item::Absent);
         let (mut attempt, _held) = start(&store);
         let (shell, key) = (shell(), key());
-        let publish = attempt.publish(&key, Instant::now() + Duration::from_millis(50), &shell);
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let publish = attempt.publish(&key, deadline, &shell);
         tokio::pin!(publish);
         assert!(
-            tokio::time::timeout(Duration::from_millis(200), &mut publish)
+            tokio::time::timeout(Duration::from_millis(20), &mut publish)
                 .await
                 .is_err(),
-            "settlement waits for the queued add"
+            "the add is queued behind the held thread"
         );
+        tokio::time::sleep_until((deadline + Duration::from_millis(20)).into()).await;
         free.send(()).expect("the blocker waits");
+        tokio::task::spawn_blocking(|| {})
+            .await
+            .expect("the one thread ran the queued add first");
+        assert_eq!(
+            store.calls(),
+            0,
+            "only the worker's own check ran, and it skipped the add"
+        );
+        assert_eq!(store.item(), Item::Absent);
         assert_eq!(publish.await, Err(Refused::Deadline));
         assert_eq!(store.calls(), 0);
-        assert_eq!(store.item(), Item::Absent);
     });
 }
 
