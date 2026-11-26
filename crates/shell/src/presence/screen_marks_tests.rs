@@ -1541,22 +1541,29 @@ fn ended(watching: &Watching, cx: &mut TestAppContext) {
     });
 }
 
-// The tests below that press Esc on a pending hold pin its cancel as it is told today: twice
-// for one press, once where the hold's input is revoked and once from the runs' hold.
+// The tests below that press Esc on a pending hold pin its cancel: once per press, where the
+// hold's input is revoked, never again from the runs' hold.
 
 #[gpui::test]
 fn the_hotkey_s_esc_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestAppContext) {
     let watching = marked(false, cx);
     watching.ready.owner.update(cx, |owner, cx| {
         assert!(owner.voice_working(), "the hold is still pending");
-        // The hotkey's reducer revokes the hold's input before the press is applied.
-        let cancelled = owner.link.cancel_input_gesture();
-        assert_eq!(cancelled, Some(GestureId(1)));
-        owner.native_escape(cancelled, None, cx).expect("escape");
+        // The hotkey's reducer revokes the hold's input for dispatch and sends its cancel
+        // before the press is applied.
+        let cancel = owner
+            .link
+            .revoke_input_for_dispatch()
+            .expect("the hold's input");
+        assert_eq!(cancel.target().0, GestureId(1));
+        assert!(owner.link.dispatch_input_cancel(&cancel));
+        owner
+            .native_escape(Some(GestureId(1)), None, cx)
+            .expect("escape");
     });
     cx.run_until_parked();
     let [stop, clear] = gone();
-    assert_eq!(told(&watching), [cancel(), stop, clear, cancel()]);
+    assert_eq!(told(&watching), [cancel(), stop, clear]);
     ended(&watching, cx);
 }
 
@@ -1619,7 +1626,7 @@ fn esc_through_the_hotkey_s_reducer_takes_a_pending_hold_s_marks_and_cancels_it(
     deliver(Event::Escape, after(at, 2000));
     cx.run_until_parked();
     let [stop, clear] = gone();
-    assert_eq!(told(&watching), [cancel(), cancel(), stop, clear]);
+    assert_eq!(told(&watching), [cancel(), stop, clear]);
     only_taken(&watching, cx);
 }
 
@@ -1726,12 +1733,7 @@ fn esc_in_another_app_takes_a_pending_hold_s_marks_and_cancels_it(cx: &mut TestA
             wake(cx);
         }
         let [stop, clear] = gone();
-        let expected = if woke_first {
-            [cancel(), stop, clear, cancel()]
-        } else {
-            [cancel(), cancel(), stop, clear]
-        };
-        assert_eq!(told(&watching), expected);
+        assert_eq!(told(&watching), [cancel(), stop, clear]);
         only_taken(&watching, cx);
     }
 }
@@ -2176,13 +2178,12 @@ fn a_press_that_cancelled_its_pending_hold_leaves_an_ordinary_drawing_up(cx: &mu
             if woke_first == Some(false) {
                 wake(cx);
             }
-            // The hold's cancels, the sources' stop and the marks' clear, and nothing else:
+            // The hold's cancel, the sources' stop and the marks' clear, and nothing else:
             // no `Stop`, and no `ClearDrawing` for the ordinary drawing.
             let [stop, clear] = gone();
             let expected = match (marks, woke_first) {
-                (true, Some(true)) => vec![cancel(), stop, clear, cancel()],
-                (true, _) => vec![cancel(), cancel(), stop, clear],
-                (false, _) => vec![cancel(), stop, cancel()],
+                (true, _) => vec![cancel(), stop, clear],
+                (false, _) => vec![cancel(), stop],
             };
             assert_eq!(
                 told(&watching),
@@ -2288,12 +2289,11 @@ fn a_reply_that_ends_the_hold_before_its_deferred_press_leaves_an_ordinary_drawi
         cx.run_until_parked();
         // The press's cancel and what the reply itself did, and nothing from the press after
         // it: no `Stop`, and no `ClearDrawing` for the ordinary drawing.
-        let expected = if interrupted {
-            vec![cancel(), Told::Stop]
-        } else {
-            vec![cancel(), Told::Stop, cancel()]
-        };
-        assert_eq!(told(&watching), expected, "interrupted {interrupted}");
+        assert_eq!(
+            told(&watching),
+            [cancel(), Told::Stop],
+            "interrupted {interrupted}"
+        );
         let notice = (!interrupted).then_some(Text::HoldCancelled);
         watching.ready.owner.read_with(cx, |owner, _| {
             assert_eq!(owner.voice.state.status, notice);
@@ -2596,7 +2596,7 @@ fn captured_cancel_before_first_state_never_promotes_its_automatic_stop(cx: &mut
     told(&watching);
     press_deferred(&deliver, at, cx);
     cx.run_until_parked();
-    assert_eq!(told(&watching), [cancel(), Told::Stop, cancel()]);
+    assert_eq!(told(&watching), [cancel(), Told::Stop]);
     state(&watching, RUN, Phase::Thinking, HOLD, cx);
     cx.run_until_parked();
     assert_eq!(
@@ -3044,7 +3044,7 @@ fn a_deferred_press_stops_what_a_cancelled_hold_s_run_still_draws(cx: &mut TestA
     status(&watching.ready.owner, 1, 1, HoldStatus::Cancelled, cx);
     cx.run_until_parked();
     let stop = stopped(vec![cut(OTHER)]);
-    assert_eq!(told(&watching), [cancel(), Told::Stop, cancel(), stop]);
+    assert_eq!(told(&watching), [cancel(), Told::Stop, stop]);
     watching.ready.owner.read_with(cx, |owner, _| {
         assert_eq!(owner.presenter.stoppable_run(), None);
         assert_eq!(scene_ids(&owner.presenter), [OTHER, DRAWN]);

@@ -242,6 +242,14 @@ impl Presence {
     ) {
         self.stop_line(cx);
         let ended = self.voice.state.end(text);
+        // A press that revoked this hold's input for dispatch sends its cancel; the runs' is skipped.
+        let deferred = ended
+            .gesture
+            .zip(self.session.as_ref())
+            .and_then(|(gesture, session)| {
+                self.link
+                    .deferred_input_cancel(gesture, session.generation())
+            });
         if let Some(gesture) = ended.gesture {
             self.marks_dropped(gesture, cx);
             self.link.microphone_gate().cancel(gesture);
@@ -251,7 +259,7 @@ impl Presence {
             self.unused_voice(token, Some(session));
         }
         self.runs.cancel_hold();
-        self.drain_voice_cancel(covered);
+        self.drain_voice_cancel(covered.or(deferred.as_ref()));
         self.voice_notice(ended.notice, cx);
     }
 
