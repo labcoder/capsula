@@ -10,6 +10,7 @@ pub(super) mod clock;
     reason = "the dormant Keychain store calls Security and LocalAuthentication"
 )]
 pub(super) mod credential;
+pub(super) mod entry;
 #[expect(unsafe_code, reason = "the instance item's writes call Security")]
 #[cfg_attr(
     not(test),

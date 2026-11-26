@@ -4,13 +4,21 @@
 use std::{ffi::OsString, process::ExitCode};
 
 use kumochi_brain::platform::{Mode, supports};
-use kumochi_brain::{BrainError, MCP_BRIDGE, PARENT_BOUND, SCREEN_WORKER, SPEECH_WORKER, logging};
-use kumochi_protocol::constants;
+use kumochi_brain::{
+    BrainError, MCP_BRIDGE, PARENT_BOUND, ParentBoundError, SCREEN_WORKER, SPEECH_WORKER, logging,
+};
+use kumochi_protocol::constants::{self, BRAIN_EXIT_BUSY, ProductIdentity};
+
+#[path = "main_platform.rs"]
+mod platform;
 
 const UNAVAILABLE: u8 = 69;
 const BAD_ARGUMENTS: u8 = 64;
-/// Another session of this user is using the profile: a refusal, not a crash.
-const PROFILE_BUSY: u8 = 75;
+/// A parent-bound brain whose settlement didn't confirm every stage.
+const INCOMPLETE: u8 = 70;
+/// A parent-bound start that was refused: the parent, the inherited pair, the greeting or the
+/// commit claim.
+const REFUSED: u8 = 76;
 
 #[derive(PartialEq, Eq)]
 enum Route {
@@ -71,10 +79,7 @@ fn main() -> ExitCode {
     match route {
         Route::BadParentBound => ExitCode::from(BAD_ARGUMENTS),
         _ if !supports(mode) => ExitCode::from(UNAVAILABLE),
-        Route::ParentBound => match kumochi_brain::run_parent_bound() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(_) => ExitCode::from(UNAVAILABLE),
-        },
+        Route::ParentBound => ExitCode::from(parent_bound()),
         Route::Detached => run_detached(),
         Route::Bridge(launch) => match kumochi_brain::bridge::serve(&launch) {
             Ok(()) => ExitCode::SUCCESS,
@@ -104,6 +109,24 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Route::Diagnostic(diagnostic) => run_diagnostic(diagnostic),
+    }
+}
+
+/// Takes descriptors 3 and 4 only after the mode and identity checks, and before anything else in
+/// the process can open a descriptor.
+fn parent_bound() -> u8 {
+    if ProductIdentity::ACTIVE == ProductIdentity::GATE {
+        return UNAVAILABLE;
+    }
+    let Ok(fds) = platform::claim_inherited() else {
+        return REFUSED;
+    };
+    match kumochi_brain::run_parent_bound(fds) {
+        Ok(()) => 0,
+        Err(ParentBoundError::Unsupported) => UNAVAILABLE,
+        Err(ParentBoundError::Busy) => BRAIN_EXIT_BUSY,
+        Err(ParentBoundError::Refused) => REFUSED,
+        Err(ParentBoundError::Incomplete) => INCOMPLETE,
     }
 }
 
@@ -155,7 +178,7 @@ fn run_detached() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(BrainError::ProfileBusy) => {
             tracing::warn!("another session is using this profile");
-            ExitCode::from(PROFILE_BUSY)
+            ExitCode::from(BRAIN_EXIT_BUSY)
         }
         Err(error) => {
             log_brain_stopped(&error);

@@ -29,6 +29,26 @@ the normal brain. The bridge consumes one launch argument and ignores the rest; 
 invalid launch fails rather than starting the brain. The other workers and diagnostics ignore the
 entire tail. Recognized debug diagnostics still exit 10 on a supported release build.
 
+A ParentBound start checks, in order, the support table, Gate identity (refused, 69) and then
+descriptors 3 and 4. The executable's own platform module (`main_platform.rs`) takes them as
+owned handles only when both are open, before anything else in the process can open a
+descriptor, and refuses with 76 otherwise; it never closes or scans other descriptors, since the
+shell spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`. The library entry, `run_parent_bound`, takes
+those handles as `InheritedFds` and repeats the mode and Gate checks before it reads them, so a
+refused call drops them unread and the shell sees EOF. It returns a typed `ParentBoundError`,
+and only the executable maps it to a code:
+
+| Result | Exit |
+|---|---|
+| A clean, confirmed quit | 0 |
+| `Unsupported`: the mode, Gate identity or missing prerequisites | 69 |
+| `Incomplete`: a settlement stage short of confirmed | 70 |
+| `Busy`: another session holds the instance | 75, `BRAIN_EXIT_BUSY`, shared with the shell |
+| `Refused`: the descriptors, the parent, the pair, the greeting or the commit claim | 76 |
+
+Detached keeps 75 for a busy profile. Today every ParentBound start still exits 69 at the support
+check.
+
 Argument matching uses OS strings without logging them. Non-Unicode input no longer panics: a
 non-Unicode first argument falls through like an unknown flag; a non-Unicode bridge launch is
 treated as an invalid launch (exit 1 on Windows); and any non-Unicode argument in a tail that was

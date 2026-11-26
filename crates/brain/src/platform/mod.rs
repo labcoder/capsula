@@ -16,6 +16,14 @@ impl BoundHello {
 #[cfg(target_os = "macos")]
 pub(crate) use macos::pair::BoundHello;
 
+/// The inherited pair's descriptors, owned. Only macOS starts a brain on an inherited pair.
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug)]
+pub enum InheritedFds {}
+
+#[cfg(target_os = "macos")]
+pub use macos::entry::InheritedFds;
+
 /// The instance item's session lock and item; only macOS has them.
 #[cfg(not(target_os = "macos"))]
 pub(crate) enum InstanceLock {}

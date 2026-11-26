@@ -208,13 +208,38 @@ pub fn run() -> impl Future<Output = Result<(), BrainError>> {
     )
 }
 
-/// Refuses parent-bound startup before opening any resources.
+/// Why parent-bound startup ended without a clean quit. The executable maps each to an exit code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ParentBoundError {
+    /// This build, mode or identity doesn't start parent-bound, or its prerequisites aren't ready.
+    #[error("parent-bound startup is unsupported")]
+    Unsupported,
+    /// Another session holds the instance.
+    #[error("another session holds the instance")]
+    Busy,
+    /// The parent, the inherited pair, the greeting or the commit claim refused.
+    #[error("parent-bound startup was refused")]
+    Refused,
+    /// Settlement couldn't confirm every stage.
+    #[error("parent-bound settlement is incomplete")]
+    Incomplete,
+}
+
+/// Starts a brain under its shell's lifetime, on the pair the executable took from descriptors 3
+/// and 4.
 ///
 /// # Errors
-/// This build always returns `Unsupported`, including under Gate identity.
-pub fn run_parent_bound() -> Result<(), BrainError> {
-    platform::require_mode(platform::Mode::ParentBound).map_err(BrainError::NativeRuntime)?;
-    Err(BrainError::NativeRuntime(io::ErrorKind::Unsupported.into()))
+/// This build always returns `Unsupported`, including under Gate identity, and drops `fds`
+/// unread.
+pub fn run_parent_bound(_fds: platform::InheritedFds) -> Result<(), ParentBoundError> {
+    use kumochi_protocol::constants::ProductIdentity;
+
+    platform::require_mode(platform::Mode::ParentBound)
+        .map_err(|_| ParentBoundError::Unsupported)?;
+    if ProductIdentity::ACTIVE == ProductIdentity::GATE {
+        return Err(ParentBoundError::Unsupported);
+    }
+    Err(ParentBoundError::Unsupported)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -583,14 +608,12 @@ async fn native_library_entries_return_unsupported() {
     }
 }
 
+/// macOS also runs the library entry on two test-owned pairs (`platform/macos/entry.rs`); elsewhere
+/// `InheritedFds` has no values.
 #[cfg(test)]
 #[test]
-fn parent_bound_library_entry_always_refuses() {
+fn no_platform_supports_parent_bound() {
     assert!(!platform::supports(platform::Mode::ParentBound));
-    assert!(matches!(
-        run_parent_bound(),
-        Err(BrainError::NativeRuntime(error)) if error.kind() == io::ErrorKind::Unsupported
-    ));
 }
 
 /// The engine runs use: in a dev build that names a script in
