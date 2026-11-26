@@ -33,11 +33,13 @@ use transport::{BoundedHttp, Control};
 #[path = "issues/owner_tests.rs"]
 mod owner_tests;
 
+/// The issue-session counter one start owns: whatever reserves its first session before a brain
+/// exists hands the same counter to [`Brain::new`], so no epoch is issued twice.
 #[derive(Debug, Default)]
-pub(super) struct IssueEpochs(u64);
+pub(crate) struct IssueEpochs(u64);
 
 impl IssueEpochs {
-    fn reserve(&mut self, incarnation: Incarnation) -> IssueSession {
+    pub(crate) fn reserve(&mut self, incarnation: Incarnation) -> IssueSession {
         self.0 = self
             .0
             .checked_add(1)

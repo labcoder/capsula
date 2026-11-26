@@ -51,6 +51,7 @@ fn brain_under(scratch: &Scratch, profile: Arc<SessionLock>) -> Brain {
         Selected::Fixture(Box::new(Fixture::parse("").expect("script"))),
         scratch.config(),
         test_support::accounts(scratch),
+        crate::runtime::IssueEpochs::default(),
     )
     .expect("brain")
 }

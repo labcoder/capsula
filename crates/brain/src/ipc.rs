@@ -90,7 +90,7 @@ pub(crate) enum Session {
 
 /// Why a client was turned away or a session broke.
 #[derive(Debug, thiserror::Error)]
-enum SessionError {
+pub(crate) enum SessionError {
     #[error("client is not the shell beside the brain")]
     NotOurShell,
     #[error("client didn't finish the handshake in time")]
@@ -337,7 +337,7 @@ impl Pipes {
 /// One transport's part of the greeting: acquiring, reading, writing and binding its two legs.
 /// Negotiation and authorization stay in [`greet`], so every transport runs the same checks in the
 /// same order. A greeting comes from the transport's own reader; shared code never assembles one.
-trait Legs {
+pub(crate) trait Legs {
     /// The one process both legs were bound to.
     type Peer;
     /// The data leg, read after its greeting.
@@ -362,6 +362,22 @@ trait Legs {
     /// Binds both legs to one process.
     fn bind(&mut self) -> Result<Self::Peer, SessionError>;
     fn data(&mut self) -> &mut Self::Data;
+    /// Refuses once the transport knows its shell is gone. [`greet`] checks it, each time with no
+    /// await in between, before reserving the session Welcome carries and after the data greeting.
+    fn fence(&self) -> Result<(), SessionError> {
+        Ok(())
+    }
+    /// The last check before Welcome or `BuildMismatch` is written, with no await in between. The
+    /// pipes check nothing here; a transport that must not answer a lost shell or a passed
+    /// `deadline` refuses, since `timeout_at` polls a write that's ready before its timer.
+    fn before_reply(&self, _deadline: Instant) -> Result<(), SessionError> {
+        Ok(())
+    }
+    /// Called before a build mismatch is answered, so it runs even when the answer can't be
+    /// written. Logs by default; a transport that must not log before its commit stays silent.
+    fn mismatch_notice(&self) {
+        tracing::warn!("build mismatch");
+    }
 }
 
 /// The pipes: the data instance is accepted only after Welcome, and the OS names each client's
@@ -439,7 +455,7 @@ impl Legs for PipeLegs<'_> {
 }
 
 /// A greeting both legs passed, ready to serve.
-struct Admitted<P> {
+pub(crate) struct Admitted<P> {
     peer: P,
     audio: AudioSession,
     start: PairStart,
@@ -452,7 +468,7 @@ struct Admitted<P> {
 /// before a build mismatch is disclosed or a session reserved, and nothing on the data leg is
 /// touched before Welcome. `reserve` reserves the issue session Welcome carries; installing it is
 /// the caller's. `None`: a shell from another build was told so.
-async fn greet<L: Legs>(
+pub(crate) async fn greet<L: Legs>(
     legs: &mut L,
     tap: &mut Tap,
     deadline: Instant,
@@ -467,10 +483,11 @@ async fn greet<L: Legs>(
     match check_hello(greeting) {
         Err(Refusal::WrongCapability) => return Err(SessionError::WrongCapability),
         Err(Refusal::BuildMismatch) => {
-            tracing::warn!("build mismatch");
+            legs.mismatch_notice();
             let reply = ControlToShell::BuildMismatch {
                 brain_build: BUILD_ID.to_owned(),
             };
+            legs.before_reply(deadline)?;
             timeout_at(deadline, send(legs, &reply, tap))
                 .await
                 .map_err(|_| SessionError::Timeout)??;
@@ -478,11 +495,13 @@ async fn greet<L: Legs>(
         }
         Ok(()) => {}
     }
+    legs.fence()?;
     let session = reserve();
     let welcome = ControlToShell::Welcome {
         incarnation: session.incarnation,
         issue_epoch: session.epoch,
     };
+    legs.before_reply(deadline)?;
     timeout_at(deadline, send(legs, &welcome, tap))
         .await
         .map_err(|_| SessionError::Timeout)??;
@@ -525,6 +544,7 @@ async fn read_startup_data<L: Legs>(
     if paired != expected {
         return Err(SessionError::Protocol("data hello does not match control"));
     }
+    legs.fence()?;
     let peer = legs.bind()?;
     let text_metrics = read_text_metrics(legs.data(), deadline).await?;
     Ok((peer, text_metrics))

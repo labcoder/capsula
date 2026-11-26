@@ -731,6 +731,7 @@ fn patient_brain_with(scratch: &Scratch, engine: Box<dyn Engine>) -> Brain {
         crate::runtime::Selected::Fixture(engine),
         scratch.config(),
         crate::test_support::accounts(scratch),
+        crate::runtime::IssueEpochs::default(),
     )
     .expect("brain")
 }
@@ -1411,6 +1412,7 @@ async fn the_vault_history_link_reaches_the_store_only_until_it_closes() {
             crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("script"))),
             scratch.config(),
             accounts,
+            crate::runtime::IssueEpochs::default(),
         )
         .expect("brain");
         let mut seen = brain.seen.take().expect("observer");

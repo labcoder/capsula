@@ -17,9 +17,9 @@ use crate::ipc::{self, PeerAuth};
 use crate::platform::macos::stream::{RecordReader, RecordWriter};
 
 /// A synthetic group secret; no real key is ever used here.
-const SECRET: [u8; SECRET_LEN] = [0x5A; SECRET_LEN];
+pub(super) const SECRET: [u8; SECRET_LEN] = [0x5A; SECRET_LEN];
 const BOUND: Duration = Duration::from_secs(10);
-const SHORT: Duration = Duration::from_millis(60);
+pub(super) const SHORT: Duration = Duration::from_millis(60);
 
 fn no_sigpipe(fd: &impl AsFd) {
     let on: libc::c_int = 1;
@@ -38,14 +38,14 @@ fn no_sigpipe(fd: &impl AsFd) {
 }
 
 /// A connected stream pair as the shell makes it: SIGPIPE suppressed on both ends.
-fn sockets() -> (StdStream, StdStream) {
+pub(super) fn sockets() -> (StdStream, StdStream) {
     let (a, b) = StdStream::pair().expect("socketpair");
     no_sigpipe(&a);
     no_sigpipe(&b);
     (a, b)
 }
 
-fn fd(stream: StdStream) -> OwnedFd {
+pub(super) fn fd(stream: StdStream) -> OwnedFd {
     OwnedFd::from(stream)
 }
 
@@ -136,7 +136,7 @@ async fn a_write_after_the_shell_closes_fails_with_epipe_instead_of_a_signal() {
     assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
 }
 
-async fn handshake_message(
+pub(super) async fn handshake_message(
     io: &mut UnixStream,
     len: impl FnOnce([u8; ENVELOPE_LEN]) -> Result<usize, SessionError>,
 ) -> Vec<u8> {
@@ -148,7 +148,7 @@ async fn handshake_message(
 }
 
 /// The honest shell: the initiator's steps over its two ends.
-async fn shell(
+pub(super) async fn shell(
     control: &mut UnixStream,
     data: &mut UnixStream,
     secret: &[u8; SECRET_LEN],
@@ -190,7 +190,7 @@ impl Shell {
 }
 
 /// The adopted pair and the shell's two ends, as tokio streams.
-fn ends() -> (InheritedPair, [UnixStream; 2]) {
+pub(super) fn ends() -> (InheritedPair, [UnixStream; 2]) {
     let (control, shell_control) = sockets();
     let (data, shell_data) = sockets();
     let pair = adopt(fd(control), fd(data)).expect("adopted");
@@ -201,13 +201,13 @@ fn ends() -> (InheritedPair, [UnixStream; 2]) {
     (pair, shell)
 }
 
-fn brain() -> BrainAwaitsInit {
+pub(super) fn brain() -> BrainAwaitsInit {
     BrainAwaitsInit::new(&SECRET, Channel::Dev).expect("brain starts")
 }
 
 /// Runs a two-sided exchange to completion within the bound, so a side that stops answering
 /// fails the test instead of hanging it.
-async fn bounded<F: Future>(exchange: F) -> F::Output {
+pub(super) async fn bounded<F: Future>(exchange: F) -> F::Output {
     tokio::time::timeout(BOUND, exchange)
         .await
         .expect("the exchange finishes within the bound")
@@ -245,11 +245,11 @@ async fn bound() -> (AuthenticatedPair, Shell) {
     (pair, shell)
 }
 
-fn hello() -> Hello {
+pub(super) fn hello() -> Hello {
     Hello::session(BUILD_ID.to_owned())
 }
 
-fn by() -> Instant {
+pub(super) fn by() -> Instant {
     Instant::now() + BOUND
 }
 

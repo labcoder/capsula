@@ -727,8 +727,18 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
             Fixture::parse(script).expect("read the answer fixture"),
         ))
     };
-    let mut brain = Brain::new(store, profile, main, high, scenes, engine, config, accounts)
-        .expect("start the fixture Brain");
+    let mut brain = Brain::new(
+        store,
+        profile,
+        main,
+        high,
+        scenes,
+        engine,
+        config,
+        accounts,
+        crate::runtime::IssueEpochs::default(),
+    )
+    .expect("start the fixture Brain");
     if let Some(probe) = probe.filter(|probe| probe.hold) {
         attach_hold_input(&mut brain, dir, probe).await;
     }

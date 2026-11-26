@@ -121,6 +121,7 @@ fn typed_brain_with_steps(
             crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("fixture"))),
             scratch.config(),
             crate::test_support::accounts(scratch),
+            crate::runtime::IssueEpochs::default(),
         )
         .expect("brain"),
         scene,
@@ -220,6 +221,7 @@ async fn a_corrupt_scene_is_cleared_without_losing_the_other_three_or_stopping_t
         crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("fixture"))),
         scratch.config(),
         crate::test_support::accounts(&scratch),
+        crate::runtime::IssueEpochs::default(),
     )
     .expect("drawing corruption must not stop the brain");
     drop(guard);
@@ -781,6 +783,7 @@ async fn an_unavailable_drawing_read_starts_the_brain_but_cannot_confirm_quit() 
         crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("fixture"))),
         scratch.config(),
         crate::test_support::accounts(&scratch),
+        crate::runtime::IssueEpochs::default(),
     )
     .expect("a failed drawing query must not stop the brain");
     assert!(!brain.coordinator.drawing_available());
@@ -926,6 +929,7 @@ async fn a_typed_restart_describes_and_queues_the_original_log_with_scene_owners
         crate::runtime::Selected::Fixture(Box::new(Fixture::parse("").expect("fixture"))),
         scratch.config(),
         crate::test_support::accounts(&scratch),
+        crate::runtime::IssueEpochs::default(),
     )
     .expect("brain");
     let (out, mut controls) = mpsc::channel(4);

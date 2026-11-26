@@ -399,7 +399,10 @@ stream with `SO_NOSIGPIPE` set and a stable identity: two `fstat` samples that a
 nonzero inode, because Darwin numbers a socket's inode lazily from zero. The two identities must
 differ, so one socket can't pose as both legs. Darwin doesn't answer `SO_ACCEPTCONN` for a Unix
 socket, so a listener is refused because it has no peer, and a TCP stream because its peer isn't
-`AF_UNIX`. `adopt` then sets close-on-exec and non-blocking. `respond` takes that checked pair
+`AF_UNIX`. `adopt` then sets close-on-exec and non-blocking. `try_ready` writes the one READY
+byte, `SESSION_READY` (`R`, 0x52), on the control leg without waiting. It goes out once the
+instance item is published and before the shell's first handshake message, and the shell reads
+the item only after it; nothing writes it yet. `respond` takes that checked pair
 and a session state the caller made before its first await, so the caller can wipe its copy of
 the secret. It hands both ends to tokio and runs the responder handshake by one deadline: control
 init and Finished, then data init and Finished, then Bind. It writes `BindAck` before it
@@ -408,6 +411,20 @@ openers. Each greeting is read once, control first, through that leg's record re
 these sets the pair cell, so the whole pair stays refused: a read out of order, a second read, a
 frame that isn't the greeting, a data greeting in the other mode, a missed deadline (checked
 again after ready I/O completes), or a greeting read that's dropped part way.
+
+`PairLegs` (`pair_legs.rs`, dormant) runs the shared `greet` over an authenticated pair, with the
+same checks in the same order as the pipes. The control greeting is authorized as `SessionBound`
+(the zero placeholder) before a build mismatch is disclosed, Welcome goes out through the
+control sealer, and the data greeting and text metrics come through the pair's own reader.
+Acquiring the data leg does nothing, and binding names the parent shell. Three `Legs` hooks keep
+transport policy out of `greet`. `fence` refuses once the shell is known to be gone; `greet`
+checks it, each time with no await in between, before it reserves the session and after the data
+greeting. A third hook, `before_reply`, runs right before Welcome or BuildMismatch is written:
+`PairLegs` refuses there on parent loss and then on a passed deadline, since `timeout_at` polls a
+ready write before its timer. The pipes check nothing in either hook, so Detached greets as
+before. `mismatch_notice` runs before the BuildMismatch reply, so the pipes log a mismatch even
+when the reply can't be written. `PairLegs` logs nothing and never writes its tap, since
+nothing before the commit may.
 
 The shell's side lives in `shell-core`'s `platform/macos/leg.rs` and `connect_pair`, also
 dormant: nothing calls them, and the group secret is a parameter for now. `initiate` runs the
