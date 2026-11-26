@@ -93,7 +93,7 @@ pub enum ProductFolder {
 /// The anchor's chain with this edition's admitted product folder last, all held.
 #[must_use = "dropping the product folder releases its held chain"]
 pub struct Product {
-    _held: Directories,
+    held: Directories,
 }
 
 /// A folder in a held anchor, admitted like a product folder and held, with the anchor kept.
@@ -197,17 +197,7 @@ pub fn open_shell_storage(support: &Path, product: &str) -> Result<ShellStorage,
     let product = basename(product)?;
     let Support(mut directories) = admit_support(support)?;
     for name in [product, c"logs".to_owned()] {
-        directories.check()?;
-        let parent = &directories.held.last().ok_or(Untrusted::Io)?.file;
-        // SAFETY: parent is retained; name is a validated basename; no existing object is repaired.
-        if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EEXIST) {
-                return Err(AcquisitionError::Open(error.kind()));
-            }
-        }
-        let file = open_at(parent.as_raw_fd(), &name, DIRECTORY_FLAGS, 0)?;
-        directories.push_private(file, name)?;
+        directories.create_private(name)?;
     }
     directories.check()?;
     Ok(ShellStorage(Arc::new(directories)))
@@ -292,7 +282,7 @@ impl Support {
         };
         directories.push_private(file, product)?;
         directories.check()?;
-        Ok(ProductFolder::Held(Product { _held: directories }))
+        Ok(ProductFolder::Held(Product { held: directories }))
     }
 
     /// Looks up the folder `name` in this anchor like [`Support::product_folder`], keeping the
@@ -318,6 +308,36 @@ impl Support {
         self.0.check()?;
         Ok(Some(HeldFolder(child)))
     }
+
+    /// Creates the folder `product` in this anchor exactly as [`open_shell_storage`]'s product
+    /// step does, and nothing beneath it: no `logs` folder, log or store.
+    ///
+    /// # Errors
+    /// As that step: an invalid name, an existing unsafe object (never repaired), a failed
+    /// re-inspection of the chain, and creation or open failure.
+    pub fn create_product(self, product: &str) -> Result<Product, AcquisitionError> {
+        let product = basename(product)?;
+        let Self(mut directories) = self;
+        directories.create_private(product)?;
+        directories.check()?;
+        Ok(Product { held: directories })
+    }
+}
+
+impl Product {
+    /// Opens/creates one private lock basename in the product folder like
+    /// [`ShellStorage::open_instance_lock`], the lock keeping the held chain until it closes.
+    ///
+    /// # Errors
+    /// As [`ShellStorage::open_instance_lock`].
+    pub fn into_lock(self, name: &str) -> Result<AdmittedLock, AcquisitionError> {
+        let directories = Arc::new(self.held);
+        let file = directories.open_lock(name)?;
+        Ok(AdmittedLock {
+            file,
+            _directories: directories,
+        })
+    }
 }
 
 impl ShellStorage {
@@ -326,13 +346,8 @@ impl ShellStorage {
     /// # Errors
     /// Returns a stage-tagged creation/open or privacy/inspection refusal.
     pub fn open_instance_lock(&self, name: &str) -> Result<AdmittedLock, AcquisitionError> {
-        let name = basename(name)?;
-        if !name.to_bytes().ends_with(b".lock") {
-            return Err(Untrusted::Unsafe.into());
-        }
-        let file = self.open_private(self.0.private_start, &name, libc::O_RDWR, true)?;
         Ok(AdmittedLock {
-            file,
+            file: self.0.open_lock(name)?,
             _directories: Arc::clone(&self.0),
         })
     }
@@ -349,7 +364,7 @@ impl ShellStorage {
         log_date(prefix, name.as_bytes()).ok_or(Untrusted::Unsafe)?;
         let prefix = prefix.to_owned();
         let name = basename(name)?;
-        let file = self.open_private(
+        let file = self.0.open_private(
             self.0.private_start + 1,
             &name,
             libc::O_WRONLY | libc::O_APPEND,
@@ -362,62 +377,6 @@ impl ShellStorage {
             identity,
             prefix,
         })
-    }
-
-    #[expect(
-        clippy::fn_params_excessive_bools,
-        reason = "preserve the reviewed distinction between creation and existing-only opens"
-    )]
-    fn open_private(
-        &self,
-        parent: usize,
-        name: &CStr,
-        access: libc::c_int,
-        create: bool,
-    ) -> Result<File, AcquisitionError> {
-        self.0.check()?;
-        let file = self.open_candidate(parent, name, access, create)?;
-        self.0.check()?;
-        Ok(file)
-    }
-
-    #[expect(
-        clippy::fn_params_excessive_bools,
-        reason = "retention passes false so a missing candidate is never created"
-    )]
-    fn open_candidate(
-        &self,
-        parent: usize,
-        name: &CStr,
-        access: libc::c_int,
-        create: bool,
-    ) -> Result<File, AcquisitionError> {
-        let folder = &self.0.held[parent].file;
-        let flags = access | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY;
-        let file = if create {
-            match open_at(
-                folder.as_raw_fd(),
-                name,
-                flags | libc::O_CREAT | libc::O_EXCL,
-                0o600,
-            ) {
-                Ok(file) => file,
-                Err(AcquisitionError::Open(io::ErrorKind::AlreadyExists)) => {
-                    precheck(folder, name, self.0.user)?;
-                    open_at(folder.as_raw_fd(), name, flags, 0)?
-                }
-                Err(error) => return Err(error),
-            }
-        } else {
-            precheck(folder, name, self.0.user)?;
-            open_at(folder.as_raw_fd(), name, flags, 0)?
-        };
-        let identity = protected::inspect_object(&file, self.0.user, ObjectKind::Regular)?;
-        if volume(&file, true)? != self.0.held[self.0.private_start - 1].volume {
-            return Err(Untrusted::Unsafe.into());
-        }
-        named(folder, name, &identity)?;
-        Ok(file)
     }
 
     /// Makes one finite best-effort pass, protecting this owner's active log by identity.
@@ -467,7 +426,10 @@ impl ShellStorage {
             };
             let Some(file) = checked_candidate(
                 || self.0.check(),
-                || self.open_candidate(self.0.private_start + 1, &name, libc::O_RDONLY, false),
+                || {
+                    self.0
+                        .open_candidate(self.0.private_start + 1, &name, libc::O_RDONLY, false)
+                },
             )?
             else {
                 result.skipped += 1;
@@ -491,7 +453,10 @@ impl ShellStorage {
         for (_, name, identity) in candidates.into_iter().skip(keep - 1) {
             let Some(file) = checked_candidate(
                 || self.0.check(),
-                || self.open_candidate(self.0.private_start + 1, &name, libc::O_RDONLY, false),
+                || {
+                    self.0
+                        .open_candidate(self.0.private_start + 1, &name, libc::O_RDONLY, false)
+                },
             )?
             else {
                 result.skipped += 1;
@@ -524,6 +489,88 @@ fn checked_candidate<T>(
     let candidate = open_candidate();
     check_parent()?;
     Ok(candidate.ok())
+}
+
+impl Directories {
+    /// Opens/creates one private `.lock` basename in the product folder, never truncating.
+    fn open_lock(&self, name: &str) -> Result<File, AcquisitionError> {
+        let name = basename(name)?;
+        if !name.to_bytes().ends_with(b".lock") {
+            return Err(Untrusted::Unsafe.into());
+        }
+        self.open_private(self.private_start, &name, libc::O_RDWR, true)
+    }
+
+    /// Creates `name` at 0700 in the last held folder unless it exists, then admits and holds it.
+    fn create_private(&mut self, name: CString) -> Result<(), AcquisitionError> {
+        self.check()?;
+        let parent = &self.held.last().ok_or(Untrusted::Io)?.file;
+        // SAFETY: parent is retained; name is a validated basename; no existing object is repaired.
+        if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EEXIST) {
+                return Err(AcquisitionError::Open(error.kind()));
+            }
+        }
+        let file = open_at(parent.as_raw_fd(), &name, DIRECTORY_FLAGS, 0)?;
+        self.push_private(file, name)
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "preserve the reviewed distinction between creation and existing-only opens"
+    )]
+    fn open_private(
+        &self,
+        parent: usize,
+        name: &CStr,
+        access: libc::c_int,
+        create: bool,
+    ) -> Result<File, AcquisitionError> {
+        self.check()?;
+        let file = self.open_candidate(parent, name, access, create)?;
+        self.check()?;
+        Ok(file)
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "retention passes false so a missing candidate is never created"
+    )]
+    fn open_candidate(
+        &self,
+        parent: usize,
+        name: &CStr,
+        access: libc::c_int,
+        create: bool,
+    ) -> Result<File, AcquisitionError> {
+        let folder = &self.held[parent].file;
+        let flags = access | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY;
+        let file = if create {
+            match open_at(
+                folder.as_raw_fd(),
+                name,
+                flags | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            ) {
+                Ok(file) => file,
+                Err(AcquisitionError::Open(io::ErrorKind::AlreadyExists)) => {
+                    precheck(folder, name, self.user)?;
+                    open_at(folder.as_raw_fd(), name, flags, 0)?
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            precheck(folder, name, self.user)?;
+            open_at(folder.as_raw_fd(), name, flags, 0)?
+        };
+        let identity = protected::inspect_object(&file, self.user, ObjectKind::Regular)?;
+        if volume(&file, true)? != self.held[self.private_start - 1].volume {
+            return Err(Untrusted::Unsafe.into());
+        }
+        named(folder, name, &identity)?;
+        Ok(file)
+    }
 }
 
 impl Directories {
