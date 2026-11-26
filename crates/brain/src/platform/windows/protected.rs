@@ -20,15 +20,18 @@ use kumochi_storage::user_sid;
 #[cfg(test)]
 pub(crate) use kumochi_storage::{DaclEntry, dacl_entries, dacl_sddl, set_dacl};
 pub(crate) use kumochi_storage::{hold_chain, owner_only_dir};
-use windows_sys::Win32::Foundation::ERROR_NO_MORE_FILES;
+use windows_sys::Win32::Foundation::{
+    ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_FULL_DIR_INFO, FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FileDispositionInfo, FileFullDirectoryInfo, FileFullDirectoryRestartInfo,
-    FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, READ_CONTROL,
-    SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
+    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO,
+    FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_FULL_DIR_INFO, FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_READ_EA, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, FileDispositionInfoEx,
+    FileFullDirectoryInfo, FileFullDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, READ_CONTROL, SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::UI::Shell::FOLDERID_Profile;
 
@@ -210,21 +213,43 @@ fn remove_entry(path: &Path, trusted: &Trusted) -> Result<(), Untrusted> {
     delete_on_close(&entry)
 }
 
-/// Deletes what `entry` is open on, with DELETE, once its last handle closes.
+/// Deletes what `entry` is open on, with DELETE, once `entry` closes. With POSIX semantics its name
+/// leaves the folder then even while another process, such as a virus scan, still has it open, so
+/// the folder above can be deleted next. Only a volume that refuses them gets the legacy delete,
+/// whose name stays until the last handle closes.
 fn delete_on_close(entry: &File) -> Result<(), Untrusted> {
-    let delete = FILE_DISPOSITION_INFO { DeleteFile: true };
-    let size = u32::try_from(size_of::<FILE_DISPOSITION_INFO>()).map_err(|_| Untrusted::Io)?;
-    // SAFETY: `delete` is readable for `size` bytes and the handle is open with DELETE.
+    let posix = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    };
+    match set_information(entry, FileDispositionInfoEx, &posix) {
+        Err(error)
+            if matches!(
+                error.raw_os_error().map(i32::cast_unsigned),
+                Some(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED)
+            ) =>
+        {
+            let legacy = FILE_DISPOSITION_INFO { DeleteFile: true };
+            set_information(entry, FileDispositionInfo, &legacy)
+        }
+        set => set,
+    }
+    .map_err(|_| Untrusted::Io)
+}
+
+/// Sets `info`, the `class` record, on what `entry` is open on.
+fn set_information<T>(entry: &File, class: FILE_INFO_BY_HANDLE_CLASS, info: &T) -> io::Result<()> {
+    let size = u32::try_from(size_of::<T>()).map_err(|_| io::ErrorKind::InvalidInput)?;
+    // SAFETY: `info` is readable for `size` bytes and the handle is open for the call.
     let set = unsafe {
         SetFileInformationByHandle(
             entry.as_raw_handle(),
-            FileDispositionInfo,
-            (&raw const delete).cast(),
+            class,
+            (&raw const *info).cast(),
             size,
         )
     };
     if set == 0 {
-        return Err(Untrusted::Io);
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
