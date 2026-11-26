@@ -175,8 +175,9 @@ grace. Parent-bound startup serves on these legs, behind the support check and t
 prerequisites. The C-7 acceptance tests in
 `crates/shell-core/src/platform/macos/leg_credit_tests.rs` pair both real adapters over socketpairs
 and drive the parent-bound serving path with offline fixtures. They cover five-record, 256 KiB
-logical frames, the 512 KiB credit window, Stop and Ping while data is blocked, and the 2 s STALL
-deadline across fragment progress.
+logical frames, exactly one counted shell receipt per frame, and the 512 KiB credit window on both
+initial send and refill. They also cover Stop and Ping while data is blocked and the 2 s STALL
+deadline across fragment progress, checking both interruptions' durable reasons.
 
 ## The instance item (dormant)
 

@@ -2,6 +2,7 @@ use std::os::fd::AsRawFd as _;
 use std::sync::mpsc;
 
 use kumochi_brain::platform::InheritedFds;
+use kumochi_brain::store::Interruption;
 use kumochi_protocol::BUILD_ID;
 use kumochi_protocol::constants::{ProductIdentity, SESSION_READY};
 use kumochi_protocol::message::{
@@ -9,6 +10,7 @@ use kumochi_protocol::message::{
 };
 
 use super::*;
+use crate::link::{LinkEvent, counted_legacy_fixture};
 use crate::platform::macos::{child, pair};
 
 const LOGICAL: usize = 256 * 1024;
@@ -23,7 +25,7 @@ const RUN: RunId = RunId(1);
 struct Shell {
     control: PipeClient,
     data: PipeClient,
-    finished: mpsc::Receiver<Result<(), kumochi_brain::ParentBoundError>>,
+    finished: mpsc::Receiver<Result<Interruption, kumochi_brain::ParentBoundError>>,
 }
 
 impl Shell {
@@ -138,20 +140,28 @@ impl Shell {
             "all record plaintext fits one logical frame"
         );
         let mut encoded = bytes.as_slice();
-        let Some(DataToShell::AssistantText { run, delta }) =
-            frame::read(&mut encoded, Pipe::Data).expect("whole frame")
-        else {
-            panic!("expected synthetic run text");
-        };
-        assert_eq!(run, RUN, "text belongs to the submitted run");
+        let message = frame::read(&mut encoded, Pipe::Data)
+            .expect("whole frame")
+            .expect("a frame");
         assert!(
             encoded.is_empty(),
             "the five records contain exactly one frame"
         );
-        assert!(
-            delta.bytes().all(|byte| byte == letter),
-            "the requested frame's synthetic text arrived intact and in order",
+        assert_text(&message, letter);
+    }
+
+    fn counted_receipt(&self, letter: u8) -> u32 {
+        let events =
+            counted_legacy_fixture(By(&self.data, Instant::now() + IO).take(u64::from(WINDOW / 2)));
+        let [LinkEvent::Data { message, bytes, .. }] = events.as_slice() else {
+            panic!("the link must issue exactly one receipt for the frame");
+        };
+        assert_text(message, letter);
+        assert_eq!(
+            *bytes, 262_144,
+            "the receipt is for the entire logical frame"
         );
+        *bytes
     }
 
     fn no_data(&self, reason: &str) {
@@ -162,24 +172,40 @@ impl Shell {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{reason}");
     }
 
-    fn record(&self) {
+    fn record(&self, letter: u8) {
         let mut bytes = vec![0; MAX_PLAINTEXT];
         let n = By(&self.data, Instant::now() + IO)
             .read(&mut bytes)
             .expect("a record of the stalled frame");
         assert_eq!(n, MAX_PLAINTEXT, "only one full record was read");
+        assert_eq!(
+            bytes.last(),
+            Some(&letter),
+            "the expected frame's synthetic text reached the reader"
+        );
     }
 
-    fn quit(self) {
+    fn quit(self, reason: Interruption) {
         let by = Instant::now() + IO * 3;
         self.control(&ControlToBrain::Quitting, by);
         assert_eq!(
             self.finished
                 .recv_timeout(by.saturating_duration_since(Instant::now())),
-            Ok(Ok(())),
-            "the fixture settled the authenticated Quit",
+            Ok(Ok(reason)),
+            "the fixture settled Quit and persisted the interruption reason",
         );
     }
+}
+
+fn assert_text(message: &DataToShell, letter: u8) {
+    let DataToShell::AssistantText { run, delta } = message else {
+        panic!("expected synthetic run text");
+    };
+    assert_eq!(*run, RUN, "text belongs to the submitted run");
+    assert!(
+        delta.bytes().all(|byte| byte == letter),
+        "the requested frame's synthetic text arrived intact and in order",
+    );
 }
 
 fn send_frame(mut leg: &PipeClient, bytes: &[u8], by: Instant) {
@@ -202,22 +228,24 @@ fn credit_is_exactly_two_logical_frames_and_control_survives_a_stalled_data_writ
     let shell = Shell::start();
     shell.submit();
     shell.frame(b'a');
-    shell.frame(b'b');
+    let receipt = shell.counted_receipt(b'b');
     shell.no_data("initial credit must stop at 512 KiB");
 
     shell.credit(WINDOW / 2 - 1);
     shell.no_data("one byte short must not send a fragment");
-    shell.credit(1);
+    shell.credit(receipt);
     shell.frame(b'c');
+    shell.no_data("the receipt released only one logical frame");
 
     shell.credit(u32::MAX);
     shell.frame(b'd');
     let before_fifth = Instant::now();
     shell.frame(b'e');
-    shell.no_data("a grant must not increase the 512 KiB window");
 
-    shell.credit(WINDOW / 2);
-    shell.record();
+    shell.credit(WINDOW / 2 - 1);
+    shell.no_data("a refill must not leave even one extra byte of credit");
+    shell.credit(1);
+    shell.record(b'f');
     for _ in 0..2 {
         shell.control_until(Instant::now() + CONTROL, |frame| {
             *frame == ControlToShell::Ping
@@ -236,14 +264,14 @@ fn credit_is_exactly_two_logical_frames_and_control_survives_a_stalled_data_writ
         Instant::now() < before_fifth + STALL,
         "Stop, not STALL, ended the run"
     );
-    shell.quit();
+    shell.quit(Interruption::Stop);
 }
 
 #[test]
 fn fragment_progress_does_not_restart_the_logical_frame_stall_deadline() {
     let shell = Shell::start();
     let submitted = shell.submit();
-    shell.record();
+    shell.record(b'a');
     let started = Instant::now();
     let progress_at = started + Duration::from_millis(1250);
     loop {
@@ -259,7 +287,7 @@ fn fragment_progress_does_not_restart_the_logical_frame_stall_deadline() {
             _ => panic!("control leg ended before fragment progress"),
         }
     }
-    shell.record();
+    shell.record(b'a');
     shell.control_until(started + STALL + CONTROL, |frame| {
         phase(frame, Phase::Interrupted)
     });
@@ -267,5 +295,5 @@ fn fragment_progress_does_not_restart_the_logical_frame_stall_deadline() {
         Instant::now() >= submitted + STALL,
         "the two-second STALL fired early"
     );
-    shell.quit();
+    shell.quit(Interruption::ViewStalled);
 }

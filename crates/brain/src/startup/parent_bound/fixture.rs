@@ -304,13 +304,17 @@ type Seed = Secret<Zeroizing<[u8; CAPABILITY_LEN]>>;
 /// published to the peer through `seed`; no product namespace or native route is opened.
 ///
 /// # Errors
-/// Refused or incomplete admission, serving or settlement, including expiry of `by`.
+/// Refused or incomplete admission, serving or settlement, including expiry of `by`, or no
+/// durable interruption of the fixture's run.
 #[cfg(all(debug_assertions, feature = "test-support"))]
 pub fn serve_pair_credit_fixture(
     fds: crate::platform::InheritedFds,
     seed: mpsc::Sender<Seed>,
     by: std::time::Instant,
-) -> Result<(), ParentBoundError> {
+) -> Result<crate::store::Interruption, ParentBoundError> {
+    use crate::store::Interruption;
+    use rusqlite::{Connection, OpenFlags};
+
     let pair = fds.adopt().map_err(|_| ParentBoundError::Refused)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -339,5 +343,25 @@ pub fn serve_pair_credit_fixture(
         .await
         .map_err(|_| ParentBoundError::Refused)?
         .0
-    })
+    })?;
+    if Instant::now() >= by {
+        return Err(ParentBoundError::Incomplete);
+    }
+    let db = Connection::open_with_flags(scratch.db(), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| ParentBoundError::Incomplete)?;
+    db.busy_timeout(Duration::ZERO)
+        .map_err(|_| ParentBoundError::Incomplete)?;
+    let (state, reason): (String, Option<String>) = db
+        .query_row("SELECT state, reason FROM runs WHERE id = 1", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(|_| ParentBoundError::Incomplete)?;
+    if Instant::now() >= by {
+        return Err(ParentBoundError::Incomplete);
+    }
+    match (state.as_str(), reason.as_deref()) {
+        ("interrupted", Some("stop")) => Ok(Interruption::Stop),
+        ("interrupted", Some("view_stalled")) => Ok(Interruption::ViewStalled),
+        _ => Err(ParentBoundError::Incomplete),
+    }
 }
