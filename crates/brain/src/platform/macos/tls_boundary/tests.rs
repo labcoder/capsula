@@ -205,15 +205,9 @@ async fn a_successful_reqwest_connection_cannot_be_reused_without_authority() {
 
     let _shared = SHARED_BOUNDARY.lock().await;
     let (root, server) = fixture(Peer::Valid, &rustls::version::TLS13);
-    let tls = crate::platform::client_tls_from_roots(
-        Ok(crate::platform::TrustRoots {
-            certificates: vec![root.to_vec()],
-            skipped: 0,
-            unreadable: 0,
-        }),
-        crate::platform::TrustDiagnostics::Quiet,
-    )
-    .expect("interim rustls verifier with fixture roots");
+    let anchor =
+        security_framework::certificate::SecCertificate::from_der(&root).expect("fixture root");
+    let tls = trust::fixture_config(vec![anchor], None).expect("offline SecTrust verifier");
     let client = super::super::http_builder(tls)
         .no_proxy()
         .timeout(TEST_BOUND)
