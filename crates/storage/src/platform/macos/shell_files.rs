@@ -574,6 +574,11 @@ impl Directories {
         self.user
     }
 
+    /// The held folders, `/` first, without their recorded identities.
+    pub(super) fn into_files(self) -> Vec<File> {
+        self.held.into_iter().map(|node| node.file).collect()
+    }
+
     /// Admits `file`, just opened as `name` in the last held folder, as a private folder on the
     /// anchor's volume and holds it.
     pub(super) fn push_private(
