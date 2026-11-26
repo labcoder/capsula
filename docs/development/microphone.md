@@ -144,6 +144,30 @@ Discontinuity (apart from WASAPI's undefined
 first-buffer flag), timestamp failure and endpoint loss fail closed. Failed
 native release or teardown never becomes a successful stop receipt.
 
+## macOS capture ring
+
+On macOS, CoreAudio hands each input cycle to an IO block on its real-time thread.
+`platform::macos::ring` is where that block copies it: slots preallocated from the
+pinned configuration (140 ms of cycles, at most 256 slots and 256 KiB), filled in
+place by the shared `copy_batch` and drained in place by the capture worker, which
+zeroizes each slot as it frees it. The block never allocates, locks or waits.
+
+```mermaid
+stateDiagram-v2
+    FREE --> WRITING: IO block, under the producer claim
+    WRITING --> FULL: whole cycle copied while collecting
+    WRITING --> FREE: revoked mid-copy, zeroized by the block
+    FULL --> READING: capture worker
+    READING --> FREE: packetized, then zeroized
+```
+
+One atomic producer claim (open, in a cycle, closed) admits a single IO cycle at a
+time. Teardown closes it and only then scrubs every slot. While a cycle is paused
+inside the copy, closing fails and teardown retries rather than touch that slot, and
+the paused cycle fails its second authorization and zeroizes its own slot. A full
+ring refuses the cycle instead of growing. Nothing fills the ring yet: Mac capture
+adopts it in its own change.
+
 ## Evidence
 
 The adjacent shared tests use only synthetic PCM, explicit monotonic timestamps

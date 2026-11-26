@@ -43,6 +43,18 @@ mod pair;
     reason = "reads the microphone permission through AVFAudio"
 )]
 pub(crate) mod permission;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Mac capture fills the ring from its own pull request"
+    )
+)]
+#[expect(
+    unsafe_code,
+    reason = "the ring's slots are shared with the CoreAudio IO thread"
+)]
+mod ring;
 #[cfg(any(test, feature = "test-support"))]
 mod wipes;
 
