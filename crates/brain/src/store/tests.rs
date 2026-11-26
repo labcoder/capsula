@@ -16,7 +16,6 @@ use super::{
 
 const MARKER: &str = "zqxplantedmarker";
 
-/// Every byte of the store's files, ASCII-lowercased.
 /// A WAL store at `dir`, migrated to `version`, as an earlier build left it.
 pub(crate) fn store_at(dir: &Path, version: usize) -> PathBuf {
     std::fs::create_dir_all(dir).expect("store folder");
@@ -30,6 +29,7 @@ pub(crate) fn store_at(dir: &Path, version: usize) -> PathBuf {
     db
 }
 
+/// Every byte of the store's files, ASCII-lowercased.
 pub(super) fn raw_bytes(db: &Path) -> Vec<u8> {
     let mut bytes = Vec::new();
     for suffix in ["", "-wal", "-shm"] {

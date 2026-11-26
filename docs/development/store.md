@@ -558,7 +558,3 @@ recovery scan before it serves any shell:
 
 The "store recovered" log line carries only counts and flags: crashed runs, finished and failed
 deletions, failed and unknown issue sends, and whether the purge is still owed.
-
-shortcut: two sessions of the same user run two brains on one store, and the second's recovery
-fails the first's live runs. That needs Windows Server or multi-session Windows, so a
-per-session store or a lock waits until Kumochi supports them.
