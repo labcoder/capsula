@@ -718,12 +718,7 @@ fn needs_neutral(loss: NeutralLoss, cx: &mut TestAppContext) {
     }
     cx.run_until_parked();
     key(1, 0x1D, Edge::Down, 2_000);
-    raw(
-        1,
-        0x38,
-        Edge::Down,
-        after(at, 2_001).with_keyboard_read(Some),
-    );
+    raw(1, 0x38, Edge::Down, after(at, 2_001).with_keyboard_read(Ok));
     deliver(Event::Deadline, after(at, 2_302));
     cx.run_until_parked();
     assert_eq!(
