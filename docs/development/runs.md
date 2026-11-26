@@ -602,7 +602,8 @@ is ready (engines.md, "The Responses engine"). A script plays through `engines/f
 `crates/brain/fixtures/default.txt` is a sample. One line per event: `<ms> text <words>`, `<ms> fill <bytes>`,
 `<ms> step <label>`, `<ms> fail`, and `late <label>`, a step the engine still sends after it's
 cancelled. Its round's pump has closed by then, so the late step reaches nobody; the coordinator
-and the store would refuse it too.
+and the store would refuse it too. A `0` delay only yields to the runtime: a zero-length timer would
+still wait for the next OS timer tick, about 15.6 ms on Windows by default.
 
 shortcut: steps stream as one `draw` call: the first step starts it, each step is one
 newline-terminated argument delta, and the script's end sends `ToolCallReady` with the joined lines,

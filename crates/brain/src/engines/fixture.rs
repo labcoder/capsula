@@ -148,7 +148,12 @@ async fn play(lines: Arc<[Line]>, mut out: Outbox) {
     let mut args = String::new();
     for line in lines.iter() {
         let (Line::Text(after, _) | Line::Step(after, _) | Line::Fail(after)) = line;
-        tokio::time::sleep(*after).await;
+        if after.is_zero() {
+            // A zero sleep still waits a timer tick: about 15.6 ms on Windows by default.
+            tokio::task::yield_now().await;
+        } else {
+            tokio::time::sleep(*after).await;
+        }
         let sent = match line {
             Line::Text(_, text) => out.send(TurnEvent::TextDelta(text.clone())).await,
             Line::Step(_, label) => {
@@ -274,6 +279,17 @@ mod tests {
                 TurnEvent::Finished(Finish::Completed),
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_delay_lines_take_no_time() {
+        tokio::time::advance(Duration::from_micros(500)).await;
+        let fixture = Fixture::parse("0 step a\n0 text b").expect("parses");
+        let (events_tx, mut events) = mpsc::channel(8);
+        let began = tokio::time::Instant::now();
+        tokio::spawn(fixture.start(request(), events_tx, gate()));
+        while events.recv().await.is_some() {}
+        assert_eq!(began.elapsed(), Duration::ZERO);
     }
 
     #[tokio::test(start_paused = true)]
