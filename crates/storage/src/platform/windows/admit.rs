@@ -196,6 +196,28 @@ mod tests {
     }
 
     #[test]
+    fn a_file_at_a_product_folder_refuses() {
+        for half in ["local", "roaming"] {
+            let run = run("admit-file");
+            let root = if half == "local" {
+                &run.pair.local
+            } else {
+                &run.pair.roaming
+            };
+            fs::write(root.join(DATA_DIR), b"").expect("a file at the product folder");
+            assert_eq!(
+                admit(&run.pair).err(),
+                Some(AppDataError::InvalidOverride),
+                "{half}"
+            );
+            assert!(
+                !run.pair.local.join(DATA_DIR).join(LOGS_DIR).exists(),
+                "no logs folder under a refused pair: {half}"
+            );
+        }
+    }
+
+    #[test]
     fn a_linked_override_root_refuses() {
         let run = run("admit-linked-root");
         fs::remove_dir(&run.pair.local).expect("the plain local folder removed");

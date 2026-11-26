@@ -188,10 +188,13 @@ pub fn product_folder(path: &Path) -> Result<(), Untrusted> {
     no_untrusted_heirs(&security)
 }
 
-/// [`owner_only_dir`] for a product folder, whose existing folder must also pass
-/// [`product_folder`]'s check on what's made in it. Its parent must be held.
+/// [`owner_only_dir`] for a product folder, which must be a folder and pass [`product_folder`]'s
+/// check on what's made in it. Its parent must be held.
 pub(super) fn owner_only_product_dir(path: &Path) -> Result<File, Untrusted> {
     let folder = owner_only_dir(path)?;
+    if attributes(&folder)? & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(Untrusted::Unsafe);
+    }
     no_untrusted_heirs(&Security::read(&folder)?)?;
     Ok(folder)
 }
