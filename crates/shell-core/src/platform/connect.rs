@@ -335,7 +335,8 @@ pub(crate) fn connect_pair(
 
 /// [`connect_pair`] with its spawn and its item read supplied. A failure after the spawn settles
 /// the child before it returns, so no later attempt starts beside it; an exit with
-/// [`BRAIN_EXIT_BUSY`](kumochi_protocol::constants::BRAIN_EXIT_BUSY) is `Busy`.
+/// [`BRAIN_EXIT_BUSY`](kumochi_protocol::constants::BRAIN_EXIT_BUSY) is `Busy`. Once connected,
+/// custody ending aborts both legs, so a peer that keeps its ends open can't hold the link.
 #[cfg(target_os = "macos")]
 pub(super) fn connect_pair_with(
     start: impl FnOnce(
@@ -368,7 +369,15 @@ pub(super) fn connect_pair_with(
         )
     });
     match connected {
-        Ok(connection) => Ok((connection, owner)),
+        Ok(connection) => {
+            let legs = [&connection.control, &connection.data].map(Arc::downgrade);
+            owner.on_settled(move || {
+                for leg in legs.iter().filter_map(std::sync::Weak::upgrade) {
+                    leg.abort();
+                }
+            });
+            Ok((connection, owner))
+        }
         Err(error) => match owner.settle() {
             Settled::Reaped(Exit::Code(code)) if code == i32::from(BRAIN_EXIT_BUSY) => {
                 Err(LinkError::Busy)

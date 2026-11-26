@@ -37,7 +37,7 @@ pub(crate) mod connect_test {
     };
 }
 
-pub(crate) use child::{ChildOwner, Settled, SpawnWord};
+pub(crate) use child::{ChildOwner, Exit, Settled, SpawnWord};
 pub(crate) use connect::{Connection, HANDSHAKE_TIMEOUT, LinkError, RETRY_DELAY, connect};
 #[cfg(windows)]
 #[cfg(debug_assertions)]

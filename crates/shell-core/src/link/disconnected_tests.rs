@@ -95,7 +95,7 @@ fn a_busy_attempt_waits_for_retry_and_a_quit_with_no_child_is_not_clean() {
         2,
         "Quit started no attempt"
     );
-    assert!(!link.clean_quit(), "no child was live at Quit");
+    assert_eq!(link.quit_outcome(), None, "no attempt was live at Quit");
     assert_eq!(states.try_recv().unwrap_err(), TryRecvError::Closed);
 }
 

@@ -262,10 +262,18 @@ the disconnected window, so no child starts.
   disposition read, the exact-pid `waitid` WNOWAIT peek before the kill, and Windows' detached
   launch. It doesn't cover dependencies such as gpui or cpal, which could install a SIGCHLD
   handler or wait on their own children; nothing checks them yet.
-- **A clean Quit** is the link having sent `Quitting` and the child live when Quit came reaped
-  with exit code 0. The link records that child's settlement when it ends on Quit, and
-  `LinkHandle::clean_quit` reads both halves after `finish_quit`. It's false when no child was
-  live at Quit, as between attempts, and always false for a detached brain.
+- **A clean Quit** is `Quitting` written whole to an attempt's pair and that same attempt's
+  child reaped with exit code 0. Each attempt carries its own write receipt, set by its control
+  writer only after the frame is written, never when Quit is queued. When the link ends on Quit
+  it joins that receipt to that attempt's settlement as a `QuitOutcome`: `Clean`, `Reaped` with
+  the exit, `Lost`, `Unsettled`, or `NotConnected` when Quit ended the attempt before Connected,
+  including a spawn still pending. `LinkHandle::quit_outcome` reads it after `finish_quit`; it's
+  None when Quit came between attempts or the attempt had no child, as for a detached brain.
+- **Terminal custody ends the pair.** Once the owner reaps, loses or gives up on the child, the
+  attempt's hook aborts both legs, so the link stops serving a pair whose peer may still hold
+  its ends open, without waiting for EOF. The hook only shuts down sockets: every signal and
+  reap stays on the owner thread. A `settle` that gives up also latches the spawn word, so a
+  reap that comes later never frees a claim for a replacement.
 
 ```mermaid
 stateDiagram-v2

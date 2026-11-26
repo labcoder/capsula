@@ -30,7 +30,9 @@ impl Link {
         connect_with(
             deadline,
             || self.quitting(),
-            |control| self.quit_parked(control),
+            |control| {
+                self.quit_parked(control);
+            },
             handshake,
             || Err(std::io::Error::other("fixture connector cannot launch")),
         )

@@ -1,5 +1,6 @@
 //! The link over the pair with a scripted brain and child: custody settles before any
-//! replacement, Busy and Lost refuse, Quit retires the child, and a clean Quit reaches the caller.
+//! replacement, Busy and Lost refuse, Quit retires the child, terminal custody ends the pair, and
+//! each Quit's outcome belongs to the attempt it ended.
 //! Synthetic sockets and a fake child only: nothing is spawned and no Keychain is read.
 
 use std::io::{self, Write as _};
@@ -16,7 +17,9 @@ use kumochi_session::Channel;
 
 use super::leg::tests::{Commit, SECRET, ends, scripted};
 use super::{NotStarted, ShellEnds};
-use crate::link::{DrawingText, LinkEvent, LinkHandle, LinkState, start_scripted};
+use crate::link::{
+    DrawingText, LinkEvent, LinkHandle, LinkState, QuitOutcome, control_writer_hold, start_scripted,
+};
 use crate::platform::Connection;
 use crate::platform::child::{ChildOwner, Exit, Observation, Os, Refusal, Report, SpawnWord};
 use crate::platform::connect::{LinkError, connect_pair_with};
@@ -31,11 +34,13 @@ struct Script {
     kills: u32,
     exit: Option<Exit>,
     lost: bool,
+    kill_fails: bool,
     killed: Option<mpsc::Sender<()>>,
 }
 
 /// A fake child: running until it exits or is killed; a kill ends it with SIGKILL and tells
-/// the brain thread, which then closes its ends as a dead process's would close.
+/// the brain thread, which then closes its ends as a dead process's would close. A refused kill
+/// changes nothing.
 #[derive(Clone, Default)]
 struct Child(Arc<Mutex<Script>>);
 
@@ -78,6 +83,9 @@ impl Os for Child {
     fn kill(&mut self) -> io::Result<()> {
         let mut script = self.script();
         script.kills += 1;
+        if script.kill_fails {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
         script.exit.get_or_insert(Exit::Signal(9));
         if let Some(killed) = script.killed.take() {
             let _unwatched = killed.send(());
@@ -185,11 +193,13 @@ fn honest(item: &mut [u8; kumochi_session::SECRET_LEN]) -> Result<(), kumochi_st
     Ok(())
 }
 
+type Attempt = Result<(Connection, Option<ChildOwner>), LinkError>;
+
 /// A link whose first attempt meets `child` scripted by `then`; later attempts come from `next`.
 fn link(
     child: &Child,
     then: Then,
-    mut next: impl FnMut(&Arc<SpawnWord>) -> LinkError + Send + 'static,
+    mut next: impl FnMut(&Arc<SpawnWord>, Instant) -> Attempt + Send + 'static,
 ) -> (LinkHandle, async_channel::Receiver<LinkEvent>) {
     let (events, states) = async_channel::unbounded();
     let child = child.clone();
@@ -198,7 +208,7 @@ fn link(
         if std::mem::take(&mut first) {
             return attempt(word, &child, then, by, honest).map(|(c, owner)| (c, Some(owner)));
         }
-        Err(next(word))
+        next(word, by)
     });
     (handle, states)
 }
@@ -225,8 +235,8 @@ fn failed(event: &LinkEvent) -> bool {
     matches!(event, LinkEvent::State(LinkState::Failed))
 }
 
-fn refused(_: &Arc<SpawnWord>) -> LinkError {
-    LinkError::Rejected
+fn refused(_: &Arc<SpawnWord>, _: Instant) -> Attempt {
+    Err(LinkError::Rejected)
 }
 
 #[test]
@@ -236,7 +246,7 @@ fn a_quit_taken_by_a_child_that_exits_0_is_clean() {
     until(&states, connected);
     assert!(link.begin_quit());
     link.finish_quit();
-    assert!(link.clean_quit());
+    assert_eq!(link.quit_outcome(), Some(QuitOutcome::Clean));
     let script = child.script();
     assert_eq!((script.exit, script.kills), (Some(Exit::Code(0)), 0));
 }
@@ -252,7 +262,7 @@ fn a_quit_is_unclean_unless_the_live_child_exits_0() {
         until(&states, connected);
         assert!(link.begin_quit());
         link.finish_quit();
-        assert!(!link.clean_quit(), "{exit:?}");
+        assert_eq!(link.quit_outcome(), Some(QuitOutcome::Reaped(exit)));
         let script = child.script();
         assert_eq!((script.exit, script.kills), (Some(exit), kills));
     }
@@ -266,7 +276,68 @@ fn a_quit_between_attempts_after_a_child_exited_0_is_not_clean() {
     until(&states, failed);
     assert!(link.begin_quit());
     link.finish_quit();
-    assert!(!link.clean_quit());
+    assert_eq!(link.quit_outcome(), None);
+}
+
+#[test]
+fn a_quit_outcome_is_the_attempt_quit_ended_not_an_earlier_childs_clean_exit() {
+    let (first, second) = (Child::default(), Child::default());
+    let (link, states) = link(&first, Then::ExitsAfterCommit(0), move |word, by| {
+        attempt(word, &second, Then::QuitExits(3), by, honest).map(|(c, owner)| (c, Some(owner)))
+    });
+    until(&states, connected);
+    until(&states, connected);
+    assert!(link.begin_quit());
+    link.finish_quit();
+    assert_eq!(
+        link.quit_outcome(),
+        Some(QuitOutcome::Reaped(Exit::Code(3)))
+    );
+    assert_eq!(first.script().exit, Some(Exit::Code(0)));
+}
+
+#[test]
+fn a_quit_queued_but_never_written_is_not_clean_on_an_exit_0() {
+    let child = Child::default();
+    let (link, states) = link(&child, Then::Stalls, refused);
+    until(&states, connected);
+    let hold = control_writer_hold(&link);
+    hold.store(1, Ordering::Release);
+    assert!(link.begin_quit());
+    thread::scope(|scope| {
+        let quit = scope.spawn(|| link.finish_quit());
+        let by = Instant::now() + BOUND;
+        while hold.load(Ordering::Acquire) != 2 {
+            assert!(
+                Instant::now() < by,
+                "Quitting reached the writer, which holds it unwritten"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+        child.exits(Exit::Code(0));
+        quit.join().expect("finish_quit");
+    });
+    assert_eq!(
+        link.quit_outcome(),
+        Some(QuitOutcome::Reaped(Exit::Code(0)))
+    );
+    assert_eq!(child.script().kills, 0);
+}
+
+#[test]
+fn a_refused_kill_ends_the_link_while_the_peer_holds_both_ends_open() {
+    let child = Child::default();
+    child.script().kill_fails = true;
+    let (link, states) = link(&child, Then::Stalls, refused);
+    until(&states, connected);
+    let quit = Instant::now();
+    assert!(link.begin_quit());
+    link.finish_quit();
+    let took = quit.elapsed();
+    assert_eq!(link.quit_outcome(), Some(QuitOutcome::Unsettled));
+    assert!(took < 2 * WAIT + Duration::from_secs(2), "{took:?}");
+    let script = child.script();
+    assert_eq!((script.exit, script.kills), (None, 1));
 }
 
 #[test]
@@ -275,13 +346,13 @@ fn a_replacement_starts_only_after_the_lost_connections_child_is_reaped() {
     let seen = Arc::new(Mutex::new(None));
     let (link, states) = {
         let (earlier, second, seen) = (first.clone(), Child::default(), Arc::clone(&seen));
-        link(&first, Then::Closes, move |word| {
+        link(&first, Then::Closes, move |word, _| {
             let reaped = earlier.script().exit;
             let claimed = owned(&second, word)
                 .map(drop)
                 .map_err(|refusal| refusal.to_string());
             *seen.lock().unwrap_or_else(PoisonError::into_inner) = Some((reaped, claimed));
-            LinkError::Rejected
+            Err(LinkError::Rejected)
         })
     };
     until(&states, failed);
@@ -301,11 +372,11 @@ fn after_a_lost_child_no_attempt_spawns_again_even_on_retry() {
     let refusals = Arc::new(AtomicUsize::new(0));
     let (link, states) = {
         let (second, refusals) = (second.clone(), Arc::clone(&refusals));
-        link(&first, Then::LostCloses, move |word| {
+        link(&first, Then::LostCloses, move |word, _| {
             if matches!(owned(&second, word), Err(Refusal::Claimed)) {
                 refusals.fetch_add(1, Ordering::SeqCst);
             }
-            LinkError::Launch(io::ErrorKind::ResourceBusy.into())
+            Err(LinkError::Launch(io::ErrorKind::ResourceBusy.into()))
         })
     };
     until(&states, failed);
@@ -353,7 +424,7 @@ fn quit_while_the_brain_hasnt_said_ready_retires_its_child_well_before_the_deadl
     assert!(took < 2 * WAIT + Duration::from_secs(2), "{took:?}");
     let script = child.script();
     assert_eq!((script.exit, script.kills), (Some(Exit::Signal(9)), 1));
-    assert!(!link.clean_quit());
+    assert_eq!(link.quit_outcome(), Some(QuitOutcome::NotConnected));
 }
 
 #[test]
