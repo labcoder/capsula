@@ -103,8 +103,12 @@ log, every Brain process's log and lock, the Claude Code and speech staging fold
 settings folder, which settings also check before they're read. It creates any missing parent as
 an ordinary folder, then the product folder owner-only. An existing folder is kept as it is if
 it's a plain folder with a trusted owner that nobody else may change, add to, or gain write
-access to what's made in it, and refused otherwise. On Unix the check makes a missing folder
-`0700` but doesn't yet check an existing one.
+access to what's made in it, and refused otherwise. On Unix the check creates a missing folder
+with mode `0700` and opens the final component without following links. It checks the held
+directory for ownership by this effective user or root and refuses group or other write bits.
+macOS also applies its existing ACL inspection, and Linux requires the default POSIX ACL to be
+absent so new children don't inherit wider permissions. This is a leaf check, not custody of
+the parent chain.
 
 Detached brain startup acquires both pipes before touching the store. It takes the profile's
 writer lock, then opens and recovers the store, loads settings, starts accounts, and builds the Brain. It retries any interrupted
