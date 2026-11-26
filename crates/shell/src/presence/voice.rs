@@ -221,7 +221,10 @@ impl Presence {
             .follow(self.settings.read(cx).hold_to_talk_notice().is_none());
     }
 
-    fn drain_voice_cancel(&mut self, covered: Option<&InputCancel>) -> bool {
+    fn drain_voice_cancel<'a>(
+        &mut self,
+        covered: impl IntoIterator<Item = &'a InputCancel>,
+    ) -> bool {
         let sent = drain_hold_cancel(&self.link, self.session.as_ref(), &mut self.runs, covered);
         if !sent && let Some(session) = &self.session {
             tracing::warn!(stage = ?FailureStage::Release, reason = ?FailureReason::CancelDrain, "held speech input failed");
@@ -259,7 +262,7 @@ impl Presence {
             self.unused_voice(token, Some(session));
         }
         self.runs.cancel_hold();
-        self.drain_voice_cancel(covered.or(deferred.as_ref()));
+        self.drain_voice_cancel(covered.into_iter().chain(&deferred));
         self.voice_notice(ended.notice, cx);
     }
 
@@ -947,7 +950,7 @@ impl Presence {
                 tracing::warn!(stage = ?FailureStage::Admission, ?reason, "held speech input failed");
                 false
             }
-            Ok(_) if !self.drain_voice_cancel(None) => {
+            Ok(_) if !self.drain_voice_cancel(None::<&InputCancel>) => {
                 tracing::warn!(stage = ?FailureStage::Admission, reason = ?FailureReason::CancelDrain, "held speech input failed");
                 false
             }

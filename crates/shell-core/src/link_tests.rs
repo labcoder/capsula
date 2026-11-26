@@ -6444,13 +6444,15 @@ fn a_show_screen_write_settling_after_reconnect_leaves_the_hold_s_cancel_to_the_
         "nothing told the brain the hold's cancel"
     );
     let cancel = ControlToBrain::GestureCancel { gesture };
-    assert!(second.handle.send_control(&session, cancel.clone()));
+    assert!(second.handle.send_control(&session, cancel));
+    // A later frame fences the pipe, so any second cancel would already be read.
+    assert!(second.handle.send_control(&session, ControlToBrain::Pong));
     let mut told = Vec::new();
-    while told.last() != Some(&cancel) {
+    while told.last() != Some(&ControlToBrain::Pong) {
         told.push(
             frame::read::<ControlToBrain>(&mut &second.control, Pipe::Control)
                 .unwrap()
-                .expect("the runs' cancel"),
+                .expect("the runs' cancel, then the fence"),
         );
     }
     let cancels = told
