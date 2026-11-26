@@ -168,18 +168,33 @@ enum Existing {
 }
 
 /// Creates this edition's product folder at `path` owner-only when it's missing, like
-/// [`owner_only_dir`]. An existing folder is kept as it is and never re-secured. It's used only
-/// when the folder itself is no reparse point and has a trusted owner, and no one untrusted may
-/// change it. Its ancestors aren't checked, so a moved or junctioned application data folder
-/// still works.
+/// [`owner_only_dir`], making any missing ancestor first as an ordinary folder. An existing folder
+/// is kept as it is and never re-secured. It's used only when the folder itself is no reparse
+/// point and has a trusted owner, and no one untrusted may change it, add to it, or gain write
+/// access to what's made in it. Its ancestors aren't checked, so a moved or junctioned
+/// application data folder still works.
 pub fn product_folder(path: &Path) -> Result<(), Untrusted> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| Untrusted::Io)?;
+    }
     create_owner_only(path, Existing::Use)?;
     let opened = open(path, Kind::Folder, 0)?;
     check_not_reparse(&opened)?;
     if attributes(&opened)? & FILE_ATTRIBUTE_DIRECTORY == 0 {
         return Err(Untrusted::Unsafe);
     }
-    trusted_security(&Security::read(&opened)?, Kind::Folder, &Trusted::new()?)
+    let security = Security::read(&opened)?;
+    let trusted = Trusted::new()?;
+    trusted_security(&security, Kind::Folder, &trusted)?;
+    // Adding a subfolder is append-data on a folder; inherited write would open the databases.
+    if security.others_may(
+        CHANGES | FILE_APPEND_DATA | FILE_WRITE_EA,
+        &trusted,
+        Aces::Inheritable,
+    )? {
+        return Err(Untrusted::Unsafe);
+    }
+    Ok(())
 }
 
 fn owner_only(path: &Path, existing: Existing) -> Result<File, Untrusted> {
@@ -997,6 +1012,16 @@ mod tests {
             open,
             "a refused folder is left as it was"
         );
+        for (others, case) in [
+            ("(A;;0x4;;;WD)", "others may add folders"),
+            ("(A;OIIO;FA;;;WD)", "others may write what's made in it"),
+        ] {
+            set_dacl(&folder, |user| format!("D:P(A;OICI;FA;;;{user}){others}"));
+            assert_eq!(product_folder(&folder), Err(Untrusted::Unsafe), "{case}");
+        }
+        let nested = scratch.join("missing-root").join("product");
+        product_folder(&nested).expect("a product folder under a missing root");
+        assert_eq!(dacl_sddl(&nested), format!("D:P(A;OICI;FA;;;{user})"));
         let file = scratch.join("file");
         std::fs::write(&file, b"kept").expect("a file at the name");
         assert_eq!(product_folder(&file), Err(Untrusted::Unsafe), "a file");

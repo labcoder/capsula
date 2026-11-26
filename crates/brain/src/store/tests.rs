@@ -211,6 +211,27 @@ fn a_v11_store_moves_past_every_version_a_pre_lock_build_knows() {
 }
 
 #[test]
+fn a_failed_migration_leaves_the_file_at_the_version_it_had() {
+    let scratch = Scratch::new("schema-rollback");
+    let db = super::existing::tests::store_at(scratch.dir(), 10);
+    Connection::open(&db)
+        .expect("raw open")
+        .execute_batch("CREATE TABLE chatgpt_recovery_context (tag BLOB)")
+        .expect("a table V12 collides with");
+    assert!(Store::open_existing(&db).is_err());
+    assert_eq!(user_version(&db), 10);
+    let repo_id: i64 = Connection::open(&db)
+        .expect("raw open")
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('actions') WHERE name = 'repo_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the actions columns");
+    assert_eq!(repo_id, 0, "V11 rolled back with V12");
+}
+
+#[test]
 fn a_recovered_v12_store_keeps_its_cutoff_at_v13() {
     let scratch = Scratch::new("schema-v12");
     let db = super::existing::tests::store_at(scratch.dir(), 11);

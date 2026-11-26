@@ -55,7 +55,11 @@ impl Scratch {
     }
 
     pub(crate) fn new(name: &str) -> Self {
-        Self::with_guard(scratch::dir(name))
+        let guard = scratch::dir(name);
+        // The temp folder may let other accounts write, and the product refuses such a folder.
+        #[cfg(windows)]
+        crate::platform::set_dacl(guard.path(), |user| format!("D:P(A;OICI;FA;;;{user})"));
+        Self::with_guard(guard)
     }
 
     pub(crate) fn under(base: &Path, name: &str) -> Self {

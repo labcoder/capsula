@@ -75,8 +75,8 @@ its own, so the id is issued before its task exists; a purge's copy keeps `sqlit
 a reservation with no row behind it outlives a purge and a restart ([tools](tools.md)).
 
 Later slices add assets, sends and cleanup jobs, each as a
-new migration. Migrations are numbered by `PRAGMA user_version`, run forward only, one
-transaction each, and a brain refuses a file whose version is newer than it knows.
+new migration. Migrations are numbered by `PRAGMA user_version` and run forward only, and a
+brain refuses a file whose version is newer than it knows.
 
 The ordinary open migrates to version 13, all pending migrations in one transaction, so a crash
 leaves the file at the version it had. Version 12 makes the ChatGPT cutoff table ordinary, and
@@ -84,8 +84,8 @@ leaves the file at the version it had. Version 12 makes the ChatGPT cutoff table
 refuse the file instead of writing history without the lock. A file that the recovery
 operation took to 12 already has the table and its rows, and moves to 13 alone. A separate,
 explicit ChatGPT repair operation can establish a cutoff only with a still-locked replacement
-binding. The upgrade and
-immutable tag row commit together, taking the last issued thread and run IDs from SQLite's
+binding, on a store the ordinary open has already migrated. Its immutable tag row commits on
+its own, taking the last issued thread and run IDs from SQLite's
 sequences, including deleted IDs. A ceiling below a surviving ID or a missing sequence for
 existing rows refuses establishment. History keeps one writer: the vault's link is bound once,
 when the store thread starts, to the owner of the store ordinary startup opens, and Establish,
@@ -122,10 +122,10 @@ at startup yet, so the replacement stays unavailable.
 A recovered connection is told by its cutoff row for its tag, not by the version. A
 compile-time assert keeps the current version above 12.
 
-Before an existing store from a build earlier than the lock reaches version 13, an old Brain
-that is still running in another Windows session without the lock (its vault had not opened
-yet) can keep writing beside the new one, and its purge can then swap in a copy that misses the
-new Brain's commits. Close Kumochi in every session before upgrading.
+Version 13 stops an earlier build from opening the store, not one that already has it open. An
+old Brain still running in another Windows session without the lock (its vault had not opened
+yet) can keep writing beside the new one, even after the move to 13, and its purge can then swap
+in a copy that misses the new Brain's commits. Close Kumochi in every session before upgrading.
 
 **Scenes** are events, so they need no migration. A run's first step writes `scene_begin`, whose
 event id is the `SceneId`; `AUTOINCREMENT` keeps it unique even after a deletion, and a

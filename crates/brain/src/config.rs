@@ -140,10 +140,17 @@ impl Config {
     /// which every view names. Only a missing file is writable as new; any other read or parse
     /// failure refuses every change until the user repairs or removes the file and restarts.
     pub(crate) fn load(dir: Option<PathBuf>, main_thread: ThreadId) -> Self {
-        let Some(path) = dir.map(|dir| dir.join(CONFIG_FILE)) else {
+        let Some(dir) = dir else {
             tracing::warn!("no settings folder; settings won't be saved");
             return Self::refusing(None, Refusal::NoHome, main_thread);
         };
+        let path = dir.join(CONFIG_FILE);
+        // An existing folder is read only when it's trusted; a missing one is made on first save.
+        if std::fs::symlink_metadata(&dir).is_ok() && crate::platform::product_folder(&dir).is_err()
+        {
+            tracing::warn!("the settings folder isn't trusted; using defaults, not saving");
+            return Self::refusing(Some(path), Refusal::Unreadable, main_thread);
+        }
         let table = match std::fs::read_to_string(&path) {
             Ok(text) => {
                 let Ok(table) = text.parse::<Table>() else {
@@ -521,13 +528,8 @@ impl Pending {
 /// A leftover temp file from a crash is never read; this overwrites it.
 fn write_replacing(path: &Path, text: &[u8]) -> io::Result<()> {
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    // A settings folder made here is owner-only; one already there is left as it is.
-    if !dir.exists() {
-        if let Some(parent) = dir.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        crate::platform::product_folder(dir)?;
-    }
+    // A settings folder made here is owner-only; one already there must be trusted.
+    crate::platform::product_folder(dir)?;
     let temp = path.with_file_name(format!("{CONFIG_FILE}.tmp"));
     let mut file = std::fs::File::create(&temp)?;
     file.write_all(text)?;

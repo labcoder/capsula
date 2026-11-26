@@ -840,6 +840,28 @@ fn the_first_save_makes_the_settings_folder_owner_only() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn an_untrusted_settings_folder_is_neither_read_nor_written() {
+    let scratch = Scratch::trusted("config-untrusted");
+    let dir = scratch.dir().join("settings");
+    let path = dir.join(CONFIG_FILE);
+    std::fs::create_dir_all(&dir).expect("the folder");
+    std::fs::write(&path, "assistant_name = \"Nimbus\"\n").expect("seeded");
+    crate::platform::set_dacl(&dir, |user| format!("D:P(A;OICI;FA;;;{user})(A;;0x4;;;WD)"));
+    let config = Config::load(Some(dir.clone()), ThreadId(1));
+    assert_eq!(
+        config.view().assistant_name.as_str(),
+        DEFAULT_ASSISTANT_NAME
+    );
+    assert!(super::write_replacing(&path, b"assistant_name = \"Cirrus\"\n").is_err());
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file stays"),
+        "assistant_name = \"Nimbus\"\n"
+    );
+    assert!(!dir.join(format!("{CONFIG_FILE}.tmp")).exists());
+}
+
 #[test]
 fn first_save_and_replacement_ignore_an_abandoned_temp() {
     let scratch = Scratch::new("config-stale-temp");

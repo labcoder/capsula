@@ -868,15 +868,16 @@ for its whole run. The store thread and the credentials thread each keep a refer
 lock: the store thread until its last close and purge cleanup end, past any wait the brain gave up
 on, and the credentials thread by opening its vault under it (`Vault::open_held`) instead of
 taking its own. The lock fixes its authority's pathname when it's taken: `credentials.db` beside
-the lock file, from an absolute path (a relative one is refused). `Authority::open` takes only the
-lock, so the brain opens its writable authority by the parent pathname of the profile lock it
+the lock file, from an absolute path (a relative one is refused). `Authority::open` takes its path only
+from the lock, so the brain opens its writable authority by the parent pathname of the profile lock it
 holds, never by resolving the data folder again. That binds the pathname, not the folder's
 identity: it doesn't protect against the folder being replaced. So a second brain of the same Windows user in
 another session, whose pipes don't collide, stops at the lock before it touches the store. It
 tries to take the lock before it opens or creates the store and, refused, logs only that another
 session is using the profile and exits with code 75. Only the brain's
 start creates `credentials.db`, under the lock, when it's missing (see [store](store.md)). The vault and the dev diagnostics open
-it without create, so a lost authority never comes back empty. Only brains with this lock are excluded: an earlier build opens
+it without create, so a lost authority stays missing until the next brain start, which makes a
+fresh one, signed out. Only brains with this lock are excluded: an earlier build opens
 the store before it takes any lock. The shell starts a brain that doesn't answer once per
 connection attempt (it starts another within the attempt only after a brain of a different build
 exits), and gives up after `CONNECT_TIMEOUT` (10 s), then waits for Retry, so a refused brain is

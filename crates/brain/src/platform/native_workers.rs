@@ -137,9 +137,7 @@ fn claude_host(vault_held: Arc<AtomicBool>, jobs: &Arc<Job>, brain_exe: &Path) -
         return None;
     };
     let base = root.join(kumochi_protocol::constants::DATA_DIR);
-    if let Err(error) = std::fs::create_dir(&base)
-        && error.kind() != std::io::ErrorKind::AlreadyExists
-    {
+    if let Err(error) = super::product_folder(&base) {
         tracing::warn!(target: env!("CARGO_CRATE_NAME"), kind = ?error.kind(), "couldn't make the local data folder for Claude Code");
         return None;
     }
