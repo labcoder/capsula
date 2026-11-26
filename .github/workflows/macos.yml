@@ -56,6 +56,10 @@ jobs:
       - name: Unix product-folder tests
         run: >-
           cargo test --locked --offline -p kumochi-brain --lib platform::unix::
+      - name: Voice reducer tests
+        run: >-
+          cargo test --locked --offline --no-fail-fast
+          -p kumochi-shell-core --lib voice::
       - name: Mac bundle task tests (offline, ad-hoc signing only)
         run: >-
           cargo test --locked --offline -p xtask mac_bundle::
