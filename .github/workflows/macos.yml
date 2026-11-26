@@ -46,6 +46,10 @@ jobs:
           cargo test --locked --offline --no-fail-fast
           -p kumochi-brain -p kumochi-shell-core --lib platform::macos::
           -- --skip platform::macos::pair::tests::adoption_refuses_anything_but_two_connected_unix_streams
+      - name: macOS TLS boundary tests (no TCP)
+        run: >-
+          cargo test --locked --offline --no-fail-fast
+          -p kumochi-brain -p kumochi-shell-core --lib platform::trust_roots::mac_tls::
       - name: Shell logging tests
         run: >-
           cargo test --locked --offline -p kumochi-shell --bin kumochi platform::logging::tests::

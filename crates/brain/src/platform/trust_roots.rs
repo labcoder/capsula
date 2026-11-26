@@ -5,6 +5,14 @@ use std::sync::Arc;
 
 use rustls::pki_types::CertificateDer;
 
+#[cfg(target_os = "macos")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "interim root loading remains selected")
+)]
+#[path = "macos/tls_boundary/mod.rs"]
+mod mac_tls;
+
 /// Root certificates as owned public DER, plus how many the store held that weren't kept.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TrustRoots {

@@ -148,7 +148,12 @@ async fn play(lines: Arc<[Line]>, mut out: Outbox) {
     let mut args = String::new();
     for line in lines.iter() {
         let (Line::Text(after, _) | Line::Step(after, _) | Line::Fail(after)) = line;
-        tokio::time::sleep(*after).await;
+        if after.is_zero() {
+            // A zero sleep can still park an idle runtime until a timer tick, ~15.6 ms on Windows.
+            tokio::task::yield_now().await;
+        } else {
+            tokio::time::sleep(*after).await;
+        }
         let sent = match line {
             Line::Text(_, text) => out.send(TurnEvent::TextDelta(text.clone())).await,
             Line::Step(_, label) => {
@@ -274,6 +279,36 @@ mod tests {
                 TurnEvent::Finished(Finish::Completed),
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_delay_lines_take_no_time() {
+        tokio::time::advance(Duration::from_micros(500)).await;
+        let fixture = Fixture::parse("0 step a\n0 text b").expect("parses");
+        let (events_tx, mut events) = mpsc::channel(8);
+        let began = tokio::time::Instant::now();
+        tokio::spawn(fixture.start(request(), events_tx, gate()));
+        let mut seen = Vec::new();
+        while let Some(event) = events.recv().await {
+            seen.push(event);
+        }
+        assert_eq!(
+            seen,
+            [
+                TurnEvent::ToolCallStarted {
+                    call: call(),
+                    name: ToolName::Draw
+                },
+                step("a"),
+                TurnEvent::TextDelta("b".to_owned()),
+                TurnEvent::ToolCallReady {
+                    call: call(),
+                    args: "a\n".to_owned()
+                },
+                TurnEvent::Finished(Finish::Completed),
+            ]
+        );
+        assert_eq!(began.elapsed(), Duration::ZERO);
     }
 
     #[tokio::test(start_paused = true)]
