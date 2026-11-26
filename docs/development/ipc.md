@@ -443,9 +443,10 @@ the greeting it fences, checks the clock and takes the commit claim, with no awa
 
 The shell's side lives in `shell-core`'s `platform/macos/leg.rs` and `connect_pair`, also
 dormant: nothing calls them, since the Mac shell only opens the disconnected window. On macOS the
-brain is the helper nested in the shell's bundle: from `Contents/MacOS/<shell>` up to `Contents`,
-then down `BRAIN_HELPER` (`Helpers/kumochid.app/Contents/MacOS/kumochid`). Windows and Linux keep
-the sibling `BRAIN_EXE`. After the spawn, `after_ready` reads exactly one byte on control by
+brain is the helper nested in the shell's bundle: from an absolute
+`<name>.app/Contents/MacOS/<shell>` up to `Contents`, then down `BRAIN_HELPER`
+(`Helpers/kumochid.app/Contents/MacOS/kumochid`); any other path is `NotFound`. Windows and Linux
+keep the sibling `BRAIN_EXE`. After the spawn, `after_ready` reads exactly one byte on control by
 what's left of the attempt's deadline, before the shell writes anything. A byte other than
 READY, or the stream ending, is `Rejected`, and the deadline is `ConnectExpired`; none of them
 touch the Keychain. Only after READY does the shell read the instance item, admitted as
