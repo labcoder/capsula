@@ -29,7 +29,7 @@ pub(crate) mod instance;
     not(test),
     expect(dead_code, reason = "parent-bound startup is not wired yet")
 )]
-mod parent_bound;
+pub(crate) mod parent_bound;
 #[cfg(all(test, windows))]
 mod tests;
 
@@ -59,6 +59,8 @@ struct Stages {
     profile: Option<Arc<SessionLock>>,
     /// A store may have opened for these stages, whether or not one is still here.
     acquired: bool,
+    /// The issue sessions reserved so far, which the Brain goes on from.
+    epochs: crate::runtime::IssueEpochs,
 }
 
 struct Lifecycle {
@@ -277,7 +279,7 @@ impl Stages {
             engine,
             config,
             self.accounts.take().expect("started accounts"),
-            crate::runtime::IssueEpochs::default(),
+            std::mem::take(&mut self.epochs),
         ) {
             Ok(brain) => {
                 self.brain = Some(brain);

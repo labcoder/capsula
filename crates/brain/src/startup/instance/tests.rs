@@ -787,6 +787,15 @@ async fn native_a_dropped_publish_keeps_the_session_lock_until_settlement_return
 /// Test support: each dropped [`Wiped`] buffer's address and whether it held only zeros at the
 /// end of its drop, read from the storage itself just before it is freed. Buffers drop on any
 /// thread, so the log is shared.
+#[test]
+fn an_owned_key_is_wiped_before_its_drop_is_recorded() {
+    let key = OwnedKey::generate().expect("a random key");
+    assert_ne!(**key.key(), [0; CAPABILITY_LEN]);
+    let (since, at) = (wipes::len(), key.key().as_ptr().addr());
+    drop(key);
+    assert_eq!(wipes::found(since, at), Some(true));
+}
+
 pub(super) mod wipes {
     use std::sync::Mutex;
 
@@ -804,6 +813,18 @@ pub(super) mod wipes {
         made.lock()
             .expect("the made list")
             .push((buffer.0.as_ptr().addr(), since));
+    }
+
+    pub(super) fn len() -> usize {
+        LOG.lock().expect("the wipe log").len()
+    }
+
+    /// Whether the first record of `addr` since `since` was all zeros.
+    pub(super) fn found(since: usize, addr: usize) -> Option<bool> {
+        LOG.lock().expect("the wipe log")[since..]
+            .iter()
+            .find(|(at, _)| *at == addr)
+            .map(|&(_, zero)| zero)
     }
 
     pub(super) fn of(made: &Made) -> Vec<Option<bool>> {

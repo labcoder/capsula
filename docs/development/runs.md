@@ -503,6 +503,33 @@ after every op and wake; while it's being found that's `Finding`, which reads as
 - **The shell hears why** in `RunState.error`, sent only with `Failed`. shortcut: it isn't
   stored, so a reloaded page shows the generic failure.
 
+### Connection facts
+
+`ConnectionKind` is a wire and store discriminator, not an account, a vendor list or a grant.
+What never changes about a kind sits in one exhaustive row, `connections::facts::of(kind)`: its
+slot in per-kind state, its shipped picture switch (`PictureRoutes::SHIPPED` reads it; tests
+override it only through `PictureRoutes::new`), its stored spelling (`chatgpt`,
+`anthropic_key`, `claude_code`, which written rows keep for good; see [store](store.md)) and
+how its stored rounds replay (`ChatGPT`'s native items carry their text, the key's native calls
+sit beside it, Claude Code's rounds replay as text). The coordinator keeps each kind's current `Availability`, and a turn's arrival keeps
+each kind's tag, in a `PerKind` indexed by that slot. A row grants nothing: the default route,
+sign-in, recovery fence, key refusal, Claude Code discovery, catalog, offer, consent and picture
+checks above stay explicit where they are, and adding a kind means writing its row and each of
+those branches.
+
+These classifications have no typed reader yet, so they stay here rather than in the row:
+
+| Kind | Availability from | Tools ceiling | Pictures | Credential | Egress |
+|---|---|---|---|---|---|
+| `ChatGPT` | account sign-in and recovery | native Responses | switched on in its row; per model by its catalog | Kumochi's OAuth sign-in | fixed OpenAI HTTPS routes |
+| Anthropic key | the checked key and its catalog | native Messages | switched on in its row | the key in Credential Manager | fixed Anthropic HTTPS routes |
+| Claude Code | discovery, sign-in and policy | launch-scoped MCP | switched off in its row | Claude Code's own sign-in in Kumochi's folder | the contained child, bound to its provider |
+
+The tools column is a ceiling, never an offer: each request's offer is built and admitted as in
+[the tool loop](#the-tool-loop). A picture switch never makes a model take pictures or skips its
+model, consent, screen grant or same-recipient checks. The adapters that own the sockets and the
+child process enforce the egress column.
+
 ## Engines and rounds
 
 An engine (`crates/brain/src/engines/`) implements one trait: `Engine::start` takes a `RunRequest`
