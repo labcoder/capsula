@@ -18,7 +18,7 @@ use objc2_core_foundation::{
 use objc2_security::{
     SecItemAdd, SecItemDelete, SecItemUpdate, errSecAllocate, errSecDuplicateItem,
 };
-use zeroize::Zeroizing;
+use zeroize::Zeroize as _;
 
 use crate::startup::custody::CustodyError;
 use crate::startup::instance::{Added, InstanceStore};
@@ -121,13 +121,14 @@ fn refused(error: AcquisitionError) -> CustodyError {
     }
 }
 
-/// A view of a wiped copy of `key`: CoreFoundation releases the view's allocator after the last
+/// A view of a copy of `key`: CoreFoundation releases the view's allocator after the last
 /// reference to the view, and that release wipes and frees the copy.
 fn owned_view(key: &[u8; CAPABILITY_LEN]) -> Result<CFRetained<CFData>, ItemError> {
-    let backing = Box::new(Zeroizing::new(*key));
-    let start = backing.as_ptr();
+    let info = Box::into_raw(Box::new([0_u8; CAPABILITY_LEN]));
+    let start = info.cast::<u8>();
+    // SAFETY: `info` is this function's live, unaliased allocation of exactly CAPABILITY_LEN bytes.
+    unsafe { start.copy_from_nonoverlapping(key.as_ptr(), CAPABILITY_LEN) };
     let len = CFIndex::try_from(CAPABILITY_LEN).expect("the key length fits CFIndex");
-    let info = Box::into_raw(backing);
     let mut context = CFAllocatorContext {
         version: 0,
         info: info.cast(),
@@ -140,10 +141,10 @@ fn owned_view(key: &[u8; CAPABILITY_LEN]) -> Result<CFRetained<CFData>, ItemErro
         preferredSize: None,
     };
     // SAFETY: the context is fully initialized; the allocator copies it and owns `info`, which
-    // its release callback frees once.
+    // its release callback wipes and frees once.
     let Some(owner) = (unsafe { CFAllocator::new(None, &raw mut context) }) else {
-        // SAFETY: no allocator was created, so `info` is still this function's Box.
-        drop(unsafe { Box::from_raw(info) });
+        // SAFETY: no allocator took `info`, so this is its one release.
+        unsafe { release_backing(info.cast()) };
         return Err(ItemError::Failed(errSecAllocate));
     };
     // SAFETY: the bytes live until `owner` is released, and the view retains `owner`.
@@ -153,14 +154,22 @@ fn owned_view(key: &[u8; CAPABILITY_LEN]) -> Result<CFRetained<CFData>, ItemErro
 
 #[cfg(test)]
 thread_local! {
-    /// How many view backings this thread released, for the tests.
+    /// How many view backings this thread released, and how many of those were all zero once
+    /// wiped, for the tests.
     pub(super) static RELEASED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static WIPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Frees the view's backing when its allocator is released: the only owner of that Box.
+/// Wipes and frees the view's backing when its allocator is released: the only owner of that Box.
 unsafe extern "C-unwind" fn release_backing(info: *const c_void) {
-    // SAFETY: `info` is the Box `owned_view` gave this allocator, released exactly once.
-    drop(unsafe { Box::from_raw(info.cast_mut().cast::<Zeroizing<[u8; CAPABILITY_LEN]>>()) });
+    // SAFETY: `info` is the Box `owned_view` made, released exactly once.
+    let mut backing = unsafe { Box::from_raw(info.cast_mut().cast::<[u8; CAPABILITY_LEN]>()) };
+    backing.zeroize();
+    #[cfg(test)]
+    if backing.iter().all(|byte| *byte == 0) {
+        WIPED.set(WIPED.get() + 1);
+    }
+    drop(backing);
     #[cfg(test)]
     RELEASED.set(RELEASED.get() + 1);
 }
