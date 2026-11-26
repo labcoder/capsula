@@ -1597,6 +1597,47 @@ fn sign_out_discloses_possible_registration_removal_before_the_plan_changes(
     });
 }
 
+/// Forget sends the revision its dialog showed, only on confirmation, and a changed offer closes
+/// the dialog.
+#[gpui::test]
+fn forget_sends_only_the_confirmed_revision(cx: &mut TestAppContext) {
+    use gpui_kit::component::WindowExt;
+    use kumochi_protocol::message::SavedSignInFailure;
+
+    let unavailable = |forget| AccountView::SavedSignInUnavailable {
+        reason: SavedSignInFailure::Missing,
+        checkable: true,
+        forget: Some(forget),
+        checking: false,
+        revocation_unconfirmed: false,
+    };
+    test_fixture::without_desktop(cx);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (window, owner, controls) = accounts_panel(cx);
+    let dialog = |cx: &mut TestAppContext| {
+        VisualTestContext::from_window(window, cx).update(WindowExt::has_active_dialog)
+    };
+    account_views(&owner, vec![chatgpt(unavailable(4))], cx);
+    click_github(window, "account-forget", cx);
+    assert!(dialog(cx));
+    click_github(window, "confirmation-cancel", cx);
+    assert!(drain(&controls).is_empty(), "Cancel sends nothing");
+
+    click_github(window, "account-forget", cx);
+    account_views(&owner, vec![chatgpt(unavailable(4))], cx);
+    assert!(dialog(cx), "an unrelated update keeps the dialog");
+    account_views(&owner, vec![chatgpt(unavailable(5))], cx);
+    assert!(!dialog(cx), "a changed offer closes it");
+    assert!(drain(&controls).is_empty());
+
+    click_github(window, "account-forget", cx);
+    click_github(window, "confirmation-danger", cx);
+    assert_eq!(
+        drain(&controls),
+        [ControlToBrain::AccountOp(AccountOp::ForgetSavedSignIn(5))]
+    );
+}
+
 #[gpui::test]
 fn confirming_sign_out_during_a_recording_stops_only_that_hold(cx: &mut TestAppContext) {
     use crate::presence::voice::tests::{source, until};

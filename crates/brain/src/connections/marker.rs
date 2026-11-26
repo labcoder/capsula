@@ -13,6 +13,9 @@ pub enum Disposition {
     Keep,
     /// Remove the whole account record.
     Erase,
+    /// Erase a saved sign-in this computer can't read, which the person chose to give up: Prepare
+    /// gives up its missing or wrong-length chunks too. The checkpoint turns it into `Erase`.
+    Discard,
 }
 
 /// The durable checkpoint separating revocation from irreversible local deletion.
@@ -104,6 +107,12 @@ impl SignOutMarker {
             && self.sign_out.is_none_or(|sign_out| {
                 self.sweep
                     && match sign_out.phase {
+                        // The checkpoint turns a Discard into an Erase, so this was never written.
+                        Phase::Deleting if sign_out.disposition == Disposition::Discard => false,
+                        // Only a promotion writes a Discard, and it sets both.
+                        Phase::Revoking if sign_out.disposition == Disposition::Discard => {
+                            self.notice && self.outcome_unknown
+                        }
                         Phase::Revoking => self.notice,
                         Phase::Deleting => !self.request_pending && !self.outcome_unknown,
                     }
@@ -161,6 +170,8 @@ impl SignOutMarker {
                     });
                     self.sweep = true;
                     self.notice = true;
+                    // A discard gives up what it can't read, so it never confirms a revocation.
+                    self.outcome_unknown |= disposition == Disposition::Discard;
                 }
             }
             MarkerUpdate::Checkpoint { list_empty_on_disk } => {
@@ -171,6 +182,10 @@ impl SignOutMarker {
                     self.request_pending = false;
                     self.outcome_unknown = false;
                     sign_out.phase = Phase::Deleting;
+                    // The exemption is spent, and an older reader understands only Erase.
+                    if sign_out.disposition == Disposition::Discard {
+                        sign_out.disposition = Disposition::Erase;
+                    }
                 }
             }
             MarkerUpdate::FinishSignOut => {

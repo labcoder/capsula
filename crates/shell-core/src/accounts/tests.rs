@@ -120,6 +120,7 @@ fn unavailable_saved_sign_in_explains_each_reason_and_only_offers_the_local_chec
                 view: AccountView::SavedSignInUnavailable {
                     reason,
                     checkable: reason != SavedSignInFailure::Changed,
+                    forget: None,
                     checking: false,
                     revocation_unconfirmed: true,
                 },
@@ -154,6 +155,7 @@ fn uncheckable_missing_saved_sign_in_offers_restart_but_not_check_or_sign_in() {
         AccountView::SavedSignInUnavailable {
             reason: SavedSignInFailure::Missing,
             checkable: false,
+            forget: None,
             checking: false,
             revocation_unconfirmed: true,
         },
@@ -184,6 +186,34 @@ fn uncheckable_missing_saved_sign_in_offers_restart_but_not_check_or_sign_in() {
     assert_missing_guidance(&copy);
 }
 
+/// Forget is offered only at the revision the view names, and never while a reread is out.
+#[test]
+fn forget_is_allowed_only_for_the_offered_revision() {
+    let view = |forget, checking| AccountView::SavedSignInUnavailable {
+        reason: SavedSignInFailure::Missing,
+        checkable: true,
+        forget,
+        checking,
+        revocation_unconfirmed: false,
+    };
+    let mut accounts = Accounts::default();
+    receive(&mut accounts, view(Some(4), false));
+    assert!(accounts.allows(AccountOp::ForgetSavedSignIn(4)));
+    assert!(!accounts.allows(AccountOp::ForgetSavedSignIn(3)));
+    for blocked in [view(Some(4), true), view(None, false)] {
+        receive(&mut accounts, blocked);
+        assert!(!accounts.allows(AccountOp::ForgetSavedSignIn(4)));
+    }
+    receive(&mut accounts, view(Some(4), false));
+    let mut sent = Vec::new();
+    press(&mut accounts, AccountOp::ForgetSavedSignIn(4), &mut sent);
+    assert_eq!(sent, [AccountOp::ForgetSavedSignIn(4)]);
+    assert!(
+        !accounts.allows(AccountOp::ForgetSavedSignIn(4)),
+        "one at a time"
+    );
+}
+
 fn assert_missing_guidance(copy: &str) {
     assert!(
         copy.contains("You can't reconnect ChatGPT by signing in while this part is missing."),
@@ -202,6 +232,7 @@ fn saved_sign_in_check_stays_pending_until_an_authoritative_result() {
     let view = |checking| AccountView::SavedSignInUnavailable {
         reason: SavedSignInFailure::Missing,
         checkable: true,
+        forget: None,
         checking,
         revocation_unconfirmed: false,
     };

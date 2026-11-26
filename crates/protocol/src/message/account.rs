@@ -29,6 +29,9 @@ pub enum AccountOp {
     CheckSavedSignIn,
     /// Contact the provider to load models after a local saved sign-in recovered.
     LoadModels,
+    /// Give up the saved sign-in this computer can't read, at the revision its view offered, by
+    /// signing it out; signing in again is a separate, ordinary sign-in.
+    ForgetSavedSignIn(u64),
 }
 
 impl AccountOp {
@@ -42,7 +45,8 @@ impl AccountOp {
             | Self::SignOut
             | Self::EnablePlan
             | Self::Retry
-            | Self::LoadModels => true,
+            | Self::LoadModels
+            | Self::ForgetSavedSignIn(_) => true,
         }
     }
 }
@@ -81,6 +85,9 @@ pub enum AccountView {
         reason: SavedSignInFailure,
         /// Whether there is a current revision that this session can safely check.
         checkable: bool,
+        /// The revision a [`AccountOp::ForgetSavedSignIn`] may give up: one whose saved part is
+        /// missing. A nonsecret counter.
+        forget: Option<u64>,
         /// A local reread is outstanding.
         checking: bool,
         /// An older remote revocation is still unconfirmed.
@@ -200,6 +207,10 @@ mod tests {
             [5]
         );
         assert_eq!(postcard::to_allocvec(&AccountOp::LoadModels).unwrap(), [6]);
+        assert_eq!(
+            postcard::to_allocvec(&AccountOp::ForgetSavedSignIn(3)).unwrap(),
+            [7, 3]
+        );
         for (tag, reason) in [
             (0, SavedSignInFailure::Missing),
             (1, SavedSignInFailure::Malformed),
@@ -209,14 +220,19 @@ mod tests {
             let view = AccountView::SavedSignInUnavailable {
                 reason,
                 checkable: true,
+                forget: (reason == SavedSignInFailure::Missing).then_some(2),
                 checking: true,
                 revocation_unconfirmed: false,
             };
-            let wire = [5, tag, 1, 1, 0];
+            let wire: &[u8] = if tag == 0 {
+                &[5, tag, 1, 1, 2, 1, 0]
+            } else {
+                &[5, tag, 1, 0, 1, 0]
+            };
             assert_eq!(postcard::to_allocvec(&view).unwrap(), wire);
-            assert_eq!(postcard::from_bytes::<AccountView>(&wire), Ok(view));
+            assert_eq!(postcard::from_bytes::<AccountView>(wire), Ok(view));
         }
-        assert!(postcard::from_bytes::<AccountView>(&[5, 4, 1, 1, 0]).is_err());
+        assert!(postcard::from_bytes::<AccountView>(&[5, 4, 1, 0, 1, 0]).is_err());
     }
 
     #[test]

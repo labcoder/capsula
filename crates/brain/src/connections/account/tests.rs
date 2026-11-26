@@ -27,6 +27,7 @@ use crate::platform::SessionLock;
 use crate::platform::credential::CredentialStore as _;
 use crate::test_support::{Captured, Scratch};
 
+mod forget;
 mod lane;
 mod ownership;
 mod refresh;
@@ -60,6 +61,7 @@ fn check_saved_sign_in_classifies_and_recovers_only_the_current_record() {
     let view = |reason, checking| AccountView::SavedSignInUnavailable {
         reason,
         checkable: true,
+        forget: (reason == SavedSignInFailure::Missing).then_some(1),
         checking,
         revocation_unconfirmed: false,
     };
@@ -122,6 +124,7 @@ fn check_saved_sign_in_does_not_adopt_a_changed_revision() {
         &AccountView::SavedSignInUnavailable {
             reason: SavedSignInFailure::Changed,
             checkable: false,
+            forget: None,
             checking: false,
             revocation_unconfirmed: false,
         }
@@ -146,6 +149,7 @@ fn a_malformed_layout_keeps_its_pin_but_an_unknown_revision_cannot_be_checked() 
         let unavailable = |reason, checkable| AccountView::SavedSignInUnavailable {
             reason,
             checkable,
+            forget: None,
             checking: false,
             revocation_unconfirmed: false,
         };

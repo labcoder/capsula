@@ -65,15 +65,24 @@ fn save_checkable_sign_in(
 
 #[tokio::test]
 async fn a_recovered_saved_sign_in_loads_models_only_on_explicit_request() {
+    recovered_by(AccountOp::CheckSavedSignIn, "account-local-check").await;
+}
+
+/// A Forget that finds the sign-in readable again recovers it exactly as Check does.
+#[tokio::test]
+async fn a_forget_that_reads_the_sign_in_again_recovers_it_as_check_does() {
+    recovered_by(AccountOp::ForgetSavedSignIn(1), "account-local-forget").await;
+}
+
+async fn recovered_by(op: AccountOp, service: &'static str) {
     use crate::connections::vault::{Vault, fake::FakeStore};
     use kumochi_protocol::message::SavedSignInFailure;
 
-    let scratch = crate::test_support::Scratch::new("account-local-check");
+    let scratch = crate::test_support::Scratch::new(service);
     let store = FakeStore::default();
     let lock = scratch
         .dir()
         .join(kumochi_protocol::constants::SESSION_LOCK);
-    let service = "account-local-check";
     {
         let mut vault = Vault::with_service(store.clone(), service, &lock).unwrap();
         save_checkable_sign_in(&mut vault);
@@ -81,7 +90,7 @@ async fn a_recovered_saved_sign_in_loads_models_only_on_explicit_request() {
     let names: Vec<_> = store
         .names()
         .into_iter()
-        .filter(|name| name.starts_with("account-local-check/gen/chatgpt/"))
+        .filter(|name| name.starts_with(&format!("{service}/gen/chatgpt/")))
         .collect();
     assert_eq!(names.len(), 1);
     let snapshot = store.snapshot();
@@ -102,12 +111,13 @@ async fn a_recovered_saved_sign_in_loads_models_only_on_explicit_request() {
         AccountView::SavedSignInUnavailable {
             reason: SavedSignInFailure::Missing,
             checkable: true,
+            forget: Some(1),
             checking: false,
             revocation_unconfirmed: false,
         },
     );
     store.rollback(&snapshot, &names);
-    accounts.handle(Input::Op(AccountOp::CheckSavedSignIn));
+    accounts.handle(Input::Op(op));
     let checked = tokio::time::timeout(Duration::from_secs(5), accounts.next())
         .await
         .unwrap();

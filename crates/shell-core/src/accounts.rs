@@ -241,6 +241,7 @@ impl Accounts {
                 checkable,
                 checking,
                 revocation_unconfirmed,
+                ..
             }) => {
                 let status = if *checking || self.waiting == Some(AccountOp::CheckSavedSignIn) {
                     Text::AccountCheckingSavedSignIn
@@ -405,6 +406,14 @@ impl Accounts {
             (Some(AccountView::SignedOut { .. }), AccountOp::Retry) => {
                 self.error_action(Action::Retry)
             }
+            (
+                Some(AccountView::SavedSignInUnavailable {
+                    forget: Some(revision),
+                    checking: false,
+                    ..
+                }),
+                AccountOp::ForgetSavedSignIn(target),
+            ) => *revision == target,
             _ => false,
         }
     }

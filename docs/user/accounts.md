@@ -42,7 +42,10 @@ panel doesn't offer **Check again**. Restarting checks the current sign-in as pa
 startup, which may also run account maintenance.
 
 While part of the saved sign-in is missing, signing in again won't reconnect ChatGPT, even
-if **Check again** isn't available. If another account you've already connected has an
+if **Check again** isn't available. This happens when Kumochi's files are copied from another
+computer. Choose **Forget saved sign-in** and confirm to remove what's left of it here. Then
+choose **Sign in** to connect again. Your tasks and conversations stay, and the account that
+signs in next can use them and the permissions you gave before. If another account you've already connected has an
 available model, choose it in **Settings → General** to keep working.
 
 ## Sign out

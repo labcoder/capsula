@@ -23,14 +23,32 @@ impl SettingsView {
         #[cfg(not(debug_assertions))]
         let fixture = false;
         let model = self.model.read(cx);
-        let sign_out = Button::new("account-sign-out")
-            .debug_selector(|| "account-sign-out".into())
-            .outline()
-            .label(cx.global::<Strings>().get(Text::AccountSignOut))
-            .disabled(!model.accounts.allows(AccountOp::SignOut))
-            .on_click(cx.listener(|view, _, window, cx| {
-                view.confirm_sign_out(window, cx);
-            }));
+        let forget = match model.accounts.view {
+            Some(AccountView::SavedSignInUnavailable {
+                forget: Some(revision),
+                ..
+            }) => Some(AccountOp::ForgetSavedSignIn(revision)),
+            _ => None,
+        };
+        let sign_out = if let Some(op) = forget {
+            Button::new("account-forget")
+                .debug_selector(|| "account-forget".into())
+                .outline()
+                .label(cx.global::<Strings>().get(Text::AccountForget))
+                .disabled(!model.accounts.allows(op))
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    view.confirm_forget(op, window, cx);
+                }))
+        } else {
+            Button::new("account-sign-out")
+                .debug_selector(|| "account-sign-out".into())
+                .outline()
+                .label(cx.global::<Strings>().get(Text::AccountSignOut))
+                .disabled(!model.accounts.allows(AccountOp::SignOut))
+                .on_click(cx.listener(|view, _, window, cx| {
+                    view.confirm_sign_out(window, cx);
+                }))
+        };
         account_section(
             model,
             move |op, cx| {
@@ -47,26 +65,46 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if window.has_active_dialog(cx) {
-            return;
-        }
-        let state = &self.model.read(cx).accounts;
-        if !state.allows(AccountOp::SignOut) {
-            return;
-        }
-        let Some(generation) = state.generation else {
-            return;
-        };
         let strings = cx.global::<Strings>();
         let body = format!(
             "{}\n\n{}",
             strings.get(Text::AccountSignOutBody),
             strings.get(Text::AccountSignOutRegistration),
         );
+        let texts = (Text::AccountSignOutTitle, body, Text::AccountSignOutConfirm);
+        self.confirm_account_op(AccountOp::SignOut, texts, window, cx);
+    }
+
+    /// Asks before giving up the saved sign-in at the revision its view offered.
+    fn confirm_forget(&mut self, op: AccountOp, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let body = cx.global::<Strings>().get(Text::AccountForgetBody);
+        let texts = (Text::AccountForgetTitle, body, Text::AccountForgetConfirm);
+        self.confirm_account_op(op, texts, window, cx);
+    }
+
+    /// Sends `op` once confirmed, only if this pair still allows it then.
+    fn confirm_account_op(
+        &mut self,
+        op: AccountOp,
+        (title, body, confirm): (Text, String, Text),
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let state = &self.model.read(cx).accounts;
+        if !state.allows(op) {
+            return;
+        }
+        let Some(generation) = state.generation else {
+            return;
+        };
+        let strings = cx.global::<Strings>();
         let view = cx.weak_entity();
-        let title = strings.get(Text::AccountSignOutTitle).into();
+        let title = strings.get(title).into();
         let cancel = strings.get(Text::AccountDialogCancel).into();
-        let confirm = strings.get(Text::AccountSignOutConfirm).into();
+        let confirm = strings.get(confirm).into();
         let dialog = crate::confirmation::open_during_exit(
             window,
             cx,
@@ -79,24 +117,22 @@ impl SettingsView {
                     if view
                         .confirmation
                         .as_ref()
-                        .is_none_or(|(current, _)| *current != generation)
+                        .is_none_or(|(current, _, _)| *current != generation)
                     {
                         return None;
                     }
                     view.confirmation = None;
                     let accounts = &view.model.read(cx).accounts;
-                    (confirmed
-                        && accounts.generation == Some(generation)
-                        && accounts.allows(AccountOp::SignOut))
-                    .then(|| view.owner.clone())
+                    (confirmed && accounts.generation == Some(generation) && accounts.allows(op))
+                        .then(|| view.owner.clone())
                 });
                 if let Ok(Some(owner)) = owner {
                     let _gone = owner.update(cx, |owner, cx| match owner.session.as_ref() {
                         Some(session) if session.generation() == generation => {
-                            owner.account_op(AccountOp::SignOut, cx);
+                            owner.account_op(op, cx);
                         }
                         None => owner.settings.update(cx, |state, cx| {
-                            state.accounts.send(AccountOp::SignOut, |_| false);
+                            state.accounts.send(op, |_| false);
                             cx.notify();
                         }),
                         Some(_) => {}
@@ -105,8 +141,23 @@ impl SettingsView {
             },
         );
         if let Some(dialog) = dialog {
-            self.confirmation = Some((generation, dialog));
+            self.confirmation = Some((generation, op, dialog));
         }
+    }
+}
+
+/// Whether `view` still shows the button that opened `op`'s confirmation.
+pub(super) fn offers(view: Option<&AccountView>, op: AccountOp) -> bool {
+    match (view, op) {
+        (Some(AccountView::SignedIn { .. }), AccountOp::SignOut) => true,
+        (
+            Some(AccountView::SavedSignInUnavailable {
+                forget: Some(offered),
+                ..
+            }),
+            AccountOp::ForgetSavedSignIn(revision),
+        ) => *offered == revision,
+        _ => false,
     }
 }
 
@@ -168,7 +219,17 @@ pub(in crate::presence) fn account_section(
             .children(details)
             .child(actions)
             .children(
-                matches!(state.view, Some(AccountView::SignedIn { .. })).then(|| {
+                matches!(
+                    state.view,
+                    Some(
+                        AccountView::SignedIn { .. }
+                            | AccountView::SavedSignInUnavailable {
+                                forget: Some(_),
+                                ..
+                            }
+                    )
+                )
+                .then(|| {
                     div()
                         .flex()
                         .border_t_1()

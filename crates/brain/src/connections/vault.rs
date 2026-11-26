@@ -312,6 +312,40 @@ impl<S: CredentialStore> Vault<S> {
         Ok(true)
     }
 
+    /// Rereads exactly `expected` as Check does and, only while it is still current with a saved
+    /// chunk missing and every other chunk readable at its length, durably promotes a `Discard`
+    /// sign-out of it and returns `None`. Otherwise nothing is written, and it returns Check's
+    /// answer, or `Malformed` or `Unavailable` for a wrong-length or refused chunk behind a missing
+    /// one.
+    pub(super) fn forget_saved_sign_in(
+        &mut self,
+        expected: u64,
+    ) -> Option<Result<SavedSignIn, SavedSignInFailure>> {
+        let checked = self.saved_sign_in(Some(expected));
+        if !matches!(&checked, Ok(saved) if matches!(saved.account, Err(SavedSignInFailure::Missing)))
+        {
+            return Some(checked);
+        }
+        let active = match self.authority.observe(Kind::Account) {
+            Ok((revision, Ok(Some(active)))) if revision == expected => active,
+            _ => return Some(Err(SavedSignInFailure::Unavailable)),
+        };
+        // Every chunk is read, so a refused or wrong-length one isn't given up behind a missing one.
+        match generation::has_missing_chunk(&self.store, &self.service, &active) {
+            Ok(true) => {}
+            Err(
+                authority::AuthorityError::WrongChunkLength
+                | authority::AuthorityError::Store(CredentialStoreError::InvalidBlob),
+            ) => return Some(Err(SavedSignInFailure::Malformed)),
+            // The record read whole this time, so it gets Check's answer and is never promoted.
+            Ok(false) => return Some(self.saved_sign_in(Some(expected))),
+            Err(_) => return Some(Err(SavedSignInFailure::Unavailable)),
+        }
+        self.update_marker(MarkerUpdate::Promote(Disposition::Discard))
+            .err()
+            .map(|_| Err(SavedSignInFailure::Unavailable))
+    }
+
     /// Reads the marker first, so a pending or unreadable sign-out never exposes usable tokens.
     ///
     /// # Errors
@@ -661,7 +695,7 @@ impl<S: CredentialStore> Vault<S> {
         }
         self.assert_removed(Kind::Revocations)?;
         match sign_out.disposition {
-            Disposition::Erase => self.assert_removed(Kind::Account),
+            Disposition::Erase | Disposition::Discard => self.assert_removed(Kind::Account),
             Disposition::Keep => match self.read::<Account>(Kind::Account)? {
                 Some(account)
                     if account.expose().tokens.is_some()

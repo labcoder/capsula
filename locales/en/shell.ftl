@@ -374,6 +374,7 @@ accounts-saved-sign-in-missing = Part of the saved sign-in wasn't found
 accounts-saved-sign-in-missing-help =
     { accounts-saved-sign-in-check-help }
     { -accounts-missing-next-step }
+    If Kumochi's files were copied from another computer, choose { accounts-forget } in { settings-title } → { settings-accounts }, then sign in again.
 accounts-saved-sign-in-missing-restart-help =
     { accounts-saved-sign-in-changed-help }
     { -accounts-missing-next-step }
@@ -397,6 +398,10 @@ accounts-sign-out-title = Sign out of ChatGPT?
 accounts-sign-out-body = This stops using your account now, tries to end its session at OpenAI, and removes its saved sign-in from Windows Credential Manager. It doesn't delete your tasks.
 accounts-sign-out-registration = Signing out may also remove the app registration saved on this computer. If it does, signing in again registers the app anew.
 accounts-sign-out-confirm = Sign out
+accounts-forget = Forget saved sign-in
+accounts-forget-title = Forget the saved ChatGPT sign-in?
+accounts-forget-body = Part of the saved sign-in isn't on this computer, as when Kumochi's files are copied from another one. Forgetting it removes what's left here so you can sign in again. OpenAI may still list the old session. Your tasks and conversations stay, and whichever account signs in next can use them and the permissions you gave before.
+accounts-forget-confirm = Forget
 accounts-dialog-cancel = Cancel
 accounts-signing-out = Signing out…
 accounts-stopped = The app has stopped using this account.
