@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use super::{EventKind, NewEvent, Store, StoreError};
 use crate::connections::anthropic::request::{literal, members};
+use crate::connections::facts;
 use crate::context::{Body, ConnectionTag, Route};
 use crate::dispatch::ToolOutput;
 use crate::engines::anthropic::encode::{KeyHistory, ToolUse};
@@ -97,19 +98,20 @@ impl Store {
         {
             return Err(StoreError::RoundRecord);
         }
+        let kind = facts::of(ConnectionKind::AnthropicKey).stored;
         let natives = calls
             .iter()
             .map(|call| {
                 let body = if let Some(model) = screen_model {
                     format!(
-                        r#"{{"connection":{},"kind":"anthropic_key","screen_model":{},"item":{}}}"#,
+                        r#"{{"connection":{},"kind":"{kind}","screen_model":{},"item":{}}}"#,
                         tag.0,
                         json!(model),
                         call.clone().scrubbed(KeyHistory::Scrubbed).json(),
                     )
                 } else {
                     format!(
-                        r#"{{"connection":{},"kind":"anthropic_key","item":{}}}"#,
+                        r#"{{"connection":{},"kind":"{kind}","item":{}}}"#,
                         tag.0,
                         call.json(),
                     )
@@ -173,11 +175,7 @@ fn native_body(route: Route, item: &Opaque) -> Result<String, StoreError> {
     if !item.is_object() {
         return Err(StoreError::RoundRecord);
     }
-    let kind = match route.kind {
-        ConnectionKind::ChatGpt => "chatgpt",
-        ConnectionKind::AnthropicKey => "anthropic_key",
-        ConnectionKind::ClaudeCode => "claude_code",
-    };
+    let kind = facts::of(route.kind).stored;
     Ok(json!({ "connection": route.tag.0, "kind": kind, "item": item }).to_string())
 }
 
@@ -197,12 +195,7 @@ pub(super) fn native(body: &str) -> Result<Body, StoreError> {
     // other kind, or a kind that isn't one of these, never replays.
     let mut kind = match value.get("kind") {
         None => Some(ConnectionKind::ChatGpt),
-        Some(kind) => match kind.as_str() {
-            Some("chatgpt") => Some(ConnectionKind::ChatGpt),
-            Some("anthropic_key") => Some(ConnectionKind::AnthropicKey),
-            Some("claude_code") => Some(ConnectionKind::ClaudeCode),
-            _ => None,
-        },
+        Some(kind) => kind.as_str().and_then(facts::stored),
     };
     let item = value["item"].take();
     if !item.is_object() {

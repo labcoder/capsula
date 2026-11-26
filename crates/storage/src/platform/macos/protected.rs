@@ -1,16 +1,13 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::fs::File;
-use std::io;
-use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, FromRawFd as _, RawFd};
-use std::os::unix::ffi::OsStrExt as _;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::ptr::NonNull;
 
 use crate::platform::Untrusted;
-
-const DIRECTORY_FLAGS: libc::c_int =
-    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+use crate::platform::unix::{
+    components, open_directory, safe_directory, safe_regular, same_inspection, stat,
+};
 
 // SDK sys/fcntl.h's filesec_property_t; libc does not declare the filesec APIs.
 const FILESEC_OWNER: libc::c_int = 1;
@@ -72,23 +69,6 @@ pub fn hold_chain(path: &Path) -> Result<Vec<File>, Untrusted> {
     hold_from(root, &names, user)
 }
 
-pub(super) fn components(path: &Path) -> Result<Vec<CString>, Untrusted> {
-    let bytes = path.as_os_str().as_bytes();
-    if bytes.is_empty() || bytes.contains(&0) || bytes.starts_with(b"//") {
-        return Err(Untrusted::Unsafe);
-    }
-    bytes
-        .split(|byte| *byte == b'/')
-        .filter(|name| !name.is_empty())
-        .map(|name| {
-            if name == b"." || name == b".." {
-                return Err(Untrusted::Unsafe);
-            }
-            CString::new(name).map_err(|_| Untrusted::Unsafe)
-        })
-        .collect()
-}
-
 pub(super) fn hold_from(
     root: File,
     names: &[CString],
@@ -107,49 +87,6 @@ pub(super) fn hold_from(
         held.push(child);
     }
     Ok(held)
-}
-
-pub(super) fn open_directory(parent: RawFd, name: &CStr) -> Result<File, Untrusted> {
-    // SAFETY: name is terminated; parent is held (or AT_FDCWD for the root); no creation flag.
-    let fd = unsafe { libc::openat(parent, name.as_ptr(), DIRECTORY_FLAGS) };
-    if fd < 0 {
-        return Err(match io::Error::last_os_error().raw_os_error() {
-            Some(libc::ENOENT) => Untrusted::Missing,
-            Some(libc::ELOOP) => Untrusted::Reparse,
-            Some(libc::ENOTDIR) => Untrusted::Unsafe,
-            _ => Untrusted::Io,
-        });
-    }
-    // SAFETY: the successful open transferred a fresh, uniquely owned descriptor.
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-
-pub(super) fn stat(fd: RawFd) -> Result<libc::stat, Untrusted> {
-    let mut metadata = MaybeUninit::uninit();
-    // SAFETY: metadata has the libc stat layout and writable storage; fd is not consumed.
-    if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } != 0 {
-        return Err(Untrusted::Io);
-    }
-    // SAFETY: successful fstat initialized the complete stat value.
-    Ok(unsafe { metadata.assume_init() })
-}
-
-fn safe_directory(metadata: &libc::stat, user: libc::uid_t) -> Result<(), Untrusted> {
-    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
-        || (metadata.st_uid != 0 && metadata.st_uid != user)
-        || metadata.st_mode & (libc::S_IWGRP | libc::S_IWOTH) != 0
-    {
-        return Err(Untrusted::Unsafe);
-    }
-    Ok(())
-}
-
-pub(super) fn same_inspection(left: &libc::stat, right: &libc::stat) -> bool {
-    left.st_dev == right.st_dev
-        && left.st_ino == right.st_ino
-        && left.st_uid == right.st_uid
-        && left.st_gid == right.st_gid
-        && left.st_mode == right.st_mode
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,17 +110,6 @@ impl ObjectKind {
             _ => Err(Untrusted::Io),
         }
     }
-}
-
-pub(super) fn safe_regular(metadata: &libc::stat, user: libc::uid_t) -> Result<(), Untrusted> {
-    if metadata.st_mode & libc::S_IFMT != libc::S_IFREG
-        || metadata.st_uid != user
-        || metadata.st_mode & 0o7777 != 0o600
-        || metadata.st_nlink != 1
-    {
-        return Err(Untrusted::Unsafe);
-    }
-    Ok(())
 }
 
 /// Inspects a held object that must be private: a folder owned by this user at mode exactly 0700,

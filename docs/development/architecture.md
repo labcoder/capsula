@@ -183,6 +183,12 @@ GPUI; the shell is the crate that does. `cargo xtask check-core` holds that in C
 direct dependencies are a list in `xtask/src/check_core.rs`, so a new one is a reviewed line,
 and the whole tree is searched for a framework's name.
 
+`kumochi-storage` groups its non-Windows code by OS family. `platform/unix/` holds POSIX
+helpers the macOS adapter shares: descriptor-relative opens and looks that never follow links,
+and the owner, mode and link-count checks. `platform/macos/` keeps what only Darwin has (ACLs,
+the APFS volume policy, dataless files, `sysdir` and the Keychain) and the policy built on both.
+The crate builds only for Windows and macOS.
+
 On macOS, shell and brain use the same Application Support lookup in `kumochi-storage`.
 It asks Darwin for the user-domain path, resolving any home-relative result through the
 OS account, not `HOME`. It opens and creates nothing. Callers append or admit the product

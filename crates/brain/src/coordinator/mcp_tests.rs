@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use kumochi_protocol::message::{AssistantName, DataToShell, ThreadId};
+use kumochi_protocol::message::{AssistantName, ConnectionKind, DataToShell, ThreadId};
 use serde_json::{Value, json};
 
 use super::{R, T, fresh};
@@ -54,7 +54,9 @@ fn offering_from(tools: Vec<ToolSchema>, sources: Vec<ThreadId>) -> (Coordinator
         .expect("build");
     core.handle(built_from(key, tools, sources))
         .expect("offered");
-    let crate::coordinator::Availability::Ready(ready) = &mut core.availability else {
+    let crate::coordinator::Availability::Ready(ready) =
+        &mut core.availability[ConnectionKind::ChatGpt]
+    else {
         panic!("ready");
     };
     ready.trusted_draw = false;
