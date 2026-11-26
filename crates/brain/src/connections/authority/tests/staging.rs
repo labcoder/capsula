@@ -251,24 +251,61 @@ fn a_version_three_file_keeps_every_row_in_the_private_store() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
     assert_eq!(version, 5);
-    assert!(
+    assert_eq!(
         authority
             .current(Kind::Host)
             .expect("host")
             .active
-            .is_some()
+            .map(|active| active.generation.hex()),
+        Some(format!("01{}", "0".repeat(30)))
     );
-    let stores: Vec<Store> = authority
-        .retired(16)
-        .expect("retired")
-        .iter()
-        .map(Retired::store)
-        .collect();
-    assert_eq!(stores, [Store::Private, Store::Private]);
+    let rows: Vec<(String, String, String)> = setup
+        .raw()
+        .prepare("SELECT hex(generation), state, store FROM generations ORDER BY rowid")
+        .expect("rows")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("rows")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    let row = |first: &str, state: &str| {
+        (
+            format!("{first}{}", "0".repeat(30)),
+            state.to_owned(),
+            "private".to_owned(),
+        )
+    };
+    assert_eq!(
+        rows,
+        [
+            row("01", "active"),
+            row("02", "removed"),
+            row("03", "removed")
+        ]
+    );
     assert_eq!(
         authority.begin_paste(0, 16).expect("paste").store(),
         Store::Staging
     );
+}
+
+#[test]
+fn an_active_row_outside_the_private_store_is_refused() {
+    let setup = Setup::new("paste-active-staged");
+    let mut authority = setup.open();
+    let saved = setup.save(&mut authority, Kind::AnthropicKey, &secret(1, 16));
+    drop(authority);
+    setup
+        .raw()
+        .execute_batch(&format!(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE generations SET store = 'staging' WHERE generation = X'{}';",
+            saved.generation.hex()
+        ))
+        .expect("a malformed file");
+    assert!(matches!(
+        setup.open().current(Kind::AnthropicKey),
+        Err(AuthorityError::Corrupt)
+    ));
 }
 
 #[test]

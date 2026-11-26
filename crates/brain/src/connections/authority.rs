@@ -802,9 +802,9 @@ fn observe(
     conn: &Connection,
     kind: Kind,
 ) -> Result<(u64, Result<Option<ActiveRef>, AuthorityError>), AuthorityError> {
-    let (revision, generation, chunks, bytes) = conn
+    let (revision, generation, chunks, bytes, store) = conn
         .query_row(
-            "SELECT heads.revision, g.generation, g.chunks, g.bytes
+            "SELECT heads.revision, g.generation, g.chunks, g.bytes, g.store
              FROM heads LEFT JOIN generations g ON g.kind = heads.kind AND g.state = 'active'
              WHERE heads.kind = ?1",
             [kind.label()],
@@ -814,6 +814,7 @@ fn observe(
                     row.get::<_, Option<Vec<u8>>>(1)?,
                     row.get::<_, Option<i64>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         )
@@ -822,6 +823,9 @@ fn observe(
     let revision = u64::try_from(revision).map_err(|_| AuthorityError::Corrupt)?;
     let active = generation
         .map(|generation| {
+            if store.as_deref() != Some(Store::Private.label()) {
+                return Err(AuthorityError::Corrupt);
+            }
             Ok::<_, AuthorityError>(ActiveRef {
                 kind,
                 generation: Generation::from_sql(&generation)?,

@@ -152,8 +152,9 @@ the permit even if its commit fails, so a late notification cannot adopt it.
 
 Each generation's row records which store holds its chunks, in the transaction
 that mints it (schema version 5; version 4 was the removed repair schema and is
-still refused as newer). A paste plan is `staging`; every other generation,
-the adopted key's fresh names included, is `private`. The file refuses a staging
+still refused as newer). A paste plan minted at version 5 is `staging`; every
+other generation, earlier versions' rows and the adopted key's fresh names
+included, is `private`. The file refuses a staging
 row that is active or isn't an Anthropic key, and the authority refuses one no
 key's length fits. The paste plan's settle read, its deletes after a failed
 adoption or Remove, and both the delete and the read-back when a retired paste

@@ -194,7 +194,7 @@ pub(super) fn check(
           AND json_type(marker, '$.outcome_unknown') = 'false'
           AND json_type(marker, '$.notice') = 'false'
           AND (SELECT count(*) FROM json_each(marker)) = 6
-          FROM control WHERE id = 1 AND (SELECT user_version FROM pragma_user_version) = 3",
+          FROM control WHERE id = 1 AND (SELECT user_version FROM pragma_user_version) = 5",
             [],
             |row| row.get::<_, bool>(0),
         )
