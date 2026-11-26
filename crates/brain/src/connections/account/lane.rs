@@ -508,7 +508,8 @@ impl AccountState {
         matches!(self.flight, Some(Flight::Commit)) && self.lane_attempt() == Some(self.attempt)
     }
 
-    pub(super) fn held(&self) -> bool {
+    /// A set the provider issued is held after its save was refused.
+    pub(crate) fn held(&self) -> bool {
         matches!(self.lane, Lane::Owning { held: Some(_), .. })
     }
 

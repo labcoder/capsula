@@ -413,7 +413,7 @@ async fn eof_queues_compensation_and_close_waits_for_the_held_save_and_worker_re
     tokio::pin!(closing);
     tokio::select! {
         biased;
-        () = &mut closing => panic!("a held admitted write cannot be discarded"),
+        _ = &mut closing => panic!("a held admitted write cannot be discarded"),
         () = tokio::task::yield_now() => {}
     }
     release.send(()).unwrap();

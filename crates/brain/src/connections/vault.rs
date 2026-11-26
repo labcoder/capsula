@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::io::{self, Write};
+#[cfg(any(test, debug_assertions))]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,9 +19,9 @@ use super::error::VaultError;
 use super::marker::{Disposition, MarkerUpdate, Phase, SignOutMarker};
 use super::records::{Account, MAX_RECORD_BYTES, Record, RevocationList};
 use crate::platform::SessionLock;
-use crate::platform::credential::{
-    CredentialStore, CredentialStoreError, SecretBytes, native_session_lock_path,
-};
+#[cfg(debug_assertions)]
+use crate::platform::credential::native_session_lock_path;
+use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretBytes};
 
 mod github;
 #[cfg_attr(
@@ -161,20 +162,17 @@ impl<S: CredentialStore> Vault<S> {
     }
 
     /// Opens the production vault under the profile lock the brain already holds for its run,
-    /// rather than taking its own, bound to the profile's one history writer by `history`.
+    /// rather than taking its own, bound to the profile's one history writer by `history`. Its
+    /// authority is the one beside that lock; nothing looks the folder up again.
     ///
     /// # Errors
-    /// Returns an unsupported-store error or a path failure.
+    /// Returns an authority failure.
     pub(in crate::connections) fn open_held(
         store: S,
         session: Arc<SessionLock>,
         history: HistoryLink,
     ) -> Result<Self, VaultError> {
-        let path = native_session_lock_path().map_err(|error| match error {
-            CredentialStoreError::NoDataDir => VaultError::NoDataDir,
-            error => error.into(),
-        })?;
-        Self::with_lock(store, CREDENTIAL_SERVICE, session, &path, history)
+        Self::with_lock(store, CREDENTIAL_SERVICE, session, history)
     }
 
     /// Takes the lock at `path`, then opens the authority beside it and sweeps once, legacy
@@ -193,19 +191,18 @@ impl<S: CredentialStore> Vault<S> {
         history: HistoryLink,
     ) -> Result<Self, VaultError> {
         let session = SessionLock::try_acquire(path)?;
-        Self::with_lock(store, service, Arc::new(session), path, history)
+        Self::with_lock(store, service, Arc::new(session), history)
     }
 
-    /// Opens the authority beside `path` under `session`, the lock held at `path`, bound to
-    /// `history`, and sweeps once, legacy names included.
+    /// Opens the authority beside `session`'s lock, bound to `history`, and sweeps once, legacy
+    /// names included.
     pub(crate) fn with_lock(
         store: S,
         service: &str,
         session: Arc<SessionLock>,
-        path: &Path,
         history: HistoryLink,
     ) -> Result<Self, VaultError> {
-        let authority = Authority::open(&path.with_file_name(authority::FILE), &session)?;
+        let authority = Authority::open(&session)?;
         let mut vault = Self {
             repair_lease: None,
             authority,

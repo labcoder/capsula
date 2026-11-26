@@ -56,6 +56,8 @@ mod registration;
 mod scenes;
 #[path = "settings_tests.rs"]
 mod settings;
+#[path = "shutdown_tests.rs"]
+mod shutdown;
 #[path = "speech_tests.rs"]
 mod speech;
 #[path = "stop_scene_tests.rs"]
