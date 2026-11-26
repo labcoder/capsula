@@ -239,3 +239,55 @@ fn retention_routing_never_downgrades_observed_parent_refusal() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_a_folder_keeps_its_name_while_its_link_count_changes() {
+    use crate::platform::macos::protected::tests::Scratch;
+
+    let mut scratch = Scratch::new();
+    let root = scratch.root.try_clone().expect("retain scratch root");
+    let busy = scratch.directory(c"busy");
+    let before = protected::stat(busy.as_raw_fd()).expect("folder identity");
+    // SAFETY: busy is a held fixture folder and the name is fixed; creation is exclusive.
+    let made = unsafe { libc::mkdirat(busy.as_raw_fd(), c"child".as_ptr(), 0o700) };
+    assert_eq!(made, 0, "a sibling makes a subfolder");
+    scratch.record(&busy, c"child").expect("record subfolder");
+    let after = protected::stat(busy.as_raw_fd()).expect("folder identity");
+    assert_ne!(
+        before.st_nlink, after.st_nlink,
+        "the fixture moved the link count"
+    );
+    assert_eq!(named(&root, c"busy", &before), Ok(()));
+
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: root is the held scratch folder and the name is fixed; creation is exclusive.
+    let fd = unsafe { libc::openat(root.as_raw_fd(), c"file".as_ptr(), flags, 0o600) };
+    assert!(fd >= 0, "exclusive fixture file");
+    // SAFETY: the successful open transferred a fresh, uniquely owned descriptor.
+    let file = unsafe { File::from_raw_fd(fd) };
+    scratch.record(&root, c"file").expect("record file");
+    let single = protected::stat(file.as_raw_fd()).expect("file identity");
+    // SAFETY: root is the held scratch folder; both names are fixed fixture components.
+    let linked = unsafe {
+        libc::linkat(
+            root.as_raw_fd(),
+            c"file".as_ptr(),
+            root.as_raw_fd(),
+            c"second".as_ptr(),
+            0,
+        )
+    };
+    assert_eq!(linked, 0, "fixture hard link");
+    scratch.record(&root, c"second").expect("record hard link");
+    assert_eq!(
+        named(&root, c"file", &single),
+        Err(Untrusted::Unsafe),
+        "a file that gained a name"
+    );
+
+    drop((busy, file));
+    scratch
+        .cleanup()
+        .expect("identity-checked cleanup; uncertainty leaves reported residual");
+}

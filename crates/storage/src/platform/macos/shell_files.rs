@@ -741,7 +741,12 @@ fn precheck(parent: &File, name: &CStr, user: libc::uid_t) -> Result<(), Acquisi
 
 pub(super) fn named(parent: &File, name: &CStr, expected: &libc::stat) -> Result<(), Untrusted> {
     let actual = entry_stat(parent, name).map_err(|_| Untrusted::Io)?;
-    if !protected::same_inspection(&actual, expected) || actual.st_nlink != expected.st_nlink {
+    // A folder's link count moves whenever anyone adds or removes a subfolder in it; only a
+    // file's says whether it gained another name.
+    if !protected::same_inspection(&actual, expected)
+        || (expected.st_mode & libc::S_IFMT == libc::S_IFREG
+            && actual.st_nlink != expected.st_nlink)
+    {
         return Err(Untrusted::Unsafe);
     }
     Ok(())
@@ -889,9 +894,23 @@ impl Entries {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Entries a test lets this thread's next listings return before they fail like a read error.
+    pub(super) static READDIR_FAILS_AFTER: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 impl Entries {
     /// The next entry's name, copied out before the stream moves on.
     pub(super) fn next_name(&mut self) -> Next {
+        #[cfg(test)]
+        if let Some(left) = READDIR_FAILS_AFTER.get() {
+            if left == 0 {
+                return Next::Failed;
+            }
+            READDIR_FAILS_AFTER.set(Some(left - 1));
+        }
         // SAFETY: __error returns this thread's live errno storage.
         let errno = unsafe { libc::__error() };
         // SAFETY: errno is writable thread-local storage.

@@ -615,7 +615,7 @@ impl Scratch {
         Ok(())
     }
 
-    fn directory(&mut self, name: &CStr) -> File {
+    pub(in crate::platform::macos) fn directory(&mut self, name: &CStr) -> File {
         // SAFETY: root is held; name is a fixed single fixture component; creation is exclusive.
         let result = unsafe { libc::mkdirat(self.root.as_raw_fd(), name.as_ptr(), 0o700) };
         assert_eq!(result, 0, "exclusive child creation");

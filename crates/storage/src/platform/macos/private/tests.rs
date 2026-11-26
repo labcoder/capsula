@@ -718,3 +718,37 @@ fn native_a_file_is_bound_from_its_look_to_its_name() {
         assert_eq!(outcome, refused, "{name:?}");
     }
 }
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_a_listing_that_fails_refuses() {
+    use crate::platform::macos::shell_files::READDIR_FAILS_AFTER;
+
+    let mut scratch = Scratch::new();
+    let root = scratch.root.try_clone().expect("retain scratch root");
+    let user = this_user();
+    let tree = folder(&mut scratch, &root, c"tree", 0o700);
+    drop(folder(&mut scratch, &tree, c"sub", 0o700));
+
+    let outcomes: Vec<_> = [0, 1]
+        .into_iter()
+        .map(|after| {
+            READDIR_FAILS_AFTER.set(Some(after));
+            let outcome = private_at(&root, c"tree", user, LIMITS);
+            READDIR_FAILS_AFTER.set(None);
+            outcome
+        })
+        .collect();
+    let clean = private_at(&root, c"tree", user, LIMITS);
+
+    drop(tree);
+    scratch
+        .cleanup()
+        .expect("identity-checked cleanup; uncertainty leaves reported residual");
+    assert_eq!(
+        outcomes,
+        [Err(Untrusted::Io), Err(Untrusted::Io)],
+        "at once and after an entry"
+    );
+    assert_eq!(clean, Ok(()));
+}
