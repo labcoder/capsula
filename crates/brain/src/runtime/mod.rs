@@ -9,6 +9,8 @@ pub(crate) mod account;
 pub(crate) mod claude;
 mod connections;
 mod controls;
+#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+pub(crate) mod credit_fixture;
 mod data;
 #[cfg(test)]
 mod draw_stream_tests;
@@ -222,7 +224,7 @@ pub(crate) enum Selected {
     /// The dev fixture answers every run, with no account; a release build can't pick it.
     #[cfg(debug_assertions)]
     DevFixture(Box<dyn Engine>),
-    #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
+    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
     Fixture(Box<dyn Engine>),
     #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
     DrawReplay(Box<dyn Engine>),
@@ -400,7 +402,7 @@ impl Brain {
                 fixture_engine = true;
                 (engine, mpsc::unbounded_channel().1, Some(Ready::fixture()))
             }
-            #[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
+            #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             Selected::Fixture(engine) => {
                 (engine, mpsc::unbounded_channel().1, Some(Ready::fixture()))
             }
@@ -2356,6 +2358,10 @@ impl<'a, 't> Link<'a, 't> {
 
     /// Data frames carry content, so the tap never records them.
     fn data(&mut self, message: &DataToShell) -> Result<(), Full> {
+        #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+        let sample = credit_fixture::expand(message);
+        #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+        let message = sample.as_ref().unwrap_or(message);
         let queued = self.registration.is_some();
         let owner = match message {
             DataToShell::SceneStepCommit {

@@ -12,6 +12,8 @@ pub mod credential;
 pub mod dispatch;
 pub mod drawing;
 pub mod engines;
+#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+mod fixture_support;
 pub mod ipc;
 pub mod issues;
 mod jobs;
@@ -20,13 +22,10 @@ pub mod platform;
 mod recall;
 mod relaunch;
 mod runtime;
-#[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
-#[cfg_attr(
-    any(test, all(windows, debug_assertions, feature = "test-support")),
-    expect(
-        clippy::print_stderr,
-        reason = "the shared fixture reports cleanup failures during unwind"
-    )
+#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+#[expect(
+    clippy::print_stderr,
+    reason = "the shared fixture reports cleanup failures during unwind"
 )]
 #[path = "../../../tests/support/scratch.rs"]
 mod scratch;
@@ -38,6 +37,8 @@ mod supervise;
 mod tap;
 #[cfg(test)]
 mod test_support;
+#[cfg(all(debug_assertions, feature = "test-support"))]
+pub use startup::parent_bound::fixture::serve_pair_credit_fixture;
 #[cfg_attr(
     not(test),
     expect(

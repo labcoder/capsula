@@ -172,11 +172,12 @@ teardown into refusal and suppress the ordinary-loss drain. They drop once `serv
 the legs close only when the pair drops. A page whose read is cancelled while its frame is being written still
 abandons that frame (C-8), which on the Mac is a cut frame and so ends the pair as refused, with no
 grace. Parent-bound startup serves on these legs, behind the support check and this build's
-prerequisites. Before activation, a test must pair the
-two real adapters, this one and the shell's blocking adapter in
-`shell-core/src/platform/macos/leg.rs`: data saturated past the 512 KiB window, credit counted in
-logical frames, the 2 s STALL, and Stop and Ping answered in time. The I1e shell-side unit owns that
-test; this cut doesn't claim it.
+prerequisites. The C-7 acceptance tests in
+`crates/shell-core/src/platform/macos/leg_credit_tests.rs` pair both real adapters over socketpairs
+and drive the parent-bound serving path with offline fixtures. They cover five-record, 256 KiB
+logical frames, exactly one counted shell receipt per frame, and the 512 KiB credit window on both
+initial send and refill. They also cover Stop and Ping while data is blocked and the 2 s STALL
+deadline across fragment progress, checking both interruptions' durable reasons.
 
 ## The instance item (dormant)
 

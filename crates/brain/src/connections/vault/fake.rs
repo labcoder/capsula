@@ -10,10 +10,15 @@ use crate::platform::credential::{CredentialStore, CredentialStoreError, SecretB
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Fault {
     Refuse,
+    #[cfg_attr(not(test), expect(dead_code, reason = "only unit tests arm crashes"))]
     CrashAfter,
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only unit tests read mutation traces")
+)]
 pub(crate) enum Mutation {
     Set(String),
     Delete(String),
@@ -45,6 +50,7 @@ pub(crate) struct FakeState {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FakeStore(pub(crate) Arc<Mutex<FakeState>>);
 
+#[cfg(test)]
 impl FakeStore {
     /// A copy of the values and the write-once history, with no faults armed.
     pub(crate) fn fork(&self) -> Self {
@@ -89,7 +95,9 @@ impl FakeStore {
         state.mutations.clear();
         state.fault = Some((index, fault));
     }
+}
 
+impl FakeStore {
     #[expect(
         clippy::panic_in_result_fn,
         reason = "fault injection deliberately models process death after a durable mutation"

@@ -10,7 +10,7 @@ pub(crate) use crate::platform::CustodyError;
 /// Holds the session lock until dropped; nothing else can make one.
 pub(crate) struct SessionCustody {
     _lock: Option<platform::InstanceLock>,
-    #[cfg(test)]
+    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
     _fixture: Option<std::sync::Arc<()>>,
 }
 
@@ -34,7 +34,7 @@ impl SessionCustody {
     }
 
     /// Custody that holds a token instead of a lock, so offline tests can watch when it drops.
-    #[cfg(test)]
+    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
     pub(crate) fn fixture(token: std::sync::Arc<()>) -> Self {
         Self {
             _lock: None,
@@ -45,7 +45,7 @@ impl SessionCustody {
     fn held(lock: platform::InstanceLock) -> Self {
         Self {
             _lock: Some(lock),
-            #[cfg(test)]
+            #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             _fixture: None,
         }
     }
