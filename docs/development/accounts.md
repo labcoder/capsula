@@ -723,7 +723,9 @@ whole sign-out makes, for Keep and Erase.
 
 **Forget** (`AccountOp::ForgetSavedSignIn(revision)`) is how a profile copied from another PC signs
 in again. The view offers it, as `SavedSignInUnavailable { forget: Some(revision) }`, only while
-the current `chatgpt` revision has a missing chunk (`Missing`). A malformed, wrong-length,
+the current `chatgpt` revision has a missing chunk (`Missing`). A tokenless registration bound to an
+identity also reads as `Missing` while its host has a missing chunk, since it keeps that host from
+being replaced and so could never sign in again; there the host is the evidence Forget scans. A malformed, wrong-length,
 unreadable or changed record isn't offered: it may still read, or Prepare couldn't finish it. The
 shell asks first and sends the revision its dialog showed. The op shares Check's gate and lane
 flight. Under the session lock the vault rereads exactly that revision, and promotes
@@ -954,7 +956,9 @@ unreadable `chatgpt` record keeps the unusable host, and sign-in is refused as
 `CredentialsUnavailable`. Ordinary sign-out keeps a subject-bound registration, and neither a
 tokenless registration nor an unreadable record can be signed out, so the host stays blocked
 until the blocking record is removed. For a record with a missing chunk, as in a copied profile,
-that is Forget (see Sign-out). The `chatgpt` record is never
+that is Forget (see Sign-out), and so it is for a bound registration whose host lost a chunk: it
+reads as missing, Forget erases it, and the next read replaces the host. A host whose bytes aren't
+a host, or whose read is refused, still blocks. The `chatgpt` record is never
 replaced silently.
 
 ```mermaid

@@ -312,11 +312,11 @@ impl<S: CredentialStore> Vault<S> {
         Ok(true)
     }
 
-    /// Rereads exactly `expected` as Check does and, only while it is still current with a saved
-    /// chunk missing and every other chunk readable at its length, durably promotes a `Discard`
-    /// sign-out of it and returns `None`. Otherwise nothing is written, and it returns Check's
-    /// answer, or `Malformed` or `Unavailable` for a wrong-length or refused chunk behind a missing
-    /// one.
+    /// Rereads exactly `expected` as Check does and, only while it is still current and missing a
+    /// chunk, its own or a bound registration's host's, with every other chunk of that record
+    /// readable at its length, durably promotes a `Discard` sign-out of it and returns `None`.
+    /// Otherwise nothing is written, and it returns Check's answer, or `Malformed` or `Unavailable`
+    /// for a wrong-length or refused chunk behind a missing one.
     pub(super) fn forget_saved_sign_in(
         &mut self,
         expected: u64,
@@ -326,20 +326,17 @@ impl<S: CredentialStore> Vault<S> {
         {
             return Some(checked);
         }
-        let active = match self.authority.observe(Kind::Account) {
-            Ok((revision, Ok(Some(active)))) if revision == expected => active,
-            _ => return Some(Err(SavedSignInFailure::Unavailable)),
+        // A readable account reads as missing only as a bound registration whose host is lost.
+        let lost = if self.read::<Account>(Kind::Account).is_ok() {
+            Kind::Host
+        } else {
+            Kind::Account
         };
-        // Every chunk is read, so a refused or wrong-length one isn't given up behind a missing one.
-        match generation::has_missing_chunk(&self.store, &self.service, &active) {
+        match self.lost(lost) {
             Ok(true) => {}
-            Err(
-                authority::AuthorityError::WrongChunkLength
-                | authority::AuthorityError::Store(CredentialStoreError::InvalidBlob),
-            ) => return Some(Err(SavedSignInFailure::Malformed)),
             // The record read whole this time, so it gets Check's answer and is never promoted.
             Ok(false) => return Some(self.saved_sign_in(Some(expected))),
-            Err(_) => return Some(Err(SavedSignInFailure::Unavailable)),
+            Err(failure) => return Some(Err(failure)),
         }
         self.update_marker(MarkerUpdate::Promote(Disposition::Discard))
             .err()
@@ -397,10 +394,44 @@ impl<S: CredentialStore> Vault<S> {
                     })
                     .transpose()
             });
+        // A registration bound to an identity keeps its lost host from being replaced, so it can
+        // never sign in again: it reads as missing, which Forget can give up.
+        let account = match account {
+            Ok(Some(registration))
+                if registration.expose().tokens.is_none()
+                    && registration.expose().subject.is_some()
+                    && self.lost(Kind::Host) == Ok(true) =>
+            {
+                Err(Missing)
+            }
+            account => account,
+        };
         Ok(SavedSignIn {
             revision,
             notice: marker.notice,
             account,
+        })
+    }
+
+    /// Whether `kind`'s current generation lacks a chunk. Every chunk is read, so a wrong-length or
+    /// refused one is never hidden behind a missing one.
+    fn lost(&self, kind: Kind) -> Result<bool, SavedSignInFailure> {
+        let active = match self.authority.observe(kind) {
+            Ok((_, Ok(Some(active)))) => active,
+            Ok((_, Ok(None))) => return Ok(false),
+            Ok((_, Err(_))) | Err(authority::AuthorityError::Corrupt) => {
+                return Err(SavedSignInFailure::Malformed);
+            }
+            Err(_) => return Err(SavedSignInFailure::Unavailable),
+        };
+        generation::has_missing_chunk(&self.store, &self.service, &active).map_err(|error| {
+            match error {
+                authority::AuthorityError::WrongChunkLength
+                | authority::AuthorityError::Store(CredentialStoreError::InvalidBlob) => {
+                    SavedSignInFailure::Malformed
+                }
+                _ => SavedSignInFailure::Unavailable,
+            }
         })
     }
 
