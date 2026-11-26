@@ -6,8 +6,7 @@ use std::sync::Arc;
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::{
     ClaudeCodeView, ConnectionKind, ConnectionOp, ConnectionsView, ControlToShell, DataToShell,
-    ErrorKey, KeyRecoveryRead, KeyRemovalFailure, KeyStageFailure, KeyStageId, KeyStagePlan,
-    KeyView, RunId, UserError,
+    KeyRecoveryRead, KeyRemovalFailure, KeyStageFailure, KeyStageId, KeyStagePlan, KeyView, RunId,
 };
 use tokio::task::JoinHandle;
 
@@ -19,7 +18,6 @@ use crate::connections::anthropic::{
     models::{CatalogModel, CheckError},
     route::{Transport, Verified},
 };
-use crate::connections::http_client::HttpError;
 use crate::connections::model::error::RejectionOrigin;
 use crate::context::ConnectionTag;
 use crate::coordinator::{Availability, Input, Ready, RefusedKey, SendKey, model_unavailable};
@@ -155,15 +153,10 @@ impl fmt::Debug for ConnectionEvent {
     }
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "transport refusal, catalog freshness, pending publication and vault loading are independent"
-)]
 pub(super) struct Connections {
     generation: u64,
     key: Option<Secret<AnthropicKey>>,
     transport: Option<Transport>,
-    transport_unsupported: bool,
     verified: Option<Arc<Verified>>,
     checking: Option<Fence>,
     adopting: Option<(u64, Option<u64>)>,
@@ -199,7 +192,6 @@ impl Default for Connections {
             generation: 0,
             key: None,
             transport: None,
-            transport_unsupported: false,
             verified: None,
             checking: None,
             adopting: None,
@@ -241,31 +233,15 @@ impl Connections {
     #[cfg(test)]
     pub(super) fn use_test_transport(&mut self, transport: Transport) {
         self.transport = Some(transport);
-        self.transport_unsupported = false;
     }
 
     pub(super) fn configure_transport(&mut self, model: ModelTuning) {
-        if self.transport.is_none() && !self.transport_unsupported {
-            match Transport::native(model) {
-                Ok(transport) => self.transport = transport,
-                Err(HttpError::UnsupportedPlatform) => self.transport_unsupported = true,
-                Err(error) => tracing::debug!(%error, "the native Anthropic route is unavailable"),
-            }
+        if self.transport.is_none() {
+            self.transport = Transport::native(model);
         }
-    }
-
-    pub(super) fn native_refusal(&self) -> Option<UserError> {
-        self.transport_unsupported
-            .then(|| ErrorKey::UnsupportedPlatform.into())
     }
 
     fn route_input(&self) -> Option<Input> {
-        if let Some(refusal) = self.native_refusal() {
-            return Some(Input::Engines(
-                ConnectionKind::AnthropicKey,
-                Availability::Unavailable(refusal),
-            ));
-        }
         self.transport.as_ref()?;
         let availability = self.verified.as_ref().map_or_else(
             || Availability::Unavailable(model_unavailable()),
@@ -350,11 +326,7 @@ impl Connections {
 
     /// The key's half of the view; the runtime puts it together with Claude Code's.
     pub(super) fn anthropic(&self) -> KeyView {
-        if self.transport_unsupported {
-            KeyView::UnsupportedPlatform
-        } else {
-            self.view.anthropic
-        }
+        self.view.anthropic
     }
 
     fn frame(&self) -> ControlToShell {
@@ -443,8 +415,7 @@ impl Accounts {
     pub(super) fn stage_op(&mut self, epoch: u64, op: ConnectionOp) -> Vec<ControlToShell> {
         let work = match op {
             ConnectionOp::BeginAnthropicKeyStage { request, len } => {
-                if self.connections.transport_unsupported
-                    || self.connections.removing.is_some()
+                if self.connections.removing.is_some()
                     || self.connections.check_request.is_some()
                     || self.connections.stage_link != Some(epoch)
                 {
@@ -462,8 +433,7 @@ impl Accounts {
                 }
             }
             ConnectionOp::AnthropicKeyStaged { plan } => {
-                if self.connections.transport_unsupported
-                    || self.connections.removing.is_some()
+                if self.connections.removing.is_some()
                     || self.connections.adopting.is_some()
                     || self.connections.check_request.is_some()
                     || self.connections.stage_link != Some(epoch)
@@ -726,9 +696,6 @@ impl Accounts {
     }
 
     fn key_op(&mut self, op: ConnectionOp) -> Vec<ControlToShell> {
-        if op == ConnectionOp::CheckAnthropicKey && self.connections.transport_unsupported {
-            return vec![self.connections.frame()];
-        }
         if let ConnectionOp::ReconcileAnthropicKey { request } = op {
             return self.recovery_check(request);
         }

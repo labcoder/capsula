@@ -77,9 +77,6 @@ refuses the catalog. A successful catalog is tagged AnthropicKey; 401/403 reject
 as does a 400 `invalid_request_error` naming the exact `anthropic-workspace-id` token
 (`WorkspaceRequired`). No workspace id is accepted or provider message forwarded. Rate limits,
 server, transport or catalog failures keep it Unconfirmed for a later Check.
-When native TLS is unsupported, the connection view reports UnsupportedPlatform on every
-snapshot instead. It doesn't admit paste or Check, and an existing key can still be removed
-locally by revision.
 
 An entry takes pictures only when its own `capabilities.image_input.supported` is a literal
 `true`; absent, `null` or any other value means no, and never fails the Check. The other flags
@@ -292,13 +289,27 @@ captured `CRYPT_E_NOT_FOUND`; unreadable usage isn't treated as unrestricted. En
 one context at a time and transfers that ownership back to the next Win32 enumeration call.
 Early returns free the held context and close the store. Nothing is installed or fetched.
 
-Rustls parses those DER roots and verifies chains offline with ring. Empty or entirely
-unparsable roots fail as `TrustStoreUnavailable`, without a fallback root bundle or permissive
-verifier. There is no platform verifier, native-certs loader or certificate-override setting.
-On builds without a native trust-store adapter, native account startup refuses before starting
-its worker. Client constructors return a permanent unsupported-platform error, not the
-retryable Windows trust-store error. The native Anthropic route refuses before allocating a
-request budget. Loopback TLS tests can still inject their own roots.
+On macOS and Linux the same function reads roots through `rustls-native-certs`, locally:
+
+| | macOS | Linux |
+| --- | --- | --- |
+| Source | User, then admin, then system Keychain trust settings; the first domain with a setting for a certificate decides | The system bundle the OpenSSL probe finds |
+| `SSL_CERT_FILE` / `SSL_CERT_DIR` | Refused (`Overridden`): they would replace the Keychain, denials included | Used instead of the system bundle, as the platform documents |
+| An unreadable entry | Refuses the whole store (`Unreadable`): it might have been a denial | Left out and counted |
+| No root | `Empty` | `Empty` |
+
+Every refusal is `TrustStoreUnavailable` to callers. On macOS these anchors follow the Keychain
+less strictly than SecTrust does: a certificate with only Unspecified or non-SSL trust settings
+counts as a root, and hostname or app limits on an SSL setting are ignored. A Deny that was read
+still excludes that certificate. This is an interim policy until SecTrust verifies on macOS; no
+macOS release build ships with it.
+
+Rustls parses those DER roots and verifies chains offline with ring on every platform. Empty or
+entirely unparsable roots fail as `TrustStoreUnavailable`, without a fallback root bundle or
+permissive verifier. There is no platform verifier or certificate-override setting. Off Windows,
+building a client no longer refuses; the runtime admission and the credential store still refuse
+before any account work, and test fixtures there get an offline Anthropic route instead of
+reading the host's store. Loopback TLS tests can still inject their own roots.
 The real-store test runs in the normal Windows test suite: it reads bounded public certificates
 only, writes nothing, and exercises the FFI ownership path rather than leaving it ignored.
 
@@ -759,7 +770,7 @@ generation, which moves on every rotation and would clear the list hourly.
 | 200 with sendable models, or a genuinely empty/hidden list | `Models` on the data pipe, once per change and per connection |
 | 200 with listable models but no known support, 200 that isn't a model list, a failed request, 401, 429, 5xx whatever its code | `AccountOffline`, Retry |
 | 403 `subscription_sharing_user_not_eligible`, and only that | `PlanUnavailable`; the account shows `PlanState::Unavailable` |
-| No native TLS adapter | `AccountUnsupported` carries the local account view on every snapshot, including reconnect. No network Retry or Sign In; local sign-out and cleanup remain available. |
+| An unsupported-platform transport refusal (no current build's TLS produces one) | `AccountUnsupported` carries the local account view on every snapshot, including reconnect. No network Retry or Sign In; local sign-out and cleanup remain available. |
 | `subscription_sharing_user_not_eligible` on another 4xx | `AccountMisconfigured` |
 | other codes | as the refresh table above maps them |
 
@@ -881,9 +892,8 @@ account startup stops at this refusal before loading other credentials or publis
 state. It neither reports damaged data nor offers Retry. Temporary Windows failures keep their
 existing recovery behavior.
 
-Native account assembly also refuses when there's no native trust adapter. At the service
-boundary, a permanent trust refusal fences further requests rather than asking the user to
-repair a trust store. ChatGPT preserves unconfirmed revocation debt and uses the same refusal
+At the service boundary, a permanent trust refusal fences further requests rather than asking
+the user to repair a trust store. ChatGPT preserves unconfirmed revocation debt and uses the same refusal
 for bearer waiters and reconnecting shells, even if only the revocation pass failed. Anthropic
 uses its permanent refusal in both the connection view and an unserved run, without suggesting
 opening Settings. GitHub replays its scoped refusal before the local GitHub view on each

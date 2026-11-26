@@ -61,7 +61,6 @@ pub enum HttpError {
 impl From<NativeTlsError> for HttpError {
     fn from(error: NativeTlsError) -> Self {
         match error {
-            NativeTlsError::Unsupported => Self::UnsupportedPlatform,
             NativeTlsError::TrustStoreUnavailable => Self::TrustStoreUnavailable,
             NativeTlsError::Configuration => Self::Configuration,
         }

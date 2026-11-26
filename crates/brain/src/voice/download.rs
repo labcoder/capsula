@@ -80,7 +80,6 @@ pub(crate) enum DownloadError {
 impl From<NativeTlsError> for DownloadError {
     fn from(error: NativeTlsError) -> Self {
         match error {
-            NativeTlsError::Unsupported => Self::UnsupportedPlatform,
             NativeTlsError::TrustStoreUnavailable | NativeTlsError::Configuration => {
                 Self::Transport
             }
