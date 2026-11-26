@@ -229,25 +229,29 @@ fn only_the_brain_is_a_background_app_and_both_plists_read_back() {
 
 #[test]
 fn only_each_workspace_binary_artifact_is_taken() {
-    let artifact = |reason: &str, package: &str, name: &str, kind: &str, exe: &str| {
+    let root = Path::new(WORKSPACE).canonicalize().expect("the workspace");
+    let root = root.to_str().expect("text");
+    let here = |package: &str| format!("path+file://{root}/crates/x#{package}@0.1.2");
+    let artifact = |reason: &str, id: &str, name: &str, kind: &str, exe: &str| {
         json!({
             "reason": reason,
-            "package_id": format!("path+file:///w/crates/x#{package}@0.1.2"),
+            "package_id": id,
             "target": { "name": name, "kind": [kind] },
             "executable": exe,
         })
         .to_string()
     };
+    let (shell_id, brain_id) = (here("kumochi-shell"), here("kumochi-brain"));
     let shell = artifact(
         "compiler-artifact",
-        "kumochi-shell",
+        &shell_id,
         "kumochi",
         "bin",
         "/t/kumochi",
     );
     let brain = artifact(
         "compiler-artifact",
-        "kumochi-brain",
+        &brain_id,
         "kumochid",
         "bin",
         "/t/kumochid",
@@ -260,53 +264,90 @@ fn only_each_workspace_binary_artifact_is_taken() {
         .concat()
         .join("\n")
     };
+    let taken = |extra: &[String]| artifacts(lines(extra).as_bytes(), WORKSPACE);
     assert_eq!(
-        artifacts(lines(&[]).as_bytes()).expect("both"),
+        taken(&[]).expect("both"),
         [
             ("kumochi".to_owned(), PathBuf::from("/t/kumochi")),
             ("kumochid".to_owned(), PathBuf::from("/t/kumochid")),
         ]
     );
     for decoy in [
+        artifact("build-script-executed", &brain_id, "kumochid", "bin", "/x"),
         artifact(
-            "build-script-executed",
-            "kumochi-brain",
+            "compiler-artifact",
+            &here("kumochi-brainx"),
             "kumochid",
             "bin",
             "/x",
         ),
-        artifact("compiler-artifact", "other", "kumochid", "bin", "/x"),
         artifact(
             "compiler-artifact",
-            "kumochi-brain",
+            "path+file:///elsewhere/crates/brain#kumochi-brain@0.1.2",
             "kumochid",
-            "test",
+            "bin",
             "/x",
         ),
+        artifact(
+            "compiler-artifact",
+            "registry+https://github.com/rust-lang/crates.io-index#kumochi-brain@0.1.2",
+            "kumochid",
+            "bin",
+            "/x",
+        ),
+        artifact("compiler-artifact", &brain_id, "kumochid", "test", "/x"),
     ] {
         assert_eq!(
-            artifacts(lines(std::slice::from_ref(&decoy)).as_bytes()).expect("decoy ignored")[1].1,
+            taken(std::slice::from_ref(&decoy)).expect("decoy ignored")[1].1,
             PathBuf::from("/t/kumochid")
         );
     }
-    let twice = artifact(
-        "compiler-artifact",
-        "kumochi-brain",
-        "kumochid",
-        "bin",
-        "/y",
-    );
+    let twice = artifact("compiler-artifact", &brain_id, "kumochid", "bin", "/y");
     assert_eq!(
-        artifacts(lines(&[twice]).as_bytes())
-            .expect_err("ambiguous")
-            .to_string(),
+        taken(&[twice]).expect_err("ambiguous").to_string(),
         "Cargo built more than one kumochid"
     );
     assert_eq!(
-        artifacts(shell.as_bytes())
+        artifacts(shell.as_bytes(), WORKSPACE)
             .expect_err("missing")
             .to_string(),
         "Cargo built no kumochid"
+    );
+}
+
+#[test]
+fn a_child_tool_runs_bounded_with_large_input_and_output_and_hides_its_errors() {
+    let big = vec![b'k'; 300_000];
+    assert_eq!(pipe("/bin/cat", &[], &big).expect("echoed"), big);
+    let mut noisy = Command::new("/bin/sh");
+    noisy.args(["-c", "head -c 200000 /dev/zero >&2; exit 4"]);
+    assert_eq!(
+        bounded("sh", &mut noisy, None, LAUNCH_WAIT)
+            .expect_err("failed")
+            .to_string(),
+        "sh failed (exit status: 4, 200000 bytes of stderr withheld)"
+    );
+    let mut stalled = Command::new("/bin/sleep");
+    stalled.arg("30");
+    let started = Instant::now();
+    assert_eq!(
+        bounded("sleep", &mut stalled, None, Duration::from_millis(200))
+            .expect_err("stalled")
+            .to_string(),
+        "sleep didn't finish within 200ms"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        strings("Platform", br#"{"not":"a list"}"#)
+            .expect_err("refused")
+            .to_string(),
+        "the profile's Platform has the wrong type"
+    );
+    assert_eq!(
+        object("Entitlements", br#""ABCDE12345""#)
+            .expect_err("refused")
+            .to_string(),
+        "the profile's Entitlements has the wrong type"
     );
 }
 

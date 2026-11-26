@@ -25,6 +25,9 @@ flowchart LR
   profile from one team, authorize that certificate, name exactly the role's App ID from
   `constants::AppleIds::DEV`, and allow the role's own group and the shared instance group. The
   expiry is checked again after the build, just before signing. `--out` must not exist yet.
+  These checks read the profile's decoded contents without verifying Apple's signature on it, so
+  they catch a wrong or stale profile early but aren't the authority: the system is, when it
+  launches each app.
 - **Layout.** `Kumochi Dev.app/Contents/MacOS/kumochi`, with the brain nested at
   `Contents/Helpers/kumochid.app` as a background-only app (`LSBackgroundOnly`). Each app embeds
   its own profile at `Contents/embedded.provisionprofile`.
@@ -38,7 +41,8 @@ flowchart LR
   statically.
 - **Nothing identifying is printed or committed.** The team, identity and profile values stay in
   the output folder. Messages name only the option or the role, never a path or an argument's
-  value, and the stderr of codesign and the other tools, which can name them, is withheld.
+  value. The stderr of codesign and the other tools, and Cargo's build output, which can name them
+  or local paths, are withheld; a failed build says which `cargo build` shows why.
 - **The first signed use** of the key may ask for the login keychain password. Only the Mac's
   owner answers that. Each codesign call gets 2 minutes, then it's stopped and the task fails, so
   a prompt nobody answers doesn't hang it.

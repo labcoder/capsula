@@ -19,6 +19,8 @@ const UNAVAILABLE: i32 = 69;
 const LAUNCH_WAIT: Duration = Duration::from_secs(10);
 /// The longest a codesign call may take, so one waiting on a keychain prompt nobody answers ends.
 const SIGN_WAIT: Duration = Duration::from_secs(120);
+/// The longest a profile or plist tool may take.
+const TOOL_WAIT: Duration = Duration::from_secs(30);
 /// More development certificates than any profile carries.
 const MAX_CERTIFICATES: usize = 64;
 
@@ -182,7 +184,7 @@ fn decode(bytes: Vec<u8>) -> Result<Profile> {
         args.extend(["-o", "-", "-"]);
         pipe("/usr/bin/plutil", &args, &plist).with_context(|| format!("the profile's {key}"))
     };
-    let teams: Vec<String> = serde_json::from_slice(&field("TeamIdentifier", "json", None)?)?;
+    let teams = strings("TeamIdentifier", &field("TeamIdentifier", "json", None)?)?;
     let [team] = <[String; 1]>::try_from(teams)
         .ok()
         .context("the profile names one team")?;
@@ -204,13 +206,37 @@ fn decode(bytes: Vec<u8>) -> Result<Profile> {
     Ok(Profile {
         bytes,
         team,
-        entitlements: serde_json::from_slice(&field("Entitlements", "json", None)?)?,
+        entitlements: object("Entitlements", &field("Entitlements", "json", None)?)?,
         expires: String::from_utf8(field("ExpirationDate", "raw", Some("date"))?)?
             .trim()
             .to_owned(),
-        platforms: serde_json::from_slice(&field("Platform", "json", None)?)?,
+        platforms: strings("Platform", &field("Platform", "json", None)?)?,
         certificates,
     })
+}
+
+/// A profile field's JSON, which must be an object. A conversion error can quote the value, so
+/// only the field is named.
+fn object(key: &str, json: &[u8]) -> Result<Value> {
+    serde_json::from_slice::<Value>(json)
+        .ok()
+        .filter(Value::is_object)
+        .with_context(|| format!("the profile's {key} has the wrong type"))
+}
+
+/// A profile field's JSON, which must be an array of strings, named the same way.
+fn strings(key: &str, json: &[u8]) -> Result<Vec<String>> {
+    let value: Option<Value> = serde_json::from_slice(json).ok();
+    value
+        .as_ref()
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .with_context(|| format!("the profile's {key} has the wrong type"))
 }
 
 /// The profile is a current macOS one from a well-formed team, for exactly `id`, authorizing
@@ -360,13 +386,24 @@ fn build() -> Result<Vec<(String, PathBuf)>> {
             "--message-format=json-render-diagnostics",
         ])
         .args(["-p", "kumochi-shell", "-p", "kumochi-brain"])
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::null())
         .output()?;
-    ensure!(output.status.success(), "the Dev build failed");
-    artifacts(&output.stdout)
+    // Cargo's diagnostics name local paths, so they aren't shown here.
+    ensure!(
+        output.status.success(),
+        "the Dev build failed; `cargo build -p kumochi-shell -p kumochi-brain` shows why"
+    );
+    artifacts(&output.stdout, WORKSPACE)
 }
 
-fn artifacts(stdout: &[u8]) -> Result<Vec<(String, PathBuf)>> {
+/// This workspace's root: xtask sits one level below it.
+const WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+
+fn artifacts(stdout: &[u8], workspace: &str) -> Result<Vec<(String, PathBuf)>> {
+    let root = Path::new(workspace)
+        .canonicalize()
+        .context("the workspace folder")?;
+    let root = root.to_str().context("a workspace path that is text")?;
     let mut built = Vec::new();
     for (package, exe) in [("kumochi-shell", SHELL_EXE), ("kumochi-brain", BRAIN_EXE)] {
         let mut found = stdout
@@ -377,7 +414,14 @@ fn artifacts(stdout: &[u8]) -> Result<Vec<(String, PathBuf)>> {
                 message["reason"] == "compiler-artifact"
                     && message["package_id"]
                         .as_str()
-                        .is_some_and(|id| id.contains(&format!("#{package}@")))
+                        .and_then(|id| id.strip_prefix("path+file://"))
+                        .and_then(|id| id.split_once('#'))
+                        .is_some_and(|(path, name)| {
+                            Path::new(path).starts_with(root)
+                                && name
+                                    .strip_prefix(package)
+                                    .is_some_and(|v| v.starts_with('@'))
+                        })
                     && target["name"] == exe
                     && target["kind"] == json!(["bin"])
             })
@@ -477,45 +521,74 @@ fn end(child: &mut Child) -> Result<ExitStatus> {
     child.wait().context("reaping a child process")
 }
 
-/// Runs `program` with `args` and then `path`, for at most [`SIGN_WAIT`]; its stdout. Its stderr
-/// isn't shown, because it can name the team or the identity.
+/// Runs `program` with `args` and then `path`, for at most [`SIGN_WAIT`]; its stdout.
 fn command(program: &str, args: &[&str], path: &Path) -> Result<Vec<u8>> {
-    let mut child = Command::new(program)
-        .args(args)
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    wait_for(&mut child, SIGN_WAIT)?
-        .with_context(|| format!("{program} didn't finish within {SIGN_WAIT:?}"))?;
-    finished(program, child.wait_with_output()?)
+    let mut command = Command::new(program);
+    command.args(args).arg(path);
+    bounded(program, &mut command, None, SIGN_WAIT)
 }
 
-/// Runs `program` with `args` on `input`; its stdout, with its stderr withheld as above.
+/// Runs `program` with `args` on `input`, for at most [`TOOL_WAIT`]; its stdout.
 fn pipe(program: &str, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .context("the program's input")?
-        .write_all(input)?;
-    finished(program, child.wait_with_output()?)
+    let mut command = Command::new(program);
+    command.args(args);
+    bounded(program, &mut command, Some(input), TOOL_WAIT)
 }
 
-fn finished(program: &str, output: std::process::Output) -> Result<Vec<u8>> {
+/// Runs `command` within `wait`, feeding `input` and draining both outputs as it runs, so a
+/// large one can't stall it; the child is reaped on every path. Its stderr isn't shown, because it
+/// can name the team or the identity.
+fn bounded(
+    program: &str,
+    command: &mut Command,
+    input: Option<&[u8]>,
+    wait: Duration,
+) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut child = command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("starting {program}"))?;
+    let stdin = child.stdin.take();
+    let mut stdout = child.stdout.take().context("the child's output")?;
+    let mut stderr = child.stderr.take().context("the child's errors")?;
+    let (status, written, out, err) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || match (stdin, input) {
+            (Some(mut stdin), Some(input)) => stdin.write_all(input),
+            _ => Ok(()),
+        });
+        let out = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let err = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let status = wait_for(&mut child, wait);
+        let joined = |name| format!("{program}'s {name} thread panicked");
+        (
+            status,
+            writer.join().map_err(|_| anyhow::anyhow!(joined("input"))),
+            out.join().map_err(|_| anyhow::anyhow!(joined("output"))),
+            err.join().map_err(|_| anyhow::anyhow!(joined("error"))),
+        )
+    });
+    let status = status?.with_context(|| format!("{program} didn't finish within {wait:?}"))?;
+    let (out, err) = (out??, err??);
     ensure!(
-        output.status.success(),
-        "{program} failed ({}, {} bytes of stderr withheld)",
-        output.status,
-        output.stderr.len()
+        status.success(),
+        "{program} failed ({status}, {} bytes of stderr withheld)",
+        err.len()
     );
-    Ok(output.stdout)
+    written?.with_context(|| format!("feeding {program}"))?;
+    Ok(out)
 }
 
 fn to_json(plist: &[u8]) -> Result<Value> {
