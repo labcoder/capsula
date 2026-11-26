@@ -542,10 +542,14 @@ fn end(child: &mut Child) -> Result<ExitStatus> {
 
 /// Kills `child` alone, whose group was stopped already, and reaps it.
 fn reap(child: &mut Child) -> Result<ExitStatus> {
-    let killed = child.kill();
-    let status = child.wait().context("reaping a child process")?;
-    killed.context("stopping a child process")?;
-    Ok(status)
+    if let Err(error) = child.kill() {
+        // A leader that's still running after a failed kill isn't waited on.
+        return child
+            .try_wait()?
+            .ok_or(error)
+            .context("stopping a child process");
+    }
+    child.wait().context("reaping a child process")
 }
 
 /// Kills every process in group `group`.
@@ -636,18 +640,19 @@ fn bounded(
     }
     drop(sent);
     let mut streams = [None, None, None];
-    let mut late = false;
+    // Set once, when the group is stopped: every pipe still open shares this one grace.
+    let mut grace: Option<Instant> = None;
     let mut gathered = Ok(());
     for _ in 0..3 {
         let left = deadline.saturating_duration_since(Instant::now());
         let next = received.recv_timeout(left).or_else(|_| {
-            if !late {
-                late = true;
+            let until = *grace.get_or_insert_with(|| {
                 // Refused only when no member is left to stop; the grace bounds the wait either way.
                 stop_group(child.id()).ok();
-            }
+                Instant::now() + STOP_GRACE
+            });
             received
-                .recv_timeout(STOP_GRACE)
+                .recv_timeout(until.saturating_duration_since(Instant::now()))
                 .with_context(|| format!("{program}'s output stayed open after it was stopped"))
         });
         match next {
@@ -658,6 +663,7 @@ fn bounded(
             }
         }
     }
+    let late = grace.is_some();
     let status = if late {
         reap(&mut child).map(Some)
     } else {
