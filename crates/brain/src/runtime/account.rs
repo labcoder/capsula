@@ -1249,7 +1249,6 @@ async fn revoke_task(
 ) {
     let ended = match account_http(http, deadline).await {
         Ok(http) => Input::Revoked(revoke(&http, entries, deadline, backoff).await),
-        Err(ExchangeError::Http(HttpError::UnsupportedPlatform)) => Input::RevocationUnsupported,
         Err(_) => Input::Revoked(Vec::new()),
     };
     events.send(ended).ok();

@@ -1103,7 +1103,6 @@ fn token_key(code: TokenError) -> ErrorKey {
 }
 fn api_key(error: ApiError) -> ErrorKey {
     match error {
-        ApiError::Http(HttpError::UnsupportedPlatform) => ErrorKey::UnsupportedPlatform,
         ApiError::Http(_) => ErrorKey::AccountOffline,
         _ => ErrorKey::ResponseUnreadable,
     }
