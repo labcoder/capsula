@@ -828,6 +828,7 @@ the Listening row.
   copied from `<models-dir>/speech-input/` (an installed models folder) into the launch's own
   models folder and the native runtime from `<natives-dir>` beside the staged brain, each checked
   against the manifest's size and SHA-256; nothing downloads and nothing lands outside the run.
+  The run's own settings then list speech input as installed, with Hold to talk on.
   Ten batches, each its own launch inside the shell's two-minute quit bound and one main trace,
   wait up to 20 s for `speech input ready=true` before their trace starts, and then make 10
   holds: each keeps the keys down until

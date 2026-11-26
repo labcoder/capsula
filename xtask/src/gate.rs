@@ -255,7 +255,8 @@ impl Images {
             &speech.natives,
             &self.folders.models(),
             bin,
-        )
+        )?;
+        self.folders.install_speech_input()
     }
 
     fn unchanged(&self) -> Result<()> {

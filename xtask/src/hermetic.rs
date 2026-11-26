@@ -286,6 +286,19 @@ impl Folders {
             .join(kumochi_protocol::voice::MODELS_DIR)
     }
 
+    /// Lists speech input as installed with Hold to talk on, so the brain loads the model the run
+    /// placed in [`Self::models`] at start.
+    pub(crate) fn install_speech_input(&self) -> Result<()> {
+        fs::write(
+            self.roaming.join(GATE.data_dir).join(CONFIG_FILE),
+            format!(
+                "{SETTINGS}\n[voice]\ninstalled = [\"{}\"]\nhold_to_talk = true\n",
+                kumochi_protocol::voice::VoicePart::SpeechInput.dir()
+            ),
+        )
+        .context("writing the gate settings")
+    }
+
     /// Leaves onboarding owed, so the shell opens the onboarding window at start.
     pub(crate) fn owe_onboarding(&self) -> Result<()> {
         fs::write(
@@ -1026,6 +1039,12 @@ mod tests {
             fs::read_to_string(dir.join("roaming/Kumochi Gate/config.toml")).expect("settings"),
             "default_model = { connection = \"AnthropicKey\", model = \"claude-haiku-5-5\", \
              effort = \"Low\" }\nonboarded = true\n\n[claude_code]\nenabled = false\n"
+        );
+        folders.install_speech_input().expect("speech input listed");
+        assert_eq!(
+            fs::read_to_string(dir.join("roaming/Kumochi Gate/config.toml")).expect("settings"),
+            "onboarded = true\n\n[claude_code]\nenabled = false\n\n[voice]\n\
+             installed = [\"speech-input\"]\nhold_to_talk = true\n"
         );
         folders.owe_onboarding().expect("owing onboarding");
         assert_eq!(

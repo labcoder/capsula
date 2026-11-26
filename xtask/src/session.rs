@@ -789,9 +789,10 @@ fn listening(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnosti
         let kept =
             shown.and_then(|records| session.wait(Duration::from_millis(150)).map(|()| records));
         session.modifier(0x38, InputEdge::Up)?;
+        let released = session.last_qpc;
         session.modifier(0x1d, InputEdge::Up)?;
         counts.sent += 1;
-        let released = session.last_qpc.context("hold break QPC missing")?;
+        let released = released.context("hold break QPC missing")?;
         let sample = kept.map(|records| heard(&records, since));
         let Ok(Some(mut sample)) = sample else {
             counts.behavior_fail += 1;
