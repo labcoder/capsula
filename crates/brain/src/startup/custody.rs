@@ -8,6 +8,17 @@ use crate::platform::{self, SessionLock};
 
 pub(crate) use crate::platform::CustodyError;
 
+/// A share of custody's held lock that only `SessionCustody::lend` makes, so every lent
+/// `SessionLock` comes from custody.
+pub(crate) struct Loan(Arc<platform::InstanceLock>);
+
+impl Loan {
+    /// The shared lock, for the lent `SessionLock` to hold.
+    pub(crate) fn into_lock(self) -> Arc<platform::InstanceLock> {
+        self.0
+    }
+}
+
 /// Holds the session lock until dropped; nothing else can make one, or lend it.
 pub(crate) struct SessionCustody {
     /// The held lock with the product path it was taken in; loans share it.
@@ -48,7 +59,7 @@ impl SessionCustody {
     /// taken in; the lock releases only with custody and the last loan. A token lends nothing.
     pub(in crate::startup) fn lend(&self) -> Option<Arc<SessionLock>> {
         let lock = self.held.as_ref()?;
-        Some(Arc::new(SessionLock::lent(Arc::clone(lock))))
+        Some(Arc::new(SessionLock::lent(Loan(Arc::clone(lock)))))
     }
 
     fn held(lock: platform::InstanceLock) -> Self {
