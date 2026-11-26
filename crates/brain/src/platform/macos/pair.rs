@@ -119,6 +119,21 @@ pub(crate) struct InheritedPair {
     data: StdStream,
 }
 
+impl InheritedPair {
+    /// Writes [`SESSION_READY`](kumochi_protocol::constants::SESSION_READY) on the control leg
+    /// without waiting: `Ok(1)` once it's out, `WouldBlock` while the shell's buffer is full. The
+    /// handshake on this pair starts only after it.
+    ///
+    /// # Errors
+    /// As a non-blocking write.
+    pub(crate) fn try_ready(&self) -> std::io::Result<usize> {
+        std::io::Write::write(
+            &mut &self.control,
+            &[kumochi_protocol::constants::SESSION_READY],
+        )
+    }
+}
+
 /// Checks both inherited ends. Needs no runtime, so it can run before one exists. Proves a
 /// connected, distinct pair of Unix streams, not who holds the other ends: that's the
 /// handshake's job.
@@ -379,3 +394,7 @@ async fn greeting<T: DeserializeOwned>(
 #[cfg(test)]
 #[path = "pair_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "pair_admission_tests.rs"]
+mod admission_tests;

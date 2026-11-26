@@ -399,7 +399,10 @@ stream with `SO_NOSIGPIPE` set and a stable identity: two `fstat` samples that a
 nonzero inode, because Darwin numbers a socket's inode lazily from zero. The two identities must
 differ, so one socket can't pose as both legs. Darwin doesn't answer `SO_ACCEPTCONN` for a Unix
 socket, so a listener is refused because it has no peer, and a TCP stream because its peer isn't
-`AF_UNIX`. `adopt` then sets close-on-exec and non-blocking. `respond` takes that checked pair
+`AF_UNIX`. `adopt` then sets close-on-exec and non-blocking. `try_ready` writes the one READY
+byte, `SESSION_READY` (`R`, 0x52), on the control leg without waiting. It goes out once the
+instance item is published and before the shell's first handshake message, and the shell reads
+the item only after it; nothing writes it yet. `respond` takes that checked pair
 and a session state the caller made before its first await, so the caller can wipe its copy of
 the secret. It hands both ends to tokio and runs the responder handshake by one deadline: control
 init and Finished, then data init and Finished, then Bind. It writes `BindAck` before it
