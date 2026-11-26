@@ -112,7 +112,7 @@ pub(super) struct PacketStatus {
     pub(super) frames: u32,
     /// The device's stream position of the packet's first frame, in frames.
     pub(super) position: u64,
-    pub(super) captured_qpc_100ns: u64,
+    pub(super) captured_at: u64,
     pub(super) discontinuity: bool,
     pub(super) timestamp_error: bool,
 }
@@ -183,24 +183,24 @@ impl PacketBoundary {
 
     pub(super) fn packet(
         &mut self,
-        accepted_qpc_100ns: Option<u64>,
+        accepted_edge: Option<u64>,
         packet: PacketStatus,
     ) -> Result<bool, MicError> {
         if let Some(error) = self.failed {
             return Err(error);
         }
         if packet.timestamp_error
-            || accepted_qpc_100ns.is_some() && packet.frames != 0 && packet.captured_qpc_100ns == 0
+            || accepted_edge.is_some() && packet.frames != 0 && packet.captured_at == 0
         {
             self.failed = Some(MicError::Timestamp);
             return Err(MicError::Timestamp);
         }
-        self.listening |= accepted_qpc_100ns.is_some();
+        self.listening |= accepted_edge.is_some();
         if !self.listening && packet.frames != 0 {
             self.discarded_before_listening = self.discarded_before_listening.saturating_add(1);
         }
         Ok(packet.frames != 0
-            && accepted_qpc_100ns.is_some_and(|accepted| packet.captured_qpc_100ns >= accepted))
+            && accepted_edge.is_some_and(|accepted| packet.captured_at >= accepted))
     }
 
     pub(super) fn kept(&mut self, packet: PacketStatus, at: Instant) {
@@ -260,6 +260,38 @@ impl PacketBoundary {
             discarded_before_listening = self.discarded_before_listening,
             "held microphone capture summary"
         );
+    }
+}
+
+/// Copies one borrowed native batch (or fills silence) only if collection is authorized both
+/// before and after the copy; a batch revoked in between is scrubbed and admits nothing.
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(dead_code, reason = "native capture and its tests copy batches")
+)]
+pub(in crate::platform) fn copy_batch(
+    raw: &mut [u8],
+    borrowed: Option<&[u8]>,
+    silence: u8,
+    mut authorized: impl FnMut() -> bool,
+    #[cfg(any(test, feature = "test-support"))] after_authorized: impl FnOnce(),
+) -> usize {
+    if !authorized() {
+        return 0;
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    after_authorized();
+    if let Some(borrowed) = borrowed {
+        raw.copy_from_slice(borrowed);
+    } else {
+        raw.fill(silence);
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    if authorized() {
+        raw.len()
+    } else {
+        raw.zeroize();
+        0
     }
 }
 
@@ -333,8 +365,8 @@ pub struct Generation {
 #[derive(Debug, Default)]
 struct Startup {
     deadline: OnceLock<Instant>,
-    #[cfg(windows)]
-    accepted_qpc_100ns: AtomicU64,
+    /// The acceptance edge in the platform capture clock's units (Windows: QPC in 100 ns).
+    accepted_edge: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -405,6 +437,27 @@ impl Generation {
         transition(&self.gate, self.gesture, CANCELLED);
     }
 
+    /// Records the native acceptance edge once, only while this generation is running; the
+    /// clock is read only after that check, and a zero reading is a timestamp fault.
+    #[cfg_attr(
+        all(not(windows), not(test)),
+        expect(dead_code, reason = "native capture and its tests record the edge")
+    )]
+    fn accept_edge(&self, clock: impl FnOnce() -> Result<u64, MicError>) -> Result<(), MicError> {
+        if self.gate.load(Ordering::Acquire) != (u64::from(self.gesture.0) << 3 | RUNNING) {
+            return Err(MicError::Stale);
+        }
+        let edge = clock()?;
+        if edge == 0 {
+            return Err(MicError::Timestamp);
+        }
+        self.startup
+            .accepted_edge
+            .compare_exchange(0, edge, Ordering::Relaxed, Ordering::Relaxed)
+            .map(|_| ())
+            .map_err(|_| MicError::Stale)
+    }
+
     #[cfg_attr(
         all(not(windows), not(test)),
         expect(
@@ -417,10 +470,13 @@ impl Generation {
     }
 
     /// The collecting transition publishes the acceptance timestamp to the capture worker.
-    #[cfg(windows)]
+    #[cfg_attr(
+        all(not(windows), not(test)),
+        expect(dead_code, reason = "native capture and its tests read the edge")
+    )]
     pub(super) fn capture_cutoff(&self, session: &AtomicBool) -> Option<u64> {
         self.collecting(session)
-            .then(|| self.startup.accepted_qpc_100ns.load(Ordering::Relaxed))
+            .then(|| self.startup.accepted_edge.load(Ordering::Relaxed))
     }
 
     pub fn mode(&self, session: &AtomicBool, now: Instant) -> Result<Mode, MicError> {
@@ -578,7 +634,9 @@ impl MicOwner {
                 Ok(Finalization::Discarded(MicError::Unavailable))
             });
         }
-        Self::spawn(generation, session, super::windows::microphone::capture)
+        Self::spawn(generation, session, |token, session, running, output| {
+            super::windows::microphone::capture(token, session, running, output)
+        })
     }
 
     #[cfg(not(windows))]
@@ -592,7 +650,7 @@ impl MicOwner {
         session: Arc<AtomicBool>,
         capture: impl FnOnce(
             &Generation,
-            &AtomicBool,
+            &Arc<AtomicBool>,
             &async_channel::Sender<Running>,
             &async_channel::Sender<MicPcm>,
         ) -> Result<Finalization, MicError>
@@ -608,7 +666,7 @@ impl MicOwner {
         session: Arc<AtomicBool>,
         capture: impl FnOnce(
             &Generation,
-            &AtomicBool,
+            &Arc<AtomicBool>,
             &async_channel::Sender<Running>,
             &async_channel::Sender<MicPcm>,
         ) -> Result<Finalization, MicError>
@@ -629,7 +687,7 @@ impl MicOwner {
         session: Arc<AtomicBool>,
         capture: impl FnOnce(
             &Generation,
-            &AtomicBool,
+            &Arc<AtomicBool>,
             &async_channel::Sender<Running>,
             &async_channel::Sender<MicPcm>,
         ) -> Result<Finalization, MicError>
@@ -650,7 +708,7 @@ impl MicOwner {
         session: Arc<AtomicBool>,
         capture: impl FnOnce(
             &Generation,
-            &AtomicBool,
+            &Arc<AtomicBool>,
             &async_channel::Sender<Running>,
             &async_channel::Sender<MicPcm>,
         ) -> Result<Finalization, MicError>
@@ -732,19 +790,8 @@ impl MicOwner {
         }
         self.generation.mode(&self.session, Instant::now())?;
         #[cfg(windows)]
-        {
-            let generation = &self.generation;
-            let expected = u64::from(running.gesture.0) << 3 | RUNNING;
-            if generation.gate.load(Ordering::Acquire) != expected {
-                return Err(MicError::Stale);
-            }
-            let accepted = super::windows::microphone::collection_start()?;
-            generation
-                .startup
-                .accepted_qpc_100ns
-                .compare_exchange(0, accepted, Ordering::Relaxed, Ordering::Relaxed)
-                .map_err(|_| MicError::Stale)?;
-        }
+        self.generation
+            .accept_edge(super::windows::microphone::collection_start)?;
         self.generation.advance(RUNNING, COLLECTING)
     }
 
