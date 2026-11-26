@@ -1,15 +1,15 @@
 #[cfg(test)]
 use std::io;
-#[cfg(feature = "test-support")]
+#[cfg(all(debug_assertions, feature = "test-support"))]
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-#[cfg(feature = "test-support")]
+#[cfg(all(debug_assertions, feature = "test-support"))]
 use kumochi_protocol::Secret;
 use kumochi_protocol::message::CAPABILITY_LEN;
 use tokio::sync::mpsc as async_mpsc;
-#[cfg(feature = "test-support")]
+#[cfg(all(debug_assertions, feature = "test-support"))]
 use zeroize::Zeroizing;
 
 use super::{
@@ -242,7 +242,7 @@ pub(super) struct Slot {
     item: Arc<std::sync::Mutex<Option<[u8; CAPABILITY_LEN]>>>,
     #[cfg(test)]
     hold: Arc<std::sync::Mutex<HeldAdd>>,
-    #[cfg(feature = "test-support")]
+    #[cfg(all(debug_assertions, feature = "test-support"))]
     seed: Option<mpsc::Sender<Seed>>,
 }
 
@@ -269,7 +269,7 @@ impl InstanceStore for Slot {
             entered.send(()).expect("the test listens");
             released.recv_timeout(PATIENCE).expect("the test releases");
         }
-        #[cfg(feature = "test-support")]
+        #[cfg(all(debug_assertions, feature = "test-support"))]
         if let Some(seed) = &self.seed {
             seed.send(Secret::new(Zeroizing::new(*key)))
                 .map_err(|_| ())?;
@@ -297,7 +297,7 @@ impl InstanceStore for Slot {
     }
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(all(debug_assertions, feature = "test-support"))]
 type Seed = Secret<Zeroizing<[u8; CAPABILITY_LEN]>>;
 
 /// Serve the real inherited pair on the offline startup fixture. The synthetic capability is
@@ -305,7 +305,7 @@ type Seed = Secret<Zeroizing<[u8; CAPABILITY_LEN]>>;
 ///
 /// # Errors
 /// Refused or incomplete admission, serving or settlement, including expiry of `by`.
-#[cfg(feature = "test-support")]
+#[cfg(all(debug_assertions, feature = "test-support"))]
 pub fn serve_pair_credit_fixture(
     fds: crate::platform::InheritedFds,
     seed: mpsc::Sender<Seed>,

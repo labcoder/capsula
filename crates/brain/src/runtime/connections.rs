@@ -246,7 +246,7 @@ impl Connections {
     }
 
     pub(super) fn configure_transport(&mut self, model: ModelTuning) {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
         if super::credit_fixture::active() {
             return;
         }

@@ -10,7 +10,11 @@ use super::macos::parent::ParentWatch;
 pub(crate) enum Verdict {
     Watching,
     #[cfg_attr(
-        not(any(test, feature = "test-support", target_os = "macos")),
+        not(any(
+            test,
+            all(debug_assertions, feature = "test-support"),
+            target_os = "macos"
+        )),
         expect(dead_code, reason = "only Darwin's parent watch sees its parent exit")
     )]
     Exited,
@@ -56,13 +60,21 @@ const LOST: u8 = 2;
 
 /// Orders the first parent-loss publication against the one commit claim.
 #[cfg_attr(
-    not(any(test, feature = "test-support", target_os = "macos")),
+    not(any(
+        test,
+        all(debug_assertions, feature = "test-support"),
+        target_os = "macos"
+    )),
     expect(dead_code, reason = "only Darwin arms a parent watch")
 )]
 pub(in crate::platform) struct CommitGate(AtomicU8);
 
 #[cfg_attr(
-    not(any(test, feature = "test-support", target_os = "macos")),
+    not(any(
+        test,
+        all(debug_assertions, feature = "test-support"),
+        target_os = "macos"
+    )),
     expect(dead_code, reason = "only Darwin arms a parent watch")
 )]
 impl CommitGate {
@@ -105,7 +117,7 @@ enum Owner {
     Native(std::os::windows::io::OwnedHandle),
     #[cfg(target_os = "macos")]
     Parent(ParentWatch),
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
     Fixture(Arc<AtomicU8>, CommitGate),
     #[cfg(test)]
     Watched(watch::Receiver<Verdict>, CommitGate),
@@ -157,7 +169,7 @@ impl ShellProcess {
             Owner::Native(_) => None,
             #[cfg(target_os = "macos")]
             Owner::Parent(ref parent) => parent.gate().claim().then_some(Committed(())),
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             Owner::Fixture(_, ref gate) => gate.claim().then_some(Committed(())),
             #[cfg(test)]
             Owner::Watched(_, ref gate) => gate.claim().then_some(Committed(())),
@@ -179,7 +191,7 @@ impl ShellProcess {
             Owner::Native(_) => Verdict::Unconfirmed(Unconfirmed::Watch),
             #[cfg(target_os = "macos")]
             Owner::Parent(ref parent) => parent.snapshot(),
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             Owner::Fixture(ref state, _) => match state.load(Ordering::Acquire) {
                 0 => Verdict::Watching,
                 1 => Verdict::Exited,
@@ -197,7 +209,10 @@ impl ShellProcess {
     }
 
     #[cfg_attr(
-        all(target_os = "macos", not(any(test, feature = "test-support"))),
+        all(
+            target_os = "macos",
+            not(any(test, all(debug_assertions, feature = "test-support")))
+        ),
         expect(clippy::unnecessary_wraps, reason = "detached platforms have no watch")
     )]
     pub(crate) fn loss(&self) -> Option<watch::Receiver<Verdict>> {
@@ -206,7 +221,7 @@ impl ShellProcess {
             Owner::Native(_) => None,
             #[cfg(target_os = "macos")]
             Owner::Parent(ref parent) => Some(parent.loss()),
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             Owner::Fixture(..) => None,
             #[cfg(test)]
             Owner::Watched(ref verdict, _) => Some(verdict.clone()),
@@ -230,7 +245,7 @@ impl ShellProcess {
                 Verdict::Exited => Ok(true),
                 Verdict::Unconfirmed(reason) => Err(io::Error::other(reason)),
             },
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             Owner::Fixture(ref state, _) => match state.load(Ordering::Acquire) {
                 0 => Ok(false),
                 1 => Ok(true),
@@ -249,7 +264,7 @@ impl ShellProcess {
         Ok(self.pid == other.pid && !other.exited()? && !self.exited()?)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
     pub(crate) fn fixture(pid: u32, state: Arc<AtomicU8>) -> Self {
         Self {
             pid,
@@ -268,7 +283,7 @@ impl ShellProcess {
 
     /// Publishes a fixture verdict the way the watch thread does: the loss latch, then the value.
     /// True when the loss came before any claim.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
     pub(crate) fn publish(&self, verdict: u8) -> bool {
         match *self.owner {
             Owner::Fixture(ref state, ref gate) => {

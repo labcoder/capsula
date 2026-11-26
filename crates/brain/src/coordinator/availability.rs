@@ -74,13 +74,12 @@ impl Ready {
     }
 
     /// The dev fixture is selected: it answers every run, with no account or catalog.
-    #[cfg(any(test, debug_assertions, feature = "test-support"))]
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn fixture() -> Self {
         Self {
             connection: ConnectionTag(0),
             models: Vec::new(),
             images: Vec::new(),
-            #[cfg(any(test, debug_assertions))]
             trusted_draw: true,
         }
     }

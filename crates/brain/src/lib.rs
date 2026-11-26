@@ -12,7 +12,7 @@ pub mod credential;
 pub mod dispatch;
 pub mod drawing;
 pub mod engines;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
 mod fixture_support;
 pub mod ipc;
 pub mod issues;
@@ -22,7 +22,7 @@ pub mod platform;
 mod recall;
 mod relaunch;
 mod runtime;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
 #[expect(
     clippy::print_stderr,
     reason = "the shared fixture reports cleanup failures during unwind"
@@ -37,7 +37,7 @@ mod supervise;
 mod tap;
 #[cfg(test)]
 mod test_support;
-#[cfg(feature = "test-support")]
+#[cfg(all(debug_assertions, feature = "test-support"))]
 pub use startup::parent_bound::fixture::serve_pair_credit_fixture;
 #[cfg_attr(
     not(test),

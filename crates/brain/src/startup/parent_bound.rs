@@ -381,5 +381,5 @@ thread_local! {
 #[cfg(test)]
 pub(crate) mod tests;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
 pub(crate) mod fixture;
