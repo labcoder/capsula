@@ -942,8 +942,10 @@ record could still use it: none, or a registration never bound to an identity, w
 its own commit first. A crash between the two leaves no registration and the old host, and the
 next read replaces it. An account with tokens, a registration holding a verified subject, or an
 unreadable `chatgpt` record keeps the unusable host, and sign-in is refused as
-`CredentialsUnavailable` until that record is signed out. The `chatgpt` record is never replaced
-silently.
+`CredentialsUnavailable`. Nothing here recovers those: ordinary sign-out keeps a subject-bound
+registration, and neither a tokenless registration nor an unreadable record can be signed out, so
+the host stays blocked until the blocking record is removed. The `chatgpt` record is never
+replaced silently.
 
 ```mermaid
 flowchart LR

@@ -386,7 +386,9 @@ fn a_lost_host_stays_while_something_could_be_bound_to_it() {
             committed(vault.save_account(&registration(&account("old"))));
         }),
         ("signed in", |vault, _, _| {
-            committed(vault.save_account(&account("old")));
+            let mut signed_in = account("old").expose().clone();
+            signed_in.subject = None;
+            committed(vault.save_account(&Secret::new(signed_in)));
         }),
         ("unreadable account", |vault, store, service| {
             committed(vault.save_account(&account("old")));
