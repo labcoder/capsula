@@ -15,7 +15,7 @@ use gpui_kit::{
 
 use super::kumo_view::PullSite;
 use super::observer::{self, Drawn, Surface};
-use super::paint::Stamp;
+use super::paint;
 use super::pull_picture::PullPicture;
 use super::{OpenError, Presence, platform};
 use crate::platform::{PresenceError, PresenceNative};
@@ -301,7 +301,7 @@ impl Render for Dock {
         div()
             .size_full()
             .relative()
-            .child(Stamp(Surface::Dock, self.drawn))
+            .children(paint::stamp(Surface::Dock, self.drawn))
             .children(line)
             .children(pulled)
             .children(label)

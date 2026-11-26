@@ -118,7 +118,7 @@ impl KumoView {
         }
         self.size = size;
         self.bake = Some(cx.spawn(async move |this, cx| {
-            let started = Instant::now();
+            let started = super::launch::RECORDER.then(Instant::now);
             let (renderer, art) = cx
                 .background_executor()
                 .spawn(async move {
@@ -136,7 +136,7 @@ impl KumoView {
                     )
                 })
                 .await;
-            let baked_us = started.elapsed().as_micros();
+            let baked_us = started.map(|started| started.elapsed().as_micros());
             let kept = this.update(cx, |view, cx| {
                 if view.size != size {
                     return;
@@ -149,7 +149,9 @@ impl KumoView {
                 view.next_rows = Rows::with_capacity(pull_rows(scale));
                 // An image from another size would show at the wrong scale.
                 view.retired = view.image.take().or(view.retired.take());
-                diagnostics::record(cx, format_args!("kumo baked size={size} us={baked_us}"));
+                if let Some(baked_us) = baked_us {
+                    diagnostics::record(cx, format_args!("kumo baked size={size} us={baked_us}"));
+                }
                 if view.shown {
                     view.animator.engage();
                     cx.emit(WantsFrames);
@@ -227,10 +229,12 @@ impl KumoView {
             && let Some(renderer) = self.renderer.clone()
         {
             let frame = self.animator.tick(dt, 0.0);
-            self.reshades += 1;
-            self.unchanged += u64::from(self.last == Some(frame));
-            self.last = Some(frame);
-            let started = Instant::now();
+            if super::launch::RECORDER {
+                self.reshades += 1;
+                self.unchanged += u64::from(self.last == Some(frame));
+                self.last = Some(frame);
+            }
+            let started = super::launch::RECORDER.then(Instant::now);
             // shortcut: two allocations per animated frame, the pixels and the image's Arc
             // (OSC-175's exception); pool the images if a profile ever shows them.
             let mut pixels = vec![0; renderer.image_len()];
@@ -245,12 +249,14 @@ impl KumoView {
                 }
                 Err(error) => tracing::error!(%error, "can't shade Kumo"),
             }
-            let shaded = started.elapsed();
-            self.shading += shaded;
-            diagnostics::record(
-                cx,
-                format_args!("kumo frame shade_us={}", shaded.as_micros()),
-            );
+            if let Some(started) = started {
+                let shaded = started.elapsed();
+                self.shading += shaded;
+                diagnostics::record(
+                    cx,
+                    format_args!("kumo frame shade_us={}", shaded.as_micros()),
+                );
+            }
         }
         self.wants_frame()
     }

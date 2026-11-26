@@ -155,3 +155,17 @@ impl<E: Element> Element for Target<E> {
         self.0.a11y_synthetic_children(prepaint, builder);
     }
 }
+
+/// The stamp a surface's frame leaves.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "a build without the recorder has no stamp"
+)]
+pub(super) fn stamp(surface: Surface, drawn: Drawn) -> Option<Stamp> {
+    Some(Stamp(surface, drawn))
+}
+
+/// The Stop button, recorded as the harness's click target.
+pub(super) fn target<E>(element: E) -> Target<E> {
+    Target(element)
+}
