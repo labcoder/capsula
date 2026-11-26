@@ -26,6 +26,8 @@ use crate::input::{
     hold::{Delivery, Fence, InputReason, InputStage, Intent},
 };
 use crate::link::{InputCancel, LinkHandle};
+#[cfg(any(test, feature = "gate-recorder"))]
+use crate::platform::Refusal;
 use crate::platform::{Deliver, EventTime, INPUT_COUNTER, cursor_position};
 use crate::strings::Text;
 use kumochi_protocol::geometry::PhysicalPoint;
@@ -192,6 +194,17 @@ pub(super) fn deliver(
     let executor = cx.background_executor().clone();
     let async_cx = cx.to_async();
     let fence = std::cell::RefCell::new(Fence::new(link.microphone_gate()));
+    #[cfg(any(test, feature = "gate-recorder"))]
+    let rearms = {
+        let (rearms, lines) = async_channel::unbounded::<&'static str>();
+        cx.spawn(async move |cx| {
+            while let Ok(line) = lines.recv().await {
+                cx.update(|cx| diagnostics::record(cx, format_args!("{line}")));
+            }
+        })
+        .detach();
+        rearms
+    };
     let escaped = Cell::new(None);
     let escape_down = Cell::new(false);
     let recovered_hold = Cell::new(None);
@@ -317,7 +330,12 @@ pub(super) fn deliver(
                 .then_some(session)
             },
             || {
-                let now = at.recovery_time()?;
+                let now = at.recovery_time();
+                #[cfg(any(test, feature = "gate-recorder"))]
+                if rearms.try_send(rearm_line(now)).is_err() {
+                    tracing::debug!("can't queue a rearm diagnostic");
+                }
+                let now = now.ok()?;
                 recovered = true;
                 Some(now)
             },
@@ -555,6 +573,18 @@ fn stale_hold_escape(owner: &Presence, cancelled: Option<(GestureId, u64)>) -> b
             current.generation() != generation || !current.alive().load(Ordering::Acquire)
         })
     })
+}
+
+/// A gate run's line for each attempt to re-arm a blocked shortcut; it names no key.
+#[cfg(any(test, feature = "gate-recorder"))]
+fn rearm_line(read: Result<Instant, Refusal>) -> &'static str {
+    match read {
+        Ok(_) => "rearm ok",
+        Err(Refusal::Unread) => "rearm refused check=unread",
+        Err(Refusal::Chord) => "rearm refused check=chord",
+        Err(Refusal::Foreground) => "rearm refused check=foreground",
+        Err(Refusal::Layout) => "rearm refused check=layout",
+    }
 }
 
 /// Applies effects through a fallible borrow of the app.

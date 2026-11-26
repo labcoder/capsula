@@ -379,7 +379,7 @@ pub(super) fn chord(deliver: &Deliver, edge: Edge, at: Instant) {
     for key in [Key::LeftControl, Key::LeftAlt] {
         let time = EventTime::new(at).with_queued_press(u64::MAX);
         let time = if key == Key::LeftAlt && edge == Edge::Down {
-            time.with_keyboard_read(Some)
+            time.with_keyboard_read(Ok)
         } else {
             time
         };
@@ -2579,16 +2579,17 @@ fn mic_generation_after_raw_reset(cx: &mut TestAppContext, initially_held: Optio
         );
     };
     if let Some(key) = initially_held {
-        press(key, now, |_| None);
+        press(key, now, |_| Err(crate::platform::Refusal::Chord));
     }
     send(Event::Reset, after(now, 1));
-    let first_read: fn(Instant) -> Option<Instant> = if initially_held.is_some() {
-        |_| None
-    } else {
-        Some
-    };
+    let first_read: fn(Instant) -> Result<Instant, crate::platform::Refusal> =
+        if initially_held.is_some() {
+            |_| Err(crate::platform::Refusal::Chord)
+        } else {
+            Ok
+        };
     press(Key::LeftControl, after(now, 2).instant, first_read);
-    press(Key::LeftAlt, after(now, 3).instant, Some);
+    press(Key::LeftAlt, after(now, 3).instant, Ok);
     send(Event::Deadline, after(now, 304));
     pipe.handle.microphone_gate().latest()
 }
@@ -2618,7 +2619,7 @@ fn mic_generation_after_reset(cx: &mut TestAppContext, presses: &[Key]) -> u64 {
                 edge: Edge::Down,
             },
             if key == Key::LeftAlt {
-                at.with_keyboard_read(Some)
+                at.with_keyboard_read(Ok)
             } else {
                 at
             },
@@ -2725,7 +2726,7 @@ impl CancelAt {
             }
             Self::ClosedQueue => {
                 CLOSE_DELIVERY.set(true);
-                let mut time = after(now, 10).with_keyboard_read(Some);
+                let mut time = after(now, 10).with_keyboard_read(Ok);
                 time.defer_terminal = true;
                 send(
                     Event::Key {

@@ -35,7 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::presence::{PresenceError, struct_size};
 use crate::input::hold::{InputReason, InputStage};
 use crate::input::{Edge, Event, Key, PhysicalKey};
-use crate::platform::{Deliver, EventTime};
+use crate::platform::{Deliver, EventTime, Refusal};
 
 mod physical;
 use physical::Physical;
@@ -758,15 +758,21 @@ fn normalize_keyboard(
     Ok(keyboard)
 }
 
-fn read_chord(_: Instant) -> Option<Instant> {
+fn read_chord(_: Instant) -> Result<Instant, Refusal> {
     // SAFETY: queries the current foreground window without touching it.
     let foreground = unsafe { GetForegroundWindow() };
     let exact = exact_chord(|key| {
         // SAFETY: queries a bounded virtual-key code without modifying input.
         unsafe { GetAsyncKeyState(i32::from(key)) < 0 }
     });
+    if !exact {
+        return Err(Refusal::Chord);
+    }
     // SAFETY: rechecks the foreground without touching it.
-    (exact && foreground == unsafe { GetForegroundWindow() }).then(Instant::now)
+    if foreground != unsafe { GetForegroundWindow() } {
+        return Err(Refusal::Foreground);
+    }
+    Ok(Instant::now())
 }
 
 fn exact_chord(mut down: impl FnMut(u16) -> bool) -> bool {

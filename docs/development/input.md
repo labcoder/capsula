@@ -370,6 +370,11 @@ creates no file. Both need a shell built with the `gate-recorder` feature (see
   - `hold warm callback_qpc=<n>` when the shortcut's chord goes down and
     `hold recognized callback_qpc=<n>` when its 300 ms hold is recognised, each stamped with the
     native callback's QPC; the line's own QPC is when presence applied it
+  - `rearm ok` or `rearm refused check=unread|chord|foreground|layout` each time a blocked
+    shortcut tries to re-arm on a fresh Ctrl + Alt make: no key-state read came with the event,
+    a key other than the chord's was down, the foreground changed during the read, or the
+    event's layout is no longer the foreground's. No gate reads it; it says why a hold after a
+    reset never warmed
   - `listening on` and `listening off`, as the line takes and leaves the Listening colour
   - `speech input ready=true|false`, from each speech state the brain sends
   - `input opened focused=true|false` and `input dismissed`

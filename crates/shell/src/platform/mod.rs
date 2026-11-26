@@ -20,7 +20,7 @@ mod connected_keyboard;
 pub(crate) use connected_events::{MaskUpdate, PresenceEvent, PresenceLabels, PresenceSurface};
 #[cfg(any(test, feature = "gate-recorder"))]
 pub(crate) use connected_events::{Observe, ProxyNote};
-pub(crate) use connected_keyboard::{Deliver, EventTime};
+pub(crate) use connected_keyboard::{Deliver, EventTime, Refusal};
 #[cfg(not(windows))]
 mod connected_desktop;
 #[cfg(not(windows))]
