@@ -867,10 +867,11 @@ authority alike. The brain takes it after its pipes and before it opens the stor
 for its whole run. The store thread and the credentials thread each keep a reference to that same
 lock: the store thread until its last close and purge cleanup end, past any wait the brain gave up
 on, and the credentials thread by opening its vault under it (`Vault::open_held`) instead of
-taking its own. The lock fixes its authority when it's taken: `credentials.db` beside the lock
-file, from an absolute path (a relative one is refused). `Authority::open` takes only the lock,
-so a writable authority can't open in a folder whose lock the brain doesn't hold, and the
-product vault never looks the data folder up a second time. So a second brain of the same Windows user in
+taking its own. The lock fixes its authority's pathname when it's taken: `credentials.db` beside
+the lock file, from an absolute path (a relative one is refused). `Authority::open` takes only the
+lock, so the brain opens its writable authority by the parent pathname of the profile lock it
+holds, never by resolving the data folder again. That binds the pathname, not the folder's
+identity: it doesn't protect against the folder being replaced. So a second brain of the same Windows user in
 another session, whose pipes don't collide, stops at the lock before it touches the store. It
 tries to take the lock before it opens or creates the store and, refused, logs only that another
 session is using the profile and exits with code 75. Only brains with this lock are excluded: an earlier build opens
@@ -885,7 +886,8 @@ its parent, and only contention is Busy. On Windows it opens the leaf itself, ne
 target, sharing read and write so a stock opener still meets the lock, but not delete, so the name
 can't be renamed or deleted while held. Elsewhere it opens the leaf without following a link,
 nonblocking, and checks and locks that descriptor, so a link or FIFO there is refused rather than
-followed or waited on. It doesn't validate the parent, and nothing calls it yet.
+followed or waited on. It doesn't validate the parent. The existing-profile classifier calls it,
+but no product startup route does yet.
 
 On builds without a native credential adapter, exact-name reads, writes, and deletes return
 `Unsupported`. The production vault also refuses before opening `credentials.db`: the

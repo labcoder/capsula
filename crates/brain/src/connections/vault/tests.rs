@@ -48,24 +48,17 @@ fn raw(path: &Path) -> Connection {
 
 #[test]
 fn the_held_vault_opens_its_authority_beside_its_lock() {
-    let (held, decoy) = (
-        Scratch::new("vault-held-lock"),
-        Scratch::new("vault-held-decoy"),
-    );
-    let decoy_lock = decoy.dir().join(SESSION_LOCK);
-    drop(open(&FakeStore::default(), "vault-held-decoy", &decoy_lock));
-    let lifetime = || -> i64 {
-        raw(&decoy_lock)
-            .query_row("SELECT lifetime FROM control", [], |row| row.get(0))
-            .expect("decoy lifetime")
-    };
-    let before = lifetime();
+    let held = Scratch::new("vault-held-lock");
     let lock = SessionLock::try_acquire(&held.dir().join(SESSION_LOCK)).expect("held lock");
-    let vault = Vault::open_held(FakeStore::default(), Arc::new(lock), HistoryLink::unbound())
+    let _vault = Vault::open_held(FakeStore::default(), Arc::new(lock), HistoryLink::unbound())
         .expect("the held vault opens");
-    assert!(held.dir().join(authority::FILE).is_file());
-    drop(vault);
-    assert_eq!(lifetime(), before, "no other authority was opened");
+    let lifetime: i64 = Connection::open_with_flags(
+        held.dir().join("credentials.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .and_then(|conn| conn.query_row("SELECT lifetime FROM control", [], |row| row.get(0)))
+    .expect("the authority beside the lock");
+    assert_eq!(lifetime, 1, "opened once, here");
 }
 
 /// A copy of a closed vault's authority file in a new folder, as a crash test's restart point.

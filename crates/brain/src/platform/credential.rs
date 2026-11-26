@@ -62,12 +62,9 @@ impl CredentialStore for NativeCredentialStore {
 
 /// This platform's native store, or Unsupported before the vault opens anything.
 pub(crate) fn admitted_store() -> Result<NativeCredentialStore, CredentialStoreError> {
-    #[cfg(windows)]
-    {
+    if cfg!(windows) {
         Ok(NativeCredentialStore)
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         Err(CredentialStoreError::Unsupported)
     }
 }

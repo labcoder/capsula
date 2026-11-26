@@ -78,8 +78,9 @@ impl SessionLock {
         Self::try_lock(file, authority)
     }
 
-    /// The credential authority file in the folder this lock was taken in. A writable authority
-    /// opens only here, so it can't be in a folder whose lock this guard doesn't hold.
+    /// The credential authority file beside this lock, by the pathname the lock was taken at. A
+    /// writable authority opens only here, so nothing resolves the data folder a second time;
+    /// this binds the pathname, not the folder's identity if it is replaced.
     pub(crate) fn authority_path(&self) -> &Path {
         &self.authority
     }
@@ -153,7 +154,11 @@ mod tests {
 
     #[test]
     fn a_relative_lock_path_is_refused_before_anything_is_created() {
-        let folder = Path::new("kumochi-relative-lock-check");
+        let name = format!(
+            "kumochi-relative-lock-{:016x}",
+            getrandom::u64().expect("test randomness")
+        );
+        let folder = Path::new(&name);
         for refusal in [
             SessionLock::try_acquire(&folder.join(SESSION_LOCK)),
             SessionLock::try_acquire_existing(&folder.join(SESSION_LOCK)),
