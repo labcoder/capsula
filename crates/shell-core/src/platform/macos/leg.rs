@@ -7,7 +7,6 @@
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
@@ -204,20 +203,6 @@ impl PipeClient {
             aborted: AtomicBool::new(false),
             pair,
         }
-    }
-
-    /// The pair has no named pipes to open.
-    pub(crate) fn open(_: &str) -> io::Result<Self> {
-        Err(io::ErrorKind::Unsupported.into())
-    }
-
-    /// The pair's peer is the shell's own child, not a pipe server.
-    #[expect(
-        clippy::unused_self,
-        reason = "the link calls it on any platform's PipeClient"
-    )]
-    pub(crate) fn server_image(&self) -> io::Result<PathBuf> {
-        Err(io::ErrorKind::Unsupported.into())
     }
 
     fn reader(&self) -> &Mutex<Reader> {
@@ -577,4 +562,4 @@ pub(crate) fn initiate(
 
 #[cfg(test)]
 #[path = "leg_tests.rs"]
-mod tests;
+pub(super) mod tests;

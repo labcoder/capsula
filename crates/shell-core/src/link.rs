@@ -657,8 +657,9 @@ struct Shared {
     /// queued.
     deletes: Mutex<Vec<Held>>,
     /// Orders Quit against an owned brain child's spawn.
-    #[cfg(target_os = "macos")]
     spawn: Arc<platform::SpawnWord>,
+    /// How custody of the child live when Quit came ended, once the link has settled it.
+    child_quit: OnceLock<platform::Settled>,
 }
 
 impl Shared {
@@ -1113,7 +1114,6 @@ impl LinkHandle {
     /// Returns false when Quit was already under way.
     pub fn begin_quit(&self) -> bool {
         let first = self.shared.input.fetch_or(QUIT_INPUT, Ordering::SeqCst) & QUIT_INPUT == 0;
-        #[cfg(target_os = "macos")]
         self.shared.spawn.quit();
         self.shared.microphone.cancel_current();
         // Wakes a link waiting for Retry, so it sees Quit and ends.
@@ -1164,6 +1164,22 @@ impl LinkHandle {
         if !worker.done.is_closed() {
             tracing::warn!("the brain didn't close the pipe after Quit");
         }
+    }
+
+    /// Whether the last Quit was clean for a brain the shell owned as its child: `Quitting` was
+    /// sent, and the child live when Quit came was reaped with exit code 0. Read it after
+    /// [`Self::finish_quit`]. False with no child, as for a detached brain or between attempts.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "R2-D's first-turn route reads it")
+    )]
+    pub(crate) fn clean_quit(&self) -> bool {
+        self.shared.quit_sent.load(Ordering::Acquire)
+            && self
+                .shared
+                .child_quit
+                .get()
+                .is_some_and(|settled| settled.is_clean())
     }
 
     /// Holds a delete the user confirmed until [`LinkHandle::settle_delete`]; it's sent by
@@ -1601,6 +1617,44 @@ pub fn prepare_disconnected(events: &Sender<LinkEvent>) -> std::io::Result<LinkH
     })
 }
 
+/// Starts a link whose attempts `connect` makes with the link's spawn word, for tests that script
+/// the brain and its child.
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the core's own tests script a link")
+)]
+pub(crate) fn start_scripted(
+    events: Sender<LinkEvent>,
+    audio: AudioSession,
+    mut connect: impl FnMut(
+        &Arc<platform::SpawnWord>,
+        Option<IssueSession>,
+        Instant,
+    )
+        -> Result<(Connection, Option<platform::ChildOwner>), platform::LinkError>
+    + Send
+    + 'static,
+) -> LinkHandle {
+    let link = Link {
+        brain: PathBuf::new(),
+        session: 0,
+        audio,
+        shared: Arc::new(Shared::default()),
+    };
+    let (handle, start) = start(link, events);
+    let word = Arc::clone(&start.link.shared.spawn);
+    thread::spawn(move || {
+        start
+            .link
+            .run_with(&start.events, &start.retries, |repair_of, by| {
+                connect(&word, repair_of, by)
+            });
+        drop(start.alive);
+    });
+    handle
+}
+
 fn start(link: Link, events: Sender<LinkEvent>) -> (LinkHandle, LinkStart) {
     let (retry, retries) = async_channel::bounded(1);
     let (alive, done) = async_channel::bounded::<()>(1);
@@ -1657,6 +1711,35 @@ impl Link {
         retries: &Receiver<()>,
         mut text_metrics: impl FnMut(Instant) -> DrawingText,
     ) {
+        self.run_with(events, retries, |repair_of, reconnect_by| {
+            platform::connect(
+                &self.brain,
+                self.session,
+                &self.shared.spawn,
+                self.audio,
+                repair_of,
+                reconnect_by,
+                || self.quitting(),
+                |control| self.quit_parked(control),
+                &mut text_metrics,
+            )
+        });
+    }
+
+    /// [`Self::run`] with its connection attempt supplied. A child's custody is settled once its
+    /// connection ends, before any other attempt, so a replacement starts only after a reap.
+    fn run_with(
+        &self,
+        events: &Sender<LinkEvent>,
+        retries: &Receiver<()>,
+        mut connect: impl FnMut(
+            Option<IssueSession>,
+            Instant,
+        ) -> Result<
+            (Connection, Option<platform::ChildOwner>),
+            platform::LinkError,
+        >,
+    ) {
         let mut state = LinkState::Connecting;
         let mut last_loss: Option<Instant> = None;
         let mut repair_of = None;
@@ -1665,17 +1748,8 @@ impl Link {
                 return;
             }
             let reconnect_by = Instant::now() + CONNECT_TIMEOUT;
-            let connection = match platform::connect_brain(
-                &self.brain,
-                self.session,
-                self.audio,
-                repair_of,
-                reconnect_by,
-                || self.quitting(),
-                |control| self.quit_parked(control),
-                &mut text_metrics,
-            ) {
-                Ok(connection) => connection,
+            let (connection, child) = match connect(repair_of, reconnect_by) {
+                Ok(connected) => connected,
                 Err(_) if self.quitting() => return,
                 Err(error) => {
                     tracing::error!(%error, "can't reach the brain");
@@ -1689,7 +1763,14 @@ impl Link {
             tracing::info!(incarnation = ?connection.issue_origin.incarnation, "connected to the brain");
             let previous = connection.issue_origin;
             let attended = self.attend_until(connection, events, reconnect_by);
-            if attended == Attendance::Ended || self.quitting() {
+            let settled = child.map(platform::ChildOwner::settle);
+            if self.quitting() {
+                if let Some(settled) = settled {
+                    let _first = self.shared.child_quit.set(settled);
+                }
+                return;
+            }
+            if attended == Attendance::Ended {
                 return;
             }
             if attended != Attendance::TalkBackChanged {

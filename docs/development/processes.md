@@ -193,11 +193,14 @@ closing that lane is unavailability, never an exit receipt.
 
 ## The shell's brain child (ParentBound, dormant)
 
-Under ParentBound the shell will start the brain as its own child and own its lifetime. The
+Under ParentBound the shell starts the brain as its own child and owns its lifetime. The
 custody rules live in shared code (`shell-core/platform/child.rs`), so every platform tests them
 against a scripted child; macOS supplies the system calls (`platform/macos/child.rs`):
 `posix_spawn` with an empty environment, an exact-pid `waitpid(WNOHANG)`, SIGKILL, and a read of
-SIGCHLD's disposition. Nothing starts a child yet, and Windows has none.
+SIGCHLD's disposition. On macOS the link's attempts go through `platform::connect` to
+`connect_pair`, which returns the child's owner with the connection; Windows and Linux keep
+`connect_brain` and get no owner. Nothing reaches the link on macOS yet: the Mac shell opens only
+the disconnected window, so no child starts.
 
 - **What the child inherits.** `start_brain` makes the two socket pairs (`platform/macos/pair.rs`)
   and spawns the brain with `--parent-bound` as its only argument, an empty environment and
@@ -221,7 +224,9 @@ SIGCHLD's disposition. Nothing starts a child yet, and Windows has none.
 - **One owner.** A `ChildOwner` thread exists before the spawn, spawns on itself and is the only
   code in the shell that waits on, signals or reaps the brain. The UI never blocks on it. It polls
   every 20 ms; that's a poll period, not a scheduling bound, so each deadline is acted on at the
-  first poll at or after it.
+  first poll at or after it. The kill is `killpg` on the private session the spawn created, after
+  an exact-pid `waitid(P_PID, WEXITED | WNOHANG | WNOWAIT)` peek that reaps nothing
+  (`platform/unix/brain_group.rs`), not a plain SIGKILL to the pid.
 - **What a wait means.** Only an exit or a signal is a reap. Any other status, such as a traced
   stop, which Darwin can report without `WUNTRACED`, counts as alive. An interrupted wait is
   retried. Any other error is **Lost**: custody is gone, never success, and the child is never
@@ -235,13 +240,32 @@ SIGCHLD's disposition. Nothing starts a child yet, and Windows has none.
   the link drops the owner, the owner waits for the child to exit, then sends one SIGKILL and
   waits once more. A failed kill isn't retried. A child still unreaped after that is
   **Unsettled**: it's reported once, the claim stays taken so nothing replaces it, and the owner
-  keeps reaping it quietly while the shell lives.
+  keeps reaping it quietly while the shell lives. The owner never holds the shell's ends of the
+  pair, only the child's until the spawn: the link closes its own ends when the connection ends
+  (aborted for Legacy, dropped for Queued), so the brain sees EOF before it's retired.
+- **Settling.** `ChildOwner::settle` retires the child and waits for how custody ended, no longer
+  than the owner's two waits and two polls plus 1 s; no answer by then, or an owner thread that's
+  gone, is **Unsettled**. The link settles a child once its connection ends, and a failed attempt
+  settles before it returns, so the next attempt runs only after that. Only a reap frees the spawn
+  claim, so a replacement starts only after its predecessor is reaped, and after Lost or
+  Unsettled every later attempt, Retry included, is refused before any spawn.
+- **Busy.** A brain whose instance another session of this user holds exits with
+  `BRAIN_EXIT_BUSY` (75) before READY. An attempt whose child settles that way is `Busy`; any other
+  exit keeps the attempt's own error. The shell never signals another session's brain. Busy is a
+  failed connect like any other: Failed, then the user's Retry, one spawn per attempt.
 - **Preconditions.** Before the spawn and before the signal the owner checks that SIGCHLD isn't
   ignored and `SA_NOCLDWAIT` isn't set, and refuses otherwise. It never changes a process-wide
   disposition, and nothing else in the shell may wait on children (`wait`, `waitpid(-1)`,
-  `waitid(P_ALL)`); review enforces that, since a check can't exclude a change racing it.
-- **A clean Quit** is the link having sent `Quitting` and the child reaped with exit code 0
-  (`Settled::is_clean` is the child's half).
+  `waitid(P_ALL)`); review enforces that, since a check can't exclude a change racing it. The
+  review grep (`waitpid|waitid|wait4|wait3|SIGCHLD|sigaction|libc::signal|try_wait|.wait()|Command::new`
+  over `shell` and `shell-core`, tests aside) allows only the owner's exact-pid `waitpid` and
+  disposition read, the exact-pid `waitid` WNOWAIT peek before the kill, and Windows' detached
+  launch. It doesn't cover dependencies such as gpui or cpal, which could install a SIGCHLD
+  handler or wait on their own children; nothing checks them yet.
+- **A clean Quit** is the link having sent `Quitting` and the child live when Quit came reaped
+  with exit code 0. The link records that child's settlement when it ends on Quit, and
+  `LinkHandle::clean_quit` reads both halves after `finish_quit`. It's false when no child was
+  live at Quit, as between attempts, and always false for a detached brain.
 
 ```mermaid
 stateDiagram-v2

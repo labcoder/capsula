@@ -447,7 +447,9 @@ text metrics go on as a value; a frame the shell sent right after them stays in 
 reader, and a replayed TextMetrics would end serving as Broken.
 
 The shell's side lives in `shell-core`'s `platform/macos/leg.rs` and `connect_pair`, also
-dormant: nothing calls them, since the Mac shell only opens the disconnected window. On macOS the
+dormant: the link reaches them through `platform::connect`, but the Mac shell only opens the
+disconnected window. On macOS `session_id` is 0, since the instance item and lock are per user,
+and the named-pipe connector isn't built. On macOS the
 brain is the helper nested in the shell's bundle: from an absolute
 `<name>.app/Contents/MacOS/<shell>` up to `Contents`, then down `BRAIN_HELPER`
 (`Helpers/kumochid.app/Contents/MacOS/kumochid`); any other path is `NotFound`. Windows and Linux

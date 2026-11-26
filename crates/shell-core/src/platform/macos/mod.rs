@@ -1,12 +1,5 @@
 //! macOS candidates for shell-owned platform resources.
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Mac connection starts its brain child from I1e-2"
-    )
-)]
 #[expect(
     unsafe_code,
     reason = "Darwin process calls are isolated to this platform adapter"
@@ -14,13 +7,8 @@
 mod child;
 mod instance;
 mod leg;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Mac connection starts its brain child from I1e-2"
-    )
-)]
+#[cfg(test)]
+mod link_tests;
 mod pair;
 #[cfg(any(test, feature = "test-support"))]
 mod wipes;
@@ -30,6 +18,26 @@ pub(crate) use instance::{read_instance, try_acquire_instance_lock};
 pub use kumochi_storage::application_support_dir as support_dir;
 pub(crate) use leg::{PipeClient, Secret, initiate, read_ready};
 pub(crate) use pair::ShellEnds;
+
+/// The shell's session for the link: always 0. The Mac's instance item and lock are per user, not
+/// per login session, so nothing on the pair path is named by it; a second login's brain exits
+/// Busy instead.
+///
+/// # Errors
+/// Never; the signature is the platforms' shared one.
+pub fn session_id() -> std::io::Result<u32> {
+    Ok(0)
+}
+
+/// The session channel of this build's edition. Gate identity has no wire value, so it refuses.
+pub(crate) fn channel() -> std::io::Result<kumochi_session::Channel> {
+    use kumochi_protocol::constants::ProductIdentity;
+    match ProductIdentity::ACTIVE {
+        identity if identity == ProductIdentity::RELEASE => Ok(kumochi_session::Channel::Release),
+        identity if identity == ProductIdentity::DEV => Ok(kumochi_session::Channel::Dev),
+        _ => Err(std::io::ErrorKind::Unsupported.into()),
+    }
+}
 
 /// The brain helper nested in the shell's bundle: from an absolute
 /// `<name>.app/Contents/MacOS/<shell>` up to `Contents`, then down
@@ -56,6 +64,26 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use kumochi_protocol::constants::BRAIN_EXE;
+
+    #[test]
+    fn the_session_is_0_and_a_link_outside_a_bundle_has_no_brain() {
+        assert_eq!(super::session_id().expect("no session to read"), 0);
+        let (events, _) = async_channel::unbounded();
+        let prepared =
+            crate::link::prepare(events, kumochi_protocol::message::AudioSession::Legacy);
+        assert_eq!(
+            prepared.map(drop).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_debug_build_speaks_the_dev_channel() {
+        assert_eq!(
+            super::channel().map_err(|error| error.kind()),
+            Ok(kumochi_session::Channel::Dev)
+        );
+    }
 
     #[test]
     fn the_brain_is_the_helper_nested_in_the_shell_bundle() {

@@ -1,8 +1,11 @@
 use std::io::ErrorKind;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use async_channel::{TryRecvError, bounded};
-use kumochi_protocol::message::{ControlToBrain, Incarnation, RunId};
+use kumochi_protocol::message::{AudioSession, ControlToBrain, Incarnation, RunId};
 
 use super::{LinkEvent, LinkHandle, LinkState, Session, prepare_disconnected};
 
@@ -34,13 +37,66 @@ fn unavailable_transport_reports_failed_without_retry_or_quit_work() {
 }
 
 #[test]
-#[cfg(target_os = "macos")]
 fn quit_refuses_every_later_brain_child_claim() {
     let link = LinkHandle::detached();
     assert!(link.begin_quit());
     assert!(!link.shared.spawn.claim());
     assert!(!link.begin_quit());
     assert!(!link.shared.spawn.claim());
+}
+
+/// The next event within the patience, or a failure.
+fn next_event(events: &async_channel::Receiver<LinkEvent>) -> LinkEvent {
+    let by = Instant::now() + Duration::from_secs(5);
+    loop {
+        match events.try_recv() {
+            Ok(event) => return event,
+            Err(TryRecvError::Empty) if Instant::now() < by => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("no link event in time: {error:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_busy_attempt_waits_for_retry_and_a_quit_with_no_child_is_not_clean() {
+    let (events, states) = async_channel::unbounded();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&attempts);
+    let link = super::start_scripted(events, AudioSession::Legacy, move |_, _, _| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Err(crate::platform::LinkError::Busy)
+    });
+    for attempt in 1..=2 {
+        if attempt > 1 {
+            assert!(link.retry());
+        }
+        assert!(matches!(
+            next_event(&states),
+            LinkEvent::State(LinkState::Connecting)
+        ));
+        assert!(matches!(
+            next_event(&states),
+            LinkEvent::State(LinkState::Failed)
+        ));
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(states.try_recv().unwrap_err(), TryRecvError::Empty);
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            attempt,
+            "one attempt per Retry"
+        );
+    }
+    assert!(link.begin_quit());
+    link.finish_quit();
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "Quit started no attempt"
+    );
+    assert!(!link.clean_quit(), "no child was live at Quit");
+    assert_eq!(states.try_recv().unwrap_err(), TryRecvError::Closed);
 }
 
 #[test]

@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 /// How often the owner observes its child. A poll period, not a scheduling bound.
 const POLL: Duration = Duration::from_millis(20);
+/// What [`ChildOwner::settle`] allows past the owner's own waits for a slow poll or kill.
+const SETTLE_SLACK: Duration = Duration::from_secs(1);
 
 const SPAWN: u8 = 1;
 const QUIT: u8 = 1 << 1;
@@ -131,6 +133,7 @@ impl Settled {
 pub(crate) struct ChildOwner {
     retire: Sender<()>,
     reports: Receiver<Report>,
+    wait: Duration,
 }
 
 impl ChildOwner {
@@ -147,7 +150,11 @@ impl ChildOwner {
         thread::Builder::new()
             .name("brain child".to_owned())
             .spawn(move || own(os, &word, wait, retires, &report))?;
-        Ok(Self { retire, reports })
+        Ok(Self {
+            retire,
+            reports,
+            wait,
+        })
     }
 
     /// Starts bounded retirement of a live child. Never waits.
@@ -164,6 +171,18 @@ impl ChildOwner {
     pub(crate) fn spawned(&self, by: Instant) -> Result<Report, RecvTimeoutError> {
         self.reports
             .recv_timeout(by.saturating_duration_since(Instant::now()))
+    }
+
+    /// Retires a live child and returns how custody ended, waiting no longer than the owner's two
+    /// waits and two polls plus [`SETTLE_SLACK`]. No settlement by then, or an owner thread
+    /// that's gone, is `Unsettled`. Call it after the spawn report was taken, off the UI thread.
+    pub(crate) fn settle(self) -> Settled {
+        self.retire();
+        let by = Instant::now() + 2 * (self.wait + POLL) + SETTLE_SLACK;
+        match self.next(by) {
+            Some(Report::Settled(settled)) => settled,
+            _ => Settled::Unsettled,
+        }
     }
 
     /// The next report, or None when none arrives by `by`.
@@ -881,5 +900,63 @@ mod tests {
                 "{refusal}: dropped before the report"
             );
         }
+    }
+
+    /// Runs `settle` on its own thread, so a wait with no bound fails the test instead of hanging.
+    fn settled_within(owner: ChildOwner, watchdog: Duration) -> (Settled, Duration) {
+        let (done, outcome) = mpsc::channel();
+        thread::spawn(move || {
+            let start = Instant::now();
+            let settled = owner.settle();
+            let _unwatched = done.send((settled, start.elapsed()));
+        });
+        outcome
+            .recv_timeout(watchdog)
+            .expect("settle returned within the watchdog")
+    }
+
+    #[test]
+    fn settle_retires_a_live_child_and_returns_its_reap() {
+        let word = Arc::new(SpawnWord::default());
+        let fake = Fake::with(|s| s.killable = true);
+        let owner = started(&fake, &word);
+        let (settled, took) = settled_within(owner, BOUND);
+        assert_eq!(settled, Settled::Reaped(Exit::Signal(9)));
+        assert_eq!(fake.script().kills, 1);
+        assert!(took >= WAIT, "the grace came first: {took:?}");
+        assert!(claimable(&word), "a reap frees the claim");
+    }
+
+    #[test]
+    fn settle_gives_up_at_its_bound_when_the_kill_hangs() {
+        let word = Arc::new(SpawnWord::default());
+        let (kill_gate, held) = gate();
+        let fake = Fake::with(|s| s.kill_gate = Some(kill_gate));
+        let owner = started(&fake, &word);
+        let (settled, took) = settled_within(owner, BOUND);
+        held.entered();
+        held.release();
+        assert_eq!(settled, Settled::Unsettled);
+        let bound = 2 * (WAIT + POLL) + SETTLE_SLACK;
+        assert!(took >= bound, "waited the whole bound: {took:?}");
+        assert!(took < bound + WAIT * 5, "and no longer: {took:?}");
+    }
+
+    #[test]
+    fn settle_with_its_owner_thread_gone_is_unsettled_at_once() {
+        let (retire, _retires) = mpsc::channel();
+        let (report, reports) = mpsc::channel::<Report>();
+        drop(report);
+        let owner = ChildOwner {
+            retire,
+            reports,
+            wait: BOUND,
+        };
+        let (settled, took) = settled_within(owner, BOUND);
+        assert_eq!(settled, Settled::Unsettled);
+        assert!(
+            took < WAIT,
+            "a closed report channel ends the wait: {took:?}"
+        );
     }
 }

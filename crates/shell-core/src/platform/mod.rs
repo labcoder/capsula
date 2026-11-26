@@ -2,11 +2,8 @@
 //! models make themselves (folders, the credential store, the microphone). Windows only for now.
 
 #[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Mac connection starts its brain child from I1e-2"
-    )
+    not(any(test, target_os = "macos")),
+    expect(dead_code, reason = "only macOS starts its brain as a child")
 )]
 mod child;
 pub mod clipboard;
@@ -40,20 +37,21 @@ pub(crate) mod connect_test {
     };
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) use child::SpawnWord;
-pub(crate) use connect::{Connection, HANDSHAKE_TIMEOUT, RETRY_DELAY, connect_brain};
+pub(crate) use child::{ChildOwner, Settled, SpawnWord};
+pub(crate) use connect::{Connection, HANDSHAKE_TIMEOUT, LinkError, RETRY_DELAY, connect};
 #[cfg(windows)]
 #[cfg(debug_assertions)]
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use connect::{handshake_pair, open};
 #[cfg(target_os = "macos")]
 pub(crate) use macos::PipeClient;
+#[cfg(target_os = "macos")]
+pub use macos::session_id;
 #[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) use unsupported::PipeClient;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 use unsupported::launch_detached;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub use unsupported::session_id;
 #[cfg(windows)]
 pub(crate) use windows::PipeClient;
