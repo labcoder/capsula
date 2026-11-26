@@ -741,7 +741,12 @@ fn precheck(parent: &File, name: &CStr, user: libc::uid_t) -> Result<(), Acquisi
 
 pub(super) fn named(parent: &File, name: &CStr, expected: &libc::stat) -> Result<(), Untrusted> {
     let actual = entry_stat(parent, name).map_err(|_| Untrusted::Io)?;
-    if !protected::same_inspection(&actual, expected) || actual.st_nlink != expected.st_nlink {
+    // A folder's link count moves whenever anyone adds or removes a subfolder in it; only a
+    // file's says whether it gained another name.
+    if !protected::same_inspection(&actual, expected)
+        || (expected.st_mode & libc::S_IFMT == libc::S_IFREG
+            && actual.st_nlink != expected.st_nlink)
+    {
         return Err(Untrusted::Unsafe);
     }
     Ok(())
@@ -889,9 +894,21 @@ impl Entries {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Child names a test lets this thread's listings return before one read fails like an error.
+    pub(super) static READDIR_FAILS_AFTER: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 impl Entries {
     /// The next entry's name, copied out before the stream moves on.
     pub(super) fn next_name(&mut self) -> Next {
+        #[cfg(test)]
+        if READDIR_FAILS_AFTER.get() == Some(0) {
+            READDIR_FAILS_AFTER.set(None);
+            return Next::Failed;
+        }
         // SAFETY: __error returns this thread's live errno storage.
         let errno = unsafe { libc::__error() };
         // SAFETY: errno is writable thread-local storage.
@@ -907,7 +924,14 @@ impl Entries {
             };
         };
         // SAFETY: this successful readdir record is live until the next call on this stream.
-        unsafe { read_dirent_name(entry) }.map_or(Next::Malformed, Next::Name)
+        let next = unsafe { read_dirent_name(entry) }.map_or(Next::Malformed, Next::Name);
+        #[cfg(test)]
+        if let (Next::Name(name), Some(left)) = (&next, READDIR_FAILS_AFTER.get())
+            && !matches!(name.to_bytes(), b"." | b"..")
+        {
+            READDIR_FAILS_AFTER.set(Some(left - 1));
+        }
+        next
     }
 }
 
