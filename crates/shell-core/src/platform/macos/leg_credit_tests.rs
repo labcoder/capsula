@@ -55,7 +55,9 @@ impl Shell {
         } else {
             Channel::Dev
         };
-        let (control, data) = initiate(ends, seed.expose(), channel, by).expect("bound pair");
+        let mut secret = Secret::zeroed();
+        secret.bytes_mut().copy_from_slice(&seed.expose()[..]);
+        let (control, data) = initiate(ends, secret, channel, by).expect("bound pair");
         let shell = Self {
             control,
             data,
