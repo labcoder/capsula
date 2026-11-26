@@ -823,10 +823,21 @@ fn the_first_save_makes_the_settings_folder_owner_only() {
     apply(&mut config, SettingsOp::SetAssistantName(name("Nimbus")));
     #[cfg(windows)]
     {
-        let user = crate::platform::this_user();
+        use windows_sys::Win32::Security::{CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
+        use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+        assert!(crate::platform::dacl_sddl(&dir).starts_with("D:P("));
+        let entries: Vec<_> = crate::platform::dacl_entries(&dir)
+            .into_iter()
+            .map(|entry| (entry.allow, entry.flags, entry.rights, entry.sid))
+            .collect();
         assert_eq!(
-            crate::platform::dacl_sddl(&dir),
-            format!("D:P(A;OICI;FA;;;{user})")
+            entries,
+            [(
+                true,
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                FILE_ALL_ACCESS,
+                crate::platform::this_user()
+            )]
         );
     }
     #[cfg(unix)]

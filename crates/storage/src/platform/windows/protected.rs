@@ -979,11 +979,13 @@ fn mapped(mut mask: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use windows_sys::Win32::Security::{CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
     use windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData;
 
     use super::{
-        Kind, Security, Trusted, Untrusted, dacl_sddl, hold_chain, known_folder,
-        new_owner_only_dir, owner_only_dir, product_folder, set_dacl, trusted_security, user_sid,
+        FILE_ALL_ACCESS, Kind, Security, Trusted, Untrusted, dacl_entries, dacl_sddl, hold_chain,
+        known_folder, new_owner_only_dir, owner_only_dir, product_folder, set_dacl,
+        trusted_security, user_sid,
     };
     use crate::scratch::Scratch;
 
@@ -994,7 +996,7 @@ mod tests {
         let folder = scratch.join("product");
         let user = user_sid().expect("this user's SID");
         product_folder(&folder).expect("a new product folder");
-        assert_eq!(dacl_sddl(&folder), format!("D:P(A;OICI;FA;;;{user})"));
+        assert_owner_only(&folder, &user);
         set_dacl(&folder, |user| {
             format!("D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;SY)")
         });
@@ -1028,11 +1030,30 @@ mod tests {
         product_folder(&folder).expect("CREATOR OWNER names only the trusted creator");
         let nested = scratch.join("missing-root").join("product");
         product_folder(&nested).expect("a product folder under a missing root");
-        assert_eq!(dacl_sddl(&nested), format!("D:P(A;OICI;FA;;;{user})"));
+        assert_owner_only(&nested, &user);
         let file = scratch.join("file");
         std::fs::write(&file, b"kept").expect("a file at the name");
         assert_eq!(product_folder(&file), Err(Untrusted::Unsafe), "a file");
         assert_eq!(std::fs::read(&file).expect("the file stays"), b"kept");
+    }
+
+    /// Exactly this user's full control, passed down and not inherited from above. SDDL would
+    /// print some accounts by alias, so the entries are compared by SID.
+    fn assert_owner_only(path: &std::path::Path, user: &str) {
+        assert!(dacl_sddl(path).starts_with("D:P("), "a protected DACL");
+        let entries: Vec<_> = dacl_entries(path)
+            .into_iter()
+            .map(|entry| (entry.allow, entry.flags, entry.rights, entry.sid))
+            .collect();
+        assert_eq!(
+            entries,
+            [(
+                true,
+                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                FILE_ALL_ACCESS,
+                user.to_owned()
+            )]
+        );
     }
 
     #[test]
