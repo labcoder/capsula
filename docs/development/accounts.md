@@ -896,7 +896,7 @@ chunks live in Credential Manager under `CREDENTIAL_SERVICE`:
 
 | Record | Layout |
 | --- | --- |
-| `host` | A JSON UUIDv4 URN, generated from `getrandom` when no generation is current. |
+| `host` | A JSON UUIDv4 URN, generated from `getrandom` when no generation is current, or when the current one can't be used and may be replaced. |
 | `chatgpt` | JSON holds `client_id`, optional `subject` and `email`, `plan_enabled`, and optional nested `tokens` (`access_token`, `refresh_token`, optional `id_token`, `scope`, `expires_at`, `pending_identity_validation`, `refresh_sent`, which reads as false when absent). Registration-only JSON contains just `client_id` and `subject`. |
 | `revoke` | JSON holds `entries`, each with its own `client_id`, `refresh_token`, `added_at` Unix seconds, and `origin` (`Account` or `Exchange`). At most four exchanges and one account entry. |
 | sign-out marker | Not in Credential Manager: `control.marker` in credentials.db, token-free compact JSON: `{v:1,sign_out,sweep,request_pending,outcome_unknown,notice}`. `sign_out` is null or `{disposition,phase}`, with `Keep`/`Erase` and `Revoking`/`Deleting`. Unknown fields, versions, enums or malformed data fail closed to an Erase/Revoking marker with uncertainty and notice set. |
@@ -916,8 +916,18 @@ current in one authority transaction, which also retires the one it replaces. Be
 commit the old value remains current; afterwards the new one is, and `SaveResult::Committed`
 says so even when the replaced generation's cleanup is still owed. Reads never fall back to an
 older generation.
-An unreadable `chatgpt` record is erased by sign-out's Delete, which fails closed. An unreadable `host` fails closed: sign-in is refused as `CredentialsUnavailable` and Retry
-reads it again, but nothing replaces it, so a damaged host id blocks sign-in until it's fixed. This layer does not silently replace either record.
+An unreadable `chatgpt` record is erased by sign-out's Delete, which fails closed. The `host` is an identifier, not a credential: it authorizes nothing and belongs to the PC that
+made it. So a current host whose chunks are missing or whose bytes aren't a host, as in a profile
+copied to another PC, is replaced with a fresh one, while a refused read stays an error. A client is
+issued under a host, so the host is replaced only when no sign-out is pending and no `chatgpt`
+record could still use it: none, or a registration never bound to an identity, which is retired in
+its own commit first. A crash between the two leaves no registration and the old host, and the
+next read replaces it. An account with tokens, a registration holding a verified subject, or an
+unreadable `chatgpt` record keeps the unusable host, and sign-in is refused as
+`CredentialsUnavailable`. Nothing here recovers those: ordinary sign-out keeps a subject-bound
+registration, and neither a tokenless registration nor an unreadable record can be signed out, so
+the host stays blocked until the blocking record is removed. The `chatgpt` record is never
+replaced silently.
 
 ```mermaid
 flowchart LR

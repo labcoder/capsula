@@ -285,24 +285,137 @@ fn records_and_host_round_trip_and_a_second_client_is_busy() {
     assert_only_current(&vault, &store);
 }
 
-/// A current host whose bytes went missing stays an error and is never replaced (L2).
+/// Removes every stored chunk of `kind`, as on a PC the profile was copied to.
+fn lose(store: &FakeStore, service: &str, kind: &str) {
+    let prefix = format!("{service}/gen/{kind}/");
+    let names: Vec<_> = store
+        .names()
+        .into_iter()
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+    assert!(!names.is_empty(), "{kind} had chunks to lose");
+    store.rollback(&BTreeMap::new(), &names);
+}
+
+/// A host whose chunks went missing is an identifier, not a credential: it's replaced once, and
+/// the replacement is what every later read and reopen sees.
 #[test]
-fn a_host_that_stops_reading_back_is_never_replaced() {
+fn a_host_whose_chunks_went_missing_is_replaced() {
     let (_scratch, path, service, store) = setup("vault-host-missing");
     let mut vault = open(&store, &service, &path);
+    let old = vault.host_id().expect("host");
+    lose(&store, &service, "host");
+    let new = vault.host_id().expect("replaced host");
+    assert!(valid_host(new.expose()), "a fresh host");
+    assert!(new.expose() != old.expose(), "never the lost one");
+    drop(vault);
+    let mut vault = open(&store, &service, &path);
+    assert!(
+        vault.host_id().expect("persisted host").expose() == new.expose(),
+        "the replacement persists"
+    );
+    assert_only_current(&vault, &store);
+}
+
+#[test]
+fn a_malformed_host_is_replaced() {
+    let (_scratch, path, service, store) = setup("vault-host-malformed");
+    let mut vault = open(&store, &service, &path);
+    vault
+        .write(
+            Kind::Host,
+            &encode(&"not-a-host", 128).expect("encode"),
+            None,
+        )
+        .expect("write a malformed host");
+    let host = vault.host_id().expect("replaced host");
+    assert!(valid_host(host.expose()), "a fresh host");
+    assert_only_current(&vault, &store);
+}
+
+/// A refused read proves nothing about the host, so nothing is written.
+#[test]
+fn a_refused_host_read_replaces_nothing() {
+    let (_scratch, path, service, store) = setup("vault-host-refused");
+    let mut vault = open(&store, &service, &path);
     let host = vault.host_id().expect("host");
-    let saved = store.snapshot();
-    store.rollback(&BTreeMap::new(), &store.names());
+    let names = store.names();
+    store.0.lock().expect("fake lock").denied_read = names.first().cloned();
     assert!(matches!(
         vault.host_id(),
-        Err(VaultError::Store(CredentialStoreError::Unsettled))
+        Err(VaultError::Store(CredentialStoreError::Read(5)))
     ));
-    assert!(store.names().is_empty(), "no new host was written");
-    store.rollback(&saved, &saved.keys().cloned().collect::<Vec<_>>());
+    assert_eq!(store.names(), names, "nothing was written");
+    store.0.lock().expect("fake lock").denied_read = None;
     assert!(
         vault.host_id().expect("host again").expose() == host.expose(),
-        "the host id survives a reopen"
+        "the host stays"
     );
+}
+
+/// A client issued under the lost host is never reused: a registration never bound to an
+/// identity is retired before the new host is written, and a refused host write leaves it
+/// retired, so the next read replaces the host.
+#[test]
+fn a_lost_host_retires_an_unbound_registration_first() {
+    let (_scratch, path, service, store) = setup("vault-host-registration");
+    let mut vault = open(&store, &service, &path);
+    vault.host_id().expect("host");
+    let mut unbound = registration(&account("old")).expose().clone();
+    unbound.subject = None;
+    committed(vault.save_account(&Secret::new(unbound)));
+    lose(&store, &service, "host");
+    store.arm(1, Fault::Refuse);
+    assert!(vault.host_id().is_err(), "the host write was refused");
+    assert!(
+        vault.load_account().expect("account read").is_none(),
+        "the registration was retired first"
+    );
+    let host = vault.host_id().expect("replaced host");
+    assert!(valid_host(host.expose()), "a fresh host");
+    assert_only_current(&vault, &store);
+}
+
+/// A host isn't replaced while something could still be bound to it: a registration holding a
+/// verified subject, an account with tokens, an unreadable account or a pending sign-out.
+#[test]
+fn a_lost_host_stays_while_something_could_be_bound_to_it() {
+    type Arrange = fn(&mut Vault<FakeStore>, &FakeStore, &str);
+    let cases: [(&str, Arrange); 4] = [
+        ("bound registration", |vault, _, _| {
+            committed(vault.save_account(&registration(&account("old"))));
+        }),
+        ("signed in", |vault, _, _| {
+            let mut signed_in = account("old").expose().clone();
+            signed_in.subject = None;
+            committed(vault.save_account(&Secret::new(signed_in)));
+        }),
+        ("unreadable account", |vault, store, service| {
+            committed(vault.save_account(&account("old")));
+            lose(store, service, "chatgpt");
+        }),
+        ("signing out", |vault, _, _| {
+            vault
+                .update_marker(MarkerUpdate::Promote(Disposition::Erase))
+                .expect("promote");
+        }),
+    ];
+    for (case, arrange) in cases {
+        let (_scratch, path, service, store) = setup("vault-host-bound");
+        let mut vault = open(&store, &service, &path);
+        vault.host_id().expect("host");
+        arrange(&mut vault, &store, &service);
+        lose(&store, &service, "host");
+        let names = store.names();
+        assert!(
+            matches!(
+                vault.host_id(),
+                Err(VaultError::Store(CredentialStoreError::Unsettled))
+            ),
+            "{case}: the lost host stays an error"
+        );
+        assert_eq!(store.names(), names, "{case}: nothing was written");
+    }
 }
 
 #[test]
