@@ -23,7 +23,7 @@ use super::tests::{SHORT, bounded, by, hello};
 use crate::ParentBoundError;
 use crate::platform::ShellProcess;
 use crate::platform::shell_process::Verdict;
-use crate::runtime::{Brain, Ended, Seen, Terminal};
+use crate::runtime::{Brain, Ended, Fatal, Seen, Terminal};
 use crate::startup::custody::SessionCustody;
 use crate::startup::parent_bound::tests::{Holding, Script, run_on_fixtures};
 use crate::startup::parent_bound::{AdmissionPair, Root};
@@ -426,14 +426,65 @@ async fn a_writer_that_gets_room_after_the_deadline_writes_no_tuning() {
         );
         serving.await
     };
-    assert_eq!(ended, Ended::Lost);
-    drop((bound, brain_control));
+    assert_eq!(
+        ended,
+        Ended::Fatal(Fatal::Refused),
+        "the cancelled write refused the pair"
+    );
+    assert_eq!(drain(&shell_control), (0, false), "no tuning");
+    drop((bound, brain_control, greeter));
+    brain.close().await;
+    Box::pin(root.settle(None, ())).await;
+}
+
+#[tokio::test]
+async fn a_parent_exit_during_a_pending_tuning_ends_fatal_with_nothing_written() {
+    let scratch = Scratch::new("pair-tuning-exit");
+    let item = Item::default();
+    let (shell, verdict) = ShellProcess::watched(1);
+    let (pair, ends) = inherited();
+    let brain_control = pair.control.try_clone().expect("the brain's control end");
+    let shell_control = StdStream::from(
+        ends[0]
+            .as_fd()
+            .try_clone_to_owned()
+            .expect("the shell's control end"),
+    );
+    let mut root = Root::new();
+    let (admitted, greeter) = bounded(async {
+        tokio::join!(
+            Box::pin(root.admit(pair, &shell, by(), || Ok(custody()), || Ok(item.clone()))),
+            async {
+                let mut greeter = parent(ends, &item).await;
+                greeter.hellos().await;
+                greeter.metrics().await;
+                greeter
+            },
+        )
+    })
+    .await;
+    let (mut bound, _committed) = admitted.expect("admitted");
+    let mut brain = crate::test_support::brain(&scratch, "");
+    let terminal = Terminal::new(bound.pair.pair.subscribe(), shell.loss());
+    assert_eq!(drain(&shell_control), (0, false), "the greeting was read");
+    let filled = fill(&brain_control);
+    let ended = {
+        let mut serving = std::pin::pin!(serve(&mut bound, &mut brain, terminal, &shell, by()));
+        let first = std::future::poll_fn(|cx| Poll::Ready(serving.as_mut().poll(cx))).await;
+        assert_eq!(first, Poll::Pending, "the tuning waits for room");
+        assert!(
+            !shell.publish_watched(&verdict, Verdict::Exited),
+            "the claim came first"
+        );
+        bounded(serving).await
+    };
+    assert_eq!(ended, Ended::Fatal(Fatal::ParentExited));
     assert_eq!(
         drain(&shell_control),
-        (0, true),
-        "EOF, and no tuning before it"
+        (filled, false),
+        "no tuning after the fill"
     );
-    drop(greeter);
+    drop((bound, brain_control, greeter));
     brain.close().await;
     Box::pin(root.settle(None, ())).await;
 }

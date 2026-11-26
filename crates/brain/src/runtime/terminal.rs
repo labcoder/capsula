@@ -34,6 +34,11 @@ impl Terminal {
         Self { pair, parent }
     }
 
+    /// The fatal cause already set, read as it stands rather than as a change.
+    pub(crate) fn fatal(&self) -> Option<Fatal> {
+        self.cause(Read::Initial)
+    }
+
     fn cause(&self, read: Read) -> Option<Fatal> {
         if let Some(parent) = &self.parent {
             let changed = parent.has_changed();
@@ -108,7 +113,7 @@ impl Fence {
     pub(super) fn new(terminal: Option<Terminal>) -> Self {
         let first = terminal
             .as_ref()
-            .and_then(|terminal| terminal.cause(Read::Initial))
+            .and_then(Terminal::fatal)
             .map(Disposition::Fatal);
         Self {
             terminal,

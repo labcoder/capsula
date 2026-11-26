@@ -181,7 +181,9 @@ writer that is ready at the same time, and checked again after it. It then lends
 a terminal that watches the pair's cell and the parent. The root keeps the pair through
 settlement and drops it after the Brain and its helpers, before the item, so the shell sees EOF
 only once the Brain has settled. A refused admission, or a fatal end of serving, drops it at
-once, before any cleanup is awaited. Settlement has no
+once, before any cleanup is awaited. A failed tuning ends with the fatal cause the pair's cell or
+the parent already holds, such as a cancelled write's refusal, and as lost only without one.
+Settlement has no
 admission deadline. The 5-second handshake caps sit inside the admission clock.
 
 `AdmissionPair` is the seam between that shared driver and the platform's pair: it keys,

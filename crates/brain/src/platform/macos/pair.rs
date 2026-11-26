@@ -385,7 +385,7 @@ async fn serve(
         return Ended::Broken("the shell tuning doesn't encode");
     };
     if tune(pair, shell, by, &tuning).await.is_err() {
-        return Ended::Lost;
+        return terminal.fatal().map_or(Ended::Lost, Ended::Fatal);
     }
     let Ok((control, data)) = pair.legs() else {
         return Ended::Broken("the greeted pair isn't greeted");
