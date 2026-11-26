@@ -210,7 +210,7 @@ fn copy(query: &ItemQuery) -> Result<CFRetained<CFType>, ItemError> {
 /// The instance group `role` may use: its application identifier, split at its first dot, must be
 /// exactly `P.<role's id>` with `P` non-empty and no wildcard, and its access groups an array of
 /// strings that holds `P.<instance group>`.
-pub(super) fn admitted_group(
+fn admitted_group(
     ids: AppleIds,
     role: Role,
     app_id: Option<&CFType>,
@@ -232,7 +232,8 @@ pub(super) fn admitted_group(
     let groups = groups
         .and_then(CFType::downcast_ref::<CFArray>)
         .ok_or(ItemError::NotAdmitted)?;
-    // SAFETY: every element of a CFArray is a CoreFoundation object.
+    // SAFETY: callers pass only this process's entitlement value, a property list whose arrays
+    // hold CoreFoundation objects alone, or a test's typed array of CoreFoundation objects.
     let groups = unsafe { groups.cast_unchecked::<CFType>() };
     let mut found = false;
     for entry in groups {
