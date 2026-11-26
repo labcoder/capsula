@@ -216,6 +216,17 @@ pub(super) fn inspect_private(
     Ok(after)
 }
 
+/// Checks only this held folder, not its name or ancestors, against the existing ownership,
+/// mode and ACL policy. The caller opens it without following the final component.
+///
+/// # Errors
+/// Refuses unsafe or incomplete descriptor inspection.
+pub fn check_product_folder(folder: &File) -> Result<(), Untrusted> {
+    // SAFETY: geteuid only returns the effective identity.
+    let user = unsafe { libc::geteuid() };
+    inspect(folder, user).map(drop)
+}
+
 pub(super) fn inspect(file: &File, user: libc::uid_t) -> Result<libc::stat, Untrusted> {
     inspect_object(file, user, ObjectKind::Directory)
 }
