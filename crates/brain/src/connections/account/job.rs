@@ -192,20 +192,13 @@ impl<S: CredentialStore> fmt::Debug for Worker<S> {
 
 impl Worker<NativeCredentialStore> {
     /// The worker on the real credential store: the only way the brain reaches it outside tests.
-    /// Its vault opens under `profile`, the lock the brain holds for its whole run, linked to the
-    /// history writer by `history`.
-    pub(crate) fn system(
-        clock: Arc<dyn Clock>,
-        profile: Arc<SessionLock>,
-        history: crate::connections::vault::HistoryLink,
-    ) -> Self {
+    /// Its vault opens under `profile`, the lock the brain holds for its whole run.
+    pub(crate) fn system(clock: Arc<dyn Clock>, profile: Arc<SessionLock>) -> Self {
         Self::new(
             Box::new(move || {
                 admitted_store()
                     .map_err(VaultError::from)
-                    .and_then(|store| {
-                        Vault::open_held(store, Arc::clone(&profile), history.clone())
-                    })
+                    .and_then(|store| Vault::open_held(store, Arc::clone(&profile)))
             }),
             clock,
         )
@@ -213,13 +206,11 @@ impl Worker<NativeCredentialStore> {
 }
 
 impl<S: CredentialStore> Worker<S> {
-    /// What `connection`'s sign-in is; unproved while no vault is open.
-    pub(crate) fn proof(&self, connection: u64) -> crate::connections::vault::Proof {
+    /// What the current sign-in is; unproved while no vault is open.
+    pub(crate) fn proof(&self) -> crate::connections::vault::Proof {
         self.vault
             .as_ref()
-            .map_or(crate::connections::vault::Proof::Unproved, |vault| {
-                vault.proof(connection)
-            })
+            .map_or(crate::connections::vault::Proof::Unproved, Vault::proof)
     }
 
     pub(crate) fn github(

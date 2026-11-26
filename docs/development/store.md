@@ -84,30 +84,15 @@ leaves the file at the version it had. Version 12 makes the ChatGPT cutoff table
 13 changes no schema: builds from before the profile's writer lock know at most 12, so they
 refuse the file instead of writing history without the lock. A file that the recovery
 operation took to 12 already has the table and its rows, and moves to 13 alone. No build writes a cutoff row;
-only tests write one directly. History keeps one writer: the vault's link is bound once,
-when the store thread starts, to the owner of the store ordinary startup opens, and every Check is a request that owner
-serves on that store in order.
-Startup builds the vault before that thread runs, so until then the link refuses every request.
-Shutdown releases the link before the store closes, since the store thread ends only once nothing
-can queue for it. What the link already queued is still served, and a released link never binds
-again. No call takes a store,
-path or earlier result. The purge's `VACUUM INTO` copy keeps every table,
-so the cutoff row (a tag and two IDs, no conversation content) carries over, and after a swap the
-Check reads the replacement file. A Check refuses an absent or invalid row for the expected tag
-or a connection still inside a transaction. Each confirmation of an established context reads
-the row again. The history and authority files
-share no installation binding, so nothing here compares one; that belongs to the local profile
-work. A byte-identical copy of the right file put in its place by a process running as the same
-user is outside this design's trust model and isn't detected.
+only tests write one directly. The purge's `VACUUM INTO` copy keeps every table, so a cutoff row
+(a tag and two IDs, no conversation content) carries over.
 Earlier history stays available locally. A read that carries the established cutoff reads that
 row again in the same snapshot, refuses when it is missing, invalid or different, and keeps to
 it: a run that began before the cutoff is refused, and context, summaries, drawings, deletion
 notes, recall, titles and compaction see only threads created after it. A new run in an older
 thread sees only its own turn. The coordinator carries the cutoff on every read for the
-recovered connection and sends only bodies read to it ([runs](runs.md#availability)). Cutoff
-requests take no page-read stamp, but the vault learns the cutoff only after it commits, so a read
-sent once the coordinator knows it always finds the row. Nothing reports a recovered connection
-at startup yet, so the replacement stays unavailable.
+recovered connection and sends only bodies read to it. Nothing reports a recovered connection,
+so no read carries one.
 
 A recovered connection is told by its cutoff row for its tag, not by the version. A
 compile-time assert keeps the current version above 12.
@@ -522,8 +507,7 @@ is refused, because each comes from an ordinary path, not only from a crash or a
 - **History without an authority.** Builds from before the authority (#214) issued thread ids and
   never made `credentials.db`. A post-#214 build that couldn't open its vault left the same
   state. The new authority starts signed out. It shares no ids with the store: its generations
-  are random. A ChatGPT cutoff already in the store stays inert, because only an authority that
-  established it can confirm it. The vault's first open sweeps the older builds' credential names,
+  are random. A ChatGPT cutoff already in the store stays inert, because nothing confirms it. The vault's first open sweeps the older builds' credential names,
   as the upgrade to #214 did.
 - **An authority without history.** The dev diagnostics of earlier builds made `credentials.db`
   without a store. A missing store is created empty, unless a purge's old copy beside it shows a

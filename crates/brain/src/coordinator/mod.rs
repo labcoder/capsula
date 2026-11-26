@@ -63,7 +63,7 @@ pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
 pub use lease::{LeaseId, MAX_HOLD, SEND_DEADLINE, ScreenGrantRefusal, SendKey};
 pub(crate) use lease::{PictureGrant, PictureWrite};
 pub use speech::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
-pub use store_op::{CutoffSlot, ReplyText, StoreOp, SummaryText};
+pub use store_op::{ReplyText, StoreOp, SummaryText};
 pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};
 mod page;
 pub use page::PageKey;
@@ -345,13 +345,6 @@ pub enum Input {
     ThreadOp(ThreadOp),
     /// Whether runs on a connection kind can be answered changed.
     Engines(kumochi_protocol::message::ConnectionKind, Availability),
-    /// `ChatGPT` is ready on a recovered connection whose reads must keep to its cutoff.
-    RecoveredChatGpt {
-        /// The ready sign-in.
-        ready: Ready,
-        /// The cutoff its account's established context matched.
-        boundary: crate::store::Boundary,
-    },
     /// A Messages post or a Check found the Anthropic key under this tag refused; its route change
     /// follows.
     KeyRefused(RefusedKey),
@@ -866,20 +859,8 @@ pub struct Coordinator {
     transport_failed: bool,
     /// Whether each kind's runs can be answered, and on which sign-in.
     availability: crate::connections::facts::PerKind<Availability>,
-    /// Each recovered `ChatGPT` sign-in's first cutoff, which its routes' reads and sends
-    /// require; no report about another sign-in replaces or removes one.
-    recovered_chatgpt: Vec<crate::store::Boundary>,
-    /// The `ChatGPT` sign-ins whose recovery report was inconsistent, each unavailable until a
-    /// consistent report of its own.
-    refused_recovery: Vec<crate::context::ConnectionTag>,
-    /// Whether `ChatGPT`'s current state is such a refusal, until it is ready again.
-    chatgpt_blocked: bool,
     /// Whether the account's sign-in keeps `ChatGPT`'s history from a turn, as it last said.
     chatgpt_fenced: bool,
-    /// The `ChatGPT` sign-in last ready, and the earlier ones another replaced: a sign-in's tag is
-    /// never issued again, so a recovery report naming a retired one is late and changes nothing.
-    last_chatgpt: Option<crate::context::ConnectionTag>,
-    chatgpt_retired: Vec<crate::context::ConnectionTag>,
     /// Which routes may carry a picture.
     pictures: availability::PictureRoutes,
     /// The one background job.
@@ -958,12 +939,7 @@ impl Coordinator {
                     Availability::Unavailable(availability::model_unavailable())
                 }
             }),
-            recovered_chatgpt: Vec::new(),
-            refused_recovery: Vec::new(),
-            chatgpt_blocked: false,
             chatgpt_fenced: false,
-            last_chatgpt: None,
-            chatgpt_retired: Vec::new(),
             pictures: availability::PictureRoutes::SHIPPED,
             job: None,
             account: None,
@@ -1234,9 +1210,6 @@ impl Coordinator {
             }
             Input::ThreadOp(op) => self.thread_op(op, &mut effects),
             Input::Engines(kind, now) => self.available(kind, now, &mut effects),
-            Input::RecoveredChatGpt { ready, boundary } => {
-                self.recovered_chatgpt(ready, boundary, &mut effects);
-            }
             Input::KeyRefused(refused) => self.key_refused(refused, &mut effects),
             Input::ReadFinished(done) => self.read_finished(done, &mut effects)?,
             Input::CallCommitted { key, outcome, then } => match outcome {

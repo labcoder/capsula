@@ -19,8 +19,7 @@ use kumochi_protocol::message::{ConnectionKind, Deleted, RunId, SceneId, ThreadI
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::connections::vault::HistoryLink;
-use crate::coordinator::{CutoffSlot, Input, ScreenGrantRefusal, StoreOp};
+use crate::coordinator::{Input, ScreenGrantRefusal, StoreOp};
 use crate::dispatch::Committed;
 use crate::platform::SessionLock;
 use crate::store::{
@@ -466,11 +465,8 @@ impl StoreThread {
                                     gates.remove(at).release.recv().ok();
                                 }
                             }
-                            let counted = !matches!(op, StoreOp::Cutoff(_));
                             serve_op(&mut store, &mut purger, &acks, &mut screen_repairs, op);
-                            if counted {
-                                exit.barrier.complete();
-                            }
+                            exit.barrier.complete();
                             exit.checkpoints.raise();
                             #[cfg(test)]
                             if let Some(observed) = &purger.schedule.observed {
@@ -539,13 +535,6 @@ impl StoreThread {
             self.accepted.fetch_add(1, Ordering::Relaxed);
         }
         sent
-    }
-
-    /// A vault's binding to this thread's store, the profile's one history writer. It keeps this
-    /// thread's queue open, so whoever holds it releases it before [`StoreThread::close`].
-    pub(crate) fn history_link(&self) -> HistoryLink {
-        let ops = self.ops.clone();
-        HistoryLink::new(move |request| ops.send(StoreOp::Cutoff(CutoffSlot::new(request))).is_ok())
     }
 
     #[cfg(all(test, windows))]
@@ -645,12 +634,6 @@ fn serve_op(
         | StoreOp::ReadJob(_)
         | StoreOp::CompactContext(_) => {
             unreachable!("StoreThread::send hands reads to the reader")
-        }
-        StoreOp::Cutoff(slot) => {
-            let Some(request) = slot.take() else {
-                return;
-            };
-            store.serve_cutoff(request);
         }
         StoreOp::ClearScenes { scenes } => {
             purger.op_arriving();

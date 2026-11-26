@@ -1049,31 +1049,26 @@ newer.
 
 Every sign-in is proved before `ChatGPT` is ready. Each time the account's connection changes
 (load, sign-in, sign-out; a refresh keeps it), `runtime::Accounts` asks the credential thread
-what that connection may read, under a fresh epoch. It asks only once the store thread has bound
-the vault's history link, so startup can't find a healthy replacement unproved. The vault answers
-**Ordinary** only at the ordinary schema, **Recovered** with its cutoff only for the exact
-established successor under that connection while it isn't signing out, and **Unproved** for
-every other state, a fenced predecessor included. A lost check, whose job was dropped or never
-taken, is Unproved too. An answer for another connection or epoch is dropped before anything
+what that connection may read, under a fresh epoch. It asks only once the store thread runs. The
+vault answers **Ordinary** only at the ordinary schema and **Unproved** for every other state. A
+lost check, whose job was dropped or never taken, is Unproved too. An answer for another connection or epoch is dropped before anything
 else in the brain hears it.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Unchecked: connection changes
     Unchecked --> Ordinary: ordinary schema
-    Unchecked --> Recovered: exact established successor
     Unchecked --> Unproved: anything else, or a lost check
     Ordinary --> Unchecked: connection changes
-    Recovered --> Unchecked: connection changes
     Unproved --> Unchecked: connection changes
 ```
 
-While a check is out, `ChatGPT` is Finding. Unproved asks for a sign-in. In both states, and
-while a recovered sign-in is held but not ready to publish its cutoff, a turn that arrives reads
-no history for `ChatGPT`; Claude's turns read as before. The account sets and lifts that fence
+While a check is out, `ChatGPT` is Finding. Unproved asks for a sign-in. In both states, a turn
+that arrives reads no history for `ChatGPT`; Claude's turns read as before. The account sets and lifts that fence
 after every change, the local saved-sign-in check included. No catalog read or round gets a
 bearer for an unproved sign-in, and an answer after shutdown begins starts no catalog read.
-Ordinary publishes plain Ready; Recovered publishes Ready with its cutoff.
+Ready needs an Ordinary answer, along with everything else Ready already needs, such as loaded
+models.
 
 `connections::authority` (OSC-233) decides which credential bytes count. On Rez, with two
 processes writing, Credential Manager hid a fresh write for 120 ms and brought back a confirmed
