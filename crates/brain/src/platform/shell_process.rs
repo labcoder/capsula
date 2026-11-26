@@ -8,7 +8,10 @@ use super::macos::parent::ParentWatch;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
-    not(test),
+    not(any(
+        test,
+        all(target_os = "macos", debug_assertions, feature = "test-support")
+    )),
     expect(dead_code, reason = "parent-bound runtime is not wired yet")
 )]
 pub(crate) enum Verdict {
@@ -35,7 +38,10 @@ pub(crate) enum Unconfirmed {
 
 impl Verdict {
     #[cfg_attr(
-        not(test),
+        not(any(
+            test,
+            all(target_os = "macos", debug_assertions, feature = "test-support")
+        )),
         expect(dead_code, reason = "parent-bound runtime is not wired yet")
     )]
     pub(crate) async fn wait(receiver: &mut watch::Receiver<Self>) -> Self {
@@ -89,7 +95,10 @@ impl CommitGate {
 
 /// Held by parent-bound startup after it won the commit claim.
 #[cfg_attr(
-    not(test),
+    not(any(
+        test,
+        all(target_os = "macos", debug_assertions, feature = "test-support")
+    )),
     expect(dead_code, reason = "parent-bound startup is not wired yet")
 )]
 pub(crate) struct Committed(());
@@ -105,7 +114,7 @@ enum Owner {
     Native(std::os::windows::io::OwnedHandle),
     #[cfg(target_os = "macos")]
     #[cfg_attr(
-        not(test),
+        not(any(test, all(debug_assertions, feature = "test-support"))),
         expect(dead_code, reason = "parent-bound admission is not wired yet")
     )]
     Parent(ParentWatch),
@@ -132,7 +141,7 @@ impl ShellProcess {
 
     #[cfg(target_os = "macos")]
     #[cfg_attr(
-        not(test),
+        not(any(test, all(debug_assertions, feature = "test-support"))),
         expect(dead_code, reason = "parent-bound admission is not wired yet")
     )]
     pub(in crate::platform) fn arm_parent() -> Result<Self, Unconfirmed> {
@@ -150,7 +159,10 @@ impl ShellProcess {
 
     /// The one commit claim: Some at most once, and never after a loss was latched.
     #[cfg_attr(
-        not(test),
+        not(any(
+            test,
+            all(target_os = "macos", debug_assertions, feature = "test-support")
+        )),
         expect(dead_code, reason = "parent-bound startup is not wired yet")
     )]
     pub(crate) fn claim_commit(&self) -> Option<Committed> {
@@ -169,7 +181,10 @@ impl ShellProcess {
     /// The current verdict, read without waiting: Err once a terminal verdict or a closed watch
     /// is visible. Without a parent watch nothing is confirmed.
     #[cfg_attr(
-        not(test),
+        not(any(
+            test,
+            all(target_os = "macos", debug_assertions, feature = "test-support")
+        )),
         expect(dead_code, reason = "parent-bound startup is not wired yet")
     )]
     pub(crate) fn fence(&self) -> Result<(), Verdict> {
@@ -203,7 +218,10 @@ impl ShellProcess {
     }
 
     #[cfg_attr(
-        not(test),
+        not(any(
+            test,
+            all(target_os = "macos", debug_assertions, feature = "test-support")
+        )),
         expect(dead_code, reason = "parent-bound runtime is not wired yet")
     )]
     #[cfg_attr(
