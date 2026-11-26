@@ -226,7 +226,7 @@ fn another_kinds_change_keeps_an_unbound_run_and_takes_out_only_its_own_entry() 
 #[test]
 fn a_kind_whose_sign_in_changed_since_arrival_is_refused_at_the_first_build() {
     let mut core = typed(vec![ready(CHATGPT, 7, &["m"])]);
-    core.availability = Availability::Ready(Ready {
+    core.availability[ConnectionKind::ChatGpt] = Availability::Ready(Ready {
         connection: ConnectionTag(8),
         models: vec![info("m")],
         trusted_draw: false,
@@ -446,7 +446,7 @@ fn a_hold_on_another_kind_lives_through_chatgpts_changes_and_ends_on_its_own() {
         assert!(granted(&mut core), "ChatGPT's changes leave it");
 
         if at_the_send {
-            core.claude_code = Availability::Unavailable(declined());
+            core.availability[ConnectionKind::ClaudeCode] = Availability::Unavailable(declined());
             assert!(!granted(&mut core));
         } else {
             let ended = core.handle(ready(CLAUDE, 6, &["m"])).expect("current");

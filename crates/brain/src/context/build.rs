@@ -12,6 +12,7 @@ use super::{
     PictureRecipient, REMOVED, Role, RunSnapshot, Supplied, UNAVAILABLE, note_item, summary_item,
     tools,
 };
+use crate::connections::facts::{self, Replay};
 use crate::dispatch::ToolOutput;
 use crate::engines::anthropic::encode::{KeyHistory, ToolUse};
 use crate::engines::{CallId, Opaque};
@@ -252,19 +253,20 @@ pub(super) fn render(
     key_results: &[(CallId, ToolOutput)],
     sources: &mut BTreeSet<ThreadId>,
 ) -> Result<Vec<InputItem>, StoreError> {
-    // Native items replay only on `ChatGPT` and the Anthropic key; any other route gets text.
+    // Native items replay only on a kind whose facts say so; any other route gets text.
     let kind = run
         .choice
         .as_ref()
         .map_or(ConnectionKind::ChatGpt, |choice| choice.connection);
-    let native = kind != ConnectionKind::ClaudeCode && replayable(kind, run.connection, items);
-    let key_route = native && kind == ConnectionKind::AnthropicKey;
+    let replay = facts::of(kind).replay;
+    let native = replay != Replay::Text && replayable(kind, run.connection, items);
+    let key_route = native && replay == Replay::Calls;
     if !key_results.is_empty() && !key_route {
         return Err(StoreError::RoundRecord);
     }
     let mut key = KeyReplay::new(picture, items, key_results)?;
     // A `ChatGPT` round's items carry its text; the key's carry only its calls, so its text stays.
-    let carried = native && kind == ConnectionKind::ChatGpt;
+    let carried = native && replay == Replay::Carried;
     let narration = if carried {
         native_narration(items)
     } else {
@@ -472,7 +474,7 @@ fn native_narration(items: &[Item]) -> BTreeMap<&str, String> {
 /// route requires typed calls unique within each group, and a complete group before more text;
 /// `ChatGPT` keeps unfinished rounds as before. A foreign or unpaired row makes the whole run text.
 fn replayable(kind: ConnectionKind, tag: ConnectionTag, items: &[Item]) -> bool {
-    let key_route = kind == ConnectionKind::AnthropicKey;
+    let key_route = facts::of(kind).replay == Replay::Calls;
     let mut calls = BTreeSet::new();
     let mut answered = BTreeSet::new();
     let mut natives = false;

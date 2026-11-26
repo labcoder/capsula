@@ -6,7 +6,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
 
 use crate::platform::macos::protected::tests::{Scratch, install_acl};
-use crate::platform::macos::protected::{open_directory, stat};
+use crate::platform::unix::{open_directory, stat};
 
 const DENY: &CStr = c"!#acl 1\ngroup:11111111-2222-3333-4444-555555555555:::deny:write\n";
 const CONFIG: &CStr = c"config.toml";

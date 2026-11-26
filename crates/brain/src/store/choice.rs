@@ -3,6 +3,7 @@
 use kumochi_protocol::message::{ConnectionKind, Effort, ModelChoice, ModelSlug};
 
 use super::StoreError;
+use crate::connections::facts;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StoredChoice {
@@ -30,11 +31,8 @@ impl StoredChoice {
         let Ok(model) = ModelSlug::new(model) else {
             return Self::Invalid;
         };
-        let connection = match connection {
-            "chatgpt" => ConnectionKind::ChatGpt,
-            "anthropic_key" => ConnectionKind::AnthropicKey,
-            "claude_code" => ConnectionKind::ClaudeCode,
-            _ => return Self::Invalid,
+        let Some(connection) = facts::stored(connection) else {
+            return Self::Invalid;
         };
         Self::Valid {
             connection,
@@ -85,11 +83,7 @@ impl StoredChoice {
 }
 
 pub(super) fn connection_text(connection: ConnectionKind) -> &'static str {
-    match connection {
-        ConnectionKind::ChatGpt => "chatgpt",
-        ConnectionKind::AnthropicKey => "anthropic_key",
-        ConnectionKind::ClaudeCode => "claude_code",
-    }
+    facts::of(connection).stored
 }
 
 pub(super) fn effort_text(effort: Effort) -> &'static str {

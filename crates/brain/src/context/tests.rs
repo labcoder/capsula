@@ -878,6 +878,57 @@ fn native_items_replay_only_on_a_chatgpt_route() {
             "{connection:?}"
         );
     }
+    // Claude Code's own paired round, same kind and tag, still replays as its transcript only.
+    let at = |id: u64, body: Body| Item {
+        id: EventId(last.0 + id),
+        run: current,
+        body,
+    };
+    let mut run = snapshot(Origin::Kumo, None);
+    run.choice.as_mut().expect("a choice").connection = ConnectionKind::ClaudeCode;
+    let items = vec![
+        at(
+            1,
+            Body::Native {
+                kind: Some(ConnectionKind::ClaudeCode),
+                connection: ConnectionTag(7),
+                screen_model: None,
+                item: Opaque::new(serde_json::to_vec(&call_item("c1")).expect("json"))
+                    .expect("small"),
+            },
+        ),
+        at(
+            2,
+            Body::Result {
+                call: call("c1"),
+                output: "{}".to_owned(),
+            },
+        ),
+        at(3, Body::Assistant("Done.".to_owned())),
+    ];
+    let built = world
+        .build(
+            &run,
+            (main, current),
+            Supplied {
+                summary: None,
+                items,
+                ..Supplied::default()
+            },
+            BOUND,
+        )
+        .expect("built");
+    assert_eq!(
+        built.request.input,
+        [
+            message(
+                Role::User,
+                &format!("ask\n\nLocal time: {TIME}\nDrawings on screen: []")
+            ),
+            message(Role::Assistant, "Done."),
+        ],
+        "no native item or result reaches Claude Code"
+    );
 }
 
 #[test]

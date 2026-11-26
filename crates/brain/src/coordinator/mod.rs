@@ -855,13 +855,10 @@ pub struct Coordinator {
     sends: u64,
     /// A lease that wasn't held failed closed: nothing is granted again until the brain restarts.
     transport_failed: bool,
-    /// Whether `ChatGPT` runs can be answered, and on which sign-in.
-    availability: Availability,
+    /// Whether each kind's runs can be answered, and on which sign-in.
+    availability: crate::connections::facts::PerKind<Availability>,
     /// Whether the account's sign-in keeps `ChatGPT`'s history from a turn, as it last said.
     chatgpt_fenced: bool,
-    /// The other connections, which no engine answers yet, so they stay unavailable.
-    anthropic_key: Availability,
-    claude_code: Availability,
     /// Which routes may carry a picture.
     pictures: availability::PictureRoutes,
     /// The one background job.
@@ -932,10 +929,15 @@ impl Coordinator {
             leases: Vec::new(),
             sends: 0,
             transport_failed: false,
-            availability: Availability::Unavailable(availability::sign_in_needed()),
+            availability: crate::connections::facts::PerKind::new(|kind| match kind {
+                ConnectionKind::ChatGpt => {
+                    Availability::Unavailable(availability::sign_in_needed())
+                }
+                ConnectionKind::AnthropicKey | ConnectionKind::ClaudeCode => {
+                    Availability::Unavailable(availability::model_unavailable())
+                }
+            }),
             chatgpt_fenced: false,
-            anthropic_key: Availability::Unavailable(availability::model_unavailable()),
-            claude_code: Availability::Unavailable(availability::model_unavailable()),
             pictures: availability::PictureRoutes::SHIPPED,
             job: None,
             account: None,
@@ -956,7 +958,7 @@ impl Coordinator {
         scenes: Vec<SceneState>,
     ) -> Self {
         let mut core = Self::new(main_thread, last_thread, last_run, scenes);
-        core.availability = Availability::Ready(Ready::fixture());
+        core.availability[ConnectionKind::ChatGpt] = Availability::Ready(Ready::fixture());
         core
     }
 
@@ -1438,7 +1440,7 @@ impl Coordinator {
         let arrived = hold
             .as_ref()
             .map_or_else(|| self.arrived_now(), |hold| hold.arrived);
-        let finding = (hold.is_none() && self.claude_code == Availability::Finding)
+        let finding = (hold.is_none() && *self.claude_code() == Availability::Finding)
             .then_some(availability::Finding::Due);
         self.current = Some(Run {
             control: crate::recall::control::CancelOnDrop(control),

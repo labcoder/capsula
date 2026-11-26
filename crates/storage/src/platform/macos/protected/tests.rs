@@ -1,6 +1,9 @@
 use super::*;
-use std::ffi::OsStr;
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::ffi::{CStr, OsStr};
+use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
+use std::mem::MaybeUninit;
+use std::os::fd::FromRawFd as _;
+use std::os::unix::ffi::OsStrExt as _;
 
 fn sample() -> libc::stat {
     // SAFETY: zero is a valid starting value for libc's integer-only stat fields.

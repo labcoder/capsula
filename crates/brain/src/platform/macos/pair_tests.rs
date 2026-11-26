@@ -190,10 +190,13 @@ impl Shell {
 }
 
 /// The adopted pair and the shell's two ends, as tokio streams.
-pub(super) fn ends() -> (InheritedPair, [UnixStream; 2]) {
+pub(super) fn ends() -> (RegisteredPair, [UnixStream; 2]) {
     let (control, shell_control) = sockets();
     let (data, shell_data) = sockets();
-    let pair = adopt(fd(control), fd(data)).expect("adopted");
+    let pair = adopt(fd(control), fd(data))
+        .expect("adopted")
+        .register()
+        .expect("registered");
     let shell = [shell_control, shell_data].map(|end| {
         end.set_nonblocking(true).expect("non-blocking");
         UnixStream::from_std(end).expect("tokio")
@@ -416,8 +419,10 @@ async fn a_greeting_that_misses_its_deadline_refuses_the_pair() {
 /// One completed handshake: the brain's owners and proof, its two ends and the shell's.
 async fn run() -> (Session, BoundPair, [UnixStream; 2], [UnixStream; 2]) {
     let (pair, [mut shell_control, mut shell_data]) = ends();
-    let mut control = UnixStream::from_std(pair.control).expect("tokio");
-    let mut data = UnixStream::from_std(pair.data).expect("tokio");
+    let RegisteredPair {
+        mut control,
+        mut data,
+    } = pair;
     let (run, _) = bounded(async {
         tokio::join!(
             handshake(&mut control, &mut data, brain(), by()),

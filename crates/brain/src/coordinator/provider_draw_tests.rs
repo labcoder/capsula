@@ -1805,7 +1805,7 @@ fn key_offered() -> Coordinator {
             .any(|effect| matches!(effect, Effect::StartEngine { .. })),
         "the key round starts: {started:?}"
     );
-    if let crate::coordinator::Availability::Ready(ready) = &mut core.availability {
+    if let Availability::Ready(ready) = &mut core.availability[ConnectionKind::ChatGpt] {
         ready.trusted_draw = false;
     }
     assert!(
