@@ -161,6 +161,19 @@ hardens the process, adopts the inherited pair and arms the parent watch. Admiss
 and serving run on one current-thread runtime through one `Root`, which owns the stages, the
 instance attempt and the process services. The parent watch drops only after that runtime has.
 
+Custody is the profile's one writer lock for a parent-bound start. On macOS, acquiring it admits
+the Support folder, holds or privately creates the product folder, locks `session.lock` on the
+descriptor it opened, and returns that lock with the absolute product path it walked, so nothing
+resolves Application Support a second time. Only custody lends the lock: a lent `SessionLock`
+shares custody's lock and carries that path as its data folder and its authority. `open` runs on
+the loan and takes no lock of its own, which would be Busy against custody's. The store, the
+settings and the authority all come from that path, with Detached's existing-or-create store
+handling, a missing authority created, and the same conservative `acquired` marking. The stages
+and their workers hold loans, and the instance attempt holds custody itself, so the lock releases
+only after the stages have dropped and the item has settled. This binds the pathname, not the
+folder's identity if it's replaced. A fixture's token custody lends nothing, so its fixture opens
+a scratch profile instead.
+
 ```mermaid
 flowchart TD
   admit["admit: fence, custody, fence, item, READY,<br/>handshake, greeting, fence, claim"]

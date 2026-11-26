@@ -684,3 +684,7 @@ mod admit_tests;
 #[cfg(test)]
 #[path = "pair_serve_tests.rs"]
 mod serve_tests;
+
+#[cfg(test)]
+#[path = "pair_custody_tests.rs"]
+mod custody_tests;

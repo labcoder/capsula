@@ -2,16 +2,19 @@
 //! admitted product folder, held from bootstrap to the item's final delete (A-7, A-10).
 
 use std::fmt;
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use crate::platform;
+use crate::platform::{self, SessionLock};
 
 pub(crate) use crate::platform::CustodyError;
 
-/// Holds the session lock until dropped; nothing else can make one.
+/// Holds the session lock until dropped; nothing else can make one, or lend it.
 pub(crate) struct SessionCustody {
-    _lock: Option<platform::InstanceLock>,
+    /// The lock and the absolute product path its acquisition walked; loans share the lock.
+    held: Option<(Arc<platform::InstanceLock>, PathBuf)>,
     #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
-    _fixture: Option<std::sync::Arc<()>>,
+    _fixture: Option<Arc<()>>,
 }
 
 impl fmt::Debug for SessionCustody {
@@ -35,16 +38,23 @@ impl SessionCustody {
 
     /// Custody that holds a token instead of a lock, so offline tests can watch when it drops.
     #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
-    pub(crate) fn fixture(token: std::sync::Arc<()>) -> Self {
+    pub(crate) fn fixture(token: Arc<()>) -> Self {
         Self {
-            _lock: None,
+            held: None,
             _fixture: Some(token),
         }
     }
 
-    fn held(lock: platform::InstanceLock) -> Self {
+    /// The held lock as the opened state's profile lock, bound to the product path it was
+    /// taken at; the lock releases only with custody and the last loan. A token lends nothing.
+    pub(in crate::startup) fn lend(&self) -> Option<Arc<SessionLock>> {
+        let (lock, product) = self.held.as_ref()?;
+        Some(Arc::new(SessionLock::lent(Arc::clone(lock), product)))
+    }
+
+    fn held((lock, product): (platform::InstanceLock, PathBuf)) -> Self {
         Self {
-            _lock: Some(lock),
+            held: Some((Arc::new(lock), product)),
             #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             _fixture: None,
         }

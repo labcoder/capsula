@@ -185,12 +185,14 @@ impl crate::startup::instance::InstanceStore for InstanceItem {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn instance_custody() -> Result<InstanceLock, CustodyError> {
+pub(crate) fn instance_custody() -> Result<(InstanceLock, std::path::PathBuf), CustodyError> {
     Err(CustodyError::NotAdmitted)
 }
 
 #[cfg(all(test, not(target_os = "macos")))]
-pub(crate) fn instance_custody_at(_: &std::path::Path) -> Result<InstanceLock, CustodyError> {
+pub(crate) fn instance_custody_at(
+    _: &std::path::Path,
+) -> Result<(InstanceLock, std::path::PathBuf), CustodyError> {
     Err(CustodyError::NotAdmitted)
 }
 
