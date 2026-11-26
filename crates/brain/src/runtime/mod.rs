@@ -1813,8 +1813,13 @@ impl Brain {
                 }
                 Effect::StartEngine { request } => {
                     let run = request.run;
+                    let by = self
+                        .deadline
+                        .filter(|(owner, _)| *owner == run)
+                        .map_or_else(Instant::now, |(_, at)| at);
                     let gate =
-                        SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
+                        SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone())
+                            .with_run_deadline(by);
                     let owned = self.owned_engine(&request);
                     let engine = owned.as_deref().unwrap_or(&*self.engine);
                     let cancel = engines::start(engine, request, self.engine_tx.clone(), gate);

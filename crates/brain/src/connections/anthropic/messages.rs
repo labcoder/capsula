@@ -89,10 +89,9 @@ pub async fn stream<C: AnthropicConnect, L: Lease>(
         lease: Some(lease),
     };
     let tuning = client.tuning;
-    timeout(tuning.send, async {
-        let io = client
-            .connect
-            .connect()
+    let by = Instant::now() + tuning.send;
+    timeout_at(by, async {
+        let io = crate::platform::connect_scope(by, None, client.connect.connect())
             .await
             .map_err(|_| Failure::Transport)?;
         let lease = &attempt.lease;

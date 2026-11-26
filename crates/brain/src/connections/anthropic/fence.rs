@@ -3,23 +3,17 @@
 use std::future::{Future, poll_fn};
 use std::io;
 use std::pin::{Pin, pin};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::Notify;
 
 use super::tls::{AnthropicConnect, sealed};
 use crate::connections::model::conn::Connect;
+use crate::platform::{ConnectCut, connect_with_cut};
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Fence(Arc<Cut>);
-
-#[derive(Debug, Default)]
-struct Cut {
-    closed: Mutex<bool>,
-    changed: Notify,
-}
+pub(crate) struct Fence(Arc<ConnectCut>);
 
 impl Fence {
     pub(super) fn same_cut(&self, other: &Self) -> bool {
@@ -27,8 +21,7 @@ impl Fence {
     }
 
     pub(crate) fn revoke(&self) {
-        *self.0.closed.lock().unwrap_or_else(PoisonError::into_inner) = true;
-        self.0.changed.notify_waiters();
+        self.0.close();
     }
 
     pub(crate) fn open(&self) -> bool {
@@ -36,28 +29,13 @@ impl Fence {
     }
 
     pub(crate) fn with<T>(&self, poll: impl FnOnce() -> T) -> io::Result<T> {
-        let closed = self
-            .0
-            .closed
-            .lock()
-            .map_err(|_| io::ErrorKind::Interrupted)?;
-        if *closed {
-            return Err(io::ErrorKind::Interrupted.into());
-        }
-        Ok(poll())
-    }
-
-    async fn until_revoked(&self) {
-        let changed = self.0.changed.notified();
-        if self.open() {
-            changed.await;
-        }
+        self.0.with(poll)
     }
 
     pub(crate) async fn while_open<T>(&self, work: impl Future<Output = T>) -> Option<T> {
         tokio::select! {
             biased;
-            () = self.until_revoked() => None,
+            () = self.0.until_closed() => None,
             value = work => Some(value),
         }
     }
@@ -69,7 +47,10 @@ impl<C: AnthropicConnect> Connect for Fenced<C> {
     type Io = Fenced<C::Io>;
 
     async fn connect(&self) -> io::Result<Self::Io> {
-        let mut opening = pin!(self.1.with(|| self.0.connect())?);
+        let mut opening = pin!(
+            self.1
+                .with(|| { connect_with_cut(Arc::clone(&self.1.0), self.0.connect()) })?
+        );
         let io = poll_fn(|cx| self.1.with(|| opening.as_mut().poll(cx))?).await?;
         Ok(Fenced(io, self.1.clone()))
     }

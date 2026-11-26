@@ -6,8 +6,9 @@ mod tests;
 
 use std::time::Duration;
 
+use crate::platform::connect_timeout_at;
 use kumochi_protocol::Secret;
-use tokio::time::{Instant, timeout_at};
+use tokio::time::Instant;
 use zeroize::Zeroizing;
 
 use super::RESOURCE;
@@ -50,7 +51,7 @@ pub async fn refresh(
     .into_iter()
     .map(|(key, value)| (key, Secret::new(Zeroizing::new(value.to_owned()))))
     .collect();
-    let response = timeout_at(deadline, async {
+    let response = connect_timeout_at(deadline, async {
         if Instant::now() >= deadline {
             return Err(ExchangeError::PreDispatchTimeout);
         }
