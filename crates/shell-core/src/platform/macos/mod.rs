@@ -31,8 +31,14 @@ pub fn session_id() -> std::io::Result<u32> {
 
 /// The session channel of this build's edition. Gate identity has no wire value, so it refuses.
 pub(crate) fn channel() -> std::io::Result<kumochi_session::Channel> {
+    channel_of(kumochi_protocol::constants::ProductIdentity::ACTIVE)
+}
+
+fn channel_of(
+    identity: kumochi_protocol::constants::ProductIdentity,
+) -> std::io::Result<kumochi_session::Channel> {
     use kumochi_protocol::constants::ProductIdentity;
-    match ProductIdentity::ACTIVE {
+    match identity {
         identity if identity == ProductIdentity::RELEASE => Ok(kumochi_session::Channel::Release),
         identity if identity == ProductIdentity::DEV => Ok(kumochi_session::Channel::Dev),
         _ => Err(std::io::ErrorKind::Unsupported.into()),
@@ -83,6 +89,23 @@ mod tests {
             super::channel().map_err(|error| error.kind()),
             Ok(kumochi_session::Channel::Dev)
         );
+    }
+
+    #[test]
+    fn each_identity_has_its_own_channel_and_gate_has_none() {
+        use kumochi_protocol::constants::ProductIdentity;
+        use kumochi_session::Channel;
+        for (identity, channel) in [
+            (ProductIdentity::RELEASE, Ok(Channel::Release)),
+            (ProductIdentity::DEV, Ok(Channel::Dev)),
+            (ProductIdentity::GATE, Err(std::io::ErrorKind::Unsupported)),
+        ] {
+            assert_eq!(
+                super::channel_of(identity).map_err(|error| error.kind()),
+                channel,
+                "{identity:?}"
+            );
+        }
     }
 
     #[test]
