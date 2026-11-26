@@ -20,7 +20,8 @@ use kumochi_session::{
 };
 use zeroize::{Zeroize as _, Zeroizing};
 
-use super::pair::{SEND_LOW_WATER, ShellEnds};
+use super::child::poll;
+use super::pair::ShellEnds;
 
 /// Both legs' shared state: once refused, neither leg reads, delivers or writes again.
 struct Pair {
@@ -68,25 +69,46 @@ fn pair_refused() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "the pair already refused")
 }
 
-/// A socket bound that took, or one Darwin refused because both directions are already shut
-/// (`EINVAL`); then no transfer on the socket can block, so there's nothing left to bound.
-fn applied(set: io::Result<()>) -> io::Result<()> {
-    match set {
-        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
-        result => result,
-    }
-}
-
-/// What's left of a call's deadline for its next transfer; None when the call is unbounded.
-fn left(by: Option<Instant>) -> io::Result<Option<Duration>> {
+/// Waits until `stream` is ready for `events`, until `by` when bounded. Returns once it's ready,
+/// the wait was interrupted or `by` passed; the caller tries again and sees which.
+fn ready(stream: &UnixStream, events: libc::c_short, by: Option<Instant>) -> io::Result<()> {
     let Some(by) = by else {
-        return Ok(None);
+        return poll(stream, events, None);
     };
     let left = by.saturating_duration_since(Instant::now());
     if left.is_zero() {
         return Err(io::ErrorKind::TimedOut.into());
     }
-    Ok(Some(left))
+    poll(stream, events, Some(left))
+}
+
+/// One read of what's there, waiting for bytes until `by` when bounded. The sockets are
+/// nonblocking, so no transfer ever waits inside the kernel past a deadline.
+fn read_by(stream: &UnixStream, buf: &mut [u8], by: Option<Instant>) -> io::Result<usize> {
+    loop {
+        match (&*stream).read(buf) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                ready(stream, libc::POLLIN, by)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
+}
+
+/// One write of what fits, waiting for room until `by` when bounded. Darwin restarts a blocking
+/// send's timeout on every wake and ignores `MSG_DONTWAIT` on Unix streams, so the sockets are
+/// nonblocking and the wait is a poll on what's left of the deadline.
+fn write_by(stream: &UnixStream, bytes: &[u8], by: Option<Instant>) -> io::Result<usize> {
+    loop {
+        match (&*stream).write(bytes) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                ready(stream, libc::POLLOUT, by)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
 }
 
 fn leg_aborted() -> io::Error {
@@ -121,8 +143,9 @@ impl Reader {
         }
     }
 
-    /// Wipes every byte this reader holds, plaintext and ciphertext alike.
+    /// Wipes every byte this reader holds, plaintext and ciphertext alike, and its opener.
     fn wipe(&mut self) {
+        self.opener = None;
         self.record.as_mut_slice().zeroize();
         (self.filled, self.announced, self.start, self.end) = (0, None, 0, 0);
         self.retained.zeroize();
@@ -147,6 +170,13 @@ impl std::fmt::Debug for PipeClient {
             .field("pipe", &self.pipe)
             .field("aborted", &self.is_aborted())
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for PipeClient {
+    /// The pair outlives a dropped leg while the other leg lives, so the leg wipes its reader.
+    fn drop(&mut self) {
+        locked(self.reader()).wipe();
     }
 }
 
@@ -208,26 +238,14 @@ impl PipeClient {
     }
 
     /// Bounds each later read and write call as a whole, however many socket transfers it takes;
-    /// None waits without a bound. A bound the socket refuses ends the leg rather than leaving a
-    /// wait unbounded.
+    /// None waits without a bound.
     pub(crate) fn set_timeout(&self, timeout: Option<Duration>) {
         *locked(&self.timeout) = timeout;
-        if timeout.is_none()
-            && (applied(self.stream.set_read_timeout(None)).is_err()
-                || applied(self.stream.set_write_timeout(None)).is_err())
-        {
-            self.abort();
-        }
     }
 
     /// When the call starting now must end, if it's bounded.
     fn call_deadline(&self) -> Option<Instant> {
         locked(&self.timeout).map(|timeout| Instant::now() + timeout)
-    }
-
-    /// A bound the socket refuses ends the leg rather than leaving a wait unbounded.
-    fn bounded(&self, set: io::Result<()>) -> io::Result<()> {
-        applied(set).inspect_err(|_| self.abort())
     }
 
     /// Reads the next control frame by `by`, decodes it, and keeps its bytes so the next reader
@@ -325,13 +343,9 @@ impl PipeClient {
             let need = ENVELOPE_LEN + announced.unwrap_or(0);
             if *filled < need {
                 // A timeout keeps the partial record, so the next read resumes it.
-                if let Some(left) = left(by)? {
-                    client.bounded(client.stream.set_read_timeout(Some(left)))?;
-                }
-                let n = match (&client.stream).read(&mut record[*filled..need]) {
+                let n = match read_by(&client.stream, &mut record[*filled..need], by) {
                     // Refused or aborted while this read waited: report that, not an end.
                     _ if client.is_aborted() => continue,
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     result => result?,
                 };
                 if n == 0 {
@@ -396,15 +410,7 @@ impl Write for &PipeClient {
                 if rest.is_empty() {
                     break;
                 }
-                let mut take = rest.len();
-                if let Some(left) = left(by).map_err(|error| client.pair.refuse(error))? {
-                    client
-                        .bounded(client.stream.set_write_timeout(Some(left)))
-                        .map_err(|error| client.pair.refuse(error))?;
-                    take = take.min(SEND_LOW_WATER);
-                }
-                let n = match (&client.stream).write(&rest[..take]) {
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                let n = match write_by(&client.stream, rest, by) {
                     Err(error) => return Err(client.pair.refuse(error)),
                     Ok(0) => return Err(client.pair.refuse(io::ErrorKind::WriteZero)),
                     Ok(n) => n,
@@ -422,13 +428,6 @@ impl Write for &PipeClient {
     }
 }
 
-/// Bounds the next transfer on `stream` by what's left of `by`.
-fn bound(stream: &UnixStream, by: Instant) -> io::Result<()> {
-    let left = left(Some(by))?;
-    applied(stream.set_read_timeout(left))?;
-    applied(stream.set_write_timeout(left))
-}
-
 fn end(ends: &ShellEnds, leg: Pipe) -> &UnixStream {
     match leg {
         Pipe::Control => &ends.control,
@@ -436,29 +435,23 @@ fn end(ends: &ShellEnds, leg: Pipe) -> &UnixStream {
     }
 }
 
-/// Writes all of `bytes` by `by`, each transfer bounded by what's left.
+/// Writes all of `bytes` by `by`.
 fn send(stream: &UnixStream, mut bytes: &[u8], by: Instant) -> io::Result<()> {
     while !bytes.is_empty() {
-        bound(stream, by)?;
-        match (&*stream).write(&bytes[..bytes.len().min(SEND_LOW_WATER)]) {
-            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
-            Ok(n) => bytes = &bytes[n..],
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
+        match write_by(stream, bytes, Some(by))? {
+            0 => return Err(io::ErrorKind::WriteZero.into()),
+            n => bytes = &bytes[n..],
         }
     }
     Ok(())
 }
 
-/// Fills `buf` by `by`, each transfer bounded by what's left.
+/// Fills `buf` by `by`.
 fn fill(stream: &UnixStream, mut buf: &mut [u8], by: Instant) -> io::Result<()> {
     while !buf.is_empty() {
-        bound(stream, by)?;
-        match (&*stream).read(buf) {
-            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
-            Ok(n) => buf = &mut std::mem::take(&mut buf)[n..],
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
+        match read_by(stream, buf, Some(by))? {
+            0 => return Err(io::ErrorKind::UnexpectedEof.into()),
+            n => buf = &mut std::mem::take(&mut buf)[n..],
         }
     }
     Ok(())
@@ -489,6 +482,9 @@ pub(crate) fn initiate(
     channel: Channel,
     by: Instant,
 ) -> io::Result<(PipeClient, PipeClient)> {
+    for end in [&ends.control, &ends.data] {
+        end.set_nonblocking(true)?;
+    }
     let (mut shell, init) = ShellAwaitsReply::start(secret, channel).map_err(session_error)?;
     send(end(&ends, init.leg), &init.bytes, by)?;
     let reply = message(&ends.control, by, |envelope| shell.record_len(envelope))?;
@@ -505,10 +501,6 @@ pub(crate) fn initiate(
     let Session { control, data } = shell.receive(&ack).map_err(session_error)?;
     if Instant::now() >= by {
         return Err(io::ErrorKind::TimedOut.into());
-    }
-    for end in [&ends.control, &ends.data] {
-        applied(end.set_read_timeout(None))?;
-        applied(end.set_write_timeout(None))?;
     }
     let pair = Arc::new(Pair {
         refused: AtomicBool::new(false),

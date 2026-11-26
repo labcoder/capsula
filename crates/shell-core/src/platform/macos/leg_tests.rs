@@ -14,11 +14,12 @@ use kumochi_session::{
     BrainAwaitsInit, Channel, ENVELOPE_LEN, MAX_PLAINTEXT, SECRET_LEN, Session, SessionError,
 };
 
+use super::super::NotStarted;
 use super::*;
 use crate::link::DrawingText;
 use crate::platform::Connection;
 use crate::platform::SpawnWord;
-use crate::platform::connect::{LinkError, connect_pair, over_pair};
+use crate::platform::connect::{LinkError, connect_pair, not_started, over_pair};
 
 /// A synthetic group secret; no real key is ever used here.
 const SECRET: [u8; SECRET_LEN] = [0x5A; SECRET_LEN];
@@ -654,16 +655,19 @@ fn a_bounded_write_ends_at_its_deadline_while_the_brain_drains_slowly() {
     ] {
         super::super::child::set_socket_int(fd, buffer, 8192).expect("buffer size");
     }
+    // Less than any send's worth per wake, for a second at most.
     let drained = thread::spawn(move || {
-        let mut chunk = [0; 1024];
+        let mut chunk = [0; 64];
         let mut total = 0;
-        loop {
-            thread::sleep(Duration::from_millis(100));
+        let stop = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < stop {
+            thread::sleep(Duration::from_millis(50));
             match brain.data.read(&mut chunk) {
                 Ok(0) | Err(_) => return total,
                 Ok(n) => total += n,
             }
         }
+        total
     });
     let timeout = Duration::from_millis(300);
     data.set_timeout(Some(timeout));
@@ -694,10 +698,15 @@ fn a_bounded_write_ends_at_its_deadline_while_the_brain_drains_slowly() {
     );
 }
 
-/// Whether a leg's reader holds no bytes at all.
+/// Whether a leg's reader holds no bytes and no opener.
 fn wiped(client: &PipeClient) -> bool {
-    let reader = locked(client.reader());
-    reader.record.iter().all(|&byte| byte == 0)
+    clear(client.reader())
+}
+
+fn clear(reader: &std::sync::Mutex<Reader>) -> bool {
+    let reader = locked(reader);
+    reader.opener.is_none()
+        && reader.record.iter().all(|&byte| byte == 0)
         && (reader.filled, reader.start, reader.end) == (0, 0, 0)
         && reader.retained.is_empty()
 }
@@ -762,4 +771,32 @@ fn abort_wipes_its_own_reader_without_another_read() {
     control.abort();
     assert!(wiped(&control), "the aborted leg");
     assert!(!wiped(&data), "the other leg keeps its frame");
+}
+
+#[test]
+fn a_dropped_leg_wipes_its_reader_while_the_other_lives() {
+    let (control, data, mut brain) = bound();
+    control.set_timeout(Some(BOUND));
+    brain.control(&ControlToShell::Ping);
+    let mut byte = [0; 1];
+    (&control)
+        .read_exact(&mut byte)
+        .expect("the frame's first byte");
+    assert!(!wiped(&control), "the rest of the frame waits to be read");
+    drop(control);
+    assert!(clear(&data.pair.readers[0]), "the dropped leg's reader");
+    assert!(!data.is_aborted(), "dropping a leg isn't a refusal");
+}
+
+#[test]
+fn a_pending_spawn_report_is_the_deadline_only_once_it_has_passed() {
+    let passed = Instant::now();
+    assert!(matches!(
+        not_started(NotStarted::Pending, passed),
+        LinkError::ConnectExpired
+    ));
+    assert!(matches!(
+        not_started(NotStarted::Pending, by()),
+        LinkError::Launch(ref error) if error.kind() == std::io::ErrorKind::TimedOut
+    ));
 }

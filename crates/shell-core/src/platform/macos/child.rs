@@ -293,6 +293,31 @@ pub(super) fn no_sigpipe(fd: RawFd) -> io::Result<()> {
     set_socket_int(fd, libc::SO_NOSIGPIPE, 1)
 }
 
+/// Waits until `stream` is ready for `events` or reports an error or hang-up, for `left` at most
+/// when bounded. An interrupted wait returns early.
+pub(super) fn poll(
+    stream: &std::os::unix::net::UnixStream,
+    events: libc::c_short,
+    left: Option<Duration>,
+) -> io::Result<()> {
+    let mut wait = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events,
+        revents: 0,
+    };
+    let ms = left.map_or(-1, |left| {
+        libc::c_int::try_from(left.as_millis() + 1).unwrap_or(libc::c_int::MAX)
+    });
+    // SAFETY: `wait` is one valid pollfd for the duration of the call.
+    if unsafe { libc::poll(&raw mut wait, 1, ms) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 /// One integer `SOL_SOCKET` option, or None when it can't be read.
 #[cfg(test)]
 pub(super) fn socket_int(fd: RawFd, name: libc::c_int) -> Option<libc::c_int> {
