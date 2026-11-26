@@ -1914,8 +1914,23 @@ fn the_admission_worker_only_delivers_to_a_live_presence(cx: &mut gpui_kit::Test
                     index: 0,
                 })
             );
+            let window = owner.read_with(cx, |this, _| {
+                this.overlay
+                    .window()
+                    .expect("worker opened the host")
+                    .window
+            });
+            let mut visual = gpui_kit::VisualTestContext::from_window(window, cx);
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(
+                controls.try_recv(),
+                Ok(ControlToBrain::StepShown {
+                    run: RunId(6),
+                    scene: SceneId(1),
+                    index: 0,
+                })
+            );
             assert_eq!(controls.try_recv(), Err(async_channel::TryRecvError::Empty));
-            assert!(owner.read_with(cx, |this, _| this.overlay.window().is_some()));
             close_callback_scene(&owner, cx);
         } else {
             assert_eq!(
