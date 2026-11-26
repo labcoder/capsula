@@ -4010,6 +4010,7 @@ dependencies = [
  "rusqlite",
  "rustix",
  "rustls",
+ "rustls-native-certs",
  "schemars",
  "serde",
  "serde_json",

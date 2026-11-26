@@ -297,6 +297,8 @@ impl Accounts {
         accounts
             .proofs
             .release(accounts.jobs.as_ref(), &accounts.reads_tx);
+        #[cfg(all(test, not(windows)))]
+        accounts.connections.use_offline_route();
         Ok(accounts)
     }
 

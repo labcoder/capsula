@@ -101,8 +101,9 @@ compression, and `Accept-Encoding: identity`. The first URL and up to five redir
 port 443 without userinfo, on `huggingface.co` or a subdomain of `hf.co`; IP literals are refused.
 Signed CDN queries never enter diagnostics.
 
-Without a native trust adapter the downloader refuses before building a client. The
-installer reports the platform limitation and does not requeue that download.
+Off Windows a trust refusal fails the download as `Transport`. Once roots load the downloader
+builds, and creating the protected model folder refuses with `Unsupported` before any request;
+the installer reports that platform limitation and does not requeue the download.
 
 Existing final files are size- and SHA-256-checked; a bad final is removed before any request.
 Inspection retains delete access on that same handle, so only the file actually hashed can be

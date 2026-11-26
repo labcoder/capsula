@@ -52,19 +52,9 @@ fn mint_failure_cannot_produce_a_verified_authority() {
 #[cfg(windows)]
 #[test]
 fn native_route_is_served_with_os_roots() {
-    let native = Transport::native(ModelTuning::default())
-        .expect("native trust supported")
-        .expect("production serves the key route");
+    let native =
+        Transport::native(ModelTuning::default()).expect("production serves the key route");
     assert!(matches!(native.connector, RouteConnector::Native(Some(_))));
-}
-
-#[cfg(not(windows))]
-#[test]
-fn native_route_refuses_before_creating_a_request_budget() {
-    assert!(matches!(
-        Transport::native(ModelTuning::default()),
-        Err(HttpError::UnsupportedPlatform)
-    ));
 }
 
 #[tokio::test]

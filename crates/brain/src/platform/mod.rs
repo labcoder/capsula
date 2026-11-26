@@ -139,9 +139,7 @@ pub use session_lock::{SessionLock, SessionLockError};
 pub(crate) use trust_roots::client_tls_from_roots;
 #[cfg(not(windows))]
 pub use trust_roots::trust_roots;
-pub(crate) use trust_roots::{
-    NativeTlsError, TrustDiagnostics, native_client_tls, native_trust_supported,
-};
+pub(crate) use trust_roots::{NativeTlsError, TrustDiagnostics, native_client_tls};
 pub use trust_roots::{TrustRoots, TrustRootsError};
 #[cfg(windows)]
 pub(crate) use windows::DumpExclusion;

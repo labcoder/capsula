@@ -26,15 +26,6 @@ use crate::connections::http_client::MAX_BODY_BYTES;
 use crate::coordinator::{PictureGrant, PictureWrite};
 use crate::test_support::Captured;
 
-#[cfg(not(windows))]
-#[test]
-fn native_responses_tls_refuses_without_a_trust_adapter() {
-    assert!(matches!(
-        super::conn::Tls::build(),
-        Err(crate::connections::http_client::HttpError::UnsupportedPlatform)
-    ));
-}
-
 /// The coordinator's side, as the tests play it: an ask names its attempt, a grant carries a
 /// lease, and dropping the lease reports `Settled`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

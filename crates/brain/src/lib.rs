@@ -126,9 +126,6 @@ pub enum BrainError {
     /// The account's credential thread couldn't be started.
     #[error("can't start the credential thread")]
     Accounts(#[source] io::Error),
-    /// The build has no native adapter for trust roots.
-    #[error(transparent)]
-    NativeTrust(#[from] platform::TrustRootsError),
     /// The model connection's TLS setup failed.
     #[error("can't set up the model connection")]
     Model(#[source] connections::http_client::HttpError),
@@ -139,7 +136,6 @@ impl BrainError {
     #[must_use]
     pub fn diagnostic(&self) -> (&'static str, Option<i64>) {
         use ipc::IpcError;
-        use platform::TrustRootsError;
         use store::StoreError;
 
         let raw = |error: &io::Error| error.raw_os_error().map(i64::from);
@@ -161,12 +157,6 @@ impl BrainError {
             Self::StoreThread(error) => ("store_thread", raw(error)),
             Self::Helpers(error) => ("helpers", raw(error)),
             Self::Accounts(error) => ("accounts", raw(error)),
-            Self::NativeTrust(TrustRootsError::Open(code) | TrustRootsError::Enumerate(code)) => {
-                ("native_trust", Some(i64::from(*code)))
-            }
-            Self::NativeTrust(TrustRootsError::Unsupported | TrustRootsError::Empty) => {
-                ("native_trust", None)
-            }
             Self::Model(_) => ("model", None),
         }
     }
@@ -349,9 +339,6 @@ fn accounts(
     use connections::http_client::{self, SharedHttp};
     use connections::oauth::SystemBrowser;
 
-    if !platform::native_trust_supported() {
-        return Err(platform::TrustRootsError::Unsupported.into());
-    }
     let (history, binding) = connections::vault::HistoryLink::pending();
     let worker = Worker::system(Arc::new(SystemClock), profile, history);
     let net = runtime::account::Net {

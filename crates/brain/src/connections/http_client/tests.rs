@@ -1159,15 +1159,6 @@ async fn request_ids_are_bounded_graphic_ascii() {
 }
 
 #[test]
-#[cfg(not(windows))]
-fn native_client_refuses_without_a_trust_adapter() {
-    assert!(matches!(
-        super::build(),
-        Err(HttpError::UnsupportedPlatform)
-    ));
-}
-
-#[test]
 #[cfg(windows)]
 #[ignore = "entry point for the isolated proxy child process"]
 fn proxy_probe_child() {
