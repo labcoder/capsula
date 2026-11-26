@@ -376,6 +376,43 @@ fn a_kill_that_blocks_ends_the_link_unsettled_while_the_peer_holds_both_ends_ope
     drop(unblock);
 }
 
+#[test]
+fn a_quit_during_a_failed_spawn_tells_a_pending_spawn_from_none() {
+    for (pending, outcome) in [
+        (true, QuitOutcome::SpawnPending),
+        (false, QuitOutcome::NotSpawned),
+    ] {
+        let (entered, attempting) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let (events, _states) = async_channel::unbounded();
+        let link = start_scripted(events, AudioSession::Legacy, move |_, _, by| {
+            let _seen = entered.send(());
+            let _released = released.recv_timeout(BOUND);
+            connect_pair_with(
+                |_| {
+                    Err(if pending {
+                        NotStarted::Pending
+                    } else {
+                        NotStarted::Refused(Refusal::Quitting)
+                    })
+                },
+                honest,
+                Channel::Dev,
+                AudioSession::Legacy,
+                None,
+                by,
+                |_| DrawingText::default(),
+            )
+            .map(|(connection, owner)| (connection, Some(owner)))
+        });
+        attempting.recv_timeout(BOUND).expect("the attempt started");
+        assert!(link.begin_quit());
+        drop(release);
+        link.finish_quit();
+        assert_eq!(link.quit_end(), ended(None, outcome), "pending {pending}");
+    }
+}
+
 /// A brain for the queued pair that says READY only once `go` comes, then exits 0 on Quit.
 fn parked_brain(child: &Child, go: Receiver<()>) -> ShellEnds {
     let (shell, control, data) = ends();
