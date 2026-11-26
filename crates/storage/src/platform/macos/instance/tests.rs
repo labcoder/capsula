@@ -131,6 +131,10 @@ fn admission_needs_this_roles_exact_id_and_the_instance_group_under_the_same_pre
     for (app_id, group) in [
         (".ai.kumochi.dev.brain", ".ai.kumochi.dev.instance"),
         ("*.ai.kumochi.dev.brain", "*.ai.kumochi.dev.instance"),
+        (
+            "PREFIX.extra.ai.kumochi.dev.brain",
+            "PREFIX.extra.ai.kumochi.dev.instance",
+        ),
     ] {
         assert_eq!(
             admit(Role::Brain, &text(app_id), &groups(&[group])),

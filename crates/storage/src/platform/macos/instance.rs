@@ -207,9 +207,9 @@ fn copy(query: &ItemQuery) -> Result<CFRetained<CFType>, ItemError> {
     Ok(unsafe { CFRetained::from_raw(result) })
 }
 
-/// The instance group `role` may use: its application identifier must be exactly
-/// `P.<role's id>`, with `P` non-empty and no wildcard, and its access groups an array of strings
-/// that holds `P.<instance group>`.
+/// The instance group `role` may use: its application identifier, split at its first dot, must be
+/// exactly `P.<role's id>` with `P` non-empty and no wildcard, and its access groups an array of
+/// strings that holds `P.<instance group>`.
 pub(super) fn admitted_group(
     ids: AppleIds,
     role: Role,
@@ -224,11 +224,10 @@ pub(super) fn admitted_group(
         .and_then(CFType::downcast_ref::<CFString>)
         .ok_or(ItemError::NotAdmitted)?
         .to_string();
-    let prefix = app_id
-        .strip_suffix(own)
-        .and_then(|rest| rest.strip_suffix('.'))
-        .filter(|prefix| !prefix.is_empty() && !prefix.contains('*'))
-        .ok_or(ItemError::NotAdmitted)?;
+    let (prefix, id) = app_id.split_once('.').ok_or(ItemError::NotAdmitted)?;
+    if prefix.is_empty() || prefix.contains('*') || id != own {
+        return Err(ItemError::NotAdmitted);
+    }
     let group = format!("{prefix}.{}", ids.instance_group);
     let groups = groups
         .and_then(CFType::downcast_ref::<CFArray>)
