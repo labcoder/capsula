@@ -1897,10 +1897,7 @@ async fn revocation_only_startup_keeps_the_debt_when_no_client_builds() {
     timeout(PATIENCE, async {
         loop {
             let event = brain.account.next().await;
-            let revoked = matches!(
-                event,
-                Event::Machine(Input::Revoked(_))
-            );
+            let revoked = matches!(event, Event::Machine(Input::Revoked(_)));
             brain
                 .account_input(event, None)
                 .expect("revocation completion");
