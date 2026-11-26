@@ -21,7 +21,6 @@ pub(super) mod repair;
 mod tests;
 
 use std::fmt;
-use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
 
@@ -30,7 +29,9 @@ use crate::platform::SessionLock;
 use crate::platform::credential::CredentialStoreError;
 use io::Verified;
 
-/// The authority's file in the data folder; not the history store, so no purge touches it.
+/// The authority's file in the data folder; not the history store, so no purge touches it. Only
+/// tests name it: production reaches it through the held lock's `authority_path`.
+#[cfg(test)]
 pub(crate) const FILE: &str = kumochi_protocol::constants::AUTHORITY_FILE;
 /// The newest schema this build knows; a newer file is refused, never downgraded.
 const VERSION: i64 = 3;
@@ -327,13 +328,14 @@ impl fmt::Debug for Authority {
 
 impl Authority {
     /// Opens or creates the file, then retires every Pending generation: a candidate from an
-    /// earlier process is never activated. The lock proves the caller owns the account session.
+    /// earlier process is never activated. The file is the one beside `session`'s lock, which
+    /// proves the caller owns the account session.
     ///
     /// # Errors
     /// Fails on a SQLite failure, a file from a newer build, or missing or invalid rows.
-    pub(crate) fn open(path: &Path, _session: &SessionLock) -> Result<Self, AuthorityError> {
+    pub(crate) fn open(session: &SessionLock) -> Result<Self, AuthorityError> {
         let mut conn = Connection::open_with_flags(
-            path,
+            session.authority_path(),
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,

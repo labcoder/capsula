@@ -1,7 +1,5 @@
 //! Exact-name credential operations, without vault commit policy.
 
-use std::path::PathBuf;
-
 use kumochi_protocol::Secret;
 #[cfg(not(windows))]
 use kumochi_protocol::message::Capability;
@@ -62,7 +60,21 @@ impl CredentialStore for NativeCredentialStore {
     }
 }
 
-pub(crate) fn native_session_lock_path() -> Result<PathBuf, CredentialStoreError> {
+/// This platform's native store, or Unsupported before the vault opens anything.
+pub(crate) fn admitted_store() -> Result<NativeCredentialStore, CredentialStoreError> {
+    #[cfg(windows)]
+    {
+        Ok(NativeCredentialStore)
+    }
+    #[cfg(not(windows))]
+    {
+        Err(CredentialStoreError::Unsupported)
+    }
+}
+
+/// Where a diagnostic mode takes its own session lock; the product vault uses the profile's.
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn native_session_lock_path() -> Result<std::path::PathBuf, CredentialStoreError> {
     #[cfg(windows)]
     {
         super::session_lock_path().ok_or(CredentialStoreError::NoDataDir)

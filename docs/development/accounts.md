@@ -867,7 +867,10 @@ authority alike. The brain takes it after its pipes and before it opens the stor
 for its whole run. The store thread and the credentials thread each keep a reference to that same
 lock: the store thread until its last close and purge cleanup end, past any wait the brain gave up
 on, and the credentials thread by opening its vault under it (`Vault::open_held`) instead of
-taking its own. So a second brain of the same Windows user in
+taking its own. The lock fixes its authority when it's taken: `credentials.db` beside the lock
+file, from an absolute path (a relative one is refused). `Authority::open` takes only the lock,
+so a writable authority can't open in a folder whose lock the brain doesn't hold, and the
+product vault never looks the data folder up a second time. So a second brain of the same Windows user in
 another session, whose pipes don't collide, stops at the lock before it touches the store. It
 tries to take the lock before it opens or creates the store and, refused, logs only that another
 session is using the profile and exits with code 75. Only brains with this lock are excluded: an earlier build opens
@@ -885,8 +888,8 @@ nonblocking, and checks and locks that descriptor, so a link or FIFO there is re
 followed or waited on. It doesn't validate the parent, and nothing calls it yet.
 
 On builds without a native credential adapter, exact-name reads, writes, and deletes return
-`Unsupported`. The production vault also refuses before opening the session lock or
-`credentials.db`; it never substitutes a file-backed or in-memory credential store. Native
+`Unsupported`. The production vault also refuses before opening `credentials.db`: the
+credentials thread asks `platform::credential::admitted_store()` for the native store first; it never substitutes a file-backed or in-memory credential store. Native
 account startup stops at this refusal before loading other credentials or publishing account
 state. It neither reports damaged data nor offers Retry. Temporary Windows failures keep their
 existing recovery behavior.
