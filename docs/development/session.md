@@ -172,11 +172,12 @@ teardown into refusal and suppress the ordinary-loss drain. They drop once `serv
 the legs close only when the pair drops. A page whose read is cancelled while its frame is being written still
 abandons that frame (C-8), which on the Mac is a cut frame and so ends the pair as refused, with no
 grace. Parent-bound startup serves on these legs, behind the support check and this build's
-prerequisites. Before activation, a test must pair the
-two real adapters, this one and the shell's blocking adapter in
-`shell-core/src/platform/macos/leg.rs`: data saturated past the 512 KiB window, credit counted in
-logical frames, the 2 s STALL, and Stop and Ping answered in time. The I1e shell-side unit owns that
-test; this cut doesn't claim it.
+prerequisites. The C-7 acceptance tests in
+`crates/shell-core/src/platform/macos/leg_credit_tests.rs` pair both real adapters over socketpairs
+and drive the parent-bound serving path with offline fixtures. They cover five-record, 256 KiB
+logical frames, exactly one counted shell receipt per frame, and the 512 KiB credit window on both
+initial send and refill. They also cover Stop and Ping while data is blocked and the 2 s STALL
+deadline across fragment progress, checking both interruptions' durable reasons.
 
 ## The instance item (dormant)
 
@@ -200,7 +201,10 @@ provisions their identifiers.
   no delete. The readback must hold exactly 32 bytes, and only the brain compares them, in constant
   time, with its own.
 - **Storage reads, the brain writes.** Storage makes the one `SecItemCopyMatching` call. The
-  shell's `platform/macos/instance.rs` reads through it only after the brain's READY byte. The
+  shell's `platform/macos/instance.rs` reads through it only after the brain's READY byte and
+  after K-7: `limit_core_dumps` (`platform/macos/core_dumps.rs`) sets `RLIMIT_CORE` to 0/0 for
+  the whole shell and reads it back, so no core dump can hold the capability. It's idempotent; a
+  failure, or a readback other than 0/0, is a fixed `Harden` refusal and the item isn't read. The
   brain's `platform/macos/instance.rs` makes the add, the value-only update and the delete, on a
   no-copy CFData whose backing is wiped when CoreFoundation releases it.
 

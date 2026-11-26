@@ -883,6 +883,18 @@ fn after_spawn(
     item: Result<(), kumochi_storage::ItemError>,
     lag: Duration,
 ) -> Spawned {
+    after_spawn_hardened(shell, deadline, item, lag, || Ok(()))
+}
+
+/// [`after_spawn`] with `harden` in place of the real core-dump limit, which only a re-exec child
+/// may change, so the shared test process keeps its limits.
+fn after_spawn_hardened(
+    shell: ShellEnds,
+    deadline: Instant,
+    item: Result<(), kumochi_storage::ItemError>,
+    lag: Duration,
+    harden: impl FnOnce() -> std::io::Result<()>,
+) -> Spawned {
     let reads = std::cell::Cell::new(0);
     let buffer = std::cell::Cell::new(None);
     let result = after_ready(
@@ -892,6 +904,7 @@ fn after_spawn(
         None,
         deadline,
         |_| DrawingText::default(),
+        harden,
         |into| {
             reads.set(reads.get() + 1);
             buffer.set(Some((wipes::len(), into.as_ptr().addr())));
@@ -926,6 +939,117 @@ fn ready_queued() -> (ShellEnds, UnixStream, UnixStream) {
     }
     brain_control.write_all(&[SESSION_READY]).expect("READY");
     (shell, brain_control, brain_data)
+}
+
+#[test]
+fn a_failed_hardening_reads_no_item_and_writes_nothing() {
+    let (shell, mut brain_control, mut brain_data) = ready_queued();
+    let spawned = after_spawn_hardened(shell, by(), Ok(()), Duration::ZERO, || {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    });
+    assert!(matches!(spawned.result, Err(LinkError::Harden)));
+    assert_eq!((spawned.reads, spawned.wiped), (0, None));
+    nothing_written(&mut brain_control, &mut brain_data);
+}
+
+const CORE_DUMPS_ENTRY: &str = "platform::macos::leg::tests::core_dumps_entry";
+
+/// The re-exec child's exact arguments. The entry does nothing under any others, so a plain
+/// `--ignored` run never lowers the test process's own core limit.
+const CORE_DUMPS_ARGS: [&str; 4] = ["--exact", CORE_DUMPS_ENTRY, "--ignored", "--test-threads=1"];
+
+/// The entry's exit code once every check passed; libtest never exits with it.
+const CORE_DUMPS_RAN: i32 = 87;
+
+/// Run only by [`the_item_is_read_only_after_core_dumps_are_off`], in its own process: it lowers
+/// that process's core limit for good, then exits with [`CORE_DUMPS_RAN`].
+#[test]
+#[ignore = "runs in a re-exec child: it lowers its process's core limit"]
+fn core_dumps_entry() {
+    use super::super::core_dumps::core_limit;
+    use super::super::limit_core_dumps;
+
+    if !std::env::args_os()
+        .skip(1)
+        .eq(CORE_DUMPS_ARGS.map(std::ffi::OsString::from))
+    {
+        return;
+    }
+    let (shell, brain_control, brain_data) = ready_queued();
+    drop((brain_control, brain_data));
+    let hardened = std::cell::Cell::new(false);
+    let seen = std::cell::Cell::new(None);
+    let result = after_ready(
+        shell,
+        Channel::Dev,
+        AudioSession::Legacy,
+        None,
+        by(),
+        |_| DrawingText::default(),
+        || {
+            hardened.set(true);
+            limit_core_dumps()
+        },
+        |into| {
+            seen.set(Some((hardened.get(), core_limit().ok())));
+            *into = SECRET;
+            Ok(())
+        },
+    );
+    assert!(result.is_err(), "the brain's ends closed after READY");
+    assert_eq!(
+        seen.get(),
+        Some((true, Some((0, 0)))),
+        "hardened before the read"
+    );
+    assert_eq!(
+        limit_core_dumps().map_err(|error| error.kind()),
+        Ok(()),
+        "idempotent"
+    );
+    std::process::exit(CORE_DUMPS_RAN);
+}
+
+#[test]
+fn the_item_is_read_only_after_core_dumps_are_off() {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(std::env::current_exe().expect("the test binary"))
+        .args(CORE_DUMPS_ARGS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the re-exec child starts");
+    let by = by();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait on the re-exec child") {
+            break status;
+        }
+        if Instant::now() >= by {
+            let stopped = child.kill().is_ok() || child.try_wait().is_ok_and(|s| s.is_some());
+            assert!(stopped, "could not stop the late re-exec child");
+            let reap_by = Instant::now() + BOUND;
+            while child
+                .try_wait()
+                .expect("wait on the killed child")
+                .is_none()
+            {
+                assert!(
+                    Instant::now() < reap_by,
+                    "the killed re-exec child was reaped"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!("the re-exec child didn't finish within the bound");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        status.code(),
+        Some(CORE_DUMPS_RAN),
+        "the entry ran every check"
+    );
 }
 
 #[test]

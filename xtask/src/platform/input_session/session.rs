@@ -17,7 +17,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowExW, GUITHREADINFO, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo,
-    IsWindowVisible, WindowFromPoint,
+    IsWindowVisible, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_GETTEXT, WM_SETTEXT,
+    WindowFromPoint,
 };
 use windows::core::w;
 
@@ -830,6 +831,61 @@ impl Session {
         );
         // SAFETY: reads the visibility of the PID-checked panel handle; no content is read.
         Ok(unsafe { IsWindowVisible(panel) }.as_bool())
+    }
+
+    pub(crate) fn clear_fixture(&self) -> Result<()> {
+        self.guard()?;
+        ensure!(
+            self.fixture.is_foreground(),
+            "fixture must be foreground for controlled text setup"
+        );
+        ensure!(
+            pid(self.edit) == self.fixture.pid,
+            "fixture EDIT ownership changed"
+        );
+        let mut cleared = 0;
+        // SAFETY: WM_SETTEXT marshals this static empty string; only the fixture's known test content is cleared.
+        let delivered = unsafe {
+            SendMessageTimeoutW(
+                self.edit,
+                WM_SETTEXT,
+                WPARAM(0),
+                LPARAM(w!("").0.expose_provenance().cast_signed()),
+                SMTO_ABORTIFHUNG,
+                1000,
+                Some(&raw mut cleared),
+            )
+        };
+        ensure!(
+            delivered.0 != 0 && cleared != 0,
+            "owned fixture text setup timed out or failed"
+        );
+        self.guard()
+    }
+
+    pub(crate) fn expected_layout_text(&self) -> Result<bool> {
+        self.guard()?;
+        ensure!(
+            pid(self.edit) == self.fixture.pid,
+            "fixture EDIT ownership changed"
+        );
+        let mut text = [0u16; 16];
+        let mut length = 0;
+        // SAFETY: WM_GETTEXT marshals this writable buffer across processes; only our owned EDIT is read after controlled typing and a clear guard.
+        let delivered = unsafe {
+            SendMessageTimeoutW(
+                self.edit,
+                WM_GETTEXT,
+                WPARAM(text.len()),
+                LPARAM(text.as_mut_ptr().expose_provenance().cast_signed()),
+                SMTO_ABORTIFHUNG,
+                1000,
+                Some(&raw mut length),
+            )
+        };
+        ensure!(delivered.0 != 0, "owned fixture text inspection timed out");
+        self.guard()?;
+        Ok(length == 2 && text[..2] == [0x40, 0x20ac])
     }
 }
 

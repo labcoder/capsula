@@ -72,6 +72,9 @@ pub(crate) enum LinkError {
     #[cfg(target_os = "macos")]
     #[error("can't read the instance item")]
     Item(#[source] kumochi_storage::ItemError),
+    #[cfg(target_os = "macos")]
+    #[error("can't turn off core dumps")]
+    Harden,
     #[error("quitting")]
     Quitting,
     #[error(transparent)]
@@ -341,6 +344,7 @@ pub(crate) fn connect_pair(
     check_attempt(Some(deadline)).map_err(not_spawned)?;
     connect_pair_with(
         |by| super::macos::start_brain(brain, word, by),
+        super::macos::limit_core_dumps,
         super::macos::read_instance,
         channel,
         audio,
@@ -350,11 +354,16 @@ pub(crate) fn connect_pair(
     )
 }
 
-/// [`connect_pair`] with its spawn and its item read supplied. A failure after the spawn settles
-/// the child before it returns, so no later attempt starts beside it; an exit with
-/// [`BRAIN_EXIT_BUSY`](kumochi_protocol::constants::BRAIN_EXIT_BUSY) is `Busy`. Once connected,
-/// custody ending aborts both legs, so a peer that keeps its ends open can't hold the link.
+/// [`connect_pair`] with its spawn, its core-dump limit and its item read supplied. A failure
+/// after the spawn settles the child before it returns, so no later attempt starts beside it; an
+/// exit with [`BRAIN_EXIT_BUSY`](kumochi_protocol::constants::BRAIN_EXIT_BUSY) is `Busy`. Once
+/// connected, custody ending aborts both legs, so a peer that keeps its ends open can't hold the
+/// link.
 #[cfg(target_os = "macos")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pair attempt's identity, deadline and its three injected platform calls"
+)]
 pub(super) fn connect_pair_with(
     start: impl FnOnce(
         Instant,
@@ -362,6 +371,7 @@ pub(super) fn connect_pair_with(
         (super::child::ChildOwner, super::macos::ShellEnds),
         super::macos::NotStarted,
     >,
+    harden: impl FnOnce() -> std::io::Result<()>,
     read_item: impl FnOnce(
         &mut [u8; kumochi_session::SECRET_LEN],
     ) -> Result<(), kumochi_storage::ItemError>,
@@ -392,6 +402,7 @@ pub(super) fn connect_pair_with(
             repair_of,
             deadline,
             text_metrics,
+            harden,
             read_item,
         )
     });
@@ -430,10 +441,15 @@ fn not_spawned(error: LinkError) -> Failed {
     }
 }
 
-/// Waits for the brain's READY byte, then reads the instance capability with `read_item`, then
-/// runs [`over_pair`]. Nothing is written and the item isn't read until READY arrives, and a
-/// wrong byte or the stream ending is `Rejected`.
+/// Waits for the brain's READY byte, then turns off core dumps with `harden`, then reads the
+/// instance capability with `read_item`, then runs [`over_pair`]. Nothing is written and the item
+/// isn't read until READY arrives, and a wrong byte or the stream ending is `Rejected`. A failed
+/// `harden` is `Harden`, and the item is never read.
 #[cfg(target_os = "macos")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pair attempt's ends, identity, deadline and its two injected platform calls"
+)]
 pub(super) fn after_ready(
     ends: super::macos::ShellEnds,
     channel: kumochi_session::Channel,
@@ -441,6 +457,7 @@ pub(super) fn after_ready(
     repair_of: Option<IssueSession>,
     deadline: Instant,
     text_metrics: impl FnOnce(Instant) -> DrawingText,
+    harden: impl FnOnce() -> std::io::Result<()>,
     read_item: impl FnOnce(
         &mut [u8; kumochi_session::SECRET_LEN],
     ) -> Result<(), kumochi_storage::ItemError>,
@@ -454,6 +471,8 @@ pub(super) fn after_ready(
         }
         Err(error) => return Err(LinkError::Io(error)),
     }
+    // Before the secret exists, so no core dump of this process can hold it.
+    harden().map_err(|_| LinkError::Harden)?;
     let mut secret = super::macos::Secret::zeroed();
     check_attempt(Some(deadline))?;
     let read = read_item(secret.bytes_mut());

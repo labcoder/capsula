@@ -16,7 +16,7 @@ use gpui_kit::{
 };
 
 use super::{
-    Presence,
+    Presence, diagnostics,
     escape::{PlainEscape, Presses},
     voice::{Gates, HoldBack, Stamp},
 };
@@ -591,6 +591,14 @@ fn apply(
                 && (!uninterrupted || stale_hold_escape(this, pending.cancelled))
             {
                 return Some(false);
+            }
+            for intent in pending.delivery.intents.iter().flatten() {
+                let kind = match intent {
+                    Intent::Warm(_) => "warm",
+                    Intent::Recognized { .. } => "recognized",
+                    Intent::End { .. } | Intent::Unavailable => continue,
+                };
+                diagnostics::record(cx, format_args!("hold {kind} callback_qpc={}", pending.qpc));
             }
             let effects = pending.typing_effects(this, cx);
             this.apply_effects(effects, window, cx);

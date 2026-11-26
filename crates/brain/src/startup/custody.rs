@@ -2,16 +2,29 @@
 //! admitted product folder, held from bootstrap to the item's final delete (A-7, A-10).
 
 use std::fmt;
+use std::sync::Arc;
 
-use crate::platform;
+use crate::platform::{self, SessionLock};
 
 pub(crate) use crate::platform::CustodyError;
 
-/// Holds the session lock until dropped; nothing else can make one.
+/// A share of custody's held lock that only `SessionCustody::lend` makes, so every lent
+/// `SessionLock` comes from custody.
+pub(crate) struct Loan(Arc<platform::InstanceLock>);
+
+impl Loan {
+    /// The shared lock, for the lent `SessionLock` to hold.
+    pub(crate) fn into_lock(self) -> Arc<platform::InstanceLock> {
+        self.0
+    }
+}
+
+/// Holds the session lock until dropped; nothing else can make one, or lend it.
 pub(crate) struct SessionCustody {
-    _lock: Option<platform::InstanceLock>,
-    #[cfg(test)]
-    _fixture: Option<std::sync::Arc<()>>,
+    /// The held lock with the product path it was taken in; loans share it.
+    held: Option<Arc<platform::InstanceLock>>,
+    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+    _fixture: Option<Arc<()>>,
 }
 
 impl fmt::Debug for SessionCustody {
@@ -34,18 +47,25 @@ impl SessionCustody {
     }
 
     /// Custody that holds a token instead of a lock, so offline tests can watch when it drops.
-    #[cfg(test)]
-    pub(crate) fn fixture(token: std::sync::Arc<()>) -> Self {
+    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+    pub(crate) fn fixture(token: Arc<()>) -> Self {
         Self {
-            _lock: None,
+            held: None,
             _fixture: Some(token),
         }
     }
 
+    /// The held lock as the opened state's profile lock, bound to the product path it was
+    /// taken in; the lock releases only with custody and the last loan. A token lends nothing.
+    pub(in crate::startup) fn lend(&self) -> Option<Arc<SessionLock>> {
+        let lock = self.held.as_ref()?;
+        Some(Arc::new(SessionLock::lent(Loan(Arc::clone(lock)))))
+    }
+
     fn held(lock: platform::InstanceLock) -> Self {
         Self {
-            _lock: Some(lock),
-            #[cfg(test)]
+            held: Some(Arc::new(lock)),
+            #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             _fixture: None,
         }
     }

@@ -2180,7 +2180,7 @@ impl Link {
                         let _first = reader.set(thread::current());
                     }
                     read_data(
-                        &data,
+                        data.as_ref(),
                         || {
                             if !queued {
                                 ended.shared.abort_connection(generation, &control);
@@ -2749,7 +2749,8 @@ impl<R: Read> Read for Counted<R> {
 /// ending, ends the whole connection, so the link reconnects instead of leaving the shell
 /// connected with nothing arriving.
 fn read_data(
-    data: &PipeClient,
+    #[cfg(not(any(test, feature = "test-support")))] data: &PipeClient,
+    #[cfg(any(test, feature = "test-support"))] data: impl Read,
     finish: impl FnOnce(),
     events: &Sender<LinkEvent>,
     generation: u64,
@@ -2823,6 +2824,30 @@ fn read_data(
         }
     }
     finish();
+}
+
+#[cfg(test)]
+#[doc(hidden)]
+pub mod credit_fixture {
+    use super::*;
+
+    /// Runs the production legacy data receiver on input bounded by the test.
+    pub fn counted_legacy_fixture(data: impl Read) -> Vec<LinkEvent> {
+        let (events, received) = async_channel::unbounded();
+        let credit = SessionIo {
+            link: Weak::new(),
+            tuning: ShellTuning::default(),
+            queued: false,
+            narrated: None,
+            control: None,
+            playback_stop: Arc::default(),
+            bytes: AtomicU32::new(0),
+            wake: async_channel::bounded(1).0.downgrade(),
+            drawing_font_family: None,
+        };
+        read_data(data, || {}, &events, 1, &credit, None);
+        std::iter::from_fn(|| received.try_recv().ok()).collect()
+    }
 }
 
 /// Writes queued control messages in order until the queue closes or the pipe fails. Marks

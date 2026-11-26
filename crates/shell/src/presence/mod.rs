@@ -361,6 +361,10 @@ impl Presence {
             std::mem::replace(&mut dock.listening, listening)
         });
         if was_listening != listening {
+            diagnostics::record(
+                cx,
+                format_args!("listening {}", if listening { "on" } else { "off" }),
+            );
             let motion = kumo_view::motion(cx);
             let mood = if listening {
                 Mood::Listening

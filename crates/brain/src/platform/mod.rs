@@ -129,8 +129,15 @@ pub(crate) enum CustodyError {
 /// What an instance item add found. Only macOS's item, and the tests' fakes, make one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
-    not(any(test, target_os = "macos")),
-    expect(dead_code, reason = "only macOS has an instance item")
+    not(any(
+        test,
+        all(debug_assertions, feature = "test-support"),
+        target_os = "macos"
+    )),
+    expect(
+        dead_code,
+        reason = "only macOS and the fixtures have an instance item"
+    )
 )]
 pub(crate) enum Added {
     Fresh,
@@ -140,6 +147,13 @@ pub(crate) enum Added {
 /// The instance item's session lock and item; only macOS has them.
 #[cfg(not(target_os = "macos"))]
 pub(crate) enum InstanceLock {}
+
+#[cfg(not(target_os = "macos"))]
+impl InstanceLock {
+    pub(crate) fn product(&self) -> &std::path::Path {
+        match *self {}
+    }
+}
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) enum InstanceItem {}
@@ -199,8 +213,6 @@ pub(crate) fn instance_fixture_clean(_: &std::path::Path, _: &[&str]) {
     panic!("only macOS has the instance item's native fixtures")
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) type InstanceLock = kumochi_storage::AdmittedLock;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use macos::instance::lock_at as instance_custody_at;
 #[cfg(all(test, target_os = "macos"))]
@@ -208,7 +220,7 @@ pub(crate) use macos::instance::tests::{
     clean as instance_fixture_clean, support as instance_fixture,
 };
 #[cfg(target_os = "macos")]
-pub(crate) use macos::instance::{KeychainItem as InstanceItem, instance_custody};
+pub(crate) use macos::instance::{InstanceLock, KeychainItem as InstanceItem, instance_custody};
 
 #[cfg(target_os = "macos")]
 pub(crate) use macos::capture::{display_at, screen_capturer};

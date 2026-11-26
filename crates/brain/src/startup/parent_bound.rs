@@ -19,15 +19,14 @@ use crate::config::tuning::{OAuthTuning, TokenTuning};
 use crate::platform::shell_process::Committed;
 use crate::platform::{self, Job, SessionLock, ShellProcess};
 use crate::runtime::{Brain, Ended, Quit, Shutdown, Stage, Terminal, account::Accounts};
-use crate::{BrainError, ParentBoundError, StartMode};
+use crate::{BrainError, ParentBoundError};
 
 /// How long admission and the stages have, from before the first bootstrap action. Settlement
 /// has no admission deadline.
 pub(crate) const ADMISSION: Duration = Duration::from_secs(10);
 
 /// A parent-bound prerequisite this build lacks. Known to be missing: the vault's credential
-/// store, containment, custody lent to the opened state and R2's own list; that list may not be
-/// complete.
+/// store, containment and R2's own list; that list may not be complete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("parent-bound startup isn't ready")]
 pub(in crate::startup) struct NotReady;
@@ -38,8 +37,13 @@ pub(in crate::startup) trait Prerequisites {
     fn ready(&self) -> Result<(), NotReady>;
     /// Starts the process-wide services once the claim is committed.
     fn init(&mut self) -> Result<ProcessInit, BrainError>;
-    /// Sets `acquired` once it holds a store, even if it fails after.
-    fn open(&mut self, acquired: &mut bool) -> Result<OpenedState, BrainError>;
+    /// Opens the profile under `custody`'s loan. Sets `acquired` once it holds a store, even if
+    /// it fails after.
+    fn open(
+        &mut self,
+        custody: &SessionCustody,
+        acquired: &mut bool,
+    ) -> Result<OpenedState, BrainError>;
     fn accounts(
         &mut self,
         oauth: OAuthTuning,
@@ -73,8 +77,16 @@ impl Prerequisites for Pending {
         Ok(ProcessInit::default())
     }
 
-    fn open(&mut self, acquired: &mut bool) -> Result<OpenedState, BrainError> {
-        super::open_state(StartMode::Normal, &std::env::current_exe()?, acquired)
+    fn open(
+        &mut self,
+        custody: &SessionCustody,
+        acquired: &mut bool,
+    ) -> Result<OpenedState, BrainError> {
+        // A token custody lends nothing, so nothing opens.
+        let profile = custody
+            .lend()
+            .ok_or_else(|| BrainError::ProfileLock(std::io::ErrorKind::NotFound.into()))?;
+        super::open_state_held(profile, None, acquired)
     }
 
     fn accounts(
@@ -217,7 +229,12 @@ impl<S: InstanceStore> Root<S> {
         mut checkpoint: impl FnMut(Checkpoint, &mut Stages) -> Result<(), BrainError>,
     ) -> Result<(), BrainError> {
         self.init = Some(pre.init()?);
-        let opened = pre.open(&mut self.stages.acquired)?;
+        let custody = self
+            .instance
+            .as_ref()
+            .expect("admission holds the attempt before any stage starts")
+            .custody();
+        let opened = pre.open(custody, &mut self.stages.acquired)?;
         self.stages
             .start(
                 opened,
@@ -380,3 +397,6 @@ thread_local! {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+pub(crate) mod fixture;

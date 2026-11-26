@@ -177,7 +177,7 @@ enum Stop<E> {
 
 /// Owns one publication and the custody it runs under, from its first call to its settlement.
 pub(crate) struct InstanceAttempt<S: InstanceStore> {
-    _custody: SessionCustody,
+    custody: SessionCustody,
     store: Arc<S>,
     state: State<S::Error>,
     #[cfg(test)]
@@ -202,12 +202,17 @@ impl<S: InstanceStore> fmt::Debug for InstanceAttempt<S> {
 impl<S: InstanceStore> InstanceAttempt<S> {
     pub(in crate::startup) fn new(custody: SessionCustody, store: Arc<S>) -> Self {
         Self {
-            _custody: custody,
+            custody,
             store,
             state: State::Idle,
             #[cfg(test)]
             made: Arc::default(),
         }
+    }
+
+    /// The custody this attempt runs under, which lends the opened state its lock.
+    pub(in crate::startup) fn custody(&self) -> &SessionCustody {
+        &self.custody
     }
 
     /// Stores `key` as the item and reads it back exactly, once. A deadline or a parent loss
