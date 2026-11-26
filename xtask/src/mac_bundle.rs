@@ -1,6 +1,7 @@
 //! `cargo xtask mac-bundle`: the Dev shell app with the brain nested in it as a background
 //! helper, each with its own provisioning profile, signed with a passed-in Apple Development
-//! identity, verified, and its brain launched once to show the system accepts its entitlements.
+//! identity (or, with `--beta`, a Developer ID one), checked as shipped, and its brain launched
+//! once to show the system accepts its entitlements.
 
 use std::io::Write as _;
 use std::os::unix::process::CommandExt as _;
@@ -15,6 +16,10 @@ use serde_json::{Value, json};
 const APP_ID: &str = "com.apple.application-identifier";
 const TEAM_ID: &str = "com.apple.developer.team-identifier";
 const GROUPS: &str = "keychain-access-groups";
+/// The debugger entitlement, which no bundle this task builds may carry (K-8).
+const GET_TASK_ALLOW: &str = "com.apple.security.get-task-allow";
+/// The code directory flag for the hardened runtime (`CS_RUNTIME`).
+const RUNTIME: u32 = 0x1_0000;
 /// Every product entry exits with this until a signed brain can be admitted.
 const UNAVAILABLE: i32 = 69;
 const LAUNCH_WAIT: Duration = Duration::from_secs(10);
@@ -29,14 +34,26 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 const MAX_CERTIFICATES: usize = 64;
 
 pub(crate) const USAGE: &str =
-    "  mac-bundle --identity <sha1> --shell-profile <file> --brain-profile <file> --out <new-dir>
+    "  mac-bundle [--beta] --identity <sha1> --shell-profile <file> --brain-profile <file> --out <new-dir>
                     build the Dev shell and brain, nest the brain in the shell app as a
                     background helper, embed each profile, sign both with that Apple
-                    Development identity, verify them, and launch the brain once: it must
-                    exit 69, not be killed; prints no team, identity, profile or path";
+                    Development identity (--beta: Developer ID, with Developer ID profiles),
+                    check the signed apps carry no get-task-allow, the hardened runtime and
+                    their embedded profiles' App ID prefix and groups, and launch the brain
+                    once: it must exit 69, not be killed; prints no team, identity, profile or path";
+
+/// Which identity and profiles sign the bundle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// Apple Development, with development profiles.
+    Dev,
+    /// Developer ID, with Developer ID profiles, for beta artifacts.
+    Beta,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct Args {
+    mode: Mode,
     identity: String,
     shell_profile: PathBuf,
     brain_profile: PathBuf,
@@ -47,6 +64,13 @@ struct Args {
 struct Profile {
     bytes: Vec<u8>,
     team: String,
+    /// The App ID prefix, which keychain groups and the App ID start with; usually, but not
+    /// always, the team.
+    prefix: String,
+    /// A Developer ID profile's mark: `ProvisionsAllDevices` is exactly true.
+    all_devices: bool,
+    /// How many devices a development profile lists; `None` when it lists none.
+    devices: Option<usize>,
     entitlements: Value,
     expires: String,
     platforms: Vec<String>,
@@ -92,6 +116,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
                 ids.instance_group,
                 &args.identity,
                 now,
+                args.mode,
             )
             .with_context(|| format!("the {} profile", role.name))?;
         }
@@ -99,10 +124,14 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
             shell.profile.team == brain.profile.team,
             "the two profiles belong to different teams"
         );
+        ensure!(
+            shell.profile.prefix == brain.profile.prefix,
+            "the two profiles have different App ID prefixes"
+        );
         Ok(())
     };
     checked(&utc_now()?)?;
-    let team = &shell.profile.team;
+    let (team, prefix) = (&shell.profile.team, &shell.profile.prefix);
 
     std::fs::create_dir(&args.out).context("creating the output folder, which must not exist")?;
     let built = build()?;
@@ -119,7 +148,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         let file = args.out.join(format!("{}.entitlements", role.exe));
         std::fs::write(
             &file,
-            plist(&entitlements(team, role.id, ids.instance_group))?,
+            plist(&entitlements(prefix, team, role.id, ids.instance_group))?,
         )?;
         sign(app, &file, &args.identity).with_context(|| format!("signing the {}", role.name))?;
     }
@@ -130,16 +159,8 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     )
     .context("verifying the shell app")?;
     for (role, app) in [(&brain, &brain_app), (&shell, &shell_app)] {
-        let shown = command(
-            "/usr/bin/codesign",
-            &["-d", "--xml", "--entitlements", "-"],
-            app,
-        )?;
-        ensure!(
-            to_json(&shown)? == entitlements(team, role.id, ids.instance_group),
-            "the {}'s signed entitlements differ from the ones asked for",
-            role.name
-        );
+        audit(app, role.id, ids.instance_group)
+            .with_context(|| format!("the signed {}", role.name))?;
     }
     let mut brain_run = Command::new(brain_app.join(format!("Contents/MacOS/{BRAIN_EXE}")));
     launch(&mut brain_run, LAUNCH_WAIT)?;
@@ -149,7 +170,13 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut identity, mut shell, mut brain, mut out) = (None, None, None, None);
+    let mut mode = Mode::Dev;
     while let Some(flag) = args.next() {
+        if flag == "--beta" {
+            ensure!(mode == Mode::Dev, "--beta given twice");
+            mode = Mode::Beta;
+            continue;
+        }
         let (name, slot) = match flag.as_str() {
             "--identity" => ("--identity", &mut identity),
             "--shell-profile" => ("--shell-profile", &mut shell),
@@ -171,6 +198,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args> {
         "--identity is a 40-digit SHA-1 certificate hash"
     );
     Ok(Args {
+        mode,
         identity: identity.to_ascii_uppercase(),
         shell_profile: shell.context("mac-bundle needs --shell-profile")?.into(),
         brain_profile: brain.context("mac-bundle needs --brain-profile")?.into(),
@@ -180,18 +208,61 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args> {
 
 fn decode(bytes: Vec<u8>) -> Result<Profile> {
     let plist = pipe("/usr/bin/security", &["cms", "-D"], &bytes)?;
+    read_profile(bytes, &plist)
+}
+
+/// The fields of a decoded profile's property list; `bytes` are the signed ones it came from.
+fn read_profile(bytes: Vec<u8>, plist: &[u8]) -> Result<Profile> {
     let field = |key: &str, format: &str, expect: Option<&str>| {
         let mut args = vec!["-extract", key, format];
         if let Some(kind) = expect {
             args.extend(["-expect", kind]);
         }
         args.extend(["-o", "-", "-"]);
-        pipe("/usr/bin/plutil", &args, &plist).with_context(|| format!("the profile's {key}"))
+        pipe("/usr/bin/plutil", &args, plist).with_context(|| format!("the profile's {key}"))
     };
     let teams = strings("TeamIdentifier", &field("TeamIdentifier", "json", None)?)?;
     let [team] = <[String; 1]>::try_from(teams)
         .ok()
         .context("the profile names one team")?;
+    let prefixes = strings(
+        "ApplicationIdentifierPrefix",
+        &field("ApplicationIdentifierPrefix", "json", None)?,
+    )?;
+    let [prefix] = <[String; 1]>::try_from(prefixes)
+        .ok()
+        .context("the profile names one App ID prefix")?;
+    // One successful parse decides which optional keys are present: plutil writes each top-level
+    // key on its own line, indented by one tab. A present key that then can't be read as its
+    // type refuses the profile, so a failed read never passes for an absent key.
+    let canonical = pipe(
+        "/usr/bin/plutil",
+        &["-convert", "xml1", "-o", "-", "-"],
+        plist,
+    )
+    .context("the profile's property list")?;
+    let canonical = String::from_utf8_lossy(&canonical);
+    let present = |key: &str| {
+        canonical.lines().any(|line| {
+            line.strip_prefix("\t<key>")
+                .and_then(|rest| rest.strip_suffix("</key>"))
+                == Some(key)
+        })
+    };
+    let all_devices = present("ProvisionsAllDevices")
+        && field("ProvisionsAllDevices", "raw", Some("bool"))
+            .ok()
+            .context("the profile's ProvisionsAllDevices has the wrong type")?
+            .trim_ascii()
+            == b"true";
+    let devices = if present("ProvisionedDevices") {
+        let json = field("ProvisionedDevices", "json", None)
+            .ok()
+            .context("the profile's ProvisionedDevices has the wrong type")?;
+        Some(strings("ProvisionedDevices", &json)?.len())
+    } else {
+        None
+    };
     let mut certificates = Vec::new();
     while certificates.len() < MAX_CERTIFICATES {
         let key = format!("DeveloperCertificates.{}", certificates.len());
@@ -210,6 +281,9 @@ fn decode(bytes: Vec<u8>) -> Result<Profile> {
     Ok(Profile {
         bytes,
         team,
+        prefix,
+        all_devices,
+        devices,
         entitlements: object("Entitlements", &field("Entitlements", "json", None)?)?,
         expires: String::from_utf8(field("ExpirationDate", "raw", Some("date"))?)?
             .trim()
@@ -244,21 +318,41 @@ fn strings(key: &str, json: &[u8]) -> Result<Vec<String>> {
 }
 
 /// The profile is a current macOS one from a well-formed team, for exactly `id`, authorizing
-/// `identity`'s certificate and allowing both of the role's keychain groups.
-fn check(profile: &Profile, id: &str, group: &str, identity: &str, now: &str) -> Result<()> {
+/// `identity`'s certificate, allowing both of the role's keychain groups, and of the kind the mode
+/// signs with: Developer ID for beta, development otherwise.
+fn check(
+    profile: &Profile,
+    id: &str,
+    group: &str,
+    identity: &str,
+    now: &str,
+    mode: Mode,
+) -> Result<()> {
     let team = &profile.team;
+    let prefix = &profile.prefix;
     let text = |key| profile.entitlements.get(key).and_then(Value::as_str);
-    ensure!(
-        team.len() == 10
-            && team
-                .bytes()
-                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()),
-        "its team isn't a team identifier"
-    );
+    ensure!(identifier(team), "its team isn't a team identifier");
+    ensure!(identifier(prefix), "its App ID prefix isn't one");
     ensure!(
         profile.platforms.iter().any(|platform| platform == "OSX"),
         "it isn't a macOS profile"
     );
+    match mode {
+        Mode::Beta => ensure!(
+            profile.all_devices && profile.devices.is_none(),
+            "it isn't a Developer ID profile"
+        ),
+        Mode::Dev => {
+            ensure!(
+                !profile.all_devices,
+                "it's a Developer ID profile, which needs --beta"
+            );
+            ensure!(
+                profile.devices.is_some_and(|count| count > 0),
+                "it isn't a development profile: it lists no devices"
+            );
+        }
+    }
     ensure!(utc_seconds(&profile.expires), "its expiry isn't a UTC time");
     // Both are ISO 8601 UTC with seconds, so text order is time order.
     ensure!(profile.expires.as_str() > now, "it has expired");
@@ -267,28 +361,156 @@ fn check(profile: &Profile, id: &str, group: &str, identity: &str, now: &str) ->
         "its team doesn't match its entitlements"
     );
     ensure!(
-        text(APP_ID) == Some(format!("{team}.{id}").as_str()),
+        text(APP_ID) == Some(format!("{prefix}.{id}").as_str()),
         "it isn't for exactly {id}"
     );
     ensure!(
         profile.certificates.iter().any(|hash| hash == identity),
         "it doesn't authorize the signing certificate"
     );
-    let allowed: Vec<&str> = profile
-        .entitlements
-        .get(GROUPS)
-        .and_then(Value::as_array)
-        .map(|groups| groups.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
     for wanted in [id, group] {
-        let exact = format!("{team}.{wanted}");
-        let any = format!("{team}.*");
         ensure!(
-            allowed.iter().any(|&have| have == exact || have == any),
+            allows(profile, &format!("{prefix}.{wanted}")),
             "it doesn't allow the keychain group {wanted}"
         );
     }
     Ok(())
+}
+
+/// Ten uppercase letters or digits, the form of a team and of an App ID prefix.
+fn identifier(text: &str) -> bool {
+    text.len() == 10
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// Whether the profile grants keychain group `wanted`, exactly or by its prefix's wildcard.
+fn allows(profile: &Profile, wanted: &str) -> bool {
+    let any = format!("{}.*", profile.prefix);
+    profile
+        .entitlements
+        .get(GROUPS)
+        .and_then(Value::as_array)
+        .is_some_and(|groups| {
+            groups
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|have| have == wanted || have == any)
+        })
+}
+
+/// K-8 on a signed app as it will ship: read back its signature and its embedded profile, never
+/// the ones this task asked for.
+fn audit(app: &Path, id: &str, group: &str) -> Result<()> {
+    let embedded = std::fs::read(app.join("Contents/embedded.provisionprofile"))
+        .context("reading its embedded profile")?;
+    let profile = decode(embedded).context("decoding its embedded profile")?;
+    let (signed, display) = signature(app)?;
+    audited(&profile, &signed, &display, id, group)
+}
+
+/// An app's signed entitlements, and `codesign -dvvv`'s description of its code directories.
+fn signature(app: &Path) -> Result<(Value, Vec<u8>)> {
+    let signed = command(
+        "/usr/bin/codesign",
+        &["-d", "--xml", "--entitlements", "-"],
+        app,
+    )?;
+    // codesign writes the description to stderr, so the shell moves it to stdout.
+    let mut display = Command::new("/bin/sh");
+    display
+        .args(["-c", "exec /usr/bin/codesign -dvvv \"$1\" 2>&1", "sh"])
+        .arg(app);
+    let display = bounded("codesign", &mut display, None, SIGN_WAIT)?;
+    Ok((to_json(&signed)?, display))
+}
+
+/// The checks `audit` makes, on what it read: no debugger entitlement, the hardened runtime on
+/// every code directory, and exactly the App ID, team and groups the embedded profile grants
+/// under its own prefix.
+fn audited(profile: &Profile, signed: &Value, display: &[u8], id: &str, group: &str) -> Result<()> {
+    let prefix = &profile.prefix;
+    ensure!(
+        signed.get(GET_TASK_ALLOW).is_none(),
+        "it's signed with get-task-allow"
+    );
+    ensure!(thin(display), "it isn't a single-architecture app");
+    ensure!(
+        one_digest(display),
+        "it isn't signed with exactly one code directory"
+    );
+    ensure!(
+        hardened(display),
+        "it isn't signed with the hardened runtime"
+    );
+    let app_id = format!("{prefix}.{id}");
+    let granted = |key| profile.entitlements.get(key).and_then(Value::as_str);
+    ensure!(
+        granted(APP_ID) == Some(app_id.as_str()),
+        "its embedded profile isn't for {id}"
+    );
+    ensure!(
+        signed.get(APP_ID).and_then(Value::as_str) == Some(app_id.as_str()),
+        "its App ID isn't its profile's prefix and {id}"
+    );
+    ensure!(
+        granted(TEAM_ID) == Some(profile.team.as_str())
+            && signed.get(TEAM_ID).and_then(Value::as_str) == Some(profile.team.as_str()),
+        "its team isn't its profile's"
+    );
+    let groups = [format!("{prefix}.{id}"), format!("{prefix}.{group}")];
+    ensure!(
+        signed.get(GROUPS) == Some(&json!(groups))
+            && groups.iter().all(|wanted| allows(profile, wanted)),
+        "its keychain groups aren't its profile's"
+    );
+    ensure!(
+        *signed == entitlements(prefix, &profile.team, id, group),
+        "it carries entitlements beyond its App ID, team and groups"
+    );
+    Ok(())
+}
+
+/// Whether `codesign -dv` describes a thin Mach-O: one architecture, so the one code directory
+/// it shows is the whole signature. A universal app would show only the host's slice.
+fn thin(display: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(display);
+    let mut formats = text.lines().filter_map(|line| line.strip_prefix("Format="));
+    formats
+        .next()
+        .is_some_and(|format| format.contains("Mach-O thin ("))
+        && formats.next().is_none()
+}
+
+/// Whether `codesign -dvvv` lists exactly one hash choice: a slice signed with several digests
+/// has alternate code directories that `-dv` describes as one.
+fn one_digest(display: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(display);
+    let mut choices = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("Hash choices="));
+    choices
+        .next()
+        .is_some_and(|choice| !choice.is_empty() && !choice.contains(','))
+        && choices.next().is_none()
+}
+
+/// Whether `codesign -dv` shows exactly one code directory, with the runtime flag.
+fn hardened(display: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(display);
+    let flags: Vec<Option<u32>> = text
+        .lines()
+        .filter(|line| line.starts_with("CodeDirectory "))
+        .map(|line| {
+            let hex = line.split_once(" flags=0x")?.1;
+            let end = hex
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(hex.len());
+            u32::from_str_radix(&hex[..end], 16).ok()
+        })
+        .collect();
+    matches!(flags.as_slice(), [Some(flags)] if flags & RUNTIME != 0)
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ`, the only form text order compares as time.
@@ -304,13 +526,13 @@ fn utc_seconds(text: &str) -> bool {
         })
 }
 
-/// The entitlements a role is signed with: its own App ID, which is also its private keychain
-/// group, and the instance group it shares.
-fn entitlements(team: &str, id: &str, group: &str) -> Value {
+/// The entitlements a role is signed with: its own App ID under the profile's prefix, which is
+/// also its private keychain group, its team, and the instance group it shares.
+fn entitlements(prefix: &str, team: &str, id: &str, group: &str) -> Value {
     json!({
-        APP_ID: format!("{team}.{id}"),
+        APP_ID: format!("{prefix}.{id}"),
         TEAM_ID: team,
-        GROUPS: [format!("{team}.{id}"), format!("{team}.{group}")],
+        GROUPS: [format!("{prefix}.{id}"), format!("{prefix}.{group}")],
     })
 }
 
@@ -475,6 +697,8 @@ fn sign(app: &Path, entitlements: &Path, identity: &str) -> Result<()> {
     let entitlements = entitlements
         .to_str()
         .context("an entitlements path that is text")?;
+    // shortcut: no secure timestamp or notarization, so a downloaded beta is refused by
+    // Gatekeeper on other Macs; add both before the beta leaves the owner's Macs.
     command(
         "/usr/bin/codesign",
         &[

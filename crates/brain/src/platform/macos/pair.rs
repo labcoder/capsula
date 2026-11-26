@@ -9,8 +9,8 @@ use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream as StdStream;
 
 use kumochi_protocol::constants::{ProductIdentity, SESSION_READY};
-use kumochi_protocol::frame::Pipe;
-use kumochi_protocol::message::{ControlToBrain, DataToBrain, Hello, IssueSession};
+use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::message::{ControlToBrain, ControlToShell, DataToBrain, Hello, IssueSession};
 use kumochi_session::{
     BoundPair, BrainAwaitsInit, Channel, ENVELOPE_LEN, Outgoing, SECRET_LEN, Session, SessionError,
 };
@@ -25,7 +25,7 @@ use super::super::shell_process::Verdict;
 use super::stream::{RecordReader, RecordWriter};
 use crate::ipc;
 use crate::platform::ShellProcess;
-use crate::runtime::Terminal;
+use crate::runtime::{Brain, Ended, Terminal};
 use crate::startup::parent_bound::AdmissionPair;
 use crate::tap::Tap;
 
@@ -173,6 +173,20 @@ impl AdmissionPair for InheritedPair {
         reserve: impl FnOnce() -> IssueSession,
     ) -> Option<Greeted> {
         admit(keyed, shell, by, reserve).await.ok()
+    }
+
+    fn cell(greeted: &Greeted) -> watch::Receiver<bool> {
+        greeted.pair.pair.subscribe()
+    }
+
+    fn serve(
+        greeted: &mut Greeted,
+        brain: &mut Brain,
+        terminal: Terminal,
+        shell: &ShellProcess,
+        by: Instant,
+    ) -> impl Future<Output = Ended> {
+        serve(greeted, brain, terminal, shell, by)
     }
 }
 
@@ -346,13 +360,77 @@ async fn fenced<T>(
 }
 
 /// What admission hands on: the pair after both greetings, and what they chose.
-#[cfg_attr(
-    test,
-    expect(dead_code, reason = "serving takes them; it isn't wired yet")
-)]
 pub(crate) struct Greeted {
-    pub(crate) pair: AuthenticatedPair,
-    pub(crate) admitted: ipc::Admitted<ShellProcess>,
+    pair: AuthenticatedPair,
+    admitted: ipc::Admitted<ShellProcess>,
+}
+
+/// Serves the admitted shell once the stages built `brain`: `ShellTuning` goes out by `by` while
+/// the parent and the clock both pass, then the session and the shell are installed and the
+/// runtime serves both legs, lent by `greeted`, with `terminal`. The greeting's text metrics are
+/// handed on as a value, and any bytes already buffered after them stay in the data leg's reader.
+async fn serve(
+    greeted: &mut Greeted,
+    brain: &mut Brain,
+    terminal: Terminal,
+    shell: &ShellProcess,
+    by: Instant,
+) -> Ended {
+    let Greeted { pair, admitted } = greeted;
+    let tuning = ControlToShell::ShellTuning {
+        session: admitted.session,
+        tuning: brain.shell_tuning(),
+    };
+    let Ok(tuning) = frame::encode(&tuning, Pipe::Control) else {
+        return Ended::Broken("the shell tuning doesn't encode");
+    };
+    if tune(pair, shell, by, &tuning).await.is_err() {
+        return terminal.fatal().map_or(Ended::Lost, Ended::Fatal);
+    }
+    let Ok((control, data)) = pair.legs() else {
+        return Ended::Broken("the greeted pair isn't greeted");
+    };
+    brain.install_issue_session(admitted.session);
+    let _shell_identity = admitted.peer.register();
+    brain.connected_shell(admitted.peer.clone());
+    brain
+        .serve_split(
+            control,
+            data,
+            &mut Tap::default(),
+            admitted.audio,
+            admitted.text_metrics,
+            admitted.start,
+            Some(terminal),
+        )
+        .await
+}
+
+/// Writes `frame` on control only while the parent and the clock both pass right before every
+/// poll of the writer, since the timer can fire after a writer woken past `by`; a loss or the
+/// deadline wins over a writer that is ready at the same time, and both are checked again once
+/// it's written.
+async fn tune(
+    pair: &mut AuthenticatedPair,
+    shell: &ShellProcess,
+    by: Instant,
+    frame: &[u8],
+) -> Result<(), PairError> {
+    let mut loss = shell.loss();
+    let mut write = std::pin::pin!(pair.write_control(frame));
+    let checked = std::future::poll_fn(|cx| {
+        shell.fence().map_err(|_| PairError::Lost)?;
+        before(by)?;
+        write.as_mut().poll(cx).map_err(|_| PairError::Transport)
+    });
+    tokio::select! {
+        biased;
+        _ = Verdict::lost(&mut loss) => return Err(PairError::Lost),
+        () = sleep_until(by) => return Err(PairError::Timeout),
+        written = checked => written?,
+    }
+    shell.fence().map_err(|_| PairError::Lost)?;
+    before(by)
 }
 
 /// Admits the parent shell on `keyed` by `by`: READY, then the responder handshake and the
@@ -429,7 +507,10 @@ enum Stage {
 
 /// One leg as the runtime serves it: frames read through its opener, written whole through its
 /// sealer.
-type Leg = (RecordReader<OwnedReadHalf>, RecordWriter<OwnedWriteHalf>);
+type Leg<'a> = (
+    &'a mut RecordReader<OwnedReadHalf>,
+    &'a mut RecordWriter<OwnedWriteHalf>,
+);
 
 /// A pair whose handshake finished with `BindAck`: both legs' record adapters over one pair cell.
 pub(crate) struct AuthenticatedPair {
@@ -546,21 +627,17 @@ impl AuthenticatedPair {
         self.pair.send_replace(true);
     }
 
-    /// Hands both legs to the runtime once both greetings were read, with the terminal that
-    /// watches this pair's cell and `parent`. The legs keep sharing the cell.
+    /// Lends both legs to the runtime once both greetings were read; they close only when the
+    /// pair drops. The legs keep sharing the pair's cell, which the runtime's terminal watches.
     ///
     /// # Errors
     /// `Order` unless both greetings were read.
-    pub(crate) fn into_legs(
-        self,
-        parent: watch::Receiver<Verdict>,
-    ) -> Result<(Leg, Leg, Terminal), PairError> {
+    pub(crate) fn legs(&mut self) -> Result<(Leg<'_>, Leg<'_>), PairError> {
         if self.stage != Stage::Greeted {
             return Err(PairError::Order);
         }
-        let [control_out, data_out] = self.writers;
-        let terminal = Terminal::new(self.pair.subscribe(), Some(parent));
-        Ok(((self.control, control_out), (self.data, data_out), terminal))
+        let [control_out, data_out] = &mut self.writers;
+        Ok(((&mut self.control, control_out), (&mut self.data, data_out)))
     }
 }
 
@@ -603,3 +680,7 @@ mod admission_tests;
 #[cfg(test)]
 #[path = "pair_admit_tests.rs"]
 mod admit_tests;
+
+#[cfg(test)]
+#[path = "pair_serve_tests.rs"]
+mod serve_tests;

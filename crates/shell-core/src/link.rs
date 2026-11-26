@@ -16,7 +16,6 @@ use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender, WeakSender};
-use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, AudioSession, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
@@ -1569,9 +1568,12 @@ pub fn prepare(
     events: Sender<LinkEvent>,
     audio: AudioSession,
 ) -> std::io::Result<(LinkHandle, LinkStart)> {
+    let exe = std::env::current_exe()?;
+    // Before the bundle check, so a platform with no transport refuses as unsupported.
+    let session = platform::session_id()?;
     let link = Link {
-        brain: std::env::current_exe()?.with_file_name(BRAIN_EXE),
-        session: platform::session_id()?,
+        brain: platform::brain_path(&exe)?,
+        session,
         audio,
         shared: Arc::new(Shared::default()),
     };
@@ -2009,7 +2011,7 @@ impl Link {
                         let _first = reader.set(thread::current());
                     }
                     read_data(
-                        &data,
+                        data.as_ref(),
                         || {
                             if !queued {
                                 ended.shared.abort_connection(generation, &control);
@@ -2578,7 +2580,8 @@ impl<R: Read> Read for Counted<R> {
 /// ending, ends the whole connection, so the link reconnects instead of leaving the shell
 /// connected with nothing arriving.
 fn read_data(
-    data: &PipeClient,
+    #[cfg(not(any(test, feature = "test-support")))] data: &PipeClient,
+    #[cfg(any(test, feature = "test-support"))] data: impl Read,
     finish: impl FnOnce(),
     events: &Sender<LinkEvent>,
     generation: u64,
@@ -2652,6 +2655,30 @@ fn read_data(
         }
     }
     finish();
+}
+
+#[cfg(test)]
+#[doc(hidden)]
+pub mod credit_fixture {
+    use super::*;
+
+    /// Runs the production legacy data receiver on input bounded by the test.
+    pub fn counted_legacy_fixture(data: impl Read) -> Vec<LinkEvent> {
+        let (events, received) = async_channel::unbounded();
+        let credit = SessionIo {
+            link: Weak::new(),
+            tuning: ShellTuning::default(),
+            queued: false,
+            narrated: None,
+            control: None,
+            playback_stop: Arc::default(),
+            bytes: AtomicU32::new(0),
+            wake: async_channel::bounded(1).0.downgrade(),
+            drawing_font_family: None,
+        };
+        read_data(data, || {}, &events, 1, &credit, None);
+        std::iter::from_fn(|| received.try_recv().ok()).collect()
+    }
 }
 
 /// Writes queued control messages in order until the queue closes or the pipe fails.

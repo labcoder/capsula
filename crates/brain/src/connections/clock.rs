@@ -26,10 +26,10 @@ impl Clock for SystemClock {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
 pub(crate) struct FixedClock(pub(crate) u64);
 
-#[cfg(test)]
+#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
 impl Clock for FixedClock {
     fn unix_seconds(&self) -> Option<u64> {
         Some(self.0)

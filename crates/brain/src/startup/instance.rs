@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use super::custody::SessionCustody;
+pub(crate) use crate::platform::Added;
 use crate::platform::ShellProcess;
 use crate::platform::shell_process::Verdict;
 use crate::runtime::Stage;
@@ -30,13 +31,6 @@ pub(crate) trait InstanceStore: Send + Sync + 'static {
     fn update(&self, key: &[u8; CAPABILITY_LEN]) -> Result<(), Self::Error>;
     fn read(&self, into: &mut [u8; CAPABILITY_LEN]) -> Result<(), Self::Error>;
     fn delete(&self) -> Result<(), Self::Error>;
-}
-
-/// What an add found.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Added {
-    Fresh,
-    Duplicate,
 }
 
 /// An item call.
@@ -252,6 +246,10 @@ impl<S: InstanceStore> InstanceAttempt<S> {
     }
 
     /// Deletes this owner's published item, once.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "parent-bound settlement retires through settle")
+    )]
     pub(crate) async fn retire(&mut self) -> Result<(), Refused<S::Error>> {
         if !matches!(self.state, State::Published) {
             return Err(Refused::Used);

@@ -27,15 +27,16 @@ enum Read {
 }
 
 impl Terminal {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no active transport supplies a terminal yet")
-    )]
     pub(crate) fn new(
         pair: watch::Receiver<bool>,
         parent: Option<watch::Receiver<Verdict>>,
     ) -> Self {
         Self { pair, parent }
+    }
+
+    /// The fatal cause already set, read as it stands rather than as a change.
+    pub(crate) fn fatal(&self) -> Option<Fatal> {
+        self.cause(Read::Initial)
     }
 
     fn cause(&self, read: Read) -> Option<Fatal> {
@@ -112,7 +113,7 @@ impl Fence {
     pub(super) fn new(terminal: Option<Terminal>) -> Self {
         let first = terminal
             .as_ref()
-            .and_then(|terminal| terminal.cause(Read::Initial))
+            .and_then(Terminal::fatal)
             .map(Disposition::Fatal);
         Self {
             terminal,

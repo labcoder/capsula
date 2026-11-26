@@ -12,6 +12,8 @@ pub mod credential;
 pub mod dispatch;
 pub mod drawing;
 pub mod engines;
+#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+mod fixture_support;
 pub mod ipc;
 pub mod issues;
 mod jobs;
@@ -20,13 +22,10 @@ pub mod platform;
 mod recall;
 mod relaunch;
 mod runtime;
-#[cfg(any(test, all(windows, debug_assertions, feature = "test-support")))]
-#[cfg_attr(
-    any(test, all(windows, debug_assertions, feature = "test-support")),
-    expect(
-        clippy::print_stderr,
-        reason = "the shared fixture reports cleanup failures during unwind"
-    )
+#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+#[expect(
+    clippy::print_stderr,
+    reason = "the shared fixture reports cleanup failures during unwind"
 )]
 #[path = "../../../tests/support/scratch.rs"]
 mod scratch;
@@ -38,6 +37,8 @@ mod supervise;
 mod tap;
 #[cfg(test)]
 mod test_support;
+#[cfg(all(debug_assertions, feature = "test-support"))]
+pub use startup::parent_bound::fixture::serve_pair_credit_fixture;
 #[cfg_attr(
     not(test),
     expect(
@@ -226,12 +227,14 @@ pub enum ParentBoundError {
 }
 
 /// Starts a brain under its shell's lifetime, on the pair the executable took from descriptors 3
-/// and 4.
+/// and 4: one admission clock from here, the process hardened, the pair adopted and the parent
+/// watched, then admission, the stages and serving on a current-thread runtime. The parent watch
+/// drops last, after that runtime.
 ///
 /// # Errors
-/// This build always returns `Unsupported`, including under Gate identity, and drops `fds`
-/// unread.
-pub fn run_parent_bound(_fds: platform::InheritedFds) -> Result<(), ParentBoundError> {
+/// This build returns `Unsupported`, including under Gate identity, before it reads `fds`, and
+/// its prerequisites refuse after admission everywhere else.
+pub fn run_parent_bound(fds: platform::InheritedFds) -> Result<(), ParentBoundError> {
     use kumochi_protocol::constants::ProductIdentity;
 
     platform::require_mode(platform::Mode::ParentBound)
@@ -239,8 +242,18 @@ pub fn run_parent_bound(_fds: platform::InheritedFds) -> Result<(), ParentBoundE
     if ProductIdentity::ACTIVE == ProductIdentity::GATE {
         return Err(ParentBoundError::Unsupported);
     }
+    let by = tokio::time::Instant::now() + startup::parent_bound::ADMISSION;
     platform::harden().map_err(|_| ParentBoundError::Refused)?;
-    Err(ParentBoundError::Unsupported)
+    let pair = fds.adopt().map_err(|_| ParentBoundError::Refused)?;
+    let shell = platform::ShellProcess::arm_parent().map_err(|_| ParentBoundError::Refused)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| ParentBoundError::Refused)?;
+    let ended = runtime.block_on(startup::parent_bound::run_production(pair, &shell, by));
+    drop(runtime);
+    drop(shell);
+    ended
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

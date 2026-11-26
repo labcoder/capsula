@@ -16,6 +16,23 @@ impl BoundHello {
 #[cfg(target_os = "macos")]
 pub(crate) use macos::pair::BoundHello;
 
+/// Authorization selected by the local transport, not by the greeting's contents. It lives here
+/// because only macOS has a transport that authenticates the greeting itself.
+pub(crate) enum PeerAuth<'a> {
+    Capability {
+        hello: kumochi_protocol::message::Hello,
+        expected: &'a kumochi_protocol::message::Capability,
+    },
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            dead_code,
+            reason = "only an authenticated pair reader can produce this greeting"
+        )
+    )]
+    SessionBound(BoundHello),
+}
+
 /// The inherited pair's descriptors, owned. Only macOS starts a brain on an inherited pair.
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug)]
@@ -23,6 +40,62 @@ pub enum InheritedFds {}
 
 #[cfg(target_os = "macos")]
 pub use macos::entry::InheritedFds;
+
+/// The inherited pair, adopted; only macOS starts a brain on one. Its field is private, so the
+/// shared entry type-checks as reachable while nothing here can make one.
+#[cfg(not(target_os = "macos"))]
+pub(crate) struct InheritedPair(InheritedFds);
+
+#[cfg(not(target_os = "macos"))]
+impl InheritedFds {
+    pub(crate) fn adopt(self) -> Result<InheritedPair, std::convert::Infallible> {
+        match self {}
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl crate::startup::parent_bound::AdmissionPair for InheritedPair {
+    type Keyed = Self;
+    type Greeted = Self;
+
+    fn key(self, _: &[u8; kumochi_protocol::message::CAPABILITY_LEN]) -> Option<Self> {
+        match self.0 {}
+    }
+
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "an async fn here trips unused_async_trait_impl"
+    )]
+    fn admit(
+        keyed: Self,
+        _: &ShellProcess,
+        _: tokio::time::Instant,
+        _: impl FnOnce() -> kumochi_protocol::message::IssueSession,
+    ) -> impl Future<Output = Option<Self>> {
+        async move { match keyed.0 {} }
+    }
+
+    fn cell(greeted: &Self) -> tokio::sync::watch::Receiver<bool> {
+        match greeted.0 {}
+    }
+
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "an async fn here trips unused_async_trait_impl"
+    )]
+    fn serve(
+        greeted: &mut Self,
+        _: &mut crate::runtime::Brain,
+        _: crate::runtime::Terminal,
+        _: &ShellProcess,
+        _: tokio::time::Instant,
+    ) -> impl Future<Output = crate::runtime::Ended> {
+        async move { match greeted.0 {} }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos::pair::InheritedPair;
 
 /// Readies a parent-bound process before admission; only macOS starts one.
 #[cfg(not(target_os = "macos"))]
@@ -33,19 +106,64 @@ pub(crate) fn harden() -> std::io::Result<()> {
 #[cfg(target_os = "macos")]
 pub(crate) use macos::entry::harden;
 
+/// Why custody wasn't taken. It carries no path. Only macOS takes custody, so elsewhere only
+/// `NotAdmitted` is made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "only macOS takes custody")
+)]
+pub(crate) enum CustodyError {
+    #[error("another brain holds the session")]
+    Busy,
+    #[error("this edition or platform has no instance item")]
+    NotAdmitted,
+    #[error("the Application Support folder is unavailable")]
+    Unavailable,
+    #[error("the session folder or lock isn't private")]
+    Untrusted,
+    #[error("the session lock couldn't be opened")]
+    Open(std::io::ErrorKind),
+}
+
+/// What an instance item add found. Only macOS's item, and the tests' fakes, make one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(any(
+        test,
+        all(debug_assertions, feature = "test-support"),
+        target_os = "macos"
+    )),
+    expect(
+        dead_code,
+        reason = "only macOS and the fixtures have an instance item"
+    )
+)]
+pub(crate) enum Added {
+    Fresh,
+    Duplicate,
+}
+
 /// The instance item's session lock and item; only macOS has them.
 #[cfg(not(target_os = "macos"))]
 pub(crate) enum InstanceLock {}
 
 #[cfg(not(target_os = "macos"))]
-#[expect(dead_code, reason = "parent-bound startup is not wired yet")]
 pub(crate) enum InstanceItem {}
 
 #[cfg(not(target_os = "macos"))]
-impl crate::startup::instance::InstanceStore for InstanceItem {
-    type Error = std::convert::Infallible;
+impl InstanceItem {
+    /// Refuses: there's no item to admit.
+    pub(crate) fn admit() -> Result<Self, ()> {
+        Err(())
+    }
+}
 
-    fn add(&self, _: &[u8; 32]) -> Result<crate::startup::instance::Added, Self::Error> {
+#[cfg(not(target_os = "macos"))]
+impl crate::startup::instance::InstanceStore for InstanceItem {
+    type Error = ();
+
+    fn add(&self, _: &[u8; 32]) -> Result<Added, Self::Error> {
         match *self {}
     }
 
@@ -67,16 +185,13 @@ impl crate::startup::instance::InstanceStore for InstanceItem {
 }
 
 #[cfg(not(target_os = "macos"))]
-#[expect(dead_code, reason = "parent-bound startup is not wired yet")]
-pub(crate) fn instance_custody() -> Result<InstanceLock, crate::startup::custody::CustodyError> {
-    Err(crate::startup::custody::CustodyError::NotAdmitted)
+pub(crate) fn instance_custody() -> Result<InstanceLock, CustodyError> {
+    Err(CustodyError::NotAdmitted)
 }
 
 #[cfg(all(test, not(target_os = "macos")))]
-pub(crate) fn instance_custody_at(
-    _: &std::path::Path,
-) -> Result<InstanceLock, crate::startup::custody::CustodyError> {
-    Err(crate::startup::custody::CustodyError::NotAdmitted)
+pub(crate) fn instance_custody_at(_: &std::path::Path) -> Result<InstanceLock, CustodyError> {
+    Err(CustodyError::NotAdmitted)
 }
 
 /// A fresh Support folder for the instance item's native fixtures, and its cleanup; only macOS
@@ -100,7 +215,6 @@ pub(crate) use macos::instance::tests::{
     clean as instance_fixture_clean, support as instance_fixture,
 };
 #[cfg(target_os = "macos")]
-#[expect(unused_imports, reason = "parent-bound startup is not wired yet")]
 pub(crate) use macos::instance::{KeychainItem as InstanceItem, instance_custody};
 
 #[cfg(target_os = "macos")]
