@@ -74,8 +74,8 @@ use recovery::Recovery;
 pub(crate) use store_thread::StoreThread;
 #[cfg(not(test))]
 use store_thread::StoreThread;
-pub(crate) use terminal::Terminal;
-use terminal::{Fatal, Fence};
+use terminal::Fence;
+pub(crate) use terminal::{Fatal, Terminal};
 
 macro_rules! select_connection {
     ($watch_fatal:expr, [$($fatal_arm:tt)*], $($arms:tt)*) => {

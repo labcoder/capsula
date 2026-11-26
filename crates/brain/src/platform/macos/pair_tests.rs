@@ -630,3 +630,44 @@ async fn the_runtime_serves_a_greeted_pair_over_its_own_legs() {
     assert!(matches!(ended, Ended::Quit { .. }), "{ended:?}");
     brain.close().await;
 }
+
+#[tokio::test]
+async fn a_served_pair_ends_as_fatal_once_its_parent_exits() {
+    use kumochi_protocol::message::AudioSession;
+
+    use crate::runtime::{Ended, Fatal, PairStart};
+
+    let scratch = crate::test_support::Scratch::new("pair-parent");
+    let mut brain = crate::test_support::brain(&scratch, "");
+    let (mut pair, mut shell) = bound().await;
+    shell
+        .send(Pipe::Control, &ControlToBrain::Hello(hello()))
+        .await;
+    shell.send(Pipe::Data, &DataToBrain::Hello(hello())).await;
+    pair.control_greeting(by()).await.expect("control greeting");
+    pair.data_greeting(by()).await.expect("data greeting");
+    let (parent, loss) = watch::channel(Verdict::Watching);
+    let (control, data, terminal) = pair.into_legs(loss).expect("greeted");
+    let mut tap = crate::tap::Tap::from_env();
+    let (ended, ()) = bounded(async {
+        tokio::join!(
+            Box::pin(brain.serve_split(
+                control,
+                data,
+                &mut tap,
+                AudioSession::Legacy,
+                None,
+                PairStart::Ordinary,
+                Some(terminal),
+            )),
+            async {
+                tokio::time::sleep(SHORT).await;
+                parent.send_replace(Verdict::Exited);
+            },
+        )
+    })
+    .await;
+    assert_eq!(ended, Ended::Fatal(Fatal::ParentExited));
+    drop(shell);
+    brain.close().await;
+}
