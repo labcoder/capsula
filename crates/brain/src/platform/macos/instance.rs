@@ -3,14 +3,14 @@
 
 use std::ffi::c_void;
 use std::fs::TryLockError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 use kumochi_protocol::constants::{DATA_DIR, ProductIdentity, SESSION_LOCK};
 use kumochi_protocol::message::CAPABILITY_LEN;
 use kumochi_storage::{
-    AcquisitionError, AdmittedLock, InstanceItem, ItemError, Op, ProductFolder, Role,
-    admit_support, application_support_dir, instance_edition, status,
+    AcquisitionError, AdmittedLock, ApplicationSupportError, InstanceItem, ItemError, Op,
+    ProductFolder, Role, admit_support, application_support_dir, instance_edition, status,
 };
 use objc2_core_foundation::{
     CFAllocator, CFAllocatorContext, CFData, CFIndex, CFOptionFlags, CFRetained,
@@ -18,7 +18,7 @@ use objc2_core_foundation::{
 use objc2_security::{
     SecItemAdd, SecItemDelete, SecItemUpdate, errSecAllocate, errSecDuplicateItem,
 };
-use zeroize::Zeroizing;
+use zeroize::Zeroize as _;
 
 use crate::startup::custody::CustodyError;
 use crate::startup::instance::{Added, InstanceStore};
@@ -79,7 +79,16 @@ impl InstanceStore for KeychainItem {
     expect(dead_code, reason = "only a product start resolves the OS folder")
 )]
 pub(crate) fn instance_custody() -> Result<AdmittedLock, CustodyError> {
-    lock_at(&application_support_dir().map_err(|_| CustodyError::Unavailable)?)
+    custody_in(ProductIdentity::ACTIVE, application_support_dir)
+}
+
+/// Refuses another edition before `support` resolves any folder, then locks in that folder.
+fn custody_in(
+    identity: ProductIdentity,
+    support: impl FnOnce() -> Result<PathBuf, ApplicationSupportError>,
+) -> Result<AdmittedLock, CustodyError> {
+    instance_edition(identity).map_err(|_| CustodyError::NotAdmitted)?;
+    lock_at(&support().map_err(|_| CustodyError::Unavailable)?)
 }
 
 /// Refuses another edition first, then admits `support`, holds or privately creates this
@@ -108,13 +117,14 @@ fn refused(error: AcquisitionError) -> CustodyError {
     }
 }
 
-/// A view of a wiped copy of `key`: CoreFoundation releases the view's allocator after the last
+/// A view of a copy of `key`: CoreFoundation releases the view's allocator after the last
 /// reference to the view, and that release wipes and frees the copy.
 fn owned_view(key: &[u8; CAPABILITY_LEN]) -> Result<CFRetained<CFData>, ItemError> {
-    let backing = Box::new(Zeroizing::new(*key));
-    let start = backing.as_ptr();
+    let info = Box::into_raw(Box::new([0_u8; CAPABILITY_LEN]));
+    let start = info.cast::<u8>();
+    // SAFETY: `info` is this function's live, unaliased allocation of exactly CAPABILITY_LEN bytes.
+    unsafe { start.copy_from_nonoverlapping(key.as_ptr(), CAPABILITY_LEN) };
     let len = CFIndex::try_from(CAPABILITY_LEN).expect("the key length fits CFIndex");
-    let info = Box::into_raw(backing);
     let mut context = CFAllocatorContext {
         version: 0,
         info: info.cast(),
@@ -127,10 +137,10 @@ fn owned_view(key: &[u8; CAPABILITY_LEN]) -> Result<CFRetained<CFData>, ItemErro
         preferredSize: None,
     };
     // SAFETY: the context is fully initialized; the allocator copies it and owns `info`, which
-    // its release callback frees once.
+    // its release callback wipes and frees once.
     let Some(owner) = (unsafe { CFAllocator::new(None, &raw mut context) }) else {
-        // SAFETY: no allocator was created, so `info` is still this function's Box.
-        drop(unsafe { Box::from_raw(info) });
+        // SAFETY: no allocator took `info`, so this is its one release.
+        unsafe { release_backing(info.cast()) };
         return Err(ItemError::Failed(errSecAllocate));
     };
     // SAFETY: the bytes live until `owner` is released, and the view retains `owner`.
@@ -140,14 +150,22 @@ fn owned_view(key: &[u8; CAPABILITY_LEN]) -> Result<CFRetained<CFData>, ItemErro
 
 #[cfg(test)]
 thread_local! {
-    /// How many view backings this thread released, for the tests.
+    /// How many view backings this thread released, and how many of those were all zero once
+    /// wiped, for the tests.
     pub(super) static RELEASED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static WIPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Frees the view's backing when its allocator is released: the only owner of that Box.
+/// Wipes and frees the view's backing when its allocator is released: the only owner of that Box.
 unsafe extern "C-unwind" fn release_backing(info: *const c_void) {
-    // SAFETY: `info` is the Box `owned_view` gave this allocator, released exactly once.
-    drop(unsafe { Box::from_raw(info.cast_mut().cast::<Zeroizing<[u8; CAPABILITY_LEN]>>()) });
+    // SAFETY: `info` is the Box `owned_view` made, released exactly once.
+    let mut backing = unsafe { Box::from_raw(info.cast_mut().cast::<[u8; CAPABILITY_LEN]>()) };
+    backing.zeroize();
+    #[cfg(test)]
+    if backing.iter().all(|byte| *byte == 0) {
+        WIPED.set(WIPED.get() + 1);
+    }
+    drop(backing);
     #[cfg(test)]
     RELEASED.set(RELEASED.get() + 1);
 }

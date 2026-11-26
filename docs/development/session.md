@@ -179,9 +179,9 @@ provisions their identifiers.
   copy, update and delete. The update payload holds the value alone. The item is
   `AfterFirstUnlockThisDeviceOnly`. There's no LocalAuthentication and no login-keychain fallback.
 - **Admission per role.** Before any item call, the process's own `com.apple.application-identifier`
-  must be exactly `P.<its role's id>`, with a non-empty prefix and no wildcard, and its
-  `keychain-access-groups` must list `P.<instance group>`. Whether the OS honours the claims is
-  proved only by a signed run.
+  must be exactly `P.<its role's id>` when split at its first dot, with a non-empty prefix and no
+  wildcard, and its `keychain-access-groups` must list `P.<instance group>`. Whether the OS
+  honours the claims is proved only by a signed run.
 - **One protection check.** An existing item (on a duplicate add) and the readback both pass only
   with that exact protection class and no access control. Anything else refuses with no update and
   no delete. The readback must hold exactly 32 bytes, and only the brain compares them, in constant
@@ -193,6 +193,7 @@ provisions their identifiers.
 `startup::instance::InstanceAttempt` owns one publication and its `SessionCustody`, the exclusive
 lock on `session.lock` opened on the admitted product folder's descriptor (created privately, with
 no `logs` folder, when it's missing). Busy custody means no attempt exists, so no item call.
+Another edition refuses `NotAdmitted` before any folder lookup.
 
 ```mermaid
 stateDiagram-v2
