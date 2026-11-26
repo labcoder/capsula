@@ -147,17 +147,25 @@ mod tests {
                 break status;
             }
             if Instant::now() >= by {
-                child.kill().ok();
-                child.wait().ok();
+                let stopped =
+                    child.kill().is_ok() || child.try_wait().expect("the child's status").is_some();
+                assert!(stopped, "couldn't stop the entry child");
+                let reap_by = Instant::now() + Duration::from_secs(2);
+                while child.try_wait().expect("the child's status").is_none() {
+                    assert!(Instant::now() < reap_by, "the entry child didn't exit");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 panic!("the entry child didn't end by its deadline");
             }
             std::thread::sleep(Duration::from_millis(10));
         };
-        let refused = if crate::platform::admits_parent_bound(ProductIdentity::ACTIVE) {
-            76
-        } else {
-            69
-        };
+        // Only the first-light Dev build admits parent-bound; Gate and Release are unsupported.
+        let refused =
+            if cfg!(feature = "first-light") && ProductIdentity::ACTIVE == ProductIdentity::DEV {
+                76
+            } else {
+                69
+            };
         assert_eq!(status.code(), Some(refused));
     }
 }

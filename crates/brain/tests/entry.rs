@@ -93,11 +93,14 @@ fn direct_logging_refuses_before_creating_an_appender() {
 
 #[test]
 fn native_executable_modes_refuse_without_touching_app_data() {
-    use kumochi_brain::platform::admits_parent_bound;
     use kumochi_protocol::constants::ProductIdentity;
 
-    // An admitted build gets as far as its missing descriptors 3 and 4, and no further.
-    let bare = if admits_parent_bound(ProductIdentity::ACTIVE) {
+    // Only the macOS first-light Dev build is admitted, and it gets as far as its missing
+    // descriptors 3 and 4, and no further; Gate, Release and every other build are unsupported.
+    let bare = if std::env::consts::OS == "macos"
+        && cfg!(feature = "first-light")
+        && ProductIdentity::ACTIVE == ProductIdentity::DEV
+    {
         76
     } else {
         69

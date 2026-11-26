@@ -104,10 +104,13 @@ mod tests {
             .env(CLAIM_CHILD, "1")
             .output()
             .expect("run the fixture child");
-        // A build that doesn't admit parent-bound refuses before the claim.
-        let refused = if kumochi_brain::platform::admits_parent_bound(
-            kumochi_protocol::constants::ProductIdentity::ACTIVE,
-        ) {
+        // Only the macOS first-light Dev build admits parent-bound; Gate, Release and every other
+        // build refuse before the claim.
+        let refused = if std::env::consts::OS == "macos"
+            && cfg!(feature = "first-light")
+            && kumochi_protocol::constants::ProductIdentity::ACTIVE
+                == kumochi_protocol::constants::ProductIdentity::DEV
+        {
             76
         } else {
             69
