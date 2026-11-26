@@ -22,14 +22,80 @@ impl InheritedFds {
     }
 }
 
+/// Readies the process before admission: `/` as its working folder, so it holds no folder busy,
+/// and core dumps off for good, so no key in its memory reaches one.
+///
+/// # Errors
+/// Either system call's failure.
+pub(crate) fn harden() -> std::io::Result<()> {
+    use rustix::process::{Resource, Rlimit, chdir, setrlimit};
+
+    chdir("/")?;
+    setrlimit(
+        Resource::Core,
+        Rlimit {
+            current: Some(0),
+            maximum: Some(0),
+        },
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Read as _;
     use std::os::unix::net::UnixStream;
+    use std::path::Path;
+    use std::process::Command;
     use std::time::Duration;
 
-    use super::InheritedFds;
+    use rustix::process::{Resource, getrlimit};
+
+    use super::{InheritedFds, harden};
     use crate::{ParentBoundError, run_parent_bound};
+
+    const HARDEN_CHILD: &str = "KUMOCHI_TEST_HARDEN_CHILD";
+    const HARDENED: i32 = 77;
+
+    /// Run only by the test below, as a child: hardening changes the whole process.
+    #[test]
+    #[ignore = "subprocess fixture that changes its own working folder and core limit"]
+    fn harden_child() {
+        if std::env::var_os(HARDEN_CHILD).is_none() {
+            return;
+        }
+        assert_ne!(
+            std::env::current_dir().expect("working folder"),
+            Path::new("/")
+        );
+        harden().expect("hardened");
+        assert_eq!(
+            std::env::current_dir().expect("working folder"),
+            Path::new("/")
+        );
+        let core = getrlimit(Resource::Core);
+        assert_eq!((core.current, core.maximum), (Some(0), Some(0)));
+        std::process::exit(HARDENED);
+    }
+
+    #[test]
+    fn hardening_moves_to_the_root_and_turns_core_dumps_off_for_good() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this macOS test runs its own fixture child, which inherits no handles"
+        )]
+        let child = Command::new(std::env::current_exe().expect("this test binary"))
+            .args([
+                "--ignored",
+                "--exact",
+                "platform::macos::entry::tests::harden_child",
+            ])
+            .env_clear()
+            .env(HARDEN_CHILD, "1")
+            .output()
+            .expect("run the fixture child");
+        assert_eq!(child.status.code(), Some(HARDENED), "{child:?}");
+    }
 
     #[test]
     fn parent_bound_library_entry_always_refuses() {

@@ -239,6 +239,7 @@ pub fn run_parent_bound(_fds: platform::InheritedFds) -> Result<(), ParentBoundE
     if ProductIdentity::ACTIVE == ProductIdentity::GATE {
         return Err(ParentBoundError::Unsupported);
     }
+    platform::harden().map_err(|_| ParentBoundError::Refused)?;
     Err(ParentBoundError::Unsupported)
 }
 

@@ -35,8 +35,9 @@ owned handles only when both are open, before anything else in the process can o
 descriptor, and refuses with 76 otherwise; it never closes or scans other descriptors, since the
 shell spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`. The library entry, `run_parent_bound`, takes
 those handles as `InheritedFds` and repeats the mode and Gate checks before it reads them, so a
-refused call drops them unread and the shell sees EOF. It returns a typed `ParentBoundError`,
-and only the executable maps it to a code:
+refused call drops them unread and the shell sees EOF. Past those checks it first hardens the
+process: `/` as the working folder and core dumps off, soft and hard limits both 0. It returns a
+typed `ParentBoundError`, and only the executable maps it to a code:
 
 | Result | Exit |
 |---|---|
@@ -44,7 +45,7 @@ and only the executable maps it to a code:
 | `Unsupported`: the mode, Gate identity or missing prerequisites | 69 |
 | `Incomplete`: a settlement stage short of confirmed | 70 |
 | `Busy`: another session holds the instance | 75, `BRAIN_EXIT_BUSY`, shared with the shell |
-| `Refused`: the descriptors, the parent, the pair, the greeting or the commit claim | 76 |
+| `Refused`: the descriptors, hardening, the parent, the pair, the greeting or the commit claim | 76 |
 
 Detached keeps 75 for a busy profile. Today every ParentBound start still exits 69 at the support
 check.
