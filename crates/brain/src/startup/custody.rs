@@ -13,10 +13,6 @@ pub(crate) enum CustodyError {
     #[error("this edition or platform has no instance item")]
     NotAdmitted,
     #[error("the Application Support folder is unavailable")]
-    #[cfg_attr(
-        test,
-        expect(dead_code, reason = "only a product start resolves the OS folder")
-    )]
     Unavailable,
     #[error("the session folder or lock isn't private")]
     Untrusted,
@@ -40,19 +36,13 @@ impl fmt::Debug for SessionCustody {
 impl SessionCustody {
     /// Locks the session leaf in the OS-resolved Support folder's product folder, creating only
     /// that folder when it's missing. Busy refuses, so no item call follows.
-    #[cfg_attr(
-        test,
-        expect(dead_code, reason = "only a product start resolves the OS folder")
-    )]
     pub(in crate::startup) fn bootstrap() -> Result<Self, CustodyError> {
         platform::instance_custody().map(Self::held)
     }
 
     /// `bootstrap` under a test's own Support folder.
     #[cfg(test)]
-    pub(in crate::startup) fn bootstrap_at(
-        support: &std::path::Path,
-    ) -> Result<Self, CustodyError> {
+    pub(crate) fn bootstrap_at(support: &std::path::Path) -> Result<Self, CustodyError> {
         platform::instance_custody_at(support).map(Self::held)
     }
 
@@ -73,6 +63,3 @@ impl SessionCustody {
         }
     }
 }
-
-#[cfg(test)]
-pub(in crate::startup) mod tests;

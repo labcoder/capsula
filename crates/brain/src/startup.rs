@@ -19,10 +19,7 @@ use crate::{
     BrainError, STARTUP_LOG_TARGET, StartMode, accounts, credential, engine, serve, start_screen,
 };
 use instance::InstanceAttempt;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "parent-bound startup is not wired yet")
-)]
+#[expect(dead_code, reason = "parent-bound startup is not wired yet")]
 pub(crate) mod custody;
 #[cfg_attr(
     not(test),
