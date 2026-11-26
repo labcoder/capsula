@@ -14,11 +14,11 @@ use kumochi_protocol::constants::CONFIG_FILE;
 
 use super::private::DATALESS;
 use super::protected::{ObjectKind, inspect_private};
-use super::shell_files::{
-    AcquisitionError, DIRECTORY_FLAGS, Directories, admit_support, basename, entry_stat, named,
-    open_at,
-};
+use super::shell_files::{Directories, admit_support};
 use crate::Untrusted;
+use crate::platform::unix::{
+    AcquisitionError, DIRECTORY_FLAGS, basename, entry_stat, named, open_at,
+};
 
 const READ_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;

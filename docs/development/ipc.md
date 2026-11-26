@@ -399,12 +399,14 @@ stream with `SO_NOSIGPIPE` set and a stable identity: two `fstat` samples that a
 nonzero inode, because Darwin numbers a socket's inode lazily from zero. The two identities must
 differ, so one socket can't pose as both legs. Darwin doesn't answer `SO_ACCEPTCONN` for a Unix
 socket, so a listener is refused because it has no peer, and a TCP stream because its peer isn't
-`AF_UNIX`. `adopt` then sets close-on-exec and non-blocking. `try_ready` writes the one READY
-byte, `SESSION_READY` (`R`, 0x52), on the control leg without waiting. It goes out once the
-instance item is published and before the shell's first handshake message, and the shell reads
-the item only after it; nothing writes it yet. `respond` takes that checked pair
-and a session state the caller made before its first await, so the caller can wipe its copy of
-the secret. It hands both ends to tokio and runs the responder handshake by one deadline: control
+`AF_UNIX`. `adopt` then sets close-on-exec and non-blocking. Inside the runtime, `keyed` hands
+both ends to tokio and keys the responder with the published secret, so the caller can wipe its
+copy before READY. `ready` writes the one READY byte, `SESSION_READY` (`R`, 0x52), on the control
+leg. It waits for room against the parent's loss and the deadline, then checks both again with no
+await before each write, so a loss seen first means no byte goes out, and it stops at the first
+byte written. It goes out once the instance item is published and before the shell's first
+handshake message, and the shell reads the item only after it. `respond` takes that registered
+pair and runs the responder handshake by one deadline: control
 init and Finished, then data init and Finished, then Bind. It writes `BindAck` before it
 returns an `AuthenticatedPair`, and it refuses a proof that doesn't name both of the pair's own
 openers. Each greeting is read once, control first, through that leg's record reader. Each of
@@ -424,7 +426,20 @@ greeting. A third hook, `before_reply`, runs right before Welcome or BuildMismat
 ready write before its timer. The pipes check nothing in either hook, so Detached greets as
 before. `mismatch_notice` runs before the BuildMismatch reply, so the pipes log a mismatch even
 when the reply can't be written. `PairLegs` logs nothing and never writes its tap, since
-nothing before the commit may.
+nothing before the commit may. It writes through the pair's own `write_control`, so a write
+before the control greeting refuses the pair.
+
+`admit` runs READY by the attempt's deadline, then the handshake and then the whole greeting,
+each by that deadline capped at the 5-second handshake phase. The handshake and the greeting are
+each raced against the parent's loss as one unit, `read_text_metrics` included, and fenced again when they
+finish. A loss drops the unit and refuses at once instead of at the deadline. A refusal drops
+the pair, which closes both legs. The parent-bound root's own `admit`, not wired into the entry
+yet, runs before it, once per root. It fences and checks the clock, takes custody, where Busy
+makes no item call, and fences again; then the instance attempt, placed in
+the root before the first item call so settlement always finds it, then a fresh `OwnedKey`. It
+publishes the key, keys the pair, and drops the key, which wipes it before it is recorded. Then
+it reserves Welcome's session from the root's own epochs, which the Brain later continues. After
+the greeting it fences, checks the clock and takes the commit claim, with no await between them.
 
 The shell's side lives in `shell-core`'s `platform/macos/leg.rs` and `connect_pair`, also
 dormant: nothing calls them, and the group secret is a parameter for now. `initiate` runs the

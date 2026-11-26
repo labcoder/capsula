@@ -2,8 +2,8 @@
 //! drawing only from an offered tool (D13-H2).
 
 use kumochi_protocol::message::{
-    Action, AssistantName, ControlToShell, Effort, ErrorKey, ModelChoice, ModelInfo, ModelName,
-    ModelSlug, Phase, RunId, ThreadId, UserError,
+    Action, AssistantName, ConnectionKind, ControlToShell, Effort, ErrorKey, ModelChoice,
+    ModelInfo, ModelName, ModelSlug, Phase, RunId, ThreadId, UserError,
 };
 
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, StoreOp, T, delta, draw_call};
@@ -366,7 +366,7 @@ fn the_grant_checks_the_runs_connection_itself() {
     assert!(started(
         &core.handle(built(Some("m"), Vec::new())).expect("current")
     ));
-    core.availability = Availability::Ready(Ready {
+    core.availability[ConnectionKind::ChatGpt] = Availability::Ready(Ready {
         connection: ConnectionTag(8),
         models: vec![info("m")],
         trusted_draw: false,
@@ -1408,7 +1408,7 @@ fn a_conflicting_cutoff_refuses_the_sign_in_until_a_consistent_report() {
     );
     assert_eq!(core.handle(ready(7, &["m"])), Ok(Vec::new()));
     assert_eq!(
-        core.availability,
+        core.availability[ConnectionKind::ChatGpt],
         Availability::Unavailable(sign_in()),
         "a refresh is no evidence"
     );
@@ -1445,12 +1445,18 @@ fn a_conflicting_cutoff_refuses_the_sign_in_until_a_consistent_report() {
     assert!(!started(&fenced), "the next turn stays fenced");
     assert_eq!(end_of(&fenced, next), Some(RunEnd::Failed(Failure::Engine)));
     assert_eq!(core.handle(recovered(7, cut)), Ok(Vec::new()));
-    assert!(matches!(core.availability, Availability::Ready(_)));
+    assert!(matches!(
+        core.availability[ConnectionKind::ChatGpt],
+        Availability::Ready(_)
+    ));
 
     let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
     assert_eq!(core.handle(recovered(8, cut)), Ok(Vec::new()));
     assert_eq!(core.handle(ready(8, &["m"])), Ok(Vec::new()));
-    assert_eq!(core.availability, Availability::Unavailable(sign_in()));
+    assert_eq!(
+        core.availability[ConnectionKind::ChatGpt],
+        Availability::Unavailable(sign_in())
+    );
 }
 
 /// A first cutoff for the sign-in a run already answers on ends that run, read without it.
@@ -1510,7 +1516,7 @@ fn a_late_report_for_a_retired_sign_in_changes_nothing() {
         core.handle(report).expect("never stale");
     }
     assert_eq!(
-        core.availability,
+        core.availability[ConnectionKind::ChatGpt],
         Availability::Unavailable(sign_in()),
         "a refusal of another sign-in never lifts this one's"
     );
