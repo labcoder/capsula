@@ -2,8 +2,10 @@
 
 use std::fmt;
 use std::io;
+#[cfg(any(not(target_os = "macos"), test))]
 use std::sync::Arc;
 
+#[cfg(any(not(target_os = "macos"), test))]
 use rustls::pki_types::CertificateDer;
 use tokio_rustls::TlsConnector;
 
@@ -52,9 +54,6 @@ pub enum TrustRootsError {
     /// No root was usable, so no server could be verified.
     #[error("no usable root certificate")]
     Empty,
-    /// Some of the Keychain's trust settings couldn't be read, so a denial in them could be missed.
-    #[error("trust settings unreadable")]
-    Unreadable,
     /// `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, which would replace the Keychain's roots.
     #[error("trust store overridden by the environment")]
     Overridden,
@@ -74,10 +73,20 @@ pub(crate) enum TrustDiagnostics {
     Quiet,
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn native_client_tls(
     diagnostics: TrustDiagnostics,
 ) -> Result<rustls::ClientConfig, NativeTlsError> {
     client_tls_from_roots(super::trust_roots(), diagnostics)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn native_client_tls(
+    _: TrustDiagnostics,
+) -> Result<rustls::ClientConfig, NativeTlsError> {
+    reject_mac_overrides(|name| std::env::var_os(name).is_some())
+        .map_err(|_| NativeTlsError::TrustStoreUnavailable)?;
+    mac_tls::config().map_err(|_| NativeTlsError::Configuration)
 }
 
 #[cfg(target_os = "macos")]
@@ -112,6 +121,7 @@ fn http_builder(tls: rustls::ClientConfig) -> reqwest::ClientBuilder {
     builder
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 pub(crate) fn client_tls_from_roots(
     roots: Result<TrustRoots, TrustRootsError>,
     diagnostics: TrustDiagnostics,
@@ -150,62 +160,27 @@ pub(crate) fn client_tls_from_roots(
     .with_no_client_auth())
 }
 
-/// The variables that make rustls-native-certs read their files instead of the OS store.
-#[cfg(any(not(windows), test))]
-const STORE_OVERRIDES: [&str; 2] = ["SSL_CERT_FILE", "SSL_CERT_DIR"];
-
-/// Loads the roots the OS trusts for TLS: on macOS those the user, admin and system Keychain
-/// trust settings mark as roots, on Linux the system bundle, or only the files `SSL_CERT_FILE`
-/// and `SSL_CERT_DIR` name when either is set. Nothing is fetched.
-///
-/// # Errors
-/// Returns `Empty` when no root loads. On macOS, also `Overridden` when either variable is set
-/// and `Unreadable` when any trust setting couldn't be read.
-#[cfg(not(windows))]
-pub fn trust_roots() -> Result<TrustRoots, TrustRootsError> {
-    let store = if cfg!(target_os = "macos") {
-        Store::Keychain
-    } else {
-        Store::Files
-    };
-    roots_in(
-        store,
-        |name| std::env::var_os(name).is_some(),
-        || {
-            let loaded = rustls_native_certs::load_native_certs();
-            (loaded.certs, loaded.errors.len())
-        },
-    )
-}
-
-/// Where rustls-native-certs reads roots on this OS.
-#[cfg(any(not(windows), test))]
-#[derive(Clone, Copy)]
-enum Store {
-    /// macOS's Keychain trust settings: a variable that would replace them, or any entry that
-    /// couldn't be read and might have been a denial, refuses the whole store.
-    Keychain,
-    /// Linux's bundle files: an entry that couldn't be read is left out and counted.
-    Files,
-}
-
-/// Applies `store`'s policy to what `load` returns, the roots and how many entries failed;
-/// `set` says whether an environment variable is set.
-#[cfg(any(not(windows), test))]
-fn roots_in(
-    store: Store,
-    set: impl Fn(&str) -> bool,
-    load: impl FnOnce() -> (Vec<CertificateDer<'static>>, usize),
-) -> Result<TrustRoots, TrustRootsError> {
-    // shortcut: Keychain anchors are read less strictly than SecTrust checks them (Unspecified and non-SSL entries count as roots; hostname and app limits are ignored), until OSC-1136 verifies through SecTrust
-    let keychain = matches!(store, Store::Keychain);
-    if keychain && STORE_OVERRIDES.into_iter().any(set) {
+#[cfg(any(target_os = "macos", test))]
+fn reject_mac_overrides(set: impl Fn(&str) -> bool) -> Result<(), TrustRootsError> {
+    if ["SSL_CERT_FILE", "SSL_CERT_DIR"].into_iter().any(set) {
         return Err(TrustRootsError::Overridden);
     }
-    let (certs, failed) = load();
-    if keychain && failed > 0 {
-        return Err(TrustRootsError::Unreadable);
-    }
+    Ok(())
+}
+
+/// Loads system bundle roots or the files named by `SSL_CERT_FILE` and `SSL_CERT_DIR`.
+/// Nothing is fetched.
+///
+/// # Errors
+/// Returns `Empty` when no root loads.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn trust_roots() -> Result<TrustRoots, TrustRootsError> {
+    let loaded = rustls_native_certs::load_native_certs();
+    roots_in(&loaded.certs, loaded.errors.len())
+}
+
+#[cfg(any(not(any(windows, target_os = "macos")), test))]
+fn roots_in(certs: &[CertificateDer<'_>], failed: usize) -> Result<TrustRoots, TrustRootsError> {
     if certs.is_empty() {
         return Err(TrustRootsError::Empty);
     }
@@ -220,13 +195,9 @@ fn roots_in(
 mod tests {
     use rustls::pki_types::CertificateDer;
 
-    use super::{Store, TrustRoots, TrustRootsError, roots_in};
+    use super::{TrustRoots, TrustRootsError, reject_mac_overrides, roots_in};
 
     const DER: [u8; 5] = [0x30, 0x03, 0x02, 0x01, 0x07];
-
-    fn one_root(failed: usize) -> impl FnOnce() -> (Vec<CertificateDer<'static>>, usize) {
-        move || (vec![CertificateDer::from(DER.to_vec())], failed)
-    }
 
     fn kept(failed: usize) -> TrustRoots {
         TrustRoots {
@@ -238,51 +209,25 @@ mod tests {
 
     #[test]
     fn a_store_that_loads_no_root_is_empty() {
-        for store in [Store::Keychain, Store::Files] {
-            assert_eq!(
-                roots_in(store, |_| false, || (Vec::new(), 0)),
-                Err(TrustRootsError::Empty)
-            );
-        }
-        assert_eq!(
-            roots_in(Store::Files, |_| false, || (Vec::new(), 3)),
-            Err(TrustRootsError::Empty)
-        );
+        assert_eq!(roots_in(&[], 0), Err(TrustRootsError::Empty));
+        assert_eq!(roots_in(&[], 3), Err(TrustRootsError::Empty));
     }
 
     #[test]
     fn bundle_files_keep_roots_whole_and_count_failed_entries() {
-        assert_eq!(roots_in(Store::Files, |_| false, one_root(2)), Ok(kept(2)));
-        assert_eq!(roots_in(Store::Files, |_| true, one_root(0)), Ok(kept(0)));
-    }
-
-    #[test]
-    fn the_keychain_refuses_any_unreadable_entry() {
-        assert_eq!(
-            roots_in(Store::Keychain, |_| false, one_root(1)),
-            Err(TrustRootsError::Unreadable)
-        );
-        assert_eq!(
-            roots_in(Store::Keychain, |_| false, one_root(0)),
-            Ok(kept(0))
-        );
+        let roots = [CertificateDer::from(DER.to_vec())];
+        assert_eq!(roots_in(&roots, 2), Ok(kept(2)));
+        assert_eq!(roots_in(&roots, 0), Ok(kept(0)));
     }
 
     #[test]
     fn either_variable_refuses_the_keychain_before_it_is_read() {
         for variable in ["SSL_CERT_FILE", "SSL_CERT_DIR"] {
             assert_eq!(
-                roots_in(
-                    Store::Keychain,
-                    |name| name == variable,
-                    || panic!("the Keychain was read")
-                ),
+                reject_mac_overrides(|name| name == variable),
                 Err(TrustRootsError::Overridden)
             );
         }
-        assert_eq!(
-            roots_in(Store::Keychain, |name| name == "SSL_CERT", one_root(0)),
-            Ok(kept(0))
-        );
+        assert_eq!(reject_mac_overrides(|name| name == "SSL_CERT"), Ok(()));
     }
 }

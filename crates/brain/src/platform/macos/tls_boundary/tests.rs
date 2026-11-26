@@ -151,7 +151,7 @@ async fn a_worker_cannot_dispatch_dns_after_its_owner_stops() {
 async fn a_real_reqwest_connector_requires_scope_and_runs_off_the_caller() {
     let _shared = SHARED_BOUNDARY.lock().await;
     let (resolved, wait_resolve) = mpsc::channel();
-    let tls = trust::config(Vec::new()).expect("offline fixture config");
+    let tls = trust::config().expect("offline fixture config");
     let client = super::super::http_builder(tls)
         .no_proxy()
         .dns_resolver(Arc::new(NoDns(resolved)))
@@ -205,15 +205,9 @@ async fn a_successful_reqwest_connection_cannot_be_reused_without_authority() {
 
     let _shared = SHARED_BOUNDARY.lock().await;
     let (root, server) = fixture(Peer::Valid, &rustls::version::TLS13);
-    let tls = crate::platform::client_tls_from_roots(
-        Ok(crate::platform::TrustRoots {
-            certificates: vec![root.to_vec()],
-            skipped: 0,
-            unreadable: 0,
-        }),
-        crate::platform::TrustDiagnostics::Quiet,
-    )
-    .expect("interim rustls verifier with fixture roots");
+    let anchor =
+        security_framework::certificate::SecCertificate::from_der(&root).expect("fixture root");
+    let tls = trust::fixture_config(vec![anchor], None).expect("offline SecTrust verifier");
     let client = super::super::http_builder(tls)
         .no_proxy()
         .timeout(TEST_BOUND)
@@ -282,9 +276,7 @@ async fn either_original_cut_stops_the_direct_worker_without_polling_its_answer(
         let resumed = Arc::new(AtomicBool::new(false));
         let did_dial = Arc::clone(&resumed);
         let handshake = connect::handshake(
-            tokio_rustls::TlsConnector::from(Arc::new(
-                trust::config(Vec::new()).expect("offline verifier"),
-            )),
+            tokio_rustls::TlsConnector::from(Arc::new(trust::config().expect("offline verifier"))),
             ServerName::try_from("localhost").expect("fixture host"),
             || {
                 Ok(async move {
@@ -343,7 +335,7 @@ async fn a_stalled_check_times_out_but_keeps_the_only_native_slot() {
     let connection = tokio::spawn(async move {
         worker
             .connect(request, deadline, async move {
-                evaluate(|| {
+                evaluate(|_| {
                     entered.send(()).expect("report native entry");
                     wait_release.recv().expect("release the native call");
                 })
@@ -366,14 +358,49 @@ async fn a_stalled_check_times_out_but_keeps_the_only_native_slot() {
         Err(Refusal::Deadline)
     );
 
-    assert_eq!(
-        owner
-            .connect(Arc::new(Stop::default()), by(), async {
-                panic!("the next connection must not start or queue");
-            })
-            .await,
-        Err::<(), _>(Refusal::Busy)
-    );
+    for cancel in [true, false] {
+        let stop = Arc::new(Stop::default());
+        let (waiting, waiting_to_check) = oneshot::channel();
+        let (checked, refused) = oneshot::channel();
+        let by = if cancel {
+            by()
+        } else {
+            Instant::now() + Duration::from_millis(500)
+        };
+        let waiting = owner.connect(Arc::clone(&stop), by, async move {
+            waiting.send(()).expect("worker starts a second handshake");
+            let result =
+                evaluate(|_| panic!("the occupied native slot cannot admit another check"));
+            checked
+                .send(result)
+                .expect("report the waiting verifier's refusal");
+        });
+        let mut waiting = std::pin::pin!(waiting);
+        assert!(
+            waiting
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        tokio::time::timeout(TEST_BOUND, waiting_to_check)
+            .await
+            .expect("worker starts the wait")
+            .expect("waiting");
+        let expected = if cancel {
+            stop.close();
+            Refusal::Cancelled
+        } else {
+            Refusal::Deadline
+        };
+        assert_eq!(
+            tokio::time::timeout(TEST_BOUND, refused)
+                .await
+                .expect("worker stops without its caller")
+                .expect("worker reports"),
+            Err::<(), _>(expected)
+        );
+        assert_eq!(waiting.await, Err(expected));
+    }
 
     release.send(()).expect("release the native call");
     tokio::time::timeout(TEST_BOUND, async {
@@ -385,10 +412,56 @@ async fn a_stalled_check_times_out_but_keeps_the_only_native_slot() {
     .expect("the slot returns only once the native call finishes");
     assert_eq!(
         owner
-            .connect(Arc::new(Stop::default()), by(), async { evaluate(|| 7) })
+            .connect(Arc::new(Stop::default()), by(), async { evaluate(|_| 7) })
             .await,
         Ok(Ok(7))
     );
+}
+
+#[tokio::test]
+async fn overlapping_native_checks_wait_and_both_finish_without_retry() {
+    let owner = Arc::new(Executor::new().expect("executor"));
+    let (entered, wait_entered) = oneshot::channel();
+    let (release, wait_release) = mpsc::channel();
+    let worker = Arc::clone(&owner);
+    let first = tokio::spawn(async move {
+        worker
+            .connect(Arc::new(Stop::default()), by(), async move {
+                evaluate(|_| {
+                    entered.send(()).expect("first entered native evaluation");
+                    wait_release
+                        .recv_timeout(TEST_BOUND)
+                        .expect("release the first check");
+                    1
+                })
+            })
+            .await
+    });
+    tokio::time::timeout(TEST_BOUND, wait_entered)
+        .await
+        .expect("first begins")
+        .expect("native slot is occupied");
+    let (waiting, wait_waiting) = oneshot::channel();
+    let mut second = tokio::spawn(async move {
+        owner
+            .connect(Arc::new(Stop::default()), by(), async {
+                waiting
+                    .send(())
+                    .expect("second handshake reached native admission");
+                evaluate(|_| 2)
+            })
+            .await
+    });
+    tokio::time::timeout(TEST_BOUND, wait_waiting)
+        .await
+        .expect("second begins")
+        .expect("both workers are active");
+    tokio::time::timeout(Duration::from_millis(50), &mut second)
+        .await
+        .expect_err("the second check waits while the first owns the slot");
+    release.send(()).expect("first still owns its slot");
+    assert_eq!(first.await.expect("first completes"), Ok(Ok(1)));
+    assert_eq!(second.await.expect("second completes"), Ok(Ok(2)));
 }
 
 #[tokio::test]
@@ -401,7 +474,7 @@ async fn cancelling_an_unpolled_answer_stops_new_native_work() {
     let mut connection = std::pin::pin!(owner.connect(Arc::clone(&cancel), by(), async move {
         entered.send(()).expect("the attempt was dispatched");
         gate.recv().expect("release the first poll");
-        let result = evaluate(|| panic!("a revoked attempt cannot reach the verifier"));
+        let result = evaluate(|_| panic!("a revoked attempt cannot reach the verifier"));
         checked.send(result).expect("report refusal");
     }));
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
@@ -439,7 +512,7 @@ async fn an_already_ready_answer_does_not_extend_the_callers_deadline() {
     let mut connection =
         std::pin::pin!(owner.connect(Arc::new(Stop::default()), deadline, async {
             gate.await.expect("release the answer after the first poll");
-            evaluate(|| 7)
+            evaluate(|_| 7)
         }));
     let wake = Arc::new(AnswerWake::default());
     let waker = Waker::from(Arc::clone(&wake));
@@ -562,7 +635,7 @@ async fn a_spent_deadline_and_missing_worker_refuse_before_evaluation() {
         Err::<(), _>(Refusal::Deadline)
     );
     assert_eq!(
-        evaluate(|| panic!("there is no worker authority on the brain")),
+        evaluate(|_| panic!("there is no worker authority on the brain")),
         Err::<(), _>(Refusal::Unavailable)
     );
     let stopped = Arc::new(Stop::default());
@@ -727,7 +800,7 @@ async fn handshake(
             security_framework::certificate::SecCertificate::from_der(&root).expect("fixture root"),
         ]
     };
-    let config = trust::config(anchors).expect("offline verifier");
+    let config = trust::fixture_config(anchors, None).expect("offline verifier");
     let (client, peer) = tokio::io::duplex(16 * 1024);
     let peer = tokio::spawn(async move {
         tokio_rustls::TlsAcceptor::from(Arc::new(server))
