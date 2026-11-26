@@ -8,13 +8,14 @@ use std::time::Duration;
 
 use kumochi_protocol::Secret;
 use serde::Deserialize;
-use tokio::time::{Instant, sleep_until, timeout_at};
+use tokio::time::{Instant, sleep_until};
 use zeroize::Zeroizing;
 
 use crate::connections::http_client::{
     Endpoint, Http, HttpError, ISSUER, IssuerUrl, MAX_BODY_BYTES, Request,
 };
 use crate::connections::records::{Origin, Revocable};
+use crate::platform::connect_timeout_at;
 
 /// Local policy: one run's network budget, covering discovery, every request and the backoff.
 pub const BUDGET: Duration = Duration::from_secs(10);
@@ -57,7 +58,7 @@ async fn endpoint(http: &impl Http, deadline: Instant) -> Option<IssuerUrl> {
         endpoint: Endpoint::Discovery,
         fields: Vec::new(),
     };
-    let response = timeout_at(deadline, http.execute(request))
+    let response = connect_timeout_at(deadline, http.execute(request))
         .await
         .ok()?
         .ok()?;
@@ -106,7 +107,7 @@ async fn revoke_one(
             endpoint: Endpoint::Revocation(url.clone()),
             fields,
         };
-        match timeout_at(deadline, http.execute(request)).await {
+        match connect_timeout_at(deadline, http.execute(request)).await {
             Ok(Ok(response)) if response.status >= 500 => {}
             Ok(Ok(response)) => return response.status == 200 && response.body.expose().is_empty(),
             Ok(Err(HttpError::Timeout | HttpError::Transport | HttpError::Connect)) => {}

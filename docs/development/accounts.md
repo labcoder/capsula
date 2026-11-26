@@ -316,16 +316,16 @@ can still inject their own roots.
 The real-store test runs in the normal Windows test suite: it reads bounded public certificates
 only, writes nothing, and exercises the FFI ownership path rather than leaving it ignored.
 
-The staged macOS TLS boundary prestarts bounded handshake workers and a separate I/O reactor.
-Neither the brain runtime nor the reactor polls the native verifier. It checks the leaf name
-independently, then applies SecTrust's SSL server policy, including native date and chain rules.
-The caller can refuse a connection without waiting for the OS, and workers also observe the
-deadline and cancellation while the caller's answer is unpolled. Owner drop does not wait;
-an admitted job keeps its reactor alive until it exits. If the one in-flight SecTrust
-call stays stuck past the deadline, the next connection is refused without queuing; the slot
-returns only when the call does. The staged tests use in-memory TLS, synthetic certificates and
-no online lookups. Product clients still use the interim policy above. Activation and the
-revocation policy are separate work.
+On macOS, the account and download clients and the direct model connectors open connections
+on four bounded handshake workers with a separate I/O reactor. Workers and callers enforce
+the earliest enclosing request deadline, capped at ten seconds for connection setup, and
+observe cancellation even while the answer is unpolled. A DNS lookup keeps its worker until
+the resolver returns; a stopped owner can't admit a new lookup but can't retract one already
+admitted. Mac reqwest clients disable the idle pool and retries so a competing pooled
+connection or retry cannot outlive the request's
+authority. The clients still use the interim verifier above. The staged SecTrust verifier is
+used only by offline tests with synthetic certificates; no macOS release ships before its
+production activation.
 
 The client enforces HTTPS, refuses redirects, disables proxy discovery, and exposes neither
 the raw reqwest client nor raw transport errors. Discovery and validated JWKS requests contain

@@ -72,14 +72,15 @@ impl Transport {
         fence: &Fence,
         key: &Secret<AnthropicKey>,
     ) -> Result<Vec<CatalogModel>, CheckError> {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(15),
+        let by = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        tokio::time::timeout_at(
+            by,
             fence.while_open(async {
                 if !self.catalog.reserve() {
                     return Err(CheckError::Unconfirmed);
                 }
                 let connect = Fenced(self.connector.clone(), fence.clone());
-                models::read_fenced(&connect, key).await
+                models::read_fenced(&connect, key, by).await
             }),
         )
         .await

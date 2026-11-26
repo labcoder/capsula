@@ -4,13 +4,13 @@ use std::sync::{
     atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 
-use tokio::sync::Notify;
 use tokio::time::{Instant, timeout_at};
 
 use crate::config::tuning::GitHubTuning;
 use crate::connections::clock::Clock;
 use crate::connections::github::GitHubEndpoint;
 use crate::connections::http_client::{Endpoint, Http, HttpError, Request, Response, SharedHttp};
+use crate::platform::{ConnectCut, connect_owned_scope};
 
 #[cfg(test)]
 #[path = "transport_tests.rs"]
@@ -26,7 +26,7 @@ pub(in crate::runtime) struct Control {
     state: AtomicU8,
     requests: AtomicUsize,
     server_date: AtomicU64,
-    stopped: Notify,
+    stopped: Arc<ConnectCut>,
 }
 
 impl Control {
@@ -39,7 +39,7 @@ impl Control {
             state: AtomicU8::new(0),
             requests: AtomicUsize::new(0),
             server_date: AtomicU64::new(0),
-            stopped: Notify::new(),
+            stopped: Arc::default(),
         })
     }
 
@@ -48,10 +48,11 @@ impl Control {
     }
 
     pub(in crate::runtime) fn cancel(&self) -> bool {
-        let before = self.state.fetch_or(STOPPED, Ordering::AcqRel);
-        self.scope.cancel();
-        self.stopped.notify_waiters();
-        before & HANDED != 0
+        self.stopped.close_with(|| {
+            let before = self.state.fetch_or(STOPPED, Ordering::AcqRel);
+            self.scope.cancel();
+            before & HANDED != 0
+        })
     }
 
     pub(super) fn scope(&self) -> &crate::issues::WriteScope {
@@ -145,9 +146,6 @@ impl Http for BoundedHttp {
             ) => false,
             _ => return Err(HttpError::Request),
         };
-        let stopped = self.control.stopped.notified();
-        tokio::pin!(stopped);
-        let _enabled = stopped.as_mut().enable();
         if self.control.cancelled() {
             return Err(HttpError::Request);
         }
@@ -188,10 +186,12 @@ impl Http for BoundedHttp {
         }
         let response = tokio::select! {
             biased;
-            () = &mut stopped => {
+            () = self.control.stopped.until_closed() => {
                 return Err(if post { HttpError::Timeout } else { HttpError::Request });
             }
-            result = timeout_at(self.control.deadline(), self.inner.execute(request)) => {
+            result = timeout_at(self.control.deadline(), connect_owned_scope(
+                Some(self.control.deadline()), &self.control.stopped, self.inner.execute(request),
+            )) => {
                 let Ok(response) = result else {
                     self.control.cancel();
                     return Err(HttpError::Timeout);
