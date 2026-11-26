@@ -21,8 +21,6 @@ fn retirement(wait: Duration) -> Duration {
 
 const SPAWN: u8 = 1;
 const QUIT: u8 = 1 << 1;
-/// Set when custody ended unconfirmed: no claim succeeds again, whatever a late reap does.
-const STUCK: u8 = 1 << 2;
 
 /// Orders Quit against the spawn claim. Both operations act on this one word, so they're totally
 /// ordered: a claim that lands first owns whatever its spawn produced, and after Quit no claim
@@ -36,18 +34,13 @@ impl SpawnWord {
         self.0.fetch_or(QUIT, Ordering::SeqCst);
     }
 
-    /// Takes the one spawn permit, only while neither Quit, another claim nor stuck custody is set.
+    /// Takes the one spawn permit, only while neither Quit nor another claim is set.
     pub(crate) fn claim(&self) -> bool {
         self.0
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |word| {
-                (word & (SPAWN | QUIT | STUCK) == 0).then_some(word | SPAWN)
+                (word & (SPAWN | QUIT) == 0).then_some(word | SPAWN)
             })
             .is_ok()
-    }
-
-    /// Refuses every later claim for good. Never cleared, so a reap that comes after can't undo it.
-    fn hold_for_good(&self) {
-        self.0.fetch_or(STUCK, Ordering::SeqCst);
     }
 
     /// Gives the permit back: the spawn produced no child, or the child was reaped.
@@ -182,8 +175,9 @@ impl Terminal {
         self.ending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Ends custody once, as `settled`: under the lock, a reap frees the claim and `Unsettled`
-    /// latches the word for good, and `report` is sent when given; then the hook runs. Returns
+    /// Ends custody once, as `settled`: under the lock, only a reap frees the claim, so after
+    /// `Unsettled` or `Lost` it stays taken for good, whatever a late reap does; `report` is
+    /// sent when given; then the hook runs. Returns
     /// how custody ended, and whether this call ended it. A call that comes after the end
     /// changes nothing and returns the winner.
     fn end(
@@ -197,10 +191,8 @@ impl Terminal {
             return (winner, false);
         }
         ending.winner = Some(settled);
-        match settled {
-            Settled::Reaped(_) => word.release(),
-            Settled::Unsettled => word.hold_for_good(),
-            Settled::Lost => {}
+        if matches!(settled, Settled::Reaped(_)) {
+            word.release();
         }
         if let Some(report) = report {
             // A link that's gone doesn't end custody.
@@ -288,7 +280,7 @@ impl ChildOwner {
 
     /// Retires a live child and returns how custody ended, waiting no longer than [`retirement`].
     /// No settlement by then, or an owner thread that's gone, ends custody as `Unsettled`, which
-    /// latches the spawn word for good, unless a settlement wins the end first. Call it after the
+    /// keeps the spawn claim taken for good, unless a settlement wins the end first. Call it after the
     /// spawn report was taken, off the UI thread.
     pub(crate) fn settle(self) -> Settled {
         self.retire();
@@ -1155,7 +1147,11 @@ mod tests {
         let retry = Fake::default();
         let again = ChildOwner::start(retry.clone(), Arc::clone(&word), WAIT).expect("owner");
         assert!(matches!(next(&again), Report::NotSpawned(Refusal::Claimed)));
-        assert_eq!(retry.script().spawns, 0, "the watchdog latched the word");
+        assert_eq!(
+            retry.script().spawns,
+            0,
+            "the claim stays taken after Unsettled"
+        );
     }
 
     #[test]
@@ -1204,7 +1200,10 @@ mod tests {
             wait: BOUND,
         };
         assert_eq!(owner.settle(), Settled::Reaped(Exit::Code(0)));
-        assert!(claimable(&word), "the give-up didn't latch the word");
+        assert!(
+            claimable(&word),
+            "the give-up didn't take the freed claim back"
+        );
     }
 
     #[test]

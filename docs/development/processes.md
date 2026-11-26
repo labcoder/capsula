@@ -278,8 +278,8 @@ the disconnected window, so no child starts.
   caller's side, by `retire`, by the owner handle being dropped or by Quit seen on the word,
   never by the owner. At retirement's bound it ends custody as `Unsettled` even while the owner
   is stuck in a poll or a kill. Owner, watchdog and `settle` end custody through one lock, so
-  the first ending wins: a reap frees the claim there, `Unsettled` latches the word for good,
-  and a later ending returns the winner. Neither the hook nor the watchdog signals or reaps; that
+  the first ending wins and a later one returns it. Only a winning reap frees the claim, so
+  after `Unsettled` it stays taken for good. Neither the hook nor the watchdog signals or reaps; that
   stays on the owner thread, which may still reap later without reporting or freeing a claim.
   An owner thread that ends without its spawn report leaves the spawn pending, never proven
   absent.
