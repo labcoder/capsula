@@ -57,4 +57,5 @@ jobs:
         run: >-
           cargo test --locked --offline -p kumochi-brain --lib platform::unix::
       - name: Mac bundle task tests (offline, ad-hoc signing only)
-        run: cargo test --locked --offline -p xtask mac_bundle::
+        run: >-
+          cargo test --locked --offline -p xtask mac_bundle::
