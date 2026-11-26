@@ -66,6 +66,13 @@ impl CredentialStore for NativeCredentialStore {
 /// process that claims an application identifier is admitted, with every query pinned to it, so
 /// an unclaimed read can't pass for an empty store; whether the OS honors the claim is proved only
 /// by a signed run.
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "admission refuses on other platforms; Credential Manager always opens"
+    )
+)]
 pub(crate) fn admitted_store() -> Result<NativeCredentialStore, CredentialStoreError> {
     #[cfg(windows)]
     {
