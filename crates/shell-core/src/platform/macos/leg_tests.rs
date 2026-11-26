@@ -877,6 +877,18 @@ fn after_spawn(
     item: Result<(), kumochi_storage::ItemError>,
     lag: Duration,
 ) -> Spawned {
+    after_spawn_hardened(shell, deadline, item, lag, || Ok(()))
+}
+
+/// [`after_spawn`] with `harden` in place of the real core-dump limit, which only a re-exec child
+/// may change, so the shared test process keeps its limits.
+fn after_spawn_hardened(
+    shell: ShellEnds,
+    deadline: Instant,
+    item: Result<(), kumochi_storage::ItemError>,
+    lag: Duration,
+    harden: impl FnOnce() -> std::io::Result<()>,
+) -> Spawned {
     let reads = std::cell::Cell::new(0);
     let buffer = std::cell::Cell::new(None);
     let result = after_ready(
@@ -886,6 +898,7 @@ fn after_spawn(
         None,
         deadline,
         |_| DrawingText::default(),
+        harden,
         |into| {
             reads.set(reads.get() + 1);
             buffer.set(Some((wipes::len(), into.as_ptr().addr())));
@@ -920,6 +933,99 @@ fn ready_queued() -> (ShellEnds, UnixStream, UnixStream) {
     }
     brain_control.write_all(&[SESSION_READY]).expect("READY");
     (shell, brain_control, brain_data)
+}
+
+#[test]
+fn a_failed_hardening_reads_no_item_and_writes_nothing() {
+    let (shell, mut brain_control, mut brain_data) = ready_queued();
+    let spawned = after_spawn_hardened(shell, by(), Ok(()), Duration::ZERO, || {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    });
+    assert!(matches!(spawned.result, Err(LinkError::Harden)));
+    assert_eq!((spawned.reads, spawned.wiped), (0, None));
+    nothing_written(&mut brain_control, &mut brain_data);
+}
+
+const CORE_DUMPS_ENTRY: &str = "platform::macos::leg::tests::core_dumps_entry";
+
+/// Run only by [`the_item_is_read_only_after_core_dumps_are_off`], in its own process: it lowers
+/// that process's core limit for good.
+#[test]
+#[ignore = "runs in a re-exec child: it lowers its process's core limit"]
+fn core_dumps_entry() {
+    use super::super::core_dumps::core_limit;
+    use super::super::limit_core_dumps;
+
+    let (shell, brain_control, brain_data) = ready_queued();
+    drop((brain_control, brain_data));
+    let hardened = std::cell::Cell::new(false);
+    let seen = std::cell::Cell::new(None);
+    let result = after_ready(
+        shell,
+        Channel::Dev,
+        AudioSession::Legacy,
+        None,
+        by(),
+        |_| DrawingText::default(),
+        || {
+            hardened.set(true);
+            limit_core_dumps()
+        },
+        |into| {
+            seen.set(Some((hardened.get(), core_limit().ok())));
+            *into = SECRET;
+            Ok(())
+        },
+    );
+    assert!(result.is_err(), "the brain's ends closed after READY");
+    assert_eq!(
+        seen.get(),
+        Some((true, Some((0, 0)))),
+        "hardened before the read"
+    );
+    assert_eq!(
+        limit_core_dumps().map_err(|error| error.kind()),
+        Ok(()),
+        "idempotent"
+    );
+}
+
+#[test]
+fn the_item_is_read_only_after_core_dumps_are_off() {
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(std::env::current_exe().expect("the test binary"))
+        .args(["--exact", CORE_DUMPS_ENTRY, "--ignored", "--test-threads=1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the re-exec child starts");
+    let by = by();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait on the re-exec child") {
+            break status;
+        }
+        if Instant::now() >= by {
+            child.kill().expect("kill the late child");
+            let _reaped = child.wait();
+            panic!("the re-exec child didn't finish within the bound");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let mut report = String::new();
+    child
+        .stdout
+        .take()
+        .expect("piped")
+        .read_to_string(&mut report)
+        .expect("the child's report");
+    assert!(status.success(), "{report}");
+    assert!(
+        report.contains(&format!("test {CORE_DUMPS_ENTRY} ... ok")) && report.contains("1 passed"),
+        "the entry ran: {report}"
+    );
 }
 
 #[test]
