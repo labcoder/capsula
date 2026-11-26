@@ -9,7 +9,6 @@ use super::{
 };
 use crate::config::tuning::TokenTuning;
 use crate::connections::clock::{Clock, SystemClock};
-use crate::connections::http_client::HttpError;
 use kumochi_protocol::{
     Secret,
     message::{
