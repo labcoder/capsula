@@ -119,6 +119,51 @@ fn a_quit_during_a_failed_attempt_with_no_child_has_no_outcome() {
 }
 
 #[test]
+fn a_quit_during_a_failed_attempt_keeps_what_it_knows_of_its_child() {
+    use crate::link::{QuitEnd, QuitOutcome};
+    use crate::platform::{Exit, Failed, LinkError, Settled, Unconnected};
+
+    for (child, outcome) in [
+        (Unconnected::NotSpawned, QuitOutcome::NotSpawned),
+        (Unconnected::Pending, QuitOutcome::SpawnPending),
+        (
+            Unconnected::Settled(Settled::Reaped(Exit::Code(0))),
+            QuitOutcome::Reaped(Exit::Code(0)),
+        ),
+        (
+            Unconnected::Settled(Settled::Unsettled),
+            QuitOutcome::Unsettled,
+        ),
+    ] {
+        let (events, _states) = async_channel::unbounded();
+        let (entered, attempting) = std::sync::mpsc::channel();
+        let (fail, failing) = std::sync::mpsc::channel::<()>();
+        let link = super::start_scripted(events, AudioSession::Legacy, move |_, _, _| {
+            let _seen = entered.send(());
+            let _released = failing.recv_timeout(Duration::from_secs(10));
+            Err(Failed {
+                error: LinkError::Rejected,
+                child: Some(child),
+            })
+        });
+        attempting
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the attempt started");
+        assert!(link.begin_quit());
+        drop(fail);
+        link.finish_quit();
+        assert_eq!(
+            link.quit_end(),
+            Some(QuitEnd {
+                generation: None,
+                outcome
+            }),
+            "{child:?}"
+        );
+    }
+}
+
+#[test]
 fn unavailable_transport_does_not_hide_an_undelivered_initial_state() {
     let (events, states) = bounded(1);
     events
