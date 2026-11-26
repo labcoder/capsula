@@ -320,7 +320,8 @@ The staged macOS TLS boundary prestarts bounded handshake workers and a separate
 Neither the brain runtime nor the reactor polls the native verifier. It checks the leaf name
 independently, then applies SecTrust's SSL server policy, including native date and chain rules.
 The caller can refuse a connection without waiting for the OS, and workers also observe the
-deadline and cancellation while the caller's answer is unpolled. If the one in-flight SecTrust
+deadline and cancellation while the caller's answer is unpolled. Owner drop does not wait;
+an admitted job keeps its reactor alive until it exits. If the one in-flight SecTrust
 call stays stuck past the deadline, the next connection is refused without queuing; the slot
 returns only when the call does. The staged tests use in-memory TLS, synthetic certificates and
 no online lookups. Product clients still use the interim policy above. Activation and the

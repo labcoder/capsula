@@ -171,6 +171,66 @@ async fn thread_start_refusal_closes_every_prestarted_lane_without_joining() {
 }
 
 #[tokio::test]
+async fn dropping_the_owner_keeps_an_admitted_jobs_reactor_alive_until_it_exits() {
+    let (reactor_ended, wait_reactor_end) = oneshot::channel();
+    let mut reactor_ended = Some(reactor_ended);
+    let owner = Executor::with_start(|job| {
+        let reactor_ended = reactor_ended.take();
+        thread::Builder::new()
+            .spawn(move || {
+                job();
+                if let Some(ended) = reactor_ended {
+                    let _unheard = ended.send(());
+                }
+            })
+            .map(drop)
+    })
+    .expect("executor");
+    let (entered, wait_entered) = oneshot::channel();
+    let (release, wait_release) = mpsc::channel();
+    let (polled, wait_polled) = oneshot::channel();
+    let mut answer = Box::pin(owner.connect(Arc::new(Stop::default()), by(), async move {
+        entered.send(()).expect("entered a worker poll");
+        if wait_release.recv_timeout(TEST_BOUND).is_err() {
+            return;
+        }
+        let mut timer = std::pin::pin!(tokio::time::sleep(TEST_BOUND));
+        std::future::poll_fn(|cx| {
+            assert!(timer.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        let _unheard = polled.send(());
+    }));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(answer.as_mut().poll(&mut cx).is_pending());
+    tokio::time::timeout(TEST_BOUND, wait_entered)
+        .await
+        .expect("worker entered within the bound")
+        .expect("still in its first poll");
+    let reactor = owner.reactor.clone();
+    drop(answer);
+    drop(owner);
+    let heartbeat = reactor.spawn(async { tokio::time::sleep(Duration::from_millis(20)).await });
+    assert!(
+        tokio::time::timeout(TEST_BOUND, heartbeat)
+            .await
+            .expect("reactor heartbeat settled")
+            .is_ok(),
+        "dropping the owner stopped the reactor while a job still owned it"
+    );
+    release.send(()).expect("resume the running poll");
+    tokio::time::timeout(TEST_BOUND, wait_polled)
+        .await
+        .expect("worker polled its reactor timer")
+        .expect("the reactor timer stayed usable");
+    tokio::time::timeout(TEST_BOUND, wait_reactor_end)
+        .await
+        .expect("the last job released the reactor")
+        .expect("the reactor closed cleanly");
+}
+
+#[tokio::test]
 async fn a_spent_deadline_and_missing_worker_refuse_before_evaluation() {
     let owner = Executor::new().expect("executor");
     assert_eq!(

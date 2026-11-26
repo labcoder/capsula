@@ -96,7 +96,7 @@ struct Executor {
     reactor: Handle,
     workers: Vec<Worker>,
     checks: Arc<Semaphore>,
-    _shutdown: oneshot::Sender<()>,
+    reactor_stop: Arc<oneshot::Sender<()>>,
 }
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -139,7 +139,7 @@ impl Executor {
             reactor,
             workers,
             checks: Arc::new(Semaphore::new(1)),
-            _shutdown: shutdown,
+            reactor_stop: Arc::new(shutdown),
         })
     }
 
@@ -173,10 +173,12 @@ impl Executor {
             .ok_or(Refusal::Busy)?;
         let (send, answer) = oneshot::channel();
         let reactor = self.reactor.clone();
+        let reactor_stop = Arc::clone(&self.reactor_stop);
         let worker = Arc::clone(&attempt);
         sender
             .try_send(Box::new(move || {
                 let _slot = slot;
+                let _reactor_stop = reactor_stop;
                 let result = reactor.block_on(CONNECTING.scope(Arc::clone(&worker), async move {
                     worker.check()?;
                     let result = tokio::select! {
