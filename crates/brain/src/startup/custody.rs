@@ -48,7 +48,7 @@ impl SessionCustody {
 
     /// Custody that holds a token instead of a lock, so offline tests can watch when it drops.
     #[cfg(test)]
-    pub(in crate::startup) fn fixture(token: std::sync::Arc<()>) -> Self {
+    pub(crate) fn fixture(token: std::sync::Arc<()>) -> Self {
         Self {
             _lock: None,
             _fixture: Some(token),

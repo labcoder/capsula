@@ -1,4 +1,5 @@
 use super::*;
+use std::os::fd::FromRawFd as _;
 
 #[test]
 fn names_and_prefixes_cannot_escape_or_prune_another_namespace() {
@@ -203,7 +204,7 @@ fn retention_routing_never_downgrades_observed_parent_refusal() {
     parent.set(unsafe_parent);
     let refused = checked_candidate(check_parent, || {
         opened.set(true);
-        protected::safe_regular(&candidate, 501).map_err(AcquisitionError::from)
+        unix::safe_regular(&candidate, 501).map_err(AcquisitionError::from)
     });
     assert_eq!(refused, Err(AcquisitionError::Admission(Untrusted::Unsafe)));
     assert!(!opened.get());
@@ -213,7 +214,7 @@ fn retention_routing_never_downgrades_observed_parent_refusal() {
     assert_eq!(check_parent(), Ok(()));
     assert_eq!(refused, Err(AcquisitionError::Admission(Untrusted::Unsafe)));
     assert_eq!(
-        checked_candidate(check_parent, || protected::safe_regular(&candidate, 501)
+        checked_candidate(check_parent, || unix::safe_regular(&candidate, 501)
             .map_err(AcquisitionError::from)),
         Ok(None)
     );
@@ -224,7 +225,7 @@ fn retention_routing_never_downgrades_observed_parent_refusal() {
             if candidate_succeeds {
                 Ok(())
             } else {
-                protected::safe_regular(&candidate, 501).map_err(AcquisitionError::from)
+                unix::safe_regular(&candidate, 501).map_err(AcquisitionError::from)
             }
         });
         assert_eq!(
@@ -248,12 +249,12 @@ fn native_a_folder_keeps_its_name_while_its_link_count_changes() {
     let mut scratch = Scratch::new();
     let root = scratch.root.try_clone().expect("retain scratch root");
     let busy = scratch.directory(c"busy");
-    let before = protected::stat(busy.as_raw_fd()).expect("folder identity");
+    let before = unix::stat(busy.as_raw_fd()).expect("folder identity");
     // SAFETY: busy is a held fixture folder and the name is fixed; creation is exclusive.
     let made = unsafe { libc::mkdirat(busy.as_raw_fd(), c"child".as_ptr(), 0o700) };
     assert_eq!(made, 0, "a sibling makes a subfolder");
     scratch.record(&busy, c"child").expect("record subfolder");
-    let after = protected::stat(busy.as_raw_fd()).expect("folder identity");
+    let after = unix::stat(busy.as_raw_fd()).expect("folder identity");
     assert_ne!(
         before.st_nlink, after.st_nlink,
         "the fixture moved the link count"
@@ -267,7 +268,7 @@ fn native_a_folder_keeps_its_name_while_its_link_count_changes() {
     // SAFETY: the successful open transferred a fresh, uniquely owned descriptor.
     let file = unsafe { File::from_raw_fd(fd) };
     scratch.record(&root, c"file").expect("record file");
-    let single = protected::stat(file.as_raw_fd()).expect("file identity");
+    let single = unix::stat(file.as_raw_fd()).expect("file identity");
     // SAFETY: root is the held scratch folder; both names are fixed fixture components.
     let linked = unsafe {
         libc::linkat(

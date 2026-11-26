@@ -8,6 +8,7 @@ pub mod clock;
 #[cfg(debug_assertions)]
 pub mod draw_check;
 pub mod error;
+pub(crate) mod facts;
 pub mod github;
 pub mod http_client;
 #[cfg(debug_assertions)]

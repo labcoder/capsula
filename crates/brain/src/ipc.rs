@@ -39,7 +39,7 @@ pub use audio_fixture::{
 };
 
 /// How long a connected client has to complete the entire handshake.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the brain waits with no shell before exiting [guess]. A shell that gave up on it,
 /// or quit before it was up, leaves nobody to tell it to stop; the next shell starts another.
 const NO_SHELL_TIMEOUT: Duration = Duration::from_secs(30);

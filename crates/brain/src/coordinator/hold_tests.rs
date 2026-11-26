@@ -132,7 +132,7 @@ fn preparation_refuses_pending_delete_unavailable_or_cancelled_without_revival()
         match refusal {
             0 => cancel.store(true, Ordering::SeqCst),
             1 => {
-                core.availability =
+                core.availability[ConnectionKind::ChatGpt] =
                     Availability::Unavailable(super::super::availability::sign_in_needed());
             }
             2 => {
@@ -149,7 +149,7 @@ fn preparation_refuses_pending_delete_unavailable_or_cancelled_without_revival()
             core.prepare_hold(KEY, Some(T), 12, defaults(), Arc::clone(&cancel)),
             Err(())
         );
-        core.availability = Availability::Ready(Ready::fixture());
+        core.availability[ConnectionKind::ChatGpt] = Availability::Ready(Ready::fixture());
         assert_eq!(
             core.prepare_hold(KEY, None, 12, defaults(), cancel),
             Err(())
@@ -179,7 +179,7 @@ fn stale_cancel_connection_pending_delete_and_unread_target_create_no_turn() {
             }
             3 => snapshot.generation = None,
             4 => {
-                core.availability = Availability::Ready(Ready {
+                core.availability[ConnectionKind::ChatGpt] = Availability::Ready(Ready {
                     connection: ConnectionTag(0),
                     models: Vec::new(),
                     trusted_draw: false,
@@ -190,7 +190,7 @@ fn stale_cancel_connection_pending_delete_and_unread_target_create_no_turn() {
         }
         let retry = snapshot.clone();
         assert_eq!(core.submit_hold(snapshot, "words".into(), None), Err(()));
-        core.availability = Availability::Ready(Ready::fixture());
+        core.availability[ConnectionKind::ChatGpt] = Availability::Ready(Ready::fixture());
         assert_eq!(
             core.submit_hold(retry, "later valid words".into(), None),
             Err(())

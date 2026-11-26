@@ -2,8 +2,8 @@
 //! drawing only from an offered tool (D13-H2).
 
 use kumochi_protocol::message::{
-    Action, AssistantName, ControlToShell, Effort, ErrorKey, ModelChoice, ModelInfo, ModelName,
-    ModelSlug, Phase, RunId, ThreadId, UserError,
+    Action, AssistantName, ConnectionKind, ControlToShell, Effort, ErrorKey, ModelChoice,
+    ModelInfo, ModelName, ModelSlug, Phase, RunId, ThreadId, UserError,
 };
 
 use super::{BuildKey, ContextBuilt, Coordinator, Effect, Input, R, StoreOp, T, delta, draw_call};
@@ -366,7 +366,7 @@ fn the_grant_checks_the_runs_connection_itself() {
     assert!(started(
         &core.handle(built(Some("m"), Vec::new())).expect("current")
     ));
-    core.availability = Availability::Ready(Ready {
+    core.availability[ConnectionKind::ChatGpt] = Availability::Ready(Ready {
         connection: ConnectionTag(8),
         models: vec![info("m")],
         trusted_draw: false,
