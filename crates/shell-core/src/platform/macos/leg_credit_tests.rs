@@ -47,7 +47,7 @@ impl Shell {
         ends.control.set_nonblocking(true).expect("bounded READY");
         let mut ready = [0];
         fill(&ends.control, &mut ready, by).expect("READY arrived");
-        assert_eq!(ready, [SESSION_READY]);
+        assert_eq!(ready, [SESSION_READY], "the responder started admission");
         let channel = if ProductIdentity::ACTIVE == ProductIdentity::RELEASE {
             Channel::Release
         } else {
@@ -133,19 +133,25 @@ impl Shell {
             assert_eq!(n, expected, "five records in one logical frame");
             filled += n;
         }
-        assert_eq!(filled, LOGICAL);
+        assert_eq!(
+            filled, LOGICAL,
+            "all record plaintext fits one logical frame"
+        );
         let mut encoded = bytes.as_slice();
         let Some(DataToShell::AssistantText { run, delta }) =
             frame::read(&mut encoded, Pipe::Data).expect("whole frame")
         else {
             panic!("expected synthetic run text");
         };
-        assert_eq!(run, RUN);
+        assert_eq!(run, RUN, "text belongs to the submitted run");
         assert!(
             encoded.is_empty(),
             "the five records contain exactly one frame"
         );
-        assert!(delta.bytes().all(|byte| byte == letter));
+        assert!(
+            delta.bytes().all(|byte| byte == letter),
+            "the requested frame's synthetic text arrived intact and in order",
+        );
     }
 
     fn no_data(&self, reason: &str) {
@@ -161,7 +167,7 @@ impl Shell {
         let n = By(&self.data, Instant::now() + IO)
             .read(&mut bytes)
             .expect("a record of the stalled frame");
-        assert_eq!(n, MAX_PLAINTEXT);
+        assert_eq!(n, MAX_PLAINTEXT, "only one full record was read");
     }
 
     fn quit(self) {
@@ -180,7 +186,11 @@ fn send_frame(mut leg: &PipeClient, bytes: &[u8], by: Instant) {
     let left = by.saturating_duration_since(Instant::now());
     assert!(!left.is_zero(), "frame send deadline");
     leg.set_timeout(Some(left));
-    assert_eq!(leg.write(bytes).expect("whole frame written"), bytes.len());
+    assert_eq!(
+        leg.write(bytes).expect("whole frame written"),
+        bytes.len(),
+        "the shell wrote the entire logical frame",
+    );
 }
 
 fn phase(frame: &ControlToShell, expected: Phase) -> bool {
