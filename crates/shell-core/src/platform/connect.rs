@@ -286,8 +286,8 @@ pub(super) fn after_ready(
         }
         Err(error) => return Err(LinkError::Io(error)),
     }
-    check_attempt(Some(deadline))?;
     let mut secret = super::macos::Secret::zeroed();
+    check_attempt(Some(deadline))?;
     let read = read_item(secret.bytes_mut());
     // The Keychain call can outlast the attempt, so its answer counts only within the deadline.
     check_attempt(Some(deadline))?;
