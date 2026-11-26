@@ -205,12 +205,8 @@ pub(crate) fn accounts(scratch: &Scratch) -> Accounts {
 
 /// [`accounts`] under a profile lock the caller already holds, as the brain's credential thread
 /// opens its vault.
-// shortcut: `_scratch` stays until startup's tests stop passing it, after S1b-2 lands.
 #[cfg(windows)]
-pub(crate) fn held_accounts(
-    _scratch: &Scratch,
-    profile: Arc<crate::platform::SessionLock>,
-) -> Accounts {
+pub(crate) fn held_accounts(profile: Arc<crate::platform::SessionLock>) -> Accounts {
     let store = FakeStore::default();
     let worker = Worker::new(
         Box::new(move || {
