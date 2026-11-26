@@ -154,11 +154,14 @@ mod tests {
 
     #[test]
     fn a_relative_lock_path_is_refused_before_anything_is_created() {
-        let name = format!(
-            "kumochi-relative-lock-{:016x}",
-            getrandom::u64().expect("test randomness")
-        );
-        let folder = Path::new(&name);
+        // The scratch parent sits in the working folder, so a regressed guard's folder is cleaned up.
+        let cwd = std::env::current_dir().expect("working folder");
+        let scratch = Scratch::under(&cwd, "relative-lock");
+        let folder = scratch
+            .dir()
+            .strip_prefix(&cwd)
+            .expect("scratch under the working folder");
+        assert!(folder.is_relative());
         for refusal in [
             SessionLock::try_acquire(&folder.join(SESSION_LOCK)),
             SessionLock::try_acquire_existing(&folder.join(SESSION_LOCK)),
@@ -168,10 +171,7 @@ mod tests {
             };
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
-        assert!(
-            !folder.exists(),
-            "nothing was created in the working folder"
-        );
+        assert!(!scratch.dir().exists(), "nothing was created");
     }
 
     #[test]
