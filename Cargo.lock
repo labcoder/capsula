@@ -4118,6 +4118,8 @@ dependencies = [
  "kumochi-session",
  "kumochi-storage",
  "libc",
+ "objc2 0.6.5",
+ "objc2-avf-audio",
  "thiserror 2.0.21",
  "tracing",
  "tracing-appender",
