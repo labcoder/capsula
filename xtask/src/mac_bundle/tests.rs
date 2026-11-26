@@ -374,11 +374,27 @@ fn a_child_tool_runs_bounded_with_large_input_and_output_and_hides_its_errors() 
         bounded("sh", &mut forked, None, Duration::from_millis(300))
             .expect_err("a helper kept the pipe")
             .to_string(),
-        "sh's output didn't end within 300ms"
+        "sh didn't finish within 300ms"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(2),
         "the helper's group was stopped"
+    );
+    let mut escaped = Command::new("/bin/sh");
+    escaped.args([
+        "-c",
+        "/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or exit 1; sleep 4' & exit 0",
+    ]);
+    let started = Instant::now();
+    assert_eq!(
+        bounded("sh", &mut escaped, None, Duration::from_millis(300))
+            .expect_err("a helper outside the group kept the pipe")
+            .to_string(),
+        "sh's output stayed open after it was stopped"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "the task gave up after the grace, not when the helper exited"
     );
     assert_eq!(
         strings("Platform", br#"{"not":"a list"}"#)

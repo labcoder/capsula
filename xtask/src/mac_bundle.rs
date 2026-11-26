@@ -22,6 +22,9 @@ const LAUNCH_WAIT: Duration = Duration::from_secs(10);
 const SIGN_WAIT: Duration = Duration::from_secs(120);
 /// The longest a profile or plist tool may take.
 const TOOL_WAIT: Duration = Duration::from_secs(30);
+/// How long a stopped tool's pipes get to close; one a helper outside its group keeps open fails
+/// the task instead.
+const STOP_GRACE: Duration = Duration::from_secs(2);
 /// More development certificates than any profile carries.
 const MAX_CERTIFICATES: usize = 64;
 
@@ -528,28 +531,36 @@ fn wait_for(child: &mut Child, wait: Duration) -> Result<Option<ExitStatus>> {
     }
 }
 
-/// Stops `child`'s process group, which it leads, then reaps it; a failed kill matters only
-/// while it still runs.
+/// Stops the process group `child` leads, then reaps it. The group is signalled while its
+/// unreaped leader keeps the id from being reused.
 fn end(child: &mut Child) -> Result<ExitStatus> {
-    stop_group(child.id())?;
-    if let Err(error) = child.kill()
-        && child.try_wait()?.is_none()
-    {
-        return Err(error).context("stopping a child process");
-    }
-    child.wait().context("reaping a child process")
+    let stopped = stop_group(child.id());
+    let status = reap(child)?;
+    stopped?;
+    Ok(status)
 }
 
-/// Kills every process in group `group`. A group that's already gone makes `kill` exit nonzero,
-/// which needs nothing more.
+/// Kills `child` alone, whose group was stopped already, and reaps it.
+fn reap(child: &mut Child) -> Result<ExitStatus> {
+    let killed = child.kill();
+    let status = child.wait().context("reaping a child process")?;
+    killed.context("stopping a child process")?;
+    Ok(status)
+}
+
+/// Kills every process in group `group`.
 fn stop_group(group: u32) -> Result<()> {
-    Command::new("/bin/kill")
+    let status = Command::new("/bin/kill")
         .args(["-KILL", "--", &format!("-{group}")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .context("stopping a process group")
-        .map(drop)
+        .context("stopping a process group")?;
+    ensure!(
+        status.success(),
+        "stopping a process group failed ({status})"
+    );
+    Ok(())
 }
 
 /// Runs `program` with `args` and then `path`, for at most [`SIGN_WAIT`]; its stdout.
@@ -567,9 +578,10 @@ fn pipe(program: &str, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Runs `command` in its own process group within `wait`, feeding `input` and draining both
-/// outputs as it runs, so a large one can't stall it. At the deadline the whole group is stopped,
-/// so a helper holding a pipe ends too, and the child is reaped on every path. Its stderr isn't
-/// shown, because it can name the team or the identity.
+/// outputs as it runs, so a large one can't stall it. At the deadline the whole group is stopped
+/// once, so a helper holding a pipe ends too; a pipe still open [`STOP_GRACE`] later fails the
+/// task instead of holding it. The child is reaped on every path, and only after its pipes settle.
+/// Its stderr isn't shown, because it can name the team or the identity.
 fn bounded(
     program: &str,
     command: &mut Command,
@@ -589,67 +601,84 @@ fn bounded(
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("starting {program}"))?;
-    let group = child.id();
+    let (sent, received) = std::sync::mpsc::channel();
+    // Detached, not scoped: a pipe a helper outside the group keeps open must not hold the task.
+    let feed = sent.clone();
     let stdin = child.stdin.take();
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    std::thread::scope(|scope| {
-        let (sent, received) = std::sync::mpsc::channel();
-        let feed = sent.clone();
-        scope.spawn(move || {
-            let written = match (stdin, input) {
-                (Some(mut stdin), Some(input)) => stdin.write_all(input),
-                _ => Ok(()),
-            };
-            feed.send((0, written.map(|()| Vec::new()))).ok();
-        });
-        let drain = |stream: usize, pipe: Option<Box<dyn std::io::Read + Send>>| {
-            let sent = sent.clone();
-            scope.spawn(move || {
-                let mut bytes = Vec::new();
-                let read = match pipe {
-                    Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
-                    None => Ok(bytes),
-                };
-                sent.send((stream, read)).ok();
-            });
+    let input = input.map(<[u8]>::to_vec);
+    std::thread::spawn(move || {
+        let written = match (stdin, input) {
+            (Some(mut stdin), Some(input)) => stdin.write_all(&input),
+            _ => Ok(()),
         };
-        drain(
-            1,
-            stdout.map(|out| -> Box<dyn std::io::Read + Send> { Box::new(out) }),
-        );
-        drain(
-            2,
-            stderr.map(|err| -> Box<dyn std::io::Read + Send> { Box::new(err) }),
-        );
-        drop(sent);
-        let status = wait_for(&mut child, wait);
-        let mut streams = [None, None, None];
-        let mut late = false;
-        for _ in 0..3 {
-            let left = deadline.saturating_duration_since(Instant::now());
-            // A helper that outlived the child with a pipe open: end its group, then collect.
-            let next = received.recv_timeout(left).or_else(|_| {
+        feed.send((0, written.map(|()| Vec::new()))).ok();
+    });
+    let outputs: [Option<Box<dyn std::io::Read + Send>>; 2] = [
+        child
+            .stdout
+            .take()
+            .map(|out| -> Box<dyn std::io::Read + Send> { Box::new(out) }),
+        child
+            .stderr
+            .take()
+            .map(|err| -> Box<dyn std::io::Read + Send> { Box::new(err) }),
+    ];
+    for (stream, pipe) in (1..).zip(outputs) {
+        let sent = sent.clone();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let read = match pipe {
+                Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
+                None => Ok(bytes),
+            };
+            sent.send((stream, read)).ok();
+        });
+    }
+    drop(sent);
+    let mut streams = [None, None, None];
+    let mut late = false;
+    let mut gathered = Ok(());
+    for _ in 0..3 {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let next = received.recv_timeout(left).or_else(|_| {
+            if !late {
                 late = true;
-                stop_group(group)?;
-                received
-                    .recv()
-                    .context("a pipe thread ended without its result")
-            })?;
-            streams[next.0] = Some(next.1);
+                // Refused only when no member is left to stop; the grace bounds the wait either way.
+                stop_group(child.id()).ok();
+            }
+            received
+                .recv_timeout(STOP_GRACE)
+                .with_context(|| format!("{program}'s output stayed open after it was stopped"))
+        });
+        match next {
+            Ok((stream, result)) => streams[stream] = Some(result),
+            Err(error) => {
+                gathered = Err(error);
+                break;
+            }
         }
-        let status = status?.with_context(|| format!("{program} didn't finish within {wait:?}"))?;
-        ensure!(!late, "{program}'s output didn't end within {wait:?}");
-        let [written, out, err] = streams.map(|stream| stream.context("a pipe result"));
-        let err = err??;
-        ensure!(
-            status.success(),
-            "{program} failed ({status}, {} bytes of stderr withheld)",
-            err.len()
-        );
-        written??;
-        out?.map_err(Into::into)
-    })
+    }
+    let status = if late {
+        reap(&mut child).map(Some)
+    } else {
+        wait_for(
+            &mut child,
+            deadline.saturating_duration_since(Instant::now()),
+        )
+    };
+    gathered?;
+    let status = status?
+        .filter(|_| !late)
+        .with_context(|| format!("{program} didn't finish within {wait:?}"))?;
+    let [written, out, err] = streams.map(|stream| stream.context("a pipe result"));
+    let err = err??;
+    ensure!(
+        status.success(),
+        "{program} failed ({status}, {} bytes of stderr withheld)",
+        err.len()
+    );
+    written??;
+    out?.map_err(Into::into)
 }
 
 fn to_json(plist: &[u8]) -> Result<Value> {
