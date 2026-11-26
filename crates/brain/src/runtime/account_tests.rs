@@ -683,14 +683,15 @@ async fn a_dropped_wait_never_cancels_its_refresh() {
         account
             .and_then(|account| Some(account.expose().tokens.as_ref()?.refresh_token.to_string()))
     };
-    // The check, the pending flag, the sent mark, the refresh and the rotated set's save. The
-    // store is read only once the worker reports that save: a second vault's open retires a
-    // save's Pending row, which production's one opener per profile never meets.
+    // The check, the pending flag, the sent mark's save, the refresh and the rotated set's save.
+    // The store is read only once the worker reports the save after the refresh.
+    let mut refreshed = false;
     for _ in 0..8 {
         let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
         let rotated = matches!(input, Event::Machine(Input::Vault(Done::Rotated(..))));
+        refreshed |= matches!(input, Event::Machine(Input::Refreshed { .. }));
         accounts.handle(input);
-        if rotated {
+        if refreshed && rotated {
             break;
         }
     }
@@ -3281,14 +3282,16 @@ async fn an_ordinary_sign_in_is_ready_once_proved_and_stays_ready_through_a_refr
         accounts.catalog_read_pending(),
         "the held catalog read goes"
     );
-    // The store is read only once the worker reports the rotated set's save.
+    // The store is read only once the worker reports the save after the refresh.
+    let mut refreshed = false;
     for _ in 0..8 {
         let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
         assert!(!matches!(input, Event::Proof { .. }), "no second check");
         let rotated = matches!(input, Event::Machine(Input::Vault(Done::Rotated(..))));
+        refreshed |= matches!(input, Event::Machine(Input::Refreshed { .. }));
         accounts.handle(input);
         assert!(ready(&accounts));
-        if rotated {
+        if refreshed && rotated {
             break;
         }
     }
@@ -3488,8 +3491,8 @@ async fn a_recovered_answer_scopes_builds_until_the_account_stops_being_ready() 
         };
         brain.account_input(recovered, None).expect("no shell");
         if arm == "refreshed" {
-            // The store is read only once the worker reports the rotated set's save.
-            let (mut dropped, mut rotated) = (false, false);
+            // The store is read only once the worker reports the save after the refresh.
+            let (mut dropped, mut refreshed, mut rotated) = (false, false, false);
             for _ in 0..12 {
                 if dropped && rotated {
                     break;
@@ -3497,7 +3500,9 @@ async fn a_recovered_answer_scopes_builds_until_the_account_stops_being_ready() 
                 let event = timeout(PATIENCE, brain.account.next())
                     .await
                     .expect("in time");
-                rotated |= matches!(event, Event::Machine(Input::Vault(Done::Rotated(..))));
+                rotated |=
+                    refreshed && matches!(event, Event::Machine(Input::Vault(Done::Rotated(..))));
+                refreshed |= matches!(event, Event::Machine(Input::Refreshed { .. }));
                 dropped |= matches!(
                     event,
                     Event::Proof {
