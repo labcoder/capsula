@@ -3,6 +3,7 @@
 //! identity, verified, and its brain launched once to show the system accepts its entitlements.
 
 use std::io::Write as _;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -375,10 +376,14 @@ fn plist(value: &Value) -> Result<String> {
     Ok(out)
 }
 
-/// The Dev shell and brain binaries Cargo builds now, by executable name: exactly one
-/// `compiler-artifact` of each workspace package's binary target.
+/// The Dev shell and brain binaries Cargo builds now, by executable name.
 fn build() -> Result<Vec<(String, PathBuf)>> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut metadata = Command::new(&cargo);
+    metadata.args(["metadata", "--format-version", "1", "--no-deps", "--locked"]);
+    let metadata: Value =
+        serde_json::from_slice(&bounded("cargo metadata", &mut metadata, None, TOOL_WAIT)?)
+            .context("Cargo's metadata")?;
     let output = Command::new(cargo)
         .args([
             "build",
@@ -393,35 +398,46 @@ fn build() -> Result<Vec<(String, PathBuf)>> {
         output.status.success(),
         "the Dev build failed; `cargo build -p kumochi-shell -p kumochi-brain` shows why"
     );
-    artifacts(&output.stdout, WORKSPACE)
+    artifacts(&output.stdout, &members(&metadata)?)
 }
 
-/// This workspace's root: xtask sits one level below it.
-const WORKSPACE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+/// Each workspace package's opaque Cargo ID, by name.
+fn members(metadata: &Value) -> Result<Vec<(String, String)>> {
+    let workspace = metadata["workspace_members"]
+        .as_array()
+        .context("Cargo's workspace members")?;
+    let packages = metadata["packages"]
+        .as_array()
+        .context("Cargo's packages")?;
+    Ok(packages
+        .iter()
+        .filter(|package| workspace.contains(&package["id"]))
+        .filter_map(|package| {
+            Some((
+                package["name"].as_str()?.to_owned(),
+                package["id"].as_str()?.to_owned(),
+            ))
+        })
+        .collect())
+}
 
-fn artifacts(stdout: &[u8], workspace: &str) -> Result<Vec<(String, PathBuf)>> {
-    let root = Path::new(workspace)
-        .canonicalize()
-        .context("the workspace folder")?;
-    let root = root.to_str().context("a workspace path that is text")?;
+/// Exactly one `compiler-artifact` of each workspace package's binary target, matched by the
+/// package's exact ID.
+fn artifacts(stdout: &[u8], members: &[(String, String)]) -> Result<Vec<(String, PathBuf)>> {
     let mut built = Vec::new();
     for (package, exe) in [("kumochi-shell", SHELL_EXE), ("kumochi-brain", BRAIN_EXE)] {
+        let id = members
+            .iter()
+            .find(|(name, _)| name == package)
+            .map(|(_, id)| id.as_str())
+            .with_context(|| format!("the workspace has no {package}"))?;
         let mut found = stdout
             .split(|&byte| byte == b'\n')
             .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
             .filter(|message| {
                 let target = &message["target"];
                 message["reason"] == "compiler-artifact"
-                    && message["package_id"]
-                        .as_str()
-                        .and_then(|id| id.strip_prefix("path+file://"))
-                        .and_then(|id| id.split_once('#'))
-                        .is_some_and(|(path, name)| {
-                            Path::new(path).starts_with(root)
-                                && name
-                                    .strip_prefix(package)
-                                    .is_some_and(|v| v.starts_with('@'))
-                        })
+                    && message["package_id"] == id
                     && target["name"] == exe
                     && target["kind"] == json!(["bin"])
             })
@@ -477,6 +493,7 @@ fn sign(app: &Path, entitlements: &Path, identity: &str) -> Result<()> {
 /// 69; a profile or signature the system refused would kill it before `main`.
 fn launch(program: &mut Command, wait: Duration) -> Result<()> {
     let mut child = program
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -511,14 +528,28 @@ fn wait_for(child: &mut Child, wait: Duration) -> Result<Option<ExitStatus>> {
     }
 }
 
-/// Stops and reaps `child`; a failed kill matters only while it still runs.
+/// Stops `child`'s process group, which it leads, then reaps it; a failed kill matters only
+/// while it still runs.
 fn end(child: &mut Child) -> Result<ExitStatus> {
+    stop_group(child.id())?;
     if let Err(error) = child.kill()
         && child.try_wait()?.is_none()
     {
         return Err(error).context("stopping a child process");
     }
     child.wait().context("reaping a child process")
+}
+
+/// Kills every process in group `group`. A group that's already gone makes `kill` exit nonzero,
+/// which needs nothing more.
+fn stop_group(group: u32) -> Result<()> {
+    Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{group}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("stopping a process group")
+        .map(drop)
 }
 
 /// Runs `program` with `args` and then `path`, for at most [`SIGN_WAIT`]; its stdout.
@@ -535,9 +566,10 @@ fn pipe(program: &str, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
     bounded(program, &mut command, Some(input), TOOL_WAIT)
 }
 
-/// Runs `command` within `wait`, feeding `input` and draining both outputs as it runs, so a
-/// large one can't stall it; the child is reaped on every path. Its stderr isn't shown, because it
-/// can name the team or the identity.
+/// Runs `command` in its own process group within `wait`, feeding `input` and draining both
+/// outputs as it runs, so a large one can't stall it. At the deadline the whole group is stopped,
+/// so a helper holding a pipe ends too, and the child is reaped on every path. Its stderr isn't
+/// shown, because it can name the team or the identity.
 fn bounded(
     program: &str,
     command: &mut Command,
@@ -545,7 +577,9 @@ fn bounded(
     wait: Duration,
 ) -> Result<Vec<u8>> {
     use std::io::Read as _;
+    let deadline = Instant::now() + wait;
     let mut child = command
+        .process_group(0)
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -555,40 +589,67 @@ fn bounded(
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("starting {program}"))?;
+    let group = child.id();
     let stdin = child.stdin.take();
-    let mut stdout = child.stdout.take().context("the child's output")?;
-    let mut stderr = child.stderr.take().context("the child's errors")?;
-    let (status, written, out, err) = std::thread::scope(|scope| {
-        let writer = scope.spawn(move || match (stdin, input) {
-            (Some(mut stdin), Some(input)) => stdin.write_all(input),
-            _ => Ok(()),
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    std::thread::scope(|scope| {
+        let (sent, received) = std::sync::mpsc::channel();
+        let feed = sent.clone();
+        scope.spawn(move || {
+            let written = match (stdin, input) {
+                (Some(mut stdin), Some(input)) => stdin.write_all(input),
+                _ => Ok(()),
+            };
+            feed.send((0, written.map(|()| Vec::new()))).ok();
         });
-        let out = scope.spawn(move || {
-            let mut bytes = Vec::new();
-            stdout.read_to_end(&mut bytes).map(|_| bytes)
-        });
-        let err = scope.spawn(move || {
-            let mut bytes = Vec::new();
-            stderr.read_to_end(&mut bytes).map(|_| bytes)
-        });
+        let drain = |stream: usize, pipe: Option<Box<dyn std::io::Read + Send>>| {
+            let sent = sent.clone();
+            scope.spawn(move || {
+                let mut bytes = Vec::new();
+                let read = match pipe {
+                    Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
+                    None => Ok(bytes),
+                };
+                sent.send((stream, read)).ok();
+            });
+        };
+        drain(
+            1,
+            stdout.map(|out| -> Box<dyn std::io::Read + Send> { Box::new(out) }),
+        );
+        drain(
+            2,
+            stderr.map(|err| -> Box<dyn std::io::Read + Send> { Box::new(err) }),
+        );
+        drop(sent);
         let status = wait_for(&mut child, wait);
-        let joined = |name| format!("{program}'s {name} thread panicked");
-        (
-            status,
-            writer.join().map_err(|_| anyhow::anyhow!(joined("input"))),
-            out.join().map_err(|_| anyhow::anyhow!(joined("output"))),
-            err.join().map_err(|_| anyhow::anyhow!(joined("error"))),
-        )
-    });
-    let status = status?.with_context(|| format!("{program} didn't finish within {wait:?}"))?;
-    let (out, err) = (out??, err??);
-    ensure!(
-        status.success(),
-        "{program} failed ({status}, {} bytes of stderr withheld)",
-        err.len()
-    );
-    written?.with_context(|| format!("feeding {program}"))?;
-    Ok(out)
+        let mut streams = [None, None, None];
+        let mut late = false;
+        for _ in 0..3 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            // A helper that outlived the child with a pipe open: end its group, then collect.
+            let next = received.recv_timeout(left).or_else(|_| {
+                late = true;
+                stop_group(group)?;
+                received
+                    .recv()
+                    .context("a pipe thread ended without its result")
+            })?;
+            streams[next.0] = Some(next.1);
+        }
+        let status = status?.with_context(|| format!("{program} didn't finish within {wait:?}"))?;
+        ensure!(!late, "{program}'s output didn't end within {wait:?}");
+        let [written, out, err] = streams.map(|stream| stream.context("a pipe result"));
+        let err = err??;
+        ensure!(
+            status.success(),
+            "{program} failed ({status}, {} bytes of stderr withheld)",
+            err.len()
+        );
+        written??;
+        out?.map_err(Into::into)
+    })
 }
 
 fn to_json(plist: &[u8]) -> Result<Value> {

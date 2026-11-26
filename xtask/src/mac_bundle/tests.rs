@@ -227,11 +227,35 @@ fn only_the_brain_is_a_background_app_and_both_plists_read_back() {
     );
 }
 
+fn here(package: &str) -> String {
+    format!("path+file:///Users/a%20b/kumochi/crates/x#{package}@0.1.2")
+}
+
+#[test]
+fn the_workspace_members_are_cargos_exact_ids() {
+    let metadata = json!({
+        "workspace_members": [here("kumochi-shell"), here("kumochi-brain")],
+        "packages": [
+            { "name": "kumochi-shell", "id": here("kumochi-shell") },
+            { "name": "kumochi-brain", "id": here("kumochi-brain") },
+            { "name": "kumochi-brain", "id": "registry+https://example.invalid#kumochi-brain@9.0.0" },
+        ],
+    });
+    assert_eq!(
+        members(&metadata).expect("members"),
+        [
+            ("kumochi-shell".to_owned(), here("kumochi-shell")),
+            ("kumochi-brain".to_owned(), here("kumochi-brain")),
+        ]
+    );
+}
+
 #[test]
 fn only_each_workspace_binary_artifact_is_taken() {
-    let root = Path::new(WORKSPACE).canonicalize().expect("the workspace");
-    let root = root.to_str().expect("text");
-    let here = |package: &str| format!("path+file://{root}/crates/x#{package}@0.1.2");
+    let members = [
+        ("kumochi-shell".to_owned(), here("kumochi-shell")),
+        ("kumochi-brain".to_owned(), here("kumochi-brain")),
+    ];
     let artifact = |reason: &str, id: &str, name: &str, kind: &str, exe: &str| {
         json!({
             "reason": reason,
@@ -264,7 +288,7 @@ fn only_each_workspace_binary_artifact_is_taken() {
         .concat()
         .join("\n")
     };
-    let taken = |extra: &[String]| artifacts(lines(extra).as_bytes(), WORKSPACE);
+    let taken = |extra: &[String]| artifacts(lines(extra).as_bytes(), &members);
     assert_eq!(
         taken(&[]).expect("both"),
         [
@@ -290,7 +314,7 @@ fn only_each_workspace_binary_artifact_is_taken() {
         ),
         artifact(
             "compiler-artifact",
-            "registry+https://github.com/rust-lang/crates.io-index#kumochi-brain@0.1.2",
+            "registry+https://example.invalid#kumochi-brain@9.0.0",
             "kumochid",
             "bin",
             "/x",
@@ -308,10 +332,16 @@ fn only_each_workspace_binary_artifact_is_taken() {
         "Cargo built more than one kumochid"
     );
     assert_eq!(
-        artifacts(shell.as_bytes(), WORKSPACE)
+        artifacts(shell.as_bytes(), &members)
             .expect_err("missing")
             .to_string(),
         "Cargo built no kumochid"
+    );
+    assert_eq!(
+        artifacts(lines(&[]).as_bytes(), &members[..1])
+            .expect_err("not a member")
+            .to_string(),
+        "the workspace has no kumochi-brain"
     );
 }
 
@@ -337,6 +367,19 @@ fn a_child_tool_runs_bounded_with_large_input_and_output_and_hides_its_errors() 
         "sleep didn't finish within 200ms"
     );
     assert!(started.elapsed() < Duration::from_secs(5));
+    let mut forked = Command::new("/bin/sh");
+    forked.args(["-c", "/bin/sleep 30 & exit 0"]);
+    let started = Instant::now();
+    assert_eq!(
+        bounded("sh", &mut forked, None, Duration::from_millis(300))
+            .expect_err("a helper kept the pipe")
+            .to_string(),
+        "sh's output didn't end within 300ms"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the helper's group was stopped"
+    );
     assert_eq!(
         strings("Platform", br#"{"not":"a list"}"#)
             .expect_err("refused")

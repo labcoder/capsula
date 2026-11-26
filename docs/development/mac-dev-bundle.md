@@ -44,5 +44,6 @@ flowchart LR
   value. The stderr of codesign and the other tools, and Cargo's build output, which can name them
   or local paths, are withheld; a failed build says which `cargo build` shows why.
 - **The first signed use** of the key may ask for the login keychain password. Only the Mac's
-  owner answers that. Each codesign call gets 2 minutes, then it's stopped and the task fails, so
-  a prompt nobody answers doesn't hang it.
+  owner answers that. Each codesign call gets 2 minutes, and every other tool 30 s, in its own
+  process group; at the deadline the whole group is stopped and the task fails, so a prompt
+  nobody answers, or a helper that keeps a pipe open, doesn't hang it.
