@@ -25,10 +25,6 @@ use crate::startup::instance::{Added, InstanceStore};
 
 /// The brain's admitted view of the item, its only writer.
 #[derive(Debug)]
-#[cfg_attr(
-    test,
-    expect(dead_code, reason = "the instance attempt is the store's first caller")
-)]
 pub(crate) struct KeychainItem(InstanceItem);
 
 impl KeychainItem {

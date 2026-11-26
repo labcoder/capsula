@@ -27,6 +27,8 @@ pub(crate) enum CustodyError {
 /// Holds the session lock until dropped; nothing else can make one.
 pub(crate) struct SessionCustody {
     _lock: Option<platform::InstanceLock>,
+    #[cfg(test)]
+    _fixture: Option<std::sync::Arc<()>>,
 }
 
 impl fmt::Debug for SessionCustody {
@@ -54,8 +56,21 @@ impl SessionCustody {
         platform::instance_custody_at(support).map(Self::held)
     }
 
+    /// Custody that holds a token instead of a lock, so offline tests can watch when it drops.
+    #[cfg(test)]
+    pub(in crate::startup) fn fixture(token: std::sync::Arc<()>) -> Self {
+        Self {
+            _lock: None,
+            _fixture: Some(token),
+        }
+    }
+
     fn held(lock: platform::InstanceLock) -> Self {
-        Self { _lock: Some(lock) }
+        Self {
+            _lock: Some(lock),
+            #[cfg(test)]
+            _fixture: None,
+        }
     }
 }
 

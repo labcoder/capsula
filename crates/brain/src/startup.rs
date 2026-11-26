@@ -18,12 +18,16 @@ use crate::store::{self, SceneState, Store};
 use crate::{
     BrainError, STARTUP_LOG_TARGET, StartMode, accounts, credential, engine, serve, start_screen,
 };
+use instance::InstanceAttempt;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "parent-bound startup is not wired yet")
 )]
 pub(crate) mod custody;
-#[expect(dead_code, reason = "the instance attempt is the store's first caller")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "parent-bound startup is not wired yet")
+)]
 pub(crate) mod instance;
 #[cfg(all(test, windows))]
 mod tests;
@@ -52,6 +56,9 @@ struct Lifecycle {
     pipes: Pipes,
     session: u32,
     published: bool,
+    /// The parent-bound item and the custody it holds, settled by `finish` before custody drops.
+    #[expect(dead_code, reason = "parent-bound startup is not wired yet")]
+    instance: Option<InstanceAttempt<platform::InstanceItem>>,
 }
 
 pub(super) async fn run_admitted(
@@ -110,7 +117,17 @@ impl Lifecycle {
             pipes,
             session,
             published: false,
+            instance: None,
         })
+    }
+
+    /// Settles the instance attempt on every exit; custody drops with it, after.
+    #[expect(dead_code, reason = "parent-bound startup is not wired yet")]
+    async fn finish(mut self) -> Stage {
+        match self.instance.as_mut() {
+            Some(attempt) => attempt.settle().await,
+            None => Stage::Confirmed,
+        }
     }
 
     /// Each checkpoint admits the work up to the next one; Detached passes a no-op.
