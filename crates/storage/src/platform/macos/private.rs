@@ -25,9 +25,10 @@ struct Limits {
     entries: usize,
 }
 
-/// Opens a file for its metadata only. Nothing reads through it: it stays an `OwnedFd`, which has
-/// no read methods. Non-blocking and with no controlling terminal, so something other than a file
-/// swapped in after the look can't stall the open or become the process's terminal.
+/// Opens a file read-capable but for its metadata only, as the owner approved. Nothing reads
+/// through it: it stays an `OwnedFd`, which has no read methods. `O_NONBLOCK` keeps a FIFO
+/// swapped in after the look from waiting for a writer, and `O_NOCTTY` keeps a terminal from
+/// becoming the process's own.
 const FILE_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
 
@@ -146,6 +147,11 @@ fn private_file(
     seen: &libc::stat,
     user: libc::uid_t,
 ) -> Result<(), Untrusted> {
+    // A file with a second name refuses before it's opened: closing an fd releases this process's
+    // record locks on the inode, whichever name took them.
+    if seen.st_nlink != 1 {
+        return Err(Untrusted::Unsafe);
+    }
     #[cfg(test)]
     tests::step(tests::Step::Looked);
     // SAFETY: parent is held and name is one listed component; there's no creation flag.
@@ -195,7 +201,8 @@ fn look(parent: &File, name: &CStr) -> Result<libc::stat, Untrusted> {
     }
     // SAFETY: successful fstatat initialized metadata.
     let metadata = unsafe { metadata.assume_init() };
-    // A dataless entry's contents live with a file provider; touching it could fetch them.
+    // An entry already dataless here has its contents with a file provider; opening it could
+    // fetch them. This samples the look; activation still needs a base outside file providers.
     if metadata.st_flags & DATALESS != 0 {
         return Err(Untrusted::Unsafe);
     }
@@ -224,8 +231,9 @@ fn walk(
     if depth > 0 && found.st_mode & libc::S_IFMT == libc::S_IFREG {
         return private_file(parent, name, &found, user);
     }
-    // The depth limit counts folders, so a file in the deepest allowed folder still passes.
-    if depth > limits.depth {
+    // The depth limit counts folders: a file, link or anything else in the deepest allowed folder
+    // gets its own answer.
+    if found.st_mode & libc::S_IFMT == libc::S_IFDIR && depth > limits.depth {
         return Err(Untrusted::Io);
     }
     let (folder, checked) = folder_at(parent, name, &found, user)?;

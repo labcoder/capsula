@@ -84,6 +84,12 @@ fn new_fifo(folder: &File) {
     assert_eq!(made, 0, "replacement fixture FIFO");
 }
 
+fn new_link(folder: &File) {
+    // SAFETY: folder is a held fixture folder; both names are fixed and terminated.
+    let made = unsafe { libc::symlinkat(c"f-old".as_ptr(), folder.as_raw_fd(), c"f".as_ptr()) };
+    assert_eq!(made, 0, "replacement fixture link");
+}
+
 fn nothing(_: &File) {}
 
 /// A file swap: the folder's name, when it happens, what replaces the file, the refusal, and where
@@ -459,6 +465,13 @@ fn native_private_tree_refuses_past_its_bounds() {
         Ok(()),
         "a file in the deepest folder"
     );
+    let edge = folder(&mut scratch, &root, c"edge", 0o700);
+    link(&mut scratch, &edge, c"l", c"elsewhere");
+    assert_eq!(
+        private_at(&root, c"edge", user, at(0, 1)),
+        Err(Untrusted::Reparse),
+        "a link in the deepest folder is still a link"
+    );
     assert_eq!(
         private_at(&root, c"deep", user, at(1, 3)),
         Err(Untrusted::Io)
@@ -478,7 +491,7 @@ fn native_private_tree_refuses_past_its_bounds() {
         Err(Untrusted::Io)
     );
 
-    drop((deep, first, second, wide));
+    drop((deep, first, second, edge, wide));
     scratch
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");
@@ -629,7 +642,7 @@ fn native_a_file_is_bound_from_its_look_to_its_name() {
     let root = scratch.root.try_clone().expect("retain scratch root");
     let user = this_user();
 
-    let cases: [Swap; 4] = [
+    let cases: [Swap; 5] = [
         (
             c"opened",
             Step::Looked,
@@ -652,25 +665,34 @@ fn native_a_file_is_bound_from_its_look_to_its_name() {
             Untrusted::Unsafe,
             Some(c"p"),
         ),
+        (
+            c"linked",
+            Step::Looked,
+            new_link,
+            Untrusted::Reparse,
+            Some(c"l"),
+        ),
     ];
+    let mut outcomes = Vec::new();
     for (name, at, replace, refused, moved) in cases {
         let top = folder(&mut scratch, &root, name, 0o700);
         drop(file(&mut scratch, &top, c"f", 0o600));
         on_step(Some(swap_at(&top, at, replace)));
-        assert_eq!(
-            private_at(&root, name, user, LIMITS),
-            Err(refused),
-            "{name:?}"
-        );
+        let outcome = private_at(&root, name, user, LIMITS);
         on_step(None);
+        // Put the namespace back before judging, so a wrong outcome still cleans up.
         if let Some(moved) = moved {
             rename(&top, c"f", moved);
             scratch.record(&top, moved).expect("record the replacement");
         }
         rename(&top, c"f-old", c"f");
+        outcomes.push((name, outcome, Err(refused)));
     }
 
     scratch
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");
+    for (name, outcome, refused) in outcomes {
+        assert_eq!(outcome, refused, "{name:?}");
+    }
 }

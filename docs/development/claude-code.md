@@ -206,11 +206,13 @@ umask or an inherited ACL left unprivate is refused and stays. `private_tree` wa
 `claude-code` folder without following anything. Every folder in it must be private in that
 way, and every file owned by the user at mode 0600, with one link and no ACL at all, by the same
 two checks. Nothing else may be there, and a dataless entry (one whose contents a file provider
-holds) refuses before anything opens it. A file is opened read-only, without following it, with no
-blocking and no controlling terminal, for its metadata only, and then closed; it is never read.
-The owner chose this for macOS, where no descriptor lacks read access; Windows' handle has no
-read access at all. A test detects a content read: across the walk a file's access time stays
-put, while one byte read on the same file moves it. A Mac fd holds the object, not
+holds) already at the look refuses before anything opens it. So does a file with a second name.
+A file is opened read-only, without following it, for its metadata only, and then closed; it is
+never read. That read-capable descriptor is the owner's choice: the approved ACL check needs a
+descriptor, and Windows' handle, by contrast, has no read access at all. `O_NONBLOCK` keeps a
+FIFO swapped in after the look from waiting for a writer. A test detects a content read on its
+fixture: across the walk a file's access time stays put, while one byte read on the same file
+moves it. A Mac fd holds the object, not
 its name, so the walk is a sample taken under the lane's lock with cooperating writers. It
 refuses past 32 levels or 65,536 entries. The real Application Support base isn't admitted yet.
 Markers and deletion (`mark`, `marker`, `remove_tree`) still refuse, so Disconnect can't finish
@@ -218,8 +220,8 @@ there. The Mac checks are stricter than the Windows ones on exact owner, mode an
 has nothing like integrity labels. Modes don't inherit the way a DACL does, so before Claude Code
 runs on macOS its launch must give the child, and only the child, umask 077, and must create
 Kumochi's own `mcp.json` exclusively at 0600. Before it's turned on, the base must also be shown
-to be outside file-provider storage, and Kumochi must take no POSIX record locks on files in the
-folder, since closing a checked file's fd would release them. None of this runs yet: the brain refuses every mode
+to be outside file-provider storage, and Kumochi must take no POSIX record locks on any inode in
+the folder, whatever name it uses, since closing a checked file's fd would release them. None of this runs yet: the brain refuses every mode
 on macOS and has no Claude Code host there. Claude Code stays off on the Mac until a check on a
 real account shows its sign-in stays in Kumochi's folder.
 
