@@ -283,7 +283,8 @@ impl<S: InstanceStore> Root<S> {
     }
 
     /// Admits, then runs the stages, then serves until the runtime ends. Returns the greeted pair
-    /// too, once there is one, so its legs close only at settlement.
+    /// too, once there is one, so its legs close only at settlement; a fatal end drops it here,
+    /// so the shell sees EOF before any cleanup is awaited.
     async fn serve<P: AdmissionPair>(
         &mut self,
         pair: P,
@@ -307,7 +308,8 @@ impl<S: InstanceStore> Root<S> {
             .as_mut()
             .expect("the stages built the brain");
         let ended = P::serve(&mut greeted, brain, terminal, shell, by).await;
-        (Ok(ended), Some(greeted))
+        let kept = (!matches!(ended, Ended::Fatal(_))).then_some(greeted);
+        (Ok(ended), kept)
     }
 
     /// Runs the stages for a committed admission, each behind a fence and the clock: on entry,

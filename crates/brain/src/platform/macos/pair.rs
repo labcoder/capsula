@@ -406,23 +406,28 @@ async fn serve(
         .await
 }
 
-/// Writes `frame` on control only while the parent and the clock both pass right before it; a
-/// loss or the deadline wins over a writer that is ready at the same time, and both are checked
-/// again once it's written.
+/// Writes `frame` on control only while the parent and the clock both pass right before every
+/// poll of the writer, since the timer can fire after a writer woken past `by`; a loss or the
+/// deadline wins over a writer that is ready at the same time, and both are checked again once
+/// it's written.
 async fn tune(
     pair: &mut AuthenticatedPair,
     shell: &ShellProcess,
     by: Instant,
     frame: &[u8],
 ) -> Result<(), PairError> {
-    shell.fence().map_err(|_| PairError::Lost)?;
-    before(by)?;
     let mut loss = shell.loss();
+    let mut write = std::pin::pin!(pair.write_control(frame));
+    let checked = std::future::poll_fn(|cx| {
+        shell.fence().map_err(|_| PairError::Lost)?;
+        before(by)?;
+        write.as_mut().poll(cx).map_err(|_| PairError::Transport)
+    });
     tokio::select! {
         biased;
         _ = Verdict::lost(&mut loss) => return Err(PairError::Lost),
-        () = tokio::time::sleep_until(by) => return Err(PairError::Timeout),
-        written = pair.write_control(frame) => written.map_err(|_| PairError::Transport)?,
+        () = sleep_until(by) => return Err(PairError::Timeout),
+        written = checked => written?,
     }
     shell.fence().map_err(|_| PairError::Lost)?;
     before(by)

@@ -176,11 +176,12 @@ The stage driver fences and checks the clock on entry, asks the prerequisites wh
 ready, and fences again before anything starts; each checkpoint fences too. It never starts
 voice: this mode builds no models, so held speech answers NotLoaded, and only what the
 prerequisites' containment allows would start. Serving writes ShellTuning only while the parent
-and the same clock both pass, checked right before the write, preferred over a writer that is
-ready at the same time, and checked again after it. It then lends both legs to the runtime with
+and the same clock both pass, checked right before every poll of the writer, preferred over a
+writer that is ready at the same time, and checked again after it. It then lends both legs to the runtime with
 a terminal that watches the pair's cell and the parent. The root keeps the pair through
 settlement and drops it after the Brain and its helpers, before the item, so the shell sees EOF
-only once the Brain has settled. A refused admission drops it at once. Settlement has no
+only once the Brain has settled. A refused admission, or a fatal end of serving, drops it at
+once, before any cleanup is awaited. Settlement has no
 admission deadline. The 5-second handshake caps sit inside the admission clock.
 
 `AdmissionPair` is the seam between that shared driver and the platform's pair: it keys,

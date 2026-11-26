@@ -248,6 +248,22 @@ impl Greeter {
         matches!(self.data_in.read(&mut [0; 1]).await, Ok(0))
     }
 
+    /// Writes a record envelope no opener accepts on the data leg, so the brain refuses the pair.
+    pub(super) fn forge_data(&self) {
+        use std::io::Write as _;
+        use std::os::fd::AsFd as _;
+
+        let end = self
+            .data_in
+            .as_ref()
+            .as_fd()
+            .try_clone_to_owned()
+            .expect("the shell's data end");
+        std::os::unix::net::UnixStream::from(end)
+            .write_all(&[0; 2])
+            .expect("a forged envelope");
+    }
+
     /// True when neither leg reaches EOF within `quiet`, reading whatever was already written.
     pub(super) async fn open_for(&mut self, quiet: Duration) -> bool {
         loop {

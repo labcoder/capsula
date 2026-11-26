@@ -1099,7 +1099,9 @@ impl Brain {
             link.registration = registration;
             link.text_metrics = text_metrics;
             #[cfg(test)]
-            self.observer.send(Seen::TextMetrics(text_metrics)).ok();
+            self.observer
+                .send(Seen::TextMetrics(link.text_metrics))
+                .ok();
             link.start = start;
             let core = self.core::<WATCH_FATAL>(
                 &mut controls,

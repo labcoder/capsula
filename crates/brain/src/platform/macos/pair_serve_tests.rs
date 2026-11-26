@@ -2,8 +2,13 @@
 //! `ShellTuning`, the text-metrics hand-over, holds without voice or screen, the parent's exit and
 //! the order the legs close in.
 
+use std::io::{self, Read as _, Write as _};
+use std::os::fd::AsFd as _;
+use std::os::unix::net::UnixStream as StdStream;
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, mpsc};
+use std::task::Poll;
+use std::time::Duration;
 
 use kumochi_protocol::message::{
     CAPABILITY_LEN, ControlToBrain, ControlToShell, DataToBrain, IssueSession, RunId, ScreenChoice,
@@ -345,6 +350,94 @@ async fn a_tuning_whose_deadline_passed_is_never_written_even_to_a_writable_pair
     Box::pin(root.settle(None, ())).await;
 }
 
+/// Writes until the end's buffer is full; returns how many bytes that took.
+fn fill(end: &StdStream) -> usize {
+    let mut written = 0;
+    for chunk in [&[0; 4096][..], &[0]] {
+        loop {
+            match (&*end).write(chunk) {
+                Ok(n) => written += n,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("the fill failed: {error}"),
+            }
+        }
+    }
+    written
+}
+
+/// Reads what the end has buffered; true as well once it reached EOF.
+fn drain(end: &StdStream) -> (usize, bool) {
+    let mut buffer = [0; 4096];
+    let mut read = 0;
+    loop {
+        match (&*end).read(&mut buffer) {
+            Ok(0) => return (read, true),
+            Ok(n) => read += n,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return (read, false),
+            Err(error) => panic!("the drain failed: {error}"),
+        }
+    }
+}
+
+/// The writer is full at first and gets room only after `by` passed, while the timer, rounded up
+/// to the next millisecond, hasn't fired: the tuning still never goes out.
+#[tokio::test]
+async fn a_writer_that_gets_room_after_the_deadline_writes_no_tuning() {
+    let scratch = Scratch::new("pair-late-room");
+    let item = Item::default();
+    let shell = fixture();
+    let (pair, ends) = inherited();
+    let brain_control = pair.control.try_clone().expect("the brain's control end");
+    let shell_control = StdStream::from(
+        ends[0]
+            .as_fd()
+            .try_clone_to_owned()
+            .expect("the shell's control end"),
+    );
+    let mut root = Root::new();
+    let (admitted, greeter) = bounded(async {
+        tokio::join!(
+            Box::pin(root.admit(pair, &shell, by(), || Ok(custody()), || Ok(item.clone()))),
+            async {
+                let mut greeter = parent(ends, &item).await;
+                greeter.hellos().await;
+                greeter.metrics().await;
+                greeter
+            },
+        )
+    })
+    .await;
+    let (mut bound, _committed) = admitted.expect("admitted");
+    let mut brain = crate::test_support::brain(&scratch, "");
+    let terminal = Terminal::new(bound.pair.pair.subscribe(), None);
+    assert_eq!(drain(&shell_control), (0, false), "the greeting was read");
+    let filled = fill(&brain_control);
+    tokio::time::pause();
+    let late = Instant::now() + Duration::from_micros(1);
+    let ended = {
+        let mut serving = std::pin::pin!(serve(&mut bound, &mut brain, terminal, &shell, late));
+        let first = std::future::poll_fn(|cx| Poll::Ready(serving.as_mut().poll(cx))).await;
+        assert_eq!(first, Poll::Pending, "the tuning waits for room");
+        tokio::time::advance(Duration::from_micros(2)).await;
+        assert_eq!(
+            drain(&shell_control),
+            (filled, false),
+            "room after the deadline"
+        );
+        serving.await
+    };
+    assert_eq!(ended, Ended::Lost);
+    drop((bound, brain_control));
+    assert_eq!(
+        drain(&shell_control),
+        (0, true),
+        "EOF, and no tuning before it"
+    );
+    drop(greeter);
+    brain.close().await;
+    Box::pin(root.settle(None, ())).await;
+}
+
 #[tokio::test]
 async fn the_legs_stay_open_until_the_brain_settles_and_close_before_the_item() {
     let scratch = Scratch::new("pair-close-order");
@@ -431,6 +524,56 @@ async fn a_parent_exit_while_serving_refuses_and_settles_with_both_peer_ends_ope
                     "the claim came first"
                 );
                 greeter
+            },
+        )
+    })
+    .await;
+    assert_eq!(ran, Err(ParentBoundError::Refused));
+    assert_eq!(stages, STAGES);
+    assert!(item.get().is_none(), "settlement deleted the item");
+    assert!(held.upgrade().is_none(), "settlement let custody go");
+}
+
+#[tokio::test]
+async fn a_fatal_refusal_closes_both_legs_while_the_brain_still_settles() {
+    let scratch = Scratch::new("pair-fatal-close");
+    let item = Item::default();
+    let shell = fixture();
+    let token = Arc::new(());
+    let held = Arc::downgrade(&token);
+    let (pair, ends) = inherited();
+    let (give, holding) = mpsc::channel();
+    let ((ran, stages), ()) = bounded(async {
+        tokio::join!(
+            run_on_fixtures(
+                &scratch,
+                pair,
+                &shell,
+                by(),
+                item.clone(),
+                SessionCustody::fixture(token),
+                Script {
+                    hold: Some(give),
+                    ..Script::default()
+                },
+            ),
+            async {
+                let mut greeter = parent(ends, &item).await;
+                let Holding { mut entered, free } = holding.try_recv().expect("the accounts' hold");
+                greeter.hellos().await;
+                greeter.metrics().await;
+                greeter.control_until(scenes).await;
+                greeter.forge_data();
+                entered
+                    .recv()
+                    .await
+                    .expect("the accounts wait for their release");
+                assert_eq!(
+                    tokio::time::timeout(SHORT * 10, greeter.read_to_end()).await,
+                    Ok(()),
+                    "both legs reach EOF while the account close is held"
+                );
+                free.send(()).expect("the release waits");
             },
         )
     })
