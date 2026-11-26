@@ -80,12 +80,13 @@ impl SessionLock {
             .expect("an absolute authority file has a folder")
     }
 
-    /// Custody's held lock, shared, with the absolute product folder its acquisition walked.
-    /// Only custody calls this, so the folder is never resolved a second time.
-    pub(crate) fn lent(lock: Arc<super::InstanceLock>, product: &Path) -> Self {
+    /// Custody's held lock, shared, in the product folder its acquisition walked; only that
+    /// acquisition makes the lock, so the folder is never resolved a second time.
+    pub(crate) fn lent(lock: Arc<super::InstanceLock>) -> Self {
+        let authority = lock.product().join(AUTHORITY_FILE);
         Self {
             _guard: Guard::Lent(lock),
-            authority: product.join(AUTHORITY_FILE),
+            authority,
         }
     }
 

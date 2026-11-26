@@ -73,8 +73,22 @@ impl InstanceStore for KeychainItem {
     }
 }
 
-/// Custody in the OS-resolved Application Support folder, and the product folder it locked in.
-pub(crate) fn instance_custody() -> Result<(AdmittedLock, PathBuf), CustodyError> {
+/// Custody's lock, already taken, with the absolute product path its acquisition walked. Only
+/// `lock_at` makes one, once the lock is held, so a lock never pairs with another folder.
+pub(crate) struct InstanceLock {
+    _lock: AdmittedLock,
+    product: PathBuf,
+}
+
+impl InstanceLock {
+    /// The product folder this lock was taken in, by the pathname the acquisition walked.
+    pub(crate) fn product(&self) -> &Path {
+        &self.product
+    }
+}
+
+/// Custody in the OS-resolved Application Support folder.
+pub(crate) fn instance_custody() -> Result<InstanceLock, CustodyError> {
     custody_in(ProductIdentity::ACTIVE, application_support_dir)
 }
 
@@ -82,15 +96,15 @@ pub(crate) fn instance_custody() -> Result<(AdmittedLock, PathBuf), CustodyError
 fn custody_in(
     identity: ProductIdentity,
     support: impl FnOnce() -> Result<PathBuf, ApplicationSupportError>,
-) -> Result<(AdmittedLock, PathBuf), CustodyError> {
+) -> Result<InstanceLock, CustodyError> {
     instance_edition(identity).map_err(|_| CustodyError::NotAdmitted)?;
     lock_at(&support().map_err(|_| CustodyError::Unavailable)?)
 }
 
 /// Refuses another edition first, then admits `support`, holds or privately creates this
-/// edition's product folder, and locks the session leaf on the descriptor it opened. Returns the
-/// lock with the absolute product path this acquisition walked, so nothing resolves it again.
-pub(crate) fn lock_at(support: &Path) -> Result<(AdmittedLock, PathBuf), CustodyError> {
+/// edition's product folder, and locks the session leaf on the descriptor it opened. The held
+/// lock carries the absolute product path this acquisition walked, so nothing resolves it again.
+pub(crate) fn lock_at(support: &Path) -> Result<InstanceLock, CustodyError> {
     instance_edition(ProductIdentity::ACTIVE).map_err(|_| CustodyError::NotAdmitted)?;
     let product = match admit_support(support)
         .and_then(|support| support.product_folder(DATA_DIR))
@@ -104,7 +118,10 @@ pub(crate) fn lock_at(support: &Path) -> Result<(AdmittedLock, PathBuf), Custody
         TryLockError::WouldBlock => CustodyError::Busy,
         TryLockError::Error(error) => CustodyError::Open(error.kind()),
     })?;
-    Ok((lock, support.join(DATA_DIR)))
+    Ok(InstanceLock {
+        _lock: lock,
+        product: support.join(DATA_DIR),
+    })
 }
 
 fn refused(error: AcquisitionError) -> CustodyError {

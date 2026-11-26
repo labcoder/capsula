@@ -2,7 +2,6 @@
 //! admitted product folder, held from bootstrap to the item's final delete (A-7, A-10).
 
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::platform::{self, SessionLock};
@@ -11,8 +10,8 @@ pub(crate) use crate::platform::CustodyError;
 
 /// Holds the session lock until dropped; nothing else can make one, or lend it.
 pub(crate) struct SessionCustody {
-    /// The lock and the absolute product path its acquisition walked; loans share the lock.
-    held: Option<(Arc<platform::InstanceLock>, PathBuf)>,
+    /// The held lock with the product path it was taken in; loans share it.
+    held: Option<Arc<platform::InstanceLock>>,
     #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
     _fixture: Option<Arc<()>>,
 }
@@ -46,15 +45,15 @@ impl SessionCustody {
     }
 
     /// The held lock as the opened state's profile lock, bound to the product path it was
-    /// taken at; the lock releases only with custody and the last loan. A token lends nothing.
+    /// taken in; the lock releases only with custody and the last loan. A token lends nothing.
     pub(in crate::startup) fn lend(&self) -> Option<Arc<SessionLock>> {
-        let (lock, product) = self.held.as_ref()?;
-        Some(Arc::new(SessionLock::lent(Arc::clone(lock), product)))
+        let lock = self.held.as_ref()?;
+        Some(Arc::new(SessionLock::lent(Arc::clone(lock))))
     }
 
-    fn held((lock, product): (platform::InstanceLock, PathBuf)) -> Self {
+    fn held(lock: platform::InstanceLock) -> Self {
         Self {
-            held: Some((Arc::new(lock), product)),
+            held: Some(Arc::new(lock)),
             #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             _fixture: None,
         }

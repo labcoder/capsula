@@ -149,6 +149,13 @@ pub(crate) enum Added {
 pub(crate) enum InstanceLock {}
 
 #[cfg(not(target_os = "macos"))]
+impl InstanceLock {
+    pub(crate) fn product(&self) -> &std::path::Path {
+        match *self {}
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 pub(crate) enum InstanceItem {}
 
 #[cfg(not(target_os = "macos"))]
@@ -185,14 +192,12 @@ impl crate::startup::instance::InstanceStore for InstanceItem {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn instance_custody() -> Result<(InstanceLock, std::path::PathBuf), CustodyError> {
+pub(crate) fn instance_custody() -> Result<InstanceLock, CustodyError> {
     Err(CustodyError::NotAdmitted)
 }
 
 #[cfg(all(test, not(target_os = "macos")))]
-pub(crate) fn instance_custody_at(
-    _: &std::path::Path,
-) -> Result<(InstanceLock, std::path::PathBuf), CustodyError> {
+pub(crate) fn instance_custody_at(_: &std::path::Path) -> Result<InstanceLock, CustodyError> {
     Err(CustodyError::NotAdmitted)
 }
 
@@ -208,8 +213,6 @@ pub(crate) fn instance_fixture_clean(_: &std::path::Path, _: &[&str]) {
     panic!("only macOS has the instance item's native fixtures")
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) type InstanceLock = kumochi_storage::AdmittedLock;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use macos::instance::lock_at as instance_custody_at;
 #[cfg(all(test, target_os = "macos"))]
@@ -217,7 +220,7 @@ pub(crate) use macos::instance::tests::{
     clean as instance_fixture_clean, support as instance_fixture,
 };
 #[cfg(target_os = "macos")]
-pub(crate) use macos::instance::{KeychainItem as InstanceItem, instance_custody};
+pub(crate) use macos::instance::{InstanceLock, KeychainItem as InstanceItem, instance_custody};
 
 #[cfg(target_os = "macos")]
 pub(crate) use macos::capture::{display_at, screen_capturer};
