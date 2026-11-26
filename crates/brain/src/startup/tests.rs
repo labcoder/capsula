@@ -85,7 +85,7 @@ async fn unwind(stop: Checkpoint, slot: u32, shell: Option<&ShellProcess>) {
         Mode::Detached,
         opened,
         |_, _, profile| {
-            let mut account = held_accounts(&scratch, profile);
+            let mut account = held_accounts(profile);
             vault = account.take_release_receipt();
             Ok((account, Arc::default()))
         },
@@ -236,7 +236,7 @@ async fn a_loss_while_the_accounts_start_refuses_the_brain() {
         Mode::Detached,
         opened,
         |_, _, profile| {
-            let mut account = held_accounts(&scratch, profile);
+            let mut account = held_accounts(profile);
             vault = account.take_release_receipt();
             shell.publish(1);
             Ok((account, Arc::default()))
