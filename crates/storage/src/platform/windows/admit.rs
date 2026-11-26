@@ -15,7 +15,7 @@ use kumochi_protocol::constants::{
 };
 
 use super::folders::{AppDataError, Pair};
-use super::protected::{check_leaf, hold_chain, owner_only_dir};
+use super::protected::{check_leaf, hold_chain, owner_only_product_dir};
 use crate::platform::Untrusted;
 
 /// The suffixes SQLite gives a database's side files, the database itself first.
@@ -56,8 +56,9 @@ fn admit(pair: &Pair) -> Result<Admitted, AppDataError> {
     let local = pair.local.join(DATA_DIR);
     let roaming = pair.roaming.join(DATA_DIR);
     let logs = local.join(LOGS_DIR);
+    // Both product folders pass before anything, the logs folder included, is made under either.
     for folder in [&local, &roaming, &logs] {
-        held.push(owner_only_dir(folder).map_err(refused)?);
+        held.push(owner_only_product_dir(folder).map_err(refused)?);
     }
     let mut leaves: Vec<PathBuf> = [STORE_FILE, AUTHORITY_FILE]
         .into_iter()
@@ -97,7 +98,7 @@ mod tests {
     use windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData;
 
     use super::{AppDataError, Pair, admit};
-    use crate::platform::windows::protected::{known_folder, set_junction};
+    use crate::platform::windows::protected::{known_folder, set_dacl, set_junction};
     use crate::scratch::Scratch;
 
     /// A run root with existing, separate `local` and `roaming` children, and a disposable
@@ -163,6 +164,57 @@ mod tests {
         fs::write(local.join(LOGS_DIR).join("brain.log"), b"log").expect("a log");
         fs::write(run.pair.roaming.join(DATA_DIR).join(CONFIG_FILE), b"").expect("settings");
         drop(admit(&run.pair).expect("a reused profile of plain files is admitted"));
+    }
+
+    #[test]
+    fn a_product_folder_others_may_add_to_or_inherit_write_in_refuses() {
+        for (half, others) in [
+            ("local", "(A;;0x4;;;WD)"),
+            ("local", "(A;OIIO;FA;;;WD)"),
+            ("roaming", "(A;;0x4;;;WD)"),
+            ("roaming", "(A;OIIO;FA;;;WD)"),
+        ] {
+            let run = run("admit-heirs");
+            let root = if half == "local" {
+                &run.pair.local
+            } else {
+                &run.pair.roaming
+            };
+            let folder = root.join(DATA_DIR);
+            fs::create_dir(&folder).expect("the product folder");
+            set_dacl(&folder, |user| format!("D:P(A;OICI;FA;;;{user}){others}"));
+            assert_eq!(
+                admit(&run.pair).err(),
+                Some(AppDataError::InvalidOverride),
+                "{half} {others}"
+            );
+            assert!(
+                !run.pair.local.join(DATA_DIR).join(LOGS_DIR).exists(),
+                "no logs folder under a refused pair: {half} {others}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_at_a_product_folder_refuses() {
+        for half in ["local", "roaming"] {
+            let run = run("admit-file");
+            let root = if half == "local" {
+                &run.pair.local
+            } else {
+                &run.pair.roaming
+            };
+            fs::write(root.join(DATA_DIR), b"").expect("a file at the product folder");
+            assert_eq!(
+                admit(&run.pair).err(),
+                Some(AppDataError::InvalidOverride),
+                "{half}"
+            );
+            assert!(
+                !run.pair.local.join(DATA_DIR).join(LOGS_DIR).exists(),
+                "no logs folder under a refused pair: {half}"
+            );
+        }
     }
 
     #[test]
