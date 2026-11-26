@@ -58,6 +58,11 @@ impl Diagnostics {
     }
 }
 
+/// Whether this run writes input diagnostics.
+pub(super) fn active(cx: &App) -> bool {
+    cx.has_global::<Diagnostics>()
+}
+
 /// Queues `qpc=<counter> <line>` when diagnostics are on. The queue drops lines when full
 /// rather than blocking, so a stalled disk never stalls the UI.
 pub(super) fn record(cx: &mut App, line: Arguments<'_>) {

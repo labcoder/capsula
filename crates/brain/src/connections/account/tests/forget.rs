@@ -347,3 +347,155 @@ fn forget_recovers_a_sign_in_that_reads_whole_during_its_scan() {
         h.view()
     );
 }
+
+/// A host, and a registration bound to an identity with no tokens, as an ordinary sign-out keeps.
+fn bound_registration(vault: &mut Vault<FakeStore>) {
+    vault.host_id().expect("host");
+    let mut registration = saved_account("subject-1", "refresh-old").expose().clone();
+    registration.tokens = None;
+    registration.email = None;
+    registration.plan_enabled = false;
+    committed(&vault.save_account(&Secret::new(registration)));
+}
+
+/// Loses every chunk of `record`'s generations, as a copied profile does.
+fn lose(h: &Harness, record: &str) {
+    let prefix = h.generations(record);
+    let names: Vec<_> = h
+        .store
+        .names()
+        .into_iter()
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+    assert!(!names.is_empty(), "{record} had chunks to lose");
+    h.store.rollback(&BTreeMap::new(), &names);
+}
+
+/// A bound registration keeps its lost host from being replaced, so it can never sign in again:
+/// it reads as missing, Forget gives it up, and the next read replaces the host.
+#[test]
+fn forget_gives_up_a_bound_registration_whose_host_is_lost() {
+    let h = Harness::seeded("forget-lost-host", bound_registration);
+    lose(&h, "host");
+    let mut h = h.restart();
+    assert_eq!(h.view(), &unavailable(SavedSignInFailure::Missing, Some(1)));
+    h.op(AccountOp::SignIn);
+    assert!(h.listening.is_empty(), "sign-in stays refused");
+    h.op(AccountOp::CheckSavedSignIn);
+    assert_eq!(
+        h.view(),
+        &unavailable(SavedSignInFailure::Missing, Some(1)),
+        "Check finds the same"
+    );
+    h.op(AccountOp::ForgetSavedSignIn(1));
+    assert_eq!(
+        h.view(),
+        &AccountView::SignedOut {
+            revocation_unconfirmed: true
+        }
+    );
+    assert!(!committed_head(&h, "chatgpt"), "the registration is gone");
+    h.op(AccountOp::SignIn);
+    assert_eq!(h.listening.len(), 1, "an ordinary sign-in starts");
+    assert_eq!(h.saved_clients, [None], "with no client from the old host");
+}
+
+/// Only a missing host chunk counts: a refused host read, or a lost host under a signed-in account,
+/// leaves the account as it was and Forget writes nothing.
+#[test]
+fn a_lost_host_counts_as_missing_only_under_a_bound_registration() {
+    let h = Harness::seeded("forget-host-refused", bound_registration);
+    let host = h.current_chunk("host");
+    h.store.0.lock().expect("fake lock").denied_read = Some(host);
+    let mut h = h.restart();
+    assert!(
+        matches!(h.view(), AccountView::SignedOut { .. }),
+        "{:?}",
+        h.view()
+    );
+    let before = h.marker();
+    h.op(AccountOp::ForgetSavedSignIn(1));
+    assert_eq!(h.marker(), before);
+    h.store.0.lock().expect("fake lock").denied_read = None;
+    h.op(AccountOp::SignIn);
+    assert!(h.listening.is_empty(), "the refused host still blocks");
+    h.op(AccountOp::Retry);
+    h.op(AccountOp::SignIn);
+    assert_eq!(h.listening.len(), 1, "Retry rereads the host");
+
+    let h = Harness::seeded("forget-host-signed-in", |vault| {
+        vault.host_id().expect("host");
+        committed(&vault.save_account(&saved_account("subject-1", "refresh-old")));
+    });
+    lose(&h, "host");
+    let mut h = h.restart();
+    assert!(
+        matches!(h.view(), AccountView::SignedIn { .. }),
+        "{:?}",
+        h.view()
+    );
+    let before = h.marker();
+    h.op(AccountOp::ForgetSavedSignIn(1));
+    assert_eq!(h.marker(), before);
+}
+
+/// A signed-in account that reads whole again by the time Forget rereads it is recovered, even with
+/// its host still lost: only a bound registration lets the host stand as evidence.
+#[test]
+fn forget_recovers_a_signed_in_account_that_reads_again_beside_a_lost_host() {
+    let h = Harness::seeded("forget-host-account-back", |vault| {
+        vault.host_id().expect("host");
+        committed(&vault.save_account(&saved_account("subject-1", "refresh-old")));
+    });
+    let saved = h.store.snapshot();
+    lose(&h, "host");
+    lose(&h, "chatgpt");
+    let mut h = h.restart();
+    assert_eq!(h.view(), &unavailable(SavedSignInFailure::Missing, Some(1)));
+    let account: Vec<_> = saved
+        .keys()
+        .filter(|name| name.starts_with(&h.generations("chatgpt")))
+        .cloned()
+        .collect();
+    h.store.rollback(&saved, &account);
+    h.store.0.lock().expect("fake lock").missed_reads = 1;
+    let (before, revoked) = (h.marker(), h.revoking.len());
+    h.op(AccountOp::ForgetSavedSignIn(1));
+    assert_eq!(h.marker(), before, "nothing is discarded");
+    assert_eq!(h.revoking.len(), revoked, "nothing is revoked");
+    assert!(committed_head(&h, "chatgpt"), "the account stays");
+    assert!(
+        matches!(h.view(), AccountView::SignedIn { .. }),
+        "{:?}",
+        h.view()
+    );
+}
+
+/// A host that reads again before Check lets the recovered registration sign in with its own
+/// client, with no Forget and no reload.
+#[test]
+fn check_restores_a_host_that_reads_again() {
+    let h = Harness::seeded("check-host-back", bound_registration);
+    let saved = h.store.snapshot();
+    lose(&h, "host");
+    let mut h = h.restart();
+    assert_eq!(h.view(), &unavailable(SavedSignInFailure::Missing, Some(1)));
+    let host: Vec<_> = saved
+        .keys()
+        .filter(|name| name.starts_with(&h.generations("host")))
+        .cloned()
+        .collect();
+    h.store.rollback(&saved, &host);
+    h.op(AccountOp::CheckSavedSignIn);
+    assert_eq!(
+        h.view(),
+        &AccountView::SignedOut {
+            revocation_unconfirmed: false
+        }
+    );
+    let before = h.marker();
+    h.op(AccountOp::SignIn);
+    assert_eq!(h.marker(), before);
+    assert_eq!(h.listening.len(), 1, "the sign-in starts");
+    assert_eq!(h.saved_clients, [Some("client-saved".to_owned())]);
+}

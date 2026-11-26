@@ -397,8 +397,11 @@ brain deletes each listed part's folder under `%LOCALAPPDATA%\<product>\models` 
 write that takes the part out of `removing`, under epoch 0 like the default model. Every
 folder from the drive's root down to `models` stays open while the part is deleted, and the
 deletion never follows a reparse point: a junction or link on the way, or a folder another
-account could change, deletes nothing and leaves the part listed. A folder
-that's already gone counts as deleted. A folder that can't be deleted stays listed, so the next
+account could change, deletes nothing and leaves the part listed. Each entry is deleted with
+POSIX semantics, so its name leaves the folder as Kumochi's handle closes, even while another
+process such as a virus scan still has the file open. Without that, the file would stay listed
+until the scan let go, and its folder couldn't be deleted. Only a volume that refuses POSIX
+deletes gets the older kind. A folder that's already gone counts as deleted. A folder that can't be deleted stays listed, so the next
 start tries again. An unknown name is never deleted, and stays in the list. A removal at run time
 deletes the same way (see [voice](voice.md#remove)).
 

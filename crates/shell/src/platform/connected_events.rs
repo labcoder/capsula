@@ -35,6 +35,7 @@ pub(crate) enum PresenceEvent {
     /// The user picked Quit in the tray menu.
     Quit,
     /// `--gate-observer` only: the harness asked for one dock repaint.
+    #[cfg(any(test, feature = "gate-recorder"))]
     Repaint,
     /// A presence window lost mouse capture, stamped `seq` in the UI thread's input sequence.
     /// `released` is the button whose forwarded release caused it; `None` is a cancel mode or a
@@ -99,6 +100,7 @@ pub(crate) enum MaskUpdate {
 }
 
 /// What the proxy saw, stamped with the performance counter when it dispatched it.
+#[cfg(any(test, feature = "gate-recorder"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
     not(windows),
@@ -114,4 +116,5 @@ pub(crate) enum ProxyNote {
 }
 
 /// Receives the proxy's notes on the UI thread.
+#[cfg(any(test, feature = "gate-recorder"))]
 pub(crate) type Observe = Box<dyn Fn(ProxyNote)>;

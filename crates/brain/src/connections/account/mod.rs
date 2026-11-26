@@ -67,8 +67,6 @@ pub enum Input {
     },
     /// A revocation run ended with these entries confirmed.
     Revoked(Vec<Secret<Revocable>>),
-    /// A revocation run could not build a native client, so no entries were confirmed.
-    RevocationUnsupported,
     /// A caller wants the bearer, refreshed first if it's due.
     Access {
         /// Names the caller's answer.
@@ -410,10 +408,6 @@ impl AccountState {
             Input::Listened { attempt, result } => self.listened(attempt, result, &mut effects),
             Input::Exchanged { attempt, result } => self.exchanged(attempt, result, &mut effects),
             Input::Revoked(confirmed) => self.revoked(confirmed),
-            Input::RevocationUnsupported => {
-                self.revoked(Vec::new());
-                effects.push(Effect::Error(ErrorKey::UnsupportedPlatform.into()));
-            }
             Input::PlanUnavailable => {
                 self.unavailable = self.leaving.is_none()
                     && self
@@ -590,7 +584,10 @@ impl AccountState {
         {
             *held = None;
             self.jobs.push_back(Queued::Save);
-        } else if self.loaded.damaged && self.live.is_none() && matches!(self.lane, Lane::Free) {
+        } else if (self.loaded.damaged || self.loaded.host.is_none())
+            && self.live.is_none()
+            && matches!(self.lane, Lane::Free)
+        {
             self.reload();
         } else {
             self.sweep();
@@ -798,7 +795,7 @@ impl AccountState {
     fn end_attempt(&mut self, key: ErrorKey, effects: &mut Vec<Effect>) {
         self.live = None;
         let action = match key {
-            ErrorKey::AccountMisconfigured | ErrorKey::UnsupportedPlatform => None,
+            ErrorKey::AccountMisconfigured => None,
             // An attempt that ended has nothing for Retry to rerun, so a refused registration or
             // pending flag offers a new sign-in.
             ErrorKey::RevocationBacklog => Some(Action::Retry),
@@ -849,9 +846,10 @@ impl AccountState {
             tracing::warn!(%failure, record = name, "an account record can't be read");
             damaged = true;
         };
+        // A missing host already refuses sign-in, and a later Check may find it read again.
         let host = snapshot
             .host
-            .inspect_err(|failure| readable("host", failure))
+            .inspect_err(|failure| tracing::warn!(%failure, record = "host", "an account record can't be read"))
             .ok();
         let revocable = snapshot
             .revocable
@@ -900,6 +898,10 @@ impl AccountState {
             Ok(saved) => {
                 revision = Some(saved.revision);
                 self.loaded.notice = saved.notice;
+                // A host that reads again lets the sign-in Check recovered start, read-only.
+                if self.loaded.host.is_none() {
+                    self.loaded.host = saved.host;
+                }
                 saved.account
             }
             Err(failure) => Err(failure),
@@ -968,9 +970,6 @@ fn classify(failure: &ExchangeError) -> (bool, ErrorKey) {
         ExchangeError::Http(HttpError::TrustStoreUnavailable) => {
             (false, ErrorKey::TrustStoreUnavailable)
         }
-        ExchangeError::Http(HttpError::UnsupportedPlatform) => {
-            (false, ErrorKey::UnsupportedPlatform)
-        }
         ExchangeError::Http(HttpError::Timeout | HttpError::Transport) => {
             (true, ErrorKey::AccountOffline)
         }
@@ -984,7 +983,6 @@ fn classify(failure: &ExchangeError) -> (bool, ErrorKey) {
 
 fn identity_key(failure: IdentityError) -> ErrorKey {
     match failure {
-        IdentityError::Http(HttpError::UnsupportedPlatform) => ErrorKey::UnsupportedPlatform,
         IdentityError::Http(HttpError::Timeout | HttpError::Transport | HttpError::Connect) => {
             ErrorKey::AccountOffline
         }

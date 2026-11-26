@@ -46,7 +46,6 @@ pub struct Accounts {
     pub error: Option<UserError>,
     pub send_failed: bool,
     pub waiting: Option<AccountOp>,
-    pub unsupported: bool,
     unexplained: bool,
 }
 
@@ -56,23 +55,18 @@ impl Accounts {
     }
 
     pub fn receive_snapshot(&mut self, current: Option<u64>, snapshot: LinkEvent) -> bool {
-        let (generation, view, unsupported) = match snapshot {
-            LinkEvent::Account { generation, view } => (generation, view, false),
-            LinkEvent::AccountUnsupported { generation, view } => (generation, view, true),
-            _ => return false,
+        let LinkEvent::Account { generation, view } = snapshot else {
+            return false;
         };
         if current != Some(generation) {
             return false;
         }
-        if (unsupported && !self.unsupported)
-            || (!self.unexplained && self.view.as_ref() != Some(&view))
-        {
+        if !self.unexplained && self.view.as_ref() != Some(&view) {
             self.error = None;
         }
         self.unexplained = false;
         self.view = Some(view);
         self.generation = Some(generation);
-        self.unsupported = unsupported;
         self.waiting = None;
         self.send_failed = false;
         true
@@ -85,8 +79,7 @@ impl Accounts {
         } else if matches!(
             self.view,
             Some(AccountView::SignedIn { recovery: None, .. })
-        ) && !self.unsupported
-            && self.error.is_none()
+        ) && self.error.is_none()
         {
             Receipt::Recovered
         } else {
@@ -216,24 +209,24 @@ impl Accounts {
             heading: Text::AccountRemote,
             note,
         };
-        let status = match &self.view {
+        match &self.view {
             None => settings.map_or(Text::AccountOffline, |_| Text::AccountWaiting),
             Some(AccountView::SignedOut {
                 revocation_unconfirmed,
             }) => {
                 if *revocation_unconfirmed {
                     lines.push(remote(Text::AccountRevocationUnconfirmed));
-                } else if !self.unsupported {
+                } else {
                     lines.push(Note(Text::AccountUsePlan));
                 }
                 Text::AccountSignedOut
             }
             Some(AccountView::SigningIn) => {
-                lines.extend((!self.unsupported).then_some(Note(Text::AccountReplaceHelp)));
+                lines.push(Note(Text::AccountReplaceHelp));
                 Text::AccountSigningIn
             }
             Some(AccountView::Busy) => {
-                lines.extend((!self.unsupported).then_some(Note(Text::AccountBusyHelp)));
+                lines.push(Note(Text::AccountBusyHelp));
                 Text::AccountBusy
             }
             Some(AccountView::SavedSignInUnavailable {
@@ -259,7 +252,7 @@ impl Accounts {
                 if *revocation_unconfirmed {
                     lines.push(remote(Text::AccountEarlierRevocationUnconfirmed));
                 }
-                return status;
+                status
             }
             Some(view @ AccountView::SigningOut { cleanup, .. }) => {
                 lines.push(match cleanup {
@@ -285,7 +278,7 @@ impl Accounts {
                 }
                 Some(AccountRecovery::SignInAgain) => Text::AccountSessionEnded,
                 Some(AccountRecovery::Retry) => {
-                    if !self.unsupported && self.error.is_none() {
+                    if self.error.is_none() {
                         lines.push(Note(Text::AccountRetryHelp));
                     }
                     Text::AccountAttention
@@ -296,14 +289,6 @@ impl Accounts {
                     PlanState::Unavailable => Text::AccountUnavailable,
                 },
             },
-        };
-        if !self.unsupported {
-            status
-        } else if matches!(self.view, Some(AccountView::SigningOut { .. })) {
-            lines.push(Note(Text::UnsupportedPlatform));
-            status
-        } else {
-            Text::UnsupportedPlatform
         }
     }
 
@@ -351,15 +336,6 @@ impl Accounts {
 
     pub fn allows(&self, op: AccountOp) -> bool {
         if self.waiting.is_some() {
-            return false;
-        }
-        if self.unsupported
-            && (matches!(
-                op,
-                AccountOp::SignIn | AccountOp::EnablePlan | AccountOp::LoadModels
-            ) || op == AccountOp::Retry
-                && !matches!(self.view, Some(AccountView::SigningOut { .. })))
-        {
             return false;
         }
         if op == AccountOp::SignIn
@@ -419,9 +395,6 @@ impl Accounts {
     }
 
     pub fn sign_in_again(&self) -> bool {
-        if self.unsupported {
-            return false;
-        }
         matches!(
             self.view,
             Some(AccountView::SignedIn {

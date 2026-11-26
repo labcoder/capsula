@@ -91,7 +91,7 @@ fn spoken_replies_default_appends_a_redacted_settings_snapshot() {
         show_screen: false,
     });
     let bytes = postcard::to_allocvec(&message).unwrap();
-    assert_eq!(bytes[0], 38);
+    assert_eq!(bytes[0], 37);
     round_trip(&message, Pipe::Control, 32);
     redacted(&message, Direction::ToShell, "SpokenRepliesDefaulted", 32);
     let debug = format!("{message:?}");
@@ -102,7 +102,7 @@ fn spoken_replies_default_appends_a_redacted_settings_snapshot() {
 #[test]
 fn fixture_engine_appends_a_fieldless_control_tag() {
     let message = ControlToShell::FixtureEngineActive;
-    assert_eq!(postcard::to_allocvec(&message).unwrap(), [39]);
+    assert_eq!(postcard::to_allocvec(&message).unwrap(), [38]);
     round_trip(&message, Pipe::Control, 1);
     redacted(&message, Direction::ToShell, "FixtureEngineActive", 1);
 }
