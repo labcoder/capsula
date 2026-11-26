@@ -164,6 +164,9 @@ pub enum CredentialStoreError {
     /// after retries.
     #[error("credential store did not settle")]
     Unsettled,
+    /// A name an earlier build wrote may still be in the store, so first light opens nothing.
+    #[error("earlier credential names are present or unchecked")]
+    Legacy,
 }
 
 /// Synchronous storage by exact target name, with no enumeration or implicit name mapping.

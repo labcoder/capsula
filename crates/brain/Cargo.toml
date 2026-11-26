@@ -149,6 +149,9 @@ windows-sys = { version = "0.61", features = [
 workspace = true
 
 [features]
+# Admits the parent-bound brain on macOS for first light, as the Dev edition only, with one model
+# request; without it every Mac brain still exits 69.
+first-light = []
 gate-draw-replay = []
 # Lets another crate's tests drive a coordinator with no store behind it, and lets an
 # outside harness time the UIA reader on a window it owns (platform::WindowSession).

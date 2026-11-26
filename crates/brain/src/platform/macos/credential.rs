@@ -1,7 +1,7 @@
 //! Data protection keychain generic passwords, accessed only by exact target name.
 //!
-//! The native store, reached only through `platform::credential::admitted_store`; macOS still
-//! refuses every brain mode, so no product path opens it yet.
+//! The native store, reached only through `platform::credential::admitted_store`; only a
+//! `first-light` Dev brain opens it, after checking every name earlier builds wrote is absent.
 
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
@@ -66,7 +66,19 @@ impl MacCredentialStore {
         if group.is_empty() {
             return Err(CredentialStoreError::Unsupported);
         }
-        Ok(Self { group })
+        let store = Self { group };
+        #[cfg(feature = "first-light")]
+        legacy_absent(&LEGACY, |target| store.status(target))?;
+        Ok(store)
+    }
+
+    /// The exact item's status alone: no data or attributes are asked for, and no result is
+    /// taken, so nothing is copied out.
+    #[cfg(feature = "first-light")]
+    fn status(&self, target: &str) -> Result<i32, CredentialStoreError> {
+        let query = self.status_query(target)?;
+        // SAFETY: the query is a live CFString-keyed dictionary; a null result asks for nothing.
+        Ok(unsafe { SecItemCopyMatching(query.as_opaque(), ptr::null_mut()) })
     }
 
     /// One exact item's unique key in the pinned group, with a fresh no-UI context.
@@ -96,6 +108,14 @@ impl MacCredentialStore {
         pairs.extend_from_slice(extra);
         let (keys, values): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
         Ok(CFDictionary::from_slices(&keys, &values))
+    }
+
+    /// One exact item's key and a match limit of one, with nothing to return.
+    #[cfg(feature = "first-light")]
+    fn status_query(&self, target: &str) -> Result<Query, CredentialStoreError> {
+        validate(target)?;
+        let keys = Keys::get();
+        self.query(target, &[(keys.match_limit, keys.match_limit_one)])
     }
 
     fn read_query(&self, target: &str) -> Result<Query, CredentialStoreError> {
@@ -171,6 +191,10 @@ impl CredentialStore for MacCredentialStore {
 
     fn delete(&self, target: &str) -> Result<(), CredentialStoreError> {
         validate(target)?;
+        #[cfg(feature = "first-light")]
+        if let Some(answer) = legacy_delete(&LEGACY, target) {
+            return answer;
+        }
         let query = self.query(target, &[])?;
         // SAFETY: the query is a live CFString-keyed dictionary that names one exact item.
         let status = unsafe { SecItemDelete(query.as_opaque()) };
@@ -179,6 +203,49 @@ impl CredentialStore for MacCredentialStore {
         }
         succeeded(status, CredentialStoreError::Delete)
     }
+}
+
+/// First light's answer to the legacy check, latched for the process by its first check.
+#[cfg(feature = "first-light")]
+static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// First light's replacement for the vault's legacy deletion pass: every name earlier builds
+/// wrote, from `account_targets`, checked by `status` alone and never read or deleted. Only
+/// not-found is absence; a present item or any other answer refuses, and the first check's
+/// answer is final.
+#[cfg(feature = "first-light")]
+fn legacy_absent(
+    latch: &std::sync::OnceLock<bool>,
+    mut status: impl FnMut(&str) -> Result<i32, CredentialStoreError>,
+) -> Result<(), CredentialStoreError> {
+    use kumochi_protocol::constants::account_targets;
+
+    let absent = *latch.get_or_init(|| {
+        account_targets(CREDENTIAL_SERVICE)
+            .all(|name| matches!(status(&name), Ok(code) if code == errSecItemNotFound))
+    });
+    if absent {
+        Ok(())
+    } else {
+        Err(CredentialStoreError::Legacy)
+    }
+}
+
+/// A legacy name's delete under first light: never made, and answered by the latched check, so
+/// the vault's legacy pass mutates nothing. Any other name is `None`, deleted as usual.
+#[cfg(feature = "first-light")]
+fn legacy_delete(
+    latch: &std::sync::OnceLock<bool>,
+    target: &str,
+) -> Option<Result<(), CredentialStoreError>> {
+    use kumochi_protocol::constants::account_targets;
+
+    account_targets(CREDENTIAL_SERVICE)
+        .any(|name| name == target)
+        .then(|| match latch.get() {
+            Some(true) => Ok(()),
+            _ => Err(CredentialStoreError::Legacy),
+        })
 }
 
 fn validate(target: &str) -> Result<(), CredentialStoreError> {

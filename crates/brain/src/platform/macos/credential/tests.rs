@@ -195,3 +195,168 @@ fn a_signed_host_meets_the_shared_contract() {
     let _fixture = Fixture::with_store(store.clone(), vec![target.clone(), other.clone()]);
     conformance::round_trip(&store, &target, &other);
 }
+
+/// First light's legacy check, driven by a fake status so no test reaches the Keychain.
+#[cfg(feature = "first-light")]
+mod legacy {
+    use std::sync::OnceLock;
+
+    use kumochi_protocol::constants::{account_target, anthropic_staging_target};
+    use objc2_security::{
+        errSecInteractionNotAllowed, errSecMissingEntitlement, kSecReturnAttributes,
+        kSecReturnPersistentRef, kSecReturnRef,
+    };
+
+    use super::*;
+
+    /// Every name earlier builds wrote: host and signout, two chunked records with a manifest
+    /// and 2 slots of 64 chunks each, the key and its staging record.
+    const NAMES: usize = 2 + 2 * (1 + 2 * 64) + 2;
+
+    fn absent(seen: &mut Vec<String>) -> impl FnMut(&str) -> Result<i32, CredentialStoreError> {
+        move |name| {
+            seen.push(name.to_owned());
+            Ok(errSecItemNotFound)
+        }
+    }
+
+    #[test]
+    fn every_legacy_name_absent_passes_after_checking_each_exactly_once() {
+        let mut seen = Vec::new();
+        assert!(legacy_absent(&OnceLock::new(), absent(&mut seen)).is_ok());
+        assert_eq!(seen.len(), NAMES);
+        let unique: std::collections::BTreeSet<_> = seen.iter().collect();
+        assert_eq!(unique.len(), NAMES);
+        for name in [
+            account_target(CREDENTIAL_SERVICE, "host"),
+            account_target(CREDENTIAL_SERVICE, "chatgpt/1/63"),
+            anthropic_staging_target(CREDENTIAL_SERVICE),
+        ] {
+            assert!(seen.contains(&name));
+        }
+    }
+
+    #[test]
+    fn only_not_found_is_absence() {
+        let staging = anthropic_staging_target(CREDENTIAL_SERVICE);
+        for answer in [
+            Ok(errSecSuccess),
+            Ok(errSecInteractionNotAllowed),
+            Ok(errSecMissingEntitlement),
+            Err(CredentialStoreError::Unsupported),
+        ] {
+            let mut calls = 0;
+            let result = legacy_absent(&OnceLock::new(), |name| {
+                calls += 1;
+                if name == staging {
+                    answer
+                        .as_ref()
+                        .copied()
+                        .map_err(|_| CredentialStoreError::Unsupported)
+                } else {
+                    Ok(errSecItemNotFound)
+                }
+            });
+            assert!(
+                matches!(result, Err(CredentialStoreError::Legacy)),
+                "{answer:?}"
+            );
+            assert_eq!(calls, NAMES, "the staging name comes last");
+        }
+    }
+
+    #[test]
+    fn a_present_name_refuses_before_any_later_check() {
+        let present = account_target(CREDENTIAL_SERVICE, "signout");
+        let mut seen = Vec::new();
+        let result = legacy_absent(&OnceLock::new(), |name| {
+            seen.push(name.to_owned());
+            Ok(if name == present {
+                errSecSuccess
+            } else {
+                errSecItemNotFound
+            })
+        });
+        assert!(matches!(result, Err(CredentialStoreError::Legacy)));
+        assert_eq!(seen, [account_target(CREDENTIAL_SERVICE, "host"), present]);
+    }
+
+    #[test]
+    fn a_refusal_is_final_for_the_process() {
+        let latch = OnceLock::new();
+        assert!(legacy_absent(&latch, |_| Ok(errSecSuccess)).is_err());
+        let mut seen = Vec::new();
+        assert!(matches!(
+            legacy_absent(&latch, absent(&mut seen)),
+            Err(CredentialStoreError::Legacy)
+        ));
+        assert!(seen.is_empty(), "a latched refusal checks nothing again");
+        assert!(matches!(
+            legacy_delete(&latch, &account_target(CREDENTIAL_SERVICE, "host")),
+            Some(Err(CredentialStoreError::Legacy))
+        ));
+    }
+
+    #[test]
+    fn a_legacy_delete_is_never_made_and_other_deletes_are() {
+        let host = account_target(CREDENTIAL_SERVICE, "host");
+        let unchecked = OnceLock::new();
+        assert!(matches!(
+            legacy_delete(&unchecked, &host),
+            Some(Err(CredentialStoreError::Legacy))
+        ));
+        let passed = OnceLock::new();
+        let mut seen = Vec::new();
+        assert!(legacy_absent(&passed, absent(&mut seen)).is_ok());
+        for name in [host, anthropic_staging_target(CREDENTIAL_SERVICE)] {
+            assert!(
+                matches!(legacy_delete(&passed, &name), Some(Ok(()))),
+                "{name}"
+            );
+        }
+        assert!(legacy_delete(&passed, &scratch_name()).is_none());
+    }
+
+    #[test]
+    fn the_status_query_names_one_exact_item_and_asks_for_nothing_back() {
+        let name = scratch_name();
+        let query = store().status_query(&name).expect("status query");
+        assert_eq!(
+            text(&query, constant!(kSecAttrAccount)).as_deref(),
+            Some(name.as_str())
+        );
+        assert_eq!(
+            text(&query, constant!(kSecAttrService)).as_deref(),
+            Some(CREDENTIAL_SERVICE)
+        );
+        assert_eq!(
+            text(&query, constant!(kSecAttrAccessGroup)).as_deref(),
+            Some(GROUP)
+        );
+        assert_eq!(
+            flag(&query, constant!(kSecUseDataProtectionKeychain)),
+            Some(true)
+        );
+        assert!(!no_ui_context_in(&query).is_null());
+        for key in [
+            constant!(kSecReturnData),
+            constant!(kSecReturnAttributes),
+            constant!(kSecReturnRef),
+            constant!(kSecReturnPersistentRef),
+        ] {
+            assert!(query.get(key).is_none(), "nothing is copied out");
+        }
+        assert!(query.get(constant!(kSecMatchLimit)).is_some());
+    }
+
+    #[test]
+    fn the_refusal_names_nothing() {
+        let error = CredentialStoreError::Legacy;
+        let shown = format!("{error} {error:?}");
+        assert_eq!(
+            shown,
+            "earlier credential names are present or unchecked Legacy"
+        );
+        assert!(!shown.contains(CREDENTIAL_SERVICE));
+    }
+}

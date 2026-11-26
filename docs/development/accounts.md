@@ -177,6 +177,14 @@ it, recorded in credentials.db's `control` row; after that each open deletes onl
 legacy staging name as defense against earlier writers. Anyone signed in on an earlier build sees Signed out and
 connects again, and the revocations it still owed are dropped unsent.
 
+A macOS `first-light` brain replaces that deletion pass in its store, so the shared vault is
+unchanged. Admitting the store checks each of the 262 names by exact selector with a no-UI
+context and status alone, never asking for data or attributes back. Only `errSecItemNotFound` is
+absence. A present item or any other answer refuses the store with `CredentialStoreError::Legacy`
+before the vault opens, so nothing is deleted, the worker doesn't retry it as Busy, and the first
+answer is latched for the process. Once admitted, the vault's deletes of those names are answered
+by that check and never made.
+
 Instance capabilities use keyring instead: `instance_entry(session)` formats the account
 `capability-<u32>` with the session ID in decimal.
 On Windows, keyring stores `{account}.{service}`, represented by `instance_target`:
