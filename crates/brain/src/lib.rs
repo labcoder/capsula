@@ -527,7 +527,7 @@ mod profile_files {
         let authority = scratch.db().with_file_name(AUTHORITY_FILE);
         drop(open_profile(&scratch.db()).expect("a first start"));
         assert_eq!(version(&scratch.db()), 13);
-        assert_eq!(version(&authority), 3);
+        assert_eq!(version(&authority), 5);
         drop(open_profile(&scratch.db()).expect("the next start opens both"));
         assert_eq!(version(&scratch.db()), 13);
     }
@@ -546,7 +546,7 @@ mod profile_files {
         let authority = scratch.db().with_file_name(AUTHORITY_FILE);
         drop(open_profile(&scratch.db()).expect("the start goes on"));
         assert_eq!(version(&scratch.db()), 13);
-        assert_eq!(version(&authority), 3);
+        assert_eq!(version(&authority), 5);
         assert_eq!(generations(&authority), 0, "signed out");
         let title: String = Connection::open(scratch.db())
             .expect("raw open")

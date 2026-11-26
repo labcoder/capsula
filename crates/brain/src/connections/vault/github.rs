@@ -63,7 +63,7 @@ impl<S: CredentialStore> Vault<S> {
         };
         let mut remains = false;
         for row in rows {
-            let observed = generation::sweep(&self.store, &self.service, &row);
+            let observed = generation::sweep(self.store_for(row.store()), &self.service, &row);
             remains |= observed == authority::Observed::Remains;
             remains |= self.authority.observed(&row, observed).is_err();
         }

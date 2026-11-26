@@ -74,6 +74,8 @@ pub enum DeleteResult {
 pub struct Vault<S: CredentialStore> {
     authority: Authority,
     store: S,
+    /// Where the shell stages a pasted key, when that isn't `store` itself.
+    staging: Option<S>,
     service: String,
     paste: Option<authority::WritePlan>,
     _session: Arc<SessionLock>,
@@ -107,7 +109,7 @@ impl<S: CredentialStore> Vault<S> {
         }
         if let Some(plan) = self.paste.take_if(|plan| plan.base() == revision) {
             generation::delete_pending(
-                &self.store,
+                self.store_for(plan.store()),
                 &self.service,
                 Kind::AnthropicKey,
                 plan.generation(),
@@ -166,6 +168,7 @@ impl<S: CredentialStore> Vault<S> {
         let session = SessionLock::try_acquire(&path)?;
         Self::with_lock(
             store,
+            None,
             CREDENTIAL_SERVICE,
             Arc::new(session),
             authority::Missing::Refuse,
@@ -184,6 +187,7 @@ impl<S: CredentialStore> Vault<S> {
     ) -> Result<Self, VaultError> {
         Self::with_lock(
             store,
+            None,
             CREDENTIAL_SERVICE,
             session,
             authority::Missing::Refuse,
@@ -194,9 +198,21 @@ impl<S: CredentialStore> Vault<S> {
     /// names included.
     #[cfg(test)]
     pub(crate) fn with_service(store: S, service: &str, path: &Path) -> Result<Self, VaultError> {
+        Self::with_stores(store, None, service, path)
+    }
+
+    /// `Self::with_service` with pasted keys staged in `staging`, when given.
+    #[cfg(test)]
+    pub(crate) fn with_stores(
+        store: S,
+        staging: Option<S>,
+        service: &str,
+        path: &Path,
+    ) -> Result<Self, VaultError> {
         let session = SessionLock::try_acquire(path)?;
         Self::with_lock(
             store,
+            staging,
             service,
             Arc::new(session),
             authority::Missing::Create,
@@ -204,9 +220,11 @@ impl<S: CredentialStore> Vault<S> {
     }
 
     /// Opens the authority beside `session`'s lock and sweeps once, legacy names included.
-    /// `missing` says whether a missing authority is created.
+    /// `missing` says whether a missing authority is created. Pasted keys are staged in
+    /// `staging`, or in `store` itself when that is the store the shell writes, as on Windows.
     pub(crate) fn with_lock(
         store: S,
+        staging: Option<S>,
         service: &str,
         session: Arc<SessionLock>,
         missing: authority::Missing,
@@ -215,6 +233,7 @@ impl<S: CredentialStore> Vault<S> {
         let mut vault = Self {
             authority,
             store,
+            staging,
             service: service.to_owned(),
             paste: None,
             _session: session,
@@ -765,6 +784,15 @@ impl<S: CredentialStore> Vault<S> {
         }
     }
 
+    /// The store a generation's chunks were recorded in. Staging never falls back to the private
+    /// store: without its own staging store, this vault's shell writes into `store`.
+    fn store_for(&self, store: authority::Store) -> &S {
+        match (store, &self.staging) {
+            (authority::Store::Staging, Some(staging)) => staging,
+            _ => &self.store,
+        }
+    }
+
     /// One bounded pass over removed generations' names. A failure stays owed to a later pass,
     /// and nothing the store returns changes which generation is current.
     fn sweep(&mut self) {
@@ -776,7 +804,8 @@ impl<S: CredentialStore> Vault<S> {
             }
         };
         for retired in &batch {
-            let observed = generation::sweep(&self.store, &self.service, retired);
+            let observed =
+                generation::sweep(self.store_for(retired.store()), &self.service, retired);
             if let Err(error) = self.authority.observed(retired, observed) {
                 tracing::warn!(%error, "a credential cleanup wasn't recorded");
             }
