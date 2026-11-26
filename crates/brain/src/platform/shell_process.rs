@@ -111,6 +111,8 @@ enum Owner {
     Parent(ParentWatch),
     #[cfg(test)]
     Fixture(Arc<AtomicU8>, CommitGate),
+    #[cfg(test)]
+    Watched(watch::Receiver<Verdict>, CommitGate),
 }
 
 impl std::fmt::Debug for ShellProcess {
@@ -158,7 +160,9 @@ impl ShellProcess {
             #[cfg(target_os = "macos")]
             Owner::Parent(ref parent) => parent.gate().claim().then_some(Committed(())),
             #[cfg(test)]
-            Owner::Fixture(_, ref gate) => gate.claim().then_some(Committed(())),
+            Owner::Fixture(_, ref gate) | Owner::Watched(_, ref gate) => {
+                gate.claim().then_some(Committed(()))
+            }
         }
     }
 
@@ -187,6 +191,14 @@ impl ShellProcess {
                 1 => Verdict::Exited,
                 _ => Verdict::Unconfirmed(Unconfirmed::Watch),
             },
+            #[cfg(test)]
+            Owner::Watched(ref verdict, _) => {
+                let closed = verdict.has_changed().is_err();
+                match *verdict.borrow() {
+                    Verdict::Watching if closed => Verdict::Unconfirmed(Unconfirmed::Watch),
+                    verdict => verdict,
+                }
+            }
         }
     }
 
@@ -198,25 +210,16 @@ impl ShellProcess {
         all(target_os = "macos", not(test)),
         expect(clippy::unnecessary_wraps, reason = "detached platforms have no watch")
     )]
-    #[cfg_attr(
-        not(target_os = "macos"),
-        expect(
-            clippy::unused_self,
-            reason = "only macOS has a parent watch; the instance API is shared"
-        )
-    )]
     pub(crate) fn loss(&self) -> Option<watch::Receiver<Verdict>> {
-        #[cfg(target_os = "macos")]
-        {
-            match *self.owner {
-                Owner::Parent(ref parent) => Some(parent.loss()),
-                #[cfg(test)]
-                Owner::Fixture(..) => None,
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            None
+        match *self.owner {
+            #[cfg(windows)]
+            Owner::Native(_) => None,
+            #[cfg(target_os = "macos")]
+            Owner::Parent(ref parent) => Some(parent.loss()),
+            #[cfg(test)]
+            Owner::Fixture(..) => None,
+            #[cfg(test)]
+            Owner::Watched(ref verdict, _) => Some(verdict.clone()),
         }
     }
 
@@ -243,6 +246,12 @@ impl ShellProcess {
                 1 => Ok(true),
                 _ => Err(io::ErrorKind::Other.into()),
             },
+            #[cfg(test)]
+            Owner::Watched(..) => match self.snapshot() {
+                Verdict::Watching => Ok(false),
+                Verdict::Exited => Ok(true),
+                Verdict::Unconfirmed(reason) => Err(io::Error::other(reason)),
+            },
         }
     }
 
@@ -258,6 +267,15 @@ impl ShellProcess {
         }
     }
 
+    /// A fixture whose verdict a test publishes or closes through the returned sender, the way
+    /// the parent watch does.
+    #[cfg(test)]
+    pub(crate) fn watched(pid: u32) -> (Self, watch::Sender<Verdict>) {
+        let (send, verdict) = watch::channel(Verdict::Watching);
+        let owner = Arc::new(Owner::Watched(verdict, CommitGate::new()));
+        (Self { pid, owner }, send)
+    }
+
     /// Publishes a fixture verdict the way the watch thread does: the loss latch, then the value.
     /// True when the loss came before any claim.
     #[cfg(test)]
@@ -268,7 +286,6 @@ impl ShellProcess {
                 state.store(verdict, Ordering::Release);
                 first
             }
-            #[cfg(any(windows, target_os = "macos"))]
             _ => panic!("only a fixture publishes on demand"),
         }
     }
