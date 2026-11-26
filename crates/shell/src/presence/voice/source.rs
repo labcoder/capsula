@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use kumochi_protocol::message::{ControlToBrain, DataToBrain};
 use kumochi_shell_core::link::output::Denied;
+use kumochi_shell_core::voice::Collection;
 use zeroize::Zeroize as _;
 
 use super::inhibit::RECHECK;
-use super::{Context, FailureReason, FailureStage, Presence, Source};
+use super::{Context, FailureReason, FailureStage, Presence, ReceiptStep};
 use crate::platform::microphone::{Finalization, MicOwner, Mode, Reserved, StopReason};
 use crate::strings::Text;
 
@@ -39,12 +40,7 @@ impl Presence {
                 return;
             }
         };
-        self.voice
-            .state
-            .pending
-            .as_mut()
-            .expect("admitted hold")
-            .source = Source::Recording;
+        self.voice.state.record();
         let (link, gates) = (self.link.clone(), self.voice.gates.clone());
         let (watch, alive) = (token.clone(), session.alive());
         let drain = session.shell_tuning().drain();
@@ -59,13 +55,11 @@ impl Presence {
                     .await;
                 let _applied = this.update(cx, |this, cx| {
                     let now = cx.background_executor().now();
-                    if now < limit
-                        && this.voice.state.status == Some(Text::HoldListening)
-                        && this.voice_current(stamp)
-                        && this.link.input_is(watch.gesture())
-                        && watch.mode(&alive, now) == Ok(Mode::Collecting)
+                    let current =
+                        || this.voice_current(stamp) && this.link.input_is(watch.gesture());
+                    if let Some(notice) = this.voice.state.near_limit(&watch, &alive, now, current)
                     {
-                        this.voice_notice(Text::HoldNearLimit, cx);
+                        this.voice_notice(notice, cx);
                     }
                 });
             }
@@ -81,12 +75,7 @@ impl Presence {
                 ) {
                     cx.background_executor().timer(drain).await;
                     let _applied = this.update(cx, |this, cx| {
-                        if !watch.retired()
-                            && this.voice.state.pending.as_ref().is_some_and(|hold| {
-                                hold.token().gesture() == watch.gesture()
-                                    && matches!(hold.source, Source::Recording)
-                            })
-                        {
+                        if !watch.retired() && this.voice.state.recording(watch.gesture()) {
                             this.end_voice(Text::HoldUnavailable, cx);
                         }
                     });
@@ -97,9 +86,7 @@ impl Presence {
         .detach();
         cx.spawn(async move |this, cx| {
             let _warning = warning;
-            let mut refused = false;
-            if let Ok(running) = mic.running.recv().await {
-                let mut accepted = false;
+            let refused = if let Ok(running) = mic.running.recv().await {
                 // The same receipt and worker through every recheck: collected, or drained.
                 loop {
                     let collected = this.update(cx, |this, cx| {
@@ -108,43 +95,32 @@ impl Presence {
                         }
                         let (gates, owner) = (this.voice.gates.clone(), this.link.clone());
                         let (output, gesture) = (owner.output(), token.gesture());
-                        if !accepted {
-                            gates.claimed(gesture, |claim| output.accept(claim, &mic, running))?;
-                            accepted = true;
-                            let hold = this.voice.state.pending.as_mut().ok_or(Denied::Stale)?;
-                            hold.collected = true;
+                        if let Some(notice) = this.voice.state.collecting(gesture, || {
+                            gates.claimed(gesture, |claim| output.accept(claim, &mic, running))
+                        })? {
                             #[cfg(test)]
                             if let Some(publish) = this.voice.publish.as_mut() {
                                 publish();
                             }
-                            this.voice_notice(Text::HoldListening, cx);
-                        } else if this.voice.state.pending.as_ref().is_none_or(|hold| {
-                            hold.released.is_some() || hold.terminal().is_some()
-                        }) {
-                            // A release or an end while the copies waited wins: none open.
-                            return Err(Denied::Stale);
+                            this.voice_notice(notice, cx);
                         }
                         // Copies open only once Listening is up, under the same claim.
                         gates.claimed(gesture, |claim| output.collect(claim, &mic, running))
                     });
-                    if !matches!(collected, Ok(Err(Denied::Busy))) {
-                        refused = !matches!(collected, Ok(Ok(())));
-                        break;
+                    match Collection::after(collected.unwrap_or(Err(Denied::Stale))) {
+                        Collection::Complete => break false,
+                        Collection::Cancel => break true,
+                        Collection::Retry => cx.background_executor().timer(RECHECK).await,
                     }
-                    cx.background_executor().timer(RECHECK).await;
                 }
-            }
+            } else {
+                false
+            };
             if refused {
                 tracing::debug!(stage = ?FailureStage::CaptureStart, reason = ?FailureReason::RunningRejected, "held speech input refused");
                 mic.stop(StopReason::Cancel);
                 let _applied = this.update(cx, |this, cx| {
-                    if this
-                        .voice
-                        .state
-                        .pending
-                        .as_ref()
-                        .is_some_and(|hold| hold.token().gesture() == token.gesture())
-                    {
+                    if this.voice.state.owns(token.gesture()) {
                         this.end_voice(Text::HoldCancelled, cx);
                     }
                 });
@@ -192,62 +168,28 @@ impl Presence {
                 tracing::warn!(stage = ?FailureStage::CaptureReceipt, reason = ?FailureReason::StopSend, "held speech input failed");
                 link.end(&session);
             }
+            let receipt = receipt.map(|receipt| receipt.finalization);
             let _applied = this.update(cx, |this, cx| {
-                let Some(hold) = this
-                    .voice
-                    .state
-                    .pending
-                    .as_mut()
-                    .filter(|h| h.token().gesture() == gesture)
-                else {
-                    tracing::debug!(stage = ?FailureStage::CaptureReceipt, reason = ?FailureReason::StaleReceipt, "held speech input refused");
-                    return;
-                };
+                let step = this.voice.state.receipt(gesture, receipt, count);
                 match receipt {
-                    Ok(receipt) => {
-                        match receipt.finalization {
-                            Finalization::Discarded(reason) => {
-                                tracing::warn!(stage = ?FailureStage::CaptureReceipt, ?reason, "held speech input ended");
-                            }
-                            Finalization::Released { packets } if packets != count => {
-                                tracing::warn!(stage = ?FailureStage::CaptureReceipt, reason = ?FailureReason::PacketCountMismatch, "held speech input failed");
-                            }
-                            Finalization::Released { .. } => {}
-                        }
-                        let notice = match receipt.finalization {
-                            Finalization::Discarded(
-                                crate::platform::microphone::MicError::Cancelled
-                                | crate::platform::microphone::MicError::SessionLost,
-                            ) => Text::HoldCancelled,
-                            Finalization::Discarded(
-                                crate::platform::microphone::MicError::Unavailable
-                                | crate::platform::microphone::MicError::Format,
-                            ) => Text::HoldMicrophoneUnavailable,
-                            _ => Text::HoldFailed,
-                        };
-                        hold.source = Source::Sent;
-                        if let Some(terminal) = hold.terminal() {
-                            this.end_voice(
-                                if terminal == Text::HoldUnavailable {
-                                    notice
-                                } else {
-                                    terminal
-                                },
-                                cx,
-                            );
-                        } else if receipt.finalization
-                            == (Finalization::Released { packets: count })
-                        {
-                            hold.source = Source::Joined(count);
-                            this.finish_voice();
-                        } else {
-                            this.end_voice(notice, cx);
-                        }
+                    _ if step == ReceiptStep::Stale => {
+                        tracing::debug!(stage = ?FailureStage::CaptureReceipt, reason = ?FailureReason::StaleReceipt, "held speech input refused");
                     }
                     Err(reason) => {
                         tracing::warn!(stage = ?FailureStage::CaptureReceipt, ?reason, "held speech input failed");
-                        this.end_voice(Text::HoldUnavailable, cx);
                     }
+                    Ok(Finalization::Discarded(reason)) => {
+                        tracing::warn!(stage = ?FailureStage::CaptureReceipt, ?reason, "held speech input ended");
+                    }
+                    Ok(Finalization::Released { packets }) if packets != count => {
+                        tracing::warn!(stage = ?FailureStage::CaptureReceipt, reason = ?FailureReason::PacketCountMismatch, "held speech input failed");
+                    }
+                    Ok(Finalization::Released { .. }) => {}
+                }
+                match step {
+                    ReceiptStep::Stale => {}
+                    ReceiptStep::End(notice) => this.end_voice(notice, cx),
+                    ReceiptStep::Finish => this.finish_voice(),
                 }
             });
         })

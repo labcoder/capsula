@@ -309,7 +309,10 @@ impl Rig {
     }
 
     fn handle(&mut self, input: Input) -> Vec<Effect> {
-        let effects = self.core.handle(input).expect("not stale");
+        let effects = self
+            .core
+            .handle_with_screen_grant(input)
+            .expect("not stale");
         self.apply(&effects);
         effects
     }
@@ -661,7 +664,7 @@ fn withdrawal_or_sign_out_after_a_grant_closes_it_by_its_own_cause() {
             .expect("current");
         let lease = granted(
             &core
-                .handle(Input::SendReady {
+                .handle_with_screen_grant(Input::SendReady {
                     key: SendKey::Build(key()),
                     hold: None,
                 })
@@ -690,7 +693,10 @@ fn withdrawal_or_sign_out_after_a_grant_closes_it_by_its_own_cause() {
             );
             continue;
         }
-        assert!(settled.contains(&Effect::Store(StoreOp::WithdrawScreen { run: R })));
+        assert!(settled.contains(&Effect::Store(StoreOp::RepairScreen {
+            run: R,
+            correction: crate::store::UnsentScreen::Withdrawn,
+        })));
         let again = settled
             .iter()
             .find_map(|effect| match effect {

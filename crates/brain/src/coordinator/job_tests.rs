@@ -878,8 +878,8 @@ fn a_title_output_never_becomes_a_summary_or_the_reverse() {
 }
 
 /// H-h, a job's send: the default, under the cap, exactly at it, and over it.
-#[test]
-fn a_held_job_send_arms_its_hold_capped_at_165_seconds() {
+#[tokio::test(start_paused = true)]
+async fn a_held_job_send_arms_its_hold_capped_at_165_seconds() {
     for (hold, seconds) in [
         (None, 15),
         (Some(20), 20),
@@ -888,18 +888,20 @@ fn a_held_job_send_arms_its_hold_capped_at_165_seconds() {
     ] {
         let mut core = reading();
         core.handle(job_built(key(2), &[T])).expect("current");
+        let lease = lease(key(2), 1);
+        let after = Duration::from_secs(seconds);
+        let timer = hold.map_or(Effect::ArmSendDeadline { lease, after }, |_| {
+            Effect::ArmSendDeadlineAt {
+                lease,
+                at: tokio::time::Instant::now() + after,
+            }
+        });
         assert_eq!(
             core.handle(Input::SendReady {
                 key: SendKey::Job(key(2)),
                 hold: hold.map(Duration::from_secs),
             }),
-            Ok(vec![
-                Effect::Grant(lease(key(2), 1)),
-                Effect::ArmSendDeadline {
-                    lease: lease(key(2), 1),
-                    after: Duration::from_secs(seconds),
-                },
-            ]),
+            Ok(vec![Effect::Grant(lease), timer]),
             "{hold:?}"
         );
     }
@@ -1345,21 +1347,23 @@ fn a_claude_code_job_follows_claude_codes_fences_and_not_chatgpts() {
 
 /// Test 8: a Claude Code job's held send past its hold ends only that job; sends didn't fail
 /// closed, so the next run's title job still starts.
-#[test]
-fn a_claude_code_jobs_held_send_past_its_hold_ends_only_the_job() {
+#[tokio::test(start_paused = true)]
+async fn a_claude_code_jobs_held_send_past_its_hold_ends_only_the_job() {
     let mut core = claude_reading();
     core.handle(job_built_on(key(2), Some(haiku())))
         .expect("current");
+    let hold = Duration::from_secs(60);
+    let at = tokio::time::Instant::now() + hold;
     assert_eq!(
         core.handle(Input::SendReady {
             key: SendKey::Job(key(2)),
-            hold: Some(Duration::from_secs(60)),
+            hold: Some(hold),
         }),
         Ok(vec![
             Effect::Grant(lease(key(2), 1)),
-            Effect::ArmSendDeadline {
+            Effect::ArmSendDeadlineAt {
                 lease: lease(key(2), 1),
-                after: Duration::from_secs(60),
+                at,
             },
         ])
     );

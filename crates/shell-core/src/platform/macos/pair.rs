@@ -182,7 +182,7 @@ mod tests {
             child.data.as_raw_fd(),
         ] {
             assert!(
-                super::super::child::has_no_sigpipe(fd),
+                matches!(super::super::child::socket_int(fd, libc::SO_NOSIGPIPE), Some(on) if on != 0),
                 "SO_NOSIGPIPE on {fd}"
             );
         }

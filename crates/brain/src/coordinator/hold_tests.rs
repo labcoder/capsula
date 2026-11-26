@@ -57,7 +57,7 @@ fn prepared(core: &Coordinator, thread: Option<ThreadId>) -> HoldSnapshot {
 }
 
 fn sending(core: &mut Coordinator) -> Vec<Effect> {
-    core.handle(Input::SendReady {
+    core.handle_with_screen_grant(Input::SendReady {
         key: SendKey::Build(engine_key(core, R)),
         hold: None,
     })
@@ -828,7 +828,7 @@ fn a_held_runs_screen_is_told_once_and_an_image_once_its_send_may_have_written_i
             "the rebuilt request starts"
         );
         later.extend(
-            core.handle(Input::SendReady {
+            core.handle_with_screen_grant(Input::SendReady {
                 key: SendKey::Build(again),
                 hold: None,
             })
@@ -1048,7 +1048,13 @@ fn withdrawals(effects: &[Effect]) -> Vec<RunId> {
     effects
         .iter()
         .filter_map(|effect| match effect {
-            Effect::Store(StoreOp::WithdrawScreen { run }) => Some(*run),
+            Effect::Store(
+                StoreOp::WithdrawScreen { run }
+                | StoreOp::RepairScreen {
+                    run,
+                    correction: crate::store::UnsentScreen::Withdrawn,
+                },
+            ) => Some(*run),
             _ => None,
         })
         .collect()
@@ -1059,7 +1065,17 @@ fn forgotten(effects: &[Effect]) -> Vec<RunId> {
     effects
         .iter()
         .filter_map(|effect| match effect {
-            Effect::Store(StoreOp::ForgetScreen { run }) => Some(*run),
+            Effect::Store(
+                StoreOp::RepairScreen {
+                    run,
+                    correction: crate::store::UnsentScreen::Clear,
+                }
+                | StoreOp::EndRun {
+                    run,
+                    screen: Some(crate::store::UnsentScreen::Clear),
+                    ..
+                },
+            ) => Some(*run),
             _ => None,
         })
         .collect()
@@ -1134,7 +1150,11 @@ fn a_run_that_ends_before_its_first_request_stores_no_picture() {
             }
             let effects = ended(&mut core, how);
             assert_eq!(core.current_run(), None, "{how}");
-            assert_eq!(forgotten(&effects), cleared, "{how}");
+            assert_eq!(
+                forgotten(&effects),
+                if how == 2 { vec![] } else { cleared },
+                "{how}"
+            );
         }
     }
 }
@@ -1481,7 +1501,12 @@ fn an_inline_compaction_s_grant_leaves_a_held_image_untold() {
             }))
             .unwrap();
         assert_eq!(starts(&started), 1, "{after}");
-        let granted = sending(&mut core);
+        let granted = core
+            .handle(Input::SendReady {
+                key: SendKey::Build(compaction),
+                hold: None,
+            })
+            .unwrap();
         assert!(
             granted
                 .iter()

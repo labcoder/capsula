@@ -71,6 +71,23 @@ async fn start_screen_picture(brain: &mut Brain) -> (LeaseId, Vec<Effect>) {
     let Some(Effect::StartEngine { request }) = effects.last() else {
         panic!("pictured request was not admitted");
     };
+    assert!(
+        brain
+            .store
+            .as_ref()
+            .expect("store")
+            .send(StoreOp::BeginTurn {
+                thread: request.thread,
+                title: None,
+                run: request.run,
+                text: "words".into(),
+                screen: Some(kumochi_protocol::message::HeldScreen::Screen),
+            })
+    );
+    let stored = timeout(WAIT, brain.inputs.recv())
+        .await
+        .expect("turn stored in time");
+    assert_eq!(stored, Some(Input::TurnStored { run: request.run }));
     let config = brain
         .config
         .stage(kumochi_protocol::message::SettingsOp::SetDefaultModel(
@@ -89,7 +106,16 @@ async fn start_screen_picture(brain: &mut Brain) -> (LeaseId, Vec<Effect>) {
         .await
         .expect("send ask in time")
         .expect("send ask");
-    let grants = brain.handle(ask).expect("grant effects");
+    brain.offline(ask);
+    let ack = timeout(WAIT, brain.inputs.recv())
+        .await
+        .expect("picture authorization in time")
+        .expect("picture authorization");
+    assert!(matches!(
+        ack,
+        Input::ScreenGrantStored { result: Ok(()), .. }
+    ));
+    let grants = brain.handle(ack).expect("grant effects");
     let Some(Effect::Grant(lease)) = grants.first() else {
         panic!("no send grant");
     };
@@ -484,6 +510,23 @@ async fn a_bound_find_keeps_the_round_until_its_picture_settles_unsent() {
     let SendKey::Build(key) = request.key else {
         panic!("pictured build")
     };
+    assert!(
+        brain
+            .store
+            .as_ref()
+            .expect("store")
+            .send(StoreOp::BeginTurn {
+                thread: request.thread,
+                title: None,
+                run: request.run,
+                text: "words".into(),
+                screen: Some(kumochi_protocol::message::HeldScreen::Attached),
+            })
+    );
+    let stored = timeout(WAIT, brain.inputs.recv())
+        .await
+        .expect("turn stored in time");
+    assert_eq!(stored, Some(Input::TurnStored { run: request.run }));
     let choice = request.request.choice.clone().expect("run choice");
     let config = brain
         .config
@@ -513,12 +556,31 @@ async fn a_bound_find_keeps_the_round_until_its_picture_settles_unsent() {
     brain.claude_done(Wake::Note(note), None).expect("bound");
     assert!(brain.claude.launches.last().expect("launch").bound);
     let ask = timeout(WAIT, brain.inputs.recv()).await.unwrap().unwrap();
-    let grants = brain.handle(ask).expect("grant effects");
-    let lease = LeaseId {
-        key: SendKey::Build(key),
-        send: 1,
+    let authorization = brain.handle(ask).expect("authorization effects");
+    let [Effect::Store(StoreOp::GrantScreen { lease: pending }), ..] = authorization.as_slice()
+    else {
+        panic!("no picture authorization");
     };
-    assert!(grants.contains(&Effect::Grant(lease)));
+    let pending = *pending;
+    assert_eq!(pending.key, SendKey::Build(key));
+    brain.apply(authorization, None).expect("authorize");
+    let stored = timeout(WAIT, brain.inputs.recv())
+        .await
+        .expect("picture authorization in time");
+    assert_eq!(
+        stored,
+        Some(Input::ScreenGrantStored {
+            lease: pending,
+            result: Ok(()),
+        })
+    );
+    let grants = brain.handle(stored.unwrap()).expect("grant effects");
+    let [Effect::Grant(lease), ..] = grants.as_slice() else {
+        panic!("no transport grant");
+    };
+    let lease = *lease;
+    assert_eq!(lease.key, pending.key);
+    assert_ne!(lease, pending);
     brain.apply(grants, None).expect("grant");
 
     let reached = |gate: Barrier| {

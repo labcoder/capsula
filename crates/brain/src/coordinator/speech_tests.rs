@@ -809,6 +809,7 @@ fn a_store_failure_while_quieting_is_told_once_as_failed() {
     assert_eq!(
         core.handle(Input::StoreFailed { run: R }),
         Ok(vec![Effect::Store(StoreOp::EndRun {
+            screen: None,
             thread: T,
             run: R,
             text: None,

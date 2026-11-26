@@ -65,6 +65,80 @@ fn pre_seed_history_evidence_requires_the_current_launch_and_generation() {
     assert_eq!(claude.history_event(key, confirmed), generic);
 }
 
+#[tokio::test]
+async fn a_claude_generation_change_after_the_picture_commit_rebuilds_without_the_picture() {
+    use kumochi_protocol::message::HeldScreen;
+
+    use crate::context::Screen;
+    use crate::coordinator::Effect;
+    use crate::engines::{Answer, SendGate};
+
+    let scratch = Scratch::new("claude-generation-during-picture-authorization");
+    let mut brain = test_support::brain(&scratch, "");
+    let slug = ModelSlug::new("haiku").unwrap();
+    let ready = Ready {
+        connection: ConnectionTag(9),
+        models: vec![ModelInfo {
+            slug: slug.clone(),
+            display_name: ModelName::new("Haiku").unwrap(),
+            supported_efforts: EffortSet::new([Effort::Low]),
+        }],
+        images: vec![slug],
+        trusted_draw: false,
+    };
+    let picture = Screen::Image(crate::context::Jpeg::new(vec![0xFF, 0xD8, 0xFF, 0xD9]).unwrap());
+    let (coordinator, effects) =
+        crate::coordinator::pictured_claude_run(Availability::Ready(ready), picture);
+    *brain.coordinator = coordinator;
+    let Some(Effect::StartEngine { request }) = effects.last() else {
+        panic!("pictured request")
+    };
+    let SendKey::Build(key) = request.key else {
+        panic!("build send")
+    };
+    assert!(brain.store.as_ref().unwrap().send(StoreOp::BeginTurn {
+        thread: request.thread,
+        title: None,
+        run: key.run,
+        text: "words".into(),
+        screen: Some(HeldScreen::Attached),
+    }));
+    brain.claude.asked = Some((key, brain.claude.generation, LaunchId(123_456)));
+    let gate = SendGate::new(
+        request.key,
+        Arc::clone(&brain.asks),
+        brain.inputs_tx.clone(),
+    );
+    let transport = tokio::spawn(async move { gate.ask_held(Duration::from_secs(30)).await });
+    let ack = timeout(Duration::from_secs(15), async {
+        loop {
+            let input = brain.inputs.recv().await.unwrap();
+            if matches!(input, Input::ScreenGrantStored { result: Ok(()), .. }) {
+                break input;
+            }
+            brain.offline(input);
+        }
+    })
+    .await
+    .expect("the writer committed before the launch changed");
+    brain.claude.generation += 1;
+    let rebuilt = brain
+        .handle(ack)
+        .expect("the exact authorization is still owed");
+    assert!(rebuilt.contains(&Effect::Rebuild(request.key)));
+    assert!(rebuilt.contains(&Effect::Store(StoreOp::CantSeeScreen { run: key.run })));
+    assert!(rebuilt.iter().any(|effect| matches!(effect, Effect::Store(StoreOp::BuildContext(build)) if build.key.run == key.run)));
+    assert!(
+        !rebuilt
+            .iter()
+            .any(|effect| matches!(effect, Effect::Grant(_)))
+    );
+    assert_eq!(brain.coordinator.current_run(), Some(key.run));
+    brain.apply(rebuilt, None).unwrap();
+    assert!(matches!(transport.await.unwrap(), Answer::Rebuild));
+    brain.close().await;
+}
+
 /// Runs the lane's results through the connection until no job is out.
 #[cfg(windows)]
 async fn settle(claude: &mut Claude) {

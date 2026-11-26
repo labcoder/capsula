@@ -223,6 +223,102 @@ pub(crate) fn read_shell_tuning(
     }
 }
 
+/// Starts a parent-bound brain as the shell's child and connects over its pair, all by
+/// `deadline`. Returns the connection and the child's owner, which retires the child when dropped.
+///
+/// # Errors
+/// `Quitting` when Quit came first, `Launch` when no child started, or why the pair failed.
+#[cfg(target_os = "macos")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the link doesn't connect over the pair until R2")
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the link supplies the pair identity, deadline and existing callbacks"
+)]
+pub(crate) fn connect_pair(
+    brain: &Path,
+    word: Arc<super::SpawnWord>,
+    secret: &[u8; kumochi_session::SECRET_LEN],
+    channel: kumochi_session::Channel,
+    audio: AudioSession,
+    repair_of: Option<IssueSession>,
+    deadline: Instant,
+    text_metrics: impl FnOnce(Instant) -> DrawingText,
+) -> Result<(Connection, super::child::ChildOwner), LinkError> {
+    check_attempt(Some(deadline))?;
+    let (owner, ends) = super::macos::start_brain(brain, word, deadline)
+        .map_err(|error| not_started(error, deadline))?;
+    check_attempt(Some(deadline))?;
+    let connection = over_pair(
+        ends,
+        secret,
+        channel,
+        audio,
+        repair_of,
+        deadline,
+        text_metrics(deadline),
+    )?;
+    Ok((connection, owner))
+}
+
+/// Why the attempt ends when no child started: a spawn report still pending at the attempt's
+/// deadline is that deadline, not a launch failure.
+#[cfg(target_os = "macos")]
+pub(super) fn not_started(error: super::macos::NotStarted, deadline: Instant) -> LinkError {
+    use super::child::Refusal;
+    use super::macos::NotStarted;
+    match error {
+        NotStarted::Refused(Refusal::Quitting) => LinkError::Quitting,
+        NotStarted::Refused(Refusal::Spawn(error)) => LinkError::Launch(error),
+        NotStarted::Refused(Refusal::Claimed | Refusal::AutoReap) => {
+            LinkError::Launch(std::io::ErrorKind::ResourceBusy.into())
+        }
+        NotStarted::Pending if Instant::now() >= deadline => LinkError::ConnectExpired,
+        NotStarted::Pending => LinkError::Launch(std::io::ErrorKind::TimedOut.into()),
+    }
+}
+
+/// The session path's attempt: the initiator, both greetings with the zero placeholder and the
+/// brain's `ShellTuning`, and then the next control frame, which must be Settings. The runtime
+/// sends Settings first once it has committed, so it's the attempt's completion point. It stays in
+/// the control leg, so the link reads it first and in order.
+#[cfg(target_os = "macos")]
+pub(super) fn over_pair(
+    ends: super::macos::ShellEnds,
+    secret: &[u8; kumochi_session::SECRET_LEN],
+    channel: kumochi_session::Channel,
+    audio: AudioSession,
+    repair_of: Option<IssueSession>,
+    deadline: Instant,
+    drawing: DrawingText,
+) -> Result<Connection, LinkError> {
+    let (control, data) =
+        super::macos::initiate(ends, secret, channel, deadline).map_err(LinkError::Io)?;
+    let hello = Hello::session(BUILD_ID.to_owned());
+    let connection = handshake_pair(
+        control,
+        hello,
+        audio,
+        repair_of,
+        Some(deadline),
+        drawing,
+        || Ok(data),
+    )?;
+    let phase = deadline.min(Instant::now() + HANDSHAKE_TIMEOUT);
+    let settings = connection.control.peek_control(phase);
+    connection.control.set_timeout(None);
+    check_attempt(Some(deadline))?;
+    if Instant::now() >= phase {
+        return Err(LinkError::Io(std::io::ErrorKind::TimedOut.into()));
+    }
+    match settings? {
+        Some(ControlToShell::Settings { .. }) => Ok(connection),
+        _ => Err(LinkError::Rejected),
+    }
+}
+
 fn write_control_hello(
     writer: &mut impl Write,
     hello: Hello,

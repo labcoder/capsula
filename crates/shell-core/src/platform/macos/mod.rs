@@ -13,6 +13,7 @@
 )]
 mod child;
 mod instance;
+mod leg;
 #[cfg_attr(
     not(test),
     expect(
@@ -22,5 +23,8 @@ mod instance;
 )]
 mod pair;
 
+pub(crate) use child::{NotStarted, start_brain};
 pub(crate) use instance::try_acquire_instance_lock;
 pub use kumochi_storage::application_support_dir as support_dir;
+pub(crate) use leg::{PipeClient, initiate};
+pub(crate) use pair::ShellEnds;
