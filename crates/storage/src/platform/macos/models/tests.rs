@@ -71,6 +71,11 @@ fn paths_refuse_outside_the_anchor_and_dots_before_opening_anything() {
         Some(Untrusted::Unsafe),
         "lexical refusal comes before admitting the anchor, which would be Missing"
     );
+    assert_eq!(
+        create_private_file(support, &support.join("model.bin")).err(),
+        Some(Untrusted::Unsafe),
+        "a file directly in the anchor, outside every private folder"
+    );
 }
 
 #[test]
@@ -157,7 +162,10 @@ fn native_a_partial_is_published_sealed_and_an_arrival_is_kept() {
     assert_eq!(mode(&target), (0o400, 1), "published sealed");
     let sealed = open_sealed(&support, &target, Seal::ReadOnly).expect("the sealed final");
     assert_eq!(read_all(&sealed), b"verified");
-    assert_eq!(keep_sealed(&support, &sealed, &target), Ok(()));
+    assert_eq!(
+        keep_sealed(&support, &sealed, &target, Seal::ReadOnly),
+        Ok(())
+    );
     assert_eq!(check_named(&support, &sealed, &target), Ok(()));
     assert_eq!(
         open_sealed(&support, &target, Seal::ReadExecute).err(),
@@ -335,9 +343,14 @@ fn native_removal_checks_the_whole_tree_before_deleting_anything() {
         remove_private_tree(&support, &part),
         Err(Untrusted::Reparse)
     );
-    for kept in ["model.bin", "next.part", "sub/deep.part"] {
-        assert!(
-            !absent(&part.join(kept)),
+    for (kept, bytes) in [
+        ("model.bin", &b"sealed"[..]),
+        ("next.part", b"partial"),
+        ("sub/deep.part", b"deep"),
+    ] {
+        assert_eq!(
+            fs::read(part.join(kept)).expect("kept"),
+            bytes,
             "{kept} survives a refused removal"
         );
     }
@@ -383,7 +396,7 @@ fn native_removal_refuses_an_acl_child_and_a_foreign_mode_without_deleting() {
     let child = create_private_dir(&support, &part.join("child")).expect("child folder");
     install_acl(child.last().expect("child"), DENY).expect("install fixed UUID deny fixture");
     assert_eq!(remove_private_tree(&support, &part), Err(Untrusted::Unsafe));
-    assert!(!absent(&part.join("kept.part")));
+    assert_eq!(fs::read(part.join("kept.part")).expect("kept"), b"kept");
     drop(child);
     fs::remove_dir(part.join("child")).expect("drop the ACL child");
 
@@ -393,7 +406,7 @@ fn native_removal_refuses_an_acl_child_and_a_foreign_mode_without_deleting() {
     )
     .expect("a foreign mode");
     assert_eq!(remove_private_tree(&support, &part), Err(Untrusted::Unsafe));
-    assert!(!absent(&part.join("kept.part")));
+    assert_eq!(fs::read(part.join("kept.part")).expect("kept"), b"kept");
     fs::set_permissions(
         part.join("kept.part"),
         std::os::unix::fs::PermissionsExt::from_mode(0o600),
@@ -401,6 +414,58 @@ fn native_removal_refuses_an_acl_child_and_a_foreign_mode_without_deleting() {
     .expect("restore the mode");
 
     drop(held);
+    assert_eq!(
+        remove_private_tree(&support, &support.join("product")),
+        Ok(())
+    );
+    scratch
+        .cleanup()
+        .expect("identity-checked cleanup; uncertainty leaves reported residual");
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_a_file_at_the_removed_folder_survives_and_keep_needs_the_seal() {
+    let scratch = Scratch::new();
+    let support = anchor(&scratch);
+    let part = support.join("product/part");
+    let held = create_private_dir(&support, &support.join("product")).expect("private folder");
+    drop(partial(&support, &part, b"not a folder"));
+    assert_eq!(remove_private_tree(&support, &part), Err(Untrusted::Unsafe));
+    assert_eq!(fs::read(&part).expect("kept"), b"not a folder");
+    fs::remove_file(&part).expect("drop the fixture file");
+
+    let held_part = create_private_dir(&support, &part).expect("part folder");
+    let source = part.join("model.bin.part");
+    let file = partial(&support, &source, b"bytes");
+    assert_eq!(
+        keep_sealed(&support, &file, &source, Seal::ReadOnly),
+        Err(Untrusted::Unsafe),
+        "a writable partial isn't a sealed final"
+    );
+    drop(file);
+
+    // A publish that stopped between its seal and its rename.
+    fs::set_permissions(&source, std::os::unix::fs::PermissionsExt::from_mode(0o400))
+        .expect("seal the stranded partial");
+    let resumed = open_private_write(&support, &source).expect("the stranded partial resumes");
+    assert_eq!(mode(&source), (0o600, 1));
+    assert_eq!(read_all(&resumed), b"bytes");
+    let target = part.join("model.bin");
+    assert_eq!(
+        seal_and_publish(
+            &support,
+            resumed,
+            held_part.last().expect("part"),
+            &source,
+            &target,
+            Seal::ReadOnly
+        ),
+        Ok(())
+    );
+    assert_eq!(mode(&target), (0o400, 1));
+
+    drop((held, held_part));
     assert_eq!(
         remove_private_tree(&support, &support.join("product")),
         Ok(())

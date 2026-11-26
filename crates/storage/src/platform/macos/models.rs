@@ -3,8 +3,9 @@
 //!
 //! The same sample as the rest of this module, under one cooperating writer: descriptors hold
 //! objects, not names. Every call walks again from `/`, looks at each entry without following it
-//! before opening it, and refuses what it sees change. Nothing is re-secured. A same-user rename
-//! between two calls isn't detected.
+//! and checks its type, owner, links and volume before opening it, and refuses what it sees
+//! change. Nothing is re-secured. A same-user rename between two calls isn't detected, and a
+//! placeholder is refused only as the look sees it, so the anchor must be outside file providers.
 //!
 //! shortcut: an entry that already exists is admitted on its present metadata, not proven private
 //! since it was made; upgrade with first-use provisioning if earlier storage must be proven.
@@ -90,10 +91,11 @@ pub fn create_private_dir(support: &Path, path: &Path) -> Result<Vec<File>, Untr
 /// flushes the folder. It never opens an existing file.
 ///
 /// # Errors
-/// `Io` when anything is already at the name or the lock is held; otherwise refuses like
-/// [`hold_private_chain`] and on a file that isn't private once made.
+/// `Io` when anything is already at the name or the lock is held; `Unsafe` for a file directly in
+/// the anchor; otherwise refuses like [`hold_private_chain`] and on a file that isn't private once
+/// made.
 pub fn create_private_file(support: &Path, path: &Path) -> Result<File, Untrusted> {
-    let (held, name) = parent_of(support, path)?;
+    let (held, name) = file_parent(support, path)?;
     let folder = held.last()?;
     let file = open_at(
         folder.as_raw_fd(),
@@ -110,25 +112,35 @@ pub fn create_private_file(support: &Path, path: &Path) -> Result<File, Untruste
     Ok(file)
 }
 
-/// Opens the existing partial file `path` for writing without truncating it, and locks it.
+/// Opens the existing partial file `path` for writing without truncating it, and locks it. Call it
+/// only with a partial's path: a sealed file there is taken as a publish that stopped between its
+/// seal and its rename, checked as sealed, and unsealed to 0600 so it can be resumed.
 ///
 /// # Errors
-/// `Missing` when nothing is there; `Io` when the lock is held; otherwise refuses anything but
-/// this user's regular file at mode 0600 with one name and no ACL, before opening it.
+/// `Missing` when nothing is there; `Io` when the lock is held. Otherwise refuses anything but this
+/// user's regular file with one name on its folder's volume at mode 0600 (or a seal's mode) before
+/// opening it, and an ACL or any change by the time it's locked.
 pub fn open_private_write(support: &Path, path: &Path) -> Result<File, Untrusted> {
-    let (held, name) = parent_of(support, path)?;
+    let (held, name) = file_parent(support, path)?;
+    let folder = held.last()?;
+    let mode = look(folder, &name)?.st_mode & 0o7777;
+    if mode == Seal::ReadOnly.mode() || mode == Seal::ReadExecute.mode() {
+        chmod(&existing(&held, &name, READ_FLAGS, mode)?, PARTIAL)?;
+    }
     let file = existing(&held, &name, WRITE_FLAGS, PARTIAL)?;
     lock(&file)?;
+    let locked = inspect_private(&file, held.user(), ObjectKind::Exact(PARTIAL))?;
+    named(folder, &name, &locked)?;
     Ok(file)
 }
 
 /// Opens the sealed file `path` read-only: the checked read-only open.
 ///
 /// # Errors
-/// `Missing` when nothing is there; otherwise refuses anything but this user's regular file at
-/// exactly `seal`'s mode with one name and no ACL, before opening it.
+/// `Missing` when nothing is there. Otherwise refuses anything but this user's regular file with
+/// one name on its folder's volume at exactly `seal`'s mode before opening it, and an ACL after.
 pub fn open_sealed(support: &Path, path: &Path, seal: Seal) -> Result<File, Untrusted> {
-    let (held, name) = parent_of(support, path)?;
+    let (held, name) = file_parent(support, path)?;
     existing(&held, &name, READ_FLAGS, seal.mode())
 }
 
@@ -137,26 +149,29 @@ pub fn open_sealed(support: &Path, path: &Path, seal: Seal) -> Result<File, Untr
 /// # Errors
 /// `Unsafe` when it names something else; otherwise as [`hold_private_chain`] for its folder.
 pub fn check_named(support: &Path, file: &File, path: &Path) -> Result<(), Untrusted> {
-    let (held, name) = parent_of(support, path)?;
+    let (held, name) = file_parent(support, path)?;
     named(held.last()?, &name, &stat(file.as_raw_fd())?)
 }
 
-/// Keeps an already sealed file: checks that `path` still names it, then flushes its folder and
-/// the file, completing the barrier an earlier publish may not have finished.
+/// Keeps an already sealed file: checks it's still sealed at `seal`'s mode with one name and no
+/// ACL, and that `path` still names it, then flushes its folder and the file, completing the
+/// barrier an earlier publish may not have finished.
 ///
 /// # Errors
-/// As [`check_named`], and `Io` when a flush fails.
-pub fn keep_sealed(support: &Path, file: &File, path: &Path) -> Result<(), Untrusted> {
-    let (held, name) = parent_of(support, path)?;
+/// As [`check_named`], `Unsafe` for a file that isn't sealed, and `Io` when a flush fails.
+pub fn keep_sealed(support: &Path, file: &File, path: &Path, seal: Seal) -> Result<(), Untrusted> {
+    let (held, name) = file_parent(support, path)?;
     let folder = held.last()?;
-    named(folder, &name, &stat(file.as_raw_fd())?)?;
+    let sealed = inspect_private(file, held.user(), ObjectKind::Exact(seal.mode()))?;
+    named(folder, &name, &sealed)?;
     sync(folder)?;
     file.sync_all().map_err(|_| Untrusted::Io)
 }
 
 /// Seals the partial `file`, named `from`, at `seal`'s mode, renames it to its sibling `to`
 /// without replacing anything there, then flushes the folder and the file. `parent` must be the
-/// held folder they're in. A rename that fails puts the partial back at mode 0600.
+/// held folder they're in. A rename that fails puts the partial back at mode 0600 once its name is
+/// shown to still give it.
 ///
 /// # Errors
 /// `Unsafe` for names that aren't siblings or a `from` that no longer names `file`; `Reparse` when
@@ -174,7 +189,7 @@ pub fn seal_and_publish(
         return Err(Untrusted::Unsafe);
     }
     let source = below(support, from)?.pop().ok_or(Untrusted::Unsafe)?;
-    let (held, target) = parent_of(support, to)?;
+    let (held, target) = file_parent(support, to)?;
     let folder = held.last()?;
     if !same_object(&stat(folder.as_raw_fd())?, &stat(parent.as_raw_fd())?) {
         return Err(Untrusted::Reparse);
@@ -183,15 +198,22 @@ pub fn seal_and_publish(
     named(folder, &source, &identity)?;
     chmod(&file, seal.mode())?;
     let renamed = inspect_private(&file, held.user(), ObjectKind::Exact(seal.mode()))
-        .and_then(|_| rename(folder, &source, &target));
+        .and_then(|sealed| named(folder, &source, &sealed).map(|()| sealed))
+        .and_then(|sealed| rename(folder, &source, &target).map(|()| sealed));
     if let Err(error) = renamed {
-        // A partial left sealed would refuse to resume.
-        chmod(&file, PARTIAL)?;
+        // Unsealed only while it's still the partial, so a final is never made writable again.
+        let now = stat(file.as_raw_fd())?;
+        if named(folder, &source, &now).is_ok()
+            && !look(folder, &target).is_ok_and(|seen| same_object(&seen, &now))
+        {
+            chmod(&file, PARTIAL)?;
+        }
         return Err(error);
     }
     sync(folder)?;
     file.sync_all().map_err(|_| Untrusted::Io)?;
-    named(folder, &target, &stat(file.as_raw_fd())?)?;
+    let published = inspect_private(&file, held.user(), ObjectKind::Exact(seal.mode()))?;
+    named(folder, &target, &published)?;
     drop(file);
     Ok(())
 }
@@ -200,20 +222,24 @@ pub fn seal_and_publish(
 /// `parent` must be the held folder it's in.
 ///
 /// # Errors
-/// `Reparse` when `parent` isn't its folder; `Unsafe` when the name gives something else, which
-/// deletes nothing; `Io` when the unlink or the flush fails.
+/// `Reparse` when `parent` isn't its folder; `Unsafe` when the name gives something else, or
+/// anything but this user's regular file with one name on the folder's volume, which deletes
+/// nothing; `Io` when the unlink or the flush fails.
 pub fn discard_entry(
     support: &Path,
     file: File,
     parent: &File,
     path: &Path,
 ) -> Result<(), Untrusted> {
-    let (held, name) = parent_of(support, path)?;
+    let (held, name) = file_parent(support, path)?;
     let folder = held.last()?;
     if !same_object(&stat(folder.as_raw_fd())?, &stat(parent.as_raw_fd())?) {
         return Err(Untrusted::Reparse);
     }
-    if !same_object(&look(folder, &name)?, &stat(file.as_raw_fd())?) {
+    let seen = look(folder, &name)?;
+    kind(&seen, libc::S_IFREG)?;
+    plain(&seen, folder, held.user())?;
+    if !same_object(&seen, &stat(file.as_raw_fd())?) {
         return Err(Untrusted::Unsafe);
     }
     unlink(folder, &name, 0)?;
@@ -222,9 +248,9 @@ pub fn discard_entry(
 }
 
 /// Deletes the folder `path` and everything in it in two passes, then flushes the folder it was
-/// in. The first looks at the whole tree, opening only folders: every folder must be private, every
-/// file this user's at mode 0600, 0500 or 0400, all on one volume, within 32 levels and 65,536
-/// entries. The second deletes leaves first, each once its name still gives what the first pass
+/// in. The first looks at the whole tree, opening only folders: `path` must be a folder, every
+/// folder private, every file this user's with one name at mode 0600, 0500 or 0400, all on one
+/// volume, within 32 levels and 65,536 entries. The second deletes leaves first, each once its name still gives what the first pass
 /// saw. A folder already gone flushes its folder and counts as deleted.
 ///
 /// # Errors
@@ -238,6 +264,7 @@ pub fn remove_private_tree(support: &Path, path: &Path) -> Result<(), Untrusted>
         Err(Untrusted::Missing) => return sync(folder),
         seen => seen?,
     };
+    kind(&seen, libc::S_IFDIR)?;
     let mut tree = Tree {
         user: held.user(),
         device: stat(folder.as_raw_fd())?.st_dev,
@@ -299,7 +326,7 @@ impl Tree {
         let index = self.nodes.len();
         match seen.st_mode & libc::S_IFMT {
             libc::S_IFREG => {
-                if !matches!(seen.st_mode & 0o7777, 0o400 | 0o500 | 0o600) {
+                if seen.st_nlink != 1 || !matches!(seen.st_mode & 0o7777, 0o400 | 0o500 | 0o600) {
                     return Err(Untrusted::Unsafe);
                 }
                 self.nodes.push(Node {
@@ -354,15 +381,26 @@ fn parent_of(support: &Path, path: &Path) -> Result<(Directories, CString), Untr
     Ok((walk(support, names, Folders::Existing)?, name))
 }
 
+/// [`parent_of`] for a file, which must be in a private folder, never in the anchor itself.
+fn file_parent(support: &Path, path: &Path) -> Result<(Directories, CString), Untrusted> {
+    if below(support, path)?.len() < 2 {
+        return Err(Untrusted::Unsafe);
+    }
+    parent_of(support, path)
+}
+
 /// The anchor's held chain, then each of `names` in turn as a private folder.
 fn walk(support: &Path, names: Vec<CString>, folders: Folders) -> Result<Directories, Untrusted> {
     let mut held = admit_support(support).map_err(untrusted)?.into_held();
     for name in names {
         let parent = held.last()?;
-        let made = folders == Folders::Create && make(parent, &name)?;
+        if folders == Folders::Create {
+            make(parent, &name)?;
+        }
         let folder = folder_at(parent, &name, &look(parent, &name)?, held.user())?;
         held.push_private(folder, name).map_err(untrusted)?;
-        if made {
+        // Every level, not only new ones, so a retry finishes a barrier an earlier call lost.
+        if folders == Folders::Create {
             sync(held.before_last()?)?;
             sync(held.last()?)?;
         }
@@ -371,14 +409,14 @@ fn walk(support: &Path, names: Vec<CString>, folders: Folders) -> Result<Directo
     Ok(held)
 }
 
-/// Makes the folder `name` at mode 0700, and says whether this call made it.
-fn make(parent: &File, name: &CStr) -> Result<bool, Untrusted> {
+/// Makes the folder `name` at mode 0700 unless something is there.
+fn make(parent: &File, name: &CStr) -> Result<(), Untrusted> {
     // SAFETY: parent is held and name one validated component; an existing entry is kept.
     if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } == 0 {
-        return Ok(true);
+        return Ok(());
     }
     match io::Error::last_os_error().raw_os_error() {
-        Some(libc::EEXIST) => Ok(false),
+        Some(libc::EEXIST) => Ok(()),
         _ => Err(Untrusted::Io),
     }
 }
@@ -391,6 +429,9 @@ fn folder_at(
     user: libc::uid_t,
 ) -> Result<File, Untrusted> {
     kind(seen, libc::S_IFDIR)?;
+    if seen.st_uid != user || seen.st_dev != stat(parent.as_raw_fd())?.st_dev {
+        return Err(Untrusted::Unsafe);
+    }
     let folder = open_at(parent.as_raw_fd(), name, DIRECTORY_FLAGS, 0)
         .map_err(untrusted)
         .map_err(vanished)?;
@@ -402,8 +443,8 @@ fn folder_at(
 }
 
 /// The existing file `name` in the last held folder, looked at first: a regular file with one
-/// name, this user's, at exactly `mode`. Then opened without following it, compared with the look
-/// and checked again through the descriptor, ACL included.
+/// name, this user's, on the folder's volume, at exactly `mode`. Then opened without following it,
+/// compared with the look and checked again through the descriptor, ACL included.
 fn existing(
     held: &Directories,
     name: &CStr,
@@ -413,7 +454,8 @@ fn existing(
     let folder = held.last()?;
     let seen = look(folder, name)?;
     kind(&seen, libc::S_IFREG)?;
-    if seen.st_nlink != 1 || seen.st_uid != held.user() || seen.st_mode & 0o7777 != mode {
+    plain(&seen, folder, held.user())?;
+    if seen.st_mode & 0o7777 != mode {
         return Err(Untrusted::Unsafe);
     }
     let file = open_at(folder.as_raw_fd(), name, flags, 0)
@@ -434,6 +476,15 @@ fn kind(seen: &libc::stat, expected: libc::mode_t) -> Result<(), Untrusted> {
         libc::S_IFLNK => Err(Untrusted::Reparse),
         _ => Err(Untrusted::Unsafe),
     }
+}
+
+/// A file the look found: this user's, with one name, on its folder's volume.
+fn plain(seen: &libc::stat, folder: &File, user: libc::uid_t) -> Result<(), Untrusted> {
+    if seen.st_nlink != 1 || seen.st_uid != user || seen.st_dev != stat(folder.as_raw_fd())?.st_dev
+    {
+        return Err(Untrusted::Unsafe);
+    }
+    Ok(())
 }
 
 fn lock(file: &File) -> Result<(), Untrusted> {
