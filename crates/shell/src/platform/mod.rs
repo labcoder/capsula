@@ -152,9 +152,8 @@ pub(crate) fn diagnostic_clock() -> std::io::Result<kumochi_shell::QpcClock> {
     kumochi_shell::QpcClock::require(backend)
 }
 
-pub(crate) use crate::presence::line::machine::ROW_SPANS;
 #[cfg(windows)]
-pub(crate) use crate::presence::line::machine::RowSpans;
+pub(crate) use crate::presence::line::machine::{ROW_SPANS, RowSpans};
 
 pub(crate) fn connected_overlay_windows() -> Result<OverlayWindows, PresenceError> {
     #[cfg(windows)]
