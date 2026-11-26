@@ -198,6 +198,7 @@ provisions their identifiers.
   no delete. The readback must hold exactly 32 bytes, and only the brain compares them, in constant
   time, with its own.
 - **Storage reads, the brain writes.** Storage makes the one `SecItemCopyMatching` call. The
+  shell's `platform/macos/instance.rs` reads through it only after the brain's READY byte. The
   brain's `platform/macos/instance.rs` makes the add, the value-only update and the delete, on a
   no-copy CFData whose backing is wiped when CoreFoundation releases it.
 

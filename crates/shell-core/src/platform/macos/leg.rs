@@ -480,22 +480,38 @@ fn message(
     Ok(message)
 }
 
+/// The one byte the brain writes on control before the handshake, read by `by` and nothing past
+/// it, so the initiator's first envelope starts after it. `None` when the stream ended first.
+///
+/// # Errors
+/// `TimedOut` past `by`, or the transport's error.
+pub(crate) fn read_ready(ends: &ShellEnds, by: Instant) -> io::Result<Option<u8>> {
+    ends.control.set_nonblocking(true)?;
+    let mut byte = [0];
+    Ok(match read_by(&ends.control, &mut byte, Some(by))? {
+        0 => None,
+        _ => Some(byte[0]),
+    })
+}
+
 /// The initiator's side over the brain child's pair, all of it by `by`: control init and
 /// Finished, data init and Finished, then Bind, and the legs only once `BindAck` verifies. The
-/// legs start unbounded; the caller sets its own bounds.
+/// secret is wiped once the initiator has keyed itself. The legs start unbounded; the caller sets
+/// its own bounds.
 ///
 /// # Errors
 /// `TimedOut` past `by`, `InvalidData` for a session refusal, or the transport's error.
 pub(crate) fn initiate(
     ends: ShellEnds,
-    secret: &[u8; SECRET_LEN],
+    secret: Zeroizing<[u8; SECRET_LEN]>,
     channel: Channel,
     by: Instant,
 ) -> io::Result<(PipeClient, PipeClient)> {
     for end in [&ends.control, &ends.data] {
         end.set_nonblocking(true)?;
     }
-    let (mut shell, init) = ShellAwaitsReply::start(secret, channel).map_err(session_error)?;
+    let (mut shell, init) = ShellAwaitsReply::start(&secret, channel).map_err(session_error)?;
+    drop(secret);
     send(end(&ends, init.leg), &init.bytes, by)?;
     let reply = message(&ends.control, by, |envelope| shell.record_len(envelope))?;
     let (shell, out) = shell.receive(&reply).map_err(session_error)?;

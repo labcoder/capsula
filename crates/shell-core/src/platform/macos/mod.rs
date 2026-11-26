@@ -24,9 +24,9 @@ mod leg;
 mod pair;
 
 pub(crate) use child::{NotStarted, start_brain};
-pub(crate) use instance::try_acquire_instance_lock;
+pub(crate) use instance::{read_instance, try_acquire_instance_lock};
 pub use kumochi_storage::application_support_dir as support_dir;
-pub(crate) use leg::{PipeClient, initiate};
+pub(crate) use leg::{PipeClient, initiate, read_ready};
 pub(crate) use pair::ShellEnds;
 
 /// The brain helper nested in the shell's bundle: from `Contents/MacOS/<shell>` up to

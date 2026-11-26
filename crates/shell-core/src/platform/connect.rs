@@ -47,6 +47,9 @@ pub(crate) enum LinkError {
     ConnectExpired,
     #[error("the brain is from another build")]
     BuildMismatch,
+    #[cfg(target_os = "macos")]
+    #[error("can't read the instance item")]
+    Item(#[source] kumochi_storage::ItemError),
     #[error("quitting")]
     Quitting,
     #[error(transparent)]
@@ -224,7 +227,8 @@ pub(crate) fn read_shell_tuning(
 }
 
 /// Starts a parent-bound brain as the shell's child and connects over its pair, all by
-/// `deadline`. Returns the connection and the child's owner, which retires the child when dropped.
+/// `deadline`: READY, then the instance item from the Keychain, then the initiator. Returns the
+/// connection and the child's owner, which retires the child when dropped.
 ///
 /// # Errors
 /// `Quitting` when Quit came first, `Launch` when no child started, or why the pair failed.
@@ -233,14 +237,9 @@ pub(crate) fn read_shell_tuning(
     not(test),
     expect(dead_code, reason = "the link doesn't connect over the pair until R2")
 )]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the link supplies the pair identity, deadline and existing callbacks"
-)]
 pub(crate) fn connect_pair(
     brain: &Path,
     word: Arc<super::SpawnWord>,
-    secret: &[u8; kumochi_session::SECRET_LEN],
     channel: kumochi_session::Channel,
     audio: AudioSession,
     repair_of: Option<IssueSession>,
@@ -251,7 +250,46 @@ pub(crate) fn connect_pair(
     let (owner, ends) = super::macos::start_brain(brain, word, deadline)
         .map_err(|error| not_started(error, deadline))?;
     check_attempt(Some(deadline))?;
-    let connection = over_pair(
+    let connection = after_ready(
+        ends,
+        channel,
+        audio,
+        repair_of,
+        deadline,
+        text_metrics,
+        super::macos::read_instance,
+    )?;
+    Ok((connection, owner))
+}
+
+/// Waits for the brain's READY byte, then reads the instance capability with `read_item`, then
+/// runs [`over_pair`]. Nothing is written and the item isn't read until READY arrives, and a
+/// wrong byte or the stream ending is `Rejected`.
+#[cfg(target_os = "macos")]
+pub(super) fn after_ready(
+    ends: super::macos::ShellEnds,
+    channel: kumochi_session::Channel,
+    audio: AudioSession,
+    repair_of: Option<IssueSession>,
+    deadline: Instant,
+    text_metrics: impl FnOnce(Instant) -> DrawingText,
+    read_item: impl FnOnce(
+        &mut [u8; kumochi_session::SECRET_LEN],
+    ) -> Result<(), kumochi_storage::ItemError>,
+) -> Result<Connection, LinkError> {
+    use kumochi_protocol::constants::SESSION_READY;
+    match super::macos::read_ready(&ends, deadline) {
+        Ok(Some(SESSION_READY)) => {}
+        Ok(_) => return Err(LinkError::Rejected),
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+            return Err(LinkError::ConnectExpired);
+        }
+        Err(error) => return Err(LinkError::Io(error)),
+    }
+    let mut secret = zeroize::Zeroizing::new([0; kumochi_session::SECRET_LEN]);
+    read_item(&mut secret).map_err(LinkError::Item)?;
+    check_attempt(Some(deadline))?;
+    over_pair(
         ends,
         secret,
         channel,
@@ -259,8 +297,7 @@ pub(crate) fn connect_pair(
         repair_of,
         deadline,
         text_metrics(deadline),
-    )?;
-    Ok((connection, owner))
+    )
 }
 
 /// Why the attempt ends when no child started: a spawn report still pending at the attempt's
@@ -287,7 +324,7 @@ pub(super) fn not_started(error: super::macos::NotStarted, deadline: Instant) ->
 #[cfg(target_os = "macos")]
 pub(super) fn over_pair(
     ends: super::macos::ShellEnds,
-    secret: &[u8; kumochi_session::SECRET_LEN],
+    secret: zeroize::Zeroizing<[u8; kumochi_session::SECRET_LEN]>,
     channel: kumochi_session::Channel,
     audio: AudioSession,
     repair_of: Option<IssueSession>,

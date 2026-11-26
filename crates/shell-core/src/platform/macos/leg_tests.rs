@@ -4,6 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::BUILD_ID;
+use kumochi_protocol::constants::SESSION_READY;
 use kumochi_protocol::frame::{self, HEADER_LEN, Pipe};
 use kumochi_protocol::message::{
     AssistantName, AudioSession, ControlToBrain, ControlToShell, DataToBrain, DockPosition, Hello,
@@ -19,7 +20,7 @@ use super::*;
 use crate::link::DrawingText;
 use crate::platform::Connection;
 use crate::platform::SpawnWord;
-use crate::platform::connect::{LinkError, connect_pair, not_started, over_pair};
+use crate::platform::connect::{LinkError, after_ready, connect_pair, not_started, over_pair};
 
 /// A synthetic group secret; no real key is ever used here.
 const SECRET: [u8; SECRET_LEN] = [0x5A; SECRET_LEN];
@@ -146,7 +147,8 @@ impl Brain {
 fn bound() -> (PipeClient, PipeClient, Brain) {
     let (shell, brain_control, brain_data) = ends();
     let brain = thread::spawn(move || respond(brain_control, brain_data));
-    let (control, data) = initiate(shell, &SECRET, Channel::Dev, by()).expect("initiated");
+    let (control, data) =
+        initiate(shell, Zeroizing::new(SECRET), Channel::Dev, by()).expect("initiated");
     (
         control,
         data,
@@ -316,7 +318,8 @@ fn abort_ends_only_its_own_leg() {
 fn the_initiator_ends_at_its_deadline() {
     let (shell, _brain_control, _brain_data) = ends();
     let deadline = Instant::now() + SHORT;
-    let refused = initiate(shell, &SECRET, Channel::Dev, deadline).expect_err("nobody answers");
+    let refused = initiate(shell, Zeroizing::new(SECRET), Channel::Dev, deadline)
+        .expect_err("nobody answers");
     assert!(matches!(
         refused.kind(),
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
@@ -338,7 +341,8 @@ fn a_brain_with_another_secret_never_binds() {
         assert_eq!(brain.receive(&init).err(), Some(SessionError::Handshake));
         drop((brain_control, brain_data));
     });
-    let refused = initiate(shell, &SECRET, Channel::Dev, by()).expect_err("no reply");
+    let refused =
+        initiate(shell, Zeroizing::new(SECRET), Channel::Dev, by()).expect_err("no reply");
     assert_eq!(refused.kind(), std::io::ErrorKind::UnexpectedEof);
     brain.join().expect("the brain side finished");
 }
@@ -409,66 +413,84 @@ fn attempt(
     deadline: Instant,
 ) -> (Result<Connection, LinkError>, thread::JoinHandle<Brain>) {
     let (shell, brain_control, brain_data) = ends();
-    let brain = thread::spawn(move || {
-        let mut brain = respond(brain_control, brain_data);
-        let hello = Hello::session(BUILD_ID.to_owned());
-        let expected = match audio {
-            AudioSession::Legacy => ControlToBrain::Hello(hello.clone()),
-            AudioSession::QueuedRequired => ControlToBrain::QueuedHello(hello.clone()),
-        };
-        assert_eq!(brain.control_message(), expected);
-        brain.control(&ControlToShell::Welcome {
-            incarnation: ORIGIN.incarnation,
-            issue_epoch: ORIGIN.epoch,
-        });
-        let expected = match audio {
-            AudioSession::Legacy => DataToBrain::Hello(hello),
-            AudioSession::QueuedRequired => DataToBrain::QueuedHello(hello, ORIGIN),
-        };
-        assert_eq!(brain.data_message(), expected);
-        assert_eq!(brain.data_message(), DataToBrain::TextMetrics(None));
-        brain.control(&ControlToShell::ShellTuning {
-            session: ORIGIN,
-            tuning: ShellTuning::default(),
-        });
-        match commit {
-            Commit::Settings => brain.control(&ControlToShell::Settings {
-                view: view(),
-                answer: false,
-            }),
-            Commit::Pings => brain.control(&ControlToShell::Ping),
-            Commit::Closes => brain
-                .control
-                .shutdown(std::net::Shutdown::Both)
-                .expect("closed"),
-            Commit::Trickles => {
-                let settings = frame::encode(
-                    &ControlToShell::Settings {
-                        view: view(),
-                        answer: false,
-                    },
-                    Pipe::Control,
-                )
-                .expect("encodes");
-                for byte in brain.sealed(Pipe::Control, &settings) {
-                    thread::sleep(GAP);
-                    if brain.control.write_all(&[byte]).is_err() {
-                        break;
-                    }
-                }
-            }
-            Commit::Stalls => {
-                thread::sleep(deadline.saturating_duration_since(Instant::now()) + SHORT);
-            }
-        }
-        brain
-    });
+    let brain = thread::spawn(move || scripted(brain_control, brain_data, audio, commit, deadline));
     let drawing = DrawingText {
         profile: None,
         font_family: None,
     };
-    let result = over_pair(shell, &SECRET, Channel::Dev, audio, None, deadline, drawing);
+    let result = over_pair(
+        shell,
+        Zeroizing::new(SECRET),
+        Channel::Dev,
+        audio,
+        None,
+        deadline,
+        drawing,
+    );
     (result, brain)
+}
+
+/// The brain's side of an attempt over its two ends: the honest responder, both greetings and
+/// then `commit`.
+fn scripted(
+    brain_control: UnixStream,
+    brain_data: UnixStream,
+    audio: AudioSession,
+    commit: Commit,
+    deadline: Instant,
+) -> Brain {
+    let mut brain = respond(brain_control, brain_data);
+    let hello = Hello::session(BUILD_ID.to_owned());
+    let expected = match audio {
+        AudioSession::Legacy => ControlToBrain::Hello(hello.clone()),
+        AudioSession::QueuedRequired => ControlToBrain::QueuedHello(hello.clone()),
+    };
+    assert_eq!(brain.control_message(), expected);
+    brain.control(&ControlToShell::Welcome {
+        incarnation: ORIGIN.incarnation,
+        issue_epoch: ORIGIN.epoch,
+    });
+    let expected = match audio {
+        AudioSession::Legacy => DataToBrain::Hello(hello),
+        AudioSession::QueuedRequired => DataToBrain::QueuedHello(hello, ORIGIN),
+    };
+    assert_eq!(brain.data_message(), expected);
+    assert_eq!(brain.data_message(), DataToBrain::TextMetrics(None));
+    brain.control(&ControlToShell::ShellTuning {
+        session: ORIGIN,
+        tuning: ShellTuning::default(),
+    });
+    match commit {
+        Commit::Settings => brain.control(&ControlToShell::Settings {
+            view: view(),
+            answer: false,
+        }),
+        Commit::Pings => brain.control(&ControlToShell::Ping),
+        Commit::Closes => brain
+            .control
+            .shutdown(std::net::Shutdown::Both)
+            .expect("closed"),
+        Commit::Trickles => {
+            let settings = frame::encode(
+                &ControlToShell::Settings {
+                    view: view(),
+                    answer: false,
+                },
+                Pipe::Control,
+            )
+            .expect("encodes");
+            for byte in brain.sealed(Pipe::Control, &settings) {
+                thread::sleep(GAP);
+                if brain.control.write_all(&[byte]).is_err() {
+                    break;
+                }
+            }
+        }
+        Commit::Stalls => {
+            thread::sleep(deadline.saturating_duration_since(Instant::now()) + SHORT);
+        }
+    }
+    brain
 }
 
 #[test]
@@ -536,7 +558,8 @@ fn the_initiator_ends_at_its_deadline_however_the_reply_trickles() {
         drop(brain_data);
     });
     let deadline = Instant::now() + Duration::from_millis(400);
-    let refused = initiate(shell, &SECRET, Channel::Dev, deadline).expect_err("too slow");
+    let refused =
+        initiate(shell, Zeroizing::new(SECRET), Channel::Dev, deadline).expect_err("too slow");
     assert!(matches!(
         refused.kind(),
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
@@ -635,7 +658,6 @@ fn an_expired_attempt_starts_no_brain() {
     let result = connect_pair(
         std::path::Path::new("/nonexistent/kumochid"),
         std::sync::Arc::new(SpawnWord::default()),
-        &SECRET,
         Channel::Dev,
         AudioSession::Legacy,
         None,
@@ -834,4 +856,156 @@ fn nothing_moves_once_the_call_deadline_has_passed() {
         0,
         "no byte of the frame reached the brain"
     );
+}
+
+/// Runs the shell's side after the spawn over `shell`, with a fake item reader that answers
+/// `item`, filling the synthetic secret on success. Returns the result and how often it was read.
+fn after_spawn(
+    shell: ShellEnds,
+    deadline: Instant,
+    item: Result<(), kumochi_storage::ItemError>,
+) -> (Result<Connection, LinkError>, usize) {
+    let reads = std::cell::Cell::new(0);
+    let result = after_ready(
+        shell,
+        Channel::Dev,
+        AudioSession::Legacy,
+        None,
+        deadline,
+        |_| DrawingText::default(),
+        |into| {
+            reads.set(reads.get() + 1);
+            if item.is_ok() {
+                *into = SECRET;
+            }
+            item
+        },
+    );
+    (result, reads.get())
+}
+
+#[test]
+fn ready_then_the_item_runs_the_initiator_to_settings() {
+    let (shell, mut brain_control, brain_data) = ends();
+    let brain = thread::spawn(move || {
+        brain_control.write_all(&[SESSION_READY]).expect("READY");
+        scripted(
+            brain_control,
+            brain_data,
+            AudioSession::Legacy,
+            Commit::Settings,
+            by(),
+        )
+    });
+    let (result, reads) = after_spawn(shell, by(), Ok(()));
+    let connection = result.expect("connected");
+    assert_eq!((connection.issue_origin, reads), (ORIGIN, 1));
+    brain.join().expect("the brain side finished");
+    assert!(
+        matches!(
+            frame::read::<ControlToShell>(&mut &*connection.control, Pipe::Control),
+            Ok(Some(ControlToShell::Settings { .. }))
+        ),
+        "the link reads Settings first"
+    );
+}
+
+#[test]
+fn the_shell_writes_nothing_before_ready() {
+    let (shell, mut brain_control, mut brain_data) = ends();
+    let brain = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(200));
+        for end in [&brain_control, &brain_data] {
+            end.set_nonblocking(true).expect("nonblocking");
+        }
+        let mut byte = [0; 1];
+        for end in [&mut brain_control, &mut brain_data] {
+            assert_eq!(
+                end.read(&mut byte).expect_err("nothing written").kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        for end in [&brain_control, &brain_data] {
+            end.set_nonblocking(false).expect("blocking");
+        }
+        brain_control.write_all(&[SESSION_READY]).expect("READY");
+        scripted(
+            brain_control,
+            brain_data,
+            AudioSession::Legacy,
+            Commit::Settings,
+            by(),
+        )
+    });
+    let (result, reads) = after_spawn(shell, by(), Ok(()));
+    brain.join().expect("the brain saw nothing before READY");
+    assert_eq!(
+        (result.expect("connected").issue_origin, reads),
+        (ORIGIN, 1)
+    );
+}
+
+#[test]
+fn a_first_byte_other_than_ready_is_rejected_before_the_item() {
+    for first in [0x00, 0x53] {
+        let (shell, mut brain_control, _brain_data) = ends();
+        brain_control.write_all(&[first]).expect("first byte");
+        let (result, reads) = after_spawn(shell, by(), Ok(()));
+        assert!(
+            matches!(result, Err(LinkError::Rejected)),
+            "first byte {first:#04x}"
+        );
+        assert_eq!(reads, 0, "first byte {first:#04x}");
+    }
+}
+
+#[test]
+fn the_stream_ending_before_ready_is_rejected_before_the_item() {
+    let (shell, brain_control, _brain_data) = ends();
+    drop(brain_control);
+    let (result, reads) = after_spawn(shell, by(), Ok(()));
+    assert!(matches!(result, Err(LinkError::Rejected)));
+    assert_eq!(reads, 0);
+}
+
+#[test]
+fn the_ready_wait_ends_at_the_deadline_before_the_item() {
+    let (shell, brain_control, brain_data) = ends();
+    let deadline = Instant::now() + Duration::from_millis(300);
+    let brain = thread::spawn(move || {
+        thread::sleep(Duration::from_secs(1) + deadline.saturating_duration_since(Instant::now()));
+        drop((brain_control, brain_data));
+    });
+    let (result, reads) = after_spawn(shell, deadline, Ok(()));
+    let ended = Instant::now();
+    assert!(matches!(result, Err(LinkError::ConnectExpired)));
+    assert_eq!(reads, 0);
+    assert!(ended >= deadline, "waited for the deadline");
+    assert!(
+        ended < deadline + Duration::from_millis(400),
+        "ended near the deadline, not when the brain let go"
+    );
+    brain.join().expect("the brain side finished");
+}
+
+#[test]
+fn a_refused_item_read_refuses_with_nothing_written() {
+    let (shell, mut brain_control, mut brain_data) = ends();
+    // Darwin refuses the option once the peer has closed, so it's set first.
+    for end in [&brain_control, &brain_data] {
+        end.set_read_timeout(Some(BOUND)).expect("bounded");
+    }
+    brain_control.write_all(&[SESSION_READY]).expect("READY");
+    let (result, reads) = after_spawn(shell, by(), Err(kumochi_storage::ItemError::Missing));
+    assert!(matches!(
+        result,
+        Err(LinkError::Item(kumochi_storage::ItemError::Missing))
+    ));
+    assert_eq!(reads, 1);
+    for end in [&mut brain_control, &mut brain_data] {
+        let mut written = Vec::new();
+        end.read_to_end(&mut written)
+            .expect("the shell's end closed");
+        assert_eq!(written, Vec::<u8>::new(), "no initiator bytes");
+    }
 }
