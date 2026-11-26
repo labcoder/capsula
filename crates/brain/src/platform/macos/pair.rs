@@ -8,20 +8,26 @@ use std::io;
 use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream as StdStream;
 
+use kumochi_protocol::constants::{ProductIdentity, SESSION_READY};
 use kumochi_protocol::frame::Pipe;
 use kumochi_protocol::message::{ControlToBrain, DataToBrain, Hello, IssueSession};
-use kumochi_session::{BoundPair, BrainAwaitsInit, ENVELOPE_LEN, Outgoing, Session, SessionError};
+use kumochi_session::{
+    BoundPair, BrainAwaitsInit, Channel, ENVELOPE_LEN, Outgoing, SECRET_LEN, Session, SessionError,
+};
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
-use tokio::time::{Instant, timeout_at};
+use tokio::time::{Instant, sleep_until, timeout_at};
 
 use super::super::shell_process::Verdict;
 use super::stream::{RecordReader, RecordWriter};
 use crate::ipc;
+use crate::platform::ShellProcess;
 use crate::runtime::Terminal;
+use crate::startup::parent_bound::AdmissionPair;
+use crate::tap::Tap;
 
 /// Why the pair was refused. Every refusal ends the attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -48,6 +54,10 @@ pub(crate) enum PairError {
     Order,
     #[error("the first frame on a leg isn't its greeting")]
     Greeting,
+    #[error("the parent was lost")]
+    Lost,
+    #[error("this edition has no session channel")]
+    Edition,
 }
 
 /// A socket's identity from `fstat`.
@@ -123,19 +133,98 @@ pub(crate) struct InheritedPair {
 }
 
 impl InheritedPair {
-    /// Writes [`SESSION_READY`](kumochi_protocol::constants::SESSION_READY) on the control leg
-    /// without waiting: `Ok(1)` once it's out, `WouldBlock` while the shell's buffer is full. The
-    /// handshake on this pair starts only after it. Every successful call writes another `0x52`,
-    /// so the caller owns the one successful transition.
+    /// Hands both ends to tokio. Must run inside a runtime with I/O enabled.
     ///
     /// # Errors
-    /// As a non-blocking write.
-    pub(crate) fn try_ready(&self) -> std::io::Result<usize> {
-        std::io::Write::write(
-            &mut &self.control,
-            &[kumochi_protocol::constants::SESSION_READY],
-        )
+    /// `Adopt` when tokio can't register an end.
+    pub(crate) fn register(self) -> Result<RegisteredPair, PairError> {
+        Ok(RegisteredPair {
+            control: UnixStream::from_std(self.control).map_err(|_| PairError::Adopt)?,
+            data: UnixStream::from_std(self.data).map_err(|_| PairError::Adopt)?,
+        })
     }
+
+    /// Registers both ends and keys the responder with `secret`, so the caller can wipe its own
+    /// copy before READY. Must run inside a runtime with I/O enabled.
+    ///
+    /// # Errors
+    /// As [`InheritedPair::register`], or the Noise library couldn't build the handshake.
+    pub(crate) fn keyed(self, secret: &[u8; SECRET_LEN]) -> Result<KeyedPair, PairError> {
+        let brain = BrainAwaitsInit::new(secret, channel(ProductIdentity::ACTIVE)?)?;
+        Ok(KeyedPair {
+            pair: self.register()?,
+            brain,
+        })
+    }
+}
+
+impl AdmissionPair for InheritedPair {
+    type Keyed = KeyedPair;
+    type Greeted = Greeted;
+
+    fn key(self, key: &[u8; SECRET_LEN]) -> Option<KeyedPair> {
+        self.keyed(key).ok()
+    }
+
+    async fn admit(
+        keyed: KeyedPair,
+        shell: &ShellProcess,
+        by: Instant,
+        reserve: impl FnOnce() -> IssueSession,
+    ) -> Option<Greeted> {
+        admit(keyed, shell, by, reserve).await.ok()
+    }
+}
+
+/// The session channel of an edition the pair serves: an installed or a development build.
+fn channel(identity: ProductIdentity) -> Result<Channel, PairError> {
+    if identity == ProductIdentity::RELEASE {
+        Ok(Channel::Release)
+    } else if identity == ProductIdentity::DEV {
+        Ok(Channel::Dev)
+    } else {
+        Err(PairError::Edition)
+    }
+}
+
+/// Both inherited ends, registered with tokio.
+#[derive(Debug)]
+pub(crate) struct RegisteredPair {
+    control: UnixStream,
+    data: UnixStream,
+}
+
+impl RegisteredPair {
+    /// Writes [`SESSION_READY`] on the control leg, once, by `by`. Each wait for room also
+    /// watches the parent and the deadline, and both are checked again right before every write,
+    /// so nothing is written once either is seen. The handshake starts only after it.
+    ///
+    /// # Errors
+    /// `Lost`, `Timeout`, or `Transport` when the write fails.
+    pub(crate) async fn ready(&self, shell: &ShellProcess, by: Instant) -> Result<(), PairError> {
+        let mut loss = shell.loss();
+        loop {
+            tokio::select! {
+                biased;
+                _ = Verdict::lost(&mut loss) => return Err(PairError::Lost),
+                () = sleep_until(by) => return Err(PairError::Timeout),
+                room = self.control.writable() => room.map_err(|_| PairError::Transport)?,
+            }
+            shell.fence().map_err(|_| PairError::Lost)?;
+            before(by)?;
+            match self.control.try_write(&[SESSION_READY]) {
+                Ok(1) => return Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                _ => return Err(PairError::Transport),
+            }
+        }
+    }
+}
+
+/// A registered pair and the responder keyed for it.
+pub(crate) struct KeyedPair {
+    pair: RegisteredPair,
+    brain: BrainAwaitsInit,
 }
 
 /// Checks both inherited ends. Needs no runtime, so it can run before one exists. Proves a
@@ -226,14 +315,82 @@ async fn handshake(
 /// `Adopt` when tokio can't register an end, a session refusal, the deadline, or a transport
 /// failure.
 pub(crate) async fn respond(
-    pair: InheritedPair,
+    pair: RegisteredPair,
     brain: BrainAwaitsInit,
     by: Instant,
 ) -> Result<AuthenticatedPair, PairError> {
-    let mut control = UnixStream::from_std(pair.control).map_err(|_| PairError::Adopt)?;
-    let mut data = UnixStream::from_std(pair.data).map_err(|_| PairError::Adopt)?;
+    let RegisteredPair {
+        mut control,
+        mut data,
+    } = pair;
     let (session, proof) = handshake(&mut control, &mut data, brain, by).await?;
     AuthenticatedPair::new(session, &proof, control, data)
+}
+
+/// Runs `work` by `by` against the parent's loss, then fences and checks the clock again, so
+/// work that finished after either doesn't count. On a loss or the deadline `work` is dropped.
+async fn fenced<T>(
+    shell: &ShellProcess,
+    by: Instant,
+    work: impl Future<Output = Result<T, PairError>>,
+) -> Result<T, PairError> {
+    let mut loss = shell.loss();
+    let done = tokio::select! {
+        biased;
+        _ = Verdict::lost(&mut loss) => return Err(PairError::Lost),
+        done = timeout_at(by, work) => done.map_err(|_| PairError::Timeout)??,
+    };
+    shell.fence().map_err(|_| PairError::Lost)?;
+    before(by)?;
+    Ok(done)
+}
+
+/// What admission hands on: the pair after both greetings, and what they chose.
+#[cfg_attr(
+    test,
+    expect(dead_code, reason = "serving takes them; it isn't wired yet")
+)]
+pub(crate) struct Greeted {
+    pub(crate) pair: AuthenticatedPair,
+    pub(crate) admitted: ipc::Admitted<ShellProcess>,
+}
+
+/// Admits the parent shell on `keyed` by `by`: READY, then the responder handshake and the
+/// greeting, each raced against the parent's loss under its own phase cap. `reserve` reserves the
+/// session Welcome carries. A refused greeting retires the pair, even one cancelled after the
+/// data greeting's guard was let go.
+///
+/// # Errors
+/// `Lost`, `Timeout`, the pair's own refusals, and `Greeting` for any refused greeting,
+/// another build's included.
+pub(crate) async fn admit(
+    keyed: KeyedPair,
+    shell: &ShellProcess,
+    by: Instant,
+    reserve: impl FnOnce() -> IssueSession,
+) -> Result<Greeted, PairError> {
+    let KeyedPair { pair, brain } = keyed;
+    pair.ready(shell, by).await?;
+    let phase = by.min(Instant::now() + ipc::HANDSHAKE_TIMEOUT);
+    let mut pair = fenced(shell, phase, respond(pair, brain, phase)).await?;
+    let phase = by.min(Instant::now() + ipc::HANDSHAKE_TIMEOUT);
+    let greeted = fenced(shell, phase, async {
+        let mut legs = legs::PairLegs::new(&mut pair, shell, phase);
+        match ipc::greet(&mut legs, &mut Tap::default(), phase, reserve).await {
+            Ok(Some(admitted)) => Ok(admitted),
+            Err(ipc::SessionError::Timeout) => Err(PairError::Timeout),
+            Err(ipc::SessionError::ClosedEarly) => Err(PairError::Lost),
+            Ok(None) | Err(_) => Err(PairError::Greeting),
+        }
+    })
+    .await;
+    match greeted {
+        Ok(admitted) => Ok(Greeted { pair, admitted }),
+        Err(error) => {
+            pair.retire();
+            Err(error)
+        }
+    }
 }
 
 /// A greeting read through its own authenticated pair. Only [`AuthenticatedPair`]'s greeting
@@ -384,6 +541,11 @@ impl AuthenticatedPair {
         self.writers[0].write_frame(frame).await
     }
 
+    /// Refuses the whole pair from here on.
+    pub(crate) fn retire(&self) {
+        self.pair.send_replace(true);
+    }
+
     /// Hands both legs to the runtime once both greetings were read, with the terminal that
     /// watches this pair's cell and `parent`. The legs keep sharing the cell.
     ///
@@ -437,3 +599,7 @@ mod tests;
 #[cfg(test)]
 #[path = "pair_admission_tests.rs"]
 mod admission_tests;
+
+#[cfg(test)]
+#[path = "pair_admit_tests.rs"]
+mod admit_tests;
