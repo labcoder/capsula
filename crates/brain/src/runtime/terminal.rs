@@ -27,10 +27,6 @@ enum Read {
 }
 
 impl Terminal {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no active transport supplies a terminal yet")
-    )]
     pub(crate) fn new(
         pair: watch::Receiver<bool>,
         parent: Option<watch::Receiver<Verdict>>,

@@ -9,8 +9,8 @@ use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream as StdStream;
 
 use kumochi_protocol::constants::{ProductIdentity, SESSION_READY};
-use kumochi_protocol::frame::Pipe;
-use kumochi_protocol::message::{ControlToBrain, DataToBrain, Hello, IssueSession};
+use kumochi_protocol::frame::{self, Pipe};
+use kumochi_protocol::message::{ControlToBrain, ControlToShell, DataToBrain, Hello, IssueSession};
 use kumochi_session::{
     BoundPair, BrainAwaitsInit, Channel, ENVELOPE_LEN, Outgoing, SECRET_LEN, Session, SessionError,
 };
@@ -25,7 +25,7 @@ use super::super::shell_process::Verdict;
 use super::stream::{RecordReader, RecordWriter};
 use crate::ipc;
 use crate::platform::ShellProcess;
-use crate::runtime::Terminal;
+use crate::runtime::{Brain, Ended, Terminal};
 use crate::startup::parent_bound::AdmissionPair;
 use crate::tap::Tap;
 
@@ -173,6 +173,20 @@ impl AdmissionPair for InheritedPair {
         reserve: impl FnOnce() -> IssueSession,
     ) -> Option<Greeted> {
         admit(keyed, shell, by, reserve).await.ok()
+    }
+
+    fn cell(greeted: &Greeted) -> watch::Receiver<bool> {
+        greeted.pair.pair.subscribe()
+    }
+
+    fn serve(
+        greeted: Greeted,
+        brain: &mut Brain,
+        terminal: Terminal,
+        shell: &ShellProcess,
+        by: Instant,
+    ) -> impl Future<Output = Ended> {
+        serve(greeted, brain, terminal, shell, by)
     }
 }
 
@@ -346,13 +360,63 @@ async fn fenced<T>(
 }
 
 /// What admission hands on: the pair after both greetings, and what they chose.
-#[cfg_attr(
-    test,
-    expect(dead_code, reason = "serving takes them; it isn't wired yet")
-)]
 pub(crate) struct Greeted {
-    pub(crate) pair: AuthenticatedPair,
-    pub(crate) admitted: ipc::Admitted<ShellProcess>,
+    pair: AuthenticatedPair,
+    admitted: ipc::Admitted<ShellProcess>,
+}
+
+/// Serves the admitted shell once the stages built `brain`: `ShellTuning` goes out by `by`, raced
+/// against the parent's loss, then the session and the shell are installed and the runtime serves
+/// both legs with `terminal`. The greeting's text metrics are handed on as a value, and any bytes
+/// already buffered after them stay in the data leg's reader.
+async fn serve(
+    greeted: Greeted,
+    brain: &mut Brain,
+    terminal: Terminal,
+    shell: &ShellProcess,
+    by: Instant,
+) -> Ended {
+    let Greeted { mut pair, admitted } = greeted;
+    let ipc::Admitted {
+        peer,
+        audio,
+        start,
+        session,
+        text_metrics,
+    } = admitted;
+    let tuning = ControlToShell::ShellTuning {
+        session,
+        tuning: brain.shell_tuning(),
+    };
+    let Ok(tuning) = frame::encode(&tuning, Pipe::Control) else {
+        return Ended::Broken("the shell tuning doesn't encode");
+    };
+    let sent = fenced(shell, by, async {
+        pair.write_control(&tuning)
+            .await
+            .map_err(|_| PairError::Transport)
+    })
+    .await;
+    if sent.is_err() {
+        return Ended::Lost;
+    }
+    let Ok((control, data)) = pair.into_legs() else {
+        return Ended::Broken("the greeted pair isn't greeted");
+    };
+    brain.install_issue_session(session);
+    let _shell_identity = peer.register();
+    brain.connected_shell(peer);
+    brain
+        .serve_split(
+            control,
+            data,
+            &mut Tap::default(),
+            audio,
+            text_metrics,
+            start,
+            Some(terminal),
+        )
+        .await
 }
 
 /// Admits the parent shell on `keyed` by `by`: READY, then the responder handshake and the
@@ -546,21 +610,17 @@ impl AuthenticatedPair {
         self.pair.send_replace(true);
     }
 
-    /// Hands both legs to the runtime once both greetings were read, with the terminal that
-    /// watches this pair's cell and `parent`. The legs keep sharing the cell.
+    /// Hands both legs to the runtime once both greetings were read. The legs keep sharing the
+    /// pair's cell, which the runtime's terminal watches.
     ///
     /// # Errors
     /// `Order` unless both greetings were read.
-    pub(crate) fn into_legs(
-        self,
-        parent: watch::Receiver<Verdict>,
-    ) -> Result<(Leg, Leg, Terminal), PairError> {
+    pub(crate) fn into_legs(self) -> Result<(Leg, Leg), PairError> {
         if self.stage != Stage::Greeted {
             return Err(PairError::Order);
         }
         let [control_out, data_out] = self.writers;
-        let terminal = Terminal::new(self.pair.subscribe(), Some(parent));
-        Ok(((self.control, control_out), (self.data, data_out), terminal))
+        Ok(((self.control, control_out), (self.data, data_out)))
     }
 }
 

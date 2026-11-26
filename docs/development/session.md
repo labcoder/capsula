@@ -171,7 +171,8 @@ them through the final disposition checks and control grace. Dropping them earli
 teardown into refusal and suppress the ordinary-loss drain. They drop with both legs once
 `serve_split` returns. A page whose read is cancelled while its frame is being written still
 abandons that frame (C-8), which on the Mac is a cut frame and so ends the pair as refused, with no
-grace. Parent-bound startup doesn't call any of this yet. Before activation, a test must pair the
+grace. Parent-bound startup serves on these legs, behind the support check and this build's
+prerequisites. Before activation, a test must pair the
 two real adapters, this one and the shell's blocking adapter in
 `shell-core/src/platform/macos/leg.rs`: data saturated past the 512 KiB window, credit counted in
 logical frames, the 2 s STALL, and Stop and Ping answered in time. The I1e shell-side unit owns that
@@ -180,7 +181,8 @@ test; this cut doesn't claim it.
 ## The instance item (dormant)
 
 The brain stores each start's capability as one data protection Keychain item, and the shell reads
-it. Nothing calls this yet: parent-bound startup wires it in later. Only the Dev edition has an item.
+it. Parent-bound startup admits it, behind the support check and this build's prerequisites. Only
+the Dev edition has an item.
 Release and Gate builds refuse with `NotAdmitted` before any call, until release packaging
 provisions their identifiers.
 

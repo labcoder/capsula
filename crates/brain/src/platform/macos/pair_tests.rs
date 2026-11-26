@@ -519,22 +519,15 @@ async fn a_greeting_read_dropped_part_way_refuses_the_pair() {
 
 #[tokio::test]
 async fn the_legs_are_handed_over_only_after_both_greetings() {
-    let (_parent, loss) = watch::channel(Verdict::Watching);
     let (pair, _shell) = bound().await;
-    assert_eq!(
-        pair.into_legs(loss.clone()).map(|_| ()),
-        Err(PairError::Order)
-    );
+    assert_eq!(pair.into_legs().map(|_| ()), Err(PairError::Order));
 
     let (mut pair, mut shell) = bound().await;
     shell
         .send(Pipe::Control, &ControlToBrain::Hello(hello()))
         .await;
     pair.control_greeting(by()).await.expect("control greeting");
-    assert_eq!(
-        pair.into_legs(loss.clone()).map(|_| ()),
-        Err(PairError::Order)
-    );
+    assert_eq!(pair.into_legs().map(|_| ()), Err(PairError::Order));
 
     let (mut pair, mut shell) = bound().await;
     shell
@@ -543,7 +536,7 @@ async fn the_legs_are_handed_over_only_after_both_greetings() {
     shell.send(Pipe::Data, &DataToBrain::Hello(hello())).await;
     pair.control_greeting(by()).await.expect("control greeting");
     pair.data_greeting(by()).await.expect("data greeting");
-    assert!(pair.into_legs(loss).is_ok());
+    assert!(pair.into_legs().is_ok());
 }
 
 /// The runtime over a greeted pair's own legs: a run's text crosses multi-record frames inside the
@@ -579,7 +572,8 @@ async fn the_runtime_serves_a_greeted_pair_over_its_own_legs() {
     shell.send(Pipe::Data, &DataToBrain::Hello(hello())).await;
     pair.data_greeting(by()).await.expect("data greeting");
     let (_parent, loss) = watch::channel(Verdict::Watching);
-    let (control, data, terminal) = pair.into_legs(loss).expect("greeted");
+    let terminal = Terminal::new(pair.pair.subscribe(), Some(loss));
+    let (control, data) = pair.into_legs().expect("greeted");
     let mut tap = crate::tap::Tap::from_env();
     let client = async {
         shell
@@ -652,7 +646,8 @@ async fn a_served_pair_ends_as_fatal_once_its_parent_exits() {
     pair.control_greeting(by()).await.expect("control greeting");
     pair.data_greeting(by()).await.expect("data greeting");
     let (parent, loss) = watch::channel(Verdict::Watching);
-    let (control, data, terminal) = pair.into_legs(loss).expect("greeted");
+    let terminal = Terminal::new(pair.pair.subscribe(), Some(loss));
+    let (control, data) = pair.into_legs().expect("greeted");
     let mut tap = crate::tap::Tap::from_env();
     let (ended, ()) = bounded(async {
         tokio::join!(

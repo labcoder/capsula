@@ -115,7 +115,7 @@ voice model removals before creating the helpers' Job Object, then starts the op
 The mode check before the removal pass and the Claude Code setting read the running mode, so a
 mode without containment removes nothing. Startup crosses four checkpoints: after the opened
 state, after accounts, after the Brain and after the Job. Detached passes a no-op at each. A
-parent-bound start, not wired yet, makes one commit claim and then passes a fence at each
+parent-bound start makes one commit claim and then passes a fence at each
 checkpoint. The watch thread latches the parent's loss in an atomic gate before it publishes,
 so a claim that comes after a loss fails, and a fence refuses once a loss or a closed watch is
 visible. Each passed checkpoint admits the work up to the next one; the fences owed inside the
@@ -123,7 +123,7 @@ helpers' Job and worker starts come with containment. A loss during admitted wor
 finish, and the next fence refuses with the same unwind as an error there.
 Both modes run the stages through one owner of what has started. Started accounts stay there
 until the Brain takes them, and a failed `Brain::new` hands them back. Detached drops whatever
-started, as before. The parent-bound root, not wired yet, settles it instead. With no Brain, it
+started, as before. The parent-bound root settles it instead. With no Brain, it
 closes the accounts, which waits for the credential thread to let the vault go, then drops the
 raw store, recorded Unconfirmed because no receipt confirms that drop; so is a store an open
 acquired before it failed. A refused or panicked startup load returns only after the credential
@@ -151,8 +151,48 @@ Failed when an issued set was held after a refused save or a GitHub save or rota
 unfinished or ended in an error while closing.
 The Job's shutdown and the capability's deletion have no deadline, so they're only Confirmed or
 Failed. Nothing reads these yet: Detached keeps the result of serving as its exit status, so an
-incomplete Quit or any stage short of Confirmed doesn't change it. A parent-bound exit will
-require every stage Confirmed after a complete Quit.
+incomplete Quit or any stage short of Confirmed doesn't change it. A parent-bound exit requires
+every stage Confirmed after a complete Quit (see below).
+
+### Parent-bound startup
+
+`run_parent_bound` takes one 10-second admission clock before its first bootstrap action, then
+hardens the process, adopts the inherited pair and arms the parent watch. Admission, the stages
+and serving run on one current-thread runtime through one `Root`, which owns the stages, the
+instance attempt and the process services. The parent watch drops only after that runtime has.
+
+```mermaid
+flowchart TD
+  admit["admit: fence, custody, fence, item, READY,<br/>handshake, greeting, fence, claim"]
+  stage["stage: fence, ready, fence,<br/>init, open, accounts, Brain, containment"]
+  serve["serve: ShellTuning, then both legs"]
+  settle["settle: quit or close, the item, custody,<br/>then the process services"]
+  admit --> stage --> serve --> settle
+  admit -- refused --> settle
+  stage -- refused --> settle
+```
+
+The stage driver fences and checks the clock on entry, asks the prerequisites whether they're
+ready, and fences again before anything starts; each checkpoint fences too. It never starts
+voice: this mode builds no models, so held speech answers NotLoaded, and only what the
+prerequisites' containment allows would start. Serving sends ShellTuning by the same clock,
+raced against the parent's loss, then hands both legs to the runtime with a terminal that
+watches the pair's cell and the parent. Settlement has no admission deadline. The 5-second
+handshake caps sit inside the admission clock.
+
+`AdmissionPair` is the seam between that shared driver and the platform's pair: it keys,
+admits, exposes the pair's cell and serves. macOS implements it on the inherited pair; other
+platforms have no pair to make one, and the tests drive the same root with a fake.
+
+| Served, then settled | Result |
+|---|---|
+| Any stage short of Confirmed, or an incomplete Quit | `Incomplete`, over every other row |
+| An authenticated Quit that completed | `Ok` |
+| Lost, Fatal, Broken or Unavailable, even after a clean close | `Refused` |
+| A refusal before serving | that refusal: `Unsupported`, `Busy` or `Refused` |
+
+This build's prerequisites refuse at `ready`, after a real admission, so a parent-bound start
+still never runs a stage; the support table refuses before that anyway.
 
 ## Crates
 
