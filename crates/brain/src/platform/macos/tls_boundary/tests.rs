@@ -335,7 +335,7 @@ async fn a_stalled_check_times_out_but_keeps_the_only_native_slot() {
     let connection = tokio::spawn(async move {
         worker
             .connect(request, deadline, async move {
-                evaluate(|| {
+                evaluate(|_| {
                     entered.send(()).expect("report native entry");
                     wait_release.recv().expect("release the native call");
                 })
@@ -377,7 +377,7 @@ async fn a_stalled_check_times_out_but_keeps_the_only_native_slot() {
     .expect("the slot returns only once the native call finishes");
     assert_eq!(
         owner
-            .connect(Arc::new(Stop::default()), by(), async { evaluate(|| 7) })
+            .connect(Arc::new(Stop::default()), by(), async { evaluate(|_| 7) })
             .await,
         Ok(Ok(7))
     );
@@ -393,7 +393,7 @@ async fn cancelling_an_unpolled_answer_stops_new_native_work() {
     let mut connection = std::pin::pin!(owner.connect(Arc::clone(&cancel), by(), async move {
         entered.send(()).expect("the attempt was dispatched");
         gate.recv().expect("release the first poll");
-        let result = evaluate(|| panic!("a revoked attempt cannot reach the verifier"));
+        let result = evaluate(|_| panic!("a revoked attempt cannot reach the verifier"));
         checked.send(result).expect("report refusal");
     }));
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
@@ -431,7 +431,7 @@ async fn an_already_ready_answer_does_not_extend_the_callers_deadline() {
     let mut connection =
         std::pin::pin!(owner.connect(Arc::new(Stop::default()), deadline, async {
             gate.await.expect("release the answer after the first poll");
-            evaluate(|| 7)
+            evaluate(|_| 7)
         }));
     let wake = Arc::new(AnswerWake::default());
     let waker = Waker::from(Arc::clone(&wake));
@@ -554,7 +554,7 @@ async fn a_spent_deadline_and_missing_worker_refuse_before_evaluation() {
         Err::<(), _>(Refusal::Deadline)
     );
     assert_eq!(
-        evaluate(|| panic!("there is no worker authority on the brain")),
+        evaluate(|_| panic!("there is no worker authority on the brain")),
         Err::<(), _>(Refusal::Unavailable)
     );
     let stopped = Arc::new(Stop::default());

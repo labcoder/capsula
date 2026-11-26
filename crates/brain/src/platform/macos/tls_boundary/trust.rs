@@ -33,13 +33,33 @@ pub(super) fn fixture_config(
     anchors: Vec<SecCertificate>,
     policy: Option<RevocationPolicy>,
 ) -> Result<ClientConfig, Error> {
-    build(Some(Fixture { anchors, policy }))
+    build(Some(Fixture {
+        anchors,
+        policy,
+        observe: None,
+    }))
 }
 
 #[cfg(test)]
 struct Fixture {
     anchors: Vec<SecCertificate>,
     policy: Option<RevocationPolicy>,
+    observe: Option<Box<dyn Fn(EvaluationPoint) + Send + Sync>>,
+}
+
+#[cfg(test)]
+enum EvaluationPoint {
+    Prepared,
+    Admitted,
+}
+
+#[cfg(test)]
+impl Fixture {
+    fn observe(&self, point: EvaluationPoint) {
+        if let Some(observe) = &self.observe {
+            observe(point);
+        }
+    }
 }
 
 fn build(#[cfg(test)] fixture: Option<Fixture>) -> Result<ClientConfig, Error> {
@@ -80,7 +100,7 @@ impl ServerCertVerifier for Verifier {
         staple: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
-        super::evaluate(|| {
+        super::evaluate(|attempt| {
             let parsed =
                 ParsedCertificate::try_from(leaf).map_err(|_| CertificateError::BadEncoding)?;
             verify_server_name(&parsed, name).map_err(|_| CertificateError::NotValidForName)?;
@@ -124,6 +144,12 @@ impl ServerCertVerifier for Verifier {
                 trust
                     .set_trust_anchor_certificates_only(true)
                     .map_err(|_| refused())?;
+                fixture.observe(EvaluationPoint::Prepared);
+            }
+            attempt.with(|| ()).map_err(|_| refused())?;
+            #[cfg(test)]
+            if let Some(fixture) = &self.fixture {
+                fixture.observe(EvaluationPoint::Admitted);
             }
             trust.evaluate_with_error().map_err(|error| {
                 if i32::try_from(error.code()) == Ok(errSecCertificateRevoked) {

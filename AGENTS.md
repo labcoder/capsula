@@ -49,8 +49,8 @@ THIRD-PARTY-NOTICES.md  notices for incorporated third-party source
 ## Rules that protect users
 - No telemetry. Network calls are limited to the accounts the user sets up and model downloads they
   authorize. During those HTTPS handshakes, including setup, macOS trust services may fetch
-  certificate status and missing chain certificates. A refused or canceled handshake can leave an
-  already-started OS lookup running; Kumochi sends no credentials or application data to those services.
+  certificate status and missing chain certificates. An OS trust evaluation admitted before refusal
+  or cancellation can still make those lookups; Kumochi sends no credentials or application data to them.
 - Secrets live only in Windows Credential Manager: never in logs, command lines, files or the
   environment. Hold them in `Secret`, which prints `***`.
 - The one exception: Claude Code's own credential file may exist only inside Kumochi's Claude

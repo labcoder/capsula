@@ -83,7 +83,7 @@ tokio::task_local! {
     static CONNECTING: Arc<Attempt>;
 }
 
-fn evaluate<T>(verify: impl FnOnce() -> T) -> Result<T, Refusal> {
+fn evaluate<T>(verify: impl FnOnce(&Attempt) -> T) -> Result<T, Refusal> {
     let attempt = CONNECTING
         .try_with(Arc::clone)
         .map_err(|_| Refusal::Unavailable)?;
@@ -95,7 +95,7 @@ fn evaluate<T>(verify: impl FnOnce() -> T) -> Result<T, Refusal> {
         io::ErrorKind::TimedOut => Refusal::Deadline,
         _ => Refusal::Cancelled,
     })?;
-    let verdict = verify();
+    let verdict = verify(&attempt);
     attempt.check()?;
     Ok(verdict)
 }

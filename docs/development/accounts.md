@@ -297,9 +297,10 @@ DER roots without fetching certificates. Empty or entirely unparsable roots fail
 Windows test reads bounded public certificates without writing to its store.
 
 On macOS, each new TLS connection uses SecTrust's SSL server policy with the connection's
-exact hostname and the brain's own application identity. There is no flattened anchor list:
-the OS evaluates the trust domains, SSL usage, hostname and application constraints, and Deny
-for that connection. Unspecified alone does not create an anchor, and a non-SSL trust setting
+exact hostname. There is no flattened anchor list: the brain delegates trust domains, SSL
+usage, hostname and application constraints, and Deny to the OS in its own trust context.
+The offline tests don't establish the behavior of app-scoped settings for a signed release.
+Unspecified alone does not create an anchor, and a non-SSL trust setting
 does not become an SSL anchor. An independent rustls check still requires the leaf to match the
 hostname; rustls and ring verify the TLS handshake signatures. Native date and chain rules
 apply, including any allowed errors the OS recognizes. Either `SSL_CERT_FILE` or `SSL_CERT_DIR`
@@ -312,8 +313,8 @@ Ordinary certificates can pass when no revocation answer is available, but a ver
 answer or an unsatisfied status requirement from the OS refuses the connection. Must-Staple is
 also fail-closed: SecTrust does not attest the provenance of a positive status, so Kumochi
 refuses these certificates until it can authenticate the staple itself. Neither a cache hit nor
-an unverified staple substitutes. No trust overrides or exceptions are installed. OS lookups
-already started can outlive a refused or canceled handshake.
+an unverified staple substitutes. No trust overrides or exceptions are installed. An OS trust
+evaluation admitted before refusal or cancellation can still make certificate lookups.
 
 The Mac boundary prestarts four bounded handshake workers and a separate I/O reactor. The
 brain and reactor do not poll SecTrust. The caller and workers enforce cancellation and the

@@ -55,6 +55,7 @@ async fn verify(
         fixture: Some(Fixture {
             anchors: vec![issuer],
             policy,
+            observe: None,
         }),
     };
     let owner = super::super::Executor::new().expect("executor");
@@ -76,6 +77,98 @@ async fn verify(
         )
         .await
         .expect("offline verification finished")
+}
+
+#[tokio::test]
+async fn stopping_after_preparation_refuses_native_evaluation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, mpsc};
+    use std::task::{Context, Waker};
+    use std::time::{Duration, Instant};
+
+    use tokio::sync::oneshot;
+
+    use super::super::{Executor, Refusal};
+
+    const BOUND: Duration = Duration::from_secs(5);
+    for cancel in [true, false] {
+        let peer = peer(None);
+        let issuer = SecCertificate::from_der(&peer.issuer).expect("fixture root");
+        let (prepared, mut ready) = tokio::sync::mpsc::unbounded_channel();
+        let (release, parked) = mpsc::channel();
+        let parked = Mutex::new(parked);
+        let (verdict, done) = oneshot::channel();
+        let admitted = Arc::new(AtomicBool::new(false));
+        let entered = Arc::clone(&admitted);
+        let native = Verifier {
+            signatures: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            fixture: Some(Fixture {
+                anchors: vec![issuer],
+                policy: None,
+                observe: Some(Box::new(move |point| match point {
+                    EvaluationPoint::Prepared => {
+                        prepared.send(()).expect("prepared trust witness");
+                        parked
+                            .lock()
+                            .expect("test gate")
+                            .recv_timeout(BOUND)
+                            .expect("release");
+                    }
+                    EvaluationPoint::Admitted => entered.store(true, Ordering::SeqCst),
+                })),
+            }),
+        };
+        let executor = Executor::new().expect("executor");
+        let stop = Arc::new(ConnectCut::default());
+        let deadline = Instant::now()
+            + if cancel {
+                BOUND
+            } else {
+                Duration::from_secs(1)
+            };
+        let answer = executor.connect(Arc::clone(&stop), deadline, async move {
+            let result = native
+                .verify_server_cert(
+                    &peer.leaf,
+                    &[],
+                    &ServerName::try_from("localhost").expect("fixture host"),
+                    &[],
+                    UnixTime::now(),
+                )
+                .map(|_| ());
+            verdict.send(result).expect("worker verdict");
+        });
+        tokio::pin!(answer);
+        assert!(
+            answer
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(
+            tokio::time::timeout(BOUND, ready.recv())
+                .await
+                .expect("prepared"),
+            Some(())
+        );
+        let expected = if cancel {
+            stop.close();
+            Refusal::Cancelled
+        } else {
+            tokio::time::sleep_until(deadline.into()).await;
+            Refusal::Deadline
+        };
+        release.send(()).expect("prepared worker remains parked");
+        assert_eq!(
+            tokio::time::timeout(BOUND, done)
+                .await
+                .expect("worker settles")
+                .expect("reported verdict"),
+            Err(Error::InvalidCertificate(refused()))
+        );
+        assert!(!admitted.load(Ordering::SeqCst));
+        assert_eq!(answer.await, Err(expected));
+    }
 }
 
 #[tokio::test]
