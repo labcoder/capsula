@@ -210,10 +210,12 @@ fn succeeded(
 /// A zeroizing copy of `bytes` owned by the returned view: CoreFoundation releases the view's
 /// allocator only after the last reference to the view, and that release wipes and frees it.
 fn owned_view(bytes: &[u8]) -> Result<CFRetained<CFData>, CredentialStoreError> {
-    let backing = Box::new(Zeroizing::new(bytes.to_vec()));
+    let info = Box::into_raw(Box::new(Zeroizing::new(bytes.to_vec())));
+    // SAFETY: `info` is this function's live, unaliased Box; the pointer is taken after the move
+    // so the view's bytes derive from the allocation the allocator will own.
+    let backing = unsafe { &*info };
     let start = backing.as_ptr();
     let len = CFIndex::try_from(backing.len()).expect("the bounded blob length fits CFIndex");
-    let info = Box::into_raw(backing);
     let mut context = CFAllocatorContext {
         version: 0,
         info: info.cast(),

@@ -1,5 +1,5 @@
 //! The Darwin system calls behind the shell's brain child: `posix_spawn`, an exact-pid
-//! `waitpid(WNOHANG)`, SIGKILL and a read of SIGCHLD's disposition. The custody rules are the
+//! `waitpid(WNOHANG)` and a read of SIGCHLD's disposition. The custody rules are the
 //! shared owner's (`platform::child`); this file only makes the calls and classifies their results.
 
 use std::ffi::{CString, OsStr};
@@ -16,6 +16,7 @@ use kumochi_protocol::constants::PARENT_BOUND;
 
 use super::pair::{self, Action, ChildEnds, ShellEnds};
 use crate::platform::child::{ChildOwner, Exit, Observation, Os, Refusal, Report, SpawnWord};
+use crate::platform::unix::brain_group::{OwnedGroup, RetirementError, SET_SESSION};
 
 /// How long `start_brain` waits for the spawn report. A spawn takes milliseconds; this only
 /// bounds one that stalls.
@@ -74,7 +75,7 @@ pub(crate) struct Darwin {
     argv: Vec<CString>,
     /// Taken by the spawn and closed when it returns, whether or not it made a child.
     ends: Option<ChildEnds>,
-    pid: Option<libc::pid_t>,
+    group: Option<OwnedGroup>,
 }
 
 impl Darwin {
@@ -95,7 +96,7 @@ impl Darwin {
             program,
             argv,
             ends: Some(ends),
-            pid: None,
+            group: None,
         })
     }
 }
@@ -145,32 +146,39 @@ impl Os for Darwin {
         if error != 0 {
             return Err(io::Error::from_raw_os_error(error));
         }
-        self.pid = Some(pid);
+        self.group = Some(OwnedGroup::from_spawn(pid)?);
         Ok(())
     }
 
     fn poll(&mut self) -> Observation {
-        let Some(pid) = self.pid else {
+        let Some(group) = &self.group else {
             return Observation::Lost;
         };
+        let pid = group.leader();
         loop {
             let mut status = 0;
             // SAFETY: `status` is valid for one write; WNOHANG never blocks.
             let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
             let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
             if let Some(observation) = classify(waited, status, errno) {
+                if matches!(observation, Observation::Reaped(_) | Observation::Lost) {
+                    self.group = None;
+                }
                 return observation;
             }
         }
     }
 
     fn kill(&mut self) -> io::Result<()> {
-        let pid = self.pid.ok_or(io::ErrorKind::NotFound)?;
-        // SAFETY: a plain system call on our own unreaped child's pid.
-        if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
-            return Err(io::Error::last_os_error());
+        let group = self.group.as_ref().ok_or(io::ErrorKind::NotFound)?;
+        match group.retire() {
+            Ok(()) => Ok(()),
+            Err(RetirementError::Refused(error)) => Err(error),
+            Err(RetirementError::Lost) => {
+                self.group = None;
+                Err(io::ErrorKind::NotFound.into())
+            }
         }
-        Ok(())
     }
 }
 
@@ -226,14 +234,15 @@ impl Drop for FileActions {
 struct Attributes(libc::posix_spawnattr_t);
 
 impl Attributes {
-    /// Every descriptor not named by a file action is closed in the child.
+    /// Starts a new session with only descriptors named by a file action.
     fn close_by_default() -> io::Result<Self> {
         let mut attributes = ptr::null_mut();
         // SAFETY: `attributes` is valid for one write of the opaque handle.
         check(unsafe { libc::posix_spawnattr_init(&raw mut attributes) })?;
         let mut attributes = Self(attributes);
         let flags = libc::c_short::try_from(libc::POSIX_SPAWN_CLOEXEC_DEFAULT)
-            .expect("the spawn flag fits a c_short");
+            .expect("the spawn flag fits a c_short")
+            | SET_SESSION;
         // SAFETY: initialized just above.
         check(unsafe { libc::posix_spawnattr_setflags(&raw mut attributes.0, flags) })?;
         Ok(attributes)
@@ -361,6 +370,10 @@ fn null_terminated(strings: &[CString]) -> Vec<*mut libc::c_char> {
         .chain(std::iter::once(ptr::null_mut()))
         .collect()
 }
+
+#[cfg(test)]
+#[path = "../unix/brain_group_tests.rs"]
+mod group_tests;
 
 #[cfg(test)]
 mod tests {
@@ -506,10 +519,13 @@ mod tests {
     fn a_stopped_real_child_stays_alive_until_killed() {
         let mut child = sh("kill -STOP $$; exit 0");
         child.spawn().expect("spawn");
-        let pid = child.pid.expect("pid");
+        let pid = child.group.as_ref().expect("group").leader();
         let stopped = stopped_within(pid, Instant::now() + BOUND);
         let before_kill = child.poll();
-        child.kill().expect("SIGKILL");
+        let killed = child.kill();
+        if killed.is_err() && stopped && child.poll() == Observation::Running {
+            super::group_tests::clean_stopped_fixture(pid);
+        }
         let by = Instant::now() + BOUND;
         let observed = loop {
             match child.poll() {
@@ -521,6 +537,7 @@ mod tests {
         assert!(stopped, "the child stopped within the bound");
         assert_eq!(before_kill, Observation::Running, "a stop isn't a reap");
         assert_eq!(observed, Observation::Reaped(Exit::Signal(9)));
+        killed.expect("SIGKILL");
     }
 
     /// Watches for a stop without consuming it, so the adapter's own wait still sees the child.
@@ -545,14 +562,31 @@ mod tests {
 
     #[test]
     fn a_child_reaped_by_someone_else_is_lost() {
-        let mut child = sh("exit 0");
-        child.spawn().expect("spawn");
-        let pid = child.pid.expect("pid");
-        let mut status = 0;
-        // SAFETY: `status` is valid for one write; this test plays the foreign reaper.
-        let reaped = unsafe { libc::waitpid(pid, &raw mut status, 0) };
-        assert_eq!(reaped, pid, "the foreign wait reaped it");
-        assert_eq!(child.poll(), Observation::Lost);
+        for retire_first in [false, true] {
+            let mut child = sh("exit 0");
+            child.spawn().expect("spawn");
+            let pid = child.group.as_ref().expect("group").leader();
+            let mut status = 0;
+            // SAFETY: `status` is valid for one write; this test plays the foreign reaper.
+            let reaped = unsafe { libc::waitpid(pid, &raw mut status, 0) };
+            assert_eq!(reaped, pid, "the foreign wait reaped it");
+            if retire_first {
+                assert_eq!(
+                    child
+                        .kill()
+                        .expect_err("pre-signal wait found no child")
+                        .kind(),
+                    io::ErrorKind::NotFound
+                );
+                assert!(child.group.is_none(), "no second wait on a lost PID");
+            }
+            assert_eq!(child.poll(), Observation::Lost);
+            assert!(child.group.is_none(), "the lost PID is never reused");
+            assert_eq!(
+                child.kill().expect_err("no signal after loss").kind(),
+                io::ErrorKind::NotFound
+            );
+        }
     }
 
     /// An inheritable descriptor above every slot the spawn uses for `ends`, so only

@@ -374,7 +374,7 @@ async fn with_a_thread(scratch: &Scratch) -> Brain {
 #[tokio::test]
 async fn a_quit_waits_for_an_accepted_delete() {
     let scratch = Scratch::new("quit-delete");
-    let brain = with_a_thread(&scratch).await;
+    let brain = Box::pin(with_a_thread(&scratch)).await;
     assert_eq!(delete_then_quit(brain).await, Some(Quit::Complete));
     assert_eq!(listed(&scratch), 0);
 }
@@ -382,7 +382,7 @@ async fn a_quit_waits_for_an_accepted_delete() {
 #[tokio::test]
 async fn a_delete_that_hid_nothing_makes_the_quit_incomplete() {
     let scratch = Scratch::new("quit-undeleted");
-    let brain = with_a_thread(&scratch).await;
+    let brain = Box::pin(with_a_thread(&scratch)).await;
     rusqlite::Connection::open(scratch.db())
         .expect("open")
         .execute_batch(
@@ -399,7 +399,7 @@ async fn a_delete_that_hid_nothing_makes_the_quit_incomplete() {
 #[tokio::test]
 async fn a_store_held_past_the_quit_deadline_is_outstanding() {
     let scratch = Scratch::new("quit-store-held");
-    let mut brain = with_a_thread(&scratch).await;
+    let mut brain = Box::pin(with_a_thread(&scratch)).await;
     let release = brain.hold_store(is_delete);
     brain.control_offline(delete(0), 0, &mut Tap::from_env());
     let shutdown = brain
@@ -416,7 +416,7 @@ async fn a_store_held_past_the_quit_deadline_is_outstanding() {
 #[tokio::test]
 async fn a_delete_refused_for_capacity_makes_the_quit_incomplete() {
     let scratch = Scratch::new("quit-refused");
-    let mut brain = with_a_thread(&scratch).await;
+    let mut brain = Box::pin(with_a_thread(&scratch)).await;
     let release = brain.hold_store(is_delete);
     let ((control, data), mut shell) = duplex();
     let mut tap = Tap::from_env();

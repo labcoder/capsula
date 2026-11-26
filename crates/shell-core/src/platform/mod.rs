@@ -21,6 +21,8 @@ pub mod screen_watch;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub mod speaker_cpal;
 
+#[cfg(target_os = "macos")]
+mod unix;
 #[cfg(not(windows))]
 mod unsupported;
 
