@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use super::{EventKind, NewEvent, Store, StoreError};
 use crate::connections::anthropic::request::{literal, members};
+use crate::connections::facts;
 use crate::context::{Body, ConnectionTag, Route};
 use crate::dispatch::ToolOutput;
 use crate::engines::anthropic::encode::{KeyHistory, ToolUse};
@@ -173,11 +174,7 @@ fn native_body(route: Route, item: &Opaque) -> Result<String, StoreError> {
     if !item.is_object() {
         return Err(StoreError::RoundRecord);
     }
-    let kind = match route.kind {
-        ConnectionKind::ChatGpt => "chatgpt",
-        ConnectionKind::AnthropicKey => "anthropic_key",
-        ConnectionKind::ClaudeCode => "claude_code",
-    };
+    let kind = facts::of(route.kind).stored;
     Ok(json!({ "connection": route.tag.0, "kind": kind, "item": item }).to_string())
 }
 
@@ -197,12 +194,7 @@ pub(super) fn native(body: &str) -> Result<Body, StoreError> {
     // other kind, or a kind that isn't one of these, never replays.
     let mut kind = match value.get("kind") {
         None => Some(ConnectionKind::ChatGpt),
-        Some(kind) => match kind.as_str() {
-            Some("chatgpt") => Some(ConnectionKind::ChatGpt),
-            Some("anthropic_key") => Some(ConnectionKind::AnthropicKey),
-            Some("claude_code") => Some(ConnectionKind::ClaudeCode),
-            _ => None,
-        },
+        Some(kind) => kind.as_str().and_then(facts::stored),
     };
     let item = value["item"].take();
     if !item.is_object() {
