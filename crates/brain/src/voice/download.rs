@@ -152,7 +152,7 @@ impl Rules {
 
 impl Downloader {
     pub(crate) fn new(models: PathBuf) -> Result<Self, DownloadError> {
-        let tls = platform::native_client_tls(TrustDiagnostics::Quiet)?;
+        let tls = platform::native_http_builder(TrustDiagnostics::Quiet)?;
         Self::with_tls(models, tls, Rules::default())
     }
 
@@ -168,17 +168,20 @@ impl Downloader {
             unreadable: 0,
         };
         let tls = platform::client_tls_from_roots(Ok(roots), TrustDiagnostics::Quiet)?;
-        Self::with_tls(models, tls, rules)
+        Self::with_tls(
+            models,
+            reqwest::Client::builder().use_preconfigured_tls(tls),
+            rules,
+        )
     }
 
     fn with_tls(
         models: PathBuf,
-        tls: rustls::ClientConfig,
+        tls: reqwest::ClientBuilder,
         rules: Rules,
     ) -> Result<Self, DownloadError> {
         let redirects = rules.clone();
-        let client = reqwest::Client::builder()
-            .use_preconfigured_tls(tls)
+        let client = tls
             .https_only(true)
             .no_proxy()
             .referer(false)
@@ -384,9 +387,14 @@ impl Downloader {
             if offset != 0 {
                 request = request.header(RANGE, format!("bytes={offset}-"));
             }
-            let mut response = bounded(request.send(), cancel, Instant::now() + IDLE)
-                .await?
-                .map_err(|error| transport_error(&error))?;
+            let by = Instant::now() + IDLE;
+            let mut response = bounded(
+                platform::connect_scope(by, Some(cancel), request.send()),
+                cancel,
+                by,
+            )
+            .await?
+            .map_err(|error| transport_error(&error))?;
             let status = response.status().as_u16();
             if status == 416
                 || (status == 206 && !valid_range(response.headers(), offset, model.bytes))

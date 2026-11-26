@@ -386,6 +386,10 @@ impl Machine {
         self.deadline.is_some() || matches!(self.state, State::Requesting)
     }
 
+    pub(crate) fn connect_deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
     /// Consumers load this with Acquire immediately before using a bearer or saving.
     pub fn fence(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.fence)

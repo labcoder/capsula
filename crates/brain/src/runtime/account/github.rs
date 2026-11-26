@@ -84,6 +84,7 @@ struct Verification {
     stamp: Stamp,
     session: Option<u64>,
     cancelled: bool,
+    connect_cut: Arc<crate::platform::ConnectCut>,
     operation: Option<Operation>,
     kind: OperationKind,
     phase: VerificationPhase,
@@ -280,6 +281,7 @@ impl GitHub {
     fn cancel_verification(&mut self) {
         if let Some(verification) = &mut self.verification {
             verification.cancelled = true;
+            verification.connect_cut.close();
             verification.operation = None;
             if let VerificationPhase::Request(task) = &verification.phase {
                 task.abort();
@@ -355,7 +357,7 @@ impl GitHub {
                     .operation
                     .take()
                     .expect("eligible construction owns its operation");
-                verification.phase = VerificationPhase::Request(tokio::spawn(execute(
+                let request = execute(
                     verification.stamp,
                     self.machine.fence(),
                     operation,
@@ -363,7 +365,13 @@ impl GitHub {
                     self.client_id
                         .expect("configured operations have a client identifier"),
                     self.tuning,
-                )));
+                );
+                verification.phase =
+                    VerificationPhase::Request(tokio::spawn(crate::platform::connect_owned_scope(
+                        self.machine.connect_deadline(),
+                        &verification.connect_cut,
+                        request,
+                    )));
                 self.verification = Some(verification);
                 return Vec::new();
             }
@@ -840,6 +848,7 @@ impl GitHub {
             stamp,
             session: origin,
             cancelled: false,
+            connect_cut: Arc::default(),
             kind: operation.kind(),
             operation: Some(operation),
             phase: VerificationPhase::Construction(tokio::task::spawn_blocking(move || build())),

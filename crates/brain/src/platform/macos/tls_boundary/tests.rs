@@ -12,6 +12,134 @@ fn by() -> Instant {
     Instant::now() + TEST_BOUND
 }
 
+static SHARED_BOUNDARY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct NoDns(mpsc::Sender<bool>);
+
+impl reqwest::dns::Resolve for NoDns {
+    fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let _unheard = self.0.send(
+            CONNECTING
+                .try_with(|attempt| Handle::current().id() == attempt.owner)
+                .unwrap_or(false),
+        );
+        Box::pin(async { Err(io::Error::from(io::ErrorKind::NotFound).into()) })
+    }
+}
+
+#[tokio::test]
+async fn a_real_reqwest_connector_requires_scope_and_runs_off_the_caller() {
+    let _shared = SHARED_BOUNDARY.lock().await;
+    let (resolved, wait_resolve) = mpsc::channel();
+    let tls = trust::config(Vec::new()).expect("offline fixture config");
+    let client = super::super::http_builder(tls)
+        .no_proxy()
+        .dns_resolver(Arc::new(NoDns(resolved)))
+        .build()
+        .expect("configure the real connector without using sockets");
+
+    let request = || client.get("https://localhost/").send();
+    assert!(
+        request()
+            .await
+            .expect_err("no connection scope")
+            .is_connect()
+    );
+    assert_eq!(wait_resolve.try_recv(), Err(mpsc::TryRecvError::Empty));
+    let (cancel, current) = tokio::sync::watch::channel(true);
+    let error = crate::platform::connect_scope(by().into(), Some(&current), request())
+        .await
+        .expect_err("cancelled download must not start resolution");
+    assert!(error.is_connect());
+    assert_eq!(wait_resolve.try_recv(), Err(mpsc::TryRecvError::Empty));
+    drop(cancel);
+
+    let stop = Arc::new(ConnectCut::default());
+    let expired = Instant::now();
+    for expired_owner in [true, false] {
+        if !expired_owner {
+            stop.close();
+        }
+        let deadline = expired_owner.then_some(expired.into());
+        let error = crate::platform::connect_owned_scope(deadline, &stop, async {
+            crate::platform::connect_scope(by().into(), None, request()).await
+        })
+        .await
+        .expect_err("an inner HTTP request cannot renew an expired or stopped owner");
+        assert!(error.is_connect());
+        assert_eq!(wait_resolve.try_recv(), Err(mpsc::TryRecvError::Empty));
+    }
+
+    let error = crate::platform::connect_scope(by().into(), None, request())
+        .await
+        .expect_err("the synthetic resolver refuses without dialing");
+    assert!(error.is_connect());
+    assert_eq!(wait_resolve.try_recv(), Ok(true));
+    assert_eq!(wait_resolve.try_recv(), Err(mpsc::TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn either_original_cut_stops_the_direct_worker_without_polling_its_answer() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let _shared = SHARED_BOUNDARY.lock().await;
+    for revoked in 0..2 {
+        let cuts = [
+            Arc::new(ConnectCut::default()),
+            Arc::new(ConnectCut::default()),
+        ];
+        let (entered, wait_entered) = oneshot::channel();
+        let (release, wait_release) = oneshot::channel();
+        let (settled, wait_settled) = oneshot::channel::<()>();
+        let resumed = Arc::new(AtomicBool::new(false));
+        let did_dial = Arc::clone(&resumed);
+        let handshake = connect::handshake(
+            tokio_rustls::TlsConnector::from(Arc::new(
+                trust::config(Vec::new()).expect("offline verifier"),
+            )),
+            ServerName::try_from("localhost").expect("fixture host"),
+            async move {
+                let _pending = settled;
+                entered.send(()).expect("first dial poll");
+                if wait_release.await.is_ok() {
+                    did_dial.store(true, Ordering::SeqCst);
+                }
+                Err::<tokio::io::DuplexStream, _>(io::ErrorKind::ConnectionRefused.into())
+            },
+        );
+        let mut answer = Box::pin(crate::platform::connect_scope(
+            by().into(),
+            None,
+            crate::platform::connect_with_cut(
+                Arc::clone(&cuts[0]),
+                crate::platform::connect_with_cut(Arc::clone(&cuts[1]), handshake),
+            ),
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(answer.as_mut().poll(&mut cx).is_pending());
+        tokio::time::timeout(TEST_BOUND, wait_entered)
+            .await
+            .expect("dial entered")
+            .expect("worker reported its first poll");
+        cuts[revoked].close();
+        let _unheard = release.send(());
+        assert!(
+            tokio::time::timeout(TEST_BOUND, wait_settled)
+                .await
+                .expect("the worker settled without its caller")
+                .is_err()
+        );
+        assert!(!resumed.load(Ordering::SeqCst));
+        assert_eq!(
+            answer
+                .await
+                .expect_err("a revoked cut cannot hand off")
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_stalled_check_times_out_but_keeps_the_only_native_slot() {
     let owner = Arc::new(Executor::new().expect("executor"));
@@ -397,6 +525,7 @@ async fn handshake(
     case: Peer,
     version: &'static rustls::SupportedProtocolVersion,
 ) -> Result<(), rustls::Error> {
+    let _shared = SHARED_BOUNDARY.lock().await;
     let (root, server) = fixture(case, version);
     let anchors = if matches!(case, Peer::UnknownIssuer) {
         vec![]
@@ -412,15 +541,16 @@ async fn handshake(
             .accept(peer)
             .await
     });
-    let result = Executor::new()
-        .expect("executor")
-        .connect(Arc::new(Stop::default()), by(), async move {
-            tokio_rustls::TlsConnector::from(Arc::new(config))
-                .connect(ServerName::try_from(name).expect("fixture name"), client)
-                .await
-        })
-        .await
-        .expect("the handshake completed within the boundary");
+    let result = crate::platform::connect_scope(
+        by().into(),
+        None,
+        connect::handshake(
+            tokio_rustls::TlsConnector::from(Arc::new(config)),
+            ServerName::try_from(name).expect("fixture name"),
+            async { Ok(client) },
+        ),
+    )
+    .await;
     if let Err(error) = result {
         peer.abort();
         return Err(error
