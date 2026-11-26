@@ -695,6 +695,9 @@ impl Drop for Scratch {
 fn native_shell_files_append_reopen_and_skip_unsafe_candidates() {
     use std::os::unix::fs::PermissionsExt as _;
 
+    let _no_spawn = SPAWN
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut scratch = Scratch::new();
     let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
         .expect("an explicitly commissioned fixture parent");
@@ -1071,6 +1074,9 @@ fn native_product_lookup_creates_nothing_and_the_setup_guard_excludes_other_open
     use crate::{AcquisitionError, GuardError, ProductFolder, admit_support};
     use std::os::unix::fs::PermissionsExt as _;
 
+    let _no_spawn = SPAWN
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut scratch = Scratch::new();
     let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
         .expect("an explicitly commissioned fixture parent");
@@ -1217,6 +1223,10 @@ fn native_root_slot_is_absent_only_when_missing_and_reading_it_creates_nothing()
 
 const GUARD_HOLDER: &str = "STORAGE_GUARD_HOLDER_ANCHOR";
 
+/// A spawned child shares every open file until it execs, so a lock dropped meanwhile stays
+/// held. Tests that reacquire a dropped lock read this; the spawn writes it.
+static SPAWN: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 /// The holder process. Dropping it stops it, and outside a panic a holder that won't exit fails.
 struct Holder(std::process::Child);
 
@@ -1292,6 +1302,9 @@ fn native_setup_guard_is_busy_while_another_process_holds_it() {
     let support =
         std::path::PathBuf::from(parent).join(OsStr::from_bytes(scratch.residual.to_bytes()));
     let anchor = admit_support(&support).expect("admit the fixture anchor");
+    let spawning = SPAWN
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut holder = Holder(
         Command::new(std::env::current_exe().expect("this test binary"))
             .args([
@@ -1309,6 +1322,7 @@ fn native_setup_guard_is_busy_while_another_process_holds_it() {
             .spawn()
             .expect("spawn the holder"),
     );
+    drop(spawning);
     let output = holder.0.stdout.take().expect("the holder's piped output");
     assert!(
         within_deadline(move || io::BufReader::new(output)

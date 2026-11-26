@@ -258,7 +258,7 @@ fn native_a_folder_keeps_its_name_while_its_link_count_changes() {
         before.st_nlink, after.st_nlink,
         "the fixture moved the link count"
     );
-    assert_eq!(named(&root, c"busy", &before), Ok(()));
+    let folder = named(&root, c"busy", &before);
 
     let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: root is the held scratch folder and the name is fixed; creation is exclusive.
@@ -280,14 +280,12 @@ fn native_a_folder_keeps_its_name_while_its_link_count_changes() {
     };
     assert_eq!(linked, 0, "fixture hard link");
     scratch.record(&root, c"second").expect("record hard link");
-    assert_eq!(
-        named(&root, c"file", &single),
-        Err(Untrusted::Unsafe),
-        "a file that gained a name"
-    );
+    let gained = named(&root, c"file", &single);
 
     drop((busy, file));
     scratch
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");
+    assert_eq!(folder, Ok(()), "a folder whose link count moved");
+    assert_eq!(gained, Err(Untrusted::Unsafe), "a file that gained a name");
 }

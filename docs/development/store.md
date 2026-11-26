@@ -27,7 +27,8 @@ in the admitted product folder, then starts the logger in the same storage.
 The macOS shell-file primitives admit an OS-discovered Support candidate without
 creating its ancestors. The read-only anchor walk independently requires local, ownership-enforced
 APFS volumes; product/log directories and private files cannot cross the Support volume. Legacy
-`hold_chain` still refuses every device crossing. Private directories require current UID/0700;
+`hold_chain` still refuses every device crossing. A name recheck compares a folder's identity,
+owner and mode but not its link count, which moves as subfolders come and go. Private directories require current UID/0700;
 regular files require current UID/0600, one link, the same ACL/identity inspection, and checked
 no-follow/nontruncating relative acquisition. Opaque lock/log owners retain their admitted
 ancestors, expose no file/descriptor/path escape, and logs support shared-reference append writes.

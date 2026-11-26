@@ -896,7 +896,7 @@ impl Entries {
 
 #[cfg(test)]
 thread_local! {
-    /// Entries a test lets this thread's next listings return before they fail like a read error.
+    /// Child names a test lets this thread's listings return before one read fails like an error.
     pub(super) static READDIR_FAILS_AFTER: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
 }
@@ -905,11 +905,9 @@ impl Entries {
     /// The next entry's name, copied out before the stream moves on.
     pub(super) fn next_name(&mut self) -> Next {
         #[cfg(test)]
-        if let Some(left) = READDIR_FAILS_AFTER.get() {
-            if left == 0 {
-                return Next::Failed;
-            }
-            READDIR_FAILS_AFTER.set(Some(left - 1));
+        if READDIR_FAILS_AFTER.get() == Some(0) {
+            READDIR_FAILS_AFTER.set(None);
+            return Next::Failed;
         }
         // SAFETY: __error returns this thread's live errno storage.
         let errno = unsafe { libc::__error() };
@@ -926,7 +924,14 @@ impl Entries {
             };
         };
         // SAFETY: this successful readdir record is live until the next call on this stream.
-        unsafe { read_dirent_name(entry) }.map_or(Next::Malformed, Next::Name)
+        let next = unsafe { read_dirent_name(entry) }.map_or(Next::Malformed, Next::Name);
+        #[cfg(test)]
+        if let (Next::Name(name), Some(left)) = (&next, READDIR_FAILS_AFTER.get())
+            && !matches!(name.to_bytes(), b"." | b"..")
+        {
+            READDIR_FAILS_AFTER.set(Some(left - 1));
+        }
+        next
     }
 }
 
