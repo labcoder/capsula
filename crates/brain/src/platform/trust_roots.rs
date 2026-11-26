@@ -1,17 +1,21 @@
 //! The root certificates the account client trusts, read from the operating system's store.
 
 use std::fmt;
+use std::io;
 use std::sync::Arc;
 
 use rustls::pki_types::CertificateDer;
+use tokio_rustls::TlsConnector;
 
 #[cfg(target_os = "macos")]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "interim root loading remains selected")
-)]
 #[path = "macos/tls_boundary/mod.rs"]
 mod mac_tls;
+
+#[cfg(target_os = "macos")]
+pub use mac_tls::NativeStream;
+/// A TLS stream from the platform's normal connector.
+#[cfg(not(target_os = "macos"))]
+pub type NativeStream = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
 
 /// Root certificates as owned public DER, plus how many the store held that weren't kept.
 #[derive(Clone, PartialEq, Eq)]
@@ -74,6 +78,38 @@ pub(crate) fn native_client_tls(
     diagnostics: TrustDiagnostics,
 ) -> Result<rustls::ClientConfig, NativeTlsError> {
     client_tls_from_roots(super::trust_roots(), diagnostics)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn connect_native_tls<'a>(
+    tls: &'a TlsConnector,
+    host: &'static str,
+) -> impl Future<Output = io::Result<NativeStream>> + Send + 'a {
+    Box::pin(mac_tls::direct(tls, host))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) async fn connect_native_tls(
+    tls: &TlsConnector,
+    host: &'static str,
+) -> io::Result<NativeStream> {
+    let tcp = tokio::net::TcpStream::connect((host, 443)).await?;
+    tcp.set_nodelay(true)?;
+    let name = rustls::pki_types::ServerName::try_from(host).map_err(io::Error::other)?;
+    tls.connect(name, tcp).await
+}
+
+pub(crate) fn native_http_builder(
+    diagnostics: TrustDiagnostics,
+) -> Result<reqwest::ClientBuilder, NativeTlsError> {
+    native_client_tls(diagnostics).map(http_builder)
+}
+
+fn http_builder(tls: rustls::ClientConfig) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder().use_preconfigured_tls(tls);
+    #[cfg(target_os = "macos")]
+    let builder = mac_tls::http(builder);
+    builder
 }
 
 pub(crate) fn client_tls_from_roots(

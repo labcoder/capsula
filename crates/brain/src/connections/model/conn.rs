@@ -9,12 +9,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
 
-use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
-use tokio::net::TcpStream;
 use tokio::time::{Instant, timeout};
 use tokio_rustls::TlsConnector;
-use tokio_rustls::client::TlsStream;
 
 use super::error::Failure;
 use super::sse::MAX_STREAM_BYTES;
@@ -61,13 +58,10 @@ impl fmt::Debug for Tls {
 }
 
 impl Connect for Tls {
-    type Io = TlsStream<TcpStream>;
+    type Io = platform::NativeStream;
 
     async fn connect(&self) -> io::Result<Self::Io> {
-        let tcp = TcpStream::connect((HOST, 443)).await?;
-        tcp.set_nodelay(true)?;
-        let name = ServerName::try_from(HOST).map_err(io::Error::other)?;
-        self.0.connect(name, tcp).await
+        platform::connect_native_tls(&self.0, HOST).await
     }
 }
 

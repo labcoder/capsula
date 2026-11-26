@@ -4,9 +4,7 @@ use std::fmt;
 use std::io;
 use std::sync::Arc;
 
-use rustls::pki_types::ServerName;
-use tokio::net::TcpStream;
-use tokio_rustls::{TlsConnector, client::TlsStream};
+use tokio_rustls::TlsConnector;
 
 use crate::connections::http_client::HttpError;
 use crate::connections::model::conn::Connect;
@@ -14,15 +12,52 @@ use crate::platform::{self, TrustDiagnostics};
 
 pub(super) const HOST: &str = "api.anthropic.com";
 
-fn server_name() -> io::Result<ServerName<'static>> {
-    ServerName::try_from(HOST).map_err(io::Error::other)
-}
-
 /// Only connectors for the Anthropic route implement this marker.
 pub trait AnthropicConnect: Connect + sealed::Sealed {}
 
 pub(super) mod sealed {
     pub trait Sealed {}
+}
+
+#[cfg(test)]
+#[doc(hidden)]
+pub struct FixtureConnect<F>(pub std::sync::Mutex<Option<F>>);
+
+#[cfg(test)]
+impl<F> fmt::Debug for FixtureConnect<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FixtureConnect")
+    }
+}
+
+#[cfg(test)]
+impl<F> sealed::Sealed for FixtureConnect<F> {}
+
+#[cfg(test)]
+impl<F, I> AnthropicConnect for FixtureConnect<F>
+where
+    F: Future<Output = io::Result<I>> + Send,
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
+}
+
+#[cfg(test)]
+impl<F, I> Connect for FixtureConnect<F>
+where
+    F: Future<Output = io::Result<I>> + Send,
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+{
+    type Io = I;
+
+    async fn connect(&self) -> io::Result<I> {
+        let attempt = self
+            .0
+            .lock()
+            .expect("fixture lock")
+            .take()
+            .expect("one connect");
+        attempt.await
+    }
 }
 
 /// TLS to the fixed Anthropic host, using OS roots and HTTP/1.1 without early data.
@@ -47,17 +82,14 @@ impl fmt::Debug for AnthropicTls {
 }
 
 impl Connect for AnthropicTls {
-    type Io = TlsStream<TcpStream>;
+    type Io = platform::NativeStream;
 
     async fn connect(&self) -> io::Result<Self::Io> {
         // Tests never reach the network, so the only socket the route opens refuses in one.
         if cfg!(test) {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
-        let tcp = TcpStream::connect((HOST, 443)).await?;
-        tcp.set_nodelay(true)?;
-        let name = server_name()?;
-        self.0.connect(name, tcp).await
+        platform::connect_native_tls(&self.0, HOST).await
     }
 }
 
@@ -204,7 +236,7 @@ mod tests {
         let config = tls.0.config();
         assert_eq!(config.alpn_protocols, [b"http/1.1".to_vec()]);
         assert!(!config.enable_early_data);
-        let name = server_name().expect("fixed DNS host");
+        let name = rustls::pki_types::ServerName::try_from(HOST).expect("fixed DNS host");
         let mut client =
             rustls::ClientConnection::new(Arc::clone(config), name).expect("TLS client");
         let mut hello = Vec::new();

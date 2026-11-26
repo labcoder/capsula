@@ -104,6 +104,7 @@ struct ProviderError {
 pub(super) async fn read_fenced(
     connect: &impl AnthropicConnect,
     key: &Secret<AnthropicKey>,
+    by: tokio::time::Instant,
 ) -> Result<Vec<CatalogModel>, CheckError> {
     let head =
         format!("GET /v1/models?limit=65 HTTP/1.1\r\nHost: {HOST}\r\nAuthorization: Bearer ");
@@ -120,8 +121,7 @@ pub(super) async fn read_fenced(
         request.extend_from_slice(part);
     }
     let mut conn = ModelConn::new(
-        connect
-            .connect()
+        crate::platform::connect_scope(by, None, connect.connect())
             .await
             .map_err(|_| CheckError::Unconfirmed)?,
     );
