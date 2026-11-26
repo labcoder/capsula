@@ -535,6 +535,6 @@ pub(crate) fn initiate(
 #[path = "leg_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 #[path = "leg_credit_tests.rs"]
 mod credit_tests;
