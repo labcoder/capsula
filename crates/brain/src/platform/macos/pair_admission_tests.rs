@@ -125,6 +125,15 @@ async fn greeting(
     shell: &ShellProcess,
     frames: &[(Pipe, Vec<u8>)],
 ) -> (Result<bool, SessionError>, Vec<ControlToShell>, u64) {
+    greeting_reserving(shell, frames, || {}).await
+}
+
+/// [`greeting`], running `on_reserve` inside the reservation.
+async fn greeting_reserving(
+    shell: &ShellProcess,
+    frames: &[(Pipe, Vec<u8>)],
+    on_reserve: impl FnOnce(),
+) -> (Result<bool, SessionError>, Vec<ControlToShell>, u64) {
     let (mut pair, mut peer) = Box::pin(bound()).await;
     for frame in frames {
         peer.send(frame).await;
@@ -138,6 +147,7 @@ async fn greeting(
         by,
         || {
             reserved += 1;
+            on_reserve();
             epochs.reserve(INCARNATION)
         },
     ))
@@ -261,4 +271,37 @@ async fn the_shared_greeting_runs_over_the_pair_in_order_and_logs_nothing() {
 
     drop(capturing);
     assert_eq!(captured.text(), "");
+}
+
+#[tokio::test]
+async fn a_shell_lost_before_a_greeting_reply_gets_neither_reply() {
+    let other_build = Hello {
+        build_id: "0.0.0+other".to_owned(),
+        capability: Secret::new([0; CAPABILITY_LEN]),
+    };
+    let lost = ShellProcess::fixture(1, Arc::new(AtomicU8::new(0)));
+    assert!(lost.publish(1));
+    let mismatch = [control(&ControlToBrain::Hello(other_build))];
+    let (result, frames, reserved) = greeting(&lost, &mismatch).await;
+    assert!(
+        matches!(result, Err(SessionError::ClosedEarly)),
+        "{result:?}"
+    );
+    assert_eq!((frames, reserved), (Vec::new(), 0));
+
+    let losing = ShellProcess::fixture(1, Arc::new(AtomicU8::new(0)));
+    let legacy = [
+        control(&ControlToBrain::Hello(hello())),
+        data(&DataToBrain::Hello(hello())),
+        data(&DataToBrain::TextMetrics(None)),
+    ];
+    let (result, frames, reserved) = greeting_reserving(&losing, &legacy, || {
+        assert!(losing.publish(1), "the loss comes before any claim");
+    })
+    .await;
+    assert!(
+        matches!(result, Err(SessionError::ClosedEarly)),
+        "{result:?}"
+    );
+    assert_eq!((frames, reserved), (Vec::new(), 1));
 }

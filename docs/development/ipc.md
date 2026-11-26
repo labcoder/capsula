@@ -418,8 +418,9 @@ same checks in the same order as the pipes. The control greeting is authorized a
 control sealer, and the data greeting and text metrics come through the pair's own reader.
 Acquiring the data leg does nothing, and binding names the parent shell. Two `Legs` hooks keep
 transport policy out of `greet`. `fence` refuses once the shell is known to be gone; `greet`
-checks it with no await in between before it reserves the session and again after the data
-greeting. `mismatch_notice` runs before the BuildMismatch reply, so the pipes log a mismatch
+checks it, each time with no await in between, before it reserves the session, right before it
+writes Welcome or BuildMismatch (with the deadline, since `timeout_at` polls a ready write before
+its timer), and after the data greeting. `mismatch_notice` runs before the BuildMismatch reply, so the pipes log a mismatch
 even when the reply can't be written. `PairLegs` logs nothing and never writes its tap, since
 nothing before the commit may.
 
