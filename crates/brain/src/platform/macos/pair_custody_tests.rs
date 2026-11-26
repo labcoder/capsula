@@ -76,30 +76,29 @@ async fn a_lent_open_takes_no_second_lock_and_makes_its_files_in_the_locked_fold
         )
     })
     .await;
-    let (made, beside) = (entries(&product), entries(&support));
-    let in_scratch = [STORE_FILE, AUTHORITY_FILE].map(|name| scratch.dir().join(name).exists());
-    instance_fixture_clean(
-        &support,
-        &made.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    // Placement first, so a misplaced file fails here and stays as evidence.
     assert_eq!(before, sorted(&[SESSION_LOCK]), "custody made no authority");
+    assert_eq!(
+        entries(&product),
+        sorted(&[SESSION_LOCK, STORE_FILE, AUTHORITY_FILE])
+    );
+    assert_eq!(
+        entries(&support),
+        sorted(&[DATA_DIR]),
+        "nothing beside the product folder"
+    );
+    assert_eq!(
+        [STORE_FILE, AUTHORITY_FILE].map(|name| scratch.dir().join(name).exists()),
+        [false, false],
+        "nothing in the fixture's scratch"
+    );
     assert_eq!(
         ran,
         Err(ParentBoundError::Incomplete),
         "a store opened and settled unconfirmed"
     );
     assert_eq!(stages, ["init", "open"], "no accounts started");
-    assert_eq!(made, sorted(&[SESSION_LOCK, STORE_FILE, AUTHORITY_FILE]));
-    assert_eq!(
-        beside,
-        sorted(&[DATA_DIR]),
-        "nothing beside the product folder"
-    );
-    assert_eq!(
-        in_scratch,
-        [false, false],
-        "nothing in the fixture's scratch"
-    );
+    instance_fixture_clean(&support, &[SESSION_LOCK, STORE_FILE, AUTHORITY_FILE]);
 }
 
 /// Custody's lock outlives the stages' loans: while settlement's item delete is held, after both
@@ -164,9 +163,13 @@ async fn custody_holds_its_lock_through_the_item_delete_after_the_stages_drop() 
     })
     .await;
     let after = SessionCustody::bootstrap_at(&support).map(drop);
-    instance_fixture_clean(
-        &support,
-        &[SESSION_LOCK, STORE_FILE, AUTHORITY_FILE, CONFIG_FILE],
+    // Placement first, so a misplaced file fails here and stays as evidence.
+    let leaves = [SESSION_LOCK, STORE_FILE, AUTHORITY_FILE, CONFIG_FILE];
+    assert_eq!(entries(&product), sorted(&leaves));
+    assert_eq!(
+        entries(&support),
+        sorted(&[DATA_DIR]),
+        "nothing beside the product folder"
     );
     assert_eq!(ran, Ok(()));
     assert_eq!(stages, ["init", "open", "accounts", "containment"]);
@@ -187,4 +190,5 @@ async fn custody_holds_its_lock_through_the_item_delete_after_the_stages_drop() 
     );
     assert_eq!(after, Ok(()), "custody lets go once the item settles");
     assert!(item.get().is_none(), "settlement deleted the item");
+    instance_fixture_clean(&support, &leaves);
 }
