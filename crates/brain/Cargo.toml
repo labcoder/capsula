@@ -54,11 +54,13 @@ rustix = { version = "1", features = ["fs", "process"] }
 rustls-native-certs = "0.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
 kumochi-session = { path = "../session" }
 kumochi-storage = { path = "../storage" }
 libc = "=0.2.191"
 block2 = "=0.6.2"
 objc2 = "=0.6.5"
+security-framework = "3.7"
 objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
     "std",
     "CFBase",

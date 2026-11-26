@@ -307,14 +307,25 @@ on macOS; no macOS release build ships with it.
 
 Rustls parses those DER roots and verifies chains offline with ring on every platform. Empty or
 entirely unparsable roots fail as `TrustStoreUnavailable`, without a fallback root bundle or
-permissive verifier. There is no platform verifier, and Kumochi has no certificate-override
-setting of its own. Off Windows, building a client succeeds once roots load; a trust refusal is
-`TrustStoreUnavailable`, and the native Anthropic route then has no connector. The runtime
+permissive verifier. No product client selects a platform verifier, and Kumochi has no
+certificate-override setting of its own. Off Windows, building a client succeeds once roots load;
+a trust refusal is `TrustStoreUnavailable`, and the native Anthropic route then has no connector. The runtime
 admission and the credential store still refuse before any account work, and test fixtures
 there get an offline Anthropic route instead of reading the host's store. Loopback TLS tests
 can still inject their own roots.
 The real-store test runs in the normal Windows test suite: it reads bounded public certificates
 only, writes nothing, and exercises the FFI ownership path rather than leaving it ignored.
+
+The staged macOS TLS boundary prestarts bounded handshake workers and a separate I/O reactor.
+Neither the brain runtime nor the reactor polls the native verifier. It checks the leaf name
+independently, then applies SecTrust's SSL server policy, including native date and chain rules.
+The caller can refuse a connection without waiting for the OS, and workers also observe the
+deadline and cancellation while the caller's answer is unpolled. Owner drop does not wait;
+an admitted job keeps its reactor alive until it exits. If the one in-flight SecTrust
+call stays stuck past the deadline, the next connection is refused without queuing; the slot
+returns only when the call does. The staged tests use in-memory TLS, synthetic certificates and
+no online lookups. Product clients still use the interim policy above. Activation and the
+revocation policy are separate work.
 
 The client enforces HTTPS, refuses redirects, disables proxy discovery, and exposes neither
 the raw reqwest client nor raw transport errors. Discovery and validated JWKS requests contain
