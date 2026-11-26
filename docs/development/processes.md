@@ -274,10 +274,12 @@ the disconnected window, so no child starts.
   or the attempt owned no child, as for a detached brain.
 - **Terminal custody ends the pair.** Once the owner reaps, loses or gives up on the child, the
   attempt's hook aborts both legs, so the link stops serving a pair whose peer may still hold
-  its ends open, without waiting for EOF. A watchdog beside the owner is armed from the
-  caller's side, by `retire`, by the owner handle being dropped or by Quit seen on the word,
-  never by the owner. At retirement's bound it ends custody as `Unsettled` even while the owner
-  is stuck in a poll or a kill. Owner, watchdog and `settle` end custody through one lock, so
+  its ends open, without waiting for EOF. A watchdog beside the owner bounds only a confirmed
+  child: it starts once the owner has sent `Spawned`, and ends quietly on a refused spawn, so a
+  refusal stays `NotSpawned` and a spawn still pending is never called `Unsettled`. It's armed
+  from the caller's side, by `retire`, by the owner handle being dropped or by Quit seen on the
+  word, never by the owner. At retirement's bound, counted from when it was armed and the child
+  confirmed, it ends custody as `Unsettled` even while the owner is stuck in a poll or a kill. Owner, watchdog and `settle` end custody through one lock, so
   the first ending wins and a later one returns it. Only a winning reap frees the claim, so
   after `Unsettled` it stays taken for good. Neither the hook nor the watchdog signals or reaps; that
   stays on the owner thread, which may still reap later without reporting or freeing a claim.
