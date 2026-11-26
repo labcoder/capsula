@@ -39,6 +39,8 @@ struct Script {
     kill_fails: bool,
     /// A kill that blocks until this is released or dropped.
     kill_blocks: Option<Receiver<()>>,
+    /// The next poll says it entered, then blocks until released or dropped.
+    poll_blocks: Option<(mpsc::Sender<()>, Receiver<()>)>,
     killed: Option<mpsc::Sender<()>>,
 }
 
@@ -75,6 +77,11 @@ impl Os for Child {
     }
 
     fn poll(&mut self) -> Observation {
+        let blocks = self.script().poll_blocks.take();
+        if let Some((entered, release)) = blocks {
+            let _seen = entered.send(());
+            let _released = release.recv_timeout(BOUND);
+        }
         let script = self.script();
         if script.lost {
             return Observation::Lost;
@@ -411,6 +418,25 @@ fn a_quit_during_a_failed_spawn_tells_a_pending_spawn_from_none() {
         link.finish_quit();
         assert_eq!(link.quit_end(), ended(None, outcome), "pending {pending}");
     }
+}
+
+#[test]
+fn a_poll_that_blocks_ends_the_link_unsettled_while_the_peer_holds_both_ends_open() {
+    let child = Child::default();
+    let (link, states) = link(&child, Then::Stalls, refused);
+    until(&states, connected);
+    let (entered, polling) = mpsc::channel();
+    let (unblock, blocks) = mpsc::channel();
+    child.script().poll_blocks = Some((entered, blocks));
+    polling.recv_timeout(BOUND).expect("the owner is inside its poll");
+    let quit = Instant::now();
+    assert!(link.begin_quit());
+    link.finish_quit();
+    let took = quit.elapsed();
+    assert_eq!(link.quit_end(), ended(Some(1), QuitOutcome::Unsettled));
+    assert!(took < 3 * WAIT + Duration::from_secs(2), "{took:?}");
+    assert_eq!(child.script().kills, 0, "the owner never got past its poll");
+    drop(unblock);
 }
 
 /// A brain for the queued pair that says READY only once `go` comes, then exits 0 on Quit.

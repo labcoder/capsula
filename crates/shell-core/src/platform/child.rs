@@ -155,16 +155,18 @@ impl Settled {
 #[derive(Debug)]
 pub(crate) struct ChildOwner {
     retire: Sender<()>,
+    /// Arms the watchdog from the caller's side, so a stalled owner can't delay it.
+    arm: Sender<Instant>,
     reports: Receiver<Report>,
     word: Arc<SpawnWord>,
     terminal: Arc<Terminal>,
     wait: Duration,
 }
 
-/// Whether custody is terminal yet, and what runs when it is.
+/// How custody ended, once it has, and what runs when it does.
 #[derive(Default)]
 struct Ending {
-    ended: bool,
+    winner: Option<Settled>,
     hook: Option<Box<dyn FnOnce() + Send>>,
 }
 
@@ -180,18 +182,27 @@ impl Terminal {
         self.ending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Ends custody once: latches `stuck` and sends `report` when given, then runs the hook.
-    /// False, doing nothing, when custody had already ended.
-    fn end(&self, report: Option<(&Sender<Report>, Settled)>, stuck: Option<&SpawnWord>) -> bool {
+    /// Ends custody once, as `settled`: under the lock, a reap frees the claim and `Unsettled`
+    /// latches the word for good, and `report` is sent when given; then the hook runs. Returns
+    /// how custody ended, and whether this call ended it. A call that comes after the end
+    /// changes nothing and returns the winner.
+    fn end(
+        &self,
+        settled: Settled,
+        report: Option<&Sender<Report>>,
+        word: &SpawnWord,
+    ) -> (Settled, bool) {
         let mut ending = self.lock();
-        if ending.ended {
-            return false;
+        if let Some(winner) = ending.winner {
+            return (winner, false);
         }
-        ending.ended = true;
-        if let Some(word) = stuck {
-            word.hold_for_good();
+        ending.winner = Some(settled);
+        match settled {
+            Settled::Reaped(_) => word.release(),
+            Settled::Unsettled => word.hold_for_good(),
+            Settled::Lost => {}
         }
-        if let Some((report, settled)) = report {
+        if let Some(report) = report {
             // A link that's gone doesn't end custody.
             let _unheard = report.send(Report::Settled(settled));
         }
@@ -201,14 +212,14 @@ impl Terminal {
         if let Some(hook) = hook {
             hook();
         }
-        true
+        (settled, true)
     }
 }
 
 impl std::fmt::Debug for Ending {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Ending")
-            .field("ended", &self.ended)
+            .field("winner", &self.winner)
             .finish_non_exhaustive()
     }
 }
@@ -227,17 +238,18 @@ impl ChildOwner {
         let terminal = Arc::<Terminal>::default();
         let (watched, watching, watch_report) =
             (Arc::clone(&word), Arc::clone(&terminal), report.clone());
-        // Ends with the owner, which holds `arm`, or once it has ended custody itself.
+        // Ends once custody has.
         thread::Builder::new()
             .name("brain child watchdog".to_owned())
-            .spawn(move || watch(&armed, &watched, &watching, &watch_report))?;
+            .spawn(move || watch(&armed, &watched, &watching, &watch_report, wait))?;
         let (owned, ends) = (Arc::clone(&word), Arc::clone(&terminal));
         // Detached: after Unsettled it keeps reaping for as long as the shell lives.
         thread::Builder::new()
             .name("brain child".to_owned())
-            .spawn(move || own(os, &owned, wait, retires, &report, &arm, &ends))?;
+            .spawn(move || own(os, &owned, wait, retires, &report, &ends))?;
         Ok(Self {
             retire,
+            arm,
             reports,
             word,
             terminal,
@@ -249,7 +261,7 @@ impl ChildOwner {
     /// is, on whichever thread ends it. Never waits for the child.
     pub(crate) fn on_settled(&self, hook: impl FnOnce() + Send + 'static) {
         let mut ending = self.terminal.lock();
-        if !ending.ended {
+        if ending.winner.is_none() {
             ending.hook = Some(Box::new(hook));
             return;
         }
@@ -257,9 +269,10 @@ impl ChildOwner {
         hook();
     }
 
-    /// Starts bounded retirement of a live child. Never waits.
+    /// Starts bounded retirement of a live child, and its bound at once. Never waits.
     pub(crate) fn retire(&self) {
-        // A finished owner has nothing left to retire.
+        // A finished owner or watchdog has nothing left to retire or bound.
+        let _bounded = self.arm.send(Instant::now() + retirement(self.wait));
         let _settled = self.retire.send(());
     }
 
@@ -274,18 +287,17 @@ impl ChildOwner {
     }
 
     /// Retires a live child and returns how custody ended, waiting no longer than [`retirement`].
-    /// No settlement by then, or an owner thread that's gone, is `Unsettled`, and then the spawn
-    /// word refuses every later claim for good. Call it after the spawn report was taken, off the
-    /// UI thread.
+    /// No settlement by then, or an owner thread that's gone, ends custody as `Unsettled`, which
+    /// latches the spawn word for good, unless a settlement wins the end first. Call it after the
+    /// spawn report was taken, off the UI thread.
     pub(crate) fn settle(self) -> Settled {
         self.retire();
         let by = Instant::now() + retirement(self.wait);
-        if let Some(Report::Settled(settled)) = self.next(by) {
-            return settled;
-        }
-        self.word.hold_for_good();
-        self.terminal.end(None, None);
-        Settled::Unsettled
+        let settled = match self.next(by) {
+            Some(Report::Settled(settled)) => settled,
+            _ => Settled::Unsettled,
+        };
+        self.terminal.end(settled, None, &self.word).0
     }
 
     /// The next report, or None when none arrives by `by`.
@@ -312,7 +324,6 @@ fn own(
     wait: Duration,
     retires: Receiver<()>,
     report: &Sender<Report>,
-    arm: &Sender<Instant>,
     terminal: &Terminal,
 ) {
     // A link that's gone doesn't end custody, so a closed report channel is ignored throughout.
@@ -343,27 +354,19 @@ fn own(
                 } else {
                     settled
                 };
-                if matches!(settled, Settled::Reaped(_)) {
-                    word.release();
-                }
-                terminal.end(Some((report, settled)), None);
+                terminal.end(settled, Some(report), word);
             }
             return;
         }
         phase = match phase {
-            Phase::Watching if retiring || word.quitting() => {
-                let started = Instant::now();
-                // A kill that never returns can't hold the link: the watchdog ends custody.
-                let _armed = arm.send(started + retirement(wait));
-                Phase::Grace(started + wait)
-            }
+            Phase::Watching if retiring || word.quitting() => Phase::Grace(Instant::now() + wait),
             Phase::Grace(deadline) if now >= deadline => {
                 retirement_refused = !kill(&mut os);
                 Phase::Killed(Instant::now() + wait)
             }
             Phase::Killed(deadline) if now >= deadline => {
                 tracing::error!("the brain child's forced retirement is unconfirmed");
-                terminal.end(Some((report, Settled::Unsettled)), None);
+                terminal.end(Settled::Unsettled, Some(report), word);
                 Phase::Unsettled
             }
             phase => phase,
@@ -380,16 +383,28 @@ fn own(
     }
 }
 
-/// Waits for retirement to start, then ends custody as `Unsettled` if it's still open at
-/// [`retirement`]'s bound, latching the word, even while the owner is stuck in a kill.
+/// Bounds retirement without the owner: armed by the caller's retire, a dropped owner handle or
+/// Quit seen on the word, it ends custody as `Unsettled` if custody is still open at
+/// [`retirement`]'s bound, even while the owner is stuck in a poll or a kill.
 fn watch(
     armed: &Receiver<Instant>,
     word: &SpawnWord,
     terminal: &Terminal,
     report: &Sender<Report>,
+    wait: Duration,
 ) {
-    let Ok(by) = armed.recv() else {
-        return;
+    let by = loop {
+        // shortcut: Quit is seen by polling the shared word, since its setter never waits;
+        // a per-owner wake would avoid the poll if the link ever holds many children.
+        match armed.recv_timeout(POLL) {
+            Ok(by) => break by,
+            Err(RecvTimeoutError::Disconnected) => break Instant::now() + retirement(wait),
+            Err(RecvTimeoutError::Timeout) if terminal.lock().winner.is_some() => return,
+            Err(RecvTimeoutError::Timeout) if word.quitting() => {
+                break Instant::now() + retirement(wait);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+        }
     };
     let ending = terminal.lock();
     let (ending, _timeout) = terminal
@@ -397,11 +412,11 @@ fn watch(
         .wait_timeout_while(
             ending,
             by.saturating_duration_since(Instant::now()),
-            |ending| !ending.ended,
+            |ending| ending.winner.is_none(),
         )
         .unwrap_or_else(PoisonError::into_inner);
     drop(ending);
-    if terminal.end(Some((report, Settled::Unsettled)), Some(word)) {
+    if terminal.end(Settled::Unsettled, Some(report), word).1 {
         tracing::error!("the brain child's retirement overran its bound");
     }
 }
@@ -1082,7 +1097,11 @@ mod tests {
         assert_eq!(settled, Settled::Unsettled);
         assert!(took >= bound, "waited the whole bound: {took:?}");
         assert!(took < bound + WAIT * 5, "and no longer: {took:?}");
-        assert_eq!(hook_ran.try_recv(), Ok(()), "the hook ran by the give-up");
+        assert_eq!(
+            hook_ran.recv_timeout(BOUND),
+            Ok(()),
+            "the hook ran by the give-up"
+        );
 
         // The kill lands late and the child is reaped, which must not free the claim.
         held.release();
@@ -1122,7 +1141,7 @@ mod tests {
             "and no longer: {took:?}"
         );
         assert_eq!(
-            hook_ran.try_recv(),
+            hook_ran.recv_timeout(BOUND),
             Ok(()),
             "the hook ran without the owner"
         );
@@ -1137,6 +1156,55 @@ mod tests {
         let again = ChildOwner::start(retry.clone(), Arc::clone(&word), WAIT).expect("owner");
         assert!(matches!(next(&again), Report::NotSpawned(Refusal::Claimed)));
         assert_eq!(retry.script().spawns, 0, "the watchdog latched the word");
+    }
+
+    #[test]
+    fn a_poll_that_never_returns_ends_custody_unsettled_at_the_retirement_bound() {
+        let word = Arc::new(SpawnWord::default());
+        let fake = Fake::default();
+        let owner = started(&fake, &word);
+        let (hooked, hook_ran) = mpsc::channel();
+        owner.on_settled(move || {
+            let _unwatched = hooked.send(());
+        });
+        let (poll_gate, held) = gate();
+        fake.script().poll_gate = Some(poll_gate);
+        held.entered();
+        let quit = Instant::now();
+        word.quit();
+        assert!(matches!(next(&owner), Report::Settled(Settled::Unsettled)));
+        let took = quit.elapsed();
+        assert!(took >= retirement(WAIT), "the whole bound: {took:?}");
+        assert!(
+            took < retirement(WAIT) + WAIT * 5,
+            "and no longer: {took:?}"
+        );
+        assert_eq!(hook_ran.recv_timeout(BOUND), Ok(()), "the hook ran");
+        held.release();
+    }
+
+    #[test]
+    fn a_settle_that_gives_up_returns_a_reap_that_won_the_end_first() {
+        let word = Arc::new(SpawnWord::default());
+        let terminal = Arc::new(Terminal::default());
+        assert_eq!(
+            terminal.end(Settled::Reaped(Exit::Code(0)), None, &word),
+            (Settled::Reaped(Exit::Code(0)), true)
+        );
+        let (retire, _retires) = mpsc::channel();
+        let (arm, _armed) = mpsc::channel();
+        let (report, reports) = mpsc::channel::<Report>();
+        drop(report);
+        let owner = ChildOwner {
+            retire,
+            arm,
+            reports,
+            word: Arc::clone(&word),
+            terminal,
+            wait: BOUND,
+        };
+        assert_eq!(owner.settle(), Settled::Reaped(Exit::Code(0)));
+        assert!(claimable(&word), "the give-up didn't latch the word");
     }
 
     #[test]
@@ -1171,8 +1239,10 @@ mod tests {
         let (retire, _retires) = mpsc::channel();
         let (report, reports) = mpsc::channel::<Report>();
         drop(report);
+        let (arm, _armed) = mpsc::channel();
         let owner = ChildOwner {
             retire,
+            arm,
             reports,
             word: Arc::default(),
             terminal: Arc::default(),

@@ -28,10 +28,10 @@ pub(crate) enum NotStarted {
     /// No child exists, and this attempt starts none.
     #[error(transparent)]
     Refused(#[from] Refusal),
-    /// The spawn hadn't reported by its deadline, so a child may still start. Its owner is
-    /// dropped, so it retires any child it makes, and the spawn claim stays taken until that
-    /// child is reaped.
-    #[error("the brain's spawn didn't report in time")]
+    /// The spawn didn't report, by its deadline or before its owner thread ended, so a child may
+    /// exist or still start. Its owner is dropped, so it retires any child it makes, and the
+    /// spawn claim stays taken until that child is reaped.
+    #[error("the brain's spawn didn't report")]
     Pending,
 }
 
@@ -42,8 +42,8 @@ pub(crate) enum NotStarted {
 /// UI thread.
 ///
 /// # Errors
-/// `Pending` when the report didn't come in time. Otherwise the owner's refusal, or `Spawn` when
-/// the sockets, the path or the owner thread can't be made or the thread died before reporting.
+/// `Pending` when no report came in time or the owner thread ended without one. Otherwise the
+/// owner's refusal, or `Spawn` when the sockets, the path or the owner thread can't be made.
 pub(crate) fn start_brain(
     brain: &Path,
     word: Arc<SpawnWord>,
@@ -60,9 +60,10 @@ fn reported(os: impl Os, word: Arc<SpawnWord>, by: Instant) -> Result<ChildOwner
     match owner.spawned(by.min(Instant::now() + SPAWN_REPORT)) {
         Ok(Report::Spawned) => Ok(owner),
         Ok(Report::NotSpawned(refusal)) => Err(refusal.into()),
-        Err(RecvTimeoutError::Timeout) => Err(NotStarted::Pending),
-        Ok(Report::Settled(_)) | Err(RecvTimeoutError::Disconnected) => {
-            Err(Refusal::Spawn(io::ErrorKind::BrokenPipe.into()).into())
+        // A thread that ended without its report proves nothing about the spawn.
+        Ok(Report::Settled(_))
+        | Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+            Err(NotStarted::Pending)
         }
     }
 }
@@ -706,6 +707,30 @@ mod tests {
         fn kill(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    /// Dies inside its spawn, before the owner can report.
+    struct Dies;
+
+    impl Os for Dies {
+        fn auto_reaps(&self) -> bool {
+            false
+        }
+        fn spawn(&mut self) -> io::Result<()> {
+            panic!("the owner dies before its spawn report");
+        }
+        fn poll(&mut self) -> Observation {
+            Observation::Lost
+        }
+        fn kill(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_owner_that_ends_without_its_report_leaves_the_spawn_pending() {
+        let started = reported(Dies, Arc::new(SpawnWord::default()), Instant::now() + BOUND);
+        assert!(matches!(started, Err(NotStarted::Pending)));
     }
 
     #[test]

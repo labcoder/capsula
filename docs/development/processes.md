@@ -274,11 +274,15 @@ the disconnected window, so no child starts.
   or the attempt owned no child, as for a detached brain.
 - **Terminal custody ends the pair.** Once the owner reaps, loses or gives up on the child, the
   attempt's hook aborts both legs, so the link stops serving a pair whose peer may still hold
-  its ends open, without waiting for EOF. A watchdog beside the owner, armed when retirement
-  starts, ends custody as `Unsettled` at retirement's bound even while a kill never returns: it
-  latches the spawn word, reports, and runs the hook. Neither the hook nor the watchdog signals
-  or reaps; that stays on the owner thread, which may still reap later without reporting or
-  freeing a claim. A `settle` that gives up also latches the word.
+  its ends open, without waiting for EOF. A watchdog beside the owner is armed from the
+  caller's side, by `retire`, by the owner handle being dropped or by Quit seen on the word,
+  never by the owner. At retirement's bound it ends custody as `Unsettled` even while the owner
+  is stuck in a poll or a kill. Owner, watchdog and `settle` end custody through one lock, so
+  the first ending wins: a reap frees the claim there, `Unsettled` latches the word for good,
+  and a later ending returns the winner. Neither the hook nor the watchdog signals or reaps; that
+  stays on the owner thread, which may still reap later without reporting or freeing a claim.
+  An owner thread that ends without its spawn report leaves the spawn pending, never proven
+  absent.
 
 ```mermaid
 stateDiagram-v2
