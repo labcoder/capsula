@@ -9,7 +9,6 @@ use kumochi_protocol::message::{EventId, RunId, ThreadId, ThreadKind};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 use super::choice::StoredChoice;
-use super::recovered_context::Boundary;
 use super::threads::kind_of;
 use super::{Generation, StoreError, rounds, row_id, sql_id};
 use crate::config::tuning::ContextTuning;
@@ -127,7 +126,6 @@ pub(crate) struct Snapshot<'a>(
     pub(super) Transaction<'a>,
     pub(super) Option<crate::recall::control::ReadScope>,
     ContextTuning,
-    Option<Boundary>,
 );
 
 impl<'a> Snapshot<'a> {
@@ -139,44 +137,7 @@ impl<'a> Snapshot<'a> {
         let tx = conn.unchecked_transaction()?;
         // A deferred transaction's snapshot starts at its first read, so this read starts it.
         tx.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
-        Ok(Self(tx, None, ContextTuning::default(), None))
-    }
-
-    /// Keeps every later read to `require`, the established cutoff, once this snapshot reads
-    /// exactly that row; a missing, invalid or different row refuses the read.
-    pub(crate) fn for_recovery(mut self, require: Option<Boundary>) -> Result<Self, StoreError> {
-        if let Some(want) = require
-            && Boundary::read(&self.0, want.tag())? != Some(want)
-        {
-            return Err(StoreError::RecoveryContext);
-        }
-        self.3 = require;
-        Ok(self)
-    }
-
-    /// The cutoff this snapshot keeps to, which a request built from it carries.
-    pub(crate) fn recovery(&self) -> Option<Boundary> {
-        self.3
-    }
-
-    /// Whether automatic context may read `thread`'s history: always without a cutoff, and only
-    /// for threads created after one.
-    pub(crate) fn permits_history(&self, thread: ThreadId) -> bool {
-        self.3.is_none_or(|cut| cut.permits_thread(thread))
-    }
-
-    /// Refuses a run that began before the cutoff.
-    pub(crate) fn recovery_run(&self, run: RunId) -> Result<(), StoreError> {
-        if self.3.is_none_or(|cut| cut.permits_run(run)) {
-            Ok(())
-        } else {
-            Err(StoreError::RecoveryContext)
-        }
-    }
-
-    /// The highest thread id recall must skip; 0 without a cutoff.
-    pub(super) fn history_thread_floor(&self) -> i64 {
-        self.3.map_or(0, |cut| cut.bounds().0)
+        Ok(Self(tx, None, ContextTuning::default()))
     }
 
     pub(crate) fn controlled(mut self, control: crate::recall::control::ReadScope) -> Self {
@@ -231,29 +192,16 @@ impl Snapshot<'_> {
         thread: ThreadId,
         after: Option<EventId>,
         budget: usize,
-        only: Option<RunId>,
     ) -> Result<Vec<Item>, StoreError> {
         let thread = sql_id(thread.0, StoreError::NoThread)?;
         let after = after.map_or(Ok(0), |id| sql_id(id.0, StoreError::Read))?;
-        let only = only
-            .map(|run| sql_id(run.0, StoreError::NoRun))
-            .transpose()?;
-        let mut statement = self.0.prepare(if only.is_none() {
+        let mut statement = self.0.prepare(
             "SELECT id, run, kind, coalesce(text, ''), coalesce(body, '') FROM events
              WHERE thread = ?1 AND id > ?2 AND run IS NOT NULL
              AND kind IN ('user', 'assistant_text', 'output_item', 'tool_result')
-             ORDER BY id DESC"
-        } else {
-            // One run of a long thread seeks its own rows instead of scanning the thread's.
-            "SELECT id, run, kind, coalesce(text, ''), coalesce(body, '') FROM events
-             INDEXED BY events_run WHERE run = ?3 AND thread = ?1 AND id > ?2
-             AND kind IN ('user', 'assistant_text', 'output_item', 'tool_result')
-             ORDER BY id DESC"
-        })?;
-        let mut rows = match only {
-            None => statement.query(params![thread, after])?,
-            Some(run) => statement.query(params![thread, after, run])?,
-        };
+             ORDER BY id DESC",
+        )?;
+        let mut rows = statement.query(params![thread, after])?;
         let mut items: Vec<Item> = Vec::new();
         let mut bytes = 0_usize;
         while let Some(row) = rows.next()? {
@@ -332,14 +280,11 @@ impl Snapshot<'_> {
         Ok(found)
     }
 
-    /// The thread's newest summary; none for a thread from before a required cutoff.
+    /// The thread's newest summary.
     ///
     /// # Errors
     /// Fails when SQLite fails.
     pub(crate) fn summary(&self, thread: ThreadId) -> Result<Option<Summary>, StoreError> {
-        if !self.permits_history(thread) {
-            return Ok(None);
-        }
         let Ok(id) = sql_id(thread.0, StoreError::NoThread) else {
             return Ok(None);
         };

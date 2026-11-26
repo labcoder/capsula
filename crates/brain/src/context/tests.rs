@@ -1994,7 +1994,7 @@ fn a_native_item_the_reader_would_refuse_is_never_written() {
     let reader = Connection::open(world.scratch.db()).expect("reader");
     let items = Snapshot::begin(&reader)
         .expect("snapshot")
-        .conversation(world.main, None, usize::MAX, None)
+        .conversation(world.main, None, usize::MAX)
         .expect("the thread still reads");
     let natives: Vec<&[u8]> = items
         .iter()

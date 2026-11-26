@@ -109,7 +109,6 @@ fn built(choice: Option<&str>, tools: Vec<ToolSchema>) -> Input {
             connection: ConnectionTag(7),
         }),
         result: Ok(Built {
-            recovered_context: None,
             request: ModelRequest {
                 choice: None,
                 instructions: String::new(),

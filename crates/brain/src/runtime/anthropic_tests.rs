@@ -616,7 +616,6 @@ async fn a_title_takes_the_last_attempt_and_its_compaction_is_refused_unsent() {
                     ) => titled = true,
                     crate::runtime::Seen::StoreOpQueued(crate::coordinator::StoreOp::ReadJob(
                         crate::coordinator::ReadJob {
-                            require_recovery: None,
                             kind: crate::coordinator::JobKind::Compact,
                             ..
                         },
@@ -1059,7 +1058,6 @@ async fn a_title_never_posts_to_a_saved_model_the_catalog_does_not_offer() {
             loop {
                 if let crate::runtime::Seen::StoreOpQueued(crate::coordinator::StoreOp::ReadJob(
                     crate::coordinator::ReadJob {
-                        require_recovery: None,
                         kind: crate::coordinator::JobKind::Title,
                         ..
                     },

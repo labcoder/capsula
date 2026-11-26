@@ -453,7 +453,6 @@ fn a_held_runs_screen_goes_with_its_request_or_fails_the_run() {
             unreachable!()
         };
         done.result = Ok(Built {
-            recovered_context: None,
             request: ModelRequest {
                 choice: Some(ModelChoice {
                     connection,
@@ -527,7 +526,6 @@ fn a_held_runs_image_stays_out_of_inline_compaction_and_follows_its_turn_after()
                 JobAsk {
                     generation: Generation(5),
                     built: Built {
-                        recovered_context: None,
                         request: request(summary.clone()),
                         sources: vec![T],
                     },
@@ -564,7 +562,6 @@ fn a_held_runs_image_stays_out_of_inline_compaction_and_follows_its_turn_after()
             key: rebuilt,
             snapshot: None,
             result: Ok(Built {
-                recovered_context: None,
                 request: request(vec![note.clone(), user.clone()]),
                 sources: vec![T],
             }),
@@ -591,7 +588,6 @@ fn screened(key: BuildKey, sources: &[ThreadId]) -> Input {
         key,
         snapshot: None,
         result: Ok(Built {
-            recovered_context: None,
             request: ModelRequest {
                 choice: Some(choice("captured", Effort::High)),
                 instructions: String::new(),
@@ -1490,7 +1486,6 @@ fn an_inline_compaction_s_grant_leaves_a_held_image_untold() {
                     JobAsk {
                         generation: Generation(5),
                         built: crate::context::Built {
-                            recovered_context: None,
                             request: request(),
                             sources: vec![T],
                         },

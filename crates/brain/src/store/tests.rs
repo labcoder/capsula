@@ -262,11 +262,13 @@ fn a_recovered_v12_store_keeps_its_cutoff_at_v13() {
         .expect("a store the recovery operation took to v12");
     let store = Store::open_existing(&db).expect("the recovered store");
     assert_eq!(user_version(&db), 13);
-    assert_eq!(
-        super::Boundary::read(&store.conn, 7).expect("the cutoff reads"),
-        Some(super::Boundary::fixture(7, 4, 9))
-    );
-    assert_eq!(super::Boundary::read(&store.conn, 8).expect("reads"), None);
+    let row: (Vec<u8>, i64, i64) = store
+        .conn
+        .query_row("SELECT * FROM chatgpt_recovery_context", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .expect("the one cutoff row");
+    assert_eq!(row, (7_u64.to_be_bytes().to_vec(), 4, 9));
 }
 
 #[test]
