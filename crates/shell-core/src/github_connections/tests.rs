@@ -1,30 +1,5 @@
 use super::*;
 
-#[test]
-fn a_replayed_platform_refusal_prohibits_connect_without_hiding_local_cleanup() {
-    let mut state = GitHubConnections::default();
-    for generation in [7, 8] {
-        state.disconnected();
-        assert!(state.receive_error(
-            Some(generation),
-            generation,
-            ErrorKey::UnsupportedPlatform.into()
-        ));
-        let now = Instant::now();
-        assert!(state.receive(Some(generation), generation, signed_out(), now));
-        assert!(!state.allows(Some(generation), &GitHubOp::Connect));
-        assert_eq!(state.error_text(), Some(Text::UnsupportedPlatform));
-        assert!(state.receive(
-            Some(generation),
-            generation,
-            GitHubView::SignedOut {
-                cleanup: Some(Cleanup::NotDurable),
-            },
-            now
-        ));
-        assert!(state.allows(Some(generation), &GitHubOp::RetryCleanup));
-    }
-}
 use crate::strings::Strings;
 use kumochi_protocol::message::{ErrorKey, GitHubLogin, RepoName};
 use kumochi_scene::text::Bounded;

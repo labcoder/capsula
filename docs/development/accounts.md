@@ -802,7 +802,6 @@ generation, which moves on every rotation and would clear the list hourly.
 | 200 with sendable models, or a genuinely empty/hidden list | `Models` on the data pipe, once per change and per connection |
 | 200 with listable models but no known support, 200 that isn't a model list, a failed request, 401, 429, 5xx whatever its code | `AccountOffline`, Retry |
 | 403 `subscription_sharing_user_not_eligible`, and only that | `PlanUnavailable`; the account shows `PlanState::Unavailable` |
-| An unsupported-platform transport refusal (no current build's TLS produces one) | `AccountUnsupported` carries the local account view on every snapshot, including reconnect. No network Retry or Sign In; local sign-out and cleanup remain available. |
 | `subscription_sharing_user_not_eligible` on another 4xx | `AccountMisconfigured` |
 | other codes | as the refresh table above maps them |
 

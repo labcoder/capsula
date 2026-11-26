@@ -795,7 +795,7 @@ impl AccountState {
     fn end_attempt(&mut self, key: ErrorKey, effects: &mut Vec<Effect>) {
         self.live = None;
         let action = match key {
-            ErrorKey::AccountMisconfigured | ErrorKey::UnsupportedPlatform => None,
+            ErrorKey::AccountMisconfigured => None,
             // An attempt that ended has nothing for Retry to rerun, so a refused registration or
             // pending flag offers a new sign-in.
             ErrorKey::RevocationBacklog => Some(Action::Retry),

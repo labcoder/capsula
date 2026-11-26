@@ -133,10 +133,6 @@ pub enum LinkEvent {
         generation: u64,
         view: AccountView,
     },
-    AccountUnsupported {
-        generation: u64,
-        view: AccountView,
-    },
     Voice {
         generation: u64,
         view: kumochi_protocol::message::VoiceView,
@@ -2346,14 +2342,6 @@ fn watch(
             Ok(Some(ControlToShell::Account(view))) => {
                 if events
                     .send_blocking(LinkEvent::Account { generation, view })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            Ok(Some(ControlToShell::AccountUnsupported(view))) => {
-                if events
-                    .send_blocking(LinkEvent::AccountUnsupported { generation, view })
                     .is_err()
                 {
                     return;
