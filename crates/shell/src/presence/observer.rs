@@ -32,9 +32,8 @@ use draw_timing::{DrawRecord, PaintReceipts};
 use super::Launch;
 use super::geometry::{PanelVisibility, Position};
 use super::line::LineFrame;
-use crate::platform::{
-    self, MaskUpdate, PresenceError, PresenceEvent, ProxyHandle, ProxyNote, ROW_SPANS,
-};
+use super::line::machine::ROW_SPANS;
+use crate::platform::{self, MaskUpdate, PresenceError, PresenceEvent, ProxyHandle, ProxyNote};
 
 /// Rows one geometry record holds; the line's band at 200 % is under 50.
 pub(super) const ROW_CAP: usize = 512;

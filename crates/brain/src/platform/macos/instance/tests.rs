@@ -38,7 +38,7 @@ fn signed_host_admits_the_dev_brain_before_any_item_call() {
 }
 
 /// A fresh private Support folder under the commissioned fixture parent.
-fn support(label: &str) -> PathBuf {
+pub(crate) fn support(label: &str) -> PathBuf {
     let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
         .expect("an explicitly commissioned fixture parent");
     let mut random = [0_u8; 16];
@@ -55,7 +55,7 @@ fn support(label: &str) -> PathBuf {
 }
 
 /// Removes what a fixture made, by exact name, and nothing else.
-fn clean(support: &Path, names: &[&str]) {
+pub(crate) fn clean(support: &Path, names: &[&str]) {
     let product = support.join(DATA_DIR);
     for name in names {
         std::fs::remove_file(product.join(name)).expect("remove a fixture entry");

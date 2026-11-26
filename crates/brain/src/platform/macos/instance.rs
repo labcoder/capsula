@@ -25,10 +25,6 @@ use crate::startup::instance::{Added, InstanceStore};
 
 /// The brain's admitted view of the item, its only writer.
 #[derive(Debug)]
-#[cfg_attr(
-    test,
-    expect(dead_code, reason = "the instance attempt is the store's first caller")
-)]
 pub(crate) struct KeychainItem(InstanceItem);
 
 impl KeychainItem {
@@ -187,4 +183,4 @@ unsafe extern "C-unwind" fn allocate_nothing(
 unsafe extern "C-unwind" fn deallocate_nothing(_: *mut c_void, _: *mut c_void) {}
 
 #[cfg(test)]
-mod tests;
+pub(in crate::platform) mod tests;
