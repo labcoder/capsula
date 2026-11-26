@@ -184,11 +184,23 @@ pub fn product_folder(path: &Path) -> Result<(), Untrusted> {
         return Err(Untrusted::Unsafe);
     }
     let security = Security::read(&opened)?;
-    let trusted = Trusted::new()?;
-    trusted_security(&security, Kind::Folder, &trusted)?;
-    // Adding a subfolder is append-data on a folder; inherited write would open the databases.
-    // CREATOR OWNER only ever names whoever made the child, who the line above already limits.
-    let mut heirs = trusted;
+    trusted_security(&security, Kind::Folder, &Trusted::new()?)?;
+    no_untrusted_heirs(&security)
+}
+
+/// [`owner_only_dir`] for a product folder, whose existing folder must also pass
+/// [`product_folder`]'s check on what's made in it. Its parent must be held.
+pub(super) fn owner_only_product_dir(path: &Path) -> Result<File, Untrusted> {
+    let folder = owner_only_dir(path)?;
+    no_untrusted_heirs(&Security::read(&folder)?)?;
+    Ok(folder)
+}
+
+/// No one untrusted may add to the folder or inherit write on what's made in it. Adding a
+/// subfolder is append-data on a folder; inherited write would open the databases.
+fn no_untrusted_heirs(security: &Security) -> Result<(), Untrusted> {
+    // CREATOR OWNER only ever names whoever made the child, whom the change check already limits.
+    let mut heirs = Trusted::new()?;
     heirs.0.push(Sid::parse("S-1-3-0")?);
     if security.others_may(
         CHANGES | FILE_APPEND_DATA | FILE_WRITE_EA,
