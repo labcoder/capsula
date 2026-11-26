@@ -4,22 +4,22 @@ use std::sync::{Arc, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::{Handle, Id, Runtime};
 use tokio::sync::{Semaphore, oneshot};
 
 use crate::platform::tls_control::{ConnectCut, Control};
 
 mod connect;
+mod trust;
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-mod trust;
-#[cfg(test)]
-use {crate::platform::tls_control::ConnectCut as Stop, tokio::runtime::Id, tokio::sync::Notify};
+use {crate::platform::tls_control::ConnectCut as Stop, tokio::sync::Notify};
 
 pub use connect::NativeStream;
 pub(super) use connect::{direct, http};
+pub(super) use trust::config;
 
 const MAX_CONNECTS: usize = 4;
 const CONNECT_CAP: Duration = Duration::from_secs(10);
@@ -52,9 +52,7 @@ struct Attempt {
     request: Control,
     abandoned: Arc<ConnectCut>,
     by: Instant,
-    #[cfg(test)]
     owner: Id,
-    #[cfg(test)]
     checks: Arc<Semaphore>,
 }
 
@@ -85,7 +83,6 @@ tokio::task_local! {
     static CONNECTING: Arc<Attempt>;
 }
 
-#[cfg(test)]
 fn evaluate<T>(verify: impl FnOnce() -> T) -> Result<T, Refusal> {
     let attempt = CONNECTING
         .try_with(Arc::clone)
@@ -106,7 +103,6 @@ fn evaluate<T>(verify: impl FnOnce() -> T) -> Result<T, Refusal> {
 struct Executor {
     reactor: Handle,
     workers: Vec<Worker>,
-    #[cfg(test)]
     checks: Arc<Semaphore>,
     reactor_stop: Arc<oneshot::Sender<()>>,
 }
@@ -164,7 +160,6 @@ impl Executor {
         Ok(Self {
             reactor,
             workers,
-            #[cfg(test)]
             checks: Arc::new(Semaphore::new(1)),
             reactor_stop: Arc::new(shutdown),
         })
@@ -190,13 +185,10 @@ impl Executor {
             request,
             abandoned: Arc::new(ConnectCut::default()),
             by,
-            #[cfg(test)]
             owner: self.reactor.id(),
-            #[cfg(test)]
             checks: Arc::clone(&self.checks),
         });
         attempt.check()?;
-        #[cfg(test)]
         if self.checks.available_permits() == 0 {
             return Err(Refusal::Busy);
         }

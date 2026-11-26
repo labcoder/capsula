@@ -31,7 +31,7 @@ impl reqwest::dns::Resolve for NoDns {
 async fn a_real_reqwest_connector_requires_scope_and_runs_off_the_caller() {
     let _shared = SHARED_BOUNDARY.lock().await;
     let (resolved, wait_resolve) = mpsc::channel();
-    let tls = trust::config(Vec::new()).expect("offline fixture config");
+    let tls = trust::config().expect("offline fixture config");
     let client = super::super::http_builder(tls)
         .no_proxy()
         .dns_resolver(Arc::new(NoDns(resolved)))
@@ -94,9 +94,7 @@ async fn either_original_cut_stops_the_direct_worker_without_polling_its_answer(
         let resumed = Arc::new(AtomicBool::new(false));
         let did_dial = Arc::clone(&resumed);
         let handshake = connect::handshake(
-            tokio_rustls::TlsConnector::from(Arc::new(
-                trust::config(Vec::new()).expect("offline verifier"),
-            )),
+            tokio_rustls::TlsConnector::from(Arc::new(trust::config().expect("offline verifier"))),
             ServerName::try_from("localhost").expect("fixture host"),
             async move {
                 let _pending = settled;
@@ -534,7 +532,7 @@ async fn handshake(
             security_framework::certificate::SecCertificate::from_der(&root).expect("fixture root"),
         ]
     };
-    let config = trust::config(anchors).expect("offline verifier");
+    let config = trust::fixture_config(anchors, None).expect("offline verifier");
     let (client, peer) = tokio::io::duplex(16 * 1024);
     let peer = tokio::spawn(async move {
         tokio_rustls::TlsAcceptor::from(Arc::new(server))

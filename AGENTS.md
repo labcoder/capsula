@@ -47,7 +47,10 @@ THIRD-PARTY-NOTICES.md  notices for incorporated third-party source
 - Commits are the owner's: no AI attribution, no `Co-authored-by` or "Generated with" lines.
 
 ## Rules that protect users
-- No telemetry. Nothing leaves the machine except calls to accounts the user set up.
+- No telemetry. Network calls are limited to the accounts the user sets up and model downloads they
+  authorize. During those HTTPS handshakes, including setup, macOS trust services may fetch
+  certificate status and missing chain certificates. A refused or canceled handshake can leave an
+  already-started OS lookup running; Kumochi sends no credentials or application data to those services.
 - Secrets live only in Windows Credential Manager: never in logs, command lines, files or the
   environment. Hold them in `Secret`, which prints `***`.
 - The one exception: Claude Code's own credential file may exist only inside Kumochi's Claude
