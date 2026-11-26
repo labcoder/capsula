@@ -54,11 +54,15 @@ fn pair_refused() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "the pair already refused")
 }
 
+/// Darwin restarts a send's timeout each time it delivers more data, so a bounded call sends at
+/// most the default send low-water mark per transfer: such a send waits once, then delivers whole.
+const BOUNDED_SEND: usize = 2048;
+
 /// A socket bound that took, or one Darwin refused because both directions are already shut
 /// (`EINVAL`); then no transfer on the socket can block, so there's nothing left to bound.
 fn applied(set: io::Result<()>) -> io::Result<()> {
     match set {
-        Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
+        Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
         result => result,
     }
 }
@@ -353,12 +357,14 @@ impl Write for &PipeClient {
                 if rest.is_empty() {
                     break;
                 }
+                let mut take = rest.len();
                 if let Some(left) = left(by).map_err(|error| client.pair.refuse(error))? {
                     client
                         .bounded(client.stream.set_write_timeout(Some(left)))
                         .map_err(|error| client.pair.refuse(error))?;
+                    take = take.min(BOUNDED_SEND);
                 }
-                let n = match (&client.stream).write(rest) {
+                let n = match (&client.stream).write(&rest[..take]) {
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(error) => return Err(client.pair.refuse(error)),
                     Ok(0) => return Err(client.pair.refuse(io::ErrorKind::WriteZero)),
@@ -395,7 +401,7 @@ fn end(ends: &ShellEnds, leg: Pipe) -> &UnixStream {
 fn send(stream: &UnixStream, mut bytes: &[u8], by: Instant) -> io::Result<()> {
     while !bytes.is_empty() {
         bound(stream, by)?;
-        match (&*stream).write(bytes) {
+        match (&*stream).write(&bytes[..bytes.len().min(BOUNDED_SEND)]) {
             Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
             Ok(n) => bytes = &bytes[n..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}

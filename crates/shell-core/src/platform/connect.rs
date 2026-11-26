@@ -297,9 +297,13 @@ pub(super) fn over_pair(
         drawing,
         || Ok(data),
     )?;
-    let settings = connection.control.peek_control(deadline);
+    let phase = deadline.min(Instant::now() + HANDSHAKE_TIMEOUT);
+    let settings = connection.control.peek_control(phase);
     connection.control.set_timeout(None);
     check_attempt(Some(deadline))?;
+    if Instant::now() >= phase {
+        return Err(LinkError::Io(std::io::ErrorKind::TimedOut.into()));
+    }
     match settings? {
         Some(ControlToShell::Settings { .. }) => Ok(connection),
         _ => Err(LinkError::Rejected),

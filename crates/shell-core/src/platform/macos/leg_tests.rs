@@ -642,3 +642,46 @@ fn an_expired_attempt_starts_no_brain() {
     );
     assert!(matches!(result, Err(LinkError::ConnectExpired)));
 }
+
+#[test]
+fn a_bounded_write_ends_at_its_deadline_while_the_brain_drains_slowly() {
+    let (control, data, mut brain) = bound();
+    let drained = thread::spawn(move || {
+        let mut chunk = [0; 1024];
+        let mut total = 0;
+        loop {
+            thread::sleep(Duration::from_millis(100));
+            match brain.data.read(&mut chunk) {
+                Ok(0) | Err(_) => return total,
+                Ok(n) => total += n,
+            }
+        }
+    });
+    let timeout = Duration::from_millis(300);
+    data.set_timeout(Some(timeout));
+    let large = counting_frame(MAX_PLAINTEXT);
+    let started = Instant::now();
+    let failed = (&data).write(&large).expect_err("drained too slowly");
+    assert!(
+        started.elapsed() < timeout + Duration::from_millis(300),
+        "ended near its deadline, not when the brain caught up"
+    );
+    assert!(matches!(
+        failed.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+    assert!(
+        control.is_aborted() && data.is_aborted(),
+        "a frame cut off part way refuses the pair"
+    );
+    let small = frame::encode(&ControlToBrain::Pong, Pipe::Control).expect("encodes");
+    assert_eq!(
+        (&control).write(&small).expect_err("still refused").kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    drop((control, data));
+    assert!(
+        drained.join().expect("the brain side finished") > 0,
+        "part of the frame reached the brain"
+    );
+}
