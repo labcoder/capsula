@@ -74,7 +74,8 @@ use recovery::Recovery;
 pub(crate) use store_thread::StoreThread;
 #[cfg(not(test))]
 use store_thread::StoreThread;
-use terminal::{Fatal, Fence, Terminal};
+pub(crate) use terminal::Terminal;
+use terminal::{Fatal, Fence};
 
 macro_rules! select_connection {
     ($watch_fatal:expr, [$($fatal_arm:tt)*], $($arms:tt)*) => {
@@ -936,12 +937,62 @@ impl Brain {
         C: AsyncRead + AsyncWrite + Unpin,
         D: AsyncRead + AsyncWrite + Unpin,
     {
+        self.serve_split(
+            tokio::io::split(control),
+            tokio::io::split(data),
+            tap,
+            audio,
+            text_metrics,
+            start,
+            terminal,
+        )
+        .await
+    }
+
+    /// Serves one connection over legs already split into a reader and a whole-frame writer each,
+    /// as a transport whose frames can't be resumed hands them over.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one connection carries two legs, its profile and terminal source"
+    )]
+    pub(crate) async fn serve_split<CR, CW, DR, DW>(
+        &mut self,
+        control: (CR, CW),
+        data: (DR, DW),
+        tap: &mut Tap,
+        audio: AudioSession,
+        text_metrics: Option<TextMetricsV1>,
+        start: PairStart,
+        terminal: Option<Terminal>,
+    ) -> Ended
+    where
+        CR: AsyncRead + Unpin,
+        CW: FrameWrite,
+        DR: AsyncRead + Unpin,
+        DW: FrameWrite,
+    {
         if terminal.is_some() {
-            self.serve_pair::<true, _, _>(control, data, tap, audio, text_metrics, start, terminal)
-                .await
+            self.serve_pair::<true, _, _, _, _>(
+                control,
+                data,
+                tap,
+                audio,
+                text_metrics,
+                start,
+                terminal,
+            )
+            .await
         } else {
-            self.serve_pair::<false, _, _>(control, data, tap, audio, text_metrics, start, None)
-                .await
+            self.serve_pair::<false, _, _, _, _>(
+                control,
+                data,
+                tap,
+                audio,
+                text_metrics,
+                start,
+                None,
+            )
+            .await
         }
     }
 
@@ -953,10 +1004,10 @@ impl Brain {
         clippy::too_many_arguments,
         reason = "connection specialization preserves the profile and terminal source"
     )]
-    async fn serve_pair<const WATCH_FATAL: bool, C, D>(
+    async fn serve_pair<const WATCH_FATAL: bool, CR, CW, DR, DW>(
         &mut self,
-        control: C,
-        data: D,
+        control: (CR, CW),
+        data: (DR, DW),
         tap: &mut Tap,
         audio: AudioSession,
         text_metrics: Option<TextMetricsV1>,
@@ -964,8 +1015,10 @@ impl Brain {
         terminal: Option<Terminal>,
     ) -> Ended
     where
-        C: AsyncRead + AsyncWrite + Unpin,
-        D: AsyncRead + AsyncWrite + Unpin,
+        CR: AsyncRead + Unpin,
+        CW: FrameWrite,
+        DR: AsyncRead + Unpin,
+        DW: FrameWrite,
     {
         let mut wake = pin!(if WATCH_FATAL {
             terminal.clone().map(Terminal::wake_on_fatal)
@@ -978,8 +1031,8 @@ impl Brain {
             return Ended::Fatal(cause);
         }
         self.begin_pair();
-        let (mut control_in, mut control_out) = tokio::io::split(control);
-        let (mut data_in, mut data_out) = tokio::io::split(data);
+        let (mut control_in, mut control_out) = control;
+        let (mut data_in, mut data_out) = data;
         let (controls_tx, mut controls) = mpsc::channel(64);
         let (turns_tx, mut turns) = mpsc::channel(MAX_PENDING_TURNS);
         let (pages_tx, mut pages) = mpsc::channel(kumochi_protocol::message::MAX_PENDING_PAGES);
@@ -996,6 +1049,12 @@ impl Brain {
         let control_reader =
             read_control::<WATCH_FATAL>(&mut control_in, &controls_tx, &quit, fence);
         tokio::pin!(control_reader);
+        // The writers outlive the select, unpolled, until the disposition is settled: dropping a
+        // frame part way refuses a pair whose frames can't resume, turning ordinary loss fatal.
+        let control_writer = write_control(&mut control_out, &mut out);
+        tokio::pin!(control_writer);
+        let data_writer = write_data(&mut data_out, &queue, &ready, &room);
+        tokio::pin!(data_writer);
         let mut reading = true;
         let mut ended = {
             let data_reader = read_data::<WATCH_FATAL>(
@@ -1009,8 +1068,6 @@ impl Brain {
                 registration,
                 fence,
             );
-            let control_writer = write_control(&mut control_out, &mut out);
-            let data_writer = write_data(&mut data_out, &queue, &ready, &room);
             let mut link = Link::new(&out_tx, &queue, &ready, &mut *tap);
             link.registration = registration;
             link.text_metrics = text_metrics;
@@ -1030,8 +1087,8 @@ impl Brain {
                     ended
                 }
                 ended = data_reader => ended,
-                ended = control_writer => ended,
-                ended = data_writer => ended,
+                ended = &mut control_writer => ended,
+                ended = &mut data_writer => ended,
                 ended = core => ended,
             }
         };
@@ -2075,10 +2132,20 @@ async fn read_data<const WATCH_FATAL: bool>(
     }
 }
 
-async fn write_control(
-    pipe: &mut (impl AsyncWrite + Unpin),
-    out: &mut mpsc::Receiver<Vec<u8>>,
-) -> Ended {
+/// One leg's outgoing side, one whole encoded frame per call. A pipe writes and flushes the bytes;
+/// a transport whose frames can't be resumed refuses its pair when a pending frame is dropped.
+pub(crate) trait FrameWrite {
+    async fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()>;
+}
+
+impl<T: AsyncWrite + Unpin> FrameWrite for T {
+    async fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
+        self.write_all(frame).await?;
+        self.flush().await
+    }
+}
+
+async fn write_control(pipe: &mut impl FrameWrite, out: &mut mpsc::Receiver<Vec<u8>>) -> Ended {
     #[cfg(all(windows, debug_assertions, feature = "test-support"))]
     let probe = audio_fixture::probe();
     while let Some(frame) = out.recv().await {
@@ -2086,7 +2153,7 @@ async fn write_control(
         if let Some(probe) = &probe {
             probe.before_control(&frame).await;
         }
-        if let Err(error) = pipe.write_all(&frame).await {
+        if let Err(error) = pipe.write_frame(&frame).await {
             tracing::warn!(%error, "control pipe failed");
             return Ended::Lost;
         }
@@ -2096,7 +2163,7 @@ async fn write_control(
 
 /// Writes queued data as credit allows, waking the core through `room` as the queue drains.
 async fn write_data(
-    pipe: &mut (impl AsyncWrite + Unpin),
+    pipe: &mut impl FrameWrite,
     queue: &RefCell<DataQueue>,
     ready: &Notify,
     room: &Notify,
@@ -2138,7 +2205,7 @@ async fn write_data(
                 std::sync::atomic::Ordering::Release,
             );
         }
-        let writing = pipe.write_all(&frame);
+        let writing = pipe.write_frame(&frame);
         tokio::pin!(writing);
         loop {
             tokio::select! {

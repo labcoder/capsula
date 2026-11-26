@@ -18,7 +18,9 @@ use tokio::time::{Instant, timeout};
 
 use super::data::{DataQueue, Owner};
 use super::terminal::{Fatal, Fence, Terminal};
-use super::{Ended, PairStart, QUIT_GRACE, Seen, close_wait, hold, read_control, read_data};
+use super::{
+    Ended, FrameWrite, PairStart, QUIT_GRACE, Seen, close_wait, hold, read_control, read_data,
+};
 use crate::coordinator::StoreOp;
 use crate::ipc;
 use crate::platform::shell_process::{Unconfirmed, Verdict};
@@ -801,4 +803,102 @@ async fn a_writer_refusal_skips_grace_even_though_the_reader_is_still_open() {
         );
         brain.close().await;
     }
+}
+
+/// A writer whose first frame never finishes and, as a transport whose frames can't resume does,
+/// refuses its pair when that frame is dropped part way.
+struct Held<'a> {
+    pair: watch::Sender<bool>,
+    started: &'a Notify,
+}
+
+struct Cut(watch::Sender<bool>);
+
+impl Drop for Cut {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
+}
+
+impl FrameWrite for Held<'_> {
+    async fn write_frame(&mut self, _: &[u8]) -> io::Result<()> {
+        let _cut = Cut(self.pair.clone());
+        self.started.notify_one();
+        pending().await
+    }
+}
+
+#[tokio::test]
+async fn an_ordinary_loss_keeps_a_frame_written_part_way_until_it_is_settled() {
+    for audio in AUDIO {
+        let scratch = Scratch::new("loss-mid-frame");
+        let mut brain = test_support::brain(&scratch, "");
+        let mut tap = Tap::from_env();
+        let (control_pipe, shell_control) = tokio::io::duplex(8192);
+        let (data_pipe, shell_data) = tokio::io::duplex(8192);
+        let (pair, _parent, terminal) = cells();
+        let refused = pair.subscribe();
+        let started = Notify::new();
+        let (control_in, _control_out) = tokio::io::split(control_pipe);
+        let held = Held {
+            pair,
+            started: &started,
+        };
+        {
+            let mut serve = pin!(brain.serve_split(
+                (control_in, held),
+                tokio::io::split(data_pipe),
+                &mut tap,
+                audio,
+                None,
+                PairStart::Ordinary,
+                Some(terminal),
+            ));
+            tokio::select! {
+                ended = &mut serve => panic!("ended before a frame was pending: {ended:?}"),
+                () = started.notified() => {}
+            }
+            assert!(!*refused.borrow());
+            drop((shell_control, shell_data));
+            assert_eq!(timeout(LIMIT, serve).await.unwrap(), Ended::Lost);
+        }
+        assert!(
+            *refused.borrow(),
+            "the pending frame is cut once serve ends"
+        );
+        brain.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_pipe_writes_each_frame_whole_and_flushed_in_one_call() {
+    let frame = control(&ControlToBrain::Stop {
+        run: RunId(1),
+        revealed: vec![7; 300],
+    });
+    let (pipe, mut shell) = tokio::io::duplex(64);
+    let (pipe_in, mut pipe_out) = tokio::io::split(pipe);
+    let mut sent = Vec::new();
+    let ((), read) = tokio::join!(
+        async {
+            FrameWrite::write_frame(&mut pipe_out, &frame)
+                .await
+                .unwrap();
+            drop((pipe_in, pipe_out));
+        },
+        shell.read_to_end(&mut sent),
+    );
+    read.unwrap();
+    assert_eq!(sent, frame, "the whole frame, from one call");
+
+    let (pipe, mut shell) = tokio::io::duplex(64);
+    let mut buffered = tokio::io::BufWriter::new(pipe);
+    let mut sent = vec![0; frame.len()];
+    let (written, read) = tokio::join!(
+        FrameWrite::write_frame(&mut buffered, &frame),
+        timeout(LIMIT, shell.read_exact(&mut sent)),
+    );
+    written.unwrap();
+    read.expect("flushed by the call").unwrap();
+    assert_eq!(sent, frame);
 }

@@ -615,3 +615,54 @@ async fn control_round_trips_while_data_is_stuck_mid_frame() {
     );
     assert!(!*refused.borrow());
 }
+
+/// Through the runtime's seam: one call is one whole frame, here three records long, and a call
+/// dropped part way leaves the frame cut, refuses the pair and is never resumed.
+#[tokio::test]
+async fn the_runtime_seam_writes_one_whole_frame_per_call_and_a_dropped_one_refuses() {
+    use crate::runtime::FrameWrite;
+
+    let (shell, brain) = established();
+    let (pair, refused) = cell();
+    let (to_shell, at_shell) = duplex(1024);
+    let (shell_pair, _) = cell();
+    let mut at_shell = RecordReader::new(at_shell, shell.data.opener, shell_pair);
+    let mut writer = RecordWriter::new(to_shell, brain.data.sealer, Pipe::Data, pair);
+    let long = frame(2 * MAX_PLAINTEXT + 100);
+    let mut got = vec![0; long.len()];
+    let (written, read) = tokio::join!(
+        FrameWrite::write_frame(&mut writer, &long),
+        timeout(Duration::from_secs(5), at_shell.read_exact(&mut got)),
+    );
+    written.expect("one frame");
+    read.expect("in time")
+        .expect("the shell opens the whole frame");
+    assert_eq!(got, long);
+    assert!(!*refused.borrow());
+
+    let (_, brain) = established();
+    let (pair, refused) = cell();
+    let (to_shell, mut at_shell) = duplex(1000);
+    let mut writer = RecordWriter::new(to_shell, brain.data.sealer, Pipe::Data, pair);
+    {
+        let write = FrameWrite::write_frame(&mut writer, &long);
+        tokio::pin!(write);
+        assert!(
+            poll_once(write.as_mut()).await.is_pending(),
+            "the transport is full"
+        );
+        assert!(!*refused.borrow(), "pending is not refused");
+    }
+    assert!(
+        *refused.borrow(),
+        "dropping the call cuts the frame and refuses"
+    );
+    let again = FrameWrite::write_frame(&mut writer, &frame(HEADER_LEN + 1))
+        .await
+        .expect_err("never resumed");
+    assert_eq!(refusal(&again), Some(Refusal::PairRefused));
+    drop(writer);
+    let mut sent = Vec::new();
+    at_shell.read_to_end(&mut sent).await.expect("closed");
+    assert_eq!(sent.len(), 1000, "no byte after the cut");
+}
