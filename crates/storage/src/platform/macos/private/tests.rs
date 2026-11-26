@@ -90,6 +90,21 @@ fn new_link(folder: &File) {
     assert_eq!(made, 0, "replacement fixture link");
 }
 
+/// Gives the original file a second name at `f` after its single-link look.
+fn second_name(folder: &File) {
+    // SAFETY: folder is a held fixture folder; both names are fixed fixture components.
+    let made = unsafe {
+        libc::linkat(
+            folder.as_raw_fd(),
+            c"f-old".as_ptr(),
+            folder.as_raw_fd(),
+            c"f".as_ptr(),
+            0,
+        )
+    };
+    assert_eq!(made, 0, "replacement fixture hard link");
+}
+
 fn nothing(_: &File) {}
 
 /// A file swap: the folder's name, when it happens, what replaces the file, the refusal, and where
@@ -642,7 +657,7 @@ fn native_a_file_is_bound_from_its_look_to_its_name() {
     let root = scratch.root.try_clone().expect("retain scratch root");
     let user = this_user();
 
-    let cases: [Swap; 5] = [
+    let cases: [Swap; 6] = [
         (
             c"opened",
             Step::Looked,
@@ -671,6 +686,13 @@ fn native_a_file_is_bound_from_its_look_to_its_name() {
             new_link,
             Untrusted::Reparse,
             Some(c"l"),
+        ),
+        (
+            c"relinked",
+            Step::Looked,
+            second_name,
+            Untrusted::Unsafe,
+            Some(c"f2"),
         ),
     ];
     let mut outcomes = Vec::new();
