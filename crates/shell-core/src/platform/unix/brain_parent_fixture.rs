@@ -93,10 +93,7 @@ fn isolated_owned_brain_exits_cooperatively_when_its_shell_exits() {
     let mut settled = [0_u8; 1];
     read_before(&mut brain, &mut settled, by);
     assert_eq!(settled, *b"E", "parent loss closed the brain's commit gate");
-    assert!(
-        exited.exited(by),
-        "independent kernel witness of the brain's exit"
-    );
+    assert_eq!(exited.status(by), Some(0), "the brain exited cleanly");
 }
 
 #[test]
@@ -141,8 +138,14 @@ fn watch_entry() {
     if !std::env::args_os().skip(1).eq(args(WATCH)) {
         return;
     }
-    // SAFETY: only the exact owned-child invocation takes the control leg at fd 3.
-    let mut control = UnixStream::from(unsafe { OwnedFd::from_raw_fd(pair::CONTROL_FD) });
+    // SAFETY: fcntl checks fd 3 and returns a separately owned descriptor on success.
+    let raw = unsafe { libc::fcntl(pair::CONTROL_FD, libc::F_DUPFD_CLOEXEC, 0) };
+    assert!(raw >= 0, "duplicate the inherited control socket");
+    // SAFETY: successful fcntl opened this descriptor, and nothing else owns it.
+    let control = unsafe { OwnedFd::from_raw_fd(raw) };
+    assert_eq!(socket_int(raw, libc::SO_TYPE), Some(libc::SOCK_STREAM));
+    let mut control = UnixStream::from(control);
+    control.peer_addr().expect("connected Unix control socket");
     timed(&control);
     let by = Instant::now() + BOUND;
     kumochi_brain::platform::group_parent_fixture(by, || {

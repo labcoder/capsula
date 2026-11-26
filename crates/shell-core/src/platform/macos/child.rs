@@ -16,7 +16,7 @@ use kumochi_protocol::constants::PARENT_BOUND;
 
 use super::pair::{self, Action, ChildEnds, ShellEnds};
 use crate::platform::child::{ChildOwner, Exit, Observation, Os, Refusal, Report, SpawnWord};
-use crate::platform::unix::brain_group::{OwnedGroup, SET_SESSION};
+use crate::platform::unix::brain_group::{OwnedGroup, RetirementError, SET_SESSION};
 
 /// How long `start_brain` waits for the spawn report. A spawn takes milliseconds; this only
 /// bounds one that stalls.
@@ -170,7 +170,15 @@ impl Os for Darwin {
     }
 
     fn kill(&mut self) -> io::Result<()> {
-        self.group.as_ref().ok_or(io::ErrorKind::NotFound)?.retire()
+        let group = self.group.as_ref().ok_or(io::ErrorKind::NotFound)?;
+        match group.retire() {
+            Ok(()) => Ok(()),
+            Err(RetirementError::Refused(error)) => Err(error),
+            Err(RetirementError::Lost) => {
+                self.group = None;
+                Err(io::ErrorKind::NotFound.into())
+            }
+        }
     }
 }
 
@@ -515,7 +523,7 @@ mod tests {
         let stopped = stopped_within(pid, Instant::now() + BOUND);
         let before_kill = child.poll();
         let killed = child.kill();
-        if killed.is_err() && stopped && before_kill == Observation::Running {
+        if killed.is_err() && stopped && child.poll() == Observation::Running {
             super::group_tests::clean_stopped_fixture(pid);
         }
         let by = Instant::now() + BOUND;
@@ -554,18 +562,31 @@ mod tests {
 
     #[test]
     fn a_child_reaped_by_someone_else_is_lost() {
-        let mut child = sh("exit 0");
-        child.spawn().expect("spawn");
-        let pid = child.group.as_ref().expect("group").leader();
-        let mut status = 0;
-        // SAFETY: `status` is valid for one write; this test plays the foreign reaper.
-        let reaped = unsafe { libc::waitpid(pid, &raw mut status, 0) };
-        assert_eq!(reaped, pid, "the foreign wait reaped it");
-        assert_eq!(child.poll(), Observation::Lost);
-        assert_eq!(
-            child.kill().expect_err("no signal after loss").kind(),
-            io::ErrorKind::NotFound
-        );
+        for retire_first in [false, true] {
+            let mut child = sh("exit 0");
+            child.spawn().expect("spawn");
+            let pid = child.group.as_ref().expect("group").leader();
+            let mut status = 0;
+            // SAFETY: `status` is valid for one write; this test plays the foreign reaper.
+            let reaped = unsafe { libc::waitpid(pid, &raw mut status, 0) };
+            assert_eq!(reaped, pid, "the foreign wait reaped it");
+            if retire_first {
+                assert_eq!(
+                    child
+                        .kill()
+                        .expect_err("pre-signal wait found no child")
+                        .kind(),
+                    io::ErrorKind::NotFound
+                );
+                assert!(child.group.is_none(), "no second wait on a lost PID");
+            }
+            assert_eq!(child.poll(), Observation::Lost);
+            assert!(child.group.is_none(), "the lost PID is never reused");
+            assert_eq!(
+                child.kill().expect_err("no signal after loss").kind(),
+                io::ErrorKind::NotFound
+            );
+        }
     }
 
     /// An inheritable descriptor above every slot the spawn uses for `ends`, so only

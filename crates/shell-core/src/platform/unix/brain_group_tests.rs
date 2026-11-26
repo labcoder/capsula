@@ -67,7 +67,7 @@ impl ExitWitness {
             ident: pid,
             filter: libc::EVFILT_PROC,
             flags: libc::EV_ADD | libc::EV_ONESHOT,
-            fflags: libc::NOTE_EXIT,
+            fflags: libc::NOTE_EXIT | libc::NOTE_EXITSTATUS,
             data: 0,
             udata: ptr::null_mut(),
         };
@@ -90,7 +90,7 @@ impl ExitWitness {
         Self { queue, pid }
     }
 
-    fn exited(&self, by: Instant) -> bool {
+    fn status(&self, by: Instant) -> Option<libc::intptr_t> {
         let left = by.saturating_duration_since(Instant::now());
         let timeout = libc::timespec {
             tv_sec: libc::time_t::try_from(left.as_secs()).expect("bounded wait seconds"),
@@ -109,14 +109,16 @@ impl ExitWitness {
             )
         };
         if observed != 1 {
-            return false;
+            return None;
         }
         // SAFETY: a return of one means the output event was initialized.
         let event = unsafe { event.assume_init() };
-        event.ident == self.pid
+        let exit = libc::NOTE_EXIT | libc::NOTE_EXITSTATUS;
+        (event.ident == self.pid
             && event.filter == libc::EVFILT_PROC
             && event.flags & libc::EV_ERROR == 0
-            && event.fflags & libc::NOTE_EXIT != 0
+            && event.fflags & exit == exit)
+            .then_some(event.data)
     }
 }
 
@@ -133,15 +135,15 @@ fn forced_retirement_reaches_the_owned_group_but_not_another_session() {
         .expect("fixed fixture command");
         let owner = reported(os, Arc::new(SpawnWord::default()), by).expect("fixture owner");
         timed(&shell.control);
-        (owner, shell.control)
+        (owner, shell.control, shell.data)
     };
-    let (sentinel, mut other) =
+    let (sentinel, mut other, _other_data) =
         launch("printf R >&3; IFS= read -r token <&3 && [ \"$token\" = S ]");
     let mut ready = [0_u8; 1];
     read_before(&mut other, &mut ready, by);
     assert_eq!(ready, *b"R", "the other session is ready");
-    let (owner, mut control) = launch(
-        "/bin/sleep 15 & member=$!; printf '%010d%010d' \"$$\" \"$member\" >&3; wait \"$member\"",
+    let (owner, mut control, _member_data) = launch(
+        "(IFS= read -r token <&4) & member=$!; printf '%010d%010d' \"$$\" \"$member\" >&3; wait \"$member\"",
     );
     let mut ids = [0_u8; 20];
     read_before(&mut control, &mut ids, by);
@@ -161,7 +163,11 @@ fn forced_retirement_reaches_the_owned_group_but_not_another_session() {
         owner.next(by),
         Some(Report::Settled(Settled::Reaped(Exit::Signal(9))))
     ));
-    assert!(exited.exited(by), "the same-group member also exited");
+    assert_eq!(
+        exited.status(by),
+        Some(libc::intptr_t::try_from(libc::SIGKILL).expect("signal fits an event status")),
+        "the same-group member was also killed"
+    );
     other
         .write_all(b"S\n")
         .expect("the other session still answers");
