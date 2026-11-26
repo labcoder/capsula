@@ -19,7 +19,7 @@ use kumochi_session::{
 };
 use zeroize::{Zeroize as _, Zeroizing};
 
-use super::child::{poll, poll_hangup};
+use super::child::poll;
 use super::pair::ShellEnds;
 
 /// Both legs' shared state: once refused, neither leg reads, delivers or writes again.
@@ -423,61 +423,28 @@ impl Write for &PipeClient {
     }
 }
 
-/// One leg's end and the other leg's, which startup watches for a hangup.
-type Legs<'a> = (&'a UnixStream, &'a UnixStream);
-
-fn legs(ends: &ShellEnds, leg: Pipe) -> Legs<'_> {
+fn end(ends: &ShellEnds, leg: Pipe) -> &UnixStream {
     match leg {
-        Pipe::Control => (&ends.control, &ends.data),
-        Pipe::Data => (&ends.data, &ends.control),
+        Pipe::Control => &ends.control,
+        Pipe::Data => &ends.data,
     }
 }
 
-/// Waits until the leg is ready for `events` by `by`, failing with `UnexpectedEof` once the other
-/// leg hangs up: a brain that closes either leg during startup won't finish it.
-fn startup_ready((stream, other): Legs<'_>, events: libc::c_short, by: Instant) -> io::Result<()> {
-    expired(Some(by))?;
-    if poll_hangup(stream, events, other, by)? {
-        return Err(io::ErrorKind::UnexpectedEof.into());
-    }
-    Ok(())
-}
-
-/// [`read_by`] during startup, which also ends when the other leg hangs up.
-fn startup_read(legs: Legs<'_>, buf: &mut [u8], by: Instant) -> io::Result<usize> {
-    loop {
-        expired(Some(by))?;
-        match (&*legs.0).read(buf) {
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                startup_ready(legs, libc::POLLIN, by)?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            result => return result,
-        }
-    }
-}
-
-/// Writes all of `bytes` by `by`, ending when the other leg hangs up.
-fn send(legs: Legs<'_>, mut bytes: &[u8], by: Instant) -> io::Result<()> {
+/// Writes all of `bytes` by `by`.
+fn send(stream: &UnixStream, mut bytes: &[u8], by: Instant) -> io::Result<()> {
     while !bytes.is_empty() {
-        expired(Some(by))?;
-        match (&*legs.0).write(bytes) {
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                startup_ready(legs, libc::POLLOUT, by)?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
-            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
-            Ok(n) => bytes = &bytes[n..],
+        match write_by(stream, bytes, Some(by))? {
+            0 => return Err(io::ErrorKind::WriteZero.into()),
+            n => bytes = &bytes[n..],
         }
     }
     Ok(())
 }
 
-/// Fills `buf` by `by`, ending when the other leg hangs up.
-fn fill(legs: Legs<'_>, mut buf: &mut [u8], by: Instant) -> io::Result<()> {
+/// Fills `buf` by `by`.
+fn fill(stream: &UnixStream, mut buf: &mut [u8], by: Instant) -> io::Result<()> {
     while !buf.is_empty() {
-        match startup_read(legs, buf, by)? {
+        match read_by(stream, buf, Some(by))? {
             0 => return Err(io::ErrorKind::UnexpectedEof.into()),
             n => buf = &mut std::mem::take(&mut buf)[n..],
         }
@@ -487,30 +454,15 @@ fn fill(legs: Legs<'_>, mut buf: &mut [u8], by: Instant) -> io::Result<()> {
 
 /// One handshake message, its length taken from the envelope by the state that expects it.
 fn message(
-    legs: Legs<'_>,
+    stream: &UnixStream,
     by: Instant,
     len: impl FnOnce([u8; ENVELOPE_LEN]) -> Result<usize, SessionError>,
 ) -> io::Result<Vec<u8>> {
     let mut envelope = [0; ENVELOPE_LEN];
-    fill(legs, &mut envelope, by)?;
+    fill(stream, &mut envelope, by)?;
     let mut message = vec![0; len(envelope).map_err(session_error)?];
-    fill(legs, &mut message, by)?;
+    fill(stream, &mut message, by)?;
     Ok(message)
-}
-
-/// Shuts down both of the shell's ends when called, from any thread, so every wait on them
-/// returns and nothing the brain sends after it is read. For custody ending before Connected.
-///
-/// # Errors
-/// Fails when an end can't be duplicated.
-pub(crate) fn closer(ends: &ShellEnds) -> io::Result<impl FnOnce() + Send + 'static> {
-    let ends = [ends.control.try_clone()?, ends.data.try_clone()?];
-    Ok(move || {
-        for end in &ends {
-            // An end that's already shut down has nothing left to wake.
-            let _shut = end.shutdown(Shutdown::Both);
-        }
-    })
 }
 
 /// The instance capability on the heap, so a move copies only the pointer. Wiped when dropped.
@@ -542,19 +494,17 @@ fn record_wipe(bytes: &[u8]) {
 fn record_wipe(_: &[u8]) {}
 
 /// The one byte the brain writes on control before the handshake, read by `by` and nothing past
-/// it, so the initiator's first envelope starts after it. `None` when either leg ended first.
+/// it, so the initiator's first envelope starts after it. `None` when the stream ended first.
 ///
 /// # Errors
 /// `TimedOut` past `by`, or the transport's error.
 pub(crate) fn read_ready(ends: &ShellEnds, by: Instant) -> io::Result<Option<u8>> {
     ends.control.set_nonblocking(true)?;
     let mut byte = [0];
-    match startup_read(legs(ends, Pipe::Control), &mut byte, by) {
-        Ok(0) => Ok(None),
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
-        Ok(_) => Ok(Some(byte[0])),
-        Err(error) => Err(error),
-    }
+    Ok(match read_by(&ends.control, &mut byte, Some(by))? {
+        0 => None,
+        _ => Some(byte[0]),
+    })
 }
 
 /// The initiator's side over the brain child's pair, all of it by `by`: control init and
@@ -575,24 +525,18 @@ pub(crate) fn initiate(
     }
     let (mut shell, init) = ShellAwaitsReply::start(&secret.0, channel).map_err(session_error)?;
     drop(secret);
-    send(legs(&ends, init.leg), &init.bytes, by)?;
-    let reply = message(legs(&ends, Pipe::Control), by, |envelope| {
-        shell.record_len(envelope)
-    })?;
+    send(end(&ends, init.leg), &init.bytes, by)?;
+    let reply = message(&ends.control, by, |envelope| shell.record_len(envelope))?;
     let (shell, out) = shell.receive(&reply).map_err(session_error)?;
     for out in &out {
-        send(legs(&ends, out.leg), &out.bytes, by)?;
+        send(end(&ends, out.leg), &out.bytes, by)?;
     }
-    let reply = message(legs(&ends, Pipe::Data), by, |envelope| {
-        shell.record_len(envelope)
-    })?;
+    let reply = message(&ends.data, by, |envelope| shell.record_len(envelope))?;
     let (shell, out) = shell.receive(&reply).map_err(session_error)?;
     for out in &out {
-        send(legs(&ends, out.leg), &out.bytes, by)?;
+        send(end(&ends, out.leg), &out.bytes, by)?;
     }
-    let ack = message(legs(&ends, Pipe::Control), by, |envelope| {
-        shell.record_len(envelope)
-    })?;
+    let ack = message(&ends.control, by, |envelope| shell.record_len(envelope))?;
     let Session { control, data } = shell.receive(&ack).map_err(session_error)?;
     if Instant::now() >= by {
         return Err(io::ErrorKind::TimedOut.into());

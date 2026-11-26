@@ -48,7 +48,7 @@ impl Shell {
             .expect("the fixture published its synthetic seed");
         ends.control.set_nonblocking(true).expect("bounded READY");
         let mut ready = [0];
-        fill(legs(&ends, Pipe::Control), &mut ready, by).expect("READY arrived");
+        fill(&ends.control, &mut ready, by).expect("READY arrived");
         assert_eq!(ready, [SESSION_READY], "the responder started admission");
         let channel = if ProductIdentity::ACTIVE == ProductIdentity::RELEASE {
             Channel::Release

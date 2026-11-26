@@ -49,6 +49,8 @@ struct Script {
     grace: Option<Duration>,
     /// Told when the brain reaches the point its script names.
     reached: Option<mpsc::Sender<()>>,
+    /// Holds a brain that exits or is lost after commit until the test says so.
+    after_commit: Option<Receiver<()>>,
 }
 
 /// A fake child: running until it exits or is killed; a kill ends it with SIGKILL and tells
@@ -144,6 +146,8 @@ enum Then {
     /// Writes READY, waits to see the shell's ends shut down, says so and holds both ends open
     /// until killed.
     ReadyBeforeShutdown,
+    /// Writes READY, then exits with this code once the shell's ends shut down.
+    ExitsOnEof(i32),
 }
 
 fn brain(child: &Child, then: Then) -> ShellEnds {
@@ -187,6 +191,10 @@ fn brain(child: &Child, then: Then) -> ShellEnds {
                 reached();
                 return until_killed();
             }
+            Then::ExitsOnEof(code) => {
+                shut_down_seen(&control);
+                return child.exits(Exit::Code(code));
+            }
             _ => {}
         }
         let deadline = Instant::now() + BOUND;
@@ -197,6 +205,10 @@ fn brain(child: &Child, then: Then) -> ShellEnds {
             Commit::Settings,
             deadline,
         );
+        let held = child.script().after_commit.take();
+        if let Some(held) = held {
+            let _released = held.recv_timeout(BOUND);
+        }
         match then {
             Then::QuitExits(code) => {
                 while brain.control_message() != ControlToBrain::Quitting {}
@@ -211,11 +223,20 @@ fn brain(child: &Child, then: Then) -> ShellEnds {
             | Then::ClosesAfterReady
             | Then::HoldsInHandshake
             | Then::ReadyAfterShutdown
-            | Then::ReadyBeforeShutdown => {}
+            | Then::ReadyBeforeShutdown
+            | Then::ExitsOnEof(_) => {}
         }
         drop(brain);
     });
     shell
+}
+
+/// Holds `child`'s brain after commit until the returned sender is dropped, so the attempt hands
+/// over its connection before custody ends.
+fn held_after_commit(child: &Child) -> mpsc::Sender<()> {
+    let (release, held) = mpsc::channel();
+    child.script().after_commit = Some(held);
+    release
 }
 
 /// Waits until the shell's end of `control` is shut down, or [`SHUTDOWN_SEEN`] has passed.
@@ -371,8 +392,10 @@ fn a_quit_is_unclean_unless_the_live_child_exits_0() {
 #[test]
 fn a_quit_between_attempts_after_a_child_exited_0_is_not_clean() {
     let child = Child::default();
+    let exit = held_after_commit(&child);
     let (link, states) = link(&child, Then::ExitsAfterCommit(0), refused);
     until(&states, connected);
+    drop(exit);
     until(&states, failed);
     assert!(link.begin_quit());
     link.finish_quit();
@@ -382,10 +405,12 @@ fn a_quit_between_attempts_after_a_child_exited_0_is_not_clean() {
 #[test]
 fn a_quit_outcome_is_the_attempt_quit_ended_not_an_earlier_childs_clean_exit() {
     let (first, second) = (Child::default(), Child::default());
+    let exit = held_after_commit(&first);
     let (link, states) = link(&first, Then::ExitsAfterCommit(0), move |word, by| {
         attempt(word, &second, Then::QuitExits(3), by, honest).map(|(c, owner)| (c, Some(owner)))
     });
     until(&states, connected);
+    drop(exit);
     until(&states, connected);
     assert!(link.begin_quit());
     link.finish_quit();
@@ -607,6 +632,7 @@ fn a_replacement_starts_only_after_the_lost_connections_child_is_reaped() {
 #[test]
 fn after_a_lost_child_no_attempt_spawns_again_even_on_retry() {
     let first = Child::default();
+    let lose = held_after_commit(&first);
     let second = Child::default();
     let refusals = Arc::new(AtomicUsize::new(0));
     let (link, states) = {
@@ -618,6 +644,8 @@ fn after_a_lost_child_no_attempt_spawns_again_even_on_retry() {
             Err(LinkError::Launch(io::ErrorKind::ResourceBusy.into()).into())
         })
     };
+    until(&states, connected);
+    drop(lose);
     until(&states, failed);
     assert!(link.retry());
     until(&states, failed);
@@ -941,4 +969,31 @@ fn no_item_is_read_once_custody_has_ended() {
         assert!(matches!(ended.error, LinkError::Custody), "{ending:?}");
         assert_eq!(ended.reads, 1, "{ending:?}: read once, then refused");
     }
+}
+
+#[test]
+fn a_failed_item_read_lets_a_child_that_exits_on_eof_exit_unkilled() {
+    let child = Child::default();
+    // Longer than the shutdown takes, shorter than [`SHUTDOWN_SEEN`].
+    child.script().grace = Some(Duration::from_secs(2));
+    let word = Arc::new(SpawnWord::default());
+    let result = attempt(
+        &word,
+        &child,
+        Then::ExitsOnEof(3),
+        Instant::now() + BOUND,
+        |_| Err(kumochi_storage::ItemError::Missing),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(Failed {
+                error: LinkError::Item(kumochi_storage::ItemError::Missing),
+                child: Some(Unconnected::Settled(Settled::Reaped(Exit::Code(3)))),
+            })
+        ),
+        "{:?}",
+        result.map(drop)
+    );
+    assert_eq!(child.script().kills, 0, "it exited on EOF");
 }

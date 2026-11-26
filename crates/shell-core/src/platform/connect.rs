@@ -361,7 +361,9 @@ pub(crate) fn connect_pair(
 /// after the spawn settles the child before it returns, so no later attempt starts beside it; an
 /// exit with [`BRAIN_EXIT_BUSY`](kumochi_protocol::constants::BRAIN_EXIT_BUSY) is `Busy`. From
 /// the spawn on, custody ending shuts the ends down, so every wait of the attempt returns at once,
-/// and once connected it aborts both legs: a peer that keeps its ends open can't hold either.
+/// and once connected it aborts both legs: a peer that keeps its ends open can't hold either. No
+/// connection is handed over once custody has ended, and a failed attempt shuts its ends down
+/// before it settles.
 #[cfg(target_os = "macos")]
 #[expect(
     clippy::too_many_arguments,
@@ -384,8 +386,6 @@ pub(super) fn connect_pair_with(
     deadline: Instant,
     text_metrics: impl FnOnce(Instant) -> DrawingText,
 ) -> Result<(Connection, super::child::ChildOwner), Failed> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use super::child::{Exit, Settled, Unconnected};
     use kumochi_protocol::constants::BRAIN_EXIT_BUSY;
     let (owner, ends) = start(deadline).map_err(|error| {
@@ -399,15 +399,19 @@ pub(super) fn connect_pair_with(
             child: Some(child),
         }
     })?;
-    let ended = Arc::new(AtomicBool::new(false));
-    let connected = super::macos::closer(&ends)
+    let mut held = None;
+    let connected = ends
+        .control
+        .try_clone()
+        .and_then(|control| Ok([control, ends.data.try_clone()?]))
         .map_err(LinkError::Io)
-        .and_then(|close| {
-            let marked = Arc::clone(&ended);
-            // Terminal custody ends every wait on the ends, and the fences see it first.
+        .and_then(|duplicates| {
+            // Weak, so a failed attempt's ends close with it, not when custody ends.
+            let shut = Arc::downgrade(held.insert(Arc::new(duplicates)));
             owner.on_settled(move || {
-                marked.store(true, Ordering::SeqCst);
-                close();
+                if let Some(ends) = shut.upgrade() {
+                    shut_down(&ends);
+                }
             });
             check_attempt(Some(deadline))?;
             after_ready(
@@ -419,21 +423,29 @@ pub(super) fn connect_pair_with(
                 text_metrics,
                 harden,
                 read_item,
-                || ended.load(Ordering::SeqCst),
+                || owner.has_ended(),
             )
-        });
-    match connected {
-        Ok(connection) => {
+        })
+        .and_then(|connection| {
             let legs = [&connection.control, &connection.data].map(Arc::downgrade);
-            // In place of the closer, which has run already if custody has ended.
+            // In place of the shutdown, which has run already if custody has ended.
             owner.on_settled(move || {
                 for leg in legs.iter().filter_map(std::sync::Weak::upgrade) {
                     leg.abort();
                 }
             });
-            Ok((connection, owner))
-        }
+            if owner.has_ended() {
+                return Err(LinkError::Custody);
+            }
+            Ok(connection)
+        });
+    match connected {
+        Ok(connection) => Ok((connection, owner)),
         Err(error) => {
+            // The brain sees EOF now, so a child that exits on it is reaped, not killed.
+            if let Some(ends) = &held {
+                shut_down(ends);
+            }
             let settled = owner.settle();
             let error = match settled {
                 Settled::Reaped(Exit::Code(code)) if code == i32::from(BRAIN_EXIT_BUSY) => {
@@ -446,6 +458,15 @@ pub(super) fn connect_pair_with(
                 child: Some(Unconnected::Settled(settled)),
             })
         }
+    }
+}
+
+/// Shuts down both of the shell's ends, so every wait on them returns and the brain sees EOF.
+#[cfg(target_os = "macos")]
+fn shut_down(ends: &[std::os::unix::net::UnixStream; 2]) {
+    for end in ends {
+        // An end that's already shut down has nothing left to wake.
+        let _shut = end.shutdown(std::net::Shutdown::Both);
     }
 }
 

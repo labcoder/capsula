@@ -263,6 +263,11 @@ impl ChildOwner {
         hook();
     }
 
+    /// Whether custody has ended, read under the lock that publishes how, before any hook runs.
+    pub(crate) fn has_ended(&self) -> bool {
+        self.terminal.lock().winner.is_some()
+    }
+
     /// Starts bounded retirement of a live child, and its bound once the child is confirmed.
     /// Never waits.
     pub(crate) fn retire(&self) {
@@ -358,11 +363,9 @@ fn own(
             return;
         }
         phase = match phase {
-            // After the end, only reaps: a kill now would follow a published result.
-            _ if terminal.lock().winner.is_some() => Phase::Unsettled,
             Phase::Watching if retiring || word.quitting() => Phase::Grace(Instant::now() + wait),
             Phase::Grace(deadline) if now >= deadline => {
-                retirement_refused = !kill(&mut os);
+                retirement_refused = !kill(&mut os, terminal);
                 Phase::Killed(Instant::now() + wait)
             }
             Phase::Killed(deadline) if now >= deadline => {
@@ -446,9 +449,14 @@ fn spawn(os: &mut impl Os, word: &SpawnWord) -> Result<(), Refusal> {
 }
 
 /// One kill, never retried: a refusal or a failure leaves the bounded wait to decide.
-fn kill(os: &mut impl Os) -> bool {
+fn kill(os: &mut impl Os, terminal: &Terminal) -> bool {
     if os.auto_reaps() {
         tracing::error!("not signalling the brain child: the shell reaps its children itself");
+        return false;
+    }
+    // Admitted right before the signal and only while custody is open, so no kill follows a
+    // published outcome; the lock isn't held across the call.
+    if terminal.lock().winner.is_some() {
         return false;
     }
     if let Err(error) = os.kill() {
@@ -489,6 +497,7 @@ mod tests {
         spawn_gate: Option<Gate>,
         poll_gate: Option<Gate>,
         kill_gate: Option<Gate>,
+        auto_reaps_gate: Option<Gate>,
         spawns: u32,
         kills: u32,
         killed_at: Option<Instant>,
@@ -577,6 +586,8 @@ mod tests {
 
     impl Os for Fake {
         fn auto_reaps(&self) -> bool {
+            let gate = self.script().auto_reaps_gate.take();
+            Self::pass(gate);
             self.script().auto_reaps
         }
 
@@ -1218,6 +1229,26 @@ mod tests {
             owner.next(Instant::now() + WAIT).is_none(),
             "no second outcome"
         );
+    }
+
+    #[test]
+    fn a_kill_decided_before_the_unsettled_bound_is_not_sent_after_it() {
+        let word = Arc::new(SpawnWord::default());
+        let fake = Fake::default();
+        let owner = started(&fake, &word);
+        let (auto_reaps_gate, deciding) = gate();
+        fake.script().auto_reaps_gate = Some(auto_reaps_gate);
+        word.quit();
+        deciding.entered();
+        assert!(!owner.has_ended(), "custody is open as the kill is decided");
+        assert!(matches!(next(&owner), Report::Settled(Settled::Unsettled)));
+        assert!(owner.has_ended(), "the outcome is published");
+        deciding.release();
+        let (poll_gate, polling) = gate();
+        fake.script().poll_gate = Some(poll_gate);
+        polling.entered();
+        polling.release();
+        assert_eq!(fake.script().kills, 0, "no kill admitted after the outcome");
     }
 
     #[test]

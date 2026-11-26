@@ -464,10 +464,11 @@ it, before its answer counts, so a read that ends past the deadline is `ConnectE
 succeeded or not. A refused read is `Item`. Either way no byte is written. From the spawn on,
 custody of the child ending (reaped, Lost or Unsettled) shuts the shell's two ends down, so the
 READY wait, the initiator and the wait for `Settings` return at once however long the deadline,
-and the attempt is `Custody` on each side of the item read, so no item is
-read once custody has ended. A child in Quit's grace is still owned and may finish connecting.
-The data leg hanging up ends the READY wait as `Rejected`, and either leg hanging up during the
-initiator ends it with `UnexpectedEof`. `initiate` takes the
+and the attempt is `Custody` on each side of the item read and at the handoff, each asking
+whether custody has an outcome, so no item is read and no connection handed over once it has.
+A failed attempt shuts its ends down before it settles, so a child that exits on EOF is reaped,
+not killed. A child in Quit's grace is still owned and may finish connecting. A live child that
+closes only one leg holds the attempt until its deadline, then is settled. `initiate` takes the
 box and drops it once the initiator is keyed, before its first message goes out. It runs the
 initiator's steps over the shell's two ends by one deadline and returns the legs only once
 `BindAck` verifies. Each leg is the link's `PipeClient` over the session crate's record owners.

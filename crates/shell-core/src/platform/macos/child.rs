@@ -333,52 +333,6 @@ pub(super) fn poll(
     Ok(())
 }
 
-/// [`poll`] on `stream` until `by`, waking too when `other` hangs up. True when it did. Bytes
-/// waiting on `other` aren't a hangup, so the rest of the wait is on `stream` alone.
-pub(super) fn poll_hangup(
-    stream: &std::os::unix::net::UnixStream,
-    events: libc::c_short,
-    other: &std::os::unix::net::UnixStream,
-    by: Instant,
-) -> io::Result<bool> {
-    let left = by.saturating_duration_since(Instant::now());
-    let mut waits = [
-        libc::pollfd {
-            fd: stream.as_raw_fd(),
-            events,
-            revents: 0,
-        },
-        // Darwin reports a hangup only to a wait for input.
-        libc::pollfd {
-            fd: other.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        },
-    ];
-    let ms = libc::c_int::try_from(left.as_millis() + 1).unwrap_or(libc::c_int::MAX);
-    // SAFETY: `waits` is two valid pollfds for the duration of the call.
-    if unsafe { libc::poll(waits.as_mut_ptr(), 2, ms) } < 0 {
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-        return Ok(false);
-    }
-    // The leg's own state comes first, so a brain that closed both legs ends the wait as this
-    // leg's end.
-    if waits[0].revents == 0 && waits[1].revents != 0 {
-        if waits[1].revents & libc::POLLHUP != 0 {
-            return Ok(true);
-        }
-        poll(
-            stream,
-            events,
-            Some(by.saturating_duration_since(Instant::now())),
-        )?;
-    }
-    Ok(false)
-}
-
 /// One integer `SOL_SOCKET` option, or None when it can't be read.
 #[cfg(test)]
 pub(super) fn socket_int(fd: RawFd, name: libc::c_int) -> Option<libc::c_int> {

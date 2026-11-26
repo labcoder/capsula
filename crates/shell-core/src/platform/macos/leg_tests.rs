@@ -1162,35 +1162,6 @@ fn the_stream_ending_before_ready_is_rejected_before_the_item() {
 }
 
 #[test]
-fn startup_ends_when_the_data_leg_hangs_up_while_control_stays_open() {
-    for ready in [false, true] {
-        let (shell, mut brain_control, brain_data) = ends();
-        if ready {
-            brain_control.write_all(&[SESSION_READY]).expect("READY");
-        }
-        drop(brain_data);
-        let start = Instant::now();
-        let spawned = after_spawn(shell, by(), Ok(()), Duration::ZERO);
-        let took = start.elapsed();
-        if ready {
-            let Err(LinkError::Io(error)) = &spawned.result else {
-                panic!("in the initiator: {:?}", spawned.result);
-            };
-            assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
-        } else {
-            assert!(
-                matches!(spawned.result, Err(LinkError::Rejected)),
-                "before READY: {:?}",
-                spawned.result
-            );
-        }
-        assert!(took < Duration::from_secs(2), "READY {ready}: {took:?}");
-        assert_eq!(spawned.reads, usize::from(ready), "READY {ready}");
-        drop(brain_control);
-    }
-}
-
-#[test]
 fn the_ready_wait_ends_at_the_deadline_before_the_item() {
     let (shell, brain_control, brain_data) = ends();
     let deadline = Instant::now() + Duration::from_millis(300);
