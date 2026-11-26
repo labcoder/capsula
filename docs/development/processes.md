@@ -1,7 +1,7 @@
 # Processes, jobs and recovery
 
-Kumochi runs as two processes, and the brain runs its helpers inside Windows Job Objects so that
-nothing it started can outlive it.
+Kumochi runs as two processes. On Windows, the brain runs its helpers inside Job Objects so that
+nothing in those jobs can outlive it.
 
 Executable names come from `protocol::constants`: `kumochi.exe` and `kumochid.exe` on Windows,
 `kumochi` and `kumochid` elsewhere, matching Cargo's native output. Each process resolves the
@@ -59,6 +59,26 @@ The brain's platform module assembles native workers. On Windows it retries pend
 removals before creating the brain Job, then attaches voice and Claude Code before shared startup
 starts the screen worker and publishes the capability. Without native containment, worker
 assembly refuses; it does not fall back to uncontained workers.
+
+## Containment tiers
+
+`platform::containment(mode)` reports a tier separately from runtime admission. A tier does not
+establish custody of any particular process. Windows Detached is runtime-enabled at **Kernel**:
+helpers join a Job from creation, and closing the last Job handle ends its contents. Existing
+Windows jobs, nesting, and bridge peer checks are unchanged.
+
+macOS ParentBound is staged at **Group**, only for the fixed shell-to-brain launch. The shell uses
+`posix_spawn` with `POSIX_SPAWN_SETSID` and closed-by-default descriptors. That puts the child
+in a private session and process group from creation; the shell holds the exact child, and the
+brain watches its original parent. A headless fixture combines both owners: it observes a latched
+parent loss, checks that the brain cannot claim admission, and witnesses its cooperative exit.
+Neither macOS runtime mode nor any macOS helper launch is enabled by this tier.
+
+On normal exit the shell reaps the exact child without signalling the group. When forced
+retirement is needed, it may signal the group once while it still owns the unreaped leader; a
+refusal or lost custody cannot become a clean exit. That is not proof the group is empty. Group
+does not promise cleanup of descendants after the leader exits or after the owner crashes, and
+cannot contain descendants that leave the group. Other modes without an adapter remain unsupported.
 
 The dormant Darwin parent watch supplies exit evidence for a future parent-bound session. It
 registers just the original parent, verifies the kernel's receipt and checks lineage again
@@ -139,8 +159,8 @@ flowchart LR
   - `Console`: a new visible console with its own handles, for a sign-in the user must be able to
     answer. The brain gets no pipe and sees none of it.
 - **Why Win32 and not std:** std's `Command` can't place a process in a job from its first
-  instruction, and GPUI has no process API. macOS counterpart: `posix_spawn` with its own process
-  group and an explicit `envp`, ended with `killpg` (unverified).
+  instruction, and GPUI has no process API. The staged macOS Group adapter above covers only the
+  shell's brain child, not this helper launch.
 - **Job membership as a check** (`Job::contains`, `IsProcessInJob`): the bridge listener
   serves only a client inside its launch's own run job, which a run's children inherit. It proves
   where a process came from, not which one of the run's processes it is (see

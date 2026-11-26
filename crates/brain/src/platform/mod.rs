@@ -207,9 +207,12 @@ pub(crate) use pipe::{BridgeConnectError, ClientRefused};
 pub(crate) use pipe::{PipeClient, bridge_peer, client_image, open_bridge, shell_connection};
 #[cfg(not(windows))]
 pub use pipe::{PipeServer, create_owner_only, session_id};
+#[cfg(all(target_os = "macos", debug_assertions, feature = "test-support"))]
+pub use process::group_parent_fixture;
 pub(crate) use process::spawn_if;
 pub use process::{
-    ChildPipes, Helper, Job, Launch, Spawned, Stdio, launch_detached, spawn, system_env,
+    ChildPipes, Containment, ContainmentTier, Helper, Job, Launch, Spawned, Stdio, containment,
+    launch_detached, spawn, system_env,
 };
 pub(crate) use protected::{Untrusted, is_unsupported};
 

@@ -247,6 +247,12 @@ impl<W: AsyncWrite + Unpin> RecordWriter<W> {
     }
 }
 
+impl<W: AsyncWrite + Unpin> crate::runtime::FrameWrite for RecordWriter<W> {
+    async fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+        RecordWriter::write_frame(self, frame).await
+    }
+}
+
 impl<W> fmt::Debug for RecordWriter<W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RecordWriter")

@@ -9,12 +9,12 @@ use kumochi_protocol::message::{
 use kumochi_protocol::{BUILD_ID, Secret};
 use kumochi_session::{Channel, ENVELOPE_LEN, SECRET_LEN, Session, SessionError, ShellAwaitsReply};
 use tokio::net::UnixStream;
-use tokio::net::unix::OwnedWriteHalf;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::time::Instant;
 
 use super::*;
 use crate::ipc::{self, PeerAuth};
-use crate::platform::macos::stream::RecordWriter;
+use crate::platform::macos::stream::{RecordReader, RecordWriter};
 
 /// A synthetic group secret; no real key is ever used here.
 pub(super) const SECRET: [u8; SECRET_LEN] = [0x5A; SECRET_LEN];
@@ -169,11 +169,12 @@ pub(super) async fn shell(
     shell.receive(&ack).expect("BindAck")
 }
 
-/// The shell's side once bound: a frame writer per leg, and its ends kept open.
+/// The shell's side once bound: a frame writer and a frame reader per leg.
 struct Shell {
     control: RecordWriter<OwnedWriteHalf>,
     data: RecordWriter<OwnedWriteHalf>,
-    _open: [tokio::net::unix::OwnedReadHalf; 2],
+    control_in: RecordReader<OwnedReadHalf>,
+    data_in: RecordReader<OwnedReadHalf>,
 }
 
 impl Shell {
@@ -232,8 +233,14 @@ async fn bound() -> (AuthenticatedPair, Shell) {
             Pipe::Control,
             cell.clone(),
         ),
-        data: RecordWriter::new(shell_data_out, session.data.sealer, Pipe::Data, cell),
-        _open: [shell_control_in, shell_data_in],
+        data: RecordWriter::new(
+            shell_data_out,
+            session.data.sealer,
+            Pipe::Data,
+            cell.clone(),
+        ),
+        control_in: RecordReader::new(shell_control_in, session.control.opener, cell.clone()),
+        data_in: RecordReader::new(shell_data_in, session.data.opener, cell),
     };
     (pair, shell)
 }
@@ -503,4 +510,229 @@ async fn a_greeting_read_dropped_part_way_refuses_the_pair() {
         "nothing was sent, so the read was still pending"
     );
     assert!(*pair.pair.borrow(), "the pair cell is set before any retry");
+}
+
+#[tokio::test]
+async fn the_legs_are_handed_over_only_after_both_greetings() {
+    let (_parent, loss) = watch::channel(Verdict::Watching);
+    let (pair, _shell) = bound().await;
+    assert_eq!(
+        pair.into_legs(loss.clone()).map(|_| ()),
+        Err(PairError::Order)
+    );
+
+    let (mut pair, mut shell) = bound().await;
+    shell
+        .send(Pipe::Control, &ControlToBrain::Hello(hello()))
+        .await;
+    pair.control_greeting(by()).await.expect("control greeting");
+    assert_eq!(
+        pair.into_legs(loss.clone()).map(|_| ()),
+        Err(PairError::Order)
+    );
+
+    let (mut pair, mut shell) = bound().await;
+    shell
+        .send(Pipe::Control, &ControlToBrain::Hello(hello()))
+        .await;
+    shell.send(Pipe::Data, &DataToBrain::Hello(hello())).await;
+    pair.control_greeting(by()).await.expect("control greeting");
+    pair.data_greeting(by()).await.expect("data greeting");
+    assert!(pair.into_legs(loss).is_ok());
+}
+
+/// The runtime over a greeted pair's own legs: a run's text crosses multi-record frames inside the
+/// data window without credit, pings are answered and Quitting ends it. The shell's end here uses
+/// the brain's tokio adapters, not the shell's blocking adapter.
+#[tokio::test]
+async fn the_runtime_serves_a_greeted_pair_over_its_own_legs() {
+    use kumochi_protocol::message::{
+        AudioSession, ControlToShell, DataToShell, Phase, RunId, ScreenChoice,
+    };
+
+    use crate::runtime::{Ended, PairStart};
+
+    let scratch = crate::test_support::Scratch::new("pair-serve");
+    let mut brain = crate::test_support::brain(&scratch, "0 fill 240000\n0 fill 240000");
+    let (mut pair, mut shell) = bound().await;
+    shell
+        .send(Pipe::Control, &ControlToBrain::Hello(hello()))
+        .await;
+    pair.control_greeting(by()).await.expect("control greeting");
+    let welcome = ControlToShell::Welcome {
+        incarnation: Incarnation(1),
+        issue_epoch: 1,
+    };
+    let bytes = frame::encode(&welcome, Pipe::Control).expect("encodes");
+    pair.write_control(&bytes).await.expect("Welcome out");
+    let got = bounded(ipc::read::<ControlToShell>(
+        &mut shell.control_in,
+        Pipe::Control,
+    ))
+    .await;
+    assert_eq!(got.expect("Welcome in"), Some(welcome));
+    shell.send(Pipe::Data, &DataToBrain::Hello(hello())).await;
+    pair.data_greeting(by()).await.expect("data greeting");
+    let (_parent, loss) = watch::channel(Verdict::Watching);
+    let (control, data, terminal) = pair.into_legs(loss).expect("greeted");
+    let mut tap = crate::tap::Tap::from_env();
+    let client = async {
+        shell
+            .send(
+                Pipe::Data,
+                &DataToBrain::TextSubmit {
+                    turn: 1,
+                    thread: None,
+                    screen: ScreenChoice::None,
+                    text: "go".into(),
+                },
+            )
+            .await;
+        let mut text = 0;
+        while text < 480_000 {
+            match ipc::read::<DataToShell>(&mut shell.data_in, Pipe::Data).await {
+                Ok(Some(DataToShell::AssistantText { delta, .. })) => text += delta.len(),
+                other => panic!("expected a text frame, got {other:?}"),
+            }
+        }
+        assert_eq!(text, 480_000);
+        loop {
+            match ipc::read::<ControlToShell>(&mut shell.control_in, Pipe::Control).await {
+                Ok(Some(ControlToShell::Ping)) => {
+                    shell.send(Pipe::Control, &ControlToBrain::Pong).await;
+                }
+                Ok(Some(ControlToShell::RunState {
+                    run: RunId(1),
+                    phase: Phase::Done,
+                    ..
+                })) => break,
+                Ok(Some(_)) => {}
+                other => panic!("the control leg ended: {other:?}"),
+            }
+        }
+        shell.send(Pipe::Control, &ControlToBrain::Quitting).await;
+    };
+    let (ended, ()) = bounded(async {
+        tokio::join!(
+            Box::pin(brain.serve_split(
+                control,
+                data,
+                &mut tap,
+                AudioSession::Legacy,
+                None,
+                PairStart::Ordinary,
+                Some(terminal),
+            )),
+            client,
+        )
+    })
+    .await;
+    assert!(matches!(ended, Ended::Quit { .. }), "{ended:?}");
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn a_served_pair_ends_as_fatal_once_its_parent_exits() {
+    use kumochi_protocol::message::AudioSession;
+
+    use crate::runtime::{Ended, Fatal, PairStart};
+
+    let scratch = crate::test_support::Scratch::new("pair-parent");
+    let mut brain = crate::test_support::brain(&scratch, "");
+    let (mut pair, mut shell) = bound().await;
+    shell
+        .send(Pipe::Control, &ControlToBrain::Hello(hello()))
+        .await;
+    shell.send(Pipe::Data, &DataToBrain::Hello(hello())).await;
+    pair.control_greeting(by()).await.expect("control greeting");
+    pair.data_greeting(by()).await.expect("data greeting");
+    let (parent, loss) = watch::channel(Verdict::Watching);
+    let (control, data, terminal) = pair.into_legs(loss).expect("greeted");
+    let mut tap = crate::tap::Tap::from_env();
+    let (ended, ()) = bounded(async {
+        tokio::join!(
+            Box::pin(brain.serve_split(
+                control,
+                data,
+                &mut tap,
+                AudioSession::Legacy,
+                None,
+                PairStart::Ordinary,
+                Some(terminal),
+            )),
+            async {
+                tokio::time::sleep(SHORT).await;
+                parent.send_replace(Verdict::Exited);
+            },
+        )
+    })
+    .await;
+    assert_eq!(ended, Ended::Fatal(Fatal::ParentExited));
+    drop(shell);
+    brain.close().await;
+}
+
+#[tokio::test]
+async fn control_writes_wait_for_the_control_greeting_and_stop_once_a_read_failed() {
+    use kumochi_protocol::message::ControlToShell;
+
+    let ping = frame::encode(&ControlToShell::Ping, Pipe::Control).expect("encodes");
+    let order = |error: &io::Error| {
+        (
+            error.kind(),
+            error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<PairError>())
+                .copied(),
+        )
+    };
+
+    let (mut pair, mut shell) = bound().await;
+    let error = pair
+        .write_control(&ping)
+        .await
+        .expect_err("before the greeting");
+    assert_eq!(
+        order(&error),
+        (io::ErrorKind::InvalidData, Some(PairError::Order))
+    );
+    assert!(*pair.pair.borrow(), "an early write refuses the pair");
+    drop(pair);
+    let read = bounded(shell.control_in.read(&mut [0; 1])).await;
+    assert_eq!(read.expect("closed"), 0, "no byte reached the socket");
+
+    let (mut pair, _shell) = bound().await;
+    assert_eq!(
+        pair.data_greeting(by()).await.map(|_| ()),
+        Err(PairError::Order)
+    );
+    let error = pair.write_control(&ping).await.expect_err("once spent");
+    assert_eq!(
+        order(&error),
+        (io::ErrorKind::InvalidData, Some(PairError::Order))
+    );
+
+    let (mut pair, mut shell) = bound().await;
+    shell
+        .send(Pipe::Control, &ControlToBrain::Hello(hello()))
+        .await;
+    pair.control_greeting(by()).await.expect("control greeting");
+    for before_data in [true, false] {
+        if !before_data {
+            shell.send(Pipe::Data, &DataToBrain::Hello(hello())).await;
+            pair.data_greeting(by()).await.expect("data greeting");
+        }
+        pair.write_control(&ping).await.expect("written");
+        let got = bounded(ipc::read::<ControlToShell>(
+            &mut shell.control_in,
+            Pipe::Control,
+        ))
+        .await;
+        assert_eq!(
+            got.expect("read"),
+            Some(ControlToShell::Ping),
+            "{before_data}"
+        );
+    }
+    assert!(!*pair.pair.borrow());
 }

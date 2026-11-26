@@ -52,7 +52,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Variant",
 ] }
 
-[target.'cfg(windows)'.dev-dependencies]
+[target.'cfg(any(windows, target_os = "macos"))'.dev-dependencies]
 kumochi-brain = { path = "../brain", features = ["test-support"] }
 
 [features]
