@@ -35,7 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::presence::{PresenceError, struct_size};
 use crate::input::hold::{InputReason, InputStage};
 use crate::input::{Edge, Event, Key, PhysicalKey};
-use crate::platform::{Deliver, EventTime};
+use crate::platform::{Deliver, EventTime, Refusal};
 
 mod physical;
 use physical::Physical;
@@ -758,15 +758,21 @@ fn normalize_keyboard(
     Ok(keyboard)
 }
 
-fn read_chord(_: Instant) -> Option<Instant> {
+fn read_chord(_: Instant) -> Result<Instant, Refusal> {
     // SAFETY: queries the current foreground window without touching it.
     let foreground = unsafe { GetForegroundWindow() };
     let exact = exact_chord(|key| {
         // SAFETY: queries a bounded virtual-key code without modifying input.
         unsafe { GetAsyncKeyState(i32::from(key)) < 0 }
     });
+    if !exact {
+        return Err(Refusal::Chord);
+    }
     // SAFETY: rechecks the foreground without touching it.
-    (exact && foreground == unsafe { GetForegroundWindow() }).then(Instant::now)
+    if foreground != unsafe { GetForegroundWindow() } {
+        return Err(Refusal::Foreground);
+    }
+    Ok(Instant::now())
 }
 
 fn exact_chord(mut down: impl FnMut(u16) -> bool) -> bool {
@@ -1244,6 +1250,87 @@ mod tests {
                 }
             }
             assert_eq!(opened.get(), u32::from(tap == 2));
+        }
+    }
+
+    #[test]
+    fn a_hold_after_altgr_typing_in_a_newly_switched_layout_is_recognised() {
+        use std::time::{Duration, Instant};
+
+        use crate::input::Gesture;
+        use crate::input::hold::{Fence, Intent};
+        use crate::platform::microphone::CollectionGate;
+
+        let keys = super::Keys::default();
+        let mut gesture = Gesture::default();
+        let mut fence = Fence::new(CollectionGate::default());
+        let start = Instant::now();
+        let (mut ms, mut queued) = (0, 1_000);
+        let mut send = |key: Option<(u16, u32)>, layout: usize| {
+            ms += if key.is_some() { 10 } else { 300 };
+            queued += 10;
+            let now = start + Duration::from_millis(ms);
+            let (event, queued_press) = match key {
+                Some((make, flags)) => {
+                    let (event, time) = raw_at(&keys, 1, make, flags, layout, queued)?;
+                    (event, time.queued_press.filter(|_| !time.repeated_modifier))
+                }
+                None => (Event::Deadline, None),
+            };
+            let delivery = fence.reduce_with_keyboard_read(
+                &mut gesture,
+                event,
+                now,
+                queued_press,
+                || Some(1),
+                || Some(now),
+            );
+            let warm = delivery
+                .intents
+                .iter()
+                .filter(|intent| matches!(intent, Some(Intent::Warm(_))))
+                .count();
+            let recognized = delivery
+                .intents
+                .iter()
+                .filter(|intent| matches!(intent, Some(Intent::Recognized { .. })))
+                .count();
+            Some((event, warm, recognized))
+        };
+        let (up, e0) = (super::RI_KEY_BREAK, super::RI_KEY_E0);
+        for (layout, typed) in [(1, 0x10), (2, 0x03)] {
+            let mut events = Vec::new();
+            for key in [
+                (0x1D, 0),
+                (0x38, e0),
+                (typed, 0),
+                (typed, up),
+                (0x12, 0),
+                (0x12, up),
+                (0x38, e0 | up),
+                (0x1D, up),
+            ] {
+                if let Some((event, warm, recognized)) = send(Some(key), layout) {
+                    assert_eq!((warm, recognized), (0, 0), "AltGr in layout {layout}");
+                    events.push(event);
+                }
+            }
+            assert_eq!(
+                events.first() == Some(&Event::Reset),
+                layout == 2,
+                "only the switched layout's first modifier resets: {events:?}"
+            );
+            let held: Vec<_> = [Some((0x1D, 0)), Some((0x38, 0)), None]
+                .into_iter()
+                .map(|key| send(key, layout).map(|(_, warm, recognized)| (warm, recognized)))
+                .collect();
+            assert_eq!(
+                held,
+                [Some((0, 0)), Some((1, 0)), Some((0, 1))],
+                "the hold after AltGr typing in layout {layout}"
+            );
+            send(Some((0x38, up)), layout);
+            send(Some((0x1D, up)), layout);
         }
     }
 

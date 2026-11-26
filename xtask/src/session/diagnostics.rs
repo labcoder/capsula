@@ -33,7 +33,7 @@ pub(crate) enum Mark {
 }
 
 /// Every non-input line the shell records; any other unknown event still fails.
-const STATUS: [&str; 10] = [
+const STATUS: [&str; 11] = [
     "link state=",
     "carry drop perch=",
     "run phase=",
@@ -44,6 +44,7 @@ const STATUS: [&str; 10] = [
     "kumo frame shade_us=",
     "kumo reshades=",
     "kumo press at=",
+    "rearm ",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +247,8 @@ mod tests {
             ("qpc=11 dock paints settled=3", 11),
             ("qpc=12 carry drop perch=false", 12),
             ("qpc=13 resting", 13),
+            ("qpc=14 rearm ok", 14),
+            ("qpc=15 rearm refused check=chord", 15),
         ] {
             assert_eq!(
                 Record::parse(line).unwrap(),
