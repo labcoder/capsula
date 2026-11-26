@@ -1151,6 +1151,49 @@ fn native_product_lookup_creates_nothing() {
 
 #[test]
 #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn an_exclusive_product_create_refuses_a_folder_raced_in_after_the_lookup() {
+    use crate::{AcquisitionError, ProductFolder, Support, admit_support};
+
+    let mut scratch = Scratch::new();
+    let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
+        .expect("an explicitly commissioned fixture parent");
+    let support =
+        std::path::PathBuf::from(parent).join(OsStr::from_bytes(scratch.residual.to_bytes()));
+    let missing = || -> Support {
+        match admit_support(&support)
+            .expect("admit the fixture anchor")
+            .product_folder("product")
+        {
+            Ok(ProductFolder::Missing(anchor)) => anchor,
+            other => panic!("expected the product folder missing, not {other:?}"),
+        }
+    };
+    let (exclusive, adopting) = (missing(), missing());
+    let raced = scratch.directory(c"product");
+    assert_eq!(
+        exclusive.create_new_product("product").err(),
+        Some(AcquisitionError::Open(io::ErrorKind::AlreadyExists)),
+        "a folder made after the lookup isn't this call's"
+    );
+    assert_eq!(
+        std::fs::read_dir(support.join("product"))
+            .expect("the raced folder")
+            .count(),
+        0,
+        "refused without touching it"
+    );
+    assert_eq!(
+        adopting.create_product("product").map(drop),
+        Ok(()),
+        "the create-or-open step still adopts it"
+    );
+
+    drop(raced);
+    scratch.cleanup().expect("remove recorded fixture objects");
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
 fn a_lookup_in_a_held_anchor_is_not_redirected_by_a_rename() {
     use crate::{AcquisitionError, admit_support};
     use std::os::unix::fs::DirBuilderExt as _;

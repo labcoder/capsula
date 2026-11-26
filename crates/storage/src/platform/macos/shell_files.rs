@@ -95,7 +95,7 @@ pub struct HeldFolder(Directory);
 #[must_use = "dropping the owner releases its descriptor and any instance lock"]
 pub struct AdmittedLock {
     file: File,
-    _directories: Arc<Directories>,
+    directories: Arc<Directories>,
 }
 
 /// An opaque append-only log descriptor retaining its admitted ancestors until it closes.
@@ -164,6 +164,15 @@ impl AdmittedLock {
     pub fn try_lock(&self) -> Result<(), TryLockError> {
         self.file.try_lock()
     }
+
+    /// Inspects the held chain again, each folder by its descriptor: still the same object, still
+    /// named by its name in its parent with no link, and the private ones still private.
+    ///
+    /// # Errors
+    /// The first folder that no longer passes, or an inspection that fails.
+    pub fn check(&self) -> Result<(), AcquisitionError> {
+        self.directories.check()
+    }
 }
 
 impl Write for &AdmittedLog {
@@ -188,7 +197,7 @@ pub fn open_shell_storage(support: &Path, product: &str) -> Result<ShellStorage,
     let product = basename(product)?;
     let Support(mut directories) = admit_support(support)?;
     for name in [product, c"logs".to_owned()] {
-        directories.create_private(name)?;
+        directories.create_private(name, false)?;
     }
     directories.check()?;
     Ok(ShellStorage(Arc::new(directories)))
@@ -297,28 +306,33 @@ impl Support {
     /// As that step: an invalid name, an existing unsafe object (never repaired), a failed
     /// re-inspection of the chain, and creation or open failure.
     pub fn create_product(self, product: &str) -> Result<Product, AcquisitionError> {
+        self.make_product(product, false)
+    }
+
+    /// Creates the folder `product` in this anchor like [`Support::create_product`], but only if
+    /// this call makes it: a folder already at the name, raced in since the lookup, is refused
+    /// before it's opened.
+    ///
+    /// # Errors
+    /// `Open(AlreadyExists)` for anything at the name, otherwise as [`Support::create_product`].
+    pub fn create_new_product(self, product: &str) -> Result<Product, AcquisitionError> {
+        self.make_product(product, true)
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "first light's custody alone refuses a folder already there"
+    )]
+    fn make_product(self, product: &str, exclusive: bool) -> Result<Product, AcquisitionError> {
         let product = basename(product)?;
         let Self(mut directories) = self;
-        directories.create_private(product)?;
+        directories.create_private(product, exclusive)?;
         directories.check()?;
         Ok(Product { held: directories })
     }
 }
 
 impl Product {
-    /// The product folder's metadata, read from its held descriptor rather than a path.
-    ///
-    /// # Errors
-    /// The descriptor's `fstat` failure.
-    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
-        self.held
-            .held
-            .last()
-            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
-            .file
-            .metadata()
-    }
-
     /// Opens/creates one private lock basename in the product folder like
     /// [`ShellStorage::open_instance_lock`], the lock keeping the held chain until it closes.
     ///
@@ -327,10 +341,7 @@ impl Product {
     pub fn into_lock(self, name: &str) -> Result<AdmittedLock, AcquisitionError> {
         let directories = Arc::new(self.held);
         let file = directories.open_lock(name)?;
-        Ok(AdmittedLock {
-            file,
-            _directories: directories,
-        })
+        Ok(AdmittedLock { file, directories })
     }
 }
 
@@ -342,7 +353,7 @@ impl ShellStorage {
     pub fn open_instance_lock(&self, name: &str) -> Result<AdmittedLock, AcquisitionError> {
         Ok(AdmittedLock {
             file: self.0.open_lock(name)?,
-            _directories: Arc::clone(&self.0),
+            directories: Arc::clone(&self.0),
         })
     }
 
@@ -496,13 +507,18 @@ impl Directories {
     }
 
     /// Creates `name` at 0700 in the last held folder unless it exists, then admits and holds it.
-    fn create_private(&mut self, name: CString) -> Result<(), AcquisitionError> {
+    /// An `exclusive` create refuses one that exists instead.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "first light's custody alone refuses a folder already there"
+    )]
+    fn create_private(&mut self, name: CString, exclusive: bool) -> Result<(), AcquisitionError> {
         self.check()?;
         let parent = &self.held.last().ok_or(Untrusted::Io)?.file;
         // SAFETY: parent is retained; name is a validated basename; no existing object is repaired.
         if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
             let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EEXIST) {
+            if exclusive || error.raw_os_error() != Some(libc::EEXIST) {
                 return Err(AcquisitionError::Open(error.kind()));
             }
         }
