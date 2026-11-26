@@ -594,7 +594,7 @@ impl Prerequisites for Unready {
         panic!("init runs only once ready")
     }
 
-    fn open(&mut self, _: &mut bool) -> Result<OpenedState, BrainError> {
+    fn open(&mut self, _: &SessionCustody, _: &mut bool) -> Result<OpenedState, BrainError> {
         panic!("open runs only once ready")
     }
 

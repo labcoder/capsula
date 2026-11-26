@@ -319,18 +319,26 @@ fn start_screen(brain: &mut Brain, exe: PathBuf, jobs: io::Result<std::sync::Arc
 fn open_profile(
     path: &std::path::Path,
 ) -> Result<(std::sync::Arc<platform::SessionLock>, store::Store), BrainError> {
-    use connections::authority::{Authority, Missing};
-    use kumochi_protocol::constants::{AUTHORITY_FILE, SESSION_LOCK};
+    let profile = profile_lock(&path.with_file_name(kumochi_protocol::constants::SESSION_LOCK))?;
+    open_held(profile, path)
+}
 
-    let profile = profile_lock(&path.with_file_name(SESSION_LOCK))?;
-    let authority = path.with_file_name(AUTHORITY_FILE);
+/// Opens the store at `path` under `profile`, which is already held, and creates the authority
+/// `profile` names when it's missing.
+fn open_held(
+    profile: std::sync::Arc<platform::SessionLock>,
+    path: &std::path::Path,
+) -> Result<(std::sync::Arc<platform::SessionLock>, store::Store), BrainError> {
+    use connections::authority::{Authority, Missing};
+
+    let authority = profile.authority_path();
     // Under the writer lock, so no cooperating writer creates or removes either file meanwhile.
     let present = |path: &std::path::Path| match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(BrainError::Store(store::StoreError::Folder(error))),
     };
-    let has_authority = present(&authority)?;
+    let has_authority = present(authority)?;
     // A missing store is created unless a purge's old copy shows it's mid-swap (`Retired`).
     let store = if present(path)? {
         store::Store::open_existing(path)?
