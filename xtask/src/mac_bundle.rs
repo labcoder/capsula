@@ -67,8 +67,10 @@ struct Profile {
     /// The App ID prefix, which keychain groups and the App ID start with; usually, but not
     /// always, the team.
     prefix: String,
-    /// A Developer ID profile's mark; development profiles list their devices instead.
+    /// A Developer ID profile's mark: `ProvisionsAllDevices` is exactly true.
     all_devices: bool,
+    /// How many devices a development profile lists; `None` when it lists none.
+    devices: Option<usize>,
     entitlements: Value,
     expires: String,
     platforms: Vec<String>,
@@ -230,9 +232,21 @@ fn read_profile(bytes: Vec<u8>, plist: &[u8]) -> Result<Profile> {
     let [prefix] = <[String; 1]>::try_from(prefixes)
         .ok()
         .context("the profile names one App ID prefix")?;
-    // Absent in a development profile; a wrong type reads as absent, which beta refuses.
-    let all_devices = field("ProvisionsAllDevices", "raw", Some("bool"))
-        .is_ok_and(|value| value.trim_ascii() == b"true");
+    // A key is present when plutil can extract it as XML, whatever its type; a present key of
+    // the wrong type is refused rather than read as absent.
+    let present = |key| field(key, "xml1", None).is_ok();
+    let all_devices = present("ProvisionsAllDevices")
+        && field("ProvisionsAllDevices", "raw", Some("bool"))
+            .ok()
+            .context("the profile's ProvisionsAllDevices has the wrong type")?
+            .trim_ascii()
+            == b"true";
+    let devices = if present("ProvisionedDevices") {
+        let json = field("ProvisionedDevices", "json", None).unwrap_or_default();
+        Some(strings("ProvisionedDevices", &json)?.len())
+    } else {
+        None
+    };
     let mut certificates = Vec::new();
     while certificates.len() < MAX_CERTIFICATES {
         let key = format!("DeveloperCertificates.{}", certificates.len());
@@ -253,6 +267,7 @@ fn read_profile(bytes: Vec<u8>, plist: &[u8]) -> Result<Profile> {
         team,
         prefix,
         all_devices,
+        devices,
         entitlements: object("Entitlements", &field("Entitlements", "json", None)?)?,
         expires: String::from_utf8(field("ExpirationDate", "raw", Some("date"))?)?
             .trim()
@@ -307,11 +322,20 @@ fn check(
         "it isn't a macOS profile"
     );
     match mode {
-        Mode::Beta => ensure!(profile.all_devices, "it isn't a Developer ID profile"),
-        Mode::Dev => ensure!(
-            !profile.all_devices,
-            "it's a Developer ID profile, which needs --beta"
+        Mode::Beta => ensure!(
+            profile.all_devices && profile.devices.is_none(),
+            "it isn't a Developer ID profile"
         ),
+        Mode::Dev => {
+            ensure!(
+                !profile.all_devices,
+                "it's a Developer ID profile, which needs --beta"
+            );
+            ensure!(
+                profile.devices.is_some_and(|count| count > 0),
+                "it isn't a development profile: it lists no devices"
+            );
+        }
     }
     ensure!(utc_seconds(&profile.expires), "its expiry isn't a UTC time");
     // Both are ISO 8601 UTC with seconds, so text order is time order.
@@ -395,16 +419,24 @@ fn audited(profile: &Profile, signed: &Value, display: &[u8], id: &str, group: &
         signed.get(GET_TASK_ALLOW).is_none(),
         "it's signed with get-task-allow"
     );
+    ensure!(thin(display), "it isn't a single-architecture app");
     ensure!(
         hardened(display),
         "it isn't signed with the hardened runtime"
     );
+    let app_id = format!("{prefix}.{id}");
+    let granted = |key| profile.entitlements.get(key).and_then(Value::as_str);
     ensure!(
-        signed.get(APP_ID).and_then(Value::as_str) == Some(format!("{prefix}.{id}").as_str()),
+        granted(APP_ID) == Some(app_id.as_str()),
+        "its embedded profile isn't for {id}"
+    );
+    ensure!(
+        signed.get(APP_ID).and_then(Value::as_str) == Some(app_id.as_str()),
         "its App ID isn't its profile's prefix and {id}"
     );
     ensure!(
-        signed.get(TEAM_ID).and_then(Value::as_str) == Some(profile.team.as_str()),
+        granted(TEAM_ID) == Some(profile.team.as_str())
+            && signed.get(TEAM_ID).and_then(Value::as_str) == Some(profile.team.as_str()),
         "its team isn't its profile's"
     );
     let groups = [format!("{prefix}.{id}"), format!("{prefix}.{group}")];
@@ -420,7 +452,18 @@ fn audited(profile: &Profile, signed: &Value, display: &[u8], id: &str, group: &
     Ok(())
 }
 
-/// Whether `codesign -dv` shows at least one code directory and the runtime flag on every one.
+/// Whether `codesign -dv` describes a thin Mach-O: one architecture, so the one code directory
+/// it shows is the whole signature. A universal app would show only the host's slice.
+fn thin(display: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(display);
+    let mut formats = text.lines().filter_map(|line| line.strip_prefix("Format="));
+    formats
+        .next()
+        .is_some_and(|format| format.contains("Mach-O thin ("))
+        && formats.next().is_none()
+}
+
+/// Whether `codesign -dv` shows exactly one code directory, with the runtime flag.
 fn hardened(display: &[u8]) -> bool {
     let text = String::from_utf8_lossy(display);
     let flags: Vec<Option<u32>> = text
@@ -434,10 +477,7 @@ fn hardened(display: &[u8]) -> bool {
             u32::from_str_radix(&hex[..end], 16).ok()
         })
         .collect();
-    !flags.is_empty()
-        && flags
-            .iter()
-            .all(|flags| flags.is_some_and(|flags| flags & RUNTIME != 0))
+    matches!(flags.as_slice(), [Some(flags)] if flags & RUNTIME != 0)
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ`, the only form text order compares as time.

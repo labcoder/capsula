@@ -16,6 +16,7 @@ fn profile(entitlements: Value) -> Profile {
         team: TEAM.to_owned(),
         prefix: TEAM.to_owned(),
         all_devices: false,
+        devices: Some(1),
         entitlements,
         expires: "2027-11-23T04:40:22Z".to_owned(),
         platforms: vec!["OSX".to_owned()],
@@ -513,7 +514,25 @@ fn beta_is_a_flag_given_at_most_once() {
 fn each_mode_takes_only_its_own_kind_of_profile() {
     let mut developer_id = wildcard();
     developer_id.all_devices = true;
+    developer_id.devices = None;
     check(&developer_id, BRAIN, GROUP, SHA1, NOW, Mode::Beta).expect("beta takes Developer ID");
+    let mut both = wildcard();
+    both.all_devices = true;
+    both.devices = Some(2);
+    assert_eq!(
+        check(&both, BRAIN, GROUP, SHA1, NOW, Mode::Beta)
+            .expect_err("refused")
+            .to_string(),
+        "it isn't a Developer ID profile"
+    );
+    for devices in [None, Some(0)] {
+        let mut deviceless = wildcard();
+        deviceless.devices = devices;
+        assert_eq!(
+            refusal(&deviceless),
+            "it isn't a development profile: it lists no devices"
+        );
+    }
     assert_eq!(
         check(&wildcard(), BRAIN, GROUP, SHA1, NOW, Mode::Beta)
             .expect_err("refused")
@@ -591,6 +610,7 @@ fn a_decoded_profile_reads_into_exact_fields() {
     assert_eq!(read.team, "ABCDE12345");
     assert_eq!(read.prefix, "PFX1234567");
     assert!(read.all_devices);
+    assert_eq!(read.devices, None);
     assert_eq!(read.expires, "2027-11-23T04:40:22Z");
     assert_eq!(read.platforms, ["OSX"]);
     // SHA-1 of "abc", from FIPS 180-1's own example.
@@ -609,11 +629,28 @@ fn a_decoded_profile_reads_into_exact_fields() {
     let devices = "<key>ProvisionedDevices</key><array><string>00008103-0001</string></array>";
     let development = read_profile(Vec::new(), fixture(devices, one).as_bytes()).expect("read");
     assert!(!development.all_devices);
-    let mistyped = "<key>ProvisionsAllDevices</key><string>true</string>";
+    assert_eq!(development.devices, Some(1));
+    let listless = "<key>ProvisionedDevices</key><string>00008103-0001</string>";
+    assert_eq!(
+        read_profile(Vec::new(), fixture(listless, one).as_bytes())
+            .map(drop)
+            .expect_err("refused")
+            .to_string(),
+        "the profile's ProvisionedDevices has the wrong type"
+    );
+    let no_all = "<key>ProvisionsAllDevices</key><false/>";
     assert!(
-        !read_profile(Vec::new(), fixture(mistyped, one).as_bytes())
+        !read_profile(Vec::new(), fixture(no_all, one).as_bytes())
             .expect("read")
             .all_devices
+    );
+    let mistyped = "<key>ProvisionsAllDevices</key><string>true</string>";
+    assert_eq!(
+        read_profile(Vec::new(), fixture(mistyped, one).as_bytes())
+            .map(drop)
+            .expect_err("refused")
+            .to_string(),
+        "the profile's ProvisionsAllDevices has the wrong type"
     );
     for prefixes in ["", "<string>PFX1234567</string><string>ABCDE12345</string>"] {
         assert_eq!(
@@ -699,7 +736,7 @@ fn profile_with_groups(groups: &[&str]) -> Profile {
 }
 
 #[test]
-fn the_runtime_flag_is_read_from_every_code_directory() {
+fn the_runtime_flag_is_read_from_exactly_one_code_directory() {
     let line = |flags: &str| {
         format!("CodeDirectory v=20500 size=1 flags={flags} hashes=1+7 location=embedded\n")
     };
@@ -714,7 +751,7 @@ fn the_runtime_flag_is_read_from_every_code_directory() {
         ),
         (
             [line("0x10000(runtime)"), line("0x10000(runtime)")].concat(),
-            true,
+            false,
         ),
         (line("10000(runtime)"), false),
         (line("0xzz(runtime)"), false),
@@ -731,7 +768,9 @@ fn a_planted_debugger_entitlement_and_a_missing_runtime_are_read_from_a_real_sig
     let app = root.join("Probe.app");
     let contents = app.join("Contents");
     std::fs::create_dir_all(contents.join("MacOS")).expect("layout");
-    std::fs::copy("/usr/bin/true", contents.join("MacOS/probe")).expect("executable");
+    // The test binary itself: a thin Mach-O, as the bundle's binaries are.
+    let exe = std::env::current_exe().expect("this test binary");
+    std::fs::copy(exe, contents.join("MacOS/probe")).expect("executable");
     let info = json!({
         "CFBundleIdentifier": BRAIN,
         "CFBundleExecutable": "probe",
@@ -761,6 +800,7 @@ fn a_planted_debugger_entitlement_and_a_missing_runtime_are_read_from_a_real_sig
     };
     let (signed, display) = adhoc(true);
     assert_eq!(signed, planted);
+    assert!(thin(&display));
     assert!(hardened(&display));
     assert_eq!(
         audited(&prefixed(), &signed, &display, BRAIN, GROUP)
@@ -770,4 +810,56 @@ fn a_planted_debugger_entitlement_and_a_missing_runtime_are_read_from_a_real_sig
     );
     let (_, display) = adhoc(false);
     assert!(!hardened(&display));
+}
+
+#[test]
+fn only_a_single_architecture_signature_counts_as_checked() {
+    let thin_line = "Format=app bundle with Mach-O thin (arm64)\n";
+    let universal = "Format=app bundle with Mach-O universal (x86_64 arm64)\n";
+    assert!(thin(thin_line.as_bytes()));
+    assert!(thin(SIGNED_DISPLAY.as_bytes()));
+    for display in [
+        universal.to_owned(),
+        String::new(),
+        [thin_line, thin_line].concat(),
+    ] {
+        assert!(!thin(display.as_bytes()), "{display:?}");
+    }
+    let widened = SIGNED_DISPLAY.replace("Mach-O thin (arm64)", "Mach-O universal (x86_64 arm64)");
+    assert_eq!(
+        audit_refusal(
+            &prefixed(),
+            &entitlements(PREFIX, TEAM, BRAIN, GROUP),
+            &widened
+        ),
+        "it isn't a single-architecture app"
+    );
+}
+
+#[test]
+fn another_roles_profile_embedded_with_the_same_team_prefix_and_groups_is_refused() {
+    let shell = "ai.kumochi.dev.shell";
+    let signed = entitlements(PREFIX, TEAM, shell, GROUP);
+    assert_eq!(
+        audited(
+            &prefixed(),
+            &signed,
+            SIGNED_DISPLAY.as_bytes(),
+            shell,
+            GROUP
+        )
+        .expect_err("refused")
+        .to_string(),
+        "its embedded profile isn't for ai.kumochi.dev.shell"
+    );
+    let mut teamless = prefixed();
+    teamless.entitlements[TEAM_ID] = json!("ZYXWV98765");
+    assert_eq!(
+        audit_refusal(
+            &teamless,
+            &entitlements(PREFIX, TEAM, BRAIN, GROUP),
+            SIGNED_DISPLAY
+        ),
+        "its team isn't its profile's"
+    );
 }
