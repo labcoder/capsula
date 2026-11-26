@@ -2,8 +2,8 @@ use gpui_kit::{App, Context};
 use kumochi_protocol::message::DockPosition;
 
 use super::{
-    Layout, LineFrame, Observer, OpenError, PEEK_HEIGHT, PanelVisibility, Placement, Position,
-    Presence, line, platform, scaled,
+    Layout, LineFrame, OpenError, PEEK_HEIGHT, PanelVisibility, Placement, Position, Presence,
+    line, observer, platform, scaled,
 };
 use crate::settings::Save;
 
@@ -31,7 +31,7 @@ impl Presence {
         position: Option<DockPosition>,
         cx: &mut Context<'_, Self>,
     ) {
-        let mode = if cx.has_global::<Observer>() {
+        let mode = if observer::active(cx) {
             RestoreMode::ObserverSeed
         } else {
             RestoreMode::Saved

@@ -25,7 +25,14 @@ pub(crate) enum LaunchError {
         "--accounts-fixture requires a debug build, one fixed state and a quit deadline; --accounts-appearance is optional and accepts light, dark, large or constrained once"
     )]
     AccountsFixture,
+    #[error(
+        "--gate-observer and --input-diagnostics need a shell built with the gate-recorder feature"
+    )]
+    RecorderOff,
 }
+
+/// Whether this build carries the gate recorder.
+const RECORDER: bool = cfg!(any(test, feature = "gate-recorder"));
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Launch {
@@ -48,10 +55,23 @@ impl Launch {
     ///
     /// # Errors
     /// Fails on a bad value, a fixture or observer without a quit deadline, a repeated fixture
-    /// or timing flag, or either receipt mode without its required observer.
+    /// or timing flag, or either receipt mode without its required observer, or a recorder
+    /// flag in a build without the recorder.
     pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Self, LaunchError> {
+        Self::parse_for::<RECORDER>(args)
+    }
+
+    /// As [`Self::parse`], for a build with or without the gate recorder.
+    fn parse_for<const RECORDER_BUILT: bool>(
+        args: impl Iterator<Item = String>,
+    ) -> Result<Self, LaunchError> {
         let mut launch = Self::default();
         for arg in args {
+            if !RECORDER_BUILT
+                && (arg.starts_with("--gate-observer=") || arg.starts_with("--input-diagnostics="))
+            {
+                return Err(LaunchError::RecorderOff);
+            }
             if arg == "--accounts-fixture" || arg.starts_with("--accounts-fixture=") {
                 #[cfg(debug_assertions)]
                 {
@@ -197,6 +217,21 @@ mod tests {
                 .escape_fixture
         );
         assert!(!launch(args(&[])).unwrap().escape_fixture);
+    }
+
+    #[test]
+    fn a_build_without_the_recorder_refuses_its_flags() {
+        for flags in [
+            &["--gate-observer=gate.log", "--smoke"][..],
+            &["--input-diagnostics=input.log"][..],
+        ] {
+            assert!(matches!(
+                Launch::parse_for::<false>(args(flags)),
+                Err(LaunchError::RecorderOff)
+            ));
+            assert!(Launch::parse_for::<true>(args(flags)).is_ok());
+        }
+        assert!(Launch::parse_for::<false>(args(&["--smoke"])).is_ok());
     }
 
     #[test]

@@ -1,6 +1,8 @@
 mod tray;
 
-use std::cell::{Cell, OnceCell};
+use std::cell::Cell;
+#[cfg(any(test, feature = "gate-recorder"))]
+use std::cell::OnceCell;
 use std::rc::Rc;
 
 use async_channel::Sender;
@@ -24,7 +26,9 @@ use windows::core::{HSTRING, PCWSTR, w};
 
 use super::super::hit_mask::{HitMask, MaskUpdate};
 use super::super::keyboard::{self, EscapeHotkey, Keys};
-use super::super::observer::{self, Observe, ProxyHandle};
+#[cfg(any(test, feature = "gate-recorder"))]
+use super::super::observer;
+use super::super::observer::ProxyHandle;
 use super::super::{screen_watch, taskbar};
 use super::capture::{Affinity, snapshot_affinity};
 use super::window::{Hover, hide};
@@ -33,6 +37,8 @@ use super::{
     struct_size,
 };
 use crate::platform::Deliver;
+#[cfg(any(test, feature = "gate-recorder"))]
+use crate::platform::Observe;
 use tray::{TRAY_ID, TRAY_MESSAGE, add_tray, pick_from_tray_menu};
 
 /// What the proxy's window procedure reads. Only the UI thread touches it.
@@ -46,6 +52,7 @@ struct ProxyState {
     position: Cell<usize>,
     retry_enabled: Cell<bool>,
     /// Set only by `--gate-observer`.
+    #[cfg(any(test, feature = "gate-recorder"))]
     observe: OnceCell<Observe>,
 }
 
@@ -103,6 +110,7 @@ impl PresenceNative {
             taskbar_created,
             position: Cell::new(1),
             retry_enabled: Cell::new(false),
+            #[cfg(any(test, feature = "gate-recorder"))]
             observe: OnceCell::new(),
         });
         // Every field Drop cleans up starts empty, so a failure below undoes only what was done.
@@ -281,6 +289,7 @@ impl PresenceNative {
 
     /// `--gate-observer` only: stamps frame completions, harness repaint requests and tagged
     /// clicks on the proxy and hands them to `observe`. Returns where frame ids go.
+    #[cfg(any(test, feature = "gate-recorder"))]
     pub(crate) fn observe(&self, observe: Observe) -> ProxyHandle {
         if self.state().observe.set(observe).is_err() {
             tracing::warn!("the proxy is already observed");
@@ -336,6 +345,7 @@ impl PresenceNative {
             taskbar_created: 0,
             position: Cell::new(1),
             retry_enabled: Cell::new(false),
+            #[cfg(any(test, feature = "gate-recorder"))]
             observe: OnceCell::new(),
         });
         Ok(Self {
@@ -416,6 +426,7 @@ pub(super) unsafe extern "system" fn proxy_proc(
         if state.keys.on_message(hwnd, message, wparam, lparam) {
             return LRESULT(0);
         }
+        #[cfg(any(test, feature = "gate-recorder"))]
         if observer::on_message(state.observe.get(), message, wparam, click_qpc) {
             return LRESULT(0);
         }

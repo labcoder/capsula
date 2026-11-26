@@ -182,13 +182,17 @@ pub(crate) fn build(
         } else {
             "gate"
         });
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .context("xtask is in the workspace")?;
+    let root = checkout.unwrap_or(workspace);
     let mut cargo = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cargo.args([
         "build",
         "--quiet",
         "--locked",
         "--features",
-        "kumochi-protocol/gate-identity",
+        &features(packages, root)?,
     ]);
     for package in packages {
         cargo.args(["--package", package]);
@@ -198,12 +202,7 @@ pub(crate) fn build(
     if profile == Profile::Release {
         cargo.arg("--release");
     }
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .context("xtask is in the workspace")?;
-    cargo
-        .arg("--manifest-path")
-        .arg(checkout.unwrap_or(workspace).join("Cargo.toml"));
+    cargo.arg("--manifest-path").arg(root.join("Cargo.toml"));
     let built = live::run_bounded(cargo, BUILD_LIMIT, "the gate build")?;
     ensure!(built.success(), "the gate build failed ({built})");
     let profile = target.join(match profile {
@@ -212,6 +211,23 @@ pub(crate) fn build(
     });
     require_built(&profile, packages)?;
     Ok((profile, started.elapsed()))
+}
+
+/// The gate identity, and the shell's gate recorder when `root`'s shell has that feature: a
+/// checkout from before it always builds the recorder in.
+fn features(packages: &[&str], root: &Path) -> Result<String> {
+    let mut features = "kumochi-protocol/gate-identity".to_owned();
+    if packages.contains(&"kumochi-shell") {
+        let manifest = fs::read_to_string(root.join("crates/shell/Cargo.toml"))
+            .context("can't read the shell's manifest")?;
+        if manifest
+            .lines()
+            .any(|line| line.starts_with("gate-recorder ="))
+        {
+            features.push_str(",kumochi-shell/gate-recorder");
+        }
+    }
+    Ok(features)
 }
 
 /// Refuses the images `packages` built into `profile` unless each is compatible with its role.
@@ -832,6 +848,36 @@ mod tests {
             "{role}|{edition}|{}|{}|KUMOCHI_GATE_LOCALAPPDATA|KUMOCHI_GATE_APPDATA",
             identity.instance_service, GATE.instance_service
         )
+    }
+
+    #[test]
+    fn the_shell_gets_its_recorder_only_where_its_manifest_has_one() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace");
+        let both = ["kumochi-shell", "kumochi-brain"];
+        assert_eq!(
+            features(&both, workspace).expect("this workspace"),
+            "kumochi-protocol/gate-identity,kumochi-shell/gate-recorder"
+        );
+        assert_eq!(
+            features(&["kumochi-brain"], workspace).expect("brain only"),
+            "kumochi-protocol/gate-identity"
+        );
+        let old = scratch::dir("gate-old-shell");
+        fs::create_dir_all(old.join("crates/shell")).expect("shell folder");
+        fs::write(
+            old.join("crates/shell/Cargo.toml"),
+            "[features]
+gate-draw-replay = []
+",
+        )
+        .expect("old manifest");
+        assert_eq!(
+            features(&both, &old).expect("an old checkout"),
+            "kumochi-protocol/gate-identity"
+        );
+        assert!(features(&both, &old.join("missing")).is_err());
     }
 
     #[test]

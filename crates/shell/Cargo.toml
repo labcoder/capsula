@@ -61,7 +61,8 @@ windows = { version = "0.62", features = [
 ] }
 
 [features]
-gate-draw-replay = []
+gate-recorder = []
+gate-draw-replay = ["gate-recorder"]
 
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }

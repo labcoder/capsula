@@ -16,9 +16,9 @@ pub(super) use kumochi_shell_core::presence::typing::{Hide, Typing};
 
 use super::messages::Messages;
 use super::{
-    Context, Diagnostics, Entity, Foreground, InputState, OpenError, PanelVisibility, Presence,
-    PresenceEvent, PresenceSurface, SharedString, configure_surface, constants, diagnostics,
-    options, platform, send,
+    Context, Entity, Foreground, InputState, OpenError, PanelVisibility, Presence, PresenceEvent,
+    PresenceSurface, SharedString, configure_surface, constants, diagnostics, options, platform,
+    send,
 };
 use crate::chat_notice::{Notice, Source};
 use crate::runs::Target;
@@ -287,7 +287,7 @@ impl Presence {
             state.hide();
             cx.notify();
         });
-        if cx.has_global::<Diagnostics>() {
+        if diagnostics::active(cx) {
             text.draft = Some(text.input.read(cx).value());
         }
         diagnostics::record(cx, format_args!("input dismissed"));

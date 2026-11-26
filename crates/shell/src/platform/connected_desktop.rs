@@ -12,10 +12,10 @@ use raw_window_handle::HasWindowHandle;
 #[cfg(test)]
 use kumochi_shell::presence_platform as geometry;
 
+#[cfg(any(test, feature = "gate-recorder"))]
+use super::Observe;
 use super::host::{HostFacts, HostId, WatchGen};
-use super::{
-    Deliver, MaskUpdate, Observe, PresenceError, PresenceEvent, PresenceLabels, PresenceSurface,
-};
+use super::{Deliver, MaskUpdate, PresenceError, PresenceEvent, PresenceLabels, PresenceSurface};
 use crate::presenter::overlay_input::{InputPlatform, Layer, OverlayInput, Regions};
 
 #[cfg_attr(test, derive(Default))]
@@ -52,6 +52,7 @@ impl Drop for EscapeHotkey {
     }
 }
 
+#[cfg(any(test, feature = "gate-recorder"))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProxyHandle(std::convert::Infallible);
 
@@ -122,6 +123,7 @@ pub(crate) fn watch_host(
     Err(PresenceError::BindingsUnavailable)
 }
 
+#[cfg(any(test, feature = "gate-recorder"))]
 pub(crate) fn window_handle(_: &impl HasWindowHandle) -> Result<usize, PresenceError> {
     Err(PresenceError::BindingsUnavailable)
 }
@@ -193,6 +195,7 @@ impl Affinity {
     }
 }
 
+#[cfg(any(test, feature = "gate-recorder"))]
 impl ProxyHandle {
     pub(crate) fn value(self) -> usize {
         match self.0 {}
@@ -244,6 +247,7 @@ impl PresenceNative {
         self.unavailable()
     }
 
+    #[cfg(any(test, feature = "gate-recorder"))]
     pub(crate) fn observe(&self, _: Observe) -> ProxyHandle {
         match *self {
             #[cfg(test)]

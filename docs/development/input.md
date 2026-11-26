@@ -359,7 +359,8 @@ other key going down cancels the hold, and the chord is never held outside a hol
 ## Diagnostics for the input session
 
 Two opt-in flags serve the approved gate-session harness. A normal run uses neither, and
-creates no file.
+creates no file. Both need a shell built with the `gate-recorder` feature (see
+[the gate observer](presence.md#gate-observer)); without it the shell refuses them at launch.
 
 - `--input-diagnostics=<file>` writes one line per input milestone, flushed as it happens, as
   `qpc=<QueryPerformanceCounter> <event> key=value…`. Durations are in microseconds since the

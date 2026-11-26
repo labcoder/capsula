@@ -5,6 +5,7 @@
 mod accounts_fixture;
 mod carry;
 mod deletes;
+#[cfg_attr(not(any(test, feature = "gate-recorder")), path = "diagnostics_off.rs")]
 pub(crate) mod diagnostics;
 pub(crate) use kumochi_shell_core::presence::drag;
 mod drawings;
@@ -25,6 +26,7 @@ pub(crate) mod line;
 mod link;
 mod marks;
 mod messages;
+#[cfg_attr(not(any(test, feature = "gate-recorder")), path = "observer_off.rs")]
 pub(crate) mod observer;
 mod onboarding;
 mod overlay;
@@ -32,6 +34,7 @@ mod overlay;
 mod overlay_fixture;
 mod overlay_input;
 mod overlay_visibility;
+#[cfg_attr(not(any(test, feature = "gate-recorder")), path = "paint_off.rs")]
 mod paint;
 mod paint_cache;
 mod paint_geometry;
@@ -106,7 +109,6 @@ pub(crate) use launch::{Launch, LaunchError};
 use line::{Dock, Line, LineFrame, Placement};
 pub(crate) use observer::Observer;
 use observer::{Drawn, Surface};
-use paint::{Stamp, Target};
 use settings::SettingsPanel;
 use text::TextPanel;
 use threads::ThreadsPanel;
@@ -598,8 +600,9 @@ impl Presence {
     }
 
     /// `--gate-observer` only: starts observing the proxy and records where everything is.
+    #[cfg(any(test, feature = "gate-recorder"))]
     fn observe(&self, position: Position, cx: &mut Context<'_, Self>) -> Result<(), OpenError> {
-        if !cx.has_global::<Observer>() {
+        if !observer::active(cx) {
             return Ok(());
         }
         let dock_hwnd = self
@@ -672,6 +675,7 @@ impl Presence {
             PresenceEvent::Escape => self.escape_with_speech(None, cx)?,
             PresenceEvent::EscapeSpeech(press) => self.escape_with_speech(Some(press), cx)?,
             PresenceEvent::Quit => self.quit(cx),
+            #[cfg(any(test, feature = "gate-recorder"))]
             PresenceEvent::Repaint => self.dock.update(cx, |_, cx| cx.notify()),
             // The wake says nothing itself: the presenter reads its watch's bit.
             PresenceEvent::ScreenWoke => {
@@ -811,14 +815,14 @@ impl Render for Panel {
                     send_escape(&events, owner.as_ref(), cx);
                 })
                 .debug_selector(|| "presence-stop".into());
-            Target(button.into_element())
+            paint::target(button.into_element())
         });
         let line = self
             .screen_line
             .as_ref()
             .map(|(text, model)| voice::screen_text(strings, *text, model.as_ref()))
             .or_else(|| self.notice.map(|notice| strings.get(notice)));
-        let stamped = cx.has_global::<Observer>() || cx.has_global::<Diagnostics>();
+        let stamped = observer::active(cx) || diagnostics::active(cx);
         // Kumo, the name and the status read as one identity; size and weight carry the
         // hierarchy, since muted text fails AA contrast over the glass.
         let identity = div()
@@ -903,7 +907,7 @@ impl Render for Panel {
             .flex()
             .flex_col()
             .gap_2()
-            .children(stamped.then_some(Stamp(Surface::Panel, Drawn::default())))
+            .children(paint::stamp(Surface::Panel, Drawn::default()).filter(|_| stamped))
             .child(identity)
             .child(actions)
     }
@@ -1110,6 +1114,7 @@ pub(crate) fn open(
         )),
     );
     presenter.input = input;
+    #[cfg(any(test, feature = "gate-recorder"))]
     if cx.has_global::<Observer>() {
         cx.global::<Observer>().observe_draw_timing(&mut presenter);
     }
@@ -1198,6 +1203,7 @@ pub(crate) fn open(
     status_panel.update(cx, |panel, _| panel.threads = Some(owner.downgrade()));
     let position = flags.position();
     owner.update(cx, |this, cx| this.position(position, cx))?;
+    #[cfg(any(test, feature = "gate-recorder"))]
     owner.update(cx, |this, cx| this.observe(position, cx))?;
     let (link, target, paused, gates, presses) = {
         let this = owner.read(cx);
