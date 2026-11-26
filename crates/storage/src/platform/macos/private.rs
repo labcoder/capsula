@@ -7,11 +7,11 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::AsRawFd as _;
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::path::Path;
 
 use super::protected::{
-    components, hold_from, inspect_private, open_directory, same_inspection, stat,
+    ObjectKind, components, hold_from, inspect_private, open_directory, same_inspection, stat,
 };
 use super::shell_files::{AcquisitionError, Entries, Next, named, writable_volume};
 use crate::Untrusted;
@@ -24,6 +24,11 @@ struct Limits {
     /// Entries seen across the whole walk.
     entries: usize,
 }
+
+/// Opens a file for its metadata only. Nothing reads through it: it stays an `OwnedFd`, which has
+/// no read methods. Non-blocking, so a FIFO swapped in after the look can't stall the open.
+const FILE_FLAGS: libc::c_int =
+    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
 
 const LIMITS: Limits = Limits {
     depth: 32,
@@ -45,13 +50,13 @@ pub fn owner_only_dir(path: &Path) -> Result<File, Untrusted> {
 }
 
 /// Checks `path` and everything in it, each entry looked at without following it: every folder
-/// must be private like [`owner_only_dir`]'s, and nothing else may be there. Every file refuses:
-/// there's no approved check that shows a file has no ACL while leaving it unopened. Nothing is
-/// re-secured. Its parent is held from `/`.
+/// must be private like [`owner_only_dir`]'s, and every file owned by this user, mode 0600, with one
+/// link and no ACL at all. A file is opened read-only for its metadata and closed; it is never
+/// read. Nothing else may be there, and nothing is re-secured. Its parent is held from `/`.
 ///
 /// # Errors
-/// `Missing` when `path` is; otherwise refuses like [`owner_only_dir`], and on any file, link,
-/// other object, listing failure, or more than 32 levels or 65,536 entries.
+/// `Missing` when `path` is; otherwise refuses like [`owner_only_dir`], and on a file that isn't
+/// private, a link, any other object, a listing failure, or more than 32 levels or 65,536 entries.
 pub fn private_tree(path: &Path) -> Result<(), Untrusted> {
     let (parent, name, user) = held_parent(path)?;
     private_at(&parent, &name, user, LIMITS)
@@ -104,7 +109,16 @@ fn private_folder(
     name: &CStr,
     user: libc::uid_t,
 ) -> Result<(File, libc::stat), Untrusted> {
-    let seen = look(parent, name)?;
+    folder_at(parent, name, &look(parent, name)?, user)
+}
+
+/// [`private_folder`] after its look, which found `seen`.
+fn folder_at(
+    parent: &File,
+    name: &CStr,
+    seen: &libc::stat,
+    user: libc::uid_t,
+) -> Result<(File, libc::stat), Untrusted> {
     match seen.st_mode & libc::S_IFMT {
         libc::S_IFDIR => {}
         libc::S_IFLNK => return Err(Untrusted::Reparse),
@@ -114,15 +128,44 @@ fn private_folder(
         Untrusted::Missing => Untrusted::Io,
         error => error,
     })?;
-    let checked = inspect_private(&folder, user)?;
+    let checked = inspect_private(&folder, user, ObjectKind::Directory)?;
+    same_entry(parent, seen, &checked)?;
+    named(parent, name, &checked)?;
+    Ok((folder, checked))
+}
+
+/// `name` in `parent`, a regular file at the look, opened read-only without following it and
+/// checked as a private file on its parent's device that the name still gives. Never read.
+fn private_file(
+    parent: &File,
+    name: &CStr,
+    seen: &libc::stat,
+    user: libc::uid_t,
+) -> Result<(), Untrusted> {
+    // SAFETY: parent is held and name is one listed component; there's no creation flag.
+    let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), FILE_FLAGS) };
+    if fd < 0 {
+        return Err(match io::Error::last_os_error().raw_os_error() {
+            Some(libc::ELOOP) => Untrusted::Reparse,
+            _ => Untrusted::Io,
+        });
+    }
+    // SAFETY: the successful open transferred a fresh, uniquely owned descriptor.
+    let file = unsafe { OwnedFd::from_raw_fd(fd) };
+    let checked = inspect_private(&file, user, ObjectKind::Regular)?;
+    same_entry(parent, seen, &checked)?;
+    named(parent, name, &checked)
+}
+
+/// The checked object is the one the look found, on its parent's device.
+fn same_entry(parent: &File, seen: &libc::stat, checked: &libc::stat) -> Result<(), Untrusted> {
     if checked.st_dev != stat(parent.as_raw_fd())?.st_dev
         || checked.st_dev != seen.st_dev
         || checked.st_ino != seen.st_ino
     {
         return Err(Untrusted::Unsafe);
     }
-    named(parent, name, &checked)?;
-    Ok((folder, checked))
+    Ok(())
 }
 
 fn look(parent: &File, name: &CStr) -> Result<libc::stat, Untrusted> {
@@ -166,7 +209,11 @@ fn walk(
     if depth > limits.depth {
         return Err(Untrusted::Io);
     }
-    let (folder, checked) = private_folder(parent, name, user)?;
+    let found = look(parent, name)?;
+    if found.st_mode & libc::S_IFMT == libc::S_IFREG {
+        return private_file(parent, name, &found, user);
+    }
+    let (folder, checked) = folder_at(parent, name, &found, user)?;
     for child in list(&folder, limits, seen)? {
         match walk(&folder, &child, user, limits, depth + 1, seen) {
             Ok(()) | Err(Untrusted::Missing) => {}

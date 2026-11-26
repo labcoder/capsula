@@ -198,23 +198,26 @@ its own thread; `runtime/claude.rs` asks it for work and turns the results into
 `ClaudeCodeView`.
 
 Linux has no protected-path adapter, so holding, creating and removing Claude Code's private
-paths and markers all refuse there. macOS has the folder half, in kumochi-storage. `hold_chain`
-holds the base from `/`. `owner_only_dir` makes or admits a folder owned by the user at mode
-0700 with no ACL at all: the folder's filesec must show no entries, and its attribute query must
-leave the ACL out, which rules out an empty ACL too. A folder it made that a umask or an
-inherited ACL left unprivate is refused and stays. `private_tree` walks Kumochi's `claude-code`
-folder without following anything and passes only such folders, so any file in it refuses:
-there's no approved check that shows a file has no ACL while leaving it unopened. A Mac fd holds
-the object, not its name, so the walk is a sample taken under the lane's lock with cooperating
-writers. It refuses past 32 levels or 65,536 entries. The real Application Support base isn't
-admitted yet. Markers and deletion (`mark`,
-`marker`, `remove_tree`) still refuse, so Disconnect can't finish there. The Mac checks are
-stricter than the Windows ones on exact owner, mode and ACL, and macOS has nothing like integrity
-labels. Modes don't inherit the way a DACL does, so before Claude Code runs on macOS its launch
-must give the child, and only the child, umask 077, and must create Kumochi's own `mcp.json`
-exclusively at 0600. None of this runs yet: the brain refuses every mode on macOS and has no
-Claude Code host there. Claude Code stays off on the Mac until a check on a real account shows
-its sign-in stays in Kumochi's folder.
+paths and markers all refuse there. macOS has the holding and checking half, in kumochi-storage.
+`hold_chain` holds the base from `/`. `owner_only_dir` makes or admits a folder owned by the
+user at mode 0700 with no ACL at all: the folder's filesec must show no entries, and its
+attribute query must leave the ACL out, which rules out an empty ACL too. A folder it made that a
+umask or an inherited ACL left unprivate is refused and stays. `private_tree` walks Kumochi's
+`claude-code` folder without following anything. Every folder in it must be private in that
+way, and every file owned by the user at mode 0600, with one link and no ACL at all, by the same
+two checks. Nothing else may be there. A file is opened read-only, without following it, for its
+metadata only, and then closed; it is never read. The owner chose this for macOS, where no
+descriptor lacks read access; Windows' handle has no read access at all. A test shows a file's
+access time stays put across the walk, which any read would move. A Mac fd holds the object, not
+its name, so the walk is a sample taken under the lane's lock with cooperating writers. It
+refuses past 32 levels or 65,536 entries. The real Application Support base isn't admitted yet.
+Markers and deletion (`mark`, `marker`, `remove_tree`) still refuse, so Disconnect can't finish
+there. The Mac checks are stricter than the Windows ones on exact owner, mode and ACL, and macOS
+has nothing like integrity labels. Modes don't inherit the way a DACL does, so before Claude Code
+runs on macOS its launch must give the child, and only the child, umask 077, and must create
+Kumochi's own `mcp.json` exclusively at 0600. None of this runs yet: the brain refuses every mode
+on macOS and has no Claude Code host there. Claude Code stays off on the Mac until a check on a
+real account shows its sign-in stays in Kumochi's folder.
 
 A scratch directory does not stand in for native ownership and handle checks, and there is no
 native Claude Code lane on the Linux test host. The lane and launch supervisor compile

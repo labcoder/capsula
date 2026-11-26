@@ -1,7 +1,6 @@
 use super::*;
 use std::cell::RefCell;
 use std::ffi::OsStr;
-use std::os::fd::FromRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 
 use crate::platform::macos::protected::tests::{Scratch, install_acl};
@@ -40,14 +39,37 @@ fn folder(scratch: &mut Scratch, parent: &File, name: &CStr, mode: libc::mode_t)
     folder
 }
 
-fn file(scratch: &mut Scratch, parent: &File, name: &CStr) {
+/// The access time every fixture file starts with: older than its modification time, so any read
+/// of it (`read`, `pread` or an `mmap` fault) moves it on APFS.
+const UNREAD: libc::time_t = 86_400;
+
+/// A fixture file holding a few bytes, at `mode`, with an access time older than its change time.
+fn file(scratch: &mut Scratch, parent: &File, name: &CStr, mode: libc::mode_t) -> File {
     let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     // SAFETY: parent is a held fixture folder and name one fixed component; creation is exclusive.
     let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags, 0o600) };
     assert!(fd >= 0, "exclusive fixture file");
     // SAFETY: the successful open transferred a fresh, uniquely owned descriptor.
-    drop(unsafe { File::from_raw_fd(fd) });
+    let mut file = unsafe { File::from_raw_fd(fd) };
     scratch.record(parent, name).expect("record fixture file");
+    std::io::Write::write_all(&mut file, b"fixture").expect("fixture bytes");
+    // SAFETY: file is the fixture just created; the mode is a fixed fixture value.
+    let changed = unsafe { libc::fchmod(file.as_raw_fd(), mode) };
+    assert_eq!(changed, 0, "fixture file mode");
+    let times = [
+        libc::timespec {
+            tv_sec: UNREAD,
+            tv_nsec: 0,
+        },
+        libc::timespec {
+            tv_sec: 2 * UNREAD,
+            tv_nsec: 0,
+        },
+    ];
+    // SAFETY: file is the fixture just created and times holds the two timestamps futimens reads.
+    let stamped = unsafe { libc::futimens(file.as_raw_fd(), times.as_ptr()) };
+    assert_eq!(stamped, 0, "fixture file times");
+    file
 }
 
 fn link(scratch: &mut Scratch, parent: &File, name: &CStr, target: &CStr) {
@@ -241,7 +263,7 @@ fn native_owner_only_dir_creates_reuses_and_refuses() {
         owner_only_at(&root, c"link", user).err(),
         Some(Untrusted::Reparse)
     );
-    file(&mut scratch, &root, c"file");
+    drop(file(&mut scratch, &root, c"file", 0o600));
     assert_eq!(
         owner_only_at(&root, c"file", user).err(),
         Some(Untrusted::Unsafe)
@@ -315,7 +337,7 @@ fn native_private_tree_passes_only_private_folders() {
         Err(Untrusted::Unsafe)
     );
     let cases: [(&CStr, Untrusted); 5] = [
-        (c"with-file", Untrusted::Unsafe),
+        (c"open-file", Untrusted::Unsafe),
         (c"open-sub", Untrusted::Unsafe),
         (c"with-link", Untrusted::Reparse),
         (c"with-fifo", Untrusted::Unsafe),
@@ -328,7 +350,7 @@ fn native_private_tree_passes_only_private_folders() {
         held.push(top);
         held.push(sub);
     }
-    file(&mut scratch, &held[2], c"f");
+    drop(file(&mut scratch, &held[2], c"f", 0o644));
     // SAFETY: held[4] is the open-sub fixture's sub folder; the mode is a fixed fixture value.
     assert_eq!(unsafe { libc::fchmod(held[4].as_raw_fd(), 0o750) }, 0);
     link(&mut scratch, &held[6], c"l", c"f");
@@ -419,6 +441,83 @@ fn native_private_tree_skips_vanished_entries_and_refuses_a_replaced_folder() {
         .expect("record replacement");
     rename(&root, c"swapped", c"swap");
 
+    scratch
+        .cleanup()
+        .expect("identity-checked cleanup; uncertainty leaves reported residual");
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_private_tree_checks_files_without_reading_them() {
+    let mut scratch = Scratch::new();
+    let root = scratch.root.try_clone().expect("retain scratch root");
+    let user = this_user();
+    let accessed = |parent: &File, name: &CStr| look(parent, name).expect("fixture look").st_atime;
+
+    let tree = folder(&mut scratch, &root, c"tree", 0o700);
+    drop(file(&mut scratch, &tree, c"secret", 0o600));
+    let sub = folder(&mut scratch, &tree, c"sub", 0o700);
+    drop(file(&mut scratch, &sub, c"inner", 0o600));
+    assert_eq!(private_at(&root, c"tree", user, LIMITS), Ok(()));
+    assert_eq!(
+        accessed(&tree, c"secret"),
+        UNREAD,
+        "the walk never read the file"
+    );
+    assert_eq!(accessed(&sub, c"inner"), UNREAD, "nor the nested one");
+    let found = look(&tree, c"secret").expect("fixture look");
+    assert_eq!(
+        private_file(&tree, c"secret", &found, user + 1),
+        Err(Untrusted::Unsafe),
+        "another owner's file"
+    );
+
+    let mut held = vec![tree, sub];
+    for (name, mode) in [(c"group-file", 0o640), (c"read-only", 0o400)] {
+        let top = folder(&mut scratch, &root, name, 0o700);
+        drop(file(&mut scratch, &top, c"f", mode));
+        assert_eq!(
+            private_at(&root, name, user, LIMITS),
+            Err(Untrusted::Unsafe),
+            "{name:?}"
+        );
+        held.push(top);
+    }
+    let linked = folder(&mut scratch, &root, c"linked", 0o700);
+    drop(file(&mut scratch, &linked, c"a", 0o600));
+    // SAFETY: linked is a held fixture folder; both names are fixed fixture components.
+    let made = unsafe {
+        libc::linkat(
+            linked.as_raw_fd(),
+            c"a".as_ptr(),
+            linked.as_raw_fd(),
+            c"b".as_ptr(),
+            0,
+        )
+    };
+    assert_eq!(made, 0, "fixture hard link");
+    scratch
+        .record(&linked, c"b")
+        .expect("record fixture hard link");
+    assert_eq!(
+        private_at(&root, c"linked", user, LIMITS),
+        Err(Untrusted::Unsafe),
+        "a second name"
+    );
+    held.push(linked);
+    for (name, acl) in [(c"denied-file", DENY), (c"empty-acl-file", c"!#acl 1\n")] {
+        let top = folder(&mut scratch, &root, name, 0o700);
+        let fixture = file(&mut scratch, &top, c"f", 0o600);
+        install_acl(&fixture, acl).expect("install fixture file ACL");
+        assert_eq!(
+            private_at(&root, name, user, LIMITS),
+            Err(Untrusted::Unsafe),
+            "{name:?}"
+        );
+        held.push(top);
+    }
+
+    drop(held);
     scratch
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");
