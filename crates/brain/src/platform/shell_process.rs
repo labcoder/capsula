@@ -304,7 +304,11 @@ impl ShellProcess {
                 state.store(verdict, Ordering::Release);
                 first
             }
-            _ => panic!("only a fixture publishes on demand"),
+            #[cfg(windows)]
+            Owner::Native(_) => panic!("only a fixture publishes on demand"),
+            #[cfg(target_os = "macos")]
+            Owner::Parent(_) => panic!("only a fixture publishes on demand"),
+            Owner::Watched(..) => panic!("only a fixture publishes on demand"),
         }
     }
 }
