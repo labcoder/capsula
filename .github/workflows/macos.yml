@@ -33,6 +33,10 @@ jobs:
           fi
       - name: Fetch locked dependencies
         run: cargo fetch --locked --target aarch64-apple-darwin
+      - name: Clippy
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Build the workspace
         run: cargo build --locked --offline --workspace
       - name: Storage and session tests
