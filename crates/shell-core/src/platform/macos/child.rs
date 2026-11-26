@@ -57,10 +57,15 @@ pub(crate) fn start_brain(
 /// Starts the owner and waits for its spawn report, until `by` or for `SPAWN_REPORT` at most.
 fn reported(os: impl Os, word: Arc<SpawnWord>, by: Instant) -> Result<ChildOwner, NotStarted> {
     let owner = ChildOwner::start(os, word, crate::link::QUIT_TIMEOUT).map_err(Refusal::Spawn)?;
-    match owner.spawned(by.min(Instant::now() + SPAWN_REPORT)) {
-        Ok(Report::Spawned) => Ok(owner),
+    started(owner.spawned(by.min(Instant::now() + SPAWN_REPORT))).map(|()| owner)
+}
+
+/// What the spawn report proves. Only a report says whether a child exists; a thread that ended
+/// without one proves nothing, so it's `Pending` like a late report.
+fn started(report: Result<Report, RecvTimeoutError>) -> Result<(), NotStarted> {
+    match report {
+        Ok(Report::Spawned) => Ok(()),
         Ok(Report::NotSpawned(refusal)) => Err(refusal.into()),
-        // A thread that ended without its report proves nothing about the spawn.
         Ok(Report::Settled(_))
         | Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
             Err(NotStarted::Pending)
@@ -709,32 +714,24 @@ mod tests {
         }
     }
 
-    /// Dies inside its spawn, before the owner can report.
-    struct Dies;
-
-    impl Os for Dies {
-        fn auto_reaps(&self) -> bool {
-            false
-        }
-        #[expect(
-            clippy::panic_in_result_fn,
-            reason = "the owner thread must end without a report"
-        )]
-        fn spawn(&mut self) -> io::Result<()> {
-            panic!("the owner dies before its spawn report");
-        }
-        fn poll(&mut self) -> Observation {
-            Observation::Lost
-        }
-        fn kill(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[test]
-    fn an_owner_that_ends_without_its_report_leaves_the_spawn_pending() {
-        let started = reported(Dies, Arc::new(SpawnWord::default()), Instant::now() + BOUND);
-        assert!(matches!(started, Err(NotStarted::Pending)));
+    fn only_a_report_proves_whether_a_child_exists() {
+        for report in [
+            Err(RecvTimeoutError::Disconnected),
+            Err(RecvTimeoutError::Timeout),
+            Ok(Report::Settled(Settled::Lost)),
+        ] {
+            let shown = format!("{report:?}");
+            assert!(
+                matches!(started(report), Err(NotStarted::Pending)),
+                "{shown}"
+            );
+        }
+        assert!(matches!(started(Ok(Report::Spawned)), Ok(())));
+        assert!(matches!(
+            started(Ok(Report::NotSpawned(Refusal::Claimed))),
+            Err(NotStarted::Refused(Refusal::Claimed))
+        ));
     }
 
     #[test]
