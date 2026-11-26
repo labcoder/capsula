@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd as _, FromRawFd as _, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd as _, RawFd};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 use std::ptr::NonNull;
@@ -186,19 +186,31 @@ pub(super) fn safe_regular(metadata: &libc::stat, user: libc::uid_t) -> Result<(
     Ok(())
 }
 
-/// Inspects a held folder that must be private: owned by this user, mode exactly 0700, and no
-/// ACL at all, so a DENY-only or empty present ACL refuses too.
-pub(super) fn inspect_private(file: &File, user: libc::uid_t) -> Result<libc::stat, Untrusted> {
+/// Inspects a held object that must be private: a folder owned by this user at mode exactly 0700,
+/// or a file that passes [`safe_regular`], and no ACL at all, so a DENY-only or empty present ACL
+/// refuses too. Only metadata is read.
+pub(super) fn inspect_private(
+    file: &impl AsRawFd,
+    user: libc::uid_t,
+    kind: ObjectKind,
+) -> Result<libc::stat, Untrusted> {
     let before = stat(file.as_raw_fd())?;
-    if before.st_mode & libc::S_IFMT != libc::S_IFDIR
-        || before.st_uid != user
-        || before.st_mode & 0o7777 != 0o700
-    {
-        return Err(Untrusted::Unsafe);
+    match kind {
+        ObjectKind::Directory => {
+            if before.st_mode & libc::S_IFMT != libc::S_IFDIR
+                || before.st_uid != user
+                || before.st_mode & 0o7777 != 0o700
+            {
+                return Err(Untrusted::Unsafe);
+            }
+        }
+        ObjectKind::Regular => safe_regular(&before, user)?,
     }
     Filesec::new()?.inspect_with(file.as_raw_fd(), &before, Acl::Absent)?;
     let after = stat(file.as_raw_fd())?;
-    if !same_inspection(&before, &after) {
+    if !same_inspection(&before, &after)
+        || (kind == ObjectKind::Regular && before.st_nlink != after.st_nlink)
+    {
         return Err(Untrusted::Io);
     }
     Ok(after)
