@@ -289,43 +289,44 @@ captured `CRYPT_E_NOT_FOUND`; unreadable usage isn't treated as unrestricted. En
 one context at a time and transfers that ownership back to the next Win32 enumeration call.
 Early returns free the held context and close the store. Nothing is installed or fetched.
 
-On macOS and Linux the same function reads roots through `rustls-native-certs`, locally:
+On Linux, `rustls-native-certs` reads the system bundle and certificate directories. A set
+`SSL_CERT_FILE` or nonempty `SSL_CERT_DIR` overrides the default locations; unreadable entries
+are left out and counted. Windows and Linux validate with rustls and ring against the resulting
+DER roots without fetching certificates. Empty or entirely unparsable roots fail as
+`TrustStoreUnavailable`, without a fallback bundle or permissive verifier. The normal
+Windows test reads bounded public certificates without writing to its store.
 
-| | macOS | Linux |
-| --- | --- | --- |
-| Source | User, then admin, then system Keychain trust settings; the first domain with a setting for a certificate decides | The system bundle files and certificate directories the OpenSSL probe finds |
-| `SSL_CERT_FILE` / `SSL_CERT_DIR` | Either one set, even empty, refuses (`Overridden`): they would replace the Keychain, denials included | A set file, or a nonempty directory list, is read instead of the system store |
-| An unreadable entry | Refuses the whole store (`Unreadable`): it might have been a denial | Left out and counted |
-| No root | `Empty` | `Empty` |
+On macOS, each new TLS connection uses SecTrust's SSL server policy with the connection's
+exact hostname. There is no flattened anchor list: the brain delegates trust domains, SSL
+usage, hostname and application constraints, and Deny to the OS in its own trust context.
+The offline tests don't establish the behavior of app-scoped settings for a signed release.
+Unspecified alone does not create an anchor, and a non-SSL trust setting
+does not become an SSL anchor. An independent rustls check still requires the leaf to match the
+hostname; rustls and ring verify the TLS handshake signatures. Native date and chain rules
+apply, including any allowed errors the OS recognizes. Either `SSL_CERT_FILE` or `SSL_CERT_DIR`
+being set, even empty, refuses TLS configuration without reading those locations. No macOS
+release ships before OSC-1136 lands.
 
-Every refusal is `TrustStoreUnavailable` to callers. On macOS these anchors follow the Keychain
-less strictly than SecTrust does: a certificate with only Unspecified or non-SSL trust settings
-counts as a root, and hostname or app limits on an SSL setting are ignored. When the deciding
-domain's setting is Deny, that certificate is left out of the anchors; a lower domain's Deny
-doesn't override a higher domain's Unspecified. This is an interim policy until SecTrust verifies
-on macOS; no macOS release build ships with it.
+The Mac trust service may fetch status or missing chain certificates only while evaluating an
+already-authorized HTTPS connection, including account setup and explicit model downloads.
+Ordinary certificates can pass when no revocation answer is available, but a verified revoked
+answer or an unsatisfied status requirement from the OS refuses the connection. Must-Staple is
+also fail-closed: SecTrust does not attest the provenance of a positive status, so Kumochi
+refuses these certificates until it can authenticate the staple itself. Neither a cache hit nor
+an unverified staple substitutes. No trust overrides or exceptions are installed. An OS trust
+evaluation admitted before refusal or cancellation can still make certificate lookups.
 
-Rustls parses those DER roots and verifies chains offline with ring on every platform. Empty or
-entirely unparsable roots fail as `TrustStoreUnavailable`, without a fallback root bundle or
-permissive verifier. No product client selects a platform verifier, and Kumochi has no
-certificate-override setting of its own. Off Windows, building a client succeeds once roots load;
-a trust refusal is `TrustStoreUnavailable`, and the native Anthropic route then has no connector. The runtime
-admission and the credential store still refuse before any account work, and test fixtures
-there get an offline Anthropic route instead of reading the host's store. Loopback TLS tests
-can still inject their own roots.
-The real-store test runs in the normal Windows test suite: it reads bounded public certificates
-only, writes nothing, and exercises the FFI ownership path rather than leaving it ignored.
-
-On macOS, the account and download clients and the direct model connectors open connections
-on four bounded handshake workers with a separate I/O reactor. Workers and callers enforce
-the earliest enclosing request deadline, capped at ten seconds for connection setup, and
-observe cancellation even while the answer is unpolled. A DNS lookup keeps its worker until
-the resolver returns; a stopped owner can't admit a new lookup but can't retract one already
-admitted. Mac reqwest clients disable the idle pool and retries so a competing pooled
-connection or retry cannot outlive the request's
-authority. The clients still use the interim verifier above. The staged SecTrust verifier is
-used only by offline tests with synthetic certificates; no macOS release ships before its
-production activation.
+The Mac boundary prestarts four bounded handshake workers and a separate I/O reactor. The
+brain and reactor do not poll SecTrust. The caller and workers enforce cancellation and the
+earliest enclosing request deadline, capped at ten seconds for connection setup. An admitted
+job keeps the reactor alive and holds its worker through an in-flight DNS lookup. A stopped
+owner can't admit a lookup or native check, but can't retract one already admitted. Only one
+SecTrust check can run at a time. A competing handshake can wait for the slot on its own
+worker until its original deadline or cancellation. An admitted check keeps the slot until
+it returns; a boundary timeout always refuses, even under soft-fail revocation. If all four
+workers are occupied, new connections refuse without queuing. Mac reqwest clients disable
+the idle pool and retries. Offline fixtures use synthetic certificates with in-memory or
+loopback transport and never change the user or system trust settings.
 
 The client enforces HTTPS, refuses redirects, disables proxy discovery, and exposes neither
 the raw reqwest client nor raw transport errors. Discovery and validated JWKS requests contain
@@ -338,9 +339,9 @@ requests have a 10 s limit. All success and error bodies are capped at 1 MiB, an
 header is retained only as at most 256 graphic ASCII bytes. The Windows root loader keeps at most
 1,024 roots, caps each DER certificate and EKU buffer at 16 KiB, and counts skipped and unreadable entries separately.
 Proxied networks cannot sign in until a user-set proxy setting exists. Each exchange builds its
-own client on a blocking thread (`spawn_blocking`), because reading the trust store blocks; a
-root store fixed since the last try is read again. A root Windows hasn't
-installed yet fails as `UnknownIssuer`; verification never invokes an online OS chain builder.
+own client on a blocking thread (`spawn_blocking`), so Windows and Linux can reload their root
+stores without blocking the brain. On Windows, a root the OS hasn't installed yet fails as
+`UnknownIssuer`; the Windows verifier never invokes an online OS chain builder.
 ROOT entries present in Windows' Disallowed store or carrying a due disallowed-time property
 are excluded. A Disallowed store that doesn't exist (`ERROR_FILE_NOT_FOUND`) counts as empty;
 any other failure to open it fails closed. Distrusted server-supplied intermediates, root not-before/usage policies and revocation

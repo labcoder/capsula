@@ -415,7 +415,11 @@ It runs with an allowlisted environment, telemetry opt-outs, and a working folde
 
 ## Rules that protect you
 
-- Kumochi itself sends no telemetry. Nothing leaves the machine except calls to the accounts you set up.
+- Kumochi itself sends no telemetry. Network calls are limited to the accounts you set up and
+  model downloads you authorize. During those HTTPS handshakes, including setup, macOS trust
+  services may fetch certificate status or missing certificates. An OS trust evaluation admitted
+  before refusal or cancellation may still make those lookups without receiving credentials
+  or application data from Kumochi. See [Checked HTTP and roots](accounts.md#checked-http-and-roots).
 - Claude Code is your own program. Kumochi asks it to switch telemetry off, shows what it reports, and runs it either way.
 - Secrets live only in Windows Credential Manager, never in logs, arguments or files. The one exception: Claude Code's own credential file may exist only inside Kumochi's Claude Code folder, readable by the user and SYSTEM only. Kumochi never reads, copies or relays its contents, and Disconnect removes it (logout, then delete).
 - Prompts, transcripts and screenshots are never logged.
