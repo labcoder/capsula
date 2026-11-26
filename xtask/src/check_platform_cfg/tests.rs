@@ -129,3 +129,20 @@ fn no_trailing() {}";
         ]
     );
 }
+
+#[test]
+fn checks_applied_product_cfg_but_not_shared_test_fixtures() {
+    let source = r#"#[cfg(any(test, feature = "test-support"))]
+mod fixture { #[cfg(windows)] fn fixture() {} }
+#[cfg_attr(test, cfg(windows))]
+#[cfg_attr(not(test), cfg(unix))]
+fn product() {}"#;
+    let mut sites = Vec::new();
+    scan(source.parse().unwrap(), &mut |line, signature| {
+        sites.push((line, signature));
+    });
+    assert_eq!(
+        sites,
+        [(4, "#[cfg_attr(not (test)) -> cfg(unix)]".to_owned())],
+    );
+}

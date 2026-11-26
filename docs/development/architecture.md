@@ -217,16 +217,17 @@ measurement pair whose two commits sit on either side of the commit that added t
 compares two different builds of those crates, so build both sides with the same table.
 
 CI runs two jobs side by side. `lint` runs fmt, cargo-deny for dependency or CI configuration
-changes and on every scheduled or manual run, `check-vendor`, `check-core`, `check-platform-cfg`, clippy on the core
-alone without test support, and clippy on the workspace. `test` runs the workspace tests and the
+changes and on every scheduled or manual run, `check-vendor`, `check-core`, `check-platform-cfg`,
+clippy on the core alone without test support, and clippy on the workspace. `test` runs the workspace tests and the
 vsync test. Each job restores its own cache, and only runs on main save one. The test job points
 `TEMP` and `TMP` at the runner's work disk: the tests' scratch stores make many durable writes,
 and the profile's temp folder on C: takes them seven to ten times slower.
 
 `cargo xtask check-platform-cfg` keeps plain OS predicates out of product code outside
 `platform.rs` and `platform/`. It scans Rust source under `crates/*/src`, skipping conventionally
-named test and fixture files and test-gated items. A plain predicate uses only OS selectors
-(`windows`, `unix`, `target_os`, or `target_family`), not feature, debug, or test gates.
+named test and fixture files and items gated on tests or `test-support`. A plain predicate uses
+only OS selectors (`windows`, `unix`, `target_os`, or `target_family`), not feature, debug,
+or test gates. This includes plain predicates applied by a product-reachable `cfg_attr`.
 The baseline counts occurrences of each predicate per file; line changes and relocating an
 identical predicate within the same file do not change that count. Delete an entry when removing
 its site (use `--list` to see the current inventory). CI compares against the PR base or current

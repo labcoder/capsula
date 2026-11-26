@@ -253,25 +253,42 @@ fn test_attribute(fields: &[TokenTree]) -> bool {
     match fields {
         [TokenTree::Ident(name)] => name == "test",
         [TokenTree::Ident(name), TokenTree::Group(body)] if name == "cfg" => {
-            requires_test(&body.stream().into_iter().collect::<Vec<_>>())
+            product_value(&body.stream().into_iter().collect::<Vec<_>>()) == Some(false)
         }
         _ => false,
     }
 }
 
-fn requires_test(predicate: &[TokenTree]) -> bool {
+fn product_value(predicate: &[TokenTree]) -> Option<bool> {
     match without_trailing_comma(predicate) {
-        [TokenTree::Ident(name)] => name == "test",
+        [TokenTree::Ident(name)] if name == "test" || name == "false" => Some(false),
+        [TokenTree::Ident(name)] if name == "true" => Some(true),
+        [TokenTree::Ident(name), equals, TokenTree::Literal(value)]
+            if name == "feature"
+                && punct(equals, '=')
+                && value.to_string() == "\"test-support\"" =>
+        {
+            Some(false)
+        }
+        [TokenTree::Ident(name), TokenTree::Group(body)] if name == "not" => {
+            product_value(&body.stream().into_iter().collect::<Vec<_>>()).map(|truth| !truth)
+        }
         [TokenTree::Ident(name), TokenTree::Group(body)] if name == "all" || name == "any" => {
             let fields: Vec<_> = body.stream().into_iter().collect();
-            let mut parts = without_trailing_comma(&fields).split(|token| punct(token, ','));
-            if name == "all" {
-                parts.any(requires_test)
-            } else {
-                parts.all(requires_test)
+            let short = name == "any";
+            let mut value = Some(!short);
+            if !fields.is_empty() {
+                for part in without_trailing_comma(&fields).split(|token| punct(token, ',')) {
+                    match product_value(part) {
+                        Some(truth) if truth == short => return Some(short),
+                        None => value = None,
+                        _ => {}
+                    }
+                }
             }
+            value
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -286,15 +303,13 @@ fn attribute_sites(fields: &[TokenTree], parent: &str, found: &mut impl FnMut(St
     let mut parts = without_trailing_comma(&fields).split(|token| punct(token, ','));
     let predicate = parts.next().unwrap_or_default();
     let site = format!("{parent}{name}({})", normalized(predicate));
-    let mut os = false;
-    if only_os(predicate, &mut os) {
-        if os {
-            found(site.clone());
-        }
-        if name == "cfg_attr" {
-            for child in parts {
-                attribute_sites(child, &format!("{site} -> "), found);
-            }
+    if plain_os(predicate) {
+        found(site.clone());
+    }
+    if name == "cfg_attr" && product_value(predicate) != Some(false) {
+        let parent = format!("{site} -> ");
+        for child in parts {
+            attribute_sites(child, &parent, found);
         }
     }
 }
