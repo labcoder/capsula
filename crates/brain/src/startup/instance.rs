@@ -255,6 +255,7 @@ impl<S: InstanceStore> InstanceAttempt<S> {
     }
 
     fn begin_retire(&mut self) {
+        self.state = State::Settled(Stage::Failed); // Drops any key before the delete can start.
         self.state = State::Retiring(spawn(
             &self.store,
             Job::Delete,

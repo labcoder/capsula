@@ -40,6 +40,9 @@ struct Fake {
     item: Mutex<Item>,
     calls: AtomicUsize,
     script: Mutex<Script>,
+    /// An attempt's buffers, and their wipes as the delete was entered.
+    watched: Mutex<Option<Made>>,
+    at_delete: Mutex<Option<Vec<Option<bool>>>>,
 }
 
 impl Fake {
@@ -48,6 +51,8 @@ impl Fake {
             item: Mutex::new(item),
             calls: AtomicUsize::new(0),
             script: Mutex::default(),
+            watched: Mutex::default(),
+            at_delete: Mutex::default(),
         })
     }
 
@@ -165,6 +170,9 @@ impl InstanceStore for Fake {
     }
 
     fn delete(&self) -> Result<(), Fault> {
+        if let Some(made) = &*self.watched.lock().expect("watched") {
+            *self.at_delete.lock().expect("snapshot") = Some(wipes::of(made));
+        }
         self.call(Step::Delete)?;
         let mut item = self.item.lock().expect("item");
         if *item == Item::Absent {
@@ -614,7 +622,7 @@ async fn a_publish_dropped_while_its_cleanup_delete_is_held_leaves_settle_to_wai
     let (deleting, release_delete) = store.hold(Step::Delete);
     let thread = release_after(added, release_add, after(Duration::from_millis(100)));
     let (mut attempt, held) = start(&store);
-    let made = Arc::clone(&attempt.made);
+    *store.watched.lock().expect("watched") = Some(Arc::clone(&attempt.made));
     let (key, shell) = (key(), shell());
     let deadline = Instant::now() + Duration::from_millis(30);
     {
@@ -630,9 +638,9 @@ async fn a_publish_dropped_while_its_cleanup_delete_is_held_leaves_settle_to_wai
             .recv_timeout(Duration::from_secs(5))
             .expect("the cleanup delete started");
         assert_eq!(
-            wipes::of(&made),
-            [Some(true), Some(true)],
-            "the copy and the readback are wiped while the live publish awaits the delete"
+            *store.at_delete.lock().expect("snapshot"),
+            Some(vec![Some(true), Some(true)]),
+            "the copy and the readback were wiped before the delete was entered"
         );
     }
     {
