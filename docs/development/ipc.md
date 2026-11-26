@@ -495,6 +495,18 @@ recovered pair but supplies neither a make nor evidence of release. Closing
 or locally aborting the pair revokes native hold eligibility
 without waiting for the outbox. This doesn't block local Quit or cancellation.
 
+### Who owns the greeting
+
+The brain's transport acquires each leg and reads its greeting. The shared greeting flow
+checks authorization and build, reserves the issue session, and sends Welcome before it asks
+for the data leg. It checks the data greeting and any queued echo before the connection can
+be admitted. The caller's one startup deadline covers every step. The pipe caller then sends
+`ShellTuning` by that deadline and installs the reserved session only after that send.
+
+On Windows, the pipe adapter still checks the client image before reading each Hello.
+The data accept, Hello, pairing and metrics keep their existing order. No transport on
+macOS is wired through this flow yet.
+
 ## After the handshake
 
 Each pipe has its own reader and writer, all polled together in one task with the core loop

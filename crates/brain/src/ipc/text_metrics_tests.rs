@@ -7,6 +7,7 @@ use kumochi_protocol::{BUILD_ID, Secret};
 use tokio::io::AsyncWriteExt as _;
 use tokio::time::{Instant, sleep_until};
 
+use super::greeting_tests::Memory;
 use super::{
     AudioSession, DataToBrain, FrameError, HANDSHAKE_TIMEOUT, Hello, Identity, Incarnation, Pipe,
     SessionError, Tap, TextMetricsV1, frame, read_startup_data, read_text_metrics,
@@ -119,18 +120,11 @@ async fn data_connect_hello_and_metrics_share_one_budget_in_both_modes() {
             let mut tap = Tap::default();
             let start = Instant::now();
             let startup = async {
-                let result = read_startup_data(
-                    &identity,
-                    expected,
-                    &mut tap,
-                    start + HANDSHAKE_TIMEOUT,
-                    async {
-                        sleep_until(start + tick * connect_at).await;
-                        Ok(&mut pipe)
-                    },
-                    |_| Ok(()),
-                )
-                .await;
+                let mut legs = Memory::new([].as_slice(), &mut pipe);
+                legs.open_at = Some(start + tick * connect_at);
+                let result =
+                    read_startup_data(&mut legs, expected, &mut tap, start + HANDSHAKE_TIMEOUT)
+                        .await;
                 (result, Instant::now())
             };
             let peer = async {
