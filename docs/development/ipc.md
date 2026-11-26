@@ -415,12 +415,17 @@ initiator's steps over the shell's two ends by one deadline and returns the legs
 `BindAck` verifies. Each leg is the link's `PipeClient` over the session crate's record owners.
 A timeout bounds each read or write call as a whole, however many socket transfers it takes, and
 the initiator and the wait for `Settings` end by their deadline even when the peer trickles
-bytes. A read that times out keeps its partial record and resumes it. A write takes exactly one
-frame and writes it whole, because a frame cut off part way can't be resumed. After a local
-abort or a refusal, reads fail and deliver nothing, not even a frame already looked at. A record that fails to
+bytes. The shell's two ends are nonblocking, and a transfer that can't go ahead waits in `poll`
+for what's left of the call's deadline, because Darwin restarts a blocking send's timeout on
+every wake and ignores `MSG_DONTWAIT` on Unix streams. A read
+that times out keeps its partial record and resumes it. A write takes exactly one frame and
+writes it whole, because a frame cut off part way can't be resumed. A record that fails to
 authenticate, a stream that ends inside a record, or a write that stops part way refuses the
-whole pair and shuts down both legs, so a reader blocked on the other leg wakes. The stream
-ending between frames is an ordinary end. `connect_pair` starts the child, runs `initiate`,
+whole pair and shuts down both legs, so a reader blocked on the other leg wakes. After a local
+abort or a refusal, reads fail and deliver nothing, not even a frame already looked at, and the
+affected readers' buffers are wiped at once; a call that holds a reader then wipes it as it
+lets go. A dropped leg wipes its own reader too. The stream ending between frames is an ordinary end. `connect_pair` starts the child,
+waiting for its spawn report no longer than the attempt, runs `initiate`,
 sends both greetings with the zero placeholder and the text metrics, accepts `ShellTuning` as
 the pipes do, and then reads the next control frame by the same deadline. That frame must be
 `Settings`, which the runtime sends first once it has committed, in both audio modes; anything

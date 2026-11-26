@@ -247,17 +247,9 @@ pub(crate) fn connect_pair(
     deadline: Instant,
     text_metrics: impl FnOnce(Instant) -> DrawingText,
 ) -> Result<(Connection, super::child::ChildOwner), LinkError> {
-    use super::child::Refusal;
-    use super::macos::NotStarted;
     check_attempt(Some(deadline))?;
-    let (owner, ends) = super::macos::start_brain(brain, word).map_err(|error| match error {
-        NotStarted::Refused(Refusal::Quitting) => LinkError::Quitting,
-        NotStarted::Refused(Refusal::Spawn(error)) => LinkError::Launch(error),
-        NotStarted::Refused(Refusal::Claimed | Refusal::AutoReap) => {
-            LinkError::Launch(std::io::ErrorKind::ResourceBusy.into())
-        }
-        NotStarted::Pending => LinkError::Launch(std::io::ErrorKind::TimedOut.into()),
-    })?;
+    let (owner, ends) = super::macos::start_brain(brain, word, deadline)
+        .map_err(|error| not_started(error, deadline))?;
     check_attempt(Some(deadline))?;
     let connection = over_pair(
         ends,
@@ -269,6 +261,23 @@ pub(crate) fn connect_pair(
         text_metrics(deadline),
     )?;
     Ok((connection, owner))
+}
+
+/// Why the attempt ends when no child started: a spawn report still pending at the attempt's
+/// deadline is that deadline, not a launch failure.
+#[cfg(target_os = "macos")]
+pub(super) fn not_started(error: super::macos::NotStarted, deadline: Instant) -> LinkError {
+    use super::child::Refusal;
+    use super::macos::NotStarted;
+    match error {
+        NotStarted::Refused(Refusal::Quitting) => LinkError::Quitting,
+        NotStarted::Refused(Refusal::Spawn(error)) => LinkError::Launch(error),
+        NotStarted::Refused(Refusal::Claimed | Refusal::AutoReap) => {
+            LinkError::Launch(std::io::ErrorKind::ResourceBusy.into())
+        }
+        NotStarted::Pending if Instant::now() >= deadline => LinkError::ConnectExpired,
+        NotStarted::Pending => LinkError::Launch(std::io::ErrorKind::TimedOut.into()),
+    }
 }
 
 /// The session path's attempt: the initiator, both greetings with the zero placeholder and the
