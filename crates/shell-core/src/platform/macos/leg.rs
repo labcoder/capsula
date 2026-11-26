@@ -69,6 +69,14 @@ fn pair_refused() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "the pair already refused")
 }
 
+/// `TimedOut` once `by` has passed, so no transfer starts after its deadline.
+fn expired(by: Option<Instant>) -> io::Result<()> {
+    if by.is_some_and(|by| Instant::now() >= by) {
+        return Err(io::ErrorKind::TimedOut.into());
+    }
+    Ok(())
+}
+
 /// Waits until `stream` is ready for `events`, until `by` when bounded. Returns once it's ready,
 /// the wait was interrupted or `by` passed; the caller tries again and sees which.
 fn ready(stream: &UnixStream, events: libc::c_short, by: Option<Instant>) -> io::Result<()> {
@@ -86,6 +94,7 @@ fn ready(stream: &UnixStream, events: libc::c_short, by: Option<Instant>) -> io:
 /// nonblocking, so no transfer ever waits inside the kernel past a deadline.
 fn read_by(stream: &UnixStream, buf: &mut [u8], by: Option<Instant>) -> io::Result<usize> {
     loop {
+        expired(by)?;
         match (&*stream).read(buf) {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 ready(stream, libc::POLLIN, by)?;
@@ -101,6 +110,7 @@ fn read_by(stream: &UnixStream, buf: &mut [u8], by: Option<Instant>) -> io::Resu
 /// nonblocking and the wait is a poll on what's left of the deadline.
 fn write_by(stream: &UnixStream, bytes: &[u8], by: Option<Instant>) -> io::Result<usize> {
     loop {
+        expired(by)?;
         match (&*stream).write(bytes) {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 ready(stream, libc::POLLOUT, by)?;

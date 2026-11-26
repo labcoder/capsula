@@ -800,3 +800,38 @@ fn a_pending_spawn_report_is_the_deadline_only_once_it_has_passed() {
         LinkError::Launch(ref error) if error.kind() == std::io::ErrorKind::TimedOut
     ));
 }
+
+#[test]
+fn nothing_moves_once_the_call_deadline_has_passed() {
+    let (control, data, mut brain) = bound();
+    brain.control(&ControlToShell::Ping);
+    control.set_timeout(Some(Duration::ZERO));
+    let mut byte = [0; 1];
+    assert_eq!(
+        (&control)
+            .read(&mut byte)
+            .expect_err("past its deadline")
+            .kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    control.set_timeout(Some(BOUND));
+    assert_eq!(
+        frame::read::<ControlToShell>(&mut &control, Pipe::Control).expect("read"),
+        Some(ControlToShell::Ping),
+        "the queued frame is still whole"
+    );
+    data.set_timeout(Some(Duration::ZERO));
+    let frame = counting_frame(HEADER_LEN + 9);
+    assert_eq!(
+        (&data).write(&frame).expect_err("past its deadline").kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    assert_eq!(
+        brain
+            .data
+            .read(&mut byte)
+            .expect("the brain reads its data end"),
+        0,
+        "no byte of the frame reached the brain"
+    );
+}
