@@ -1252,7 +1252,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         use crate::input::Gesture;
-        use crate::input::hold::Fence;
+        use crate::input::hold::{Fence, Intent};
         use crate::platform::microphone::CollectionGate;
 
         let keys = super::Keys::default();
@@ -1260,30 +1260,40 @@ mod tests {
         let mut fence = Fence::new(CollectionGate::default());
         let start = Instant::now();
         let (mut ms, mut queued) = (0, 1_000);
-        let mut send = |key: Option<(u16, u32)>, layout: usize, gesture: &mut Gesture| {
+        let mut send = |key: Option<(u16, u32)>, layout: usize| {
             ms += if key.is_some() { 10 } else { 300 };
             queued += 10;
             let now = start + Duration::from_millis(ms);
             let (event, queued_press) = match key {
                 Some((make, flags)) => {
-                    let Some((event, time)) = raw_at(&keys, 1, make, flags, layout, queued) else {
-                        return;
-                    };
+                    let (event, time) = raw_at(&keys, 1, make, flags, layout, queued)?;
                     (event, time.queued_press.filter(|_| !time.repeated_modifier))
                 }
                 None => (Event::Deadline, None),
             };
-            fence.reduce_with_keyboard_read(
-                gesture,
+            let delivery = fence.reduce_with_keyboard_read(
+                &mut gesture,
                 event,
                 now,
                 queued_press,
-                || None,
+                || Some(1),
                 || Some(now),
             );
+            let warm = delivery
+                .intents
+                .iter()
+                .filter(|intent| matches!(intent, Some(Intent::Warm(_))))
+                .count();
+            let recognized = delivery
+                .intents
+                .iter()
+                .filter(|intent| matches!(intent, Some(Intent::Recognized { .. })))
+                .count();
+            Some((event, warm, recognized))
         };
         let (up, e0) = (super::RI_KEY_BREAK, super::RI_KEY_E0);
         for (layout, typed) in [(1, 0x10), (2, 0x03)] {
+            let mut events = Vec::new();
             for key in [
                 (0x1D, 0),
                 (0x38, e0),
@@ -1294,21 +1304,27 @@ mod tests {
                 (0x38, e0 | up),
                 (0x1D, up),
             ] {
-                send(Some(key), layout, &mut gesture);
-                assert!(
-                    !gesture.engaged(),
-                    "AltGr in layout {layout} engaged the shortcut"
-                );
+                if let Some((event, warm, recognized)) = send(Some(key), layout) {
+                    assert_eq!((warm, recognized), (0, 0), "AltGr in layout {layout}");
+                    events.push(event);
+                }
             }
-            send(Some((0x1D, 0)), layout, &mut gesture);
-            send(Some((0x38, 0)), layout, &mut gesture);
-            assert!(
-                gesture.engaged(),
-                "the hold after AltGr typing in layout {layout} wasn't a chord"
+            assert_eq!(
+                events.first() == Some(&Event::Reset),
+                layout == 2,
+                "only the switched layout's first modifier resets: {events:?}"
             );
-            send(None, layout, &mut gesture);
-            send(Some((0x38, up)), layout, &mut gesture);
-            send(Some((0x1D, up)), layout, &mut gesture);
+            let held: Vec<_> = [Some((0x1D, 0)), Some((0x38, 0)), None]
+                .into_iter()
+                .map(|key| send(key, layout).map(|(_, warm, recognized)| (warm, recognized)))
+                .collect();
+            assert_eq!(
+                held,
+                [Some((0, 0)), Some((1, 0)), Some((0, 1))],
+                "the hold after AltGr typing in layout {layout}"
+            );
+            send(Some((0x38, up)), layout);
+            send(Some((0x1D, up)), layout);
         }
     }
 
