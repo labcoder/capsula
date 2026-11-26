@@ -272,8 +272,7 @@ impl Presence {
                     run,
                     thread,
                 } => self.focus(generation, run, thread, cx),
-                snapshot @ (LinkEvent::Account { generation, .. }
-                | LinkEvent::AccountUnsupported { generation, .. }) => {
+                snapshot @ LinkEvent::Account { generation, .. } => {
                     self.account_changed(generation, snapshot, cx);
                 }
                 LinkEvent::GitHub { generation, view } => {

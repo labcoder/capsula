@@ -66,7 +66,7 @@ impl Presence {
     ) {
         let accounts = &self.settings.read(cx).accounts;
         let view = accounts.view.as_ref();
-        let complete = !accounts.unsupported && account_complete(view);
+        let complete = account_complete(view);
         let shows = if matches!(view, Some(AccountView::SigningIn)) {
             Shows::Waiting
         } else {

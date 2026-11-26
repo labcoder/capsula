@@ -58,37 +58,6 @@ fn error(key: ErrorKey, actions: Vec<Action>) -> UserError {
 }
 
 #[test]
-fn a_platform_refusal_cannot_retry_or_sign_in_again() {
-    let mut accounts = Accounts::default();
-    receive(&mut accounts, signed_out());
-    accounts.error(&error(ErrorKey::UnsupportedPlatform, vec![]));
-    assert_eq!(
-        allowed(&accounts),
-        [AccountOp::SignIn],
-        "unscoped errors aren't account state"
-    );
-    assert!(accounts.receive_snapshot(
-        Some(7),
-        LinkEvent::AccountUnsupported {
-            generation: 7,
-            view: signed_out(),
-        },
-    ));
-    assert_eq!(allowed(&accounts), []);
-
-    accounts.disconnected();
-    assert!(accounts.receive_snapshot(
-        Some(8),
-        LinkEvent::AccountUnsupported {
-            generation: 8,
-            view: signed_in(PlanState::Enabled, Some(AccountRecovery::Retry)),
-        },
-    ));
-    assert!(!accounts.receive(Some(8), 7, signed_out()));
-    assert_eq!(allowed(&accounts), [AccountOp::SignOut]);
-}
-
-#[test]
 fn unavailable_saved_sign_in_explains_each_reason_and_only_offers_the_local_check() {
     for (reason, status, help) in [
         (
@@ -115,7 +84,7 @@ fn unavailable_saved_sign_in_explains_each_reason_and_only_offers_the_local_chec
         let mut accounts = Accounts::default();
         assert!(accounts.receive_snapshot(
             Some(7),
-            LinkEvent::AccountUnsupported {
+            LinkEvent::Account {
                 generation: 7,
                 view: AccountView::SavedSignInUnavailable {
                     reason,
@@ -1011,16 +980,5 @@ fn only_a_signed_in_supported_account_owing_nothing_reads_as_recovered() {
         accounts.receive_account(Some(7), snapshot(7, signed_in(PlanState::Enabled, None))),
         super::Receipt::Accepted,
         "an error still stands for the same view"
-    );
-    assert_eq!(
-        accounts.receive_account(
-            Some(7),
-            LinkEvent::AccountUnsupported {
-                generation: 7,
-                view: signed_in(PlanState::Enabled, None)
-            }
-        ),
-        super::Receipt::Accepted,
-        "unsupported"
     );
 }

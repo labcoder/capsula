@@ -829,8 +829,6 @@ pub enum ControlToShell {
     SpeechDecisionTaken(SpeechDispatch),
     /// The queued connection's exact logical output has been installed.
     QueuedAudioRegistered(OutputGeneration),
-    /// The local account state when this build cannot use the account's network service.
-    AccountUnsupported(AccountView),
     /// First successful spoken-replies install saved On, but this queued pair stays silent.
     SpokenRepliesDefaulted(SettingsView),
     /// The debug brain selected the fixture engine. Sent once per authenticated connection.
@@ -1444,12 +1442,8 @@ mod tests {
 
     #[test]
     fn permanent_provider_states_append_without_renumbering() {
-        use super::{AccountView, KeyView};
+        use super::KeyView;
 
-        let account = ControlToShell::AccountUnsupported(AccountView::SignedOut {
-            revocation_unconfirmed: false,
-        });
-        assert_eq!(postcard::to_allocvec(&account).unwrap(), [37, 0, 0]);
         assert_eq!(
             postcard::to_allocvec(&KeyView::UnsupportedPlatform).unwrap(),
             [5]

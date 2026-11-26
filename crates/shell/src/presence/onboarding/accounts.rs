@@ -23,7 +23,7 @@ use crate::strings::Strings;
 
 /// A model connection is usable: the step's button reads Continue instead of Not now.
 pub(super) fn usable(state: &Settings) -> bool {
-    !state.accounts.unsupported && account_complete(state.accounts.view.as_ref())
+    account_complete(state.accounts.view.as_ref())
         || matches!(state.claude.view, Some(ClaudeCodeView::Ready { .. }))
 }
 

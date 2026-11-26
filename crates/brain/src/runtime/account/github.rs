@@ -180,11 +180,10 @@ pub(super) async fn read_user(
 
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "the feature switch, transport refusal, closing, stopped and failed rotation are independent"
+    reason = "the feature switch, closing, stopped and failed rotation are independent"
 )]
 pub(crate) struct GitHub {
     enabled: bool,
-    unsupported: bool,
     next_verification: u64,
     verification: Option<Verification>,
     wake: Option<Wake>,
@@ -235,7 +234,6 @@ impl GitHub {
             client_id.filter(|value| crate::connections::github::ClientId::new(value).is_ok());
         Self {
             enabled: client_id.is_some(),
-            unsupported: false,
             next_verification: 0,
             verification: None,
             wake: None,
@@ -433,18 +431,7 @@ impl GitHub {
         if !self.enabled || self.session.is_none() || self.closing || self.machine.is_loading() {
             return Vec::new();
         }
-        self.view_frames(self.machine.view(Instant::now()))
-            .collect()
-    }
-
-    fn view_frames(
-        &self,
-        view: kumochi_protocol::message::GitHubView,
-    ) -> impl Iterator<Item = ControlToShell> {
-        self.unsupported
-            .then(|| ControlToShell::GitHubError(ErrorKey::UnsupportedPlatform.into()))
-            .into_iter()
-            .chain(std::iter::once(ControlToShell::GitHub(view)))
+        vec![ControlToShell::GitHub(self.machine.view(Instant::now()))]
     }
 
     pub(super) fn session(
@@ -501,7 +488,7 @@ impl GitHub {
     }
 
     pub(in crate::runtime) fn issue_snapshot(&self) -> crate::issues::Snapshot {
-        let usable = self.enabled && !self.closing && !self.unsupported;
+        let usable = self.enabled && !self.closing;
         crate::issues::Snapshot {
             capacity: false,
             account: usable.then(|| self.machine.user().cloned()).flatten(),
@@ -531,7 +518,7 @@ impl GitHub {
         stamp: Stamp,
         action: &crate::issues::Action,
     ) -> Option<Secret<GitHubToken>> {
-        if !self.enabled || self.closing || self.unsupported || stamp != self.machine.stamp() {
+        if !self.enabled || self.closing || stamp != self.machine.stamp() {
             return None;
         }
         let (token, _, _) = self
@@ -549,7 +536,6 @@ impl GitHub {
     ) -> Option<(Secret<GitHubToken>, Instant, u64)> {
         if !self.enabled
             || self.closing
-            || self.unsupported
             || stamp != self.machine.stamp()
             || action.account.as_ref()?.id != user.id
             || !repos.names.as_ref().contains(action.repo.as_ref()?)
@@ -602,18 +588,9 @@ impl GitHub {
         http: &HttpFactory,
     ) -> Vec<ControlToShell> {
         if op == GitHubOp::ListReposIfUnlisted
-            && (self.unsupported
-                || self.session.is_none()
+            && (self.session.is_none()
                 || self.verification.is_some()
                 || !self.machine.can_list_repositories())
-        {
-            return self.opened();
-        }
-        if self.unsupported
-            && matches!(
-                op,
-                GitHubOp::Connect | GitHubOp::RefreshRepos | GitHubOp::SetDefaultRepo(_)
-            )
         {
             return self.opened();
         }
@@ -771,13 +748,11 @@ impl GitHub {
                 | Effect::Poll { .. }
                 | Effect::RefreshToken { .. }
                 | Effect::RefreshRepos { .. }) => {
-                    if !self.unsupported
-                        && (!self.closing || (self.machine.rotating() && !self.rotation_stopped))
-                    {
+                    if !self.closing || (self.machine.rotating() && !self.rotation_stopped) {
                         frames.extend(self.start_effect(effect, origin, jobs, events, http));
                     }
                 }
-                Effect::Wake(at) if !self.closing && !self.unsupported => {
+                Effect::Wake(at) if !self.closing => {
                     if self.automatic() {
                         self.next_verification = self
                             .next_verification
@@ -807,16 +782,11 @@ impl GitHub {
                         && self.session.is_some()
                         && !self.machine.is_loading()
                     {
-                        frames.extend(self.view_frames(view));
+                        frames.push(ControlToShell::GitHub(view));
                     }
                 }
                 Effect::Error(error) => {
-                    if error.key() != ErrorKey::UnsupportedPlatform
-                        && self.enabled
-                        && !self.closing
-                        && origin.is_some()
-                        && origin == self.session
-                    {
+                    if self.enabled && !self.closing && origin.is_some() && origin == self.session {
                         frames.push(ControlToShell::GitHubError(error));
                     }
                 }
