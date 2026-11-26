@@ -3,7 +3,7 @@
 //! its dialog shows and when a grant takes effect; nothing here grants or starts capture.
 
 use gpui_kit::component::{
-    ActiveTheme as _,
+    ActiveTheme as _, Disableable as _,
     button::{Button, ButtonVariants as _},
 };
 use gpui_kit::{
