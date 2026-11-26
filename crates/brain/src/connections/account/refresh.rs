@@ -623,11 +623,7 @@ impl AccountState {
 }
 
 pub(super) fn error_of(key: ErrorKey, action: Action) -> UserError {
-    if key == ErrorKey::UnsupportedPlatform {
-        no_action(key)
-    } else {
-        UserError::new(key, Vec::new(), vec![action]).expect("one action is within the limit")
-    }
+    UserError::new(key, Vec::new(), vec![action]).expect("one action is within the limit")
 }
 
 fn no_action(key: ErrorKey) -> UserError {

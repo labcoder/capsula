@@ -402,7 +402,6 @@ pub(crate) fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError
             | ControlToShell::ScenesV1 { .. }
             | ControlToShell::NoVisual { .. }
             | ControlToShell::Account(_)
-            | ControlToShell::AccountUnsupported(_)
             | ControlToShell::ThreadsChanged
             | ControlToShell::Focus { .. }
             | ControlToShell::CaptureDone { .. }

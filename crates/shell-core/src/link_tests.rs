@@ -1680,7 +1680,7 @@ fn missing_stale_and_out_of_range_shell_tuning_do_not_install_defaults() {
         tuning: ShellTuning::default(),
     };
     let stale = frame::encode(&stale, Pipe::Control).unwrap();
-    let invalid = frame::encode(&(40_u8, origin, 1999_u64, 500_u64), Pipe::Control).unwrap();
+    let invalid = frame::encode(&(39_u8, origin, 1999_u64, 500_u64), Pipe::Control).unwrap();
     for mut wire in [&[][..], stale.as_slice(), invalid.as_slice()] {
         assert!(matches!(
             read_shell_tuning(&mut wire, origin),
