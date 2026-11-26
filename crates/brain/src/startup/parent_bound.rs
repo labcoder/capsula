@@ -36,8 +36,9 @@ pub(in crate::startup) struct NotReady;
 
 /// What parent-bound startup takes from outside the shared stages.
 pub(in crate::startup) trait Prerequisites {
-    /// Checks what must hold before custody makes anything, asking `live` before each native
-    /// call and stopping for good once it says no; a call already made may finish.
+    /// Checks what must hold before any state opens, once the session is committed, asking `live`
+    /// before each native call and stopping for good once it says no; a call already made may
+    /// finish.
     ///
     /// # Errors
     /// `Busy` when an earlier build's state may be there, otherwise `Refused`.
@@ -193,9 +194,6 @@ pub(crate) struct Settled {
 pub(crate) trait AdmissionPair {
     type Keyed;
     type Greeted;
-    /// Whether either leg already ended, or holds bytes the shell may not send before READY,
-    /// seen without waiting or reading.
-    fn ended(&self) -> bool;
     /// Keys the responder from `key`; the caller wipes its own copy right after.
     fn key(self, key: &[u8; CAPABILITY_LEN]) -> Option<Self::Keyed>;
     /// READY, the handshake and the greeting by `by`; `reserve` reserves Welcome's session.
@@ -380,8 +378,7 @@ impl<S: InstanceStore> Root<S> {
         Ok((greeted, committed))
     }
 
-    /// Runs the preflight on the parent, the deadline and the pair, then admits, then runs the
-    /// stages, then serves until the runtime ends. Returns the greeted pair
+    /// Admits, then runs the stages, then serves until the runtime ends. Returns the greeted pair
     /// too, once there is one, so its legs close only at settlement; a fatal end drops it here,
     /// so the shell sees EOF before any cleanup is awaited.
     async fn serve<P: AdmissionPair>(
@@ -393,20 +390,11 @@ impl<S: InstanceStore> Root<S> {
         custody: impl FnOnce() -> Result<SessionCustody, CustodyError>,
         store: impl FnOnce() -> Result<S, S::Error>,
     ) -> (Result<Ended, ParentBoundError>, Option<P::Greeted>) {
-        let mut live = || shell.fence().is_ok() && Instant::now() < by && !pair.ended();
-        if let Err(refused) = pre.preflight(&mut live) {
-            let refused = if live() {
-                refused
-            } else {
-                ParentBoundError::Refused
-            };
-            return (Err(refused), None);
-        }
         let (mut greeted, committed) = match self.admit(pair, shell, by, custody, store).await {
             Ok(admitted) => admitted,
             Err(refused) => return (Err(refused), None),
         };
-        if let Err(refused) = self.stage(pre, shell, by, &committed) {
+        if let Err(refused) = self.stage(pre, shell, by, &P::cell(&greeted), &committed) {
             return (Err(refused), Some(greeted));
         }
         let terminal = Terminal::new(P::cell(&greeted), shell.loss());
@@ -421,17 +409,21 @@ impl<S: InstanceStore> Root<S> {
     }
 
     /// Runs the stages for a committed admission, each behind a fence and the clock: on entry,
-    /// again once the prerequisites are ready and before anything starts, and at each
-    /// checkpoint. A refusal keeps what started for `settle`. Voice never starts here: this mode
-    /// builds no models, and the helpers start only what their containment allows.
+    /// again once the prerequisites are ready, then the preflight, live only while the parent,
+    /// the clock and the session's `cell` all pass, and that check again once it returns,
+    /// whatever it answered, before anything starts; and at each checkpoint. A refusal keeps
+    /// what started for `settle`. Voice never starts here: this mode builds no models, and the
+    /// helpers start only what their containment allows.
     ///
     /// # Errors
-    /// `Unsupported` when the prerequisites aren't ready, otherwise `Refused`.
+    /// `Unsupported` when the prerequisites aren't ready, the preflight's own refusal while the
+    /// session is live, otherwise `Refused`.
     fn stage(
         &mut self,
         pre: &mut impl Prerequisites,
         shell: &ShellProcess,
         by: Instant,
+        cell: &watch::Receiver<bool>,
         _: &Committed,
     ) -> Result<(), ParentBoundError> {
         let fence = || -> Result<(), BrainError> {
@@ -446,6 +438,12 @@ impl<S: InstanceStore> Root<S> {
         fence().map_err(|_| ParentBoundError::Refused)?;
         pre.ready().map_err(|_| ParentBoundError::Unsupported)?;
         fence().map_err(|_| ParentBoundError::Refused)?;
+        let mut live = || fence().is_ok() && cell.has_changed().is_ok() && !*cell.borrow();
+        let checked = pre.preflight(&mut live);
+        if !live() {
+            return Err(ParentBoundError::Refused);
+        }
+        checked?;
         self.start(pre, |_, _| fence())
             .map_err(|_| ParentBoundError::Refused)?;
         self.stages.jobs = pre.containment().map_err(|_| ParentBoundError::Refused)?;

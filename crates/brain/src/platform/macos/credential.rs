@@ -59,8 +59,9 @@ impl MacCredentialStore {
         Ok(store)
     }
 
-    /// First light's legacy check on the admitted group, before custody: the check `admitted`
-    /// would make, asking `live` before each name, and latched for the vault that opens later.
+    /// First light's legacy check on the admitted group, before any state opens: the check
+    /// `admitted` would make, asking `live` before each name, latched for the vault that opens
+    /// later.
     #[cfg(feature = "first-light")]
     pub(crate) fn preflight(live: &mut dyn FnMut() -> bool) -> Result<(), CredentialStoreError> {
         let store = Self::grouped()?;

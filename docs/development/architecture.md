@@ -183,26 +183,29 @@ only the custody fixtures use until D-b reopens roots. Custody's held chain is i
 root: `fresh_root` and settlement inspect each held folder again by its descriptor, the way the
 acquisition's walk did (the same object, named by its name in its parent with no link, the
 private ones still private). The root's identity lives only in those descriptors for the run;
-D-b decides where a durable record lives before any run reopens a root.
+D-b decides where a durable record lives before any run reopens a root. A same-user window
+stays between `mkdirat` and the `openat` that holds the new folder, as it does for a rename
+before SQLite's pathname open: the held descriptor is what's checked from then on.
 
 ```mermaid
 flowchart TD
-  preflight["preflight: the legacy check,<br/>live on the parent, the pair and the clock"]
   admit["admit: fence, custody, fence, item, READY,<br/>handshake, greeting, fence, claim"]
-  stage["stage: fence, ready, fence,<br/>init, open, accounts, Brain, containment"]
+  stage["stage: fence, ready, fence, preflight, live check,<br/>init, open, accounts, Brain, containment"]
   serve["serve: ShellTuning, then both legs"]
   settle["settle: quit or close, the helpers, the legs,<br/>the item, custody, then the process services"]
-  preflight --> admit --> stage --> serve --> settle
-  preflight -- refused --> settle
+  admit --> stage --> serve --> settle
   admit -- refused --> settle
   stage -- refused --> settle
 ```
 
-Before custody makes anything, the root runs the prerequisites' preflight with a `live` check:
-the parent's fence, the admission clock, and the pair's `ended`, a zero-timeout poll of both legs
-(before READY the shell writes nothing, so a readable leg has ended or broken the order). The
-preflight asks it before each native call; once it says no, no further call is made, an OS call
-already in flight may finish, and the start is `Refused` whatever the preflight answered.
+Once the pair is authenticated and the claim committed, and before anything opens, the stage
+driver runs the prerequisites' preflight with a `live` check: the parent's fence, the admission
+clock, and the session's own cell, set once the live session sees either leg end or refuse. The
+preflight asks it before each native call; once it says no, no further call is made, and an OS
+call already in flight may finish. The driver asks it again when the preflight returns, whatever
+it answered, so a session lost during the last call, or while a latched answer made none, is
+`Refused` before the next effect. Nothing reads the legs while the stages run, so a shell that
+closes a leg then is seen at that check only once the parent watch or the clock sees it too.
 
 The stage driver fences and checks the clock on entry, asks the prerequisites whether they're
 ready, and fences again before anything starts; each checkpoint fences too. It never starts
@@ -233,16 +236,20 @@ The production prerequisites, `FirstLight`, are ready only where the support tab
 parent-bound: the macOS `first-light` Dev build. Everywhere else they refuse at `ready`, and the
 support table refuses before that anyway. On first light:
 
-- `preflight` checks the names earlier builds wrote are absent from the Keychain, before custody
+- `preflight` checks the names earlier builds wrote are absent from the Keychain, only after
+  authentication, so an unverified caller learns nothing of the brain's credential group
   ([accounts](accounts.md)). A name that may be there answers `Busy` (75), the refusal code
   r2-r2 gives the legacy stop; it's `ParentBoundError::Busy`, never the vault's Busy. No store
-  admitted answers `Refused`. Every other build has no preflight to pass and refuses there.
+  admitted answers `Refused`. Custody's fresh root, its lock and the item exist by then, and
+  settlement deletes the item; no store, authority, settings file or vault has opened. Every other
+  build refuses at `ready` first.
 - `init` installs the panic hook and starts deferred scene destruction, with no file sink. The
   brain has no log at first light; that's a first-light-only gap, not G-2 evidence, and the
   admitted brain log (L1) lands before the feature leaves the support table.
 - `open` is run 1 only. Custody must have created the product folder itself, its held chain
   must still pass, and none of either database or its `-wal`, `-shm` or `-journal` sidecar, the
-  settings or the `.tmp` file a settings write unlinks, or any file a purge leaves may be there. Any of these, or a second `open`, refuses before SQLite opens, so
+  settings or the `.tmp` file a settings write unlinks, or any file a purge leaves may be
+  there. Any of these, or a second `open`, refuses before SQLite opens, so
   `Store::recover`'s pending deletions and the purger's leftover removal have nothing to act on.
   A same-user rename between the check and SQLite's pathname open stays possible; this isn't a
   held store.

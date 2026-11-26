@@ -304,12 +304,12 @@ fn first_light_allows_one_model_request_and_refuses_the_second() {
 }
 
 /// A pair that records how far it was driven: 1 once keyed, 2 once greeted, 3 once served, when
-/// serving ends as `ends`; `end` shows its legs ended.
+/// serving ends as `ends`; `end` sets its session cell, as a live session does when it ends.
 #[derive(Clone)]
 struct FakePair {
     reached: Arc<std::sync::atomic::AtomicU8>,
     ends: Ended,
-    ended: Arc<std::sync::atomic::AtomicBool>,
+    cell: Arc<watch::Sender<bool>>,
 }
 
 impl Default for FakePair {
@@ -323,12 +323,12 @@ impl FakePair {
         Self {
             reached: Arc::default(),
             ends,
-            ended: Arc::default(),
+            cell: Arc::new(watch::channel(false).0),
         }
     }
 
     fn end(&self) {
-        self.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.cell.send_replace(true);
     }
 
     fn reached(&self) -> u8 {
@@ -344,10 +344,6 @@ impl FakePair {
 impl AdmissionPair for FakePair {
     type Keyed = Self;
     type Greeted = Self;
-
-    fn ended(&self) -> bool {
-        self.ended.load(std::sync::atomic::Ordering::SeqCst)
-    }
 
     fn key(self, _: &[u8; CAPABILITY_LEN]) -> Option<Self> {
         self.reach(1);
@@ -365,8 +361,8 @@ impl AdmissionPair for FakePair {
         std::future::ready(Some(keyed))
     }
 
-    fn cell(_: &Self) -> watch::Receiver<bool> {
-        watch::channel(false).1
+    fn cell(greeted: &Self) -> watch::Receiver<bool> {
+        greeted.cell.subscribe()
     }
 
     fn serve(
@@ -641,26 +637,44 @@ impl Prerequisites for Unready {
     }
 }
 
-/// A preflight over three native calls that fires `during` while its first call is in flight,
-/// counting the calls it made and refusing the way first light does once `live` says no. No
-/// later stage may run.
+/// A preflight over `calls` native calls that fires `during` once `after` of them were made, or
+/// before it answers when it makes none, as a latched answer does; it refuses the way first
+/// light does once `live` says no. `init` records that the stages started, and refuses.
 struct Checking<F> {
+    calls: usize,
+    after: usize,
     during: F,
     made: usize,
+    started: bool,
+}
+
+impl<F: FnMut()> Checking<F> {
+    fn new(calls: usize, after: usize, during: F) -> Self {
+        Self {
+            calls,
+            after,
+            during,
+            made: 0,
+            started: false,
+        }
+    }
 }
 
 #[expect(
     clippy::panic_in_result_fn,
-    reason = "a stage that runs after a refused preflight fails the test"
+    reason = "a stage past a refused init fails the test"
 )]
 impl<F: FnMut()> Prerequisites for Checking<F> {
     fn preflight(&mut self, live: &mut dyn FnMut() -> bool) -> Result<(), ParentBoundError> {
-        for _ in 0..3 {
+        if self.calls == 0 {
+            (self.during)();
+        }
+        for call in 1..=self.calls {
             if !live() {
                 return Err(ParentBoundError::Busy);
             }
-            self.made += 1;
-            if self.made == 1 {
+            self.made = call;
+            if call == self.after {
                 (self.during)();
             }
         }
@@ -668,15 +682,16 @@ impl<F: FnMut()> Prerequisites for Checking<F> {
     }
 
     fn ready(&self) -> Result<(), NotReady> {
-        panic!("readiness is asked only after admission")
+        Ok(())
     }
 
     fn init(&mut self) -> Result<ProcessInit, BrainError> {
-        panic!("init runs only after admission")
+        self.started = true;
+        Err(BrainError::Process(io::ErrorKind::Interrupted.into()))
     }
 
     fn open(&mut self, _: &SessionCustody, _: &mut bool) -> Result<OpenedState, BrainError> {
-        panic!("open runs only after admission")
+        panic!("nothing opens once init refused")
     }
 
     fn accounts(
@@ -685,72 +700,72 @@ impl<F: FnMut()> Prerequisites for Checking<F> {
         _: TokenTuning,
         _: Arc<SessionLock>,
     ) -> Result<(Accounts, VaultHeld), BrainError> {
-        panic!("accounts start only after admission")
+        panic!("no accounts start once init refused")
     }
 
     fn containment(&mut self) -> Result<Option<Arc<Job>>, BrainError> {
-        panic!("containment is asked only after admission")
+        panic!("no containment once init refused")
     }
 }
 
-/// The parent lost, the pair ended or the deadline passed while a preflight call is in flight:
-/// no further call is made, nothing after it runs, and the refusal is the loss's, not Busy.
+/// Runs a full admission on a fake pair and a token custody, then the stages under `pre`.
+async fn staged(
+    pair: &FakePair,
+    shell: &ShellProcess,
+    by: Instant,
+    pre: &mut impl Prerequisites,
+) -> Result<(), ParentBoundError> {
+    Box::pin(run(
+        pair.clone(),
+        shell,
+        by,
+        pre,
+        || Ok(SessionCustody::fixture(Arc::new(()))),
+        || Ok(Slot::default()),
+    ))
+    .await
+}
+
+/// The parent lost, the session ended or the deadline passed while the first call or the last
+/// was in flight, or while a latched answer made none: no further call is made, no stage
+/// starts, and the start is Refused whatever the preflight answered.
 #[tokio::test]
-async fn a_preflight_stops_at_a_lost_parent_an_ended_pair_or_the_deadline() {
-    for signal in ["parent", "pair", "deadline"] {
-        let shell = live();
-        let pair = FakePair::default();
-        let soon = Instant::now() + Duration::from_millis(200);
-        let by = if signal == "deadline" { soon } else { later() };
-        let mut pre = Checking {
-            during: || match signal {
+async fn a_preflight_stops_at_a_lost_parent_an_ended_session_or_the_deadline() {
+    for (calls, after, made) in [(3, 1, 1), (3, 3, 3), (0, 0, 0)] {
+        for signal in ["parent", "session", "deadline"] {
+            let shell = live();
+            let pair = FakePair::default();
+            let soon = Instant::now() + Duration::from_millis(200);
+            let by = if signal == "deadline" { soon } else { later() };
+            let mut pre = Checking::new(calls, after, || match signal {
                 "parent" => assert!(shell.publish(1), "the loss lands"),
-                "pair" => pair.end(),
+                "session" => pair.end(),
                 _ => std::thread::sleep(
                     soon.into_std()
                         .saturating_duration_since(std::time::Instant::now()),
                 ),
-            },
-            made: 0,
-        };
-        let ran = Box::pin(run::<Slot, _>(
-            pair.clone(),
-            &shell,
-            by,
-            &mut pre,
-            || panic!("no custody after a refused preflight"),
-            || panic!("no item after a refused preflight"),
-        ))
-        .await;
-        assert_eq!(ran, Err(ParentBoundError::Refused), "{signal}");
-        assert_eq!(pre.made, 1, "{signal}: no call after the one in flight");
-        assert_eq!(pair.reached(), 0, "{signal}: no READY");
+            });
+            let ran = staged(&pair, &shell, by, &mut pre).await;
+            let case = format!("{signal} after {after} of {calls}");
+            assert_eq!(ran, Err(ParentBoundError::Refused), "{case}");
+            assert_eq!(pre.made, made, "{case}: no call after the one in flight");
+            assert!(!pre.started, "{case}: no stage started");
+            assert_eq!(pair.reached(), 2, "{case}: admitted, never served");
+        }
     }
 }
 
-/// With nothing fired the same preflight makes every call and admission goes on to custody.
+/// With nothing fired the same preflight makes every call, after admission, and the stages go
+/// on to start.
 #[tokio::test]
-async fn a_preflight_that_stays_live_makes_every_call_before_custody() {
-    let mut pre = Checking {
-        during: || {},
-        made: 0,
-    };
-    let custody = std::cell::Cell::new(false);
-    let ran = Box::pin(run::<Slot, _>(
-        FakePair::default(),
-        &live(),
-        later(),
-        &mut pre,
-        || {
-            custody.set(true);
-            Err(CustodyError::Busy)
-        },
-        || panic!("no item while custody is busy"),
-    ))
-    .await;
-    assert_eq!(ran, Err(ParentBoundError::Busy));
+async fn a_preflight_that_stays_live_makes_every_call_before_the_stages() {
+    let pair = FakePair::default();
+    let mut pre = Checking::new(3, 3, || {});
+    let ran = staged(&pair, &live(), later(), &mut pre).await;
+    assert_eq!(ran, Err(ParentBoundError::Refused), "init refused");
     assert_eq!(pre.made, 3);
-    assert!(custody.get(), "custody came after the preflight");
+    assert!(pre.started, "the stages came after the preflight");
+    assert_eq!(pair.reached(), 2);
 }
 
 #[tokio::test]
@@ -888,10 +903,11 @@ mod first_light {
 
     /// First light's preflight, ready, open and containment, with the legacy check on fake status
     /// answers, offline accounts on a fake vault and no process-wide init; it records whether the
-    /// authority was there before the accounts.
+    /// authority was there before the accounts, and whether `open` was asked.
     struct Offline {
         inner: FirstLight,
         authority: Option<bool>,
+        opened: bool,
     }
 
     impl Offline {
@@ -906,6 +922,7 @@ mod first_light {
                     ..FirstLight::new()
                 },
                 authority: None,
+                opened: false,
             }
         }
     }
@@ -928,6 +945,7 @@ mod first_light {
             custody: &SessionCustody,
             acquired: &mut bool,
         ) -> Result<OpenedState, BrainError> {
+            self.opened = true;
             self.inner.open(custody, acquired)
         }
 
@@ -1145,19 +1163,19 @@ mod first_light {
         Err(CredentialStoreError::Unsupported)
     }
 
-    /// A start whose preflight refuses: nothing after it runs, custody and the item included.
+    /// An authenticated, committed start on a token custody whose preflight refuses.
     async fn refused_start(legacy: Legacy) -> (Result<(), ParentBoundError>, FakePair, Offline) {
         let pair = FakePair::ending(Ended::Quit { deadline: later() });
         let mut pre = Offline::with(legacy);
         let ran = timeout(
             PATIENCE,
-            Box::pin(run::<Slot, _>(
+            Box::pin(run(
                 pair.clone(),
                 &live(),
                 later(),
                 &mut pre,
-                || panic!("no custody, so no root"),
-                no_item,
+                || Ok(SessionCustody::fixture(Arc::new(()))),
+                || Ok(Slot::default()),
             )),
         )
         .await
@@ -1165,23 +1183,42 @@ mod first_light {
         (ran, pair, pre)
     }
 
+    /// The scan runs only once the pair is authenticated and committed, and refuses before
+    /// anything opens: no store, no authority, no vault, no serving.
     #[tokio::test]
-    async fn a_legacy_name_present_or_unanswered_is_busy_before_custody_makes_a_root() {
+    async fn a_legacy_name_present_or_unanswered_is_busy_after_admission_before_any_open() {
         let cases: [(Legacy, &str); 2] = [(present, "present"), (unanswered, "an error")];
         for (legacy, label) in cases {
             let (ran, pair, pre) = refused_start(legacy).await;
             assert_eq!(ran, Err(ParentBoundError::Busy), "{label}");
-            assert_eq!(pair.reached(), 0, "{label}: no READY and no serving");
-            assert_eq!(pre.authority, None, "{label}: no store or vault opened");
+            assert_eq!(pair.reached(), 2, "{label}: admitted, never served");
+            assert!(!pre.opened, "{label}: no store opened");
+            assert_eq!(pre.authority, None, "{label}: no accounts or vault");
         }
     }
 
     #[tokio::test]
-    async fn an_unadmitted_store_is_refused_before_custody_makes_a_root() {
+    async fn an_unadmitted_store_is_refused_after_admission_before_any_open() {
         let (ran, pair, pre) = refused_start(unadmitted).await;
         assert_eq!(ran, Err(ParentBoundError::Refused));
-        assert_eq!(pair.reached(), 0);
+        assert_eq!(pair.reached(), 2);
+        assert!(!pre.opened);
         assert_eq!(pre.authority, None);
+    }
+
+    /// In a real fresh root, a legacy refusal leaves custody's lock and nothing else: no store,
+    /// authority or settings file.
+    #[tokio::test]
+    #[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+    async fn a_legacy_refusal_leaves_only_custodys_lock_in_a_fresh_root() {
+        let support = instance_fixture("fl-legacy");
+        let mut pre = Offline::with(present);
+        assert_eq!(
+            run_quit(&support, &mut pre, || Ok(Slot::default())).await,
+            Err(ParentBoundError::Busy)
+        );
+        assert_eq!(pre.authority, None);
+        clean(&support, &[SESSION_LOCK]);
     }
 
     /// Every file first light refuses to find in a fresh root, written out by hand.

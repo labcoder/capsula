@@ -58,10 +58,6 @@ impl crate::startup::parent_bound::AdmissionPair for InheritedPair {
     type Keyed = Self;
     type Greeted = Self;
 
-    fn ended(&self) -> bool {
-        match self.0 {}
-    }
-
     fn key(self, _: &[u8; kumochi_protocol::message::CAPABILITY_LEN]) -> Option<Self> {
         match self.0 {}
     }

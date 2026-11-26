@@ -52,9 +52,9 @@ executable maps it to a code:
 
 Detached keeps 75 for a busy profile. Without the feature every ParentBound start exits 69 at the
 support check. A `first-light` Dev build with no pair exits 76 and touches nothing; with a pair it
-goes through the legacy preflight, the parent, custody (which refuses an existing root with 76),
-the item's entitlement, the handshake and first light's prerequisites (architecture.md,
-"Parent-bound startup").
+goes through the parent, custody (which refuses an existing root with 76), the item's
+entitlement, the handshake, the commit claim, the legacy preflight (75 when a name may be there)
+and first light's prerequisites (architecture.md, "Parent-bound startup").
 
 Argument matching uses OS strings without logging them. Non-Unicode input no longer panics: a
 non-Unicode first argument falls through like an unknown flag; a non-Unicode bridge launch is

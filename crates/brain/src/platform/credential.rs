@@ -88,7 +88,8 @@ pub(crate) fn admitted_store() -> Result<NativeCredentialStore, CredentialStoreE
     }
 }
 
-/// First light's legacy check, before custody makes anything: every name an earlier build wrote
+/// First light's legacy check, once the pair is authenticated and before any state opens: every
+/// name an earlier build wrote
 /// must be absent, `live` is asked before each one, and the first answer stands for the process,
 /// so the vault opened later sees it too.
 ///
