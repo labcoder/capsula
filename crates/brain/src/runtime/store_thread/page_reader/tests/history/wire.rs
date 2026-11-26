@@ -228,7 +228,6 @@ fn next_request(store: &Store, run: RunId, kind: ConnectionKind) -> Built {
     build_request(
         Some(&store.side()),
         BuildContext {
-            require_recovery: None,
             control: Control::new(Instant::now() + Duration::from_secs(10)),
             key: BuildKey {
                 run,
@@ -295,7 +294,6 @@ fn compact_quoted_reply(store: &mut Store, quote: &str) {
     let compact = read_job(
         Some(&store.side()),
         ReadJob {
-            require_recovery: None,
             control: Control::new(Instant::now() + Duration::from_secs(10)),
             key: JobKey {
                 thread: MAIN,

@@ -78,7 +78,6 @@ fn built_from(key: BuildKey, tools: Vec<ToolSchema>, sources: Vec<ThreadId>) -> 
             connection: ConnectionTag(0),
         }),
         result: Ok(Built {
-            recovered_context: None,
             request: crate::context::ModelRequest {
                 tools,
                 ..super::request()

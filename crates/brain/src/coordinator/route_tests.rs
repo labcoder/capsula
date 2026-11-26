@@ -105,7 +105,6 @@ fn built(choice: Option<ModelChoice>) -> Input {
         key: key(),
         snapshot: Some(defaults(choice)),
         result: Ok(Built {
-            recovered_context: None,
             request: ModelRequest {
                 choice: None,
                 instructions: String::new(),
@@ -515,7 +514,6 @@ pub(crate) fn built_for(key: BuildKey, choice: &ModelChoice) -> Input {
         key,
         snapshot: (key.attempt == 1).then(|| defaults(Some(choice.clone()))),
         result: Ok(Built {
-            recovered_context: None,
             request: ModelRequest {
                 choice: Some(choice.clone()),
                 instructions: String::new(),
@@ -1282,7 +1280,6 @@ fn a_written_picture_lost_stops_every_later_send_of_its_run() {
                 JobAsk {
                     generation: Generation(5),
                     built: Built {
-                        recovered_context: None,
                         request: ModelRequest {
                             choice: Some(choice(kind, "m")),
                             instructions: String::new(),

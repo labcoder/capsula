@@ -46,9 +46,6 @@ pub struct BuildContext {
     pub(crate) drawings: crate::drawing::Digest,
     pub(crate) picture_models: Vec<(Route, Vec<ModelSlug>)>,
     pub(crate) key_results: Vec<(CallId, crate::dispatch::ToolOutput)>,
-    /// The recovered `ChatGPT` cutoff at the run's arrival; the read of a run that answers on
-    /// `ChatGPT` must find it unchanged and keep to it.
-    pub(crate) require_recovery: Option<crate::store::Boundary>,
 }
 
 impl PartialEq for BuildContext {
@@ -58,7 +55,6 @@ impl PartialEq for BuildContext {
             && self.origin == other.origin
             && self.snapshot == other.snapshot
             && self.first == other.first
-            && self.require_recovery == other.require_recovery
             && self.arrived == other.arrived
             && self.drawings == other.drawings
             && self.picture_models == other.picture_models
@@ -84,7 +80,6 @@ impl ContextBuilt {
             key: build.key,
             snapshot: None,
             result: Ok(Built {
-                recovered_context: None,
                 request: crate::context::ModelRequest {
                     choice: None,
                     instructions: String::new(),
@@ -142,8 +137,6 @@ pub(super) struct Build {
     offered: Vec<ToolName>,
     /// The admitted request's sources, checked again before each send.
     sources: Vec<ThreadId>,
-    /// The cutoff the admitted request was read to, which a recovered route's send requires.
-    pub(super) recovered_context: Option<crate::store::Boundary>,
     /// An inline compaction's progress; `None` for a normal build.
     pub(super) inline: Option<Inline>,
 }
@@ -169,20 +162,14 @@ impl Build {
             private_scenes: Vec::new(),
             offered: Vec::new(),
             sources: Vec::new(),
-            recovered_context: None,
             inline,
         }
     }
 
-    /// Admits the request that carries `sources`, read to `recovered_context`.
-    pub(super) fn admit(
-        &mut self,
-        sources: Vec<ThreadId>,
-        recovered_context: Option<crate::store::Boundary>,
-    ) {
+    /// Admits the request that carries `sources`.
+    pub(super) fn admit(&mut self, sources: Vec<ThreadId>) {
         self.admitted = true;
         self.sources = sources;
-        self.recovered_context = recovered_context;
     }
 
     pub(super) fn admitted(&self) -> bool {
@@ -302,7 +289,6 @@ impl Coordinator {
             .expect("the current run did not change")
             .build = Some(build);
         effects.push(Effect::Store(StoreOp::BuildContext(BuildContext {
-            require_recovery: arrived.recovered(),
             control,
             key,
             thread,
@@ -410,18 +396,8 @@ impl Coordinator {
         current.effective_effort = effective;
         current.route = Some(route);
         current.finding = None;
-        let asked = current.asked.then_some(current.thread);
-        let required = self.required_recovery(route);
         let made = match made {
-            // An ask's turn is a drawing's own text, which a cutoff after its thread keeps out.
-            _ if asked
-                .zip(required)
-                .is_some_and(|(thread, cut)| !cut.permits_thread(thread)) =>
-            {
-                return self.fail(key.run, Failure::Store, effects);
-            }
-            Ok(made) if made.recovered_context == required => made,
-            Ok(_) => return self.fail(key.run, Failure::Store, effects),
+            Ok(made) => made,
             Err(room) => return self.compact_inline(key, room, effects),
         };
         self.admit_built(key, made, effects)
@@ -496,7 +472,7 @@ impl Coordinator {
             self.rebuild(key, &voided, &pending, effects);
             return Ok(());
         }
-        build.admit(made.sources.clone(), made.recovered_context);
+        build.admit(made.sources.clone());
         if key.round == 1 {
             current.sent.clear();
         }

@@ -103,7 +103,6 @@ fn reading() -> Coordinator {
 
 fn read_job(key: JobKey, kind: JobKind) -> Effect {
     Effect::Store(StoreOp::ReadJob(ReadJob {
-        require_recovery: None,
         control: crate::recall::control::Control::new(
             std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
         ),
@@ -130,7 +129,6 @@ fn job_built(key: JobKey, sources: &[ThreadId]) -> Input {
         result: Ok(Some(JobAsk {
             generation: G,
             built: Built {
-                recovered_context: None,
                 request: request(),
                 sources: sources.to_vec(),
             },
@@ -647,7 +645,6 @@ fn compact_built(key: JobKey, sources: &[ThreadId]) -> Input {
         result: Ok(Some(JobAsk {
             generation: G,
             built: Built {
-                recovered_context: None,
                 request: request(),
                 sources: sources.to_vec(),
             },
@@ -835,7 +832,6 @@ fn a_delete_of_a_quoted_task_voids_kumos_compaction() {
             result: Ok(Some(JobAsk {
                 generation: G,
                 built: Built {
-                    recovered_context: None,
                     request: request(),
                     sources: vec![MAIN, T],
                 },
@@ -1010,7 +1006,6 @@ fn run_done_on(
             connection: ConnectionTag(7),
         }),
         result: Ok(Built {
-            recovered_context: None,
             request: request(),
             sources: vec![T],
         }),

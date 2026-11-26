@@ -666,8 +666,6 @@ struct Run {
     snapshot: Option<crate::context::RunSnapshot>,
     /// Resolved once before the first send; the raw snapshot still fences held input.
     effective_effort: Option<kumochi_protocol::message::Effort>,
-    /// Whether the turn is an ask's: a drawing's own text, carried as a new turn in its thread.
-    asked: bool,
     hold: Option<HoldSnapshot>,
     /// The hold's screen, which every request of the run carries.
     screen: Option<crate::context::Screen>,
@@ -1461,7 +1459,6 @@ impl Coordinator {
             held: VecDeque::new(),
             snapshot: hold.as_ref().map(|hold| hold.defaults.clone()),
             effective_effort: None,
-            asked: false,
             untold,
             hold,
             pictured: matches!(screen, Some(crate::context::Screen::Picture(..))),

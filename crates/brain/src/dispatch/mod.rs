@@ -477,8 +477,6 @@ impl fmt::Debug for CallInput<'_> {
 /// The run a call resolved to, borrowed from the coordinator's current run.
 #[derive(Debug)]
 pub(crate) struct RunCtx<'a> {
-    /// The cutoff the run's route requires, which its history reads keep to.
-    pub(crate) require_recovery: Option<crate::store::Boundary>,
     pub(crate) build: crate::coordinator::BuildKey,
     pub(crate) end: std::time::Instant,
     pub(crate) control: crate::recall::control::Control,
@@ -686,7 +684,6 @@ pub(crate) fn call<'a>(
         }
         Ok((tool, Prepared::Read { hash, query })) => {
             let call = ReadCall {
-                require_recovery: run.require_recovery,
                 key,
                 build: run.build,
                 thread: run.thread,

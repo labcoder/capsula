@@ -2836,7 +2836,6 @@ async fn a_title_job_starts_only_while_the_account_can_send() {
             while !matches!(
                 seen.recv().await.expect("the brain reports"),
                 Seen::StoreOpQueued(StoreOp::ReadJob(ReadJob {
-                    require_recovery: None,
                     kind: JobKind::Title,
                     ..
                 }))

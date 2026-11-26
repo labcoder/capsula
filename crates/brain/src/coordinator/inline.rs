@@ -30,9 +30,6 @@ pub struct CompactContext {
     pub(crate) snapshot: Option<RunSnapshot>,
     /// The bytes the bound leaves for the summary after the current turn.
     pub(crate) room: usize,
-    /// The established history cutoff this read must find unchanged and keep to; unset until
-    /// reconnect admission sets it.
-    pub(crate) require_recovery: Option<crate::store::Boundary>,
 }
 
 impl PartialEq for CompactContext {
@@ -41,7 +38,6 @@ impl PartialEq for CompactContext {
             && self.thread == other.thread
             && self.snapshot == other.snapshot
             && self.room == other.room
-            && self.require_recovery == other.require_recovery
     }
 }
 impl Eq for CompactContext {}
@@ -116,7 +112,6 @@ impl Coordinator {
         self.attempts += 1;
         let attempt = self.attempts;
         let exposed = self.pending_deletes();
-        let required = self.current_recovery();
         let current = self.current(key.run)?;
         if current.compacted == Some(key.round) {
             return self.fail(key.run, Failure::Budget, effects);
@@ -131,7 +126,6 @@ impl Coordinator {
             control.clone(),
         ));
         effects.push(Effect::Store(StoreOp::CompactContext(CompactContext {
-            require_recovery: required,
             control,
             key,
             thread: current.thread,
@@ -152,7 +146,6 @@ impl Coordinator {
         let CompactBuilt { key, result } = done;
         let pending = self.pending_deletes();
         let main = self.main_thread;
-        let required = self.current_recovery();
         let current = self.current(key.run)?;
         let thread = current.thread;
         let build = current
@@ -161,8 +154,8 @@ impl Coordinator {
             .filter(|build| build.key() == key && matches!(build.inline, Some(Inline::Reading)))
             .ok_or(Stale)?;
         let (ask, allowance) = match result {
-            Ok(Some(found)) if found.0.built.recovered_context == required => found,
-            Ok(Some(_)) | Err(Unbuilt::Failed) => {
+            Ok(Some(found)) => found,
+            Err(Unbuilt::Failed) => {
                 return self.fail(key.run, Failure::Store, effects);
             }
             Ok(None) | Err(Unbuilt::TooLarge { .. }) => {
@@ -177,7 +170,7 @@ impl Coordinator {
             self.rebuild(key, &voided, &pending, effects);
             return Ok(());
         }
-        build.admit(ask.built.sources, ask.built.recovered_context);
+        build.admit(ask.built.sources);
         build.inline = Some(Inline::Sending {
             generation: ask.generation,
             covers,

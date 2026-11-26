@@ -58,7 +58,6 @@ fn too_large(attempt: u64, room: Option<usize>) -> Input {
 
 fn compact_context(attempt: u64) -> Effect {
     Effect::Store(StoreOp::CompactContext(CompactContext {
-        require_recovery: None,
         control: crate::recall::control::Control::new(
             std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
         ),
@@ -76,7 +75,6 @@ fn compact_built(attempt: u64, sources: &[ThreadId]) -> Input {
             JobAsk {
                 generation: G,
                 built: Built {
-                    recovered_context: None,
                     request: request(),
                     sources: sources.to_vec(),
                 },
@@ -141,7 +139,6 @@ fn store_summary(attempt: u64, text: &str) -> Effect {
 /// A later attempt of the run's first round, after its first build read the snapshot.
 fn rebuilt(attempt: u64) -> Effect {
     Effect::Store(StoreOp::BuildContext(BuildContext {
-        require_recovery: None,
         control: crate::recall::control::Control::new(
             std::time::Instant::now() + crate::coordinator::WALL_CLOCK,
         ),
@@ -478,7 +475,6 @@ fn chatgpt_inline_and_its_rebuild_use_the_same_granted_effort() {
             key: read.key,
             snapshot: None,
             result: Ok(Built {
-                recovered_context: None,
                 request: crate::context::ModelRequest {
                     choice: Some(rebuilt_choice),
                     ..request()
