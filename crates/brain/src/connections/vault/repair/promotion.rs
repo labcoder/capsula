@@ -42,7 +42,7 @@ impl HistoryLink {
         Self(Arc::new(Mutex::new(Writer::Bound(Arc::new(send)))))
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn unbound() -> Self {
         Self(Arc::new(Mutex::new(Writer::Closed)))
     }
