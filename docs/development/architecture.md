@@ -229,6 +229,12 @@ GPUI; the shell is the crate that does. `cargo xtask check-core` holds that in C
 direct dependencies are a list in `xtask/src/check_core.rs`, so a new one is a reviewed line,
 and the whole tree is searched for a framework's name.
 
+`kumochi-storage` groups its non-Windows code by OS family. `platform/unix/` holds POSIX
+helpers the macOS adapter shares: descriptor-relative opens and looks that never follow links,
+and the owner, mode and link-count checks. `platform/macos/` keeps what only Darwin has (ACLs,
+the APFS volume policy, dataless files, `sysdir` and the Keychain) and the policy built on both.
+The crate builds only for Windows and macOS.
+
 On macOS, shell and brain use the same Application Support lookup in `kumochi-storage`.
 It asks Darwin for the user-domain path, resolving any home-relative result through the
 OS account, not `HOME`. It opens and creates nothing. Callers append or admit the product
@@ -455,7 +461,11 @@ It runs with an allowlisted environment, telemetry opt-outs, and a working folde
 
 ## Rules that protect you
 
-- Kumochi itself sends no telemetry. Nothing leaves the machine except calls to the accounts you set up.
+- Kumochi itself sends no telemetry. Network calls are limited to the accounts you set up and
+  model downloads you authorize. During those HTTPS handshakes, including setup, macOS trust
+  services may fetch certificate status or missing certificates. An OS trust evaluation admitted
+  before refusal or cancellation may still make those lookups without receiving credentials
+  or application data from Kumochi. See [Checked HTTP and roots](accounts.md#checked-http-and-roots).
 - Claude Code is your own program. Kumochi asks it to switch telemetry off, shows what it reports, and runs it either way.
 - Secrets live only in Windows Credential Manager, never in logs, arguments or files. The one exception: Claude Code's own credential file may exist only inside Kumochi's Claude Code folder, readable by the user and SYSTEM only. Kumochi never reads, copies or relays its contents, and Disconnect removes it (logout, then delete).
 - Prompts, transcripts and screenshots are never logged.

@@ -83,30 +83,19 @@ The ordinary open migrates to version 13, all pending migrations in one transact
 leaves the file at the version it had. Version 12 makes the ChatGPT cutoff table ordinary, and
 13 changes no schema: builds from before the profile's writer lock know at most 12, so they
 refuse the file instead of writing history without the lock. A file that the recovery
-operation took to 12 already has the table and its rows, and moves to 13 alone. A separate,
-explicit ChatGPT repair operation can establish a cutoff only with a still-locked replacement
-binding, on a store the ordinary open has already migrated. Its immutable tag row commits on
-its own, taking the last issued thread and run IDs from SQLite's
-sequences, including deleted IDs. A ceiling below a surviving ID or a missing sequence for
-existing rows refuses establishment. History keeps one writer: the vault's link is bound once,
-when the store thread starts, to the owner of the store ordinary startup opens, and Establish,
-its Check and every later confirmation are requests that owner serves on that store in order.
+operation took to 12 already has the table and its rows, and moves to 13 alone. No build writes a cutoff row;
+only tests write one directly. History keeps one writer: the vault's link is bound once,
+when the store thread starts, to the owner of the store ordinary startup opens, and every Check is a request that owner
+serves on that store in order.
 Startup builds the vault before that thread runs, so until then the link refuses every request.
 Shutdown releases the link before the store closes, since the store thread ends only once nothing
 can queue for it. What the link already queued is still served, and a released link never binds
 again. No call takes a store,
-path or earlier result. Because the cutoff commits on the writer's own connection, a purge copy
-taken before it is stale and isn't swapped in. The purge's `VACUUM INTO` copy keeps every table,
+path or earlier result. The purge's `VACUUM INTO` copy keeps every table,
 so the cutoff row (a tag and two IDs, no conversation content) carries over, and after a swap the
 Check reads the replacement file. A Check refuses an absent or invalid row for the expected tag
-or a connection still inside a transaction. Ordinary open never creates a cutoff or uses one to
-unlock a replacement. The binding is spent once a commit is attempted, or when the writer's
-answer is lost, so a lost row is never reseeded. Establish returns a receipt of the exact row it
-wrote. The vault refuses to queue it once the repair attempt is stopped, but a stop that lands
-after that check can still leave a written row; its context is then refused at the
-establishment's own claim, so the writer doesn't check for a stop itself. A stop that lands after
-that claim doesn't undo it: the establishment may still commit. The credential authority marks the context established only when a fresh Check reads
-exactly that row, and each confirmation reads the row again. The history and authority files
+or a connection still inside a transaction. Each confirmation of an established context reads
+the row again. The history and authority files
 share no installation binding, so nothing here compares one; that belongs to the local profile
 work. A byte-identical copy of the right file put in its place by a process running as the same
 user is outside this design's trust model and isn't detected.
@@ -213,7 +202,7 @@ rows read as `thread` and `words` with no model:
 |---|---|
 | `kind` | `main` for Kumo's thread, `thread` for a task. A unique partial index allows one `main`. It keeps these two values for good: changing a `CHECK` rebuilds the table, so later facts (origin, parent, archive) get their own nullable columns |
 | `title_source` | Who wrote the title: `words` (the first turn's first line, from `BeginTurn`), `model` or `user` |
-| `model`, `effort`, `connection` | The saved route, model and effort. Version 9 adds `connection` and backfills selected older rows as ChatGPT. Only three unset fields mean no choice; a partial row, invalid slug or unknown connection fails the read rather than falling back to another model. Pages retain the saved route/model independently of sign-in and catalogs; an unknown effort displays Medium without changing the saved row. An unknown connection fails the whole thread list and search read, so a new connection kind needs a schema version that older builds refuse |
+| `model`, `effort`, `connection` | The saved route, model and effort. Version 9 adds `connection` and backfills selected older rows as ChatGPT. Only three unset fields mean no choice; a partial row, invalid slug or unknown connection fails the read rather than falling back to another model. Pages retain the saved route/model independently of sign-in and catalogs; an unknown effort displays Medium without changing the saved row. An unknown connection fails the whole thread list and search read, so a new connection kind needs a schema version that older builds refuse. The spellings `chatgpt`, `anthropic_key` and `claude_code` come from the kind's [facts](runs.md#connection-facts), which round bodies' `kind` shares |
 
 `StoredChoice` separates structural decoding from admission. Page display never contacts a provider.
 An unknown effort is kept as unknown for execution, which uses the selected model's policy instead

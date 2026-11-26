@@ -1,8 +1,8 @@
 use rusqlite::{Connection, TransactionBehavior, params};
 
 use super::{
-    Authority, AuthorityError, Current, GENERATIONS, Generation, Kind, SignOutMarker, VERSION,
-    current, read_marker,
+    Authority, AuthorityError, Current, GENERATIONS, Generation, Kind, VERSION, current,
+    read_marker,
 };
 
 mod exchange;
@@ -75,7 +75,6 @@ INSERT INTO chatgpt_repair (id, old_grant_notice, fresh_text_only, phase) VALUES
 #[must_use]
 pub(in crate::connections) struct RepairAttempt {
     id: Generation,
-    marker: SignOutMarker,
 }
 
 impl RepairAttempt {
@@ -177,7 +176,7 @@ impl Authority {
             }
             return Err(error.into());
         }
-        Ok(RepairAttempt { id, marker })
+        Ok(RepairAttempt { id })
     }
 
     pub(in crate::connections) fn cancel_repair_admission(

@@ -25,8 +25,6 @@ pub(crate) use issues::IssueEpochs;
 #[cfg(test)]
 pub(crate) use store_thread::REFUSE_SPAWN;
 #[cfg(test)]
-pub(crate) use store_thread::{Attempt, Schedule};
-#[cfg(test)]
 mod tests;
 mod voice;
 
@@ -614,7 +612,6 @@ impl Brain {
     /// complete quit; otherwise the scenes, or a thread whose delete didn't commit, come back at
     /// the next start, as after a crash. Reports what each later stage was seen to do.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Shutdown {
-        self.account.stop_repair();
         self.settings_owed = Some(settings::Owed::default());
         self.claude.stop();
         self.offline(Input::ShellLost);
@@ -694,7 +691,6 @@ impl Brain {
     /// committed outcomes stay, and uncommitted work may be lost. Reports what each later stage
     /// was seen to do.
     pub(crate) async fn close(mut self) -> Shutdown {
-        self.account.stop_repair();
         self.settings_owed = Some(settings::Owed::default());
         let deadline = Instant::now() + close_wait();
         self.voice_quit();
@@ -1123,8 +1119,6 @@ impl Brain {
                 ended = core => ended,
             }
         };
-        // The pair is gone or quitting: its repair attempt stops before any grace or drain.
-        self.account.stop_repair();
         if WATCH_FATAL && let Some(cause) = fence.and_then(Fence::check) {
             ended = Ended::Fatal(cause);
         }
@@ -1831,8 +1825,13 @@ impl Brain {
                 }
                 Effect::StartEngine { request } => {
                     let run = request.run;
+                    let by = self
+                        .deadline
+                        .filter(|(owner, _)| *owner == run)
+                        .map_or_else(Instant::now, |(_, at)| at);
                     let gate =
-                        SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone());
+                        SendGate::new(request.key, Arc::clone(&self.asks), self.inputs_tx.clone())
+                            .with_run_deadline(by);
                     let owned = self.owned_engine(&request);
                     let engine = owned.as_deref().unwrap_or(&*self.engine);
                     let cancel = engines::start(engine, request, self.engine_tx.clone(), gate);

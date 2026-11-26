@@ -17,7 +17,7 @@ mod bounds;
 mod github;
 mod inventory;
 mod marker;
-pub(crate) mod repair;
+mod repair;
 mod staging;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

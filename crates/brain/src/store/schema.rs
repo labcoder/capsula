@@ -1,6 +1,6 @@
 //! The schema, as forward-only migrations numbered by `PRAGMA user_version`.
 
-use rusqlite::{Connection, Transaction};
+use rusqlite::Connection;
 
 use super::StoreError;
 
@@ -222,7 +222,8 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
 }
 
 /// The cutoff table is ordinary, so a recovery cutoff only needs the current schema.
-pub(super) fn migrate_recovery_context(tx: &Transaction<'_>) -> Result<(), StoreError> {
+#[cfg(test)]
+pub(super) fn migrate_recovery_context(tx: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
     if version(tx)? == ORDINARY_VERSION {
         Ok(())
     } else {

@@ -1,17 +1,27 @@
 use std::future::Future;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::pin::pin;
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use tokio::runtime::{Handle, Id, Runtime};
-use tokio::sync::{Notify, Semaphore, oneshot};
+use tokio::sync::{Semaphore, SemaphorePermit, oneshot};
 
+use crate::platform::tls_control::{ConnectCut, Control};
+
+mod connect;
 mod trust;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+use {crate::platform::tls_control::ConnectCut as Stop, tokio::sync::Notify};
+
+pub use connect::NativeStream;
+pub(super) use connect::{direct, http};
+pub(super) use trust::config;
 
 const MAX_CONNECTS: usize = 4;
 const CONNECT_CAP: Duration = Duration::from_secs(10);
@@ -28,36 +38,21 @@ enum Refusal {
     Unavailable,
 }
 
-#[derive(Default)]
-struct Stop {
-    closed: AtomicBool,
-    changed: Notify,
-}
-
-impl Stop {
-    fn close(&self) {
-        self.closed.store(true, Ordering::SeqCst);
-        self.changed.notify_waiters();
-    }
-
-    fn check(&self) -> Result<(), Refusal> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(Refusal::Cancelled);
-        }
-        Ok(())
-    }
-
-    async fn until_closed(&self) {
-        let changed = self.changed.notified();
-        if self.check().is_ok() {
-            changed.await;
-        }
+impl From<Refusal> for io::Error {
+    fn from(refusal: Refusal) -> Self {
+        let kind = match refusal {
+            Refusal::Cancelled => io::ErrorKind::Interrupted,
+            Refusal::Deadline => io::ErrorKind::TimedOut,
+            Refusal::Busy => io::ErrorKind::WouldBlock,
+            Refusal::Unavailable => io::ErrorKind::NotConnected,
+        };
+        Self::from(kind)
     }
 }
 
 struct Attempt {
-    request: Arc<Stop>,
-    abandoned: Arc<Stop>,
+    request: Control,
+    abandoned: Arc<ConnectCut>,
     by: Instant,
     owner: Id,
     checks: Arc<Semaphore>,
@@ -65,12 +60,60 @@ struct Attempt {
 
 impl Attempt {
     fn check(&self) -> Result<(), Refusal> {
-        self.request.check()?;
-        self.abandoned.check()?;
+        if self.request.cancelled() || self.abandoned.closed() {
+            return Err(Refusal::Cancelled);
+        }
         if Instant::now() >= self.by {
             return Err(Refusal::Deadline);
         }
         Ok(())
+    }
+
+    fn with<T>(&self, poll: impl FnOnce() -> T) -> io::Result<T> {
+        self.request.with(|| {
+            self.abandoned.with(|| {
+                if Instant::now() >= self.by {
+                    return Err(Refusal::Deadline.into());
+                }
+                Ok(poll())
+            })?
+        })
+    }
+
+    fn native_slot(&self) -> Result<SemaphorePermit<'_>, Refusal> {
+        self.check()?;
+        if let Ok(slot) = self.checks.try_acquire() {
+            return Ok(slot);
+        }
+        let mut wait = pin!(tokio::task::unconstrained(async {
+            tokio::select! {
+                biased;
+                () = self.request.until_cancelled() => Err(Refusal::Cancelled),
+                () = self.abandoned.until_closed() => Err(Refusal::Cancelled),
+                slot = self.checks.acquire() => slot.map_err(|_| Refusal::Unavailable),
+            }
+        }));
+        let waker = Waker::from(Arc::new(WakeWorker(thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        loop {
+            self.check()?;
+            if let Poll::Ready(slot) = wait.as_mut().poll(&mut cx) {
+                return slot;
+            }
+            thread::park_timeout(self.by.saturating_duration_since(Instant::now()));
+        }
+    }
+}
+
+struct WakeWorker(thread::Thread);
+
+impl Wake for WakeWorker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
     }
 }
 
@@ -78,16 +121,19 @@ tokio::task_local! {
     static CONNECTING: Arc<Attempt>;
 }
 
-fn evaluate<T>(verify: impl FnOnce() -> T) -> Result<T, Refusal> {
+fn evaluate<T>(verify: impl FnOnce(&Attempt) -> T) -> Result<T, Refusal> {
     let attempt = CONNECTING
         .try_with(Arc::clone)
         .map_err(|_| Refusal::Unavailable)?;
     if !Handle::try_current().is_ok_and(|worker| worker.id() == attempt.owner) {
         return Err(Refusal::Unavailable);
     }
-    let _slot = attempt.checks.try_acquire().map_err(|_| Refusal::Busy)?;
-    attempt.check()?;
-    let verdict = verify();
+    let _slot = attempt.native_slot()?;
+    attempt.with(|| ()).map_err(|error| match error.kind() {
+        io::ErrorKind::TimedOut => Refusal::Deadline,
+        _ => Refusal::Cancelled,
+    })?;
+    let verdict = verify(&attempt);
     attempt.check()?;
     Ok(verdict)
 }
@@ -104,6 +150,30 @@ type Job = Box<dyn FnOnce() + Send>;
 struct Worker {
     job: mpsc::SyncSender<Job>,
     idle: Arc<Semaphore>,
+}
+
+async fn establish<T: Send + 'static>(
+    work: impl Future<Output = T> + Send + 'static,
+) -> io::Result<T> {
+    let request = Control::current()?;
+    shared_executor()?
+        .establish(request, work)
+        .await
+        .map_err(Into::into)
+}
+
+fn shared_executor() -> Result<&'static Executor, Refusal> {
+    static RUNNING: OnceLock<Executor> = OnceLock::new();
+    static STARTING: Mutex<()> = Mutex::new(());
+    if let Some(executor) = RUNNING.get() {
+        return Ok(executor);
+    }
+    let _starting = STARTING.lock().map_err(|_| Refusal::Unavailable)?;
+    if let Some(executor) = RUNNING.get() {
+        return Ok(executor);
+    }
+    let started = Executor::new()?;
+    Ok(RUNNING.get_or_init(|| started))
 }
 
 impl Executor {
@@ -143,24 +213,30 @@ impl Executor {
         })
     }
 
+    #[cfg(test)]
     async fn connect<T: Send + 'static>(
         &self,
         request: Arc<Stop>,
         by: Instant,
         work: impl Future<Output = T> + Send + 'static,
     ) -> Result<T, Refusal> {
-        let by = by.min(Instant::now() + CONNECT_CAP);
+        self.establish(Control::fixture(by, request), work).await
+    }
+
+    async fn establish<T: Send + 'static>(
+        &self,
+        request: Control,
+        work: impl Future<Output = T> + Send + 'static,
+    ) -> Result<T, Refusal> {
+        let by = request.deadline(CONNECT_CAP);
         let attempt = Arc::new(Attempt {
             request,
-            abandoned: Arc::new(Stop::default()),
+            abandoned: Arc::new(ConnectCut::default()),
             by,
             owner: self.reactor.id(),
             checks: Arc::clone(&self.checks),
         });
         attempt.check()?;
-        if self.checks.available_permits() == 0 {
-            return Err(Refusal::Busy);
-        }
         let (sender, slot) = self
             .workers
             .iter()
@@ -183,7 +259,7 @@ impl Executor {
                     worker.check()?;
                     let result = tokio::select! {
                         biased;
-                        () = worker.request.until_closed() => return Err(Refusal::Cancelled),
+                        () = worker.request.until_cancelled() => return Err(Refusal::Cancelled),
                         () = worker.abandoned.until_closed() => return Err(Refusal::Cancelled),
                         () = tokio::time::sleep_until(by.into()) => return Err(Refusal::Deadline),
                         outcome = work => outcome,
@@ -197,7 +273,7 @@ impl Executor {
         let _abandon = Abandon(Arc::clone(&attempt.abandoned));
         let result = tokio::select! {
             biased;
-            () = attempt.request.until_closed() => Err(Refusal::Cancelled),
+            () = attempt.request.until_cancelled() => Err(Refusal::Cancelled),
             () = tokio::time::sleep_until(by.into()) => Err(Refusal::Deadline),
             result = answer => result.map_err(|_| Refusal::Unavailable)?,
         }?;
@@ -224,7 +300,7 @@ impl Drop for Driver {
     }
 }
 
-struct Abandon(Arc<Stop>);
+struct Abandon(Arc<ConnectCut>);
 
 impl Drop for Abandon {
     fn drop(&mut self) {

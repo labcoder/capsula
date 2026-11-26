@@ -292,13 +292,16 @@ impl fmt::Debug for Client {
     }
 }
 
-/// Construct the account client using only usable public roots from the OS store.
+/// Construct the account client with the platform's TLS trust policy.
 ///
 /// # Errors
 /// Refuses an unreadable/empty trust store or a failed TLS/HTTP configuration.
 pub fn build() -> Result<Client, HttpError> {
-    let tls = platform::native_client_tls(TrustDiagnostics::Account)?;
-    with_tls(tls, Duration::from_secs(15)).map(Client)
+    with_tls(
+        platform::native_http_builder(TrustDiagnostics::Account)?,
+        Duration::from_secs(15),
+    )
+    .map(Client)
 }
 
 #[cfg(test)]
@@ -314,14 +317,19 @@ fn connecting_within(
     connect: Duration,
 ) -> Result<reqwest::Client, HttpError> {
     let tls = platform::client_tls_from_roots(roots, TrustDiagnostics::Account)?;
-    with_tls(tls, connect)
+    with_tls(
+        reqwest::Client::builder().use_preconfigured_tls(tls),
+        connect,
+    )
 }
 
 /// The client, with `connect` as its deadline for the connection and TLS handshake.
-fn with_tls(tls: rustls::ClientConfig, connect: Duration) -> Result<reqwest::Client, HttpError> {
+fn with_tls(
+    builder: reqwest::ClientBuilder,
+    connect: Duration,
+) -> Result<reqwest::Client, HttpError> {
     // shortcut: proxied networks can't sign in, until there's a user-set proxy setting
-    reqwest::Client::builder()
-        .use_preconfigured_tls(tls)
+    builder
         .https_only(true)
         .no_proxy()
         .redirect(Policy::none())
@@ -428,8 +436,13 @@ impl Client {
         if let Some(observation) = super::model::text_observation::Observation::active() {
             observation.auxiliary(&request.endpoint);
         }
-        let response = builder
-            .send()
+        let outgoing = builder.build().map_err(|error| transport_error(&error))?;
+        let by = tokio::time::Instant::now()
+            + outgoing
+                .timeout()
+                .copied()
+                .unwrap_or(Duration::from_secs(120));
+        let response = platform::connect_scope(by, None, self.0.execute(outgoing))
             .await
             .map_err(|error| transport_error(&error))?;
         let github = match &request.endpoint {

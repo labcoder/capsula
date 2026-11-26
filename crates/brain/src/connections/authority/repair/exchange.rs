@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 
 use super::super::{
     ActiveRef, Authority, AuthorityError, Generation, Kind, Layout, Verified, WritePlan,
-    activate_plan, bump, current, head_revision, read_marker, retire_active,
+    activate_plan, current, head_revision, read_marker,
 };
 use super::RepairAttempt;
 
@@ -10,7 +10,6 @@ use super::RepairAttempt;
 pub(in crate::connections) enum ExchangeStep {
     Charge,
     Drain,
-    Replace,
 }
 
 impl ExchangeStep {
@@ -18,7 +17,6 @@ impl ExchangeStep {
         match self {
             Self::Charge => "browser",
             Self::Drain => "exchange",
-            Self::Replace => "escrow",
         }
     }
 }
@@ -39,11 +37,7 @@ impl Authority {
         let layout = Layout::for_len(len)?;
         let (chunks, bytes) = layout.sql()?;
         let generation = Generation::fresh()?;
-        let kind = if step == ExchangeStep::Replace {
-            Kind::Account
-        } else {
-            Kind::Repair
-        };
+        let kind = Kind::Repair;
         let base = head_revision(&tx, kind)?;
         tx.execute(
             "INSERT INTO generations (generation, kind, state, chunks, bytes)
@@ -72,7 +66,6 @@ impl Authority {
         let next = match step {
             ExchangeStep::Charge => "exchange",
             ExchangeStep::Drain => "escrow",
-            ExchangeStep::Replace => return Err(AuthorityError::Conflict),
         };
         let tx = self
             .conn
@@ -89,118 +82,6 @@ impl Authority {
             params![next, active.generation.0.as_slice()],
         )?;
         tx.commit()?;
-        Ok(())
-    }
-
-    pub(in crate::connections) fn bind_repair_replacement(
-        &mut self,
-        attempt: &RepairAttempt,
-        verified: Verified,
-        tag: u64,
-        check: impl FnOnce(ActiveRef, ActiveRef, &WritePlan) -> Result<(), AuthorityError>,
-    ) -> Result<Generation, AuthorityError> {
-        let tag = i64::try_from(tag).map_err(|_| AuthorityError::Bounds)?;
-        let plan = verified.into_plan();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if tag == 0
-            || plan.kind != Kind::Account
-            || candidate(&tx, self.lifetime, attempt, ExchangeStep::Replace)?
-                != Some(plan.generation)
-        {
-            return Err(AuthorityError::Conflict);
-        }
-        let old = current(&tx, Kind::Account)?
-            .active
-            .ok_or(AuthorityError::Corrupt)?;
-        let escrow = current(&tx, Kind::Repair)?
-            .active
-            .ok_or(AuthorityError::Corrupt)?;
-        check(old, escrow, &plan)?;
-        let active = activate_plan(&tx, &plan)?;
-        retire_active(&tx, Kind::Repair)?;
-        bump(&tx, Kind::Repair)?;
-        let changed = tx.execute(
-            "UPDATE chatgpt_repair SET phase='idle', fenced=NULL, attempt=NULL, opened_in=NULL,
-             account_revision=NULL, host_revision=NULL, revocation_revision=NULL, credential=NULL,
-             candidate=NULL, issued_by=NULL, fresh_text_only=1, context_tag=?1,
-             context_successor=?2, context_established=0, context_last_thread=NULL,
-             context_last_run=NULL WHERE id=1",
-            params![tag, active.generation.0.as_slice()],
-        )?;
-        if changed != 1 {
-            return Err(AuthorityError::Conflict);
-        }
-        let revision = head_revision(&tx, Kind::Account)?;
-        if let Err(error) = tx.execute_batch("COMMIT") {
-            if !tx.is_autocommit() {
-                tx.rollback()?;
-                return Err(error.into());
-            }
-            let committed: bool = tx.query_row(
-                "SELECT EXISTS (
-                   SELECT 1 FROM chatgpt_repair WHERE id=1 AND phase='idle' AND old_grant_notice=1
-                   AND fenced IS NULL AND fresh_text_only=1 AND context_established=0
-                   AND context_tag=?1 AND context_successor=?2
-                 )",
-                params![tag, active.generation.0.as_slice()],
-                |row| row.get(0),
-            )?;
-            if !committed
-                || current(&tx, Kind::Account)?
-                    != (super::super::Current {
-                        active: Some(active),
-                        revision,
-                    })
-                || current(&tx, Kind::Repair)?.active.is_some()
-            {
-                return Err(error.into());
-            }
-        }
-        Ok(active.generation)
-    }
-
-    pub(in crate::connections) fn establish_repair_context(
-        &mut self,
-        successor: Generation,
-        tag: u64,
-        (last_thread, last_run): (i64, i64),
-        claim: impl FnOnce() -> bool,
-    ) -> Result<(), AuthorityError> {
-        let tag = i64::try_from(tag).map_err(|_| AuthorityError::Bounds)?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if current(&tx, Kind::Account)?
-            .active
-            .map(|active| active.generation)
-            != Some(successor)
-        {
-            return Err(AuthorityError::Conflict);
-        }
-        let changed = tx.execute(
-            "UPDATE chatgpt_repair SET context_established=1, context_last_thread=?3,
-             context_last_run=?4 WHERE id=1 AND phase='idle' AND fenced IS NULL
-             AND fresh_text_only=1 AND context_established=0 AND context_tag=?1
-             AND context_successor=?2",
-            params![tag, successor.0.as_slice(), last_thread, last_run],
-        )?;
-        if changed != 1 || !claim() {
-            return Err(AuthorityError::Conflict);
-        }
-        if let Err(error) = tx.execute_batch("COMMIT") {
-            #[cfg(test)]
-            if std::mem::take(&mut self.refuse_rollback) {
-                let mut tx = tx;
-                tx.set_drop_behavior(rusqlite::DropBehavior::Ignore);
-                return Err(error.into());
-            }
-            if !tx.is_autocommit() {
-                tx.rollback()?;
-            }
-            return Err(error.into());
-        }
         Ok(())
     }
 
@@ -322,12 +203,7 @@ fn candidate(
             [],
             |row| row.get(0),
         )?;
-        if !same_heads
-            || marker.sign_out.is_some()
-            || marker.request_pending
-            || marker.sweep
-            || (step == ExchangeStep::Replace && marker != attempt.marker)
-        {
+        if !same_heads || marker.sign_out.is_some() || marker.request_pending || marker.sweep {
             return Err(AuthorityError::Conflict);
         }
     }

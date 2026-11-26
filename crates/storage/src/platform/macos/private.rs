@@ -10,11 +10,13 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::path::Path;
 
-use super::protected::{
-    ObjectKind, components, hold_from, inspect_private, open_directory, same_inspection, stat,
-};
-use super::shell_files::{AcquisitionError, Entries, Next, named, writable_volume};
+use super::protected::{ObjectKind, hold_from, inspect_private};
+use super::shell_files::{Entries, Next, writable_volume};
 use crate::Untrusted;
+use crate::platform::unix::{
+    AcquisitionError, FILE_FLAGS, components, named, open_directory, same_entry, same_inspection,
+    stat, user,
+};
 
 /// How far a private walk goes before it refuses.
 #[derive(Clone, Copy)]
@@ -24,13 +26,6 @@ struct Limits {
     /// Entries seen across the whole walk.
     entries: usize,
 }
-
-/// Opens a file read-capable but for its metadata only, as the owner approved. Nothing reads
-/// through it: it stays an `OwnedFd`, which has no read methods. `O_NONBLOCK` keeps a FIFO
-/// swapped in after the look from waiting for a writer, and `O_NOCTTY` keeps a terminal from
-/// becoming the process's own.
-const FILE_FLAGS: libc::c_int =
-    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
 
 // SDK sys/stat.h's SF_DATALESS; libc does not declare it.
 pub(super) const DATALESS: u32 = 0x4000_0000;
@@ -78,22 +73,6 @@ fn held_parent(path: &Path) -> Result<(File, CString, libc::uid_t), Untrusted> {
     let parent = hold_from(root, &names, user)?.pop().ok_or(Untrusted::Io)?;
     writable_volume(&parent)?;
     Ok((parent, name, user))
-}
-
-/// This process's user, when it isn't root and its real and effective identities match.
-fn user() -> Result<libc::uid_t, Untrusted> {
-    // SAFETY: getuid has no arguments or ownership effects.
-    let user = unsafe { libc::getuid() };
-    // SAFETY: geteuid only returns the effective identity.
-    let effective = unsafe { libc::geteuid() };
-    // SAFETY: getgid only returns the real group identity.
-    let group = unsafe { libc::getgid() };
-    // SAFETY: getegid only returns the effective group identity.
-    let effective_group = unsafe { libc::getegid() };
-    if user == 0 || user != effective || group != effective_group {
-        return Err(Untrusted::Unsafe);
-    }
-    Ok(user)
 }
 
 fn owner_only_at(parent: &File, name: &CStr, user: libc::uid_t) -> Result<File, Untrusted> {
@@ -169,17 +148,6 @@ fn private_file(
     #[cfg(test)]
     tests::step(tests::Step::Checked);
     named(parent, name, &checked)
-}
-
-/// The checked object is the one the look found, on its parent's device.
-fn same_entry(parent: &File, seen: &libc::stat, checked: &libc::stat) -> Result<(), Untrusted> {
-    if checked.st_dev != stat(parent.as_raw_fd())?.st_dev
-        || checked.st_dev != seen.st_dev
-        || checked.st_ino != seen.st_ino
-    {
-        return Err(Untrusted::Unsafe);
-    }
-    Ok(())
 }
 
 fn look(parent: &File, name: &CStr) -> Result<libc::stat, Untrusted> {
