@@ -1422,7 +1422,7 @@ mod tests {
         };
         assert_eq!(
             postcard::to_allocvec(&tuning).unwrap(),
-            [40, 5, 6, 208, 15, 244, 3]
+            [39, 5, 6, 208, 15, 244, 3]
         );
         let bytes = frame::encode(&tuning, Pipe::Control).unwrap();
         assert_eq!(

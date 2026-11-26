@@ -58,6 +58,14 @@ fn error(key: ErrorKey, actions: Vec<Action>) -> UserError {
 }
 
 #[test]
+fn an_unscoped_platform_error_isnt_account_state() {
+    let mut accounts = Accounts::default();
+    receive(&mut accounts, signed_out());
+    accounts.error(&error(ErrorKey::UnsupportedPlatform, vec![]));
+    assert_eq!(allowed(&accounts), [AccountOp::SignIn]);
+}
+
+#[test]
 fn unavailable_saved_sign_in_explains_each_reason_and_only_offers_the_local_check() {
     for (reason, status, help) in [
         (
