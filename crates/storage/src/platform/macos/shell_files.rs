@@ -643,6 +643,11 @@ fn directory(file: File, name: CString, user: libc::uid_t) -> Result<Directory, 
     })
 }
 
+/// Whether `file`'s volume takes private descendants: local, writable APFS that enforces ownership.
+pub(super) fn writable_volume(file: &File) -> Result<(), Untrusted> {
+    volume(file, true).map(|_| ())
+}
+
 #[expect(
     clippy::fn_params_excessive_bools,
     reason = "ancestor inspection permits read-only volumes, private descendants require writable volumes"
@@ -737,7 +742,7 @@ fn precheck(parent: &File, name: &CStr, user: libc::uid_t) -> Result<(), Acquisi
     Ok(())
 }
 
-fn named(parent: &File, name: &CStr, expected: &libc::stat) -> Result<(), Untrusted> {
+pub(super) fn named(parent: &File, name: &CStr, expected: &libc::stat) -> Result<(), Untrusted> {
     let actual = entry_stat(parent, name).map_err(|_| Untrusted::Io)?;
     if !protected::same_inspection(&actual, expected) || actual.st_nlink != expected.st_nlink {
         return Err(Untrusted::Unsafe);
@@ -814,7 +819,7 @@ fn log_date(prefix: &str, name: &[u8]) -> Option<SystemTime> {
     }
 }
 
-unsafe fn read_dirent_name(entry: NonNull<libc::dirent>) -> Option<CString> {
+pub(super) unsafe fn read_dirent_name(entry: NonNull<libc::dirent>) -> Option<CString> {
     let record = entry.as_ptr().cast::<u8>();
     let reclen = record
         .wrapping_add(offset_of!(libc::dirent, d_reclen))
@@ -852,10 +857,10 @@ fn bounded_dirent_name<'a>(
     CStr::from_bytes_with_nul(read(len)).ok()
 }
 
-struct Entries(NonNull<libc::DIR>);
+pub(super) struct Entries(pub(super) NonNull<libc::DIR>);
 
 impl Entries {
-    fn open(logs: &File) -> Result<Self, AcquisitionError> {
+    pub(super) fn open(logs: &File) -> Result<Self, AcquisitionError> {
         let file = open_at(logs.as_raw_fd(), c".", DIRECTORY_FLAGS, 0)?;
         if !same_object(
             &protected::stat(logs.as_raw_fd())?,

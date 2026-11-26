@@ -197,11 +197,26 @@ version: its launch policy and the facts its audit expects. Any other version is
 its own thread; `runtime/claude.rs` asks it for work and turns the results into
 `ClaudeCodeView`.
 
-Without a protected-path adapter, holding, creating and removing Claude Code's private paths
-and markers all refuse. A scratch directory does not stand in for native ownership and
-handle checks, and there is no native Claude Code lane on the Linux test host.
-The native lane, launch supervisor and named-pipe listener compile only on Windows. The offline
-tests still exercise the shared connection policy, bounded stdio and in-memory bridge session.
+Linux has no protected-path adapter, so holding, creating and removing Claude Code's private
+paths and markers all refuse there. macOS has the folder half, in kumochi-storage. `hold_chain`
+holds the base from `/`. `owner_only_dir` makes or admits a folder owned by the user at mode
+0700 with no ACL entries at all. `private_tree` walks Kumochi's `claude-code` folder without
+following anything and passes only such folders, so any file in it refuses. macOS shows that a
+file has no ACL only through a descriptor that could read it, and Kumochi opens none on the
+sign-in, so checking files is a separate, later decision. Markers and deletion (`mark`,
+`marker`, `remove_tree`) still refuse, so Disconnect can't finish there. The Mac checks are
+stricter than the Windows ones on exact owner, mode and ACL, and macOS has nothing like integrity
+labels. Modes don't inherit the way a DACL does, so before Claude Code runs on macOS its launch
+must give the child, and only the child, umask 077, and must create Kumochi's own `mcp.json`
+exclusively at 0600. None of this runs yet: the brain refuses every mode on macOS and has no
+Claude Code host there. Claude Code stays off on the Mac until a check on a real account shows
+its sign-in stays in Kumochi's folder.
+
+A scratch directory does not stand in for native ownership and handle checks, and there is no
+native Claude Code lane on the Linux test host. The lane and launch supervisor compile
+everywhere, but only Windows has a Claude Code host, a launch and the named-pipe listener. The
+offline tests still exercise the shared connection policy, bounded stdio and in-memory bridge
+session.
 
 ```mermaid
 sequenceDiagram

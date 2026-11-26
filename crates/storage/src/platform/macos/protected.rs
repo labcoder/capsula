@@ -89,7 +89,11 @@ pub(super) fn components(path: &Path) -> Result<Vec<CString>, Untrusted> {
         .collect()
 }
 
-fn hold_from(root: File, names: &[CString], user: libc::uid_t) -> Result<Vec<File>, Untrusted> {
+pub(super) fn hold_from(
+    root: File,
+    names: &[CString],
+    user: libc::uid_t,
+) -> Result<Vec<File>, Untrusted> {
     let device = inspect(&root, user)?.st_dev;
     let mut held = vec![root];
     for name in names {
@@ -105,7 +109,7 @@ fn hold_from(root: File, names: &[CString], user: libc::uid_t) -> Result<Vec<Fil
     Ok(held)
 }
 
-fn open_directory(parent: RawFd, name: &CStr) -> Result<File, Untrusted> {
+pub(super) fn open_directory(parent: RawFd, name: &CStr) -> Result<File, Untrusted> {
     // SAFETY: name is terminated; parent is held (or AT_FDCWD for the root); no creation flag.
     let fd = unsafe { libc::openat(parent, name.as_ptr(), DIRECTORY_FLAGS) };
     if fd < 0 {
@@ -182,6 +186,24 @@ pub(super) fn safe_regular(metadata: &libc::stat, user: libc::uid_t) -> Result<(
     Ok(())
 }
 
+/// Inspects a held folder that must be private: owned by this user, mode exactly 0700, and no
+/// ACL at all, so a DENY-only or empty present ACL refuses too.
+pub(super) fn inspect_private(file: &File, user: libc::uid_t) -> Result<libc::stat, Untrusted> {
+    let before = stat(file.as_raw_fd())?;
+    if before.st_mode & libc::S_IFMT != libc::S_IFDIR
+        || before.st_uid != user
+        || before.st_mode & 0o7777 != 0o700
+    {
+        return Err(Untrusted::Unsafe);
+    }
+    Filesec::new()?.inspect_with(file.as_raw_fd(), &before, Acl::Absent)?;
+    let after = stat(file.as_raw_fd())?;
+    if !same_inspection(&before, &after) {
+        return Err(Untrusted::Io);
+    }
+    Ok(after)
+}
+
 pub(super) fn inspect(file: &File, user: libc::uid_t) -> Result<libc::stat, Untrusted> {
     inspect_object(file, user, ObjectKind::Directory)
 }
@@ -207,6 +229,15 @@ pub(super) fn inspect_object(
     Ok(after)
 }
 
+/// What a present ACL may hold and still pass.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Acl {
+    /// Only supported DENY entries.
+    DenyOnly,
+    /// Nothing: any present ACL refuses.
+    Absent,
+}
+
 struct Filesec(NonNull<libc::c_void>);
 
 impl Filesec {
@@ -218,6 +249,10 @@ impl Filesec {
     }
 
     fn inspect(&self, fd: RawFd, expected: &libc::stat) -> Result<(), Untrusted> {
+        self.inspect_with(fd, expected, Acl::DenyOnly)
+    }
+
+    fn inspect_with(&self, fd: RawFd, expected: &libc::stat, acl: Acl) -> Result<(), Untrusted> {
         // SAFETY: all-zero libc stat is valid initialized storage, not an inspection result.
         let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: fd is borrowed; metadata is writable libc stat and self owns a fresh filesec.
@@ -252,7 +287,7 @@ impl Filesec {
             unsafe { filesec_query_property(self.0.as_ptr(), FILESEC_ACL, &raw mut present) };
         match acl_absent(result, present) {
             Ok(()) => Ok(()),
-            Err(Untrusted::Unsafe) => inspect_present_acl(fd, expected),
+            Err(Untrusted::Unsafe) if acl == Acl::DenyOnly => inspect_present_acl(fd, expected),
             Err(error) => Err(error),
         }
     }
@@ -383,4 +418,4 @@ impl Drop for Filesec {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
