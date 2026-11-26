@@ -587,8 +587,12 @@ fn superseded_removed_and_interrupted_pastes_are_cleaned_in_the_staging_store() 
         staging.names().is_empty(),
         "the next open swept the interrupted paste"
     );
-    let names = private.names();
-    assert!(decoys.iter().all(|name| names.contains(name)));
+    decoys.sort();
+    assert_eq!(
+        private.names(),
+        decoys,
+        "the private store holds only the decoys: the old key was swept there"
+    );
     assert_eq!(loaded(&mut vault), None);
     let states: Vec<String> = raw(&path)
         .prepare("SELECT state FROM generations ORDER BY rowid")
@@ -629,11 +633,12 @@ fn failed_candidate_writes_and_refused_removes_delete_only_staged_names() {
     let staging = FakeStore::default();
     let mut vault = open_split(&private, &staging, &service, &path);
     vault.save_anthropic_key(OLD.as_bytes()).expect("old key");
-    let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
-    plant(&staging, &service, &plan, NEW.as_bytes());
+    let long = format!("{NEW}{}", "x".repeat(2048 - NEW.len()));
+    let plan = vault.begin_anthropic_paste(long.len()).expect("plan");
+    plant(&staging, &service, &plan, long.as_bytes());
     plant(&private, &service, &plan, OLD.as_bytes());
     let before = private.names();
-    private.arm(0, Fault::Refuse);
+    private.arm(1, Fault::Refuse);
     assert!(matches!(
         vault.adopt_anthropic_paste(plan.generation),
         Err(PasteError::Key(KeyError::Vault(VaultError::Store(
