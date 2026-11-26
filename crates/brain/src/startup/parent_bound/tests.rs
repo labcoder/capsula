@@ -802,9 +802,10 @@ fn the_stage_driver_fences_on_entry_before_asking_whether_its_ready() {
         } else {
             Instant::now()
         };
+        let (_session, cell) = watch::channel(false);
         let mut root = Root::<NoItem>::new();
         assert_eq!(
-            root.stage(&mut Unready { ask: false }, &shell, by, &committed),
+            root.stage(&mut Unready { ask: false }, &shell, by, &cell, &committed),
             Err(ParentBoundError::Refused),
             "lost: {lost}"
         );
