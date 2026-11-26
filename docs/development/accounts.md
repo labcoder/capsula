@@ -856,8 +856,11 @@ We chose not to add that second keyring stack: our store is small and reviewed, 
 zeroizing bytes, and its guard wipes the validated native read blob and frees the allocation
 on every exit, including panic unwinding. `CredentialStore` is the seam for a macOS Keychain store.
 
-On macOS, `platform::macos::credential::MacCredentialStore` is dormant: only tests construct it,
-and the native store stays `Unsupported`. It uses the data protection keychain, never the
+On macOS, `platform::macos::credential::MacCredentialStore` is the native store, and
+`admitted_store()` returns it only through `MacCredentialStore::admitted`. A process that claims no
+application identifier, such as an unsigned or ad-hoc build, gets `Unsupported` there, so its
+not-found reads can never pass for an empty store. macOS still refuses every brain mode, so no product
+path opens it yet. It uses the data protection keychain, never the
 file-based login keychain: one generic password per exact target, as the account under
 `CREDENTIAL_SERVICE`, not synchronizable, readable only while unlocked on this device. Every query
 pins one access group, the `com.apple.application-identifier` the process claims;

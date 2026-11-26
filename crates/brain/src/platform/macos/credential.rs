@@ -1,6 +1,7 @@
 //! Data protection keychain generic passwords, accessed only by exact target name.
 //!
-//! Dormant: only tests construct it, until a signed, provisioned brain can be admitted to it.
+//! The native store, reached only through `platform::credential::admitted_store`; macOS still
+//! refuses every brain mode, so no product path opens it yet.
 
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};

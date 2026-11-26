@@ -38,7 +38,7 @@ use crate::context::{InputItem, ModelRequest, Origin, Role};
 use crate::dispatch::{MAX_ARGS, model_schemas};
 use crate::drawing::CallError;
 use crate::engines::responses::body;
-use crate::platform::credential::NativeCredentialStore;
+use crate::platform::credential::admitted_store;
 
 /// One request per recorded drawing, none retried.
 const BUDGET: u32 = 2;
@@ -297,7 +297,10 @@ pub fn run() -> u8 {
             Err(_) => STOPPED,
         };
     }
-    let vault = match Vault::open(NativeCredentialStore) {
+    let vault = match admitted_store()
+        .map_err(VaultError::from)
+        .and_then(Vault::open)
+    {
         Ok(vault) => vault,
         Err(VaultError::Busy) => return Outcome::Busy.code(),
         Err(_) => return Outcome::Vault.code(),
