@@ -189,7 +189,8 @@ fn invalid_input_is_refused_before_the_keychain() {
 #[test]
 #[ignore = "needs a test host signed and provisioned for the data protection keychain"]
 fn a_signed_host_meets_the_shared_contract() {
-    let store = MacCredentialStore::admitted().expect("a provisioned application identifier");
+    let store = crate::platform::credential::admitted_store()
+        .expect("the production factory admits a provisioned application identifier");
     let (target, other) = (scratch_name(), scratch_name());
     let _fixture = Fixture::with_store(store.clone(), vec![target.clone(), other.clone()]);
     conformance::round_trip(&store, &target, &other);

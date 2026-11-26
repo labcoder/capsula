@@ -63,8 +63,9 @@ impl CredentialStore for NativeCredentialStore {
 }
 
 /// This platform's native store, or Unsupported before the vault opens anything. On macOS only a
-/// process entitled to its own access group is admitted, so an unentitled read can't pass for an
-/// empty store.
+/// process that claims an application identifier is admitted, with every query pinned to it, so
+/// an unclaimed read can't pass for an empty store; whether the OS honors the claim is proved only
+/// by a signed run.
 pub(crate) fn admitted_store() -> Result<NativeCredentialStore, CredentialStoreError> {
     #[cfg(windows)]
     {
