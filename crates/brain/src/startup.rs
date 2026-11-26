@@ -57,6 +57,8 @@ struct Stages {
     accounts: Option<Accounts>,
     opened: Option<OpenedState>,
     profile: Option<Arc<SessionLock>>,
+    /// A store was opened for these stages, whether or not one is still here.
+    acquired: bool,
 }
 
 struct Lifecycle {
@@ -76,7 +78,7 @@ pub(super) async fn run_admitted(
     #[cfg(test)]
     starting();
     let lifecycle = Lifecycle::acquire(platform::session_id()?)?;
-    let opened = open_state(mode, &lifecycle.exe)?;
+    let opened = open_state(mode, &lifecycle.exe, &mut false)?;
     let mut lifecycle = lifecycle.start(Mode::Detached, opened, accounts, |_, _| Ok(()))?;
     let identity = lifecycle.publish_capability()?;
     tracing::info!(target: STARTUP_LOG_TARGET, incarnation = ?identity.incarnation, build = BUILD_ID, "listening");
@@ -136,8 +138,18 @@ impl Lifecycle {
         ) -> Result<(Accounts, VaultHeld), BrainError>,
         mut checkpoint: impl FnMut(Checkpoint, &mut Stages) -> Result<(), BrainError>,
     ) -> Result<Self, BrainError> {
-        let claude_setting = native_workers::claude_setting(&opened.config, mode);
-        let vault_held = self.stages.start(opened, accounts, &mut checkpoint)?;
+        let mut claude_setting = None;
+        let vault_held =
+            self.stages
+                .start(opened, accounts, &mut |point, stages: &mut Stages| {
+                    checkpoint(point, stages)?;
+                    if point == Checkpoint::Open {
+                        let opened = stages.opened.as_ref().expect("opened state");
+                        claude_setting = Some(native_workers::claude_setting(&opened.config, mode));
+                    }
+                    Ok(())
+                })?;
+        let claude_setting = claude_setting.expect("read after the opened state");
         let stages = &mut self.stages;
         // shortcut: a parent loss during the removal pass doesn't stop the Job from starting; fence
         // the Job's creation when containment lands.
@@ -226,6 +238,7 @@ impl Stages {
         ) -> Result<(Accounts, VaultHeld), BrainError>,
         checkpoint: &mut impl FnMut(Checkpoint, &mut Self) -> Result<(), BrainError>,
     ) -> Result<VaultHeld, BrainError> {
+        self.acquired = true;
         self.profile = Some(Arc::clone(&opened.profile));
         self.opened = Some(opened);
         checkpoint(Checkpoint::Open, self)?;
@@ -279,14 +292,14 @@ impl Stages {
 
     /// Settles what started when no Brain was built: closes the accounts, which waits for the
     /// credential thread to let the vault go, then drops a raw store. No receipt confirms that
-    /// drop, so an opened store is Unconfirmed, even one a failed `Brain::new` dropped.
+    /// drop, so an opened store is Unconfirmed, even one a failed open or `Brain::new` dropped.
     async fn close_unbuilt(&mut self) -> Shutdown {
         let account = match self.accounts.take() {
             Some(accounts) => crate::runtime::close_unbuilt(accounts).await,
             None => Stage::Confirmed,
         };
         drop(self.opened.take());
-        let store = if self.profile.is_some() {
+        let store = if self.acquired {
             Stage::Unconfirmed
         } else {
             Stage::Confirmed
@@ -310,7 +323,7 @@ enum Checkpoint {
     Helpers,
 }
 
-fn open_state(mode: StartMode, exe: &Path) -> Result<OpenedState, BrainError> {
+fn open_state(mode: StartMode, exe: &Path, acquired: &mut bool) -> Result<OpenedState, BrainError> {
     #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
     Observation::prepare(exe);
     #[cfg(all(windows, any(debug_assertions, feature = "gate-draw-replay")))]
@@ -322,19 +335,40 @@ fn open_state(mode: StartMode, exe: &Path) -> Result<OpenedState, BrainError> {
         let _ = (mode, exe);
         None
     };
-    OpenedState::load(&store::default_path()?, platform::config_dir, replay)
+    OpenedState::load_marking(
+        &store::default_path()?,
+        platform::config_dir,
+        replay,
+        acquired,
+    )
 }
 
 impl OpenedState {
+    #[cfg(all(test, windows))]
     fn load(
         path: &Path,
         config_dir: impl FnOnce() -> Option<PathBuf>,
         replay: Option<Selected>,
     ) -> Result<Self, BrainError> {
+        Self::load_marking(path, config_dir, replay, &mut false)
+    }
+
+    /// Sets `acquired` once it holds a store, so its owner can tell a failure after that from
+    /// one before.
+    fn load_marking(
+        path: &Path,
+        config_dir: impl FnOnce() -> Option<PathBuf>,
+        replay: Option<Selected>,
+        acquired: &mut bool,
+    ) -> Result<Self, BrainError> {
         // Every writer of the store and the credential authority holds this lock for its whole run,
         // so a brain of this user in another session stops here. Before any shell is served, so no
         // run starts ahead of the recovery scan. Blocking is fine: nothing else runs on the runtime yet.
-        let (profile, mut store) = super::open_profile(path)?;
+        let (profile, mut store) = super::open_profile(path).inspect_err(|error| {
+            // Only the authority's open fails once the store is open.
+            *acquired = matches!(error, BrainError::Authority);
+        })?;
+        *acquired = true;
         let recovered = store.recover()?;
         tracing::info!(
             target: STARTUP_LOG_TARGET,

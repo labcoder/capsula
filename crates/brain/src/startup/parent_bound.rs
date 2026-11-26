@@ -26,7 +26,8 @@ pub(in crate::startup) trait Prerequisites {
     fn ready(&self) -> Result<(), NotReady>;
     /// Starts the process-wide services once the claim is committed.
     fn init(&mut self) -> Result<ProcessInit, BrainError>;
-    fn open(&mut self) -> Result<OpenedState, BrainError>;
+    /// Sets `acquired` once it holds a store, even if it fails after.
+    fn open(&mut self, acquired: &mut bool) -> Result<OpenedState, BrainError>;
     fn accounts(
         &mut self,
         oauth: OAuthTuning,
@@ -58,8 +59,8 @@ impl Prerequisites for Pending {
         Ok(ProcessInit::default())
     }
 
-    fn open(&mut self) -> Result<OpenedState, BrainError> {
-        super::open_state(StartMode::Normal, &std::env::current_exe()?)
+    fn open(&mut self, acquired: &mut bool) -> Result<OpenedState, BrainError> {
+        super::open_state(StartMode::Normal, &std::env::current_exe()?, acquired)
     }
 
     fn accounts(
@@ -105,7 +106,7 @@ impl<S: InstanceStore> Root<S> {
         mut checkpoint: impl FnMut(Checkpoint, &mut Stages) -> Result<(), BrainError>,
     ) -> Result<(), BrainError> {
         self.init = Some(pre.init()?);
-        let opened = pre.open()?;
+        let opened = pre.open(&mut self.stages.acquired)?;
         self.stages
             .start(
                 opened,
@@ -137,5 +138,5 @@ impl<S: InstanceStore> Root<S> {
     }
 }
 
-#[cfg(all(test, any(windows, target_os = "macos")))]
+#[cfg(test)]
 mod tests;

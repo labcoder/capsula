@@ -227,7 +227,6 @@ pub(crate) fn held_accounts(profile: Arc<crate::platform::SessionLock>) -> Accou
 
 /// [`held_accounts`], whose credential thread drops `hold` after the vault and before it
 /// reports the release.
-#[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn held_accounts_until(
     profile: Arc<crate::platform::SessionLock>,
     hold: impl Send + 'static,
@@ -247,6 +246,21 @@ pub(crate) fn held_accounts_until(
         Arc::new(FixedClock(1_800_000_000)),
     );
     Accounts::spawn_unconfigured(worker, net()).expect("credential thread")
+}
+
+/// An account system whose startup load finds native credentials unsupported; its credential
+/// thread drops `hold` before it reports the release.
+pub(crate) fn unsupported_accounts(hold: impl Send + 'static) -> std::io::Result<Accounts> {
+    let worker = Worker::<FakeStore>::new(
+        Box::new(move || {
+            let _hold = &hold;
+            Err(crate::connections::error::VaultError::Store(
+                crate::platform::credential::CredentialStoreError::Unsupported,
+            ))
+        }),
+        Arc::new(FixedClock(1_800_000_000)),
+    );
+    Accounts::spawn_unconfigured(worker, net())
 }
 
 /// What an account system reaches outside the brain through, in tests: it never opens a

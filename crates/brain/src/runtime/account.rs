@@ -301,8 +301,9 @@ impl Accounts {
         let (events_tx, events) = mpsc::unbounded_channel();
         let (loaded_tx, loaded) = std_mpsc::channel();
         let (reads_tx, reads) = mpsc::unbounded_channel();
-        let (jobs, released) = spawn(worker, loaded_tx, events_tx.clone(), reads_tx.clone())?;
+        // Before the credential thread starts, so nothing after it can fail but its load.
         let salt = getrandom::u64().map_err(std::io::Error::other)?;
+        let (jobs, released) = spawn(worker, loaded_tx, events_tx.clone(), reads_tx.clone())?;
         let mut accounts = Self {
             github,
             oauth,
@@ -1035,7 +1036,7 @@ impl Brain {
 /// The credential thread: runs each job whole, in order, and reports it; the first, the startup
 /// load, to `loaded`.
 fn spawn<S: CredentialStore + 'static>(
-    mut worker: Worker<S>,
+    worker: Worker<S>,
     loaded: std_mpsc::Sender<io::Result<(Input, crate::connections::anthropic::KeyResult)>>,
     events: mpsc::UnboundedSender<Input>,
     reads: mpsc::UnboundedSender<Event>,
@@ -1046,6 +1047,9 @@ fn spawn<S: CredentialStore + 'static>(
         .name("credentials".to_owned())
         .spawn(move || {
             let mut loaded = Some(loaded);
+            // After `loaded`, so an unwind drops the vault and its lock before the load hears.
+            let mut worker = worker;
+            let mut refused = None;
             // shortcut: a native credential call that never returns holds every later job and
             // shutdown's release; job order and the runtime generation guard keep removal safe,
             // and only a worker that can abandon a call would bound the wait.
@@ -1089,9 +1093,7 @@ fn spawn<S: CredentialStore + 'static>(
                             error @ CredentialStoreError::Unsupported,
                         ))),
                     ) => {
-                        loaded
-                            .send(Err(io::Error::new(io::ErrorKind::Unsupported, error)))
-                            .ok();
+                        refused = Some((loaded, io::Error::new(io::ErrorKind::Unsupported, error)));
                         break;
                     }
                     (Some(loaded), done) => loaded
@@ -1109,6 +1111,10 @@ fn spawn<S: CredentialStore + 'static>(
             drop(worker);
             // Nobody waiting on the release is fine.
             released_tx.send(()).ok();
+            // Only now, so a start refused here has already seen the vault and its lock go.
+            if let Some((loaded, error)) = refused {
+                loaded.send(Err(error)).ok();
+            }
         })?;
     Ok((jobs, released))
 }
