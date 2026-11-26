@@ -2058,8 +2058,8 @@ updates (`Case::A`, `Case::B`, `Case::D`, `Case::E`) as one-off `App` recovery w
 post-recovery steady-state draws (`166..167`) remain zero-extra-App-allocation. However, the
 existing headless fixture does not render or paint a mounted visible status or typing panel
 inside `160..161`, deferred frees occur later on the `scene-dropper` thread after the hold
-gate releases (`241..242`), and process-wide heap/RSS, real-font/atlas retention, recovery
-latency, real Win32 HWND/DWM/capture-exclusion behavior and native Rez before-and-after
+gate releases (`241..242`), and process-wide heap/RSS, real-font/atlas retention,
+real Win32 HWND/DWM/capture-exclusion behavior and native Rez before-and-after
 measurements remain unmeasured; a `160..161` count alone does not close the recovery or
 acceptance gates.
 
@@ -2073,6 +2073,37 @@ held to measured per-case bounds, at most 395 allocations and 130,961 bytes, of 
 172 allocations and 65,598 bytes outlive the interval. The real typing panel's gpui-kit text
 input keeps the text system alive after teardown, so the episodes expect two holders of it; this
 is an accepted exception to raise with gpui-kit.
+
+Recovery completes inside the failing update. The one terminal apply runs before that update
+returns; the episodes then run what it queued to rest and assert that no timer is left and
+that nothing applies a second time (the observer fails on a second entry). That structural
+bound is the asserted one. Wall-clock latency is measured and documented, not asserted, because
+a time limit in a test would depend on the machine running it.
+
+The latency was measured in a release-profile build of the shell test binary
+(`cargo test --release -p kumochi-shell --bin kumochi --no-run`) with a temporary print added
+around the failing update, on the same GPUI headless test-platform fixture. The clock is
+`std::time::Instant` (QueryPerformanceCounter on Windows), from just before the armed draw
+(`162`) to the return of the update that ends at `163`; for `Case::C` and `Case::E`, whose
+survivor host draws again, the following redraw (`166..167`) is timed separately. Each episode
+ran in 20 fresh processes, A to E round-robin, 100 in total, on a quiet Windows 11 desktop
+(i9-10900K, 100% display scale; whole-machine CPU median 17% and peak 25%, 14% outside the run).
+
+| Episode | Recover median | Min | Peak | Redraw median | Redraw peak |
+|---|---|---|---|---|---|
+| A | 410 µs | 395 µs | 446 µs | — | — |
+| B | 415 µs | 396 µs | 437 µs | — | — |
+| C | 498 µs | 474 µs | 561 µs | 46 µs | 52 µs |
+| D | 420 µs | 398 µs | 545 µs | — | — |
+| E | 427 µs | 405 µs | 659 µs | 45 µs | 68 µs |
+
+The documented bound is 1 ms from the failing draw to a usable drawing again, redraw included,
+in a release test build. The slowest single run (E, 659 µs recover plus at most 68 µs redraw)
+leaves about 1.4x headroom, and the widest median-to-peak spread seen (E, 1.54x) applied to
+the slowest median (C, 498 µs, plus its 52 µs redraw peak) gives about 820 µs. This times only the shell's
+headless path. Native host recreation (a real Win32 window and DWM), GPU present of the first
+recovered frame and the brain round trip (learning of the failure and sending the next scene)
+stay unmeasured.
 
 Fixed four-slot cache
 metadata is conservatively charged in full to each scene, rather than adding an unmetered
