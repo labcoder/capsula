@@ -394,8 +394,7 @@ impl Legs for PipeLegs<'_> {
     }
 
     async fn write_control(&mut self, frame: &[u8]) -> io::Result<()> {
-        self.pipes.control.write_all(frame).await?;
-        self.pipes.control.flush().await
+        self.pipes.control.write_all(frame).await
     }
 
     async fn open_data(&mut self) -> Result<(), SessionError> {

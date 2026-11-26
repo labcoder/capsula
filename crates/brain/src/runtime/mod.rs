@@ -2132,16 +2132,15 @@ async fn read_data<const WATCH_FATAL: bool>(
     }
 }
 
-/// One leg's outgoing side, one whole encoded frame per call. A pipe writes and flushes the bytes;
-/// a transport whose frames can't be resumed refuses its pair when a pending frame is dropped.
+/// One leg's outgoing side, one whole encoded frame per call. A pipe writes the bytes, as it always
+/// has; a transport whose frames can't be resumed refuses its pair when a pending frame is dropped.
 pub(crate) trait FrameWrite {
     async fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()>;
 }
 
 impl<T: AsyncWrite + Unpin> FrameWrite for T {
     async fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
-        self.write_all(frame).await?;
-        self.flush().await
+        self.write_all(frame).await
     }
 }
 
