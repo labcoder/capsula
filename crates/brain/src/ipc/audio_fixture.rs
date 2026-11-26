@@ -208,7 +208,10 @@ fn offline_peer(
                 .expect("one runtime in the Brain fixture");
             runtime.block_on(async {
                 let scratch = scratch::dir("paired-queued-audio");
-                let mut brain = audio_fixture::brain(scratch.path(), &script, tone_chunks).await;
+                // An owner-only profile folder, since the temp folder may let others write.
+                let profile = scratch.path().join("profile");
+                crate::platform::product_folder(&profile).expect("the fixture's profile folder");
+                let mut brain = audio_fixture::brain(&profile, &script, tone_chunks).await;
                 let mut pipes = Pipes::create(session).expect("owner-only test pipes");
                 ready.send(()).expect("waiting test peer");
                 let mut tap = Tap::default();
