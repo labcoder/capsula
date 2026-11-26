@@ -57,7 +57,7 @@ struct Stages {
     accounts: Option<Accounts>,
     opened: Option<OpenedState>,
     profile: Option<Arc<SessionLock>>,
-    /// A store was opened for these stages, whether or not one is still here.
+    /// A store may have opened for these stages, whether or not one is still here.
     acquired: bool,
 }
 
@@ -353,7 +353,7 @@ impl OpenedState {
         Self::load_marking(path, config_dir, replay, &mut false)
     }
 
-    /// Sets `acquired` once it holds a store, so its owner can tell a failure after that from
+    /// Sets `acquired` once a store may be open, so its owner can tell a failure after that from
     /// one before.
     fn load_marking(
         path: &Path,
