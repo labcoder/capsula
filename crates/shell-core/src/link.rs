@@ -16,7 +16,6 @@ use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender, WeakSender};
-use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, AudioSession, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
@@ -1570,7 +1569,7 @@ pub fn prepare(
     audio: AudioSession,
 ) -> std::io::Result<(LinkHandle, LinkStart)> {
     let link = Link {
-        brain: std::env::current_exe()?.with_file_name(BRAIN_EXE),
+        brain: platform::brain_path(&std::env::current_exe()?)?,
         session: platform::session_id()?,
         audio,
         shared: Arc::new(Shared::default()),

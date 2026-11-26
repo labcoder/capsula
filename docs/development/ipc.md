@@ -442,7 +442,10 @@ it reserves Welcome's session from the root's own epochs, which the Brain later 
 the greeting it fences, checks the clock and takes the commit claim, with no await between them.
 
 The shell's side lives in `shell-core`'s `platform/macos/leg.rs` and `connect_pair`, also
-dormant: nothing calls them, and the group secret is a parameter for now. `initiate` runs the
+dormant: nothing calls them, and the group secret is a parameter for now. On macOS the brain is
+the helper nested in the shell's bundle: from `Contents/MacOS/<shell>` up to `Contents`, then down
+`BRAIN_HELPER` (`Helpers/kumochid.app/Contents/MacOS/kumochid`). Windows and Linux keep the
+sibling `BRAIN_EXE`. `initiate` runs the
 initiator's steps over the shell's two ends by one deadline and returns the legs only once
 `BindAck` verifies. Each leg is the link's `PipeClient` over the session crate's record owners.
 A timeout bounds each read or write call as a whole, however many socket transfers it takes, and

@@ -26,12 +26,27 @@ pub const SHELL_EXE: &str = if cfg!(windows) {
     "kumochi"
 };
 
+/// The brain's executable stem, as a literal so [`BRAIN_HELPER`] can be built from it.
+macro_rules! brain_stem {
+    () => {
+        "kumochid"
+    };
+}
+
 /// The brain's target-native executable.
 pub const BRAIN_EXE: &str = if cfg!(windows) {
-    "kumochid.exe"
+    concat!(brain_stem!(), ".exe")
 } else {
-    "kumochid"
+    brain_stem!()
 };
+
+/// The brain helper's executable inside the macOS shell bundle, relative to its `Contents`.
+pub const BRAIN_HELPER: &str = concat!(
+    "Helpers/",
+    brain_stem!(),
+    ".app/Contents/MacOS/",
+    brain_stem!()
+);
 
 /// The folder in the local application data root (logs, store, models) and the roaming one
 /// (config).
