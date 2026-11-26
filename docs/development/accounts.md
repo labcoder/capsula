@@ -316,13 +316,14 @@ can still inject their own roots.
 The real-store test runs in the normal Windows test suite: it reads bounded public certificates
 only, writes nothing, and exercises the FFI ownership path rather than leaving it ignored.
 
-The staged macOS TLS boundary polls handshakes on an executor separate from the brain runtime.
-The verifier checks the leaf name independently, then applies SecTrust's SSL server policy,
-including native date and chain rules. The deadline and cancellation can refuse the connection
-without waiting for the OS. If the one in-flight SecTrust call stays stuck past the deadline, the
-next connection is refused without queuing; the slot is available again only when that call
-returns. The staged tests use in-memory TLS, synthetic certificates and no online lookups. All
-product clients still use the interim policy above. Activating the boundary and choosing the
+The staged macOS TLS boundary prestarts bounded handshake workers and a separate I/O reactor.
+Neither the brain runtime nor the reactor polls the native verifier. It checks the leaf name
+independently, then applies SecTrust's SSL server policy, including native date and chain rules.
+The caller can refuse a connection without waiting for the OS, and workers also observe the
+deadline and cancellation while the caller's answer is unpolled. If the one in-flight SecTrust
+call stays stuck past the deadline, the next connection is refused without queuing; the slot
+returns only when the call does. The staged tests use in-memory TLS, synthetic certificates and
+no online lookups. Product clients still use the interim policy above. Activation and the
 revocation policy are separate work.
 
 The client enforces HTTPS, refuses redirects, disables proxy discovery, and exposes neither

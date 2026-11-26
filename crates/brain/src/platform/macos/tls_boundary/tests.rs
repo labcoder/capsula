@@ -1,4 +1,5 @@
 use std::sync::mpsc;
+use std::task::{Context, Wake, Waker};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use tokio::sync::oneshot;
@@ -33,6 +34,13 @@ async fn a_stalled_check_times_out_but_keeps_the_only_native_slot() {
         .await
         .expect("the brain can poll while evaluation is parked")
         .expect("the worker reached evaluation");
+    let reactor_timer = {
+        let _reactor = owner.reactor.enter();
+        tokio::time::sleep(Duration::from_millis(1))
+    };
+    tokio::time::timeout(TEST_BOUND, reactor_timer)
+        .await
+        .expect("the connection reactor also runs while evaluation is parked");
     assert_eq!(
         connection.await.expect("caller completed"),
         Err(Refusal::Deadline)
@@ -68,11 +76,11 @@ async fn cancelling_an_unpolled_answer_stops_new_native_work() {
     let owner = Executor::new().expect("executor");
     let cancel = Arc::new(Stop::default());
     let (entered, wait_entered) = oneshot::channel();
-    let (unblock, gate) = oneshot::channel();
+    let (unblock, gate) = mpsc::channel();
     let (checked, wait_checked) = oneshot::channel();
-    let mut connection = std::pin::pin!(owner.connect(Arc::clone(&cancel), by(), async {
+    let mut connection = std::pin::pin!(owner.connect(Arc::clone(&cancel), by(), async move {
         entered.send(()).expect("the attempt was dispatched");
-        gate.await.expect("release the first poll");
+        gate.recv().expect("release the first poll");
         let result = evaluate(|| panic!("a revoked attempt cannot reach the verifier"));
         checked.send(result).expect("report refusal");
     }));
@@ -94,29 +102,72 @@ async fn cancelling_an_unpolled_answer_stops_new_native_work() {
     assert_eq!(connection.await, Err(Refusal::Cancelled));
 }
 
+#[derive(Default)]
+struct AnswerWake(Notify);
+
+impl Wake for AnswerWake {
+    fn wake(self: Arc<Self>) {
+        self.0.notify_one();
+    }
+}
+
 #[tokio::test]
 async fn an_already_ready_answer_does_not_extend_the_callers_deadline() {
     let owner = Executor::new().expect("executor");
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let (release, gate) = oneshot::channel();
     let mut connection =
         std::pin::pin!(owner.connect(Arc::new(Stop::default()), deadline, async {
+            gate.await.expect("release the answer after the first poll");
             evaluate(|| 7)
         }));
-    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let wake = Arc::new(AnswerWake::default());
+    let waker = Waker::from(Arc::clone(&wake));
+    let mut cx = Context::from_waker(&waker);
     assert!(connection.as_mut().poll(&mut cx).is_pending());
-    tokio::time::timeout(TEST_BOUND, async {
-        while owner.connects.available_permits() < MAX_CONNECTS {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("work finished while the caller did not poll");
+    release.send(()).expect("worker can complete");
+    tokio::time::timeout_at(deadline.into(), wake.0.notified())
+        .await
+        .expect("the result woke its receiver before its deadline");
     assert!(
         Instant::now() < deadline,
         "the worker finished within the caller's bound"
     );
     tokio::time::sleep_until(deadline.into()).await;
     assert_eq!(connection.await, Err(Refusal::Deadline));
+}
+
+#[tokio::test]
+async fn thread_start_refusal_closes_every_prestarted_lane_without_joining() {
+    for fail_at in 0..=MAX_CONNECTS {
+        let mut started = Vec::new();
+        let mut attempts = 0;
+        let result = Executor::with_start(|job| {
+            let index = attempts;
+            attempts += 1;
+            if index == fail_at {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            let (done, settled) = oneshot::channel();
+            thread::Builder::new()
+                .spawn(move || {
+                    job();
+                    done.send(()).expect("report executor lane closed");
+                })
+                .map(drop)?;
+            started.push(settled);
+            Ok(())
+        });
+        assert!(matches!(result, Err(Refusal::Unavailable)));
+        assert_eq!(attempts, fail_at + 1);
+        assert_eq!(started.len(), fail_at);
+        for lane in started {
+            tokio::time::timeout(TEST_BOUND, lane)
+                .await
+                .expect("an executor lane did not close")
+                .expect("the executor lane closed cleanly");
+        }
+    }
 }
 
 #[tokio::test]
@@ -146,9 +197,20 @@ async fn a_spent_deadline_and_missing_worker_refuse_before_evaluation() {
     );
 }
 
-#[tokio::test]
-async fn full_connect_capacity_refuses_and_dropped_answers_end_pending_work() {
+enum End {
+    DropAnswer,
+    Cancel,
+    Deadline,
+}
+
+async fn recover_capacity(end: End) {
     let owner = Executor::new().expect("executor");
+    let cancel = Arc::new(Stop::default());
+    let deadline = if matches!(end, End::Deadline) {
+        Instant::now() + Duration::from_secs(3)
+    } else {
+        Instant::now() + CONNECT_CAP
+    };
     let (entered, mut wait_entered) = tokio::sync::mpsc::channel(MAX_CONNECTS);
     let mut answers = Vec::new();
     let mut settlements = Vec::new();
@@ -156,7 +218,7 @@ async fn full_connect_capacity_refuses_and_dropped_answers_end_pending_work() {
     for _ in 0..MAX_CONNECTS {
         let entered = entered.clone();
         let (pending, settled) = oneshot::channel::<()>();
-        let mut answer = Box::pin(owner.connect(Arc::new(Stop::default()), by(), async move {
+        let mut answer = Box::pin(owner.connect(Arc::clone(&cancel), deadline, async move {
             let _pending = pending;
             entered.send(()).await.expect("report entry");
             std::future::pending::<()>().await;
@@ -181,14 +243,39 @@ async fn full_connect_capacity_refuses_and_dropped_answers_end_pending_work() {
             .await,
         Err::<(), _>(Refusal::Busy)
     );
-    drop(answers);
+    match end {
+        End::DropAnswer => answers.clear(),
+        End::Cancel => cancel.close(),
+        End::Deadline => {}
+    }
     for worker in settlements {
         assert!(
             tokio::time::timeout(TEST_BOUND, worker)
                 .await
-                .expect("the drop cancelled the pending worker")
+                .expect("the worker settled without polling its answer")
                 .is_err()
         );
+    }
+    let fresh = tokio::time::timeout(TEST_BOUND, async {
+        loop {
+            match owner
+                .connect(Arc::new(Stop::default()), by(), async { 7 })
+                .await
+            {
+                Err(Refusal::Busy) => tokio::task::yield_now().await,
+                result => break result,
+            }
+        }
+    })
+    .await;
+    assert_eq!(fresh.expect("a settled worker frees its slot"), Ok(7));
+    drop(answers);
+}
+
+#[tokio::test]
+async fn full_capacity_is_recovered_without_polling_parked_answers() {
+    for end in [End::DropAnswer, End::Cancel, End::Deadline] {
+        recover_capacity(end).await;
     }
 }
 
