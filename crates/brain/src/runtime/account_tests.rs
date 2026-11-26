@@ -79,7 +79,7 @@ async fn native_account_startup_refuses_unsupported_without_publishing_retry() {
     let captured = Captured::default();
     let _logs = captured.install();
     let net = test_support::net();
-    let (_scratch, profile) = profile();
+    let (scratch, profile) = profile();
     let worker = Worker::system(
         Arc::clone(&net.clock),
         profile,
@@ -103,6 +103,13 @@ async fn native_account_startup_refuses_unsupported_without_publishing_retry() {
     assert!(
         !captured.text().contains("session lock failed"),
         "an unsupported adapter is not a lock failure"
+    );
+    assert!(
+        !scratch
+            .dir()
+            .join(kumochi_protocol::constants::AUTHORITY_FILE)
+            .exists(),
+        "refused before the authority opened"
     );
 }
 

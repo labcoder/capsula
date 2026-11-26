@@ -239,9 +239,23 @@ mod tests {
                 .expect("change the authority");
         }
 
+        /// Opens the writable authority under a lock beside it, which goes when `write` returns,
+        /// so the folder holds only the authority's own files when it's read.
+        fn writing<T>(&self, write: impl FnOnce(&mut Authority) -> T) -> T {
+            let path = self.scratch.dir().join("session.lock");
+            let lock = SessionLock::try_acquire(&path).expect("colocated lock");
+            let written = write(&mut Authority::open(&lock).expect("open authority"));
+            drop(lock);
+            fs::remove_file(path).expect("remove the colocated lock");
+            written
+        }
+
         /// A closed current authority, committing `host` if given; returns the host's names.
         fn authority(&self, host: Option<&[u8]>) -> Vec<String> {
-            let mut authority = Authority::open(&self.db(), &self.lock).expect("open authority");
+            self.writing(|authority| self.commit(authority, host))
+        }
+
+        fn commit(&self, authority: &mut Authority, host: Option<&[u8]>) -> Vec<String> {
             let Some(host) = host else {
                 return Vec::new();
             };
@@ -299,7 +313,7 @@ mod tests {
             migrated.authority(Some(HOST));
             migrated.raw(sql);
             assert_eq!(migrated.read(), UNVERIFIED, "{case} before its migration");
-            drop(Authority::open(&migrated.db(), &migrated.lock).expect("migrate"));
+            migrated.writing(|_| ());
             assert_eq!(migrated.read(), MATCHING, "{case} after its migration");
         }
     }

@@ -18,7 +18,7 @@ use crate::connections::records::{
 };
 use crate::connections::vault::{DeleteResult, SaveResult, SavedSignIn, Vault};
 use crate::platform::SessionLock;
-use crate::platform::credential::{CredentialStore, NativeCredentialStore};
+use crate::platform::credential::{CredentialStore, NativeCredentialStore, admitted_store};
 
 /// How often a patient load tries the session lock [guess]: Windows releases a dead brain's
 /// lock a little after the process ends.
@@ -194,7 +194,11 @@ impl Worker<NativeCredentialStore> {
     ) -> Self {
         Self::new(
             Box::new(move || {
-                Vault::open_held(NativeCredentialStore, Arc::clone(&profile), history.clone())
+                admitted_store()
+                    .map_err(VaultError::from)
+                    .and_then(|store| {
+                        Vault::open_held(store, Arc::clone(&profile), history.clone())
+                    })
             }),
             clock,
         )
