@@ -17,9 +17,7 @@ use kumochi_session::Channel;
 
 use super::leg::tests::{Commit, SECRET, ends, scripted};
 use super::{NotStarted, ShellEnds};
-use crate::link::{
-    DrawingText, LinkEvent, LinkHandle, LinkState, QuitOutcome, control_writer_hold, start_scripted,
-};
+use crate::link::{DrawingText, LinkEvent, LinkHandle, LinkState, QuitOutcome, start_scripted};
 use crate::platform::Connection;
 use crate::platform::child::{ChildOwner, Exit, Observation, Os, Refusal, Report, SpawnWord};
 use crate::platform::connect::{LinkError, connect_pair_with};
@@ -301,7 +299,7 @@ fn a_quit_queued_but_never_written_is_not_clean_on_an_exit_0() {
     let child = Child::default();
     let (link, states) = link(&child, Then::Stalls, refused);
     until(&states, connected);
-    let hold = control_writer_hold(&link);
+    let hold = &link.shared.hold_control_writer;
     hold.store(1, Ordering::Release);
     assert!(link.begin_quit());
     thread::scope(|scope| {

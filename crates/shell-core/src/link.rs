@@ -617,7 +617,7 @@ fn queue_on(
 
 /// What the UI thread and the link thread share.
 #[derive(Debug, Default)]
-struct Shared {
+pub(crate) struct Shared {
     microphone: CollectionGate,
     microphone_stop: Mutex<Option<microphone::Stop>>,
     input: AtomicU64,
@@ -640,8 +640,9 @@ struct Shared {
     voice_ready_at: AtomicU64,
     output: output::OutputOwner,
     narrated: bool,
+    /// Set 1 and the control writer parks unwritten at its next message, showing 2.
     #[cfg(any(test, feature = "test-support"))]
-    hold_control_writer: std::sync::atomic::AtomicU8,
+    pub(crate) hold_control_writer: std::sync::atomic::AtomicU8,
     #[cfg(any(test, feature = "test-support"))]
     hold_pcm_writer: std::sync::atomic::AtomicU8,
     #[cfg(any(test, feature = "test-support"))]
@@ -911,7 +912,8 @@ impl InputCancel {
 /// The UI's handle on the link.
 #[derive(Clone, Debug)]
 pub struct LinkHandle {
-    shared: Arc<Shared>,
+    /// Crate-visible so the platforms' scripted-link tests can reach the test holds.
+    pub(crate) shared: Arc<Shared>,
     worker: Option<LinkWorker>,
     #[cfg(any(test, feature = "test-support"))]
     recording: Option<Sender<DataToBrain>>,
@@ -1638,17 +1640,6 @@ pub fn prepare_disconnected(events: &Sender<LinkEvent>) -> std::io::Result<LinkH
         #[cfg(any(test, feature = "test-support"))]
         control_recording: None,
     })
-}
-
-/// Holds the control writer for tests: set 1, and the writer parks unwritten at its next message
-/// and shows 2.
-#[cfg(any(test, feature = "test-support"))]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only the core's own tests script a link")
-)]
-pub(crate) fn control_writer_hold(link: &LinkHandle) -> &std::sync::atomic::AtomicU8 {
-    &link.shared.hold_control_writer
 }
 
 /// Starts a link whose attempts `connect` makes with the link's spawn word, for tests that script
