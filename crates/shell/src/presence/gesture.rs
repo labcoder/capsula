@@ -332,7 +332,10 @@ pub(super) fn deliver(
             || {
                 let now = at.recovery_time();
                 #[cfg(any(test, feature = "gate-recorder"))]
-                if rearms.try_send(rearm_line(now)).is_err() {
+                if rearms
+                    .try_send(now.map_or_else(Refusal::line, |_| "rearm ok"))
+                    .is_err()
+                {
                     tracing::debug!("can't queue a rearm diagnostic");
                 }
                 let now = now.ok()?;
@@ -573,20 +576,6 @@ fn stale_hold_escape(owner: &Presence, cancelled: Option<(GestureId, u64)>) -> b
             current.generation() != generation || !current.alive().load(Ordering::Acquire)
         })
     })
-}
-
-/// A gate run's line for each attempt to re-arm a blocked shortcut; it names no key.
-#[cfg(any(test, feature = "gate-recorder"))]
-fn rearm_line(read: Result<Instant, Refusal>) -> &'static str {
-    match read {
-        Ok(_) => "rearm ok",
-        Err(Refusal::Unread) => "rearm refused check=unread",
-        #[cfg(windows)]
-        Err(Refusal::Chord) => "rearm refused check=chord",
-        #[cfg(windows)]
-        Err(Refusal::Foreground) => "rearm refused check=foreground",
-        Err(Refusal::Layout) => "rearm refused check=layout",
-    }
 }
 
 /// Applies effects through a fallible borrow of the app.

@@ -21,6 +21,21 @@ pub(crate) enum Refusal {
     Layout,
 }
 
+#[cfg(any(test, feature = "gate-recorder"))]
+impl Refusal {
+    /// A gate run's diagnostic line for this refusal; it names no key.
+    pub(crate) fn line(self) -> &'static str {
+        match self {
+            Self::Unread => "rearm refused check=unread",
+            #[cfg(windows)]
+            Self::Chord => "rearm refused check=chord",
+            #[cfg(windows)]
+            Self::Foreground => "rearm refused check=foreground",
+            Self::Layout => "rearm refused check=layout",
+        }
+    }
+}
+
 /// When the native callback that carried an event began, for gesture timing.
 #[derive(Clone, Copy)]
 pub(crate) struct EventTime {
