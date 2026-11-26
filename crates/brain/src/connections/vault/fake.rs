@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 use kumochi_protocol::Secret;
 
@@ -51,6 +51,8 @@ pub(crate) struct FakeState {
     pub(crate) note_markers: Option<(PathBuf, Vec<String>)>,
     change_readback: ChangeReadback,
     written: BTreeSet<String>,
+    /// The next write says it has started, then waits until it's let go.
+    held_write: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -99,6 +101,15 @@ impl FakeStore {
         let mut state = self.0.lock().expect("fake lock");
         state.mutations.clear();
         state.fault = Some((index, fault));
+    }
+
+    /// Holds the next write before it lands: the first receiver hears it start, and the write
+    /// goes on once the sender sends or drops.
+    pub(crate) fn hold_next_write(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (started, start) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        self.0.lock().expect("fake lock").held_write = Some((started, released));
+        (start, release)
     }
 
     pub(crate) fn change_after_next_write_readback(&self) {
@@ -194,6 +205,11 @@ impl CredentialStore for FakeStore {
     }
 
     fn set(&self, target: &str, secret: &SecretBytes) -> Result<(), CredentialStoreError> {
+        let held = self.0.lock().expect("fake lock").held_write.take();
+        if let Some((started, released)) = held {
+            started.send(()).ok();
+            released.recv().ok();
+        }
         self.mutate(target, Some(secret))
     }
 

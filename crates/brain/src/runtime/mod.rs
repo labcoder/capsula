@@ -586,6 +586,7 @@ impl Brain {
     /// complete quit; otherwise the scenes, or a thread whose delete didn't commit, come back at
     /// the next start, as after a crash. Reports what each later stage was seen to do.
     pub(crate) async fn quit(mut self, deadline: Instant) -> Shutdown {
+        self.account.stop_repair();
         self.settings_owed = Some(settings::Owed::default());
         self.claude.stop();
         self.offline(Input::ShellLost);
@@ -665,6 +666,7 @@ impl Brain {
     /// committed outcomes stay, and uncommitted work may be lost. Reports what each later stage
     /// was seen to do.
     pub(crate) async fn close(mut self) -> Shutdown {
+        self.account.stop_repair();
         self.settings_owed = Some(settings::Owed::default());
         let deadline = Instant::now() + close_wait();
         self.voice_quit();
@@ -1033,6 +1035,8 @@ impl Brain {
                 ended = core => ended,
             }
         };
+        // The pair is gone or quitting: its repair attempt stops before any grace or drain.
+        self.account.stop_repair();
         if WATCH_FATAL && let Some(cause) = fence.and_then(Fence::check) {
             ended = Ended::Fatal(cause);
         }
