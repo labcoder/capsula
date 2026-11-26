@@ -22,19 +22,28 @@ fn holds(dict: &CFDictionary<CFString, CFType>, key: &CFString, want: &CFType) -
 
 #[test]
 fn every_query_pins_the_exact_item_without_ui_and_the_update_payload_holds_only_the_value() {
-    let k = keys();
+    #[expect(
+        deprecated,
+        reason = "the item pins this value; its replacement needs LocalAuthentication"
+    )]
+    let ui_fail = constant!(objc2_security::kSecUseAuthenticationUIFail);
+    let yes: &CFType = CFBoolean::new(true).as_ref();
+    let no: &CFType = CFBoolean::new(false).as_ref();
     let value = CFData::from_bytes(&[7; INSTANCE_LEN]);
     let group = CFString::from_static_str(GROUP);
     let service = CFString::from_static_str("Kumochi Dev instance");
     let account = CFString::from_static_str("capability");
     let pinned: [(&CFString, &CFType); 7] = [
-        (k.class, k.generic_password.as_ref()),
-        (k.group, group.as_ref()),
-        (k.service, service.as_ref()),
-        (k.account, account.as_ref()),
-        (k.data_protection, k.yes),
-        (k.synchronizable, k.no),
-        (k.ui, k.ui_fail.as_ref()),
+        (
+            constant!(kSecClass),
+            constant!(kSecClassGenericPassword).as_ref(),
+        ),
+        (constant!(kSecAttrAccessGroup), group.as_ref()),
+        (constant!(kSecAttrService), service.as_ref()),
+        (constant!(kSecAttrAccount), account.as_ref()),
+        (constant!(kSecUseDataProtectionKeychain), yes),
+        (constant!(kSecAttrSynchronizable), no),
+        (constant!(kSecUseAuthenticationUI), ui_fail.as_ref()),
     ];
     let item = item();
     let cases: [(&str, ItemQuery, Pairs<'_>); 4] = [
@@ -42,22 +51,34 @@ fn every_query_pins_the_exact_item_without_ui_and_the_update_payload_holds_only_
             "add",
             item.add_attributes(&value),
             vec![
-                (k.accessible, k.protection.as_ref()),
-                (k.value, value.as_ref()),
+                (
+                    constant!(kSecAttrAccessible),
+                    constant!(kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly).as_ref(),
+                ),
+                (constant!(kSecValueData), value.as_ref()),
             ],
         ),
         (
             "inspect",
             item.inspect_query(),
-            vec![(k.return_attributes, k.yes), (k.match_limit, k.one)],
+            vec![
+                (constant!(kSecReturnAttributes), yes),
+                (
+                    constant!(kSecMatchLimit),
+                    constant!(kSecMatchLimitOne).as_ref(),
+                ),
+            ],
         ),
         (
             "read back",
             item.read_query(),
             vec![
-                (k.return_data, k.yes),
-                (k.return_attributes, k.yes),
-                (k.match_limit, k.one),
+                (constant!(kSecReturnData), yes),
+                (constant!(kSecReturnAttributes), yes),
+                (
+                    constant!(kSecMatchLimit),
+                    constant!(kSecMatchLimitOne).as_ref(),
+                ),
             ],
         ),
         ("update query and delete", item.exact(), vec![]),
@@ -74,8 +95,11 @@ fn every_query_pins_the_exact_item_without_ui_and_the_update_payload_holds_only_
     }
     let payload = InstanceItem::update_payload(&value);
     assert_eq!(pairs(&payload), 1, "the update changes the value alone");
-    assert!(holds(&payload, k.value, value.as_ref()));
-    assert!(!payload.contains_key(k.ui), "no UI switch in the payload");
+    assert!(holds(&payload, constant!(kSecValueData), value.as_ref()));
+    assert!(
+        !payload.contains_key(constant!(kSecUseAuthenticationUI)),
+        "no UI switch in the payload"
+    );
 }
 
 #[test]
@@ -131,6 +155,10 @@ fn admission_needs_this_roles_exact_id_and_the_instance_group_under_the_same_pre
     for (app_id, group) in [
         (".ai.kumochi.dev.brain", ".ai.kumochi.dev.instance"),
         ("*.ai.kumochi.dev.brain", "*.ai.kumochi.dev.instance"),
+        (
+            "PREFIX.extra.ai.kumochi.dev.brain",
+            "PREFIX.extra.ai.kumochi.dev.instance",
+        ),
     ] {
         assert_eq!(
             admit(Role::Brain, &text(app_id), &groups(&[group])),
@@ -212,13 +240,17 @@ fn attributes(pairs: &[(&CFString, &CFType)]) -> CFRetained<CFDictionary<CFStrin
 
 #[test]
 fn only_a_plain_protected_item_passes_and_reads_back_exactly_32_bytes() {
-    let k = keys();
-    // SAFETY: reads one immutable Security framework constant that the loader initialized.
-    let migratable = unsafe { objc2_security::kSecAttrAccessibleAfterFirstUnlock };
+    let accessible = constant!(kSecAttrAccessible);
+    let access_control = constant!(kSecAttrAccessControl);
+    let data = constant!(kSecValueData);
+    let migratable = constant!(objc2_security::kSecAttrAccessibleAfterFirstUnlock);
     let bytes: Vec<u8> = (1..=32).collect();
     let value = CFData::from_bytes(&bytes);
-    let protected = (k.accessible, k.protection.as_ref());
-    let plain = attributes(&[protected, (k.value, value.as_ref())]);
+    let protected = (
+        accessible,
+        constant!(kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly).as_ref(),
+    );
+    let plain = attributes(&[protected, (data, value.as_ref())]);
     assert!(protection(plain.as_ref()).is_ok());
     let mut into = [0_u8; INSTANCE_LEN];
     assert_eq!(readback(plain.as_ref(), &mut into), Ok(()));
@@ -230,23 +262,20 @@ fn only_a_plain_protected_item_passes_and_reads_back_exactly_32_bytes() {
     let refused = [
         (
             "migratable class",
-            attributes(&[
-                (k.accessible, migratable.as_ref()),
-                (k.value, value.as_ref()),
-            ]),
+            attributes(&[(accessible, migratable.as_ref()), (data, value.as_ref())]),
         ),
         (
             "access control",
             attributes(&[
                 protected,
-                (k.access_control, acl.as_ref()),
-                (k.value, value.as_ref()),
+                (access_control, acl.as_ref()),
+                (data, value.as_ref()),
             ]),
         ),
-        ("no class", attributes(&[(k.value, value.as_ref())])),
+        ("no class", attributes(&[(data, value.as_ref())])),
         (
             "mistyped class",
-            attributes(&[(k.accessible, number.as_ref()), (k.value, value.as_ref())]),
+            attributes(&[(accessible, number.as_ref()), (data, value.as_ref())]),
         ),
     ];
     for (name, item) in &refused {
@@ -275,16 +304,10 @@ fn only_a_plain_protected_item_passes_and_reads_back_exactly_32_bytes() {
         ("no value", attributes(&[protected])),
         (
             "mistyped value",
-            attributes(&[protected, (k.value, text.as_ref())]),
+            attributes(&[protected, (data, text.as_ref())]),
         ),
-        (
-            "31 bytes",
-            attributes(&[protected, (k.value, short.as_ref())]),
-        ),
-        (
-            "33 bytes",
-            attributes(&[protected, (k.value, long.as_ref())]),
-        ),
+        ("31 bytes", attributes(&[protected, (data, short.as_ref())])),
+        ("33 bytes", attributes(&[protected, (data, long.as_ref())])),
     ] {
         assert!(
             protection(item.as_ref()).is_ok(),
