@@ -8,12 +8,14 @@ use tokio::sync::mpsc as async_mpsc;
 use tokio::time::timeout;
 
 use super::*;
+use crate::connections::error::VaultError;
 use crate::engines::fixture::Fixture;
 use crate::platform::SessionLockError;
+use crate::platform::credential::CredentialStoreError;
 use crate::runtime::{REFUSE_SPAWN, Selected};
 use crate::startup::custody::SessionCustody;
 use crate::startup::instance::Added;
-use crate::test_support::{Scratch, held_accounts_until, unsupported_accounts};
+use crate::test_support::{Scratch, failing_accounts, held_accounts_until};
 
 const PATIENCE: Duration = Duration::from_secs(60);
 
@@ -75,6 +77,8 @@ enum Start {
     Held,
     /// A startup load that finds native credentials unsupported.
     Unsupported,
+    /// A startup load that panics.
+    Panics,
 }
 
 /// A scratch store, accounts whose release waits on the hold, and a subscriber scoped to this
@@ -131,10 +135,23 @@ impl Prerequisites for Scripted<'_> {
         let hold = Hold { entered, free };
         let accounts = match self.start {
             Start::Held => held_accounts_until(profile, hold),
-            Start::Unsupported => unsupported_accounts(hold)?,
+            Start::Unsupported => failing_accounts(hold, || {
+                Err(VaultError::Store(CredentialStoreError::Unsupported))
+            })?,
+            Start::Panics => failing_accounts(hold, panicking_open)?,
         };
         Ok((accounts, Arc::default()))
     }
+}
+
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "the vault's open panics on purpose"
+)]
+fn panicking_open()
+-> Result<crate::connections::vault::Vault<crate::connections::vault::fake::FakeStore>, VaultError>
+{
+    panic!("the vault's open panics")
 }
 
 /// A root whose attempt holds a token custody, and a watch on that custody.
@@ -197,11 +214,15 @@ async fn assert_settles_after_the_release(name: &str, stop: Option<Checkpoint>) 
     assert!(root.stages.brain.is_none(), "no Brain was built");
     let settle = root.settle();
     tokio::pin!(settle);
-    tokio::select! {
-        biased;
-        settled = &mut settle => panic!("settled before the credential thread let go: {settled:?}"),
-        entered = holding.entered.recv() => entered.expect("the credential thread ends"),
-    }
+    timeout(PATIENCE, async {
+        tokio::select! {
+            biased;
+            settled = &mut settle => panic!("settled before the credential thread let go: {settled:?}"),
+            entered = holding.entered.recv() => entered.expect("the credential thread ends"),
+        }
+    })
+    .await
+    .expect("the credential thread reaches its release");
     assert!(
         timeout(Duration::ZERO, &mut settle).await.is_err(),
         "settling waits for the held credential thread"
@@ -240,14 +261,13 @@ async fn a_failed_brain_constructor_returns_the_accounts_to_close_before_custody
     Box::pin(assert_settles_after_the_release("root-brain-new", None)).await;
 }
 
-/// The worker starts, its load refuses, and the start returns only once that worker has let go,
-/// so nothing it held is left for settlement to miss.
-#[tokio::test]
-async fn a_refused_startup_load_returns_only_after_its_worker_let_go() {
-    let scratch = Scratch::new("root-unsupported-load");
+/// The worker starts and its load fails as `start` makes it; the start returns only once that
+/// worker has let go, so nothing it held is left for settlement to miss.
+async fn assert_start_waits_for_the_worker(name: &str, start: Start, kind: io::ErrorKind) {
+    let scratch = Scratch::new(name);
     let lock = scratch.dir().join(SESSION_LOCK);
     let (mut root, custody) = root();
-    let (mut pre, holding) = Scripted::new(&scratch, Start::Unsupported);
+    let (mut pre, holding) = Scripted::new(&scratch, start);
     let (returned_tx, returned) = mpsc::channel();
     let watcher = std::thread::spawn({
         let Holding { mut entered, free } = holding;
@@ -271,10 +291,10 @@ async fn a_refused_startup_load_returns_only_after_its_worker_let_go() {
     let started = root.start(&mut pre, |_, _| Ok(()));
     returned_tx.send(()).ok();
     let Err(error) = started else {
-        panic!("an unsupported load must stop the start");
+        panic!("a failed load must stop the start");
     };
     assert!(
-        matches!(&error, BrainError::Process(error) if error.kind() == io::ErrorKind::Unsupported),
+        matches!(&error, BrainError::Process(error) if error.kind() == kind),
         "{error:?}"
     );
     let custody = watcher.join().expect("the watcher's checks hold");
@@ -287,6 +307,27 @@ async fn a_refused_startup_load_returns_only_after_its_worker_let_go() {
     );
     assert!(custody.upgrade().is_none(), "custody drops at settlement");
     drop(SessionLock::try_acquire(&lock).expect("the profile is free once settled"));
+}
+
+#[tokio::test]
+async fn a_refused_startup_load_returns_only_after_its_worker_let_go() {
+    Box::pin(assert_start_waits_for_the_worker(
+        "root-unsupported-load",
+        Start::Unsupported,
+        io::ErrorKind::Unsupported,
+    ))
+    .await;
+}
+
+/// The worker's own unwind drops the vault before the start hears it stopped.
+#[tokio::test]
+async fn a_panicked_startup_load_returns_only_after_its_worker_let_go() {
+    Box::pin(assert_start_waits_for_the_worker(
+        "root-panicked-load",
+        Start::Panics,
+        io::ErrorKind::Other,
+    ))
+    .await;
 }
 
 /// An open refused before it holds a store leaves nothing to confirm.
@@ -331,6 +372,30 @@ async fn an_open_failed_after_the_store_settles_it_unconfirmed() {
         settled.runtime.store,
         Stage::Unconfirmed,
         "the store opened before recovery failed: {settled:?}"
+    );
+}
+
+/// A store SQLite opened but whose schema is newer than this build's is still a raw store.
+#[tokio::test]
+async fn an_open_refused_during_the_stores_setup_settles_it_unconfirmed() {
+    let scratch = Scratch::new("root-open-schema");
+    std::fs::create_dir_all(scratch.dir()).expect("scratch folder");
+    drop(crate::store::Store::open(&scratch.db()).expect("a first open"));
+    rusqlite::Connection::open(scratch.db())
+        .expect("raw open")
+        .execute_batch("PRAGMA user_version = 999;")
+        .expect("a newer build's schema");
+    let (mut root, _) = root();
+    let (mut pre, _holding) = Scripted::new(&scratch, Start::Held);
+    let Err(error) = root.start(&mut pre, fail_at(None)) else {
+        panic!("a newer schema must stop the start");
+    };
+    assert!(matches!(error, BrainError::Store(_)), "{error:?}");
+    let settled = Box::pin(root.settle()).await;
+    assert_eq!(
+        settled.runtime.store,
+        Stage::Unconfirmed,
+        "SQLite opened before the setup failed: {settled:?}"
     );
 }
 

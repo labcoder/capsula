@@ -248,15 +248,16 @@ pub(crate) fn held_accounts_until(
     Accounts::spawn_unconfigured(worker, net()).expect("credential thread")
 }
 
-/// An account system whose startup load finds native credentials unsupported; its credential
-/// thread drops `hold` before it reports the release.
-pub(crate) fn unsupported_accounts(hold: impl Send + 'static) -> std::io::Result<Accounts> {
+/// An account system whose vault opens with `open`, which fails or panics; its credential
+/// thread drops `hold` after it stops and before it reports the release.
+pub(crate) fn failing_accounts(
+    hold: impl Send + 'static,
+    open: fn() -> Result<Vault<FakeStore>, crate::connections::error::VaultError>,
+) -> std::io::Result<Accounts> {
     let worker = Worker::<FakeStore>::new(
         Box::new(move || {
             let _hold = &hold;
-            Err(crate::connections::error::VaultError::Store(
-                crate::platform::credential::CredentialStoreError::Unsupported,
-            ))
+            open()
         }),
         Arc::new(FixedClock(1_800_000_000)),
     );

@@ -1086,24 +1086,24 @@ fn spawn<S: CredentialStore + 'static>(
                         continue;
                     }
                 };
-                let sent = match (loaded.take(), worker.run(job)) {
-                    (
-                        Some(loaded),
-                        Done::Loaded(Err(VaultError::Store(
-                            error @ CredentialStoreError::Unsupported,
-                        ))),
-                    ) => {
-                        refused = Some((loaded, io::Error::new(io::ErrorKind::Unsupported, error)));
+                let done = worker.run(job);
+                // Borrowed, never taken, until the reply is ready: any unwind drops the worker first.
+                let Some(sender) = &loaded else {
+                    if events.send(Input::Vault(done)).is_err() {
                         break;
                     }
-                    (Some(loaded), done) => loaded
-                        .send(Ok((
-                            Input::Vault(done),
-                            worker.anthropic(crate::connections::anthropic::KeyOp::Load),
-                        )))
-                        .is_ok(),
-                    (None, done) => events.send(Input::Vault(done)).is_ok(),
+                    continue;
                 };
+                if let Done::Loaded(Err(VaultError::Store(
+                    error @ CredentialStoreError::Unsupported,
+                ))) = done
+                {
+                    refused = Some(io::Error::new(io::ErrorKind::Unsupported, error));
+                    break;
+                }
+                let key = worker.anthropic(crate::connections::anthropic::KeyOp::Load);
+                let sent = sender.send(Ok((Input::Vault(done), key))).is_ok();
+                loaded = None;
                 if !sent {
                     break;
                 }
@@ -1112,7 +1112,7 @@ fn spawn<S: CredentialStore + 'static>(
             // Nobody waiting on the release is fine.
             released_tx.send(()).ok();
             // Only now, so a start refused here has already seen the vault and its lock go.
-            if let Some((loaded, error)) = refused {
+            if let (Some(loaded), Some(error)) = (loaded, refused) {
                 loaded.send(Err(error)).ok();
             }
         })?;

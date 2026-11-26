@@ -365,8 +365,8 @@ impl OpenedState {
         // so a brain of this user in another session stops here. Before any shell is served, so no
         // run starts ahead of the recovery scan. Blocking is fine: nothing else runs on the runtime yet.
         let (profile, mut store) = super::open_profile(path).inspect_err(|error| {
-            // Only the authority's open fails once the store is open.
-            *acquired = matches!(error, BrainError::Authority);
+            // Past the profile lock, SQLite may already be open: Unconfirmed only costs a 70.
+            *acquired = !matches!(error, BrainError::ProfileBusy | BrainError::ProfileLock(_));
         })?;
         *acquired = true;
         let recovered = store.recover()?;
