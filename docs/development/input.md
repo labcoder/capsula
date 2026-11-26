@@ -371,6 +371,7 @@ creates no file. Both need a shell built with the `gate-recorder` feature (see
     `hold recognized callback_qpc=<n>` when its 300 ms hold is recognised, each stamped with the
     native callback's QPC; the line's own QPC is when presence applied it
   - `listening on` and `listening off`, as the line takes and leaves the Listening colour
+  - `speech input ready=true|false`, from each speech state the brain sends
   - `input opened focused=true|false` and `input dismissed`
   - `input draft nonempty=true|false preserved=true|false`, after an `input opened` that follows
     a dismiss: whether the draft held at that dismiss was nonempty, and whether the input still
@@ -626,7 +627,7 @@ Main trace backstops are fixed per phase:
 | --- | ---: |
 | Hover, resting receipts | 30s |
 | Focus, layouts | 20s |
-| Listening | 360s |
+| Listening, each batch | 40s |
 | Free Esc, contested persistence, Stop button | 10s |
 
 CPU rows have no main input trace. Normal completion stops only this harness's uniquely named
@@ -814,26 +815,33 @@ the Listening row.
 - **Layouts (AltGr typing).** German `00000407` and Spanish `0000040A` are loaded in turn in the
   foreground fixture. Each types AltGr+Q (German) or AltGr+2 (Spanish) and then AltGr+E, and the
   EDIT must hold exactly `@€`; no text is printed. From the AltGr press to the next left
-  Ctrl + left Alt make, no `hold warm`, `hold recognized` or `input opened` may appear, so
-  AltGr's synthetic left Ctrl never starts the shortcut. Then one held left Ctrl + left Alt
-  must be recognised. The Gate copy has no speech model, so that hold ends in the Not installed
+  Ctrl + left Alt make, no `hold warm` or `hold recognized` callback may fall, so AltGr's
+  synthetic left Ctrl never starts the shortcut. Then one held left Ctrl + left Alt must be
+  recognised by a callback after its own make. Once the product has quit, its whole log must
+  hold exactly two `hold warm`, two `hold recognized` and no `input opened`, so a late line
+  can't slip past the live check. The Gate copy has no speech model, so that hold ends in the Not installed
   notice and opens no microphone. The fixture's original layout and the loaded-layout list are
   restored and checked. `phases.tsv` counts three checks per layout: the typed pair, the quiet
   AltGr window and the recognised hold.
-- **Listening (hold recognised → Listening on screen).** Only with `--speech`. Before the phase,
-  speech input's model files are copied from `<models-dir>/speech-input/` (an installed models
-  folder) into the launch's own models folder, and the native runtime from `<natives-dir>` beside
-  the brain, each checked against the manifest's size and SHA-256; nothing downloads. The phase
-  then makes 100 holds: each keeps the keys down until `listening on`, and 150 ms more, then
-  releases, waits for `listening off` and 1.5 s more. **Each hold opens the real microphone**;
-  the audio stays in the brain and is never stored, and a silent hold starts no turn. The clock
+- **Listening (hold recognised → Listening on screen).** Only with `--speech`. The images are
+  staged into the run's own `bin`, and before the first batch speech input's model files are
+  copied from `<models-dir>/speech-input/` (an installed models folder) into the launch's own
+  models folder and the native runtime from `<natives-dir>` beside the staged brain, each checked
+  against the manifest's size and SHA-256; nothing downloads and nothing lands outside the run.
+  Ten batches, each its own launch inside the shell's two-minute quit bound and one main trace,
+  wait up to 20 s for `speech input ready=true` before their trace starts, and then make 10
+  holds: each keeps the keys down until
+  `listening on`, and 150 ms more, then releases, waits for a `listening off` after the release
+  and 1.5 s more. **Each hold opens the real microphone**; the audio stays in the brain and is
+  never stored. A silent hold starts no turn; transcribed noise would start a turn that fails
+  with Sign in needed before any connection is used, since the run has no account. The clock
   starts at the native callback that recognised the hold and stops at the present of the first
-  dock frame painted at or after `listening on`; key-down → that present is reported beside it.
-  The gate is p95 ≤7ms over all 100 holds; a hold that never reaches Listening fails the phase,
-  and one with no present stays in the denominator. The span covers the brain's admission
+  dock frame painted between `listening on` and `listening off`; key-down → that present is
+  reported beside it. The gate is p95 ≤7ms over all 100 holds; a hold that never reaches
+  Listening or a present fails its batch. The span covers the brain's admission
   round trip, the microphone start and the paint, so it is a target for the current input
-  model, not the old chord → Listening figure. `listening/listening-display.txt` holds the
-  samples and the summary lines.
+  model, not the old chord → Listening figure. Each `listening-NN/listening-joins.txt` holds
+  its batch's samples, and the evidence folder's `listening-display.txt` the summary lines.
 
 ## Voice hold authority
 

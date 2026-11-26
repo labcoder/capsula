@@ -59,12 +59,27 @@ const TRIALS: [Trial; 8] = [
     Trial::StopButton,
 ];
 
+/// The Listening batches' evidence folders, by batch number from 1.
+const LISTENING: [&str; 11] = [
+    "listening-unknown",
+    "listening-01",
+    "listening-02",
+    "listening-03",
+    "listening-04",
+    "listening-05",
+    "listening-06",
+    "listening-07",
+    "listening-08",
+    "listening-09",
+    "listening-10",
+];
+
 impl Trial {
     fn trace_bound(self) -> Option<Duration> {
         let seconds = match self {
             Self::Input(Phase::Hover, _) | Self::ReceiptRest => 30,
             Self::Input(Phase::Focus | Phase::Layouts, _) => 20,
-            Self::Input(Phase::Listening, _) => 360,
+            Self::Input(Phase::Listening(_), _) => 40,
             Self::Input(Phase::Esc, _) | Self::StopButton => 10,
             Self::Idle => return None,
         };
@@ -72,10 +87,10 @@ impl Trial {
     }
 
     fn budget(self) -> Duration {
-        match self {
-            Self::Idle => Duration::from_secs(120),
-            Self::Input(Phase::Listening, _) => Duration::from_secs(420),
-            _ => PHASE_LIMIT,
+        if self == Self::Idle {
+            Duration::from_secs(120)
+        } else {
+            PHASE_LIMIT
         }
     }
 
@@ -85,7 +100,10 @@ impl Trial {
             Self::Input(Phase::Hover, _) => "hover",
             Self::Input(Phase::Focus, _) => "focus-draft-escape",
             Self::Input(Phase::Layouts, _) => "layouts",
-            Self::Input(Phase::Listening, _) => "listening",
+            Self::Input(Phase::Listening(batch), _) => LISTENING
+                .get(usize::from(batch))
+                .copied()
+                .unwrap_or("listening-unknown"),
             Self::Input(Phase::Esc, FixtureEscMode::Free) => "escape-free",
             Self::Input(Phase::Esc, FixtureEscMode::Reserved) => "escape-contested",
             Self::ReceiptRest => "receipt-rest",
@@ -201,6 +219,24 @@ impl Images {
             self.brain_sha256,
             self.build.as_secs_f64()
         ))
+    }
+
+    /// Moves the launches onto verified copies of the images in the run's own `bin`, so the
+    /// native runtime copied beside the brain stays inside the run.
+    fn stage(&mut self) -> Result<()> {
+        let release = self
+            .brain
+            .parent()
+            .context("the brain image has a folder")?
+            .to_path_buf();
+        let pins = Prebuilt {
+            shell_sha256: self.shell_sha256.clone(),
+            brain_sha256: self.brain_sha256.clone(),
+        };
+        let bin = pins.stage(&release, &self.folders)?;
+        self.shell = bin.join(SHELL_EXE);
+        self.brain = bin.join(BRAIN_EXE);
+        Ok(())
     }
 
     /// Copies speech input into the launch's own models folder and the native runtime beside the
@@ -322,17 +358,17 @@ pub(crate) fn hold(mut args: impl Iterator<Item = String>) -> Result<()> {
         }),
         _ => bail!(HOLD_USAGE),
     };
-    let layouts = Trial::Input(Phase::Layouts, FixtureEscMode::Free);
-    let listening = Trial::Input(Phase::Listening, FixtureEscMode::Free);
-    let trials: &[Trial] = if speech.is_some() {
-        &[layouts, listening]
-    } else {
-        &[layouts]
-    };
+    let mut trials = vec![Trial::Input(Phase::Layouts, FixtureEscMode::Free)];
+    if speech.is_some() {
+        trials.extend(
+            (1..=session::BATCHES)
+                .map(|batch| Trial::Input(Phase::Listening(batch), FixtureEscMode::Free)),
+        );
+    }
     session_run(
         std::iter::once(transcript),
         ("idle-open", idle_open, FixturePlacement::AwayFromCursor),
-        trials,
+        &trials,
         speech,
     )
 }
@@ -347,6 +383,9 @@ fn session_run(
 ) -> Result<()> {
     retained_run(args, Run::finish, |output, run| {
         let result = Images::build(run).and_then(|mut images| {
+            if speech.is_some() {
+                images.stage()?;
+            }
             images.speech = speech;
             run_session(output, &images, opener, trials)
         });
@@ -391,11 +430,23 @@ fn run_session(
         open(session, images, output, end)?;
         let registry = Registry::snapshot();
         fs::write(output.join("registry-before.txt"), format!("{registry:#?}"))?;
+        let mut presented = Vec::new();
         let measured = (|| {
             for (index, &trial) in trials.iter().enumerate() {
                 session.guard()?;
                 session.set_phase(u8::try_from(index + 1)?)?;
-                run_trial(trial, session, images, output, end)?;
+                run_trial(trial, session, images, output, end, &mut presented)?;
+            }
+            if trials
+                .iter()
+                .any(|trial| matches!(trial, Trial::Input(Phase::Listening(_), _)))
+            {
+                observation::summarize_listening(
+                    &presented,
+                    usize::from(crate::session::BATCHES)
+                        * usize::try_from(crate::session::BATCH_HOLDS)?,
+                    output,
+                )?;
             }
             Ok(())
         })();
@@ -730,13 +781,14 @@ fn run_trial(
     images: &Images,
     output: &Path,
     whole_end: Instant,
+    presented: &mut Vec<observation::Presented>,
 ) -> Result<()> {
     images.unchanged()?;
     ensure!(
         platform::processes()?.is_empty(),
         "unexpected product process between phases"
     );
-    if let Trial::Input(Phase::Listening, _) = trial {
+    if trial == Trial::Input(Phase::Listening(1), FixtureEscMode::Free) {
         images.install_speech()?;
     }
     let directory = output.join(trial.name());
@@ -823,6 +875,9 @@ fn run_trial(
         diagnostics.await_started(session)?;
         let mut reader = observation::Reader::open(&observer, pid)?;
         let startup = await_startup(&mut reader, session)?;
+        if let Trial::Input(Phase::Listening(_), _) = trial {
+            session::await_speech(session, &diagnostics)?;
+        }
         let trace = Capture::warm_and_start(
             pid,
             &directory.join("presents.csv"),
@@ -876,7 +931,15 @@ fn run_trial(
     } else {
         Ok(())
     };
-    let summarized = summarize(trial, &observer, pid, rows, dock, &directory, &diagnostics);
+    let summarized = summarize(
+        trial,
+        &observer,
+        (pid, dock),
+        rows,
+        &directory,
+        &diagnostics,
+        presented,
+    );
     let result = session::combine([
         body, release, uncovered, stopped, escape, flushed, summarized,
     ]);
@@ -913,11 +976,11 @@ fn run_trial(
 fn summarize(
     trial: Trial,
     observer: &Path,
-    pid: u32,
+    (pid, dock): (u32, u64),
     rows: Option<Result<PresentRows>>,
-    dock: u64,
     output: &Path,
     diagnostics: &Diagnostics,
+    presented: &mut Vec<observation::Presented>,
 ) -> Result<()> {
     if trial.cpu_limit().is_some() {
         return Ok(());
@@ -946,14 +1009,14 @@ fn summarize(
             Trial::ReceiptRest => {
                 receipts::summarize(observer, pid, &mut rows, dock, output, receipts::Mode::Rest)
             }
-            Trial::Input(Phase::Listening, _) => observation::summarize_listening(
+            Trial::Input(Phase::Listening(_), _) => observation::join_listening(
                 &diagnostics.heard.borrow(),
-                usize::try_from(session::HOLDS)?,
+                usize::try_from(session::BATCH_HOLDS)?,
                 observer,
-                pid,
+                (pid, dock),
                 &mut rows,
-                dock,
                 output,
+                presented,
             ),
             _ => Ok(()),
         }
@@ -963,7 +1026,7 @@ fn summarize(
 
 #[cfg(test)]
 mod tests {
-    use super::{TRIALS, Trial, end_fixture, evidence_directory, phase_deadline};
+    use super::{INPUT_RESERVE, TRIALS, Trial, end_fixture, evidence_directory, phase_deadline};
     use crate::platform::input_session::FixtureEscMode;
     use crate::session::Phase;
     use std::path::{Path, PathBuf};
@@ -1097,6 +1160,24 @@ mod tests {
     }
 
     #[test]
+    fn every_listening_batch_fits_the_shell_quit_bound_and_one_main_trace() {
+        for batch in 1..=crate::session::BATCHES {
+            let trial = Trial::Input(Phase::Listening(batch), FixtureEscMode::Free);
+            let quit_ms = u64::try_from(trial.budget().as_millis()).unwrap();
+            assert_eq!(quit_ms, 90_000);
+            assert!((1..=120_000).contains(&quit_ms));
+            let trace = trial.trace_bound().unwrap();
+            assert_eq!(trace, Duration::from_secs(40));
+            assert!((10..=70).contains(&trace.as_secs()));
+            assert!(
+                crate::session::SPEECH_WAIT + Duration::from_secs(1) + trace
+                    <= trial.budget().checked_sub(INPUT_RESERVE).unwrap()
+            );
+            assert_eq!(trial.name(), format!("listening-{batch:02}"));
+        }
+    }
+
+    #[test]
     fn phase_never_spends_final_cleanup_reserve() {
         let now = Instant::now();
         assert_eq!(
@@ -1137,7 +1218,7 @@ mod tests {
         assert!(
             !TRIALS
                 .iter()
-                .any(|trial| matches!(trial, Trial::Input(Phase::Listening, _))),
+                .any(|trial| matches!(trial, Trial::Input(Phase::Listening(_), _))),
             "only hold-gate with a speech source opens the microphone"
         );
         assert_eq!(

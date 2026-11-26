@@ -14,7 +14,7 @@ mod summary;
 use draw::DrawStep;
 pub(super) use draw::{Active, DRAW_STEPS, DrawKey};
 pub(super) use summary::milliseconds;
-pub(super) use summary::{summarize_hover, summarize_listening};
+pub(super) use summary::{Presented, join_listening, summarize_hover, summarize_listening};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Startup {

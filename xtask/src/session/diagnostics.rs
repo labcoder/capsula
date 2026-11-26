@@ -12,6 +12,8 @@ pub(crate) enum Mark {
     },
     /// The dock's line took or left the Listening colour.
     Listening(bool),
+    /// The brain reported whether speech input is loaded and ready.
+    SpeechReady(bool),
     Opened(bool),
     Draft {
         nonempty: bool,
@@ -76,6 +78,8 @@ impl Record {
                 recognized,
                 callback_qpc,
             }
+        } else if let Some(value) = event.strip_prefix("speech input ready=") {
+            Mark::SpeechReady(value.parse()?)
         } else if let Some(value) = event.strip_prefix("input opened focused=") {
             Mark::Opened(value.parse()?)
         } else if let Some(value) = event.strip_prefix("input draft nonempty=") {
@@ -197,6 +201,8 @@ mod tests {
             ),
             ("qpc=60 listening on", Mark::Listening(true)),
             ("qpc=70 listening off", Mark::Listening(false)),
+            ("qpc=80 speech input ready=true", Mark::SpeechReady(true)),
+            ("qpc=90 speech input ready=false", Mark::SpeechReady(false)),
         ] {
             assert_eq!(
                 Record::parse(line).unwrap(),
@@ -215,6 +221,7 @@ mod tests {
             "qpc=50 hold recognized callback_qpc=x",
             "qpc=60 listening",
             "qpc=60 listening yes",
+            "qpc=80 speech input ready=maybe",
         ] {
             assert!(Record::parse(line).is_err(), "{line}");
         }

@@ -41,17 +41,19 @@ pub(crate) enum Phase {
     Hover,
     Focus,
     Layouts,
-    Listening,
+    /// One numbered batch of the Listening row.
+    Listening(u8),
     Esc,
 }
 
 /// One hold that reached Listening: its chord's and its recognition's native callback QPCs, and
-/// the QPC at which the line took the Listening colour.
+/// the QPCs at which the line took and left the Listening colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Heard {
     pub(crate) key_down: i64,
     pub(crate) recognized: i64,
     pub(crate) listening: i64,
+    pub(crate) resting: i64,
 }
 
 #[derive(Debug, Default)]
@@ -164,6 +166,22 @@ pub(crate) fn check_flushed(
     let records = diagnostics.read()?;
     ensure!(!records.is_empty(), "no input diagnostics were flushed");
     let count = |mark: Mark| records.iter().filter(|record| record.mark == mark).count();
+    if phase == Phase::Layouts {
+        let hold = |recognized: bool| {
+            records
+                .iter()
+                .filter(|record| matches!(record.mark, Mark::Hold { recognized: seen, .. } if seen == recognized))
+                .count()
+        };
+        ensure!(
+            hold(false) == 2
+                && hold(true) == 2
+                && !records
+                    .iter()
+                    .any(|record| matches!(record.mark, Mark::Opened(_))),
+            "layouts needs exactly its two chords and two holds and no typing box"
+        );
+    }
     if phase == Phase::Focus {
         let actions = records
             .iter()
@@ -427,7 +445,7 @@ pub(crate) fn exercise(
             Phase::Hover => hover_panel(session, counts, context, diagnostics),
             Phase::Focus => focus(session, counts, diagnostics),
             Phase::Layouts => layouts(session, counts, diagnostics),
-            Phase::Listening => listening(session, counts, diagnostics),
+            Phase::Listening(_) => listening(session, counts, diagnostics),
             Phase::Esc => exercise_escape(contested, session, counts, diagnostics, context),
         }
     })();
@@ -639,8 +657,8 @@ fn positive_hold(session: &mut Session, diagnostics: &Diagnostics) -> Result<(i6
                 record.mark,
                 Mark::Hold {
                     recognized: true,
-                    ..
-                }
+                    callback_qpc,
+                } if callback_qpc >= since
             )
         })
     });
@@ -709,17 +727,21 @@ fn layouts(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics
     combine([exercise, release, restore])
 }
 
-/// How many holds the Listening phase measures.
-pub(crate) const HOLDS: u32 = 100;
+/// How many batches of [`BATCH_HOLDS`] the Listening row measures: each batch is its own launch,
+/// so it stays inside the shell's two-minute quit bound and one main trace.
+pub(crate) const BATCHES: u8 = 10;
+/// How many holds each Listening batch measures.
+pub(crate) const BATCH_HOLDS: u32 = 10;
 
-/// One hold's records: its chord, its recognition and the line taking the Listening colour.
-fn heard(records: &[Record]) -> Option<Heard> {
+/// One hold's records since its make: its chord, its recognition and the line taking the
+/// Listening colour, each no earlier than `since`.
+fn heard(records: &[Record], since: i64) -> Option<Heard> {
     let hold = |recognized: bool| {
         records.iter().find_map(|record| match record.mark {
             Mark::Hold {
                 recognized: seen,
                 callback_qpc,
-            } if seen == recognized => Some(callback_qpc),
+            } if seen == recognized && callback_qpc >= since => Some(callback_qpc),
             _ => None,
         })
     };
@@ -732,13 +754,28 @@ fn heard(records: &[Record]) -> Option<Heard> {
         key_down,
         recognized,
         listening,
+        resting: i64::MAX,
     })
 }
 
-/// [`HOLDS`] holds of left Ctrl + left Alt, each kept down until the line shows Listening and
-/// a little after, then released and left to finish before the next.
+/// How long a Listening batch waits, before its trace starts, for the brain to load speech input.
+pub(crate) const SPEECH_WAIT: Duration = Duration::from_secs(20);
+
+/// Waits until the brain reports speech input loaded and ready.
+pub(crate) fn await_speech(session: &Session, diagnostics: &Diagnostics) -> Result<()> {
+    diagnostics
+        .observe_within(session, 0, SPEECH_WAIT, |records| {
+            records
+                .iter()
+                .any(|record| record.mark == Mark::SpeechReady(true))
+        })
+        .map(drop)
+}
+
+/// Makes [`BATCH_HOLDS`] holds of left Ctrl + left Alt, each kept down until the line shows
+/// Listening and a little after, then released and left to finish before the next.
 fn listening(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnostics) -> Result<()> {
-    for index in 0..HOLDS {
+    for index in 0..BATCH_HOLDS {
         session.wait(Duration::from_micros(1000 + u64::from(index * 997 % 6944)))?;
         counts.attempts += 1;
         session.modifier(0x1d, InputEdge::Down)?;
@@ -754,8 +791,9 @@ fn listening(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnosti
         session.modifier(0x38, InputEdge::Up)?;
         session.modifier(0x1d, InputEdge::Up)?;
         counts.sent += 1;
-        let sample = kept.map(|records| heard(&records));
-        let Ok(Some(sample)) = sample else {
+        let released = session.last_qpc.context("hold break QPC missing")?;
+        let sample = kept.map(|records| heard(&records, since));
+        let Ok(Some(mut sample)) = sample else {
             counts.behavior_fail += 1;
             println!(
                 "hold attempt={} reached no complete Listening",
@@ -765,12 +803,18 @@ fn listening(session: &mut Session, counts: &mut Counts, diagnostics: &Diagnosti
                 bail!("a hold's chord, recognition and Listening are missing or out of order")
             });
         };
+        let ended =
+            diagnostics.observe_within(session, released, Duration::from_secs(3), |records| {
+                records
+                    .iter()
+                    .any(|record| record.mark == Mark::Listening(false))
+            })?;
+        sample.resting = ended
+            .iter()
+            .find(|record| record.mark == Mark::Listening(false))
+            .context("Listening off vanished")?
+            .qpc;
         diagnostics.heard.borrow_mut().push(sample);
-        diagnostics.observe_within(session, since, Duration::from_secs(3), |records| {
-            records
-                .iter()
-                .any(|record| record.mark == Mark::Listening(false))
-        })?;
         counts.behavior_pass += 1;
         session.wait(SETTLE)?;
     }
