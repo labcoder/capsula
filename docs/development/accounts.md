@@ -320,9 +320,10 @@ The Mac boundary prestarts four bounded handshake workers and a separate I/O rea
 brain and reactor do not poll SecTrust. The caller and workers enforce cancellation and the
 earliest enclosing request deadline, capped at ten seconds for connection setup. An admitted
 job keeps the reactor alive and holds its worker through an in-flight DNS lookup. A stopped
-owner can't admit a lookup or native check, but can't retract one already admitted. A stuck
-native check retains the only SecTrust slot, so new connections refuse without queuing. A
-boundary timeout always refuses, even under soft-fail revocation. Mac reqwest clients disable
+owner can't admit a lookup or native check, but can't retract one already admitted. Only one
+SecTrust check can run at a time. Overlapping checks refuse without queuing, and a stuck check
+keeps that slot until it returns. A boundary timeout always refuses, even under soft-fail
+revocation. Mac reqwest clients disable
 the idle pool and retries. Offline fixtures use synthetic certificates with in-memory or
 loopback transport and never change the user or system trust settings.
 
@@ -337,9 +338,9 @@ requests have a 10 s limit. All success and error bodies are capped at 1 MiB, an
 header is retained only as at most 256 graphic ASCII bytes. The Windows root loader keeps at most
 1,024 roots, caps each DER certificate and EKU buffer at 16 KiB, and counts skipped and unreadable entries separately.
 Proxied networks cannot sign in until a user-set proxy setting exists. Each exchange builds its
-own client on a blocking thread (`spawn_blocking`), because reading the trust store blocks; a
-root store fixed since the last try is read again. A root Windows hasn't
-installed yet fails as `UnknownIssuer`; verification never invokes an online OS chain builder.
+own client on a blocking thread (`spawn_blocking`), so Windows and Linux can reload their root
+stores without blocking the brain. On Windows, a root the OS hasn't installed yet fails as
+`UnknownIssuer`; the Windows verifier never invokes an online OS chain builder.
 ROOT entries present in Windows' Disallowed store or carrying a due disallowed-time property
 are excluded. A Disallowed store that doesn't exist (`ERROR_FILE_NOT_FOUND`) counts as empty;
 any other failure to open it fails closed. Distrusted server-supplied intermediates, root not-before/usage policies and revocation
