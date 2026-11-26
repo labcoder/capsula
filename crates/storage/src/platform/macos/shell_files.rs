@@ -15,7 +15,7 @@ use kumochi_protocol::profile::Root;
 use super::protected::{self, ObjectKind};
 use crate::Untrusted;
 
-const DIRECTORY_FLAGS: libc::c_int =
+pub(super) const DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 const SCAN_LIMIT: usize = 256;
 const DIRENT_NAME_OFFSET: usize = offset_of!(libc::dirent, d_name);
@@ -67,7 +67,7 @@ struct Directory {
     volume: Volume,
 }
 
-struct Directories {
+pub(super) struct Directories {
     held: Vec<Directory>,
     private_start: usize,
     user: libc::uid_t,
@@ -291,6 +291,11 @@ pub fn admit_support(support: &Path) -> Result<Support, AcquisitionError> {
 }
 
 impl Support {
+    /// The held chain, anchor last.
+    pub(super) fn into_held(self) -> Directories {
+        self.0
+    }
+
     /// Takes the setup guard without waiting: an exclusive `flock` on a fresh open of this held
     /// folder. Every edition and anything else that locks this user's Support folder contends for
     /// it, and closing the guard or its holder's exit releases it.
@@ -582,9 +587,32 @@ fn checked_candidate<T>(
 }
 
 impl Directories {
+    /// The last held folder.
+    pub(super) fn last(&self) -> Result<&File, Untrusted> {
+        self.held.last().map(|node| &node.file).ok_or(Untrusted::Io)
+    }
+
+    /// The held folder that contains the last one.
+    pub(super) fn before_last(&self) -> Result<&File, Untrusted> {
+        let index = self.held.len().checked_sub(2).ok_or(Untrusted::Io)?;
+        self.held
+            .get(index)
+            .map(|node| &node.file)
+            .ok_or(Untrusted::Io)
+    }
+
+    /// Whose folders these are.
+    pub(super) fn user(&self) -> libc::uid_t {
+        self.user
+    }
+
     /// Admits `file`, just opened as `name` in the last held folder, as a private folder on the
     /// anchor's volume and holds it.
-    fn push_private(&mut self, file: File, name: CString) -> Result<(), AcquisitionError> {
+    pub(super) fn push_private(
+        &mut self,
+        file: File,
+        name: CString,
+    ) -> Result<(), AcquisitionError> {
         let child = self.private(file, name)?;
         self.held.push(child);
         Ok(())
@@ -603,7 +631,7 @@ impl Directories {
         Ok(child)
     }
 
-    fn check(&self) -> Result<(), AcquisitionError> {
+    pub(super) fn check(&self) -> Result<(), AcquisitionError> {
         for (index, node) in self.held.iter().enumerate() {
             let now = protected::inspect(&node.file, self.user)?;
             if !protected::same_inspection(&node.identity, &now)
@@ -682,14 +710,14 @@ fn filesystem_policy(metadata: &libc::statfs, writable: bool) -> Result<(), Untr
     Ok(())
 }
 
-fn basename(name: &str) -> Result<CString, Untrusted> {
+pub(super) fn basename(name: &str) -> Result<CString, Untrusted> {
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
         return Err(Untrusted::Unsafe);
     }
     CString::new(name).map_err(|_| Untrusted::Unsafe)
 }
 
-fn open_at(
+pub(super) fn open_at(
     parent: RawFd,
     name: &CStr,
     flags: libc::c_int,
@@ -709,7 +737,7 @@ fn open_at(
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn entry_stat(parent: &File, name: &CStr) -> io::Result<libc::stat> {
+pub(super) fn entry_stat(parent: &File, name: &CStr) -> io::Result<libc::stat> {
     let mut metadata = MaybeUninit::uninit();
     // SAFETY: retained parent, terminated basename and writable stat storage; no link following.
     if unsafe {

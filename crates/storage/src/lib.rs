@@ -17,8 +17,9 @@ pub use platform::Untrusted;
 #[cfg(target_os = "macos")]
 pub use platform::macos::{
     AcquisitionError, AdmittedLock, AdmittedLog, ApplicationSupportError, GuardError, HeldFolder,
-    Product, ProductFolder, Retention, SetupGuard, ShellStorage, Support, admit_support,
-    application_support_dir, hold_chain, open_shell_storage, owner_only_dir, private_tree,
+    Product, ProductFolder, Retention, SettingsWriteError, SetupGuard, ShellStorage, Support,
+    admit_support, application_support_dir, hold_chain, open_shell_storage, owner_only_dir,
+    private_tree, read_settings, replace_settings,
 };
 #[cfg(windows)]
 pub use platform::windows::{
