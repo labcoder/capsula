@@ -497,7 +497,7 @@ unsafe extern "C" {
     fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
 }
 
-fn install_acl(file: &File, text: &CStr) -> Result<(), Untrusted> {
+pub(in crate::platform::macos) fn install_acl(file: &File, text: &CStr) -> Result<(), Untrusted> {
     // SAFETY: text is a terminated, fixed fixture ACL with a UUID, not an account lookup.
     let acl = NonNull::new(unsafe { acl_from_text(text.as_ptr()) }).ok_or(Untrusted::Io)?;
     // SAFETY: file is held and acl_from_text returned this live ACL.
@@ -522,11 +522,11 @@ struct Entry {
     identity: libc::stat,
 }
 
-struct Scratch {
-    root: File,
+pub(in crate::platform::macos) struct Scratch {
+    pub(in crate::platform::macos) root: File,
     entries: Vec<Entry>,
     _ancestors: Vec<File>,
-    residual: CString,
+    pub(in crate::platform::macos) residual: CString,
     user: libc::uid_t,
     cleaned: bool,
 }
@@ -550,7 +550,7 @@ fn entry_stat(parent: &File, name: &CStr) -> Result<libc::stat, Untrusted> {
 }
 
 impl Scratch {
-    fn new() -> Self {
+    pub(in crate::platform::macos) fn new() -> Self {
         let parent = std::env::var_os("STORAGE_ADMISSION_FIXTURE_PARENT")
             .expect("native execution requires an explicitly approved fixture parent");
         let mut ancestors = crate::hold_chain(Path::new(&parent))
@@ -597,7 +597,11 @@ impl Scratch {
         scratch
     }
 
-    fn record(&mut self, parent: &File, name: &CStr) -> Result<(), Untrusted> {
+    pub(in crate::platform::macos) fn record(
+        &mut self,
+        parent: &File,
+        name: &CStr,
+    ) -> Result<(), Untrusted> {
         let identity = entry_stat(parent, name)?;
         if identity.st_uid != self.user {
             return Err(Untrusted::Unsafe);
@@ -637,7 +641,7 @@ impl Scratch {
         )
     }
 
-    fn cleanup(mut self) -> Result<(), Untrusted> {
+    pub(in crate::platform::macos) fn cleanup(mut self) -> Result<(), Untrusted> {
         while let Some(entry) = self.entries.last() {
             let parent = stat(entry.parent.as_raw_fd())?;
             let current = entry_stat(&entry.parent, &entry.name)?;

@@ -6,9 +6,12 @@ pub(crate) use kumochi_storage::Untrusted;
 /// Why a path can't be trusted. It carries no path.
 #[cfg(not(windows))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[expect(
-    dead_code,
-    reason = "only a native adapter can classify a checked path"
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(
+        dead_code,
+        reason = "only a native adapter can classify a checked path"
+    )
 )]
 pub(crate) enum Untrusted {
     #[error("a path component doesn't exist")]
@@ -35,6 +38,42 @@ pub(crate) fn is_unsupported(error: Untrusted) -> bool {
     error == Untrusted::Unsupported
 }
 
+#[cfg(target_os = "macos")]
+impl From<kumochi_storage::Untrusted> for Untrusted {
+    fn from(error: kumochi_storage::Untrusted) -> Self {
+        match error {
+            kumochi_storage::Untrusted::Missing => Self::Missing,
+            kumochi_storage::Untrusted::Reparse => Self::Reparse,
+            kumochi_storage::Untrusted::Unsafe => Self::Unsafe,
+            kumochi_storage::Untrusted::Io => Self::Io,
+        }
+    }
+}
+
+/// The held private root: kumochi-storage's macOS folder checks, with the brain's error.
+#[cfg(target_os = "macos")]
+mod held {
+    use std::fs::File;
+    use std::path::Path;
+
+    use super::Untrusted;
+
+    pub(crate) fn hold_chain(path: &Path) -> Result<Vec<File>, Untrusted> {
+        kumochi_storage::hold_chain(path).map_err(Untrusted::from)
+    }
+
+    pub(crate) fn owner_only_dir(path: &Path) -> Result<File, Untrusted> {
+        kumochi_storage::owner_only_dir(path).map_err(Untrusted::from)
+    }
+
+    pub(crate) fn private_tree(path: &Path) -> Result<(), Untrusted> {
+        kumochi_storage::private_tree(path).map_err(Untrusted::from)
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) use held::{hold_chain, owner_only_dir, private_tree};
+
 #[cfg(not(windows))]
 mod unsupported {
     use std::fs::File;
@@ -46,14 +85,17 @@ mod unsupported {
         Err(Untrusted::Unsupported)
     }
 
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn hold_chain(_: &Path) -> Result<Vec<File>, Untrusted> {
         Err(Untrusted::Unsupported)
     }
 
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn owner_only_dir(_: &Path) -> Result<File, Untrusted> {
         Err(Untrusted::Unsupported)
     }
 
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn private_tree(_: &Path) -> Result<(), Untrusted> {
         Err(Untrusted::Unsupported)
     }
@@ -130,7 +172,12 @@ mod unsupported {
 
             let model = ModelFiles::open(root.path(), &["keep"]);
             assert_eq!(model.err(), Some(Untrusted::Unsupported));
-            assert_eq!(hold_chain(root.path()).err(), Some(Untrusted::Unsupported));
+            #[cfg(not(target_os = "macos"))]
+            {
+                assert_eq!(hold_chain(root.path()).err(), Some(Untrusted::Unsupported));
+                assert_eq!(owner_only_dir(&absent).err(), Some(Untrusted::Unsupported));
+                assert_eq!(private_tree(root.path()), Err(Untrusted::Unsupported));
+            }
             assert_eq!(marker(&absent).err(), Some(Untrusted::Unsupported));
             assert_eq!(open_model_write(&kept).err(), Some(Untrusted::Unsupported));
             assert_eq!(
@@ -141,14 +188,12 @@ mod unsupported {
                 create_model_dir(&absent).err(),
                 Some(Untrusted::Unsupported)
             );
-            assert_eq!(owner_only_dir(&absent).err(), Some(Untrusted::Unsupported));
             for result in [
                 mark(&absent),
                 check_model_final(&file(), &kept),
                 publish_model(file(), &parent, &absent),
                 discard_model(file()),
                 unmark(file()),
-                private_tree(root.path()),
                 remove_model_tree(root.path()),
                 remove_tree(root.path()),
             ] {
@@ -163,7 +208,9 @@ mod unsupported {
 
 #[cfg(not(windows))]
 pub(crate) use unsupported::{
-    check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
-    private_tree, publish_model, remove_model_tree, remove_tree, unmark, validate_model_path,
+    check_model_final, create_model_dir, create_model_write, discard_model, hold_model_creation,
+    mark, marker, model_file, model_final, open_model_write, publish_model, remove_model_tree,
+    remove_tree, unmark, validate_model_path,
 };
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(crate) use unsupported::{hold_chain, owner_only_dir, private_tree};

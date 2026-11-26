@@ -18,7 +18,7 @@ pub use platform::Untrusted;
 pub use platform::macos::{
     AcquisitionError, AdmittedLock, AdmittedLog, ApplicationSupportError, GuardError, HeldFolder,
     Product, ProductFolder, Retention, SetupGuard, ShellStorage, Support, admit_support,
-    application_support_dir, hold_chain, open_shell_storage,
+    application_support_dir, hold_chain, open_shell_storage, owner_only_dir, private_tree,
 };
 #[cfg(windows)]
 pub use platform::windows::{
