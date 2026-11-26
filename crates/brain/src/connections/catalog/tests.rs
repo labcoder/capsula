@@ -383,10 +383,6 @@ fn refusal(status: u16, code: Option<&str>) -> String {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one refusal matrix checks both sanitized diagnostics and the exact recovery for each response"
-)]
 async fn refusals_keep_only_status_and_code_and_say_what_to_do() {
     let error = |key, actions: &[Action]| {
         UserError::new(key, Vec::new(), actions.to_vec()).expect("within limits")
