@@ -690,11 +690,20 @@ async fn a_dropped_wait_never_cancels_its_refresh() {
         account
             .and_then(|account| Some(account.expose().tokens.as_ref()?.refresh_token.to_string()))
     };
-    // The pending flag, the sent mark, the refresh and the rotated set's save.
-    for _ in 0..4 {
+    // The check, the pending flag, the sent mark's save, the refresh and the rotated set's save.
+    // The store is read only once the worker reports the save after the refresh.
+    let (mut refreshed, mut saved) = (false, false);
+    for _ in 0..8 {
         let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
+        let rotated = matches!(input, Event::Machine(Input::Vault(Done::Rotated(..))));
+        refreshed |= matches!(input, Event::Machine(Input::Refreshed { .. }));
         accounts.handle(input);
+        saved = refreshed && rotated;
+        if saved {
+            break;
+        }
     }
+    assert!(saved, "the rotated set's save was reported");
     assert_eq!(refresh_token(), Some("refresh-new".to_owned()));
     accounts.close(Instant::now(), Instant::now()).await;
 }
@@ -3282,15 +3291,21 @@ async fn an_ordinary_sign_in_is_ready_once_proved_and_stays_ready_through_a_refr
         accounts.catalog_read_pending(),
         "the held catalog read goes"
     );
+    // The store is read only once the worker reports the save after the refresh.
+    let (mut refreshed, mut saved) = (false, false);
     for _ in 0..8 {
-        if saved_refresh(&scratch, &store).0 == "refresh-new" {
-            break;
-        }
         let input = timeout(PATIENCE, accounts.next()).await.expect("in time");
         assert!(!matches!(input, Event::Proof { .. }), "no second check");
+        let rotated = matches!(input, Event::Machine(Input::Vault(Done::Rotated(..))));
+        refreshed |= matches!(input, Event::Machine(Input::Refreshed { .. }));
         accounts.handle(input);
         assert!(ready(&accounts));
+        saved = refreshed && rotated;
+        if saved {
+            break;
+        }
     }
+    assert!(saved, "the rotated set's save was reported");
     assert_eq!(saved_refresh(&scratch, &store).0, "refresh-new");
     assert_eq!(saved_connection(&scratch, &store), SEEDED);
     accounts.close(Instant::now(), Instant::now()).await;
@@ -3471,7 +3486,6 @@ async fn a_locally_checked_sign_in_is_fenced_until_its_check_answers() {
 /// rotates the set, the build still keeps to it; and once that account can't be ready, the next
 /// build reads no `ChatGPT` history at all, while a ready Claude Code still arrives.
 #[tokio::test]
-#[ignore = "stalls in its refreshed arm on the hosted runner; under repair"]
 async fn a_recovered_answer_scopes_builds_until_the_account_stops_being_ready() {
     use crate::connections::vault::Proof;
 
@@ -3488,14 +3502,18 @@ async fn a_recovered_answer_scopes_builds_until_the_account_stops_being_ready() 
         };
         brain.account_input(recovered, None).expect("no shell");
         if arm == "refreshed" {
-            let mut dropped = false;
+            // The store is read only once the worker reports the save after the refresh.
+            let (mut dropped, mut refreshed, mut rotated) = (false, false, false);
             for _ in 0..12 {
-                if dropped && saved_refresh(&scratch, &store).0 == "refresh-new" {
+                if dropped && rotated {
                     break;
                 }
                 let event = timeout(PATIENCE, brain.account.next())
                     .await
                     .expect("in time");
+                rotated |=
+                    refreshed && matches!(event, Event::Machine(Input::Vault(Done::Rotated(..))));
+                refreshed |= matches!(event, Event::Machine(Input::Refreshed { .. }));
                 dropped |= matches!(
                     event,
                     Event::Proof {
@@ -3506,6 +3524,7 @@ async fn a_recovered_answer_scopes_builds_until_the_account_stops_being_ready() 
                 brain.account_input(event, None).expect("no shell");
             }
             assert!(dropped, "the vault's own answer came after");
+            assert!(rotated, "the rotated set's save was reported");
             assert_eq!(saved_refresh(&scratch, &store).0, "refresh-new");
             assert_eq!(saved_connection(&scratch, &store), SEEDED);
         }
