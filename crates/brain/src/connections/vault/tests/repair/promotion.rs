@@ -1136,6 +1136,10 @@ pub(crate) async fn blocked_bind(name: &str) -> BlockedBind {
 impl BlockedBind {
     /// Lets the bind go on, and what it came to. A refused one left the predecessor fenced,
     /// its escrow as it was and no active successor.
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "a bind stuck after its release fails the test instead of hanging it"
+    )]
     pub(crate) fn release(self) -> Result<(), VaultError> {
         self.release.send(()).ok();
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
