@@ -738,7 +738,7 @@ async fn a_preflight_stops_at_a_lost_parent_an_ended_session_or_the_deadline() {
             let soon = Instant::now() + Duration::from_millis(200);
             let by = if signal == "deadline" { soon } else { later() };
             let mut pre = Checking::new(calls, after, || match signal {
-                "parent" => assert!(shell.publish(1), "the loss lands"),
+                "parent" => assert!(!shell.publish(1), "the claim came first"),
                 "session" => pair.end(),
                 _ => std::thread::sleep(
                     soon.into_std()
