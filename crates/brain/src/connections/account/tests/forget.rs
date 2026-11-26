@@ -416,6 +416,12 @@ fn a_lost_host_counts_as_missing_only_under_a_bound_registration() {
     let before = h.marker();
     h.op(AccountOp::ForgetSavedSignIn(1));
     assert_eq!(h.marker(), before);
+    h.store.0.lock().expect("fake lock").denied_read = None;
+    h.op(AccountOp::SignIn);
+    assert!(h.listening.is_empty(), "the refused host still blocks");
+    h.op(AccountOp::Retry);
+    h.op(AccountOp::SignIn);
+    assert_eq!(h.listening.len(), 1, "Retry rereads the host");
 
     let h = Harness::seeded("forget-host-signed-in", |vault| {
         vault.host_id().expect("host");
@@ -431,4 +437,65 @@ fn a_lost_host_counts_as_missing_only_under_a_bound_registration() {
     let before = h.marker();
     h.op(AccountOp::ForgetSavedSignIn(1));
     assert_eq!(h.marker(), before);
+}
+
+/// A signed-in account that reads whole again by the time Forget rereads it is recovered, even with
+/// its host still lost: only a bound registration lets the host stand as evidence.
+#[test]
+fn forget_recovers_a_signed_in_account_that_reads_again_beside_a_lost_host() {
+    let h = Harness::seeded("forget-host-account-back", |vault| {
+        vault.host_id().expect("host");
+        committed(&vault.save_account(&saved_account("subject-1", "refresh-old")));
+    });
+    let saved = h.store.snapshot();
+    lose(&h, "host");
+    lose(&h, "chatgpt");
+    let mut h = h.restart();
+    assert_eq!(h.view(), &unavailable(SavedSignInFailure::Missing, Some(1)));
+    let account: Vec<_> = saved
+        .keys()
+        .filter(|name| name.starts_with(&h.generations("chatgpt")))
+        .cloned()
+        .collect();
+    h.store.rollback(&saved, &account);
+    h.store.0.lock().expect("fake lock").missed_reads = 1;
+    let (before, revoked) = (h.marker(), h.revoking.len());
+    h.op(AccountOp::ForgetSavedSignIn(1));
+    assert_eq!(h.marker(), before, "nothing is discarded");
+    assert_eq!(h.revoking.len(), revoked, "nothing is revoked");
+    assert!(committed_head(&h, "chatgpt"), "the account stays");
+    assert!(
+        matches!(h.view(), AccountView::SignedIn { .. }),
+        "{:?}",
+        h.view()
+    );
+}
+
+/// A host that reads again before Check lets the recovered registration sign in with its own
+/// client, with no Forget and no reload.
+#[test]
+fn check_restores_a_host_that_reads_again() {
+    let h = Harness::seeded("check-host-back", bound_registration);
+    let saved = h.store.snapshot();
+    lose(&h, "host");
+    let mut h = h.restart();
+    assert_eq!(h.view(), &unavailable(SavedSignInFailure::Missing, Some(1)));
+    let host: Vec<_> = saved
+        .keys()
+        .filter(|name| name.starts_with(&h.generations("host")))
+        .cloned()
+        .collect();
+    h.store.rollback(&saved, &host);
+    h.op(AccountOp::CheckSavedSignIn);
+    assert_eq!(
+        h.view(),
+        &AccountView::SignedOut {
+            revocation_unconfirmed: false
+        }
+    );
+    let before = h.marker();
+    h.op(AccountOp::SignIn);
+    assert_eq!(h.marker(), before);
+    assert_eq!(h.listening.len(), 1, "the sign-in starts");
+    assert_eq!(h.saved_clients, [Some("client-saved".to_owned())]);
 }
