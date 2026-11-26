@@ -567,6 +567,8 @@ fn episode(outer: &mut gpui_kit::TestAppContext, case: Case) {
     });
     let seen = observer.snapshot();
     assert_eq!((seen.entered, seen.returned, seen.controls), (1, 1, 1));
+    // Recovery finishes inside the failing update: no task or timer is left for it to wait on.
+    assert!(!outer.dispatcher.scheduler().has_pending_tasks());
     assert_eq!(target.counts(), [1, 1, 1, 0]);
     assert_eq!(
         target.key(),
