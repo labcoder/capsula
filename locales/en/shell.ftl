@@ -374,7 +374,7 @@ accounts-saved-sign-in-missing = Part of the saved sign-in wasn't found
 accounts-saved-sign-in-missing-help =
     { accounts-saved-sign-in-check-help }
     { -accounts-missing-next-step }
-    If Kumochi's files were copied from another computer, choose { accounts-forget } and then sign in again.
+    If Kumochi's files were copied from another computer, choose { accounts-forget } in { settings-title } → { settings-accounts }, then sign in again.
 accounts-saved-sign-in-missing-restart-help =
     { accounts-saved-sign-in-changed-help }
     { -accounts-missing-next-step }

@@ -117,7 +117,7 @@ impl SettingsView {
                     if view
                         .confirmation
                         .as_ref()
-                        .is_none_or(|(current, _)| *current != generation)
+                        .is_none_or(|(current, _, _)| *current != generation)
                     {
                         return None;
                     }
@@ -141,8 +141,23 @@ impl SettingsView {
             },
         );
         if let Some(dialog) = dialog {
-            self.confirmation = Some((generation, dialog));
+            self.confirmation = Some((generation, op, dialog));
         }
+    }
+}
+
+/// Whether `view` still shows the button that opened `op`'s confirmation.
+pub(super) fn offers(view: Option<&AccountView>, op: AccountOp) -> bool {
+    match (view, op) {
+        (Some(AccountView::SignedIn { .. }), AccountOp::SignOut) => true,
+        (
+            Some(AccountView::SavedSignInUnavailable {
+                forget: Some(offered),
+                ..
+            }),
+            AccountOp::ForgetSavedSignIn(revision),
+        ) => *offered == revision,
+        _ => false,
     }
 }
 
@@ -204,7 +219,17 @@ pub(in crate::presence) fn account_section(
             .children(details)
             .child(actions)
             .children(
-                matches!(state.view, Some(AccountView::SignedIn { .. })).then(|| {
+                matches!(
+                    state.view,
+                    Some(
+                        AccountView::SignedIn { .. }
+                            | AccountView::SavedSignInUnavailable {
+                                forget: Some(_),
+                                ..
+                            }
+                    )
+                )
+                .then(|| {
                     div()
                         .flex()
                         .border_t_1()

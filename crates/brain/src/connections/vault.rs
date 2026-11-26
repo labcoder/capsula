@@ -324,6 +324,19 @@ impl<S: CredentialStore> Vault<S> {
         {
             return Some(checked);
         }
+        let active = match self.authority.observe(Kind::Account) {
+            Ok((revision, Ok(Some(active)))) if revision == expected => active,
+            _ => return Some(Err(SavedSignInFailure::Unavailable)),
+        };
+        // Every chunk is read, so a refused or wrong-length one isn't given up behind a missing one.
+        match generation::has_missing_chunk(&self.store, &self.service, &active) {
+            Ok(true) => {}
+            Err(
+                authority::AuthorityError::WrongChunkLength
+                | authority::AuthorityError::Store(CredentialStoreError::InvalidBlob),
+            ) => return Some(Err(SavedSignInFailure::Malformed)),
+            Ok(false) | Err(_) => return Some(Err(SavedSignInFailure::Unavailable)),
+        }
         self.update_marker(MarkerUpdate::Promote(Disposition::Discard))
             .err()
             .map(|_| Err(SavedSignInFailure::Unavailable))

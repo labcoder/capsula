@@ -107,6 +107,8 @@ impl SignOutMarker {
             && self.sign_out.is_none_or(|sign_out| {
                 self.sweep
                     && match sign_out.phase {
+                        // The checkpoint turns a Discard into an Erase, so this was never written.
+                        Phase::Deleting if sign_out.disposition == Disposition::Discard => false,
                         Phase::Revoking => self.notice,
                         Phase::Deleting => !self.request_pending && !self.outcome_unknown,
                     }
@@ -164,6 +166,8 @@ impl SignOutMarker {
                     });
                     self.sweep = true;
                     self.notice = true;
+                    // A discard gives up what it can't read, so it never confirms a revocation.
+                    self.outcome_unknown |= disposition == Disposition::Discard;
                 }
             }
             MarkerUpdate::Checkpoint { list_empty_on_disk } => {

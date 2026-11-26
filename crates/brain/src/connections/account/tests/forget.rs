@@ -218,10 +218,12 @@ fn forget_revokes_a_readable_list_and_checkpoints_as_erase() {
     h.store.rollback(&BTreeMap::new(), &account);
     let mut h = h.restart();
     assert_eq!(h.view(), &unavailable(SavedSignInFailure::Missing, Some(1)));
+    assert_eq!(h.revoking.len(), 1, "startup's own pass over the list");
+    h.feed(Input::Revoked(Vec::new()));
     h.store.0.lock().expect("fake lock").refuse_deletes = true;
     h.op(AccountOp::ForgetSavedSignIn(1));
-    let [run] = h.revoking.as_slice() else {
-        panic!("one revocation run, not {}", h.revoking.len());
+    let [_, run] = h.revoking.as_slice() else {
+        panic!("the discard's own run, not {} runs", h.revoking.len());
     };
     let tokens: Vec<_> = run
         .iter()
@@ -231,11 +233,17 @@ fn forget_revokes_a_readable_list_and_checkpoints_as_erase() {
     let run = run.clone();
     h.feed(Input::Revoked(run));
     let written: Vec<&String> = h.markers.iter().flatten().collect();
+    let discards: Vec<_> = written
+        .iter()
+        .filter(|marker| marker.contains(r#""disposition":"Discard""#))
+        .collect();
+    assert!(!discards.is_empty(), "{written:?}");
     assert!(
-        written
+        discards
             .iter()
-            .any(|marker| marker.contains(r#""disposition":"Discard","phase":"Revoking""#)),
-        "{written:?}"
+            .all(|marker| marker.contains(r#""phase":"Revoking""#)
+                && marker.contains(r#""outcome_unknown":true"#)),
+        "a discard is uncertain from its promotion on: {discards:?}"
     );
     let deleting: Vec<_> = written
         .iter()
@@ -277,4 +285,49 @@ fn forget_is_not_offered_for_a_wrong_length_chunk() {
     h.op(AccountOp::ForgetSavedSignIn(1));
     assert_eq!(h.marker(), None);
     assert_eq!(h.view(), &unavailable(SavedSignInFailure::Malformed, None));
+}
+
+/// A record missing one chunk while another is refused or the wrong length isn't given up, in
+/// either chunk order: every chunk is read before the discard is admitted.
+#[test]
+fn forget_writes_nothing_when_another_chunk_is_refused_or_the_wrong_length() {
+    for (refused, missing_first) in [(true, true), (true, false), (false, true), (false, false)] {
+        let context = format!("refused {refused}, missing first {missing_first}");
+        let mut h = Harness::seeded("forget-mixed", |vault| {
+            let mut account = saved_account("subject-1", "refresh-old").expose().clone();
+            account.tokens.as_mut().expect("tokens").access_token =
+                Zeroizing::new("a".repeat(3_000));
+            committed(&vault.save_account(&Secret::new(account)));
+        });
+        let first = h.current_chunk("chatgpt");
+        let second = format!("{}1", first.trim_end_matches('0'));
+        let (missing, other) = if missing_first {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        if refused {
+            h.store
+                .rollback(&BTreeMap::new(), std::slice::from_ref(&missing));
+            h = h.restart();
+            h.store.0.lock().expect("fake lock").denied_read = Some(other);
+        } else {
+            let mut bytes = h.store.snapshot()[&other].expose().to_vec();
+            bytes.push(0);
+            let longer = BTreeMap::from([(other.clone(), Secret::new(Zeroizing::new(bytes)))]);
+            h.store.rollback(&longer, &[missing, other]);
+            h = h.restart();
+        }
+        let before = h.marker();
+        h.op(AccountOp::ForgetSavedSignIn(1));
+        assert_eq!(h.marker(), before, "{context}");
+        assert!(
+            matches!(
+                h.view(),
+                AccountView::SavedSignInUnavailable { forget: None, .. }
+            ),
+            "{context}: {:?}",
+            h.view()
+        );
+    }
 }

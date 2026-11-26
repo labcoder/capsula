@@ -63,7 +63,11 @@ impl SettingsTab {
 pub(super) struct SettingsView {
     pub(super) model: Entity<Settings>,
     pub(super) owner: WeakEntity<Presence>,
-    pub(super) confirmation: Option<(u64, crate::confirmation::Handle)>,
+    pub(super) confirmation: Option<(
+        u64,
+        kumochi_protocol::message::AccountOp,
+        crate::confirmation::Handle,
+    )>,
     #[cfg(any(test, debug_assertions))]
     pub(super) fixture: bool,
     #[cfg(test)]
@@ -132,13 +136,14 @@ impl SettingsView {
             view.sync_github(window, cx);
             view.schedule_github_on_open(cx);
             let account = &view.model.read(cx).accounts;
-            if view.confirmation.as_ref().is_some_and(|(generation, _)| {
-                account.generation != Some(*generation)
-                    || !matches!(
-                        account.view,
-                        Some(kumochi_protocol::message::AccountView::SignedIn { .. })
-                    )
-            }) && let Some((_, dialog)) = view.confirmation.take()
+            if view
+                .confirmation
+                .as_ref()
+                .is_some_and(|(generation, op, _)| {
+                    account.generation != Some(*generation)
+                        || !accounts::offers(account.view.as_ref(), *op)
+                })
+                && let Some((_, _, dialog)) = view.confirmation.take()
             {
                 dialog.dismiss_owned(window, cx);
             }

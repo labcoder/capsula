@@ -727,7 +727,9 @@ the current `chatgpt` revision has a missing chunk (`Missing`). A malformed, wro
 unreadable or changed record isn't offered: it may still read, or Prepare couldn't finish it. The
 shell asks first and sends the revision its dialog showed. The op shares Check's gate and lane
 flight. Under the session lock the vault rereads exactly that revision, and promotes
-`Discard`/`Revoking` only if the head is still that revision and a chunk is still missing.
+`Discard`/`Revoking` only if the head is still that revision and a chunk is still missing. It reads
+every chunk first, so a refused or wrong-length chunk behind a missing one is never given up. The
+promotion also sets `outcome_unknown`, so the notice stays even if the bytes come back.
 Anything else writes nothing and answers as Check does, runtime completion included, so a sign-in
 that reads again is recovered and waits for **Load models**. `SignIn` never discards anything.
 
@@ -924,7 +926,7 @@ chunks live in Credential Manager under `CREDENTIAL_SERVICE`:
 | `host` | A JSON UUIDv4 URN, generated from `getrandom` when no generation is current, or when the current one can't be used and may be replaced. |
 | `chatgpt` | JSON holds `client_id`, optional `subject` and `email`, `plan_enabled`, and optional nested `tokens` (`access_token`, `refresh_token`, optional `id_token`, `scope`, `expires_at`, `pending_identity_validation`, `refresh_sent`, which reads as false when absent). Registration-only JSON contains just `client_id` and `subject`. |
 | `revoke` | JSON holds `entries`, each with its own `client_id`, `refresh_token`, `added_at` Unix seconds, and `origin` (`Account` or `Exchange`). At most four exchanges and one account entry. |
-| sign-out marker | Not in Credential Manager: `control.marker` in credentials.db, token-free compact JSON: `{v:1,sign_out,sweep,request_pending,outcome_unknown,notice}`. `sign_out` is null or `{disposition,phase}`, with `Keep`/`Erase`/`Discard` and `Revoking`/`Deleting`; `Discard` appears only in `Revoking`. Unknown fields, versions, enums or malformed data fail closed to an Erase/Revoking marker with uncertainty and notice set. |
+| sign-out marker | Not in Credential Manager: `control.marker` in credentials.db, token-free compact JSON: `{v:1,sign_out,sweep,request_pending,outcome_unknown,notice}`. `sign_out` is null or `{disposition,phase}`, with `Keep`/`Erase`/`Discard` and `Revoking`/`Deleting`; `Discard` appears only in `Revoking`, so a `Discard`/`Deleting` marker is malformed and fails closed. Unknown fields, versions, enums or malformed data fail closed to an Erase/Revoking marker with uncertainty and notice set. |
 
 A generation holds 1 to 25 chunks of at most 2,000 bytes. Both serialized JSON records are
 capped at 48 KiB, including escaping. Access

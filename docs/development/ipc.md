@@ -663,8 +663,8 @@ write, and these facts add no GPUI presentation.
 
 | Message | Pipe | Fields |
 |---|---|---|
-| `AccountOp` | Control, shell to brain | `SignIn`, `CancelSignIn`, `SignOut`, `EnablePlan` or `Retry`; no fields |
-| `Account` | Control, brain to shell | an `AccountView`: `SignedOut`, `SigningIn`, `SigningOut` (cleanup progress), `Busy` or `SignedIn` (an optional `AccountEmail`, a `PlanState` and an optional `AccountRecovery`) |
+| `AccountOp` | Control, shell to brain | `SignIn`, `CancelSignIn`, `SignOut`, `EnablePlan`, `Retry`, `CheckSavedSignIn` or `LoadModels`, with no fields, or `ForgetSavedSignIn` with the `u64` revision its view offered |
+| `Account` | Control, brain to shell | an `AccountView`: `SignedOut`, `SigningIn`, `SigningOut` (cleanup progress), `Busy`, `SignedIn` (an optional `AccountEmail`, a `PlanState` and an optional `AccountRecovery`) or `SavedSignInUnavailable` (a `SavedSignInFailure`, whether it's checkable, the optional revision Forget may give up, and whether a check is running or an earlier revocation is unconfirmed) |
 | `Models` | Data, brain to shell | the `ConnectionKind` the list belongs to, then at most 200 `ModelInfo`s in catalog order: a `ModelSlug`, a `ModelName` (one line, 1–80 characters) and optional `EffortSet`. A present set is one byte, a nonzero mask using only the five known effort bits. Absent means unknown, not all efforts. The largest postcard payload is 77,804 bytes before the frame header, under the data frame cap. This wire change requires the existing exact `BUILD_ID` match |
 
 - No token, code or account identifier crosses the pipe. The only identity is the display
