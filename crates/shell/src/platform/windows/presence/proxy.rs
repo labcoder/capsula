@@ -407,7 +407,8 @@ pub(super) unsafe extern "system" fn proxy_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    let click_qpc = (message == WM_LBUTTONDOWN).then(performance_counter);
+    let click_qpc = (cfg!(any(test, feature = "gate-recorder")) && message == WM_LBUTTONDOWN)
+        .then(performance_counter);
     if message == WM_MOUSEACTIVATE {
         return LRESULT(MA_NOACTIVATE.try_into().unwrap_or(isize::MAX));
     }
@@ -436,9 +437,8 @@ pub(super) unsafe extern "system" fn proxy_proc(
         }
         match message {
             WM_LBUTTONDOWN => {
-                if let Some(qpc) = click_qpc {
-                    send(&state.hover.events, PresenceEvent::DockPressed { qpc });
-                }
+                let qpc = click_qpc.unwrap_or(0);
+                send(&state.hover.events, PresenceEvent::DockPressed { qpc });
                 return LRESULT(0);
             }
             WM_CLOSE => {

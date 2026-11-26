@@ -128,15 +128,17 @@ impl OnboardingView {
         });
         let scale = window.scale_factor();
         let kumo_bake = cx.spawn(async move |view, cx| {
-            let started = Instant::now();
+            let started = super::launch::RECORDER.then(Instant::now);
             let image = cx
                 .background_executor()
                 .spawn(async move { still(scale) })
                 .await;
-            let baked_us = started.elapsed().as_micros();
+            let baked_us = started.map(|started| started.elapsed().as_micros());
             let kept = view.update(cx, |view, cx| {
                 view.kumo = image.map(Arc::new);
-                if view.kumo.is_some() {
+                if view.kumo.is_some()
+                    && let Some(baked_us) = baked_us
+                {
                     super::diagnostics::record(
                         cx,
                         format_args!("onboarding kumo baked us={baked_us}"),

@@ -220,9 +220,13 @@ fn features(packages: &[&str], root: &Path) -> Result<String> {
     if packages.contains(&"kumochi-shell") {
         let manifest = fs::read_to_string(root.join("crates/shell/Cargo.toml"))
             .context("can't read the shell's manifest")?;
+        let manifest: toml::Table = manifest
+            .parse()
+            .map_err(|_| anyhow!("the shell's manifest isn't valid TOML"))?;
         if manifest
-            .lines()
-            .any(|line| line.starts_with("gate-recorder ="))
+            .get("features")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|features| features.contains_key("gate-recorder"))
         {
             features.push_str(",kumochi-shell/gate-recorder");
         }
@@ -868,16 +872,27 @@ mod tests {
         fs::create_dir_all(old.join("crates/shell")).expect("shell folder");
         fs::write(
             old.join("crates/shell/Cargo.toml"),
-            "[features]
-gate-draw-replay = []
-",
+            "[features]\ngate-draw-replay = []\n",
         )
         .expect("old manifest");
         assert_eq!(
             features(&both, &old).expect("an old checkout"),
             "kumochi-protocol/gate-identity"
         );
+        fs::write(
+            old.join("crates/shell/Cargo.toml"),
+            "[features]\n\"gate-recorder\"=[]\n",
+        )
+        .expect("quoted manifest");
+        assert_eq!(
+            features(&both, &old).expect("a quoted key"),
+            "kumochi-protocol/gate-identity,kumochi-shell/gate-recorder"
+        );
         assert!(features(&both, &old.join("missing")).is_err());
+        assert_eq!(
+            features(&["kumochi-brain"], &old.join("missing")).expect("no shell read"),
+            "kumochi-protocol/gate-identity"
+        );
     }
 
     #[test]

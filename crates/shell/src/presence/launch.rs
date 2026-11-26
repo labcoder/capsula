@@ -32,7 +32,7 @@ pub(crate) enum LaunchError {
 }
 
 /// Whether this build carries the gate recorder.
-const RECORDER: bool = cfg!(any(test, feature = "gate-recorder"));
+pub(super) const RECORDER: bool = cfg!(any(test, feature = "gate-recorder"));
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Launch {
@@ -68,7 +68,10 @@ impl Launch {
         let mut launch = Self::default();
         for arg in args {
             if !RECORDER_BUILT
-                && (arg.starts_with("--gate-observer=") || arg.starts_with("--input-diagnostics="))
+                && matches!(
+                    arg.split_once('=').map_or(arg.as_str(), |(name, _)| name),
+                    "--gate-observer" | "--input-diagnostics"
+                )
             {
                 return Err(LaunchError::RecorderOff);
             }
@@ -230,6 +233,15 @@ mod tests {
                 Err(LaunchError::RecorderOff)
             ));
             assert!(Launch::parse_for::<true>(args(flags)).is_ok());
+        }
+        for flags in [
+            &["--gate-observer", "--smoke"][..],
+            &["--input-diagnostics", "input.log"][..],
+        ] {
+            assert!(matches!(
+                Launch::parse_for::<false>(args(flags)),
+                Err(LaunchError::RecorderOff)
+            ));
         }
         assert!(Launch::parse_for::<false>(args(&["--smoke"])).is_ok());
     }
