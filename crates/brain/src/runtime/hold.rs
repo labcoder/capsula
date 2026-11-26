@@ -251,6 +251,19 @@ impl Default for Holds {
 }
 
 impl Holds {
+    /// What a handled hold control left: a pending hold, a debt, a screen part under way.
+    #[cfg(test)]
+    pub(super) fn left(&self) -> super::Seen {
+        super::Seen::HoldsLeft {
+            pending: self.pending.is_some(),
+            debt: self.debt.is_some(),
+            capturing: self
+                .pending
+                .as_ref()
+                .is_some_and(|hold| !matches!(hold.screen, ScreenPart::None)),
+        }
+    }
+
     /// Whether this platform can capture a window and the screen worker started.
     pub(super) fn can_capture_window(&self) -> bool {
         self.window_capture && self.screen.is_some()

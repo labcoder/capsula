@@ -114,10 +114,11 @@ pub(crate) trait AdmissionPair {
     ) -> impl Future<Output = Option<Self::Greeted>>;
     /// The greeted pair's cell, set once either leg refuses.
     fn cell(greeted: &Self::Greeted) -> watch::Receiver<bool>;
-    /// `ShellTuning` by `by`, raced against the parent's loss, then the runtime on both legs,
-    /// with `terminal`, until it ends.
+    /// `ShellTuning` by `by`, written only while the parent and the clock both still pass, then
+    /// the runtime on both legs, lent by `greeted`, with `terminal`, until it ends. The legs stay
+    /// open until the root drops `greeted`.
     fn serve(
-        greeted: Self::Greeted,
+        greeted: &mut Self::Greeted,
         brain: &mut Brain,
         terminal: Terminal,
         shell: &ShellProcess,
@@ -153,12 +154,12 @@ async fn run<S: InstanceStore, P: AdmissionPair>(
     store: impl FnOnce() -> Result<S, S::Error>,
 ) -> Result<(), ParentBoundError> {
     let mut root = Root::<S>::new();
-    let served = root.serve(pair, shell, by, pre, custody, store).await;
+    let (served, greeted) = root.serve(pair, shell, by, pre, custody, store).await;
     let quit = match served {
         Ok(Ended::Quit { deadline }) => Some(deadline),
         _ => None,
     };
-    exit(&served, root.settle(quit).await)
+    exit(&served, root.settle(quit, greeted).await)
 }
 
 /// 0 only for an authenticated, latched Quit that completed with every stage Confirmed. Any
@@ -281,7 +282,8 @@ impl<S: InstanceStore> Root<S> {
         Ok((greeted, committed))
     }
 
-    /// Admits, then runs the stages, then serves until the runtime ends.
+    /// Admits, then runs the stages, then serves until the runtime ends. Returns the greeted pair
+    /// too, once there is one, so its legs close only at settlement.
     async fn serve<P: AdmissionPair>(
         &mut self,
         pair: P,
@@ -290,16 +292,22 @@ impl<S: InstanceStore> Root<S> {
         pre: &mut impl Prerequisites,
         custody: impl FnOnce() -> Result<SessionCustody, CustodyError>,
         store: impl FnOnce() -> Result<S, S::Error>,
-    ) -> Result<Ended, ParentBoundError> {
-        let (greeted, committed) = self.admit(pair, shell, by, custody, store).await?;
-        self.stage(pre, shell, by, &committed)?;
+    ) -> (Result<Ended, ParentBoundError>, Option<P::Greeted>) {
+        let (mut greeted, committed) = match self.admit(pair, shell, by, custody, store).await {
+            Ok(admitted) => admitted,
+            Err(refused) => return (Err(refused), None),
+        };
+        if let Err(refused) = self.stage(pre, shell, by, &committed) {
+            return (Err(refused), Some(greeted));
+        }
         let terminal = Terminal::new(P::cell(&greeted), shell.loss());
         let brain = self
             .stages
             .brain
             .as_mut()
             .expect("the stages built the brain");
-        Ok(P::serve(greeted, brain, terminal, shell, by).await)
+        let ended = P::serve(&mut greeted, brain, terminal, shell, by).await;
+        (Ok(ended), Some(greeted))
     }
 
     /// Runs the stages for a committed admission, each behind a fence and the clock: on entry,
@@ -335,9 +343,10 @@ impl<S: InstanceStore> Root<S> {
     }
 
     /// Quits the Brain by `quit` after an accepted Quit, closes it otherwise, or closes whatever
-    /// started without one; then settles the instance attempt under custody, drops custody, and
-    /// only then the process services.
-    pub(crate) async fn settle(self, quit: Option<Instant>) -> Settled {
+    /// started without one; drops the helpers, then `pair`, so the shell sees EOF only after
+    /// those; then settles the instance attempt under custody, drops custody, and only then the
+    /// process services.
+    pub(crate) async fn settle(self, quit: Option<Instant>, pair: impl Sized) -> Settled {
         let Self {
             admitting: _,
             mut stages,
@@ -350,6 +359,7 @@ impl<S: InstanceStore> Root<S> {
             (None, _) => stages.close_unbuilt().await,
         };
         drop(stages);
+        drop(pair);
         let item = match instance.as_mut() {
             Some(attempt) => attempt.settle().await,
             None => Stage::Confirmed,

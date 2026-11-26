@@ -166,7 +166,7 @@ flowchart TD
   admit["admit: fence, custody, fence, item, READY,<br/>handshake, greeting, fence, claim"]
   stage["stage: fence, ready, fence,<br/>init, open, accounts, Brain, containment"]
   serve["serve: ShellTuning, then both legs"]
-  settle["settle: quit or close, the item, custody,<br/>then the process services"]
+  settle["settle: quit or close, the helpers, the legs,<br/>the item, custody, then the process services"]
   admit --> stage --> serve --> settle
   admit -- refused --> settle
   stage -- refused --> settle
@@ -175,10 +175,13 @@ flowchart TD
 The stage driver fences and checks the clock on entry, asks the prerequisites whether they're
 ready, and fences again before anything starts; each checkpoint fences too. It never starts
 voice: this mode builds no models, so held speech answers NotLoaded, and only what the
-prerequisites' containment allows would start. Serving sends ShellTuning by the same clock,
-raced against the parent's loss, then hands both legs to the runtime with a terminal that
-watches the pair's cell and the parent. Settlement has no admission deadline. The 5-second
-handshake caps sit inside the admission clock.
+prerequisites' containment allows would start. Serving writes ShellTuning only while the parent
+and the same clock both pass, checked right before the write, preferred over a writer that is
+ready at the same time, and checked again after it. It then lends both legs to the runtime with
+a terminal that watches the pair's cell and the parent. The root keeps the pair through
+settlement and drops it after the Brain and its helpers, before the item, so the shell sees EOF
+only once the Brain has settled. A refused admission drops it at once. Settlement has no
+admission deadline. The 5-second handshake caps sit inside the admission clock.
 
 `AdmissionPair` is the seam between that shared driver and the platform's pair: it keys,
 admits, exposes the pair's cell and serves. macOS implements it on the inherited pair; other

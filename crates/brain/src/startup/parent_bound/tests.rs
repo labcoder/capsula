@@ -56,9 +56,9 @@ impl Drop for Hold {
 }
 
 /// The test's ends of a `Hold`.
-struct Holding {
-    entered: async_mpsc::UnboundedReceiver<()>,
-    free: mpsc::Sender<()>,
+pub(crate) struct Holding {
+    pub(crate) entered: async_mpsc::UnboundedReceiver<()>,
+    pub(crate) free: mpsc::Sender<()>,
 }
 
 /// A `Hold`'s parts, unarmed, so a fixture dropped before its accounts start never blocks.
@@ -247,7 +247,7 @@ async fn assert_settles_after_the_release(name: &str, stop: Option<Checkpoint>) 
         ),
     }
     assert!(root.stages.brain.is_none(), "no Brain was built");
-    let settle = root.settle(None);
+    let settle = root.settle(None, ());
     tokio::pin!(settle);
     timeout(PATIENCE, async {
         tokio::select! {
@@ -333,7 +333,7 @@ async fn assert_start_waits_for_the_worker(name: &str, start: Start, kind: io::E
         "{error:?}"
     );
     let custody = watcher.join().expect("the watcher's checks hold");
-    let settled = timeout(PATIENCE, Box::pin(root.settle(None)))
+    let settled = timeout(PATIENCE, Box::pin(root.settle(None, ())))
         .await
         .expect("settling has nothing to wait for");
     assert_eq!(
@@ -377,7 +377,7 @@ async fn an_open_refused_before_the_store_settles_it_confirmed() {
         panic!("a busy profile must stop the start");
     };
     assert!(matches!(error, BrainError::ProfileBusy), "{error:?}");
-    let settled = Box::pin(root.settle(None)).await;
+    let settled = Box::pin(root.settle(None, ())).await;
     assert_eq!(
         settled.runtime.store,
         Stage::Confirmed,
@@ -402,7 +402,7 @@ async fn an_open_failed_after_the_store_settles_it_unconfirmed() {
         panic!("a failed recovery must stop the start");
     };
     assert!(matches!(error, BrainError::Store(_)), "{error:?}");
-    let settled = Box::pin(root.settle(None)).await;
+    let settled = Box::pin(root.settle(None, ())).await;
     assert_eq!(
         settled.runtime.store,
         Stage::Unconfirmed,
@@ -426,7 +426,7 @@ async fn an_open_refused_during_the_stores_setup_settles_it_unconfirmed() {
         panic!("a newer schema must stop the start");
     };
     assert!(matches!(error, BrainError::Store(_)), "{error:?}");
-    let settled = Box::pin(root.settle(None)).await;
+    let settled = Box::pin(root.settle(None, ())).await;
     assert_eq!(
         settled.runtime.store,
         Stage::Unconfirmed,
@@ -496,7 +496,7 @@ impl AdmissionPair for FakePair {
     }
 
     fn serve(
-        greeted: Self,
+        greeted: &mut Self,
         _: &mut Brain,
         _: Terminal,
         _: &ShellProcess,
@@ -590,7 +590,7 @@ async fn admission_fences_again_after_custody_before_the_item() {
     assert!(matches!(admitted, Err(ParentBoundError::Refused)));
     assert_eq!(pair.reached(), 0, "no READY");
     assert!(custody.upgrade().is_none(), "the unused custody is let go");
-    assert_eq!(Box::pin(root.settle(None)).await.item, Stage::Confirmed);
+    assert_eq!(Box::pin(root.settle(None, ())).await.item, Stage::Confirmed);
 }
 
 #[tokio::test]
@@ -618,7 +618,7 @@ async fn a_second_admission_after_a_refusal_refuses_without_running_anything() {
     .await;
     assert!(matches!(second, Err(ParentBoundError::Refused)));
     assert_eq!(pair.reached(), 0);
-    assert_eq!(Box::pin(root.settle(None)).await.item, Stage::Confirmed);
+    assert_eq!(Box::pin(root.settle(None, ())).await.item, Stage::Confirmed);
 }
 
 /// Starts an admission whose add the slot holds, waits for that add to enter, then drops it.
@@ -660,7 +660,7 @@ async fn custody_outlives_an_admission_dropped_during_publish_until_settlement()
         "custody is held while the add is out"
     );
     release.send(()).expect("the add waits");
-    assert_eq!(Box::pin(root.settle(None)).await.item, Stage::Confirmed);
+    assert_eq!(Box::pin(root.settle(None, ())).await.item, Stage::Confirmed);
     assert!(!slot.present(), "settlement deleted what the add wrote");
     assert!(custody.upgrade().is_none(), "settlement let custody go");
 }
@@ -688,7 +688,7 @@ async fn a_second_admission_after_a_cancelled_one_leaves_its_attempt_alone() {
         "the first attempt still holds custody"
     );
     release.send(()).expect("the add waits");
-    assert_eq!(Box::pin(root.settle(None)).await.item, Stage::Confirmed);
+    assert_eq!(Box::pin(root.settle(None, ())).await.item, Stage::Confirmed);
     assert!(!slot.present());
     assert!(custody.upgrade().is_none());
 }
@@ -719,7 +719,10 @@ async fn run_to(name: &str, ends: Ended, lose: Option<LoseAt>) -> Ran {
             later(),
             item.clone(),
             SessionCustody::fixture(token),
-            lose,
+            Script {
+                lose,
+                ..Script::default()
+            },
         ),
     )
     .await
@@ -776,8 +779,46 @@ async fn a_loss_after_the_claim_stops_at_the_next_checkpoint() {
     assert!(ran.custody.upgrade().is_none());
 }
 
+/// Prerequisites none of whose stages may run: `ready` refuses, or fails the test when even asking
+/// is too early, and every later stage fails the test.
+struct Unready {
+    ask: bool,
+}
+
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "a stage that runs before readiness fails the test"
+)]
+impl Prerequisites for Unready {
+    fn ready(&self) -> Result<(), NotReady> {
+        assert!(self.ask, "readiness is asked only after the entry fence");
+        Err(NotReady)
+    }
+
+    fn init(&mut self) -> Result<ProcessInit, BrainError> {
+        panic!("init runs only once ready")
+    }
+
+    fn open(&mut self, _: &mut bool) -> Result<OpenedState, BrainError> {
+        panic!("open runs only once ready")
+    }
+
+    fn accounts(
+        &mut self,
+        _: OAuthTuning,
+        _: TokenTuning,
+        _: Arc<SessionLock>,
+    ) -> Result<(Accounts, VaultHeld), BrainError> {
+        panic!("accounts start only once ready")
+    }
+
+    fn containment(&mut self) -> Result<Option<Arc<Job>>, BrainError> {
+        panic!("containment is asked only once ready")
+    }
+}
+
 #[tokio::test]
-async fn this_builds_prerequisites_refuse_after_a_full_admission() {
+async fn unready_prerequisites_refuse_after_a_full_admission_before_any_stage() {
     let item = Slot::default();
     let token = Arc::new(());
     let custody = Arc::downgrade(&token);
@@ -786,7 +827,7 @@ async fn this_builds_prerequisites_refuse_after_a_full_admission() {
         pair.clone(),
         &live(),
         later(),
-        &mut Pending,
+        &mut Unready { ask: true },
         || Ok(SessionCustody::fixture(token)),
         || Ok(item.clone()),
     ))
@@ -795,6 +836,28 @@ async fn this_builds_prerequisites_refuse_after_a_full_admission() {
     assert_eq!(pair.reached(), 2, "admitted, never served");
     assert!(!item.present());
     assert!(custody.upgrade().is_none());
+}
+
+/// A committed start whose parent is already lost, or whose clock already ran out, refuses on
+/// entry, before it asks whether it's ready.
+#[test]
+fn the_stage_driver_fences_on_entry_before_asking_whether_its_ready() {
+    for lost in [true, false] {
+        let shell = live();
+        let committed = shell.claim_commit().expect("the one claim");
+        let by = if lost {
+            assert!(!shell.publish(1), "the claim came first");
+            later()
+        } else {
+            Instant::now()
+        };
+        let mut root = Root::<NoItem>::new();
+        assert_eq!(
+            root.stage(&mut Unready { ask: false }, &shell, by, &committed),
+            Err(ParentBoundError::Refused),
+            "lost: {lost}"
+        );
+    }
 }
 
 #[test]
@@ -863,9 +926,19 @@ fn the_exit_follows_the_served_end_unless_a_stage_is_short_of_confirmed() {
     }
 }
 
-/// Runs a parent-bound start on `pair` with the fixture stages, `custody` and `item`, losing
-/// the parent at `lose` if set; returns its result and the stages it ran. The platforms' own
-/// pair tests use it too.
+/// How a fixture run goes beyond its defaults.
+#[derive(Default)]
+pub(crate) struct Script {
+    /// Where the parent is lost, if anywhere.
+    pub(crate) lose: Option<LoseAt>,
+    /// Takes the accounts' release hold, so the test decides when the credential thread lets go;
+    /// without it the release never waits.
+    pub(crate) hold: Option<mpsc::Sender<Holding>>,
+}
+
+/// Runs a parent-bound start on `pair` with the fixture stages, `custody` and `item`, as
+/// `script` says; returns its result and the stages it ran. The platforms' own pair tests use it
+/// too.
 pub(crate) async fn run_on_fixtures<S: InstanceStore, P: AdmissionPair>(
     scratch: &Scratch,
     pair: P,
@@ -873,10 +946,14 @@ pub(crate) async fn run_on_fixtures<S: InstanceStore, P: AdmissionPair>(
     by: Instant,
     item: S,
     custody: SessionCustody,
-    lose: Option<LoseAt>,
+    script: Script,
 ) -> (Result<(), ParentBoundError>, Vec<&'static str>) {
-    let (mut pre, _) = Scripted::new(scratch, Start::Held);
-    pre.lose = lose.map(|at| (at, shell.clone()));
+    let (mut pre, holding) = Scripted::new(scratch, Start::Held);
+    pre.lose = script.lose.map(|at| (at, shell.clone()));
+    match script.hold {
+        Some(hold) => hold.send(holding).expect("the test takes the hold"),
+        None => drop(holding),
+    }
     let result = Box::pin(run(pair, shell, by, &mut pre, || Ok(custody), || Ok(item))).await;
     (result, pre.calls)
 }

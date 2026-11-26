@@ -353,6 +353,14 @@ pub(crate) enum Seen {
     QuitDraining,
     /// A settings write is on disk and became the settings.
     SettingsCommitted,
+    /// A served pair's link measures text with this profile.
+    TextMetrics(Option<TextMetricsV1>),
+    /// A hold control was handled, and this is what it left behind.
+    HoldsLeft {
+        pending: bool,
+        debt: bool,
+        capturing: bool,
+    },
 }
 
 impl Brain {
@@ -1090,6 +1098,8 @@ impl Brain {
             let mut link = Link::new(&out_tx, &queue, &ready, &mut *tap);
             link.registration = registration;
             link.text_metrics = text_metrics;
+            #[cfg(test)]
+            self.observer.send(Seen::TextMetrics(text_metrics)).ok();
             link.start = start;
             let core = self.core::<WATCH_FATAL>(
                 &mut controls,

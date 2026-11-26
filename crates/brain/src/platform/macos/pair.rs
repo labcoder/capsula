@@ -180,7 +180,7 @@ impl AdmissionPair for InheritedPair {
     }
 
     fn serve(
-        greeted: Greeted,
+        greeted: &mut Greeted,
         brain: &mut Brain,
         terminal: Terminal,
         shell: &ShellProcess,
@@ -365,58 +365,67 @@ pub(crate) struct Greeted {
     admitted: ipc::Admitted<ShellProcess>,
 }
 
-/// Serves the admitted shell once the stages built `brain`: `ShellTuning` goes out by `by`, raced
-/// against the parent's loss, then the session and the shell are installed and the runtime serves
-/// both legs with `terminal`. The greeting's text metrics are handed on as a value, and any bytes
-/// already buffered after them stay in the data leg's reader.
+/// Serves the admitted shell once the stages built `brain`: `ShellTuning` goes out by `by` while
+/// the parent and the clock both pass, then the session and the shell are installed and the
+/// runtime serves both legs, lent by `greeted`, with `terminal`. The greeting's text metrics are
+/// handed on as a value, and any bytes already buffered after them stay in the data leg's reader.
 async fn serve(
-    greeted: Greeted,
+    greeted: &mut Greeted,
     brain: &mut Brain,
     terminal: Terminal,
     shell: &ShellProcess,
     by: Instant,
 ) -> Ended {
-    let Greeted { mut pair, admitted } = greeted;
-    let ipc::Admitted {
-        peer,
-        audio,
-        start,
-        session,
-        text_metrics,
-    } = admitted;
+    let Greeted { pair, admitted } = greeted;
     let tuning = ControlToShell::ShellTuning {
-        session,
+        session: admitted.session,
         tuning: brain.shell_tuning(),
     };
     let Ok(tuning) = frame::encode(&tuning, Pipe::Control) else {
         return Ended::Broken("the shell tuning doesn't encode");
     };
-    let sent = fenced(shell, by, async {
-        pair.write_control(&tuning)
-            .await
-            .map_err(|_| PairError::Transport)
-    })
-    .await;
-    if sent.is_err() {
+    if tune(pair, shell, by, &tuning).await.is_err() {
         return Ended::Lost;
     }
-    let Ok((control, data)) = pair.into_legs() else {
+    let Ok((control, data)) = pair.legs() else {
         return Ended::Broken("the greeted pair isn't greeted");
     };
-    brain.install_issue_session(session);
-    let _shell_identity = peer.register();
-    brain.connected_shell(peer);
+    brain.install_issue_session(admitted.session);
+    let _shell_identity = admitted.peer.register();
+    brain.connected_shell(admitted.peer.clone());
     brain
         .serve_split(
             control,
             data,
             &mut Tap::default(),
-            audio,
-            text_metrics,
-            start,
+            admitted.audio,
+            admitted.text_metrics,
+            admitted.start,
             Some(terminal),
         )
         .await
+}
+
+/// Writes `frame` on control only while the parent and the clock both pass right before it; a
+/// loss or the deadline wins over a writer that is ready at the same time, and both are checked
+/// again once it's written.
+async fn tune(
+    pair: &mut AuthenticatedPair,
+    shell: &ShellProcess,
+    by: Instant,
+    frame: &[u8],
+) -> Result<(), PairError> {
+    shell.fence().map_err(|_| PairError::Lost)?;
+    before(by)?;
+    let mut loss = shell.loss();
+    tokio::select! {
+        biased;
+        _ = Verdict::lost(&mut loss) => return Err(PairError::Lost),
+        () = tokio::time::sleep_until(by) => return Err(PairError::Timeout),
+        written = pair.write_control(frame) => written.map_err(|_| PairError::Transport)?,
+    }
+    shell.fence().map_err(|_| PairError::Lost)?;
+    before(by)
 }
 
 /// Admits the parent shell on `keyed` by `by`: READY, then the responder handshake and the
@@ -493,7 +502,10 @@ enum Stage {
 
 /// One leg as the runtime serves it: frames read through its opener, written whole through its
 /// sealer.
-type Leg = (RecordReader<OwnedReadHalf>, RecordWriter<OwnedWriteHalf>);
+type Leg<'a> = (
+    &'a mut RecordReader<OwnedReadHalf>,
+    &'a mut RecordWriter<OwnedWriteHalf>,
+);
 
 /// A pair whose handshake finished with `BindAck`: both legs' record adapters over one pair cell.
 pub(crate) struct AuthenticatedPair {
@@ -610,17 +622,17 @@ impl AuthenticatedPair {
         self.pair.send_replace(true);
     }
 
-    /// Hands both legs to the runtime once both greetings were read. The legs keep sharing the
-    /// pair's cell, which the runtime's terminal watches.
+    /// Lends both legs to the runtime once both greetings were read; they close only when the
+    /// pair drops. The legs keep sharing the pair's cell, which the runtime's terminal watches.
     ///
     /// # Errors
     /// `Order` unless both greetings were read.
-    pub(crate) fn into_legs(self) -> Result<(Leg, Leg), PairError> {
+    pub(crate) fn legs(&mut self) -> Result<(Leg<'_>, Leg<'_>), PairError> {
         if self.stage != Stage::Greeted {
             return Err(PairError::Order);
         }
-        let [control_out, data_out] = self.writers;
-        Ok(((self.control, control_out), (self.data, data_out)))
+        let [control_out, data_out] = &mut self.writers;
+        Ok(((&mut self.control, control_out), (&mut self.data, data_out)))
     }
 }
 
@@ -663,3 +675,7 @@ mod admission_tests;
 #[cfg(test)]
 #[path = "pair_admit_tests.rs"]
 mod admit_tests;
+
+#[cfg(test)]
+#[path = "pair_serve_tests.rs"]
+mod serve_tests;

@@ -84,7 +84,7 @@ impl crate::startup::parent_bound::AdmissionPair for InheritedPair {
         reason = "an async fn here trips unused_async_trait_impl"
     )]
     fn serve(
-        greeted: Self,
+        greeted: &mut Self,
         _: &mut crate::runtime::Brain,
         _: crate::runtime::Terminal,
         _: &ShellProcess,

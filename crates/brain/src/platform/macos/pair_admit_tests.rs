@@ -29,17 +29,32 @@ use crate::platform::shell_process::Verdict;
 use crate::runtime::Stage;
 use crate::startup::custody::{CustodyError, SessionCustody};
 use crate::startup::instance::{Added, InstanceStore};
-use crate::startup::parent_bound::tests::run_on_fixtures;
 use crate::startup::parent_bound::{BEFORE_CLAIM, Root};
-use crate::test_support::Scratch;
 
-/// The one item in a fake keychain, shared so a test still sees it after the attempt.
+/// Where a held delete says it entered, and what releases it.
+type HeldDelete = Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>;
+
+/// The one item in a fake keychain, shared so a test still sees it after the attempt; its next
+/// delete can be held.
 #[derive(Clone, Default)]
-struct Item(Arc<Mutex<Option<[u8; CAPABILITY_LEN]>>>);
+pub(super) struct Item {
+    key: Arc<Mutex<Option<[u8; CAPABILITY_LEN]>>>,
+    hold: Arc<Mutex<HeldDelete>>,
+}
 
 impl Item {
-    fn get(&self) -> Option<[u8; CAPABILITY_LEN]> {
-        *self.0.lock().expect("item")
+    pub(super) fn get(&self) -> Option<[u8; CAPABILITY_LEN]> {
+        *self.key.lock().expect("item")
+    }
+
+    /// Holds the next delete until the returned sender releases it; the receiver hears it enter.
+    pub(super) fn hold_delete(
+        &self,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *self.hold.lock().expect("hold") = Some((entered, released));
+        (started, release)
     }
 }
 
@@ -47,7 +62,7 @@ impl InstanceStore for Item {
     type Error = ();
 
     fn add(&self, key: &[u8; CAPABILITY_LEN]) -> Result<Added, ()> {
-        let mut item = self.0.lock().expect("item");
+        let mut item = self.key.lock().expect("item");
         if item.is_some() {
             return Ok(Added::Duplicate);
         }
@@ -60,7 +75,7 @@ impl InstanceStore for Item {
     }
 
     fn update(&self, key: &[u8; CAPABILITY_LEN]) -> Result<(), ()> {
-        *self.0.lock().expect("item") = Some(*key);
+        *self.key.lock().expect("item") = Some(*key);
         Ok(())
     }
 
@@ -70,7 +85,13 @@ impl InstanceStore for Item {
     }
 
     fn delete(&self) -> Result<(), ()> {
-        self.0.lock().expect("item").take().map(drop).ok_or(())
+        if let Some((entered, released)) = self.hold.lock().expect("hold").take() {
+            entered.send(()).expect("the test listens");
+            released
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the test releases");
+        }
+        self.key.lock().expect("item").take().map(drop).ok_or(())
     }
 }
 
@@ -87,7 +108,7 @@ fn fixture() -> ShellProcess {
 }
 
 /// An adopted pair that tokio doesn't hold yet, and the shell's ends.
-fn inherited() -> (InheritedPair, [UnixStream; 2]) {
+pub(super) fn inherited() -> (InheritedPair, [UnixStream; 2]) {
     let (control, shell_control) = sockets();
     let (data, shell_data) = sockets();
     let pair = adopt(fd(control), fd(data)).expect("adopted");
@@ -125,7 +146,7 @@ fn never() -> IssueSession {
 }
 
 /// The shell's side of a bound pair, greeting and then serving.
-struct Greeter {
+pub(super) struct Greeter {
     control: RecordWriter<OwnedWriteHalf>,
     data: RecordWriter<OwnedWriteHalf>,
     from_control: RecordReader<OwnedReadHalf>,
@@ -151,7 +172,7 @@ impl Greeter {
     }
 
     /// Sends the control greeting and returns the reply, then sends the data greeting.
-    async fn hellos(&mut self) -> ControlToShell {
+    pub(super) async fn hellos(&mut self) -> ControlToShell {
         let control =
             frame::encode(&ControlToBrain::Hello(hello()), Pipe::Control).expect("encodes");
         self.control
@@ -167,16 +188,16 @@ impl Greeter {
         reply
     }
 
-    async fn metrics(&mut self) {
+    pub(super) async fn metrics(&mut self) {
         self.send_data(&DataToBrain::TextMetrics(None)).await;
     }
 
-    async fn send_data(&mut self, message: &DataToBrain) {
+    pub(super) async fn send_data(&mut self, message: &DataToBrain) {
         let bytes = frame::encode(message, Pipe::Data).expect("encodes");
         self.data.write_frame(&bytes).await.expect("a data frame");
     }
 
-    async fn send_control(&mut self, message: &ControlToBrain) {
+    pub(super) async fn send_control(&mut self, message: &ControlToBrain) {
         let bytes = frame::encode(message, Pipe::Control).expect("encodes");
         self.control
             .write_frame(&bytes)
@@ -186,7 +207,7 @@ impl Greeter {
 
     /// Reads control frames, answering pings, until `done` takes one; returns every other frame
     /// read on the way and that one last.
-    async fn control_until(
+    pub(super) async fn control_until(
         &mut self,
         done: impl Fn(&ControlToShell) -> bool,
     ) -> Vec<ControlToShell> {
@@ -210,7 +231,7 @@ impl Greeter {
     }
 
     /// Quits, then reads the control leg to its end; returns what came after the Quit.
-    async fn quit(&mut self) -> Vec<ControlToShell> {
+    pub(super) async fn quit(&mut self) -> Vec<ControlToShell> {
         self.send_control(&ControlToBrain::Quitting).await;
         let mut frames = Vec::new();
         while let Some(frame) = ipc::read::<ControlToShell>(&mut self.from_control, Pipe::Control)
@@ -227,8 +248,45 @@ impl Greeter {
         matches!(self.data_in.read(&mut [0; 1]).await, Ok(0))
     }
 
+    /// True when neither leg reaches EOF within `quiet`, reading whatever was already written.
+    pub(super) async fn open_for(&mut self, quiet: Duration) -> bool {
+        loop {
+            match tokio::time::timeout(
+                quiet,
+                ipc::read::<ControlToShell>(&mut self.from_control, Pipe::Control),
+            )
+            .await
+            {
+                Err(_) => break,
+                Ok(Ok(Some(_))) => {}
+                Ok(_) => return false,
+            }
+        }
+        let mut buffer = [0; 4096];
+        loop {
+            match tokio::time::timeout(quiet, self.data_in.read(&mut buffer)).await {
+                Err(_) => return true,
+                Ok(Ok(read)) if read > 0 => {}
+                Ok(_) => return false,
+            }
+        }
+    }
+
+    /// Reads both legs to their ends.
+    pub(super) async fn read_to_end(&mut self) {
+        while ipc::read::<ControlToShell>(&mut self.from_control, Pipe::Control)
+            .await
+            .expect("whole frames until the end")
+            .is_some()
+        {}
+        self.data_in
+            .read_to_end(&mut Vec::new())
+            .await
+            .expect("the data leg reads to its end");
+    }
+
     /// True once the brain closed the control leg with nothing more written.
-    async fn closed(&mut self) -> bool {
+    pub(super) async fn closed(&mut self) -> bool {
         ipc::read::<ControlToShell>(&mut self.from_control, Pipe::Control)
             .await
             .is_ok_and(|frame| frame.is_none())
@@ -236,7 +294,7 @@ impl Greeter {
 }
 
 /// The parent shell: READY, then the item READY vouches for, then the handshake on its secret.
-async fn parent(mut ends: [UnixStream; 2], item: &Item) -> Greeter {
+pub(super) async fn parent(mut ends: [UnixStream; 2], item: &Item) -> Greeter {
     let mut ready = [0; 1];
     ends[0].read_exact(&mut ready).await.expect("READY");
     assert_eq!(ready, [0x52]);
@@ -398,7 +456,7 @@ async fn admission_publishes_before_ready_and_claims_after_the_greeting() {
     );
     drop(greeted);
     assert!(item.get().is_some());
-    assert_eq!(Box::pin(root.settle(None)).await.item, Stage::Confirmed);
+    assert_eq!(Box::pin(root.settle(None, ())).await.item, Stage::Confirmed);
     assert!(item.get().is_none());
 }
 
@@ -423,7 +481,7 @@ async fn a_loss_between_the_last_fence_and_the_claim_refuses() {
     })
     .await;
     assert!(matches!(admitted, Err(ParentBoundError::Refused)));
-    assert_eq!(Box::pin(root.settle(None)).await.item, Stage::Confirmed);
+    assert_eq!(Box::pin(root.settle(None, ())).await.item, Stage::Confirmed);
     assert!(item.get().is_none());
 }
 
@@ -446,7 +504,7 @@ async fn busy_custody_refuses_before_any_item_call_or_ready() {
     assert!(matches!(admitted, Err(ParentBoundError::Busy)));
     assert!(!called.load(Ordering::SeqCst), "no item was made");
     assert!(!ready_seen(&control));
-    assert_eq!(Box::pin(root.settle(None)).await.item, Stage::Confirmed);
+    assert_eq!(Box::pin(root.settle(None, ())).await.item, Stage::Confirmed);
 }
 
 /// Admits on a fresh pair with `shell` by `by`, where neither factory may run; returns whether
@@ -518,7 +576,7 @@ async fn custody_outlives_an_admission_dropped_after_ready_until_settlement() {
         item.get().is_some(),
         "the item READY vouched for is still there"
     );
-    assert_eq!(Box::pin(root.settle(None)).await.item, Stage::Confirmed);
+    assert_eq!(Box::pin(root.settle(None, ())).await.item, Stage::Confirmed);
     assert!(item.get().is_none(), "settlement retired the item");
     assert!(custody.upgrade().is_none(), "settlement let custody go");
 }
@@ -537,156 +595,4 @@ fn only_an_installed_or_a_development_edition_has_a_session_channel() {
         channel(ProductIdentity::GATE),
         Err(PairError::Edition)
     ));
-}
-
-#[tokio::test]
-async fn text_metrics_are_handed_over_once_and_the_frame_buffered_after_them_is_served() {
-    use kumochi_protocol::message::{RunId, ScreenChoice};
-
-    let scratch = Scratch::new("pair-handover");
-    let item = Item::default();
-    let shell = fixture();
-    let (pair, ends) = inherited();
-    let ((ran, stages), (served, after)) = bounded(async {
-        tokio::join!(
-            run_on_fixtures(
-                &scratch,
-                pair,
-                &shell,
-                by(),
-                item.clone(),
-                SessionCustody::fixture(Arc::new(())),
-                None,
-            ),
-            async {
-                let mut greeter = parent(ends, &item).await;
-                let submit = DataToBrain::TextSubmit {
-                    turn: 1,
-                    thread: None,
-                    screen: ScreenChoice::None,
-                    text: "go".into(),
-                };
-                for message in [
-                    DataToBrain::Hello(hello()),
-                    DataToBrain::TextMetrics(None),
-                    submit,
-                ] {
-                    greeter.send_data(&message).await;
-                }
-                greeter.send_control(&ControlToBrain::Hello(hello())).await;
-                let served = greeter
-                    .control_until(|frame| {
-                        matches!(frame, ControlToShell::RunState { run: RunId(1), .. })
-                    })
-                    .await;
-                (served, greeter.quit().await)
-            },
-        )
-    })
-    .await;
-    assert_eq!(ran, Ok(()), "served {served:?}, then {after:?}");
-    assert_eq!(stages, ["init", "open", "accounts", "containment"]);
-    assert!(matches!(
-        served.first(),
-        Some(ControlToShell::Welcome { issue_epoch: 1, .. })
-    ));
-    assert!(item.get().is_none(), "settlement deleted the item");
-}
-
-#[tokio::test]
-async fn holds_without_voice_or_screen_fail_not_loaded_and_a_quit_exits_cleanly() {
-    use kumochi_protocol::geometry::PhysicalPoint;
-    use kumochi_protocol::message::{
-        CaptureFailure, CaptureFor, GestureId, HoldFailure, HoldStatus, LeaseGeneration,
-    };
-
-    let scratch = Scratch::new("pair-holds");
-    let item = Item::default();
-    let shell = fixture();
-    let (pair, ends) = inherited();
-    let holds = [
-        ControlToBrain::VoiceHoldRecognized {
-            gesture: GestureId(1),
-            thread: None,
-            selection: 1,
-        },
-        ControlToBrain::HoldRecognized {
-            gesture: GestureId(2),
-            thread: None,
-            selection: 1,
-            pointer: PhysicalPoint([0, 0]),
-            lease: LeaseGeneration(1),
-            t_qpc: 1,
-            notice: None,
-        },
-        ControlToBrain::ScreenHoldRecognized {
-            gesture: GestureId(3),
-            thread: None,
-            selection: 1,
-            t_qpc: 2,
-            notice: None,
-        },
-    ];
-    let ((ran, stages), (answers, after)) = bounded(async {
-        tokio::join!(
-            run_on_fixtures(
-                &scratch,
-                pair,
-                &shell,
-                by(),
-                item.clone(),
-                SessionCustody::fixture(Arc::new(())),
-                None,
-            ),
-            async {
-                let mut greeter = parent(ends, &item).await;
-                greeter.hellos().await;
-                greeter.metrics().await;
-                greeter
-                    .control_until(|frame| matches!(frame, ControlToShell::Scenes { .. }))
-                    .await;
-                let mut answers = Vec::new();
-                for hold in &holds {
-                    greeter.send_control(hold).await;
-                    let last = match hold {
-                        ControlToBrain::HoldRecognized { .. } => capture_failed,
-                        _ => voice_status,
-                    };
-                    answers.push(greeter.control_until(last).await);
-                }
-                (answers, greeter.quit().await)
-            },
-        )
-    })
-    .await;
-    let not_loaded = |gesture| ControlToShell::VoiceHoldStatus {
-        gesture: GestureId(gesture),
-        status: HoldStatus::Failed(HoldFailure::NotLoaded),
-    };
-    assert_eq!(
-        answers,
-        [
-            vec![not_loaded(1)],
-            vec![
-                not_loaded(2),
-                ControlToShell::CaptureFailed {
-                    capture_for: CaptureFor::Gesture(GestureId(2)),
-                    reason: CaptureFailure::Unavailable,
-                },
-            ],
-            vec![not_loaded(3)],
-        ]
-    );
-    assert_eq!(after, [], "nothing was pending at the Quit");
-    assert_eq!(ran, Ok(()));
-    assert_eq!(stages, ["init", "open", "accounts", "containment"]);
-    assert!(item.get().is_none(), "settlement deleted the item");
-}
-
-fn voice_status(frame: &ControlToShell) -> bool {
-    matches!(frame, ControlToShell::VoiceHoldStatus { .. })
-}
-
-fn capture_failed(frame: &ControlToShell) -> bool {
-    matches!(frame, ControlToShell::CaptureFailed { .. })
 }
