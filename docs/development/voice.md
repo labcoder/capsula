@@ -512,8 +512,10 @@ somewhere else:
 
 - **One private anchor.** Every path must be below the Support anchor that `admit_support`
   admits. Each folder below it must be this user's, mode 0700, with no ACL at all, on the anchor's
-  volume. Each call walks again from `/`, and each entry is looked at without following it
-  before it's opened, so a link or a cloud placeholder is refused before anything is read.
+  volume. Each call walks again from `/`, and each entry is looked at without following it, and
+  its type, owner, links and volume are checked before it's opened. Its ACL is checked after. A
+  placeholder is refused only as that look sees it, so the anchor must be outside file
+  providers.
 - **Exclusive partials, sealed finals.** A partial is created only with `O_EXCL` at 0600 and
   locked. `seal_and_publish` seals it (0400 for a model, 0500 for a staged native library),
   then renames it with `RENAME_EXCL`, so an arrival at the final name is kept. It then flushes
@@ -524,7 +526,8 @@ somewhere else:
   65,536 entries. It then deletes leaves first, each once its name still gives what the first pass
   saw, and flushes the folder above. A part already gone counts as removed.
 
-This assumes one cooperating writer. A rename by this user between two calls isn't detected.
+This assumes one cooperating writer. A rename by this user between two calls isn't detected,
+and neither is a replacement made between a removal's last look and its unlink.
 An entry that already exists is admitted on its present metadata, not proven private since it was
 made.
 
