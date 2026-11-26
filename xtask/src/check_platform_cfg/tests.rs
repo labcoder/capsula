@@ -47,6 +47,7 @@ fn excludes_platform_and_test_paths_but_counts_duplicate_product_sites() {
         "platform.rs",
         "platform/unix.rs",
         "normal_tests.rs",
+        "test_support.rs",
         "parts/tests/case.rs",
         "fixtures/case.rs",
         "normal.rs",
@@ -73,4 +74,58 @@ fn baseline_substitutions_and_duplicate_growth_fail_but_removals_pass() {
     assert_eq!(excess(&substituted, &base), [("c", 1)]);
     let duplicated = counts("a\na\na\nb\n");
     assert_eq!(excess(&duplicated, &base), [("a", 1)]);
+}
+
+#[test]
+fn detects_cfg_select_literals_and_nested_applied_cfg() {
+    let source = r#"#[cfg(all(windows, true))]
+#[cfg_attr(all(), cfg(unix))]
+fn select() {
+    let _ = cfg_select! {
+        target_os = "macos" => "apple",
+        not(unix) => { "other" }
+        windows => "win",
+        _ => "fallback",
+    };
+}"#;
+    let mut sites = Vec::new();
+    scan(source.parse().unwrap(), &mut |line, signature| {
+        sites.push((line, signature));
+    });
+    assert_eq!(
+        sites,
+        [
+            (1, "#[cfg(all (windows , true))]".to_owned()),
+            (2, "#[cfg_attr(all ()) -> cfg(unix)]".to_owned()),
+            (5, "cfg_select!(target_os = \"macos\")".to_owned()),
+            (6, "cfg_select!(not (unix))".to_owned()),
+            (7, "cfg_select!(windows)".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn skips_test_gated_siblings_and_macro_bodies_and_normalizes_commas() {
+    let source = r"#[cfg(windows)]
+#[cfg(all(test, unix))]
+fn wrapped() { let _ = cfg!(windows); }
+#[cfg(test)]
+thread_local! { #[cfg(windows)] static N: usize = 0; }
+#[test]
+fn test_fn() { let _ = cfg!(windows); }
+#[cfg(any(windows, unix,))]
+fn trailing() {}
+#[cfg(any(windows, unix))]
+fn no_trailing() {}";
+    let mut sites = Vec::new();
+    scan(source.parse().unwrap(), &mut |line, signature| {
+        sites.push((line, signature));
+    });
+    assert_eq!(
+        sites,
+        [
+            (8, "#[cfg(any (windows , unix))]".to_owned()),
+            (10, "#[cfg(any (windows , unix))]".to_owned()),
+        ]
+    );
 }

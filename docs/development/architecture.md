@@ -224,13 +224,13 @@ vsync test. Each job restores its own cache, and only runs on main save one. The
 and the profile's temp folder on C: takes them seven to ten times slower.
 
 `cargo xtask check-platform-cfg` keeps plain OS predicates out of product code outside
-`platform.rs` and `platform/`. It scans Rust source under `crates/*/src`, skipping test and fixture
-files and inline `#[cfg(test)] mod` bodies. A plain predicate uses only OS selectors
+`platform.rs` and `platform/`. It scans Rust source under `crates/*/src`, skipping conventionally
+named test and fixture files and test-gated items. A plain predicate uses only OS selectors
 (`windows`, `unix`, `target_os`, or `target_family`), not feature, debug, or test gates.
-The baseline records the existing predicates per file, including repeated sites, without line
-numbers. When a branch removes a site, delete its baseline entry (the command's `--list` output
-shows the current inventory). CI compares against the base for pull requests and batch pushes
-so the baseline cannot grow to admit a new site.
+The baseline counts occurrences of each predicate per file; line changes and relocating an
+identical predicate within the same file do not change that count. Delete an entry when removing
+its site (use `--list` to see the current inventory). CI compares against the PR base or current
+`origin/main` for batch pushes so the baseline cannot grow to admit a new site.
 
 ## The brain is a game loop
 

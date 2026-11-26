@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context as _, Result, bail, ensure};
-use proc_macro2::{Delimiter, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
 
 const BASELINE: &str = "xtask/platform-cfg-baseline.txt";
 
@@ -112,7 +112,7 @@ fn collect(root: &Path, folder: &Path, sites: &mut BTreeMap<String, Vec<usize>>)
         let name = name.to_string_lossy();
         if matches!(
             name.as_ref(),
-            "platform" | "platform.rs" | "tests" | "tests.rs" | "fixtures"
+            "platform" | "platform.rs" | "tests" | "tests.rs" | "test_support.rs" | "fixtures"
         ) || name.ends_with("_tests")
             || name.ends_with("_tests.rs")
             || name.ends_with("_fixture.rs")
@@ -146,52 +146,38 @@ fn scan(stream: TokenStream, found: &mut impl FnMut(usize, String)) {
     let tokens: Vec<_> = stream.into_iter().collect();
     let mut cursor = tokens.as_slice();
     while let [first, rest @ ..] = cursor {
-        if let TokenTree::Punct(hash) = first
-            && hash.as_char() == '#'
-        {
-            let (inner, tail) = match rest {
-                [TokenTree::Punct(bang), tail @ ..] if bang.as_char() == '!' => (true, tail),
-                _ => (false, rest),
-            };
-            if let [TokenTree::Group(group), tail @ ..] = tail
-                && group.delimiter() == Delimiter::Bracket
-            {
-                let attribute: Vec<_> = group.stream().into_iter().collect();
-                if let [TokenTree::Ident(name), TokenTree::Group(body)] = attribute.as_slice()
-                    && body.delimiter() == Delimiter::Parenthesis
-                {
-                    let is_cfg = name == "cfg";
-                    if inner && is_cfg && body.stream().to_string() == "test" {
+        if attribute(cursor).is_some() {
+            let mut sites = Vec::new();
+            let mut test_item = false;
+            while let Some((inner, body, tail)) = attribute(cursor) {
+                let fields: Vec<_> = body.stream().into_iter().collect();
+                if test_attribute(&fields) {
+                    if inner {
                         return;
                     }
-                    if !inner
-                        && is_cfg
-                        && body.stream().to_string() == "test"
-                        && let Some(tail) = after_test_module(tail)
-                    {
-                        cursor = tail;
-                        continue;
-                    }
-                    if is_cfg || name == "cfg_attr" {
-                        let predicate: TokenStream = body
-                            .stream()
-                            .into_iter()
-                            .take_while(
-                                |token| !matches!(token, TokenTree::Punct(p) if p.as_char() == ','),
-                            )
-                            .collect();
-                        if plain_os(&predicate) {
-                            let prefix = if inner { "#!" } else { "#" };
-                            found(
-                                hash.span().start().line,
-                                format!("{prefix}[{name}({predicate})]"),
-                            );
-                        }
-                    }
+                    test_item = true;
                 }
+                let prefix = if inner { "#!" } else { "#" };
+                attribute_sites(&fields, "", &mut |signature| {
+                    sites.push((
+                        body.span_open().start().line,
+                        format!("{prefix}[{signature}]"),
+                    ));
+                });
                 cursor = tail;
-                continue;
             }
+            if test_item {
+                cursor = cursor
+                    .iter()
+                    .position(|token| punct(token, ';') || punct(token, ',')
+                        || matches!(token, TokenTree::Group(body) if body.delimiter() == Delimiter::Brace))
+                    .map_or(&[], |end| &cursor[end + 1..]);
+            } else {
+                for (line, signature) in sites {
+                    found(line, signature);
+                }
+            }
+            continue;
         }
         if let [
             TokenTree::Ident(name),
@@ -199,11 +185,39 @@ fn scan(stream: TokenStream, found: &mut impl FnMut(usize, String)) {
             TokenTree::Group(body),
             ..,
         ] = cursor
-            && name == "cfg"
             && bang.as_char() == '!'
-            && plain_os(&body.stream())
         {
-            found(name.span().start().line, format!("cfg!({})", body.stream()));
+            if name == "cfg" {
+                let predicate: Vec<_> = body.stream().into_iter().collect();
+                if plain_os(&predicate) {
+                    found(
+                        name.span().start().line,
+                        format!("cfg!({})", normalized(&predicate)),
+                    );
+                }
+            } else if name == "cfg_select" {
+                let arms: Vec<_> = body.stream().into_iter().collect();
+                for end in 1..arms.len().saturating_sub(1) {
+                    if punct(&arms[end], '=') && punct(&arms[end + 1], '>') {
+                        let start = match &arms[..end] {
+                            [.., TokenTree::Ident(_), TokenTree::Group(_)] => end - 2,
+                            [.., TokenTree::Ident(_), equals, TokenTree::Literal(_)]
+                                if punct(equals, '=') =>
+                            {
+                                end - 3
+                            }
+                            _ => end - 1,
+                        };
+                        let predicate = &arms[start..end];
+                        if plain_os(predicate) {
+                            found(
+                                arms[start].span().start().line,
+                                format!("cfg_select!({})", normalized(predicate)),
+                            );
+                        }
+                    }
+                }
+            }
         }
         if let TokenTree::Group(group) = first {
             scan(group.stream(), found);
@@ -212,28 +226,109 @@ fn scan(stream: TokenStream, found: &mut impl FnMut(usize, String)) {
     }
 }
 
-fn after_test_module(tokens: &[TokenTree]) -> Option<&[TokenTree]> {
-    let [
-        TokenTree::Ident(module),
-        TokenTree::Ident(_),
-        TokenTree::Group(body),
-        tail @ ..,
-    ] = tokens
-    else {
+fn punct(token: &TokenTree, value: char) -> bool {
+    matches!(token, TokenTree::Punct(mark) if mark.as_char() == value)
+}
+
+fn attribute(tokens: &[TokenTree]) -> Option<(bool, &Group, &[TokenTree])> {
+    let [hash, rest @ ..] = tokens else {
         return None;
     };
-    (module == "mod" && body.delimiter() == Delimiter::Brace).then_some(tail)
+    if !punct(hash, '#') {
+        return None;
+    }
+    let (inner, rest) = match rest {
+        [bang, rest @ ..] if punct(bang, '!') => (true, rest),
+        _ => (false, rest),
+    };
+    match rest {
+        [TokenTree::Group(body), tail @ ..] if body.delimiter() == Delimiter::Bracket => {
+            Some((inner, body, tail))
+        }
+        _ => None,
+    }
 }
 
-fn plain_os(predicate: &TokenStream) -> bool {
+fn test_attribute(fields: &[TokenTree]) -> bool {
+    match fields {
+        [TokenTree::Ident(name)] => name == "test",
+        [TokenTree::Ident(name), TokenTree::Group(body)] if name == "cfg" => {
+            requires_test(&body.stream().into_iter().collect::<Vec<_>>())
+        }
+        _ => false,
+    }
+}
+
+fn requires_test(predicate: &[TokenTree]) -> bool {
+    match without_trailing_comma(predicate) {
+        [TokenTree::Ident(name)] => name == "test",
+        [TokenTree::Ident(name), TokenTree::Group(body)] if name == "all" || name == "any" => {
+            let fields: Vec<_> = body.stream().into_iter().collect();
+            let mut parts = without_trailing_comma(&fields).split(|token| punct(token, ','));
+            if name == "all" {
+                parts.any(requires_test)
+            } else {
+                parts.all(requires_test)
+            }
+        }
+        _ => false,
+    }
+}
+
+fn attribute_sites(fields: &[TokenTree], parent: &str, found: &mut impl FnMut(String)) {
+    let [TokenTree::Ident(name), TokenTree::Group(body)] = fields else {
+        return;
+    };
+    if body.delimiter() != Delimiter::Parenthesis || (name != "cfg" && name != "cfg_attr") {
+        return;
+    }
+    let fields: Vec<_> = body.stream().into_iter().collect();
+    let mut parts = without_trailing_comma(&fields).split(|token| punct(token, ','));
+    let predicate = parts.next().unwrap_or_default();
+    let site = format!("{parent}{name}({})", normalized(predicate));
     let mut os = false;
-    only_os(predicate.clone(), &mut os) && os
+    if only_os(predicate, &mut os) {
+        if os {
+            found(site.clone());
+        }
+        if name == "cfg_attr" {
+            for child in parts {
+                attribute_sites(child, &format!("{site} -> "), found);
+            }
+        }
+    }
 }
 
-fn only_os(predicate: TokenStream, os: &mut bool) -> bool {
-    predicate.into_iter().all(|token| match token {
+fn without_trailing_comma(tokens: &[TokenTree]) -> &[TokenTree] {
+    match tokens {
+        [rest @ .., comma] if punct(comma, ',') => rest,
+        _ => tokens,
+    }
+}
+
+fn normalized(tokens: &[TokenTree]) -> TokenStream {
+    without_trailing_comma(tokens)
+        .iter()
+        .map(|token| {
+            if let TokenTree::Group(group) = token {
+                let children: Vec<_> = group.stream().into_iter().collect();
+                TokenTree::Group(Group::new(group.delimiter(), normalized(&children)))
+            } else {
+                token.clone()
+            }
+        })
+        .collect()
+}
+
+fn plain_os(predicate: &[TokenTree]) -> bool {
+    let mut os = false;
+    only_os(predicate, &mut os) && os
+}
+
+fn only_os(predicate: &[TokenTree], os: &mut bool) -> bool {
+    predicate.iter().all(|token| match token {
         TokenTree::Ident(name) => match name.to_string().trim_start_matches("r#") {
-            "all" | "any" | "not" => true,
+            "all" | "any" | "not" | "true" | "false" => true,
             "windows" | "unix" | "target_os" | "target_family" => {
                 *os = true;
                 true
@@ -241,7 +336,8 @@ fn only_os(predicate: TokenStream, os: &mut bool) -> bool {
             _ => false,
         },
         TokenTree::Group(group) => {
-            group.delimiter() == Delimiter::Parenthesis && only_os(group.stream(), os)
+            group.delimiter() == Delimiter::Parenthesis
+                && only_os(&group.stream().into_iter().collect::<Vec<_>>(), os)
         }
         TokenTree::Literal(_) => true,
         TokenTree::Punct(punct) => matches!(punct.as_char(), ',' | '='),

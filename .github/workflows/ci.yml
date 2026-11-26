@@ -87,7 +87,7 @@ jobs:
       - run: cargo xtask check-core
       - name: Check platform cfg boundaries
         env:
-          BASE: ${{ steps.dependencies.outputs.base }}
+          BASE: ${{ github.event_name == 'push' && 'origin/main' || steps.dependencies.outputs.base }}
         run: |
           $baseline = @()
           if ($env:BASE) { $baseline = @('--base', $env:BASE) }
