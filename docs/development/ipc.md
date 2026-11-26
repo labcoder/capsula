@@ -412,6 +412,17 @@ these sets the pair cell, so the whole pair stays refused: a read out of order, 
 frame that isn't the greeting, a data greeting in the other mode, a missed deadline (checked
 again after ready I/O completes), or a greeting read that's dropped part way.
 
+`PairLegs` (`pair_legs.rs`, dormant) runs the shared `greet` over an authenticated pair, with the
+same checks in the same order as the pipes. The control greeting is authorized as `SessionBound`
+(the zero placeholder) before a build mismatch is disclosed, Welcome goes out through the
+control sealer, and the data greeting and text metrics come through the pair's own reader.
+Acquiring the data leg does nothing, and binding names the parent shell. Two `Legs` hooks keep
+transport policy out of `greet`. `fence` refuses once the shell is known to be gone; `greet`
+checks it with no await in between before it reserves the session and again after the data
+greeting. `mismatch_notice` runs before the BuildMismatch reply, so the pipes log a mismatch
+even when the reply can't be written. `PairLegs` logs nothing and never writes its tap, since
+nothing before the commit may.
+
 The shell's side lives in `shell-core`'s `platform/macos/leg.rs` and `connect_pair`, also
 dormant: nothing calls them, and the group secret is a parameter for now. `initiate` runs the
 initiator's steps over the shell's two ends by one deadline and returns the legs only once

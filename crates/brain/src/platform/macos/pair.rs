@@ -268,13 +268,6 @@ enum Stage {
 pub(crate) struct AuthenticatedPair {
     control: RecordReader<OwnedReadHalf>,
     data: RecordReader<OwnedReadHalf>,
-    #[cfg_attr(
-        test,
-        expect(
-            dead_code,
-            reason = "held so the write directions stay open; the ParentBound entry writes through them"
-        )
-    )]
     writers: [RecordWriter<OwnedWriteHalf>; 2],
     pair: watch::Sender<bool>,
     stage: Stage,
@@ -390,6 +383,9 @@ async fn greeting<T: DeserializeOwned>(
     before(by)?;
     Ok(read)
 }
+
+#[path = "pair_legs.rs"]
+pub(crate) mod legs;
 
 #[cfg(test)]
 #[path = "pair_tests.rs"]

@@ -236,6 +236,27 @@ async fn a_build_mismatch_goes_only_to_the_capability_holder_and_reserves_nothin
 }
 
 #[tokio::test]
+async fn a_build_mismatch_is_noticed_even_when_its_answer_cant_be_written() {
+    let captured = crate::test_support::Captured::default();
+    let capturing = captured.install();
+    let control = control_frame(&ControlToBrain::Hello(hello(1, "0.0.0+other")));
+    let data = ready_data(AudioSession::Legacy);
+    let mut legs = Memory::new(control.as_slice(), data.as_slice());
+    legs.refuse_writes = true;
+    let result = greet(&mut legs, &mut Tap::default(), startup(), || SESSION).await;
+    drop(capturing);
+    assert!(matches!(
+        &result,
+        Err(SessionError::Io(e)) if e.kind() == io::ErrorKind::BrokenPipe
+    ));
+    assert!(
+        captured.text().contains("build mismatch"),
+        "{}",
+        captured.text()
+    );
+}
+
+#[tokio::test]
 async fn a_welcome_that_fails_to_send_never_opens_data() {
     for mode in [AudioSession::Legacy, AudioSession::QueuedRequired] {
         let control = control_frame(&match mode {
