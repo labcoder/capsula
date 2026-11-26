@@ -164,8 +164,19 @@ An owned headless child checks the retained Windows handle's exit witness
 separately. The Darwin parent watch has its own native tests; the Mac runtime
 does not yet bind a microphone session to that witness.
 
+## macOS permission
+
+macOS feeds silence to input the user hasn't authorized, so Mac capture must read
+the microphone permission before it creates any audio object.
+`platform::macos::permission` reads `AVAudioApplication`'s record permission
+(macOS 14 and later) without prompting. `admit` runs the opener only when it is
+granted; undetermined, denied and any unknown value end the hold as
+`MicError::Permission`, and on macOS 13 and older the class is absent and capture
+refuses the same way. The voice reducer shows that as the existing microphone
+unavailable text. Nothing calls it yet: Mac capture adopts it in its own change.
+
 Compilation, native permissions/device/rate/stop behavior and hot-path allocation,
 latency and memory measurements still require their separately approved checks.
 Windows 11 x64 is the initial target, not a measured support claim. Other Windows
 versions/ARM64 and built-in/USB/Bluetooth differences remain unverified. There is
-no Mac implementation or parity claim.
+no Mac capture or parity claim.

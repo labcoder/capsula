@@ -34,6 +34,15 @@ mod leg;
     )
 )]
 mod pair;
+#[expect(
+    dead_code,
+    reason = "Mac capture reads the permission from its own pull request"
+)]
+#[expect(
+    unsafe_code,
+    reason = "reads the microphone permission through AVFAudio"
+)]
+pub(crate) mod permission;
 #[cfg(any(test, feature = "test-support"))]
 mod wipes;
 
