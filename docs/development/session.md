@@ -192,7 +192,8 @@ provisions their identifiers.
 
 `startup::custody::SessionCustody` is the exclusive lock on `session.lock` opened on the admitted
 product folder's descriptor (created privately, with no `logs` folder, when it's missing). Busy
-custody refuses before any item call.
+custody refuses before any item call, and another edition refuses `NotAdmitted` before any folder
+lookup.
 
 ## What this crate doesn't do
 

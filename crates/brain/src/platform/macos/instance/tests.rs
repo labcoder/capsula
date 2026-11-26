@@ -22,6 +22,14 @@ fn a_view_releases_its_wiped_backing_when_its_last_reference_drops() {
 }
 
 #[test]
+fn another_edition_refuses_before_any_folder_lookup() {
+    for identity in [ProductIdentity::RELEASE, ProductIdentity::GATE] {
+        let refused = custody_in(identity, || panic!("no folder lookup")).map(drop);
+        assert_eq!(refused, Err(CustodyError::NotAdmitted), "{identity:?}");
+    }
+}
+
+#[test]
 #[ignore = "calls SecTask on this process: run only in the signed, provisioned Dev brain host"]
 fn signed_host_admits_the_dev_brain_before_any_item_call() {
     assert!(KeychainItem::admit().is_ok());

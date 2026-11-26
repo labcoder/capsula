@@ -3,14 +3,14 @@
 
 use std::ffi::c_void;
 use std::fs::TryLockError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 use kumochi_protocol::constants::{DATA_DIR, ProductIdentity, SESSION_LOCK};
 use kumochi_protocol::message::CAPABILITY_LEN;
 use kumochi_storage::{
-    AcquisitionError, AdmittedLock, InstanceItem, ItemError, Op, ProductFolder, Role,
-    admit_support, application_support_dir, instance_edition, status,
+    AcquisitionError, AdmittedLock, ApplicationSupportError, InstanceItem, ItemError, Op,
+    ProductFolder, Role, admit_support, application_support_dir, instance_edition, status,
 };
 use objc2_core_foundation::{
     CFAllocator, CFAllocatorContext, CFData, CFIndex, CFOptionFlags, CFRetained,
@@ -83,7 +83,16 @@ impl InstanceStore for KeychainItem {
     expect(dead_code, reason = "only a product start resolves the OS folder")
 )]
 pub(crate) fn instance_custody() -> Result<AdmittedLock, CustodyError> {
-    lock_at(&application_support_dir().map_err(|_| CustodyError::Unavailable)?)
+    custody_in(ProductIdentity::ACTIVE, application_support_dir)
+}
+
+/// Refuses another edition before `support` resolves any folder, then locks in that folder.
+fn custody_in(
+    identity: ProductIdentity,
+    support: impl FnOnce() -> Result<PathBuf, ApplicationSupportError>,
+) -> Result<AdmittedLock, CustodyError> {
+    instance_edition(identity).map_err(|_| CustodyError::NotAdmitted)?;
+    lock_at(&support().map_err(|_| CustodyError::Unavailable)?)
 }
 
 /// Refuses another edition first, then admits `support`, holds or privately creates this
