@@ -807,9 +807,11 @@ fixture and wait for it (not a confirmed close), or `unread`.
 
 ### The hold to talk rows
 
-`hold-gate <path-session.txt> [--speech <models-dir> <natives-dir>]` runs the two hold to talk
-rows behind `hover-gate`'s idle opener, with the same transcript, evidence folder, fixture,
-guards and PresentMon bounds. `measure-gate` and `gate-session` run the layouts row too, never
+`hold-gate <path-session.txt> [--prebuilt <shell-sha256> <brain-sha256>] [--speech <models-dir>
+<natives-dir>]` runs the two hold to talk rows behind `hover-gate`'s idle opener, with the same
+transcript, evidence folder, fixture, guards and PresentMon bounds. With `--prebuilt` it starts
+no Cargo: it stages the pinned sibling images the way
+[prebuilt cold-start](gate-identity.md#prebuilt-idle-and-cold-start) does. `measure-gate` and `gate-session` run the layouts row too, never
 the Listening row.
 
 - **Layouts (AltGr typing).** German `00000407` and Spanish `0000040A` are loaded in turn in the

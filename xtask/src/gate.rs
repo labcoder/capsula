@@ -170,7 +170,7 @@ struct Images {
 }
 
 /// An installed speech-input model folder and the native runtime, both already on this machine.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct Speech {
     models: PathBuf,
     natives: PathBuf,
@@ -326,7 +326,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
         args,
         ("feel-ready", feel, FixturePlacement::Default),
         &TRIALS,
-        None,
+        (None, None),
     )
 }
 
@@ -336,29 +336,20 @@ pub(crate) fn hover(args: impl Iterator<Item = String>) -> Result<()> {
         args,
         ("idle-open", idle_open, FixturePlacement::AwayFromCursor),
         &[Trial::Input(Phase::Hover, FixtureEscMode::Free)],
-        None,
+        (None, None),
     )
 }
 
-const HOLD_USAGE: &str = "hold-gate needs <path-session.txt> [--speech <models-dir> <natives-dir>]";
+const HOLD_USAGE: &str = "hold-gate needs <path-session.txt> [--prebuilt <shell-sha256> <brain-sha256>] [--speech <models-dir> <natives-dir>]";
 
 /// The hold to talk rows alone, opened by the owner's away rule: `AltGr` typing under two layouts,
 /// then, with `--speech`, hold recognised to Listening on screen with the microphone open.
 pub(crate) fn hold(mut args: impl Iterator<Item = String>) -> Result<()> {
     let transcript = args.next().context(HOLD_USAGE)?;
-    let speech = match (
-        args.next().as_deref(),
-        args.next(),
-        args.next(),
-        args.next(),
-    ) {
-        (None, ..) => None,
-        (Some("--speech"), Some(models), Some(natives), None) => Some(Speech {
-            models: PathBuf::from(models),
-            natives: PathBuf::from(natives),
-        }),
-        _ => bail!(HOLD_USAGE),
-    };
+    let (pins, speech) = hold_options(args)?;
+    let prepared = pins
+        .map(|pins| pins.release().map(|release| (pins, release)))
+        .transpose()?;
     let mut trials = vec![Trial::Input(Phase::Layouts, FixtureEscMode::Free)];
     if speech.is_some() {
         trials.extend(
@@ -370,8 +361,32 @@ pub(crate) fn hold(mut args: impl Iterator<Item = String>) -> Result<()> {
         std::iter::once(transcript),
         ("idle-open", idle_open, FixturePlacement::AwayFromCursor),
         &trials,
-        speech,
+        (prepared, speech),
     )
+}
+
+/// `hold-gate`'s options after its transcript: optional prebuilt pins, then an optional speech
+/// source, in that order.
+fn hold_options(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(Option<Prebuilt>, Option<Speech>)> {
+    let mut next = args.next();
+    let pins = if next.as_deref() == Some("--prebuilt") {
+        let pins = Prebuilt::parse(&mut args)?;
+        next = args.next();
+        Some(pins)
+    } else {
+        None
+    };
+    let speech = match (next.as_deref(), args.next(), args.next(), args.next()) {
+        (None, None, ..) => None,
+        (Some("--speech"), Some(models), Some(natives), None) => Some(Speech {
+            models: PathBuf::from(models),
+            natives: PathBuf::from(natives),
+        }),
+        _ => bail!(HOLD_USAGE),
+    };
+    Ok((pins, speech))
 }
 
 type Opener = fn(&mut Session, &Images, &Path, Instant) -> Result<()>;
@@ -380,13 +395,19 @@ fn session_run(
     args: impl Iterator<Item = String>,
     opener: (&str, Opener, FixturePlacement),
     trials: &[Trial],
-    speech: Option<Speech>,
+    (prepared, speech): (Option<(Prebuilt, PathBuf)>, Option<Speech>),
 ) -> Result<()> {
     retained_run(args, Run::finish, |output, run| {
-        let result = Images::build(run).and_then(|mut images| {
-            if speech.is_some() {
-                images.stage()?;
-            }
+        let images = match prepared {
+            Some((pins, release)) => Images::prepared(run, &release, pins),
+            None => Images::build(run).and_then(|mut images| {
+                if speech.is_some() {
+                    images.stage()?;
+                }
+                Ok(images)
+            }),
+        };
+        let result = images.and_then(|mut images| {
             images.speech = speech;
             run_session(output, &images, opener, trials)
         });
@@ -585,7 +606,7 @@ pub(crate) fn measure(args: impl Iterator<Item = String>) -> Result<()> {
             FixturePlacement::AwayFromCursor,
         ),
         &TRIALS,
-        None,
+        (None, None),
     )
 }
 
@@ -1027,7 +1048,11 @@ fn summarize(
 
 #[cfg(test)]
 mod tests {
-    use super::{INPUT_RESERVE, TRIALS, Trial, end_fixture, evidence_directory, phase_deadline};
+    use super::{
+        INPUT_RESERVE, Speech, TRIALS, Trial, end_fixture, evidence_directory, hold_options,
+        phase_deadline,
+    };
+    use crate::hermetic::Prebuilt;
     use crate::platform::input_session::FixtureEscMode;
     use crate::session::Phase;
     use std::path::{Path, PathBuf};
@@ -1158,6 +1183,58 @@ mod tests {
             geometry: 0,
         });
         assert!(super::completed_stop_target(&observed).is_none());
+    }
+
+    fn options(args: &[&str]) -> anyhow::Result<(Option<Prebuilt>, Option<Speech>)> {
+        hold_options(args.iter().map(|&arg| arg.to_owned()))
+    }
+
+    #[test]
+    fn hold_gate_takes_prebuilt_pins_then_a_speech_source() {
+        let (shell, brain) = ("a".repeat(64), "B".repeat(64));
+        let pins = Prebuilt {
+            shell_sha256: shell.clone(),
+            brain_sha256: "b".repeat(64),
+        };
+        let speech = Speech {
+            models: "m".into(),
+            natives: "n".into(),
+        };
+        assert_eq!(options(&[]).unwrap(), (None, None));
+        assert_eq!(
+            options(&["--speech", "m", "n"]).unwrap(),
+            (
+                None,
+                Some(Speech {
+                    models: "m".into(),
+                    natives: "n".into(),
+                })
+            )
+        );
+        assert_eq!(
+            options(&["--prebuilt", &shell, &brain]).unwrap(),
+            (
+                Some(Prebuilt {
+                    shell_sha256: shell.clone(),
+                    brain_sha256: "b".repeat(64),
+                }),
+                None
+            )
+        );
+        assert_eq!(
+            options(&["--prebuilt", &shell, &brain, "--speech", "m", "n"]).unwrap(),
+            (Some(pins), Some(speech))
+        );
+        for refused in [
+            &["--speech", "m", "n", "--prebuilt", &shell, &brain][..],
+            &["--prebuilt", &shell][..],
+            &["--prebuilt", "abc", &brain][..],
+            &["--speech", "m"][..],
+            &["--speech", "m", "n", "extra"][..],
+            &["--prebuilt", &shell, &brain, "extra"][..],
+        ] {
+            assert!(options(refused).is_err(), "{refused:?}");
+        }
     }
 
     #[test]
