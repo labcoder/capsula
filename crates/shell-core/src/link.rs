@@ -16,7 +16,6 @@ use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender, WeakSender};
-use kumochi_protocol::constants::BRAIN_EXE;
 use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, AudioSession, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
@@ -1569,9 +1568,12 @@ pub fn prepare(
     events: Sender<LinkEvent>,
     audio: AudioSession,
 ) -> std::io::Result<(LinkHandle, LinkStart)> {
+    let exe = std::env::current_exe()?;
+    // Before the bundle check, so a platform with no transport refuses as unsupported.
+    let session = platform::session_id()?;
     let link = Link {
-        brain: std::env::current_exe()?.with_file_name(BRAIN_EXE),
-        session: platform::session_id()?,
+        brain: platform::brain_path(&exe)?,
+        session,
         audio,
         shared: Arc::new(Shared::default()),
     };

@@ -70,6 +70,26 @@ pub(crate) const fn keyboard_ticks() -> u64 {
     0
 }
 
+/// The brain the shell starts: the sibling of its executable, or on macOS the helper nested in
+/// its bundle.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "only the macOS helper can be missing, when no bundle holds the shell"
+    )
+)]
+pub(crate) fn brain_path(exe: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::brain_helper(exe)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(exe.with_file_name(kumochi_protocol::constants::BRAIN_EXE))
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn instance_lock_path() -> Result<std::path::PathBuf, crate::instance::SessionLockError>
 {
