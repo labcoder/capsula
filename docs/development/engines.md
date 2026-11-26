@@ -180,7 +180,9 @@ sequenceDiagram
   (no image or recipient data). The coordinator then rechecks the build, its sources and
   authority. No transport lease exists during this wait, so a refusal, cancellation or timeout
   leaves no send or delete fence to settle. A held sender keeps its original deadline, including
-  time spent waiting for the store. Digest-only and text-only sends skip the write.
+  time spent waiting for the store. Digest-only and text-only sends skip the write. The writer
+  refuses any other key's authorization as `NotBuild` without touching the store, owed
+  corrections included.
 - **Lease.** Each grant is a `LeaseId { key, send }` with its sources. Leases belong to send
   attempts, not runs, so Stop, a replacement and a lost shell keep them.
 - **Settle.** The `SendLease` guard travels inside the grant. Dropping it, wherever it is (a lost

@@ -567,7 +567,11 @@ fn serve_op(
     screen_repairs: &mut BTreeMap<RunId, UnsentScreen>,
     op: StoreOp,
 ) {
-    if !screen_repairs.is_empty() {
+    // A refused non-build authorization must not commit or announce unrelated repairs.
+    if !screen_repairs.is_empty()
+        && !matches!(&op, StoreOp::GrantScreen { lease }
+            if !matches!(lease.key, crate::coordinator::SendKey::Build(_)))
+    {
         purger.op_arriving();
         if store.reconnect().is_ok() {
             screen_repairs.retain(
@@ -772,7 +776,14 @@ fn serve_op(
         }
         StoreOp::GrantScreen { lease } => {
             let crate::coordinator::SendKey::Build(key) = lease.key else {
-                unreachable!("only a build can authorize a held picture");
+                answer(
+                    acks,
+                    Input::ScreenGrantStored {
+                        lease,
+                        result: Err(ScreenGrantRefusal::NotBuild),
+                    },
+                );
+                return;
             };
             // With an old correction still owed, no new picture can add to the in-flight cohort.
             let stored = screen_repairs.is_empty() && {
