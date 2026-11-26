@@ -188,18 +188,6 @@ retain keyring's default mapping. Anthropic paste staging uses
 only authority generation names through the raw Windows writer described above;
 `anthropic_staging_target` remains only in legacy cleanup inventories.
 
-### Profile owner item
-
-Each edition reserves one owner item for the new-format profile: service
-`ProductIdentity::profile_service` (`Kumochi Profile`, `Kumochi Dev Profile` or `Kumochi Gate
-Profile`) and account `PROFILE_OWNER_ACCOUNT` (`owner`), joined like the vault's raw names by
-`account_target`, as in `Kumochi Profile/owner`. It is outside every legacy and generation name.
-The brain's owner probe only reads it (OSC-1085 cut 7): not found is absent, while an item that
-is there, or any failed read, is unverified. Its bytes are dropped unread: the store's read
-buffer is wiped, and nothing logs, compares or keeps them. Nothing writes it before the allocator (cut 9), so the name stays cheap to
-change until then. macOS and Linux have no native store yet, so they read it as unverified until
-a noninteractive Keychain read lands.
-
 ## Sign-in callback
 
 `connections::oauth::SignIn::bind` binds `127.0.0.1` on port 0 before the browser
@@ -884,13 +872,7 @@ exits), and gives up after `CONNECT_TIMEOUT` (10 s), then waits for Retry, so a 
 never restarted in a loop; it shows the same can't-reach-the-brain
 state as any other failed start. Dev diagnostics run as their own processes and still take
 their own lock, so they're Busy while a brain runs.
-`SessionLock::try_acquire_existing` locks an existing empty session file without creating it or
-its parent, and only contention is Busy. On Windows it opens the leaf itself, never a reparse
-target, sharing read and write so a stock opener still meets the lock, but not delete, so the name
-can't be renamed or deleted while held. Elsewhere it opens the leaf without following a link,
-nonblocking, and checks and locks that descriptor, so a link or FIFO there is refused rather than
-followed or waited on. It doesn't validate the parent. The existing-profile classifier calls it,
-but no product startup route does yet.
+
 
 On builds without a native credential adapter, exact-name reads, writes, and deletes return
 `Unsupported`. The production vault also refuses before opening `credentials.db`: the
@@ -914,7 +896,7 @@ chunks live in Credential Manager under `CREDENTIAL_SERVICE`:
 
 | Record | Layout |
 | --- | --- |
-| `host` | A JSON UUIDv4 URN, generated from `getrandom` when no generation is current. |
+| `host` | A JSON UUIDv4 URN, generated from `getrandom` when no generation is current, or when the current one can't be used and may be replaced. |
 | `chatgpt` | JSON holds `client_id`, optional `subject` and `email`, `plan_enabled`, and optional nested `tokens` (`access_token`, `refresh_token`, optional `id_token`, `scope`, `expires_at`, `pending_identity_validation`, `refresh_sent`, which reads as false when absent). Registration-only JSON contains just `client_id` and `subject`. |
 | `revoke` | JSON holds `entries`, each with its own `client_id`, `refresh_token`, `added_at` Unix seconds, and `origin` (`Account` or `Exchange`). At most four exchanges and one account entry. |
 | sign-out marker | Not in Credential Manager: `control.marker` in credentials.db, token-free compact JSON: `{v:1,sign_out,sweep,request_pending,outcome_unknown,notice}`. `sign_out` is null or `{disposition,phase}`, with `Keep`/`Erase` and `Revoking`/`Deleting`. Unknown fields, versions, enums or malformed data fail closed to an Erase/Revoking marker with uncertainty and notice set. |
@@ -934,8 +916,18 @@ current in one authority transaction, which also retires the one it replaces. Be
 commit the old value remains current; afterwards the new one is, and `SaveResult::Committed`
 says so even when the replaced generation's cleanup is still owed. Reads never fall back to an
 older generation.
-An unreadable `chatgpt` record is erased by sign-out's Delete, which fails closed. An unreadable `host` fails closed: sign-in is refused as `CredentialsUnavailable` and Retry
-reads it again, but nothing replaces it, so a damaged host id blocks sign-in until it's fixed. This layer does not silently replace either record.
+An unreadable `chatgpt` record is erased by sign-out's Delete, which fails closed. The `host` is an identifier, not a credential: it authorizes nothing and belongs to the PC that
+made it. So a current host whose chunks are missing or whose bytes aren't a host, as in a profile
+copied to another PC, is replaced with a fresh one, while a refused read stays an error. A client is
+issued under a host, so the host is replaced only when no sign-out is pending and no `chatgpt`
+record could still use it: none, or a registration never bound to an identity, which is retired in
+its own commit first. A crash between the two leaves no registration and the old host, and the
+next read replaces it. An account with tokens, a registration holding a verified subject, or an
+unreadable `chatgpt` record keeps the unusable host, and sign-in is refused as
+`CredentialsUnavailable`. Nothing here recovers those: ordinary sign-out keeps a subject-bound
+registration, and neither a tokenless registration nor an unreadable record can be signed out, so
+the host stays blocked until the blocking record is removed. The `chatgpt` record is never
+replaced silently.
 
 ```mermaid
 flowchart LR
@@ -1128,52 +1120,3 @@ back or resurrect names, so those cases run offline.
 The vault reads and writes every record through the authority. It runs one sweep pass of 16
 generations (`SWEEP`) when it opens and after each commit or removal. Generations past a
 pass's 16, and any whose names come back, stay owed to later passes and opens.
-
-### Reading a legacy authority
-
-`connections::authority::existing::legacy` looks at a legacy profile's `credentials.db` and the
-host it commits, for the existing-profile observer. Nothing calls it yet. It takes the caller's
-`SessionLock` and opens the file only through [`store::existing::open`](store.md#reading-an-existing-database),
-inside `store::existing::in_folder`, as the [legacy history read](store.md#a-legacy-history-store)
-does: the folder's identity is taken first and must read the same at the same path afterwards,
-so a lasting rename or replacement is refused. A stable path through the read is the caller's
-guarantee, by holding the product folder's chain.
-It creates, migrates, checkpoints, retires and sweeps nothing, and it never writes or deletes a
-credential name. It returns two `Observation`s from one snapshot:
-
-| | `Matching` | `Absent` | `Unverified` |
-|---|---|---|---|
-| authority | `check` passes | the folder holds no `credentials.db`, `-wal`, `-shm`, `-journal` or purge leftover | anything else |
-| host | the Active `host` generation's names, read by exact name under `CREDENTIAL_SERVICE`, are all present at their committed lengths and decode to a valid host | a `Matching` authority with no Active host, or an `Absent` authority | a missing, short or refused chunk, or a malformed host |
-
-An `Absent` authority isn't an absent profile: the folder is still a footprint.
-
-`authority::existing::check` is the side-effect-free validator a live open can share. It isn't
-the repair rule: a missing account chunk is repair's business, and a missing host chunk here is
-simply `Unverified`. How each `user_version` maps:
-
-| Version | Verdict | Why |
-|---|---|---|
-| 0 | `Unverified` | `Authority::open` would initialize it |
-| 1, 2 | `Unverified` | `Authority::open` would migrate it; after that migration it reads like a fresh v3 |
-| 3 | checked | the current version |
-| 4 | `Unverified` | an account repair is in progress, under OSC-1065's recovery lifecycle |
-| 5 and newer | `Unverified` | written by a newer build |
-
-At version 3 the file's shape must be exactly that of one built in memory from the open's own
-SQL: the same schema objects by type, name and table (so an extra virtual table, which has no
-columns to compare, still shows), the same tables, strictness and columns (name, type, not-null, default, key), the same
-foreign keys (table, columns, actions), the same index keys (unique, origin, partial, columns)
-and the same index SQL. The candidate's rows are read once, unsorted, each using up a distinct
-entry of the small expected set, so SQLite sorts nothing and at most one row past that set is
-read. Table SQL isn't compared, since a migrated file's differs in text. Then `integrity_check`
-must pass and there must be no foreign-key orphan. CHECK clauses are neither compared nor
-re-verified, because `integrity_check` skips them on a read-only connection, so the check reads
-what the open relies on itself: exactly one `control` row, keyed 1, with a lifetime from 0 to
-one below the largest integer, since the next open increments it; and every ordinary head with
-a valid Active layout. A Pending row is allowed, since the next open retires it. The host's
-chunks are read into one zeroizing buffer and decoded into a zeroizing string inside the check,
-then dropped; neither is logged, compared elsewhere or returned. Tests use the fake store and
-scratch folders: fresh and migrated files, every other version, each changed shape or bad row,
-each host failure, each leftover, a missing, linked, renamed or swapped folder, each checking
-that no file or credential changed.

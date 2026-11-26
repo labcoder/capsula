@@ -16,16 +16,15 @@ mod scratch;
 pub use platform::Untrusted;
 #[cfg(target_os = "macos")]
 pub use platform::macos::{
-    AcquisitionError, AdmittedLock, AdmittedLog, ApplicationSupportError, GuardError, HeldFolder,
-    Product, ProductFolder, Retention, SettingsWriteError, SetupGuard, ShellStorage, Support,
-    admit_support, application_support_dir, hold_chain, open_shell_storage, owner_only_dir,
-    private_tree, read_settings, replace_settings,
+    AcquisitionError, AdmittedLock, AdmittedLog, ApplicationSupportError, HeldFolder, Product,
+    ProductFolder, Retention, SettingsWriteError, ShellStorage, Support, admit_support,
+    application_support_dir, hold_chain, open_shell_storage, owner_only_dir, private_tree,
+    read_settings, replace_settings,
 };
 #[cfg(windows)]
 pub use platform::windows::{
-    AppDataError, Child, GuardError, SQLITE_FILES, SetupGuard, Today, acquire_setup_guard,
-    admit_leaf, check_leaf, hold_chain, hold_product_folder, known_folder, local_app_data,
-    new_owner_only_dir, owner_only_dir, product_folder, profile_root, roaming_app_data, user_sid,
+    AppDataError, SQLITE_FILES, Today, admit_leaf, check_leaf, hold_chain, known_folder,
+    local_app_data, new_owner_only_dir, owner_only_dir, product_folder, roaming_app_data, user_sid,
 };
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub use platform::windows::{DaclEntry, dacl_entries, dacl_sddl, set_dacl, set_junction};

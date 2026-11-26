@@ -167,31 +167,3 @@ fn instance_accounts_and_windows_targets_keep_their_spelling() {
         "capability-7.Kumochi Dev instance"
     );
 }
-
-#[test]
-fn each_edition_names_its_profile_root_and_owner_item() {
-    for (identity, name, owner) in [
-        (
-            ProductIdentity::RELEASE,
-            "Kumochi Profile",
-            "Kumochi Profile/owner",
-        ),
-        (
-            ProductIdentity::DEV,
-            "Kumochi Dev Profile",
-            "Kumochi Dev Profile/owner",
-        ),
-        (
-            ProductIdentity::GATE,
-            "Kumochi Gate Profile",
-            "Kumochi Gate Profile/owner",
-        ),
-    ] {
-        assert_eq!(identity.profile_root, name);
-        assert_eq!(identity.profile_service, name);
-        assert_eq!(
-            account_target(identity.profile_service, PROFILE_OWNER_ACCOUNT),
-            owner
-        );
-    }
-}

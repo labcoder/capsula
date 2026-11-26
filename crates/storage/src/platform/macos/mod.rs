@@ -9,6 +9,6 @@ pub use private::{owner_only_dir, private_tree};
 pub use protected::hold_chain;
 pub use settings::{SettingsWriteError, read_settings, replace_settings};
 pub use shell_files::{
-    AcquisitionError, AdmittedLock, AdmittedLog, GuardError, HeldFolder, Product, ProductFolder,
-    Retention, SetupGuard, ShellStorage, Support, admit_support, open_shell_storage,
+    AcquisitionError, AdmittedLock, AdmittedLog, HeldFolder, Product, ProductFolder, Retention,
+    ShellStorage, Support, admit_support, open_shell_storage,
 };

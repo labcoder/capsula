@@ -20,7 +20,6 @@ pub(crate) mod context;
 mod drawing;
 #[cfg(test)]
 mod duplicate_tests;
-pub(crate) mod existing;
 mod heard;
 #[cfg(test)]
 mod heard_tests;

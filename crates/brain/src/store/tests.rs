@@ -16,6 +16,19 @@ use super::{
 
 const MARKER: &str = "zqxplantedmarker";
 
+/// A WAL store at `dir`, migrated to `version`, as an earlier build left it.
+pub(crate) fn store_at(dir: &Path, version: usize) -> PathBuf {
+    std::fs::create_dir_all(dir).expect("store folder");
+    let db = dir.join("x.db");
+    let mut conn = Connection::open(&db).expect("store");
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .expect("WAL");
+    assert_eq!(mode, "wal");
+    super::schema::migrate_to(&mut conn, version).expect("migrations");
+    db
+}
+
 /// Every byte of the store's files, ASCII-lowercased.
 pub(super) fn raw_bytes(db: &Path) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -198,7 +211,7 @@ fn user_version(db: &Path) -> i64 {
 #[test]
 fn a_v11_store_moves_past_every_version_a_pre_lock_build_knows() {
     let scratch = Scratch::new("schema-v11");
-    let db = super::existing::tests::store_at(scratch.dir(), 11);
+    let db = store_at(scratch.dir(), 11);
     drop(Store::open_existing(&db).expect("the existing store"));
     assert_eq!(user_version(&db), 13);
     let cutoffs: i64 = Connection::open(&db)
@@ -213,7 +226,7 @@ fn a_v11_store_moves_past_every_version_a_pre_lock_build_knows() {
 #[test]
 fn a_failed_migration_leaves_the_file_at_the_version_it_had() {
     let scratch = Scratch::new("schema-rollback");
-    let db = super::existing::tests::store_at(scratch.dir(), 10);
+    let db = store_at(scratch.dir(), 10);
     Connection::open(&db)
         .expect("raw open")
         .execute_batch("CREATE TABLE chatgpt_recovery_context (tag BLOB)")
@@ -234,7 +247,7 @@ fn a_failed_migration_leaves_the_file_at_the_version_it_had() {
 #[test]
 fn a_recovered_v12_store_keeps_its_cutoff_at_v13() {
     let scratch = Scratch::new("schema-v12");
-    let db = super::existing::tests::store_at(scratch.dir(), 11);
+    let db = store_at(scratch.dir(), 11);
     Connection::open(&db)
         .expect("raw open")
         .execute_batch(
