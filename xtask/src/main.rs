@@ -86,7 +86,7 @@ tasks:
   measure-gate <path-session.txt>
                     gate-session's measured phases with hover-gate's opener;
                     no Ready and no feel verdicts
-  hold-gate <path-session.txt> [--speech <models-dir> <natives-dir>]
+  hold-gate <path-session.txt> [--prebuilt <shell-sha256> <brain-sha256>] [--speech <models-dir> <natives-dir>]
                     hover-gate's opener; AltGr row, --speech adds Listening with the microphone
   draw-timing <path-session.txt> [--prebuilt] <shell-sha256> <brain-sha256>
                     one offline paint timing trial (90 seconds plus shared teardown);

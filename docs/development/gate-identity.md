@@ -80,6 +80,7 @@ brain pins in that order, not hashes taken from a different build for this invoc
 ```bash
 "$target/release/xtask.exe" bench idle --prebuilt "$shell_sha" "$brain_sha"
 "$target/release/xtask.exe" cold-start "$transcript" --prebuilt "$shell_sha" "$brain_sha"
+"$target/release/xtask.exe" hold-gate "$transcript" --prebuilt "$shell_sha" "$brain_sha" [--speech ...]
 ```
 
 The release Gate driver verifies both sibling executables before admitting the run. It then
