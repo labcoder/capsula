@@ -98,19 +98,20 @@ impl Store {
         {
             return Err(StoreError::RoundRecord);
         }
+        let kind = facts::of(ConnectionKind::AnthropicKey).stored;
         let natives = calls
             .iter()
             .map(|call| {
                 let body = if let Some(model) = screen_model {
                     format!(
-                        r#"{{"connection":{},"kind":"anthropic_key","screen_model":{},"item":{}}}"#,
+                        r#"{{"connection":{},"kind":"{kind}","screen_model":{},"item":{}}}"#,
                         tag.0,
                         json!(model),
                         call.clone().scrubbed(KeyHistory::Scrubbed).json(),
                     )
                 } else {
                     format!(
-                        r#"{{"connection":{},"kind":"anthropic_key","item":{}}}"#,
+                        r#"{{"connection":{},"kind":"{kind}","item":{}}}"#,
                         tag.0,
                         call.json(),
                     )
