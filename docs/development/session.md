@@ -157,14 +157,19 @@ above. The four adapters of a pair share one `watch` cell, the pair cell that
   a transport error (reset, broken pipe, a zero-length write) comes back as it came. Neither touches
   the cell.
 
-Activation must change the three places that write frames today: `write_control` and `write_data`
-in `runtime/mod.rs`, and `send` in `ipc.rs`, which writes the greeting replies and Welcome. The Mac
-must use `write_frame` for the whole encoded frame at each call site. When an ordinary loss has
-already stopped writes, the runtime must keep any pending writer futures alive without polling
-them through the final disposition checks and control grace. Dropping them earlier would turn
-teardown into refusal and suppress the ordinary-loss drain. After disposition is settled the
-entry drops both legs. This cut doesn't change runtime wiring. The full C-7 proof needs both the
-brain's adapter and the shell's blocking adapter, which arrives in I1e-2.
+The runtime writes frames through one seam, `FrameWrite`: one whole encoded frame per call, in
+`write_control` and `write_data` in `runtime/mod.rs` and, for the greeting replies and Welcome,
+through `Legs::write_control` in `ipc.rs`. A pipe writes and flushes the bytes; the Mac's
+`RecordWriter` takes the frame through `write_frame`, and `AuthenticatedPair::write_control` does
+the same for the greeting replies. Once both greetings were read, `AuthenticatedPair::into_legs`
+hands the runtime both split legs and the terminal that watches the pair cell and the parent, and
+`serve_split` serves them. When an ordinary loss has stopped writes, the runtime keeps any pending
+writer futures alive without polling them through the final disposition checks and control grace.
+Dropping them earlier would turn teardown into refusal and suppress the ordinary-loss drain. They
+drop with both legs once `serve_split` returns. A page whose read is cancelled while its frame is
+being written still abandons that frame, which on the Mac is a cut frame and so ends the pair as
+refused rather than lost. Parent-bound startup doesn't call any of this yet. The full C-7 proof
+needs both the brain's adapter and the shell's blocking adapter, which arrives in I1e-2.
 
 ## The instance item (dormant)
 

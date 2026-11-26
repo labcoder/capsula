@@ -4,6 +4,7 @@
 //! own openers, so a [`BoundHello`] never travels apart from the pair that authenticated it. See
 //! `docs/development/ipc.md`.
 
+use std::io;
 use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream as StdStream;
 
@@ -17,8 +18,10 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
 use tokio::time::{Instant, timeout_at};
 
+use super::super::shell_process::Verdict;
 use super::stream::{RecordReader, RecordWriter};
 use crate::ipc;
+use crate::runtime::Terminal;
 
 /// Why the pair was refused. Every refusal ends the attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -245,21 +248,20 @@ enum Stage {
     Data {
         queued: bool,
     },
-    /// Both greetings were read, or a read failed.
+    /// Both greetings were read, so the legs can be served.
+    Greeted,
+    /// A read failed or came out of order.
     Spent,
 }
+
+/// One leg as the runtime serves it: frames read through its opener, written whole through its
+/// sealer.
+type Leg = (RecordReader<OwnedReadHalf>, RecordWriter<OwnedWriteHalf>);
 
 /// A pair whose handshake finished with `BindAck`: both legs' record adapters over one pair cell.
 pub(crate) struct AuthenticatedPair {
     control: RecordReader<OwnedReadHalf>,
     data: RecordReader<OwnedReadHalf>,
-    #[cfg_attr(
-        test,
-        expect(
-            dead_code,
-            reason = "held so the write directions stay open; the ParentBound entry writes through them"
-        )
-    )]
     writers: [RecordWriter<OwnedWriteHalf>; 2],
     pair: watch::Sender<bool>,
     stage: Stage,
@@ -347,7 +349,34 @@ impl AuthenticatedPair {
             _ => return Err(PairError::Greeting),
         };
         std::mem::forget(refusing);
+        self.stage = Stage::Greeted;
         Ok((BoundHello { greeting }, echo, len))
+    }
+
+    /// Writes one whole control frame, a greeting reply or Welcome, through this pair's control
+    /// sealer.
+    ///
+    /// # Errors
+    /// As [`RecordWriter::write_frame`].
+    pub(crate) async fn write_control(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.writers[0].write_frame(frame).await
+    }
+
+    /// Hands both legs to the runtime once both greetings were read, with the terminal that
+    /// watches this pair's cell and `parent`. The legs keep sharing the cell.
+    ///
+    /// # Errors
+    /// `Order` unless both greetings were read.
+    pub(crate) fn into_legs(
+        self,
+        parent: watch::Receiver<Verdict>,
+    ) -> Result<(Leg, Leg, Terminal), PairError> {
+        if self.stage != Stage::Greeted {
+            return Err(PairError::Order);
+        }
+        let [control_out, data_out] = self.writers;
+        let terminal = Terminal::new(self.pair.subscribe(), Some(parent));
+        Ok(((self.control, control_out), (self.data, data_out), terminal))
     }
 }
 
