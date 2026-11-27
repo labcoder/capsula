@@ -512,7 +512,7 @@ containing interval must have begun before the first harness repaint; its cutoff
 in `first-harness-repaint.txt`. Overlapping startup intervals are allowed because cold start
 measures creation to the first present, not a particular frame.
 The matching paint need not be the first recorded paint: only the first actual present is the
-seed. Missing, invalid, post-repaint or dropped seed evidence is unmeasured; no later
+seed. Missing, invalid or post-repaint seed evidence is unmeasured; no later
 ordinary row or warm-up repaint substitutes. `seed.txt` retains the first raw row and intervals.
 The 400ms gate is creation → first eligible dock **present**, with
 display latency reported beside it when available. The existing prelaunch name trace remains:
