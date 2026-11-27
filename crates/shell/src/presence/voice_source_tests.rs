@@ -1399,15 +1399,22 @@ fn a_silent_hold_releases_even_with_a_saved_default_on_and_retirement_held(
     });
     assert!(!view.talk_back);
     view.talk_back = true;
-    apply(
-        LinkEvent::SpokenRepliesDefaulted {
-            generation: session.generation(),
-            view,
-        },
-        cx,
-    );
+    // The default landed while the pair was busy, so no Talk-back save followed it.
+    owner.update(cx, |owner, cx| {
+        owner.settings.update(cx, |settings, _| {
+            let generation = session.generation();
+            assert!(settings.receive(
+                Some(generation),
+                generation,
+                view,
+                crate::settings::Update::SpokenRepliesDefaulted,
+            ));
+        });
+    });
     owner.read_with(cx, |owner, cx| {
-        assert_eq!(owner.settings.read(cx).talk_back_choice(), Some(true));
+        let settings = owner.settings.read(cx);
+        assert_eq!(settings.talk_back_choice(), Some(true));
+        assert!(!settings.talk_back_pending());
     });
 
     let (open, finish, started, samples) = source(&owner, cx, None);

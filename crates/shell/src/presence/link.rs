@@ -113,7 +113,11 @@ impl Presence {
                 LinkEvent::SpokenRepliesDefaulted { generation, view } => {
                     self.settings_changed(generation, view, Update::SpokenRepliesDefaulted, cx);
                     // The user's Install just finished: an idle pair takes the checkbox's switch.
-                    if let Some(session) = &self.session {
+                    if let Some(session) = self
+                        .session
+                        .as_ref()
+                        .filter(|session| session.generation() == generation)
+                    {
                         let link = &self.link;
                         self.settings.update(cx, |state, cx| {
                             if state.send_deferred_talk_back(|| link.send_talk_back(session, true))
