@@ -179,7 +179,7 @@ pub struct Pipes {
     control: PipeServer,
     data: PipeServer,
     last_queued: Option<IssueSession>,
-    /// The shell the last session admitted, whatever ended it.
+    /// The last admitted shell, watched until its exit is handled, whatever ended its session.
     served: Option<platform::ShellProcess>,
 }
 
@@ -238,32 +238,33 @@ impl Pipes {
         tap: &mut Tap,
         launched: &mut Option<oneshot::Receiver<()>>,
     ) -> Result<Session, IpcError> {
-        let mut departed: Option<platform::ShellProcess> = None;
         loop {
             // A shell the brain relaunched, or one still running, tells it to stop once it
             // connects, so only an idle brain gives up.
-            let idle = launched.is_none() && departed.is_none();
+            let idle = launched.is_none() && self.served.is_none();
             tokio::select! {
                 accepted = self.control.connect() => accepted?,
                 () = brain.idle() => {}
                 () = exited(launched) => return Ok(Session::ShellLost),
-                () = ended(departed.as_ref()) => {
+                () = ended(self.served.as_ref()) => {
                     // A shell that ended on purpose, such as a Quit from Retry, isn't relaunched.
-                    if departed.take().is_some_and(|shell| !shell.quit_cleanly()) {
+                    if self.served.take().is_some_and(|shell| !shell.quit_cleanly()) {
                         return Ok(Session::ShellLost);
                     }
                     continue;
                 }
                 () = tokio::time::sleep(NO_SHELL_TIMEOUT), if idle => return Ok(Session::NoShell),
             }
+            let watched = self.served.take();
             let session = self
                 .session(identity, brain, tap, Instant::now() + HANDSHAKE_TIMEOUT)
                 .await;
             self.renew()?;
             // From admission on, only the admitted shell's own process decides a relaunch.
-            if let Some(shell) = self.served.take() {
+            if self.served.is_some() {
                 *launched = None;
-                departed = Some(shell);
+            } else {
+                self.served = watched;
             }
             match session {
                 Ok(Session::ShellLost) => tracing::info!("the shell left without quitting"),
@@ -1483,6 +1484,32 @@ mod tests {
             launched.is_none(),
             "the failed relaunch isn't waited on again"
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(start_paused = true)]
+    async fn only_a_served_shell_that_exits_abnormally_is_relaunched() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU8;
+
+        use crate::platform::ShellProcess;
+
+        let scratch = Scratch::new("ipc");
+        let mut brain = test_support::brain(&scratch, "");
+        for (slot, state, expected) in [
+            (0, 1, Session::ShellLost),
+            (1, 2, Session::ShellLost),
+            (2, ShellProcess::CLEAN, Session::NoShell),
+        ] {
+            let mut pipes = Pipes::create(u32::MAX - 40 - slot - std::process::id())
+                .expect("the test pipes are free");
+            pipes.served = Some(ShellProcess::fixture(7, Arc::new(AtomicU8::new(state))));
+            let session = pipes
+                .next_session(&identity(), &mut brain, &mut Tap::from_env(), &mut None)
+                .await
+                .expect("no pipe failed");
+            assert_eq!(session, expected, "exit state {state}");
+        }
     }
 
     #[cfg(windows)]

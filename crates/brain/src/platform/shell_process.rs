@@ -54,10 +54,6 @@ impl Verdict {
     }
 }
 
-/// A fixture's state for a process that exited with code 0; 1 is any other exit.
-#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
-const CLEAN: u8 = 3;
-
 const OPEN: u8 = 0;
 const CLAIMED: u8 = 1;
 const LOST: u8 = 2;
@@ -134,6 +130,10 @@ impl std::fmt::Debug for ShellProcess {
 }
 
 impl ShellProcess {
+    /// A fixture's state for a process that exited with code 0; 1 is any other exit.
+    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+    pub(crate) const CLEAN: u8 = 3;
+
     #[cfg(windows)]
     pub(super) fn new(pid: u32, handle: std::os::windows::io::OwnedHandle) -> Self {
         Self {
@@ -198,7 +198,7 @@ impl ShellProcess {
             #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             Owner::Fixture(ref state, _) => match state.load(Ordering::Acquire) {
                 0 => Verdict::Watching,
-                1 | CLEAN => Verdict::Exited,
+                1 | Self::CLEAN => Verdict::Exited,
                 _ => Verdict::Unconfirmed(Unconfirmed::Watch),
             },
             #[cfg(test)]
@@ -252,7 +252,7 @@ impl ShellProcess {
             #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             Owner::Fixture(ref state, _) => match state.load(Ordering::Acquire) {
                 0 => Ok(false),
-                1 | CLEAN => Ok(true),
+                1 | Self::CLEAN => Ok(true),
                 _ => Err(io::ErrorKind::Other.into()),
             },
             #[cfg(test)]
@@ -277,7 +277,7 @@ impl ShellProcess {
             #[cfg(target_os = "macos")]
             Owner::Parent(_) => false,
             #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
-            Owner::Fixture(ref state, _) => state.load(Ordering::Acquire) == CLEAN,
+            Owner::Fixture(ref state, _) => state.load(Ordering::Acquire) == Self::CLEAN,
             #[cfg(test)]
             Owner::Watched(..) => false,
         }
@@ -396,8 +396,8 @@ mod tests {
     #[test]
     fn only_a_code_zero_exit_quit_cleanly() {
         let state = |value| ShellProcess::fixture(7, Arc::new(AtomicU8::new(value)));
-        assert!(state(super::CLEAN).quit_cleanly());
-        assert_eq!(state(super::CLEAN).exited().ok(), Some(true));
+        assert!(state(ShellProcess::CLEAN).quit_cleanly());
+        assert_eq!(state(ShellProcess::CLEAN).exited().ok(), Some(true));
         for (value, why) in [(0, "running"), (1, "crashed"), (2, "unknown")] {
             assert!(!state(value).quit_cleanly(), "{why}");
         }

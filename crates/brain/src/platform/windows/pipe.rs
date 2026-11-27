@@ -386,13 +386,17 @@ mod tests {
     const ME: &str = "S-1-5-21-1-2-3-1001";
 
     #[test]
+    #[expect(clippy::disallowed_methods, reason = "spawns while holding spawn_lock")]
     fn exit_code_reads_how_a_child_ended() {
         use std::os::windows::io::AsHandle as _;
         for code in [0, 3] {
-            let mut child = std::process::Command::new("cmd.exe")
-                .args(["/C", &format!("exit {code}")])
-                .spawn()
-                .expect("cmd starts");
+            let mut child = {
+                let _spawning = crate::platform::spawn_lock();
+                std::process::Command::new("cmd.exe")
+                    .args(["/D", "/C", &format!("exit {code}")])
+                    .spawn()
+                    .expect("cmd starts")
+            };
             child.wait().expect("cmd ends");
             assert_eq!(super::exit_code(child.as_handle()).ok(), Some(code));
         }
