@@ -193,22 +193,32 @@ async fn round<L: Lease>(
         conn: None,
         lease: Some(lease),
     };
-    timeout_at(Instant::now() + tuning.send, async {
+    let send_by = (Instant::now() + tuning.send).min(by);
+    let uploaded = timeout_at(send_by, async {
         let io = timeout(CONNECT_DEADLINE, endpoint.connect())
             .await
             .map_err(|_| Failure::Transport)??;
         let lease = &attempt.lease;
         let conn = attempt.conn.insert(ModelConn::new(io));
-        match conn
-            .upload(&request, || lease.as_ref().and_then(Lease::admit))
-            .await?
-        {
+        // Each write is admitted only before the cutoff, which a ready socket can't outrun.
+        let admit = || {
+            (Instant::now() < send_by)
+                .then(|| lease.as_ref().and_then(Lease::admit))
+                .flatten()
+        };
+        match conn.upload(&request, admit).await? {
             Upload::Flushed => Ok(()),
             Upload::Refused(head) => Err(refused(head.status)),
         }
     })
     .await
-    .map_err(|_| Failure::Transport)??;
+    .unwrap_or(Err(Failure::Transport));
+    match uploaded {
+        Err(Failure::Rebuild | Failure::Withheld) if Instant::now() >= send_by => {
+            return Err(Failure::Transport);
+        }
+        uploaded => uploaded?,
+    }
     if let Some(mut lease) = attempt.lease.take() {
         lease.wrote();
     }

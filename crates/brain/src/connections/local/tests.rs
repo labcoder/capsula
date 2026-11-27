@@ -340,9 +340,11 @@ async fn text_that_is_never_taken_ends_the_round_by_its_deadline() {
 }
 
 #[tokio::test]
-async fn a_server_error_beside_untaken_text_is_still_the_server_error() {
+async fn a_failure_beside_untaken_text_is_still_that_failure() {
     let (listener, endpoint) = listener().await;
-    let stream_bytes = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\ndata: {\"error\":{\"message\":\"x\"}}\n\n";
+    // One event hands out text and fails, so no split of the reads can separate the two.
+    let stream_bytes =
+        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":\"length\"}]}\n\n";
     let server = serve(listener, events(stream_bytes));
     let waited = Arc::new(AtomicBool::new(false));
     let sink = Stalled(Arc::clone(&waited));
@@ -357,7 +359,10 @@ async fn a_server_error_beside_untaken_text_is_still_the_server_error() {
         ),
     )
     .await;
-    assert_eq!(ended.expect("no wait on the sink"), Err(Failure::Provider));
+    assert_eq!(
+        ended.expect("no wait on the sink"),
+        Err(Failure::Incomplete)
+    );
     assert!(!waited.load(Ordering::SeqCst));
     join(server).await;
 }

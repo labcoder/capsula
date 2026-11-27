@@ -85,7 +85,7 @@ impl Reader {
 }
 
 /// Reads one event's data. Each chunk is JSON with no repeated member, holding one choice at
-/// index 0 whose delta carries only the assistant's text, and any reasoning, which is dropped.
+/// index 0 whose delta carries only the assistant's text, and any reasoning, which is discarded.
 fn event(
     state: &mut State,
     text: &mut usize,
@@ -121,8 +121,9 @@ fn event(
         let allowed = match key.as_str() {
             "content" => true,
             "role" => value.is_null() || value.as_str() == Some("assistant"),
-            // A thinking model's reasoning, which isn't part of the answer, is dropped unread.
-            "reasoning_content" => value.is_null() || value.is_string(),
+            // A thinking model's reasoning, which isn't part of the answer, is discarded:
+            // llama-server names it `reasoning_content`, Ollama `reasoning`.
+            "reasoning_content" | "reasoning" => value.is_null() || value.is_string(),
             _ => value.is_null(),
         };
         if !allowed {

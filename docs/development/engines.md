@@ -673,7 +673,8 @@ more than `MAX_REQUEST_BYTES` before anything connects.
 **What completes.** Each event is `[DONE]` or a chunk read with the duplicate-refusing JSON reader
 the Anthropic route uses. A chunk holds exactly one choice at index 0 with a `delta` object; its
 `content`, when it's a string, is handed to the sink, counted against `MAX_TEXT_BYTES`. A `role`
-must be `assistant`, a thinking model's `reasoning_content` is dropped unread, and any other
+must be `assistant`, a thinking model's reasoning (`reasoning_content` from `llama-server`, `reasoning` from
+Ollama) is checked and discarded, and any other
 delta field (a refusal, audio, a tool call) must be null. A round
 completes only on one `finish_reason: "stop"`, then `[DONE]`, then the end of the HTTP body with
 no data event after it. These fail, and a failure stays failed:
@@ -685,7 +686,7 @@ no data event after it. These fail, and a failure stays failed:
 | a role other than `assistant`, any other non-null delta field, any other finish reason, empty or extra choices, a second `stop`, text after it, `[DONE]` before it, data after `[DONE]`, bad JSON, a cap | `Protocol` |
 | the body ending before `[DONE]` or its own framing | `Truncated` |
 | 401 or 403 | `AuthRequired`: a local connection never authenticates |
-| another 4xx or 5xx | `Refused { status }`; its body is never waited for or read |
+| another 4xx or 5xx | `Refused { status }`; its body is never waited for or parsed |
 | a redirect or another non-200 head, or a body that isn't an event stream | `Protocol`; no redirect is followed |
 
 Text handed out before a failure stays handed out and never counts as a completed answer. A
@@ -696,7 +697,9 @@ activation decide whether that matters.
 **Waits and stopping.** One absolute `ROUND_DEADLINE` (120 s, a guess) starts before the grant is
 asked for and covers the grant (it's checked first on every poll, and again before the budget is
 spent), connecting (at most `CONNECT_DEADLINE`, 3 s), the upload, the
-head, the body and every wait on the sink, so trickled bytes can't stretch it. Within it the
+head, the body and every wait on the sink, so trickled bytes can't stretch it. No write of the
+request is admitted after the send cutoff (the tuning's send wait, or the round deadline if that's
+sooner), so a socket that turns writable late can't send more; that ends as `Transport`. Within it the
 model tuning's send, idle and backpressure waits still apply; a read that fails doesn't wait for
 the sink to take its text first. A refused grant or a spent budget
 connects to nothing. Esc, Stop and delete drop the round's future, which closes the connection.

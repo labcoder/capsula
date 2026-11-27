@@ -106,7 +106,10 @@ fn reasoning_is_dropped_and_only_the_answer_is_handed_out() {
     let thinking = chunk(
         r#"{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":"hmm","refusal":null},"finish_reason":null}"#,
     );
-    let stream = [thinking.as_str(), &delta("Hi"), STOP, DONE].concat();
+    let ollama = chunk(
+        r#"{"index":0,"delta":{"role":"assistant","content":"","reasoning":"hmm"},"finish_reason":null}"#,
+    );
+    let stream = [thinking.as_str(), &ollama, &delta("Hi"), STOP, DONE].concat();
     assert_eq!(read(&[stream.as_bytes()]), ("Hi".to_owned(), Ok(())));
 }
 
