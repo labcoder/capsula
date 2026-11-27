@@ -60,8 +60,6 @@ pub(super) enum Produced {
     Revoked,
     /// The next slot is still unread; nothing was written.
     Full,
-    /// The producer is closed or another cycle holds the claim; nothing was touched.
-    Refused,
 }
 
 impl Ring {
@@ -93,34 +91,16 @@ impl Ring {
         })
     }
 
-    /// The IO block's whole ring step: claims the producer, lets `fill` copy into the next free
-    /// slot in place, then publishes the slot or scrubs it.
-    pub(super) fn produce(&self, stamp: Stamp, fill: impl FnOnce(&mut [u8]) -> usize) -> Produced {
-        if self
-            .admission
+    /// Claims the producer for one IO cycle, held until the returned value drops. None while the
+    /// producer is closed or another cycle holds it; then nothing may be touched.
+    pub(super) fn claim(&self) -> Option<Producer<'_>> {
+        self.admission
             .compare_exchange(OPEN, IN_CYCLE, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            return Produced::Refused;
-        }
-        let _claim = Claim(&self.admission);
-        let at = self.write.load(Ordering::Relaxed);
-        let Some(mut owned) = self
-            .slots
-            .get(at)
-            .and_then(|slot| Owned::take(slot, FREE, WRITING))
-        else {
-            return Produced::Full;
-        };
-        let cycle = owned.cycle();
-        if fill(&mut cycle.bytes) != cycle.bytes.len() {
-            return Produced::Revoked;
-        }
-        cycle.stamp = stamp;
-        owned.publish();
-        self.write
-            .store((at + 1) % self.slots.len(), Ordering::Relaxed);
-        Produced::Published
+            .ok()?;
+        Some(Producer {
+            ring: self,
+            _claim: Claim(&self.admission),
+        })
     }
 
     /// The worker's drain step: hands the oldest published cycle to `read` in place, then
@@ -158,6 +138,41 @@ impl Ring {
             scrubbed &= owned.is_some();
         }
         scrubbed
+    }
+}
+
+/// One IO cycle's hold on the producer. Teardown can't close the ring while it lives, so the
+/// cycle's every effect, its slot included, is settled before a close succeeds.
+pub(super) struct Producer<'a> {
+    ring: &'a Ring,
+    _claim: Claim<'a>,
+}
+
+impl Producer<'_> {
+    /// Lets `fill` copy into the next free slot in place, then publishes the slot or scrubs it.
+    pub(super) fn produce(
+        &mut self,
+        stamp: Stamp,
+        fill: impl FnOnce(&mut [u8]) -> usize,
+    ) -> Produced {
+        let ring = self.ring;
+        let at = ring.write.load(Ordering::Relaxed);
+        let Some(mut owned) = ring
+            .slots
+            .get(at)
+            .and_then(|slot| Owned::take(slot, FREE, WRITING))
+        else {
+            return Produced::Full;
+        };
+        let cycle = owned.cycle();
+        if fill(&mut cycle.bytes) != cycle.bytes.len() {
+            return Produced::Revoked;
+        }
+        cycle.stamp = stamp;
+        owned.publish();
+        ring.write
+            .store((at + 1) % ring.slots.len(), Ordering::Relaxed);
+        Produced::Published
     }
 }
 
@@ -211,6 +226,16 @@ mod tests {
 
     use super::{FREE, FULL, MicError, OPEN, Produced, Ring, Stamp};
     use crate::platform::microphone::copy_batch;
+
+    /// One whole IO cycle's ring step; None when the claim is refused.
+    fn produce(
+        ring: &Ring,
+        stamp: Stamp,
+        fill: impl FnOnce(&mut [u8]) -> usize,
+    ) -> Option<Produced> {
+        ring.claim()
+            .map(|mut producer| producer.produce(stamp, fill))
+    }
 
     fn stamp(n: u32) -> Stamp {
         Stamp {
@@ -269,12 +294,24 @@ mod tests {
     #[test]
     fn cycles_come_out_in_order_and_every_read_slot_is_zeroed() {
         let mut ring = small();
-        assert_eq!(ring.produce(stamp(1), fill_with(0xa1)), Produced::Published);
-        assert_eq!(ring.produce(stamp(2), fill_with(0xa2)), Produced::Published);
-        assert_eq!(ring.produce(stamp(3), fill_with(0xa3)), Produced::Full);
+        assert_eq!(
+            produce(&ring, stamp(1), fill_with(0xa1)),
+            Some(Produced::Published)
+        );
+        assert_eq!(
+            produce(&ring, stamp(2), fill_with(0xa2)),
+            Some(Produced::Published)
+        );
+        assert_eq!(
+            produce(&ring, stamp(3), fill_with(0xa3)),
+            Some(Produced::Full)
+        );
         let read = |stamp: Stamp, bytes: &[u8]| (stamp, bytes.to_vec());
         assert_eq!(ring.pop(read), Some((stamp(1), vec![0xa1; 16])));
-        assert_eq!(ring.produce(stamp(3), fill_with(0xa3)), Produced::Published);
+        assert_eq!(
+            produce(&ring, stamp(3), fill_with(0xa3)),
+            Some(Produced::Published)
+        );
         assert_eq!(ring.pop(read), Some((stamp(2), vec![0xa2; 16])));
         assert_eq!(ring.pop(read), Some((stamp(3), vec![0xa3; 16])));
         assert_eq!(ring.pop(read), None);
@@ -288,11 +325,17 @@ mod tests {
             raw.fill(0xa5);
             raw.len() - 1
         };
-        assert_eq!(ring.produce(stamp(1), short), Produced::Revoked);
+        assert_eq!(produce(&ring, stamp(1), short), Some(Produced::Revoked));
         assert_eq!(contents(&mut ring), vec![0; 32]);
         assert_eq!(ring.pop(|_, _| ()), None);
-        assert_eq!(ring.produce(stamp(2), fill_with(0xa2)), Produced::Published);
-        assert_eq!(ring.produce(stamp(3), fill_with(0xa3)), Produced::Published);
+        assert_eq!(
+            produce(&ring, stamp(2), fill_with(0xa2)),
+            Some(Produced::Published)
+        );
+        assert_eq!(
+            produce(&ring, stamp(3), fill_with(0xa3)),
+            Some(Produced::Published)
+        );
         assert_eq!(ring.pop(|stamp, _| stamp), Some(stamp(2)));
     }
 
@@ -300,27 +343,36 @@ mod tests {
     fn closing_scrubs_published_cycles_and_refuses_every_later_one() {
         let mut ring = small();
         assert!(!ring.scrub());
-        assert_eq!(ring.produce(stamp(1), fill_with(0xa5)), Produced::Published);
-        assert_eq!(ring.produce(stamp(2), fill_with(0xa5)), Produced::Published);
+        assert_eq!(
+            produce(&ring, stamp(1), fill_with(0xa5)),
+            Some(Produced::Published)
+        );
+        assert_eq!(
+            produce(&ring, stamp(2), fill_with(0xa5)),
+            Some(Produced::Published)
+        );
         assert!(ring.close());
         assert!(ring.close());
         assert!(ring.scrub());
         assert_eq!(contents(&mut ring), vec![0; 32]);
-        assert_eq!(ring.produce(stamp(3), fill_with(0xa5)), Produced::Refused);
+        assert_eq!(produce(&ring, stamp(3), fill_with(0xa5)), None);
         assert_eq!(ring.pop(|_, _| ()), None);
     }
 
     #[test]
     fn teardown_waits_out_a_cycle_paused_inside_the_copy() {
         let mut ring = small();
-        assert_eq!(ring.produce(stamp(1), fill_with(0xa1)), Produced::Published);
+        assert_eq!(
+            produce(&ring, stamp(1), fill_with(0xa1)),
+            Some(Produced::Published)
+        );
         let collecting = AtomicBool::new(true);
         let (paused, pause) = mpsc::channel();
         let (resume, resumed) = mpsc::channel();
         let (shared, flag) = (&ring, &collecting);
         thread::scope(|scope| {
             let producer = scope.spawn(move || {
-                shared.produce(stamp(2), |raw| {
+                produce(shared, stamp(2), |raw| {
                     copy_batch(
                         raw,
                         Some(&[0xa5; 16]),
@@ -334,12 +386,12 @@ mod tests {
                 })
             });
             pause.recv_timeout(Duration::from_secs(2)).unwrap();
-            assert_eq!(ring.produce(stamp(3), fill_with(0xa3)), Produced::Refused);
+            assert_eq!(produce(&ring, stamp(3), fill_with(0xa3)), None);
             collecting.store(false, Ordering::Release);
             assert!(!ring.close());
             assert!(!ring.scrub());
             resume.send(()).unwrap();
-            assert_eq!(producer.join().unwrap(), Produced::Revoked);
+            assert_eq!(producer.join().unwrap(), Some(Produced::Revoked));
         });
         assert_eq!(
             ring.pop(|stamp, bytes| (stamp, bytes.to_vec())),
@@ -348,7 +400,7 @@ mod tests {
         assert_eq!(contents(&mut ring), vec![0; 32]);
         assert!(ring.close());
         assert!(ring.scrub());
-        assert_eq!(ring.produce(stamp(4), fill_with(0xa4)), Produced::Refused);
+        assert_eq!(produce(&ring, stamp(4), fill_with(0xa4)), None);
     }
     #[test]
     fn an_unwinding_fill_or_read_leaves_no_audio_and_a_working_ring() {
@@ -356,7 +408,7 @@ mod tests {
 
         let mut ring = small();
         let fill = catch_unwind(AssertUnwindSafe(|| {
-            ring.produce(stamp(1), |raw| {
+            produce(&ring, stamp(1), |raw| {
                 raw.fill(0xa5);
                 panic!("fill unwinds");
             })
@@ -364,8 +416,14 @@ mod tests {
         assert!(fill.is_err());
         assert_eq!(*ring.admission.get_mut(), OPEN);
         assert_eq!(contents(&mut ring), vec![0; 32]);
-        assert_eq!(ring.produce(stamp(2), fill_with(0xa2)), Produced::Published);
-        assert_eq!(ring.produce(stamp(3), fill_with(0xa3)), Produced::Published);
+        assert_eq!(
+            produce(&ring, stamp(2), fill_with(0xa2)),
+            Some(Produced::Published)
+        );
+        assert_eq!(
+            produce(&ring, stamp(3), fill_with(0xa3)),
+            Some(Produced::Published)
+        );
         let read = catch_unwind(AssertUnwindSafe(|| {
             ring.pop::<()>(|_, _| panic!("read unwinds"))
         }));

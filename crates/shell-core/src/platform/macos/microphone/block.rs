@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
-use block2::RcBlock;
+use block2::{Block, RcBlock};
 use objc2_core_audio_types::{AudioBufferList, AudioTimeStamp, AudioTimeStampFlags};
 
 use crate::platform::macos::ring::{Produced, Ring, Stamp};
@@ -16,16 +16,14 @@ const NO_FAULT: u8 = 0;
 const FORMAT: u8 = 1;
 const OVERFLOW: u8 = 2;
 
-/// The block Core Audio calls with `(now, input, input time, output, output time)`.
-pub(super) type IoBlock = RcBlock<
-    dyn Fn(
-        NonNull<AudioTimeStamp>,
-        NonNull<AudioBufferList>,
-        NonNull<AudioTimeStamp>,
-        NonNull<AudioBufferList>,
-        NonNull<AudioTimeStamp>,
-    ),
->;
+/// What Core Audio calls with `(now, input, input time, output, output time)`.
+type IoFn = dyn Fn(
+    NonNull<AudioTimeStamp>,
+    NonNull<AudioBufferList>,
+    NonNull<AudioTimeStamp>,
+    NonNull<AudioBufferList>,
+    NonNull<AudioTimeStamp>,
+);
 
 /// Shared by the IO block and the capture worker. The block's clone lives inside Core Audio
 /// until its IO proc is destroyed, so neither the ring nor the gate can be freed under a cycle.
@@ -82,31 +80,57 @@ impl Context {
     }
 }
 
-/// The IO block to register for this context; it holds one clone of it.
-pub(super) fn io_block(context: Arc<Context>) -> IoBlock {
-    RcBlock::new(
-        move |_: NonNull<AudioTimeStamp>,
-              input: NonNull<AudioBufferList>,
-              input_time: NonNull<AudioTimeStamp>,
-              _: NonNull<AudioBufferList>,
-              _: NonNull<AudioTimeStamp>| {
-            // SAFETY: Core Audio passes this cycle's input buffer list, valid for the call.
-            let input = unsafe { input.as_ref() };
-            // SAFETY: Core Audio passes this cycle's input timestamp, valid for the call.
-            let input_time = unsafe { input_time.as_ref() };
-            on_io(&context, input, input_time);
-        },
-    )
+/// The IO block for one context, holding one clone of it. Only its raw pointer leaves this
+/// module, so calling it takes `unsafe` and Core Audio's IO-proc contract: the input list and
+/// input stamp are live for the call, and the list's buffers hold the bytes they claim.
+pub(super) struct IoBlock(RcBlock<IoFn>);
+
+impl IoBlock {
+    pub(super) fn new(context: Arc<Context>) -> Self {
+        Self(RcBlock::new(
+            move |_: NonNull<AudioTimeStamp>,
+                  input: NonNull<AudioBufferList>,
+                  input_time: NonNull<AudioTimeStamp>,
+                  _: NonNull<AudioBufferList>,
+                  _: NonNull<AudioTimeStamp>| {
+                // SAFETY: callers hold the IO-proc contract; with no input, the stamp is zeroed.
+                let input_time = unsafe { input_time.as_ref() };
+                // SAFETY: callers hold the IO-proc contract for this cycle's input list.
+                unsafe { on_io(&context, input, input_time) };
+            },
+        ))
+    }
+
+    /// The block for `AudioDeviceCreateIOProcIDWithBlock`, which keeps its own copy until the
+    /// IO proc is destroyed.
+    pub(super) fn as_ptr(&self) -> *mut Block<IoFn> {
+        RcBlock::as_ptr(&self.0)
+    }
 }
 
-/// One IO cycle. A buffer that doesn't match the pin sets a sticky `Format` fault and copies
-/// nothing; a valid one counts as progress and is copied in place only while collecting. A full
-/// ring sets a sticky `Overflow` fault. A missing host time is stamped 0 and a missing sample
-/// time NaN, so the worker fails them after acceptance.
-fn on_io(context: &Context, input: &AudioBufferList, time: &AudioTimeStamp) {
-    let [buffer] = &input.mBuffers;
-    if input.mNumberBuffers != 1
-        || buffer.mNumberChannels != context.channels
+/// One IO cycle, entirely under the ring's producer claim, so a cycle a closed or busy producer
+/// refuses changes nothing. A buffer that doesn't match the pin sets a sticky `Format` fault and
+/// copies nothing; a valid one counts as progress and is copied in place only while collecting.
+/// A full ring while collecting sets a sticky `Overflow` fault. A missing host time is stamped 0
+/// and a missing sample time NaN, so the worker fails them after acceptance.
+///
+/// # Safety
+///
+/// `input`'s header is readable for the call. When it counts one buffer, that buffer is readable
+/// too, and its `mData`, when not null, holds `mDataByteSize` readable bytes.
+unsafe fn on_io(context: &Context, input: NonNull<AudioBufferList>, time: &AudioTimeStamp) {
+    let Some(mut producer) = context.ring.claim() else {
+        return;
+    };
+    // SAFETY: the header is readable; this reads its count alone, never a buffer it may lack.
+    let count = unsafe { (*input.as_ptr()).mNumberBuffers };
+    if count != 1 {
+        context.fault.fetch_max(FORMAT, Ordering::AcqRel);
+        return;
+    }
+    // SAFETY: the list counts exactly one buffer, which the caller makes readable.
+    let [buffer] = unsafe { &(*input.as_ptr()).mBuffers };
+    if buffer.mNumberChannels != context.channels
         || buffer.mData.is_null()
         || buffer.mDataByteSize != context.bytes
     {
@@ -114,6 +138,9 @@ fn on_io(context: &Context, input: &AudioBufferList, time: &AudioTimeStamp) {
         return;
     }
     context.valid_cycles.fetch_add(1, Ordering::AcqRel);
+    if !context.token.collecting(&context.session) {
+        return;
+    }
     let stamp = Stamp {
         frames: context.frames,
         host_time: if time.mFlags.contains(AudioTimeStampFlags::HostTimeValid) {
@@ -130,10 +157,10 @@ fn on_io(context: &Context, input: &AudioBufferList, time: &AudioTimeStamp) {
     let Ok(len) = usize::try_from(buffer.mDataByteSize) else {
         return;
     };
-    // SAFETY: Core Audio owns `mDataByteSize` readable bytes at the non-null `mData` for the
-    // duration of this call, and nothing here outlives it.
+    // SAFETY: the caller makes `mDataByteSize` bytes at the non-null `mData` readable for the
+    // call, and nothing here outlives it.
     let data = unsafe { std::slice::from_raw_parts(buffer.mData.cast::<u8>(), len) };
-    let produced = context.ring.produce(stamp, |raw| {
+    let outcome = producer.produce(stamp, |raw| {
         if raw.len() != data.len() {
             return 0;
         }
@@ -146,7 +173,7 @@ fn on_io(context: &Context, input: &AudioBufferList, time: &AudioTimeStamp) {
             || {},
         )
     });
-    if produced == Produced::Full {
+    if outcome == Produced::Full {
         context.fault.fetch_max(OVERFLOW, Ordering::AcqRel);
     }
 }
@@ -164,7 +191,7 @@ mod tests {
         SMPTETimeFlags, SMPTETimeType,
     };
 
-    use super::{Context, io_block, on_io};
+    use super::{Context, IoBlock, on_io};
     use crate::platform::macos::ring::Stamp;
     use crate::platform::microphone::{CollectionGate, Generation, MicError};
 
@@ -213,6 +240,13 @@ mod tests {
         }
     }
 
+    /// One cycle over a fixture: a whole list whose non-null `mData` holds at least
+    /// `mDataByteSize` bytes.
+    fn cycle(context: &Context, input: &AudioBufferList, time: &AudioTimeStamp) {
+        // SAFETY: the list is borrowed whole for the call, and every fixture's data is that long.
+        unsafe { on_io(context, NonNull::from(input), time) };
+    }
+
     fn popped(context: &Context) -> Option<(Stamp, Vec<u8>)> {
         context.ring().pop(|stamp, bytes| (stamp, bytes.to_vec()))
     }
@@ -222,7 +256,7 @@ mod tests {
         let (gate, context) = context();
         let mut audio = [0xa5_u8; 16];
         let input = list(1, 1, 16, audio.as_mut_ptr().cast());
-        on_io(&context, &input, &both());
+        cycle(&context, &input, &both());
         assert_eq!(context.valid_cycles(), 1);
         let stamp = Stamp {
             frames: 4,
@@ -231,7 +265,7 @@ mod tests {
         };
         assert_eq!(popped(&context), Some((stamp, vec![0xa5; 16])));
         gate.release(GestureId(1));
-        on_io(&context, &input, &both());
+        cycle(&context, &input, &both());
         assert_eq!(context.valid_cycles(), 2);
         assert_eq!(popped(&context), None);
         assert_eq!(context.fault(), Ok(()));
@@ -252,11 +286,11 @@ mod tests {
         ];
         for (why, input) in cases {
             let (_gate, context) = context();
-            on_io(&context, &input, &both());
+            cycle(&context, &input, &both());
             assert_eq!(context.fault(), Err(MicError::Format), "{why}");
             assert_eq!(context.valid_cycles(), 0, "{why}");
             assert_eq!(popped(&context), None, "{why}");
-            on_io(&context, &list(1, 1, 16, data), &both());
+            cycle(&context, &list(1, 1, 16, data), &both());
             assert_eq!(context.fault(), Err(MicError::Format), "{why} stays");
         }
     }
@@ -266,16 +300,16 @@ mod tests {
         let (_gate, context) = context();
         let mut audio = [0xa5_u8; 16];
         let input = list(1, 1, 16, audio.as_mut_ptr().cast());
-        on_io(&context, &input, &both());
-        on_io(&context, &input, &both());
+        cycle(&context, &input, &both());
+        cycle(&context, &input, &both());
         assert_eq!(context.fault(), Ok(()));
-        on_io(&context, &input, &both());
+        cycle(&context, &input, &both());
         assert_eq!(context.fault(), Err(MicError::Overflow));
         assert_eq!(
             popped(&context).map(|(_, bytes)| bytes),
             Some(vec![0xa5; 16])
         );
-        on_io(&context, &input, &both());
+        cycle(&context, &input, &both());
         assert_eq!(context.fault(), Err(MicError::Overflow));
     }
 
@@ -284,12 +318,12 @@ mod tests {
         let (_gate, context) = context();
         let mut audio = [0xa5_u8; 16];
         let input = list(1, 1, 16, audio.as_mut_ptr().cast());
-        on_io(
+        cycle(
             &context,
             &input,
             &time(AudioTimeStampFlags::SampleTimeValid),
         );
-        on_io(&context, &input, &time(AudioTimeStampFlags::HostTimeValid));
+        cycle(&context, &input, &time(AudioTimeStampFlags::HostTimeValid));
         let first = popped(&context).unwrap().0;
         assert_eq!((first.host_time, first.sample_time), (0, 512.0));
         let second = popped(&context).unwrap().0;
@@ -298,11 +332,56 @@ mod tests {
     }
 
     #[test]
+    fn a_header_counting_no_buffers_is_refused_without_reading_one() {
+        #[repr(C, align(8))]
+        struct Header {
+            buffers: u32,
+        }
+        let (_gate, context) = context();
+        let header = Header { buffers: 0 };
+        // SAFETY: the header is borrowed for the call and counts no buffer.
+        unsafe { on_io(&context, NonNull::from(&header).cast(), &both()) };
+        assert_eq!(context.fault(), Err(MicError::Format));
+        assert_eq!(context.valid_cycles(), 0);
+        assert_eq!(popped(&context), None);
+    }
+
+    #[test]
+    fn a_cycle_the_producer_refuses_changes_nothing() {
+        let (_gate, context) = context();
+        let mut audio = [0xa5_u8; 16];
+        let data: *mut c_void = audio.as_mut_ptr().cast();
+        let busy = context.ring().claim();
+        assert!(busy.is_some());
+        cycle(&context, &list(1, 1, 16, data), &both());
+        cycle(&context, &list(1, 2, 16, data), &both());
+        drop(busy);
+        assert_eq!((context.valid_cycles(), context.fault()), (0, Ok(())));
+        assert!(context.ring().close());
+        cycle(&context, &list(1, 1, 16, data), &both());
+        cycle(&context, &list(0, 1, 16, data), &both());
+        assert_eq!((context.valid_cycles(), context.fault()), (0, Ok(())));
+        assert_eq!(popped(&context), None);
+    }
+
+    #[test]
+    fn a_cycle_after_release_never_faults_a_full_ring() {
+        let (gate, context) = context();
+        let mut audio = [0xa5_u8; 16];
+        let input = list(1, 1, 16, audio.as_mut_ptr().cast());
+        cycle(&context, &input, &both());
+        cycle(&context, &input, &both());
+        gate.release(GestureId(1));
+        cycle(&context, &input, &both());
+        assert_eq!((context.valid_cycles(), context.fault()), (3, Ok(())));
+    }
+
+    #[test]
     fn the_block_owns_one_context_reference_until_it_is_dropped() {
         const fn shared<T: Send + Sync>() {}
         shared::<Context>();
         let (_gate, context) = context();
-        let block = io_block(Arc::clone(&context));
+        let block = IoBlock::new(Arc::clone(&context));
         assert_eq!(Arc::strong_count(&context), 2);
         let mut audio = [0xa5_u8; 16];
         let mut input = list(1, 1, 16, audio.as_mut_ptr().cast());
@@ -310,7 +389,9 @@ mod tests {
         let mut output = list(0, 0, 0, std::ptr::null_mut());
         let mut now = both();
         let mut later = both();
-        block.call((
+        // SAFETY: a live block; every argument is borrowed whole for the call.
+        let callable = unsafe { &*block.as_ptr() };
+        callable.call((
             NonNull::from(&mut now),
             NonNull::from(&mut input),
             NonNull::from(&mut stamp),
