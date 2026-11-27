@@ -20,7 +20,7 @@ use super::{
     connecting_within, from_roots, read_response,
 };
 use crate::platform::{TrustRoots, TrustRootsError};
-use crate::test_support::{Captured, SENTINEL};
+use crate::test_support::{Captured, SENTINEL, assert_no_preview};
 
 struct Server {
     address: SocketAddr,
@@ -323,15 +323,13 @@ async fn github_wire_policy_uses_typed_payloads_and_never_logs_them() {
     }
     let logs = captured.text();
     assert!(logs.contains("github-wire-control"));
-    assert!(!logs.contains(SENTINEL));
-    assert!(!logs.contains(&format!("{:?}", SENTINEL.as_bytes())));
-    assert!(
-        !logs.contains(
-            format!("{:?}", SENTINEL.as_bytes())
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-        )
-    );
+    for marker in [
+        SENTINEL,
+        &format!("ghu_{SENTINEL}"),
+        &format!("ghr_{SENTINEL}"),
+    ] {
+        assert_no_preview(&logs, marker);
+    }
 }
 
 #[tokio::test]
@@ -544,7 +542,7 @@ fn retry_after_presence_survives_invalid_values_duplicates_and_bad_date() {
     assert_eq!(ResponseMeta::parse(&headers), present);
     let printed = format!("{:?}", ResponseMeta::parse(&headers));
     assert!(printed.contains("retry_after_present: true"));
-    assert!(!printed.contains("Mon, 06 Nov 1994"));
+    assert_no_preview(&printed, "Mon, 06 Nov 1994");
 }
 
 #[tokio::test]
@@ -881,7 +879,7 @@ async fn trust_root_diagnostics_log_counts_and_loader_codes_only() {
             "missing safe root diagnostic {expected}"
         );
     }
-    assert!(!text.contains(SENTINEL));
+    assert_no_preview(&text, SENTINEL);
 }
 
 #[tokio::test]
@@ -1081,16 +1079,13 @@ async fn forms_and_responses_do_not_enter_logs_or_debug() {
     let server = Server::start(reply(
         "200 OK",
         SENTINEL.as_bytes(),
-        "x-request-id: req_fixture\r\n",
+        "x-request-id: mxj-fixture\r\n",
     ));
     let request = Request {
         endpoint: Endpoint::Token,
         fields: vec![("code", Secret::new(Zeroizing::new(SENTINEL.to_owned())))],
     };
-    assert!(
-        !format!("{request:?}").contains(SENTINEL),
-        "form values redacted"
-    );
+    assert_no_preview(&format!("{request:?}"), SENTINEL);
     let client = server.client();
     let response = client
         .send_to(&format!("{}?query={SENTINEL}", server.url()), request)
@@ -1101,11 +1096,11 @@ async fn forms_and_responses_do_not_enter_logs_or_debug() {
         response.body.expose().capacity() < MAX_BODY_BYTES,
         "a small response doesn't reserve the whole body cap"
     );
-    assert_eq!(response.request_id.as_deref(), Some("req_fixture"));
-    assert!(
-        !format!("{response:?}").contains(SENTINEL),
-        "response body redacted"
-    );
+    assert_eq!(response.request_id.as_deref(), Some("mxj-fixture"));
+    let response_debug = format!("{response:?}");
+    for marker in [SENTINEL, "mxj-fixture"] {
+        assert_no_preview(&response_debug, marker);
+    }
     let unavailable = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("unused loopback port");
     let address = unavailable.local_addr().expect("unused address");
     drop(unavailable);
@@ -1120,16 +1115,13 @@ async fn forms_and_responses_do_not_enter_logs_or_debug() {
         .await
         .expect_err("the loopback listener was closed");
     assert_eq!(error, HttpError::Connect);
+    let logs = captured.text();
+    assert!(logs.contains("capture-control"), "capture active");
+    for marker in [SENTINEL, "mxj-fixture"] {
+        assert_no_preview(&logs, marker);
+    }
     assert!(
-        captured.text().contains("capture-control"),
-        "capture active"
-    );
-    assert!(
-        !captured.text().contains(SENTINEL),
-        "query, form and body never logged"
-    );
-    assert!(
-        !captured.text().contains("127.0.0.1") && !captured.text().contains(&address.to_string()),
+        !logs.contains("127.0.0.1") && !logs.contains(&address.to_string()),
         "connection hosts and addresses never logged"
     );
     server.finish().expect("fixture completed");

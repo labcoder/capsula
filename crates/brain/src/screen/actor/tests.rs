@@ -818,6 +818,7 @@ fn a_failed_new_attempt_revokes_the_old_frame_and_invalid_elements_stay_spent() 
 #[test]
 fn protocol_debug_redacts_the_outer_tree_and_ticket() {
     let marker = "outer_content_marker";
+    let nonce = b"qzv-ticket-nonce";
     let mut tree = ElementTree::unavailable(CaptureId(1), crate::screen::Unavailable::NoWindow);
     tree.elements.push(crate::screen::Element {
         id: crate::screen::ElementId {
@@ -832,13 +833,16 @@ fn protocol_debug_redacts_the_outer_tree_and_ticket() {
         screen: RECT,
         in_window: RECT,
     });
-    for debug in [
-        format!("{:?}", Reply::Elements(key(1), tree)),
-        format!("{:?}", context(1)),
-    ] {
-        crate::test_support::assert_no_preview(&debug, marker);
-        assert!(!debug.contains(&format!("{:?}", [91_u8; 16])));
-    }
+    let request = Request::Context {
+        key: key(1),
+        ticket: TicketWire::new(CaptureId(1), 1, *nonce, 30_000, FAR),
+        point: PhysicalPoint([1, 1]),
+    };
+    crate::test_support::assert_no_preview(&format!("{:?}", Reply::Elements(key(1), tree)), marker);
+    crate::test_support::assert_no_preview(
+        &format!("{request:?}"),
+        std::str::from_utf8(nonce).expect("ASCII nonce"),
+    );
 }
 
 #[test]
