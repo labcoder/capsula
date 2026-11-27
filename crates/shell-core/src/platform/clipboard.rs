@@ -25,6 +25,8 @@ pub type KeyClipboardResult = Result<Zeroizing<String>, ClipboardRefusal>;
 pub struct KeyClipboardRead {
     #[cfg(windows)]
     sequence: u32,
+    #[cfg(target_os = "macos")]
+    count: isize,
 }
 
 impl KeyClipboardRead {
@@ -37,7 +39,14 @@ impl KeyClipboardRead {
         Ok(Self { sequence })
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    pub fn capture() -> Result<Self, ClipboardRefusal> {
+        Ok(Self {
+            count: super::macos::clipboard::count()?,
+        })
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     pub fn capture() -> Result<Self, ClipboardRefusal> {
         Err(ClipboardRefusal::Unsupported)
     }
@@ -47,14 +56,19 @@ impl KeyClipboardRead {
         super::windows::clipboard::read(self.sequence, deadline, is_current)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    pub fn read(self, deadline: Instant, is_current: impl Fn() -> bool) -> KeyClipboardResult {
+        super::macos::clipboard::read(self.count, deadline, is_current)
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     pub fn read(self, _: Instant, _: impl Fn() -> bool) -> KeyClipboardResult {
         let Self {} = self;
         Err(ClipboardRefusal::Unsupported)
     }
 }
 
-#[cfg(all(test, not(windows)))]
+#[cfg(all(test, not(any(windows, target_os = "macos"))))]
 mod tests {
     use super::*;
 

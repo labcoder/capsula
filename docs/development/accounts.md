@@ -8,7 +8,14 @@ as metadata. A row-only Windows adapter reads the payload off the UI thread:
 it takes only Unicode text when present, never queries, reads or names any
 other format, and never writes to the clipboard. The adapter strictly decodes
 the terminated UTF-16 text and bounds the raw UTF-8 result to 2,048 bytes before
-trim. Other platforms refuse the read. A validated paste stays in a zeroizing
+trim. On macOS the click samples the general pasteboard's change count instead,
+and the adapter takes only the string of a single pasteboard item, refusing a
+changed count, any other item count, an embedded NUL or more than 2,048 UTF-8
+bytes before it copies into the zeroizing buffer. It never writes to the
+pasteboard. When the user has set Kumochi's pasteboard access to Deny, it
+refuses without reading; otherwise macOS may show its own paste alert. The Mac
+staging writer still refuses, so a Mac paste stops there. Other platforms refuse
+the read. A validated paste stays in a zeroizing
 buffer until the brain replies with a one-use staging plan; only its trimmed
 byte length describes the key on the pipe.
 The shell-core writer puts chunks in Credential Manager at those authority-owned

@@ -5,6 +5,8 @@
     reason = "Darwin process calls are isolated to this platform adapter"
 )]
 mod child;
+#[expect(unsafe_code, reason = "reads one string through AppKit's pasteboard")]
+pub(super) mod clipboard;
 #[expect(
     unsafe_code,
     reason = "Darwin resource-limit calls are isolated to this platform adapter"
