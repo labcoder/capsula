@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ModelChoice, ThreadId};
+use super::{ModelChoice, ShortcutChord, ShortcutView, ThreadId};
 use crate::voice::VoicePart;
 
 /// The longest name, in Unicode scalar values.
@@ -208,6 +208,8 @@ pub enum SettingsOp {
     SetShowScreen(bool),
     /// Load already installed speech input, without verifying or fetching files for an install.
     LoadSpeechInput,
+    /// Save a checked shortcut override or remove it to restore the default setting.
+    SetShortcut(Option<ShortcutChord>),
 }
 
 /// The initial held-speech choice, also used by older settings files without the key.
@@ -269,6 +271,8 @@ pub struct SettingsView {
     pub screen_holds: bool,
     /// Whether a hold may also show the model a picture of the screen, taken when it's released.
     pub show_screen: bool,
+    /// The shortcut choice as saved, independent of the live input binding.
+    pub shortcut: ShortcutView,
 }
 
 /// The most frames a second Kumo draws. The shell paces to the display, so the rate it runs at
@@ -347,6 +351,121 @@ mod tests {
             hold_to_talk: crate::message::DEFAULT_HOLD_TO_TALK,
             screen_holds: crate::message::DEFAULT_SCREEN_HOLDS,
             show_screen: crate::message::DEFAULT_SHOW_SCREEN,
+            shortcut: crate::message::ShortcutView::Default,
+        }
+    }
+
+    #[test]
+    fn shortcut_ops_keep_their_wire_shape_and_reject_unchecked_parts() {
+        use super::ShortcutChord;
+        use crate::frame::{self, FrameError, Pipe};
+        use crate::message::ControlToBrain;
+
+        let chord = ShortcutChord::new(2, Some(24)).expect("right Ctrl and F24");
+        for (op, payload) in [
+            (SettingsOp::SetShortcut(None), &[17, 0][..]),
+            (SettingsOp::SetShortcut(Some(chord)), &[17, 1, 2, 1, 24]),
+        ] {
+            assert_eq!(postcard::to_allocvec(&op).expect("encodes"), payload);
+            assert_eq!(frame::decode::<SettingsOp>(payload).expect("decodes"), op);
+            let message = ControlToBrain::Settings(op);
+            let actual = frame::encode(&message, Pipe::Control).unwrap();
+            assert_eq!(&actual[frame::HEADER_LEN..], [&[6][..], payload].concat());
+            assert_eq!(
+                frame::read(&mut actual.as_slice(), Pipe::Control).unwrap(),
+                Some(message)
+            );
+        }
+        for payload in [
+            &[17, 1, 9, 0][..],
+            &[17, 1, 17, 1, 6],
+            &[17, 1, 2, 1, 25],
+            &[17, 1, 2, 1],
+            &[17, 1, 2, 1, 24, 1],
+        ] {
+            assert!(matches!(
+                frame::decode::<SettingsOp>(payload),
+                Err(FrameError::Malformed(_))
+            ));
+        }
+    }
+
+    fn wire_view() -> SettingsView {
+        SettingsView {
+            assistant_name: AssistantName::new("K").unwrap(),
+            user_name: None,
+            talk_back: true,
+            hold_to_talk: true,
+            screen_holds: false,
+            show_screen: false,
+            ..view()
+        }
+    }
+
+    #[test]
+    fn settings_and_notices_append_the_same_shortcut_field_before_the_reply_flag() {
+        use super::{ShortcutChord, ShortcutView};
+        use crate::frame::{self, Pipe};
+        use crate::message::ControlToShell;
+
+        let chord = ShortcutChord::new(2, Some(24)).unwrap();
+        for (view, prefix, tail) in [
+            (
+                wire_view(),
+                [1, b'K', 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0],
+                &[0][..],
+            ),
+            (
+                SettingsView {
+                    show_in_taskbar: true,
+                    hold_to_talk: false,
+                    screen_holds: true,
+                    shortcut: ShortcutView::Custom(chord),
+                    ..wire_view()
+                },
+                [1, b'K', 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0],
+                &[1, 2, 1, 24],
+            ),
+            (
+                SettingsView {
+                    show_in_taskbar: true,
+                    talk_back: false,
+                    hold_to_talk: false,
+                    show_screen: true,
+                    shortcut: ShortcutView::Invalid,
+                    ..wire_view()
+                },
+                [1, b'K', 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1],
+                &[2],
+            ),
+        ] {
+            for (tag, suffix, message) in [
+                (
+                    7,
+                    &[0][..],
+                    ControlToShell::Settings {
+                        view: view.clone(),
+                        answer: false,
+                    },
+                ),
+                (
+                    7,
+                    &[1][..],
+                    ControlToShell::Settings {
+                        view: view.clone(),
+                        answer: true,
+                    },
+                ),
+                (37, &[][..], ControlToShell::SpokenRepliesDefaulted(view)),
+            ] {
+                let expected = [&[tag][..], &prefix, tail, suffix].concat();
+                let bytes = frame::encode(&message, Pipe::Control).unwrap();
+                assert_eq!(&bytes[frame::HEADER_LEN..], expected);
+                assert_eq!(
+                    frame::read(&mut bytes.as_slice(), Pipe::Control).unwrap(),
+                    Some(message)
+                );
+            }
         }
     }
 

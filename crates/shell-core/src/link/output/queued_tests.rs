@@ -69,6 +69,7 @@ fn settings_modes() -> (SettingsView, SettingsView) {
         onboarding_from: OnboardingStep::Welcome,
         screen_holds: true,
         show_screen: false,
+        shortcut: kumochi_protocol::message::ShortcutView::Default,
     };
     let on = SettingsView {
         talk_back: true,

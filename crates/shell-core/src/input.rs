@@ -1,7 +1,7 @@
-//! Left Ctrl+Alt gestures, independent of native event delivery and the UI.
+//! Shortcut gestures, independent of native event delivery and the UI.
 //!
-//! A tap runs from chord make to its first modifier release. Two completed short taps
-//! open input when their releases are less than 300ms apart. Either modifier may stay
+//! A tap runs from chord make to its first participating release. Two completed short taps
+//! open input when their releases are less than 300ms apart. Other participants may stay
 //! held between taps. After another key cancels, all tracked keys must release to rearm.
 //! A second tap that misses the window becomes a new first tap if it is still short.
 //! Holding starts at 300ms inclusive, even when the release arrives before its timer.
@@ -11,9 +11,7 @@ use std::time::{Duration, Instant};
 
 pub mod hold;
 pub mod path;
-
-#[cfg(test)]
-mod shortcut;
+pub mod shortcut;
 
 const WINDOW: Duration = Duration::from_millis(300);
 
@@ -82,11 +80,17 @@ pub enum Effect {
     OpenInput,
 }
 
-/// The physical modifiers that stayed down through release, redacted in diagnostics.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub struct TalkHeld(pub [Option<PhysicalKey>; 2]);
+/// The physical participants that stayed down through release, redacted in diagnostics.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TalkHeld<const N: usize = 2>(pub [Option<PhysicalKey>; N]);
 
-impl std::fmt::Debug for TalkHeld {
+impl Default for TalkHeld {
+    fn default() -> Self {
+        Self([None; 2])
+    }
+}
+
+impl<const N: usize> std::fmt::Debug for TalkHeld<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TalkHeld").finish_non_exhaustive()
     }
@@ -121,6 +125,13 @@ impl std::fmt::Debug for Gesture {
 struct Timing {
     phase: Phase,
     first_tap: Option<Instant>,
+}
+
+#[derive(Clone, Copy)]
+enum ChordEdge {
+    Repeat,
+    Press { complete: bool, clear: bool },
+    Release { neutral: bool },
 }
 
 impl Gesture {
@@ -186,11 +197,9 @@ impl Gesture {
             if !matches!(self.timing.phase, Phase::Ready) {
                 report(hold::InputReason::Reset);
             }
-            let effects = self.timing.cancel();
             self.down = [false; 2];
             self.other = [0; 16];
-            self.timing.phase = Phase::Blocked;
-            return effects;
+            return self.timing.block();
         }
         if matches!(self.timing.phase, Phase::Blocked) {
             return [None; 3];
@@ -212,35 +221,23 @@ impl Gesture {
         // shortcut: a held key's auto-repeat also reaches the threshold if both deadline timers are
         // late, but only after the keyboard's repeat delay (about 500 ms, up to 1 s), so such a
         // hold starts late; drop it once desk logs never show `by=Repeat`.
-        if self.down[index] == down {
-            return [self.timing.advance(now), None, None];
-        }
-        let threshold = self.timing.advance(now);
-        self.down[index] = down;
-        if down && self.down == [true; 2] {
-            let reason = if matches!(self.timing.phase, Phase::Ready) && self.other == [0; 16] {
-                hold::InputReason::ChordStarted
+        let change = if self.down[index] == down {
+            ChordEdge::Repeat
+        } else {
+            self.down[index] = down;
+            if down {
+                let complete = self.down == [true; 2];
+                ChordEdge::Press {
+                    complete,
+                    clear: complete && self.other == [0; 16],
+                }
             } else {
-                hold::InputReason::ChordSuppressed
-            };
-            report(reason);
-        }
-        if down
-            && matches!(self.timing.phase, Phase::Ready)
-            && self.down == [true; 2]
-            && self.other == [0; 16]
-        {
-            return self.timing.start(now);
-        }
-        if !down {
-            if matches!(self.timing.phase, Phase::Active { .. }) {
-                return self.timing.finish(now, threshold);
+                ChordEdge::Release {
+                    neutral: self.down == [false; 2] && self.other == [0; 16],
+                }
             }
-            if self.down == [false; 2] && self.other == [0; 16] {
-                self.timing.phase = Phase::Ready;
-            }
-        }
-        [threshold, None, None]
+        };
+        self.timing.participant(change, now, report)
     }
 
     fn other_key(&mut self, key: PhysicalKey, edge: Edge) -> [Option<Effect>; 3] {
@@ -262,6 +259,43 @@ impl Gesture {
 }
 
 impl Timing {
+    fn participant(
+        &mut self,
+        change: ChordEdge,
+        now: Instant,
+        mut report: impl FnMut(hold::InputReason),
+    ) -> [Option<Effect>; 3] {
+        let threshold = self.advance(now);
+        match change {
+            ChordEdge::Press {
+                complete: true,
+                clear,
+            } => {
+                if clear && matches!(self.phase, Phase::Ready) {
+                    report(hold::InputReason::ChordStarted);
+                    return self.start(now);
+                }
+                report(hold::InputReason::ChordSuppressed);
+            }
+            ChordEdge::Release { neutral } => {
+                if matches!(self.phase, Phase::Active { .. }) {
+                    return self.finish(now, threshold);
+                }
+                if neutral {
+                    self.phase = Phase::Ready;
+                }
+            }
+            _ => {}
+        }
+        [threshold, None, None]
+    }
+
+    fn block(&mut self) -> [Option<Effect>; 3] {
+        let effects = self.cancel();
+        self.phase = Phase::Blocked;
+        effects
+    }
+
     fn deadline(&self) -> Option<Instant> {
         let hold = match self.phase {
             Phase::Active {

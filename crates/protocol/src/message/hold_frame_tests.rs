@@ -90,11 +90,12 @@ fn spoken_replies_default_appends_a_redacted_settings_snapshot() {
         onboarding_from: super::OnboardingStep::Welcome,
         screen_holds: true,
         show_screen: false,
+        shortcut: super::ShortcutView::Default,
     });
     let bytes = postcard::to_allocvec(&message).unwrap();
     assert_eq!(bytes[0], 37);
-    round_trip(&message, Pipe::Control, 32);
-    redacted(&message, Direction::ToShell, "SpokenRepliesDefaulted", 32);
+    round_trip(&message, Pipe::Control, 33);
+    redacted(&message, Direction::ToShell, "SpokenRepliesDefaulted", 33);
     let debug = format!("{message:?}");
     assert!(!debug.contains(name));
     assert!(!debug.contains(&format!("{:?}", name.as_bytes())));

@@ -45,6 +45,39 @@ The shell recognizes one shortcut, left Ctrl plus left Alt, with Raw Input and n
 keyboard hook. It also decides locally what Esc does, before the brain hears of it. Holding
 the shortcut admits voice-only input; it grants no screen capture authority.
 
+## Dormant custom recognition
+
+`shell-core::input::shortcut` takes the same validated `ShortcutChord` as storage and uses
+the default gesture's hold and double-tap timing. Sided modifiers can arrive in either order;
+an optional function key must make last. The first verified break of a participant ends the
+gesture normally. A repeat is exempt from invalidating a screen watch only when it is the
+same still-held physical key, on the same device; this applies to function keys too.
+
+The reducer starts disarmed at the current input generation, so queued input from before a
+rebind cannot arm it. That generation begins at a positively established neutral boundary.
+An adapter must certify desktop, layout, right-Alt-up and the complete
+participant set at each eligible edge and deadline. A raw match or a timer alone cannot
+authorize an effect. Missing or conflicting evidence cancels, not releases, and old callbacks
+cannot rearm the reducer. The adapter must preserve the existing rule for raw makes: a first
+unknown make under coverage can qualify, but a known down from before coverage loss needs
+its own device's break, and stale known makes cannot be passed as new presses. The adapter
+also owns the bounded active-coverage watchdog: it must report expiry as uncertainty before
+accepting another edge. The reducer's gesture deadline only governs hold and tap timing.
+
+Right Alt and Esc are never participants. AltGr arrives as a synthetic left Ctrl followed by
+right Alt, so with Win held it can briefly complete left Ctrl+Win. The right Alt edge, reported
+as another key or as uncertainty, cancels that candidate when it arrives. Nothing guarantees
+when right Alt arrives, so any earlier effect still needs the adapter's right-Alt-up evidence.
+Esc during a custom tap or hold cancels the same way, and the chord's later releases cannot
+finish it as a tap, hold or double-tap. Only a newer generation's neutral observation rearms
+the reducer.
+
+No shipping caller selects a stored binding or routes custom effects into the live hold,
+typing or picture paths. Raw Input still passes keys to the foreground app. Custom chords
+never register a projected Escape; the validator refuses reserved projections and native
+activation still needs a proven non-claiming cancel path and fresh evidence before deferred
+effects can run. The default's Escape lease and release path are unchanged.
+
 ## From key to Listening
 
 ```mermaid
@@ -157,9 +190,6 @@ sequenceDiagram
   be registered, arming fails and undoes what it registered.
 
 ## What each effect does
-
-Custom matching is fixture-only and shares the default gesture's tap/hold timing.
-It adds no saved shortcut, trial, hotkey registration or input route.
 
 | Effect | Current shell action |
 |---|---|

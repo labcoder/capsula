@@ -109,6 +109,7 @@ fn view() -> ControlToShell {
             hold_to_talk: crate::message::DEFAULT_HOLD_TO_TALK,
             screen_holds: crate::message::DEFAULT_SCREEN_HOLDS,
             show_screen: crate::message::DEFAULT_SHOW_SCREEN,
+            shortcut: crate::message::ShortcutView::Default,
         },
         answer: true,
     }
