@@ -63,10 +63,10 @@ impl Record {
             .context("invalid input diagnostic envelope")?;
         let qpc = counter.parse()?;
         ensure!(qpc > 0, "invalid diagnostic QPC counter");
-        let mark = if let Some(value) = event.strip_prefix("hold ") {
-            let (kind, callback) = value
-                .split_once(" callback_qpc=")
-                .context("hold diagnostic callback QPC missing")?;
+        let hold = event
+            .strip_prefix("hold ")
+            .and_then(|value| value.split_once(" callback_qpc="));
+        let mark = if let Some((kind, callback)) = hold {
             let recognized = match kind {
                 "warm" => false,
                 "recognized" => true,
@@ -105,7 +105,7 @@ impl Record {
             Mark::Status
         } else {
             match event {
-                "resting" => Mark::Status,
+                "resting" | "hold admitted" | "microphone running" => Mark::Status,
                 "listening on" => Mark::Listening(true),
                 "listening off" => Mark::Listening(false),
                 "input dismissed" => Mark::Dismissed,
@@ -254,6 +254,8 @@ mod tests {
             ("qpc=16 rearm skipped check=break", 16),
             ("qpc=17 voice refused check=ready", 17),
             ("qpc=18 voice failed reason=choice-changed", 18),
+            ("qpc=19 hold admitted", 19),
+            ("qpc=20 microphone running", 20),
         ] {
             assert_eq!(
                 Record::parse(line).unwrap(),
