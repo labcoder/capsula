@@ -20,27 +20,34 @@ const GROUPS: &str = "keychain-access-groups";
 const GET_TASK_ALLOW: &str = "com.apple.security.get-task-allow";
 /// The code directory flag for the hardened runtime (`CS_RUNTIME`).
 const RUNTIME: u32 = 0x1_0000;
-/// Every product entry exits with this until a signed brain can be admitted.
+/// A bare brain launch exits with this on macOS, first light included: it's detached, which no
+/// Mac build supports.
 const UNAVAILABLE: i32 = 69;
 const LAUNCH_WAIT: Duration = Duration::from_secs(10);
 /// The longest a codesign call may take, so one waiting on a keychain prompt nobody answers ends.
 const SIGN_WAIT: Duration = Duration::from_secs(120);
 /// The longest a profile or plist tool may take.
 const TOOL_WAIT: Duration = Duration::from_secs(30);
+/// The longest the Dev build may take, so a hung build fails packaging instead of stalling it.
+const BUILD_WAIT: Duration = Duration::from_mins(30);
 /// How long a stopped tool's pipes get to close; one a helper outside its group keeps open fails
 /// the task instead.
 const STOP_GRACE: Duration = Duration::from_secs(2);
 /// More development certificates than any profile carries.
 const MAX_CERTIFICATES: usize = 64;
+/// The default-off features that admit a Dev brain and shell for first light.
+const FIRST_LIGHT: &str = "kumochi-brain/first-light,kumochi-shell/first-light";
 
 pub(crate) const USAGE: &str =
-    "  mac-bundle [--beta] --identity <sha1> --shell-profile <file> --brain-profile <file> --out <new-dir>
-                    build the Dev shell and brain, nest the brain in the shell app as a
-                    background helper, embed each profile, sign both with that Apple
-                    Development identity (--beta: Developer ID, with Developer ID profiles),
-                    check the signed apps carry no get-task-allow, the hardened runtime and
-                    their embedded profiles' App ID prefix and groups, and launch the brain
-                    once: it must exit 69, not be killed; prints no team, identity, profile or path";
+    "  mac-bundle [--beta | --first-light] --identity <sha1> --shell-profile <file> --brain-profile <file> --out <new-dir>
+                    build the Dev shell and brain (--first-light: with their first-light
+                    features, for first light only, never with --beta), nest the brain
+                    in the shell app as a background helper, embed each profile, sign both
+                    with that Apple Development identity (--beta: Developer ID, with
+                    Developer ID profiles), check the signed apps carry no get-task-allow,
+                    the hardened runtime and their embedded profiles' App ID prefix and
+                    groups, and launch the brain once: it must exit 69, not be killed;
+                    prints no team, identity, profile or path";
 
 /// Which identity and profiles sign the bundle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +61,7 @@ enum Mode {
 #[derive(Debug, PartialEq, Eq)]
 struct Args {
     mode: Mode,
+    first_light: bool,
     identity: String,
     shell_profile: PathBuf,
     brain_profile: PathBuf,
@@ -134,7 +142,7 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
     let (team, prefix) = (&shell.profile.team, &shell.profile.prefix);
 
     std::fs::create_dir(&args.out).context("creating the output folder, which must not exist")?;
-    let built = build()?;
+    let built = build(args.first_light.then_some(FIRST_LIGHT))?;
     let shell_app = args
         .out
         .join(format!("{}.app", ProductIdentity::DEV.data_dir));
@@ -171,10 +179,16 @@ pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<()> {
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut identity, mut shell, mut brain, mut out) = (None, None, None, None);
     let mut mode = Mode::Dev;
+    let mut first_light = false;
     while let Some(flag) = args.next() {
         if flag == "--beta" {
             ensure!(mode == Mode::Dev, "--beta given twice");
             mode = Mode::Beta;
+            continue;
+        }
+        if flag == "--first-light" {
+            ensure!(!first_light, "--first-light given twice");
+            first_light = true;
             continue;
         }
         let (name, slot) = match flag.as_str() {
@@ -191,6 +205,10 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args> {
                 .with_context(|| format!("{name} needs a value"))?,
         );
     }
+    ensure!(
+        !(first_light && mode == Mode::Beta),
+        "--first-light builds a Dev bundle only, so it can't be given with --beta"
+    );
     let identity = identity.context("mac-bundle needs --identity")?;
     // Only an exact certificate hash, so codesign never picks an identity by name.
     ensure!(
@@ -199,6 +217,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args> {
     );
     Ok(Args {
         mode,
+        first_light,
         identity: identity.to_ascii_uppercase(),
         shell_profile: shell.context("mac-bundle needs --shell-profile")?.into(),
         brain_profile: brain.context("mac-bundle needs --brain-profile")?.into(),
@@ -601,29 +620,43 @@ fn plist(value: &Value) -> Result<String> {
     Ok(out)
 }
 
+/// The Cargo arguments of the Dev build, with `features` when given.
+fn build_args(features: Option<&'static str>) -> Vec<&'static str> {
+    let mut args = vec![
+        "build",
+        "--locked",
+        "--message-format=json-render-diagnostics",
+        "-p",
+        "kumochi-shell",
+        "-p",
+        "kumochi-brain",
+    ];
+    if let Some(features) = features {
+        args.extend(["--features", features]);
+    }
+    args
+}
+
 /// The Dev shell and brain binaries Cargo builds now, by executable name.
-fn build() -> Result<Vec<(String, PathBuf)>> {
+fn build(features: Option<&'static str>) -> Result<Vec<(String, PathBuf)>> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut metadata = Command::new(&cargo);
     metadata.args(["metadata", "--format-version", "1", "--no-deps", "--locked"]);
     let metadata: Value =
         serde_json::from_slice(&bounded("cargo metadata", &mut metadata, None, TOOL_WAIT)?)
             .context("Cargo's metadata")?;
-    let output = Command::new(cargo)
-        .args([
-            "build",
-            "--locked",
-            "--message-format=json-render-diagnostics",
-        ])
-        .args(["-p", "kumochi-shell", "-p", "kumochi-brain"])
-        .stderr(Stdio::null())
-        .output()?;
-    // Cargo's diagnostics name local paths, so they aren't shown here.
-    ensure!(
-        output.status.success(),
-        "the Dev build failed; `cargo build -p kumochi-shell -p kumochi-brain` shows why"
-    );
-    artifacts(&output.stdout, &members(&metadata)?)
+    let mut command = Command::new(cargo);
+    command.args(build_args(features));
+    let shown = features
+        .map(|list| format!(" --features {list}"))
+        .unwrap_or_default();
+    // Cargo's diagnostics name local paths, so `bounded` withholds them.
+    let stdout = bounded("cargo build", &mut command, None, BUILD_WAIT).with_context(|| {
+        format!(
+            "the Dev build failed; `cargo build -p kumochi-shell -p kumochi-brain{shown}` shows why"
+        )
+    })?;
+    artifacts(&stdout, &members(&metadata)?)
 }
 
 /// Each workspace package's opaque Cargo ID, by name.
@@ -716,8 +749,9 @@ fn sign(app: &Path, entitlements: &Path, identity: &str) -> Result<()> {
     .map(drop)
 }
 
-/// Runs `program` once, expecting exit 69 within `wait`. The brain refuses every entry with
-/// 69; a profile or signature the system refused would kill it before `main`.
+/// Runs `program` once, expecting exit 69 within `wait`. The brain refuses a bare launch with
+/// 69, with or without first light; a profile or signature the system refused would kill it
+/// before `main`.
 fn launch(program: &mut Command, wait: Duration) -> Result<()> {
     let mut child = program
         .process_group(0)

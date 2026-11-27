@@ -68,6 +68,7 @@ fn every_input_is_named_once_and_the_identity_is_an_exact_hash() {
         args(&full).expect("complete"),
         Args {
             mode: Mode::Dev,
+            first_light: false,
             identity: SHA1.to_owned(),
             shell_profile: "s".into(),
             brain_profile: "b".into(),
@@ -509,6 +510,86 @@ fn beta_is_a_flag_given_at_most_once() {
             .expect_err("refused")
             .to_string(),
         "--beta given twice"
+    );
+}
+
+#[test]
+fn first_light_is_a_dev_flag_given_at_most_once() {
+    let full = [
+        "--identity",
+        SHA1,
+        "--shell-profile",
+        "s",
+        "--brain-profile",
+        "b",
+        "--out",
+        "o",
+    ];
+    for list in [
+        [&["--first-light"][..], &full].concat(),
+        [&full[..], &["--first-light"]].concat(),
+    ] {
+        let parsed = args(&list).expect("first light");
+        assert_eq!((parsed.mode, parsed.first_light), (Mode::Dev, true));
+    }
+    let refused = |list: &[&str]| args(list).expect_err("refused").to_string();
+    for flags in [["--first-light", "--beta"], ["--beta", "--first-light"]] {
+        assert_eq!(
+            refused(&[&flags[..], &full].concat()),
+            "--first-light builds a Dev bundle only, so it can't be given with --beta"
+        );
+    }
+    assert_eq!(
+        refused(&[&["--first-light", "--first-light"][..], &full].concat()),
+        "--first-light given twice"
+    );
+}
+
+#[test]
+fn only_first_light_adds_both_features_to_the_dev_build() {
+    let dev = [
+        "build",
+        "--locked",
+        "--message-format=json-render-diagnostics",
+        "-p",
+        "kumochi-shell",
+        "-p",
+        "kumochi-brain",
+    ];
+    assert_eq!(build_args(None), dev);
+    assert_eq!(
+        build_args(Some(FIRST_LIGHT)),
+        [
+            &dev[..],
+            &[
+                "--features",
+                "kumochi-brain/first-light,kumochi-shell/first-light"
+            ]
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn the_dev_build_has_thirty_minutes_and_a_stalled_one_is_stopped() {
+    assert_eq!(BUILD_WAIT.as_secs(), 1800);
+    let mut stalled = Command::new("/bin/sh");
+    stalled.args(["-c", "/bin/sleep 30 & /bin/sleep 30"]);
+    let started = Instant::now();
+    assert_eq!(
+        bounded(
+            "cargo build",
+            &mut stalled,
+            None,
+            Duration::from_millis(200)
+        )
+        .expect_err("stalled")
+        .to_string(),
+        "cargo build didn't finish within 200ms"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the build and its helper were stopped, not waited out"
     );
 }
 
