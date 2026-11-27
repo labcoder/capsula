@@ -999,8 +999,7 @@ fn coordinator_debug_does_not_format_frames_held_for_deletion() {
     assert!(!debug.contains("SceneBegin"));
     assert!(!debug.contains("SceneStepCommit"));
     assert!(!debug.contains("SceneEnd"));
-    assert!(!debug.contains("test diagram"));
-    assert!(!debug.contains(&format!("{:?}", b"test diagram")));
+    crate::test_support::assert_no_preview(&debug, "test diagram");
 }
 
 #[test]

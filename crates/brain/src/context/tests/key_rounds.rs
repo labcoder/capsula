@@ -57,13 +57,13 @@ fn calling_with_input(input: &str) -> Vec<u8> {
     streamed(&[
         json!({"type":"message_start","message":{"usage":{"input_tokens":5}}}),
         json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"THOUGHT-SENTINEL"}}),
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"SIG-SENTINEL"}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"JKVUGHT-SENTINEL"}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"WZP-SENTINEL"}}),
         json!({"type":"content_block_stop","index":0}),
         json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}),
         json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Looking."}}),
         json!({"type":"content_block_stop","index":1}),
-        json!({"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"list_tasks","input":{},"signature":"CALL-SIG-SENTINEL"}}),
+        json!({"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"list_tasks","input":{},"signature":"ZXQ-SIG-SENTINEL"}}),
         json!({"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":input}}),
         json!({"type":"content_block_stop","index":2}),
         json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}),
@@ -379,9 +379,9 @@ async fn a_signed_key_round_goes_on_from_memory_and_only_its_call_is_stored() {
         next[sent.len()..],
         [
             json!({"role":"assistant","content":[
-                {"type":"thinking","thinking":"THOUGHT-SENTINEL","signature":"SIG-SENTINEL"},
+                {"type":"thinking","thinking":"JKVUGHT-SENTINEL","signature":"WZP-SENTINEL"},
                 {"type":"text","text":"Looking."},
-                {"type":"tool_use","id":"toolu_1","name":"list_tasks","input":{"limit":3},"signature":"CALL-SIG-SENTINEL"},
+                {"type":"tool_use","id":"toolu_1","name":"list_tasks","input":{"limit":3},"signature":"ZXQ-SIG-SENTINEL"},
             ]}),
             json!({"role":"user","content":[
                 {"type":"tool_result","tool_use_id":"toolu_1","content":"three tasks"},
@@ -400,9 +400,8 @@ async fn a_standalone_key_job_does_not_take_the_held_reply() {
     let (finish, events) = peer.play(&live, &first, Answer::Grant).await;
     assert_eq!(finish, Some(Finish::Completed));
     let shown = format!("{live:?} {events:?}");
-    for marker in ["SIG-SENTINEL", "THOUGHT-SENTINEL", "CALL-SIG-SENTINEL"] {
-        assert!(!shown.contains(marker));
-        assert!(!shown.contains(&format!("{:?}", marker.as_bytes())));
+    for marker in ["WZP-SENTINEL", "JKVUGHT-SENTINEL", "ZXQ-SIG-SENTINEL"] {
+        crate::test_support::assert_no_preview(&shown, marker);
     }
 
     let mut job = request(&world, run, 1);
@@ -421,8 +420,9 @@ async fn a_standalone_key_job_does_not_take_the_held_reply() {
     assert_eq!(finish, Some(Finish::Completed));
     let bodies = peer.sent();
     assert_eq!(bodies.len(), 3);
-    assert!(!bodies[1].contains("SIG-SENTINEL"));
-    assert!(bodies[2].contains("SIG-SENTINEL"));
+    assert!(!bodies[1].contains("WZP-SENTINEL"));
+    assert!(!bodies[1].contains("ZXQ-SIG-SENTINEL"));
+    assert!(bodies[2].contains("WZP-SENTINEL"));
 }
 
 #[tokio::test]
@@ -801,7 +801,7 @@ fn a_key_run_with_another_routes_row_or_unpaired_results_replays_as_its_text() {
             "{run:?}"
         );
         assert_eq!(built.sources, vec![main], "no recall was read: {run:?}");
-        assert!(!format!("{input:?}").contains("private-sentinel"));
+        crate::test_support::assert_no_preview(&format!("{input:?}"), "private-sentinel");
     }
 }
 

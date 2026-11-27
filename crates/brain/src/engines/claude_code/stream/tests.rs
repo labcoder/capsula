@@ -222,8 +222,8 @@ fn initialize_line(account: &str) -> String {
 
 #[test]
 fn the_initialize_account_keeps_no_email_or_organization() {
-    let email = "sentinel-k7q@example.invalid";
-    let organization = "Sentinel Org K7Q";
+    let email = "zqx-sample@example.invalid";
+    let organization = "Jkv Org K7Q";
     let line = initialize_line(&format!(
         r#"{{"email":"{email}","organization":"{organization}","subscriptionType":"max","apiProvider":"firstParty"}}"#
     ));
@@ -245,14 +245,7 @@ fn the_initialize_account_keeps_no_email_or_organization() {
     );
     let printed = format!("{mapped:?}");
     for marker in [email, organization] {
-        assert!(!printed.contains(marker), "{marker} in Debug");
-        assert!(
-            !printed
-                .as_bytes()
-                .windows(marker.len())
-                .any(|window| window == marker.as_bytes()),
-            "{marker} in Debug's bytes"
-        );
+        crate::test_support::assert_no_preview(&printed, marker);
     }
 }
 
@@ -535,7 +528,7 @@ fn debug_shows_shapes_and_counts_never_stream_content() {
         .expect("text");
     let output = format!("{framer:?} {control:?} {init:?} {text:?} {mapper:?}");
     let bytes: Vec<String> = SENTINEL.bytes().map(|byte| byte.to_string()).collect();
-    assert!(!output.contains(SENTINEL), "{output}");
+    crate::test_support::assert_no_preview(&output, SENTINEL);
     assert!(!output.contains(&bytes.join(", ")), "{output}");
     assert_eq!(
         format!("{framer:?}"),

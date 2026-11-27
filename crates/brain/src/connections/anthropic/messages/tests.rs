@@ -712,7 +712,7 @@ async fn early_provider_refusal_closes_before_lease_and_recovery_stays_closed() 
     assert!(!shown.contains(format!("{:?}", b"SYNTHETIC_PROVIDER").trim_matches(['[', ']'])));
     let logged = captured.text();
     for marker in ["SYNTHETIC_PROVIDER", "SYNTHETIC_PROMPT", "SYNTHETIC_KEY"] {
-        assert!(!logged.contains(marker));
+        crate::test_support::assert_no_preview(&logged, marker);
         assert!(!logged.contains(format!("{:?}", marker.as_bytes()).trim_matches(['[', ']'])));
     }
 }

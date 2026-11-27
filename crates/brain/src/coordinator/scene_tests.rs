@@ -371,7 +371,7 @@ fn a_scene_state_s_debug_leaves_its_labels_out() {
         }],
     };
     let debug = format!("{state:?}");
-    assert!(!debug.contains("zqxsentinel"), "{debug}");
+    crate::test_support::assert_no_preview(&debug, "zqxsentinel");
     assert!(debug.contains("revision: 3"), "{debug}");
 }
 

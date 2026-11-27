@@ -915,7 +915,7 @@ fn speech_effects_and_inputs_show_no_text_or_audio() {
     };
     let audio = tts(Synthesized::Audio(vec![12_345; 3]));
     for shown in [format!("{speak:?}"), format!("{audio:?}")] {
-        assert!(!shown.contains(marker), "{shown}");
+        crate::test_support::assert_no_preview(&shown, marker);
         assert!(!shown.contains("12345"), "{shown}");
         assert!(
             !shown

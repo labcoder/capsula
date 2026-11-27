@@ -179,8 +179,7 @@ mod tests {
             assert_eq!(restored.user.id, 7);
             let debug = format!("{restored:?}");
             for marker in ["ghu_fake_sentinel", "ghr_fake_sentinel", "octocat"] {
-                assert!(!debug.contains(marker));
-                assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+                crate::test_support::assert_no_preview(&debug, marker);
             }
         }
     }

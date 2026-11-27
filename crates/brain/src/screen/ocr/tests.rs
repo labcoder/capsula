@@ -680,7 +680,6 @@ fn debug_redacts_outer_result_job_bitmap_and_native_words() {
         native,
         job.output.words[0]
     );
-    assert!(!debug.contains(marker));
-    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+    crate::test_support::assert_no_preview(&debug, marker);
     assert!(!debug.contains("83, 69, 78, 84"));
 }

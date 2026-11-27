@@ -270,7 +270,7 @@ mod tests {
             draw: super::super::DrawAction::Complete(Ok(draw)),
         };
         for shown in [records, format!("{action:?}")] {
-            assert!(!shown.contains(marker));
+            crate::test_support::assert_no_preview(&shown, marker);
             assert!(!shown.contains(format!("{:?}", marker.as_bytes()).trim_matches(['[', ']'])));
         }
     }

@@ -142,6 +142,6 @@ fn debug_shows_no_text() {
     segmenter.push(&format!("{marker}. {marker}"), &mut out);
     let debug = format!("{segmenter:?} {out:?}");
     let bytes = format!("{:?}", marker.as_bytes());
-    assert!(!debug.contains(marker), "{debug}");
+    crate::test_support::assert_no_preview(&debug, marker);
     assert!(!debug.contains(&bytes[1..bytes.len() - 1]), "{debug}");
 }

@@ -505,7 +505,7 @@ fn diagnostics_never_show_arguments_outputs_ids_or_titles() {
     let listed = format!("{:?}", MARKER.as_bytes());
     let bytes = listed.trim_matches(['[', ']']);
     for shown in formatted {
-        assert!(!shown.contains(MARKER), "{shown}");
+        crate::test_support::assert_no_preview(&shown, MARKER);
         assert!(!shown.contains(bytes), "{shown}");
     }
 }

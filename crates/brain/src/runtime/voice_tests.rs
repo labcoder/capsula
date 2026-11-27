@@ -2109,7 +2109,7 @@ async fn model_review_debug_excludes_paths_through_outer_carriers() {
     let fetcher: Arc<dyn Fetch> = Arc::new(crate::voice::download::Online(models.clone()));
     let (brain, _release, _) = attached_at(&scratch, Some(models), Arc::clone(&fetcher));
     let debug = format!("{brain:?} {fetcher:?}");
-    assert!(!debug.contains(test_support::SENTINEL));
+    crate::test_support::assert_no_preview(&debug, test_support::SENTINEL);
     assert!(!debug.contains(&format!("{:?}", test_support::SENTINEL.as_bytes())));
     brain.close().await;
 }
@@ -2129,7 +2129,7 @@ async fn removal_diagnostics_exclude_paths_and_report_owner_counts() {
     disk.insert("private".into(), test_support::SENTINEL.into());
     let disk = toml::Value::Table(disk);
     let diagnostic = timeout_diagnostics(&brain, Some(&disk));
-    assert!(!diagnostic.contains(test_support::SENTINEL));
+    crate::test_support::assert_no_preview(&diagnostic, test_support::SENTINEL);
     assert!(!diagnostic.contains(&format!("{:?}", test_support::SENTINEL.as_bytes())));
     assert_eq!(diagnostic.matches("owners: 0").count(), 2);
     assert_eq!(

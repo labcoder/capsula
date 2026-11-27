@@ -352,7 +352,7 @@ async fn only_auth_refusals_reject_and_neither_provider_errors_nor_content_are_l
             .expect_err("closed failure");
         assert_eq!(error, expected);
         let printed = format!("{error:?} {error}");
-        assert!(!printed.contains(marker), "error text is redacted");
+        crate::test_support::assert_no_preview(&printed, marker);
         let bytes = format!("{:?}", marker.as_bytes());
         assert!(!printed.contains(bytes.trim_matches(['[', ']'])));
     }
@@ -379,11 +379,7 @@ async fn only_auth_refusals_reject_and_neither_provider_errors_nor_content_are_l
     assert!(logs.contains("capture-control"), "capture active");
     for output in [printed, logs] {
         for secret in [marker, CATALOG_FIXTURE_KEY] {
-            assert!(!output.contains(secret), "content text is redacted");
-            assert!(
-                !output.contains(format!("{:?}", secret.as_bytes()).trim_matches(['[', ']'])),
-                "content bytes are redacted"
-            );
+            crate::test_support::assert_no_preview(&output, secret);
         }
     }
 }

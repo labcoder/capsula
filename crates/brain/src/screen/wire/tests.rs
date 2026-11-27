@@ -15,7 +15,6 @@ fn shell_identity_round_trips_privately_through_the_worker_wire() {
     assert_eq!(decoded.deadline_qpc(), 41);
     assert_eq!(decoded.nonce, *b"shell-pid-secret");
     let printed = format!("{decoded:?}");
-    assert!(!printed.contains("305419896"));
-    assert!(!printed.contains("shell-pid-secret"));
-    assert!(!printed.contains(&format!("{:?}", b"shell-pid-secret")));
+    crate::test_support::assert_no_preview(&printed, "305419896");
+    crate::test_support::assert_no_preview(&printed, "shell-pid-secret");
 }

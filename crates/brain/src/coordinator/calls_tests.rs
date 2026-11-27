@@ -836,9 +836,6 @@ fn a_created_tasks_title_never_shows_in_a_carrier() {
         &mut effects,
     );
     let shown = format!("{effects:?}");
-    assert!(shown.contains("CreateTask"), "{shown}");
-    let bytes = format!("{:?}", b"Zqxsecrettitle");
-    for marker in ["Zqxsecrettitle", &bytes[1..bytes.len() - 1]] {
-        assert!(!shown.contains(marker), "{shown}");
-    }
+    assert!(shown.contains("CreateTask"));
+    crate::test_support::assert_no_preview(&shown, "Zqxsecrettitle");
 }

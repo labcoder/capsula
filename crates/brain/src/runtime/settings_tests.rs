@@ -693,7 +693,7 @@ async fn a_panicked_write_logs_only_its_kind() {
     assert_eq!(ended, Ended::Lost);
     brain.close().await;
     let text = logs.text();
-    assert!(!text.contains(SENTINEL), "{text}");
+    crate::test_support::assert_no_preview(&text, SENTINEL);
     assert!(text.contains("the settings write didn't finish"), "{text}");
     assert!(text.contains("panicked=true"), "{text}");
 }

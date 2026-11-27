@@ -442,8 +442,7 @@ async fn completion_debug_never_formats_the_reply_content() {
     assert_eq!(destination.deliver(marker.into(), Generation(0)), Ok(true));
     let completion = request.await.expect("guarded reply");
     let debug = format!("{completion:?}");
-    assert!(!debug.contains(marker));
-    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+    crate::test_support::assert_no_preview(&debug, marker);
     assert_eq!(completion.handoff(), Ok((marker.into(), Generation(0))));
 }
 

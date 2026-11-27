@@ -1,7 +1,8 @@
 use super::*;
 use crate::connections::anthropic::{KeyError, KeyOp};
+use crate::connections::authority::Generation;
 use crate::connections::vault::staging::{PasteError, PastePlan};
-use kumochi_protocol::message::KeyRejection;
+use kumochi_protocol::message::{KeyRejection, KeyStageId};
 
 const OLD: &str = "sk-ant-api-old-fake-sentinel";
 const NEW: &str = "sk-ant-api-new-fake-sentinel";
@@ -388,14 +389,18 @@ fn staging_errors_and_metadata_do_not_print_secret_material() {
     let plan = vault.begin_anthropic_paste(NEW.len()).expect("plan");
     plant(&store, &service, &plan, NEW.as_bytes());
     let id = plan.generation.hex();
+    let generation = Generation::from_stage_id(KeyStageId(*b"Zqx-generation!!"));
+    let fixture = PastePlan { generation, ..plan };
     let key = vault.adopt_anthropic_paste(plan.generation);
+    assert!(matches!(&key, Ok((_, adopted)) if adopted.expose().as_str() == NEW));
     let text = format!(
-        "{plan:?} {key:?} {vault:?} {:?}",
+        "{plan:?} {fixture:?} {key:?} {vault:?} {:?}",
         PasteError::Key(KeyError::Rejected(KeyRejection::Format))
     );
-    assert!(!text.contains(NEW));
-    assert!(!text.contains(&format!("{:?}", NEW.as_bytes())));
+    crate::test_support::assert_no_preview(&text, &generation.hex());
+    crate::test_support::assert_no_preview(&text, "Zqx-generation!!");
     assert!(!text.contains(&id));
+    crate::test_support::assert_no_preview(&text, NEW);
 }
 
 #[test]

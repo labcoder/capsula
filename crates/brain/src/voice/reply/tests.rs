@@ -1110,7 +1110,7 @@ fn debug_shows_no_text_or_audio() {
     reply.pcm(seg(0), vec![12_345; 4], &mut out);
     let debug = format!("{reply:?} {out:?}");
     let bytes = format!("{:?}", marker.as_bytes());
-    assert!(!debug.contains(marker), "{debug}");
+    crate::test_support::assert_no_preview(&debug, marker);
     assert!(!debug.contains(&bytes[1..bytes.len() - 1]), "{debug}");
     assert!(
         !debug.contains("12345") && !debug.contains("57, 48"),

@@ -544,8 +544,9 @@ fn outermost_carriers_and_attempt_do_not_print_secrets_or_byte_lists() {
         polling: false,
     };
     let text = format!("{input:?} {effect:?} {attempt:?}");
-    assert!(!text.contains("sentinel"));
-    assert!(!text.contains("115, 101, 110, 116, 105, 110, 101, 108"));
+    for marker in ["sentinel", "ghu_", "ghr_"] {
+        crate::test_support::assert_no_preview(&text, marker);
+    }
 }
 
 #[tokio::test(start_paused = true)]

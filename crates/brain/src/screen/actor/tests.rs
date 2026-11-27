@@ -836,8 +836,7 @@ fn protocol_debug_redacts_the_outer_tree_and_ticket() {
         format!("{:?}", Reply::Elements(key(1), tree)),
         format!("{:?}", context(1)),
     ] {
-        assert!(!debug.contains(marker));
-        assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+        crate::test_support::assert_no_preview(&debug, marker);
         assert!(!debug.contains(&format!("{:?}", [91_u8; 16])));
     }
 }
@@ -1157,9 +1156,9 @@ fn a_window_changed_since_its_capture_refuses_the_seal_and_releases_the_frame() 
 
 #[test]
 fn a_sealed_context_never_prints_its_jpeg() {
-    let marker = b"KUMOCHI-SEALED-MARKER".to_vec();
+    const MARKER: &str = "zqx-sealed-marker";
     let encoded = crate::screen::encode::Encoded {
-        jpeg: zeroize::Zeroizing::new(marker.clone()),
+        jpeg: zeroize::Zeroizing::new(MARKER.as_bytes().to_vec()),
         size: [4, 3],
         capture: CaptureId(1),
         generation: 1,
@@ -1175,7 +1174,6 @@ fn a_sealed_context_never_prints_its_jpeg() {
     let printed = format!("{context:?}");
     let reply = format!("{:?}", Reply::Sealed(key(1), context));
     for text in [printed, reply] {
-        assert!(!text.contains("KUMOCHI-SEALED-MARKER"), "{text}");
-        assert!(!text.contains(&format!("{marker:?}")[1..20]), "{text}");
+        crate::test_support::assert_no_preview(&text, MARKER);
     }
 }

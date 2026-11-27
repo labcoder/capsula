@@ -1209,13 +1209,22 @@ fn listener_endings_map_to_their_errors_and_declining_is_quiet() {
 /// logs or any `Debug` output, through an ambiguous failure, a refused save and a list save.
 #[test]
 fn no_secret_reaches_the_logs_or_debug_output() {
+    const CODE: &str = "jkv-code-SENTINEL";
+    const CLIENT: &str = "zqx-client-SENTINEL";
+    const NONCE: &str = "wzp-nonce-SENTINEL";
+    const VERIFIER: &str = "qwx-SENTINEL-vvvvvvvvvvvvvvvvvvvvvvvvvvvvvv";
+    const ACCESS: &str = "mxj-access-SENTINEL";
+    const REFRESH: &str = "pqv-refresh-SENTINEL";
+    const TOKEN: &str = "rvq-id-token-SENTINEL";
+    const SUBJECT: &str = "vwx-subject-SENTINEL";
+    const EMAIL: &str = "qzv-SENTINEL@example.invalid";
     let captured = Captured::default();
     let guard = captured.install();
     let authorization = || Authorization {
-        code: secret("code-SENTINEL"),
-        client_id: secret("client-SENTINEL"),
-        nonce: secret("nonce-SENTINEL"),
-        verifier: secret(&format!("verifier-SENTINEL-{}", "v".repeat(30))),
+        code: secret(CODE),
+        client_id: secret(CLIENT),
+        nonce: secret(NONCE),
+        verifier: secret(VERIFIER),
         // The loopback redirect carries no secret and isn't redacted; the launch URL, which
         // does, never reaches the machine.
         redirect: "http://127.0.0.1:1455/auth/callback".to_owned(),
@@ -1223,15 +1232,15 @@ fn no_secret_reaches_the_logs_or_debug_output() {
     let issued = || {
         Ok(Received {
             tokens: TokenSet {
-                access_token: secret("access-SENTINEL"),
-                refresh_token: Some(secret("refresh-SENTINEL")),
-                id_token: Some(secret("idtoken-SENTINEL")),
+                access_token: secret(ACCESS),
+                refresh_token: Some(secret(REFRESH)),
+                id_token: Some(secret(TOKEN)),
                 scope: secret(PLAN),
                 expires_in: 3600,
             },
             identity: Ok(VerifiedIdentity {
-                subject: secret("subject-SENTINEL"),
-                email: Some(secret("SENTINEL@example.invalid")),
+                subject: secret(SUBJECT),
+                email: Some(secret(EMAIL)),
             }),
             now: Some(NOW),
             connection: 1,
@@ -1270,10 +1279,15 @@ fn no_secret_reaches_the_logs_or_debug_output() {
     assert!(
         logs.contains("a token request's outcome is unknown")
             && logs.contains("a verified sign-in is held for another save"),
-        "the capture saw the account's warnings: {logs}"
+        "the capture saw the account's warnings"
     );
     for text in printed.iter().chain([&logs]) {
-        assert!(!text.contains("SENTINEL"), "{text}");
+        assert!(!text.contains("SENTINEL"));
+        for marker in [
+            CODE, CLIENT, NONCE, VERIFIER, ACCESS, REFRESH, TOKEN, SUBJECT, EMAIL,
+        ] {
+            crate::test_support::assert_no_preview(text, marker);
+        }
     }
 }
 

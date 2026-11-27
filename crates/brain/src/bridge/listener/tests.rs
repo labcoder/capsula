@@ -498,8 +498,6 @@ async fn the_deadline_and_a_malformed_frame_end_the_session() {
 #[tokio::test]
 async fn nothing_the_client_sent_reaches_debug_or_an_answer() {
     const PLANTED: &str = "kumochi-planted";
-    // "kumo" as a byte list and as the hex a call key spells.
-    let (decimal, hex) = ("107, 117, 109, 111", "6b756d6f");
     let fixture = fixture();
     let context = fixture.context(Duration::from_secs(60));
     let planted = JsonRpcId::String(PLANTED.to_owned()).key();
@@ -529,8 +527,8 @@ async fn nothing_the_client_sent_reaches_debug_or_an_answer() {
         answer.1.to_string(),
     ];
     for text in printed {
-        for needle in [PLANTED, decimal, hex] {
-            assert!(!text.contains(needle), "{needle} in {text}");
+        for marker in [PLANTED, "6b756d6f"] {
+            crate::test_support::assert_no_preview(&text, marker);
         }
     }
 }

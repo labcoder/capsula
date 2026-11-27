@@ -783,13 +783,24 @@ fn debug_output_names_no_generation_or_value() {
     let mut authority = setup.open();
     let plan = authority.begin(Kind::Account, 0, 4).expect("begin");
     let hex = plan.generation.hex();
-    let shown = format!("{plan:?} {authority:?}");
-    assert!(!shown.contains(&hex), "no generation in Debug");
+    let generation = Generation(*b"Zqx-generation!!");
+    let fixture = WritePlan { generation, ..plan };
+    let shown = format!("{plan:?} {authority:?} {fixture:?}");
+    crate::test_support::assert_no_preview(&shown, &generation.hex());
+    crate::test_support::assert_no_preview(&shown, "Zqx-generation!!");
+    assert!(!shown.contains(&hex));
     let verified = io::write(&setup.store, SERVICE, plan, &secret(b'S', 4)).expect("write");
     let (active, _) = authority.activate(verified, None).expect("activate");
-    let shown = format!("{active:?} {:?}", authority.retired(16).expect("retired"));
-    assert!(
-        !shown.contains(&hex) && !shown.contains("SSSS"),
-        "no secret or generation"
+    let fixture = ActiveRef {
+        generation,
+        ..active
+    };
+    let shown = format!(
+        "{active:?} {fixture:?} {:?}",
+        authority.retired(16).expect("retired")
     );
+    crate::test_support::assert_no_preview(&shown, &generation.hex());
+    crate::test_support::assert_no_preview(&shown, "Zqx-generation!!");
+    assert!(!shown.contains(&hex));
+    crate::test_support::assert_no_preview(&shown, "SSSS");
 }

@@ -132,7 +132,7 @@ fn assert_turn_context(context: &str, alt: &str) {
 
 #[tokio::test]
 async fn an_ask_reaches_the_engine_in_the_scenes_thread_on_its_model_with_its_history() {
-    let (label, info, alt) = (capped("LABELSENT"), capped("INFOSENT"), capped("ALTSENT"));
+    let (label, info, alt) = (capped("ZQXBLSENT"), capped("JKVOSENT"), capped("WZPSENT"));
     let scratch = Scratch::new("ask-request");
     let choice = ModelChoice {
         model: ModelSlug::new("thread-model").expect("valid"),
@@ -227,7 +227,7 @@ async fn an_ask_reaches_the_engine_in_the_scenes_thread_on_its_model_with_its_hi
         _ => true,
     }));
     let text = logs.text();
-    for marker in ["LABELSENT", "INFOSENT", "ALTSENT"] {
-        assert!(!text.contains(marker), "{marker}");
+    for marker in ["ZQXBLSENT", "JKVOSENT", "WZPSENT"] {
+        crate::test_support::assert_no_preview(&text, marker);
     }
 }

@@ -354,6 +354,5 @@ fn the_outer_draft_commit_never_formats_its_content() {
     let mut ledger = Ledger::default();
     let call = commit(draft(&mut ledger, model("draft"), &args));
     let debug = format!("{call:?}");
-    assert!(!debug.contains(marker));
-    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+    crate::test_support::assert_no_preview(&debug, marker);
 }
