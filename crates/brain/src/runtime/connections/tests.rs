@@ -27,11 +27,24 @@ async fn production_composition_serves_the_key_route_and_refuses_unadmitted_send
             Availability::Unavailable(refusal),
         )) if refusal == unavailable
     ));
-    assert_owned_key_refusal(&mut brain, unavailable).await;
+    assert_owned_refusal(&mut brain, ConnectionKind::AnthropicKey, unavailable).await;
     brain.close().await;
 }
 
-async fn assert_owned_key_refusal(brain: &mut Brain, unavailable: UserError) {
+/// A saved local choice gets its own refusing engine; `None` would answer it on `ChatGPT`.
+#[tokio::test]
+async fn a_local_choice_is_refused_by_its_own_engine_never_the_default() {
+    let scratch = Scratch::new("dormant-local-route");
+    let mut brain = test_support::brain(&scratch, "");
+    assert_owned_refusal(&mut brain, ConnectionKind::LocalChat, model_unavailable()).await;
+    brain.close().await;
+}
+
+async fn assert_owned_refusal(
+    brain: &mut Brain,
+    connection: ConnectionKind,
+    unavailable: UserError,
+) {
     use crate::context::{ModelRequest, Origin};
     use crate::coordinator::{BuildKey, SendKey};
     use crate::engines::{Asks, EngineFailure, Finish, RunRequest, SendGate, TurnEvent};
@@ -49,7 +62,7 @@ async fn assert_owned_key_refusal(brain: &mut Brain, unavailable: UserError) {
         origin: Origin::Kumo,
         request: ModelRequest {
             choice: Some(ModelChoice {
-                connection: ConnectionKind::AnthropicKey,
+                connection,
                 model: ModelSlug::new("claude-sonnet-5-5").expect("model"),
                 effort: Effort::Medium,
             }),

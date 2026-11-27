@@ -1701,6 +1701,10 @@ impl Brain {
                 self.key_engine(request)
                     .unwrap_or_else(|| Box::new(engines::Unserved::model_unavailable())),
             ),
+            // No build serves a local server yet; never `None`, which would answer on ChatGPT.
+            Some(ConnectionKind::LocalChat) => {
+                Some(Box::new(engines::Unserved::model_unavailable()))
+            }
         }
     }
 

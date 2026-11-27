@@ -933,7 +933,9 @@ impl Coordinator {
                 ConnectionKind::ChatGpt => {
                     Availability::Unavailable(availability::sign_in_needed())
                 }
-                ConnectionKind::AnthropicKey | ConnectionKind::ClaudeCode => {
+                ConnectionKind::AnthropicKey
+                | ConnectionKind::ClaudeCode
+                | ConnectionKind::LocalChat => {
                     Availability::Unavailable(availability::model_unavailable())
                 }
             }),

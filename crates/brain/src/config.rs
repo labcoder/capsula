@@ -734,6 +734,7 @@ fn default_choice_of(table: &Table) -> StoredChoice {
             "ChatGpt" => "chatgpt",
             "ClaudeCode" => "claude_code",
             "AnthropicKey" => "anthropic_key",
+            "LocalChat" => "local_chat",
             _ => return StoredChoice::Invalid,
         },
         Some(_) => return StoredChoice::Invalid,

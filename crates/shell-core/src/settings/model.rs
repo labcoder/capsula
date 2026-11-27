@@ -16,6 +16,7 @@ impl Settings {
                 ConnectionKind::ChatGpt => 0,
                 ConnectionKind::AnthropicKey => 1,
                 ConnectionKind::ClaudeCode => 2,
+                ConnectionKind::LocalChat => 3,
             });
         }
     }

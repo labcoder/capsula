@@ -1356,3 +1356,39 @@ fn a_turn_while_chatgpt_is_fenced_arrives_blocked_until_the_account_lifts_it() {
         "the account lifts it"
     );
 }
+
+/// A saved local choice is refused at its first build with Open Settings, and nothing starts,
+/// though `ChatGPT` is ready with the same model.
+#[test]
+fn a_local_choice_is_refused_and_never_answered_on_chatgpt() {
+    let mut core = turn_after(vec![ready(7, &["haiku"])]);
+    assert_eq!(
+        core.handle(built_on(ConnectionKind::LocalChat, "haiku")),
+        Ok(failed(Some(model_unavailable())))
+    );
+}
+
+/// A local route takes no picture with every switch on, even ready with an image model, while
+/// the same model on `ChatGPT` does.
+#[test]
+fn a_local_route_takes_no_picture_even_when_ready_with_an_image_model() {
+    let haiku = ModelSlug::new("haiku").expect("valid");
+    let mut core = Coordinator::new(ThreadId(1), ThreadId(3), RunId(9), Vec::new());
+    core.set_pictures(crate::coordinator::PictureRoutes::new(true, true));
+    for kind in [ConnectionKind::ChatGpt, ConnectionKind::LocalChat] {
+        core.handle(Input::Engines(
+            kind,
+            Availability::Ready(Ready {
+                connection: ConnectionTag(5),
+                models: vec![info("haiku")],
+                trusted_draw: false,
+                images: vec![haiku.clone()],
+            }),
+        ))
+        .expect("never stale");
+    }
+    assert!(core.takes_pictures(ConnectionKind::ChatGpt, &haiku));
+    assert!(core.pictured(on(ConnectionKind::ChatGpt, 5), Some(&haiku)));
+    assert!(!core.takes_pictures(ConnectionKind::LocalChat, &haiku));
+    assert!(!core.pictured(on(ConnectionKind::LocalChat, 5), Some(&haiku)));
+}

@@ -1553,3 +1553,24 @@ fn a_config_that_cant_be_written_serves_onboarded_and_still_refuses_every_write(
     assert_eq!(std::fs::read_to_string(&path).expect("readable"), broken);
     assert!(blocked_file.is_dir());
 }
+/// A saved local default reopens as local, so the run is refused on its own kind rather than
+/// read as no choice, which would answer it on `ChatGPT`.
+#[test]
+fn a_local_default_model_reopens_as_local() {
+    let scratch = Scratch::new("config-local-default");
+    let dir = dir(&scratch);
+    let mut config = Config::load(Some(dir.clone()), ThreadId(1));
+    let local = ModelChoice {
+        connection: kumochi_protocol::message::ConnectionKind::LocalChat,
+        ..choice("gpt-6-luna", Effort::Low)
+    };
+    apply(&mut config, SettingsOp::SetDefaultModel(local));
+    assert_eq!(
+        Config::load(Some(dir), ThreadId(1)).default_choice(),
+        crate::store::choice::StoredChoice::Valid {
+            connection: kumochi_protocol::message::ConnectionKind::LocalChat,
+            model: ModelSlug::new("gpt-6-luna").expect("valid"),
+            effort: Some(Effort::Low),
+        }
+    );
+}

@@ -223,7 +223,7 @@ fn next_request(store: &Store, run: RunId, kind: ConnectionKind) -> Built {
     let connection = match kind {
         ConnectionKind::ChatGpt => ConnectionTag(0),
         ConnectionKind::ClaudeCode => ConnectionTag(1),
-        ConnectionKind::AnthropicKey => unreachable!(),
+        ConnectionKind::AnthropicKey | ConnectionKind::LocalChat => unreachable!(),
     };
     build_request(
         Some(&store.side()),

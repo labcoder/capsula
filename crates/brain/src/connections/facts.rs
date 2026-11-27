@@ -7,13 +7,14 @@ use std::ops::{Index, IndexMut};
 
 use kumochi_protocol::message::ConnectionKind;
 
-const COUNT: usize = 3;
+const COUNT: usize = 4;
 
 /// Every kind, in the order of [`Facts::index`].
 pub(crate) const KINDS: [ConnectionKind; COUNT] = [
     ConnectionKind::ChatGpt,
     ConnectionKind::AnthropicKey,
     ConnectionKind::ClaudeCode,
+    ConnectionKind::LocalChat,
 ];
 
 /// How a run's stored rounds replay on a kind.
@@ -59,6 +60,12 @@ pub(crate) const fn of(kind: ConnectionKind) -> Facts {
         ConnectionKind::ClaudeCode => Facts {
             index: 2,
             stored: "claude_code",
+            replay: Replay::Text,
+            pictures: false,
+        },
+        ConnectionKind::LocalChat => Facts {
+            index: 3,
+            stored: "local_chat",
             replay: Replay::Text,
             pictures: false,
         },
@@ -117,6 +124,13 @@ mod tests {
                 Replay::Text,
                 false,
             ),
+            (
+                ConnectionKind::LocalChat,
+                3,
+                "local_chat",
+                Replay::Text,
+                false,
+            ),
         ] {
             assert_eq!(
                 of(kind),
@@ -130,11 +144,19 @@ mod tests {
             assert_eq!(KINDS[index], kind);
             assert_eq!(stored(spelling), Some(kind));
         }
-        for text in ["", "ChatGpt", "chatgpt ", "CLAUDE_CODE", "anthropic"] {
+        for text in [
+            "",
+            "ChatGpt",
+            "chatgpt ",
+            "CLAUDE_CODE",
+            "anthropic",
+            "LocalChat",
+            "local",
+        ] {
             assert_eq!(stored(text), None, "{text:?}");
         }
         let mut slots = PerKind::new(|kind| of(kind).index * 10);
         slots[ConnectionKind::AnthropicKey] = 7;
-        assert_eq!(slots, PerKind([0, 7, 20]));
+        assert_eq!(slots, PerKind([0, 7, 20, 30]));
     }
 }

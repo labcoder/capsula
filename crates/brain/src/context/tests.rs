@@ -2608,6 +2608,7 @@ fn a_route_without_screen_pictures_is_sent_no_screen_scene() {
                     .to_vec()
             }
             ConnectionKind::ChatGpt => drawing_line(&built).as_bytes().to_vec(),
+            ConnectionKind::LocalChat => unreachable!("no local encoder yet"),
         };
         let sent = String::from_utf8(sent).expect("UTF-8");
         let screens = picture_fact && connection == ConnectionKind::ChatGpt;

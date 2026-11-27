@@ -91,6 +91,7 @@ fn label(
         _ if !shared => return name.to_owned(),
         ConnectionKind::ChatGpt => Text::AccountProvider,
         ConnectionKind::ClaudeCode => Text::ClaudeProvider,
+        ConnectionKind::LocalChat => Text::LocalProvider,
     };
     strings.model_on(name, &strings.get(provider))
 }
