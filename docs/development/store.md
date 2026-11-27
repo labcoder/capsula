@@ -5,6 +5,12 @@ The brain keeps threads, their events and runs in one SQLite file,
 admitted override or the Known Folder in Gate and debug builds; see [architecture](architecture.md)), through `rusqlite` with SQLite and FTS5 built in. Only the
 brain opens it. The code is `crates/brain/src/store/`.
 
+Store errors format as fixed messages and include the extended SQLite code when available.
+The typed SQLite error stays available for handling, but isn't exposed through the error chain.
+Warnings name the failed operation without including record IDs or SQLite's text, which can quote
+private data. Direct purge I/O warnings keep only the error kind and OS code. The shell receives typed
+failure replies, not database diagnostics.
+
 On macOS the default path is `<Application Support>/<product>/kumochi.db`, beside the
 configuration file. The shared OS lookup ignores `HOME` and refuses if it can't provide an
 absolute path. Computing it doesn't open the database or create the folder. The native
@@ -98,7 +104,7 @@ rolled-back id is never seen because no id leaves the brain before its commit. E
 body names its `scene`, `index` and `label`, and `scene_cleared`'s body names its `scene`. A
 clear is one immediate transaction, so a busy store makes it wait rather than fail. At start,
 after the recovery scan, one read rebuilds the visible set (see [processes](processes.md)) from
-live threads only: a step that doesn't decode is skipped and logged by row id, never its
+live threads only: a step that doesn't decode is skipped and logged without its row ID or
 content. The threads panel's pages leave `scene_begin` and `scene_cleared` out.
 
 Search takes the user's words as one quoted phrase, so FTS5 query syntax in them is plain text,
@@ -483,7 +489,7 @@ The shell crash guard also uses durable `scene_cleared` events before relaunch (
 A failed acknowledgement or the guard's 2 s deadline cannot authorize launch. Clear debt is
 only held in the running brain; after brain exit a failed clear may need another crash cycle.
 
-Drawing recovery warnings name only native row ids, never JSON or SQL error content. Recovery
+Store drawing recovery warnings name the failure kind, never JSON or SQL error content. Recovery
 tests capture those warnings and isolate a corrupt scene from the other three. The aggregate
 32 MiB body limit is tested at exactly the limit and one byte over with individually valid
 bodies below 8 MiB, independently of the per-body limit.

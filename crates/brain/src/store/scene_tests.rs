@@ -161,7 +161,7 @@ fn a_thread_left_deleting_yields_no_scene() {
 }
 
 #[test]
-fn a_step_that_doesnt_decode_is_skipped_and_named_by_its_row_alone() {
+fn a_step_that_doesnt_decode_is_skipped_and_logged_without_row_content() {
     let scratch = Scratch::new("malformed-step");
     let mut store = Store::open(&scratch.db()).expect("store");
     let (thread, scene) = draw(&mut store, &["drawn"], None);
@@ -184,10 +184,8 @@ fn a_step_that_doesnt_decode_is_skipped_and_named_by_its_row_alone() {
     assert_eq!(scenes[0].revision, 1, "the malformed row isn't counted");
     assert_eq!(scenes[0].kept[0].label, "drawn");
     let logs = logs.text();
-    assert!(
-        logs.contains(&format!("stored scene row {row} doesn't decode")),
-        "{logs}"
-    );
+    assert!(logs.contains("stored scene row doesn't decode"), "{logs}");
+    assert!(!logs.contains(&format!("stored scene row {row}")));
     assert!(!logs.contains(SENTINEL), "{logs}");
     assert!(
         !format!("{:?}", scenes[0]).contains("drawn"),

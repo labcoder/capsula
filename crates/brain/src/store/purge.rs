@@ -257,7 +257,7 @@ impl Store {
             held.available();
         }
         if let (Err(error), Err(_)) = (&moved, &reopened) {
-            tracing::warn!(%error, "the move failed before the reopen did");
+            tracing::warn!(kind = ?error.kind(), code = ?error.raw_os_error(), "the move failed before the reopen did");
         }
         reopened?;
         moved.map_err(StoreError::Purge)?;
@@ -296,7 +296,7 @@ impl Store {
             && linked
             && let Err(error) = fs::remove_file(&old)
         {
-            tracing::warn!(%error, "the old store's second name stays until the purge removes it");
+            tracing::warn!(kind = ?error.kind(), code = ?error.raw_os_error(), "the old store's second name stays until the purge removes it");
         }
         moved
     }
@@ -346,7 +346,7 @@ impl Owed {
             #[cfg(test)]
             cancel.pauses.reach(Point::Cleanup);
             if let Err(error) = leftovers.remove() {
-                tracing::warn!(%error, "a purge's copy couldn't be removed; it's retried later");
+                tracing::warn!(kind = ?error.kind(), code = ?error.raw_os_error(), "a purge's copy couldn't be removed; it's retried later");
             }
         }
         Ok(made?.then_some(Copied {

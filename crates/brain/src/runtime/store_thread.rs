@@ -258,7 +258,7 @@ impl Purger {
                 (Ok(Ok(())), None) if store.purge_pending() => self.next = Some(Instant::now()),
                 (Ok(Ok(())), None) => self.settle(Attempt::Done, store),
                 (Ok(Err(error)), _) => {
-                    tracing::warn!(%error, "a purge file couldn't be removed; it's retried later");
+                    tracing::warn!(kind = ?error.kind(), code = ?error.raw_os_error(), "a purge file couldn't be removed; it's retried later");
                     self.settle(Attempt::Failed, store);
                 }
                 (Err(_), _) => {
@@ -324,7 +324,7 @@ impl Purger {
         {
             Ok(helper) => self.job = Some(Job::Copy { cancel, helper }),
             Err(error) => {
-                tracing::error!(%error, "the purge's helper didn't start");
+                tracing::error!(kind = ?error.kind(), code = ?error.raw_os_error(), "the purge's helper didn't start");
                 self.settle(Attempt::Failed, store);
             }
         }
@@ -338,7 +338,7 @@ impl Purger {
         {
             Ok(helper) => self.job = Some(Job::Remove { helper, then }),
             Err(error) => {
-                tracing::error!(%error, "the purge's helper didn't start");
+                tracing::error!(kind = ?error.kind(), code = ?error.raw_os_error(), "the purge's helper didn't start");
                 self.settle(Attempt::Failed, store);
             }
         }
@@ -673,7 +673,7 @@ fn serve_op(
             {
                 Ok(applied) => applied,
                 Err(error) => {
-                    tracing::warn!(%error, thread = thread.0, "a title wasn't stored");
+                    tracing::warn!(%error, "a title wasn't stored");
                     false
                 }
             };
@@ -694,7 +694,7 @@ fn serve_op(
             }) {
                 Ok(applied) => applied,
                 Err(error) => {
-                    tracing::warn!(%error, thread = thread.0, "a summary wasn't stored");
+                    tracing::warn!(%error, "a summary wasn't stored");
                     false
                 }
             };
@@ -950,12 +950,12 @@ fn delete(store: &mut Store, thread: ThreadId) -> Input {
     }
 }
 
-/// Writes a clear. A failed one is retried, so it's only logged, by how many scenes it names.
+/// Writes a clear. A failed one is logged for retry.
 fn clear(store: &mut Store, scenes: Vec<SceneId>) -> Input {
     let ok = match store.reconnect().and_then(|()| store.clear_scenes(&scenes)) {
         Ok(()) => true,
         Err(error) => {
-            tracing::warn!(%error, scenes = scenes.len(), "a clear failed; it's retried");
+            tracing::warn!(%error, "a clear failed; it's retried");
             false
         }
     };
@@ -963,7 +963,7 @@ fn clear(store: &mut Store, scenes: Vec<SceneId>) -> Input {
 }
 
 /// Runs one write in one transaction and answers it, holding off the purge meanwhile. Errors are
-/// logged by kind and run id only, never content.
+/// logged by classification only, never content.
 fn write(
     store: &mut Store,
     purger: &mut Purger,
@@ -976,11 +976,11 @@ fn write(
     // After a swap's reopen failed: fails closed until the file opens again.
     let reply = match store.reconnect().map(|()| op(store)) {
         Err(error) => {
-            tracing::warn!(%error, run = run.0, "the store is unavailable");
+            tracing::warn!(%error, "the store is unavailable");
             Input::StoreFailed { run }
         }
         Ok(Err(error)) => {
-            tracing::warn!(%error, run = run.0, what, "a store operation failed");
+            tracing::warn!(%error, what, "a store operation failed");
             Input::StoreFailed { run }
         }
         Ok(Ok(stored)) => stored,
