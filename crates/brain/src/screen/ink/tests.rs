@@ -122,7 +122,7 @@ fn a_segment_that_leaves_the_image_is_painted_up_to_its_edge() {
             top: 3,
             right: 10,
             bottom: 8,
-            focus: [9, 5],
+            focus: [5, 5],
         })
     );
     assert_eq!(coloured(&rgb, 10, PINK), block(4..=9, 4..=6));
@@ -234,20 +234,20 @@ fn a_long_approach_that_ends_circling_a_word_gathers_on_the_circle() {
 
 #[test]
 fn sparse_points_that_tie_gather_at_the_later_one() {
-    let (mut rgb, region) = blank([200, 20]);
+    let (mut rgb, region) = blank([250, 20]);
     assert_eq!(
         paint(
             &mut rgb,
-            [200, 20],
+            [250, 20],
             region,
-            &points(&[[10, 10], [100, 10], [190, 10]])
+            &points(&[[10, 10], [120, 10], [230, 10]])
         ),
         Some(InkBounds {
             left: 8,
             top: 8,
-            right: 193,
+            right: 233,
             bottom: 13,
-            focus: [190, 10],
+            focus: [230, 10],
         })
     );
 }
@@ -264,7 +264,7 @@ fn points_off_the_image_never_decide_where_the_line_gathers() {
             top: 8,
             right: 83,
             bottom: 83,
-            focus: [80, 80],
+            focus: [80, 45],
         })
     );
 }

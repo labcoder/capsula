@@ -867,8 +867,8 @@ fn the_prompt_example_draws_two_steps_without_promising_an_overlay_canvas() {
         (
             "prompt-diagram",
             Some([600, 360]),
-            &["cycle", "heat"][..],
-            "drawn: [cycle, heat]",
+            &["cycle", "fall"][..],
+            "drawn: [cycle, fall]",
         ),
         (
             "prompt-sine",

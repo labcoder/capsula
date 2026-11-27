@@ -11,9 +11,9 @@ const WHITE: [u8; 3] = [255, 255, 255];
 const CORE: f64 = 1.5;
 /// Half the whole line's width: a 1-pixel white edge on each side of the core.
 const EDGE: f64 = 2.5;
-/// How near another of the path's points must be to count where the path gathers, in image
-/// pixels: about the size of a circle drawn around a word in a 1280-pixel picture [guess].
-const GATHER: f64 = 48.0;
+/// The side of the cells the path's points are counted in, in image pixels. Four of them make the
+/// square a circle drawn around a word in a 1280-pixel picture fits in [guess].
+const GATHER: u32 = 48;
 
 /// The painted pixels' bounding rectangle in image pixels: left and top included, right and
 /// bottom not, and the pixel where the path gathers most. Where the user pointed is theirs, so
@@ -103,7 +103,7 @@ pub(crate) fn paint(
         .collect();
     // shortcut: a line whose kept points all lie off the image gathers at its rectangle's centre;
     // the shell keeps only points on the display the picture shows, so none reaches this yet.
-    let mean = gathered(&places).unwrap_or([
+    let mean = gathered(&places, size).unwrap_or([
         f64::midpoint(f64::from(left), f64::from(right)),
         f64::midpoint(f64::from(top), f64::from(bottom)),
     ]);
@@ -117,22 +117,58 @@ pub(crate) fn paint(
     })
 }
 
-/// Where `places` are densest: the mean of the places within [`GATHER`] of the one with the most
-/// such neighbours, the later one on a tie; none for no places.
-fn gathered(places: &[[f64; 2]]) -> Option<[f64; 2]> {
-    let near =
-        |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) <= GATHER * GATHER;
-    let centre = places
-        .iter()
-        .copied()
-        .max_by_key(|&at| places.iter().filter(|&&other| near(at, other)).count())?;
-    let (sum, count) = places
-        .iter()
-        .filter(|&&other| near(centre, other))
-        .fold(([0.0, 0.0], 0.0), |([x, y], count), [px, py]| {
-            ([x + px, y + py], count + 1.0)
-        });
-    Some([sum[0] / count, sum[1] / count])
+/// Where `places`, all inside an image of `size`, are densest: the mean of the places in the
+/// square of two by two [`GATHER`] cells holding the most, the one holding the latest place on a
+/// tie; none for no places. One pass over the places and one over the cells.
+fn gathered(places: &[[f64; 2]], size: [u32; 2]) -> Option<[f64; 2]> {
+    let [columns, rows] =
+        size.map(|side| usize::try_from(side.div_ceil(GATHER)).expect("an image side fits usize"));
+    // Each cell's count, the sum of its places and its latest place's index.
+    let mut cells = vec![(0_u32, [0.0, 0.0], 0_usize); columns * rows];
+    for (index, at) in places.iter().enumerate() {
+        let cell = &mut cells[cell(at[1]) * columns + cell(at[0])];
+        *cell = (cell.0 + 1, [cell.1[0] + at[0], cell.1[1] + at[1]], index);
+    }
+    let mut best: Option<(u32, usize, [f64; 2])> = None;
+    for top in 0..rows {
+        for left in 0..columns {
+            let mut square = (0, 0, [0.0, 0.0]);
+            for (x, y) in [
+                (left, top),
+                (left + 1, top),
+                (left, top + 1),
+                (left + 1, top + 1),
+            ] {
+                if x < columns && y < rows {
+                    let (count, sum, latest) = cells[y * columns + x];
+                    if count > 0 {
+                        square = (
+                            square.0 + count,
+                            square.1.max(latest),
+                            [square.2[0] + sum[0], square.2[1] + sum[1]],
+                        );
+                    }
+                }
+            }
+            if square.0 > 0
+                && best.is_none_or(|(count, latest, _)| (square.0, square.1) > (count, latest))
+            {
+                best = Some(square);
+            }
+        }
+    }
+    best.map(|(count, _, sum)| [sum[0] / f64::from(count), sum[1] / f64::from(count)])
+}
+
+/// The [`GATHER`] cell a place inside the image falls in, along one axis.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a place inside the image is non-negative and under its side"
+)]
+fn cell(at: f64) -> usize {
+    (at / f64::from(GATHER)).floor() as usize
 }
 
 /// The pixel `at` falls in, moved into `low..high`, which isn't empty.
