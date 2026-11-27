@@ -15,6 +15,7 @@ mod tests;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
@@ -194,31 +195,23 @@ async fn round<L: Lease>(
         lease: Some(lease),
     };
     let send_by = (Instant::now() + tuning.send).min(by);
-    let uploaded = timeout_at(send_by, async {
-        let io = timeout(CONNECT_DEADLINE, endpoint.connect())
+    timeout_at(send_by, async {
+        let connect_by = Instant::now() + CONNECT_DEADLINE;
+        let io = timeout_at(connect_by, endpoint.connect())
             .await
             .map_err(|_| Failure::Transport)??;
-        let lease = &attempt.lease;
+        // A connection that completes as its cap passes is still too late.
+        if Instant::now() >= connect_by {
+            return Err(Failure::Transport);
+        }
         let conn = attempt.conn.insert(ModelConn::new(io));
-        // Each write is admitted only before the cutoff, which a ready socket can't outrun.
-        let admit = || {
-            (Instant::now() < send_by)
-                .then(|| lease.as_ref().and_then(Lease::admit))
-                .flatten()
-        };
-        match conn.upload(&request, admit).await? {
+        match upload(conn, &request, attempt.lease.as_ref(), send_by).await? {
             Upload::Flushed => Ok(()),
             Upload::Refused(head) => Err(refused(head.status)),
         }
     })
     .await
-    .unwrap_or(Err(Failure::Transport));
-    match uploaded {
-        Err(Failure::Rebuild | Failure::Withheld) if Instant::now() >= send_by => {
-            return Err(Failure::Transport);
-        }
-        uploaded => uploaded?,
-    }
+    .map_err(|_| Failure::Transport)??;
     if let Some(mut lease) = attempt.lease.take() {
         lease.wrote();
     }
@@ -254,6 +247,28 @@ async fn round<L: Lease>(
         }
     }
     reader.finish()
+}
+
+/// Writes `request`, each write admitted by `lease` and only before `send_by`, which a socket
+/// that turns writable late can't outrun. A write refused by the cutoff is `Transport`, never a
+/// retryable `Rebuild`.
+async fn upload<Io: AsyncRead + AsyncWrite + Unpin, L: Lease>(
+    conn: &mut ModelConn<Io>,
+    request: &[u8],
+    lease: Option<&L>,
+    send_by: Instant,
+) -> Result<Upload, Failure> {
+    let admit = || {
+        (Instant::now() < send_by)
+            .then(|| lease.and_then(Lease::admit))
+            .flatten()
+    };
+    match conn.upload(request, admit).await {
+        Err(error::Failure::Rebuild | error::Failure::Withheld) if Instant::now() >= send_by => {
+            Err(Failure::Transport)
+        }
+        uploaded => uploaded.map_err(Failure::from),
+    }
 }
 
 /// What a final head other than 200 means. Its body is never read: only the status counts.

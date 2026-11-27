@@ -367,6 +367,21 @@ async fn a_failure_beside_untaken_text_is_still_that_failure() {
     join(server).await;
 }
 
+#[tokio::test]
+async fn no_write_is_admitted_once_the_send_cutoff_has_passed() {
+    let (client, mut server) = tokio::io::duplex(64 * 1024);
+    let mut conn = ModelConn::new(client);
+    let past = Instant::now();
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    let request = body().request(LoopbackEndpoint::for_tests("127.0.0.1:8080"));
+    let uploaded = upload(&mut conn, &request, Some(&()), past).await;
+    assert_eq!(uploaded, Err(Failure::Transport));
+    drop(conn);
+    let mut bytes = Vec::new();
+    server.read_to_end(&mut bytes).await.expect("read");
+    assert_eq!(bytes, b"");
+}
+
 struct Probe(Arc<AtomicBool>);
 
 impl Lease for Probe {

@@ -699,7 +699,9 @@ asked for and covers the grant (it's checked first on every poll, and again befo
 spent), connecting (at most `CONNECT_DEADLINE`, 3 s), the upload, the
 head, the body and every wait on the sink, so trickled bytes can't stretch it. No write of the
 request is admitted after the send cutoff (the tuning's send wait, or the round deadline if that's
-sooner), so a socket that turns writable late can't send more; that ends as `Transport`. Within it the
+sooner), so a socket that turns writable late can't send more; that ends as `Transport`, or as `Deadline`
+when the round deadline is the cutoff. A connection that completes as its 3 s cap passes is refused
+too. Within it the
 model tuning's send, idle and backpressure waits still apply; a read that fails doesn't wait for
 the sink to take its text first. A refused grant or a spent budget
 connects to nothing. Esc, Stop and delete drop the round's future, which closes the connection.
