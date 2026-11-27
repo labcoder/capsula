@@ -743,8 +743,8 @@ write, and these facts add no GPUI presentation.
   ```
 
   The shell's `Runs` keys the answer on the connection, the selection and the thread, so focus, a
-  New chat's promotion, Kumo's id arriving, a confirmed delete and a reconnect each ask again with
-  no panel open. It keeps one read and one write outstanding, matches answers by request, kind and
+  New chat's promotion, Kumo's id arriving, a confirmed delete and a reconnect each forget the answer
+  and make a read due on the next `Runs::model_read` call, whether or not a panel is open. It keeps one read and one write outstanding, matches answers by request, kind and
   thread, and takes a found choice only at a revision at least the newest it saw. It writes only over
   a current found answer; a write that fails, isn't sent or goes unanswered for `MODEL_WRITE_TIME` leaves
   the choice unknown until a read sent after it answers. A failed read is asked again after

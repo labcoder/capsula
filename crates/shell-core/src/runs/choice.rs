@@ -3,7 +3,7 @@
 //!
 //! The tracker keys itself on the pair, the selection and the thread, so focus, a New chat's
 //! promotion, Kumo's id arriving with settings, a confirmed delete and a reconnect each forget the
-//! answer and ask again. Only the outstanding request of each kind is matched, by id, kind and
+//! answer and make a read due on the next `Runs::model_read` call. Only the outstanding request of each kind is matched, by id, kind and
 //! thread, and an answer asked under an older key retires its slot without applying. A found
 //! choice replaces the state only at a revision at least the key's newest, and nothing lowers it.
 
