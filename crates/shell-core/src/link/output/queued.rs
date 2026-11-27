@@ -541,6 +541,7 @@ impl OutputOwner {
             return false;
         }
         owner.ack = None;
+        self.wake();
         true
     }
 

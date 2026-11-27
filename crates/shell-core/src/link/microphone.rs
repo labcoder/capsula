@@ -77,6 +77,7 @@ impl Shared {
             if current == gesture && sent == generation)
         {
             *pending = None;
+            self.output.wake();
         }
     }
 }

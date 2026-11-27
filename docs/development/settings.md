@@ -162,7 +162,8 @@ a queued pair opened Off gets the tagged `SpokenRepliesDefaulted` snapshot inste
 ordinary Settings change. While the Voice tab shows the install note, presence offers that pair
 an explicit On save after every link batch and every output-owner change, so whichever edge
 frees the pair last (a terminal `RunState`, `RunEnd`, a thread deletion, a refused turn, a hold
-status or the microphone's retirement) is followed by another offer. A busy pair refuses it
+status, the microphone's retirement, its accepted stop or the audio registration's
+acknowledgement) is followed by another offer. A busy pair refuses it
 silently. The pair takes at most one accepted offer; its answer reconnects the pair in the
 saved mode, so the next reply speaks without a restart. Until then the pair speaks no new
 replies and the note stays, while the setting shows what was saved. The save closes turn and

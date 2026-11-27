@@ -405,7 +405,7 @@ impl OutputOwner {
         Ok(state)
     }
 
-    fn wake(&self) {
+    pub(in crate::link) fn wake(&self) {
         // A full channel already holds a wake.
         let _woken = self.changed.try_send(());
     }
