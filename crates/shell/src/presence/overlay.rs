@@ -422,14 +422,11 @@ impl Presence {
             })
             .detach();
         }
-        let drawn = self.presenter.on_screen();
-        if self.on_screen != drawn {
+        let (chat, tasks) = (self.text_open(), self.threads_open());
+        let drawn = (chat || tasks).then(|| self.presenter.on_screen());
+        if let Some(drawn) = drawn.filter(|drawn| *drawn != self.on_screen) {
             self.on_screen = drawn;
-            let chat = self.text.as_ref().is_some_and(|text| text.typing.visible);
-            for (model, open) in [
-                (&self.chat, chat),
-                (&self.threads, self.thread_panel.is_some()),
-            ] {
+            for (model, open) in [(&self.chat, chat), (&self.threads, tasks)] {
                 if open {
                     model.update(cx, |state, cx| {
                         if state.follow_drawn(drawn) {

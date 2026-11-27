@@ -341,6 +341,36 @@ impl Frames {
         failed
     }
 
+    /// The scenes [`Frames::paint`] draws something for on a shown overlay: during a handoff the
+    /// frozen pictures and not the successor, and never an empty or failed frame.
+    fn on_screen(&self) -> [Option<SceneId>; MAX_VISIBLE_SCENES] {
+        let mut scenes = [None; MAX_VISIBLE_SCENES];
+        if !self.shown {
+            return scenes;
+        }
+        let handoff = self
+            .retirement
+            .as_ref()
+            .filter(|retirement| retirement.epoch.is_none());
+        let live = self
+            .slots
+            .iter()
+            .flatten()
+            .filter(|(id, _)| handoff.is_none_or(|retirement| *id != retirement.successor))
+            .map(|(id, slot)| (*id, slot));
+        let frozen = handoff
+            .into_iter()
+            .flat_map(|retirement| retirement.pictures.iter().flatten())
+            .map(|picture| (picture.id, &picture.slot));
+        let drawn = live
+            .chain(frozen)
+            .filter(|(_, slot)| !slot.failed.get() && !slot.frame.items().is_empty());
+        for (place, (id, _)) in scenes.iter_mut().zip(drawn) {
+            *place = Some(id);
+        }
+        scenes
+    }
+
     /// The bound a shown overlay last painted for `scene`, at its current epoch.
     pub(crate) fn painted(&self, scene: SceneId) -> Option<Painted> {
         let (_, slot) = self.slots.iter().flatten().find(|(id, _)| *id == scene)?;
@@ -441,13 +471,9 @@ impl Presenter {
         self.frames.borrow().shown
     }
 
-    /// The scenes with a frame on the shown overlay.
+    /// The scenes whose pictures a shown overlay paints now.
     pub fn on_screen(&self) -> [Option<SceneId>; MAX_VISIBLE_SCENES] {
-        let frames = self.frames.borrow();
-        frames
-            .slots
-            .each_ref()
-            .map(|slot| slot.as_ref().filter(|_| frames.shown).map(|(id, _)| *id))
+        self.frames.borrow().on_screen()
     }
 
     /// Samples every scene's view at `now_ms`. A scene whose frame its view refuses is
