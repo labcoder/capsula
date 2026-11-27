@@ -3,6 +3,7 @@
 
 use std::ffi::c_void;
 use std::fs::TryLockError;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::ptr;
 
@@ -74,10 +75,14 @@ impl InstanceStore for KeychainItem {
 }
 
 /// Custody's lock, already taken, with the absolute product path its acquisition walked. Only
-/// `lock_at` makes one, once the lock is held, so a lock never pairs with another folder.
+/// `lock_in` makes one, once the lock is held, so a lock never pairs with another folder.
 pub(crate) struct InstanceLock {
-    _lock: AdmittedLock,
+    lock: AdmittedLock,
     product: PathBuf,
+    /// Whether this acquisition made the product folder itself, refusing one already there.
+    // shortcut: the root's identity is held in memory only, as the lock's descriptors; D-b
+    // decides where a durable record lives before any run reopens a root.
+    fresh: bool,
 }
 
 impl InstanceLock {
@@ -85,32 +90,71 @@ impl InstanceLock {
     pub(crate) fn product(&self) -> &Path {
         &self.product
     }
+
+    /// Whether this acquisition made the product folder and the held chain still passes: every
+    /// folder the same object, named by its name in its parent with no link, the private ones
+    /// still private. A same-user rename after this check stays possible: the store opens by
+    /// pathname.
+    pub(crate) fn fresh(&self) -> bool {
+        self.fresh && self.intact()
+    }
+
+    /// Whether a fresh product folder still passes that check; a lock taken in a folder that was
+    /// already there has nothing of its own to keep.
+    pub(crate) fn intact(&self) -> bool {
+        !self.fresh || self.lock.check().is_ok()
+    }
 }
 
-/// Custody in the OS-resolved Application Support folder.
+/// Fresh custody in the OS-resolved Application Support folder: first light's, which refuses a
+/// product folder already there.
 pub(crate) fn instance_custody() -> Result<InstanceLock, CustodyError> {
     custody_in(ProductIdentity::ACTIVE, application_support_dir)
 }
 
-/// Refuses another edition before `support` resolves any folder, then locks in that folder.
+/// Refuses another edition before `support` resolves any folder, then locks fresh in that folder.
 fn custody_in(
     identity: ProductIdentity,
     support: impl FnOnce() -> Result<PathBuf, ApplicationSupportError>,
 ) -> Result<InstanceLock, CustodyError> {
     instance_edition(identity).map_err(|_| CustodyError::NotAdmitted)?;
-    lock_at(&support().map_err(|_| CustodyError::Unavailable)?)
+    lock_in(&support().map_err(|_| CustodyError::Unavailable)?, true)
+}
+
+/// `lock_in` that holds a product folder already there, for the custody fixtures.
+#[cfg(test)]
+pub(crate) fn lock_at(support: &Path) -> Result<InstanceLock, CustodyError> {
+    lock_in(support, false)
+}
+
+/// `instance_custody` under a test's own Support folder.
+#[cfg(all(test, feature = "first-light"))]
+pub(crate) fn fresh_lock_at(support: &Path) -> Result<InstanceLock, CustodyError> {
+    lock_in(support, true)
 }
 
 /// Refuses another edition first, then admits `support`, holds or privately creates this
-/// edition's product folder, and locks the session leaf on the descriptor it opened. The held
-/// lock carries the absolute product path this acquisition walked, so nothing resolves it again.
-pub(crate) fn lock_at(support: &Path) -> Result<InstanceLock, CustodyError> {
+/// edition's product folder, and locks the session leaf on the descriptor it opened. A `fresh`
+/// acquisition refuses a folder already there, found or raced in, with `Open(AlreadyExists)`
+/// before any lock leaf is opened. The held lock carries the absolute product path this
+/// acquisition walked, so nothing resolves it again.
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "the custody fixtures hold a folder already there; first light refuses one"
+)]
+fn lock_in(support: &Path, fresh: bool) -> Result<InstanceLock, CustodyError> {
     instance_edition(ProductIdentity::ACTIVE).map_err(|_| CustodyError::NotAdmitted)?;
     let product = match admit_support(support)
         .and_then(|support| support.product_folder(DATA_DIR))
         .map_err(refused)?
     {
+        ProductFolder::Held(_) if fresh => {
+            return Err(CustodyError::Open(io::ErrorKind::AlreadyExists));
+        }
         ProductFolder::Held(product) => product,
+        ProductFolder::Missing(support) if fresh => {
+            support.create_new_product(DATA_DIR).map_err(refused)?
+        }
         ProductFolder::Missing(support) => support.create_product(DATA_DIR).map_err(refused)?,
     };
     let lock = product.into_lock(SESSION_LOCK).map_err(refused)?;
@@ -119,8 +163,9 @@ pub(crate) fn lock_at(support: &Path) -> Result<InstanceLock, CustodyError> {
         TryLockError::Error(error) => CustodyError::Open(error.kind()),
     })?;
     Ok(InstanceLock {
-        _lock: lock,
+        lock,
         product: support.join(DATA_DIR),
+        fresh,
     })
 }
 
