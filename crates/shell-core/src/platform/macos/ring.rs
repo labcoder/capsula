@@ -49,8 +49,8 @@ pub(super) struct Ring {
     read: AtomicUsize,
 }
 
-// SAFETY: a slot's cycle is touched only by the thread whose compare-exchange moved that slot out
-// of FREE or FULL, until the same thread stores FREE or FULL again, so no cycle is shared.
+// SAFETY: a slot's cycle is touched only through an `Owned`, which exists only for the thread
+// whose compare-exchange moved that slot out of FREE or FULL, so no cycle is shared.
 unsafe impl Sync for Ring {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,52 +103,36 @@ impl Ring {
         {
             return Produced::Refused;
         }
+        let _claim = Claim(&self.admission);
         let at = self.write.load(Ordering::Relaxed);
-        let produced = match self.slots.get(at) {
-            Some(slot)
-                if slot
-                    .state
-                    .compare_exchange(FREE, WRITING, Ordering::Acquire, Ordering::Relaxed)
-                    .is_ok() =>
-            {
-                // SAFETY: this thread took WRITING above and alone touches the cycle until it
-                // stores FULL or FREE below.
-                let cycle = unsafe { &mut *slot.cycle.get() };
-                if fill(&mut cycle.bytes) == cycle.bytes.len() {
-                    cycle.stamp = stamp;
-                    slot.state.store(FULL, Ordering::Release);
-                    self.write
-                        .store((at + 1) % self.slots.len(), Ordering::Relaxed);
-                    Produced::Published
-                } else {
-                    cycle.bytes.zeroize();
-                    slot.state.store(FREE, Ordering::Release);
-                    Produced::Revoked
-                }
-            }
-            _ => Produced::Full,
+        let Some(mut owned) = self
+            .slots
+            .get(at)
+            .and_then(|slot| Owned::take(slot, FREE, WRITING))
+        else {
+            return Produced::Full;
         };
-        self.admission.store(OPEN, Ordering::Release);
-        produced
+        let cycle = owned.cycle();
+        if fill(&mut cycle.bytes) != cycle.bytes.len() {
+            return Produced::Revoked;
+        }
+        cycle.stamp = stamp;
+        owned.publish();
+        self.write
+            .store((at + 1) % self.slots.len(), Ordering::Relaxed);
+        Produced::Published
     }
 
     /// The worker's drain step: hands the oldest published cycle to `read` in place, then
-    /// zeroizes and frees its slot. None when nothing is published.
+    /// zeroizes and frees its slot. None when nothing is published. Cycles come out in order
+    /// only while one capture worker is the sole consumer.
     pub(super) fn pop<T>(&self, read: impl FnOnce(Stamp, &[u8]) -> T) -> Option<T> {
         let at = self.read.load(Ordering::Relaxed);
-        let slot = self.slots.get(at)?;
-        slot.state
-            .compare_exchange(FULL, READING, Ordering::Acquire, Ordering::Relaxed)
-            .ok()?;
-        // SAFETY: this thread took READING above and alone touches the cycle until it stores
-        // FREE below.
-        let cycle = unsafe { &mut *slot.cycle.get() };
-        let value = read(cycle.stamp, &cycle.bytes);
-        cycle.bytes.zeroize();
-        slot.state.store(FREE, Ordering::Release);
+        let mut owned = Owned::take(self.slots.get(at)?, FULL, READING)?;
         self.read
             .store((at + 1) % self.slots.len(), Ordering::Relaxed);
-        Some(value)
+        let cycle = owned.cycle();
+        Some(read(cycle.stamp, &cycle.bytes))
     }
 
     /// Closes the producer for good. False while a cycle holds the claim, so teardown retries at
@@ -169,21 +153,52 @@ impl Ring {
         }
         let mut scrubbed = true;
         for slot in &self.slots {
-            let claimed = [FREE, FULL].into_iter().any(|from| {
-                slot.state
-                    .compare_exchange(from, READING, Ordering::Acquire, Ordering::Relaxed)
-                    .is_ok()
-            });
-            if !claimed {
-                scrubbed = false;
-                continue;
-            }
-            // SAFETY: this thread took READING above and alone touches the cycle until it
-            // stores FREE below.
-            unsafe { &mut *slot.cycle.get() }.bytes.zeroize();
-            slot.state.store(FREE, Ordering::Release);
+            let owned =
+                Owned::take(slot, FREE, READING).or_else(|| Owned::take(slot, FULL, READING));
+            scrubbed &= owned.is_some();
         }
         scrubbed
+    }
+}
+
+/// Reopens the producer when a cycle ends, unwinding included, after its slot is settled.
+struct Claim<'a>(&'a AtomicU8);
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        self.0.store(OPEN, Ordering::Release);
+    }
+}
+
+/// A slot this thread moved out of FREE or FULL. Dropping it zeroizes the slot and frees it, so
+/// a revoked copy, a finished read, a scrub and an unwinding fill or read all leave no audio.
+struct Owned<'a>(&'a Slot);
+
+impl<'a> Owned<'a> {
+    fn take(slot: &'a Slot, from: u8, to: u8) -> Option<Self> {
+        slot.state
+            .compare_exchange(from, to, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Self(slot))
+    }
+
+    fn cycle(&mut self) -> &mut Cycle {
+        // SAFETY: `take`'s compare-exchange gave this thread the slot, and it keeps it until this
+        // value stores FULL or FREE; `&mut self` keeps the borrow unique meanwhile.
+        unsafe { &mut *self.0.cycle.get() }
+    }
+
+    fn publish(self) {
+        let slot = self.0;
+        std::mem::forget(self);
+        slot.state.store(FULL, Ordering::Release);
+    }
+}
+
+impl Drop for Owned<'_> {
+    fn drop(&mut self) {
+        self.cycle().bytes.zeroize();
+        self.0.state.store(FREE, Ordering::Release);
     }
 }
 
@@ -194,7 +209,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use super::{FREE, FULL, MicError, Produced, READING, Ring, Stamp};
+    use super::{FREE, FULL, MicError, OPEN, Produced, Ring, Stamp};
     use crate::platform::microphone::copy_batch;
 
     fn stamp(n: u32) -> Stamp {
@@ -212,16 +227,15 @@ mod tests {
         }
     }
 
-    /// Every slot's bytes, read only while no producer or consumer runs.
-    fn contents(ring: &Ring) -> Vec<u8> {
+    /// Every slot's bytes; free or published only, since `&mut` excludes a running cycle.
+    fn contents(ring: &mut Ring) -> Vec<u8> {
         let mut all = Vec::new();
-        for slot in &ring.slots {
-            let was = slot.state.load(Ordering::Acquire);
-            assert!(was == FREE || was == FULL, "a slot is mid-cycle");
-            slot.state.store(READING, Ordering::Release);
-            // SAFETY: the test holds the only references and no cycle is running.
-            all.extend_from_slice(&unsafe { &*slot.cycle.get() }.bytes);
-            slot.state.store(was, Ordering::Release);
+        for slot in &mut ring.slots {
+            assert!(
+                matches!(*slot.state.get_mut(), FREE | FULL),
+                "a slot is mid-cycle"
+            );
+            all.extend_from_slice(&slot.cycle.get_mut().bytes);
         }
         all
     }
@@ -234,11 +248,14 @@ mod tests {
     #[test]
     fn the_ring_is_sized_for_140_ms_within_its_bounds() {
         let size = |rate, channels, frames| {
-            Ring::new(rate, channels, frames).map(|ring| (ring.slots.len(), contents(&ring).len()))
+            Ring::new(rate, channels, frames)
+                .map(|mut ring| (ring.slots.len(), contents(&mut ring).len()))
         };
         assert_eq!(size(48_000, 1, 64), Ok((105, 26_880)));
         assert_eq!(size(48_000, 1, 27), Ok((249, 26_892)));
         assert_eq!(size(48_000, 1, 26), Err(MicError::Format));
+        assert_eq!(size(12_800, 1, 7), Ok((256, 7_168)));
+        assert_eq!(size(12_850, 1, 7), Err(MicError::Format));
         assert_eq!(size(192_000, 2, 3_839), Ok((8, 245_696)));
         assert_eq!(size(220_000, 2, 4_096), Ok((8, 262_144)));
         assert_eq!(size(240_000, 2, 4_096), Err(MicError::Format));
@@ -251,7 +268,7 @@ mod tests {
 
     #[test]
     fn cycles_come_out_in_order_and_every_read_slot_is_zeroed() {
-        let ring = small();
+        let mut ring = small();
         assert_eq!(ring.produce(stamp(1), fill_with(0xa1)), Produced::Published);
         assert_eq!(ring.produce(stamp(2), fill_with(0xa2)), Produced::Published);
         assert_eq!(ring.produce(stamp(3), fill_with(0xa3)), Produced::Full);
@@ -261,18 +278,18 @@ mod tests {
         assert_eq!(ring.pop(read), Some((stamp(2), vec![0xa2; 16])));
         assert_eq!(ring.pop(read), Some((stamp(3), vec![0xa3; 16])));
         assert_eq!(ring.pop(read), None);
-        assert_eq!(contents(&ring), vec![0; 32]);
+        assert_eq!(contents(&mut ring), vec![0; 32]);
     }
 
     #[test]
     fn a_short_fill_is_scrubbed_and_its_slot_reused() {
-        let ring = small();
+        let mut ring = small();
         let short = |raw: &mut [u8]| {
             raw.fill(0xa5);
             raw.len() - 1
         };
         assert_eq!(ring.produce(stamp(1), short), Produced::Revoked);
-        assert_eq!(contents(&ring), vec![0; 32]);
+        assert_eq!(contents(&mut ring), vec![0; 32]);
         assert_eq!(ring.pop(|_, _| ()), None);
         assert_eq!(ring.produce(stamp(2), fill_with(0xa2)), Produced::Published);
         assert_eq!(ring.produce(stamp(3), fill_with(0xa3)), Produced::Published);
@@ -281,21 +298,21 @@ mod tests {
 
     #[test]
     fn closing_scrubs_published_cycles_and_refuses_every_later_one() {
-        let ring = small();
+        let mut ring = small();
         assert!(!ring.scrub());
         assert_eq!(ring.produce(stamp(1), fill_with(0xa5)), Produced::Published);
         assert_eq!(ring.produce(stamp(2), fill_with(0xa5)), Produced::Published);
         assert!(ring.close());
         assert!(ring.close());
         assert!(ring.scrub());
-        assert_eq!(contents(&ring), vec![0; 32]);
+        assert_eq!(contents(&mut ring), vec![0; 32]);
         assert_eq!(ring.produce(stamp(3), fill_with(0xa5)), Produced::Refused);
         assert_eq!(ring.pop(|_, _| ()), None);
     }
 
     #[test]
     fn teardown_waits_out_a_cycle_paused_inside_the_copy() {
-        let ring = small();
+        let mut ring = small();
         assert_eq!(ring.produce(stamp(1), fill_with(0xa1)), Produced::Published);
         let collecting = AtomicBool::new(true);
         let (paused, pause) = mpsc::channel();
@@ -328,9 +345,32 @@ mod tests {
             ring.pop(|stamp, bytes| (stamp, bytes.to_vec())),
             Some((stamp(1), vec![0xa1; 16]))
         );
-        assert_eq!(contents(&ring), vec![0; 32]);
+        assert_eq!(contents(&mut ring), vec![0; 32]);
         assert!(ring.close());
         assert!(ring.scrub());
         assert_eq!(ring.produce(stamp(4), fill_with(0xa4)), Produced::Refused);
+    }
+    #[test]
+    fn an_unwinding_fill_or_read_leaves_no_audio_and_a_working_ring() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let mut ring = small();
+        let fill = catch_unwind(AssertUnwindSafe(|| {
+            ring.produce(stamp(1), |raw| {
+                raw.fill(0xa5);
+                panic!("fill unwinds");
+            })
+        }));
+        assert!(fill.is_err());
+        assert_eq!(*ring.admission.get_mut(), OPEN);
+        assert_eq!(contents(&mut ring), vec![0; 32]);
+        assert_eq!(ring.produce(stamp(2), fill_with(0xa2)), Produced::Published);
+        assert_eq!(ring.produce(stamp(3), fill_with(0xa3)), Produced::Published);
+        let read = catch_unwind(AssertUnwindSafe(|| {
+            ring.pop::<()>(|_, _| panic!("read unwinds"))
+        }));
+        assert!(read.is_err());
+        assert_eq!(contents(&mut ring), [vec![0; 16], vec![0xa3; 16]].concat());
+        assert_eq!(ring.pop(|stamp, _| stamp), Some(stamp(3)));
     }
 }

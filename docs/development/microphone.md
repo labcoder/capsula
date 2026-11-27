@@ -149,8 +149,9 @@ native release or teardown never becomes a successful stop receipt.
 On macOS, CoreAudio hands each input cycle to an IO block on its real-time thread.
 `platform::macos::ring` is where that block copies it: slots preallocated from the
 pinned configuration (140 ms of cycles, at most 256 slots and 256 KiB), filled in
-place by the shared `copy_batch` and drained in place by the capture worker, which
-zeroizes each slot as it frees it. The block never allocates, locks or waits.
+place by the shared `copy_batch` and drained in place, in order, by the one capture
+worker, which zeroizes each slot as it frees it. A fill or read that unwinds still
+scrubs and frees its slot. The block never allocates, locks or waits.
 
 ```mermaid
 stateDiagram-v2
@@ -162,7 +163,8 @@ stateDiagram-v2
 ```
 
 One atomic producer claim (open, in a cycle, closed) admits a single IO cycle at a
-time. Teardown closes it and only then scrubs every slot. While a cycle is paused
+time. Teardown first revokes the collection gate, then closes the claim, and only
+then scrubs every slot. While a cycle is paused
 inside the copy, closing fails and teardown retries rather than touch that slot, and
 the paused cycle fails its second authorization and zeroizes its own slot. A full
 ring refuses the cycle instead of growing. Nothing fills the ring yet: Mac capture
