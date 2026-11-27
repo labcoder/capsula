@@ -88,6 +88,29 @@ pub(crate) fn admitted_store() -> Result<NativeCredentialStore, CredentialStoreE
     }
 }
 
+/// First light's legacy check, once the pair is authenticated and before any state opens: every
+/// name an earlier build wrote
+/// must be absent, `live` is asked before each one, and the first answer stands for the process,
+/// so the vault opened later sees it too.
+///
+/// # Errors
+/// `Legacy` when a name may be there, or when `live` said no; `Unsupported` when no store is
+/// admitted.
+#[cfg(all(target_os = "macos", feature = "first-light"))]
+pub(crate) fn legacy_preflight(live: &mut dyn FnMut() -> bool) -> Result<(), CredentialStoreError> {
+    NativeCredentialStore::preflight(live)
+}
+
+/// The legacy check itself, on a test's own latch and status answers, for the startup tests.
+#[cfg(all(test, target_os = "macos", feature = "first-light"))]
+pub(crate) use super::macos::credential::legacy_absent;
+
+/// Every other build opens no native store parent-bound, so it has nothing to check past.
+#[cfg(not(all(target_os = "macos", feature = "first-light")))]
+pub(crate) fn legacy_preflight(_: &mut dyn FnMut() -> bool) -> Result<(), CredentialStoreError> {
+    Err(CredentialStoreError::Unsupported)
+}
+
 /// Where a diagnostic mode takes its own session lock; the product vault uses the profile's.
 #[cfg(any(test, debug_assertions))]
 pub(crate) fn native_session_lock_path() -> Result<std::path::PathBuf, CredentialStoreError> {
@@ -164,6 +187,9 @@ pub enum CredentialStoreError {
     /// after retries.
     #[error("credential store did not settle")]
     Unsettled,
+    /// A name an earlier build wrote may still be in the store, so first light opens nothing.
+    #[error("earlier credential names are present or unchecked")]
+    Legacy,
 }
 
 /// Synchronous storage by exact target name, with no enumeration or implicit name mapping.

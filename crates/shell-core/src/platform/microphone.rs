@@ -85,6 +85,8 @@ pub enum MicError {
     Deadline,
     #[error("microphone is unavailable")]
     Unavailable,
+    #[error("microphone access is off")]
+    Permission,
     #[cfg(not(windows))]
     #[error("native microphone capture is unsupported on this platform")]
     Unsupported,

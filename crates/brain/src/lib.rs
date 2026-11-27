@@ -232,14 +232,12 @@ pub enum ParentBoundError {
 /// drops last, after that runtime.
 ///
 /// # Errors
-/// This build returns `Unsupported`, including under Gate identity, before it reads `fds`, and
-/// its prerequisites refuse after admission everywhere else.
+/// `Unsupported` before it reads `fds` unless this is a supporting build's Dev edition; Gate and
+/// Release names would reach another edition's data.
 pub fn run_parent_bound(fds: platform::InheritedFds) -> Result<(), ParentBoundError> {
     use kumochi_protocol::constants::ProductIdentity;
 
-    platform::require_mode(platform::Mode::ParentBound)
-        .map_err(|_| ParentBoundError::Unsupported)?;
-    if ProductIdentity::ACTIVE == ProductIdentity::GATE {
+    if !platform::admits_parent_bound(ProductIdentity::ACTIVE) {
         return Err(ParentBoundError::Unsupported);
     }
     let by = tokio::time::Instant::now() + startup::parent_bound::ADMISSION;
@@ -628,18 +626,10 @@ async fn native_library_entries_return_unsupported() {
     }
 }
 
-/// macOS also runs the library entry on two test-owned pairs (`platform/macos/entry.rs`); elsewhere
-/// `InheritedFds` has no values.
-#[cfg(test)]
-#[test]
-fn no_platform_supports_parent_bound() {
-    assert!(!platform::supports(platform::Mode::ParentBound));
-}
-
 /// The engine runs use: in a dev build that names a script in
 /// [`kumochi_protocol::constants::FIXTURE_ENV`], that script answers every run; otherwise the
-/// account's Responses engine answers, once the account is ready.
-fn engine(tuning: config::tuning::ModelTuning) -> Result<Selected, BrainError> {
+/// account's Responses engine answers within `budget`, once the account is ready.
+fn engine(tuning: config::tuning::ModelTuning, budget: Budget) -> Result<Selected, BrainError> {
     #[cfg(debug_assertions)]
     if let Some(path) = std::env::var_os(kumochi_protocol::constants::FIXTURE_ENV) {
         let script = std::fs::read_to_string(path).map_err(BrainError::Fixture)?;
@@ -651,7 +641,7 @@ fn engine(tuning: config::tuning::ModelTuning) -> Result<Selected, BrainError> {
     }
     let (access, asks) = AccessHandle::new();
     let client = ModelClient::new(Tls::build().map_err(BrainError::Model)?).with_tuning(tuning);
-    let engine = Responses::new(client, Budget::from_env(), access);
+    let engine = Responses::new(client, budget, access);
     Ok(Selected::Account {
         engine: Box::new(engine),
         asks,

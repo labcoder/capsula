@@ -392,6 +392,7 @@ mod tests {
         }
         assert_eq!(mcp.matches("```json").count(), 2);
         assert!(mcp.contains("Draw in canvas coordinates, not screen pixels. Pick a begin.size [width, height] that suits the content and draw inside it; the default canvas is 960 by 600. Kumochi fits and centers the drawing in the free area beside its panel, enlarging it up to 2 times when there is room. Do not guess the display size or position."));
+        assert!(mcp.contains("Kumochi places nodes, so never size a shape to sit behind or around them; for a frame round related nodes, use a mermaid subgraph with a title, which is drawn to fit them."));
         assert!(mcp.contains("Build a larger drawing in 3 to 6 steps, in the order you would draw it by hand, each with a short say. Without a delay, a step's objects come in one after another in put order; leave enter out unless you want a particular effect. Everything on screen can hold about 40 filled circles or ellipses, or a diagram of about 30 boxes with labelled arrows; more is refused."));
     }
 

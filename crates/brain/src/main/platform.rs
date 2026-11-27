@@ -104,6 +104,17 @@ mod tests {
             .env(CLAIM_CHILD, "1")
             .output()
             .expect("run the fixture child");
-        assert_eq!(child.status.code(), Some(76), "{child:?}");
+        // Only the macOS first-light Dev build admits parent-bound; Gate, Release and every other
+        // build refuse before the claim.
+        let refused = if std::env::consts::OS == "macos"
+            && cfg!(feature = "first-light")
+            && kumochi_protocol::constants::ProductIdentity::ACTIVE
+                == kumochi_protocol::constants::ProductIdentity::DEV
+        {
+            76
+        } else {
+            69
+        };
+        assert_eq!(child.status.code(), Some(refused), "{child:?}");
     }
 }

@@ -581,6 +581,17 @@ fn a_cancel_before_the_receipt_keeps_its_notice() {
 }
 
 #[test]
+fn a_permission_refusal_ends_the_hold_as_microphone_unavailable() {
+    let (mut state, _gate) = holding(Source::Recording);
+    let refused = state.receipt(
+        GestureId(1),
+        Ok(Finalization::Discarded(MicError::Permission)),
+        0,
+    );
+    assert_eq!(refused, ReceiptStep::End(Text::HoldMicrophoneUnavailable));
+}
+
+#[test]
 fn only_the_exact_packet_count_joins_and_sends_once_retired() {
     let (mut state, _gate) = holding(Source::Recording);
     let short = state.receipt(GestureId(1), Ok(Finalization::Released { packets: 3 }), 2);

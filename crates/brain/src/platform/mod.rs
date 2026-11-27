@@ -153,6 +153,14 @@ impl InstanceLock {
     pub(crate) fn product(&self) -> &std::path::Path {
         match *self {}
     }
+
+    pub(crate) fn fresh(&self) -> bool {
+        match *self {}
+    }
+
+    pub(crate) fn intact(&self) -> bool {
+        match *self {}
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -213,6 +221,8 @@ pub(crate) fn instance_fixture_clean(_: &std::path::Path, _: &[&str]) {
     panic!("only macOS has the instance item's native fixtures")
 }
 
+#[cfg(all(test, target_os = "macos", feature = "first-light"))]
+pub(crate) use macos::instance::fresh_lock_at as fresh_custody_at;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use macos::instance::lock_at as instance_custody_at;
 #[cfg(all(test, target_os = "macos"))]
@@ -342,7 +352,7 @@ pub(crate) use protected::{
     hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
     private_tree, publish_model, remove_model_tree, remove_tree, unmark, validate_model_path,
 };
-pub use runtime_admission::{Mode, supports};
+pub use runtime_admission::{Mode, admits_parent_bound, supports};
 pub(crate) use runtime_admission::{require_mode, serve_speech};
 pub use session_lock::{SessionLock, SessionLockError};
 pub(crate) use tls_control::{

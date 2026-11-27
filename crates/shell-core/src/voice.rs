@@ -972,9 +972,9 @@ impl State {
             Finalization::Discarded(MicError::Cancelled | MicError::SessionLost) => {
                 Text::HoldCancelled
             }
-            Finalization::Discarded(MicError::Unavailable | MicError::Format) => {
-                Text::HoldMicrophoneUnavailable
-            }
+            Finalization::Discarded(
+                MicError::Unavailable | MicError::Format | MicError::Permission,
+            ) => Text::HoldMicrophoneUnavailable,
             _ => Text::HoldFailed,
         };
         hold.source = Source::Sent;

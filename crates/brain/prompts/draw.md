@@ -57,6 +57,8 @@ cleared names cannot be reused.
 Put a group's nodes in the
 same step as the group, since later growth does not move its siblings. Use a
 mermaid operation for labelled groups rather than fenced Mermaid in chat.
+Kumochi places nodes, so never size a shape to sit behind or around them; for a frame
+round related nodes, use a mermaid subgraph with a title, which is drawn to fit them.
 
 Nodes may omit `in` for the scene root; edges may omit it to use their endpoints'
 nearest common diagram, while rows, series and Mermaid need a table, chart and diagram.
