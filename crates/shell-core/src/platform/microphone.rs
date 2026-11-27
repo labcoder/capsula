@@ -35,6 +35,8 @@ use zeroize::Zeroize;
 
 #[cfg(windows)]
 pub(super) use pcm::{Format, Packetizer, Sample};
+#[cfg(target_os = "macos")]
+pub(super) use pcm::{Format, Sample};
 
 /// The capture pump's sleep while the endpoint is empty, one wire chunk long; the reaper and
 /// the UI's hold watcher reuse it as their check interval.
