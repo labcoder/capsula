@@ -3228,3 +3228,35 @@ fn a_hold_gives_global_esc_back_once_its_run_answers(cx: &mut TestAppContext) {
         "the hold's own answer gives Esc back"
     );
 }
+
+#[gpui::test]
+fn a_gate_run_names_why_a_hold_ended_before_listening(cx: &mut TestAppContext) {
+    let (refused, _data, _controls) = ready(cx);
+    let (unheard, _data, _controls) = ready(cx);
+    let (lines, recorded) = async_channel::unbounded();
+    crate::platform::listen_rearm(lines);
+    hold(&refused, 1, cx);
+    status(&refused, 2, 1, HoldStatus::Failed(HoldFailure::Busy), cx);
+    status(
+        &refused,
+        1,
+        1,
+        HoldStatus::Failed(HoldFailure::ChoiceChanged),
+        cx,
+    );
+    hold(&unheard, 1, cx);
+    unheard.update(cx, |owner, _| {
+        owner.voice.start = Some(Box::new(|_, _| Err(MicError::Unavailable)));
+    });
+    status(&unheard, 1, 1, HoldStatus::Admitted, cx);
+    until(cx, |cx| {
+        unheard.read_with(cx, |owner, _| owner.voice.state.pending.is_none())
+    });
+    assert_eq!(
+        std::iter::from_fn(|| recorded.try_recv().ok()).collect::<Vec<_>>(),
+        [
+            "voice failed reason=choice-changed",
+            "voice failed reason=microphone"
+        ]
+    );
+}

@@ -49,7 +49,7 @@ pub struct Ready {
     /// sign-in, which for `ChatGPT` is its account's catalog listing image input.
     pub(crate) images: Vec<ModelSlug>,
     /// The dev fixture answers, so its draw calls draw though no request offers the tool.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "gate-fixture"))]
     pub(crate) trusted_draw: bool,
 }
 
@@ -68,13 +68,13 @@ impl Ready {
                 supported_efforts: EffortSet::new([Effort::Low]),
             }],
             images: Vec::new(),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, debug_assertions, feature = "gate-fixture"))]
             trusted_draw: false,
         }
     }
 
     /// The dev fixture is selected: it answers every run, with no account or catalog.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "gate-fixture"))]
     pub(crate) fn fixture() -> Self {
         Self {
             connection: ConnectionTag(0),
@@ -84,12 +84,12 @@ impl Ready {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "gate-fixture"))]
     fn trusted(&self) -> bool {
         self.trusted_draw
     }
 
-    #[cfg(not(any(test, debug_assertions)))]
+    #[cfg(not(any(test, debug_assertions, feature = "gate-fixture")))]
     #[expect(clippy::unused_self, reason = "a release build never trusts a draw")]
     fn trusted(&self) -> bool {
         false

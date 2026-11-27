@@ -1062,8 +1062,27 @@ impl Presence {
             StatusStep::End(text) => self.end_voice(text, cx),
             StatusStep::Failed(reason, text) => {
                 tracing::warn!(stage = ?FailureStage::Brain, ?reason, "held speech input failed");
+                #[cfg(any(test, feature = "gate-recorder"))]
+                crate::platform::rearm_note(failed_line(reason));
                 self.end_voice(text, cx);
             }
         }
+    }
+}
+
+/// A gate run's line for a hold the brain failed; it names only the failure's kind.
+#[cfg(any(test, feature = "gate-recorder"))]
+fn failed_line(reason: kumochi_protocol::message::HoldFailure) -> &'static str {
+    use kumochi_protocol::message::HoldFailure;
+    match reason {
+        HoldFailure::NotLoaded => "voice failed reason=not-loaded",
+        HoldFailure::Busy => "voice failed reason=busy",
+        HoldFailure::Unavailable => "voice failed reason=unavailable",
+        HoldFailure::InvalidAudio => "voice failed reason=invalid-audio",
+        HoldFailure::TooLong => "voice failed reason=too-long",
+        HoldFailure::TimedOut => "voice failed reason=timed-out",
+        HoldFailure::ChoiceChanged => "voice failed reason=choice-changed",
+        HoldFailure::DecodeFailed => "voice failed reason=decode-failed",
+        HoldFailure::NoConnection => "voice failed reason=no-connection",
     }
 }

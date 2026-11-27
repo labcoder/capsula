@@ -68,6 +68,12 @@ use crate::platform::Job;
 use crate::runtime::{Brain, Selected};
 use crate::startup::run_admitted;
 
+#[cfg(feature = "gate-fixture")]
+const _: () = assert!(
+    kumochi_protocol::constants::GATE_IDENTITY,
+    "gate-fixture builds only with kumochi-protocol/gate-identity, never into a Dev or release product"
+);
+
 const STARTUP_LOG_TARGET: &str = module_path!();
 
 /// How long a relaunched shell the brain can't watch gets to connect: past the shell's own

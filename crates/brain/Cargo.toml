@@ -153,6 +153,10 @@ workspace = true
 # request; without it every Mac brain still exits 69.
 first-light = []
 gate-draw-replay = []
+# hold-gate's Listening row: ChatGPT reads ready with no account, so a hold is admitted and opens
+# the microphone, and every run fails at once without sending. Only a gate prebuild's command line
+# sets it, and the brain doesn't compile it without kumochi-protocol/gate-identity.
+gate-fixture = []
 # Lets another crate's tests drive a coordinator with no store behind it, and lets an
 # outside harness time the UIA reader on a window it owns (platform::WindowSession).
 test-support = []

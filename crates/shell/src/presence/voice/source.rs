@@ -36,6 +36,8 @@ impl Presence {
             Ok(mic) => mic,
             Err(reason) => {
                 tracing::warn!(stage = ?FailureStage::CaptureStart, ?reason, "held speech input failed");
+                #[cfg(any(test, feature = "gate-recorder"))]
+                crate::platform::rearm_note("voice failed reason=microphone");
                 self.end_voice(Text::HoldMicrophoneUnavailable, cx);
                 return;
             }
