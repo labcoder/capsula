@@ -137,6 +137,18 @@ impl Brain {
         }
     }
 
+    /// Reads control until the shell shuts it down; false if the read bound passes first.
+    pub(in crate::platform::macos) fn shut_down_seen(&mut self) -> bool {
+        let mut byte = [0];
+        loop {
+            match self.control.read(&mut byte) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+    }
+
     pub(in crate::platform::macos) fn control_message(&mut self) -> ControlToBrain {
         frame::decode(&self.receive(Pipe::Control)[HEADER_LEN..]).expect("decodes")
     }

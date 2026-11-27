@@ -286,8 +286,8 @@ the disconnected window, so no child starts.
 - **Terminal custody ends the pair.** Once the owner reaps, loses or gives up on the child, the
   attempt's hook aborts both legs, so the link stops serving a pair whose peer may still hold
   its ends open, without waiting for EOF. Custody that ends after the handoff but before
-  Connected goes out is read once more as attendance starts, so no Connected or generation follows
-  it (ipc.md). A watchdog beside the owner bounds only a confirmed
+  Connected goes out is read under custody's lock as Connected is enqueued, so no Connected or
+  generation follows it (ipc.md). A watchdog beside the owner bounds only a confirmed
   child: it starts once the owner has sent `Spawned`, and ends quietly on a refused spawn, so a
   refusal stays `NotSpawned` and a spawn still pending is never called `Unsettled`. It's armed
   from the caller's side, by `retire`, by the owner handle being dropped or by Quit seen on the

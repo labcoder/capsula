@@ -2037,6 +2037,11 @@ impl Link {
         let reader = queued.then(Arc::<OnceLock<Thread>>::default);
         let custody_ended = || child.is_some_and(platform::ChildOwner::has_ended);
         let cancelled = || self.quitting() || events.is_closed() || custody_ended();
+        // Connected never follows an ended custody: both are decided under custody's lock.
+        let admit = |event| match child {
+            Some(child) => child.while_open(|| events.try_send(event)),
+            None => Some(events.try_send(event)),
+        };
         let registration = if let Some(reader) = &reader {
             let (ack, started) = std::sync::mpsc::sync_channel(1);
             let pipes = [Arc::downgrade(&control), Arc::downgrade(&data)];
@@ -2085,9 +2090,6 @@ impl Link {
         } else {
             None
         };
-        if !queued && custody_ended() {
-            return Attendance::Retry;
-        }
         let connected = LinkEvent::Connected(Session {
             alive: Arc::clone(&ended.alive),
             closing: Arc::clone(&closing),
@@ -2109,7 +2111,7 @@ impl Link {
             Some(connected)
         } else if Instant::now() >= reconnect_by
             || cancelled()
-            || events.try_send(connected).is_err()
+            || !matches!(admit(connected), Some(Ok(())))
         {
             drop(outbox);
             drop(control_slot);
@@ -2193,11 +2195,30 @@ impl Link {
                 }
             })
         })();
-        let open = legacy_connected.is_none_or(|connected| events.send_blocking(connected).is_ok());
+        let mut custody_ended_first = false;
+        let open = legacy_connected.is_none_or(|mut connected| {
+            loop {
+                match admit(connected) {
+                    Some(Ok(())) => break true,
+                    Some(Err(async_channel::TrySendError::Full(unsent))) => connected = unsent,
+                    Some(Err(async_channel::TrySendError::Closed(_))) => break false,
+                    None => {
+                        custody_ended_first = true;
+                        break false;
+                    }
+                }
+                // shortcut: polls for room, as the channel can't wait for capacity without sending;
+                // a capacity wake would avoid it if a full UI queue ever holds Connected for long.
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
         if open {
             let _first = attempt.generation.set(generation);
         }
         let read = spawned.and_then(|()| {
+            if !open {
+                return Ok(());
+            }
             // Only now, so nothing from the brain reaches the UI before Connected.
             spawn_helper("link-data-reader", &mut helpers, {
                 let (data, control, events) =
@@ -2262,7 +2283,13 @@ impl Link {
                 tracing::error!("a link thread panicked");
             }
         }
-        if open { attendance } else { Attendance::Ended }
+        if open {
+            attendance
+        } else if custody_ended_first {
+            Attendance::Retry
+        } else {
+            Attendance::Ended
+        }
     }
 }
 

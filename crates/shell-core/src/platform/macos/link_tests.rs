@@ -150,6 +150,8 @@ enum Then {
     ReadyBeforeShutdown,
     /// Writes READY, then exits with this code once the shell's ends shut down.
     ExitsOnEof(i32),
+    /// Commits, then says so once the shell shuts control down.
+    SeesShutdown,
 }
 
 fn brain(child: &Child, then: Then) -> ShellEnds {
@@ -213,6 +215,11 @@ fn brain(child: &Child, then: Then) -> ShellEnds {
             Then::Stalls => until_killed(),
             Then::ExitsAfterCommit(code) => child.exits(Exit::Code(code)),
             Then::LostCloses => child.script().lost = true,
+            Then::SeesShutdown => {
+                if brain.shut_down_seen() {
+                    reached();
+                }
+            }
             Then::Closes
             | Then::NoReady
             | Then::ExitsBeforeReady(_)
@@ -577,6 +584,39 @@ fn custody_ending_as_the_connection_is_handed_over_publishes_no_connected() {
         assert_eq!(link.quit_end(), QuitEnding::Ended(None), "queued {queued}");
         assert_eq!(child.script().spawns, 1, "queued {queued}: one attempt");
     }
+}
+
+#[test]
+fn custody_ending_while_connected_waits_for_room_publishes_no_connected() {
+    let child = Child::default();
+    let (reached, shut_down) = mpsc::channel();
+    child.script().reached = Some(reached);
+    // Room for Connecting only, so Connected waits until the test drains it.
+    let (events, states) = async_channel::bounded(1);
+    let (brain_child, mut first) = (child.clone(), true);
+    let link = start_scripted(events, AudioSession::Legacy, move |word, _, by| {
+        if !std::mem::take(&mut first) {
+            return refused(word, by);
+        }
+        attempt(word, &brain_child, Then::SeesShutdown, by, honest)
+            .map(|(connection, owner)| (connection, Some(owner)))
+    });
+    let by = Instant::now() + BOUND;
+    while !link.can_start_voice_gesture(1) {
+        assert!(Instant::now() < by, "the attempt came to publish Connected");
+        thread::sleep(Duration::from_millis(5));
+    }
+    child.exits(Exit::Code(0));
+    shut_down
+        .recv_timeout(BOUND)
+        .expect("custody ended and shut the pair down");
+    until(&states, |event| {
+        assert!(!connected(event), "no Connected once custody ended");
+        failed(event)
+    });
+    assert!(link.begin_quit());
+    link.finish_quit();
+    assert_eq!(link.quit_end(), QuitEnding::Ended(None));
 }
 
 /// A brain for the queued pair that says READY only once `go` comes, then exits 0 on Quit.
