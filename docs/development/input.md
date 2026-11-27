@@ -66,9 +66,11 @@ accepting another edge. The reducer's gesture deadline only governs hold and tap
 
 Right Alt and Esc are never participants. AltGr arrives as a synthetic left Ctrl followed by
 right Alt, so with Win held it can briefly complete left Ctrl+Win. The right Alt edge, reported
-as another key or as uncertainty, cancels that candidate before its hold deadline. Esc during a
-custom tap or hold cancels the same way, and the chord's later releases cannot finish it as a
-tap, hold or double-tap. Only a newer generation's neutral observation rearms the reducer.
+as another key or as uncertainty, cancels that candidate when it arrives. Nothing guarantees
+when right Alt arrives, so any earlier effect still needs the adapter's right-Alt-up evidence.
+Esc during a custom tap or hold cancels the same way, and the chord's later releases cannot
+finish it as a tap, hold or double-tap. Only a newer generation's neutral observation rearms
+the reducer.
 
 No shipping caller selects a stored binding or routes custom effects into the live hold,
 typing or picture paths. Raw Input still passes keys to the foreground app. Custom chords

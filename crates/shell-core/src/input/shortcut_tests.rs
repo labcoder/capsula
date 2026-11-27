@@ -405,7 +405,7 @@ fn fixture_chord_shape_and_input_diagnostics_are_redacted() {
 fn altgr_apparent_left_ctrl_cancels_when_right_alt_arrives() {
     let t = Instant::now();
     let chord = ShortcutChord::new(1 | 128, None).unwrap();
-    for right_alt in [key(Key::Other, 3, Edge::Down, &[1, 2, 3]), Event::Uncertain] {
+    for right_alt in [key(Key::Other, 3, Edge::Down, &[1, 2]), Event::Uncertain] {
         let mut shortcut = armed(chord, t);
         assert_eq!(
             shortcut.reduce(1, key(WIN, 2, Edge::Down, &[2]), t).effects,
@@ -444,7 +444,7 @@ fn altgr_apparent_left_ctrl_cancels_when_right_alt_arrives() {
 fn esc_cancels_a_custom_tap_or_hold_and_its_releases_cannot_finish_it() {
     let t = Instant::now();
     let due = at(t, 300);
-    for esc in [key(Key::Other, 9, Edge::Down, &[1, 2, 9]), Event::Uncertain] {
+    for esc in [key(Key::Other, 9, Edge::Down, &[1, 2]), Event::Uncertain] {
         for (holding, effects) in [(false, RESTING), (true, HOLD_END)] {
             let mut shortcut = ctrl_f6(t);
             if holding {
