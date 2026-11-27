@@ -2349,8 +2349,8 @@ async fn unavailable_containment_leaves_screen_holds_unsupported() {
     );
     brain.holds.window_capture = true;
     brain.holds.display_capture = true;
-    let job = crate::platform::Job::new().map(Arc::new);
-    assert!(matches!(&job, Err(error) if error.kind() == std::io::ErrorKind::Unsupported));
+    // What product builds' `Job::new` returns here; macOS test builds can make a Job.
+    let job = Err(std::io::ErrorKind::Unsupported.into());
     crate::start_screen(&mut brain, scratch.dir().join("missing-worker"), job);
     assert_screen_holds_unsupported(&mut brain);
     brain.close().await;

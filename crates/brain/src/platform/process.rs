@@ -8,6 +8,12 @@ use std::path::Path;
 
 use super::Mode;
 
+#[cfg(target_os = "macos")]
+#[expect(
+    unsafe_code,
+    reason = "posix_spawn, waitpid and kill keep custody of macOS workers"
+)]
+mod macos;
 #[cfg(not(windows))]
 mod unsupported;
 
@@ -15,10 +21,14 @@ mod unsupported;
 pub(crate) use super::windows::spawn_if;
 #[cfg(windows)]
 pub use super::windows::{Helper, Job, launch_detached, spawn, system_env};
+#[cfg(target_os = "macos")]
+pub use macos::{Helper, Job};
 #[cfg(not(windows))]
 pub(crate) use unsupported::spawn_if;
+#[cfg(not(any(windows, target_os = "macos")))]
+pub use unsupported::{Helper, Job};
 #[cfg(not(windows))]
-pub use unsupported::{Helper, Job, launch_detached, spawn, system_env};
+pub use unsupported::{launch_detached, spawn, system_env};
 
 /// The containment guarantees of a configured process adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

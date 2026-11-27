@@ -1,5 +1,6 @@
 //! No launch can produce a contained process without a native adapter.
 
+#[cfg(not(target_os = "macos"))]
 use std::convert::Infallible;
 use std::ffi::OsString;
 use std::io;
@@ -7,12 +8,16 @@ use std::path::Path;
 use std::process::Child;
 use std::time::Duration;
 
-use super::{ChildPipes, Launch, Spawned};
+#[cfg(not(target_os = "macos"))]
+use super::ChildPipes;
+use super::{Launch, Spawned};
 
 /// Owns native process containment. No value exists without a containment adapter.
+#[cfg(not(target_os = "macos"))]
 #[derive(Debug)]
 pub struct Job(Infallible);
 
+#[cfg(not(target_os = "macos"))]
 impl Job {
     /// Creates process containment.
     ///
@@ -48,9 +53,11 @@ impl Job {
 }
 
 /// A handle to a contained process; it cannot exist without a containment adapter.
+#[cfg(not(target_os = "macos"))]
 #[derive(Debug)]
 pub struct Helper(Infallible);
 
+#[cfg(not(target_os = "macos"))]
 impl Helper {
     /// The helper's process id.
     #[must_use]
@@ -131,6 +138,7 @@ mod tests {
             jobs: &[],
         };
 
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(
             Job::new().expect_err("no containment").kind(),
             io::ErrorKind::Unsupported
@@ -145,6 +153,7 @@ mod tests {
                 .kind(),
             io::ErrorKind::Unsupported
         );
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(
             Job::spawn_piped(path, "", &[])
                 .expect_err("no helper or pipes")

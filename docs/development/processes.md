@@ -88,6 +88,26 @@ refusal or lost custody cannot become a clean exit. That is not proof the group 
 does not promise cleanup of descendants after the leader exits or after the owner crashes, and
 cannot contain descendants that leave the group. Other modes without an adapter remain unsupported.
 
+The dormant macOS `Job` keeps custody of leaf workers, the speech workers, which start no
+descendants. It isn't a kernel tier, and nothing admits it yet: `Job::new` and
+`Job::spawn_piped` return `Unsupported` outside test builds, and worker assembly still asks for
+Kernel. A spawn takes `platform::spawn_lock` and the job's lock, refuses once the job is shut
+down or when SIGCHLD is ignored or `SA_NOCLDWAIT` is set, then `posix_spawn`s `[exe, arg]`. The
+worker gets the two pipes on 0 and 1, `/dev/null` on 2, no other descriptor, an empty
+environment, `/` as its folder and the brain's process group. The child is registered before
+either lock is released, so a shutdown either refuses the spawn or kills the child.
+
+The job holds each child by its exact pid until a `waitpid` sees an exit or a fatal signal. A
+stop isn't a reap, and a failed wait latches `Lost`, which is never signalled and never counts
+as an exit. Every wait and signal for one pid runs under that child's lock, and a kill is sent
+only while the child is unreaped, after a fresh wait and the SIGCHLD check. Dropping a
+`Helper` leaves the reap with the job. `Job::new` starts the job's reaper thread before any
+child can exist, and fails if the thread can't start. When the last `Job` handle drops, the
+reaper kills every child still running once and waits on each pid until it's reaped or lost.
+`terminate` and `shut_down` report any child that couldn't be killed or wasn't reaped within
+five seconds, never an empty job. A worker stopped when the brain dies can't run a parent watch,
+so this tier makes no parent-death claim.
+
 The dormant Darwin parent watch supplies exit evidence for a future parent-bound session. It
 registers just the original parent, verifies the kernel's receipt and checks lineage again
 before arming. Only that registration's `NOTE_EXIT` proves exit. If lineage changes without
