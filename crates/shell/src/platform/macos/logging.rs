@@ -121,8 +121,8 @@ mod tests {
                 .expect("exclusive fixture folder");
         }
         // A subscriber is already global, so installing fails after the log file opened.
-        let _ours =
-            tracing::subscriber::set_global_default(tracing::subscriber::NoSubscriber::default());
+        tracing::subscriber::set_global_default(tracing::subscriber::NoSubscriber::default())
+            .expect("the fixture's subscriber is the process's first");
 
         let lock = InstanceLock::try_acquire_existing(&support).expect("first touch");
         let refused = Admitted::start(lock);
@@ -131,9 +131,14 @@ mod tests {
         let released = InstanceLock::try_acquire_existing(&support).map(drop);
 
         let logs = product.join("logs");
+        let mut names = Vec::new();
         let mut written = Vec::new();
         for entry in std::fs::read_dir(&logs).expect("list the fixture logs") {
             let path = entry.expect("a fixture log").path();
+            names.push(
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
+            );
             written.push(std::fs::read(&path).expect("read a fixture log"));
             std::fs::remove_file(&path).expect("remove a fixture log");
         }
@@ -152,6 +157,16 @@ mod tests {
             released,
             Ok(()),
             "dropping the handed-back lock releases it"
+        );
+        let prefix = format!("{}.", constants::SHELL_LOG);
+        let day = |name: &String| {
+            name.strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(".log"))
+                .map(str::len)
+        };
+        assert!(
+            matches!(names.as_slice(), [Some(name)] if day(name) == Some("YYYY-MM-DD".len())),
+            "the logger opened its one log before refusing: {names:?}"
         );
         assert!(
             written
