@@ -511,27 +511,21 @@ fn the_jpeg_cap_admits_its_exact_size_and_refuses_one_byte_less() {
 /// A desktop with a file window away from the display's corner, holding a row of white tiles
 /// 104 physical pixels apart, of which tile 3 is red.
 fn tiles(dpi: u32) -> RawFrame {
-    let holds = |area: PhysicalRect, x: u32, y: u32| {
-        let [x, y] = [i64::from(x), i64::from(y)];
-        let [left, top] = area.origin.map(i64::from);
-        let [width, height] = area.size.map(i64::from);
-        (left..left + width).contains(&x) && (top..top + height).contains(&y)
-    };
     let mut raw = RawFrame::default();
     let bytes = raw.begin(2560, 1440).unwrap();
-    for y in 0..1440 {
-        for x in 0..2560 {
-            let pixel = if holds(tile(3), x, y) {
-                [0, 0, 255, 255]
-            } else if (0..8).any(|index| holds(tile(index), x, y)) {
-                [255; 4]
-            } else if holds(rect([300, 400], [1200, 600]), x, y) {
-                [96, 96, 96, 255]
-            } else {
-                [32, 32, 32, 255]
-            };
-            let at = usize::try_from((y * 2560 + x) * 4).unwrap();
-            bytes[at..at + 4].copy_from_slice(&pixel);
+    bytes.as_chunks_mut::<4>().0.fill([32, 32, 32, 255]);
+    let window = (rect([300, 400], [1200, 600]), [96, 96, 96, 255]);
+    let row = (0..8).map(|index| (tile(index), [255; 4]));
+    for (area, pixel) in std::iter::once(window)
+        .chain(row)
+        .chain([(tile(3), [0, 0, 255, 255])])
+    {
+        let [left, top] = area.origin.map(|side| usize::try_from(side).unwrap());
+        let [width, height] = area.size.map(|side| usize::try_from(side).unwrap());
+        for y in top..top + height {
+            for at in (y * 2560 + left..y * 2560 + left + width).map(|at| at * 4) {
+                bytes[at..at + 4].copy_from_slice(&pixel);
+            }
         }
     }
     raw.commit(FrameMeta {
@@ -666,20 +660,17 @@ fn a_mark_on_the_tile_found_in_the_picture_lands_on_that_tile_not_a_neighbour() 
         };
         let (left, right) = logical(tile(3), 0);
         let (top, bottom) = logical(tile(3), 1);
+        // Each side clears the tile but stays inside the gap before the next one.
+        let gap = logical(tile(4), 0).0 - right;
+        let outsets = [
+            left - mark.origin.x,
+            top - mark.origin.y,
+            mark.max().x - right,
+            mark.max().y - bottom,
+        ];
         assert!(
-            mark.origin.x <= left
-                && mark.origin.y <= top
-                && mark.max().x >= right
-                && mark.max().y >= bottom,
-            "the mark surrounds its tile at {dpi} DPI"
+            outsets.iter().all(|outset| *outset > 0.0 && *outset < gap),
+            "the mark surrounds only its tile at {dpi} DPI: {outsets:?} within {gap}"
         );
-        for neighbour in [tile(2), tile(4)] {
-            let (start, end) = logical(neighbour, 0);
-            let centre = f32::midpoint(start, end);
-            assert!(
-                centre < mark.origin.x || centre > mark.max().x,
-                "the mark stays off the neighbouring tile at {dpi} DPI"
-            );
-        }
     }
 }
