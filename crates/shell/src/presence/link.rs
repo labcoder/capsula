@@ -307,6 +307,7 @@ impl Presence {
                     }
                 }
                 LinkEvent::KeyStage { generation, reply } => self.key_reply(generation, &reply, cx),
+                LinkEvent::ModelChoice { reply, .. } => self.runs.apply_model(&reply),
                 LinkEvent::Error { generation, error } => {
                     if self
                         .session
@@ -321,6 +322,7 @@ impl Presence {
         }
         events.attribute(events.capacity() * size_of::<LinkEvent>());
         self.follow_voice_input(cx);
+        self.send_model_read();
         if applied {
             self.screen_changed(cx);
             self.runs_changed(cx)

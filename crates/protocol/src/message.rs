@@ -63,9 +63,10 @@ pub use settings::{
 };
 pub use shortcut::{InvalidShortcutChord, ShortcutChord, ShortcutView};
 pub use threads::{
-    Effort, EffortSet, EffortSetError, LISTED_MODELS_CALL_TOOLS, MAX_MODEL_NAME_CHARS, MAX_MODELS,
-    MAX_SLUG_BYTES, MAX_TITLE_CHARS, ModelChoice, ModelInfo, ModelName, ModelSlug, SlugError,
-    ThreadKind, ThreadOp, ThreadTitle, effective_effort,
+    ChoiceRead, ChoiceRev, Effort, EffortSet, EffortSetError, LISTED_MODELS_CALL_TOOLS,
+    MAX_MODEL_NAME_CHARS, MAX_MODELS, MAX_SLUG_BYTES, MAX_TITLE_CHARS, ModelChoice, ModelInfo,
+    ModelName, ModelSlug, SavedChoice, SlugError, ThreadKind, ThreadOp, ThreadTitle,
+    effective_effort,
 };
 pub use tuning::{HOLD_DRAIN_TIMEOUT_MS, HOLD_START_TIMEOUT_MS, ShellTuning};
 pub use voice::{
@@ -83,6 +84,9 @@ pub const MAX_PAGE_ROWS: usize = 50;
 pub const MAX_PAGE_BYTES: usize = 32 * 1024;
 /// Unanswered page requests before the brain ends the connection [guess].
 pub const MAX_PENDING_PAGES: usize = 4;
+/// Model-choice reads the brain keeps unanswered, cancelled ones included until they end; one
+/// more is answered `Failed` at once [guess].
+pub const MAX_PENDING_MODEL_READS: usize = 2;
 
 /// Length of the instance capability, in bytes.
 pub const CAPABILITY_LEN: usize = 32;
@@ -347,7 +351,7 @@ pub enum ControlToBrain {
     },
     /// Change a setting; answered by exactly one [`ControlToShell::Settings`].
     Settings(SettingsOp),
-    /// Rename a task or set a thread's model; model writes receive
+    /// Rename a task, or set or clear a thread's model; model writes receive
     /// [`ControlToShell::ThreadModelSet`], including refused writes.
     ThreadOp(ThreadOp),
     /// A scene-wide Stop, applied even when a later run appended to one of its scenes.
@@ -578,6 +582,14 @@ pub enum ControlToBrain {
     QueuedHello(Hello),
     /// First control frame when deliberately replacing the previous queued audio pair.
     QueuedAudioReconnect(Box<Hello>, IssueSession),
+    /// Read one thread's committed model choice, Kumo's main chat included. Answered by exactly
+    /// one [`ControlToShell::ThreadModelRead`] on the same connection. Appended.
+    ReadModel {
+        /// The shell's number for this read on this connection, echoed in its answer.
+        request: u32,
+        /// The thread.
+        thread: ThreadId,
+    },
 }
 
 /// What a thread's delete came to.
@@ -730,14 +742,15 @@ pub enum ControlToShell {
         /// A content-free refusal.
         reason: IssueRefused,
     },
-    /// The committed result of one `ThreadOp::SetModel`, including a refused write.
+    /// The committed result of one `ThreadOp::SetModel`: what the store now holds, never the
+    /// request echoed. Sent only on the connection that wrote it.
     ThreadModelSet {
+        /// The write's number.
+        request: u32,
         /// The requested thread.
         thread: ThreadId,
-        /// The requested choice, echoed unchanged.
-        choice: ModelChoice,
-        /// A live row matched and the write committed.
-        applied: bool,
+        /// The committed choice, `Missing` for no live thread, or `Failed`.
+        result: ChoiceRead,
     },
     /// `run` asked to move the user's typed input to `thread`, sent once its tool call
     /// committed. The shell applies it only while `run` is its newest named run, not stopped,
@@ -841,6 +854,16 @@ pub enum ControlToShell {
         session: IssueSession,
         /// Its immutable values.
         tuning: ShellTuning,
+    },
+    /// The answer to one [`ControlToBrain::ReadModel`], sent only on the connection that asked.
+    /// Appended.
+    ThreadModelRead {
+        /// The read's number.
+        request: u32,
+        /// The requested thread.
+        thread: ThreadId,
+        /// The committed choice, `Missing` for no live thread, or `Failed`.
+        result: ChoiceRead,
     },
 }
 

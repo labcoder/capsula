@@ -130,8 +130,10 @@ fn recognition_reads_choice_and_live_generation_after_the_prior_write_barrier() 
     let captured = choice("captured", Effort::High);
     let release = gate(&running.gates, |op| matches!(op, StoreOp::SetModel { .. }));
     assert!(running.thread.send(StoreOp::SetModel {
+        session: 1,
+        request: 1,
         thread: TASK,
-        choice: captured.clone()
+        choice: Some(captured.clone())
     }));
     running.saw(|seen| matches!(seen, Seen::StoreOpStarted(StoreOp::SetModel { .. })));
     assert!(running.thread.send(prepare(&core, Some(TASK))));
@@ -140,9 +142,13 @@ fn recognition_reads_choice_and_live_generation_after_the_prior_write_barrier() 
     assert_eq!(
         running.ack(),
         Input::ModelSet {
+            session: 1,
+            request: 1,
             thread: TASK,
-            choice: captured.clone(),
-            applied: true
+            result: kumochi_protocol::message::ChoiceRead::Found {
+                choice: kumochi_protocol::message::SavedChoice::Chosen(captured.clone()),
+                revision: kumochi_protocol::message::ChoiceRev(1),
+            }
         }
     );
     let snapshot = snapshot(running.ack());
@@ -352,7 +358,7 @@ fn a_hold_reads_the_exact_saved_choice_on_any_connection() {
                 .unwrap();
             store.end_run(TASK, RunId(1), &[], RunEnd::Done).unwrap();
             if let Some(saved) = &saved {
-                store.set_model(TASK, saved).unwrap();
+                store.set_model(TASK, Some(saved)).unwrap();
             }
             let running = run(store, None);
             let core = Coordinator::ready_for_tests(MAIN, TASK, RunId(9), Vec::new());

@@ -21,6 +21,7 @@ mod hold;
 mod inline;
 mod job;
 mod lease;
+mod model_choice;
 mod provider_draw;
 mod run;
 mod scenes;
@@ -41,7 +42,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use kumochi_protocol::message::{
-    ConnectionKind, Content, ControlToShell, Cursor, DataToShell, Deleted, ModelChoice, Narration,
+    ConnectionKind, Content, ControlToShell, Cursor, DataToShell, Deleted, Narration,
     OutputGeneration, PageOf, Phase, RunId, SceneId, SegmentId, SpeechDecision, SpeechDispatch,
     SpeechRetirement, Step, ThreadId, ThreadOp, UserError,
 };
@@ -62,6 +63,7 @@ pub(crate) use job::JobAsk;
 pub use job::{JobBuilt, JobKey, JobKind, JobOutput, ReadJob};
 pub use lease::{LeaseId, MAX_HOLD, SEND_DEADLINE, ScreenGrantRefusal, SendKey};
 pub(crate) use lease::{PictureGrant, PictureWrite};
+pub use model_choice::ModelRead;
 pub use speech::{DRAIN_STALL, QUIET_TIMEOUT, Synthesized};
 pub use store_op::{ReplyText, StoreOp, SummaryText};
 pub use tools::{MAX_CALLS, MAX_ROUNDS, RoundItems};
@@ -214,13 +216,31 @@ pub enum Input {
     },
     /// A thread's model write finished.
     ModelSet {
+        /// The session that asked.
+        session: u64,
+        /// The shell's number for the write.
+        request: u32,
         /// The requested thread.
         thread: ThreadId,
-        /// The requested choice.
-        choice: ModelChoice,
-        /// A live row matched the committed write.
-        applied: bool,
+        /// What the store committed.
+        result: kumochi_protocol::message::ChoiceRead,
     },
+    /// The shell asked for a thread's committed model choice.
+    ReadModel {
+        /// The shell's number for the read.
+        request: u32,
+        /// The thread.
+        thread: ThreadId,
+    },
+    /// The page reader answered a `ReadModel`.
+    ModelRead {
+        /// The read.
+        read: ModelRead,
+        /// What the store holds.
+        result: kumochi_protocol::message::ChoiceRead,
+    },
+    /// A parked model read's deadline may have passed.
+    ModelReadsDue,
     /// A `StoreSummary` finished.
     SummaryStored {
         /// The job or build that wrote it.
@@ -556,6 +576,11 @@ pub enum Effect {
         /// How long from now.
         after: Duration,
     },
+    /// Report `ModelReadsDue` at `at`, replacing any earlier one.
+    ArmModelReads {
+        /// The earliest parked read's deadline.
+        at: tokio::time::Instant,
+    },
     /// Resume a run with the same absolute deadline as its store-read control.
     ArmDeadlineAt {
         /// The run.
@@ -843,6 +868,7 @@ pub struct Coordinator {
     /// Threads whose delete, sent on an earlier connection, was answered on this one before the
     /// shell's resend of it was read; that resend needs no second op.
     crossed: Vec<ThreadId>,
+    model_choices: model_choice::ModelChoices,
     /// The turns taken on this connection.
     turns_read: u32,
     /// A delete on this connection was refused, so its thread wasn't hidden.
@@ -923,6 +949,7 @@ impl Coordinator {
             deleting: Vec::new(),
             fenced: Vec::new(),
             crossed: Vec::new(),
+            model_choices: model_choice::ModelChoices::default(),
             turns_read: 0,
             refused_delete: false,
             attempts: 0,
@@ -1085,16 +1112,14 @@ impl Coordinator {
                 self.job_written(job, &mut effects);
             }
             Input::ModelSet {
+                session,
+                request,
                 thread,
-                choice,
-                applied,
-            } => {
-                effects.push(Effect::Control(ControlToShell::ThreadModelSet {
-                    thread,
-                    choice,
-                    applied,
-                }));
-            }
+                result,
+            } => self.model_set(session, request, thread, result, &mut effects),
+            Input::ReadModel { request, thread } => self.read_model(request, thread, &mut effects),
+            Input::ModelRead { read, result } => self.model_read(&read, result, &mut effects),
+            Input::ModelReadsDue => self.model_reads_due(&mut effects),
             Input::SummaryStored {
                 owner: SendKey::Job(key),
                 ..
@@ -1277,6 +1302,7 @@ impl Coordinator {
         }
         self.drawing_settle(&mut effects);
         self.begin_turns(&mut effects);
+        self.release_model_reads(&mut effects);
         self.retry_with(&mut effects);
         self.arm_retry(&mut effects);
         Ok(effects)

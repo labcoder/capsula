@@ -1,6 +1,6 @@
 //! A task's rename and a thread's model choice: each goes to the store as one write, except a
 //! rename of the main thread, whose name is the assistant's setting and whose stored title stays
-//! empty.
+//! empty. The main thread's model choice is written like a task's.
 
 use kumochi_protocol::message::ThreadOp;
 
@@ -20,7 +20,14 @@ impl Coordinator {
                 source: TitleSource::User,
                 job: None,
             },
-            ThreadOp::SetModel { thread, choice } => StoreOp::SetModel { thread, choice },
+            ThreadOp::SetModel {
+                request,
+                thread,
+                choice,
+            } => {
+                self.set_model(request, thread, choice, effects);
+                return;
+            }
         };
         effects.push(Effect::Store(op));
     }

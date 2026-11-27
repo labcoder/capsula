@@ -558,18 +558,31 @@ async fn play(
                     };
                     shell
                         .send(&ControlToBrain::ThreadOp(ThreadOp::SetModel {
+                            request: 1,
                             thread,
-                            choice: choice.clone(),
+                            choice: Some(choice.clone()),
                         }))
                         .await;
                     loop {
                         if let ControlToShell::ThreadModelSet {
+                            request,
                             thread: actual,
-                            choice: model,
-                            applied,
+                            result,
                         } = shell.control().await.expect("the model write answers")
                         {
-                            assert_eq!((actual, model, applied), (thread, choice, true));
+                            assert_eq!(
+                                (request, actual, result),
+                                (
+                                    1,
+                                    thread,
+                                    kumochi_protocol::message::ChoiceRead::Found {
+                                        choice: kumochi_protocol::message::SavedChoice::Chosen(
+                                            choice
+                                        ),
+                                        revision: kumochi_protocol::message::ChoiceRev(1),
+                                    }
+                                )
+                            );
                             break;
                         }
                     }

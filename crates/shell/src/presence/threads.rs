@@ -68,7 +68,20 @@ impl Presence {
             .is_some_and(|panel| panel.typing.visible && panel.focused)
     }
 
+    /// Sends the model-choice read the target is owed, whether or not a panel is shown.
+    pub(super) fn send_model_read(&mut self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if let Some(read) = self.runs.model_read(std::time::Instant::now())
+            && !self.link.send_control(session, read.clone())
+        {
+            self.runs.model_unsent(&read);
+        }
+    }
+
     pub(super) fn request_pages(&mut self, cx: &mut Context<'_, Self>) {
+        self.send_model_read();
         let mut requests = Vec::new();
         for model in [&self.threads, &self.chat] {
             requests.extend(model.update(cx, |state, cx| {

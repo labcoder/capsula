@@ -3,8 +3,9 @@
 
 use kumochi_protocol::frame::{self, Pipe};
 use kumochi_protocol::message::{
-    DataToShell, Effort, MAX_PAGE_BYTES, MAX_PAGE_ROWS, ModelChoice, ModelSlug, PageOf, RunId,
-    ThreadCursor, ThreadId, ThreadKind, ThreadRow, ThreadTitle,
+    ChoiceRead, ChoiceRev, DataToShell, Effort, MAX_PAGE_BYTES, MAX_PAGE_ROWS, ModelChoice,
+    ModelSlug, PageOf, RunId, SavedChoice, ThreadCursor, ThreadId, ThreadKind, ThreadRow,
+    ThreadTitle,
 };
 use rusqlite::{Connection, OptionalExtension as _};
 
@@ -81,7 +82,10 @@ fn route_choice_keeps_the_same_slug_on_each_connection_after_reopen() {
             connection,
             ..choice("same-slug", Effort::High)
         };
-        assert!(store.set_model(thread, &picked).expect("save"));
+        assert!(matches!(
+            store.set_model(thread, Some(&picked)).expect("save"),
+            ChoiceRead::Found { .. }
+        ));
         expected.push((thread, picked));
     }
     drop(store);
@@ -136,7 +140,7 @@ fn route_choice_unknown_or_missing_kind_never_becomes_absent() {
     let mut store = opened(&scratch);
     let thread = task(&mut store, "invalid");
     let picked = choice("same-slug", Effort::High);
-    store.set_model(thread, &picked).expect("save");
+    store.set_model(thread, Some(&picked)).expect("save");
     for connection in [Some("unknown"), None] {
         store
             .conn
@@ -181,7 +185,7 @@ fn route_choice_pages_keep_unknown_models_and_routes_without_a_catalog() {
         connection: ConnectionKind::ClaudeCode,
         ..choice("removed-model", Effort::High)
     };
-    store.set_model(thread, &picked).expect("save");
+    store.set_model(thread, Some(&picked)).expect("save");
     drop(store);
     let store = opened(&scratch);
     for search in [None, Some("needle".to_owned())] {
@@ -481,7 +485,7 @@ fn search_rows_carry_kind_and_choice_and_rank_kumo_like_any_thread() {
     let main = store.main_thread().expect("main");
     let thread = task(&mut store, "task");
     let picked = choice("gpt-6.1-sol", Effort::Low);
-    store.set_model(thread, &picked).expect("model");
+    store.set_model(thread, Some(&picked)).expect("model");
     let run = RunId(store.high_water().expect("ids").1.0 + 1);
     store
         .begin_turn(main, None, run, "needle needle needle")
@@ -581,11 +585,23 @@ fn a_model_choice_round_trips_through_a_page_and_a_restart() {
     let thread = task(&mut store, "task");
     let hidden = task(&mut store, "hidden");
     let picked = choice("gpt-6.1-sol", Effort::XHigh);
-    assert!(store.set_model(thread, &picked).expect("model"));
-    assert!(store.set_model(thread, &picked).expect("same model"));
+    for revision in [1, 2] {
+        assert_eq!(
+            store.set_model(thread, Some(&picked)).expect("model"),
+            ChoiceRead::Found {
+                choice: SavedChoice::Chosen(picked.clone()),
+                revision: ChoiceRev(revision),
+            }
+        );
+    }
     store.begin_delete(hidden).expect("hidden");
     for refused in [hidden, ThreadId(999), ThreadId(u64::MAX)] {
-        assert!(!store.set_model(refused, &picked).expect("no match"));
+        for write in [Some(&picked), None] {
+            assert_eq!(
+                store.set_model(refused, write).expect("no match"),
+                ChoiceRead::Missing
+            );
+        }
     }
     let hidden_model: Option<String> = store
         .conn
@@ -615,7 +631,7 @@ fn an_unknown_stored_effort_keeps_the_saved_model_on_pages() {
     let older = task(&mut store, "older");
     let kept = task(&mut store, "kept");
     let picked = choice("gpt-6.1-sol", Effort::Max);
-    store.set_model(kept, &picked).expect("model");
+    store.set_model(kept, Some(&picked)).expect("model");
     for (thread, effort) in [(newer, "ultra"), (older, "minimal")] {
         store
             .conn
@@ -675,11 +691,11 @@ fn a_deleted_tasks_title_and_model_leave_the_files_and_a_kept_choice_survives() 
     let mut store = opened(&scratch);
     let kept = task(&mut store, "kept");
     let kept_choice = choice("kept-model", Effort::Low);
-    store.set_model(kept, &kept_choice).expect("model");
+    store.set_model(kept, Some(&kept_choice)).expect("model");
     let doomed = task(&mut store, "doomed");
     rename(&mut store, doomed, &TITLE.to_uppercase(), TitleSource::User);
     store
-        .set_model(doomed, &choice(SLUG, Effort::High))
+        .set_model(doomed, Some(&choice(SLUG, Effort::High)))
         .expect("model");
     assert!(holds(&scratch, TITLE) && holds(&scratch, SLUG), "planted");
     assert_eq!(

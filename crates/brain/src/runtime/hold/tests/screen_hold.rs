@@ -1157,8 +1157,9 @@ async fn a_pin_moved_while_the_recipient_is_read_ends_the_hold_without_a_capture
     };
     for choice in [other, sol] {
         brain.hold_fence(&Input::ThreadOp(ThreadOp::SetModel {
+            request: 1,
             thread: main,
-            choice,
+            choice: Some(choice),
         }));
     }
     controls(&mut output);

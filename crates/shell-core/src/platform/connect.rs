@@ -730,6 +730,7 @@ pub(crate) fn welcome(control: &mut impl Read) -> Result<IssueSession, LinkError
             | ControlToShell::CaptureDone { .. }
             | ControlToShell::CaptureFailed { .. }
             | ControlToShell::ThreadModelSet { .. }
+            | ControlToShell::ThreadModelRead { .. }
             | ControlToShell::GitHub(_)
             | ControlToShell::GitHubError(_)
             | ControlToShell::DrawingReplacementFailed { .. }

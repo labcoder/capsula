@@ -1,0 +1,205 @@
+//! A thread's model choice, read and written by id. Kumo's main chat takes the same read and write
+//! as a task. Answers go only to the pair that asked: each request is stamped with the session at
+//! ingress, and an answer for an earlier session is dropped. Reads keep at most
+//! [`MAX_PENDING_MODEL_READS`] slots from admission until the reader answers, cancelled ones
+//! included, so a shell that reconnects or floods can't grow the reader's queue.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use kumochi_protocol::message::{
+    ChoiceRead, ControlToShell, MAX_PENDING_MODEL_READS, ModelChoice, ThreadId,
+};
+use tokio::time::Instant;
+
+use super::{Coordinator, Effect, StoreOp};
+use crate::recall::control::{Control, READ_TIME};
+
+/// One read on the page reader, ordered after every write accepted before it.
+#[derive(Clone, Debug)]
+pub struct ModelRead {
+    pub(crate) session: u64,
+    pub(crate) request: u32,
+    pub(crate) thread: ThreadId,
+    /// Ends at the deadline set at admission, or when the pair that asked is gone.
+    pub(crate) control: Control,
+}
+
+impl PartialEq for ModelRead {
+    fn eq(&self, other: &Self) -> bool {
+        (self.session, self.request, self.thread) == (other.session, other.request, other.thread)
+    }
+}
+
+#[derive(Debug)]
+struct Slot {
+    session: u64,
+    request: u32,
+    thread: ThreadId,
+    deadline: Instant,
+    cancel: Arc<AtomicBool>,
+    /// Handed to the reader; a parked read waits for its new thread's row to be queued.
+    sent: bool,
+}
+
+/// The pair's session and its admitted reads.
+#[derive(Debug, Default)]
+pub(super) struct ModelChoices {
+    session: u64,
+    slots: Vec<Slot>,
+}
+
+impl Coordinator {
+    #[cfg(test)]
+    pub(crate) fn model_session(&self) -> u64 {
+        self.model_choices.session
+    }
+
+    pub(super) fn begin_model_session(&mut self) {
+        let choices = &mut self.model_choices;
+        choices.session = choices
+            .session
+            .checked_add(1)
+            .expect("pair sessions never wrap");
+        choices.slots.retain(|slot| {
+            slot.cancel.store(true, Ordering::SeqCst);
+            slot.sent
+        });
+    }
+
+    pub(super) fn set_model(
+        &self,
+        request: u32,
+        thread: ThreadId,
+        choice: Option<ModelChoice>,
+        effects: &mut Vec<Effect>,
+    ) {
+        effects.push(Effect::Store(StoreOp::SetModel {
+            session: self.model_choices.session,
+            request,
+            thread,
+            choice,
+        }));
+    }
+
+    pub(super) fn model_set(
+        &self,
+        session: u64,
+        request: u32,
+        thread: ThreadId,
+        result: ChoiceRead,
+        effects: &mut Vec<Effect>,
+    ) {
+        if session == self.model_choices.session {
+            effects.push(Effect::Control(ControlToShell::ThreadModelSet {
+                request,
+                thread,
+                result,
+            }));
+        }
+    }
+
+    /// Admits a read, or refuses it at once when every slot is held or the request repeats.
+    pub(super) fn read_model(&mut self, request: u32, thread: ThreadId, effects: &mut Vec<Effect>) {
+        let session = self.model_choices.session;
+        let slots = &mut self.model_choices.slots;
+        if slots.len() >= MAX_PENDING_MODEL_READS
+            || slots
+                .iter()
+                .any(|slot| slot.session == session && slot.request == request)
+        {
+            effects.push(Effect::Control(ControlToShell::ThreadModelRead {
+                request,
+                thread,
+                result: ChoiceRead::Failed,
+            }));
+            return;
+        }
+        slots.push(Slot {
+            session,
+            request,
+            thread,
+            deadline: Instant::now() + READ_TIME,
+            cancel: Arc::new(AtomicBool::new(false)),
+            sent: false,
+        });
+    }
+
+    /// Hands the reader every parked read whose thread has no new row waiting to be queued, so
+    /// the read is stamped after the write that creates it; arms the earliest parked deadline.
+    pub(super) fn release_model_reads(&mut self, effects: &mut Vec<Effect>) {
+        let unborn: Vec<ThreadId> = self
+            .ending
+            .iter()
+            .chain(self.current.as_ref())
+            .filter_map(|run| match &run.begin {
+                Some(StoreOp::BeginTurn {
+                    thread,
+                    title: Some(_),
+                    ..
+                }) => Some(*thread),
+                _ => None,
+            })
+            .collect();
+        let mut parked = None;
+        for slot in self
+            .model_choices
+            .slots
+            .iter_mut()
+            .filter(|slot| !slot.sent)
+        {
+            if unborn.contains(&slot.thread) {
+                parked = Some(parked.map_or(slot.deadline, |at: Instant| at.min(slot.deadline)));
+                continue;
+            }
+            slot.sent = true;
+            effects.push(Effect::Store(StoreOp::ReadModel(ModelRead {
+                session: slot.session,
+                request: slot.request,
+                thread: slot.thread,
+                control: Control::new(slot.deadline.into_std()).observe(Arc::clone(&slot.cancel)),
+            })));
+        }
+        if let Some(at) = parked {
+            effects.push(Effect::ArmModelReads { at });
+        }
+    }
+
+    /// Fails each parked read past its deadline: its new thread's row is still waiting.
+    pub(super) fn model_reads_due(&mut self, effects: &mut Vec<Effect>) {
+        let now = Instant::now();
+        let session = self.model_choices.session;
+        self.model_choices.slots.retain(|slot| {
+            if slot.sent || slot.deadline > now {
+                return true;
+            }
+            if slot.session == session {
+                effects.push(Effect::Control(ControlToShell::ThreadModelRead {
+                    request: slot.request,
+                    thread: slot.thread,
+                    result: ChoiceRead::Failed,
+                }));
+            }
+            false
+        });
+    }
+
+    /// The reader answered: the slot is free again, and the answer goes out only to its pair.
+    pub(super) fn model_read(
+        &mut self,
+        read: &ModelRead,
+        result: ChoiceRead,
+        effects: &mut Vec<Effect>,
+    ) {
+        self.model_choices.slots.retain(|slot| {
+            !(slot.sent && slot.session == read.session && slot.request == read.request)
+        });
+        if read.session == self.model_choices.session {
+            effects.push(Effect::Control(ControlToShell::ThreadModelRead {
+                request: read.request,
+                thread: read.thread,
+                result,
+            }));
+        }
+    }
+}

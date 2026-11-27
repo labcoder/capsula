@@ -5,7 +5,8 @@ use rusqlite::Connection;
 use super::StoreError;
 
 /// Each entry moves the schema up one version; append, never edit.
-pub(super) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
+pub(super) const MIGRATIONS: &[&str] =
+    &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14];
 const ORDINARY_VERSION: usize = MIGRATIONS.len();
 /// The newest version a build from before the profile's writer lock knows.
 const PRE_LOCK_NEWEST: usize = 12;
@@ -215,6 +216,13 @@ CREATE TABLE chatgpt_recovery_context (
 /// No schema change. Builds from before the profile's writer lock know at most version 12, so
 /// they refuse this file rather than write history without the lock.
 const V13: &str = "";
+
+/// Each committed Set or Clear of a thread's model choice advances its revision, so the shell can
+/// order answers that cross. Older rows read as 0 with their saved choice unchanged.
+const V14: &str = "
+ALTER TABLE threads ADD COLUMN model_choice_rev INTEGER NOT NULL DEFAULT 0
+    CHECK (model_choice_rev >= 0);
+";
 
 /// Brings the schema up to date.
 pub(super) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {

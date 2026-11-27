@@ -277,13 +277,19 @@ pub enum StoreOp {
         /// The model that wrote it; `None` when the engine took none.
         model: Option<String>,
     },
-    /// Store a live thread's model and effort; `ModelSet` answers the result.
+    /// Store or clear a live thread's model and effort; `ModelSet` answers what was committed.
     SetModel {
+        /// The session that asked.
+        session: u64,
+        /// The shell's number for the write.
+        request: u32,
         /// The thread.
         thread: ThreadId,
-        /// The model and effort.
-        choice: ModelChoice,
+        /// The model and effort, or `None` to inherit.
+        choice: Option<ModelChoice>,
     },
+    /// Read a thread's committed model choice on the page reader; `ModelRead` answers.
+    ReadModel(super::ModelRead),
     /// A tool call's write and its ledger row, in one transaction; answered by `CallCommitted`.
     CommitCall(crate::dispatch::CommitCall),
     /// How far the user heard a released spoken run. Nothing answers it: the run is gone.
@@ -367,6 +373,7 @@ impl StoreOp {
             | Self::SetTitle { .. }
             | Self::StoreSummary { .. }
             | Self::SetModel { .. }
+            | Self::ReadModel(_)
             | Self::Heard { .. }
             | Self::GrantScreen { .. }
             | Self::RestoreScreen { .. }
@@ -450,10 +457,20 @@ impl StoreOp {
                 outcome: crate::dispatch::Committed::Failed,
                 then: None,
             },
-            Self::SetModel { thread, choice } => Input::ModelSet {
+            Self::SetModel {
+                session,
+                request,
+                thread,
+                ..
+            } => Input::ModelSet {
+                session: *session,
+                request: *request,
                 thread: *thread,
-                choice: choice.clone(),
-                applied: false,
+                result: kumochi_protocol::message::ChoiceRead::Failed,
+            },
+            Self::ReadModel(read) => Input::ModelRead {
+                read: read.clone(),
+                result: kumochi_protocol::message::ChoiceRead::Failed,
             },
             Self::GrantScreen { lease } => Input::ScreenGrantStored {
                 lease: *lease,

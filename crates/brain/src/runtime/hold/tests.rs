@@ -1608,7 +1608,19 @@ async fn cancel_model_default_and_unload_changes_are_terminal_before_their_handl
             HoldStatus::Failed(HoldFailure::NotLoaded),
         ),
         (
-            ControlToBrain::ThreadOp(ThreadOp::SetModel { thread, choice }),
+            ControlToBrain::ThreadOp(ThreadOp::SetModel {
+                request: 1,
+                thread,
+                choice: Some(choice),
+            }),
+            HoldStatus::Failed(HoldFailure::ChoiceChanged),
+        ),
+        (
+            ControlToBrain::ThreadOp(ThreadOp::SetModel {
+                request: 2,
+                thread,
+                choice: None,
+            }),
             HoldStatus::Failed(HoldFailure::ChoiceChanged),
         ),
         (
@@ -1995,8 +2007,14 @@ fn closers(thread: ThreadId) -> Vec<Closer> {
             kumochi_protocol::voice::VoicePart::SpeechInput,
         ))),
         Closer::Control(ControlToBrain::ThreadOp(ThreadOp::SetModel {
+            request: 1,
             thread,
-            choice,
+            choice: Some(choice),
+        })),
+        Closer::Control(ControlToBrain::ThreadOp(ThreadOp::SetModel {
+            request: 2,
+            thread,
+            choice: None,
         })),
         fence(Input::ShellLost),
         fence(Input::Turn {

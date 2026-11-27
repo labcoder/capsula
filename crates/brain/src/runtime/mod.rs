@@ -276,6 +276,8 @@ pub(crate) struct Brain {
     /// When each granted send's deadline passes, in no order.
     send_deadlines: Vec<(LeaseId, Instant)>,
     deadline: Option<(RunId, Instant)>,
+    /// When a parked model-choice read's deadline is checked.
+    model_reads_at: Option<Instant>,
     /// The one reader of TTS; none when TTS couldn't start.
     pump: Option<Pump>,
     /// The voice parts; none when there's no data folder for them.
@@ -500,6 +502,7 @@ impl Brain {
             access,
             send_deadlines: Vec::new(),
             deadline: None,
+            model_reads_at: None,
             pump: None,
             voice: None,
             holds: hold::Holds::default(),
@@ -1447,6 +1450,10 @@ impl Brain {
                     let at = first.map(|(at, _)| at).expect("a quiet timer fired");
                     Input::QuietTimeout { run: self.quiet.swap_remove(at).0 }
                 }
+                () = sleep_until(self.model_reads_at) => {
+                    self.model_reads_at = None;
+                    Input::ModelReadsDue
+                }
                 () = sleep_until(deadline.map(|(_, at)| at)) => {
                     self.deadline = None;
                     match deadline {
@@ -1966,6 +1973,7 @@ impl Brain {
                     self.deadline = Some((run, Instant::now() + after));
                 }
                 Effect::ArmDeadlineAt { run, at } => self.deadline = Some((run, at)),
+                Effect::ArmModelReads { at } => self.model_reads_at = Some(at),
                 Effect::Broken(reason) => broken = Some(reason),
                 speech @ (Effect::Speak { .. }
                 | Effect::Credit { .. }
