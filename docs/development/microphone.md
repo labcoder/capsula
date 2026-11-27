@@ -144,6 +144,21 @@ Discontinuity (apart from WASAPI's undefined
 first-buffer flag), timestamp failure and endpoint loss fail closed. Failed
 native release or teardown never becomes a successful stop receipt.
 
+## macOS input pin
+
+`platform::macos::microphone` decides what Mac capture may trust before any device
+opens. It accepts only the stream's own virtual format: interleaved,
+native-endian float32 that fills each frame, at the device's bit-exact nominal
+rate, within the shared wire bounds. No client format is requested, so nothing
+converts the audio. An IO cycle over 100 ms refuses, and the input counts as
+stalled after two cycles plus 100 ms without a valid one. The acceptance edge
+is the host clock that `AudioTimeStamp.mHostTime` uses, read two ticks on,
+because a cycle at the adjacent tick is ambiguous across threads. A kept
+cycle's sample time must be whole, finite, below 2^53 and moving forward. A
+fractional, repeated or backward position fails the hold, and a forward gap
+counts as missing frames. Nothing calls these yet: Mac capture adopts them in
+its own change.
+
 ## macOS capture ring
 
 On macOS, CoreAudio hands each input cycle to an IO block on its real-time thread.

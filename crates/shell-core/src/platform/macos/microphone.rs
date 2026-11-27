@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use objc2_core_audio::AudioGetCurrentHostTime;
 use objc2_core_audio_types::{
-    AudioStreamBasicDescription, kAudioFormatFlagIsBigEndian, kAudioFormatFlagIsFloat,
-    kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
+    AudioStreamBasicDescription, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonMixable,
+    kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
 };
 
 use crate::platform::microphone::{Format, MicError, Sample};
@@ -33,15 +33,18 @@ fn edge(now: u64) -> Result<u64, MicError> {
 }
 
 /// Accepts the stream's virtual format only as packed, interleaved, native-endian float32 at the
-/// device's nominal rate, so the IO block receives exactly what the packetizer reads.
+/// device's nominal rate, so the IO block receives exactly what the packetizer reads. The float
+/// flag is required, the packed and non-mixable flags are allowed (packing is implied when the
+/// samples fill the frame, as required below), and any other flag refuses.
 pub(super) fn read_format(
     asbd: &AudioStreamBasicDescription,
     nominal_rate: f64,
 ) -> Result<Format, MicError> {
     let flags = asbd.mFormatFlags;
     let packed_float = flags & kAudioFormatFlagIsFloat != 0
-        && flags & kAudioFormatFlagIsPacked != 0
-        && flags & (kAudioFormatFlagIsBigEndian | kAudioFormatFlagIsNonInterleaved) == 0;
+        && flags
+            & !(kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonMixable)
+            == 0;
     let rate = asbd.mSampleRate;
     if asbd.mFormatID != kAudioFormatLinearPCM
         || !packed_float
@@ -96,7 +99,7 @@ impl Positions {
     /// `Timestamp`; a fractional, repeated or backward one is `Discontinuity`.
     pub(super) fn admit(&mut self, sample_time: Option<f64>, frames: u32) -> Result<u64, MicError> {
         let time = sample_time.ok_or(MicError::Timestamp)?;
-        if !time.is_finite() || time < 0.0 || time + f64::from(frames) > EXACT_FRAMES {
+        if !time.is_finite() || time < 0.0 || time > EXACT_FRAMES - f64::from(frames) {
             return Err(MicError::Timestamp);
         }
         if time.fract() != 0.0 {
@@ -122,9 +125,9 @@ mod tests {
     use std::time::Duration;
 
     use objc2_core_audio_types::{
-        AudioStreamBasicDescription, kAudioFormatFlagIsBigEndian, kAudioFormatFlagIsFloat,
-        kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsPacked,
-        kAudioFormatFlagIsSignedInteger, kAudioFormatLinearPCM,
+        AudioStreamBasicDescription, kAudioFormatFlagIsAlignedHigh, kAudioFormatFlagIsBigEndian,
+        kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsNonMixable,
+        kAudioFormatFlagIsPacked, kAudioFormatFlagIsSignedInteger, kAudioFormatLinearPCM,
     };
 
     use super::{Positions, edge, read_format, stall_after};
@@ -144,8 +147,15 @@ mod tests {
         }
     }
 
+    fn flagged(flags: u32) -> AudioStreamBasicDescription {
+        AudioStreamBasicDescription {
+            mFormatFlags: flags,
+            ..float(48_000.0, 2)
+        }
+    }
+
     #[test]
-    fn only_packed_interleaved_native_float32_at_the_nominal_rate_is_accepted() {
+    fn only_interleaved_native_float32_at_the_nominal_rate_is_accepted() {
         let format = |rate, channels| Format {
             rate,
             channels,
@@ -163,7 +173,7 @@ mod tests {
             read_format(&float(192_000.0, 2), 192_000.0),
             Ok(format(192_000, 2))
         );
-        let refused: [(&str, AudioStreamBasicDescription, f64); 14] = [
+        let refused = [
             ("rate differs from nominal", float(44_100.0, 1), 48_000.0),
             ("fractional rate", float(44_100.5, 1), 44_100.5),
             ("rate not a multiple of 50", float(44_125.0, 1), 44_125.0),
@@ -172,41 +182,31 @@ mod tests {
             ("not a number", float(f64::NAN, 1), f64::NAN),
             ("no channels", float(48_000.0, 0), 48_000.0),
             ("three channels", float(48_000.0, 3), 48_000.0),
+        ];
+        for (why, asbd, nominal) in refused {
+            assert_eq!(read_format(&asbd, nominal), Err(MicError::Format), "{why}");
+        }
+        let layout = [
             (
-                "integer samples",
+                "not linear PCM",
                 AudioStreamBasicDescription {
-                    mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+                    mFormatID: 0x6161_6320,
                     ..float(48_000.0, 1)
                 },
-                48_000.0,
             ),
             (
-                "not packed",
+                "two frames per packet",
                 AudioStreamBasicDescription {
-                    mFormatFlags: kAudioFormatFlagIsFloat,
+                    mFramesPerPacket: 2,
                     ..float(48_000.0, 1)
                 },
-                48_000.0,
             ),
             (
-                "big-endian",
+                "bytes per packet mismatched",
                 AudioStreamBasicDescription {
-                    mFormatFlags: kAudioFormatFlagIsFloat
-                        | kAudioFormatFlagIsPacked
-                        | kAudioFormatFlagIsBigEndian,
+                    mBytesPerPacket: 8,
                     ..float(48_000.0, 1)
                 },
-                48_000.0,
-            ),
-            (
-                "non-interleaved",
-                AudioStreamBasicDescription {
-                    mFormatFlags: kAudioFormatFlagIsFloat
-                        | kAudioFormatFlagIsPacked
-                        | kAudioFormatFlagIsNonInterleaved,
-                    ..float(48_000.0, 2)
-                },
-                48_000.0,
             ),
             (
                 "bytes per frame mismatched",
@@ -215,7 +215,6 @@ mod tests {
                     mBytesPerPacket: 8,
                     ..float(48_000.0, 1)
                 },
-                48_000.0,
             ),
             (
                 "64-bit samples",
@@ -223,28 +222,42 @@ mod tests {
                     mBitsPerChannel: 64,
                     ..float(48_000.0, 1)
                 },
-                48_000.0,
             ),
         ];
-        for (why, asbd, nominal) in refused {
-            assert_eq!(read_format(&asbd, nominal), Err(MicError::Format), "{why}");
+        for (why, asbd) in layout {
+            assert_eq!(read_format(&asbd, 48_000.0), Err(MicError::Format), "{why}");
         }
-        let other = [
-            AudioStreamBasicDescription {
-                mFormatID: 0x6161_6320,
-                ..float(48_000.0, 1)
-            },
-            AudioStreamBasicDescription {
-                mFramesPerPacket: 2,
-                ..float(48_000.0, 1)
-            },
-            AudioStreamBasicDescription {
-                mBytesPerPacket: 8,
-                ..float(48_000.0, 1)
-            },
-        ];
-        for asbd in other {
-            assert_eq!(read_format(&asbd, 48_000.0), Err(MicError::Format));
+    }
+
+    #[test]
+    fn float_is_required_and_only_the_packed_and_non_mixable_flags_may_join_it() {
+        let stereo = Ok(Format {
+            rate: 48_000,
+            channels: 2,
+            sample: Sample::F32,
+        });
+        for flags in [
+            kAudioFormatFlagIsFloat,
+            kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonMixable,
+        ] {
+            assert_eq!(read_format(&flagged(flags), 48_000.0), stereo);
+        }
+        let float = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+        for flags in [
+            kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            kAudioFormatFlagIsPacked,
+            float | kAudioFormatFlagIsSignedInteger,
+            float | kAudioFormatFlagIsBigEndian,
+            float | kAudioFormatFlagIsNonInterleaved,
+            float | kAudioFormatFlagIsAlignedHigh,
+            float | 1 << 31,
+        ] {
+            assert_eq!(
+                read_format(&flagged(flags), 48_000.0),
+                Err(MicError::Format),
+                "{flags:#x}"
+            );
         }
     }
 
@@ -317,7 +330,7 @@ mod tests {
             Ok(9_007_199_254_740_480)
         );
         assert_eq!(
-            Positions::default().admit(Some(9_007_199_254_740_482.0), 512),
+            Positions::default().admit(Some(9_007_199_254_740_481.0), 512),
             Err(MicError::Timestamp)
         );
     }
