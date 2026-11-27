@@ -48,8 +48,8 @@ pub(super) use library::{
 pub(crate) use pipe::test_pair;
 pub(crate) use pipe::{PipeClient, bridge_peer, open_bridge, shell_connection};
 pub use pipe::{
-    PipeServer, client_image, client_process, create_owner_only, has_exited, process_image,
-    server_image, session_id,
+    PipeServer, client_image, client_process, create_owner_only, exit_code, has_exited,
+    process_image, server_image, session_id,
 };
 pub use policy::{managed_presence, system_env};
 pub use process::{detached_command, launch_detached};

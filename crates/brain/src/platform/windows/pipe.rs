@@ -23,7 +23,7 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::{
-    GetProcessId, OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32,
+    GetExitCodeProcess, GetProcessId, OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
     WaitForSingleObject,
 };
@@ -298,6 +298,19 @@ pub fn has_exited(process: BorrowedHandle<'_>) -> io::Result<bool> {
     }
 }
 
+/// The exit code `process` ended with, or `STILL_ACTIVE` (259) while it runs.
+///
+/// # Errors
+/// Fails when the handle lacks the right to query it.
+pub fn exit_code(process: BorrowedHandle<'_>) -> io::Result<u32> {
+    let mut code = 0;
+    // SAFETY: the handle is open for the borrow and `code` is a writable u32.
+    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &raw mut code) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(code)
+}
+
 /// The executable of the process serving the pipe `client` is connected to.
 ///
 /// # Errors
@@ -371,6 +384,19 @@ mod tests {
     };
 
     const ME: &str = "S-1-5-21-1-2-3-1001";
+
+    #[test]
+    fn exit_code_reads_how_a_child_ended() {
+        use std::os::windows::io::AsHandle as _;
+        for code in [0, 3] {
+            let mut child = std::process::Command::new("cmd.exe")
+                .args(["/C", &format!("exit {code}")])
+                .spawn()
+                .expect("cmd starts");
+            child.wait().expect("cmd ends");
+            assert_eq!(super::exit_code(child.as_handle()).ok(), Some(code));
+        }
+    }
 
     #[test]
     fn only_a_protected_single_user_entry_passes() {

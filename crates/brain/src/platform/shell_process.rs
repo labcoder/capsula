@@ -54,6 +54,10 @@ impl Verdict {
     }
 }
 
+/// A fixture's state for a process that exited with code 0; 1 is any other exit.
+#[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+const CLEAN: u8 = 3;
+
 const OPEN: u8 = 0;
 const CLAIMED: u8 = 1;
 const LOST: u8 = 2;
@@ -194,7 +198,7 @@ impl ShellProcess {
             #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             Owner::Fixture(ref state, _) => match state.load(Ordering::Acquire) {
                 0 => Verdict::Watching,
-                1 => Verdict::Exited,
+                1 | CLEAN => Verdict::Exited,
                 _ => Verdict::Unconfirmed(Unconfirmed::Watch),
             },
             #[cfg(test)]
@@ -248,7 +252,7 @@ impl ShellProcess {
             #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
             Owner::Fixture(ref state, _) => match state.load(Ordering::Acquire) {
                 0 => Ok(false),
-                1 => Ok(true),
+                1 | CLEAN => Ok(true),
                 _ => Err(io::ErrorKind::Other.into()),
             },
             #[cfg(test)]
@@ -257,6 +261,25 @@ impl ShellProcess {
                 Verdict::Exited => Ok(true),
                 Verdict::Unconfirmed(reason) => Err(io::Error::other(reason)),
             },
+        }
+    }
+
+    /// Whether the process has exited with code 0, as the shell does when it ends on purpose.
+    /// Unknown counts as not clean.
+    pub(crate) fn quit_cleanly(&self) -> bool {
+        match *self.owner {
+            #[cfg(windows)]
+            Owner::Native(ref handle) => {
+                use std::os::windows::io::AsHandle as _;
+                matches!(super::has_exited(handle.as_handle()), Ok(true))
+                    && matches!(super::exit_code(handle.as_handle()), Ok(0))
+            }
+            #[cfg(target_os = "macos")]
+            Owner::Parent(_) => false,
+            #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+            Owner::Fixture(ref state, _) => state.load(Ordering::Acquire) == CLEAN,
+            #[cfg(test)]
+            Owner::Watched(..) => false,
         }
     }
 
@@ -368,6 +391,16 @@ mod tests {
             unconfirmed.fence(),
             Err(Verdict::Unconfirmed(Unconfirmed::Watch))
         );
+    }
+
+    #[test]
+    fn only_a_code_zero_exit_quit_cleanly() {
+        let state = |value| ShellProcess::fixture(7, Arc::new(AtomicU8::new(value)));
+        assert!(state(super::CLEAN).quit_cleanly());
+        assert_eq!(state(super::CLEAN).exited().ok(), Some(true));
+        for (value, why) in [(0, "running"), (1, "crashed"), (2, "unknown")] {
+            assert!(!state(value).quit_cleanly(), "{why}");
+        }
     }
 
     #[test]
