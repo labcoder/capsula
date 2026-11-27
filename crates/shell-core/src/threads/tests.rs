@@ -1572,6 +1572,18 @@ fn drawing_marker(id: u64, scene: u64) -> PageEvent {
 }
 
 #[test]
+fn only_a_step_whose_scene_is_on_screen_reads_as_shown() {
+    let mut state = Threads::chat();
+    state.events = vec![drawing_marker(2, 3), drawing_marker(1, 2)];
+    assert!(state.follow_drawn([None, Some(SceneId(3)), None, None]));
+    assert_eq!(state.drawing_label(SceneId(3)), Text::ThreadDrawingShown);
+    assert_eq!(state.drawing_label(SceneId(2)), Text::ThreadNoVisual);
+    assert!(!state.follow_drawn([Some(SceneId(9)), Some(SceneId(3)), None, None]));
+    assert!(state.follow_drawn([None; MAX_VISIBLE_SCENES]));
+    assert_eq!(state.drawing_label(SceneId(3)), Text::ThreadNoVisual);
+}
+
+#[test]
 fn history_rows_keep_the_newest_drawing_key_when_an_older_page_extends_its_group() {
     let mut state = loaded();
     assert_eq!(state.history_rows().next(), None);

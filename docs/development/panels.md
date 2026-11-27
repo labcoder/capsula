@@ -119,6 +119,11 @@ retained `presence/messages.rs` conversation component:
   of which steps stayed isn't listed, since the steps themselves are.
 
 History labels stored drawing markers “Drawing step” without claiming they appeared on screen.
+A step whose scene has a frame on the shown overlay says “Drawing shown on screen” instead.
+`Presenter::on_screen` names those scenes; Presence copies them into a `Threads` model when
+its panel opens, and again when they change while it's open, and the panel redraws only when a
+loaded step's label changes. `Threads::drawing_label` makes the choice. A closed panel costs
+the drawing nothing.
 Adjacent empty markers group only with the same known run and scene;
 text, cut notices and unknown metadata break groups. Presentation keeps the newest event id
 as each group's key, while raw events and pagination cursors stay intact. The list is sized

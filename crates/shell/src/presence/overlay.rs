@@ -422,6 +422,23 @@ impl Presence {
             })
             .detach();
         }
+        let drawn = self.presenter.on_screen();
+        if self.on_screen != drawn {
+            self.on_screen = drawn;
+            let chat = self.text.as_ref().is_some_and(|text| text.typing.visible);
+            for (model, open) in [
+                (&self.chat, chat),
+                (&self.threads, self.thread_panel.is_some()),
+            ] {
+                if open {
+                    model.update(cx, |state, cx| {
+                        if state.follow_drawn(drawn) {
+                            cx.notify();
+                        }
+                    });
+                }
+            }
+        }
         moving
     }
 

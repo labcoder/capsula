@@ -58,6 +58,7 @@ threads-close = Close
 thread-user = You
 thread-assistant = { $assistant }
 thread-no-visual = Drawing step
+thread-drawing-shown = Drawing shown on screen
 thread-issue-title = Issue: { $title }
 
 # Saved issue states never authorize a send without explicit confirmation.

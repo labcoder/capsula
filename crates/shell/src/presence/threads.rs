@@ -194,6 +194,7 @@ impl Presence {
             })
             .map_err(|error| OpenError::Gpui(error.into()))??;
         self.threads.update(cx, |state, cx| {
+            state.drawn = self.presenter.on_screen();
             state.show();
             cx.notify();
         });

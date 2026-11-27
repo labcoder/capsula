@@ -441,6 +441,15 @@ impl Presenter {
         self.frames.borrow().shown
     }
 
+    /// The scenes with a frame on the shown overlay.
+    pub fn on_screen(&self) -> [Option<SceneId>; MAX_VISIBLE_SCENES] {
+        let frames = self.frames.borrow();
+        frames
+            .slots
+            .each_ref()
+            .map(|slot| slot.as_ref().filter(|_| frames.shown).map(|(id, _)| *id))
+    }
+
     /// Samples every scene's view at `now_ms`. A scene whose frame its view refuses is
     /// cleared, as an over-cap adoption is.
     #[cfg_attr(

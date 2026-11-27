@@ -113,6 +113,7 @@ impl Presence {
         text.bounds = bounds;
         if text.typing.open() {
             self.chat.update(cx, |state, cx| {
+                state.drawn = self.presenter.on_screen();
                 state.show_for(self.runs.thread());
                 cx.notify();
             });
