@@ -80,7 +80,8 @@ fn a_two_point_path_colours_exactly_its_line_and_edge() {
             left: 8,
             top: 8,
             right: 23,
-            bottom: 13
+            bottom: 13,
+            focus: [15, 10],
         })
     );
     let pink = coloured(&rgb, 32, PINK);
@@ -120,7 +121,8 @@ fn a_segment_that_leaves_the_image_is_painted_up_to_its_edge() {
             left: 3,
             top: 3,
             right: 10,
-            bottom: 8
+            bottom: 8,
+            focus: [5, 5],
         })
     );
     assert_eq!(coloured(&rgb, 10, PINK), block(4..=9, 4..=6));
@@ -171,7 +173,8 @@ fn a_full_path_between_the_corners_stays_inside_a_scaled_image() {
             left: 0,
             top: 0,
             right: 1280,
-            bottom: 720
+            bottom: 720,
+            focus: [1279, 719],
         }
     );
     assert_eq!(&rgb[..3], PINK);
@@ -185,9 +188,91 @@ fn bounds_never_print_their_numbers() {
         top: 876_543,
         right: 765_432,
         bottom: 654_321,
+        focus: [543_210, 432_109],
     };
     let text = format!("{bounds:?}");
-    for number in ["987654", "876543", "765432", "654321"] {
+    for number in ["987654", "876543", "765432", "654321", "543210", "432109"] {
         assert!(!text.contains(number), "{text}");
     }
+}
+
+#[test]
+fn a_long_approach_that_ends_circling_a_word_gathers_on_the_circle() {
+    let (mut rgb, region) = blank([400, 300]);
+    let mut path = vec![
+        [10, 10],
+        [40, 32],
+        [70, 54],
+        [100, 76],
+        [130, 98],
+        [160, 120],
+    ];
+    let lap = [
+        [12, 0],
+        [8, 8],
+        [0, 12],
+        [-8, 8],
+        [-12, 0],
+        [-8, -8],
+        [0, -12],
+        [8, -8],
+    ];
+    for _ in 0..5 {
+        path.extend(lap.map(|[x, y]| [250 + x, 150 + y]));
+    }
+    assert_eq!(
+        paint(&mut rgb, [400, 300], region, &points(&path)),
+        Some(InkBounds {
+            left: 8,
+            top: 8,
+            right: 265,
+            bottom: 165,
+            focus: [250, 150],
+        })
+    );
+}
+
+#[test]
+fn sparse_points_that_tie_gather_at_the_later_one() {
+    let (mut rgb, region) = blank([250, 20]);
+    assert_eq!(
+        paint(
+            &mut rgb,
+            [250, 20],
+            region,
+            &points(&[[10, 10], [120, 10], [230, 10]])
+        ),
+        Some(InkBounds {
+            left: 8,
+            top: 8,
+            right: 233,
+            bottom: 13,
+            focus: [230, 10],
+        })
+    );
+}
+
+#[test]
+fn points_off_the_image_never_decide_where_the_line_gathers() {
+    let (mut rgb, region) = blank([100, 100]);
+    let mut path = vec![[80, 10], [80, 80], [-200, 80]];
+    path.extend([[-200, -200]; 10]);
+    assert_eq!(
+        paint(&mut rgb, [100, 100], region, &points(&path)),
+        Some(InkBounds {
+            left: 0,
+            top: 8,
+            right: 83,
+            bottom: 83,
+            focus: [80, 45],
+        })
+    );
+}
+
+#[test]
+fn a_path_with_no_point_on_the_image_names_no_place() {
+    let (mut rgb, region) = blank([100, 100]);
+    let path = points(&[[-10, 10], [110, 10], [110, 90], [-10, 90]]);
+    assert_eq!(paint(&mut rgb, [100, 100], region, &path), None);
+    assert!(!coloured(&rgb, 100, PINK).is_empty());
 }

@@ -378,8 +378,9 @@ pub const LIVE_RUN_BIN_DIR: &str = "bin";
 /// The content-free record within one copied Dev live check.
 pub const LIVE_CHATGPT_TEXT_STAMPS_FILE: &str = "chatgpt-text.stamps";
 
-/// Dev builds only: the most Claude Code questions the brain may seed. A value that isn't a
-/// count allows none.
+/// Dev builds only: the most Claude Code launches the brain may seed. Every seeded launch counts
+/// as one: a run's question, a compaction inside a run, and each title and compaction job. A value
+/// that isn't a count allows none.
 pub const CLAUDE_QUESTIONS_ENV: &str = "KUMOCHI_CLAUDE_QUESTIONS";
 /// Dev builds only: when set, to any value, every Claude Code launch, title jobs included, passes
 /// `--max-turns 1` to request one native turn, with `--permission-mode dontAsk` and no Kumochi

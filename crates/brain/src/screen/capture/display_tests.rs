@@ -66,7 +66,8 @@ fn a_sealed_path_is_painted_on_the_image_and_its_bounds_come_back() {
             left: 8,
             top: 8,
             right: 23,
-            bottom: 13
+            bottom: 13,
+            focus: [15, 10],
         })
     );
     let image = image::load_from_memory_with_format(context.jpeg(), image::ImageFormat::Jpeg)
@@ -95,6 +96,7 @@ fn neither_the_context_nor_its_bounds_print_where_the_user_pointed() {
             top: 8,
             right: 23,
             bottom: 13,
+            focus: [15, 10],
         })
     );
     let debug = format!("{context:?}");
@@ -107,6 +109,7 @@ fn neither_the_context_nor_its_bounds_print_where_the_user_pointed() {
         top: 19,
         right: 27,
         bottom: 29,
+        focus: [21, 23],
     };
     assert_eq!(format!("{:?}", Some(first)), format!("{:?}", Some(second)));
     let context = context.with_ink(Some(second));

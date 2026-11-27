@@ -125,7 +125,7 @@ fn tagged_github_refusal_keeps_frame_validation() {
         Some(refusal)
     );
     let mut unknown = wire;
-    unknown[5] = 54;
+    unknown[5] = u8::try_from(ErrorKey::ALL.len()).unwrap();
     assert!(matches!(
         read::<ControlToShell>(&mut unknown.as_slice(), Pipe::Control),
         Err(FrameError::Malformed(_))
@@ -212,6 +212,10 @@ fn control_messages_and_error_keys_keep_their_wire_tags() {
     assert_eq!(
         postcard::to_allocvec(&ErrorKey::UnsupportedPlatform).unwrap(),
         [53]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ErrorKey::LiveBudgetSpent).unwrap(),
+        [54]
     );
 }
 

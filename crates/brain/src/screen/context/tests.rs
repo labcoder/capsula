@@ -72,20 +72,32 @@ fn a_received_jpeg_is_one_allocation_of_its_exact_length() {
 #[test]
 fn painted_bounds_reach_a_model_line_only_inside_the_image() {
     use crate::screen::ink::InkBounds;
-    let bounds = |left, top, right, bottom| InkBounds {
+    let bounds = |left, top, right, bottom, focus| InkBounds {
         left,
         top,
         right,
         bottom,
+        focus,
     };
     let ink = |ink| context(vec![1]).with_ink(Some(ink)).ink();
-    assert_eq!(ink(bounds(0, 0, 4, 3)), Some(bounds(0, 0, 4, 3)));
+    assert_eq!(
+        ink(bounds(0, 0, 4, 3, [0, 0])),
+        Some(bounds(0, 0, 4, 3, [0, 0]))
+    );
+    assert_eq!(
+        ink(bounds(1, 1, 4, 3, [3, 2])),
+        Some(bounds(1, 1, 4, 3, [3, 2]))
+    );
     for outside in [
-        bounds(0, 0, 5, 3),
-        bounds(0, 0, 4, 4),
-        bounds(2, 0, 2, 3),
-        bounds(0, 2, 4, 2),
-        bounds(3, 0, 1, 3),
+        bounds(0, 0, 5, 3, [0, 0]),
+        bounds(0, 0, 4, 4, [0, 0]),
+        bounds(2, 0, 2, 3, [2, 0]),
+        bounds(0, 2, 4, 2, [0, 2]),
+        bounds(3, 0, 1, 3, [3, 0]),
+        bounds(1, 1, 4, 3, [4, 2]),
+        bounds(1, 1, 4, 3, [3, 3]),
+        bounds(1, 1, 4, 3, [0, 2]),
+        bounds(1, 1, 4, 3, [3, 0]),
     ] {
         assert_eq!(ink(outside), None);
     }

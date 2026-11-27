@@ -198,8 +198,8 @@ impl Failure {
             }
             Self::Protocol => (ErrorKey::ResponseUnreadable, Some(Action::Retry)),
             Self::Withheld => (ErrorKey::ScreenPictureStopped, None),
-            // shortcut: a spent live-check budget reads as a refused request; it's debug-only
-            Self::Spent | Self::Request => (ErrorKey::RequestRefused, None),
+            Self::Spent => (ErrorKey::LiveBudgetSpent, None),
+            Self::Request => (ErrorKey::RequestRefused, None),
             Self::Credential => (ErrorKey::AccountRefused, Some(Action::SignIn)),
         };
         UserError::new(key, Vec::new(), action.into_iter().collect())

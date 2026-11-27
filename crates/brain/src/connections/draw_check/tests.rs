@@ -16,13 +16,13 @@ fn the_budget_is_one_request_per_prompt() {
 }
 
 #[test]
-fn the_variable_can_only_lower_the_budget_of_two() {
+fn the_variable_can_only_lower_the_budget_of_three() {
     for (value, want) in [
-        (None, 2),
-        (Some("2"), 2),
+        (None, 3),
+        (Some("3"), 3),
         (Some(" 1 "), 1),
         (Some("0"), 0),
-        (Some("3"), 2),
+        (Some("4"), 3),
         (Some("4294967296"), 0),
         (Some("-1"), 0),
         (Some("x"), 0),
@@ -53,6 +53,25 @@ fn a_step_after_the_end_is_refused_and_not_drawn() {
         draw: Some(Ok(arguments.to_owned())),
     };
     assert!(!line(1, "water-cycle", 10, Ok(()), &reply, 5).1);
+}
+
+#[test]
+fn a_scene_that_puts_nothing_is_not_counted_as_drawn() {
+    for arguments in [
+        r#"{"records":[{"begin":{"scene":"s","surface":"overlay","title":"t","alt":"a"}},{"end":{}}]}"#,
+        r#"{"records":[{"begin":{"scene":"s","surface":"overlay","title":"t","alt":"a"}},{"step":{"id":"a","say":"Here it is.","put":[]}},{"end":{}}]}"#,
+    ] {
+        assert_eq!(
+            check(arguments.as_bytes()),
+            Verdict::Drawn(0),
+            "{arguments}"
+        );
+        let reply = Reply {
+            calls: 1,
+            draw: Some(Ok(arguments.to_owned())),
+        };
+        assert!(!line(1, "overlay-diagram", 10, Ok(()), &reply, 5).1);
+    }
 }
 
 #[test]

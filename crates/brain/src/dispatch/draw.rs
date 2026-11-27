@@ -371,7 +371,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         for screen in [
-            "When this turn includes a picture of the user's screen, use surface: screen to point at something in that picture when it helps the answer.",
+            "When this turn includes a picture of the user's screen, use surface: screen to point at something in that picture only when the user asks you to show or mark it, or when the answer can't be followed without it.",
+            "Asked only what something is or what they are pointing at, without being asked to mark it, name it in words and don't draw.",
             "Omit begin.size and never write begin.display.",
             "Coordinates are picture pixels from its top-left corner, not display pixels or the pink pointing line.",
             r#"Give the thing's own tight box as target: {"box":[x,y,width,height]}; Kumochi adds the space and stroke."#,
@@ -386,7 +387,7 @@ mod tests {
             assert!(providers.contains(screen), "{screen}");
             assert!(!mcp.contains(screen), "{screen}");
         }
-        for example in [r#""scene":"heating""#, r#""scene":"sine""#] {
+        for example in [r#""scene":"evaporation""#, r#""scene":"sine""#] {
             assert_eq!(mcp.matches(example).count(), 1, "{example}");
         }
         assert_eq!(mcp.matches("```json").count(), 2);

@@ -143,7 +143,8 @@ impl Accounts {
             | ErrorKey::ScreenUnavailable
             | ErrorKey::ScreenPictureStopped
             | ErrorKey::ScreenConnectionChanged
-            | ErrorKey::ConnectionNeeded => {}
+            | ErrorKey::ConnectionNeeded
+            | ErrorKey::LiveBudgetSpent => {}
             ErrorKey::SignInTimedOut
             | ErrorKey::SignInFailed
             | ErrorKey::SignInOtherAccount

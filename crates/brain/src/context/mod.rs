@@ -517,6 +517,8 @@ impl ModelRequest {
                 ("top", ink.top),
                 ("right", ink.right),
                 ("bottom", ink.bottom),
+                ("x", ink.focus[0]),
+                ("y", ink.focus[1]),
             ] {
                 args.set(name, value);
             }

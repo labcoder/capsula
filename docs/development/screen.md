@@ -501,8 +501,19 @@ image, in 64-bit floats, and colours only pixels inside it, so a segment that le
 is painted up to the edge. The line is 3 pixels of pink with a 1-pixel white edge on each side
 [guess]. A path of fewer than two points paints nothing. `ScreenContext` carries the painted
 pixels' bounding rectangle in image pixels, left out of its `Debug`, as `InkBounds`, whose
-`Debug` prints no numbers. The brain reads it through `ScreenContext::ink`, which returns it only
-when it is non-empty and lies inside the image, so a bad worker answer reaches no model line.
+`Debug` prints no numbers. `InkBounds` also holds `focus`, the pixel where the path's points
+are densest: the points inside the image are counted in 48-pixel cells [guess], and the focus is
+the mean of the points in the two-by-two square of cells holding the most, the square holding the
+latest point on a tie, clamped into the rectangle. That's one pass over at most 2,048 points and
+one over about 400 cells. The shell keeps a point at most every 16 ms while the pointer moves, so
+time spent moving over one place, such as circling a word many times after a long approach,
+crowds points there, and the model is told the thing there is the likeliest answer rather than
+everything in the rectangle. It's a density estimate, not proof of intent: along an evenly
+spaced line any square may win. A path with no point inside the image names no place, so its
+picture goes without the pointed line; the shell keeps only points on the display it shows.
+The brain reads it through `ScreenContext::ink`, which returns it only when it is non-empty and
+lies inside the image, with `focus` inside the rectangle, so a bad worker answer reaches no model
+line.
 
 ### Slice 6 release-capture gate
 

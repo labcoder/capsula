@@ -92,13 +92,16 @@ impl ScreenContext {
     }
 
     /// Where the pointer's path was painted on the image, in image pixels, when that lies inside
-    /// the image; the worker's answer is checked here, before a model line can carry it.
+    /// the image and gathers inside the painted rectangle; the worker's answer is checked here,
+    /// before a model line can carry it.
     pub(crate) fn ink(&self) -> Option<InkBounds> {
         self.ink.filter(|ink| {
             ink.left < ink.right
                 && ink.top < ink.bottom
                 && ink.right <= self.size[0]
                 && ink.bottom <= self.size[1]
+                && (ink.left..ink.right).contains(&ink.focus[0])
+                && (ink.top..ink.bottom).contains(&ink.focus[1])
         })
     }
 
