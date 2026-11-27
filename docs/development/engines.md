@@ -634,3 +634,80 @@ The [offline drawing timing gate](input.md#offline-drawing-timing) reuses the Re
 parser with a fixed in-memory HTTP/SSE transport. In an opted-in release build, the
 Gate identity, draw mode, one-run budget, fixed replay model and fresh receipt are
 required. The fixture can't fall back to the account engine.
+
+## The local Chat Completions transport
+
+`connections/local/` sends one streamed text request to a model server on this machine that
+speaks OpenAI's Chat Completions (llama.cpp's `llama-server`, Ollama and LM Studio all do). It's
+dormant: `LOCAL_CHAT` in `protocol::constants` is `false`, and `LoopbackEndpoint::configured`,
+the only way text becomes an endpoint, refuses every input while it is. No connection kind,
+setting, saved choice, engine or job reaches it yet.
+
+```mermaid
+flowchart LR
+    T["settings text"] -->|"configured: refused while LOCAL_CHAT is off"| E["LoopbackEndpoint"]
+    E --> S["stream(endpoint, body, ask, budget, sink)"]
+    B["ChatBody: text messages only"] --> S
+    S -->|"one absolute deadline"| C["TCP to 127.0.0.1 or ::1, peer checked"]
+    C --> M["ModelConn: lease-admitted upload, bounded head and body"]
+    M --> R["Reader over the shared SSE framer"]
+    R -->|"text"| K["Sink"]
+```
+
+**Where it can connect.** `LoopbackEndpoint` holds which loopback address (`127.0.0.1` or
+`::1`) and a nonzero port, so it can't represent any other destination. Its parser accepts only
+the exact text `127.0.0.1:<port>` or `[::1]:<port>`, the port in plain decimal from 1 to 65535:
+no host names (`localhost` included), other IPv4 or IPv6 spellings, mapped addresses, zones,
+schemes, user info, paths or queries. The connection goes to that socket address directly, with
+no name lookup, proxy or system configuration, and its peer address is checked before any byte is
+written. There's no connection pool: each request says `Connection: close`.
+
+**What it sends.** `POST /v1/chat/completions` with `Host` set from the endpoint itself,
+`Content-Type: application/json`, `Accept: text/event-stream`, `Accept-Encoding: identity`,
+`Connection: close` and the length. There's no `Authorization` header, cookie or credential of
+any kind, and the module never touches the vault. The body is `model`, `messages` (each a role,
+`system`, `user` or `assistant`, and its text) and `stream: true`: `ChatMessage` can only hold
+text, so tools, pictures and native items can't be expressed. `ChatBody` refuses no messages or
+more than `MAX_REQUEST_BYTES` before anything connects.
+
+**What completes.** Each event is `[DONE]` or a chunk read with the duplicate-refusing JSON reader
+the Anthropic route uses. A chunk holds exactly one choice at index 0 with a `delta` object; its
+`content`, when it's a string, is handed to the sink, counted against `MAX_TEXT_BYTES`. A round
+completes only on one `finish_reason: "stop"`, then `[DONE]`, then the end of the HTTP body with
+no data event after it. These fail, and a failure stays failed:
+
+| What arrives | `Failure` |
+|---|---|
+| `finish_reason: "length"` | `Incomplete` |
+| an `error` chunk | `Provider`, with none of its text |
+| tool calls, a function call, any other finish reason, empty or extra choices, a second `stop`, text after it, `[DONE]` before it, data after `[DONE]`, bad JSON, a cap | `Protocol` |
+| the body ending before `[DONE]` or its own framing | `Truncated` |
+| 401 or 403 | `AuthRequired`: a local connection never authenticates |
+| another 4xx or 5xx | `Refused { status }`; its body is never read |
+| a redirect or another non-200 head, or a body that isn't an event stream | `Protocol`; no redirect is followed |
+
+Text handed out before a failure stays handed out and never counts as a completed answer.
+
+**Waits and stopping.** One absolute `ROUND_DEADLINE` (120 s, a guess) starts before the grant is
+asked for and covers the grant, connecting (at most `CONNECT_DEADLINE`, 3 s), the upload, the
+head, the body and every wait on the sink, so trickled bytes can't stretch it. Within it the
+model tuning's send, idle and backpressure waits still apply. A refused grant or a spent budget
+connects to nothing. Esc, Stop and delete drop the round's future, which closes the connection
+before the send lease settles, as on the other routes; a lease whose request may have been
+written is told so, and nothing is retried or sent again.
+
+**Privacy.** The module logs nothing. `ChatMessage`, `ChatBody` and the reader print only kinds
+and lengths in `Debug`, and `Failure` holds at most a status. The request bytes are zeroed when
+they drop; response bytes pass through the shared `ModelConn` and framer buffers, which aren't.
+
+**Fixtures.** `fixtures/local/synthetic-llama-server-text.sse` is written by hand in the shape
+`llama-server` documents; it's not a recording and claims no server compatibility. Transport tests
+use real sockets on `127.0.0.1:0` only.
+
+**Before it can be switched on.** A connection kind with its facts row, an engine that maps text to
+`TurnEvent`s and `Failure` to fixed local errors, the model list check, a settings path, sanitized
+recordings from each supported server, and the owner's decision on trusting a server the user
+configured: loopback proves where Kumochi sends, not which process listens or what it forwards.
+That engine must keep each local task bound to its endpoint, filter history before it's read,
+keep the screen pipeline and jobs off the route, and never fall back to another engine.
+
