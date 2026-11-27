@@ -1513,6 +1513,51 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[tokio::test]
+    async fn a_refused_client_leaves_the_departed_shell_watched() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        use crate::platform::ShellProcess;
+
+        let session = u32::MAX - 50 - std::process::id();
+        let mut pipes = Pipes::create(session).expect("the test pipes are free");
+        let mut id = identity();
+        id.shell_image = std::env::current_exe().unwrap();
+        let scratch = Scratch::new("ipc-refused-watch");
+        let mut brain = test_support::brain(&scratch, "");
+        let state = Arc::new(AtomicU8::new(0));
+        pipes.served = Some(ShellProcess::fixture(7, Arc::clone(&state)));
+        let refused = async {
+            let mut control = ClientOptions::new()
+                .open(Pipe::Control.name(session))
+                .unwrap();
+            control
+                .write_all(&frame::encode(&ControlToBrain::Quitting, Pipe::Control).unwrap())
+                .await
+                .unwrap();
+            let reply = super::read::<ControlToShell>(&mut control, Pipe::Control).await;
+            assert_eq!(
+                reply.unwrap(),
+                None,
+                "a first frame that isn't Hello is refused"
+            );
+            state.store(1, Ordering::Release);
+        };
+        let (mut tap, mut launched) = (Tap::from_env(), None);
+        let (result, ()) = timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(
+                pipes.next_session(&id, &mut brain, &mut tap, &mut launched),
+                refused
+            )
+        })
+        .await
+        .expect("the departed shell's exit ends the wait");
+        assert_eq!(result.unwrap(), Session::ShellLost);
+        brain.close().await;
+    }
+
+    #[cfg(windows)]
     #[tokio::test(start_paused = true)]
     async fn a_brain_no_shell_reaches_gives_up() {
         let mut pipes =
