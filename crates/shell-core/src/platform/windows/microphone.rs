@@ -19,6 +19,7 @@ use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerforma
 use windows::core::{GUID, HRESULT, Interface};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::platform::microphone::stream::{self, Stream};
 use crate::platform::microphone::{
     CAPTURE_BUFFER, Finalization, Format, Generation, MicError, Mode, POLL, PacketBoundary,
     PacketStatus, Packetizer, Running, Sample, copy_batch,
@@ -92,6 +93,12 @@ impl Source {
             format,
             started: false,
         })
+    }
+}
+
+impl Stream for Source {
+    fn format(&self) -> Format {
+        self.format
     }
 
     fn check(&self) -> Result<(), MicError> {
@@ -245,68 +252,16 @@ fn capture_with(
         Ok(apartment) => apartment,
         Err(error) => return Ok(Finalization::Discarded(error)),
     };
-    let mut source = match Source::open(token, session) {
-        Ok(source) => source,
-        Err(error) => {
-            return Ok(match (error, token.mode(session, Instant::now())) {
-                (MicError::Cancelled | MicError::Stale, Ok(Mode::Release)) => {
-                    Finalization::Released { packets: 0 }
-                }
-                _ => Finalization::Discarded(error),
-            });
-        }
-    };
-    let mut packets = Packetizer::new(token.gesture(), source.format)?;
-    let mut result = collect(
-        &mut source,
+    stream::run(
         token,
         session,
-        running,
         output,
-        &mut packets,
         boundary,
-    );
-    boundary.queued(packets.high_water());
-    if matches!(result, Err(MicError::Stale | MicError::Cancelled))
-        && token.mode(session, Instant::now()) == Ok(Mode::Release)
-    {
-        result = Ok(());
-    }
-    if result.is_err() {
-        token.cancel();
-        packets.clear();
-    }
-    let stopped = source.stop();
-    if stopped == Err(MicError::Unconfirmed) {
-        return Err(MicError::Unconfirmed);
-    }
-    result = boundary.finish(result.and(stopped).and_then(|()| source.check()));
-    if result.is_err() {
-        token.cancel();
-        packets.clear();
-    }
-    drop(source);
-    if result == Err(MicError::Unconfirmed) {
-        return Err(MicError::Unconfirmed);
-    }
-    match result {
-        Ok(()) => match token.mode(session, Instant::now()) {
-            Ok(Mode::Release) => {
-                let finished = packets.finish(output);
-                boundary.queued(packets.high_water());
-                Ok(match finished {
-                    Ok(packets) => Finalization::Released { packets },
-                    Err(error) => {
-                        token.cancel();
-                        Finalization::Discarded(error)
-                    }
-                })
-            }
-            Err(error) => Ok(Finalization::Discarded(error)),
-            _ => Ok(Finalization::Discarded(MicError::Cancelled)),
+        Source::open(token, session),
+        |source, packets, boundary| {
+            collect(source, token, session, running, output, packets, boundary)
         },
-        Err(error) => Ok(Finalization::Discarded(error)),
-    }
+    )
 }
 
 fn collect(
