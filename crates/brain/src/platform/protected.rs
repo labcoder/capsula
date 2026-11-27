@@ -85,6 +85,19 @@ mod unsupported {
         Err(Untrusted::Unsupported)
     }
 
+    /// Today's generic chain, until activation re-exports the anchored Mac forward.
+    pub(crate) fn hold_model_chain(path: &Path) -> Result<Vec<File>, Untrusted> {
+        super::hold_chain(path)
+    }
+
+    pub(crate) fn keep_model_final(_: &File, _: &Path) -> Result<(), Untrusted> {
+        Err(Untrusted::Unsupported)
+    }
+
+    pub(crate) fn resume_model_write(_: File, _: &Path) -> Result<File, Untrusted> {
+        Err(Untrusted::Unsupported)
+    }
+
     #[cfg(not(target_os = "macos"))]
     pub(crate) fn hold_chain(_: &Path) -> Result<Vec<File>, Untrusted> {
         Err(Untrusted::Unsupported)
@@ -148,7 +161,7 @@ mod unsupported {
         Err(Untrusted::Unsupported)
     }
 
-    pub(crate) fn discard_model(_: File) -> Result<(), Untrusted> {
+    pub(crate) fn discard_model(_: File, _: &File, _: &Path) -> Result<(), Untrusted> {
         Err(Untrusted::Unsupported)
     }
 
@@ -181,6 +194,10 @@ mod unsupported {
             assert_eq!(marker(&absent).err(), Some(Untrusted::Unsupported));
             assert_eq!(open_model_write(&kept).err(), Some(Untrusted::Unsupported));
             assert_eq!(
+                resume_model_write(file(), &kept).err(),
+                Some(Untrusted::Unsupported)
+            );
+            assert_eq!(
                 create_model_write(&absent).err(),
                 Some(Untrusted::Unsupported)
             );
@@ -192,7 +209,8 @@ mod unsupported {
                 mark(&absent),
                 check_model_final(&file(), &kept),
                 publish_model(file(), &parent, &absent),
-                discard_model(file()),
+                discard_model(file(), &parent, &kept),
+                keep_model_final(&file(), &kept),
                 unmark(file()),
                 remove_model_tree(root.path()),
                 remove_tree(root.path()),
@@ -208,9 +226,12 @@ mod unsupported {
 
 #[cfg(not(windows))]
 pub(crate) use unsupported::{
-    check_model_final, create_model_dir, create_model_write, discard_model, hold_model_creation,
-    mark, marker, model_file, model_final, open_model_write, publish_model, remove_model_tree,
-    remove_tree, unmark, validate_model_path,
+    check_model_final, create_model_dir, create_model_write, discard_model, hold_model_chain,
+    hold_model_creation, keep_model_final, mark, marker, model_file, model_final, open_model_write,
+    publish_model, remove_model_tree, remove_tree, resume_model_write, unmark, validate_model_path,
 };
+
+#[cfg(target_os = "macos")]
+mod models;
 #[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) use unsupported::{hold_chain, owner_only_dir, private_tree};

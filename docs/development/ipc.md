@@ -108,7 +108,7 @@ only while that gesture is listening, ahead of its `KeyUp`. The picture is taken
 worker, so no frame crosses the pipe, and a cancel or consent change before submit discards it.
 AskAbout and conducted Speech are still unsupported on Plain queued pairs.
 
-The offline narrated fixture selects a separate internal adapter on the same authenticated
+A queued pair prepared as `Conducted` selects a separate internal adapter on the same authenticated
 pair. Each attendance owns a fresh bridge; neither a reconnect nor a new run inherits the
 old speaker's wake. The bridge matches the scene's durable speech promise to the ordered
 announcement on that registered session before passing either authority or PCM to the queued
@@ -136,7 +136,8 @@ while both slots are occupied; neither quiet nor a different run's marker releas
 the predecessor. For a natural end, the exact data `RunEnd` and settled drawing binding
 release the single narration slot for the next reply. That releases the audio binding, not an
 already installed frame or its outstanding paint receipt. Decision receipts remain on the
-control pipe. There is no production selector for the narrated adapter.
+control pipe. Link preparation takes the narration mode explicitly; the ordinary launcher
+prepares `Plain` on its Legacy session, so it never selects the narrated adapter.
 
 ## Voice-only hold messages
 
@@ -447,7 +448,9 @@ text metrics go on as a value; a frame the shell sent right after them stays in 
 reader, and a replayed TextMetrics would end serving as Broken.
 
 The shell's side lives in `shell-core`'s `platform/macos/leg.rs` and `connect_pair`, also
-dormant: nothing calls them, since the Mac shell only opens the disconnected window. On macOS the
+dormant: the link reaches them through `platform::connect`, but the Mac shell only opens the
+disconnected window. On macOS `session_id` is 0, since the instance item and lock are per user,
+and the named-pipe connector isn't built. On macOS the
 brain is the helper nested in the shell's bundle: from an absolute
 `<name>.app/Contents/MacOS/<shell>` up to `Contents`, then down `BRAIN_HELPER`
 (`Helpers/kumochid.app/Contents/MacOS/kumochid`); any other path is `NotFound`. Windows and Linux
@@ -459,7 +462,19 @@ is `Harden`, with no read and no byte written. Only then does the shell read the
 `Role::Shell`, into a `Secret`: a boxed buffer, allocated before the read, that wipes itself when
 dropped, so a move copies only the pointer. The clock is checked before the read and again after
 it, before its answer counts, so a read that ends past the deadline is `ConnectExpired` whether it
-succeeded or not. A refused read is `Item`. Either way no byte is written. `initiate` takes the
+succeeded or not. A refused read is `Item`. Either way no byte is written. From the spawn on,
+custody of the child ending (reaped, Lost or Unsettled) shuts the shell's two ends down, so the
+READY wait, the initiator and the wait for `Settings` return at once however long the deadline,
+and the attempt is `Custody` on each side of the item read and at the handoff, each asking
+whether custody has an outcome, so no item is read and no connection handed over once it has.
+Attendance asks once more as Connected goes out: the event is enqueued without waiting, under the
+lock that publishes custody's outcome, and refused once there is one. The legacy start retries a
+full UI queue outside that lock and asks again each time; the queued start refuses a full queue,
+and also counts an ended custody as cancelled while it waits for the microphone to retire. Either
+way the link shows Failed and waits for Retry, with no Connected and no generation recorded.
+A failed attempt shuts its ends down before it settles, so a child that exits on EOF is reaped,
+not killed. A child in Quit's grace is still owned and may finish connecting. A live child that
+closes only one leg holds the attempt until its deadline, then is settled. `initiate` takes the
 box and drops it once the initiator is keyed, before its first message goes out. It runs the
 initiator's steps over the shell's two ends by one deadline and returns the legs only once
 `BindAck` verifies. Each leg is the link's `PipeClient` over the session crate's record owners.

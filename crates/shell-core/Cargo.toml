@@ -25,6 +25,7 @@ cpal = { version = "=0.18.2", default-features = false }
 kumochi-audio.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "=0.6.2", default-features = false, features = ["std"] }
 kumochi-session = { path = "../session" }
 kumochi-storage = { path = "../storage" }
 libc = "=0.2.191"
@@ -32,6 +33,16 @@ objc2 = "=0.6.5"
 objc2-avf-audio = { version = "=0.3.2", default-features = false, features = [
     "std",
     "AVAudioApplication",
+] }
+objc2-core-audio = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "HostTime",
+] }
+objc2-core-audio-types = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CoreAudioBaseTypes",
+    "bitflags",
+    "objc2",
 ] }
 
 [target.'cfg(windows)'.dependencies]

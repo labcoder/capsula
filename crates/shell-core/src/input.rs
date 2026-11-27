@@ -128,6 +128,11 @@ impl Gesture {
         self.timing.deadline()
     }
 
+    /// A reset left the shortcut waiting for a fresh chord to re-arm it.
+    pub fn blocked(&self) -> bool {
+        matches!(self.timing.phase, Phase::Blocked)
+    }
+
     /// The chord is down, or its first tap's window is still open.
     pub fn engaged(&self) -> bool {
         matches!(self.timing.phase, Phase::Active { .. }) || self.timing.first_tap.is_some()

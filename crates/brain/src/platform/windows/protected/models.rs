@@ -110,6 +110,25 @@ pub(crate) fn check_model_final(file: &File, path: &Path) -> Result<(), Untruste
     check_marker(file, path)
 }
 
+/// A valid final is kept as it is: its held handle denies renaming and deleting it already.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the macOS adapter's keep re-checks the name and can fail"
+)]
+pub(crate) fn keep_model_final(_: &File, _: &Path) -> Result<(), Untrusted> {
+    Ok(())
+}
+
+/// An opened partial is already writable: Windows opens it so, and a stopped publish leaves
+/// nothing sealed.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the macOS adapter unseals a stopped publish's partial here and can fail"
+)]
+pub(crate) fn resume_model_write(file: File, _: &Path) -> Result<File, Untrusted> {
+    Ok(file)
+}
+
 pub(crate) fn create_model_write(path: &Path) -> Result<File, Untrusted> {
     let file = File::options()
         .write(true)
@@ -130,7 +149,8 @@ fn checked_write(file: File, path: &Path) -> Result<File, Untrusted> {
     Ok(file)
 }
 
-pub(crate) fn discard_model(file: File) -> Result<(), Untrusted> {
+/// Deletes through the held handle, which already guards the name, so the parent and name go unused.
+pub(crate) fn discard_model(file: File, _: &File, _: &Path) -> Result<(), Untrusted> {
     unlink_on_close(&file)?;
     drop(file);
     Ok(())

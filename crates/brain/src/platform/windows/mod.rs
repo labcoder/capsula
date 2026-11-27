@@ -39,7 +39,7 @@ pub use fault::quiet_failures;
 #[cfg(debug_assertions)]
 pub use fault::raise_access_violation;
 pub use folders::{config_dir, data_dir, product_folder, session_lock_path};
-pub use fs::{free_space, links_unsupported, replace_file};
+pub use fs::{free_space, links_unsupported, model_free_space, replace_file};
 pub use job::{Helper, Job};
 pub(super) use library::{
     Library, RawExport, missing_dependency, modules, open_locked, system_dir,
@@ -63,9 +63,9 @@ pub(crate) use protected::{
 };
 pub(crate) use protected::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain, hold_file,
-    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
-    private_tree, profile_dir, publish_model, remove_model_tree, remove_tree, unmark,
-    validate_model_path,
+    hold_model_chain, hold_model_creation, keep_model_final, mark, marker, model_file, model_final,
+    open_model_write, owner_only_dir, private_tree, profile_dir, publish_model, remove_model_tree,
+    remove_tree, resume_model_write, unmark, validate_model_path,
 };
 pub use root_store::trust_roots;
 pub use spawn::spawn;

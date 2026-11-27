@@ -20,8 +20,8 @@ use url::{Host, Url};
 
 use crate::platform::{
     self, NativeTlsError, TrustDiagnostics, Untrusted, check_model_final, create_model_dir,
-    create_model_write, discard_model, hold_model_creation, model_final, open_model_write,
-    publish_model,
+    create_model_write, discard_model, hold_model_creation, keep_model_final, model_final,
+    open_model_write, publish_model, resume_model_write,
 };
 
 const IDLE: Duration = Duration::from_secs(30);
@@ -227,6 +227,10 @@ impl Downloader {
             .await
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "every phase shares the held folders and the checked handles of the one before"
+    )]
     async fn fetch_files(
         &self,
         files: &[&ModelFile],
@@ -276,6 +280,7 @@ impl Downloader {
                 if file.metadata().map_err(|_| DownloadError::Io)?.len() == model.bytes
                     && hash_matches(hash_file(&mut file, cancel).await?.0, model.sha256)
                 {
+                    keep_model_final(&file, &path).map_err(path_error)?;
                     done += model.bytes;
                     continue;
                 }
@@ -292,41 +297,44 @@ impl Downloader {
             missing += model.bytes - if length <= model.bytes { length } else { 0 };
             pending.push((model, path, partial, final_file, existing));
         }
-        self.check_space(missing)?;
-        let mut ready = Vec::new();
+        self.check_space(missing, &root_creation)?;
+        let mut acquired = Vec::new();
         for (model, path, partial, final_file, existing) in pending {
             check_cancel(cancel)?;
             let file = match existing {
                 Some(file) => file,
                 None => create_model_write(&partial).map_err(path_error)?,
             };
+            acquired.push((model, path, partial, final_file, file));
+        }
+        // Only once every file is checked and every partial held may a stopped publish be unsealed.
+        let mut ready = Vec::new();
+        for (model, path, partial, final_file, file) in acquired {
+            let file = resume_model_write(file, &partial).map_err(path_error)?;
             ready.push((model, path, final_file, file));
         }
         drop((root_creation, part_creation));
         report.value.done = done;
         report.sender.send_replace(report.value);
+        let parent = held.last().expect("the model directory is held");
         for (model, path, final_file, mut file) in ready {
-            if let Some(file) = final_file {
+            if let Some(final_file) = final_file {
                 #[cfg(all(test, windows))]
                 crate::platform::paused(&path);
-                discard_model(file).map_err(|_| DownloadError::Io)?;
+                discard_model(final_file, parent, &path).map_err(|_| DownloadError::Io)?;
             }
             // `fetch_file` hashes the bytes already in the `.part` first.
             report.phase(FetchPhase::Verifying);
             let result = self.fetch_file(model, &mut file, &mut report, cancel).await;
             if let Err(error) = result {
                 if matches!(error, DownloadError::Size | DownloadError::Hash) {
-                    discard_model(file).map_err(|_| DownloadError::Io)?;
+                    let partial = dir.join(format!("{}.part", model.name));
+                    discard_model(file, parent, &partial).map_err(|_| DownloadError::Io)?;
                 }
                 tracing::warn!(?error, "voice download stopped");
                 return Err(error);
             }
-            publish_model(
-                file,
-                held.last().expect("the model directory is held"),
-                &path,
-            )
-            .map_err(|_| DownloadError::Io)?;
+            publish_model(file, parent, &path).map_err(|_| DownloadError::Io)?;
             done += model.bytes;
             report.value.done = done;
         }
@@ -334,17 +342,19 @@ impl Downloader {
         Ok(())
     }
 
-    fn check_space(&self, missing: u64) -> Result<(), DownloadError> {
+    fn check_space(&self, missing: u64, held: &File) -> Result<(), DownloadError> {
         let needed = missing + missing.div_ceil(10);
+        let measure =
+            || crate::platform::model_free_space(&self.models, held).map_err(|_| DownloadError::Io);
         let available = {
             #[cfg(test)]
             if let Some(space) = self.space {
                 space
             } else {
-                crate::platform::free_space(&self.models).map_err(|_| DownloadError::Io)?
+                measure()?
             }
             #[cfg(not(test))]
-            crate::platform::free_space(&self.models).map_err(|_| DownloadError::Io)?
+            measure()?
         };
         if available < needed {
             return Err(DownloadError::NoSpace { needed });

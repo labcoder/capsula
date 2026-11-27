@@ -1,7 +1,7 @@
 use super::*;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::{Read as _, Seek as _, Write as _};
 use std::path::PathBuf;
 
 use crate::platform::macos::protected::tests::{Scratch, install_acl};
@@ -550,9 +550,20 @@ fn native_a_file_at_the_removed_folder_survives_and_keep_needs_the_seal() {
     );
     assert_eq!(mode(&source), (0o400, 1), "a locked partial keeps its seal");
     drop(file);
-    let resumed = open_private_write(&support, &source).expect("the stranded partial resumes");
+    let opened = open_private_write(&support, &source).expect("the stranded partial opens");
+    assert_eq!(mode(&source), (0o400, 1), "opening changes nothing");
+    assert_eq!(
+        open_private_write(&support, &source).err(),
+        Some(Untrusted::Io),
+        "the opened partial's lock"
+    );
+    let resumed =
+        resume_private_write(&support, opened, &source).expect("the stranded partial resumes");
     assert_eq!(mode(&source), (0o600, 1));
     assert_eq!(read_all(&resumed), b"bytes");
+    let resumed =
+        resume_private_write(&support, resumed, &source).expect("a writable partial is kept");
+    assert_eq!(mode(&source), (0o600, 1));
     let target = part.join("model.bin");
     assert_eq!(
         seal_and_publish(
@@ -575,4 +586,119 @@ fn native_a_file_at_the_removed_folder_survives_and_keep_needs_the_seal() {
     scratch
         .cleanup()
         .expect("identity-checked cleanup; uncertainty leaves reported residual");
+}
+
+#[test]
+#[ignore = "requires exact-head review and a bounded native fixture-parent commission"]
+fn native_resume_needs_the_lock_and_the_same_file() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let scratch = Scratch::new();
+    let support = anchor(&scratch);
+    let part = support.join("product/part");
+    let held = create_private_dir(&support, &part).expect("private folders");
+    let source = part.join("model.bin.part");
+    drop(partial(&support, &source, b"bytes"));
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o400)).expect("a stopped publish");
+
+    let opened = open_private_write(&support, &source).expect("the stranded partial opens");
+    let stray = File::open(&source).expect("another descriptor");
+    assert_eq!(
+        resume_private_write(&support, stray, &source).err(),
+        Some(Untrusted::Io),
+        "the opener's lock"
+    );
+    assert_eq!(mode(&source), (0o400, 1), "a refused resume keeps the seal");
+
+    let moved = part.join("moved.part");
+    fs::rename(&source, &moved).expect("the opened partial moves away");
+    fs::write(&source, b"other").expect("another file at the name");
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o400)).expect("sealed too");
+    assert_eq!(
+        resume_private_write(&support, opened, &source).err(),
+        Some(Untrusted::Unsafe),
+        "the name no longer gives the opened file"
+    );
+    assert_eq!((mode(&source), mode(&moved)), ((0o400, 1), (0o400, 1)));
+    assert_eq!(fs::read(&source).expect("kept"), b"other");
+    fs::remove_file(&source).expect("drop the other file");
+    fs::rename(&moved, &source).expect("back at its name");
+
+    let opened = open_private_write(&support, &source).expect("opens again");
+    let mut resumed = resume_private_write(&support, opened, &source).expect("resumes");
+    assert_eq!(mode(&source), (0o600, 1));
+    resumed.seek(io::SeekFrom::End(0)).expect("seek");
+    resumed
+        .write_all(b"more")
+        .expect("the resumed handle writes");
+    assert_eq!(
+        open_private_write(&support, &source).err(),
+        Some(Untrusted::Io),
+        "the resumed handle holds the lock"
+    );
+    drop(resumed);
+    assert_eq!(fs::read(&source).expect("bytes"), b"bytesmore");
+    let read_only = File::open(&source).expect("a read-only descriptor");
+    assert_eq!(
+        resume_private_write(&support, read_only, &source).err(),
+        Some(Untrusted::Unsafe),
+        "a writable partial must be open for writing"
+    );
+
+    drop(held);
+    assert_eq!(
+        remove_private_tree(&support, &support.join("product")),
+        Ok(())
+    );
+    scratch
+        .cleanup()
+        .expect("identity-checked cleanup; uncertainty leaves reported residual");
+}
+
+#[test]
+#[ignore = "requires a commissioned volume fixture: an anchor whose product/part is another mounted volume"]
+fn other_volume_native_a_model_folder_on_another_volume_refuses_and_survives() {
+    use std::os::unix::fs::MetadataExt as _;
+    let support = PathBuf::from(
+        std::env::var_os("STORAGE_VOLUME_ANCHOR")
+            .expect("an explicitly commissioned volume anchor"),
+    );
+    let part = support.join("product/part");
+    let kept = part.join("kept.part");
+    let (root, above) = (
+        fs::symlink_metadata(&part).expect("the mount root"),
+        fs::symlink_metadata(support.join("product")).expect("the folder above"),
+    );
+    assert_ne!(root.dev(), above.dev(), "another volume");
+    // SAFETY: getuid has no arguments or ownership effects.
+    let user = unsafe { libc::getuid() };
+    assert_eq!(root.uid(), user, "this user's mount root");
+    assert_eq!(mode(&part).0, 0o700, "the mount root passes the mode check");
+    assert_eq!(mode(&kept), (0o600, 1));
+    assert_eq!(
+        hold_private_chain(&support, &support.join("product")).map(|held| held.len()),
+        Ok(support.components().count() + 1),
+        "the folder above the mount is admitted"
+    );
+    assert_eq!(
+        hold_private_chain(&support, &part).err(),
+        Some(Untrusted::Unsafe)
+    );
+    assert_eq!(
+        create_private_dir(&support, &part).err(),
+        Some(Untrusted::Unsafe)
+    );
+    assert_eq!(
+        open_private_write(&support, &kept).err(),
+        Some(Untrusted::Unsafe)
+    );
+    assert_eq!(
+        create_private_file(&support, &part.join("model.bin.part")).err(),
+        Some(Untrusted::Unsafe)
+    );
+    assert_eq!(
+        remove_private_tree(&support, &support.join("product")),
+        Err(Untrusted::Unsafe)
+    );
+    assert_eq!(fs::read(&kept).expect("kept"), b"kept");
+    assert!(absent(&part.join("model.bin.part")));
 }

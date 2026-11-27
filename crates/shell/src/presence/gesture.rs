@@ -195,7 +195,7 @@ pub(super) fn deliver(
     let async_cx = cx.to_async();
     let fence = std::cell::RefCell::new(Fence::new(link.microphone_gate()));
     #[cfg(any(test, feature = "gate-recorder"))]
-    let rearms = {
+    {
         let (rearms, lines) = async_channel::unbounded::<&'static str>();
         cx.spawn(async move |cx| {
             while let Ok(line) = lines.recv().await {
@@ -203,7 +203,7 @@ pub(super) fn deliver(
             }
         })
         .detach();
-        rearms
+        crate::platform::listen_rearm(rearms);
     };
     let escaped = Cell::new(None);
     let escape_down = Cell::new(false);
@@ -315,34 +315,54 @@ pub(super) fn deliver(
         };
         let mut state = gesture.get();
         let mut recovered = false;
+        #[cfg(any(test, feature = "gate-recorder"))]
+        let (blocked, mut read) = (state.blocked(), false);
         let session = link.link_generation();
+        let queued_press = at.queued_press.filter(|_| !at.repeated_modifier);
         let delivery = fence.borrow_mut().reduce_with_keyboard_read(
             &mut state,
             event,
             at.instant,
-            at.queued_press.filter(|_| !at.repeated_modifier),
+            queued_press,
             || {
-                (!paused.get()
-                    && link.can_start_voice_gesture(session)
-                    && presses[0]
-                        .zip(presses[1])
-                        .is_some_and(|(control, alt)| link.voice_ready_before(control.min(alt))))
-                .then_some(session)
+                let refused = if paused.get() {
+                    Some("voice refused check=paused")
+                } else if !link.can_start_voice_gesture(session) {
+                    Some("voice refused check=link")
+                } else if !presses[0]
+                    .zip(presses[1])
+                    .is_some_and(|(control, alt)| link.voice_ready_before(control.min(alt)))
+                {
+                    Some("voice refused check=ready")
+                } else {
+                    None
+                };
+                #[cfg(any(test, feature = "gate-recorder"))]
+                if let Some(line) = refused {
+                    crate::platform::rearm_note(line);
+                }
+                refused.is_none().then_some(session)
             },
             || {
                 let now = at.recovery_time();
                 #[cfg(any(test, feature = "gate-recorder"))]
-                if rearms
-                    .try_send(now.map_or_else(Refusal::line, |_| "rearm ok"))
-                    .is_err()
                 {
-                    tracing::debug!("can't queue a rearm diagnostic");
+                    read = true;
+                    crate::platform::rearm_note(now.map_or_else(Refusal::line, |_| "rearm ok"));
                 }
                 let now = now.ok()?;
                 recovered = true;
                 Some(now)
             },
         );
+        #[cfg(any(test, feature = "gate-recorder"))]
+        if blocked && !read && matches!(modifier, Some((_, Edge::Down))) {
+            crate::platform::rearm_note(if queued_press.is_none() {
+                "rearm skipped check=repeat"
+            } else {
+                "rearm pending"
+            });
+        }
         if let Some((key, Edge::Up)) = modifier {
             presses[key] = None;
         }

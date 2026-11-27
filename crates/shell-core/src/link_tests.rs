@@ -30,7 +30,9 @@ impl Link {
         connect_with(
             deadline,
             || self.quitting(),
-            |control| self.quit_parked(control),
+            |control| {
+                self.quit_parked(control);
+            },
             handshake,
             || Err(std::io::Error::other("fixture connector cannot launch")),
         )
@@ -2589,6 +2591,80 @@ fn queued_owner_refuses_turns_and_ends_both_pipes_on_withdrawal() {
 }
 
 #[test]
+fn prepared_queued_pairs_register_the_selected_narration() {
+    use kumochi_protocol::message::Narration;
+
+    for (label, narration) in [
+        ("prepared-plain", Narration::Plain),
+        ("prepared-conducted", Narration::Conducted),
+    ] {
+        let (prepared, _unstarted) = super::prepare(
+            async_channel::unbounded().0,
+            super::AudioSession::QueuedRequired,
+            narration,
+        )
+        .expect("prepare without starting the stock connector");
+        let link = attended_queued_shared(label, Arc::clone(&prepared.shared));
+        let events = patient(link.events);
+        let session = connected(next(&events));
+        assert_eq!(
+            session.has_narration(),
+            narration == Narration::Conducted,
+            "only a conducted session owns a narration bridge"
+        );
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::Settings {
+                view: settings_view(),
+                answer: false,
+            },
+            Pipe::Control,
+        )
+        .expect("silent settings sent");
+        let Some(ControlToBrain::QueuedAudioOutput(24_000, output, declared)) =
+            frame::read(&mut &link.control, Pipe::Control).expect("read queued registration")
+        else {
+            panic!("the pair registers its 24 kHz queued output");
+        };
+        assert_eq!(
+            declared, narration,
+            "registration carries the selected mode"
+        );
+        acknowledge_queued(&link.control, output);
+        drop(link.control);
+        assert!(link.link.join().expect("the link joined"), "pair retired");
+    }
+
+    let (prepared, _unstarted) = super::prepare(
+        async_channel::bounded(1).0,
+        super::AudioSession::Legacy,
+        Narration::Conducted,
+    )
+    .expect("a Legacy link ignores narration, so any sender prepares");
+    let link = attended_shared(
+        "prepared-legacy-conducted",
+        Arc::clone(&prepared.shared),
+        Incarnation(1),
+    );
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    assert!(!session.has_narration(), "a Legacy session owns no bridge");
+    link.handle.end(&session);
+    assert!(link.link.join().expect("the ended session joins"));
+
+    let bounded = super::prepare(
+        async_channel::bounded(1).0,
+        super::AudioSession::QueuedRequired,
+        Narration::Conducted,
+    );
+    assert_eq!(
+        bounded.map(drop).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::InvalidInput),
+        "a conducted link refuses a bounded sender before attendance"
+    );
+}
+
+#[test]
 fn queued_owner_start_deadline_is_not_extended_by_control_traffic() {
     let start = Instant::now();
     let link = attended_queued("queued-owner-deadline");
@@ -4114,8 +4190,7 @@ fn queued_report_refusal_closes_the_full_control_mailbox_and_parked_data_head() 
     }
     queued_pair_closed(link.link, &link.control, &link.data);
     link.handle
-        .shared
-        .hold_control_writer
+        .control_writer_hold()
         .store(0, Ordering::Release);
     assert_queued_retry_after_local_quiet(&link.handle, &session, "queued-report-refusal-retry");
 }
@@ -4124,7 +4199,7 @@ fn fill_queued_control_mailbox(link: &Attended, session: &Session) {
     use super::CONTROL_QUEUE;
     use std::sync::atomic::Ordering;
 
-    let hold = &link.handle.shared.hold_control_writer;
+    let hold = link.handle.control_writer_hold();
     hold.store(1, Ordering::Release);
     frame::write(&mut &link.control, &ControlToShell::Ping, Pipe::Control)
         .expect("trigger the exact control writer");
@@ -4358,8 +4433,7 @@ fn refused_queued_progress(label: &str) -> (LinkHandle, Session, FixturePlayback
         "the full mailbox refused non-final retirement for the original callback"
     );
     link.handle
-        .shared
-        .hold_control_writer
+        .control_writer_hold()
         .store(0, Ordering::Release);
     (link.handle, session, playback)
 }
@@ -4455,9 +4529,13 @@ fn queued_reconnect_waits_for_the_exact_microphone_retirement() {
     assert_eq!(denied, Denied::Inhibited, "cancel is not retirement");
     let reconnect_by = Instant::now() + super::CONNECT_TIMEOUT;
     let worker = thread::spawn(move || {
-        start
-            .link
-            .attend_until(connection, &start.events, reconnect_by)
+        start.link.attend_until(
+            connection,
+            None,
+            &start.events,
+            reconnect_by,
+            &Arc::default(),
+        )
     });
     control.set_timeout(Some(Duration::from_millis(500)));
     let early = frame::read::<ControlToBrain>(&mut &control, Pipe::Control);
@@ -4534,7 +4612,7 @@ fn queued_reconnect_expires_without_retiring_an_unproved_microphone() {
     let (events, received) = async_channel::unbounded();
     let deadline = Instant::now() + Duration::from_millis(100);
     assert_eq!(
-        link.attend_until(connection, &events, deadline),
+        link.attend_until(connection, None, &events, deadline, &Arc::default()),
         Attendance::Retry
     );
     assert!(Instant::now() >= deadline);
@@ -4587,9 +4665,13 @@ fn queued_reconnect_rejects_a_successful_late_handshake_or_late_attendance() {
             }
             let connection =
                 connection.expect("the handshake completed before the attempt deadline");
-            start
-                .link
-                .attend_until(connection, &start.events, Instant::now())
+            start.link.attend_until(
+                connection,
+                None,
+                &start.events,
+                Instant::now(),
+                &Arc::default(),
+            )
         });
         let output = handle.output();
         drop(reserved);
@@ -4722,7 +4804,9 @@ fn queued_reconnect_can_be_observed_after_the_timely_admission_decision() {
                 queued_fixture_connector(shell_control, None, || Ok(shell_data)),
             )
             .unwrap();
-        let result = start.link.attend_until(connection, &start.events, end);
+        let result = start
+            .link
+            .attend_until(connection, None, &start.events, end, &Arc::default());
         drop(start.alive);
         result
     });
@@ -4803,7 +4887,9 @@ fn queued_reconnect_quits_its_authenticated_parked_pair_after_held_deletes() {
                 queued_fixture_connector(shell_control, None, || Ok(shell_data)),
             )
             .unwrap();
-        start.link.attend_until(connection, &start.events, end)
+        start
+            .link
+            .attend_until(connection, None, &start.events, end, &Arc::default())
     });
     read_queued_fixture_hello(&control, &data);
     control.set_timeout(Some(Duration::from_millis(250)));

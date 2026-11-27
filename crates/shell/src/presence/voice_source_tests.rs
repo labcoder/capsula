@@ -2552,6 +2552,54 @@ fn both_queued_makes_after_reset_arm_even_when_first_read_already_sees_both(
 }
 
 #[cfg(windows)]
+#[gpui::test]
+fn each_blocked_make_names_why_it_did_or_did_not_rearm(cx: &mut TestAppContext) {
+    use crate::link::fixture;
+    use crate::platform::Refusal;
+    use kumochi_shell_core::platform::keyboard_ticks;
+
+    let (owner, _data, _controls) = ready(cx);
+    let pipe = fixture::attended("rearm-lines");
+    let events = fixture::patient(pipe.events.clone());
+    let session = fixture::connected(fixture::next(&events));
+    owner.update(cx, |this, _| {
+        this.link = pipe.handle.clone();
+        this.session = Some(session);
+    });
+    let send = crate::platform::with_raw_modifiers(native(&owner, cx));
+    let (lines, recorded) = async_channel::unbounded();
+    crate::platform::listen_rearm(lines);
+    let tick = keyboard_ticks() + 1;
+    let now = Instant::now();
+    let edge = |key, edge, at: u64, read: fn(Instant) -> Result<Instant, Refusal>| {
+        send(
+            Event::Key { key, edge },
+            after(now, at)
+                .with_keyboard_read(read)
+                .with_queued_press(tick),
+        );
+    };
+    send(Event::Reset, after(now, 1));
+    edge(Key::LeftControl, Edge::Down, 2, Ok);
+    edge(Key::LeftAlt, Edge::Down, 3, |_| Err(Refusal::Chord));
+    edge(Key::LeftAlt, Edge::Down, 4, Ok);
+    edge(Key::LeftAlt, Edge::Up, 5, Ok);
+    edge(Key::LeftControl, Edge::Up, 6, Ok);
+    edge(Key::LeftControl, Edge::Down, 7, Ok);
+    edge(Key::LeftAlt, Edge::Down, 8, Ok);
+    assert_eq!(
+        std::iter::from_fn(|| recorded.try_recv().ok()).collect::<Vec<_>>(),
+        [
+            "rearm pending",
+            "rearm refused check=chord",
+            "rearm skipped check=repeat",
+            "rearm pending",
+            "rearm ok",
+        ]
+    );
+}
+
+#[cfg(windows)]
 fn mic_generation_after_raw_reset(cx: &mut TestAppContext, initially_held: Option<Key>) -> u64 {
     use crate::link::fixture;
     use kumochi_shell_core::platform::keyboard_ticks;

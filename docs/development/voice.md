@@ -244,8 +244,8 @@ stateDiagram-v2
   until a keyed Allow or Discard joins it at the normal synthesis window. An early decision sticks
   to its announced segment; a duplicate cannot dispatch it again. Discard still owes the ordered
   final. A closed reply waiting only on eligibility invalidates its drain timer; resolving that
-  wait immediately checks completion or resumes ordinary drain. The future shell adapter owns
-  the eligibility deadline.
+  wait immediately checks completion or resumes ordinary drain. The shell's narration
+  adapter sends the eligibility decision.
   Authoritative whole-scene removal cancels only its queued Speech assignments, settling their
   existing decisions and ordered finals without stopping other narration.
 - **Chunks.** Audio goes out as it's made, in chunks of at most 100 ms. Every queued segment ends with one empty chunk whose `last` carries the samples sent. TTS reaching `Done`, a failure, a zero-output segment and a failed scene all end a segment that way. Final chunks go out in segment order, so a dropped segment's waits for every earlier one's.
@@ -353,7 +353,8 @@ sequenceDiagram
   the dispatch even if unload already moved its TTS generation, and ends the reply's remaining
   narration with ordered empty finals. Earlier audio and the text reply continue.
   An empty final releases its own picture to authored timing without claiming it was heard.
-  This fences late output but does not interrupt a blocked native call. Conducted output stays off.
+  This fences late output but does not interrupt a blocked native call. The ordinary launcher
+  prepares `Plain`, so conducted output stays off.
 - **Draining.** When the engine finishes, the reply closes. The run ends `done` only once its
   speech is final, so it can sit finished with its speech still playing; see
   [runs.md](runs.md#draining-a-spoken-run).
@@ -505,9 +506,10 @@ and routes explicit Install or Retry requests to this installer.
 
 ### Model files on macOS
 
-`kumochi-storage`'s `platform/macos/models.rs` holds the macOS model-file primitives. Nothing calls
-them yet: the brain still refuses model storage on macOS. Windows guards held names by refusing to
-share them. A POSIX descriptor holds an object, not its name, so the Mac guarantee comes from
+`kumochi-storage`'s `platform/macos/models.rs` holds the macOS model-file primitives, and the
+brain's `platform/protected/models.rs` forwards the shared model calls to them below the
+Application Support anchor. The forwards aren't re-exported yet, so the brain still refuses model
+storage on macOS. Windows guards held names by refusing to share them. A POSIX descriptor holds an object, not its name, so the Mac guarantee comes from
 somewhere else:
 
 - **One private anchor.** Every path must be below the Support anchor that `admit_support`
@@ -522,13 +524,28 @@ somewhere else:
   the folder and the file. A failed rename puts the partial back at 0600 only when its name still
   gives it with one link and the final name is shown not to; otherwise it stays sealed. Every
   partial's name ends `.part` and no sealed file's does, in any ASCII case, since APFS compares
-  names that way. So `open_private_write` resumes a sealed `.part` file, a publish stopped
-  between seal and rename, and only once it holds the lock.
+  names that way. So `open_private_write` opens a sealed `.part` file, a publish stopped
+  between seal and rename, read-only and locked, and `resume_private_write` unseals it later,
+  only for the descriptor holding its lock, and returns a writable descriptor to that same file.
   `open_sealed` accepts only the exact sealed mode with one link.
 - **Two-pass removal.** `remove_private_tree` checks the whole tree before it unlinks anything:
   private folders, files this user owns at 0400, 0500 or 0600, one volume, within 32 levels and
   65,536 entries. It then deletes leaves first, each once its name still gives what the first pass
   saw, and flushes the folder above. A part already gone counts as removed.
+
+Three shared calls exist for this contract. `hold_model_chain` holds the folders the model calls
+work in: `hold_chain` on Windows, and once the Mac forwards are activated, the anchored private
+chain there. `keep_model_final` keeps a final that hashed valid: it does nothing on Windows, where
+the held handle guards the name; the Mac forward re-checks the seal and the name and redoes the
+folder and file flush. `discard_model` takes the held part folder and the entry's path, so the Mac
+can delete by name only after checking identity. `model_free_space` measures the held models
+folder: by path on Windows, through the descriptor (`fstatfs`) on the Mac. Once activated, the
+Mac refuses a hard-linked final. A sealed `.part` left by a stopped publish opens read-only and
+locked in the installer's preflight, and `resume_model_write` unseals it only after every final
+and partial is checked and every missing partial is created. So a refusal in the preflight or
+while acquiring partials unseals nothing, though a partial it just created stays. A resume that
+fails after its unseal, or a later one that fails, can leave a partial at 0600: still private,
+its bytes unchanged.
 
 This assumes one cooperating writer. A rename by this user between two calls isn't detected,
 and neither is a replacement made between a removal's last look and its unlink.
