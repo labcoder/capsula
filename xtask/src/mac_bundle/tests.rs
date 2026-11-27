@@ -571,6 +571,29 @@ fn only_first_light_adds_both_features_to_the_dev_build() {
 }
 
 #[test]
+fn the_dev_build_has_thirty_minutes_and_a_stalled_one_is_stopped() {
+    assert_eq!(BUILD_WAIT.as_secs(), 1800);
+    let mut stalled = Command::new("/bin/sh");
+    stalled.args(["-c", "/bin/sleep 30 & /bin/sleep 30"]);
+    let started = Instant::now();
+    assert_eq!(
+        bounded(
+            "cargo build",
+            &mut stalled,
+            None,
+            Duration::from_millis(200)
+        )
+        .expect_err("stalled")
+        .to_string(),
+        "cargo build didn't finish within 200ms"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the build and its helper were stopped, not waited out"
+    );
+}
+
+#[test]
 fn each_mode_takes_only_its_own_kind_of_profile() {
     let mut developer_id = wildcard();
     developer_id.all_devices = true;

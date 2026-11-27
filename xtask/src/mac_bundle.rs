@@ -28,6 +28,8 @@ const LAUNCH_WAIT: Duration = Duration::from_secs(10);
 const SIGN_WAIT: Duration = Duration::from_secs(120);
 /// The longest a profile or plist tool may take.
 const TOOL_WAIT: Duration = Duration::from_secs(30);
+/// The longest the Dev build may take, so a hung build fails packaging instead of stalling it.
+const BUILD_WAIT: Duration = Duration::from_mins(30);
 /// How long a stopped tool's pipes get to close; one a helper outside its group keeps open fails
 /// the task instead.
 const STOP_GRACE: Duration = Duration::from_secs(2);
@@ -643,19 +645,18 @@ fn build(features: Option<&'static str>) -> Result<Vec<(String, PathBuf)>> {
     let metadata: Value =
         serde_json::from_slice(&bounded("cargo metadata", &mut metadata, None, TOOL_WAIT)?)
             .context("Cargo's metadata")?;
-    let output = Command::new(cargo)
-        .args(build_args(features))
-        .stderr(Stdio::null())
-        .output()?;
-    let features = features
+    let mut command = Command::new(cargo);
+    command.args(build_args(features));
+    let shown = features
         .map(|list| format!(" --features {list}"))
         .unwrap_or_default();
-    // Cargo's diagnostics name local paths, so they aren't shown here.
-    ensure!(
-        output.status.success(),
-        "the Dev build failed; `cargo build -p kumochi-shell -p kumochi-brain{features}` shows why"
-    );
-    artifacts(&output.stdout, &members(&metadata)?)
+    // Cargo's diagnostics name local paths, so `bounded` withholds them.
+    let stdout = bounded("cargo build", &mut command, None, BUILD_WAIT).with_context(|| {
+        format!(
+            "the Dev build failed; `cargo build -p kumochi-shell -p kumochi-brain{shown}` shows why"
+        )
+    })?;
+    artifacts(&stdout, &members(&metadata)?)
 }
 
 /// Each workspace package's opaque Cargo ID, by name.

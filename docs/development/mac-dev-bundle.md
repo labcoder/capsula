@@ -81,5 +81,5 @@ flowchart LR
   owner answers that. Each codesign call gets 2 minutes, and `cargo metadata`, `security`,
   `plutil`, `base64` and `shasum` 30 s each, in their own process group. At the deadline the
   whole group is stopped once and the task fails, so a prompt nobody answers doesn't hang it, and
-  a pipe a helper outside the group keeps open fails it 2 s later. The Cargo build and `date`
-  aren't bounded.
+  a pipe a helper outside the group keeps open fails it 2 s later. The Cargo build gets 30
+  minutes the same way, so a hung build fails the task; only `date` isn't bounded.
