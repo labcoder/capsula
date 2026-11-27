@@ -244,8 +244,8 @@ stateDiagram-v2
   until a keyed Allow or Discard joins it at the normal synthesis window. An early decision sticks
   to its announced segment; a duplicate cannot dispatch it again. Discard still owes the ordered
   final. A closed reply waiting only on eligibility invalidates its drain timer; resolving that
-  wait immediately checks completion or resumes ordinary drain. The future shell adapter owns
-  the eligibility deadline.
+  wait immediately checks completion or resumes ordinary drain. The shell's narration
+  adapter owns the eligibility deadline.
   Authoritative whole-scene removal cancels only its queued Speech assignments, settling their
   existing decisions and ordered finals without stopping other narration.
 - **Chunks.** Audio goes out as it's made, in chunks of at most 100 ms. Every queued segment ends with one empty chunk whose `last` carries the samples sent. TTS reaching `Done`, a failure, a zero-output segment and a failed scene all end a segment that way. Final chunks go out in segment order, so a dropped segment's waits for every earlier one's.

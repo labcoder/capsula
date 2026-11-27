@@ -2634,6 +2634,34 @@ fn prepared_queued_pairs_register_the_selected_narration() {
         drop(link.control);
         assert!(link.link.join().expect("the link joined"), "pair retired");
     }
+
+    let (prepared, _unstarted) = super::prepare(
+        async_channel::unbounded().0,
+        super::AudioSession::Legacy,
+        Narration::Conducted,
+    )
+    .expect("prepare without starting the stock connector");
+    let link = attended_shared(
+        "prepared-legacy-conducted",
+        Arc::clone(&prepared.shared),
+        Incarnation(1),
+    );
+    let events = patient(link.events);
+    let session = connected(next(&events));
+    assert!(!session.has_narration(), "a Legacy session owns no bridge");
+    link.handle.end(&session);
+    assert!(link.link.join().expect("the ended session joins"));
+
+    let bounded = super::prepare(
+        async_channel::bounded(1).0,
+        super::AudioSession::QueuedRequired,
+        Narration::Conducted,
+    );
+    assert_eq!(
+        bounded.map(drop).map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::InvalidInput),
+        "a conducted link refuses a bounded sender before attendance"
+    );
 }
 
 #[test]

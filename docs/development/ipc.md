@@ -108,7 +108,7 @@ only while that gesture is listening, ahead of its `KeyUp`. The picture is taken
 worker, so no frame crosses the pipe, and a cancel or consent change before submit discards it.
 AskAbout and conducted Speech are still unsupported on Plain queued pairs.
 
-The offline narrated fixture selects a separate internal adapter on the same authenticated
+A queued pair prepared as `Conducted` selects a separate internal adapter on the same authenticated
 pair. Each attendance owns a fresh bridge; neither a reconnect nor a new run inherits the
 old speaker's wake. The bridge matches the scene's durable speech promise to the ordered
 announcement on that registered session before passing either authority or PCM to the queued

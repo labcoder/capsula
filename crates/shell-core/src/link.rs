@@ -1658,12 +1658,17 @@ pub struct DrawingText {
 /// receiver or the user quits. Only queued pairs use the selected narration mode.
 ///
 /// # Errors
-/// Fails when the shell can't find its own path or session.
+/// Fails when the shell can't find its own path or session, or when a conducted link is given
+/// a bounded sender.
 pub fn prepare(
     events: Sender<LinkEvent>,
     audio: AudioSession,
     narration: Narration,
 ) -> std::io::Result<(LinkHandle, LinkStart)> {
+    // The narration bridge refuses a bounded sender at attendance, which would end it silently.
+    if narration == Narration::Conducted && events.capacity().is_some() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
     let exe = std::env::current_exe()?;
     // Before the bundle check, so a platform with no transport refuses as unsupported.
     let session = platform::session_id()?;

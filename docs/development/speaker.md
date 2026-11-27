@@ -112,7 +112,7 @@ or replaced. No production caller enables this gate yet.
 
 ## Dormant drawing conductor
 
-The internal narrated fixture uses an exact source reservation at queued ingress.
+A queued pair prepared as `Conducted` uses an exact source reservation at queued ingress.
 A matching presenter level can be replaced or disappear, but cannot erase ownership
 of its unallowed bytes. The worker applies the gate after its command drain and Stop
 check, and a separate keyed Allow permits PCM. A fence retires and credits never-staged
