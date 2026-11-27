@@ -999,8 +999,7 @@ fn coordinator_debug_does_not_format_frames_held_for_deletion() {
     assert!(!debug.contains("SceneBegin"));
     assert!(!debug.contains("SceneStepCommit"));
     assert!(!debug.contains("SceneEnd"));
-    assert!(!debug.contains("test diagram"));
-    assert!(!debug.contains(&format!("{:?}", b"test diagram")));
+    crate::test_support::assert_no_preview(&debug, "test diagram");
 }
 
 #[test]
@@ -2362,6 +2361,21 @@ fn a_finished_run_whose_draw_calls_committed_no_step_says_so_once() {
         );
         effects.extend(stored(&mut core));
         assert_eq!(not_returned(&effects), 1);
+        let at = |done: bool| {
+            effects.iter().position(|effect| match effect {
+                Effect::Control(ControlToShell::DrawingNotReturned { run, .. }) => {
+                    !done && *run == R
+                }
+                Effect::Control(ControlToShell::RunState { run, phase, .. }) => {
+                    done && *run == R && *phase == Phase::Done
+                }
+                _ => false,
+            })
+        };
+        assert!(
+            at(false).expect("notice") < at(true).expect("done"),
+            "the shell keeps the turn for Retry until Done"
+        );
     }
 }
 

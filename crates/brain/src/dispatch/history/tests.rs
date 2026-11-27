@@ -95,8 +95,7 @@ fn outer_history_carriers_redact_query_text_and_its_bytes() {
         format!("{:?}", crate::coordinator::StoreOp::ReadCall(read)),
         format!("{:?}", crate::coordinator::Input::ReadFinished(done)),
     ] {
-        assert!(!debug.contains(marker));
-        assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+        crate::test_support::assert_no_preview(&debug, marker);
     }
 }
 

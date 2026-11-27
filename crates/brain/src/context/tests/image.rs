@@ -123,7 +123,7 @@ fn debug_shows_an_images_length_and_never_its_bytes() {
     let shown = format!("{request:?} {image:?}");
     let listed = format!("{:?}", SENTINEL.as_bytes());
     let url = image.data_url();
-    assert!(!shown.contains(SENTINEL), "{shown}");
+    crate::test_support::assert_no_preview(&shown, SENTINEL);
     assert!(!shown.contains(listed.trim_matches(['[', ']'])), "{shown}");
     assert!(!shown.contains(&url[url.len() - 8..]), "{shown}");
     assert!(

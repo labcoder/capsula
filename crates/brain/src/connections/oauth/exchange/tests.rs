@@ -206,8 +206,8 @@ async fn exchange_sends_the_exact_grant_and_retains_the_issued_tokens() {
         "fixture-id",
         "issued-client",
     ] {
-        assert!(!debug.contains(value), "credentials redacted");
-        assert!(!captured.text().contains(value), "credentials never logged");
+        crate::test_support::assert_no_preview(&debug, value);
+        crate::test_support::assert_no_preview(&captured.text(), value);
     }
     assert!(
         captured.text().contains("capture-control"),

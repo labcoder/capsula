@@ -27,7 +27,12 @@ as much as one reply may. If the same reply shows a drawing first, there is no n
 that drawing is a different one; the earlier drawings stay removed. Stopping the reply with Stop
 or Esc, sending a new message or deleting the conversation reports no drawing failure.
 If Kumochi tries to draw but none of its drawing can be shown, its reply ends with the notice
-**No drawing came back**. Ask again to retry.
+**No drawing came back**. With the message box empty, choose **Retry** to send the same message
+again, or Dismiss to keep the reply as it is. A retried message is an ordinary reply: Stop and
+Esc end it, and it can draw, fail or come back empty like any other. Retry is offered for a
+message you typed while that conversation is still the one you're typing to; sending something
+else, switching conversation, or an Esc that stops the reply, clears the drawing or closes chat
+withdraws it.
 Separate drawings can be kept for comparison, up to four on
 screen; they can still overlap until side-by-side arrangement is available.
 

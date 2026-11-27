@@ -62,6 +62,5 @@ fn sqlite_diagnostics_are_sanitized_before_actual_tracing_at_query_and_render_si
     let text = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
     assert!(text.contains("can't read history"));
     assert!(text.contains("can't read the store page"));
-    assert!(!text.contains(marker));
-    assert!(!text.contains(&format!("{:?}", marker.as_bytes())));
+    crate::test_support::assert_no_preview(&text, marker);
 }

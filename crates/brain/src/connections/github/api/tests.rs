@@ -1348,11 +1348,8 @@ async fn dropping_each_api_future_drops_its_injected_request_without_a_backgroun
 }
 
 fn assert_redacted(text: &str) {
-    for marker in [SENTINEL.to_owned(), SENTINEL.to_ascii_uppercase()] {
-        assert!(!text.contains(&marker));
-        let bytes = format!("{:?}", marker.as_bytes());
-        assert!(!text.contains(&bytes));
-        assert!(!text.contains(bytes.trim_start_matches('[').trim_end_matches(']')));
+    for marker in [SENTINEL, "ghu_", "ghr_"] {
+        crate::test_support::assert_no_preview(text, marker);
     }
 }
 
@@ -1425,7 +1422,7 @@ async fn outermost_success_carriers_redact_credentials_user_codes_logins_and_rep
     assert_eq!(reply.installations, vec![9_876_543_210_987_654_321]);
     let printed = format!("{:?}", Ok::<_, ApiError>(reply));
     assert_redacted(&printed);
-    assert!(!printed.contains("9876543210987654321"));
+    crate::test_support::assert_no_preview(&printed, "9876543210987654321");
 }
 
 #[tokio::test]

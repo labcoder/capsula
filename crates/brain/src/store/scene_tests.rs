@@ -186,7 +186,7 @@ fn a_step_that_doesnt_decode_is_skipped_and_logged_without_row_content() {
     let logs = logs.text();
     assert!(logs.contains("stored scene row doesn't decode"), "{logs}");
     assert!(!logs.contains(&format!("stored scene row {row}")));
-    assert!(!logs.contains(SENTINEL), "{logs}");
+    crate::test_support::assert_no_preview(&logs, SENTINEL);
     assert!(
         !format!("{:?}", scenes[0]).contains("drawn"),
         "Debug leaves labels out"

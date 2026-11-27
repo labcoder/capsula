@@ -434,8 +434,6 @@ async fn a_pipe_served_by_another_executable_is_refused() {
 #[test]
 fn debug_prints_no_id_line_params_or_body() {
     const PLANTED: &str = "kumochi-planted";
-    // "kumo" as a byte list and as the hex a call key spells.
-    let (decimal, hex) = ("107, 117, 109, 111", "6b756d6f");
     let id = JsonRpcId::String(PLANTED.to_owned());
     let line = format!(
         r#"{{"jsonrpc":"2.0","id":"{PLANTED}","method":"tools/call","params":{{"text":"{PLANTED}"}}}}"#
@@ -468,8 +466,8 @@ fn debug_prints_no_id_line_params_or_body() {
         format!("{:?}", Some(id)),
     ];
     for text in printed {
-        for needle in [PLANTED, decimal, hex, "424242"] {
-            assert!(!text.contains(needle), "{needle} in {text}");
+        for marker in [PLANTED, "6b756d6f", "424242"] {
+            crate::test_support::assert_no_preview(&text, marker);
         }
     }
 }

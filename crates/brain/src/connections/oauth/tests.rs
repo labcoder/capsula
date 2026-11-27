@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 use super::callback::{self, CallbackError, Event};
 use super::{Authorization, Intent, LaunchError, LaunchTarget, Launcher, SignIn, SignInError};
 use crate::connections::records::{Account, Tokens};
-use crate::test_support::{Captured, SENTINEL};
+use crate::test_support::{Captured, SENTINEL, assert_no_preview};
 
 #[derive(Default)]
 struct RecordingLauncher(Mutex<Option<String>>);
@@ -275,12 +275,12 @@ async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
     ];
     let task = tokio::spawn(attempt.receive());
     for request in invalid {
+        let reply = send(address, &request).await;
         assert!(
-            send(address, &request)
-                .await
-                .starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            reply.starts_with("HTTP/1.1 400 Bad Request\r\n"),
             "invalid callback rejected"
         );
+        assert_no_preview(&reply, SENTINEL);
         event(&mut seen, Event::Reading).await;
         event(&mut seen, Event::Rejected).await;
     }
@@ -293,7 +293,7 @@ async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
         reply.starts_with("HTTP/1.1 200 OK\r\n"),
         "lowercase host accepted after stale requests"
     );
-    assert!(!reply.contains(SENTINEL), "reply never reflects code");
+    assert_no_preview(&reply, SENTINEL);
     let authorization = result(task).await.expect("valid callback");
     assert_eq!(authorization.code.expose().as_str(), SENTINEL);
     assert_eq!(authorization.client_id.expose().as_str(), "issued");
@@ -301,18 +301,10 @@ async fn stale_and_invalid_callbacks_do_not_consume_pending_attempt() {
         authorization.redirect,
         format!("http://{address}/auth/callback")
     );
-    assert!(
-        !format!("{authorization:?}").contains(SENTINEL),
-        "code redacted"
-    );
-    assert!(
-        captured.text().contains("capture-control"),
-        "capture is active"
-    );
-    assert!(
-        !captured.text().contains(SENTINEL),
-        "authorization code never logged"
-    );
+    assert_no_preview(&format!("{authorization:?}"), SENTINEL);
+    let logs = captured.text();
+    assert!(logs.contains("capture-control"), "capture is active");
+    assert_no_preview(&logs, SENTINEL);
     assert!(
         TcpStream::connect(address).await.is_err(),
         "listener closes after success"
@@ -547,8 +539,10 @@ async fn a_tuned_sign_in_attempt_expires_at_its_own_deadline() {
 
 #[tokio::test]
 async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
+    const CLIENT_ID: &str = "jkv_saved";
+    const HOST_ID: &str = "urn:uuid:rvq-fixture-host";
     let saved = Account {
-        client_id: Zeroizing::new("oaiapp_saved".into()),
+        client_id: Zeroizing::new(CLIENT_ID.into()),
         subject: Some(Zeroizing::new("saved-subject".into())),
         email: Some(Zeroizing::new("saved-email@example.invalid".into())),
         plan_enabled: true,
@@ -563,14 +557,9 @@ async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
             connection: 0,
         }),
     };
-    let attempt = SignIn::bind(
-        "urn:uuid:synthetic-host",
-        Some(&saved),
-        Intent::SignIn,
-        super::ATTEMPT_LIMIT,
-    )
-    .await
-    .expect("bind");
+    let attempt = SignIn::bind(HOST_ID, Some(&saved), Intent::SignIn, super::ATTEMPT_LIMIT)
+        .await
+        .expect("bind");
     let launcher = Arc::new(RecordingLauncher::default());
     attempt
         .open_browser(Arc::<RecordingLauncher>::clone(&launcher), &Arc::default())
@@ -592,23 +581,36 @@ async fn returning_sign_in_never_hands_saved_tokens_or_hints_to_the_launcher() {
     }
     let url = Url::parse(&url).expect("URL");
     let query: BTreeMap<_, _> = url.query_pairs().collect();
-    assert_eq!(query["client_id"], "oaiapp_saved");
+    assert_eq!(query["client_id"], CLIENT_ID);
+    assert_eq!(query["ext_agent_host_id"], HOST_ID);
     assert!(
         !query.contains_key("agent_name_hint"),
         "no returning agent hint"
     );
     assert!(!query.contains_key("prompt"), "no forced consent");
+    let debug = format!("{attempt:?} {:?}", attempt.target);
     for secret in [
         attempt.state.expose().as_str(),
         attempt.nonce.expose().as_str(),
         attempt.verifier.expose().as_str(),
-        "oaiapp_saved",
-        "synthetic-host",
     ] {
-        assert!(
-            !format!("{attempt:?} {:?}", attempt.target).contains(secret),
-            "attempt and launch target redact fields"
-        );
+        assert!(!debug.contains(secret));
+    }
+    let [state, nonce, verifier] = [
+        "zqx-state-marker",
+        "pqv-nonce-marker",
+        "wzp-verifier-marker",
+    ];
+    let private = |text: &str| Secret::new(Zeroizing::new(text.to_owned()));
+    let fixture = SignIn {
+        state: private(state),
+        nonce: private(nonce),
+        verifier: private(verifier),
+        ..attempt
+    };
+    let debug = format!("{fixture:?} {:?}", fixture.target);
+    for marker in [CLIENT_ID, "rvq-fixture-host", state, nonce, verifier] {
+        assert_no_preview(&debug, marker);
     }
 }
 

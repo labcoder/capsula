@@ -994,7 +994,7 @@ fn stop_settles_the_submitted_step_without_resurrecting_queued_records_or_conten
     let scratch = Scratch::new("provider-draw-stop");
     let mut store = store(&scratch);
     let mut core = offered(vec![T]);
-    let marker = "providerprivacysentinel";
+    let marker = "zqxproviderprivacysentinel";
     let bytes = String::from_utf8(args(None))
         .expect("fixture")
         .replace("diagram", marker);
@@ -1044,8 +1044,7 @@ fn stop_settles_the_submitted_step_without_resurrecting_queued_records_or_conten
         );
     }
     let debug = format!("{core:?} {:?} {stopped:?} {settled:?}", core.ending);
-    assert!(!debug.contains(marker));
-    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+    crate::test_support::assert_no_preview(&debug, marker);
     assert!(!core.drawing.pending_for(R));
     assert_eq!(
         settled

@@ -28,7 +28,7 @@ use crate::engines::{
     self, Answer, Asks, Engine, EngineFailure, Finish, RunRequest, SendGate, SendLease, TurnEvent,
 };
 use crate::platform::Job;
-use crate::test_support::{Captured, SENTINEL, Scratch};
+use crate::test_support::{Captured, Scratch, assert_no_preview};
 
 mod one_turn;
 mod pictures;
@@ -1285,18 +1285,21 @@ async fn a_question_stopped_mid_answer_leaves_no_process_and_no_folder() {
 /// Debug of the question, its request or its reports, as text or as bytes.
 #[tokio::test]
 async fn a_question_logs_and_debugs_no_prompt_or_answer_text() {
+    const PROMPT: &str = "zqx-prompt-marker";
+    const ANSWER: &str = "jkv-answer-marker";
     let captured = Captured::default();
     let _capturing = captured.install();
+    tracing::info!("question-redaction-control");
     let mut script = offering_nothing();
     for line in &mut script.user {
         if let Some(text) = line["event"]["delta"]["text"].as_str() {
-            let marked = format!("{text}{SENTINEL}");
+            let marked = format!("{ANSWER} {text}");
             line["event"]["delta"]["text"] = json!(marked);
         }
     }
     let mut rig = Rig::new("question-sentinel", &script).await;
     let mut request = choosing("haiku", Effort::Low, ConnectionKind::ClaudeCode);
-    request.request.instructions = format!("Be brief. {SENTINEL}");
+    request.request.instructions = format!("{PROMPT}. Be brief.");
     let question = rig.claude.question(&request).expect("admitted");
     let (id, _) = rig.last();
     let debugs = [format!("{question:?}"), format!("{request:?}")];
@@ -1307,17 +1310,25 @@ async fn a_question_logs_and_debugs_no_prompt_or_answer_text() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, TurnEvent::TextDelta(text) if text.contains(SENTINEL))),
+            .any(|event| matches!(event, TurnEvent::TextDelta(text) if text.starts_with(ANSWER))),
         "the marked answer came through"
     );
     let reports = format!("{:?}", rig.reported(id).await);
-    let bytes = format!("{:?}", SENTINEL.as_bytes());
-    let bytes = bytes.trim_start_matches('[').trim_end_matches(']');
-    for text in debugs.iter().chain([&reports, &captured.text()]) {
-        assert!(!text.contains(SENTINEL), "{text}");
-        assert!(!text.contains(bytes), "{text}");
-    }
+    assert!(
+        rig.seed(1).starts_with(PROMPT),
+        "the child received the marked prompt"
+    );
     rig.close().await;
+    let logs = captured.text();
+    assert!(
+        logs.contains("question-redaction-control"),
+        "capture active"
+    );
+    for text in debugs.iter().chain([&reports, &logs]) {
+        for marker in [PROMPT, ANSWER] {
+            assert_no_preview(text, marker);
+        }
+    }
 }
 
 /// A condition that alone stops admission: its name, how to set it and how to clear it.
@@ -2001,7 +2012,7 @@ fn a_snapshots_debug_shows_no_model_or_effort_text() {
         version: V,
     };
     let text = format!("{snapshot:?}");
-    assert!(!text.contains(marker), "{text}");
+    crate::test_support::assert_no_preview(&text, marker);
     let bytes = format!("{:?}", marker.as_bytes());
     assert!(!text.contains(bytes.trim_matches(['[', ']'])), "{text}");
     assert_eq!(

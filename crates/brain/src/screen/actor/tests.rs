@@ -818,6 +818,7 @@ fn a_failed_new_attempt_revokes_the_old_frame_and_invalid_elements_stay_spent() 
 #[test]
 fn protocol_debug_redacts_the_outer_tree_and_ticket() {
     let marker = "outer_content_marker";
+    let nonce = b"qzv-ticket-nonce";
     let mut tree = ElementTree::unavailable(CaptureId(1), crate::screen::Unavailable::NoWindow);
     tree.elements.push(crate::screen::Element {
         id: crate::screen::ElementId {
@@ -832,14 +833,16 @@ fn protocol_debug_redacts_the_outer_tree_and_ticket() {
         screen: RECT,
         in_window: RECT,
     });
-    for debug in [
-        format!("{:?}", Reply::Elements(key(1), tree)),
-        format!("{:?}", context(1)),
-    ] {
-        assert!(!debug.contains(marker));
-        assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
-        assert!(!debug.contains(&format!("{:?}", [91_u8; 16])));
-    }
+    let request = Request::Context {
+        key: key(1),
+        ticket: TicketWire::new(CaptureId(1), 1, *nonce, 30_000, FAR),
+        point: PhysicalPoint([1, 1]),
+    };
+    crate::test_support::assert_no_preview(&format!("{:?}", Reply::Elements(key(1), tree)), marker);
+    crate::test_support::assert_no_preview(
+        &format!("{request:?}"),
+        std::str::from_utf8(nonce).expect("ASCII nonce"),
+    );
 }
 
 #[test]
@@ -1157,9 +1160,9 @@ fn a_window_changed_since_its_capture_refuses_the_seal_and_releases_the_frame() 
 
 #[test]
 fn a_sealed_context_never_prints_its_jpeg() {
-    let marker = b"KUMOCHI-SEALED-MARKER".to_vec();
+    const MARKER: &str = "zqx-sealed-marker";
     let encoded = crate::screen::encode::Encoded {
-        jpeg: zeroize::Zeroizing::new(marker.clone()),
+        jpeg: zeroize::Zeroizing::new(MARKER.as_bytes().to_vec()),
         size: [4, 3],
         capture: CaptureId(1),
         generation: 1,
@@ -1175,7 +1178,6 @@ fn a_sealed_context_never_prints_its_jpeg() {
     let printed = format!("{context:?}");
     let reply = format!("{:?}", Reply::Sealed(key(1), context));
     for text in [printed, reply] {
-        assert!(!text.contains("KUMOCHI-SEALED-MARKER"), "{text}");
-        assert!(!text.contains(&format!("{marker:?}")[1..20]), "{text}");
+        crate::test_support::assert_no_preview(&text, MARKER);
     }
 }

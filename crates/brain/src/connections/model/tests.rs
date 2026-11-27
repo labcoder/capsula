@@ -1888,10 +1888,10 @@ async fn nothing_planted_reaches_debug_or_the_log() {
     let harness = Harness::new(1 << 20);
     let body = body("PLANTED-PROMPT");
     complete(&harness, &body, 1, None);
-    let leaked = |text: &str| {
-        ["PLANTED", "Bearer"]
-            .iter()
-            .any(|marker| text.contains(marker))
+    let redacted = |text: &str| {
+        for marker in ["PLANTED", "Bearer"] {
+            crate::test_support::assert_no_preview(text, marker);
+        }
     };
     assert_eq!(
         format!("{body:?}"),
@@ -1904,10 +1904,10 @@ async fn nothing_planted_reaches_debug_or_the_log() {
     ];
     for failure in failures {
         let failure = failure.expect_err("a failure");
-        assert!(!leaked(&format!("{failure:?} {failure}")));
+        redacted(&format!("{failure:?} {failure}"));
     }
-    assert!(!leaked(&format!("{:?}", harness.client)));
-    assert!(!leaked(&captured.text()), "the log holds no planted text");
+    redacted(&format!("{:?}", harness.client));
+    redacted(&captured.text());
 }
 
 /// TLS over the gated pipes; once the handshake is done the valve holds every write beneath

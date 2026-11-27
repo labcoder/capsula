@@ -715,10 +715,10 @@ async fn a_recovered_label_never_reaches_the_logs_or_the_tap() {
     let recorded = std::fs::read(&recording).expect("tap read");
     assert!(!recorded.is_empty(), "the tap recorded the control frames");
     let found = recorded
-        .windows(SENTINEL.len())
-        .any(|window| window == SENTINEL.as_bytes());
+        .windows(3)
+        .any(|window| window == &SENTINEL.as_bytes()[..3]);
     assert!(!found, "the tap carries the label");
-    assert!(!logs.text().contains(SENTINEL), "{}", logs.text());
+    crate::test_support::assert_no_preview(&logs.text(), SENTINEL);
 }
 
 /// The slice 2 row's scenario, over the real pipes: a drawing restored in several chunks while a

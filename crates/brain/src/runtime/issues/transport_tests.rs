@@ -502,12 +502,5 @@ async fn outer_debug_never_exposes_request_response_or_access_content() {
     let request_debug = format!("{request:?}");
     let response = http.execute(request).await.unwrap();
     let debug = format!("{http:?} {control:?} {request_debug} {response:?}");
-    let bytes = format!("{:?}", SENTINEL.as_bytes());
-    for marker in [
-        SENTINEL,
-        bytes.as_str(),
-        bytes.trim_start_matches('[').trim_end_matches(']'),
-    ] {
-        assert!(!debug.contains(marker));
-    }
+    crate::test_support::assert_no_preview(&debug, SENTINEL);
 }

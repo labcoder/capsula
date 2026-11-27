@@ -235,7 +235,7 @@ async fn a_corrupt_scene_is_cleared_without_losing_the_other_three_or_stopping_t
             .all(|row| !warnings.contains(&format!("stored scene row {row}")))
     );
     assert!(warnings.contains(&format!("row={}", scenes[0].0)));
-    assert!(!warnings.contains("private drawing"));
+    crate::test_support::assert_no_preview(&warnings, "private drawing");
     let reply = tokio::time::timeout(super::PATIENCE, brain.inputs.recv())
         .await
         .expect("durable recovery clear deadline")

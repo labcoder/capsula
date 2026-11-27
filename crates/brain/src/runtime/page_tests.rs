@@ -185,8 +185,7 @@ fn outer_page_carriers_never_print_search_or_page_content() {
     queue.push_page(&admitted, marker.as_bytes().to_vec());
     let effect = Effect::Page { key, reply };
     let debug = format!("{op:?} {input:?} {effect:?} {queue:?}");
-    assert!(!debug.contains(marker));
-    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+    crate::test_support::assert_no_preview(&debug, marker);
 }
 
 #[tokio::test]

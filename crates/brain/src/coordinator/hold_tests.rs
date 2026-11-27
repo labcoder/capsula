@@ -382,16 +382,19 @@ fn hold_carriers_redact_content_and_ignore_execution_capabilities_in_equality() 
         })
     );
     let effects = core
-        .submit_hold(read.snapshot.clone(), "transcript-sentinel".into(), None)
+        .submit_hold(
+            read.snapshot.clone(),
+            "zqx-transcript-sentinel".into(),
+            None,
+        )
         .unwrap();
     for debug in [
         format!("{:?}", StoreOp::ReadHold(read)),
         format!("{prepared:?}"),
         format!("{effects:?}"),
     ] {
-        for marker in ["transcript-sentinel", "private-name-sentinel"] {
-            assert!(!debug.contains(marker));
-            assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+        for marker in ["zqx-transcript-sentinel", "private-name-sentinel"] {
+            crate::test_support::assert_no_preview(&debug, marker);
         }
     }
 }

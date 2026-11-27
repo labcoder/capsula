@@ -1224,7 +1224,7 @@ fn a_step_write_prints_its_labels_length_never_the_label() {
     };
     let shown = format!("{write:?}");
     let byte_list = format!("{:?}", SENTINEL.as_bytes());
-    assert!(!shown.contains(SENTINEL), "the label leaked: {shown}");
+    crate::test_support::assert_no_preview(&shown, SENTINEL);
     assert!(
         !shown.contains(byte_list.trim_matches(['[', ']'])),
         "the bytes leaked"
@@ -1273,7 +1273,7 @@ fn formatting_a_runs_carriers_shows_lengths_never_text() {
     let byte_list = byte_list.trim_matches(['[', ']']);
     let length = format!("Content(len={})", SENTINEL.len());
     for shown in [format!("{turn:?}"), format!("{effects:?}")] {
-        assert!(!shown.contains(SENTINEL), "the text leaked: {shown}");
+        crate::test_support::assert_no_preview(&shown, SENTINEL);
         assert!(!shown.contains(byte_list), "the bytes leaked");
         assert!(shown.contains(&length), "the length is missing");
     }

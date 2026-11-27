@@ -381,7 +381,7 @@ fn outer_reader_debug_never_exposes_unknown_types_or_error_bodies() {
         format!("{error:?}"),
         format!("{error}"),
     ] {
-        assert!(!formatted.contains(marker), "provider text is redacted");
+        crate::test_support::assert_no_preview(&formatted, marker);
         assert!(
             !formatted.contains(bytes.trim_matches(['[', ']'])),
             "provider bytes are redacted"

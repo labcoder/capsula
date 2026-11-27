@@ -550,7 +550,7 @@ async fn a_failed_model_write_is_not_rescued_by_a_later_success() {
         .conn_for_tests()
         .execute_batch(
             "CREATE TRIGGER refuse_model BEFORE UPDATE OF model ON threads WHEN old.id = 1
-         BEGIN SELECT RAISE(ABORT, 'MODEL_ERROR_SENTINEL'); END;",
+         BEGIN SELECT RAISE(ABORT, 'ZQX_MODEL_ERROR_SENTINEL'); END;",
         )
         .expect("trigger");
     let (acks, mut replies) = mpsc::unbounded_channel();
@@ -597,8 +597,7 @@ async fn a_failed_model_write_is_not_rescued_by_a_later_success() {
     );
     let logs = captured.text();
     assert!(logs.contains("a model choice wasn't stored"));
-    assert!(!logs.contains("MODEL_ERROR_SENTINEL"));
-    assert!(!logs.contains(&format!("{:?}", b"MODEL_ERROR_SENTINEL")));
+    crate::test_support::assert_no_preview(&logs, "ZQX_MODEL_ERROR_SENTINEL");
     drop(acks);
     drop(purger);
     drop(store);

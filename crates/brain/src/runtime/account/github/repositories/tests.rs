@@ -381,7 +381,7 @@ async fn errors_and_malformed_later_replies_never_return_an_earlier_partial_snap
             .await
             .unwrap_err();
         assert_eq!(error, expected);
-        assert!(!format!("{error:?} {error}").contains(SENTINEL));
+        crate::test_support::assert_no_preview(&format!("{error:?} {error}"), SENTINEL);
         assert_eq!(http.urls.lock().unwrap().len(), 3);
     }
 }

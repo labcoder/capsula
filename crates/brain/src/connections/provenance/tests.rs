@@ -363,7 +363,7 @@ async fn no_planted_marker_reaches_the_written_bytes() {
     let text = String::from_utf8(bytes.clone()).expect("UTF-8");
     assert!(text.starts_with("{\n  \""), "pretty-printed");
     let marker = MARKER.to_ascii_lowercase();
-    assert!(!text.to_ascii_lowercase().contains(&marker), "{text}");
+    crate::test_support::assert_no_preview(&text, MARKER);
     let lower = bytes.to_ascii_lowercase();
     assert!(!lower.windows(marker.len()).any(|w| w == marker.as_bytes()));
     for planted in [MARKER, marker.as_str()] {

@@ -635,17 +635,15 @@ async fn connection_replay_is_tagged_and_outer_carriers_redact_the_key() {
     let scratch = Scratch::new("key-replay");
     let mut accounts = accounts(&scratch, Scripted::default());
     let generation = accounts.connections.generation;
+    let key = key();
+    let private = key.expose().as_str().to_owned();
     let event = ConnectionEvent::Loaded {
         generation,
-        result: (Some(1), Ok(Some(key()))),
+        result: (Some(1), Ok(Some(key))),
     };
-    let text = format!("{event:?} {accounts:?}");
-    assert!(!text.contains(test_support::SENTINEL), "no text marker");
-    assert!(
-        !text.contains(&format!("{:?}", test_support::SENTINEL.as_bytes())),
-        "no byte-list marker"
-    );
+    crate::test_support::assert_no_preview(&format!("{event:?}"), &private);
     accounts.connection_event(event);
+    crate::test_support::assert_no_preview(&format!("{accounts:?}"), &private);
     assert_eq!(
         accounts.connections.connected(),
         ControlToShell::Connections(ConnectionsView {

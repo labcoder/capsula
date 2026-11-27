@@ -338,10 +338,14 @@ fn secret(text: &str) -> Secret<Zeroizing<String>> {
 /// and after, never prints the client id, the code or the redirect.
 #[tokio::test]
 async fn the_account_system_never_prints_a_secret() {
+    const CLIENT: &str = "zqx-client-SENTINEL";
+    const CODE: &str = "jkv-code-SENTINEL";
+    const NONCE: &str = "wzp-nonce-SENTINEL";
+    const VERIFIER: &str = "qwxvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv";
     let scratch = Scratch::new("account-debug");
     let store = FakeStore::default();
     let registration = Secret::new(Account {
-        client_id: Zeroizing::new("client-SENTINEL".to_owned()),
+        client_id: Zeroizing::new(CLIENT.to_owned()),
         subject: None,
         email: None,
         plan_enabled: false,
@@ -365,10 +369,10 @@ async fn the_account_system_never_prints_a_secret() {
     let frames = accounts.handle(Input::Listened {
         attempt: 1,
         result: Listened::Authorized(Authorization {
-            code: secret("code-SENTINEL"),
-            client_id: secret("client-SENTINEL"),
-            nonce: secret("nonce-SENTINEL"),
-            verifier: secret(&"v".repeat(43)),
+            code: secret(CODE),
+            client_id: secret(CLIENT),
+            nonce: secret(NONCE),
+            verifier: secret(VERIFIER),
             redirect: "http://127.0.0.1:1/auth/callback".to_owned(),
         }),
     });
@@ -381,10 +385,13 @@ async fn the_account_system_never_prints_a_secret() {
     }
     assert!(
         printed.iter().any(|text| text.contains("Outstanding")),
-        "an exchange was outstanding while printed: {printed:?}"
+        "an exchange was outstanding while printed"
     );
     for text in &printed {
-        assert!(!text.contains("SENTINEL"), "{text}");
+        assert!(!text.contains("SENTINEL"));
+        for marker in [CLIENT, CODE, NONCE, VERIFIER] {
+            crate::test_support::assert_no_preview(text, marker);
+        }
     }
     accounts.close(Instant::now(), Instant::now()).await;
 }

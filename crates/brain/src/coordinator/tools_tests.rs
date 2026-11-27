@@ -1060,7 +1060,7 @@ fn round_writes_show_lengths_never_content() {
         },
     ];
     let printed = format!("{op:?} {result:?} {request:?} {events:?}");
-    assert!(!printed.contains(MARKER), "{printed}");
+    crate::test_support::assert_no_preview(&printed, MARKER);
     let bytes = format!("{:?}", MARKER.as_bytes());
     let listed = bytes.trim_start_matches('[').trim_end_matches(']');
     assert!(!printed.contains(listed), "{printed}");

@@ -157,8 +157,7 @@ fn card_carriers_never_print_their_content() {
         reply: Ok(rows),
     };
     let debug = format!("{input:?} {effect:?}");
-    assert!(!debug.contains("private-card-marker"));
-    assert!(!debug.contains(&format!("{:?}", b"private-card-marker")));
+    crate::test_support::assert_no_preview(&debug, "private-card-marker");
 }
 
 #[test]

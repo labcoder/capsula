@@ -71,7 +71,7 @@ async fn a_tasks_first_done_run_takes_the_models_title_and_nudges_the_shell() {
     assert_eq!(titles, [(SENTINEL.to_owned(), "model".to_owned())]);
     let logs = captured.text();
     assert!(logs.contains("a job ended"), "{logs}");
-    assert!(!logs.contains(SENTINEL), "{logs}");
+    crate::test_support::assert_no_preview(&logs, SENTINEL);
     assert!(!logs.contains("zqxfirstask"), "{logs}");
 }
 
@@ -171,6 +171,6 @@ async fn a_long_tasks_done_run_titles_it_then_stores_a_summary_of_its_oldest_run
         "through the second run, the last one outside the window"
     );
     let logs = captured.text();
-    assert!(!logs.contains(SENTINEL), "{logs}");
+    crate::test_support::assert_no_preview(&logs, SENTINEL);
     assert!(!logs.contains("zqxoldask"), "{logs}");
 }

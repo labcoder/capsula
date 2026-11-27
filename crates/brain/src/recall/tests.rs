@@ -170,6 +170,5 @@ fn query_ids_and_diagnostics_are_content_free() {
         Some(output.clone())
     );
     let debug = format!("{query:?} {output:?} {} {:?}", Error::Read, Error::Read);
-    assert!(!debug.contains(marker));
-    assert!(!debug.contains(&format!("{:?}", marker.as_bytes())));
+    crate::test_support::assert_no_preview(&debug, marker);
 }

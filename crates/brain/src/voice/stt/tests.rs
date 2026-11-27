@@ -855,10 +855,8 @@ fn text(len: usize) -> SttResult {
 #[test]
 fn debug_shows_no_samples_and_no_transcript() {
     let marker = "kumochi-transcript-sentinel";
-    let bytes = format!("{:?}", marker.as_bytes());
     let text = format!("{:?}", SttResult::Text(marker.into()));
     assert_eq!(text, format!("Text({} bytes)", marker.len()));
-    assert!(!text.contains(marker) && !text.contains(&bytes[1..bytes.len() - 1]));
 
     let (reply, _answer) = oneshot::channel();
     let decode = format!(
@@ -869,7 +867,7 @@ fn debug_shows_no_samples_and_no_transcript() {
             reply,
         }
     );
-    assert!(!decode.contains("31337"), "{decode}");
+    crate::test_support::assert_no_preview(&decode, "31337");
     assert!(decode.contains("samples: 3"), "{decode}");
 }
 

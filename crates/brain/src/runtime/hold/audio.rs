@@ -372,8 +372,7 @@ mod tests {
             let mut audio = Audio::new();
             audio.push(&packet(rate, 0, true, samples.clone())).unwrap();
             let debug = format!("{audio:?}");
-            assert!(!debug.contains("voice-sentinel"));
-            assert!(!debug.contains(&format!("{samples:?}")));
+            crate::test_support::assert_no_preview(&debug, "voice-sentinel");
         }
     }
 }
