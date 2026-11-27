@@ -11,9 +11,10 @@ use anyhow::{Context as _, Result, ensure};
 
 /// The crates the core may depend on directly, dev-dependencies included. A change that gives
 /// the core a dependency adds it here, so the new line is reviewed.
-const DEPENDENCIES: [&str; 23] = [
+const DEPENDENCIES: [&str; 24] = [
     "arc-swap",
     "async-channel",
+    "block2",
     "cpal",
     "fluent-bundle",
     "keyring",

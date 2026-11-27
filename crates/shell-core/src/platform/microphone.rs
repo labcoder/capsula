@@ -525,6 +525,26 @@ impl Generation {
     pub fn running_for_tests(&self) -> Result<(), MicError> {
         self.running()
     }
+
+    /// A generation already collecting, for a platform adapter's own tests.
+    #[cfg(any(test, feature = "test-support"))]
+    #[cfg_attr(
+        any(not(test), not(target_os = "macos")),
+        expect(
+            dead_code,
+            reason = "only the Mac adapter's tests start from a collecting generation"
+        )
+    )]
+    pub(in crate::platform) fn collecting_for_tests(
+        gate: &CollectionGate,
+        gesture: GestureId,
+    ) -> Result<Self, MicError> {
+        let generation = gate.arm(gesture)?;
+        generation.advance(ARMED, OPENING)?;
+        generation.advance(OPENING, RUNNING)?;
+        generation.advance(RUNNING, COLLECTING)?;
+        Ok(generation)
+    }
 }
 /// A generation's claimed single start. Dropped unstarted, it retires the generation, since no
 /// worker ever ran.

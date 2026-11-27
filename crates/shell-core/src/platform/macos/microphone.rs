@@ -11,6 +11,8 @@ use objc2_core_audio_types::{
 
 use crate::platform::microphone::{Format, MicError, Sample};
 
+mod block;
+
 /// The longest IO cycle admitted, so a stalled device is noticed within a few drain polls.
 const MAX_CYCLE: Duration = Duration::from_millis(100);
 /// Scheduling slack the stall check allows on top of two cycles.
