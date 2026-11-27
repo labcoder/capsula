@@ -83,6 +83,13 @@ brain pins in that order, not hashes taken from a different build for this invoc
 "$target/release/xtask.exe" hold-gate "$transcript" --prebuilt "$shell_sha" "$brain_sha" [--speech ...]
 ```
 
+For `hold-gate --speech`, add `kumochi-brain/gate-fixture` to the build's features. It reads
+`ChatGPT` ready with no account, so a hold is admitted and its microphone opens, and it fails
+every run at once without sending anything ([runs](runs.md#the-fixture-engine)). The brain doesn't
+compile it without the gate identity, so no Dev or release build can carry it, and `hold-gate
+--speech` refuses a prebuilt brain that doesn't log `gate fixture engine active`. Build it into a
+separate target from the images other gate tools measure. The fixture itself sends nothing, but it replaces only `ChatGPT`'s engine: the rest of the brain is as online as any Gate build's, so a Gate profile with a saved key or sign-in still reaches those accounts. The Listening row is offline only because its run has a fresh profile with no account.
+
 The release Gate driver verifies both sibling executables before admitting the run. It then
 copies them into the run's own folder, verifies the copies, and launches only those copies
 with the same job and isolated app data as the built forms. At both points it checks the

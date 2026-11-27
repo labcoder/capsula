@@ -245,7 +245,12 @@ pub(crate) struct Brain {
     store: Option<StoreThread>,
     engine: Box<dyn Engine>,
     /// The dev fixture was picked, so runs never wait on the account.
-    #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
+    #[cfg(any(
+        test,
+        debug_assertions,
+        feature = "gate-fixture",
+        all(windows, feature = "gate-draw-replay")
+    ))]
     fixture: Option<Ready>,
     #[cfg(debug_assertions)]
     fixture_engine: bool,
@@ -395,7 +400,12 @@ impl Brain {
         connections.configure_transport(config.model_tuning());
         #[cfg(debug_assertions)]
         let mut fixture_engine = false;
-        #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
+        #[cfg(any(
+            test,
+            debug_assertions,
+            feature = "gate-fixture",
+            all(windows, feature = "gate-draw-replay")
+        ))]
         let (engine, access, fixture) = match engine {
             #[cfg(debug_assertions)]
             Selected::DevFixture(engine) => {
@@ -412,9 +422,26 @@ impl Brain {
                 mpsc::unbounded_channel().1,
                 Some(Ready::draw_replay()),
             ),
+            #[cfg(not(feature = "gate-fixture"))]
             Selected::Account { engine, asks } => (engine, asks, None),
+            // A Gate build's fixture route replaces the account's engine: ready with no account,
+            // it fails every run at once and sends nothing.
+            #[cfg(feature = "gate-fixture")]
+            Selected::Account { engine, asks } => {
+                drop((engine, asks));
+                tracing::info!("gate fixture engine active");
+                let fixture = crate::engines::fixture::Fixture::parse("0 fail")
+                    .expect("the gate fixture's one line is an event");
+                let engine: Box<dyn Engine> = Box::new(fixture);
+                (engine, mpsc::unbounded_channel().1, Some(Ready::fixture()))
+            }
         };
-        #[cfg(not(any(test, debug_assertions, all(windows, feature = "gate-draw-replay"))))]
+        #[cfg(not(any(
+            test,
+            debug_assertions,
+            feature = "gate-fixture",
+            all(windows, feature = "gate-draw-replay")
+        )))]
         let Selected::Account {
             engine,
             asks: access,
@@ -451,7 +478,12 @@ impl Brain {
             coordinator: Box::new(coordinator),
             store: Some(store),
             engine,
-            #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
+            #[cfg(any(
+                test,
+                debug_assertions,
+                feature = "gate-fixture",
+                all(windows, feature = "gate-draw-replay")
+            ))]
             fixture,
             #[cfg(debug_assertions)]
             fixture_engine,
@@ -523,9 +555,19 @@ impl Brain {
     /// nothing. `ChatGPT` is ready only once its sign-in is proved ordinary. Until then a turn
     /// that arrives reads no history for it.
     fn availability_changed(&mut self, link: Option<&mut Link<'_, '_>>) -> Result<(), Ended> {
-        #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
+        #[cfg(any(
+            test,
+            debug_assertions,
+            feature = "gate-fixture",
+            all(windows, feature = "gate-draw-replay")
+        ))]
         let fixture = self.fixture.clone();
-        #[cfg(not(any(test, debug_assertions, all(windows, feature = "gate-draw-replay"))))]
+        #[cfg(not(any(
+            test,
+            debug_assertions,
+            feature = "gate-fixture",
+            all(windows, feature = "gate-draw-replay")
+        )))]
         let fixture: Option<Ready> = None;
         let chatgpt = kumochi_protocol::message::ConnectionKind::ChatGpt;
         let input = if let Some(ready) = fixture {
@@ -545,9 +587,19 @@ impl Brain {
     /// Tells the coordinator whether the account's sign-in keeps `ChatGPT`'s history from a turn
     /// that arrives now. The dev fixture answers without the account.
     fn fence_chatgpt_reads(&mut self) {
-        #[cfg(any(test, debug_assertions, all(windows, feature = "gate-draw-replay")))]
+        #[cfg(any(
+            test,
+            debug_assertions,
+            feature = "gate-fixture",
+            all(windows, feature = "gate-draw-replay")
+        ))]
         let fixture = self.fixture.is_some();
-        #[cfg(not(any(test, debug_assertions, all(windows, feature = "gate-draw-replay"))))]
+        #[cfg(not(any(
+            test,
+            debug_assertions,
+            feature = "gate-fixture",
+            all(windows, feature = "gate-draw-replay")
+        )))]
         let fixture = false;
         if !fixture && self.account.reads_fenced() {
             self.coordinator.fence_chatgpt_reads();

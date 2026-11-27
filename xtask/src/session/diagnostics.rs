@@ -33,7 +33,7 @@ pub(crate) enum Mark {
 }
 
 /// Every non-input line the shell records; any other unknown event still fails.
-const STATUS: [&str; 12] = [
+const STATUS: [&str; 13] = [
     "link state=",
     "carry drop perch=",
     "run phase=",
@@ -46,6 +46,7 @@ const STATUS: [&str; 12] = [
     "kumo press at=",
     "rearm ",
     "voice refused ",
+    "voice failed ",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +253,7 @@ mod tests {
             ("qpc=15 rearm refused check=chord", 15),
             ("qpc=16 rearm skipped check=break", 16),
             ("qpc=17 voice refused check=ready", 17),
+            ("qpc=18 voice failed reason=choice-changed", 18),
         ] {
             assert_eq!(
                 Record::parse(line).unwrap(),

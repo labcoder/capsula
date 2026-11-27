@@ -593,7 +593,7 @@ impl Claude {
         Availability::Ready(Ready {
             connection: ConnectionTag(epoch.tag),
             models,
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, debug_assertions, feature = "gate-fixture"))]
             trusted_draw: false,
             images,
         })

@@ -263,7 +263,7 @@ impl Connections {
                 Availability::Ready(Ready {
                     connection: verified.tag,
                     models: self.models.iter().map(|model| model.info.clone()).collect(),
-                    #[cfg(any(test, debug_assertions))]
+                    #[cfg(any(test, debug_assertions, feature = "gate-fixture"))]
                     trusted_draw: false,
                     images: self
                         .models

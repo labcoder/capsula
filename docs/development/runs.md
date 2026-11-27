@@ -611,7 +611,13 @@ can't pick it. The debug brain logs `fixture engine active` at INFO when it sele
 and its connected Chat window shows **Fixture mode**. For a normal desk build, launch from a fresh
 terminal with `KUMOCHI_FIXTURE` unset, and quit any running fixture instance first: a running
 brain doesn't change engines. Without the fixture, the Responses engine answers once the account
-is ready (engines.md, "The Responses engine"). A script plays through `engines/fixture.rs`;
+is ready (engines.md, "The Responses engine"). A Gate build with `kumochi-brain/gate-fixture`
+replaces `ChatGPT`'s engine with one fixed `0 fail` script that fails every run without sending
+anything, ready with no account, so `hold-gate`'s Listening row can admit holds; the brain logs
+`gate fixture engine active`, and `lib.rs` refuses to compile the feature without
+`kumochi-protocol/gate-identity`. It doesn't take the rest of the brain offline: a Gate profile with
+a saved key or sign-in still reaches those accounts, so only a fresh, accountless profile is offline. A script plays
+through `engines/fixture.rs`;
 `crates/brain/fixtures/default.txt` is a sample. One line per event: `<ms> text <words>`, `<ms> fill <bytes>`,
 `<ms> step <label>`, `<ms> fail`, and `late <label>`, a step the engine still sends after it's
 cancelled. Its round's pump has closed by then, so the late step reaches nobody; the coordinator

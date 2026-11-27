@@ -221,24 +221,6 @@ impl Images {
         ))
     }
 
-    /// Moves the launches onto verified copies of the images in the run's own `bin`, so the
-    /// native runtime copied beside the brain stays inside the run.
-    fn stage(&mut self) -> Result<()> {
-        let release = self
-            .brain
-            .parent()
-            .context("the brain image has a folder")?
-            .to_path_buf();
-        let pins = Prebuilt {
-            shell_sha256: self.shell_sha256.clone(),
-            brain_sha256: self.brain_sha256.clone(),
-        };
-        let bin = pins.stage(&release, &self.folders)?;
-        self.shell = bin.join(SHELL_EXE);
-        self.brain = bin.join(BRAIN_EXE);
-        Ok(())
-    }
-
     /// Copies speech input into the launch's own models folder and the native runtime beside the
     /// brain, verified against the manifest, so the next launch can hear. Never downloads.
     fn install_speech(&self) -> Result<()> {
@@ -340,7 +322,7 @@ pub(crate) fn hover(args: impl Iterator<Item = String>) -> Result<()> {
     )
 }
 
-const HOLD_USAGE: &str = "hold-gate needs <path-session.txt> [--prebuilt <shell-sha256> <brain-sha256>] [--speech <models-dir> <natives-dir>]";
+const HOLD_USAGE: &str = "hold-gate needs <path-session.txt> [--prebuilt <shell-sha256> <brain-sha256> [--speech <models-dir> <natives-dir>]]";
 
 /// The hold to talk rows alone, opened by the owner's away rule: `AltGr` typing under two layouts,
 /// then, with `--speech`, hold recognised to Listening on screen with the microphone open.
@@ -350,6 +332,12 @@ pub(crate) fn hold(mut args: impl Iterator<Item = String>) -> Result<()> {
     let prepared = pins
         .map(|pins| pins.release().map(|release| (pins, release)))
         .transpose()?;
+    if speech.is_some()
+        && let Some((_, release)) = &prepared
+    {
+        hermetic::require_compatible(&release.join(BRAIN_EXE), hermetic::GATE_FIXTURE)
+            .context("hold-gate --speech needs a brain built with kumochi-brain/gate-fixture")?;
+    }
     let mut trials = vec![Trial::Input(Phase::Layouts, FixtureEscMode::Free)];
     if speech.is_some() {
         trials.extend(
@@ -386,6 +374,11 @@ fn hold_options(
         }),
         _ => bail!(HOLD_USAGE),
     };
+    // Only a prebuilt brain carries kumochi-brain/gate-fixture, which admits a hold with no account.
+    ensure!(
+        speech.is_none() || pins.is_some(),
+        "hold-gate --speech needs --prebuilt images whose brain was built with kumochi-brain/gate-fixture"
+    );
     Ok((pins, speech))
 }
 
@@ -400,12 +393,7 @@ fn session_run(
     retained_run(args, Run::finish, |output, run| {
         let images = match prepared {
             Some((pins, release)) => Images::prepared(run, &release, pins),
-            None => Images::build(run).and_then(|mut images| {
-                if speech.is_some() {
-                    images.stage()?;
-                }
-                Ok(images)
-            }),
+            None => Images::build(run),
         };
         let result = images.and_then(|mut images| {
             images.speech = speech;
@@ -1202,16 +1190,6 @@ mod tests {
         };
         assert_eq!(options(&[]).unwrap(), (None, None));
         assert_eq!(
-            options(&["--speech", "m", "n"]).unwrap(),
-            (
-                None,
-                Some(Speech {
-                    models: "m".into(),
-                    natives: "n".into(),
-                })
-            )
-        );
-        assert_eq!(
             options(&["--prebuilt", &shell, &brain]).unwrap(),
             (
                 Some(Prebuilt {
@@ -1226,6 +1204,7 @@ mod tests {
             (Some(pins), Some(speech))
         );
         for refused in [
+            &["--speech", "m", "n"][..],
             &["--speech", "m", "n", "--prebuilt", &shell, &brain][..],
             &["--prebuilt", &shell][..],
             &["--prebuilt", "abc", &brain][..],

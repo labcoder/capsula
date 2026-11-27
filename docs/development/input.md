@@ -391,6 +391,9 @@ creates no file. Both need a shell built with the `gate-recorder` feature (see
   - `voice refused check=paused|link|ready` when a chord or hold can't start voice input: the
     onboarding window is open, the link can't start a voice gesture, or voice wasn't ready before
     both presses
+  - `voice failed reason=<kind>` when a begun hold ends before Listening: `microphone` when its
+    microphone doesn't start, otherwise the brain's failure, `not-loaded`, `busy`, `unavailable`,
+    `invalid-audio`, `too-long`, `timed-out`, `choice-changed`, `decode-failed` or `no-connection`
   - `listening on` and `listening off`, as the line takes and leaves the Listening colour
   - `speech input ready=true|false`, from each speech state the brain sends
   - `input opened focused=true|false` and `input dismissed`
@@ -828,8 +831,8 @@ fixture and wait for it (not a confirmed close), or `unread`.
 
 ### The hold to talk rows
 
-`hold-gate <path-session.txt> [--prebuilt <shell-sha256> <brain-sha256>] [--speech <models-dir>
-<natives-dir>]` runs the two hold to talk rows behind `hover-gate`'s idle opener, with the same
+`hold-gate <path-session.txt> [--prebuilt <shell-sha256> <brain-sha256> [--speech <models-dir>
+<natives-dir>]]` runs the two hold to talk rows behind `hover-gate`'s idle opener, with the same
 transcript, evidence folder, fixture, guards and PresentMon bounds. With `--prebuilt` it starts
 no Cargo: it stages the pinned sibling images the way
 [prebuilt cold-start](gate-identity.md#prebuilt-idle-and-cold-start) does. `measure-gate` and `gate-session` run the layouts row too, never
@@ -846,7 +849,13 @@ the Listening row.
   notice and opens no microphone. The fixture's original layout and the loaded-layout list are
   restored and checked. `phases.tsv` counts three checks per layout: the typed pair, the quiet
   AltGr window and the recognised hold.
-- **Listening (hold recognised → Listening on screen).** Only with `--speech`. The images are
+- **Listening (hold recognised → Listening on screen).** Only with `--speech`, which needs
+  `--prebuilt` images whose brain was also built with `kumochi-brain/gate-fixture`: the run has no
+  account, and the brain admits a hold only while a connection is ready, so without the fixture
+  route every hold ends in `voice failed reason=no-connection` before its microphone opens. The
+  fixture reads `ChatGPT` ready and fails every run at once without sending anything, and the
+  run's fresh profile has no account to reach; `hold-gate` refuses a prebuilt brain without it. The
+  images are
   staged into the run's own `bin`, and before the first batch speech input's model files are
   copied from `<models-dir>/speech-input/` (an installed models folder) into the launch's own
   models folder and the native runtime from `<natives-dir>` beside the staged brain, each checked
@@ -857,8 +866,8 @@ the Listening row.
   holds: each keeps the keys down until
   `listening on`, and 150 ms more, then releases, waits for a `listening off` after the release
   and 1.5 s more. **Each hold opens the real microphone**; the audio stays in the brain and is
-  never stored. A silent hold starts no turn; transcribed noise would start a turn that fails
-  with Sign in needed before any connection is used, since the run has no account. The clock
+  never stored. A silent hold starts no turn; transcribed noise would start a turn that the
+  fixture fails at once. The clock
   starts at the native callback that recognised the hold and stops at the present of the first
   dock frame painted between `listening on` and `listening off`; key-down → that present is
   reported beside it. The gate is p95 ≤7ms over all 100 holds; a hold that never reaches
