@@ -186,6 +186,9 @@ impl<F: FnMut(bool) + Send + 'static> DrawingIo for Plain<F> {
     fn owner_exited(&mut self, exit: OwnerExit) {
         (self.0)(exit == OwnerExit::ReportRefused);
     }
+    fn plain(&self) -> bool {
+        true
+    }
 }
 
 impl Drop for Input {
@@ -261,6 +264,8 @@ pub(crate) fn spawn(
         stop: Arc::clone(&stop),
         closed: Arc::clone(&closed),
     };
+    let mut engine = Engine::new(run, generation);
+    engine.hold_first_open = drawing.plain();
     let drawing = Drawing::new(session, Arc::clone(&closed), drawing);
     #[cfg(not(any(test, feature = "test-support")))]
     let start = backend::spawn;
@@ -282,7 +287,7 @@ pub(crate) fn spawn(
         .spawn(move || {
             own(
                 &port,
-                (Engine::new(run, generation), origin),
+                (engine, origin),
                 drawing,
                 move |credit| grant(credit.bytes),
                 reports,

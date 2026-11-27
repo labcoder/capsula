@@ -77,6 +77,8 @@ pub(super) struct Engine {
     physical: Option<u64>,
     recovering: bool,
     pending_open: Option<u64>,
+    /// Plain output has no conductor, so its reply can wait for a slow first open.
+    pub(super) hold_first_open: bool,
     generation: u64,
     inhibit: Option<(u64, bool)>,
     unresolved: [Option<u64>; 2],
@@ -103,6 +105,7 @@ impl Engine {
             physical: None,
             recovering: false,
             pending_open: None,
+            hold_first_open: false,
             generation: 0,
             inhibit: None,
             unresolved: [None; 2],
@@ -474,6 +477,10 @@ impl Engine {
                 self.present_due(now);
             }
         } else if !self.inhibited() && self.phase == Phase::Running {
+            if self.hold_first_open && self.pending_open == Some(1) {
+                // A slow first open keeps the reply's start until its retry time, not unheard.
+                self.virtual_at = self.virtual_at.max(self.retry_at.min(now));
+            }
             let elapsed = now.saturating_sub(self.virtual_at).as_nanos();
             self.virtual_at = self.virtual_at.max(now);
             let numerator = elapsed.saturating_mul(u128::from(RATE)) + self.virtual_fraction;

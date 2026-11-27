@@ -7,7 +7,7 @@
 pub(crate) mod conductor;
 #[expect(
     dead_code,
-    reason = "stock startup still selects the silent Legacy session"
+    reason = "Expect has no production sender, and Pause and Resume have none outside Windows"
 )]
 pub(crate) mod queued;
 mod tail;
