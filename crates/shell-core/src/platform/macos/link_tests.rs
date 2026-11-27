@@ -19,7 +19,7 @@ use kumochi_session::Channel;
 use super::leg::tests::{Commit, SECRET, ends, scripted};
 use super::{NotStarted, ShellEnds};
 use crate::link::{
-    DrawingText, LinkEvent, LinkHandle, LinkState, QuitEnd, QuitOutcome, start_scripted,
+    DrawingText, LinkEvent, LinkHandle, LinkState, QuitEnd, QuitEnding, QuitOutcome, start_scripted,
 };
 use crate::platform::Connection;
 use crate::platform::child::{
@@ -51,6 +51,8 @@ struct Script {
     reached: Option<mpsc::Sender<()>>,
     /// Holds a brain that exits or is lost after commit until the test says so.
     after_commit: Option<Receiver<()>>,
+    /// The pair runs queued audio, not legacy.
+    queued: bool,
 }
 
 /// A fake child: running until it exits or is killed; a kill ends it with SIGKILL and tells
@@ -148,6 +150,8 @@ enum Then {
     ReadyBeforeShutdown,
     /// Writes READY, then exits with this code once the shell's ends shut down.
     ExitsOnEof(i32),
+    /// Commits, then says so once the shell shuts control down.
+    SeesShutdown,
 }
 
 fn brain(child: &Child, then: Then) -> ShellEnds {
@@ -198,13 +202,7 @@ fn brain(child: &Child, then: Then) -> ShellEnds {
             _ => {}
         }
         let deadline = Instant::now() + BOUND;
-        let mut brain = scripted(
-            control,
-            data,
-            AudioSession::Legacy,
-            Commit::Settings,
-            deadline,
-        );
+        let mut brain = scripted(control, data, audio(&child), Commit::Settings, deadline);
         let held = child.script().after_commit.take();
         if let Some(held) = held {
             let _released = held.recv_timeout(BOUND);
@@ -217,6 +215,11 @@ fn brain(child: &Child, then: Then) -> ShellEnds {
             Then::Stalls => until_killed(),
             Then::ExitsAfterCommit(code) => child.exits(Exit::Code(code)),
             Then::LostCloses => child.script().lost = true,
+            Then::SeesShutdown => {
+                if brain.shut_down_seen() {
+                    reached();
+                }
+            }
             Then::Closes
             | Then::NoReady
             | Then::ExitsBeforeReady(_)
@@ -291,11 +294,19 @@ fn attempt_with(
         harden,
         read_item,
         Channel::Dev,
-        AudioSession::Legacy,
+        audio(child),
         None,
         by,
         |_| DrawingText::default(),
     )
+}
+
+fn audio(child: &Child) -> AudioSession {
+    if child.script().queued {
+        AudioSession::QueuedRequired
+    } else {
+        AudioSession::Legacy
+    }
 }
 
 #[expect(clippy::unnecessary_wraps, reason = "it stands in for the item read")]
@@ -306,15 +317,11 @@ fn honest(item: &mut [u8; kumochi_session::SECRET_LEN]) -> Result<(), kumochi_st
 
 type Attempt = Result<(Connection, Option<ChildOwner>), Failed>;
 
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "it stands in for the accessor's own value"
-)]
-fn ended(generation: Option<u64>, outcome: QuitOutcome) -> Option<QuitEnd> {
-    Some(QuitEnd {
+fn ended(generation: Option<u64>, outcome: QuitOutcome) -> QuitEnding {
+    QuitEnding::Ended(Some(QuitEnd {
         generation,
         outcome,
-    })
+    }))
 }
 
 /// A link whose first attempt meets `child` scripted by `then`; later attempts come from `next`.
@@ -400,7 +407,7 @@ fn a_quit_between_attempts_after_a_child_exited_0_is_not_clean() {
     until(&states, failed);
     assert!(link.begin_quit());
     link.finish_quit();
-    assert_eq!(link.quit_end(), None);
+    assert_eq!(link.quit_end(), QuitEnding::Ended(None));
 }
 
 #[test]
@@ -542,6 +549,74 @@ fn a_poll_that_blocks_ends_the_link_unsettled_while_the_peer_holds_both_ends_ope
     assert!(took < 3 * WAIT + Duration::from_secs(2), "{took:?}");
     assert_eq!(child.script().kills, 0, "the owner never got past its poll");
     drop(unblock);
+}
+
+#[test]
+fn custody_ending_as_the_connection_is_handed_over_publishes_no_connected() {
+    for queued in [false, true] {
+        let child = Child::default();
+        child.script().queued = queued;
+        let (events, states) = async_channel::unbounded();
+        let (brain_child, mut first) = (child.clone(), true);
+        let link = start_scripted(events, audio(&child), move |word, _, by| {
+            if !std::mem::take(&mut first) {
+                return refused(word, by);
+            }
+            let (connection, owner) = attempt(word, &brain_child, Then::Closes, by, honest)?;
+            // The handoff holds until the child's end is published.
+            brain_child.exits(Exit::Code(0));
+            let ended_by = Instant::now() + BOUND;
+            while !owner.has_ended() {
+                assert!(Instant::now() < ended_by, "custody ended in time");
+                thread::sleep(Duration::from_millis(5));
+            }
+            Ok((connection, Some(owner)))
+        });
+        until(&states, |event| {
+            assert!(
+                !connected(event),
+                "queued {queued}: no Connected once custody ended"
+            );
+            failed(event)
+        });
+        assert!(link.begin_quit());
+        link.finish_quit();
+        assert_eq!(link.quit_end(), QuitEnding::Ended(None), "queued {queued}");
+        assert_eq!(child.script().spawns, 1, "queued {queued}: one attempt");
+    }
+}
+
+#[test]
+fn custody_ending_while_connected_waits_for_room_publishes_no_connected() {
+    let child = Child::default();
+    let (reached, shut_down) = mpsc::channel();
+    child.script().reached = Some(reached);
+    // Room for Connecting only, so Connected waits until the test drains it.
+    let (events, states) = async_channel::bounded(1);
+    let (brain_child, mut first) = (child.clone(), true);
+    let link = start_scripted(events, AudioSession::Legacy, move |word, _, by| {
+        if !std::mem::take(&mut first) {
+            return refused(word, by);
+        }
+        attempt(word, &brain_child, Then::SeesShutdown, by, honest)
+            .map(|(connection, owner)| (connection, Some(owner)))
+    });
+    let by = Instant::now() + BOUND;
+    while !link.can_start_voice_gesture(1) {
+        assert!(Instant::now() < by, "the attempt came to publish Connected");
+        thread::sleep(Duration::from_millis(5));
+    }
+    child.exits(Exit::Code(0));
+    shut_down
+        .recv_timeout(BOUND)
+        .expect("custody ended and shut the pair down");
+    until(&states, |event| {
+        assert!(!connected(event), "no Connected once custody ended");
+        failed(event)
+    });
+    assert!(link.begin_quit());
+    link.finish_quit();
+    assert_eq!(link.quit_end(), QuitEnding::Ended(None));
 }
 
 /// A brain for the queued pair that says READY only once `go` comes, then exits 0 on Quit.

@@ -268,6 +268,13 @@ impl ChildOwner {
         self.terminal.lock().winner.is_some()
     }
 
+    /// Runs `admit` only while custody has no outcome, under the lock that publishes one, so
+    /// nothing it does follows an outcome. None once custody has ended; `admit` must not wait.
+    pub(crate) fn while_open<T>(&self, admit: impl FnOnce() -> T) -> Option<T> {
+        let ending = self.terminal.lock();
+        ending.winner.is_none().then(admit)
+    }
+
     /// Starts bounded retirement of a live child, and its bound once the child is confirmed.
     /// Never waits.
     pub(crate) fn retire(&self) {

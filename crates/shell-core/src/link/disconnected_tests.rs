@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use async_channel::{TryRecvError, bounded};
 use kumochi_protocol::message::{AudioSession, ControlToBrain, Incarnation, RunId};
 
-use super::{LinkEvent, LinkHandle, LinkState, Session, prepare_disconnected};
+use super::{LinkEvent, LinkHandle, LinkState, QuitEnding, Session, prepare_disconnected};
 
 #[test]
 fn unavailable_transport_reports_failed_without_retry_or_quit_work() {
@@ -95,7 +95,11 @@ fn a_busy_attempt_waits_for_retry_and_a_quit_with_no_child_is_not_clean() {
         2,
         "Quit started no attempt"
     );
-    assert_eq!(link.quit_end(), None, "no attempt was live at Quit");
+    assert_eq!(
+        link.quit_end(),
+        QuitEnding::Ended(None),
+        "no attempt was live at Quit"
+    );
     assert_eq!(states.try_recv().unwrap_err(), TryRecvError::Closed);
 }
 
@@ -115,7 +119,11 @@ fn a_quit_during_a_failed_attempt_with_no_child_has_no_outcome() {
     assert!(link.begin_quit());
     drop(fail);
     link.finish_quit();
-    assert_eq!(link.quit_end(), None, "a childless attempt has no outcome");
+    assert_eq!(
+        link.quit_end(),
+        QuitEnding::Ended(None),
+        "a childless attempt has no outcome"
+    );
 }
 
 #[test]
@@ -154,13 +162,52 @@ fn a_quit_during_a_failed_attempt_keeps_what_it_knows_of_its_child() {
         link.finish_quit();
         assert_eq!(
             link.quit_end(),
-            Some(QuitEnd {
+            QuitEnding::Ended(Some(QuitEnd {
                 generation: None,
                 outcome
-            }),
+            })),
             "{child:?}"
         );
     }
+}
+
+#[test]
+fn a_quit_that_outlasts_its_wait_is_pending_and_keeps_the_settlement_that_follows() {
+    use crate::link::{QuitEnd, QuitOutcome};
+    use crate::platform::{Exit, Failed, LinkError, Settled, Unconnected};
+
+    let (events, _states) = async_channel::unbounded();
+    let (entered, attempting) = std::sync::mpsc::channel();
+    let (read, reading) = std::sync::mpsc::channel::<()>();
+    let link = super::start_scripted(events, AudioSession::Legacy, move |_, _, _| {
+        let _seen = entered.send(());
+        // The item read, which Quit can't cancel.
+        let _released = reading.recv_timeout(Duration::from_secs(10));
+        Err(Failed {
+            error: LinkError::Rejected,
+            child: Some(Unconnected::Settled(Settled::Reaped(Exit::Code(0)))),
+        })
+    });
+    attempting
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the attempt started");
+    assert!(link.begin_quit());
+    link.finish_quit_by(Instant::now() + Duration::from_millis(50));
+    assert_eq!(
+        link.quit_end(),
+        QuitEnding::Pending,
+        "the read outlasted the wait"
+    );
+    drop(read);
+    link.finish_quit();
+    assert_eq!(
+        link.quit_end(),
+        QuitEnding::Ended(Some(QuitEnd {
+            generation: None,
+            outcome: QuitOutcome::Reaped(Exit::Code(0)),
+        })),
+        "the read's settlement is kept"
+    );
 }
 
 #[test]
