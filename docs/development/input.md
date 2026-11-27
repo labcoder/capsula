@@ -68,8 +68,9 @@ sequenceDiagram
   before GPUI; it now starts once the dock is open and the keyboard is armed (architecture §2.2).
 - **Normalization.** Only make code 0x1D and 0x38 without a prefix are left Ctrl and left Alt.
   Right Ctrl (E0 0x1D) and AltGr's right Alt (E0 0x38) are other keys, so AltGr cancels instead of
-  firing. AltGr's synthetic left Ctrl can't be told from a real one by its flags; the right Alt
-  that follows still cancels. Pause (E1) resets, because it has no dependable key-up. A keyboard
+  firing. Raw Input reports no synthetic left Ctrl for an AltGr press, so AltGr reaches the
+  adapter as the right Alt alone; where a synthetic left Ctrl does arrive, it can't be told from a
+  real one by its flags, and the right Alt that follows still cancels. Pause (E1) resets, because it has no dependable key-up. A keyboard
   overrun resets. A missing make code falls back to `MapVirtualKeyW` only when its result
   preserves the record's prefix evidence and doesn't guess a modifier side. An unsided
   modifier VK or conflicting prefix is loss of coverage, not a left-key make or break.
@@ -121,9 +122,15 @@ sequenceDiagram
 - **Resets.** An unreadable Raw Input record resets the gesture; a record known to be
   non-keyboard input does not. Device changes, observed keyboard-layout changes, session
   changes, desktop switches, suspend, overruns and Pause also reset it. On every decoded
-  left Ctrl or left Alt record (make, repeat, or break), the proxy calls
-  `GetForegroundWindow`, `GetWindowThreadProcessId`, and `GetKeyboardLayout` for the
-  foreground thread, if it can identify one. The deferred release checks sample again,
+  key record (make, repeat, or break), the proxy calls `GetForegroundWindow`,
+  `GetWindowThreadProcessId`, and `GetKeyboardLayout` for the foreground thread, if it can
+  identify one; a left Ctrl or left Alt record whose foreground can't be identified loses
+  coverage. The first record to see a new layout, even a release the adapter otherwise ignores,
+  and an explicit layout-change notice both reset the gesture and set a coverage boundary,
+  so a left make queued before that moment still needs its own break, while one queued after it
+  can re-arm. AltGr's right Alt, or the keys that switched the layout, usually see the switch
+  first, so a Ctrl + Alt hold after them re-arms; a left make that is itself the first to see it
+  resets and needs its own break. The deferred release checks sample again,
   so a layout change that changes back between samples can escape detection. The decoded
   tracker uses fixed storage; that doesn't bound the cost of the native queries. After coverage loss,
   overflow or registered Escape, shell-core cancels the chord. A modifier known down at reset
@@ -370,11 +377,20 @@ creates no file. Both need a shell built with the `gate-recorder` feature (see
   - `hold warm callback_qpc=<n>` when the shortcut's chord goes down and
     `hold recognized callback_qpc=<n>` when its 300 ms hold is recognised, each stamped with the
     native callback's QPC; the line's own QPC is when presence applied it
-  - `rearm ok` or `rearm refused check=unread|chord|foreground|layout` each time a blocked
-    shortcut tries to re-arm on a fresh Ctrl + Alt make: no key-state read came with the event,
-    a key other than the chord's was down, the foreground changed during the read, or the
-    event's layout is no longer the foreground's. No gate reads it; it says why a hold after a
-    reset never warmed
+  - one `rearm` line for each left Ctrl or left Alt make that can't count yet, so a hold that never
+    warms says why. No gate reads them:
+    - `rearm skipped check=reset` when the adapter turns the make into a reset, and
+      `rearm skipped check=break` when the make is dropped because its key still needs its own
+      break;
+    - while the shortcut waits to re-arm, `rearm skipped check=repeat` for a make with no fresh
+      queued press, `rearm pending` for a make that alone can't re-arm (the other key isn't down
+      yet, or this one already was), `rearm ok`, or `rearm refused check=unread|chord|foreground|layout`
+      when the recovery read refuses: no key-state read came with the event, a key other than the
+      chord's was down, the foreground changed during the read, or the event's layout is no longer
+      the foreground's
+  - `voice refused check=paused|link|ready` when a chord or hold can't start voice input: the
+    onboarding window is open, the link can't start a voice gesture, or voice wasn't ready before
+    both presses
   - `listening on` and `listening off`, as the line takes and leaves the Listening colour
   - `speech input ready=true|false`, from each speech state the brain sends
   - `input opened focused=true|false` and `input dismissed`
