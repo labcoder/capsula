@@ -1739,9 +1739,6 @@ pub fn prepare_first_light(
     events: Sender<LinkEvent>,
     at_ready: AtReady,
 ) -> std::io::Result<(LinkHandle, LinkStart)> {
-    if !platform::admits_first_light(kumochi_protocol::constants::ProductIdentity::ACTIVE) {
-        return Err(std::io::ErrorKind::Unsupported.into());
-    }
     prepare_with(
         events,
         AudioSession::Legacy,
@@ -1756,6 +1753,12 @@ fn prepare_with(
     relaunch: Relaunch,
     at_ready: Option<AtReady>,
 ) -> std::io::Result<(LinkHandle, LinkStart)> {
+    // A link that never relaunches is first light's, so it refuses before any worker elsewhere.
+    if relaunch == Relaunch::Never
+        && !platform::admits_first_light(kumochi_protocol::constants::ProductIdentity::ACTIVE)
+    {
+        return Err(std::io::ErrorKind::Unsupported.into());
+    }
     let exe = std::env::current_exe()?;
     // Before the bundle check, so a platform with no transport refuses as unsupported.
     let session = platform::session_id()?;
