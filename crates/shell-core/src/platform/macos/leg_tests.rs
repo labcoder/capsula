@@ -28,6 +28,8 @@ pub(in crate::platform::macos) const SECRET: [u8; SECRET_LEN] = [0x5A; SECRET_LE
 const BOUND: Duration = Duration::from_secs(10);
 const SHORT: Duration = Duration::from_millis(60);
 const GAP: Duration = Duration::from_millis(40);
+/// Slow enough that a trickled Settings frame finishes many seconds after any deadline here.
+const TRICKLE: Duration = Duration::from_millis(250);
 
 fn by() -> Instant {
     Instant::now() + BOUND
@@ -403,7 +405,8 @@ pub(in crate::platform::macos) enum Commit {
     Closes,
     Pings,
     Stalls,
-    /// Settings a byte at a time, each gap well inside any one transfer's bound.
+    /// Settings a byte at a time, each gap well inside any one transfer's bound; the brain fails
+    /// unless the shell closes its ends before the last byte.
     Trickles,
 }
 
@@ -480,12 +483,12 @@ pub(in crate::platform::macos) fn scripted(
                 Pipe::Control,
             )
             .expect("encodes");
-            for byte in brain.sealed(Pipe::Control, &settings) {
-                thread::sleep(GAP);
-                if brain.control.write_all(&[byte]).is_err() {
-                    break;
-                }
-            }
+            let wire = brain.sealed(Pipe::Control, &settings);
+            let whole = wire.iter().all(|byte| {
+                thread::sleep(TRICKLE);
+                brain.control.write_all(&[*byte]).is_ok()
+            });
+            assert!(!whole, "the shell gave up before the frame finished");
         }
         Commit::Stalls => {
             thread::sleep(deadline.saturating_duration_since(Instant::now()) + SHORT);
@@ -535,12 +538,17 @@ fn the_attempt_ends_at_its_deadline_while_waiting_for_settings() {
 fn the_settings_wait_ends_at_the_deadline_however_the_frame_trickles() {
     let deadline = Instant::now() + Duration::from_millis(700);
     let (result, brain) = attempt(AudioSession::Legacy, Commit::Trickles, deadline);
+    let ended = Instant::now();
     assert!(matches!(result, Err(LinkError::ConnectExpired)));
+    assert!(ended >= deadline, "waited for the deadline");
     assert!(
-        Instant::now() < deadline + Duration::from_millis(400),
-        "ended near the deadline, not when the frame finished"
+        ended < deadline + Duration::from_secs(5),
+        "ended near the deadline: {:?} after it",
+        ended - deadline
     );
-    brain.join().expect("the brain side finished");
+    brain
+        .join()
+        .expect("the shell gave up before the frame finished");
 }
 
 #[test]
