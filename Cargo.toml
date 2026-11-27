@@ -97,7 +97,7 @@ ring = { opt-level = 2 }
 memchr = { opt-level = 2 }
 postcard = { opt-level = 2 }
 base64 = { opt-level = 2 }
-# Spoken replies: at opt-level 0 a dev brain synthesizes speech at about 2.5x real time.
+# Spoken replies: at opt-level 0, CPU synthesis takes about 2.4 s per second of audio.
 ptts = { opt-level = 2 }
 xn = { opt-level = 2 }
 xn-gemm = { opt-level = 2 }
