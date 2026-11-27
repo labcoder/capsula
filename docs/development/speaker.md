@@ -151,7 +151,8 @@ Missing owner, backend startup failure and worker exit
 are reported to the pair's bridge, which supplies keyed Unavailable when there's no
 onset to preserve. An ordered Applied for the exact binding lets the bridge send
 Allow; only then can that assignment's PCM reach the worker. An unresolved assignment is
-not unassigned. The narrated adapter is fixture-only.
+not unassigned. A queued pair prepared as `Conducted` selects the adapter; the ordinary
+launcher prepares `Plain`.
 
 ## The output owner
 

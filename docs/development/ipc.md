@@ -136,7 +136,8 @@ while both slots are occupied; neither quiet nor a different run's marker releas
 the predecessor. For a natural end, the exact data `RunEnd` and settled drawing binding
 release the single narration slot for the next reply. That releases the audio binding, not an
 already installed frame or its outstanding paint receipt. Decision receipts remain on the
-control pipe. There is no production selector for the narrated adapter.
+control pipe. Link preparation takes the narration mode explicitly; the ordinary launcher
+prepares `Plain` on its Legacy session, so it never selects the narrated adapter.
 
 ## Voice-only hold messages
 

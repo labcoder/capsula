@@ -2591,6 +2591,52 @@ fn queued_owner_refuses_turns_and_ends_both_pipes_on_withdrawal() {
 }
 
 #[test]
+fn prepared_queued_pairs_register_the_selected_narration() {
+    use kumochi_protocol::message::Narration;
+
+    for (label, narration) in [
+        ("prepared-plain", Narration::Plain),
+        ("prepared-conducted", Narration::Conducted),
+    ] {
+        let (prepared, _unstarted) = super::prepare(
+            async_channel::unbounded().0,
+            super::AudioSession::QueuedRequired,
+            narration,
+        )
+        .expect("prepare without starting the stock connector");
+        let link = attended_queued_shared(label, Arc::clone(&prepared.shared));
+        let events = patient(link.events);
+        let session = connected(next(&events));
+        assert_eq!(
+            session.has_narration(),
+            narration == Narration::Conducted,
+            "only a conducted session owns a narration bridge"
+        );
+        frame::write(
+            &mut &link.control,
+            &ControlToShell::Settings {
+                view: settings_view(),
+                answer: false,
+            },
+            Pipe::Control,
+        )
+        .expect("silent settings sent");
+        let Some(ControlToBrain::QueuedAudioOutput(24_000, output, declared)) =
+            frame::read(&mut &link.control, Pipe::Control).expect("read queued registration")
+        else {
+            panic!("the pair registers its 24 kHz queued output");
+        };
+        assert_eq!(
+            declared, narration,
+            "registration carries the selected mode"
+        );
+        acknowledge_queued(&link.control, output);
+        drop(link.control);
+        assert!(link.link.join().expect("the link joined"), "pair retired");
+    }
+}
+
+#[test]
 fn queued_owner_start_deadline_is_not_extended_by_control_traffic() {
     let start = Instant::now();
     let link = attended_queued("queued-owner-deadline");

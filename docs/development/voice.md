@@ -353,7 +353,8 @@ sequenceDiagram
   the dispatch even if unload already moved its TTS generation, and ends the reply's remaining
   narration with ordered empty finals. Earlier audio and the text reply continue.
   An empty final releases its own picture to authored timing without claiming it was heard.
-  This fences late output but does not interrupt a blocked native call. Conducted output stays off.
+  This fences late output but does not interrupt a blocked native call. The ordinary launcher
+  prepares `Plain`, so conducted output stays off.
 - **Draining.** When the engine finishes, the reply closes. The run ends `done` only once its
   speech is final, so it can sit finished with its speech still playing; see
   [runs.md](runs.md#draining-a-spoken-run).

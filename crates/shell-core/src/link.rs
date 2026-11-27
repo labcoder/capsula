@@ -20,7 +20,7 @@ use kumochi_protocol::frame::{self, FrameError, Pipe};
 use kumochi_protocol::message::{
     AccountView, AudioSession, ConnectionsView, ControlToBrain, ControlToShell, DataToBrain,
     DataToShell, Deleted, ErrorKey, GestureId, GitHubView, HoldStatus, Incarnation, IssueSession,
-    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Phase, RunId, RunOrigin, SceneDescriptor,
+    MAX_PENDING_TURNS, MAX_VISIBLE_SCENES, Narration, Phase, RunId, RunOrigin, SceneDescriptor,
     SceneDescriptorV1, SettingsOp, SettingsView, ShellTuning, TextMetricsV1, ThreadId, ThreadOp,
     UserError,
 };
@@ -1655,13 +1655,14 @@ pub struct DrawingText {
 }
 
 /// Prepares the link. It reports on `events` once started, and ends when the UI drops the
-/// receiver or the user quits.
+/// receiver or the user quits. Only queued pairs use the selected narration mode.
 ///
 /// # Errors
 /// Fails when the shell can't find its own path or session.
 pub fn prepare(
     events: Sender<LinkEvent>,
     audio: AudioSession,
+    narration: Narration,
 ) -> std::io::Result<(LinkHandle, LinkStart)> {
     let exe = std::env::current_exe()?;
     // Before the bundle check, so a platform with no transport refuses as unsupported.
@@ -1670,7 +1671,10 @@ pub fn prepare(
         brain: platform::brain_path(&exe)?,
         session,
         audio,
-        shared: Arc::new(Shared::default()),
+        shared: Arc::new(Shared {
+            narrated: narration == Narration::Conducted,
+            ..Shared::default()
+        }),
     };
     Ok(start(link, events))
 }

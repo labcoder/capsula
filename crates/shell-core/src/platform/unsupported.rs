@@ -84,7 +84,11 @@ mod tests {
             assert_eq!(session_id().unwrap_err().kind(), unsupported);
             let (events, _) = async_channel::unbounded();
             assert!(matches!(
-                crate::link::prepare(events, kumochi_protocol::message::AudioSession::Legacy),
+                crate::link::prepare(
+                events,
+                kumochi_protocol::message::AudioSession::Legacy,
+                kumochi_protocol::message::Narration::Plain,
+            ),
                 Err(error) if error.kind() == unsupported
             ));
             assert_eq!(PipeClient::open("unused").unwrap_err().kind(), unsupported);
