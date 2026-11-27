@@ -159,9 +159,13 @@ Hiding or removing the exact active reply's thread ends its control side, but th
 waits for the reply's data end and any speaking quiet receipt before allowing a change.
 When successful Spoken Replies setup supplies the default (On for an unset preference),
 a queued pair opened Off gets the tagged `SpokenRepliesDefaulted` snapshot instead of an
-ordinary Settings change. It still speaks no new replies until its next ordinary connection,
-while the setting shows what was saved. That snapshot doesn't answer any queued preference
-write. An explicit Off still saves normally and clears the difference without re-registering.
+ordinary Settings change. While the Voice tab shows the restart note, presence offers that pair
+an explicit On save whenever the pair may be idle: after the snapshot, a voice view, a hold
+status or a `RunEnd`. A busy pair refuses the offer silently and the next of those offers it
+again; once accepted, its answer reconnects the pair in the saved mode, so the next reply speaks
+without a restart. Until then the pair speaks no new replies, while the setting shows what was
+saved. Presence offers this save at most once per pair. That snapshot doesn't answer any queued
+preference write. An explicit Off still saves normally and clears the difference without re-registering.
 The registered mode still governs hold release. An explicit On racing the default only
 reconnects if its own write succeeds; an On snapshot after a refusal reflects the default.
 If the pair drops with an Off save pending, its replacement waits for that save before

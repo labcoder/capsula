@@ -109,7 +109,10 @@ impl Presence {
                     generation,
                     gesture,
                     status,
-                } => self.voice_status(generation, gesture, status, cx),
+                } => {
+                    self.voice_status(generation, gesture, status, cx);
+                    self.hear_deferred_talk_back(cx);
+                }
                 LinkEvent::SpokenRepliesDefaulted { generation, view } => {
                     self.settings_changed(generation, view, Update::SpokenRepliesDefaulted, cx);
                 }
@@ -122,6 +125,7 @@ impl Presence {
                             cx.notify();
                         }
                     });
+                    self.hear_deferred_talk_back(cx);
                 }
                 LinkEvent::CaptureDone {
                     generation,
@@ -501,6 +505,7 @@ impl Presence {
         {
             if let DataToShell::RunEnd { run } = &message {
                 self.voice.state.input_ended(*run);
+                self.hear_deferred_talk_back(cx);
             }
             let credit = match message {
                 DataToShell::IssueReview { request, card } => {
@@ -638,6 +643,20 @@ impl Presence {
         if let Err(error) = self.onboarding_changed(cx) {
             tracing::error!(%error, "can't show onboarding");
         }
+        self.hear_deferred_talk_back(cx);
+    }
+
+    /// Replaces a pair that opened Off before Spoken Replies set the default, once it's idle.
+    fn hear_deferred_talk_back(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let link = &self.link;
+        self.settings.update(cx, |state, cx| {
+            if state.send_deferred_talk_back(|| link.send_talk_back(session, true)) {
+                cx.notify();
+            }
+        });
     }
 
     /// Shows the brain's error in both panels and on the connected dock.

@@ -689,6 +689,56 @@ fn only_the_current_pair_shows_deferred_saved_talk_back_without_settling_prefere
 }
 
 #[test]
+fn a_deferred_default_offers_on_until_one_send_is_accepted() {
+    use crate::link::output::Denied;
+    use kumochi_protocol::message::ControlToBrain;
+
+    let mut state = connected();
+    let mut sent = Vec::new();
+    let mut offer = |state: &mut Settings, result: Result<(), Denied>| {
+        state.send_deferred_talk_back(|| {
+            sent.push(ControlToBrain::Settings(SettingsOp::SetTalkBack(true)));
+            result
+        })
+    };
+    assert!(!offer(&mut state, Ok(())), "no default to hear");
+    let mut on = saved(SttUnload::Kept);
+    on.talk_back = true;
+    assert!(state.receive(Some(7), 7, on, Update::SpokenRepliesDefaulted));
+    assert!(
+        !offer(&mut state, Ok(())),
+        "spoken replies aren't ready yet"
+    );
+    assert!(state.receive_voice(
+        Some(7),
+        7,
+        VoiceView {
+            speech_input: PartState::Ready,
+            spoken_replies: PartState::Ready,
+        }
+    ));
+    assert!(!offer(&mut state, Err(Denied::Busy)));
+    assert!(
+        state.talk_back_restart_needed(),
+        "a busy pair is offered again"
+    );
+    assert_eq!(
+        state.talk_back_send_error(),
+        None,
+        "a busy offer shows nothing"
+    );
+    assert!(offer(&mut state, Ok(())));
+    assert!(state.talk_back_pending());
+    assert!(!state.talk_back_restart_needed());
+    assert!(!offer(&mut state, Ok(())), "one accepted offer per pair");
+    assert_eq!(
+        sent.len(),
+        2,
+        "the refused offer and the accepted one were each sent once"
+    );
+}
+
+#[test]
 fn show_screen_waits_for_its_own_answer_and_a_refusal_restores_the_saved_choice() {
     let mut saved = saved(SttUnload::Kept);
     saved.screen_holds = false;

@@ -412,6 +412,80 @@ fn speak_answers_aloud_saves_and_restores_the_authoritative_choice(cx: &mut Test
 }
 
 #[gpui::test]
+fn an_idle_pair_opened_off_asks_to_speak_once_spoken_replies_set_the_default(
+    cx: &mut TestAppContext,
+) {
+    use crate::link::{Batch, LinkEvent, Session};
+    use kumochi_protocol::message::{ControlToBrain, Incarnation, SettingsOp};
+
+    let (_window, view) = open(cx);
+    let owner = crate::presence::test_fixture::presence(cx);
+    let controls = view.update(cx, |view, cx| {
+        view.owner = owner.downgrade();
+        owner.update(cx, |owner, _| {
+            owner.settings = view.model.clone();
+            owner.session = Some(Session::detached(7, Incarnation(1)));
+            owner.link.record_controls()
+        })
+    });
+    let mut saved = view.read_with(cx, |view, cx| view.model.read(cx).view().unwrap().clone());
+    saved.talk_back = false;
+    let ready = || LinkEvent::Voice {
+        generation: 7,
+        view: VoiceView {
+            speech_input: PartState::Ready,
+            spoken_replies: PartState::Ready,
+        },
+    };
+    let apply = |events, cx: &mut TestAppContext| {
+        owner.update(cx, |owner, cx| {
+            owner.link_events(Batch::Plain(events), cx).unwrap();
+        });
+    };
+    apply(
+        vec![
+            LinkEvent::Settings {
+                generation: 7,
+                view: saved.clone(),
+                answer: false,
+            },
+            ready(),
+        ],
+        cx,
+    );
+    let talk_back = ControlToBrain::Settings(SettingsOp::SetTalkBack(true));
+    assert!(
+        std::iter::from_fn(|| controls.try_recv().ok()).all(|sent| sent != talk_back),
+        "an Off pair without the default asks for nothing"
+    );
+
+    saved.talk_back = true;
+    apply(
+        vec![LinkEvent::SpokenRepliesDefaulted {
+            generation: 7,
+            view: saved,
+        }],
+        cx,
+    );
+    let sent: Vec<_> = std::iter::from_fn(|| controls.try_recv().ok()).collect();
+    assert_eq!(
+        sent.iter().filter(|sent| **sent == talk_back).count(),
+        1,
+        "the idle pair saves On again so its answer reconnects it speaking"
+    );
+    owner.read_with(cx, |owner, cx| {
+        let settings = owner.settings.read(cx);
+        assert!(settings.talk_back_pending());
+        assert!(!settings.talk_back_restart_needed());
+    });
+    apply(vec![ready()], cx);
+    assert!(
+        std::iter::from_fn(|| controls.try_recv().ok()).all(|sent| sent != talk_back),
+        "one offer per pair"
+    );
+}
+
+#[gpui::test]
 fn hold_to_talk_is_keyboard_operable_and_waits_for_the_saved_answer(cx: &mut TestAppContext) {
     use crate::link::{Batch, LinkEvent, Session};
     use kumochi_protocol::message::{ControlToBrain, Incarnation, SettingsOp};
