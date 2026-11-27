@@ -57,13 +57,13 @@ fn retried(runs: &mut Runs, run: u64) -> Option<DataToBrain> {
     sent
 }
 
-fn ask(turn: u32) -> Option<DataToBrain> {
-    Some(DataToBrain::TextSubmit {
+fn ask(turn: u32) -> DataToBrain {
+    DataToBrain::TextSubmit {
         turn,
         screen: ScreenChoice::None,
         thread: Some(ThreadId(1)),
         text: ASK.into(),
-    })
+    }
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn retry_after_no_drawing_resends_the_exact_turn_and_a_drawn_retry_ends_it() {
     let mut runs = asked();
     assert_eq!(drew_nothing(&mut runs, 1, 1), [Action::Retry]);
     assert!(runs.retry_ready(RunId(1)));
-    assert_eq!(retried(&mut runs, 1), ask(2));
+    assert_eq!(retried(&mut runs, 1), Some(ask(2)));
     assert_eq!(retried(&mut runs, 1), None);
 
     state(&mut runs, 2, 2, Phase::Thinking, None);
@@ -84,16 +84,16 @@ fn retry_after_no_drawing_resends_the_exact_turn_and_a_drawn_retry_ends_it() {
 fn a_retry_that_draws_nothing_again_offers_retry_again() {
     let mut runs = asked();
     drew_nothing(&mut runs, 1, 1);
-    assert_eq!(retried(&mut runs, 1), ask(2));
+    assert_eq!(retried(&mut runs, 1), Some(ask(2)));
     assert_eq!(drew_nothing(&mut runs, 2, 2), [Action::Retry]);
-    assert_eq!(retried(&mut runs, 2), ask(3));
+    assert_eq!(retried(&mut runs, 2), Some(ask(3)));
 }
 
 #[test]
 fn esc_stops_a_retried_run_like_any_other_and_its_late_notice_offers_nothing() {
     let mut runs = asked();
     drew_nothing(&mut runs, 1, 1);
-    assert_eq!(retried(&mut runs, 1), ask(2));
+    assert_eq!(retried(&mut runs, 1), Some(ask(2)));
     state(&mut runs, 2, 2, Phase::Thinking, None);
     assert_eq!(
         runs.stop(),
@@ -126,12 +126,12 @@ fn esc_or_a_spoken_stop_withdraws_an_offered_retry() {
 fn a_retried_run_that_fails_gets_the_failed_runs_retry() {
     let mut runs = asked();
     drew_nothing(&mut runs, 1, 1);
-    assert_eq!(retried(&mut runs, 1), ask(2));
+    assert_eq!(retried(&mut runs, 1), Some(ask(2)));
     state(&mut runs, 2, 2, Phase::Thinking, None);
-    let offline = UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry])
-        .expect("bounded");
+    let offline =
+        UserError::new(ErrorKey::AccountOffline, Vec::new(), vec![Action::Retry]).expect("bounded");
     state(&mut runs, 2, 2, Phase::Failed, Some(offline));
-    assert_eq!(retried(&mut runs, 2), ask(3));
+    assert_eq!(retried(&mut runs, 2), Some(ask(3)));
 }
 
 #[test]

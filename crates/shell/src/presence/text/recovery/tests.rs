@@ -335,7 +335,9 @@ fn a_drawing_that_never_came_back_offers_a_retry_button_for_the_typed_turn(
     cx: &mut TestAppContext,
 ) {
     let (owner, data, _control) = ready(cx);
-    let window = owner.update(cx, |owner, _| owner.text.as_ref().expect("typing fixture").window);
+    let window = owner.update(cx, |owner, _| {
+        owner.text.as_ref().expect("typing fixture").window
+    });
     draft(&owner, "draw retry", cx);
     owner.update(cx, |owner, cx| owner.submit(cx).expect("original turn"));
     data.try_recv().expect("original turn");

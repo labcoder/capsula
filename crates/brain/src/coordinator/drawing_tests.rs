@@ -2363,7 +2363,9 @@ fn a_finished_run_whose_draw_calls_committed_no_step_says_so_once() {
         assert_eq!(not_returned(&effects), 1);
         let at = |done: bool| {
             effects.iter().position(|effect| match effect {
-                Effect::Control(ControlToShell::DrawingNotReturned { run, .. }) => !done && *run == R,
+                Effect::Control(ControlToShell::DrawingNotReturned { run, .. }) => {
+                    !done && *run == R
+                }
                 Effect::Control(ControlToShell::RunState { run, phase, .. }) => {
                     done && *run == R && *phase == Phase::Done
                 }
