@@ -1125,16 +1125,14 @@ fn a_turn_carries_the_saved_local_intent_to_the_store() {
             text: "b".into(),
         })
         .expect("turn");
-    assert!(
-        matches!(
-            effects.first(),
-            Some(Effect::Store(StoreOp::BeginTurn {
-                local_default: true,
-                ..
-            }))
-        ),
-        "{effects:?}"
-    );
+    let carried: Vec<bool> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Store(StoreOp::BeginTurn { local_default, .. }) => Some(*local_default),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(carried, vec![true]);
 }
 
 #[test]

@@ -36,6 +36,30 @@ fn a_local_thread_model_is_refused_without_a_write() {
     );
 }
 
+/// While a local default is saved, a cloud model for a thread is answered unapplied too, so a
+/// thread that inherits the local route keeps it.
+#[test]
+fn a_saved_local_default_keeps_every_thread_route() {
+    let mut core = fresh();
+    core.local_default = true;
+    let choice = ModelChoice {
+        model: ModelSlug::new("gpt-6.1-sol").expect("valid"),
+        effort: Effort::Medium,
+        connection: kumochi_protocol::message::ConnectionKind::ChatGpt,
+    };
+    assert_eq!(
+        core.handle(Input::ThreadOp(ThreadOp::SetModel {
+            thread: T,
+            choice: choice.clone(),
+        })),
+        Ok(vec![Effect::Control(ControlToShell::ThreadModelSet {
+            thread: T,
+            choice,
+            applied: false,
+        })])
+    );
+}
+
 #[test]
 fn model_results_echo_the_exact_write_and_refusals_have_an_answer() {
     let mut core = fresh();

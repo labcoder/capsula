@@ -20,9 +20,11 @@ impl Coordinator {
                 source: TitleSource::User,
                 job: None,
             },
-            // No build serves a local server yet, so none is saved as a thread's route.
+            // No build serves a local server yet, so none is saved as a thread's route, and while a
+            // local default is saved no thread's route changes: one that inherits it stays local.
             ThreadOp::SetModel { thread, choice }
-                if choice.connection == kumochi_protocol::message::ConnectionKind::LocalChat =>
+                if choice.connection == kumochi_protocol::message::ConnectionKind::LocalChat
+                    || self.local_default =>
             {
                 effects.push(Effect::Control(
                     kumochi_protocol::message::ControlToShell::ThreadModelSet {
