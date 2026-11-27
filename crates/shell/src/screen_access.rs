@@ -3,7 +3,7 @@
 //! its dialog shows and when a grant takes effect; nothing here grants or starts capture.
 
 use gpui_kit::component::{
-    ActiveTheme as _,
+    ActiveTheme as _, Disableable as _,
     button::{Button, ButtonVariants as _},
 };
 use gpui_kit::{
@@ -45,6 +45,12 @@ impl Access {
     /// Takes macOS's nonprompting answer.
     fn recheck(&mut self, preflight: impl FnOnce() -> bool) {
         self.granted = preflight();
+    }
+
+    /// The request button: gone once access is granted, and disabled, not hidden, once this launch
+    /// has asked, so the reason beside it stays readable.
+    fn request_enabled(self) -> Option<bool> {
+        (!self.granted).then_some(!self.requested)
     }
 
     /// Asks only for a separate press in the active window, and at most once per launch.
@@ -108,7 +114,8 @@ impl ScreenAccess {
 
 impl Render for ScreenAccess {
     fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let Access { granted, requested } = *cx.global::<Access>();
+        let access = *cx.global::<Access>();
+        let Access { granted, requested } = access;
         let strings = cx.global::<Strings>();
         let title = strings.get(Text::ScreenAccessTitle);
         let status = if granted {
@@ -128,22 +135,23 @@ impl Render for ScreenAccess {
         let path = strings.get(Text::ScreenAccessPath);
 
         let mut actions = div().flex().flex_col().gap_2();
-        if !granted {
-            let mut open = Button::new("screen-access-settings")
+        if let Some(enabled) = access.request_enabled() {
+            let request = Button::new("screen-access-request")
+                .label(request)
+                .disabled(!enabled)
+                .on_click(cx.listener(Self::press));
+            let open = Button::new("screen-access-settings")
                 .label(settings)
                 .on_click(cx.listener(|_, _, _, cx| cx.open_url(SETTINGS_URL)));
-            if requested {
-                open = open.primary();
+            let (request, open) = if enabled {
+                (request.primary(), open.outline())
             } else {
-                actions = actions.child(
-                    Button::new("screen-access-request")
-                        .label(request)
-                        .primary()
-                        .on_click(cx.listener(Self::press)),
-                );
-                open = open.outline();
-            }
-            actions = actions.child(open).child(div().text_sm().child(path));
+                (request.outline(), open.primary())
+            };
+            actions = actions
+                .child(request)
+                .child(open)
+                .child(div().text_sm().child(path));
         }
 
         div()
@@ -215,6 +223,28 @@ mod tests {
         assert_eq!(access.press(|| false, &press, never), Press::Ignored);
         access.recheck(|| true);
         assert!(access.granted, "a later nonprompting grant is taken");
+    }
+
+    #[test]
+    fn the_request_button_stays_disabled_after_the_one_request() {
+        let mut access = Access::default();
+        assert_eq!(access.request_enabled(), Some(true));
+        assert_eq!(
+            access.press(|| true, &ClickEvent::default(), || false),
+            Press::Requested
+        );
+        access.recheck(|| false);
+        assert_eq!(
+            access.request_enabled(),
+            Some(false),
+            "a refused request keeps the button, disabled"
+        );
+        access.recheck(|| true);
+        assert_eq!(
+            access.request_enabled(),
+            None,
+            "granted access needs no button"
+        );
     }
 
     #[test]

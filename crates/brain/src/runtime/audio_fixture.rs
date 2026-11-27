@@ -686,6 +686,7 @@ pub(crate) async fn brain(dir: &Path, script: &str, tone_chunks: usize) -> Brain
         Box::new(move || {
             Vault::with_lock(
                 Offline,
+                None,
                 "test-accounts",
                 Arc::clone(&held),
                 crate::connections::authority::Missing::Create,

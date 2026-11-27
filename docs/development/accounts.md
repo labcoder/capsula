@@ -150,6 +150,18 @@ candidate's names too, without logging contents or retiring its row.
 Failed deletes wait for the next begin or open. Remove consumes admission and
 the permit even if its commit fails, so a late notification cannot adopt it.
 
+Each generation's row records which store holds its chunks, in the transaction
+that mints it (schema version 5; version 4 was the removed repair schema and is
+still refused as newer). A paste plan minted at version 5 is `staging`; every
+other generation, earlier versions' rows and the adopted key's fresh names
+included, is `private`. The file refuses a staging
+row that is active or isn't an Anthropic key, and the authority refuses one no
+key's length fits. The paste plan's settle read, its deletes after a failed
+adoption or Remove, and both the delete and the read-back when a retired paste
+is swept use the staging store. Candidate writes, active reads, predecessors
+and legacy names stay private. On Windows both are the same Credential Manager
+store; a refused staging store never falls back to the private one.
+
 A lost notification or failed operation leaves Pending until another begin
 or the next open retires it. Startup never resumes a paste. A shell write can
 outlive a brain restart, including the later lifetime that marks its generation
@@ -176,6 +188,16 @@ open. The pass repeats at each open until a clean pass in any open after the fir
 it, recorded in credentials.db's `control` row; after that each open deletes only the
 legacy staging name as defense against earlier writers. Anyone signed in on an earlier build sees Signed out and
 connects again, and the revocations it still owed are dropped unsent.
+
+A macOS `first-light` brain replaces that deletion pass in its store, so the shared vault is
+unchanged. Its parent-bound preflight, once the pair is authenticated and before any store or
+account opens, checks each of the 262 names by exact selector with a no-UI context and status
+alone, never asking for data or attributes back, and asks the start's `live` check (parent,
+session, clock) before each one. Only `errSecItemNotFound` is absence. A present item or any
+other answer refuses with `CredentialStoreError::Legacy`, which the start answers as `Busy` (75).
+A no from `live` refuses too, but the start answers an observed cancellation as `Refused` (76),
+and it asks `live` again once the check returns. The first answer is latched for the process. Admitting the store for the vault reads that latch, and the vault's
+deletes of those names are answered by it and never made.
 
 Instance capabilities use keyring instead: `instance_entry(session)` formats the account
 `capability-<u32>` with the session ID in decimal.

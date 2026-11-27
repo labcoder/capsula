@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result, ensure};
 
 /// The crates the core may depend on directly, dev-dependencies included. A change that gives
 /// the core a dependency adds it here, so the new line is reviewed.
-const DEPENDENCIES: [&str; 19] = [
+const DEPENDENCIES: [&str; 23] = [
     "arc-swap",
     "async-channel",
     "cpal",
@@ -24,6 +24,10 @@ const DEPENDENCIES: [&str; 19] = [
     "kumochi-session",
     "kumochi-storage",
     "libc",
+    "objc2",
+    "objc2-avf-audio",
+    "objc2-core-audio",
+    "objc2-core-audio-types",
     "thiserror",
     "tracing",
     "tracing-appender",

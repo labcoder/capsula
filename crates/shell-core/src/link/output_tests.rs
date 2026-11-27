@@ -220,7 +220,7 @@ fn parked(
     held: mpsc::Receiver<()>,
 ) -> impl FnOnce(
     &Generation,
-    &AtomicBool,
+    &Arc<AtomicBool>,
     &async_channel::Sender<Running>,
     &async_channel::Sender<MicPcm>,
 ) -> Result<Finalization, MicError>

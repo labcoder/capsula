@@ -17,10 +17,12 @@ pub use platform::Untrusted;
 #[cfg(target_os = "macos")]
 pub use platform::macos::{
     AcquisitionError, AdmittedLock, AdmittedLog, ApplicationSupportError, HeldFolder, INSTANCE_LEN,
-    InstanceItem, ItemError, ItemQuery, Op, Product, ProductFolder, Retention, Role,
-    SettingsWriteError, ShellStorage, Support, admit_support, application_support_dir,
-    check_product_folder, hold_chain, instance_edition, open_shell_storage, owner_only_dir,
-    private_tree, read_settings, replace_settings, status,
+    InstanceItem, ItemError, ItemQuery, Op, Product, ProductFolder, Retention, Role, Seal,
+    SettingsWriteError, ShellStorage, Support, admit_support, application_support_dir, check_named,
+    check_product_folder, create_private_dir, create_private_file, discard_entry, hold_chain,
+    hold_private_chain, instance_edition, keep_sealed, open_private_write, open_sealed,
+    open_shell_storage, owner_only_dir, private_tree, read_settings, remove_private_tree,
+    replace_settings, seal_and_publish, status, validate_private_path,
 };
 #[cfg(windows)]
 pub use platform::windows::{

@@ -16,8 +16,8 @@ inherited environment is a fallback.
 
 The brain's launch mode is a lifetime contract. Windows supports **Detached**, in which the brain
 outlives its shell. **ParentBound** means the shell starts the brain with an inherited pair and
-owns its lifetime; no platform supports it yet, including under Gate identity. macOS and Linux
-support neither mode. The executable and the library's brain, parent-bound, bridge, screen and
+owns its lifetime; only a macOS build with the brain's `first-light` Cargo feature supports it,
+and only as the Dev edition. Every other macOS build, and Linux, supports neither mode. The executable and the library's brain, parent-bound, bridge, screen and
 speech entries check the same platform support table before starting anything. The executable
 exits 69 for an unsupported mode without initializing logs, creating a runtime or touching app
 data. The detached launcher doesn't observe that status.
@@ -29,12 +29,13 @@ the normal brain. The bridge consumes one launch argument and ignores the rest; 
 invalid launch fails rather than starting the brain. The other workers and diagnostics ignore the
 entire tail. Recognized debug diagnostics still exit 10 on a supported release build.
 
-A ParentBound start checks, in order, the support table, Gate identity (refused, 69) and then
-descriptors 3 and 4. The executable's own platform module (`main/platform.rs`) takes them as
+A ParentBound start checks, in order, the support table, the Dev identity (Gate and Release are
+refused with 69, since their names reach other editions' data; the feature is a build switch, not
+admission) and then descriptors 3 and 4. The executable's own platform module (`main/platform.rs`) takes them as
 owned handles only when both are open, before anything else in the process can open a
 descriptor, and refuses with 76 otherwise; it never closes or scans other descriptors, since the
 shell spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`. The library entry, `run_parent_bound`, takes
-those handles as `InheritedFds` and repeats the mode and Gate checks before it reads them, so a
+those handles as `InheritedFds` and repeats the mode and identity checks before it reads them, so a
 refused call drops them unread and the shell sees EOF. Past those checks it starts the admission
 clock and hardens the process: `/` as the working folder and core dumps off, soft and hard limits
 both 0. Then it adopts the pair, arms the parent watch and runs the parent-bound root
@@ -44,13 +45,16 @@ executable maps it to a code:
 | Result | Exit |
 |---|---|
 | A clean, confirmed quit | 0 |
-| `Unsupported`: the mode, Gate identity or missing prerequisites | 69 |
+| `Unsupported`: the mode, an identity other than Dev, or missing prerequisites | 69 |
 | `Incomplete`: a settlement stage short of confirmed | 70 |
-| `Busy`: another session holds the instance | 75, `BRAIN_EXIT_BUSY`, shared with the shell |
+| `Busy`: another session holds the instance, or first light's legacy stop | 75, `BRAIN_EXIT_BUSY`, shared with the shell |
 | `Refused`: the descriptors, hardening, the parent, the pair, the greeting, the commit claim, or serving that ended other than by a Quit | 76 |
 
-Detached keeps 75 for a busy profile. Today every ParentBound start still exits 69 at the support
-check; past it, this build's prerequisites would refuse with 69 after admission.
+Detached keeps 75 for a busy profile. Without the feature every ParentBound start exits 69 at the
+support check. A `first-light` Dev build with no pair exits 76 and touches nothing; with a pair it
+goes through the parent, custody (which refuses an existing root with 76), the item's
+entitlement, the handshake, the commit claim, the legacy preflight (75 when a name may be there)
+and first light's prerequisites (architecture.md, "Parent-bound startup").
 
 Argument matching uses OS strings without logging them. Non-Unicode input no longer panics: a
 non-Unicode first argument falls through like an unknown flag; a non-Unicode bridge launch is
@@ -59,8 +63,9 @@ already ignored is still ignored. The executable name isn't parsed.
 
 The brain's platform module assembles native workers. On Windows it retries pending voice-model
 removals before creating the brain Job, then attaches voice and Claude Code before shared startup
-starts the screen worker and publishes the capability. Without native containment, worker
-assembly refuses; it does not fall back to uncontained workers.
+starts the screen worker and publishes the capability. Worker assembly refuses, before any removal,
+unless the mode's containment is runtime-enabled at Kernel; Group isn't enough, and it never falls
+back to uncontained workers.
 
 ## Containment tiers
 
@@ -69,12 +74,13 @@ establish custody of any particular process. Windows Detached is runtime-enabled
 helpers join a Job from creation, and closing the last Job handle ends its contents. Existing
 Windows jobs, nesting, and bridge peer checks are unchanged.
 
-macOS ParentBound is staged at **Group**, only for the fixed shell-to-brain launch. The shell uses
+macOS ParentBound is **Group**, only for the fixed shell-to-brain launch: runtime-enabled in a
+`first-light` build, staged otherwise. The shell uses
 `posix_spawn` with `POSIX_SPAWN_SETSID` and closed-by-default descriptors. That puts the child
 in a private session and process group from creation; the shell holds the exact child, and the
 brain watches its original parent. A headless fixture combines both owners: it observes a latched
 parent loss, checks that the brain cannot claim admission, and witnesses its cooperative exit.
-Neither macOS runtime mode nor any macOS helper launch is enabled by this tier.
+No macOS helper launch is enabled by this tier: first light starts no helper.
 
 On normal exit the shell reaps the exact child without signalling the group. When forced
 retirement is needed, it may signal the group once while it still owns the unreaped leader; a
@@ -193,11 +199,14 @@ closing that lane is unavailability, never an exit receipt.
 
 ## The shell's brain child (ParentBound, dormant)
 
-Under ParentBound the shell will start the brain as its own child and own its lifetime. The
+Under ParentBound the shell starts the brain as its own child and owns its lifetime. The
 custody rules live in shared code (`shell-core/platform/child.rs`), so every platform tests them
 against a scripted child; macOS supplies the system calls (`platform/macos/child.rs`):
 `posix_spawn` with an empty environment, an exact-pid `waitpid(WNOHANG)`, SIGKILL, and a read of
-SIGCHLD's disposition. Nothing starts a child yet, and Windows has none.
+SIGCHLD's disposition. On macOS the link's attempts go through `platform::connect` to
+`connect_pair`, which returns the child's owner with the connection; Windows and Linux keep
+`connect_brain` and get no owner. Nothing reaches the link on macOS yet: the Mac shell opens only
+the disconnected window, so no child starts.
 
 - **What the child inherits.** `start_brain` makes the two socket pairs (`platform/macos/pair.rs`)
   and spawns the brain with `--parent-bound` as its only argument, an empty environment and
@@ -221,7 +230,9 @@ SIGCHLD's disposition. Nothing starts a child yet, and Windows has none.
 - **One owner.** A `ChildOwner` thread exists before the spawn, spawns on itself and is the only
   code in the shell that waits on, signals or reaps the brain. The UI never blocks on it. It polls
   every 20 ms; that's a poll period, not a scheduling bound, so each deadline is acted on at the
-  first poll at or after it.
+  first poll at or after it. The kill is `killpg` on the private session the spawn created, after
+  an exact-pid `waitid(P_PID, WEXITED | WNOHANG | WNOWAIT)` peek that reaps nothing
+  (`platform/unix/brain_group.rs`), not a plain SIGKILL to the pid.
 - **What a wait means.** Only an exit or a signal is a reap. Any other status, such as a traced
   stop, which Darwin can report without `WUNTRACED`, counts as alive. An interrupted wait is
   retried. Any other error is **Lost**: custody is gone, never success, and the child is never
@@ -235,13 +246,54 @@ SIGCHLD's disposition. Nothing starts a child yet, and Windows has none.
   the link drops the owner, the owner waits for the child to exit, then sends one SIGKILL and
   waits once more. A failed kill isn't retried. A child still unreaped after that is
   **Unsettled**: it's reported once, the claim stays taken so nothing replaces it, and the owner
-  keeps reaping it quietly while the shell lives.
+  keeps reaping it quietly while the shell lives. A kill is admitted only while custody has no
+  outcome, the watchdog's Unsettled included. Only the admission is checked, right before the
+  signal, so a kill admitted before Unsettled can still land after it, on the same retained PID.
+  The owner never holds the shell's ends of the
+  pair, only the child's until the spawn: the link closes its own ends when the connection ends
+  (aborted for Legacy, dropped for Queued), so the brain sees EOF before it's retired.
+- **Settling.** `ChildOwner::settle` retires the child and waits for how custody ended, no longer
+  than the owner's two waits and two polls plus 1 s; no answer by then, or an owner thread that's
+  gone, is **Unsettled**. The link settles a child once its connection ends, and a failed attempt
+  settles before it returns, so the next attempt runs only after that. Only a reap frees the spawn
+  claim, so a replacement starts only after its predecessor is reaped, and after Lost or
+  Unsettled every later attempt, Retry included, is refused before any spawn.
+- **Busy.** A brain whose instance another session of this user holds exits with
+  `BRAIN_EXIT_BUSY` (75) before READY. An attempt whose child settles that way is `Busy`; any other
+  exit keeps the attempt's own error. The shell never signals another session's brain. Busy is a
+  failed connect like any other: Failed, then the user's Retry, one spawn per attempt.
 - **Preconditions.** Before the spawn and before the signal the owner checks that SIGCHLD isn't
   ignored and `SA_NOCLDWAIT` isn't set, and refuses otherwise. It never changes a process-wide
   disposition, and nothing else in the shell may wait on children (`wait`, `waitpid(-1)`,
-  `waitid(P_ALL)`); review enforces that, since a check can't exclude a change racing it.
-- **A clean Quit** is the link having sent `Quitting` and the child reaped with exit code 0
-  (`Settled::is_clean` is the child's half).
+  `waitid(P_ALL)`); review enforces that, since a check can't exclude a change racing it. The
+  review grep (`waitpid|waitid|wait4|wait3|SIGCHLD|sigaction|libc::signal|try_wait|.wait()|Command::new`
+  over `shell` and `shell-core`, tests aside) allows only the owner's exact-pid `waitpid` and
+  disposition read, the exact-pid `waitid` WNOWAIT peek before the kill, and Windows' detached
+  launch. It doesn't cover dependencies such as gpui or cpal, which could install a SIGCHLD
+  handler or wait on their own children; nothing checks them yet.
+- **A clean Quit** is `Quitting` written whole to an attempt's pair and that same attempt's
+  child reaped with exit code 0. Each attempt carries its own write receipt, set by its control
+  writer only after the frame is written (or by the parked Quit on a queued pair), never when
+  Quit is queued. When the link ends on Quit it joins that receipt to that attempt's settlement
+  as a `QuitEnd`: the attempt's generation, set only once Connected went out, and a
+  `QuitOutcome` of `Clean`, `Reaped` with the exit, `Lost` or `Unsettled`. An attempt that
+  fails before Connected carries its child's state out with its error, so Quit there gives no
+  generation and `NotSpawned`, `SpawnPending`, or the spawned child's own settlement.
+  `LinkHandle::quit_end` reads it after `finish_quit`; it's None when Quit came between attempts
+  or the attempt owned no child, as for a detached brain.
+- **Terminal custody ends the pair.** Once the owner reaps, loses or gives up on the child, the
+  attempt's hook aborts both legs, so the link stops serving a pair whose peer may still hold
+  its ends open, without waiting for EOF. A watchdog beside the owner bounds only a confirmed
+  child: it starts once the owner has sent `Spawned`, and ends quietly on a refused spawn, so a
+  refusal stays `NotSpawned` and a spawn still pending is never called `Unsettled`. It's armed
+  from the caller's side, by `retire`, by the owner handle being dropped or by Quit seen on the
+  word, never by the owner. At retirement's bound, counted from when it was armed and the child
+  confirmed, it ends custody as `Unsettled` even while the owner is stuck in a poll or a kill. Owner, watchdog and `settle` end custody through one lock, so
+  the first ending wins and a later one returns it. Only a winning reap frees the claim, so
+  after `Unsettled` it stays taken for good. Neither the hook nor the watchdog signals or reaps; that
+  stays on the owner thread, which may still reap later without reporting or freeing a claim.
+  An owner thread that ends without its spawn report leaves the spawn pending, never proven
+  absent.
 
 ```mermaid
 stateDiagram-v2

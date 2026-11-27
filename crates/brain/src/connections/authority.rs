@@ -21,7 +21,9 @@ use io::Verified;
 #[cfg(test)]
 pub(crate) const FILE: &str = kumochi_protocol::constants::AUTHORITY_FILE;
 /// The newest schema this build knows; a newer file is refused, never downgraded.
-const VERSION: i64 = 3;
+const VERSION: i64 = 5;
+/// The removed repair schema's number; skipped, so a file it wrote is still refused as newer.
+const REPAIR_VERSION: i64 = 4;
 /// The sign-out marker's JSON bound, as the vault had it.
 const MARKER_BYTES: usize = 200;
 
@@ -55,6 +57,13 @@ CREATE TABLE generations (
 CREATE UNIQUE INDEX one_active ON generations (kind) WHERE state = 'active';
 CREATE UNIQUE INDEX one_pending ON generations (kind) WHERE state = 'pending';
 CREATE INDEX removed ON generations (state) WHERE state = 'removed';
+";
+/// Version 3 to 5: which store holds each generation's chunks. Every earlier row is the brain's
+/// own; only an Anthropic paste candidate, never an active one, may be in the shell's staging store.
+const STORE: &str = "
+ALTER TABLE generations ADD COLUMN store TEXT NOT NULL DEFAULT 'private' CHECK (
+    store = 'private' OR (store = 'staging' AND kind = 'anthropic' AND state <> 'active')
+);
 ";
 /// Version 1 to 2: the legacy cleanup's progress.
 const LEGACY: &str = "
@@ -252,6 +261,38 @@ pub(crate) struct Current {
     pub(crate) active: Option<ActiveRef>,
 }
 
+/// Which store holds a generation's chunks, recorded when the generation is minted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Store {
+    /// The brain's own store: every saved credential and its candidates.
+    Private,
+    /// The store the shell writes a pasted Anthropic key into; never active.
+    Staging,
+}
+
+impl Store {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Staging => "staging",
+        }
+    }
+
+    /// A staging row must be an Anthropic paste of a valid key length, whatever the file says.
+    fn parse(label: &str, kind: Kind, layout: Layout) -> Result<Self, AuthorityError> {
+        match label {
+            "private" => Ok(Self::Private),
+            "staging"
+                if kind == Kind::AnthropicKey
+                    && kumochi_protocol::message::ANTHROPIC_KEY_BYTES.contains(&layout.bytes) =>
+            {
+                Ok(Self::Staging)
+            }
+            _ => Err(AuthorityError::Corrupt),
+        }
+    }
+}
+
 /// A Pending generation's one chance to be written; not Clone, so it can't be written twice.
 #[derive(Debug)]
 #[must_use = "an unwritten plan stays Pending until the next open retires it"]
@@ -260,9 +301,14 @@ pub(crate) struct WritePlan {
     generation: Generation,
     layout: Layout,
     base: u64,
+    store: Store,
 }
 
 impl WritePlan {
+    pub(crate) fn store(&self) -> Store {
+        self.store
+    }
+
     pub(crate) fn generation(&self) -> Generation {
         self.generation
     }
@@ -291,6 +337,13 @@ pub(crate) struct Retired {
     kind: Kind,
     generation: Generation,
     layout: Layout,
+    store: Store,
+}
+
+impl Retired {
+    pub(crate) fn store(&self) -> Store {
+        self.store
+    }
 }
 
 /// What an open does when the authority file is missing.
@@ -350,6 +403,7 @@ impl Authority {
                 0 => {
                     tx.execute_batch(SCHEMA)?;
                     tx.execute_batch(GENERATIONS)?;
+                    tx.execute_batch(STORE)?;
                     tx.execute(
                         "INSERT INTO control (id, lifetime, marker) VALUES (1, 0, ?1)",
                         [marker_json(SignOutMarker::default())?],
@@ -358,9 +412,15 @@ impl Authority {
                 1 => {
                     tx.execute_batch(LEGACY)?;
                     tx.execute_batch(GITHUB)?;
+                    tx.execute_batch(STORE)?;
                 }
-                2 => tx.execute_batch(GITHUB)?,
+                2 => {
+                    tx.execute_batch(GITHUB)?;
+                    tx.execute_batch(STORE)?;
+                }
+                3 => tx.execute_batch(STORE)?,
                 VERSION => {}
+                REPAIR_VERSION => return Err(AuthorityError::NewerSchema),
                 newer if newer > VERSION => return Err(AuthorityError::NewerSchema),
                 _ => return Err(AuthorityError::Corrupt),
             }
@@ -430,6 +490,32 @@ impl Authority {
         expected: u64,
         len: usize,
     ) -> Result<WritePlan, AuthorityError> {
+        self.begin_in(kind, expected, len, Store::Private)
+    }
+
+    /// `Self::begin` for a pasted Anthropic key, whose chunks the shell writes into the staging
+    /// store. The plan is only ever read, never activated.
+    ///
+    /// # Errors
+    /// Bounds for a length outside a key's; otherwise as `Self::begin`.
+    pub(crate) fn begin_paste(
+        &mut self,
+        expected: u64,
+        len: usize,
+    ) -> Result<WritePlan, AuthorityError> {
+        if !kumochi_protocol::message::ANTHROPIC_KEY_BYTES.contains(&len) {
+            return Err(AuthorityError::Bounds);
+        }
+        self.begin_in(Kind::AnthropicKey, expected, len, Store::Staging)
+    }
+
+    fn begin_in(
+        &mut self,
+        kind: Kind,
+        expected: u64,
+        len: usize,
+        store: Store,
+    ) -> Result<WritePlan, AuthorityError> {
         let layout = Layout::for_len(len)?;
         let (chunks, bytes) = layout.sql()?;
         let generation = Generation::fresh()?;
@@ -444,9 +530,15 @@ impl Authority {
             [kind.label()],
         )?;
         tx.execute(
-            "INSERT INTO generations (generation, kind, state, chunks, bytes)
-             VALUES (?1, ?2, 'pending', ?3, ?4)",
-            params![generation.0.as_slice(), kind.label(), chunks, bytes],
+            "INSERT INTO generations (generation, kind, state, chunks, bytes, store)
+             VALUES (?1, ?2, 'pending', ?3, ?4, ?5)",
+            params![
+                generation.0.as_slice(),
+                kind.label(),
+                chunks,
+                bytes,
+                store.label()
+            ],
         )?;
         tx.commit()?;
         Ok(WritePlan {
@@ -454,6 +546,7 @@ impl Authority {
             generation,
             layout,
             base: expected,
+            store,
         })
     }
 
@@ -571,7 +664,7 @@ impl Authority {
     pub(crate) fn retired(&self, limit: usize) -> Result<Vec<Retired>, AuthorityError> {
         let limit = i64::try_from(limit).map_err(|_| AuthorityError::Bounds)?;
         let mut statement = self.conn.prepare(
-            "SELECT generation, kind, chunks, bytes FROM generations
+            "SELECT generation, kind, chunks, bytes, store FROM generations
              WHERE state = 'removed' AND (deleted_in IS NULL OR deleted_in < ?1)
              ORDER BY deleted_in IS NOT NULL, deleted_in, rowid LIMIT ?2",
         )?;
@@ -581,14 +674,18 @@ impl Authority {
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<i64>>(2)?,
                 row.get::<_, Option<i64>>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?;
         rows.map(|row| {
-            let (generation, kind, chunks, bytes) = row?;
+            let (generation, kind, chunks, bytes, store) = row?;
+            let kind = Kind::parse(&kind)?;
+            let layout = Layout::from_sql(chunks, bytes)?;
             Ok(Retired {
-                kind: Kind::parse(&kind)?,
+                kind,
                 generation: Generation::from_sql(&generation)?,
-                layout: Layout::from_sql(chunks, bytes)?,
+                layout,
+                store: Store::parse(&store, kind, layout)?,
             })
         })
         .collect()
@@ -596,7 +693,7 @@ impl Authority {
 
     pub(crate) fn retired_kind(&self, kind: Kind) -> Result<Vec<Retired>, AuthorityError> {
         let mut statement = self.conn.prepare(
-            "SELECT generation, chunks, bytes FROM generations
+            "SELECT generation, chunks, bytes, store FROM generations
              WHERE state = 'removed' AND kind = ?1 ORDER BY rowid",
         )?;
         let rows = statement.query_map([kind.label()], |row| {
@@ -604,14 +701,17 @@ impl Authority {
                 row.get::<_, Vec<u8>>(0)?,
                 row.get::<_, Option<i64>>(1)?,
                 row.get::<_, Option<i64>>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
         rows.map(|row| {
-            let (generation, chunks, bytes) = row?;
+            let (generation, chunks, bytes, store) = row?;
+            let layout = Layout::from_sql(chunks, bytes)?;
             Ok(Retired {
                 kind,
                 generation: Generation::from_sql(&generation)?,
-                layout: Layout::from_sql(chunks, bytes)?,
+                layout,
+                store: Store::parse(&store, kind, layout)?,
             })
         })
         .collect()
@@ -659,7 +759,8 @@ impl Authority {
 fn activate_plan(conn: &Connection, plan: &WritePlan) -> Result<ActiveRef, AuthorityError> {
     let pending = conn
         .query_row(
-            "SELECT 1 FROM generations WHERE generation = ?1 AND kind = ?2 AND state = 'pending'",
+            "SELECT 1 FROM generations
+             WHERE generation = ?1 AND kind = ?2 AND state = 'pending' AND store = 'private'",
             params![plan.generation.0.as_slice(), plan.kind.label()],
             |_| Ok(()),
         )
@@ -701,9 +802,9 @@ fn observe(
     conn: &Connection,
     kind: Kind,
 ) -> Result<(u64, Result<Option<ActiveRef>, AuthorityError>), AuthorityError> {
-    let (revision, generation, chunks, bytes) = conn
+    let (revision, generation, chunks, bytes, store) = conn
         .query_row(
-            "SELECT heads.revision, g.generation, g.chunks, g.bytes
+            "SELECT heads.revision, g.generation, g.chunks, g.bytes, g.store
              FROM heads LEFT JOIN generations g ON g.kind = heads.kind AND g.state = 'active'
              WHERE heads.kind = ?1",
             [kind.label()],
@@ -713,6 +814,7 @@ fn observe(
                     row.get::<_, Option<Vec<u8>>>(1)?,
                     row.get::<_, Option<i64>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         )
@@ -721,6 +823,9 @@ fn observe(
     let revision = u64::try_from(revision).map_err(|_| AuthorityError::Corrupt)?;
     let active = generation
         .map(|generation| {
+            if store.as_deref() != Some(Store::Private.label()) {
+                return Err(AuthorityError::Corrupt);
+            }
             Ok::<_, AuthorityError>(ActiveRef {
                 kind,
                 generation: Generation::from_sql(&generation)?,

@@ -269,7 +269,9 @@ The view explains why access is needed, in Kumochi's own window, and asks macOS 
 press or GPUI's focusing click asks only for the app and window to come forward (`App::activate`,
 `Window::activate_window`), even if the window became active before mouse-up. Neither call
 confirms activation and nothing asks later on its own. One launch asks at most once: the state
-is a GPUI global, so re-rendering or reopening the view can't ask again. A false answer is not a
+is a GPUI global, so re-rendering or reopening the view can't ask again. After that one request,
+while access is still ungranted, the button stays in place, disabled, and the status says macOS asks only once per launch and
+points to Settings, so a refused dialog doesn't leave the view looking broken. A false answer is not a
 denial, because macOS may still be
 showing its dialog or may apply the grant only after a relaunch. The view rechecks with the
 nonprompting `CGPreflightScreenCaptureAccess` when it opens and whenever its window becomes

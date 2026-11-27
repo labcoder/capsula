@@ -669,6 +669,7 @@ fn a_version_one_file_is_migrated_with_the_legacy_cleanup_owed() {
         .execute_batch(
             "ALTER TABLE control DROP COLUMN legacy_done;
              ALTER TABLE control DROP COLUMN legacy_deleted_in;
+             ALTER TABLE generations DROP COLUMN store;
              PRAGMA user_version = 1;",
         )
         .expect("a version 1 file");
@@ -691,7 +692,7 @@ fn a_version_one_file_is_migrated_with_the_legacy_cleanup_owed() {
         .raw()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 3);
+    assert_eq!(version, 5);
 }
 
 /// The legacy cleanup ends only after a clean pass in any open after the first pass's open.

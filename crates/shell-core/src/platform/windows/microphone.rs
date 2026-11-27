@@ -21,7 +21,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::platform::microphone::{
     CAPTURE_BUFFER, Finalization, Format, Generation, MicError, Mode, POLL, PacketBoundary,
-    PacketStatus, Packetizer, Running, Sample,
+    PacketStatus, Packetizer, Running, Sample, copy_batch,
 };
 
 pub(super) struct Apartment;
@@ -396,7 +396,7 @@ fn read(
         let status = PacketStatus {
             frames,
             position,
-            captured_qpc_100ns,
+            captured_at: captured_qpc_100ns,
             discontinuity: flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0.cast_unsigned() != 0,
             timestamp_error: flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0.cast_unsigned() != 0,
         };
@@ -447,32 +447,6 @@ fn read(
             packets.push(source.format.mono(frame)?, output)?;
         }
         raw[..copied].zeroize();
-    }
-}
-
-pub(in crate::platform) fn copy_batch(
-    raw: &mut [u8],
-    borrowed: Option<&[u8]>,
-    silence: u8,
-    mut authorized: impl FnMut() -> bool,
-    #[cfg(any(test, feature = "test-support"))] after_authorized: impl FnOnce(),
-) -> usize {
-    if !authorized() {
-        return 0;
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    after_authorized();
-    if let Some(borrowed) = borrowed {
-        raw.copy_from_slice(borrowed);
-    } else {
-        raw.fill(silence);
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-    if authorized() {
-        raw.len()
-    } else {
-        raw.zeroize();
-        0
     }
 }
 

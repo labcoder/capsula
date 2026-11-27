@@ -127,3 +127,199 @@ fn pending_read_refuses_missing_malformed_and_failed_reads() {
         Err(AuthorityError::Store(CredentialStoreError::Read(5)))
     ));
 }
+
+#[test]
+fn a_paste_plan_is_recorded_as_staged_and_never_activates() {
+    let setup = Setup::new("paste-store");
+    let mut authority = setup.open();
+    for len in [15, 2049] {
+        assert!(matches!(
+            authority.begin_paste(0, len),
+            Err(AuthorityError::Bounds)
+        ));
+    }
+    let store_of = |generation: Generation| -> String {
+        setup
+            .raw()
+            .query_row(
+                "SELECT store FROM generations WHERE generation = ?1",
+                [generation.0.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("store")
+    };
+    let private = authority.begin(Kind::AnthropicKey, 0, 16).expect("private");
+    assert_eq!(private.store(), Store::Private);
+    assert_eq!(store_of(private.generation()), "private");
+    let paste = authority.begin_paste(0, 16).expect("paste");
+    let generation = paste.generation();
+    assert_eq!(paste.store(), Store::Staging);
+    assert_eq!(store_of(generation), "staging");
+    let verified = io::write(&setup.store, SERVICE, paste, &secret(3, 16)).expect("staged");
+    assert!(matches!(
+        authority.activate(verified, None),
+        Err(AuthorityError::Conflict)
+    ));
+    assert_eq!(
+        authority.current(Kind::AnthropicKey).expect("head"),
+        Current {
+            revision: 0,
+            active: None
+        }
+    );
+    for change in [
+        "UPDATE generations SET state = 'active' WHERE generation = ?1",
+        "UPDATE generations SET kind = 'host' WHERE generation = ?1",
+    ] {
+        assert!(
+            setup
+                .raw()
+                .execute(change, [generation.0.as_slice()])
+                .is_err(),
+            "the file refuses an active or non-Anthropic staged row"
+        );
+    }
+}
+
+#[test]
+fn retired_rows_keep_the_store_they_were_minted_in() {
+    let setup = Setup::new("paste-retired-store");
+    let mut authority = setup.open();
+    let saved = setup.save(&mut authority, Kind::AnthropicKey, &secret(1, 16));
+    let staged = authority.begin_paste(1, 16).expect("paste").generation();
+    setup.save(&mut authority, Kind::AnthropicKey, &secret(2, 16));
+    let retired: BTreeMap<String, Store> = authority
+        .retired(16)
+        .expect("retired")
+        .into_iter()
+        .map(|row| (row.generation.hex(), row.store()))
+        .collect();
+    assert_eq!(
+        retired,
+        BTreeMap::from([
+            (saved.generation.hex(), Store::Private),
+            (staged.hex(), Store::Staging),
+        ])
+    );
+    assert_eq!(
+        authority
+            .retired_kind(Kind::AnthropicKey)
+            .expect("retired")
+            .iter()
+            .map(Retired::store)
+            .collect::<Vec<_>>(),
+        [Store::Private, Store::Staging]
+    );
+    drop(authority);
+    setup
+        .raw()
+        .execute(
+            "UPDATE generations SET chunks = 2, bytes = 2049 WHERE generation = ?1",
+            [staged.0.as_slice()],
+        )
+        .expect("a staged row no key fits");
+    assert!(matches!(
+        setup.open().retired(16),
+        Err(AuthorityError::Corrupt)
+    ));
+}
+
+#[test]
+fn a_version_three_file_keeps_every_row_in_the_private_store() {
+    let setup = Setup::new("auth-migrate-store");
+    let raw = setup.raw();
+    raw.execute_batch(SCHEMA).expect("version 3 heads");
+    raw.execute_batch(GENERATIONS)
+        .expect("version 3 generations");
+    raw.execute(
+        "INSERT INTO control (id, lifetime, marker) VALUES (1, 0, ?1)",
+        [marker_json(SignOutMarker::default()).expect("marker")],
+    )
+    .expect("control");
+    raw.execute_batch(
+        "INSERT INTO generations (generation, kind, state, chunks, bytes) VALUES
+             (X'01000000000000000000000000000000', 'host', 'active', 1, 45),
+             (X'02000000000000000000000000000000', 'anthropic', 'pending', 1, 16),
+             (X'03000000000000000000000000000000', 'github', 'removed', 1, 10);
+         PRAGMA user_version = 3;",
+    )
+    .expect("version 3 rows");
+    drop(raw);
+    let mut authority = setup.open();
+    let version: i64 = setup
+        .raw()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 5);
+    assert_eq!(
+        authority
+            .current(Kind::Host)
+            .expect("host")
+            .active
+            .map(|active| active.generation.hex()),
+        Some(format!("01{}", "0".repeat(30)))
+    );
+    let rows: Vec<(String, String, String)> = setup
+        .raw()
+        .prepare("SELECT hex(generation), state, store FROM generations ORDER BY rowid")
+        .expect("rows")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("rows")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    let row = |first: &str, state: &str| {
+        (
+            format!("{first}{}", "0".repeat(30)),
+            state.to_owned(),
+            "private".to_owned(),
+        )
+    };
+    assert_eq!(
+        rows,
+        [
+            row("01", "active"),
+            row("02", "removed"),
+            row("03", "removed")
+        ]
+    );
+    assert_eq!(
+        authority.begin_paste(0, 16).expect("paste").store(),
+        Store::Staging
+    );
+}
+
+#[test]
+fn an_active_row_outside_the_private_store_is_refused() {
+    let setup = Setup::new("paste-active-staged");
+    let mut authority = setup.open();
+    let saved = setup.save(&mut authority, Kind::AnthropicKey, &secret(1, 16));
+    drop(authority);
+    setup
+        .raw()
+        .execute_batch(&format!(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE generations SET store = 'staging' WHERE generation = X'{}';",
+            saved.generation.hex()
+        ))
+        .expect("a malformed file");
+    assert!(matches!(
+        setup.open().current(Kind::AnthropicKey),
+        Err(AuthorityError::Corrupt)
+    ));
+}
+
+#[test]
+fn the_skipped_repair_version_and_later_ones_are_refused_as_newer() {
+    for version in [4, 6] {
+        let setup = Setup::new(&format!("auth-newer-{version}"));
+        drop(setup.open());
+        setup
+            .raw()
+            .execute_batch(&format!("PRAGMA user_version = {version}"))
+            .expect("newer");
+        assert!(matches!(
+            Authority::open(&setup.lock, Missing::Create),
+            Err(AuthorityError::NewerSchema)
+        ));
+    }
+}

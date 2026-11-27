@@ -1,12 +1,14 @@
 //! The parent-bound start: admission, the stage driver, serving and settlement, through one root
 //! that owns the stages, the instance attempt and the process services and settles them in one
-//! order, so nothing that started outlives custody. This build's prerequisites are never ready,
-//! so production refuses at `ready` after a real admission.
+//! order, so nothing that started outlives custody. Only a build that supports the mode, macOS
+//! `first-light`, has prerequisites that are ready; every other build refuses at `ready`.
 
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use kumochi_protocol::constants::BRAIN_LOG;
+use kumochi_protocol::constants::{AUTHORITY_FILE, CONFIG_FILE, STORE_FILE};
 
 use kumochi_protocol::message::{CAPABILITY_LEN, Incarnation, IssueSession};
 use tokio::sync::watch;
@@ -16,8 +18,10 @@ use super::custody::{CustodyError, SessionCustody};
 use super::instance::{InstanceAttempt, InstanceStore, OwnedKey};
 use super::{Checkpoint, OpenedState, Stages, VaultHeld};
 use crate::config::tuning::{OAuthTuning, TokenTuning};
+use crate::connections::model::budget::Budget;
+use crate::platform::credential::CredentialStoreError;
 use crate::platform::shell_process::Committed;
-use crate::platform::{self, Job, SessionLock, ShellProcess};
+use crate::platform::{self, Job, Mode, SessionLock, ShellProcess};
 use crate::runtime::{Brain, Ended, Quit, Shutdown, Stage, Terminal, account::Accounts};
 use crate::{BrainError, ParentBoundError};
 
@@ -25,14 +29,20 @@ use crate::{BrainError, ParentBoundError};
 /// has no admission deadline.
 pub(crate) const ADMISSION: Duration = Duration::from_secs(10);
 
-/// A parent-bound prerequisite this build lacks. Known to be missing: the vault's credential
-/// store, containment and R2's own list; that list may not be complete.
+/// This build doesn't start parent-bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("parent-bound startup isn't ready")]
 pub(in crate::startup) struct NotReady;
 
 /// What parent-bound startup takes from outside the shared stages.
 pub(in crate::startup) trait Prerequisites {
+    /// Checks what must hold before any state opens, once the session is committed, asking `live`
+    /// before each native call and stopping for good once it says no; a call already made may
+    /// finish.
+    ///
+    /// # Errors
+    /// `Busy` when an earlier build's state may be there, otherwise `Refused`.
+    fn preflight(&mut self, live: &mut dyn FnMut() -> bool) -> Result<(), ParentBoundError>;
     /// Refuses until every prerequisite is in place, before any process effect.
     fn ready(&self) -> Result<(), NotReady>;
     /// Starts the process-wide services once the claim is committed.
@@ -62,17 +72,49 @@ pub(in crate::startup) struct ProcessInit {
     pub(in crate::startup) _scoped: Option<tracing::subscriber::DefaultGuard>,
 }
 
-/// This build's prerequisites: not ready on any platform, so nothing after `ready` runs.
-pub(in crate::startup) struct Pending;
+/// First light's prerequisites: ready only where parent-bound is supported, the macOS
+/// `first-light` Dev build. No name an earlier build wrote may be in the Keychain, the root must
+/// be one custody created, with nothing a store, the settings or a purge would act on; there's no
+/// file log, no helpers and one model request.
+pub(in crate::startup) struct FirstLight {
+    /// The run's model requests; OAuth and catalog traffic never draw on it.
+    budget: Budget,
+    /// Set by the first `open`, so a refused root stays refused.
+    opened: bool,
+    /// The latched legacy check: the platform's, or a test's.
+    legacy: fn(&mut dyn FnMut() -> bool) -> Result<(), CredentialStoreError>,
+}
 
-impl Prerequisites for Pending {
+impl FirstLight {
+    pub(in crate::startup) fn new() -> Self {
+        Self {
+            budget: Budget::limited(Some(1)),
+            opened: false,
+            legacy: platform::credential::legacy_preflight,
+        }
+    }
+}
+
+impl Prerequisites for FirstLight {
+    fn preflight(&mut self, live: &mut dyn FnMut() -> bool) -> Result<(), ParentBoundError> {
+        (self.legacy)(live).map_err(|error| match error {
+            CredentialStoreError::Legacy => ParentBoundError::Busy,
+            _ => ParentBoundError::Refused,
+        })
+    }
+
     fn ready(&self) -> Result<(), NotReady> {
-        Err(NotReady)
+        if platform::supports(Mode::ParentBound) {
+            Ok(())
+        } else {
+            Err(NotReady)
+        }
     }
 
     fn init(&mut self) -> Result<ProcessInit, BrainError> {
-        crate::logging::init(BRAIN_LOG)
-            .map_err(|_| BrainError::NativeRuntime(std::io::ErrorKind::Unsupported.into()))?;
+        // shortcut: no file log, so first light is no G-2 evidence; the admitted brain log (L1)
+        // lands before `first-light` leaves `supports`.
+        crate::logging::install_panic_hook();
         kumochi_scene::deferred::start()?;
         Ok(ProcessInit::default())
     }
@@ -82,11 +124,22 @@ impl Prerequisites for Pending {
         custody: &SessionCustody,
         acquired: &mut bool,
     ) -> Result<OpenedState, BrainError> {
+        let refused = || {
+            BrainError::Store(crate::store::StoreError::Folder(
+                io::ErrorKind::AlreadyExists.into(),
+            ))
+        };
+        if std::mem::replace(&mut self.opened, true) {
+            return Err(refused());
+        }
         // A token custody lends nothing, so nothing opens.
         let profile = custody
             .lend()
-            .ok_or_else(|| BrainError::ProfileLock(std::io::ErrorKind::NotFound.into()))?;
-        super::open_state_held(profile, None, acquired)
+            .ok_or_else(|| BrainError::ProfileLock(io::ErrorKind::NotFound.into()))?;
+        if !custody.fresh_root() || !untouched(profile.data_dir()) {
+            return Err(refused());
+        }
+        super::open_state_held(profile, None, self.budget.clone(), acquired)
     }
 
     fn accounts(
@@ -99,15 +152,41 @@ impl Prerequisites for Pending {
     }
 
     fn containment(&mut self) -> Result<Option<Arc<Job>>, BrainError> {
-        Err(BrainError::Helpers(std::io::ErrorKind::Unsupported.into()))
+        Ok(None)
     }
+}
+
+/// Whether `folder` holds nothing the store, the authority, the settings or a purge would act
+/// on: either database or its WAL, shared-memory or rollback journal, the settings file or the
+/// temporary one a settings write unlinks, or any file a purge leaves. One that can't be checked
+/// counts as there.
+fn untouched(folder: &Path) -> bool {
+    let databases = [STORE_FILE, AUTHORITY_FILE].into_iter().flat_map(|db| {
+        ["", "-wal", "-shm", "-journal"].map(|suffix| {
+            let mut name = folder.join(db).into_os_string();
+            name.push(suffix);
+            PathBuf::from(name)
+        })
+    });
+    let store = folder.join(STORE_FILE);
+    databases
+        .chain([
+            folder.join(CONFIG_FILE),
+            folder.join(format!("{CONFIG_FILE}.tmp")),
+        ])
+        .chain(crate::store::purge_files(&store))
+        .all(|path| {
+            std::fs::symlink_metadata(path)
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        })
 }
 
 /// What each stage was seen to do when the root settled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Settled {
     pub(in crate::startup) runtime: Shutdown,
-    /// The instance attempt's settlement; Confirmed when there was none.
+    /// The instance attempt's settlement, Failed once a root its custody made stops passing;
+    /// Confirmed when there was none.
     pub(crate) item: Stage,
 }
 
@@ -138,8 +217,8 @@ pub(crate) trait AdmissionPair {
     ) -> impl Future<Output = Ended>;
 }
 
-/// Starts a parent-bound brain on `pair` with this build's prerequisites, which refuse at
-/// `ready`, so production stops after a real admission.
+/// Starts a parent-bound brain on `pair` with first light's prerequisites, which refuse at
+/// `ready` on every build that doesn't support the mode.
 pub(crate) async fn run_production(
     pair: platform::InheritedPair,
     shell: &ShellProcess,
@@ -149,7 +228,7 @@ pub(crate) async fn run_production(
         pair,
         shell,
         by,
-        &mut Pending,
+        &mut FirstLight::new(),
         SessionCustody::bootstrap,
         platform::InstanceItem::admit,
     ))
@@ -315,7 +394,7 @@ impl<S: InstanceStore> Root<S> {
             Ok(admitted) => admitted,
             Err(refused) => return (Err(refused), None),
         };
-        if let Err(refused) = self.stage(pre, shell, by, &committed) {
+        if let Err(refused) = self.stage(pre, shell, by, &P::cell(&greeted), &committed) {
             return (Err(refused), Some(greeted));
         }
         let terminal = Terminal::new(P::cell(&greeted), shell.loss());
@@ -330,17 +409,21 @@ impl<S: InstanceStore> Root<S> {
     }
 
     /// Runs the stages for a committed admission, each behind a fence and the clock: on entry,
-    /// again once the prerequisites are ready and before anything starts, and at each
-    /// checkpoint. A refusal keeps what started for `settle`. Voice never starts here: this mode
-    /// builds no models, and the helpers start only what their containment allows.
+    /// again once the prerequisites are ready, then the preflight, live only while the parent,
+    /// the clock and the session's `cell` all pass, and that check again once it returns,
+    /// whatever it answered, before anything starts; and at each checkpoint. A refusal keeps
+    /// what started for `settle`. Voice never starts here: this mode builds no models, and the
+    /// helpers start only what their containment allows.
     ///
     /// # Errors
-    /// `Unsupported` when the prerequisites aren't ready, otherwise `Refused`.
+    /// `Unsupported` when the prerequisites aren't ready, the preflight's own refusal while the
+    /// session is live, otherwise `Refused`.
     fn stage(
         &mut self,
         pre: &mut impl Prerequisites,
         shell: &ShellProcess,
         by: Instant,
+        cell: &watch::Receiver<bool>,
         _: &Committed,
     ) -> Result<(), ParentBoundError> {
         let fence = || -> Result<(), BrainError> {
@@ -355,6 +438,12 @@ impl<S: InstanceStore> Root<S> {
         fence().map_err(|_| ParentBoundError::Refused)?;
         pre.ready().map_err(|_| ParentBoundError::Unsupported)?;
         fence().map_err(|_| ParentBoundError::Refused)?;
+        let mut live = || fence().is_ok() && cell.has_changed().is_ok() && !*cell.borrow();
+        let checked = pre.preflight(&mut live);
+        if !live() {
+            return Err(ParentBoundError::Refused);
+        }
+        checked?;
         self.start(pre, |_, _| fence())
             .map_err(|_| ParentBoundError::Refused)?;
         self.stages.jobs = pre.containment().map_err(|_| ParentBoundError::Refused)?;
@@ -363,8 +452,8 @@ impl<S: InstanceStore> Root<S> {
 
     /// Quits the Brain by `quit` after an accepted Quit, closes it otherwise, or closes whatever
     /// started without one; drops the helpers, then `pair`, so the shell sees EOF only after
-    /// those; then settles the instance attempt under custody, drops custody, and only then the
-    /// process services.
+    /// those; then settles the instance attempt under custody, checks again that a root custody
+    /// made is still the one it made, drops custody, and only then the process services.
     pub(crate) async fn settle(self, quit: Option<Instant>, pair: impl Sized) -> Settled {
         let Self {
             admitting: _,
@@ -380,7 +469,14 @@ impl<S: InstanceStore> Root<S> {
         drop(stages);
         drop(pair);
         let item = match instance.as_mut() {
-            Some(attempt) => attempt.settle().await,
+            Some(attempt) => {
+                let settled = attempt.settle().await;
+                if attempt.custody().intact() {
+                    settled
+                } else {
+                    Stage::Failed
+                }
+            }
             None => Stage::Confirmed,
         };
         drop(instance);

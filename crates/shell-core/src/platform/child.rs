@@ -3,14 +3,21 @@
 //! the platform through [`Os`]; the order of decisions lives here, so every platform tests it.
 
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 /// How often the owner observes its child. A poll period, not a scheduling bound.
 const POLL: Duration = Duration::from_millis(20);
+/// What retirement allows past the owner's own waits for a slow poll or kill.
+const SETTLE_SLACK: Duration = Duration::from_secs(1);
+
+/// The most retirement may take: the owner's two waits and two polls, plus [`SETTLE_SLACK`].
+fn retirement(wait: Duration) -> Duration {
+    2 * (wait + POLL) + SETTLE_SLACK
+}
 
 const SPAWN: u8 = 1;
 const QUIT: u8 = 1 << 1;
@@ -117,6 +124,17 @@ pub(crate) enum Settled {
     Unsettled,
 }
 
+/// What an attempt that failed before Connected knows of its child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unconnected {
+    /// Proven: the attempt started no child.
+    NotSpawned,
+    /// The spawn hadn't reported in time, so a child may still exist.
+    Pending,
+    /// A child was spawned, and its custody ended so.
+    Settled(Settled),
+}
+
 impl Settled {
     /// The child's half of a clean Quit: reaped with exit code 0. The link's half is that it
     /// sent `Quitting`; without both, the Quit isn't clean.
@@ -130,7 +148,72 @@ impl Settled {
 #[derive(Debug)]
 pub(crate) struct ChildOwner {
     retire: Sender<()>,
+    /// Arms the watchdog from the caller's side, so a stalled owner can't delay it.
+    arm: Sender<()>,
     reports: Receiver<Report>,
+    word: Arc<SpawnWord>,
+    terminal: Arc<Terminal>,
+    wait: Duration,
+}
+
+/// How custody ended, once it has, and what runs when it does.
+#[derive(Default)]
+struct Ending {
+    winner: Option<Settled>,
+    hook: Option<Box<dyn FnOnce() + Send>>,
+}
+
+/// Custody's one terminal point, shared by the owner, its watchdog and the link.
+#[derive(Debug, Default)]
+struct Terminal {
+    ending: Mutex<Ending>,
+    ended: Condvar,
+}
+
+impl Terminal {
+    fn lock(&self) -> MutexGuard<'_, Ending> {
+        self.ending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Ends custody once, as `settled`: under the lock, only a reap frees the claim, so after
+    /// `Unsettled` or `Lost` it stays taken for good, whatever a late reap does; `report` is
+    /// sent when given; then the hook runs. Returns
+    /// how custody ended, and whether this call ended it. A call that comes after the end
+    /// changes nothing and returns the winner.
+    fn end(
+        &self,
+        settled: Settled,
+        report: Option<&Sender<Report>>,
+        word: &SpawnWord,
+    ) -> (Settled, bool) {
+        let mut ending = self.lock();
+        if let Some(winner) = ending.winner {
+            return (winner, false);
+        }
+        ending.winner = Some(settled);
+        if matches!(settled, Settled::Reaped(_)) {
+            word.release();
+        }
+        if let Some(report) = report {
+            // A link that's gone doesn't end custody.
+            let _unheard = report.send(Report::Settled(settled));
+        }
+        let hook = ending.hook.take();
+        drop(ending);
+        self.ended.notify_all();
+        if let Some(hook) = hook {
+            hook();
+        }
+        (settled, true)
+    }
+}
+
+impl std::fmt::Debug for Ending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ending")
+            .field("winner", &self.winner)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ChildOwner {
@@ -143,16 +226,53 @@ impl ChildOwner {
     pub(crate) fn start(os: impl Os, word: Arc<SpawnWord>, wait: Duration) -> io::Result<Self> {
         let (retire, retires) = mpsc::channel();
         let (report, reports) = mpsc::channel();
+        let (arm, armed) = mpsc::channel();
+        let (confirm, confirmed) = mpsc::channel();
+        let terminal = Arc::<Terminal>::default();
+        let (watched, watching, watch_report) =
+            (Arc::clone(&word), Arc::clone(&terminal), report.clone());
+        // Ends once custody has.
+        thread::Builder::new()
+            .name("brain child watchdog".to_owned())
+            .spawn(move || watch(&confirmed, &armed, &watched, &watching, &watch_report, wait))?;
+        let (owned, ends) = (Arc::clone(&word), Arc::clone(&terminal));
         // Detached: after Unsettled it keeps reaping for as long as the shell lives.
         thread::Builder::new()
             .name("brain child".to_owned())
-            .spawn(move || own(os, &word, wait, retires, &report))?;
-        Ok(Self { retire, reports })
+            .spawn(move || own(os, &owned, wait, retires, &report, &confirm, &ends))?;
+        Ok(Self {
+            retire,
+            arm,
+            reports,
+            word,
+            terminal,
+            wait,
+        })
     }
 
-    /// Starts bounded retirement of a live child. Never waits.
+    /// Runs `hook` once custody is terminal (reaped, lost or unsettled), at once if it already
+    /// is, on whichever thread ends it. A later hook replaces one that hasn't run. Never waits for
+    /// the child.
+    pub(crate) fn on_settled(&self, hook: impl FnOnce() + Send + 'static) {
+        let mut ending = self.terminal.lock();
+        if ending.winner.is_none() {
+            ending.hook = Some(Box::new(hook));
+            return;
+        }
+        drop(ending);
+        hook();
+    }
+
+    /// Whether custody has ended, read under the lock that publishes how, before any hook runs.
+    pub(crate) fn has_ended(&self) -> bool {
+        self.terminal.lock().winner.is_some()
+    }
+
+    /// Starts bounded retirement of a live child, and its bound once the child is confirmed.
+    /// Never waits.
     pub(crate) fn retire(&self) {
-        // A finished owner has nothing left to retire.
+        // A finished owner or watchdog has nothing left to retire or bound.
+        let _bounded = self.arm.send(());
         let _settled = self.retire.send(());
     }
 
@@ -164,6 +284,20 @@ impl ChildOwner {
     pub(crate) fn spawned(&self, by: Instant) -> Result<Report, RecvTimeoutError> {
         self.reports
             .recv_timeout(by.saturating_duration_since(Instant::now()))
+    }
+
+    /// Retires a live child and returns how custody ended, waiting no longer than [`retirement`].
+    /// No settlement by then, or an owner thread that's gone, ends custody as `Unsettled`, which
+    /// keeps the spawn claim taken for good, unless a settlement wins the end first. Call it after the
+    /// spawn report was taken, off the UI thread.
+    pub(crate) fn settle(self) -> Settled {
+        self.retire();
+        let by = Instant::now() + retirement(self.wait);
+        let settled = match self.next(by) {
+            Some(Report::Settled(settled)) => settled,
+            _ => Settled::Unsettled,
+        };
+        self.terminal.end(settled, None, &self.word).0
     }
 
     /// The next report, or None when none arrives by `by`.
@@ -190,15 +324,20 @@ fn own(
     wait: Duration,
     retires: Receiver<()>,
     report: &Sender<Report>,
+    confirm: &Sender<()>,
+    terminal: &Terminal,
 ) {
     // A link that's gone doesn't end custody, so a closed report channel is ignored throughout.
     if let Err(refusal) = spawn(&mut os, word) {
         // Whatever the child would have inherited is closed before the refusal is heard.
         drop(os);
         let _unheard = report.send(Report::NotSpawned(refusal));
+        // Returning drops `confirm`, which ends the watchdog quietly: there's no child to bound.
         return;
     }
     let _unheard = report.send(Report::Spawned);
+    // Only a confirmed child is bounded; a watchdog that's gone has nothing left to bound.
+    let _bounded = confirm.send(());
     let mut retires = Some(retires);
     let mut retiring = false;
     let mut retirement_refused = false;
@@ -219,22 +358,19 @@ fn own(
                 } else {
                     settled
                 };
-                if matches!(settled, Settled::Reaped(_)) {
-                    word.release();
-                }
-                let _unheard = report.send(Report::Settled(settled));
+                terminal.end(settled, Some(report), word);
             }
             return;
         }
         phase = match phase {
             Phase::Watching if retiring || word.quitting() => Phase::Grace(Instant::now() + wait),
             Phase::Grace(deadline) if now >= deadline => {
-                retirement_refused = !kill(&mut os);
+                retirement_refused = !kill(&mut os, terminal);
                 Phase::Killed(Instant::now() + wait)
             }
             Phase::Killed(deadline) if now >= deadline => {
                 tracing::error!("the brain child's forced retirement is unconfirmed");
-                let _unheard = report.send(Report::Settled(Settled::Unsettled));
+                terminal.end(Settled::Unsettled, Some(report), word);
                 Phase::Unsettled
             }
             phase => phase,
@@ -248,6 +384,48 @@ fn own(
             }
             None => thread::sleep(POLL),
         }
+    }
+}
+
+/// Bounds retirement of a confirmed child without the owner. It waits for the owner to confirm
+/// the spawn and ends quietly when the spawn is refused or the owner ends first. Then, armed by
+/// the caller's retire, a dropped owner handle or Quit seen on the word, it ends custody as
+/// `Unsettled` if custody is still open at [`retirement`]'s bound, even while the owner is
+/// stuck in a poll or a kill.
+fn watch(
+    confirmed: &Receiver<()>,
+    armed: &Receiver<()>,
+    word: &SpawnWord,
+    terminal: &Terminal,
+    report: &Sender<Report>,
+    wait: Duration,
+) {
+    if confirmed.recv().is_err() {
+        return;
+    }
+    loop {
+        // shortcut: Quit is seen by polling the shared word, since its setter never waits;
+        // a per-owner wake would avoid the poll if the link ever holds many children.
+        match armed.recv_timeout(POLL) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) if terminal.lock().winner.is_some() => return,
+            Err(RecvTimeoutError::Timeout) if word.quitting() => break,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+    let by = Instant::now() + retirement(wait);
+    let ending = terminal.lock();
+    let (ending, _timeout) = terminal
+        .ended
+        .wait_timeout_while(
+            ending,
+            by.saturating_duration_since(Instant::now()),
+            |ending| ending.winner.is_none(),
+        )
+        .unwrap_or_else(PoisonError::into_inner);
+    drop(ending);
+    if terminal.end(Settled::Unsettled, Some(report), word).1 {
+        tracing::error!("the brain child's retirement overran its bound");
     }
 }
 
@@ -271,9 +449,14 @@ fn spawn(os: &mut impl Os, word: &SpawnWord) -> Result<(), Refusal> {
 }
 
 /// One kill, never retried: a refusal or a failure leaves the bounded wait to decide.
-fn kill(os: &mut impl Os) -> bool {
+fn kill(os: &mut impl Os, terminal: &Terminal) -> bool {
     if os.auto_reaps() {
         tracing::error!("not signalling the brain child: the shell reaps its children itself");
+        return false;
+    }
+    // Admitted right before the signal and only while custody is open, so no kill follows a
+    // published outcome; the lock isn't held across the call.
+    if terminal.lock().winner.is_some() {
         return false;
     }
     if let Err(error) = os.kill() {
@@ -288,7 +471,7 @@ fn kill(os: &mut impl Os) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Barrier, Mutex, MutexGuard, PoisonError};
+    use std::sync::{Barrier, MutexGuard};
 
     use super::*;
 
@@ -314,6 +497,7 @@ mod tests {
         spawn_gate: Option<Gate>,
         poll_gate: Option<Gate>,
         kill_gate: Option<Gate>,
+        auto_reaps_gate: Option<Gate>,
         spawns: u32,
         kills: u32,
         killed_at: Option<Instant>,
@@ -402,6 +586,8 @@ mod tests {
 
     impl Os for Fake {
         fn auto_reaps(&self) -> bool {
+            let gate = self.script().auto_reaps_gate.take();
+            Self::pass(gate);
             self.script().auto_reaps
         }
 
@@ -881,5 +1067,323 @@ mod tests {
                 "{refusal}: dropped before the report"
             );
         }
+    }
+
+    /// Runs `settle` on its own thread, so a wait with no bound fails the test instead of hanging.
+    fn settled_within(owner: ChildOwner, watchdog: Duration) -> (Settled, Duration) {
+        let (done, outcome) = mpsc::channel();
+        thread::spawn(move || {
+            let start = Instant::now();
+            let settled = owner.settle();
+            let _unwatched = done.send((settled, start.elapsed()));
+        });
+        outcome
+            .recv_timeout(watchdog)
+            .expect("settle returned within the watchdog")
+    }
+
+    #[test]
+    fn settle_retires_a_live_child_and_returns_its_reap() {
+        let word = Arc::new(SpawnWord::default());
+        let fake = Fake::with(|s| s.killable = true);
+        let owner = started(&fake, &word);
+        let (settled, took) = settled_within(owner, BOUND);
+        assert_eq!(settled, Settled::Reaped(Exit::Signal(9)));
+        assert_eq!(fake.script().kills, 1);
+        assert!(took >= WAIT, "the grace came first: {took:?}");
+        assert!(claimable(&word), "a reap frees the claim");
+    }
+
+    #[test]
+    fn settle_gives_up_at_its_bound_when_the_kill_hangs() {
+        let word = Arc::new(SpawnWord::default());
+        let (kill_gate, held) = gate();
+        let fake = Fake::with(|s| {
+            s.kill_gate = Some(kill_gate);
+            s.killable = true;
+        });
+        let owner = started(&fake, &word);
+        let (hooked, hook_ran) = mpsc::channel();
+        owner.on_settled(move || {
+            let _unwatched = hooked.send(());
+        });
+        let bound = 2 * (WAIT + POLL) + SETTLE_SLACK;
+        let (settled, took) = settled_within(owner, bound + WAIT * 10);
+        held.entered();
+        assert_eq!(settled, Settled::Unsettled);
+        assert!(took >= bound, "waited the whole bound: {took:?}");
+        assert!(took < bound + WAIT * 5, "and no longer: {took:?}");
+        assert_eq!(
+            hook_ran.recv_timeout(BOUND),
+            Ok(()),
+            "the hook ran by the give-up"
+        );
+
+        // The kill lands late and the child is reaped, which must not free the claim.
+        held.release();
+        fake.until(|s| s.reaped);
+        thread::sleep(WAIT);
+        let retry = Fake::default();
+        let owner = ChildOwner::start(retry.clone(), Arc::clone(&word), WAIT).expect("owner");
+        assert!(matches!(next(&owner), Report::NotSpawned(Refusal::Claimed)));
+        assert_eq!(
+            retry.script().spawns,
+            0,
+            "a retry after Unsettled spawns nothing"
+        );
+    }
+
+    #[test]
+    fn a_kill_that_never_returns_ends_custody_unsettled_at_the_retirement_bound() {
+        let word = Arc::new(SpawnWord::default());
+        let (kill_gate, held) = gate();
+        let fake = Fake::with(|s| {
+            s.kill_gate = Some(kill_gate);
+            s.killable = true;
+        });
+        let owner = started(&fake, &word);
+        let (hooked, hook_ran) = mpsc::channel();
+        owner.on_settled(move || {
+            let _unwatched = hooked.send(());
+        });
+        let quit = Instant::now();
+        owner.retire();
+        held.entered();
+        assert!(matches!(next(&owner), Report::Settled(Settled::Unsettled)));
+        let took = quit.elapsed();
+        assert!(took >= retirement(WAIT), "the whole bound: {took:?}");
+        assert!(
+            took < retirement(WAIT) + WAIT * 5,
+            "and no longer: {took:?}"
+        );
+        assert_eq!(
+            hook_ran.recv_timeout(BOUND),
+            Ok(()),
+            "the hook ran without the owner"
+        );
+        held.release();
+        fake.until(|s| s.reaped);
+        thread::sleep(WAIT);
+        assert!(
+            owner.next(Instant::now()).is_none(),
+            "the late reap reports nothing"
+        );
+        let retry = Fake::default();
+        let again = ChildOwner::start(retry.clone(), Arc::clone(&word), WAIT).expect("owner");
+        assert!(matches!(next(&again), Report::NotSpawned(Refusal::Claimed)));
+        assert_eq!(
+            retry.script().spawns,
+            0,
+            "the claim stays taken after Unsettled"
+        );
+    }
+
+    #[test]
+    fn a_poll_that_never_returns_ends_custody_unsettled_at_the_retirement_bound() {
+        let word = Arc::new(SpawnWord::default());
+        let fake = Fake::default();
+        let owner = started(&fake, &word);
+        let (hooked, hook_ran) = mpsc::channel();
+        owner.on_settled(move || {
+            let _unwatched = hooked.send(());
+        });
+        let (poll_gate, held) = gate();
+        fake.script().poll_gate = Some(poll_gate);
+        held.entered();
+        let quit = Instant::now();
+        word.quit();
+        assert!(matches!(next(&owner), Report::Settled(Settled::Unsettled)));
+        let took = quit.elapsed();
+        assert!(took >= retirement(WAIT), "the whole bound: {took:?}");
+        assert!(
+            took < retirement(WAIT) + WAIT * 5,
+            "and no longer: {took:?}"
+        );
+        assert_eq!(hook_ran.recv_timeout(BOUND), Ok(()), "the hook ran");
+        held.release();
+        // Lets the owner's late reaper end.
+        fake.script().exits = Some((Instant::now(), Exit::Code(0)));
+    }
+
+    #[test]
+    fn an_owner_that_resumes_after_the_unsettled_bound_only_reaps() {
+        let word = Arc::new(SpawnWord::default());
+        let fake = Fake::default();
+        let owner = started(&fake, &word);
+        let (poll_gate, held) = gate();
+        fake.script().poll_gate = Some(poll_gate);
+        held.entered();
+        word.quit();
+        assert!(matches!(next(&owner), Report::Settled(Settled::Unsettled)));
+        // The resumed owner reaches its kill decision past the grace; then one poll after it.
+        let (auto_reaps_gate, deciding) = gate();
+        fake.script().auto_reaps_gate = Some(auto_reaps_gate);
+        held.release();
+        deciding.entered();
+        deciding.release();
+        let (poll_gate, polling) = gate();
+        fake.script().poll_gate = Some(poll_gate);
+        polling.entered();
+        polling.release();
+        assert_eq!(fake.script().kills, 0, "no kill after the published end");
+        fake.script().exits = Some((Instant::now(), Exit::Code(0)));
+        fake.until(|script| script.reaped);
+        assert!(
+            owner.next(Instant::now() + WAIT).is_none(),
+            "no second outcome"
+        );
+    }
+
+    #[test]
+    fn a_kill_decided_before_the_unsettled_bound_is_not_sent_after_it() {
+        let word = Arc::new(SpawnWord::default());
+        let fake = Fake::default();
+        let owner = started(&fake, &word);
+        let (auto_reaps_gate, deciding) = gate();
+        fake.script().auto_reaps_gate = Some(auto_reaps_gate);
+        word.quit();
+        deciding.entered();
+        assert!(!owner.has_ended(), "custody is open as the kill is decided");
+        assert!(matches!(next(&owner), Report::Settled(Settled::Unsettled)));
+        assert!(owner.has_ended(), "the outcome is published");
+        deciding.release();
+        let (poll_gate, polling) = gate();
+        fake.script().poll_gate = Some(poll_gate);
+        polling.entered();
+        polling.release();
+        assert_eq!(fake.script().kills, 0, "no kill admitted after the outcome");
+        // Lets the owner's late reaper end.
+        fake.script().exits = Some((Instant::now(), Exit::Code(0)));
+    }
+
+    #[test]
+    fn a_refused_spawn_ends_quietly_without_an_unsettled_bound() {
+        for refusal in ["spawn fails", "quit first"] {
+            let word = Arc::new(SpawnWord::default());
+            if refusal == "quit first" {
+                word.quit();
+            }
+            let fake = Fake::with(|s| s.spawn_fails = true);
+            let owner = ChildOwner::start(fake, Arc::clone(&word), WAIT).expect("owner");
+            assert!(matches!(next(&owner), Report::NotSpawned(_)), "{refusal}");
+            let (hooked, hook_ran) = mpsc::channel();
+            owner.on_settled(move || {
+                let _unwatched = hooked.send(());
+            });
+            word.quit();
+            owner.retire();
+            assert!(
+                owner
+                    .next(Instant::now() + retirement(WAIT) + WAIT * 3)
+                    .is_none(),
+                "{refusal}: no Unsettled past the bound"
+            );
+            assert_eq!(
+                hook_ran.try_recv(),
+                Err(mpsc::TryRecvError::Empty),
+                "{refusal}: custody never ended"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spawn_pending_past_the_bound_is_not_bounded_and_its_failure_frees_the_claim() {
+        let word = Arc::new(SpawnWord::default());
+        let (spawn_gate, held) = gate();
+        let fake = Fake::with(|s| {
+            s.spawn_gate = Some(spawn_gate);
+            s.spawn_fails = true;
+        });
+        let owner = ChildOwner::start(fake, Arc::clone(&word), WAIT).expect("owner");
+        held.entered();
+        owner.retire();
+        assert!(
+            owner
+                .next(Instant::now() + retirement(WAIT) + WAIT * 3)
+                .is_none(),
+            "no Unsettled for a spawn nobody confirmed"
+        );
+        held.release();
+        assert!(matches!(
+            next(&owner),
+            Report::NotSpawned(Refusal::Spawn(_))
+        ));
+        assert!(claimable(&word), "the failed spawn freed its claim");
+    }
+
+    #[test]
+    fn a_settle_that_gives_up_returns_a_reap_that_won_the_end_first() {
+        let word = Arc::new(SpawnWord::default());
+        let terminal = Arc::new(Terminal::default());
+        assert_eq!(
+            terminal.end(Settled::Reaped(Exit::Code(0)), None, &word),
+            (Settled::Reaped(Exit::Code(0)), true)
+        );
+        let (retire, _retires) = mpsc::channel();
+        let (arm, _armed) = mpsc::channel();
+        let (report, reports) = mpsc::channel::<Report>();
+        drop(report);
+        let owner = ChildOwner {
+            retire,
+            arm,
+            reports,
+            word: Arc::clone(&word),
+            terminal,
+            wait: BOUND,
+        };
+        assert_eq!(owner.settle(), Settled::Reaped(Exit::Code(0)));
+        assert!(
+            claimable(&word),
+            "the give-up didn't take the freed claim back"
+        );
+    }
+
+    #[test]
+    fn on_settled_runs_when_custody_ends_or_at_once_after() {
+        let word = Arc::new(SpawnWord::default());
+        let fake = Fake::default();
+        let owner = started(&fake, &word);
+        let (hooked, hook_ran) = mpsc::channel();
+        let early = hooked.clone();
+        owner.on_settled(move || {
+            let _unwatched = early.send("early");
+        });
+        assert_eq!(
+            hook_ran.try_recv(),
+            Err(mpsc::TryRecvError::Empty),
+            "live custody"
+        );
+        fake.script().exits = Some((Instant::now(), Exit::Code(0)));
+        assert!(matches!(
+            next(&owner),
+            Report::Settled(Settled::Reaped(Exit::Code(0)))
+        ));
+        assert_eq!(hook_ran.recv_timeout(BOUND), Ok("early"));
+        owner.on_settled(move || {
+            let _unwatched = hooked.send("late");
+        });
+        assert_eq!(hook_ran.try_recv(), Ok("late"), "ran at once on the caller");
+    }
+
+    #[test]
+    fn settle_with_its_owner_thread_gone_is_unsettled_at_once() {
+        let (retire, _retires) = mpsc::channel();
+        let (report, reports) = mpsc::channel::<Report>();
+        drop(report);
+        let (arm, _armed) = mpsc::channel();
+        let owner = ChildOwner {
+            retire,
+            arm,
+            reports,
+            word: Arc::default(),
+            terminal: Arc::default(),
+            wait: BOUND,
+        };
+        let (settled, took) = settled_within(owner, BOUND);
+        assert_eq!(settled, Settled::Unsettled);
+        assert!(
+            took < WAIT,
+            "a closed report channel ends the wait: {took:?}"
+        );
     }
 }

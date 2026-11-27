@@ -1,24 +1,10 @@
 //! macOS candidates for shell-owned platform resources.
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the Mac connection starts its brain child from I1e-2"
-    )
-)]
 #[expect(
     unsafe_code,
     reason = "Darwin process calls are isolated to this platform adapter"
 )]
 mod child;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the link doesn't connect over the pair until I1e-5"
-    )
-)]
 #[expect(
     unsafe_code,
     reason = "Darwin resource-limit calls are isolated to this platform adapter"
@@ -26,14 +12,36 @@ mod child;
 mod core_dumps;
 mod instance;
 mod leg;
+#[cfg(test)]
+mod link_tests;
+#[expect(
+    dead_code,
+    reason = "Mac capture reads its pin and edge from its own pull request"
+)]
+#[expect(unsafe_code, reason = "reads the Core Audio host clock")]
+pub(super) mod microphone;
+mod pair;
+#[expect(
+    dead_code,
+    reason = "Mac capture reads the permission from its own pull request"
+)]
+#[expect(
+    unsafe_code,
+    reason = "reads the microphone permission through AVFAudio"
+)]
+pub(crate) mod permission;
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "the Mac connection starts its brain child from I1e-2"
+        reason = "Mac capture fills the ring from its own pull request"
     )
 )]
-mod pair;
+#[expect(
+    unsafe_code,
+    reason = "the ring's slots are shared with the CoreAudio IO thread"
+)]
+mod ring;
 #[cfg(any(test, feature = "test-support"))]
 mod wipes;
 
@@ -43,6 +51,32 @@ pub(crate) use instance::{read_instance, try_acquire_instance_lock};
 pub use kumochi_storage::application_support_dir as support_dir;
 pub(crate) use leg::{PipeClient, Secret, initiate, read_ready};
 pub(crate) use pair::ShellEnds;
+
+/// The shell's session for the link: always 0. The Mac's instance item and lock are per user, not
+/// per login session, so nothing on the pair path is named by it; a second login's brain exits
+/// Busy instead.
+///
+/// # Errors
+/// Never; the signature is the platforms' shared one.
+pub fn session_id() -> std::io::Result<u32> {
+    Ok(0)
+}
+
+/// The session channel of this build's edition. Gate identity has no wire value, so it refuses.
+pub(crate) fn channel() -> std::io::Result<kumochi_session::Channel> {
+    channel_of(kumochi_protocol::constants::ProductIdentity::ACTIVE)
+}
+
+fn channel_of(
+    identity: kumochi_protocol::constants::ProductIdentity,
+) -> std::io::Result<kumochi_session::Channel> {
+    use kumochi_protocol::constants::ProductIdentity;
+    match identity {
+        identity if identity == ProductIdentity::RELEASE => Ok(kumochi_session::Channel::Release),
+        identity if identity == ProductIdentity::DEV => Ok(kumochi_session::Channel::Dev),
+        _ => Err(std::io::ErrorKind::Unsupported.into()),
+    }
+}
 
 /// The brain helper nested in the shell's bundle: from an absolute
 /// `<name>.app/Contents/MacOS/<shell>` up to `Contents`, then down
@@ -69,6 +103,45 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use kumochi_protocol::constants::BRAIN_EXE;
+
+    #[test]
+    fn the_session_is_0_and_a_link_outside_a_bundle_has_no_brain() {
+        assert_eq!(super::session_id().expect("no session to read"), 0);
+        let (events, _) = async_channel::unbounded();
+        let prepared =
+            crate::link::prepare(events, kumochi_protocol::message::AudioSession::Legacy);
+        assert_eq!(
+            prepared.map(drop).map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::NotFound)
+        );
+    }
+
+    #[test]
+    fn each_identity_has_its_own_channel_and_gate_has_none() {
+        use kumochi_protocol::constants::ProductIdentity;
+        use kumochi_session::Channel;
+        let mut active = 0;
+        for (identity, channel) in [
+            (ProductIdentity::RELEASE, Ok(Channel::Release)),
+            (ProductIdentity::DEV, Ok(Channel::Dev)),
+            (ProductIdentity::GATE, Err(std::io::ErrorKind::Unsupported)),
+        ] {
+            assert_eq!(
+                super::channel_of(identity).map_err(|error| error.kind()),
+                channel,
+                "{identity:?}"
+            );
+            if identity == ProductIdentity::ACTIVE {
+                active += 1;
+                assert_eq!(
+                    super::channel().map_err(|error| error.kind()),
+                    channel,
+                    "the build's own"
+                );
+            }
+        }
+        assert_eq!(active, 1, "the build's identity is one of the three");
+    }
 
     #[test]
     fn the_brain_is_the_helper_nested_in_the_shell_bundle() {

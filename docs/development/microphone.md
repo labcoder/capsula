@@ -39,7 +39,10 @@ call `accept_running(Running) -> Result<(), MicError>`. On Windows this records 
 acceptance edge on the same performance clock that WASAPI uses to timestamp each
 packet's first frame. The source rejects a packet that starts before the edge,
 including a straddling packet, and keeps the first packet whose first sample is
-known to be after the edge. The comparison skips the ambiguous adjacent QPC tick
+known to be after the edge. The shared generation stores that edge once, only while
+running, in the platform capture clock's units; each native adapter supplies its own
+clock reading, and the copy-and-recheck of a borrowed batch (`copy_batch`) is shared.
+The comparison skips the ambiguous adjacent QPC tick
 and rounds forward to WASAPI's 100 ns units. Missing capture timestamps after
 acceptance and explicit timestamp faults
 fail closed. Preparing and stopping must remain distinct from Listening. A late
@@ -141,6 +144,47 @@ Discontinuity (apart from WASAPI's undefined
 first-buffer flag), timestamp failure and endpoint loss fail closed. Failed
 native release or teardown never becomes a successful stop receipt.
 
+## macOS input pin
+
+`platform::macos::microphone` decides what Mac capture may trust before any device
+opens. It accepts only the stream's own virtual format: interleaved,
+native-endian float32 that fills each frame, at the device's bit-exact nominal
+rate, within the shared wire bounds. No client format is requested, so nothing
+converts the audio. An IO cycle over 100 ms refuses, and the input counts as
+stalled after two cycles plus 100 ms without a valid one. The acceptance edge
+is the host clock that `AudioTimeStamp.mHostTime` uses, read two ticks on,
+because a cycle at the adjacent tick is ambiguous across threads. A kept
+cycle's sample time must be whole, finite, below 2^53 and moving forward. A
+fractional, repeated or backward position fails the hold, and a forward gap
+counts as missing frames. Nothing calls these yet: Mac capture adopts them in
+its own change.
+
+## macOS capture ring
+
+On macOS, CoreAudio hands each input cycle to an IO block on its real-time thread.
+`platform::macos::ring` is where that block copies it: slots preallocated from the
+pinned configuration (140 ms of cycles, at most 256 slots and 256 KiB), filled in
+place by the shared `copy_batch` and drained in place, in order, by the one capture
+worker, which zeroizes each slot as it frees it. A fill or read that unwinds still
+scrubs and frees its slot. The block never allocates, locks or waits.
+
+```mermaid
+stateDiagram-v2
+    FREE --> WRITING: IO block, under the producer claim
+    WRITING --> FULL: whole cycle copied while collecting
+    WRITING --> FREE: revoked mid-copy, zeroized by the block
+    FULL --> READING: capture worker
+    READING --> FREE: packetized, then zeroized
+```
+
+One atomic producer claim (open, in a cycle, closed) admits a single IO cycle at a
+time. Teardown first revokes the collection gate, then closes the claim, and only
+then scrubs every slot. While a cycle is paused
+inside the copy, closing fails and teardown retries rather than touch that slot, and
+the paused cycle fails its second authorization and zeroizes its own slot. A full
+ring refuses the cycle instead of growing. Nothing fills the ring yet: Mac capture
+adopts it in its own change.
+
 ## Evidence
 
 The adjacent shared tests use only synthetic PCM, explicit monotonic timestamps
@@ -161,8 +205,19 @@ An owned headless child checks the retained Windows handle's exit witness
 separately. The Darwin parent watch has its own native tests; the Mac runtime
 does not yet bind a microphone session to that witness.
 
+## macOS permission
+
+macOS feeds silence to input the user hasn't authorized, so Mac capture must read
+the microphone permission before it creates any audio object.
+`platform::macos::permission` reads `AVAudioApplication`'s record permission
+(macOS 14 and later) without prompting. `admit` runs the opener only when it is
+granted; undetermined, denied and any unknown value end the hold as
+`MicError::Permission`, and on macOS 13 and older the class is absent and capture
+refuses the same way. The voice reducer shows that as the existing microphone
+unavailable text. Nothing calls it yet: Mac capture adopts it in its own change.
+
 Compilation, native permissions/device/rate/stop behavior and hot-path allocation,
 latency and memory measurements still require their separately approved checks.
 Windows 11 x64 is the initial target, not a measured support claim. Other Windows
 versions/ARM64 and built-in/USB/Bluetooth differences remain unverified. There is
-no Mac implementation or parity claim.
+no Mac capture or parity claim.

@@ -45,7 +45,7 @@ impl<S: CredentialStore> Vault<S> {
             .map_err(VaultError::from)?;
         let plan = self
             .authority
-            .begin(Kind::AnthropicKey, current.revision, len)
+            .begin_paste(current.revision, len)
             .map_err(VaultError::from)?;
         let reply = PastePlan {
             generation: plan.generation(),
@@ -77,15 +77,16 @@ impl<S: CredentialStore> Vault<S> {
             .paste
             .take_if(|plan| plan.generation() == id)
             .ok_or(PasteError::Changed)?;
-        let parsed = generation::read_pending(&self.store, &self.service, &plan, clock)
-            .map_err(VaultError::from)
-            .map_err(KeyError::from)
-            .and_then(|bytes| AnthropicKey::parse(bytes).map_err(KeyError::Rejected));
+        let parsed =
+            generation::read_pending(self.store_for(plan.store()), &self.service, &plan, clock)
+                .map_err(VaultError::from)
+                .map_err(KeyError::from)
+                .and_then(|bytes| AnthropicKey::parse(bytes).map_err(KeyError::Rejected));
         let key = match parsed {
             Ok(key) => key,
             Err(error) => {
                 generation::delete_pending(
-                    &self.store,
+                    self.store_for(plan.store()),
                     &self.service,
                     Kind::AnthropicKey,
                     plan.generation(),
@@ -99,7 +100,7 @@ impl<S: CredentialStore> Vault<S> {
             .write_expected(Kind::AnthropicKey, plan.base(), &bytes, None)
             .inspect_err(|_| {
                 generation::delete_pending(
-                    &self.store,
+                    self.store_for(plan.store()),
                     &self.service,
                     Kind::AnthropicKey,
                     plan.generation(),

@@ -90,6 +90,7 @@ pub(crate) fn held_accounts_until(
             let _hold = &hold;
             Vault::with_lock(
                 store.clone(),
+                None,
                 "test-accounts",
                 Arc::clone(&profile),
                 crate::connections::authority::Missing::Create,

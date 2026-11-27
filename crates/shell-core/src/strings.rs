@@ -793,7 +793,7 @@ mod tests {
         assert_eq!(
             strings.with_app(Text::ScreenAccessPending),
             format!(
-                "Screen capture stays off until you allow {app} in Screen Recording settings. If access still doesn't show after you allow it, quit and reopen {app}."
+                "macOS asks only once each time {app} opens, so turn on {app} in Screen Recording settings instead. Screen capture stays off until you do. If access still doesn't show after you allow it, quit and reopen {app}."
             )
         );
     }

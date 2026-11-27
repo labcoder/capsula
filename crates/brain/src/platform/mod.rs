@@ -153,6 +153,14 @@ impl InstanceLock {
     pub(crate) fn product(&self) -> &std::path::Path {
         match *self {}
     }
+
+    pub(crate) fn fresh(&self) -> bool {
+        match *self {}
+    }
+
+    pub(crate) fn intact(&self) -> bool {
+        match *self {}
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -213,6 +221,8 @@ pub(crate) fn instance_fixture_clean(_: &std::path::Path, _: &[&str]) {
     panic!("only macOS has the instance item's native fixtures")
 }
 
+#[cfg(all(test, target_os = "macos", feature = "first-light"))]
+pub(crate) use macos::instance::fresh_lock_at as fresh_custody_at;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) use macos::instance::lock_at as instance_custody_at;
 #[cfg(all(test, target_os = "macos"))]
@@ -313,7 +323,7 @@ pub(crate) const DATA_ROOT_ERROR: &str = "macOS Application Support folder is un
 #[cfg(not(any(windows, target_os = "macos")))]
 pub use fs::{config_dir, data_dir};
 #[cfg(not(windows))]
-pub use fs::{free_space, links_unsupported, replace_file};
+pub use fs::{free_space, links_unsupported, model_free_space, replace_file};
 #[cfg(unix)]
 pub use unix::product_folder;
 #[cfg(target_os = "macos")]
@@ -339,10 +349,11 @@ pub(crate) use protected::{Untrusted, is_unsupported};
 #[cfg(not(windows))]
 pub(crate) use protected::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
-    private_tree, publish_model, remove_model_tree, remove_tree, unmark, validate_model_path,
+    hold_model_chain, hold_model_creation, keep_model_final, mark, marker, model_file, model_final,
+    open_model_write, owner_only_dir, private_tree, publish_model, remove_model_tree, remove_tree,
+    unmark, validate_model_path,
 };
-pub use runtime_admission::{Mode, supports};
+pub use runtime_admission::{Mode, admits_parent_bound, supports};
 pub(crate) use runtime_admission::{require_mode, serve_speech};
 pub use session_lock::{SessionLock, SessionLockError};
 pub(crate) use tls_control::{
@@ -437,8 +448,9 @@ pub(crate) use windows::{
 #[cfg(windows)]
 pub use windows::{
     PipeServer, client_image, client_process, config_dir, create_owner_only, data_dir,
-    detached_command, free_space, has_exited, links_unsupported, process_image, product_folder,
-    quiet_failures, replace_file, server_image, session_id, session_lock_path, trust_roots,
+    detached_command, free_space, has_exited, links_unsupported, model_free_space, process_image,
+    product_folder, quiet_failures, replace_file, server_image, session_id, session_lock_path,
+    trust_roots,
 };
 #[cfg(all(test, windows))]
 pub(crate) use windows::{SpawnEdge, observe_next_spawn};
@@ -450,9 +462,9 @@ pub(crate) use windows::{
 #[cfg(windows)]
 pub(crate) use windows::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_chain,
-    hold_model_creation, mark, marker, model_file, model_final, open_model_write, owner_only_dir,
-    private_tree, profile_dir, publish_model, remove_model_tree, remove_tree, unmark,
-    validate_model_path,
+    hold_model_chain, hold_model_creation, keep_model_final, mark, marker, model_file, model_final,
+    open_model_write, owner_only_dir, private_tree, profile_dir, publish_model, remove_model_tree,
+    remove_tree, unmark, validate_model_path,
 };
 
 /// Whether this platform captures one window alone. No platform but Windows does yet.

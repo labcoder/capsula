@@ -99,7 +99,7 @@ fn github_can_be_written_removed_and_swept_after_every_supported_upgrade() {
             auth.conn
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            3
+            5
         );
         let active = setup.save(&mut auth, Kind::GitHub, &secret(7, 37));
         assert_eq!(
