@@ -116,36 +116,92 @@ pub fn create_private_file(support: &Path, path: &Path) -> Result<File, Untruste
     Ok(file)
 }
 
-/// Opens the existing partial file `path`, whose name ends `.part`, for writing without truncating
-/// it, and locks it. A sealed file there is taken as a publish that stopped between its seal and
-/// its rename: it's locked, checked sealed and still named, and only then unsealed to 0600.
+/// Opens the existing partial file `path`, whose name ends `.part`, without truncating it, and
+/// locks it. A partial at 0600 opens for writing. A sealed file there is a publish that stopped
+/// between its seal and its rename: it opens read-only, locked and checked sealed, and stays sealed
+/// until [`resume_private_write`], so a check that refuses after this one changes nothing.
 ///
 /// # Errors
 /// `Missing` when nothing is there; `Io` when the lock is held; `Unsafe` for a name that doesn't
-/// end `.part`. Otherwise refuses anything but this
-/// user's regular file with one name on its folder's volume at mode 0600 (or a seal's mode) before
-/// opening it, and an ACL or any change by the time it's locked.
+/// end `.part`. Otherwise refuses anything but this user's regular file with one name on its
+/// folder's volume at mode 0600 or a seal's mode before opening it, and an ACL or any change by
+/// the time it's locked.
 pub fn open_private_write(support: &Path, path: &Path) -> Result<File, Untrusted> {
     partial_name(path)?;
     let (held, name) = file_parent(support, path)?;
     let folder = held.last()?;
     let mode = look(folder, &name)?.st_mode & 0o7777;
-    if mode == Seal::ReadOnly.mode() || mode == Seal::ReadExecute.mode() {
-        // Locked first, so a publisher still holding it keeps its seal; released before the reopen.
-        let sealed = existing(&held, &name, READ_FLAGS, mode)?;
-        lock(&sealed)?;
-        named(
-            folder,
-            &name,
-            &inspect_private(&sealed, held.user(), ObjectKind::Exact(mode))?,
-        )?;
-        chmod(&sealed, PARTIAL)?;
-    }
-    let file = existing(&held, &name, WRITE_FLAGS, PARTIAL)?;
+    let (flags, mode) = if sealed(mode) {
+        (READ_FLAGS, mode)
+    } else {
+        (WRITE_FLAGS, PARTIAL)
+    };
+    let file = existing(&held, &name, flags, mode)?;
     lock(&file)?;
-    let locked = inspect_private(&file, held.user(), ObjectKind::Exact(PARTIAL))?;
-    named(folder, &name, &locked)?;
+    named(
+        folder,
+        &name,
+        &inspect_private(&file, held.user(), ObjectKind::Exact(mode))?,
+    )?;
     Ok(file)
+}
+
+/// Makes the partial `file`, which [`open_private_write`] opened from `path`, writable. It first
+/// takes `file`'s lock, which is a no-op when `file` already holds it and refuses while another
+/// descriptor does. A writable one is then checked and kept. A sealed one is checked sealed and
+/// still named, unsealed to 0600 and reopened for writing while `file` still holds the lock; the
+/// reopened descriptor must be the same file, and is then locked and checked again.
+///
+/// # Errors
+/// `Io` when another descriptor holds the lock, or takes it at the handoff; `Unsafe` for a name
+/// that doesn't end `.part`, another mode, a name that no longer gives `file`, a different file
+/// at the reopen (which puts the seal back) or a 0600 `file` that isn't open for writing;
+/// otherwise as [`open_private_write`].
+pub fn resume_private_write(support: &Path, file: File, path: &Path) -> Result<File, Untrusted> {
+    partial_name(path)?;
+    let (held, name) = file_parent(support, path)?;
+    let folder = held.last()?;
+    lock(&file)?;
+    let mode = stat(file.as_raw_fd())?.st_mode & 0o7777;
+    let kind = ObjectKind::Exact(if sealed(mode) { mode } else { PARTIAL });
+    let original = inspect_private(&file, held.user(), kind)?;
+    named(folder, &name, &original)?;
+    if !sealed(mode) {
+        return if writable(&file)? {
+            Ok(file)
+        } else {
+            Err(Untrusted::Unsafe)
+        };
+    }
+    chmod(&file, PARTIAL)?;
+    let reopened = existing(&held, &name, WRITE_FLAGS, PARTIAL)?;
+    if !same_object(&original, &stat(reopened.as_raw_fd())?) {
+        chmod(&file, mode)?;
+        return Err(Untrusted::Unsafe);
+    }
+    drop(file);
+    lock(&reopened)?;
+    named(
+        folder,
+        &name,
+        &inspect_private(&reopened, held.user(), ObjectKind::Exact(PARTIAL))?,
+    )?;
+    Ok(reopened)
+}
+
+/// Whether `file` is open for reading and writing.
+fn writable(file: &File) -> Result<bool, Untrusted> {
+    // SAFETY: file is held and not consumed; F_GETFL only reads its status flags.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(Untrusted::Io);
+    }
+    Ok(flags & libc::O_ACCMODE == libc::O_RDWR)
+}
+
+/// Whether `mode` is one a publish seals at.
+fn sealed(mode: libc::mode_t) -> bool {
+    mode == Seal::ReadOnly.mode() || mode == Seal::ReadExecute.mode()
 }
 
 /// Opens the sealed file `path` read-only: the checked read-only open.
