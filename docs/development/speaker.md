@@ -51,7 +51,10 @@ handoff boundary, or Stop can discard the queue without the handoff boundary. St
 observations don't request recovery. Virtual pacing never crosses the first unheard gap
 in heard history. Finality after Stop still requires every applicable generation-specific
 tail proof and the latest known deadline. Two unresolved device tails refuse another
-physical open, but virtual pacing continues.
+physical open, but virtual pacing continues. On a Plain pair, a reply's first open request
+holds virtual pacing until it resolves or reaches its 1 s retry time, whichever comes first, so a
+slow first device open doesn't retire the reply's start unheard. An open still pending after that
+can lose the start. A retry, and a Conducted pair, keep pacing during an open.
 
 Stop is sticky and bypasses the bounded command mailbox. The owner handles commands
 before admitting ingress, and a terminated owner reports disconnection, not backpressure.
@@ -69,7 +72,8 @@ route whose tail never arrived counts as quiet once the backend confirms its str
 since that stream can't play anything more. A
 reroute replaces the stream instead of assuming that old endpoint timing still applies.
 An xrun rechecks refill readiness on every tick, even without new ingress.
-Only an authoritative typed RunState starts this worker on an internally selected queued pair.
+An authoritative RunState for a typed reply or a speaking Hold binds that run on a queued pair. With
+Talk-back on it also starts this worker; with Talk-back off it starts none.
 
 The offline tests that require a positive heard prefix open the fake route before the
 worker admits PCM: the first run for Plain, and each run in the two-reply Presence
@@ -92,9 +96,9 @@ admitting another turn; a refused live report ends the pair. After an earlier re
 is refused, the original worker can observe its fenced callback for at most 500 ms without
 feeding audio or sending another report. That local proof doesn't release the device permit;
 the backend still owns disposal. Unknown tails still block replacement. An
-absolute startup deadline ends the same pair even while control traffic continues. Ordinary launch still selects Legacy. That session starts quiet and never opens a playback
-device. Unexpected speech PCM is wiped, credited and dropped; typed replies and voice input
-continue on the Legacy pair. There is no user-facing queued selector or fallback.
+absolute startup deadline ends the same pair even while control traffic continues. Ordinary launch
+selects queued Plain, with no Legacy fallback. A Legacy session starts quiet and never opens a
+playback device; unexpected speech PCM is wiped, credited and dropped.
 
 ## Dormant segment gate
 
@@ -158,8 +162,8 @@ launcher prepares `Plain`.
 
 Each link has one output owner. A Legacy connection gets a fresh no-output epoch before
 Connected, so an old capture claim cannot match a replacement session. A queued pair can
-lend the capture inhibit only after its exact logical output is registered, with Show
-Screen confirmed off and no pending setting change. With Talk-back on, the pair must be
+lend the capture inhibit only after its exact logical output is registered, with its Show
+Screen value known (on or off) and no pending setting change. With Talk-back on, the pair must be
 Plain, with no typed turn reserved, no draining predecessor, and the previous run's
 `SpeechStopped` accepted by the control queue. While the inhibit is held, no typed turn
 can reserve the pair. Registration cannot prove that an earlier route or microphone retired.
@@ -175,7 +179,7 @@ not a quiet receipt and never authorizes capture. The callback normally reports 
 first/last nonzero pair on a separate optional ring. If extending a pair would reach
 500 ms, it keeps that pair and starts another at the current copy's actual timestamps.
 It reports at most eight pairs after copying; capacity loss drops speech evidence without
-delaying PCM, receipts, or Stop. This does not change which route ordinary launch selects.
+delaying PCM, receipts, or Stop.
 
 Once the brain's Stop has been queued, a queued stop closes admission immediately. If the
 owner is busy, Presence can offer the same stop again; an undeliverable stop ends the pair.

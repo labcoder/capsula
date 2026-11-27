@@ -232,7 +232,7 @@ stateDiagram-v2
 
 - **The window.** At most one Speak is out at a time. A new one goes out only while the unplayed audio is under 20 s and at most two segments lie beyond the playing one.
 - **Credit.** The pump reads TTS only on credit, which keeps forwarded audio inside the window. `SpeechProgress` gives credit back as it plays, so a 30 s segment streams through the 20 s window.
-- **Queued output (dormant).** Ordered retirement
+- **Queued output.** Ordered retirement
   refunds the synthesis window even for unheard samples. Only the separate heard prefix updates
   history; duplicate retirement and a producer-side drop cannot refund the same samples twice.
   The device callback reserves presentation evidence before copying stamped speech. If the receipt
@@ -308,9 +308,10 @@ flowchart LR
 
 ### A spoken run
 
-Only a registered queued pair can play a reply. The brain admits speech when its voice is
-`Ready` and Talk-back is on. Stock Legacy sessions never register output, so their text
-and steps still run without audio.
+Kumochi's shell plays replies only on a registered queued pair. The brain admits speech when its voice is
+`Ready` and Talk-back is on. Kumochi's shell never announces output on a Legacy session, so
+its text and steps run without audio. The brain still installs a Legacy `AudioOutput` for wire
+compatibility ([ipc.md](ipc.md)).
 
 ```mermaid
 sequenceDiagram
@@ -347,7 +348,7 @@ sequenceDiagram
   dispatched Speak, including plain text, from dispatch to its first nonempty PCM or terminal.
   The pump reads the registered narration at each Speak, so a pump loaded after the pair
   registered times the same way, and losing the shell drops back to untimed. Queued segments have no timer.
-  The provisional deadline is five seconds; it needs measuring on the current build before activation.
+  The provisional deadline is five seconds; it needs measuring on the current build before conducted output is switched on.
   At expiry the pump checks the receiver even if the data pipe has no room. A ready event keeps
   its normal credit and order; an unfinished send does not delay expiry. Silence at expiry fences
   the dispatch even if unload already moved its TTS generation, and ends the reply's remaining

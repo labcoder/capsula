@@ -25,7 +25,6 @@ reconnecting reads the saved preference instead of assuming an interrupted save 
 **Hold to talk** is the checkbox above it.
 
 **Speak answers aloud** saves your preference for spoken replies when playback is available.
-This version can install the model but can't play spoken replies.
 You can choose it before a voice is installed; it doesn't download a voice or start recording.
 Use **Install spoken replies** on the same tab to install the voice and see its setup status.
 If Settings asks you to finish or stop current work first, the saved choice hasn't changed.
