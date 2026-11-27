@@ -292,6 +292,10 @@ impl Runs {
 
     /// What the brain last answered about the target's model choice, Kumo's main chat included.
     pub fn model_choice(&self) -> Choice {
+        if matches!(self.target, Target::Kumo) && self.main.is_none() {
+            // Kumo's chat exists and may have a saved choice; only its id hasn't arrived.
+            return Choice::Unknown;
+        }
         self.choice.choice(self.revision, self.thread())
     }
 

@@ -1119,7 +1119,7 @@ impl Coordinator {
             } => self.model_set(session, request, thread, result, &mut effects),
             Input::ReadModel { request, thread } => self.read_model(request, thread, &mut effects),
             Input::ModelRead { read, result } => self.model_read(&read, result, &mut effects),
-            Input::ModelReadsDue => self.model_reads_due(&mut effects),
+            Input::ModelReadsDue => self.model_reads_due(),
             Input::SummaryStored {
                 owner: SendKey::Job(key),
                 ..

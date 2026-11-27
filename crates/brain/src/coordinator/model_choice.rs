@@ -104,15 +104,19 @@ impl Coordinator {
         }
     }
 
-    /// Admits a read, or refuses it at once when every slot is held or the request repeats.
+    /// Admits a read, or refuses it at once when every slot is held. A repeat of a request still
+    /// held is ignored, so that request is answered once.
     pub(super) fn read_model(&mut self, request: u32, thread: ThreadId, effects: &mut Vec<Effect>) {
         let session = self.model_choices.session;
         let slots = &mut self.model_choices.slots;
-        if slots.len() >= MAX_PENDING_MODEL_READS
-            || slots
-                .iter()
-                .any(|slot| slot.session == session && slot.request == request)
+        if slots
+            .iter()
+            .any(|slot| slot.session == session && slot.request == request)
         {
+            // The first read with this number answers it, once.
+            return;
+        }
+        if slots.len() >= MAX_PENDING_MODEL_READS {
             effects.push(Effect::Control(ControlToShell::ThreadModelRead {
                 request,
                 thread,
@@ -131,13 +135,14 @@ impl Coordinator {
         });
     }
 
-    /// Hands the reader every parked read whose thread has no new row waiting to be queued, so
-    /// the read is stamped after the write that creates it; arms the earliest deadline still owed
-    /// an answer, parked or handed out.
+    /// Fails reads past their deadline, then hands the reader every parked read whose thread has
+    /// no new row waiting to be queued, so the read is stamped after the write that creates it;
+    /// arms the earliest deadline still owed an answer, parked or handed out.
     pub(super) fn release_model_reads(&mut self, effects: &mut Vec<Effect>) {
         if self.model_choices.slots.is_empty() {
             return;
         }
+        self.expire_model_reads(effects);
         if self.model_choices.slots.iter().any(|slot| !slot.sent) {
             let unborn: Vec<ThreadId> = self
                 .ending
@@ -183,12 +188,18 @@ impl Coordinator {
         }
     }
 
-    /// Answers `Failed` once for each read past its deadline. A parked one frees its slot; one
-    /// the reader holds is cancelled and keeps its slot until the reader lets it go.
-    pub(super) fn model_reads_due(&mut self, effects: &mut Vec<Effect>) {
+    /// The timer fired; the expiry itself runs with every input's release.
+    pub(super) fn model_reads_due(&mut self) {
+        self.model_choices.armed = None;
+    }
+
+    /// Answers `Failed` once for each read past its deadline, before any parked read is handed
+    /// out, so a store acknowledgement taken ahead of the timer can't send an expired read. A
+    /// parked one frees its slot; one the reader holds is cancelled and keeps its slot until the
+    /// reader lets it go.
+    fn expire_model_reads(&mut self, effects: &mut Vec<Effect>) {
         let now = Instant::now();
         let choices = &mut self.model_choices;
-        choices.armed = None;
         choices.slots.retain_mut(|slot| {
             if slot.expired || slot.deadline > now {
                 return true;

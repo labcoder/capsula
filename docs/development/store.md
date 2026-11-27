@@ -88,8 +88,8 @@ brain refuses a file whose version is newer than it knows.
 The ordinary open migrates to version 14, all pending migrations in one transaction, so a crash
 leaves the file at the version it had. Version 14 adds `threads.model_choice_rev` (see below). Version 12 adds the `chatgpt_recovery_context` table, and
 13 changes no schema: builds from before the profile's writer lock know at most 12, so they
-refuse the file instead of writing history without the lock. A file already at 12 moves to 13
-alone. Nothing writes or reads that table, so it stays empty; a row an older file holds (a tag
+refuse the file instead of writing history without the lock. A file at 12 moves through 13 to 14
+in that one transaction. Nothing writes or reads that table, so it stays empty; a row an older file holds (a tag
 and two IDs, no conversation content) is kept and changes nothing. A compile-time assert keeps
 the current version above 12.
 

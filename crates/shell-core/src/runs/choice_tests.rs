@@ -77,8 +77,8 @@ fn kumo_focus_promotion_and_reconnect_each_ask_again() {
     runs.connected(1);
     assert_eq!(
         runs.model_choice(),
-        Choice::NoThread,
-        "Kumo's id hasn't arrived"
+        Choice::Unknown,
+        "Kumo's id hasn't arrived, but its chat exists"
     );
     assert_eq!(runs.model_read(now), None);
     runs.settings(KUMO);

@@ -144,14 +144,32 @@ fn reads_hold_their_slots_until_answered_even_across_a_new_session() {
     );
 }
 
+/// A request number still held is answered once, by its first read; the repeat takes no slot.
 #[test]
-fn a_repeated_request_is_refused_without_taking_a_slot() {
+fn a_repeated_request_is_answered_once() {
     let mut core = fresh();
-    assert_eq!(sent(&core.handle(read(1, T)).expect("admitted")).len(), 1);
-    assert_eq!(core.handle(read(1, MAIN)), Ok(vec![refused(1, MAIN)]));
+    let first = sent(&core.handle(read(1, T)).expect("admitted"));
+    assert_eq!(first.len(), 1);
+    assert_eq!(core.handle(read(1, T)), Ok(Vec::new()), "the exact replay");
+    assert_eq!(
+        core.handle(read(1, MAIN)),
+        Ok(Vec::new()),
+        "the same number"
+    );
     assert_eq!(
         sent(&core.handle(read(2, MAIN)).expect("admitted")).len(),
         1
+    );
+    assert_eq!(
+        core.handle(Input::ModelRead {
+            read: first[0].clone(),
+            result: ChoiceRead::Missing,
+        }),
+        Ok(vec![Effect::Control(ControlToShell::ThreadModelRead {
+            request: 1,
+            thread: T,
+            result: ChoiceRead::Missing,
+        })])
     );
 }
 
@@ -326,4 +344,48 @@ async fn an_answer_taken_after_the_deadline_is_the_promised_failure() {
         Ok(Vec::new()),
         "answered once"
     );
+}
+
+/// The older run's store answer can be taken at the deadline ahead of the timer: the parked
+/// reads fail then and are never handed to the reader, so both slots are free again.
+#[tokio::test(start_paused = true)]
+async fn a_parked_read_past_its_deadline_is_never_handed_out() {
+    let mut core = started();
+    draw_step(&mut core, R, "one").expect("current");
+    core.handle(Input::Turn {
+        turn: 1,
+        thread: None,
+        text: "b".into(),
+    })
+    .expect("turn");
+    let new = ThreadId(T.0 + 1);
+    core.handle(read(1, new)).expect("parked");
+    core.handle(read(2, new)).expect("parked");
+    tokio::time::advance(READ_TIME).await;
+    let effects = core.handle(ack(0, "one")).expect("ending");
+    assert!(sent(&effects).is_empty(), "nothing queued: {effects:?}");
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(
+                effect,
+                Effect::Control(ControlToShell::ThreadModelRead { .. })
+            ))
+            .collect::<Vec<_>>(),
+        [&refused(1, new), &refused(2, new)]
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Store(StoreOp::BeginTurn { thread, .. }) if *thread == new
+        )),
+        "the row's write still goes"
+    );
+    assert_eq!(
+        core.handle(Input::ModelReadsDue),
+        Ok(Vec::new()),
+        "answered once"
+    );
+    assert_eq!(sent(&core.handle(read(3, T)).expect("admitted")).len(), 1);
+    assert_eq!(sent(&core.handle(read(4, T)).expect("admitted")).len(), 1);
 }
