@@ -52,8 +52,9 @@ observations don't request recovery. Virtual pacing never crosses the first unhe
 in heard history. Finality after Stop still requires every applicable generation-specific
 tail proof and the latest known deadline. Two unresolved device tails refuse another
 physical open, but virtual pacing continues. On a Plain pair, a reply's first open request
-holds virtual pacing until that request's 1 s retry time, so a slow first device open doesn't
-retire the reply's start unheard. A retry, and a Conducted pair, keep pacing during an open.
+holds virtual pacing until it resolves or reaches its 1 s retry time, whichever comes first, so a
+slow first device open doesn't retire the reply's start unheard. An open still pending after that
+can lose the start. A retry, and a Conducted pair, keep pacing during an open.
 
 Stop is sticky and bypasses the bounded command mailbox. The owner handles commands
 before admitting ingress, and a terminated owner reports disconnection, not backpressure.

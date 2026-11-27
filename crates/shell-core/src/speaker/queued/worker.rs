@@ -264,8 +264,7 @@ pub(crate) fn spawn(
         stop: Arc::clone(&stop),
         closed: Arc::clone(&closed),
     };
-    let mut engine = Engine::new(run, generation);
-    engine.hold_first_open = drawing.plain();
+    let plain = drawing.plain();
     let drawing = Drawing::new(session, Arc::clone(&closed), drawing);
     #[cfg(not(any(test, feature = "test-support")))]
     let start = backend::spawn;
@@ -285,6 +284,8 @@ pub(crate) fn spawn(
     let task = thread::Builder::new()
         .name("speaker-owner".into())
         .spawn(move || {
+            let mut engine = Engine::new(run, generation);
+            engine.hold_first_open = plain;
             own(
                 &port,
                 (engine, origin),
