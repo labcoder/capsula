@@ -418,7 +418,7 @@ pub(in crate::platform::macos) enum Commit {
     Pings,
     Stalls,
     /// Settings a byte at a time, each gap well inside any one transfer's bound; the brain fails
-    /// unless the shell closes its ends before the last byte.
+    /// unless a byte goes out before the deadline and the shell closes its ends before the last.
     Trickles,
 }
 
@@ -496,10 +496,16 @@ pub(in crate::platform::macos) fn scripted(
             )
             .expect("encodes");
             let wire = brain.sealed(Pipe::Control, &settings);
+            let mut early = false;
             let whole = wire.iter().all(|byte| {
-                thread::sleep(TRICKLE);
-                brain.control.write_all(&[*byte]).is_ok()
+                let sent = brain.control.write_all(&[*byte]).is_ok();
+                early |= sent && Instant::now() < deadline;
+                if sent {
+                    thread::sleep(TRICKLE);
+                }
+                sent
             });
+            assert!(early, "part of the frame went out before the deadline");
             assert!(!whole, "the shell gave up before the frame finished");
         }
         Commit::Stalls => {
@@ -548,7 +554,7 @@ fn the_attempt_ends_at_its_deadline_while_waiting_for_settings() {
 
 #[test]
 fn the_settings_wait_ends_at_the_deadline_however_the_frame_trickles() {
-    let deadline = Instant::now() + Duration::from_millis(700);
+    let deadline = Instant::now() + Duration::from_secs(2);
     let (result, brain) = attempt(AudioSession::Legacy, Commit::Trickles, deadline);
     let ended = Instant::now();
     assert!(matches!(result, Err(LinkError::ConnectExpired)));
