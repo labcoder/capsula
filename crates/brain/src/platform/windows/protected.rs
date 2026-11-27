@@ -19,7 +19,7 @@ use kumochi_storage::known_folder;
 use kumochi_storage::user_sid;
 #[cfg(test)]
 pub(crate) use kumochi_storage::{DaclEntry, dacl_entries, dacl_sddl, set_dacl};
-pub(crate) use kumochi_storage::{hold_chain, owner_only_dir};
+pub(crate) use kumochi_storage::{hold_chain, hold_chain as hold_model_chain, owner_only_dir};
 use windows_sys::Win32::Foundation::{
     ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED,
 };
@@ -40,7 +40,7 @@ use crate::platform::Untrusted;
 mod models;
 pub(crate) use models::{
     check_model_final, create_model_dir, create_model_write, discard_model, hold_model_creation,
-    model_file, model_final, open_model_write, publish_model, remove_model_tree,
+    keep_model_final, model_file, model_final, open_model_write, publish_model, remove_model_tree,
     validate_model_path,
 };
 

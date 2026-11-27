@@ -1,12 +1,13 @@
 //! Ordinary file operations where Windows' platform adapter is absent.
 
+use std::fs::File;
 use std::io;
 use std::path::Path;
 #[cfg(not(target_os = "macos"))]
 use std::path::PathBuf;
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-use std::fs::{self, File};
+use std::fs;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 use std::io::Write as _;
 
@@ -100,7 +101,7 @@ pub fn free_space(dir: &Path) -> io::Result<u64> {
     available_bytes(stat.f_bavail, block_size)
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(any(target_os = "macos", all(test, target_os = "linux")))]
 fn available_bytes(blocks: u64, block_size: u64) -> io::Result<u64> {
     blocks
         .checked_mul(block_size)
@@ -114,6 +115,28 @@ fn available_bytes(blocks: u64, block_size: u64) -> io::Result<u64> {
 #[cfg(not(all(test, any(target_os = "linux", target_os = "macos"))))]
 pub fn free_space(_: &Path) -> io::Result<u64> {
     Err(io::ErrorKind::Unsupported.into())
+}
+
+/// The bytes available for model storage on the volume of `held`, the admitted folder at `dir`.
+/// macOS asks through the descriptor, so a redirected name can't report another volume.
+///
+/// # Errors
+/// Fails when the volume can't be queried or the byte count overflows.
+// shortcut: statfs ignores purgeable APFS space, so it can refuse while Finder shows room; switch to
+// the important-usage capacity if users hit NoSpace.
+#[cfg(target_os = "macos")]
+pub fn model_free_space(_: &Path, held: &File) -> io::Result<u64> {
+    let stat = rustix::fs::fstatfs(held)?;
+    available_bytes(stat.f_bavail, u64::from(stat.f_bsize))
+}
+
+/// [`free_space`] of `dir`, which Unix has only in tests.
+///
+/// # Errors
+/// As [`free_space`].
+#[cfg(not(target_os = "macos"))]
+pub fn model_free_space(dir: &Path, _: &File) -> io::Result<u64> {
+    free_space(dir)
 }
 
 /// Only an explicit unsupported-operation error permits replacing without a hard link.
@@ -286,6 +309,24 @@ mod tests {
         );
         assert!(links_unsupported(&io::ErrorKind::Unsupported.into()));
         assert!(!links_unsupported(&io::ErrorKind::PermissionDenied.into()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn model_space_asks_the_held_folder_not_its_name() {
+        let scratch = crate::scratch::dir("fs-model-space");
+        let held = std::fs::File::open(scratch.path()).expect("the held folder");
+        let absent = scratch.join("absent");
+        assert_eq!(
+            free_space(&absent)
+                .expect_err("the name resolves nowhere")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(
+            super::model_free_space(&absent, &held).is_ok(),
+            "measured through the descriptor"
+        );
     }
 
     #[cfg(target_os = "macos")]

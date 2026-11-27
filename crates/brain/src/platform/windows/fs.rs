@@ -1,5 +1,6 @@
 //! File operations the store needs with guarantees std doesn't give.
 
+use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt as _;
 use std::path::Path;
@@ -52,6 +53,15 @@ pub fn free_space(dir: &Path) -> io::Result<u64> {
         return Err(io::Error::last_os_error());
     }
     Ok(free)
+}
+
+/// [`free_space`] of `dir`, the held model folder's path: Windows' held handles already deny
+/// renaming it.
+///
+/// # Errors
+/// As [`free_space`].
+pub fn model_free_space(dir: &Path, _: &File) -> io::Result<u64> {
+    free_space(dir)
 }
 
 /// Whether a hard link failed because the volume has none, as on FAT and some network shares.
