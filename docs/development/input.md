@@ -884,8 +884,10 @@ the Listening row.
   one present per window per DWM frame, and the dock and the panel are both DirectComposition
   swapchains, so when the panel presents in the same frame the dock's present can be marked
   dropped although it may have been shown; `Dropped` isn't used for that reason. Recognition → display
-  comes only from a row with `Dropped` = 0 and an `msUntilDisplayed`, is never inferred from
-  another swapchain or a later present, and is reported with its coverage (how many of the
+  comes only from a row with `Dropped` = 0 and an `msUntilDisplayed`, or from the validated
+  first-present seed described above ("Every main-trace swapchain has the same first-present seed
+  rule"), which is reconstructed from the
+  swapchain's first emitted row. It is never inferred from another swapchain, and is reported with its coverage (how many of the
   attempted holds have a measured display); key-down → that present is reported too, and neither is gated.
   The gate (owner, 2026-11-27: option A) splits the holds: each launch's first hold is cold and
   every one must be ≤150ms, and the other 90 are warm, at p95 ≤40ms over all attempted warm holds.

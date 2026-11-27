@@ -394,7 +394,8 @@ impl PresentRows {
     /// The Listening join: the unique present submitted on `swapchain` within the frame's
     /// interval, whatever its `Dropped` flag, since `PresentMon` credits at most one present per
     /// window per DWM frame and two composition swapchains can mark a shown present dropped. Its
-    /// display is known only from that row with `Dropped` = 0, never from another present.
+    /// display is known only from that row with `Dropped` = 0, or from the validated first-present
+    /// seed that every join shares, never from another swapchain.
     pub(super) fn join_submission(
         &mut self,
         swapchain: u64,
