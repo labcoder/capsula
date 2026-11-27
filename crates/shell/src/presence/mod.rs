@@ -156,6 +156,9 @@ struct Presence {
     settings: Entity<Settings>,
     threads: Entity<Threads>,
     chat: Entity<Threads>,
+    /// The scenes on screen as an open panel last heard them.
+    on_screen:
+        [Option<kumochi_protocol::message::SceneId>; kumochi_protocol::message::MAX_VISIBLE_SCENES],
     chat_notice: crate::chat_notice::ChatNotice,
     events: Sender<PresenceEvent>,
     /// The channel's receiving end, for a drop's drains.
@@ -1197,6 +1200,7 @@ pub(crate) fn open(
             frames: FrameLoop::default(),
             kumo_frames: FrameLoop::default(),
             overlay: overlay_visibility::Visibility::Closed,
+            on_screen: Default::default(),
         }
     });
     owner.update(cx, |this, cx| {

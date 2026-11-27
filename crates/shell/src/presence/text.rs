@@ -113,7 +113,10 @@ impl Presence {
             .map_err(|error| OpenError::Gpui(error.into()))??;
         text.bounds = bounds;
         if text.typing.open() {
+            self.on_screen = self.presenter.on_screen();
+            let drawn = self.on_screen;
             self.chat.update(cx, |state, cx| {
+                state.drawn = drawn;
                 state.show_for(self.runs.thread());
                 cx.notify();
             });

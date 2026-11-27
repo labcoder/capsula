@@ -188,6 +188,47 @@ fn a_zero_alpha_first_sample_hands_off_and_its_paint_starts_the_entrance_clock()
 }
 
 #[test]
+fn on_screen_names_the_pictures_that_paint_through_a_handoff() {
+    let scenes = |presenter: &Presenter| {
+        let mut scenes: Vec<_> = presenter.on_screen().into_iter().flatten().collect();
+        scenes.sort_unstable();
+        scenes
+    };
+    let (mut presenter, now) = fixture(&[SceneId(10), LIVE]);
+    let mut before = vec![SceneId(10), LIVE];
+    before.sort_unstable();
+    assert_eq!(scenes(&presenter), before);
+    replace(&mut presenter, &[LIVE], NEXT, now);
+    begin(&mut presenter, NEXT, now);
+    prepare(
+        &mut presenter,
+        0,
+        step(r#"{"step":{"id":"empty","start":"now"}}"#),
+        now,
+    );
+    let second = step(
+        r#"{"step":{"id":"new","start":"now","put":[{"shape":{"id":"new","kind":"rect","box":[40,0,30,20],"enter":"none"}}]}}"#,
+    );
+    prepare(&mut presenter, 1, second, now);
+    presenter
+        .advance(GENERATION, now)
+        .expect("empty activation");
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
+    assert_eq!(
+        scenes(&presenter),
+        before,
+        "the frozen picture still paints"
+    );
+    presenter.advance(GENERATION, now).expect("next prefix");
+    assert!(presenter.sample_at(now).expect("a sample").0.visible);
+    let mut after = vec![SceneId(10), NEXT];
+    after.sort_unstable();
+    assert_eq!(scenes(&presenter), after);
+    presenter.frames.borrow_mut().hide();
+    assert_eq!(scenes(&presenter), []);
+}
+
+#[test]
 fn a_survivor_does_not_trigger_handoff_and_an_empty_prefix_can_advance() {
     let (mut presenter, now) = fixture(&[SceneId(10), LIVE]);
     let old = picture(&presenter);

@@ -208,6 +208,7 @@ pub(super) fn presence(cx: &mut TestAppContext) -> Entity<Presence> {
             frames: FrameLoop::default(),
             kumo_frames: FrameLoop::default(),
             overlay: super::overlay_visibility::Visibility::Closed,
+            on_screen: Default::default(),
             delete_retry: None,
             error: None,
             refusal: None,
