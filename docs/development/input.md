@@ -883,10 +883,10 @@ the Listening row.
   `listening on` and `listening off`, whatever its `Dropped` flag. PresentMon credits at most
   one present per window per DWM frame, and the dock and the panel are both DirectComposition
   swapchains, so when the panel presents in the same frame the dock's present can be marked
-  dropped although it was shown; `Dropped` isn't used for that reason. Recognition → display
+  dropped although it may have been shown; `Dropped` isn't used for that reason. Recognition → display
   comes only from a row with `Dropped` = 0 and an `msUntilDisplayed`, is never inferred from
-  another swapchain or a later present, and is reported with its coverage (how many holds were
-  displayed of those attempted); key-down → that present is reported too, and neither is gated.
+  another swapchain or a later present, and is reported with its coverage (how many of the
+  attempted holds have a measured display); key-down → that present is reported too, and neither is gated.
   The gate (owner, 2026-11-27: option A) splits the holds: each launch's first hold is cold and
   every one must be ≤150ms, and the other 90 are warm, at p95 ≤40ms over all attempted warm holds.
   A hold that never reaches Listening or a present fails its batch. The span covers the brain's admission
