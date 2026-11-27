@@ -14,6 +14,12 @@ mod instance;
 mod leg;
 #[cfg(test)]
 mod link_tests;
+#[expect(
+    dead_code,
+    reason = "Mac capture reads its pin and edge from its own pull request"
+)]
+#[expect(unsafe_code, reason = "reads the Core Audio host clock")]
+pub(super) mod microphone;
 mod pair;
 #[expect(
     dead_code,

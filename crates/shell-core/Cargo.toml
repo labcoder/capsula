@@ -33,6 +33,15 @@ objc2-avf-audio = { version = "=0.3.2", default-features = false, features = [
     "std",
     "AVAudioApplication",
 ] }
+objc2-core-audio = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "HostTime",
+] }
+objc2-core-audio-types = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CoreAudioBaseTypes",
+    "bitflags",
+] }
 
 [target.'cfg(windows)'.dependencies]
 keyring.workspace = true
