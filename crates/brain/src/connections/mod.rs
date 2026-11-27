@@ -11,9 +11,9 @@ pub mod error;
 pub(crate) mod facts;
 pub mod github;
 pub mod http_client;
-pub mod local;
 #[cfg(debug_assertions)]
 pub mod image_check;
+pub mod local;
 pub mod marker;
 #[cfg(debug_assertions)]
 pub mod marks_check;

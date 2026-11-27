@@ -386,7 +386,11 @@ async fn stopping_a_round_closes_its_connection_after_its_request_was_written() 
         stream.write_all(EVENTS.as_bytes()).await.expect("write");
         answered.send(()).expect("the round is waiting");
         let mut rest = [0; 16];
-        stream.read(&mut rest).await.expect("read")
+        // A close with the head still unread arrives as a reset on Windows.
+        match stream.read(&mut rest).await {
+            Ok(read) => read == 0,
+            Err(error) => error.kind() == std::io::ErrorKind::ConnectionReset,
+        }
     });
     let wrote = Arc::new(AtomicBool::new(false));
     let probe = Probe(Arc::clone(&wrote));
@@ -402,6 +406,6 @@ async fn stopping_a_round_closes_its_connection_after_its_request_was_written() 
         ended = round => panic!("the round ended on its own: {ended:?}"),
         heard = heard => heard.expect("the server answered"),
     }
-    assert_eq!(join(server).await, 0, "the server sees the close");
+    assert!(join(server).await, "the server sees the close");
     assert!(wrote.load(Ordering::SeqCst));
 }
