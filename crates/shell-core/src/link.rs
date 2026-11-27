@@ -2037,10 +2037,11 @@ impl Link {
         let reader = queued.then(Arc::<OnceLock<Thread>>::default);
         let custody_ended = || child.is_some_and(platform::ChildOwner::has_ended);
         let cancelled = || self.quitting() || events.is_closed() || custody_ended();
-        // Connected never follows an ended custody: both are decided under custody's lock.
+        // Connected never follows an ended custody: both are decided under custody's lock. The
+        // send's error, None once sent; the outer None is an ended custody.
         let admit = |event| match child {
-            Some(child) => child.while_open(|| events.try_send(event)),
-            None => Some(events.try_send(event)),
+            Some(child) => child.while_open(|| events.try_send(event).err()),
+            None => Some(events.try_send(event).err()),
         };
         let registration = if let Some(reader) = &reader {
             let (ack, started) = std::sync::mpsc::sync_channel(1);
@@ -2111,7 +2112,7 @@ impl Link {
             Some(connected)
         } else if Instant::now() >= reconnect_by
             || cancelled()
-            || !matches!(admit(connected), Some(Ok(())))
+            || !matches!(admit(connected), Some(None))
         {
             drop(outbox);
             drop(control_slot);
@@ -2199,9 +2200,9 @@ impl Link {
         let open = legacy_connected.is_none_or(|mut connected| {
             loop {
                 match admit(connected) {
-                    Some(Ok(())) => break true,
-                    Some(Err(async_channel::TrySendError::Full(unsent))) => connected = unsent,
-                    Some(Err(async_channel::TrySendError::Closed(_))) => break false,
+                    Some(None) => break true,
+                    Some(Some(async_channel::TrySendError::Full(unsent))) => connected = unsent,
+                    Some(Some(async_channel::TrySendError::Closed(_))) => break false,
                     None => {
                         custody_ended_first = true;
                         break false;
